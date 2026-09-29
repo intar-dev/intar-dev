@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
+import { loadRevisionStatus, revisionReady } from "@/control-plane/image-registry/build-status";
 import {
   agentHosts,
   courseCatalogs,
@@ -154,6 +155,36 @@ describe("image revision completion status", () => {
       ok: false,
       state: "warming",
       hosts: [{ host_id: "agent-1", actual_guest_tools_ready: false }],
+    });
+  });
+
+  it("admits a promotion only for built images warm on a host with the stable tools", async () => {
+    const ready = async (channel: "stable" | "candidate" = "stable") => {
+      const loaded = await loadRevisionStatus(env, "revision-1", channel);
+      if (!loaded.ok) throw new Error(loaded.error);
+      return revisionReady(loaded.body);
+    };
+    expect(await ready()).toBe(true);
+    expect(await ready("candidate")).toBe(false);
+
+    const report = hostReport();
+    report.cached_guest_tools = [];
+    await drizzle(env.DB)
+      .update(hostActualState)
+      .set({ reportJson: report })
+      .where(eq(hostActualState.hostId, "agent-1"));
+    expect(await ready()).toBe(false);
+
+    // A bundle without images is `ready` for the route, never for a drain.
+    await drizzle(env.DB)
+      .update(imageBuildBundles)
+      .set({ metaJson: { buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION, scenarios: [] } })
+      .where(eq(imageBuildBundles.rev, "revision-1"));
+    expect(await ready()).toBe(false);
+    await expect(loadRevisionStatus(env, "missing", "stable")).resolves.toEqual({
+      ok: false,
+      status: 404,
+      error: "bundle revision not found",
     });
   });
 

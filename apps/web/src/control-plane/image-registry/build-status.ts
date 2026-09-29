@@ -51,7 +51,44 @@ export async function handleImageBuildRevisionStatus(
   if (!toolsChannel) {
     return jsonResponse({ error: "tools must be stable or candidate" }, 400);
   }
+  const status = await loadRevisionStatus(env, revision, toolsChannel);
+  return status.ok
+    ? jsonResponse(status.body)
+    : jsonResponse({ error: status.error }, status.status);
+}
 
+/** A revision's status as the build-status route answers it. */
+export type RevisionStatus = Extract<
+  Awaited<ReturnType<typeof loadRevisionStatus>>,
+  { ok: true }
+>["body"];
+
+/**
+ * Whether a revision may be promoted into a drained fleet: every build
+ * succeeded and every affected platform host holds the images and the exact
+ * guest tools of `status`'s channel.
+ */
+export function revisionReady(status: RevisionStatus): boolean {
+  return (
+    status.ok &&
+    status.state === "ready" &&
+    status.tools_channel === "stable" &&
+    status.builds.length > 0 &&
+    status.hosts.length > 0 &&
+    status.builds.every((build) => build.status === "succeeded") &&
+    status.hosts.every(
+      (host) =>
+        host.ready && host.desired_guest_tools_ready && host.actual_guest_tools_ready,
+    )
+  );
+}
+
+/** A revision's builds, and the platform host caches its images need. */
+export async function loadRevisionStatus(
+  env: Cloudflare.Env,
+  revision: string,
+  toolsChannel: ScenarioGuestToolsChannel,
+) {
   const db = drizzle(env.DB);
   const bundles = await db
     .select({
@@ -63,7 +100,7 @@ export async function handleImageBuildRevisionStatus(
     .limit(1);
   const bundle = bundles[0];
   if (!bundle) {
-    return jsonResponse({ error: "bundle revision not found" }, 404);
+    return { ok: false as const, status: 404, error: "bundle revision not found" };
   }
 
   const expected = bundle.meta.scenarios;
@@ -126,10 +163,11 @@ export async function handleImageBuildRevisionStatus(
   try {
     desiredTools = await loadPublishedScenarioGuestToolsPin(env, toolsChannel);
   } catch (error) {
-    return jsonResponse(
-      { error: error instanceof Error ? error.message : "guest-tools pin unavailable" },
-      409,
-    );
+    return {
+      ok: false as const,
+      status: 409,
+      error: error instanceof Error ? error.message : "guest-tools pin unavailable",
+    };
   }
 
   const hosts = await db
@@ -179,19 +217,22 @@ export async function handleImageBuildRevisionStatus(
         ? "building"
         : "queued";
 
-  return jsonResponse({
-    ok: state === "ready",
-    revision,
-    state,
-    tools_channel: toolsChannel,
-    guest_tools: desiredTools,
-    builds: builds.map(({ manifest: _manifest, ...build }) => build),
-    images: requiredImages,
-    hosts: cacheReports,
-    ...(revision.startsWith("git-")
-      ? await scenarioSourceStatus(env.DB, revision, bundle.organizationId)
-      : {}),
-  });
+  return {
+    ok: true as const,
+    body: {
+      ok: state === "ready",
+      revision,
+      state,
+      tools_channel: toolsChannel,
+      guest_tools: desiredTools,
+      builds: builds.map(({ manifest: _manifest, ...build }) => build),
+      images: requiredImages,
+      hosts: cacheReports,
+      ...(revision.startsWith("git-")
+        ? await scenarioSourceStatus(env.DB, revision, bundle.organizationId)
+        : {}),
+    },
+  };
 }
 
 /** A `git-` rev's commit state, and whether the drained lane admits it. */

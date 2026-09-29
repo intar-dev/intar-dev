@@ -8,6 +8,8 @@ import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import {
   type CandidatePromotionOutcome,
   promoteCandidateRevision,
+  promoteDrainedRevision,
+  type PromotionFence,
 } from "@/control-plane/image-registry/catalog-promotion";
 import {
   agentHosts,
@@ -26,6 +28,7 @@ import {
   vmScenarios,
 } from "@/db/schema";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
+import { errorChainMatches } from "@/lib/app-error";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import { projectRegistryRetention } from "@/lib/image-artifact-retention";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
@@ -272,6 +275,85 @@ describe("candidate scenario catalog promotion", () => {
     expect(
       (await drizzle(env.DB).select().from(vmScenarios).where(eq(vmScenarios.scenarioId, "broken-nginx")))[0],
     ).toMatchObject({ title: "Old catalog" });
+  });
+
+  describe("a fenced promotion", () => {
+    // The attempt record Intar's promotion fences its commit on.
+    const fence = (expected: string): PromotionFence => ({
+      statements: [
+        env.DB.prepare(
+          "UPDATE runtime_operation_gates SET evidence_json = ?2 WHERE key = ?1 AND evidence_json = ?3",
+        ).bind(PROMOTION_HOLD_GATE, "attempt:committed", expected),
+        env.DB.prepare(
+          "INSERT INTO runtime_operation_gates (key, state, updated_at)" +
+            " SELECT '__promotion_fence__', NULL, 0 WHERE NOT EXISTS (SELECT 1" +
+            " FROM runtime_operation_gates WHERE key = ?1 AND evidence_json = ?2)",
+        ).bind(PROMOTION_HOLD_GATE, "attempt:committed"),
+      ],
+      aborted: (error) =>
+        errorChainMatches(error, /NOT NULL constraint failed: runtime_operation_gates\.state/),
+    });
+    const run = (expected: string) =>
+      promoteDrainedRevision(
+        {
+          ...env,
+          REGISTRY_CLEANUP: createCleanupServiceDouble({
+            DB: env.DB,
+            VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
+          }),
+        } as unknown as Cloudflare.Env,
+        "revision-1",
+        {
+          admit: async () => {
+            const admitted = await admitInternalRegistryOperation(env, {
+              operation: "pointer_mutation",
+              owner: { kind: "system", id: "image-promotion" },
+            });
+            return admitted.ok
+              ? admitted
+              : { ok: false, response: new Response(null, { status: 503 }) };
+          },
+          fence: fence(expected),
+        },
+      );
+    const title = async () =>
+      (await drizzle(env.DB).select().from(vmScenarios).where(eq(vmScenarios.scenarioId, "broken-nginx")))[0]
+        ?.title;
+    const evidence = async () =>
+      (await drizzle(env.DB)
+        .select({ evidence: runtimeOperationGates.evidenceJson })
+        .from(runtimeOperationGates)
+        .where(eq(runtimeOperationGates.key, PROMOTION_HOLD_GATE)))[0]?.evidence;
+
+    beforeEach(async () => {
+      await drizzle(env.DB)
+        .insert(runtimeOperationGates)
+        .values({ key: PROMOTION_HOLD_GATE, state: "drained", evidenceJson: "attempt" });
+    });
+
+    it("commits with the attempt record in one batch", async () => {
+      await expect(run("attempt")).resolves.toMatchObject({ ok: true });
+      expect(await title()).toBe("Broken Nginx");
+      expect(await evidence()).toBe("attempt:committed");
+    });
+
+    it("writes nothing and settles its writer when the attempt changed", async () => {
+      await expect(run("another attempt")).resolves.toEqual({
+        ok: false,
+        status: 409,
+        body: { error: "the promotion attempt changed" },
+        retry: false,
+      });
+      expect(await title()).toBe("Old catalog");
+      expect(await evidence()).toBe("attempt");
+      // An `unknown` writer would hold every collector sweep for an operator.
+      await expect(
+        env.DB.prepare("SELECT COUNT(*) AS count FROM image_registry_operation_writers").first(),
+      ).resolves.toEqual({ count: 0 });
+      await expect(
+        env.DB.prepare("SELECT COUNT(*) AS count FROM runtime_operation_gates WHERE key = '__promotion_fence__'").first(),
+      ).resolves.toEqual({ count: 0 });
+    });
   });
 
   it("answers a committed retry without a second rollback row", async () => {

@@ -31,6 +31,7 @@ import {
 import {
   admitRegistryOperation,
   createRegistryWriterGuard,
+  type RegistryOperationLease,
   type RegistryWriterGuard,
 } from "@/lib/image-registry-admission";
 import { withImageBuildCoordinationLocks } from "@/lib/image-build-lock";
@@ -85,7 +86,8 @@ export type CandidatePromotionRefusal =
         | "incomplete_builds"
         | "incomplete_catalog"
         | "ownership_conflict"
-        | "not_promotable";
+        | "not_promotable"
+        | "fenced";
       status: 409;
       error: string;
     }
@@ -102,6 +104,42 @@ export type CandidatePromotionRefusal =
 export type CandidatePromotionResult =
   | { ok: true; outcome: CandidatePromotionOutcome }
   | CandidatePromotionRefusal;
+
+/**
+ * Binds a promotion's commit to the attempt that runs it. The statements join
+ * the commit batch first; a batch the fence aborts is one rolled-back
+ * transaction, so it wrote nothing.
+ */
+export interface PromotionFence {
+  statements: D1PreparedStatement[];
+  /** Whether a batch error is this fence's abort. */
+  aborted(error: unknown): boolean;
+}
+
+/** A promotion's writer admission: a lease, or the refusal as its answer. */
+export type PromotionAdmission =
+  | { ok: true; lease: RegistryOperationLease }
+  | { ok: false; response: Response };
+
+/** A drained promotion that wrote nothing, as the answer an HTTP caller gives. */
+export interface DrainedPromotionRefusal {
+  ok: false;
+  status: number;
+  body: Record<string, unknown>;
+  /** The refusal can pass later with nothing changed on Intar's side. */
+  retry: boolean;
+  /** The admission's own answer, kept whole for an HTTP caller. */
+  response?: Response;
+}
+
+export type DrainedPromotionResult =
+  | {
+      ok: true;
+      outcome: CandidatePromotionOutcome;
+      cleanupService: RegistryCleanupServiceBinding;
+      nowUnixMs: number;
+    }
+  | DrainedPromotionRefusal;
 
 const SOURCE_NOT_PROMOTABLE = "scenario source revision is not promotable";
 // One swap at a time: an operator lane waits while Intar's promotion holds.
@@ -146,138 +184,15 @@ export async function handleCandidateCatalogPromotion(
     return jsonResponse({ error: "catalog promotion requires zero running desired VMs" }, 409);
   }
 
-  const db = drizzle(env.DB);
-  const bundles = await db
-    .select({
-      organizationId: imageBuildBundles.organizationId,
-      meta: imageBuildBundles.metaJson,
-    })
-    .from(imageBuildBundles)
-    .where(eq(imageBuildBundles.rev, revision))
-    .limit(1);
-  const bundle = bundles[0];
-  if (!bundle || bundle.meta.catalogChannel !== "candidate") {
-    return jsonResponse({ error: "candidate bundle revision not found" }, 404);
-  }
-  if (bundle.meta.buildFormatVersion !== IMAGE_BUILD_FORMAT_VERSION) {
-    return jsonResponse(
-      { error: "candidate bundle uses an unsupported image build format" },
-      409,
-    );
-  }
-  // A scenario source rev goes live here only as the applied public catalog,
-  // or as the public live rev when image-ops retries a committed 503.
-  const source = revision.startsWith("git-");
-  if (source && !(await publicSourceRevPromotable(env.DB, revision))) {
-    return jsonResponse({ error: SOURCE_NOT_PROMOTABLE }, 409);
-  }
-  // Promotion is not complete until retired artifacts are actually gone, so
-  // the cleanup service must be reachable. This check runs after the request
-  // validation above, so a bad request keeps its own status code, and it still
-  // precedes every catalog write below.
-  const cleanupService = registryCleanupService(env);
-  if (!cleanupService) {
-    return jsonResponse(
-      { error: "registry cleanup service is not configured" },
-      503,
-    );
-  }
-  // A report-only collector lists candidates and deletes nothing, so a
-  // promotion that ran now would leave retired artifacts in the bucket while
-  // reporting success. Refuse before the first catalog write instead.
-  const cleanupReadiness = await readCleanupReadiness(cleanupService);
-  if (!cleanupReadiness.deletes) {
-    return jsonResponse(
-      {
-        error:
-          "registry cleanup cannot delete: promotion needs a collector in delete mode",
-        code: "registry_cleanup_not_deleting",
-        cleanup: {
-          state: cleanupReadiness.status,
-          mode: cleanupReadiness.mode,
-          hold: cleanupReadiness.hold,
-        },
-      },
-      503,
-    );
-  }
-  const now = Date.now();
-  // The writer is admitted BEFORE the first source read and held through the
-  // commit and the cache updates, so the collector cannot retire the candidate
-  // build, the candidate rows, or their artifacts while this promotion is
-  // still deciding what to install. It is settled before the sweep is asked to
-  // run, which is what lets the collector take its exclusive lease after.
-  const admitted = await admitRegistryOperation(request, env, {
-    operation: "pointer_mutation",
-    requireSession: false,
+  const result = await promoteDrainedRevision(env, revision, {
+    admit: () =>
+      admitRegistryOperation(request, env, {
+        operation: "pointer_mutation",
+        requireSession: false,
+      }),
   });
-  if (!admitted.ok) return admitted.response;
-  const writer = createRegistryWriterGuard(admitted.lease);
-  let promoted: CandidatePromotionOutcome | undefined;
-  try {
-    if (source) {
-      // The collector may have retired reused candidates since the catalog
-      // applied; the held writer keeps it out from here to the commit.
-      try {
-        await stageReusableCandidateManifests(db, {
-          revision,
-          organizationId: bundle.organizationId,
-          meta: bundle.meta,
-          nowUnixMs: now,
-          wakeHost: (hostId) =>
-            tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
-        });
-      } catch (error) {
-        if (!isCandidateSourceLocked(error)) {
-          writer.markWriteStarted();
-          throw error;
-        }
-        await writer.release("ok");
-        const refusal = toErrorResponse(error, "candidate staging refused", 409);
-        return jsonResponse(refusal.body, refusal.status);
-      }
-    }
-    const result = await promoteCandidateRevision(env, db, writer, {
-      revision,
-      bundle,
-      nowUnixMs: now,
-      // Admission ran before the locks, and the DO's catalog sync runs
-      // outside them, so the check repeats right before the commit.
-      beforeCommit: source
-        ? () => publicSourceRevPromotable(env.DB, revision)
-        : undefined,
-    });
-    if (!result.ok) {
-      return jsonResponse(
-        result.kind === "image_in_use"
-          ? {
-              error: result.error,
-              blocking_execution_ids: result.blockingExecutionIds,
-              blocking_host_ids: result.blockingHostIds,
-              outgoing_image_ids: result.outgoingImageIds,
-            }
-          : { error: result.error },
-        result.status,
-      );
-    }
-    promoted = result.outcome;
-    // Every write of this promotion has landed: the rollback record (when an
-    // image rotated), the catalog rows, the retirement markers, and the host
-    // cache updates. The writer is settled here and not later, because the
-    // sweep below is exactly the work a held writer would block.
-    await writer.release("ok");
-  } finally {
-    await writer.finish();
-  }
-
-  if (promoted === undefined) {
-    // Every path through the guarded section either returns a refusal or
-    // assigns the outcome, so this branch is defensive only.
-    return jsonResponse({ error: "catalog promotion did not run" }, 500);
-  }
-  // Committed: live_rev follows the images before any answer, so the retry
-  // after a 503 is admitted and a head move cannot leave live_rev behind.
-  if (source) await recordPublicSourceLive(env.DB, revision);
+  if (!result.ok) return result.response ?? jsonResponse(result.body, result.status);
+  const { outcome: promoted, cleanupService, nowUnixMs: now } = result;
   if (promoted.failedHostIds.length > 0) {
     return jsonResponse(
       {
@@ -327,6 +242,152 @@ export async function handleCandidateCatalogPromotion(
 }
 
 /**
+ * Promotes a candidate revision into a drained fleet: the bundle and collector
+ * checks, the writer, candidate staging, the locked core, and live_rev for a
+ * `git-` revision. The caller has proven the drain, and the registry cleanup is
+ * its next step. A refusal wrote nothing.
+ */
+export async function promoteDrainedRevision(
+  env: Cloudflare.Env,
+  revision: string,
+  options: { admit: () => Promise<PromotionAdmission>; fence?: PromotionFence },
+): Promise<DrainedPromotionResult> {
+  const refuse = (
+    status: number,
+    body: Record<string, unknown>,
+    retry = false,
+  ): DrainedPromotionRefusal => ({ ok: false, status, body, retry });
+  const db = drizzle(env.DB);
+  const bundles = await db
+    .select({
+      organizationId: imageBuildBundles.organizationId,
+      meta: imageBuildBundles.metaJson,
+    })
+    .from(imageBuildBundles)
+    .where(eq(imageBuildBundles.rev, revision))
+    .limit(1);
+  const bundle = bundles[0];
+  if (!bundle || bundle.meta.catalogChannel !== "candidate") {
+    return refuse(404, { error: "candidate bundle revision not found" });
+  }
+  if (bundle.meta.buildFormatVersion !== IMAGE_BUILD_FORMAT_VERSION) {
+    return refuse(409, { error: "candidate bundle uses an unsupported image build format" });
+  }
+  // A scenario source rev goes live here only as the applied public catalog,
+  // or as the public live rev when a committed promotion is retried.
+  const source = revision.startsWith("git-");
+  if (source && !(await publicSourceRevPromotable(env.DB, revision))) {
+    return refuse(409, { error: SOURCE_NOT_PROMOTABLE });
+  }
+  // Promotion is not complete until retired artifacts are actually gone, so
+  // the cleanup service must be reachable. This check follows the request
+  // validation, so a bad request keeps its own status code, and it still
+  // precedes every catalog write below.
+  const cleanupService = registryCleanupService(env);
+  if (!cleanupService) {
+    return refuse(503, { error: "registry cleanup service is not configured" });
+  }
+  // A report-only collector lists candidates and deletes nothing, so a
+  // promotion that ran now would leave retired artifacts in the bucket while
+  // reporting success. Refuse before the first catalog write instead.
+  const cleanupReadiness = await readCleanupReadiness(cleanupService);
+  if (!cleanupReadiness.deletes) {
+    return refuse(
+      503,
+      {
+        error:
+          "registry cleanup cannot delete: promotion needs a collector in delete mode",
+        code: "registry_cleanup_not_deleting",
+        cleanup: {
+          state: cleanupReadiness.status,
+          mode: cleanupReadiness.mode,
+          hold: cleanupReadiness.hold,
+        },
+      },
+      true,
+    );
+  }
+  const now = Date.now();
+  // The writer is admitted BEFORE the first source read and held through the
+  // commit and the cache updates, so the collector cannot retire the candidate
+  // build, the candidate rows, or their artifacts while this promotion is
+  // still deciding what to install. It is settled before the sweep is asked to
+  // run, which is what lets the collector take its exclusive lease after.
+  const admitted = await options.admit();
+  if (!admitted.ok) {
+    const body = (await admitted.response
+      .clone()
+      .json()
+      .catch(() => ({}))) as Record<string, unknown>;
+    return { ok: false, status: admitted.response.status, body, retry: true, response: admitted.response };
+  }
+  const writer = createRegistryWriterGuard(admitted.lease);
+  let promoted: CandidatePromotionOutcome | undefined;
+  try {
+    if (source) {
+      // The collector may have retired reused candidates since the catalog
+      // applied; the held writer keeps it out from here to the commit.
+      try {
+        await stageReusableCandidateManifests(db, {
+          revision,
+          organizationId: bundle.organizationId,
+          meta: bundle.meta,
+          nowUnixMs: now,
+          wakeHost: (hostId) =>
+            tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
+        });
+      } catch (error) {
+        if (!isCandidateSourceLocked(error)) {
+          writer.markWriteStarted();
+          throw error;
+        }
+        await writer.release("ok");
+        const refusal = toErrorResponse(error, "candidate staging refused", 409);
+        return refuse(refusal.status, { ...refusal.body }, true);
+      }
+    }
+    const result = await promoteCandidateRevision(env, db, writer, {
+      revision,
+      bundle,
+      nowUnixMs: now,
+      // Admission ran before the locks, and the DO's catalog sync runs
+      // outside them, so the check repeats right before the commit.
+      beforeCommit: source
+        ? () => publicSourceRevPromotable(env.DB, revision)
+        : undefined,
+      fence: options.fence,
+    });
+    if (!result.ok) {
+      return result.kind === "image_in_use"
+        ? refuse(
+            result.status,
+            {
+              error: result.error,
+              blocking_execution_ids: result.blockingExecutionIds,
+              blocking_host_ids: result.blockingHostIds,
+              outgoing_image_ids: result.outgoingImageIds,
+            },
+            true,
+          )
+        : refuse(result.status, { error: result.error });
+    }
+    promoted = result.outcome;
+    // Every write of this promotion has landed: the rollback record (when an
+    // image rotated), the catalog rows, the retirement markers, and the host
+    // cache updates. The writer is settled here and not later, because the
+    // sweep that follows is exactly the work a held writer would block.
+    await writer.release("ok");
+  } finally {
+    await writer.finish();
+  }
+  // Committed: live_rev follows the images before any answer, so a retry of
+  // the committed revision is admitted and a head move cannot leave live_rev
+  // behind.
+  if (source) await recordPublicSourceLive(env.DB, revision);
+  return { ok: true, outcome: promoted, cleanupService, nowUnixMs: now };
+}
+
+/**
  * The locked promotion core: validates a candidate revision under the
  * per-family locks and commits it. The caller admits `writer` before the call
  * and settles it after, and a refusal has written nothing.
@@ -341,6 +402,8 @@ export async function promoteCandidateRevision(
     nowUnixMs: number;
     /** Runs under the family locks right before the commit; false refuses. */
     beforeCommit?: (() => Promise<boolean>) | undefined;
+    /** Commits only while the attempt running this promotion holds. */
+    fence?: PromotionFence | undefined;
   },
 ): Promise<CandidatePromotionResult> {
   const { revision, bundle, nowUnixMs: now } = input;
@@ -535,7 +598,17 @@ export async function promoteCandidateRevision(
       // The first mutating write of this promotion. From here a throw must
       // leave the writer unresolved instead of claiming nothing changed.
       writer.markWriteStarted();
-      if (statements.length) await env.DB.batch(statements);
+      if (statements.length) {
+        try {
+          await env.DB.batch([...(input.fence?.statements ?? []), ...statements]);
+        } catch (error) {
+          if (!input.fence?.aborted(error)) throw error;
+          // The fence rolled the whole batch back, so nothing committed and
+          // the writer settles instead of holding the collector.
+          await writer.release("error");
+          return { ok: false, kind: "fenced", status: 409, error: "the promotion attempt changed" };
+        }
+      }
 
       const retention = await applyImageRetentionAfterCatalogChange(db, env, {
         organizationId: bundle.organizationId,
@@ -584,7 +657,7 @@ function rollbackOf(
  * report-only collector answers no, and the promotion refuses before it
  * mutates anything.
  */
-async function readCleanupReadiness(
+export async function readCleanupReadiness(
   service: RegistryCleanupServiceBinding,
 ): Promise<{ deletes: boolean; mode: string; status: string; hold: string }> {
   try {

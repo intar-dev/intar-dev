@@ -924,6 +924,8 @@ const REFUSAL_STATES = {
   ownership_conflict: "invalid",
   // Only the drained lane asks; the DO never does.
   not_promotable: "waiting",
+  // Only Intar's image promotion passes a fence; the DO never does.
+  fenced: "waiting",
 } as const satisfies Record<CandidatePromotionRefusal["kind"], ScenarioSourceCommitState>;
 
 // An operator's image release or Intar's own promotion hold.
