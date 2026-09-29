@@ -1162,7 +1162,8 @@ const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_r
   FROM scenario_source_commits WHERE scope_key = ?1 AND purpose = 'deploy'`;
 
 // A superseded head row waits to be delivered again, so it shows as queued.
-// The summary says what a row waits for.
+// The summary says what a row waits for. A catalog-first row's images go live
+// only when an operator runs the image cutover, so its title names that.
 const DEPLOY_CHECKS = {
   fetching: { status: "queued", title: "Queued" },
   ingesting: { status: "queued", title: "Queued" },
@@ -1170,7 +1171,7 @@ const DEPLOY_CHECKS = {
   building: { status: "in_progress", title: "Building" },
   waiting: { status: "in_progress", title: "Waiting" },
   promoting: { status: "in_progress", title: "Promoting" },
-  awaiting_promote: { status: "in_progress", title: "Promoting" },
+  awaiting_promote: { status: "in_progress", title: "Waiting for image cutover" },
   live: { status: "completed", conclusion: "success", title: "Live" },
   failed: { status: "completed", conclusion: "failure", title: "Failed" },
   invalid: { status: "completed", conclusion: "failure", title: "Invalid" },

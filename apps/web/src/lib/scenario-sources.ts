@@ -220,8 +220,8 @@ export async function publicSourceRevPromotable(
 /**
  * The drained lane committed a public rev. One transaction makes it the
  * binding's live commit, whatever state its row was left in, and supersedes
- * the previous live row. The poke lets the check leave `Promoting` within a
- * minute.
+ * the previous live row. The poke lets the check leave `Waiting for image
+ * cutover` within a minute.
  */
 export async function recordPublicSourceLive(
   d1: D1Database,

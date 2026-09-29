@@ -212,12 +212,27 @@ jobs:
     concurrency:
       group: intar-image-catalog-promotion
       cancel-in-progress: false
-    timeout-minutes: 420
+    # Two hours for the host caches to warm, six for active VMs to finish, and
+    # the promotion itself.
+    timeout-minutes: 540
     environment: production
     env:
       INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
       REVISION: ${{ inputs.revision }}
       CONFIRMATION: ${{ inputs.confirmation }}
+      # The revision status a promotion needs: every build succeeded, and every
+      # platform host holds the images and the exact stable guest tools.
+      READY: >-
+        .ok == true and .state == "ready" and .tools_channel == "stable" and
+        (.guest_tools | type == "object") and (.builds | length > 0) and
+        (.hosts | length > 0) and all(.builds[]; .status == "succeeded") and
+        all(.hosts[]; .ready == true and .desired_guest_tools_ready == true and
+        .actual_guest_tools_ready == true)
+      # What the revision still waits for.
+      PENDING: >-
+        {state, builds: [.builds[] | select(.status != "succeeded") |
+        {scenario_id, arch, status, phase}], hosts: [.hosts[] |
+        select(.ready != true)]}
 
     steps:
       - name: Validate catalog-promotion authority
@@ -228,7 +243,32 @@ jobs:
           [[ "${REVISION}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]
           test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
 
+      - name: Wait for complete builds and warm host caches
+        run: |
+          set -euo pipefail
+          # Nothing is drained yet, so a host that still warms the new images
+          # delays the drain instead of failing a drained fleet.
+          status="${RUNNER_TEMP}/warm-status.json"
+          for _ in $(seq 1 240); do
+            curl --fail --silent --show-error --retry 3 \
+              --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+              "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" \
+              > "${status}"
+            if jq -e "${READY}" "${status}" >/dev/null; then
+              exit 0
+            fi
+            jq -c "${PENDING}" "${status}"
+            if jq -e '.state == "failed"' "${status}" >/dev/null; then
+              echo "A build of this revision failed." >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "The builds and host caches were not ready within two hours." >&2
+          exit 1
+
       - name: Stop new image runs
+        id: drain
         run: |
           set -euo pipefail
           curl --fail --silent --show-error --retry 3 \
@@ -254,15 +294,8 @@ jobs:
             jq -c '{source_state, source_promotable}' "${status}"
             exit 0
           fi
-          echo "The scenario source revision is not promotable; reopening the gate." >&2
+          echo "The scenario source revision is not promotable." >&2
           jq -c '{source_state, source_promotable}' "${status}" >&2 || true
-          curl --fail --silent --show-error --retry 3 \
-            --request POST \
-            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data '{"state":"open"}' \
-            "https://intar.dev/registry/v1/cutover/gate" \
-            | jq -e '.ok == true and .state == "open"' >/dev/null
           exit 1
 
       - name: Let active VMs finish
@@ -291,18 +324,13 @@ jobs:
             --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
             "https://intar.dev/registry/v1/builds/revisions/${REVISION}?tools=stable" \
             > "${status}"
-          jq -e '
-            .ok == true and
-            .state == "ready" and
-            .tools_channel == "stable" and
-            (.guest_tools | type == "object") and
-            (.builds | length > 0) and
-            (.hosts | length > 0) and
-            all(.builds[]; .status == "succeeded") and
-            all(.hosts[]; .ready == true and .desired_guest_tools_ready == true and .actual_guest_tools_ready == true)
-          ' "${status}" >/dev/null
+          if ! jq -e "${READY}" "${status}" >/dev/null; then
+            jq -c "${PENDING}" "${status}" >&2
+            exit 1
+          fi
 
       - name: Promote catalog
+        id: promote
         run: |
           set -euo pipefail
           response="${RUNNER_TEMP}/catalog-promotion.json"
@@ -376,6 +404,22 @@ jobs:
           done
           echo "Promoted image and stable tool cache did not converge within 60 seconds." >&2
           exit 1
+
+      - name: Reopen the gate when no promotion ran
+        # A drained fleet that no promotion followed has nothing to finish, so
+        # new runs may start again. A promotion that started may have
+        # committed, so after one the gate stays for the operator to open.
+        if: (failure() || cancelled()) && steps.drain.outcome == 'success' && steps.promote.outcome == 'skipped'
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 3 \
+            --request POST \
+            --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data '{"state":"open"}' \
+            "https://intar.dev/registry/v1/cutover/gate" \
+            | jq -e '.ok == true and .state == "open"' >/dev/null
+          echo "No promotion ran, so the run gate is open again." >> "${GITHUB_STEP_SUMMARY}"
 
 
   tools-build:

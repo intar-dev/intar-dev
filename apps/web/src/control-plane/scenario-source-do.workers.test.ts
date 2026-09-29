@@ -1647,6 +1647,10 @@ describe("ScenarioSourceDO public apply", () => {
     expect(await commitState(SHA_B)).toMatchObject({ state: "awaiting_promote" });
     await tick();
     expect(await commitState(SHA_B)).toMatchObject({ state: "awaiting_promote" });
+    expect(shownChecks().at(-1)).toMatchObject({
+      status: "in_progress",
+      title: "Waiting for image cutover",
+    });
 
     // The images wait for the drained lane.
     expect(promotion.calls).toBe(1);
