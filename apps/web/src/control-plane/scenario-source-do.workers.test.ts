@@ -94,6 +94,7 @@ vi.mock("@/lib/scenario-catalog-candidates", async (importOriginal) => {
 const readiness = vi.hoisted(() => ({
   calls: 0,
   ready: ((_call: number) => true) as (call: number) => boolean,
+  builds: [] as Array<{ status: string }>,
 }));
 vi.mock("@/control-plane/image-registry/build-status", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/control-plane/image-registry/build-status")>();
@@ -104,7 +105,7 @@ vi.mock("@/control-plane/image-registry/build-status", async (importOriginal) =>
       const ready = readiness.ready(readiness.calls);
       return {
         ok: true as const,
-        body: { ok: ready, state: ready ? "ready" : "warming", builds: [], hosts: [] },
+        body: { ok: ready, state: ready ? "ready" : "warming", builds: readiness.builds, hosts: [] },
       };
     },
     revisionReady: (body: { ok: boolean }) => body.ok,
@@ -189,6 +190,7 @@ beforeEach(async () => {
   stageLock.before = undefined;
   readiness.calls = 0;
   readiness.ready = () => true;
+  readiness.builds = [];
   promotion.calls = 0;
   promotion.before = undefined;
   promotion.after = undefined;
@@ -2134,6 +2136,22 @@ describe("ScenarioSourceDO public apply", () => {
       expect(await attempt()).toMatchObject({
         phase: "yielded",
         detail: "the public commit is no longer waiting",
+      });
+      expect(await gate()).toMatchObject({ state: "open" });
+    });
+
+    it("waits for a retired build to heal and fails only on a failed one", async () => {
+      await awaitB();
+      readiness.ready = () => false;
+      readiness.builds = [{ status: "stale" }];
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "waiting", detail: "1 image build not finished" });
+
+      readiness.builds = [{ status: "failed" }];
+      await advance();
+      expect(await attempt()).toMatchObject({
+        phase: "failed",
+        detail: "an image build of the revision failed",
       });
       expect(await gate()).toMatchObject({ state: "open" });
     });

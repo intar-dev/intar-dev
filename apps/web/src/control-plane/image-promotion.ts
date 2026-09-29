@@ -264,7 +264,11 @@ async function drainRefusal(
   const db = drizzle(env.DB);
   const loaded = await loadRevisionStatus(env, revision, "stable");
   if (!loaded.ok) return loaded.status === 404 ? never(loaded.error) : waitFor(loaded.error);
-  if (loaded.body.state === "failed") return never("an image build of the revision failed");
+  // A retired or superseded build reads as stale and heals in the scenario
+  // source; only a build that failed never becomes ready.
+  if (loaded.body.builds.some((build) => build.status === "failed")) {
+    return never("an image build of the revision failed");
+  }
   if (!revisionReady(loaded.body)) return waitFor(readinessDetail(loaded.body));
   if (revision.startsWith("git-") && !(await publicSourceRevPromotable(env.DB, revision))) {
     return never("the scenario source revision is no longer promotable");
