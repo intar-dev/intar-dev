@@ -113,6 +113,12 @@ schema.#Project & {
 			},
 		]
 
+		// ponytail: cuenv 0.56.7 hardcodes each workflow's concurrency group to
+		// the head branch name with cancel-in-progress, so a fork pull request
+		// from a branch named like another pull request's branch cancels that
+		// pull request's lanes. Re-run them; nothing merges on a cancelled lane
+		// without a human. Key pull requests on their number once cuenv lets a
+		// pipeline set its concurrency group.
 		pipelines: {
 			rust: {
 				mode: "expanded"
