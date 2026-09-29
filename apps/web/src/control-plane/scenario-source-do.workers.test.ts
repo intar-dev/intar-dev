@@ -131,7 +131,10 @@ vi.mock("@/control-plane/image-registry/catalog-promotion", async (importOrigina
     },
   };
 });
-const guard = vi.hoisted(() => ({ before: undefined as (() => Promise<void>) | undefined }));
+const guard = vi.hoisted(() => ({
+  before: undefined as (() => Promise<void>) | undefined,
+  beforeLive: undefined as (() => Promise<void>) | undefined,
+}));
 vi.mock("@/lib/scenario-sources", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/scenario-sources")>();
   return {
@@ -139,6 +142,10 @@ vi.mock("@/lib/scenario-sources", async (importOriginal) => {
     countUnitGuardRuns: async (...args: Parameters<typeof actual.countUnitGuardRuns>) => {
       await guard.before?.();
       return actual.countUnitGuardRuns(...args);
+    },
+    recordPublicSourceLive: async (...args: Parameters<typeof actual.recordPublicSourceLive>) => {
+      await guard.beforeLive?.();
+      return actual.recordPublicSourceLive(...args);
     },
   };
 });
@@ -186,6 +193,7 @@ beforeEach(async () => {
   promotion.before = undefined;
   promotion.after = undefined;
   guard.before = undefined;
+  guard.beforeLive = undefined;
   scopeKey = SCOPE;
   headSha = SHA_A;
   githubCalls = [];
@@ -2114,7 +2122,7 @@ describe("ScenarioSourceDO public apply", () => {
       expect(await attempt()).toMatchObject({ phase: "failed", id: late.id });
     });
 
-    it("cancels an automatic attempt whose commit moved on", async () => {
+    it("steps aside when the commit moved on", async () => {
       await awaitB();
       readiness.ready = () => false;
       await advance();
@@ -2123,8 +2131,111 @@ describe("ScenarioSourceDO public apply", () => {
       // C reuses A's image, so it goes live directly and B is superseded.
       await publicCommit(SHA_C, { title: "Reworded" });
       await advance();
-      expect(await attempt()).toMatchObject({ phase: "cancelled", detail: "the public commit moved on" });
+      expect(await attempt()).toMatchObject({
+        phase: "yielded",
+        detail: "the public commit is no longer waiting",
+      });
       expect(await gate()).toMatchObject({ state: "open" });
+    });
+
+    it("starts again after a pause of the public source", async () => {
+      await awaitB();
+      readiness.ready = () => false;
+      await advance();
+      const paused = () =>
+        db().update(scenarioSources).set({ pausedAt: Date.now(), pauseReason: "admin" })
+          .where(eq(scenarioSources.scopeKey, "public"));
+      await paused();
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "yielded" });
+
+      await db().update(scenarioSources).set({ pausedAt: null, pauseReason: null })
+        .where(eq(scenarioSources.scopeKey, "public"));
+      readiness.ready = () => true;
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "done", revision: rev(SHA_B) });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_B }]);
+    });
+
+    it("ends a hold at once when the revision can no longer be promoted", async () => {
+      await awaitB();
+      await runVm();
+      await startImagePromotion(promotionEnv(), { revision: rev(SHA_B), actorUserId: ADMIN });
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "drained" });
+
+      // The public catalog moves back to A, as a retarget does.
+      await db().update(courseCatalogs).set({ sourceRevision: rev(SHA_A) })
+        .where(eq(courseCatalogs.scopeKey, "public"));
+      await advance();
+      expect(await attempt()).toMatchObject({
+        phase: "failed",
+        detail: "the scenario source revision is no longer promotable",
+      });
+      expect(await gate()).toMatchObject({ state: "open" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_A }]);
+    });
+
+    it("records the swap live when runs reopen after its tick died, and a retry promotes nothing twice", async () => {
+      await awaitB();
+      cleanupApplies = false;
+      let died = false;
+      guard.beforeLive = async () => {
+        if (!died) {
+          died = true;
+          throw new Error("the tick died");
+        }
+      };
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "cleaning" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_B }]);
+      expect(await binding()).toMatchObject({ liveRev: rev(SHA_A) });
+
+      await releaseImagePromotion(promotionEnv(), { actorUserId: ADMIN });
+      expect(await attempt()).toMatchObject({ phase: "released" });
+      expect(await gate()).toMatchObject({ state: "open" });
+      expect(await binding()).toMatchObject({ liveRev: rev(SHA_B) });
+      expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
+
+      // An admin retry of the committed revision swaps nothing and finishes.
+      cleanupApplies = true;
+      await startImagePromotion(promotionEnv(), { revision: rev(SHA_B), actorUserId: ADMIN });
+      await advance();
+      expect(await attempt()).toMatchObject({ origin: "admin", phase: "done" });
+      expect(await liveImages()).toEqual([{ imageId: IMAGE_B }]);
+    });
+
+    it("reopens an automatic hold after 10 minutes of hosts that did not converge", async () => {
+      await awaitB();
+      // Ready for the three checks before the commit, then not.
+      readiness.ready = (call) => call <= 3;
+      await advance();
+      expect(await attempt()).toMatchObject({ phase: "verifying" });
+      expect(await gate()).toMatchObject({ state: "drained" });
+
+      const held = JSON.parse((await gate())?.evidenceJson ?? "{}") as PromotionAttempt;
+      await db()
+        .update(runtimeOperationGates)
+        .set({ evidenceJson: JSON.stringify({ ...held, cleanedAt: (held.cleanedAt ?? 0) - 11 * 60_000 }) })
+        .where(eq(runtimeOperationGates.key, PROMOTION_HOLD_GATE));
+      await advance();
+      expect(await attempt()).toMatchObject({
+        phase: "done",
+        detail: "the hosts had not reported the new images yet",
+      });
+      expect(await gate()).toMatchObject({ state: "open" });
+    });
+
+    it("lets only an active platform admin start or end a promotion", async () => {
+      await awaitB();
+      await expect(
+        startImagePromotion(promotionEnv(), { revision: rev(SHA_B), actorUserId: OWNER }),
+      ).rejects.toMatchObject({ status: 409, code: "promotion_changed" });
+      await startImagePromotion(promotionEnv(), { revision: rev(SHA_B), actorUserId: ADMIN });
+      await expect(
+        releaseImagePromotion(promotionEnv(), { actorUserId: OWNER }),
+      ).rejects.toMatchObject({ status: 409, code: "promotion_changed" });
+      expect(await attempt()).toMatchObject({ origin: "admin", phase: "waiting" });
     });
   });
 });

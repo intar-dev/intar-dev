@@ -239,45 +239,58 @@ function readinessDetail(status: RevisionStatus): string {
   return `the revision is ${status.state}`;
 }
 
+/** Why an attempt waits; a permanent refusal never clears by waiting. */
+interface Refusal {
+  reason: string;
+  permanent: boolean;
+}
+
+const waitFor = (reason: string): Refusal => ({ reason, permanent: false });
+const never = (reason: string): Refusal => ({ reason, permanent: true });
+
 /**
  * Why `revision` may not take or use a drain yet, or null when it may: warm
  * images and stable tools, a collector that deletes, no unresolved registry
  * writer, a promotable `git-` revision and, with `imageUse`, no run or host
  * that still uses an outgoing image. A forced drain skips that last check
- * before it drains and waits for it after.
+ * before it drains and waits for it after. A missing bundle, a failed build
+ * and an unpromotable revision are permanent.
  */
 async function drainRefusal(
   env: Cloudflare.Env,
   revision: string,
   imageUse: boolean,
-): Promise<string | null> {
+): Promise<Refusal | null> {
   const db = drizzle(env.DB);
   const loaded = await loadRevisionStatus(env, revision, "stable");
-  if (!loaded.ok) return loaded.error;
-  if (!revisionReady(loaded.body)) return readinessDetail(loaded.body);
+  if (!loaded.ok) return loaded.status === 404 ? never(loaded.error) : waitFor(loaded.error);
+  if (loaded.body.state === "failed") return never("an image build of the revision failed");
+  if (!revisionReady(loaded.body)) return waitFor(readinessDetail(loaded.body));
   if (revision.startsWith("git-") && !(await publicSourceRevPromotable(env.DB, revision))) {
-    return "the scenario source revision is no longer promotable";
+    return never("the scenario source revision is no longer promotable");
   }
   const service = registryCleanupService(env);
-  if (!service) return "the registry cleanup service is not configured";
+  if (!service) return waitFor("the registry cleanup service is not configured");
   if (!(await readCleanupReadiness(service)).deletes) {
-    return "the registry cleanup is not in delete mode";
+    return waitFor("the registry cleanup is not in delete mode");
   }
   // The cleanup deletes only under enforced admission; without it a drain
   // would hold runs for a cleanup that cannot apply.
   const admission = await readRegistryAdmissionState(env);
   if (admission.enforcement !== "enforce") {
-    return `registry admission is ${admission.enforcement}, so the cleanup cannot delete`;
+    return waitFor(`registry admission is ${admission.enforcement}, so the cleanup cannot delete`);
   }
   const unknown = await db.get<{ count: number }>(sql`SELECT COUNT(*) AS count
     FROM image_registry_operation_writers
     WHERE released_at IS NOT NULL AND outcome = 'unknown'`);
   if (unknown?.count) {
-    return "a registry writer awaits the image-ops cleanup-resolve operation";
+    return waitFor("a registry writer awaits the image-ops cleanup-resolve operation");
   }
   const use = imageUse ? await outgoingImageUse(db, revision) : { executionIds: [], hostIds: [] };
   if (use.executionIds.length || use.hostIds.length) {
-    return `the old images are still in use by ${counted(use.executionIds.length, "run")} and ${counted(use.hostIds.length, "host")}`;
+    return waitFor(
+      `the old images are still in use by ${counted(use.executionIds.length, "run")} and ${counted(use.hostIds.length, "host")}`,
+    );
   }
   return null;
 }
@@ -359,17 +372,20 @@ async function step(
   const automatic = attempt.origin === "auto";
   switch (attempt.phase) {
     case "waiting": {
+      // A pause, a suspension or a head that moved on: the attempt steps
+      // aside, and the revision starts again once it waits again.
       if (automatic && (await pendingPublicRevision(db)) !== attempt.revision) {
-        return end(db, gate, "cancelled", "the public commit moved on");
+        return end(db, gate, "yielded", "the public commit is no longer waiting");
       }
       if (!automatic && now - attempt.createdAt > ADMIN_WAIT_BOUND_MS) {
         return end(db, gate, "failed", attempt.detail ?? "the revision did not become ready");
       }
       const refusal =
         (await drainRefusal(env, attempt.revision, automatic)) ??
-        (automatic && (await operatorDrained(db)) ? "an operator drain is active" : null);
+        (automatic && (await operatorDrained(db)) ? waitFor("an operator drain is active") : null);
+      if (refusal?.permanent) return end(db, gate, "failed", refusal.reason);
       if (refusal) {
-        await setDetail(db, gate, refusal);
+        await setDetail(db, gate, refusal.reason);
         return null;
       }
       // The idle moment is one statement: no operator drain and no running VM
@@ -396,12 +412,13 @@ async function step(
       if (now - (attempt.drainedAt ?? now) > bound) {
         return end(db, gate, "failed", attempt.detail ?? "the drain did not become ready in time");
       }
+      // A refusal that never clears ends the hold now, not at the bound.
+      const refusal = await drainRefusal(env, attempt.revision, true);
+      if (refusal?.permanent) return end(db, gate, "failed", refusal.reason);
       const running = await runningVms(db);
-      const refusal = running
-        ? `${counted(running, "VM")} still running`
-        : await drainRefusal(env, attempt.revision, true);
-      if (refusal) {
-        await setDetail(db, gate, refusal);
+      const pending = running ? `${counted(running, "VM")} still running` : refusal?.reason;
+      if (pending) {
+        await setDetail(db, gate, pending);
         return null;
       }
       if (attempt.phase === "drained") {
@@ -606,6 +623,11 @@ export async function releaseImagePromotion(
     throw appError(409, "no_promotion", "No promotion is running.");
   }
   const phase = attempt.committedAt === null ? "cancelled" : "released";
+  // A tick that died between the commit and live_rev leaves only this call
+  // to record the committed catalog; it is idempotent.
+  if (phase === "released" && attempt.revision.startsWith("git-")) {
+    await recordPublicSourceLive(env.DB, attempt.revision);
+  }
   const next: PromotionAttempt = {
     ...attempt,
     phase,

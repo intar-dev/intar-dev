@@ -26,7 +26,7 @@ const PHASE_LABELS: Record<PromotionPhase, string> = {
   failed: "Failed",
   cancelled: "Cancelled",
   released: "Runs reopened by an admin",
-  yielded: "Stepped aside for an operator drain",
+  yielded: "Stepped aside",
 };
 
 const ENDED = new Set<PromotionPhase>(["done", "failed", "cancelled", "released", "yielded"]);
