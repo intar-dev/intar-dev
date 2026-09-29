@@ -265,20 +265,7 @@ package workflows
 				// then colours its --json output, which jq can not parse.
 				name: "Verify published Kino source"
 				env: GH_TOKEN: "${{ github.token }}"
-				run: """
-					set -euo pipefail
-					gh release view "${KINO_TAG}" --json isDraft,isPrerelease \\
-					  | jq -e '.isDraft == false and .isPrerelease == false' >/dev/null
-					test "$(git cat-file -t "refs/tags/${KINO_TAG}")" = tag
-					source_sha="$(git rev-parse "refs/tags/${KINO_TAG}^{commit}")"
-					git merge-base --is-ancestor "${source_sha}" "${GITHUB_SHA}"
-					git worktree add --detach "${RUNNER_TEMP}/kino-source" "${source_sha}"
-					jq -n --arg tag "${KINO_TAG}" --arg source "${source_sha}" \\
-					  --arg workflow "${GITHUB_SHA}" \\
-					  '{tag: $tag, source_sha: $source, workflow_sha: $workflow, profile: "guest", target: "x86_64-unknown-linux-musl"}' \\
-					  > "${TOOLS_DIR}/provenance.json"
-
-					"""
+				run: "cuenv task image-ops-verify-kino-source"
 			}, {
 				name: "Install Rust toolchain"
 				run:  "cuenv task image-ops-install-rust-toolchain"
@@ -549,6 +536,7 @@ package workflows
 tasks: {
 	"image-ops-install-rust-toolchain": #Script & {_script: "tools/workflows/image-ops/install-rust-toolchain.sh"}
 	"image-ops-verify-runner-disk-tools": #Script & {_script: "tools/workflows/image-ops/verify-runner-disk-tools.sh"}
+	"image-ops-verify-kino-source": #Script & {_script: "tools/workflows/image-ops/verify-kino-source.sh"}
 	"image-ops-prepare-kino-source": #Script & {_script: "tools/workflows/image-ops/prepare-kino-source.sh"}
 	"image-ops-build-guest-tools": #Script & {_script: "tools/workflows/image-ops/build-guest-tools.sh"}
 	"image-ops-upload-tools-candidate": #Script & {_script: "tools/workflows/image-ops/upload-tools-candidate.sh", _production: true}
