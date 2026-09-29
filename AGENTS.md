@@ -22,13 +22,14 @@
 - Use the default shared Cargo cache and the root workspace target directory. Do not create component-specific `CARGO_HOME` directories.
 - JavaScript and TypeScript packages use the root Bun workspace and lockfile. Do not add nested lockfiles or cross-project relative imports. The documentation site in `docs/` is a standalone Bun project with its own lockfile.
 - For JavaScript and TypeScript work, use Bun and `bunx`; do not use npm, Yarn, or pnpm for installs, scripts, or CI.
-- Shared wire and guest contracts belong in `crates/intar-contracts`. Regenerate web outputs with `just generate-contracts`; never edit `apps/web/src/generated/` by hand.
+- Shared wire and guest contracts belong in `crates/intar-contracts`. Regenerate web outputs with `cuenv task generate-contracts`; never edit `apps/web/src/generated/` by hand.
 - The kino protobuf source belongs to `crates/intar-kino-proto/proto/kino/v1/probes.proto`.
 - `apps/web/AGENTS.md` contains website, Worker, and database migration guidance.
+- Repository tasks live in `env.cue` and run with `cuenv task <name>`; `cuenv task` lists them. Every workflow except `scenario-publish.yml` is generated: the `intar-*.yml` lanes from the `env.cue` pipelines with `cuenv sync ci`, and the rest from `ci/workflows/*.cue` with `cuenv sync codegen`. Edit the CUE, never the YAML; `cuenv task sync-check` fails when they drift. `scenario-publish.yml` is an external contract and stays hand-written.
 - Use Conventional Commits with one scope, for example `fix(web): ...`, `feat(intar-agent): ...`, or `chore(stargate): ...`. Use a lowercase subject after the colon, and mark breaking changes with `!`.
 
 ## Rust quality
 
-- Local and CI Clippy checks MUST use `-D warnings` (`just clippy`). Do not add `#[allow(...)]`, `#![allow(...)]`, or Clippy-specific suppressions unless necessary and justified. Prefer removing dead code, exercising it, or narrowing visibility.
+- Local and CI Clippy checks MUST use `-D warnings` (`cuenv task clippy`). Do not add `#[allow(...)]`, `#![allow(...)]`, or Clippy-specific suppressions unless necessary and justified. Prefer removing dead code, exercising it, or narrowing visibility.
 - The workspace lints forbid `unsafe` code and deny `unwrap()`, `dbg!`, and `todo!()`. Handle or propagate errors explicitly.
-- Format Rust changes with `just fmt`. `just verify` runs the formatting, Clippy, and test checks that CI runs.
+- Format Rust changes with `cuenv task fmt`. `cuenv task verify` runs the formatting, Clippy, and test gate. `cuenv task lanes.rust`, `lanes.security`, and `lanes.images` run exactly what each CI lane runs.
