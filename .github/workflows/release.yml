@@ -1,210 +1,172 @@
 # Generated from ci/workflows/release.cue by cuenv; do not edit manually.
 # Regenerate with: cuenv sync codegen
 name: Release
-run-name: |-
-  ${{ inputs.resume_tag != ''
-      && format('{0} resume {1} from {2}', inputs.project, inputs.resume_tag, github.ref_name)
-      || format('{0} release {1} from {2}', inputs.project, inputs.bump, github.ref_name) }}
 "on":
-  workflow_dispatch:
-    inputs:
-      project:
-        description: Rust project to release
-        required: true
-        type: choice
-        options:
-          - intar-agent
-          - intar-builder
-          - intar-image-cli
-          - kino
-          - stargate
-      bump:
-        description: Semantic version increment
-        required: true
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
-      resume_tag:
-        description: Existing project tag to finish publishing; bump is ignored
-        required: false
-        default: ""
-        type: string
-permissions:
-  actions: read
-  contents: read
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+permissions: {}
 concurrency:
-  group: release-${{ inputs.project }}
+  group: release
   cancel-in-progress: false
 jobs:
-  release:
-    name: Bump, tag, and build
+  plan:
+    name: Plan releases
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
     permissions:
-      actions: read
       contents: write
-    runs-on: ${{ inputs.project == 'intar-agent' && 'ubuntu-24.04' || 'namespace-profile-intar-dev' }}
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      - name: Ensure main
-        env:
-          RESUME_TAG: ${{ inputs.resume_tag }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          if [ -z "${RESUME_TAG}" ]; then
-            if [ "${RUN_ATTEMPT}" != "1" ]; then
-              echo "Do not rerun a failed new release: start a fresh dispatch, or resume the exact tag if one was created." >&2
-              exit 1
-            fi
-            if [ "${GITHUB_REF_TYPE}" != "branch" ] || [ "${GITHUB_REF_NAME}" != "main" ]; then
-              echo "A new release must run from the main branch, got ${GITHUB_REF}." >&2
-              exit 1
-            fi
-          else
-            case "${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}" in
-              branch:main|"tag:${RESUME_TAG}") ;;
-              *)
-                echo "Resume ${RESUME_TAG} from main or from that exact tag, got ${GITHUB_REF}." >&2
-                exit 1
-                ;;
-            esac
-          fi
-      - name: Checkout on Namespace
-        if: inputs.project != 'intar-agent'
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
-        with:
-          fetch-depth: 0
-      - name: Checkout jailed agent release
-        if: inputs.project == 'intar-agent'
+      - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Set up cuenv
         uses: ./.github/actions/setup-cuenv
+      - name: Install git-cliff
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: git-cliff@2.14.2
+          fallback: none
+      - name: Plan releases
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cuenv task -p ci --package ci release-plan
+  release-pr:
+    name: Update the release pull request
+    needs: plan
+    runs-on: ubuntu-24.04
+    environment: release-pr
+    steps:
+      - name: Create the release app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Install git-cliff
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: git-cliff@2.14.2
+          fallback: none
+      - name: Update the release pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: cuenv task -p ci --package ci release-update-pr
+  build:
+    name: Build ${{ matrix.tag }}
+    needs: plan
+    if: needs.plan.outputs.matrix != '[]'
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Checkout on Namespace
+        if: matrix.runner != 'ubuntu-24.04'
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+          ref: ${{ matrix.tag }}
+      - name: Checkout jailed agent release
+        if: matrix.runner == 'ubuntu-24.04'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ matrix.tag }}
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
       - name: Preflight jailed release runner
-        if: inputs.project == 'intar-agent'
+        if: matrix.project == 'intar-agent'
         run: cuenv task -p ci --package ci release-preflight-jailed-release-runner
-      - name: Resolve project
-        id: project
-        env:
-          PROJECT: ${{ inputs.project }}
-        run: cuenv task -p ci --package ci release-resolve-project
-      - name: Determine release tag
-        id: next
-        env:
-          BUMP: ${{ inputs.bump }}
-          MANIFEST: ${{ steps.project.outputs.manifest }}
-          PROJECT: ${{ inputs.project }}
-          RESUME_TAG: ${{ inputs.resume_tag }}
-          TAG_PREFIX: ${{ steps.project.outputs.tag_prefix }}
-        run: cuenv task -p ci --package ci release-determine-release-tag
       - name: Set up Rust
-        if: steps.next.outputs.resume != 'true'
         uses: ./.github/actions/setup-rust
         with:
           targets: aarch64-unknown-linux-musl
-          namespace-cache: ${{ inputs.project != 'intar-agent' }}
-      - name: Apply release version
-        if: steps.next.outputs.resume != 'true'
-        env:
-          MANIFEST: ${{ steps.project.outputs.manifest }}
-          VERSION: ${{ steps.next.outputs.version }}
-          PACKAGE: ${{ steps.project.outputs.package }}
-        run: cuenv task -p ci --package ci release-apply-release-version
-      - name: Set up Bun for pinned content hydration
-        if: steps.next.outputs.resume != 'true'
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.3.14
-      - name: Restore shared Bun cache
-        if: inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'
-        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
-        with:
-          path: ~/.bun/install/cache
-      - name: Run checks
-        if: steps.next.outputs.resume != 'true'
-        run: cuenv task verify
+          namespace-cache: ${{ matrix.runner != 'ubuntu-24.04' }}
       - name: Build release artifacts
-        if: steps.next.outputs.resume != 'true'
         env:
-          PACKAGE: ${{ steps.project.outputs.package }}
-          BINARY: ${{ steps.project.outputs.binary }}
-          VERSION: ${{ steps.next.outputs.version }}
+          PACKAGE: ${{ matrix.package }}
+          BINARY: ${{ matrix.binary }}
+          VERSION: ${{ matrix.version }}
         run: cuenv task -p ci --package ci release-build-release-artifacts
       - name: Test personal-host installer
-        if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
+        if: matrix.project == 'intar-agent'
         run: cuenv task installer-tests
       - name: Run privileged agent package smoke
-        if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
+        if: matrix.project == 'intar-agent'
         env:
-          VERSION: ${{ steps.next.outputs.version }}
+          VERSION: ${{ matrix.version }}
         run: cuenv task -p ci --package ci release-privileged-agent-package-smoke
       - name: Smoke-test image CLI release package
-        if: inputs.project == 'intar-image-cli' && steps.next.outputs.resume != 'true'
+        if: matrix.project == 'intar-image-cli'
         env:
-          VERSION: ${{ steps.next.outputs.version }}
+          VERSION: ${{ matrix.version }}
         run: cuenv task -p ci --package ci release-smoke-test-image-cli-package
       - name: Preserve exact release payload
-        id: release_payload
-        if: steps.next.outputs.resume != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ${{ steps.next.outputs.payload_name }}
+          name: release-${{ matrix.prefix }}
           path: dist/
           if-no-files-found: error
           compression-level: 0
           overwrite: true
-          retention-days: 30
-      - name: Resolve release payload
-        id: payload
-        env:
-          NEW_DIGEST: ${{ steps.release_payload.outputs.artifact-digest }}
-          NEW_ID: ${{ steps.release_payload.outputs.artifact-id }}
-          PAYLOAD_NAME: ${{ steps.next.outputs.payload_name }}
-          RESUME: ${{ steps.next.outputs.resume }}
-          RESUME_DIGEST: ${{ steps.next.outputs.payload_digest }}
-          RESUME_ID: ${{ steps.next.outputs.payload_id }}
-          RESUME_RUN_ID: ${{ steps.next.outputs.payload_run_id }}
-          RESUME_SOURCE_SHA: ${{ steps.next.outputs.payload_source_sha }}
-        run: cuenv task -p ci --package ci release-resolve-release-payload
-      - name: Validate preserved resume payload
-        if: steps.next.outputs.resume == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PAYLOAD_DIGEST: ${{ steps.payload.outputs.digest }}
-          PAYLOAD_ID: ${{ steps.payload.outputs.id }}
-          PAYLOAD_NAME: ${{ steps.payload.outputs.name }}
-          PAYLOAD_RUN_ID: ${{ steps.payload.outputs.run_id }}
-          PAYLOAD_SOURCE_SHA: ${{ steps.payload.outputs.source_sha }}
-        run: cuenv task -p ci --package ci release-validate-resume-payload
-      - name: Restore exact release payload
-        if: steps.next.outputs.resume == 'true'
+          retention-days: 7
+  publish:
+    name: Publish ${{ matrix.tag }}
+    needs:
+      - plan
+      - build
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.matrix != '[]' }}
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Download release payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          artifact-ids: ${{ steps.payload.outputs.id }}
+          name: release-${{ matrix.prefix }}
           path: dist/
-          github-token: ${{ github.token }}
-          run-id: ${{ steps.payload.outputs.run_id }}
-      - name: Commit release version
-        id: version_commit
-        env:
-          MANIFEST: ${{ steps.project.outputs.manifest }}
-          RESUME: ${{ steps.next.outputs.resume }}
-          RESUME_SHA: ${{ steps.next.outputs.release_sha }}
-          VERSION_TAG: ${{ steps.next.outputs.version_tag }}
-          PROJECT: ${{ inputs.project }}
-        run: cuenv task -p ci --package ci release-commit-release-version
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/${{ matrix.binary }}_${{ matrix.version }}_checksums.txt
       - name: Publish tagged GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          PAYLOAD_DIGEST: ${{ steps.payload.outputs.digest }}
-          PAYLOAD_ID: ${{ steps.payload.outputs.id }}
-          PAYLOAD_NAME: ${{ steps.payload.outputs.name }}
-          PAYLOAD_RUN_ID: ${{ steps.payload.outputs.run_id }}
-          PAYLOAD_SOURCE_SHA: ${{ steps.payload.outputs.source_sha }}
-          PROJECT: ${{ inputs.project }}
-          RELEASE_SHA: ${{ steps.version_commit.outputs.sha }}
-          RESUME: ${{ steps.next.outputs.resume }}
-          TAG: ${{ steps.next.outputs.tag }}
-          VERSION_TAG: ${{ steps.next.outputs.version_tag }}
+          TAG: ${{ matrix.tag }}
+          TITLE: ${{ matrix.project }} v${{ matrix.version }}
         run: cuenv task -p ci --package ci release-publish-tagged-github-release

@@ -11,6 +11,7 @@ const PINNED_TAIKI_TOOLS = new Map([
   ["cargo-nextest", "0.9.143"],
   ["cargo-zigbuild", "0.23.0"],
   ["cargo-audit", "0.22.2"],
+  ["git-cliff", "2.14.2"],
 ]);
 // cuenv 0.56.7 hardcodes a tag-pinned checkout as the first step of every job
 // it generates, with no way to pin or replace it. Allow exactly that reference

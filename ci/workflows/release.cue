@@ -2,274 +2,227 @@ package workflows
 
 import "github.com/intar-dev/intar-dev/ci/gha"
 
+// Product releases through a release pull request; nothing is published to a
+// package registry. On every push to main:
+//
+//   - plan tags each product whose manifest version is new, opens its draft
+//     release, and lists every draft for the build;
+//   - release-pr rebuilds release/next with the bumps git-cliff finds since
+//     each product's latest tag (tools/workflows/release/cliff.toml and
+//     products.json);
+//   - build packages each draft from its tag, and publish attests the payload
+//     and publishes the draft.
+//
+// A draft left by a failed run is rebuilt by the next run, so re-running or
+// dispatching the workflow resumes it.
+let _hasReleases = "needs.plan.outputs.matrix != '[]'"
+let _releases = {
+	matrix: include: "${{ fromJSON(needs.plan.outputs.matrix) }}"
+	"fail-fast": false
+}
+
+// The intar-release GitHub App's token: its pushes and pull requests run CI,
+// which a GITHUB_TOKEN push does not. Its key lives in the release-pr
+// environment, which only main can use.
+let _appToken = {
+	name: "Create the release app token"
+	id:   "app-token"
+	uses: gha.pin."create-github-app-token".ref
+	with: {
+		"client-id":                "${{ vars.RELEASE_APP_CLIENT_ID }}"
+		"private-key":              "${{ secrets.RELEASE_APP_PRIVATE_KEY }}"
+		"permission-contents":      "write"
+		"permission-pull-requests": "write"
+	}
+}
+let _appEnv = {
+	GH_TOKEN: "${{ steps.app-token.outputs.token }}"
+	APP_SLUG: "${{ steps.app-token.outputs.app-slug }}"
+}
+
+let _gitCliff = {
+	name: "Install git-cliff"
+	uses: gha.pin."install-action".ref
+	with: {
+		tool:     "git-cliff@2.14.2"
+		fallback: "none"
+	}
+}
+
 "workflows": release: {
 	name: "Release"
-	"run-name": """
-		${{ inputs.resume_tag != ''
-		    && format('{0} resume {1} from {2}', inputs.project, inputs.resume_tag, github.ref_name)
-		    || format('{0} release {1} from {2}', inputs.project, inputs.bump, github.ref_name) }}
-		"""
-	on: workflow_dispatch: inputs: {
-		project: {
-			description: "Rust project to release"
-			required:    true
-			type:        "choice"
-			options: [
-				"intar-agent",
-				"intar-builder",
-				"intar-image-cli",
-				"kino",
-				"stargate",
-			]
-		}
-		bump: {
-			description: "Semantic version increment"
-			required:    true
-			type:        "choice"
-			options: [
-				"patch",
-				"minor",
-				"major",
-			]
-		}
-		resume_tag: {
-			description: "Existing project tag to finish publishing; bump is ignored"
-			required:    false
-			type:        "string"
-			default:     ""
-		}
+	on: {
+		push: branches: ["main"]
+		workflow_dispatch: {}
 	}
-	permissions: {
-		actions:  "read"
-		contents: "read"
-	}
-	concurrency: {
-		group:                "release-${{ inputs.project }}"
-		"cancel-in-progress": false
-	}
-
-	// This is a shared artifact-release workflow, not a production deployment.
-	// Keep protected-environment approval on the project-specific install/deploy
-	// workflow so unrelated release targets do not inherit production approvals.
+	concurrency: gha.#ProductionConcurrency & {group: "release"}
 	jobs: {
-		release: {
-			name: "Bump, tag, and build"
-			permissions: {
-				actions:  "read"
-				contents: "write"
-			}
-			// The jailed agent release needs a host kernel with Landlock enabled.
-			// Namespace's runner kernel currently has Landlock disabled at boot, while
-			// the other release targets do not execute the privileged jailer smoke.
-			"runs-on": "${{ inputs.project == 'intar-agent' && 'ubuntu-24.04' || 'namespace-profile-intar-dev' }}"
-			steps: [{
-				name: "Ensure main"
-				env: {
-					RESUME_TAG:  "${{ inputs.resume_tag }}"
-					RUN_ATTEMPT: "${{ github.run_attempt }}"
-				}
-				run: """
-					set -euo pipefail
-					if [ -z "${RESUME_TAG}" ]; then
-					  if [ "${RUN_ATTEMPT}" != "1" ]; then
-					    echo "Do not rerun a failed new release: start a fresh dispatch, or resume the exact tag if one was created." >&2
-					    exit 1
-					  fi
-					  if [ "${GITHUB_REF_TYPE}" != "branch" ] || [ "${GITHUB_REF_NAME}" != "main" ]; then
-					    echo "A new release must run from the main branch, got ${GITHUB_REF}." >&2
-					    exit 1
-					  fi
-					else
-					  case "${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}" in
-					    branch:main|"tag:${RESUME_TAG}") ;;
-					    *)
-					      echo "Resume ${RESUME_TAG} from main or from that exact tag, got ${GITHUB_REF}." >&2
-					      exit 1
-					      ;;
-					  esac
-					fi
+		plan: {
+			name:      "Plan releases"
+			if:        "github.ref == 'refs/heads/main'"
+			"runs-on": "ubuntu-24.04"
+			permissions: contents: "write"
+			outputs: matrix:       "${{ steps.plan.outputs.matrix }}"
+			steps: [
+				gha.#Checkout & {with: "fetch-depth": 0},
+				gha.#SetupCuenv,
+				_gitCliff,
+				{
+					name: "Plan releases"
+					id:   "plan"
+					env: GH_TOKEN: "${{ github.token }}"
+					#StepTask & {#task: "release-plan"}
+				},
+			]
+		}
 
-					"""
-			}, {
-				name: "Checkout on Namespace"
-				if:   "inputs.project != 'intar-agent'"
-				uses: gha.pin."nscloud-checkout".ref
-				with: "fetch-depth": 0
-			}, {
-				name: "Checkout jailed agent release"
-				if:   "inputs.project == 'intar-agent'"
-				uses: gha.pin.checkout.ref
-				with: "fetch-depth": 0
-			}, {
-				// The run steps below are cuenv tasks, on the resume path too.
-				name: "Set up cuenv"
-				uses: "./.github/actions/setup-cuenv"
-			}, {
-				name: "Preflight jailed release runner"
-				if:   "inputs.project == 'intar-agent'"
-				#StepTask & {#task: "release-preflight-jailed-release-runner"}
-			}, {
-				name: "Resolve project"
-				id:   "project"
-				env: PROJECT: "${{ inputs.project }}"
-				#StepTask & {#task: "release-resolve-project"}
-			}, {
-				name: "Determine release tag"
-				id:   "next"
-				env: {
-					BUMP:       "${{ inputs.bump }}"
-					MANIFEST:   "${{ steps.project.outputs.manifest }}"
-					PROJECT:    "${{ inputs.project }}"
-					RESUME_TAG: "${{ inputs.resume_tag }}"
-					TAG_PREFIX: "${{ steps.project.outputs.tag_prefix }}"
-				}
-				#StepTask & {#task: "release-determine-release-tag"}
-			}, gha.#SetupRust & {
-				if: "steps.next.outputs.resume != 'true'"
-				with: {
-					targets: "aarch64-unknown-linux-musl"
-					// The jailed agent release runs on a GitHub-hosted runner.
-					"namespace-cache": "${{ inputs.project != 'intar-agent' }}"
-				}
-			}, {
-				name: "Apply release version"
-				if:   "steps.next.outputs.resume != 'true'"
-				env: {
-					MANIFEST: "${{ steps.project.outputs.manifest }}"
-					VERSION:  "${{ steps.next.outputs.version }}"
-					PACKAGE:  "${{ steps.project.outputs.package }}"
-				}
-				#StepTask & {#task: "release-apply-release-version"}
-			}, {
-				name: "Set up Bun for pinned content hydration"
-				if:   "steps.next.outputs.resume != 'true'"
-				uses: gha.pin."setup-bun".ref
-				with: "bun-version": "1.3.14"
-			}, {
-				name: "Restore shared Bun cache"
-				if:   "inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'"
-				uses: gha.pin."nscloud-cache".ref
-				with: path: "~/.bun/install/cache"
-			}, {
-				name: "Run checks"
-				if:   "steps.next.outputs.resume != 'true'"
-				run:  "cuenv task verify"
-			}, {
-				name: "Build release artifacts"
-				if:   "steps.next.outputs.resume != 'true'"
-				env: {
-					PACKAGE: "${{ steps.project.outputs.package }}"
-					BINARY:  "${{ steps.project.outputs.binary }}"
-					VERSION: "${{ steps.next.outputs.version }}"
-				}
-				#StepTask & {#task: "release-build-release-artifacts"}
-			}, {
-				name: "Test personal-host installer"
-				if:   "inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'"
-				run:  "cuenv task installer-tests"
-			}, {
-				name: "Run privileged agent package smoke"
-				if:   "inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'"
-				env: VERSION: "${{ steps.next.outputs.version }}"
-				#StepTask & {#task: "release-privileged-agent-package-smoke"}
-			}, {
-				name: "Smoke-test image CLI release package"
-				if:   "inputs.project == 'intar-image-cli' && steps.next.outputs.resume != 'true'"
-				env: VERSION: "${{ steps.next.outputs.version }}"
-				#StepTask & {#task: "release-smoke-test-image-cli-package"}
-			}, {
-				name: "Preserve exact release payload"
-				id:   "release_payload"
-				if:   "steps.next.outputs.resume != 'true'"
-				uses: gha.pin."upload-artifact".ref
-				with: {
-					name:                "${{ steps.next.outputs.payload_name }}"
-					path:                "dist/"
-					"if-no-files-found": "error"
-					"compression-level": 0
-					overwrite:           true
-					"retention-days":    30
-				}
-			}, {
-				name: "Resolve release payload"
-				id:   "payload"
-				env: {
-					NEW_DIGEST:        "${{ steps.release_payload.outputs.artifact-digest }}"
-					NEW_ID:            "${{ steps.release_payload.outputs.artifact-id }}"
-					PAYLOAD_NAME:      "${{ steps.next.outputs.payload_name }}"
-					RESUME:            "${{ steps.next.outputs.resume }}"
-					RESUME_DIGEST:     "${{ steps.next.outputs.payload_digest }}"
-					RESUME_ID:         "${{ steps.next.outputs.payload_id }}"
-					RESUME_RUN_ID:     "${{ steps.next.outputs.payload_run_id }}"
-					RESUME_SOURCE_SHA: "${{ steps.next.outputs.payload_source_sha }}"
-				}
-				#StepTask & {#task: "release-resolve-release-payload"}
-			}, {
-				name: "Validate preserved resume payload"
-				if:   "steps.next.outputs.resume == 'true'"
-				env: {
-					GH_TOKEN:           "${{ github.token }}"
-					PAYLOAD_DIGEST:     "${{ steps.payload.outputs.digest }}"
-					PAYLOAD_ID:         "${{ steps.payload.outputs.id }}"
-					PAYLOAD_NAME:       "${{ steps.payload.outputs.name }}"
-					PAYLOAD_RUN_ID:     "${{ steps.payload.outputs.run_id }}"
-					PAYLOAD_SOURCE_SHA: "${{ steps.payload.outputs.source_sha }}"
-				}
-				#StepTask & {#task: "release-validate-resume-payload"}
-			}, {
-				name: "Restore exact release payload"
-				if:   "steps.next.outputs.resume == 'true'"
-				uses: gha.pin."download-artifact".ref
-				with: {
-					"artifact-ids": "${{ steps.payload.outputs.id }}"
-					path:           "dist/"
-					"github-token": "${{ github.token }}"
-					"run-id":       "${{ steps.payload.outputs.run_id }}"
-				}
-			}, {
-				name: "Commit release version"
-				id:   "version_commit"
-				env: {
-					MANIFEST:    "${{ steps.project.outputs.manifest }}"
-					RESUME:      "${{ steps.next.outputs.resume }}"
-					RESUME_SHA:  "${{ steps.next.outputs.release_sha }}"
-					VERSION_TAG: "${{ steps.next.outputs.version_tag }}"
-					PROJECT:     "${{ inputs.project }}"
-				}
-				#StepTask & {#task: "release-commit-release-version"}
-			}, {
-				name: "Publish tagged GitHub release"
-				env: {
-					GH_TOKEN:           "${{ github.token }}"
-					PAYLOAD_DIGEST:     "${{ steps.payload.outputs.digest }}"
-					PAYLOAD_ID:         "${{ steps.payload.outputs.id }}"
-					PAYLOAD_NAME:       "${{ steps.payload.outputs.name }}"
-					PAYLOAD_RUN_ID:     "${{ steps.payload.outputs.run_id }}"
-					PAYLOAD_SOURCE_SHA: "${{ steps.payload.outputs.source_sha }}"
-					PROJECT:            "${{ inputs.project }}"
-					RELEASE_SHA:        "${{ steps.version_commit.outputs.sha }}"
-					RESUME:             "${{ steps.next.outputs.resume }}"
-					TAG:                "${{ steps.next.outputs.tag }}"
-					VERSION_TAG:        "${{ steps.next.outputs.version_tag }}"
-				}
-				#StepTask & {#task: "release-publish-tagged-github-release"}
-			}]
+		"release-pr": {
+			name:        "Update the release pull request"
+			needs:       "plan"
+			"runs-on":   "ubuntu-24.04"
+			environment: "release-pr"
+			steps: [
+				_appToken,
+				gha.#Checkout & {with: {
+					"fetch-depth": 0
+					token:         "${{ steps.app-token.outputs.token }}"
+				}},
+				gha.#SetupCuenv,
+				_gitCliff,
+				{
+					name: "Update the release pull request"
+					env:  _appEnv
+					#StepTask & {#task: "release-update-pr"}
+				},
+			]
+		}
+
+		// The payload is built from the tag alone, with read-only access.
+		build: {
+			name:      "Build ${{ matrix.tag }}"
+			needs:     "plan"
+			if:        _hasReleases
+			strategy:  _releases
+			"runs-on": "${{ matrix.runner }}"
+			permissions: contents: "read"
+			steps: [
+				gha.#Checkout & {
+					name: "Checkout on Namespace"
+					if:   "matrix.runner != 'ubuntu-24.04'"
+					uses: gha.pin."nscloud-checkout".ref
+					with: ref: "${{ matrix.tag }}"
+				},
+				// The jailed agent release needs a host kernel with Landlock
+				// enabled, which Namespace's runner kernel disables at boot.
+				gha.#Checkout & {
+					name: "Checkout jailed agent release"
+					if:   "matrix.runner == 'ubuntu-24.04'"
+					with: ref: "${{ matrix.tag }}"
+				},
+				gha.#SetupCuenv,
+				{
+					name: "Preflight jailed release runner"
+					if:   "matrix.project == 'intar-agent'"
+					#StepTask & {#task: "release-preflight-jailed-release-runner"}
+				},
+				gha.#SetupRust & {with: {
+					targets:           "aarch64-unknown-linux-musl"
+					"namespace-cache": "${{ matrix.runner != 'ubuntu-24.04' }}"
+				}},
+				{
+					name: "Build release artifacts"
+					env: {
+						PACKAGE: "${{ matrix.package }}"
+						BINARY:  "${{ matrix.binary }}"
+						VERSION: "${{ matrix.version }}"
+					}
+					#StepTask & {#task: "release-build-release-artifacts"}
+				},
+				gha.#Run & {
+					name:  "Test personal-host installer"
+					if:    "matrix.project == 'intar-agent'"
+					#task: "installer-tests"
+				},
+				{
+					name: "Run privileged agent package smoke"
+					if:   "matrix.project == 'intar-agent'"
+					env: VERSION: "${{ matrix.version }}"
+					#StepTask & {#task: "release-privileged-agent-package-smoke"}
+				},
+				{
+					name: "Smoke-test image CLI release package"
+					if:   "matrix.project == 'intar-image-cli'"
+					env: VERSION: "${{ matrix.version }}"
+					#StepTask & {#task: "release-smoke-test-image-cli-package"}
+				},
+				{
+					name: "Preserve exact release payload"
+					uses: gha.pin."upload-artifact".ref
+					with: {
+						name:                "release-${{ matrix.prefix }}"
+						path:                "dist/"
+						"if-no-files-found": "error"
+						"compression-level": 0
+						overwrite:           true
+						"retention-days":    7
+					}
+				},
+			]
+		}
+
+		// Each product publishes on its own, so one failed build leaves only
+		// its own draft for the next run. A product whose build failed has no
+		// payload to download.
+		publish: {
+			name: "Publish ${{ matrix.tag }}"
+			needs: ["plan", "build"]
+			if:        "${{ !cancelled() && needs.plan.result == 'success' && \(_hasReleases) }}"
+			strategy:  _releases
+			"runs-on": "ubuntu-24.04"
+			permissions: {
+				contents:            "write"
+				"id-token":          "write"
+				attestations:        "write"
+				"artifact-metadata": "write"
+			}
+			steps: [
+				gha.#Checkout & {with: "fetch-depth": 0},
+				gha.#SetupCuenv,
+				{
+					name: "Download release payload"
+					uses: gha.pin."download-artifact".ref
+					with: {
+						name: "release-${{ matrix.prefix }}"
+						path: "dist/"
+					}
+				},
+				{
+					name: "Attest build provenance"
+					uses: gha.pin.attest.ref
+					with: "subject-checksums": "dist/${{ matrix.binary }}_${{ matrix.version }}_checksums.txt"
+				},
+				{
+					name: "Publish tagged GitHub release"
+					env: {
+						GH_TOKEN: "${{ github.token }}"
+						TAG:      "${{ matrix.tag }}"
+						TITLE:    "${{ matrix.project }} v${{ matrix.version }}"
+					}
+					#StepTask & {#task: "release-publish-tagged-github-release"}
+				},
+			]
 		}
 	}
 }
 
-// The release job's run steps. The resume payload check and the publish use the
-// job token, and the publish pushes and tags, so they run only in GitHub Actions.
+// Every release step runs only in GitHub Actions: they tag, publish, open pull
+// requests, or reconfigure the runner as root.
 tasks: {
-	"release-preflight-jailed-release-runner": #Script & {_script: "tools/workflows/release/preflight-jailed-release-runner.sh"}
-	"release-resolve-project": #Script & {_script: "tools/workflows/release/resolve-project.sh"}
-	"release-determine-release-tag": #Script & {_script: "tools/workflows/release/determine-release-tag.sh"}
-	"release-apply-release-version": #Script & {_script: "tools/workflows/release/apply-release-version.sh"}
-	"release-build-release-artifacts": #Script & {_script: "tools/workflows/release/build-release-artifacts.sh"}
-	"release-privileged-agent-package-smoke": #Script & {_script: "tools/workflows/release/privileged-agent-package-smoke.sh"}
-	"release-smoke-test-image-cli-package": #Script & {_script: "tools/workflows/release/smoke-test-image-cli-package.sh"}
-	"release-resolve-release-payload": #Script & {_script: "tools/workflows/release/resolve-release-payload.sh"}
-	"release-validate-resume-payload": #Script & {_script: "tools/workflows/release/validate-resume-payload.sh", _production: true}
-	"release-commit-release-version": #Script & {_script: "tools/workflows/release/commit-release-version.sh"}
+	"release-plan": #Script & {_script: "tools/workflows/release/plan-release.sh", _production: true}
+	"release-update-pr": #Script & {_script: "tools/workflows/release/update-release-pr.sh", _production: true}
+	"release-preflight-jailed-release-runner": #Script & {_script: "tools/workflows/release/preflight-jailed-release-runner.sh", _production: true}
+	"release-build-release-artifacts": #Script & {_script: "tools/workflows/release/build-release-artifacts.sh", _production: true}
+	"release-privileged-agent-package-smoke": #Script & {_script: "tools/workflows/release/privileged-agent-package-smoke.sh", _production: true}
+	"release-smoke-test-image-cli-package": #Script & {_script: "tools/workflows/release/smoke-test-image-cli-package.sh", _production: true}
 	"release-publish-tagged-github-release": #Script & {_script: "tools/workflows/release/publish-tagged-github-release.sh", _production: true}
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# release.yml, job release, step "Build release artifacts".
+# release.yml, job build, step "Build release artifacts".
 set -euo pipefail
 dist_dir="${PWD}/dist"
 mkdir -p "${dist_dir}"

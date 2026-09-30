@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# release.yml, job release, step "Smoke-test image CLI release package".
+# release.yml, job build, step "Smoke-test image CLI release package".
 set -euo pipefail
 smoke_root="$(mktemp -d)"
 cleanup_smoke() {

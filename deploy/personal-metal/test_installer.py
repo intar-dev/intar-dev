@@ -689,6 +689,9 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('sh deploy/personal-metal/package.sh', build)
         self.assertIn('intar-agent_${VERSION}_intar-host', build)
         self.assertLess(workflow.index('Run privileged agent package smoke'), workflow.index('Preserve exact release payload'))
+        # The publish job releases exactly the payload the smoked build preserved.
+        self.assertEqual(workflow.count('name: release-${{ matrix.prefix }}'), 2)
+        self.assertLess(workflow.index('Preserve exact release payload'), workflow.index('Publish tagged GitHub release'))
         launcher = (REPO / 'apps/web/public/install.sh').read_text()
         self.assertIn('intar-agent_{version}_intar-host', launcher)
         self.assertNotIn('enrollmentToken', launcher)
