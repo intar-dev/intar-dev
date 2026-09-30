@@ -24,7 +24,6 @@ beforeEach(async () => {
   ]);
   await ensureFixtureMember({ d1: env.DB, userId: "owner" });
   context = { userId: "owner", sessionId: "browser", isAdmin: false, role: "user", organizationIds: [], activeOrganizationId: null };
-  await env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES ('personal_metal_registration','open',1)").run();
 });
 async function host(id = "host", scope: "personal" | "platform" = "personal") {
   await drizzle(env.DB).insert(agentHosts).values({ id, userId: "owner", name: id, scope, credentialGeneration: 1, connected: true, activeSessionId: "session", lastHeartbeatAt: now });

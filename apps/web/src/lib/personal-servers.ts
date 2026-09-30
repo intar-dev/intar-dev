@@ -15,13 +15,12 @@ import { isFreshHostHeartbeat } from "@/lib/scenario-hosts";
 export async function listPersonalServers(context: UserContext) {
   const db = drizzle(env.DB);
   const now = Date.now();
-  const [hosts, owners, gate, enrollments, activeRuns] = await Promise.all([
+  const [hosts, owners, enrollments, activeRuns] = await Promise.all([
     db.select({ host: agentHosts, report: hostActualState.reportJson, reportedAt: hostActualState.updatedAt })
       .from(agentHosts).leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
       .where(and(eq(agentHosts.userId, context.userId), eq(agentHosts.scope, "personal"),
         or(eq(agentHosts.disabled, false), isNull(agentHosts.ownerRemovalCompletedAt)))),
     db.select({ placement: user.metalPlacement }).from(user).where(eq(user.id, context.userId)),
-    env.DB.prepare("SELECT state FROM runtime_operation_gates WHERE key = 'personal_metal_registration'").first<{ state: string }>(),
     env.DB.prepare(`SELECT host_id AS id, name, expires_at AS expiresAt FROM host_enrollments
       WHERE user_id = ?1 AND scope = 'personal' AND claimed_at IS NULL AND revoked_at IS NULL AND expires_at > ?2
       ORDER BY expires_at DESC`).bind(context.userId, now).all<{ id: string; name: string; expiresAt: number }>(),
@@ -33,7 +32,6 @@ export async function listPersonalServers(context: UserContext) {
   const reservations = await loadActiveRuntimeResourceSnapshot(now, hosts.map(({ host }) => host.id));
   return {
     placement: owners[0]?.placement ?? "platform",
-    registrationOpen: gate?.state === "open",
     installerCommand: "curl -fsSL https://intar.dev/install.sh | sudo sh",
     enrollments: enrollments.results,
     servers: hosts.map(row => serializeManagedServer(row, now, reservations,

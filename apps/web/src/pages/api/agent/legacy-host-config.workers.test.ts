@@ -24,9 +24,6 @@ import { POST as hostConfig } from "./hosts";
 let context: UserContext;
 beforeEach(async () => {
   await resetD1Database();
-  await env.DB.prepare(
-    "INSERT INTO runtime_operation_gates (key, state) VALUES ('personal_metal_registration', 'open'), ('platform_metal_registration', 'open')",
-  ).run();
   await drizzle(env.DB).insert(user).values({
     id: "owner", name: "Owner", email: "owner@example.test", role: "admin",
   });

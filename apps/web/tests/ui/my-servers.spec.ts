@@ -30,7 +30,6 @@ function serverData(
 ): MyServersResponse {
   return {
     placement: "personal",
-    registrationOpen: true,
     installerCommand,
     servers: [makeServer()],
     enrollments: [],
@@ -116,13 +115,13 @@ async function createToken(page: Page) {
   ).toBeVisible();
 }
 
-test("profile shows cloud placement and a closed registration gate", async ({
+test("profile shows cloud placement and always offers server registration", async ({
   page,
   ui,
 }) => {
   await mockServers(
     page,
-    serverData({ placement: "platform", servers: [], registrationOpen: false }),
+    serverData({ placement: "platform", servers: [] }),
   );
   await ui.open(routeCase("profile"));
   await expect(section(page)).toContainText("Your runs use the cloud or organization servers.");
@@ -133,12 +132,10 @@ test("profile shows cloud placement and a closed registration gate", async ({
   await expect(section(page)).toContainText(
     "No personal servers connected yet.",
   );
-  await expect(section(page)).toContainText(
-    "New server registration is not available yet.",
-  );
+  await expect(section(page)).not.toContainText("not available yet");
   await expect(
     section(page).getByRole("button", { name: "Add server" }),
-  ).toHaveCount(0);
+  ).toBeVisible();
 });
 
 for (const viewport of [

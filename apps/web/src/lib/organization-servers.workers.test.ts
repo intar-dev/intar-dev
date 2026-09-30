@@ -38,7 +38,6 @@ beforeEach(async () => {
     contexts[userId] = { userId, sessionId: "browser", role: "user", isAdmin: false, organizationIds: [], activeOrganizationId: null };
   }
   mocks.auth.mockResolvedValue({ ok: true, context: contexts.owner });
-  await env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES ('personal_metal_registration','open',1)").run();
 });
 
 function enrollment(context = contexts.owner!) {
@@ -64,16 +63,12 @@ it("binds a claim to its organization and permits management by another admin af
   expect(await env.DB.prepare("SELECT disabled, organization_id FROM agent_hosts").first()).toEqual({ disabled: 0, organization_id: "org" });
 });
 
-it("requires current admin membership, an active account, and the user-managed gate at creation and claim", async () => {
+it("requires current admin membership and an active account at creation and claim", async () => {
   await expect(enrollment(contexts.reader!)).rejects.toMatchObject({ code: "host_enrollment_changed" });
   const setup = await enrollment();
   await env.DB.prepare("UPDATE member SET role = 'member' WHERE id = 'owner'").run();
   expect(await claimHostEnrollment(env.DB, setup.enrollmentToken, randomHostSecret())).toBeNull();
   await env.DB.prepare("UPDATE member SET role = 'owner' WHERE id = 'owner'").run();
-  await env.DB.prepare("UPDATE runtime_operation_gates SET state = 'drained'").run();
-  expect(await claimHostEnrollment(env.DB, setup.enrollmentToken, randomHostSecret())).toBeNull();
-  await expect(enrollment()).rejects.toMatchObject({ code: "host_enrollment_changed" });
-  await env.DB.prepare("UPDATE runtime_operation_gates SET state = 'open'").run();
   await revokeFixtureAccount({ d1: env.DB, userId: "owner" });
   expect(await claimHostEnrollment(env.DB, setup.enrollmentToken, randomHostSecret())).toBeNull();
   await expect(enrollment()).rejects.toMatchObject({ code: "host_enrollment_changed" });
@@ -98,7 +93,8 @@ it("isolates organization lists, allows member GET, and protects every write rou
   expect(response.status).toBe(200);
   expect(response.headers.get("cache-control")).toContain("no-store");
   const body = await response.json() as { servers: { id: string }[] };
-  expect(body).toMatchObject({ placement: "platform", registrationOpen: true, installerCommand: "curl -fsSL https://intar.dev/install.sh | sudo sh", enrollments: [{ id: setup.hostId }] });
+  expect(body).not.toHaveProperty("registrationOpen");
+  expect(body).toMatchObject({ placement: "platform", installerCommand: "curl -fsSL https://intar.dev/install.sh | sudo sh", enrollments: [{ id: setup.hostId }] });
   expect(body.servers.map(server => server.id)).toEqual(["host"]);
   for (const [handler, method, input] of [[POST, "POST", { name: "Bad" }], [PATCH, "PATCH", { name: "Bad" }], [DELETE, "DELETE", { confirmReturnToCloud: true }], [CANCEL, "DELETE", undefined]] as const) {
     expect((await route(handler, method, input)).status).toBe(403);
@@ -120,8 +116,9 @@ it("returns enrollment and update responses and refuses invalid payloads", async
   }
   expect((await route(POST, "POST", { name: "Wrong scope", scope: "platform" })).status).toBe(400);
   expect((await route(DELETE, "DELETE", {})).status).toBe(400);
-  await env.DB.prepare("UPDATE runtime_operation_gates SET state = 'drained'").run();
-  expect((await route(POST, "POST", { name: "Closed" })).status).toBe(503);
+  // A leftover drained registration gate row no longer closes registration.
+  await env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES ('personal_metal_registration','drained',1)").run();
+  expect((await route(POST, "POST", { name: "Still open" })).status).toBe(201);
 });
 
 it("rechecks write authority after route checks and rejects cross-organization host IDs", async () => {
