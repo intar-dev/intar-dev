@@ -31,3 +31,46 @@ and `bun run check:database-migrations` before committing it.
 `course.md` and ordered Lecture directories. Each Lecture contains `lecture.md`
 and can contain a technical `scenario.hcl`. The base image catalog remains at
 `content/scenarios/base-images.hcl`.
+
+## Releasing
+
+The agent, builder, image CLI, kino, and Stargate are released as GitHub
+releases tagged `<prefix>/vX.Y.Z`. Nothing is published to crates.io or any
+other registry.
+
+- **Release pull request:** on every push to main, the Release workflow
+  rebuilds `release/next`. git-cliff reads the Conventional Commits since each
+  product's latest tag, scoped to the paths in
+  `tools/workflows/release/products.json`. A `feat` bumps the minor version,
+  and a `fix`, `perf`, `refactor`, or `build` bumps the patch version. A
+  breaking change bumps the minor version while a product is on 0.x. The pull
+  request bumps each changed product's `Cargo.toml` version and `Cargo.lock`
+  entry, and prepends its `CHANGELOG.md`. The app cannot move the branch
+  across a change to `.github/workflows`, so such a push to main replaces the
+  pull request with a new one.
+- **Publishing:** merging that pull request tags each new version on main and
+  opens a draft release. The workflow builds and smoke-tests each draft from its
+  tag, attests the payload, and publishes it. A failed build leaves its draft,
+  and the next run of the workflow rebuilds and publishes it.
+- **After an image CLI release,** the workflow opens a pull request that points
+  the website at the new scenario compiler. **After a Stargate release,** the
+  run summary prints the `stargate-deploy` plan command.
+
+Never bump a product version, edit a product `CHANGELOG.md`, or create a
+product tag as part of other work, and never push a tag by hand. To release a
+version other than the one the release pull request proposes, change the
+version in a pull request of its own; the next run tags and publishes it. That
+is also how a dependency update ships, such as a security fix in the root
+`Cargo.lock`: the root `Cargo.toml` and `Cargo.lock` bump no product. The
+release pull request is rebuilt on every push to main, so edits made on it are
+lost.
+
+The workflow needs a GitHub App to push `release/next` and open pull requests,
+because pushes made with the workflow's own token do not run CI. To set it up:
+
+1. Create the `intar-release` GitHub App with contents and pull requests read
+   and write, and install it only on this repository.
+2. Create the `release-pr` environment and limit its deployment branches to
+   `main`.
+3. In that environment, add the app's client ID as the `RELEASE_APP_CLIENT_ID`
+   variable and a private key as the `RELEASE_APP_PRIVATE_KEY` secret.
