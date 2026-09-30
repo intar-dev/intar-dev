@@ -69,13 +69,13 @@ runner: "namespace-profile-intar-dev"
 	"cancel-in-progress"?: bool | string
 }
 
-// A pull request run is grouped by its number and cancelled by a newer push;
-// every other run shares the #otherwise group and is never cancelled.
+// A pull request run is grouped by its number and cancelled by a newer push.
+// Every other run is a group of its own and is never cancelled: GitHub keeps
+// one pending run per group, so a shared group would drop queued main runs.
 #PRConcurrency: {
 	#Concurrency
 	#name!:               string
-	#otherwise:           string
-	group:                "\(#name)-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || '\(#otherwise)' }}"
+	group:                "\(#name)-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}"
 	"cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
 }
 

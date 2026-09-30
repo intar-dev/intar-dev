@@ -5,11 +5,10 @@
 # Every workflow except scenario-publish.yml is rendered by cuenv, and
 # `cuenv task sync-check` rejects a hand edit, so Dependabot skips them to keep
 # the grouped proposal mergeable; sync-check also requires each rendered file
-# below. The intar-*.yml lanes carry cuenv's own checkout. The other rendered
-# workflows' pins are also listed in a scanned file, which the workflow policy
-# enforces (see .github/actions/workflow-pins). When Dependabot bumps one,
-# replace its SHA and tag in ci/gha/pins.cue in the same pull request, then run
-# `cuenv sync codegen`.
+# below. Their pins are also listed in a scanned file, which the workflow
+# policy enforces (see .github/actions/workflow-pins). When Dependabot bumps
+# one, replace its SHA and tag in ci/gha/pins.cue in the same pull request,
+# then run `cuenv sync codegen`.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -17,7 +16,7 @@ updates:
       - "/"
       - "/.github/actions/*"
     exclude-paths:
-      - ".github/workflows/intar-*.yml"
+      - ".github/workflows/ci.yml"
       - ".github/workflows/website.yml"
       - ".github/workflows/docs.yml"
       - ".github/workflows/release.yml"

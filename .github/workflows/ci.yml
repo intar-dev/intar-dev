@@ -1,0 +1,226 @@
+# Generated from ci/workflows/ci.cue by cuenv; do not edit manually.
+# Regenerate with: cuenv sync codegen
+name: CI
+"on":
+  pull_request: {}
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  rust:
+    if: needs.changes.outputs.rust == 'true'
+    needs: changes
+    runs-on: namespace-profile-intar-dev
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+      - name: installer-tests
+        run: cuenv task installer-tests
+      - name: verify
+        run: cuenv task verify
+      - name: check-generated-contracts
+        run: cuenv task check-generated-contracts
+      - name: build-kino-guest
+        run: cuenv task build-kino-guest
+  security:
+    if: needs.changes.outputs.security == 'true'
+    needs: changes
+    runs-on: namespace-profile-intar-dev
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+      - name: Set up the CI runtime
+        uses: ./.github/actions/setup-runtime
+      - name: host-scripts
+        run: cuenv task host-scripts
+      - name: whitespace
+        run: cuenv task whitespace
+      - name: sync-check
+        run: cuenv task sync-check
+      - name: install-js
+        run: cuenv task install-js
+      - name: workflow-policy
+        run: cuenv task workflow-policy
+      - name: security
+        run: cuenv task security
+      - name: actionlint
+        run: cuenv task actionlint
+  images:
+    if: needs.changes.outputs.images == 'true'
+    needs: changes
+    runs-on: namespace-profile-intar-dev
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+      - name: validate-images
+        run: cuenv task validate-images
+      - name: render-images
+        run: cuenv task render-images
+  web:
+    if: needs.changes.outputs.web == 'true'
+    needs: changes
+    runs-on: namespace-profile-intar-dev
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up the CI runtime
+        uses: ./.github/actions/setup-runtime
+      - name: Set up Bun cache
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
+        with:
+          path: ~/.bun/install/cache
+      - name: install-js
+        run: cuenv task install-js
+      - name: test.js
+        run: cuenv task test.js
+      - name: build.js
+        run: cuenv task build.js
+      - name: check-web-artifact
+        run: cuenv task check-web-artifact
+  docs:
+    if: needs.changes.outputs.docs == 'true'
+    needs: changes
+    runs-on: namespace-profile-intar-dev
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up the CI runtime
+        uses: ./.github/actions/setup-runtime
+      - name: check-docs
+        run: cuenv task check-docs
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    outputs:
+      rust: ${{ steps.lanes.outputs.rust }}
+      security: ${{ steps.lanes.outputs.security }}
+      images: ${{ steps.lanes.outputs.images }}
+      web: ${{ steps.lanes.outputs.web }}
+      docs: ${{ steps.lanes.outputs.docs }}
+      base: ${{ steps.lanes.outputs.base }}
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Select the lanes
+        id: lanes
+        run: cuenv task ci-changes
+  web-ui:
+    name: Chromium smoke
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: namespace-profile-intar-dev
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      options: --ipc=host
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: apps/web/.node-version
+      - name: Install Bun setup prerequisite
+        working-directory: apps/web
+        run: apt-get update && apt-get install --yes --no-install-recommends unzip=6.0-28ubuntu4.1
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Run Chromium smoke
+        working-directory: apps/web
+        env:
+          CI: "true"
+          HOME: /root
+        run: bunx playwright test tests/ui/smoke.spec.ts --project=chromium-smoke
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: website-smoke-${{ github.run_attempt }}
+          path: |
+            .tmp/website-playwright/playwright-report
+            .tmp/website-playwright/test-results
+          if-no-files-found: warn
+          retention-days: 7
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs:
+      - changes
+      - web-ui
+      - rust
+      - security
+      - images
+      - web
+      - docs
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to pass or skip
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"${NEEDS}"
+          jq -e '.changes.result == "success" and all(.[]; .result == "success" or .result == "skipped")' <<<"${NEEDS}" >/dev/null
+permissions: {}

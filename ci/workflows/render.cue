@@ -7,12 +7,10 @@ import (
 	"github.com/intar-dev/intar-dev/ci/gha"
 )
 
-// The GitHub Actions workflows cuenv's CI generator cannot express: deployment
-// environments with URLs, non-cancelling concurrency, job outputs, always()
-// cleanup and run-name. Each workflow is typed GitHub Actions data (see
-// ci/gha) in its own file here, and `cuenv sync codegen` renders it to
-// .github/workflows. The rendered files are checked for drift by
-// `cuenv task sync-check`.
+// Every GitHub Actions workflow but scenario-publish.yml. Each is typed GitHub
+// Actions data (see ci/gha) in its own file here, and `cuenv sync codegen`
+// renders it to .github/workflows. The rendered files are checked for drift by
+// `cuenv task sync-check`. See ci/README.md.
 //
 // scenario-publish.yml stays hand-written: callers pin it by tag, and its path
 // is part of the OIDC allowlist in apps/web/src/lib/github-oidc.ts.

@@ -24,7 +24,7 @@
     "clean:generated": "bun tools/cleanup-generated.ts",
     "test:web": "bun run --cwd apps/web test",
     "build:web": "bun run --cwd apps/web build",
-    "check": "bun run check:imports && bun run check:deploy && bun run check:vm-boot-benchmark && bun run check:database-migrations && bun run --cwd apps/web db:schema:check",
+    "check": "bun run check:imports && bun run check:deploy && bun run check:vm-boot-benchmark && bun run check:database-migrations && bun run --cwd apps/web types:cf:check && bun run --cwd apps/web db:schema:check",
     "test": "bun run check && bun run test:web",
     "build": "bun run build:web"
   },
