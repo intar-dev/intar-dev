@@ -15,7 +15,10 @@
 # Writes name=true|false per lane, and base=<sha> for a pull request, to
 # $GITHUB_OUTPUT, or to stdout outside GitHub Actions.
 set -euo pipefail
-out="${GITHUB_OUTPUT:-/dev/stdout}"
+# Not >>/dev/stdout: on Linux that reopens fd 1, which fails for a socket.
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  exec >>"${GITHUB_OUTPUT}"
+fi
 all=false
 target=(HEAD)
 case "${GITHUB_EVENT_NAME:-}" in
@@ -28,7 +31,7 @@ case "${GITHUB_EVENT_NAME:-}" in
         git fetch --quiet --no-tags --depth=1 origin "${base}"
       fi
     fi
-    echo "base=${base}" >>"${out}"
+    echo "base=${base}"
     ;;
   "")
     base="$(git merge-base origin/main HEAD)"
@@ -44,5 +47,5 @@ for lane in "$@"; do
     git diff --quiet "${base}" "${target[@]}" -- "${globs[@]/#/:(glob)}"; then
     changed=false
   fi
-  echo "${name}=${changed}" >>"${out}"
+  echo "${name}=${changed}"
 done

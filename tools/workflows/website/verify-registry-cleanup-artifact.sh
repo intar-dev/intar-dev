@@ -35,4 +35,4 @@ jq -e '
   (([.services[]? | select(.binding == "CONTROL_PLANE" and .entrypoint == "MaintenanceState")] | length) == 1)
 ' "${cleanup_config}" >/dev/null
 printf 'auxiliary worker config: %s\n' "${cleanup_config}" \
-  >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+  | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"

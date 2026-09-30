@@ -40,4 +40,7 @@ for product in "${product_list[@]}"; do
   matrix="$(jq -c --argjson product "${product}" --arg version "${version}" \
     '. + [$product + {tag: "\($product.prefix)/v\($version)", version: $version} | del(.paths)]' <<<"${matrix}")"
 done
-echo "matrix=${matrix}" >> "${GITHUB_OUTPUT:-/dev/stdout}"
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+fi
+echo "Release dry run: ${matrix}"
