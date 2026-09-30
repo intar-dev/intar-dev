@@ -21,14 +21,6 @@ run-name: Stargate ${{ inputs.operation }} ${{ inputs.operation == 'rollback' &&
         description: Exact host backup ID for rollback
         required: false
         type: string
-      confirmation:
-        description: Type DEPLOY STARGATE or ROLLBACK STARGATE for a mutation
-        required: false
-        type: string
-      single_operator_confirmation:
-        description: Type SINGLE OPERATOR STARGATE only when no independent reviewer exists
-        required: false
-        type: string
 permissions:
   actions: read
   contents: read
@@ -54,8 +46,6 @@ jobs:
           OPERATION: ${{ inputs.operation }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           ROLLBACK_BACKUP: ${{ inputs.rollback_backup }}
-          CONFIRMATION: ${{ inputs.confirmation }}
-          SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
         run: cuenv task -p ci --package ci stargate-deploy-validate-operation
       - name: Validate host deployment scripts
         run: cuenv task -p ci --package ci stargate-deploy-validate-host-deployment-scripts
@@ -69,14 +59,6 @@ jobs:
       DEPLOY_HOST: ${{ vars.STARGATE_DEPLOY_HOST }}
       DEPLOY_PORT: ${{ vars.STARGATE_DEPLOY_PORT }}
       DEPLOY_USER: ${{ vars.STARGATE_DEPLOY_USER }}
-      APPROVAL_MODE: ${{ vars.STARGATE_DEPLOY_APPROVAL_MODE }}
-      SINGLE_OPERATOR_LOGIN: ${{ vars.STARGATE_SINGLE_OPERATOR_LOGIN }}
-      SINGLE_OPERATOR_ID: ${{ vars.STARGATE_SINGLE_OPERATOR_ID }}
-      SINGLE_OPERATOR_EXPIRES_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_EXPIRES_AT }}
-      SINGLE_OPERATOR_ADMIN_ATTESTED_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_ADMIN_ATTESTED_AT }}
-      ACTOR_ID: ${{ github.actor_id }}
-      RUN_ATTEMPT: ${{ github.run_attempt }}
-      SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -110,9 +92,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: cuenv task -p ci --package ci stargate-deploy-download-and-verify-release
-      - name: Recheck sole-operator mutation window
-        if: inputs.operation != 'plan'
-        run: cuenv task -p ci --package ci stargate-deploy-recheck-sole-operator-mutation-window
       - name: Apply release
         id: apply
         if: inputs.operation == 'apply'

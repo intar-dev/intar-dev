@@ -26,16 +26,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			required:    false
 			type:        "string"
 		}
-		confirmation: {
-			description: "Type DEPLOY STARGATE or ROLLBACK STARGATE for a mutation"
-			required:    false
-			type:        "string"
-		}
-		single_operator_confirmation: {
-			description: "Type SINGLE OPERATOR STARGATE only when no independent reviewer exists"
-			required:    false
-			type:        "string"
-		}
 	}
 	permissions: {
 		actions:  "read"
@@ -63,11 +53,9 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			}, {
 				name: "Validate operation"
 				env: {
-					OPERATION:                    "${{ inputs.operation }}"
-					RELEASE_TAG:                  "${{ inputs.release_tag }}"
-					ROLLBACK_BACKUP:              "${{ inputs.rollback_backup }}"
-					CONFIRMATION:                 "${{ inputs.confirmation }}"
-					SINGLE_OPERATOR_CONFIRMATION: "${{ inputs.single_operator_confirmation }}"
+					OPERATION:       "${{ inputs.operation }}"
+					RELEASE_TAG:     "${{ inputs.release_tag }}"
+					ROLLBACK_BACKUP: "${{ inputs.rollback_backup }}"
 				}
 				#StepTask & {#task: "stargate-deploy-validate-operation"}
 			}, {
@@ -82,18 +70,10 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			environment:       "production"
 			"timeout-minutes": 20
 			env: {
-				GH_TOKEN:                          "${{ github.token }}"
-				DEPLOY_HOST:                       "${{ vars.STARGATE_DEPLOY_HOST }}"
-				DEPLOY_PORT:                       "${{ vars.STARGATE_DEPLOY_PORT }}"
-				DEPLOY_USER:                       "${{ vars.STARGATE_DEPLOY_USER }}"
-				APPROVAL_MODE:                     "${{ vars.STARGATE_DEPLOY_APPROVAL_MODE }}"
-				SINGLE_OPERATOR_LOGIN:             "${{ vars.STARGATE_SINGLE_OPERATOR_LOGIN }}"
-				SINGLE_OPERATOR_ID:                "${{ vars.STARGATE_SINGLE_OPERATOR_ID }}"
-				SINGLE_OPERATOR_EXPIRES_AT:        "${{ vars.STARGATE_SINGLE_OPERATOR_EXPIRES_AT }}"
-				SINGLE_OPERATOR_ADMIN_ATTESTED_AT: "${{ vars.STARGATE_SINGLE_OPERATOR_ADMIN_ATTESTED_AT }}"
-				ACTOR_ID:                          "${{ github.actor_id }}"
-				RUN_ATTEMPT:                       "${{ github.run_attempt }}"
-				SINGLE_OPERATOR_CONFIRMATION:      "${{ inputs.single_operator_confirmation }}"
+				GH_TOKEN:    "${{ github.token }}"
+				DEPLOY_HOST: "${{ vars.STARGATE_DEPLOY_HOST }}"
+				DEPLOY_PORT: "${{ vars.STARGATE_DEPLOY_PORT }}"
+				DEPLOY_USER: "${{ vars.STARGATE_DEPLOY_USER }}"
 			}
 			steps: [{
 				name: "Checkout"
@@ -133,10 +113,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				if:   "inputs.operation == 'apply'"
 				env: RELEASE_TAG: "${{ inputs.release_tag }}"
 				#StepTask & {#task: "stargate-deploy-download-and-verify-release"}
-			}, {
-				name: "Recheck sole-operator mutation window"
-				if:   "inputs.operation != 'plan'"
-				#StepTask & {#task: "stargate-deploy-recheck-sole-operator-mutation-window"}
 			}, {
 				name: "Apply release"
 				if:   "inputs.operation == 'apply'"
@@ -183,7 +159,6 @@ tasks: {
 	"stargate-deploy-configure-pinned-ssh-identity": #Script & {_script: "tools/workflows/stargate-deploy/configure-pinned-ssh-identity.sh", _production: true}
 	"stargate-deploy-read-host-deployment-plan": #Script & {_script: "tools/workflows/stargate-deploy/read-host-deployment-plan.sh", _production: true}
 	"stargate-deploy-download-and-verify-release": #Script & {_script: "tools/workflows/stargate-deploy/download-and-verify-release.sh"}
-	"stargate-deploy-recheck-sole-operator-mutation-window": #Script & {_script: "tools/workflows/stargate-deploy/recheck-sole-operator-mutation-window.sh"}
 	"stargate-deploy-apply-release": #Script & {_script: "tools/workflows/stargate-deploy/apply-release.sh", _production: true}
 	"stargate-deploy-roll-back-release": #Script & {_script: "tools/workflows/stargate-deploy/roll-back-release.sh", _production: true}
 	"stargate-deploy-verify-public-routing": #Script & {_script: "tools/workflows/stargate-deploy/verify-public-routing.sh"}
