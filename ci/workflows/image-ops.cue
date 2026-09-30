@@ -1,5 +1,7 @@
 package workflows
 
+import "github.com/intar-dev/intar-dev/ci/gha"
+
 "workflows": "image-ops": {
 	name:       "Image operations"
 	"run-name": "Image ops ${{ inputs.operation }} @ ${{ github.sha }}"
@@ -251,7 +253,7 @@ package workflows
 					"""
 			}, {
 				name: "Checkout deployment revision"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: {
 					ref:                   "${{ github.sha }}"
 					"fetch-depth":         0
@@ -271,15 +273,15 @@ package workflows
 				run:  "cuenv task image-ops-install-rust-toolchain"
 			}, {
 				name: "Set up Rust cache"
-				uses: "namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9" // v1
+				uses: gha.pin."nscloud-cache".ref
 				with: cache: "rust"
 			}, {
 				name: "Install cargo-zigbuild"
-				uses: "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29" // v2
+				uses: gha.pin."install-action".ref
 				with: tool: "cargo-zigbuild@0.23.0"
 			}, {
 				name: "Install Zig"
-				uses: "mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29" // v2
+				uses: gha.pin."setup-zig".ref
 				with: version: "0.16.0"
 			}, {
 				name: "Verify runner disk tools"
@@ -315,7 +317,7 @@ package workflows
 			}, {
 				name: "Retain build and deployment evidence"
 				if:   "always()"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "guest-tools-deployment-${{ github.run_id }}"
 					path:                "${{ runner.temp }}/guest-tools/"
@@ -354,7 +356,7 @@ package workflows
 					"""
 			}, {
 				name: "Checkout promotion revision"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: {
 					ref:                   "${{ github.sha }}"
 					"persist-credentials": false
@@ -387,7 +389,7 @@ package workflows
 				run: "cuenv task image-ops-require-drain-retain-stable"
 			}, {
 				name: "Retain rollback pin before promotion"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "guest-tools-rollback-${{ github.run_id }}"
 					path:                "${{ runner.temp }}/guest-tools/previous-stable.json"
@@ -404,7 +406,7 @@ package workflows
 			}, {
 				name: "Retain promotion evidence"
 				if:   "always()"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "guest-tools-promotion-${{ github.run_id }}"
 					path:                "${{ runner.temp }}/guest-tools/"
@@ -440,7 +442,7 @@ package workflows
 			}
 			steps: [{
 				name: "Checkout exact main revision"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: "persist-credentials": false
 			}, {
 				name: "Set up cuenv"
@@ -451,12 +453,12 @@ package workflows
 				// delegate to the gate script, which resolves wrangler through the locked
 				// dependency tree; without the locked install `bunx` may fetch a latest.
 				if:   "needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'"
-				uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6" // v2
+				uses: gha.pin."setup-bun".ref
 				with: "bun-version": "1.3.14"
 			}, {
 				name: "Set up Node"
 				if:   "needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'"
-				uses: "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020" // v7
+				uses: gha.pin."setup-node".ref
 				with: "node-version-file": "apps/web/.node-version"
 			}, {
 				name: "Install locked dependencies"
@@ -504,7 +506,7 @@ package workflows
 			}, {
 				name: "Retain cleanup evidence"
 				if:   "always()"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name: "image-registry-cleanup-${{ needs.request.outputs.action }}-${{ github.run_id }}"
 					path: """

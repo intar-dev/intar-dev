@@ -4,8 +4,8 @@ description: Never run. Lists the action pins only the rendered workflows use, s
 # Dependabot skips the workflows rendered from ci/workflows, so a pin they use
 # must also appear in a file it scans: this one, another composite action, or
 # scenario-publish.yml. The workflow policy enforces that. After Dependabot bumps
-# a pin, replace its SHA and tag in ci/workflows/*.cue and render.cue in the same
-# pull request, then run `cuenv sync codegen`.
+# a pin, replace its SHA and tag in ci/gha/pins.cue in the same pull request,
+# then run `cuenv sync codegen`.
 runs:
   using: composite
   steps:

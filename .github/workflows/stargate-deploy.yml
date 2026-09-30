@@ -64,7 +64,6 @@ jobs:
     needs: preflight
     runs-on: ubuntu-24.04
     environment: production
-    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
       DEPLOY_HOST: ${{ vars.STARGATE_DEPLOY_HOST }}
@@ -78,6 +77,7 @@ jobs:
       ACTOR_ID: ${{ github.actor_id }}
       RUN_ATTEMPT: ${{ github.run_attempt }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -105,17 +105,17 @@ jobs:
       - name: Read host deployment plan
         run: cuenv task stargate-deploy-read-host-deployment-plan
       - name: Download and verify release
+        id: release
         if: inputs.operation == 'apply'
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: cuenv task stargate-deploy-download-and-verify-release
-        id: release
       - name: Recheck sole-operator mutation window
         if: inputs.operation != 'plan'
         run: cuenv task stargate-deploy-recheck-sole-operator-mutation-window
       - name: Apply release
-        if: inputs.operation == 'apply'
         id: apply
+        if: inputs.operation == 'apply'
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           ARCHIVE: ${{ steps.release.outputs.archive }}
@@ -128,8 +128,8 @@ jobs:
           ROLLBACK_BACKUP: ${{ inputs.rollback_backup }}
         run: cuenv task stargate-deploy-roll-back-release
       - name: Verify public routing
-        if: inputs.operation != 'plan'
         id: public
+        if: inputs.operation != 'plan'
         env:
           OPERATION: ${{ inputs.operation }}
         run: cuenv task stargate-deploy-verify-public-routing

@@ -50,12 +50,12 @@ jobs:
   request:
     name: Validate the operation
     runs-on: namespace-profile-intar-dev
-    timeout-minutes: 5
     outputs:
       operation: ${{ steps.validate.outputs.operation }}
       job: ${{ steps.validate.outputs.job }}
       state: ${{ steps.validate.outputs.state }}
       action: ${{ steps.validate.outputs.action }}
+    timeout-minutes: 5
     steps:
       - name: Validate the operation
         id: validate
@@ -119,19 +119,19 @@ jobs:
           printf 'operation=%s job=%s\n' "${OPERATION}" "${job}" >> "${GITHUB_STEP_SUMMARY}"
   gate:
     name: Set and verify production run gate
-    runs-on: namespace-profile-intar-dev
+    if: needs.request.outputs.job == 'gate'
     needs:
       - request
-    if: needs.request.outputs.job == 'gate'
+    runs-on: namespace-profile-intar-dev
     concurrency:
       group: intar-image-catalog-promotion
       cancel-in-progress: false
-    timeout-minutes: 20
-    environment: production
     env:
       INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
       STATE: ${{ needs.request.outputs.state }}
       CONFIRMATION: ${{ inputs.confirmation }}
+    environment: production
+    timeout-minutes: 20
     steps:
       - name: Validate authority
         run: |
@@ -182,19 +182,19 @@ jobs:
             | jq -e '.state == "open"' >/dev/null
   tools-build:
     name: Build and verify tools
-    runs-on: namespace-profile-intar-dev
+    if: needs.request.outputs.job == 'tools-build'
     needs:
       - request
-    if: needs.request.outputs.job == 'tools-build'
+    runs-on: namespace-profile-intar-dev
     concurrency:
       group: intar-image-catalog-promotion
       cancel-in-progress: false
-    timeout-minutes: 30
-    environment: production
     env:
       KINO_TAG: ${{ inputs.kino_tag }}
       CONFIRMATION: ${{ inputs.confirmation }}
       BUCKET: intar-dev-vm-image-registry-20260709
+    environment: production
+    timeout-minutes: 30
     steps:
       - name: Validate deployment inputs
         run: |
@@ -261,20 +261,20 @@ jobs:
           if-no-files-found: error
   tools-promote:
     name: Promote and verify the tools channel
-    runs-on: namespace-profile-intar-dev
+    if: needs.request.outputs.job == 'tools-promote'
     needs:
       - request
-    if: needs.request.outputs.job == 'tools-promote'
+    runs-on: namespace-profile-intar-dev
     concurrency:
       group: intar-image-catalog-promotion
       cancel-in-progress: false
-    timeout-minutes: 30
-    environment: production
     env:
       REVISION: ${{ inputs.revision }}
       EXPECTED_CANDIDATE_SHA256: ${{ inputs.expected_candidate_sha256 }}
       CONFIRMATION: ${{ inputs.confirmation }}
       BUCKET: intar-dev-vm-image-registry-20260709
+    environment: production
+    timeout-minutes: 30
     steps:
       - name: Validate promotion inputs
         run: |
@@ -332,16 +332,13 @@ jobs:
           if-no-files-found: error
   cleanup:
     name: Image registry cleanup
-    runs-on: namespace-profile-intar-dev
+    if: needs.request.outputs.job == 'cleanup'
     needs:
       - request
-    if: needs.request.outputs.job == 'cleanup'
-    timeout-minutes: 75
+    runs-on: namespace-profile-intar-dev
     concurrency:
       group: ${{ needs.request.outputs.action == 'status' && 'intar-image-registry-cleanup-status' || 'intar-image-registry-cleanup' }}
       cancel-in-progress: false
-    environment:
-      name: production
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -351,6 +348,9 @@ jobs:
       ACTION: ${{ needs.request.outputs.action }}
       EXPECTED_GC_RUN_ID: ${{ inputs.expected_gc_run_id }}
       CONFIRMATION: ${{ inputs.confirmation }}
+    environment:
+      name: production
+    timeout-minutes: 75
     steps:
       - name: Checkout exact main revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

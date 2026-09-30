@@ -63,10 +63,10 @@ jobs:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY DOCS')
     needs: build
     runs-on: namespace-profile-intar-dev
-    timeout-minutes: 10
     environment:
       name: production
       url: https://docs.intar.dev
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

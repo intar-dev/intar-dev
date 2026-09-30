@@ -1,5 +1,7 @@
 package workflows
 
+import "github.com/intar-dev/intar-dev/ci/gha"
+
 "workflows": docs: {
 	name:       "Docs"
 	"run-name": "${{ github.event_name == 'pull_request' && format('Docs validate PR #{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && (inputs.confirmation != 'DEPLOY DOCS' || github.ref != 'refs/heads/main') && format('Docs validate {0} @ {1}', github.ref_name, github.sha) || format('Docs deploy main @ {0}', github.sha) }}"
@@ -40,7 +42,7 @@ package workflows
 			"timeout-minutes": 10
 			steps: [{
 				name: "Checkout"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: "persist-credentials": false
 			}, {
 				name: "Set up the CI runtime"
@@ -57,7 +59,7 @@ package workflows
 			}, {
 				name: "Upload tested docs"
 				if:   "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY DOCS')"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "docs-dist-${{ github.sha }}"
 					path:                "docs/dist"
@@ -79,11 +81,11 @@ package workflows
 			}
 			steps: [{
 				name: "Checkout"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: "persist-credentials": false
 			}, {
 				name: "Download tested docs"
-				uses: "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" // v8
+				uses: gha.pin."download-artifact".ref
 				with: {
 					name: "docs-dist-${{ github.sha }}"
 					path: "docs/dist"

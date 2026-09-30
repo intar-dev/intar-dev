@@ -1,5 +1,7 @@
 package workflows
 
+import "github.com/intar-dev/intar-dev/ci/gha"
+
 "workflows": "stargate-deploy": {
 	name:       "Stargate production"
 	"run-name": "Stargate ${{ inputs.operation }} ${{ inputs.operation == 'rollback' && inputs.rollback_backup || inputs.release_tag }} @ ${{ github.sha }}"
@@ -53,7 +55,7 @@ package workflows
 				run:  "test \"${GITHUB_REF}\" = refs/heads/main"
 			}, {
 				name: "Checkout"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: "persist-credentials": false
 			}, {
 				name: "Set up cuenv"
@@ -95,7 +97,7 @@ package workflows
 			}
 			steps: [{
 				name: "Checkout"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: {
 					"fetch-depth":         0
 					"persist-credentials": false
@@ -127,10 +129,10 @@ package workflows
 				run:  "cuenv task stargate-deploy-read-host-deployment-plan"
 			}, {
 				name: "Download and verify release"
+				id:   "release"
 				if:   "inputs.operation == 'apply'"
 				env: RELEASE_TAG: "${{ inputs.release_tag }}"
 				run: "cuenv task stargate-deploy-download-and-verify-release"
-				id:  "release"
 			}, {
 				name: "Recheck sole-operator mutation window"
 				if:   "inputs.operation != 'plan'"

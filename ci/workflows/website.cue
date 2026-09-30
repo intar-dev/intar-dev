@@ -1,5 +1,7 @@
 package workflows
 
+import "github.com/intar-dev/intar-dev/ci/gha"
+
 "workflows": website: {
 	name: "Website"
 	"run-name": """
@@ -141,7 +143,7 @@ package workflows
 			}
 			steps: [{
 				name: "Checkout"
-				uses: "namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e" // v9
+				uses: gha.pin."nscloud-checkout".ref
 				with: "persist-credentials": false
 			}, {
 				name: "Set up cuenv"
@@ -151,7 +153,7 @@ package workflows
 				uses: "./.github/actions/setup-runtime"
 			}, {
 				name: "Set up Bun cache"
-				uses: "namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9" // v1
+				uses: gha.pin."nscloud-cache".ref
 				with: path: "~/.bun/install/cache"
 			}, {
 				name: "Install dependencies"
@@ -179,7 +181,7 @@ package workflows
 				// produce the tested artifact, and the deploy lane accepts either
 				// event as long as the revision matches exactly.
 				if:   "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                   "website-dist-${{ github.sha }}"
 					path:                   "apps/web/dist"
@@ -205,11 +207,11 @@ package workflows
 			}
 			steps: [{
 				name: "Checkout"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: "persist-credentials": false
 			}, {
 				name: "Set up Node"
-				uses: "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020" // v7
+				uses: gha.pin."setup-node".ref
 				with: "node-version-file": "apps/web/.node-version"
 			}, {
 				name:                "Install Bun setup prerequisite"
@@ -217,7 +219,7 @@ package workflows
 				run:                 "apt-get update && apt-get install --yes --no-install-recommends unzip=6.0-28ubuntu4.1"
 			}, {
 				name: "Set up Bun"
-				uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6" // v2
+				uses: gha.pin."setup-bun".ref
 				with: "bun-version": "1.3.14"
 			}, {
 				name: "Install dependencies"
@@ -233,7 +235,7 @@ package workflows
 			}, {
 				name: "Upload smoke report"
 				if:   "always()"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name: "website-smoke-${{ github.run_attempt }}"
 					path: """
@@ -357,7 +359,7 @@ package workflows
 					"""
 			}, {
 				name: "Checkout exact main revision"
-				uses: "namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e" // v9
+				uses: gha.pin."nscloud-checkout".ref
 				with: "persist-credentials": false
 			}, {
 				name: "Set up cuenv"
@@ -390,7 +392,7 @@ package workflows
 			}, {
 				name: "Retain release evidence"
 				if:   "always()"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name: "website-release-${{ github.sha }}-${{ github.run_id }}"
 					path: """
@@ -427,7 +429,7 @@ package workflows
 			}
 			steps: [{
 				name: "Checkout exact main revision"
-				uses: "namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e" // v9
+				uses: gha.pin."nscloud-checkout".ref
 				with: "persist-credentials": false
 			}, {
 				name: "Set up cuenv"
@@ -459,7 +461,7 @@ package workflows
 				uses: "./.github/actions/setup-runtime"
 			}, {
 				name: "Set up Bun cache"
-				uses: "namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9" // v1
+				uses: gha.pin."nscloud-cache".ref
 				with: path: "~/.bun/install/cache"
 			}, {
 				name: "Install deployment dependencies"
@@ -522,7 +524,7 @@ package workflows
 			}, {
 				name: "Retain immutable personal-metal release inputs"
 				if:   "needs.plan.outputs.metal_action == 'deploy'"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name: "personal-metal-inputs-${{ github.sha }}-${{ github.run_id }}"
 					path: """
@@ -686,7 +688,7 @@ package workflows
 			}, {
 				name: "Retain personal-metal evidence"
 				if:   "always() && needs.plan.outputs.metal_action != ''"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "personal-metal-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
 					path:                "${{ runner.temp }}/personal-metal/"
@@ -696,7 +698,7 @@ package workflows
 			}, {
 				name: "Retain deployment evidence"
 				if:   "always()"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name: "website-production-${{ github.sha }}-${{ github.run_id }}"
 					path: """

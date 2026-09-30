@@ -29,8 +29,8 @@ run-name: |-
       resume_tag:
         description: Existing project tag to finish publishing; bump is ignored
         required: false
-        type: string
         default: ""
+        type: string
 permissions:
   actions: read
   contents: read

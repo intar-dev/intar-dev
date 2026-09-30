@@ -1,5 +1,7 @@
 package workflows
 
+import "github.com/intar-dev/intar-dev/ci/gha"
+
 "workflows": release: {
 	name: "Release"
 	"run-name": """
@@ -91,12 +93,12 @@ package workflows
 			}, {
 				name: "Checkout on Namespace"
 				if:   "inputs.project != 'intar-agent'"
-				uses: "namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e" // v9
+				uses: gha.pin."nscloud-checkout".ref
 				with: "fetch-depth": 0
 			}, {
 				name: "Checkout jailed agent release"
 				if:   "inputs.project == 'intar-agent'"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: "fetch-depth": 0
 			}, {
 				// The run steps below are cuenv tasks, on the resume path too.
@@ -129,17 +131,17 @@ package workflows
 			}, {
 				name: "Set up Namespace caches"
 				if:   "inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'"
-				uses: "namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9" // v1
+				uses: gha.pin."nscloud-cache".ref
 				with: cache: "rust"
 			}, {
 				name: "Install tools"
 				if:   "steps.next.outputs.resume != 'true'"
-				uses: "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29" // v2
+				uses: gha.pin."install-action".ref
 				with: tool: "cargo-nextest@0.9.143,cargo-zigbuild@0.23.0"
 			}, {
 				name: "Install Zig"
 				if:   "steps.next.outputs.resume != 'true'"
-				uses: "mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29" // v2
+				uses: gha.pin."setup-zig".ref
 				with: version: "0.16.0"
 			}, {
 				name: "Apply release version"
@@ -153,12 +155,12 @@ package workflows
 			}, {
 				name: "Set up Bun for pinned content hydration"
 				if:   "steps.next.outputs.resume != 'true'"
-				uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6" // v2
+				uses: gha.pin."setup-bun".ref
 				with: "bun-version": "1.3.14"
 			}, {
 				name: "Restore shared Bun cache"
 				if:   "inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'"
-				uses: "namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9" // v1
+				uses: gha.pin."nscloud-cache".ref
 				with: path: "~/.bun/install/cache"
 			}, {
 				name: "Run checks"
@@ -191,7 +193,7 @@ package workflows
 				name: "Preserve exact release payload"
 				id:   "release_payload"
 				if:   "steps.next.outputs.resume != 'true'"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "${{ steps.next.outputs.payload_name }}"
 					path:                "dist/"
@@ -229,7 +231,7 @@ package workflows
 			}, {
 				name: "Restore exact release payload"
 				if:   "steps.next.outputs.resume == 'true'"
-				uses: "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" // v8
+				uses: gha.pin."download-artifact".ref
 				with: {
 					"artifact-ids": "${{ steps.payload.outputs.id }}"
 					path:           "dist/"

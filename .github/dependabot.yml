@@ -8,8 +8,8 @@
 # below. The intar-*.yml lanes carry cuenv's own checkout. The other rendered
 # workflows' pins are also listed in a scanned file, which the workflow policy
 # enforces (see .github/actions/workflow-pins). When Dependabot bumps one,
-# replace its SHA in ci/workflows/*.cue and its tag in ci/workflows/render.cue
-# in the same pull request, then run `cuenv sync codegen`.
+# replace its SHA and tag in ci/gha/pins.cue in the same pull request, then run
+# `cuenv sync codegen`.
 version: 2
 updates:
   - package-ecosystem: github-actions
