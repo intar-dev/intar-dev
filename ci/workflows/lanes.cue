@@ -140,6 +140,8 @@ lanes: {
 			"tools/deploy/**",
 			"tools/vm-boot-benchmark/**",
 			"tools/*.py",
+			// tools/test_published_image_verifier.py, which test.js runs, loads it.
+			"tools/image-build/verify-published-image.py",
 			"crates/intar-image-scenario/**",
 			"apps/web/**",
 		]
