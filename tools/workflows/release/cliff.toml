@@ -1,0 +1,56 @@
+# git-cliff 2.14.2 configuration for the product releases in products.json.
+# The release scripts pass each product's --tag-pattern and --include-path;
+# nothing here runs cargo or reaches the network.
+
+[changelog]
+header = "# Changelog\n"
+# The leading blank line separates each release from the header or the release
+# above it.
+body = """
+
+{% if version %}\
+## {{ version }} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% else %}\
+## Unreleased
+{% endif %}\
+{% for entry in commits | commit_groups(groups=commit_parsers_groups) %}
+### {{ entry.group }}
+{% for commit in entry.commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+{% if commit.breaking %}[**breaking**] {% endif %}\
+{{ commit.message | upper_first }} ({{ commit.id | truncate(length=8, end="") }})\
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+# A breaking change is released even under a type or scope skipped below.
+protect_breaking_commits = true
+# Only the groups below reach a changelog or a version bump.
+filter_commits = true
+# Only tags on the checked-out history count, so a tag on an abandoned branch
+# never becomes the base of a bump.
+use_branch_tags = true
+# A product's own crates are listed in products.json; these never ship.
+exclude_paths = ["**/README.md", "**/CHANGELOG.md", "crates/*/tests/**"]
+commit_parsers = [
+  { message = '^chore\(release\)', skip = true },
+  { field = "breaking", pattern = "true", group = "Breaking changes" },
+  # Website, docs, and CI work that touches a shared crate is not a product change.
+  { field = "scope", pattern = '^(ci|web|apps/web|docs)$', skip = true },
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^(refactor|build)", group = "Other changes" },
+  { message = "^(chore|ci|docs|style|test)", skip = true },
+]
+
+[bump]
+features_always_bump_minor = true
+# Products stay on 0.x: a breaking change bumps the minor version.
+breaking_always_bump_major = false
+# build bumps a patch.
+no_increment_regex = "^(chore|ci|docs|style|test)$"
