@@ -16,7 +16,8 @@
       "crates/intar-kino-proto/**",
       "crates/intar-observability/**",
       "crates/stargate-core/**",
-      "deploy/personal-metal/**"
+      "deploy/personal-metal/**",
+      "tools/workflows/release/build-release-artifacts.sh"
     ]
   },
   {
@@ -33,6 +34,7 @@
       "crates/intar-image-scenario/**",
       "crates/intar-image-upload/**",
       "crates/intar-observability/**",
+      "content/scenarios/base-images.hcl",
       "tools/image-build/*libnbd*"
     ]
   },

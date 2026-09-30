@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
 // A product is released when git-cliff sees a change under one of its path
-// globs, so every workspace crate its binaries build from must be listed.
+// globs, so every workspace crate its binaries build from, and every file they
+// compile in or package, must be covered.
 const root = resolve(import.meta.dir, "../..");
 const products: { project: string; manifest: string; paths: string[] }[] =
   JSON.parse(
@@ -12,6 +13,11 @@ const products: { project: string; manifest: string; paths: string[] }[] =
 // Binaries a product's archive ships besides its own (build-release-artifacts.sh).
 const shipped: Record<string, string[]> = {
   "intar-agent": ["crates/intar-jailer", "crates/intar-jailerd"],
+};
+// Files outside the crates that decide what a product's archive holds: the
+// agent's Cloud Hypervisor binary is pinned in build-release-artifacts.sh.
+const packaged: Record<string, string[]> = {
+  "intar-agent": ["tools/workflows/release/build-release-artifacts.sh"],
 };
 
 type Dependencies = Record<string, string | { path?: string }>;
@@ -41,8 +47,27 @@ function crates(crate: string, seen: Set<string>): Set<string> {
   return seen;
 }
 
+// Files a crate compiles in with include_str! or include_bytes!. Test code
+// never ships: tests/ and tests.rs files, and an inline test module, which
+// Clippy's items_after_test_module keeps last in its file.
+function embedded(crate: string): string[] {
+  const files: string[] = [];
+  for (const file of new Bun.Glob("**/*.rs").scanSync(join(root, crate))) {
+    if (/(^|\/)tests(\/|\.rs$)/.test(file)) continue;
+    const [source = ""] = readFileSync(join(root, crate, file), "utf8").split(
+      /#\[cfg\(test\)\]\s*mod \w+\s*\{/,
+    );
+    for (const [, path] of source.matchAll(
+      /include_(?:str|bytes)!\(\s*"([^"]+)"/g,
+    )) {
+      files.push(relative(root, resolve(root, crate, dirname(file), path)));
+    }
+  }
+  return files;
+}
+
 test.each(products)(
-  "$project releases on every crate it builds from",
+  "$project releases on every crate and file it builds from",
   (product) => {
     const seen = new Set<string>();
     for (const crate of [
@@ -52,5 +77,13 @@ test.each(products)(
       crates(crate, seen);
     }
     for (const crate of seen) expect(product.paths).toContain(`${crate}/**`);
+    const files = [
+      ...[...seen].flatMap(embedded),
+      ...(packaged[product.project] ?? []),
+    ];
+    const uncovered = files.filter(
+      (file) => !product.paths.some((glob) => new Bun.Glob(glob).match(file)),
+    );
+    expect(uncovered).toEqual([]);
   },
 );

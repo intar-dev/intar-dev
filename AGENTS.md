@@ -32,7 +32,7 @@
 
 - Product releases come from the bot-maintained `release/next` pull request (see "Releasing" in README.md). Never bump a product version in `Cargo.toml` or `Cargo.lock`, edit a product `CHANGELOG.md`, or create a `<prefix>/v*` tag as part of other work. To release a version other than the one the release pull request proposes, change it in a pull request of its own.
 - Nothing is published to crates.io or any other registry.
-- A workspace crate that a product builds from belongs in that product's paths in `tools/workflows/release/products.json`; `bun test tools/ci` checks it.
+- A workspace crate that a product builds from, and a file it compiles in or packages, belongs in that product's paths in `tools/workflows/release/products.json`; `bun test tools/ci` checks it.
 
 ## Rust quality
 
