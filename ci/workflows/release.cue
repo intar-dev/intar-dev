@@ -212,6 +212,27 @@ let _gitCliff = {
 				},
 			]
 		}
+
+		"web-pins": {
+			name: "Pin the website to the new image CLI"
+			needs: ["plan", "publish"]
+			if:          "contains(needs.plan.outputs.matrix, '\"prefix\":\"image-cli\"')"
+			"runs-on":   "ubuntu-24.04"
+			environment: "release-pr"
+			steps: [
+				_appToken,
+				gha.#Checkout & {with: {
+					"fetch-depth": 0
+					token:         "${{ steps.app-token.outputs.token }}"
+				}},
+				gha.#SetupCuenv,
+				{
+					name: "Open the website pin pull request"
+					env:  _appEnv
+					#StepTask & {#task: "release-web-pins"}
+				},
+			]
+		}
 	}
 }
 
@@ -225,4 +246,5 @@ tasks: {
 	"release-privileged-agent-package-smoke": #Script & {_script: "tools/workflows/release/privileged-agent-package-smoke.sh", _production: true}
 	"release-smoke-test-image-cli-package": #Script & {_script: "tools/workflows/release/smoke-test-image-cli-package.sh", _production: true}
 	"release-publish-tagged-github-release": #Script & {_script: "tools/workflows/release/publish-tagged-github-release.sh", _production: true}
+	"release-web-pins": #Script & {_script: "tools/workflows/release/web-pins.sh", _production: true}
 }
