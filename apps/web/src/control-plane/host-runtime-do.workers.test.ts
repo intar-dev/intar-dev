@@ -31,6 +31,7 @@ import {
   type RunStateDocument,
   resetHostRuntimeTestDatabase,
 } from "./host-runtime-do/test-fixtures";
+import { runInDurableObject } from "cloudflare:test";
 import { organization } from "@/db/schema";
 import { revokeFixtureAccount } from "@/test/account-fixtures";
 
@@ -78,6 +79,21 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       { method: "POST" },
     );
     expect(wakeWithoutIdentity.status).toBe(409);
+  });
+
+  it("keeps runtime state when retirement arrives during maintenance", async () => {
+    const hostId = "host-fenced-retire";
+    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+    await runInDurableObject(stub, async (runtime, state) => {
+      Object.defineProperty(runtime, "env", { configurable: true, value: { ...env, CONTROL_PLANE_MAINTENANCE: "on" } });
+      await state.storage.put("hostId", hostId);
+      const response = await runtime.fetch(new Request("http://host-runtime/_internal/retire", {
+        method: "POST", headers: { "x-agent-host-id": hostId },
+      }));
+      expect(response.status).toBe(503);
+      await expect(response.json()).resolves.toMatchObject({ code: "maintenance" });
+      expect(await state.storage.get("hostId")).toBe(hostId);
+    });
   });
 
   it("rejects a revoked personal host again inside the durable object", async () => {
