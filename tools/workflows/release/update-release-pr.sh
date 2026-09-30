@@ -5,6 +5,13 @@
 # version, Cargo.lock entry, and changelog. The app token pushes, so CI runs on
 # the pull request; with nothing to release, the pull request is closed.
 set -euo pipefail
+# A re-run keeps its run's commit. Only the run for main's tip may rewrite the
+# pull request; a push that moved main has a run of its own that follows.
+main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+if [ "${main}" != "${GITHUB_SHA}" ]; then
+  echo "main moved on to ${main}; its run updates the release pull request."
+  exit 0
+fi
 branch=release/next
 config=tools/workflows/release/cliff.toml
 bot="${APP_SLUG}[bot]"

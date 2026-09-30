@@ -4,6 +4,13 @@
 # release that main's manifest names: its version, the published archive
 # digests, and the digest of the base-images.hcl it ships.
 set -euo pipefail
+# A re-run keeps its run's commit. Only the run for main's tip may rewrite the
+# pull request; a push that moved main has a run of its own that follows.
+main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+if [ "${main}" != "${GITHUB_SHA}" ]; then
+  echo "main moved on to ${main}; its run pins the website."
+  exit 0
+fi
 version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' crates/intar-image-cli/Cargo.toml | head -n 1)"
 tag="image-cli/v${version}"
 draft="$(gh release view "${tag}" --json isDraft --jq .isDraft)"
