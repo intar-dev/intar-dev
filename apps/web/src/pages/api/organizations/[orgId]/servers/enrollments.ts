@@ -17,8 +17,6 @@ export const POST: APIRoute = async ({ request, params }) => {
       || Object.keys(input).some(key => key !== "name")) {
       throw appError(400, "invalid_server_enrollment", "Enter a server name of 1 to 80 characters.");
     }
-    const gate = await env.DB.prepare("SELECT state FROM runtime_operation_gates WHERE key = 'personal_metal_registration'").first<{ state: string }>();
-    if (gate?.state !== "open") throw appError(503, "server_registration_closed", "Server registration is not available yet.");
     return accessInviteJson(await createHostEnrollment(env.DB, auth.context, {
       name: input.name.trim(), scope: "organization", role: "agent", organizationId,
     }), { status: 201 });

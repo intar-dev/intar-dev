@@ -13,7 +13,6 @@ import { ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtur
 let context: UserContext;
 beforeEach(async () => {
   await resetD1Database();
-  await env.DB.prepare("INSERT INTO runtime_operation_gates (key, state, updated_at) VALUES ('personal_metal_registration', 'open', 1)").run();
   await drizzle(env.DB).insert(user).values({ id: "owner", name: "Owner", email: "owner@example.test" });
   await ensureFixtureMember({ d1: env.DB, userId: "owner" });
   context = {
@@ -53,7 +52,6 @@ it("rejects a lost-response retry and new enrollments after the owner's account 
 });
 
 it("rechecks platform administrator rights when claiming an enrollment", async () => {
-  await env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES ('platform_metal_registration','open',1)").run();
   await env.DB.prepare("UPDATE user SET role = 'admin' WHERE id = 'owner'").run();
   const enrollment = await createHostEnrollment(env.DB, { ...context, isAdmin: true }, {
     name: "Builder", scope: "platform", role: "builder",
@@ -62,35 +60,26 @@ it("rechecks platform administrator rights when claiming an enrollment", async (
   expect(await claimHostEnrollment(env.DB, enrollment.enrollmentToken, randomHostSecret())).toBeNull();
 });
 
-it("keeps the public enrollment endpoint closed until release validation opens it", async () => {
-  await env.DB.prepare("DELETE FROM runtime_operation_gates WHERE key = 'personal_metal_registration'").run();
-  const response = await handleHostEnrollment(new Request("https://intar.dev/agent/enroll", {
-    method: "POST", body: JSON.stringify({ enrollmentToken: randomHostSecret(), credential: randomHostSecret() }),
-  }), env);
-  expect(response.status).toBe(503);
-  expect(response.headers.get("cache-control")).toBe("no-store");
-});
-
-it("checks the registration gate again inside enrollment writes", async () => {
+it("claims an enrollment through the public endpoint without a registration gate", async () => {
   const enrollment = await createHostEnrollment(env.DB, context, { name: "Server", scope: "personal", role: "agent" });
-  const credential = randomHostSecret();
-  // The route has already read an open gate. Maintenance starts before claim.
-  await env.DB.prepare("UPDATE runtime_operation_gates SET state = 'drained'").run();
-  expect(await claimHostEnrollment(env.DB, enrollment.enrollmentToken, credential)).toBeNull();
-  await expect(createHostEnrollment(env.DB, context, { name: "Second", scope: "personal", role: "agent" })).rejects.toThrow();
-  expect(await env.DB.prepare("SELECT count(*) AS n FROM agent_hosts").first()).toEqual({ n: 0 });
-  expect(await env.DB.prepare("SELECT count(*) AS n FROM agent_bootstrap_tokens").first()).toEqual({ n: 0 });
-  expect(await env.DB.prepare("SELECT claimed_at FROM host_enrollments").first()).toEqual({ claimed_at: null });
-  await env.DB.prepare("UPDATE runtime_operation_gates SET state = 'open'").run();
-  expect(await claimHostEnrollment(env.DB, enrollment.enrollmentToken, credential)).not.toBeNull();
+  const enroll = (enrollmentToken: string) => handleHostEnrollment(new Request("https://intar.dev/agent/enroll", {
+    method: "POST", body: JSON.stringify({ enrollmentToken, credential: randomHostSecret() }),
+  }), env);
+  expect((await enroll(randomHostSecret())).status).toBe(401);
+  const response = await enroll(enrollment.enrollmentToken);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  await expect(response.json()).resolves.toMatchObject({ hostId: enrollment.hostId, ownerUserId: "owner", scope: "personal" });
 });
 
-it("registers the admin platform fleet while personal registration stays closed", async () => {
-  await env.DB.prepare("UPDATE runtime_operation_gates SET state = 'drained' WHERE key = 'personal_metal_registration'").run();
-  await env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES ('platform_metal_registration','open',1)").run();
+it("ignores leftover drained registration gate rows", async () => {
+  // Production D1 keeps the retired gate rows; nothing may read them any more.
+  await env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES " +
+    "('personal_metal_registration','drained',1), ('platform_metal_registration','drained',1)").run();
   await env.DB.prepare("UPDATE user SET role = 'admin' WHERE id = 'owner'").run();
   const admin = { ...context, isAdmin: true };
-  await expect(createHostEnrollment(env.DB, admin, { name: "Personal", scope: "personal", role: "agent" })).rejects.toThrow();
-  const enrollment = await createHostEnrollment(env.DB, admin, { name: "Builder", scope: "platform", role: "builder" });
-  expect(await claimHostEnrollment(env.DB, enrollment.enrollmentToken, randomHostSecret())).toMatchObject({ scope: "platform" });
+  const personal = await createHostEnrollment(env.DB, admin, { name: "Personal", scope: "personal", role: "agent" });
+  const platform = await createHostEnrollment(env.DB, admin, { name: "Builder", scope: "platform", role: "builder" });
+  expect(await claimHostEnrollment(env.DB, personal.enrollmentToken, randomHostSecret())).toMatchObject({ scope: "personal" });
+  expect(await claimHostEnrollment(env.DB, platform.enrollmentToken, randomHostSecret())).toMatchObject({ scope: "platform" });
 });
