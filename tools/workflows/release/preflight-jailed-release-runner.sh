@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# release.yml, job release, step "Preflight jailed release runner".
+# release.yml, job build, step "Preflight jailed release runner".
 set -euo pipefail
 test "$(uname -m)" = x86_64
 test "$(ps -p 1 -o comm= | tr -d ' ')" = systemd
