@@ -337,9 +337,10 @@ take_inventory_proof() {
 # registry_cleanup_hold, is taken as such a leftover: it is resumed here, and
 # the hold takes it again after the inventory. A pause with any other reason,
 # such as an operator's, and a collector with a sweep in flight are not resumed
-# here, so the inventory fails. That does not keep an operator's pause across a
-# deploy: the release resumes any pause, also after a failed hold, and a hold's
-# own pause overwrites an existing reason with registry_cleanup_hold.
+# here, so the inventory fails, the hold writes no evidence, and the deploy's
+# release (tools/workflows/website/release-registry-collector.sh) leaves the
+# pause alone. A hold that pauses overwrites an existing reason with
+# registry_cleanup_hold, so its release resumes any pause.
 # Sets leftover_json.
 resume_leftover_deploy_hold() {
   local resume_status resume_class

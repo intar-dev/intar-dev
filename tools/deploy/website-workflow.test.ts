@@ -12,6 +12,7 @@ function parse(path: string) {
 }
 type Step = { name: string; id?: string; if?: string; run?: string; uses?: string; with?: Record<string, unknown> };
 type Job = {
+  name?: string;
   if?: string;
   needs?: string | string[];
   permissions?: Record<string, string>;
@@ -52,7 +53,15 @@ it("parses every workflow shell block", () => {
 it("deploys after CI passes on main's tip, or on a dispatch from main", () => {
   expect(Object.keys(workflow.jobs).sort()).toEqual(["deploy-docs", "deploy-web", "resolve"]);
   expect(workflow.on).toEqual({
-    workflow_dispatch: {},
+    workflow_dispatch: {
+      inputs: {
+        break_glass: {
+          description: "Deploy each build whose own CI lane passed on main's tip, although another CI job failed",
+          type: "boolean",
+          default: false,
+        },
+      },
+    },
     workflow_run: { workflows: ["CI"], types: ["completed"], branches: ["main"] },
   });
   // release.yml tags and publishes after the same CI runs.
@@ -127,6 +136,28 @@ it("releases the collector after every run that reached the hold", () => {
   );
 });
 
+it("leaves the collector alone when the hold refused before it paused", () => {
+  // Without hold evidence the release never calls the gate, which would fail
+  // here for want of credentials.
+  const root = mkdtempSync(join(tmpdir(), "intar-release-collector-"));
+  try {
+    const released = spawnSync("bash", ["tools/workflows/website/release-registry-collector.sh"], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, RUNNER_TEMP: root },
+    });
+    expect(released.status, released.stderr).toBe(0);
+    expect(released.stdout).toContain("the collector stays as it was");
+    writeFileSync(join(root, "registry-cleanup-hold.json"), "{}");
+    const held = spawnSync("bash", ["tools/workflows/website/release-registry-collector.sh"], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, RUNNER_TEMP: root },
+    });
+    expect(held.status).not.toBe(0);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
 it("conditions only the migration steps on pending migrations", () => {
   const conditioned = Object.fromEntries(
     deploy.steps.filter((candidate) => candidate.if).map((candidate) => [candidate.name, candidate.if]),
@@ -175,6 +206,7 @@ case "$path" in
   */commits/main) body='{"sha":"'"$MAIN"'"}' ;;
   */actions/workflows/ci.yml/runs*) body="$RUNS" ;;
   */artifacts) body="$ARTIFACTS" ;;
+  */jobs*) body="$JOBS" ;;
 esac
 jq -r "\${filter:-.}" <<<"$body"
 `,
@@ -251,4 +283,33 @@ it("deploys a dispatch from main's tip's latest successful CI run on main", () =
   expect(found.output).toBe(`run_id=77\ndocs_artifact=2\ndocs_digest=${digest}\n`);
   const none = findBuilds({ CI_RUN_ID: "", RUNS: runs([{ id: 78, event: "pull_request" }]) });
   expect(none.status).not.toBe(0);
+});
+
+it("breaks glass with the builds whose own lane jobs passed", () => {
+  // The job names find-builds.sh reads.
+  expect(ci.jobs.web!.name).toBeUndefined();
+  expect(ci.jobs.docs!.name).toBeUndefined();
+  expect(ci.jobs["web-ui"]!.name).toBe("Chromium smoke");
+  const jobs = (passed: string[]) =>
+    JSON.stringify({
+      jobs: ["changes", "security", "web", "Chromium smoke", "docs"].map((name) => ({
+        name,
+        conclusion: passed.includes(name) ? "success" : "failure",
+      })),
+    });
+  const env = {
+    CI_RUN_ID: "",
+    BREAK_GLASS: "true",
+    RUNS: JSON.stringify({ workflow_runs: [{ id: 77, event: "push", run_number: 1 }] }),
+    ARTIFACTS: artifacts({ id: 1, name: `web-dist-${sha}` }, { id: 2, name: `docs-dist-${sha}` }),
+  };
+  const web = findBuilds({ ...env, JOBS: jobs(["changes", "web", "Chromium smoke"]) });
+  expect(web.status, web.stderr).toBe(0);
+  expect(web.output).toBe(`run_id=77\nweb_artifact=1\nweb_digest=${digest}\n`);
+  const docs = findBuilds({ ...env, JOBS: jobs(["changes", "web", "docs"]) });
+  expect(docs.status, docs.stderr).toBe(0);
+  expect(docs.output).toBe(`run_id=77\ndocs_artifact=2\ndocs_digest=${digest}\n`);
+  const none = findBuilds({ ...env, JOBS: jobs(["changes", "security"]) });
+  expect(none.status).not.toBe(0);
+  expect(none.output).toBe("");
 });

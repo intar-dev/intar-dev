@@ -33,12 +33,13 @@ for product in "${product_list[@]}"; do
   prefix="$(jq -r .prefix <<<"${product}")"
   manifest="$(jq -r .manifest <<<"${product}")"
   current="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "${manifest}" | head -n 1)"
-  # The plan job tags a new manifest version only once CI passes on main, which
-  # can follow this push. Until then, a local tag where plan-release.sh puts it
-  # counts that version as released; it is never pushed.
+  # plan-release.sh tags only the manifest version on main's tip, once CI
+  # passes there, which can follow this push. A bump past a version it has not
+  # tagged yet would skip that version for good, so the product waits: the
+  # first push after the tag proposes its next release.
   if ! git rev-parse --quiet --verify "refs/tags/${prefix}/v${current}" >/dev/null; then
-    git tag "${prefix}/v${current}" \
-      "$(git log --first-parent -1 --format=%H -G '^version = "' -- "${manifest}")"
+    echo "${prefix}/v${current} is not tagged yet; ${prefix} waits for its release."
+    continue
   fi
   mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
   # With nothing to release, git-cliff prints the latest tag, the manifest

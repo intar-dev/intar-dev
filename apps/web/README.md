@@ -112,7 +112,11 @@ states are:
    maintenance version, verifies the schema, deploys the collector in the
    committed mode, and deploys production, which reopens the site. Its release
    goes through the open gate and resumes the collector (state 1). If it fails
-   again, the state stays 2 and the next deploy recovers.
+   again, the state stays 2 and the next deploy recovers. When CI on `main`'s
+   tip fails outside the web lane, for example on a newly published advisory,
+   no deploy follows it: dispatch Deploy with break glass
+   (`gh workflow run deploy.yml --ref main -f break_glass=true`), which deploys
+   the tip's build once its own web lane and Chromium smoke passed.
 
 A recovery hold has no report inventory, because the fenced collector can't
 plan, so it deploys `delete` only over a collector that already deletes. It
@@ -127,10 +131,11 @@ hold treats that pause as a leftover: it resumes it, takes the inventory, and
 pauses again, and the hold evidence records the resume under `leftover_hold`.
 The hold doesn't resume a pause with another reason, such as an operator's
 pause through `/registry/v1/admission/pause`, or a collector with a sweep in
-flight; a `delete` hold then fails on its inventory. A deploy still doesn't
-keep an operator's pause: the release resumes any pause, also after a failed
-hold, and a hold's own pause replaces an existing reason with
-`registry_cleanup_hold`. Pause the collector again after a website deploy if it
+flight; a `delete` hold then fails on its inventory before it pauses, and the
+release leaves the collector as the hold found it, so the operator's pause
+stays. A hold that does pause, such as a `report-only` one, replaces an
+existing reason with `registry_cleanup_hold`, and its release resumes the
+collector. Pause a `report-only` collector again after a website deploy if it
 must stay paused.
 
 To roll out new guest tools, run these from `main` in order:
@@ -146,7 +151,9 @@ To roll out new guest tools, run these from `main` in order:
    deploys `main`'s tip from its latest successful CI run, and every deploy
    pins the stable channel, so this one pins the promoted tools. When that CI
    run's builds have expired, dispatch CI instead
-   (`gh workflow run ci.yml --ref main`); it deploys once it passes.
+   (`gh workflow run ci.yml --ref main`); it deploys once it passes. When no CI
+   run passed for the tip because of a job outside the web lane, add
+   `-f break_glass=true` to the Deploy dispatch.
 5. image-ops `gate-open`.
 
 ## Sign-ups

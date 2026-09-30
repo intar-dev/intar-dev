@@ -49,9 +49,11 @@ other registry.
   and a `fix`, `perf`, `refactor`, or `build` bumps the patch version. A
   breaking change bumps the minor version while a product is on 0.x. The pull
   request bumps each changed product's `Cargo.toml` version and `Cargo.lock`
-  entry, and prepends its `CHANGELOG.md`. The app cannot move the branch
-  across a change to `.github/workflows`, so such a push to main replaces the
-  pull request with a new one.
+  entry, and prepends its `CHANGELOG.md`. A product whose manifest version is
+  not tagged yet, because CI has not passed on main's tip since it merged, is
+  left out until the first push after its tag, so no version is skipped. The
+  app cannot move the branch across a change to `.github/workflows`, so such a
+  push to main replaces the pull request with a new one.
 - **Dry run:** CI builds and smoke-tests every product whose version a pull
   request changes, the release pull request included, with the release build's
   own steps. A change to the release build dry-runs every product.

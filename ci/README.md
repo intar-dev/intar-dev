@@ -86,6 +86,11 @@ nothing.
   - When that run's builds have expired (14 days), or no CI run passed for the
     tip, `gh workflow run ci.yml --ref main` builds everything again and
     deploys once it passes.
+  - Break glass: when CI on the tip keeps failing outside a deploy's own lane,
+    for example on a newly published advisory in `security`,
+    `gh workflow run deploy.yml --ref main -f break_glass=true` deploys each
+    build whose own lane jobs passed in the tip's latest finished CI run
+    (`web` with its Chromium smoke, `docs`).
 - **`release.yml`** rebuilds the release pull request on every push to main.
   After CI, or on a dispatch from main, it tags and publishes merged releases;
   see "Releasing" in the root README. A build reruns the workspace gate only

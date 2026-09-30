@@ -3,7 +3,12 @@
 name: Deploy
 run-name: Deploy main @ ${{ github.event.workflow_run.head_sha || github.sha }}
 "on":
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      break_glass:
+        description: Deploy each build whose own CI lane passed on main's tip, although another CI job failed
+        default: false
+        type: boolean
   workflow_run:
     workflows:
       - CI
@@ -46,6 +51,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
         run: cuenv task -p ci --package ci deploy-find-builds
   deploy-web:
     name: Deploy the website

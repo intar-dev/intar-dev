@@ -6,11 +6,16 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 // tip (afterCI in ci.cue), `resolve` finds the build each lane uploaded in that
 // run, and the website and the docs deploy it. A lane that did not run uploaded
 // nothing, and its deploy skips. A dispatch from main deploys main's tip from
-// its latest successful CI run.
+// its latest successful CI run; with break_glass, from its latest finished one,
+// and only the builds whose own lane jobs passed there.
 "workflows": deploy: {
 	name:       "Deploy"
 	"run-name": "Deploy main @ ${{ github.event.workflow_run.head_sha || github.sha }}"
-	on: afterCI.on & {workflow_dispatch: {}}
+	on: afterCI.on & {workflow_dispatch: inputs: break_glass: {
+		description: "Deploy each build whose own CI lane passed on main's tip, although another CI job failed"
+		type:        "boolean"
+		default:     false
+	}}
 	jobs: {
 		resolve: {
 			name:              "Find the tested builds"
@@ -33,8 +38,9 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					name: "Find the tested builds"
 					id:   "builds"
 					env: {
-						GH_TOKEN:  "${{ github.token }}"
-						CI_RUN_ID: "${{ github.event.workflow_run.id }}"
+						GH_TOKEN:    "${{ github.token }}"
+						CI_RUN_ID:   "${{ github.event.workflow_run.id }}"
+						BREAK_GLASS: "${{ inputs.break_glass }}"
 					}
 					#StepTask & {#task: "deploy-find-builds"}
 				},
@@ -164,10 +170,12 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				#StepTask & {#task: "website-deploy-production"}
 			}, {
 				name: "Release the image registry collector"
-				// The hold does not expire, so every run that reached it releases the
-				// collector again, also after a failed deploy. Behind a maintenance
-				// version that this failure left serving, the release leaves the hold
-				// for the deploy that reopens the site.
+				// The hold does not expire, so every run whose hold paused releases the
+				// collector again, also after a failed deploy. A hold that refused
+				// before it paused, over an operator's pause or a sweep in flight,
+				// leaves no evidence, and the release then leaves the collector alone.
+				// Behind a maintenance version that this failure left serving, the
+				// release leaves the hold for the deploy that reopens the site.
 				if: "always() && steps.hold.outcome != 'skipped'"
 				env: CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
 				#StepTask & {#task: "website-release-registry-collector"}
