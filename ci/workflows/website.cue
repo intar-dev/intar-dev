@@ -11,8 +11,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 		"""
 
 	// One lane for the website: validate and smoke on every change, then release
-	// the tested artifact. The personal-metal rollout guard blocks normal deploys.
-	// Otherwise, a push to main deploys it. A manual dispatch may deploy
+	// the tested artifact. A push to main deploys it. A manual dispatch may deploy
 	// deliberately (maintenance on or off, or the registry delete campaign) or
 	// validate only, which is what the default operation does.
 	on: {
@@ -25,26 +24,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				options: [
 					"validate",
 					"deploy",
-					"metal-deploy",
-					"metal-open-platform-registration",
-					"metal-open-admission",
 				]
-			}
-			metal_revision: {
-				description: "Full commit SHA; keep main at this revision for every metal action"
-				type:        "string"
-			}
-			metal_deploy_run_id: {
-				description: "Prior metal-deploy run ID for recovery; successful run required for open actions"
-				type:        "string"
-			}
-			metal_checks: {
-				description: "Fleet checks JSON for an open action; record actual checks only"
-				type:        "string"
-			}
-			metal_proof_artifact_id: {
-				description: "Admission only; artifact containing personal-metal-proof.evidence from the actual NAT tests"
-				type:        "string"
 			}
 			maintenance: {
 				description: "auto follows pending migrations, on holds the control plane closed for a deliberate release, off returns the release to service"
@@ -67,11 +47,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					"report-only",
 					"delete",
 				]
-			}
-			confirmation: {
-				description: "Type DEPLOY WEB RELEASE to deploy from a manual dispatch"
-				required:    false
-				type:        "string"
 			}
 		}
 		push: {
@@ -186,9 +161,9 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					name:                   "website-dist-${{ github.sha }}"
 					path:                   "apps/web/dist"
 					"include-hidden-files": true
-					overwrite:              "${{ !startsWith(inputs.operation, 'metal-') }}"
+					overwrite:              true
 					"if-no-files-found":    "error"
-					"retention-days":       "${{ inputs.operation == 'metal-deploy' && 90 || 1 }}"
+					"retention-days":       1
 				}
 			}, {
 				name: "Record the tested artifact identity"
@@ -254,15 +229,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				"validate",
 				"ui",
 			]
-			// During this rollout, only explicit metal actions may reach production.
-			// The guard must be a repository variable, available before jobs start.
-			if: """
-				github.ref == 'refs/heads/main' && ((vars.PERSONAL_METAL_ROLLOUT != 'active' &&
-				  (github.event_name == 'push' ||
-				   (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))) ||
-				 (vars.PERSONAL_METAL_ROLLOUT == 'active' && github.event_name == 'workflow_dispatch' &&
-				  contains(fromJSON('["metal-deploy","metal-open-platform-registration","metal-open-admission"]'), inputs.operation)))
-				"""
+			if:        "github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))"
 			"runs-on": "namespace-profile-intar-dev"
 			env: BUCKET: "intar-dev-vm-image-registry-20260709"
 			environment: {
@@ -272,7 +239,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			"timeout-minutes": 30
 			outputs: {
 				static_pin_json:       "${{ steps.pin.outputs.static_pin_json }}"
-				metal_action:          "${{ steps.request.outputs.metal_action }}"
 				maintenance:           "${{ steps.request.outputs.maintenance }}"
 				registry_cleanup_mode: "${{ steps.request.outputs.registry_cleanup_mode }}"
 				artifact_id:           "${{ needs.validate.outputs.artifact_id }}"
@@ -282,15 +248,9 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Validate the release request"
 				id:   "request"
 				env: {
-					EVENT_NAME:              "${{ github.event_name }}"
-					OPERATION:               "${{ inputs.operation }}"
-					METAL_REVISION:          "${{ inputs.metal_revision }}"
-					METAL_DEPLOY_RUN_ID:     "${{ inputs.metal_deploy_run_id }}"
-					METAL_CHECKS:            "${{ inputs.metal_checks }}"
-					METAL_PROOF_ARTIFACT_ID: "${{ inputs.metal_proof_artifact_id }}"
-					CONFIRMATION:            "${{ inputs.confirmation }}"
-					REQUESTED_MAINTENANCE:   "${{ inputs.maintenance || 'auto' }}"
-					REQUESTED_CLEANUP_MODE:  "${{ inputs.registry_cleanup_mode || 'preserve' }}"
+					EVENT_NAME:             "${{ github.event_name }}"
+					REQUESTED_MAINTENANCE:  "${{ inputs.maintenance || 'auto' }}"
+					REQUESTED_CLEANUP_MODE: "${{ inputs.registry_cleanup_mode || 'preserve' }}"
 				}
 				run: """
 					set -euo pipefail
@@ -304,43 +264,12 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					    test "${REQUESTED_MAINTENANCE}" = auto
 					    test "${REQUESTED_CLEANUP_MODE}" = preserve
 					    ;;
-					  workflow_dispatch)
-					    test "${CONFIRMATION}" = 'DEPLOY WEB RELEASE'
-					    ;;
+					  workflow_dispatch) ;;
 					  *)
 					    echo "unsupported release event: ${EVENT_NAME}" >&2
 					    exit 1
 					    ;;
 					esac
-					metal_action=""
-					case "${OPERATION}" in
-					  metal-deploy|metal-open-platform-registration|metal-open-admission)
-					    # Use a fresh dispatch for recovery; never replace source artifacts.
-					    test "${GITHUB_RUN_ATTEMPT}" = 1
-					    [[ "${METAL_REVISION}" =~ ^[0-9a-f]{40}$ ]] || exit 1
-					    test "${METAL_REVISION}" = "${GITHUB_SHA}"
-					    test "${REQUESTED_MAINTENANCE}" = auto
-					    test "${REQUESTED_CLEANUP_MODE}" = preserve
-					    metal_action="${OPERATION#metal-}"
-					    if [ "${metal_action}" = deploy ]; then
-					      test -z "${METAL_CHECKS}${METAL_PROOF_ARTIFACT_ID}"
-					      if [ -n "${METAL_DEPLOY_RUN_ID}" ]; then
-					        [[ "${METAL_DEPLOY_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
-					      fi
-					      REQUESTED_MAINTENANCE=on
-					    else
-					      [[ "${METAL_DEPLOY_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
-					      printf '%s' "${METAL_CHECKS}" | jq -e --arg sha "${GITHUB_SHA}" '.revision == $sha' >/dev/null
-					      REQUESTED_MAINTENANCE=off
-					      if [ "${metal_action}" = open-admission ]; then
-					        [[ "${METAL_PROOF_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
-					      else
-					        test -z "${METAL_PROOF_ARTIFACT_ID}"
-					      fi
-					    fi
-					    ;;
-					esac
-					printf 'metal_action=%s\\n' "${metal_action}" >> "${GITHUB_OUTPUT}"
 					case "${REQUESTED_MAINTENANCE}" in
 					  auto|on|off) ;;
 					  *) echo 'maintenance must be auto, on, or off' >&2; exit 1 ;;
@@ -372,7 +301,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				run:  "bun install --frozen-lockfile"
 			}, {
 				name: "Resolve the verified guest-tools pin"
-				if:   "steps.request.outputs.metal_action == '' || (steps.request.outputs.metal_action == 'deploy' && inputs.metal_deploy_run_id == '')"
 				id:   "pin"
 				env: {
 					GH_TOKEN:              "${{ github.token }}"
@@ -386,7 +314,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// An explicit prerequisite: only a dispatch that asked for delete turns
 				// this on. It runs before the deploy job closes the plane, because the
 				// registry sits behind the maintenance fence.
-				if: "steps.request.outputs.metal_action == '' && steps.request.outputs.registry_cleanup_mode == 'delete'"
+				if: "steps.request.outputs.registry_cleanup_mode == 'delete'"
 				env: REGISTRY_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
 				#StepTask & {#task: "website-activate-upload-admission"}
 			}, {
@@ -408,8 +336,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 		}
 		deploy: {
 			name: "Deploy production"
-			// Guard the whole job, including always() cleanup, during the metal rollout.
-			if: "(vars.PERSONAL_METAL_ROLLOUT != 'active' && needs.plan.outputs.metal_action == '') || (vars.PERSONAL_METAL_ROLLOUT == 'active' && needs.plan.outputs.metal_action != '')"
 			needs: ["plan"]
 			"runs-on": "namespace-profile-intar-dev"
 			env: {
@@ -438,22 +364,11 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Verify exact-main deployment revision"
 				#StepTask & {#task: "website-verify-deploy-revision"}
 			}, {
-				name: "Restore metal retirement evidence"
-				if:   "needs.plan.outputs.metal_action != '' && inputs.metal_deploy_run_id != ''"
-				env: {
-					GH_TOKEN:          "${{ github.token }}"
-					SOURCE_RUN_ID:     "${{ inputs.metal_deploy_run_id }}"
-					METAL_ACTION:      "${{ needs.plan.outputs.metal_action }}"
-					PROOF_ARTIFACT_ID: "${{ inputs.metal_proof_artifact_id }}"
-				}
-				#StepTask & {#task: "website-restore-metal-evidence"}
-			}, {
 				name: "Download tested deployment artifact"
 				env: {
 					GH_TOKEN:               "${{ github.token }}"
 					TESTED_ARTIFACT_ID:     "${{ needs.plan.outputs.artifact_id }}"
 					TESTED_ARTIFACT_DIGEST: "${{ needs.plan.outputs.artifact_digest }}"
-					METAL_ACTION:           "${{ needs.plan.outputs.metal_action }}"
 				}
 				#StepTask & {#task: "website-download-tested-artifact"}
 			}, {
@@ -473,7 +388,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			}, {
 				name: "Inject the verified ABI 2 guest-tools pin"
 				env: {
-					METAL_ACTION:         "${{ needs.plan.outputs.metal_action }}"
 					GUEST_TOOLS_PIN_JSON: "${{ needs.plan.outputs.static_pin_json }}"
 					MAINTENANCE_MODE:     "${{ needs.plan.outputs.maintenance }}"
 				}
@@ -488,12 +402,11 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				#StepTask & {#task: "website-prepare-runtime-secrets"}
 			}, {
 				name: "Plan production D1 migrations"
-				if:   "needs.plan.outputs.metal_action == '' || needs.plan.outputs.metal_action == 'deploy'"
 				id:   "migrations"
 				#StepTask & {#task: "website-plan-d1-migrations"}
 			}, {
 				name: "Rehearse pending migrations on disposable D1"
-				if:   "(needs.plan.outputs.metal_action == '' || needs.plan.outputs.metal_action == 'deploy') && steps.migrations.outputs.pending == 'true'"
+				if:   "steps.migrations.outputs.pending == 'true'"
 				env: {
 					// Step outputs travel through the environment, never interpolated
 					// into the command line.
@@ -507,13 +420,12 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					"""
 			}, {
 				name: "Capture pre-migration D1 evidence"
-				if:   "needs.plan.outputs.metal_action == 'deploy' || (needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'))"
+				if:   "steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'"
 				env: {
 					// Both cutover operations, the pin deploy and the return to service,
 					// require the drained gate and a whole-fleet zero state. The normal
 					// migration path keeps only its original run and artifact checks.
 					REQUIRE_DRAINED_GATE: "${{ needs.plan.outputs.maintenance != 'auto' }}"
-					METAL_ACTION:         "${{ needs.plan.outputs.metal_action }}"
 				}
 				#StepTask & {#task: "website-capture-pre-migration-d1-evidence"}
 			}, {
@@ -522,45 +434,21 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				env: REGISTRY_CLEANUP_INTENT: "${{ needs.plan.outputs.registry_cleanup_mode }}"
 				#StepTask & {#task: "website-inspect-registry-cleanup"}
 			}, {
-				name: "Retain immutable personal-metal release inputs"
-				if:   "needs.plan.outputs.metal_action == 'deploy'"
-				uses: gha.pin."upload-artifact".ref
-				with: {
-					name: "personal-metal-inputs-${{ github.sha }}-${{ github.run_id }}"
-					path: """
-						${{ runner.temp }}/personal-metal/release.json
-						${{ runner.temp }}/personal-metal/release-static-pin.json
-
-						"""
-					"if-no-files-found": "error"
-					"retention-days":    90
-				}
-			}, {
-				name: "Run the staged personal-metal action"
-				if:   "needs.plan.outputs.metal_action != ''"
-				env: {
-					METAL_ACTION:                       "${{ needs.plan.outputs.metal_action }}"
-					METAL_CHECKS:                       "${{ inputs.metal_checks }}"
-					PERSONAL_METAL_RELEASE_INPUTS_FILE: "${{ runner.temp }}/personal-metal/release.json"
-					COLLECTOR_PRESENT:                  "${{ steps.registry-cleanup-state.outputs.child_present }}"
-				}
-				#StepTask & {#task: "website-run-personal-metal-action"}
-			}, {
 				name:                "Prepare the parent bootstrap configuration"
 				"working-directory": "."
-				if:                  "needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-state.outputs.child_present != 'true')"
+				if:                  "(steps.registry-cleanup-state.outputs.child_present != 'true')"
 				#StepTask & {#task: "website-prepare-bootstrap-config"}
 			}, {
 				name:                "Prepare maintenance configuration"
 				"working-directory": "."
-				if:                  "needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
+				if:                  "(steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
 				#StepTask & {#task: "website-prepare-maintenance-config"}
 			}, {
 				name: "Hold the image registry collector before the migration"
 				// A reopen already holds a paused collector, and the control plane is
 				// still closed at this point, so its hold would travel to a fenced
 				// route. The release step below is what the reopen needs.
-				if: "needs.plan.outputs.metal_action == '' && (needs.plan.outputs.maintenance != 'off')"
+				if: "(needs.plan.outputs.maintenance != 'off')"
 				env: {
 					// The collector has no public route: the parent worker holds the
 					// service binding, and the gate route on that worker is the only path
@@ -572,7 +460,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				#StepTask & {#task: "website-hold-registry-collector"}
 			}, {
 				name: "Enable maintenance for pending migrations"
-				if:   "needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
+				if:   "(steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
 				env: WEB_DEPLOY_LABEL: "maintenance"
 				run: """
 					tools/deploy/deploy-web.sh \\
@@ -584,16 +472,16 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					"""
 			}, {
 				name: "Drain and recheck maintenance"
-				if:   "needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
+				if:   "(steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
 				#StepTask & {#task: "website-drain-maintenance"}
 			}, {
 				name: "Deploy the parent revision for the first cleanup rollout"
-				if:   "needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto')"
+				if:   "(steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto')"
 				env: WEB_DEPLOY_LABEL: "bootstrap"
 				#StepTask & {#task: "website-deploy-bootstrap-parent"}
 			}, {
 				name: "Apply pending D1 migrations"
-				if:   "needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true')"
+				if:   "(steps.migrations.outputs.pending == 'true')"
 				env: {
 					CLOUDFLARE_DATABASE_ID:   "${{ env.DATABASE_ID }}"
 					MIGRATION_APPLY_EVIDENCE: "${{ runner.temp }}/production-d1-migrate.json"
@@ -601,7 +489,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				#StepTask & {#task: "website-apply-d1-migrations"}
 			}, {
 				name: "Verify production D1 schema"
-				if:   "needs.plan.outputs.metal_action == ''"
 				#StepTask & {#task: "website-verify-d1-schema"}
 			}, {
 				name: "Verify the deployed image registry cleanup worker"
@@ -614,7 +501,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// delete-capable collector, it refuses with the operation to run instead
 				// of deadlocking on evidence the fenced control plane can not produce.
 				id: "registry-cleanup-child"
-				if: "needs.plan.outputs.metal_action == '' && (needs.plan.outputs.maintenance == 'off')"
+				if: "(needs.plan.outputs.maintenance == 'off')"
 				env: REGISTRY_CLEANUP_OPERATION: "reopen"
 				#StepTask & {#task: "website-verify-deployed-registry-cleanup"}
 			}, {
@@ -623,11 +510,10 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// verification step above sets skip, and the reopen then only reopens
 				// the parent, releases the collector, and runs the campaign. A skipped
 				// verification step leaves skip empty, so every other path still deploys.
-				if: "needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-child.outputs.skip != 'true')"
+				if: "(steps.registry-cleanup-child.outputs.skip != 'true')"
 				#StepTask & {#task: "website-deploy-registry-cleanup"}
 			}, {
 				name: "Deploy production at 100 percent"
-				if:   "needs.plan.outputs.metal_action == ''"
 				env: WEB_DEPLOY_LABEL: "standard"
 				run: """
 					tools/deploy/deploy-web.sh \\
@@ -643,7 +529,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// and the reopen operation releases it after its maintenance-off deploy.
 				// A paused collector can not retire anything, and it can not refuse a
 				// learner either.
-				if: "needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on')"
+				if: "(always() && needs.plan.outputs.maintenance != 'on')"
 				env: CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
 				#StepTask & {#task: "website-release-registry-collector"}
 			}, {
@@ -656,7 +542,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// plan must be complete and fault free. That is the evidence a later
 				// delete release needs from the report-only rollout before it turns
 				// deletes on. A plan is a read, so it deletes nothing.
-				if: "needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only')"
+				if: "(always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only')"
 				env: CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
 				#StepTask & {#task: "website-verify-report-only-collector"}
 			}, {
@@ -667,7 +553,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// campaign is bounded by passes and by wall clock inside the script,
 				// and it proves the result with a fresh report whose keyset digest is
 				// the one the finished campaign recorded.
-				if: "needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete')"
+				if: "(always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete')"
 				env: {
 					CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
 					// A full plan takes roughly 90 seconds plus its post-scan, so the
@@ -681,20 +567,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Remove runtime secret file"
 				if:   "always() && steps.runtime-secrets.outcome != 'skipped'"
 				run:  "rm -f \"${RUNNER_TEMP}/website-runtime-secrets.json\""
-			}, {
-				name: "Collect personal-metal diagnostics"
-				if:   "always() && needs.plan.outputs.metal_action != ''"
-				#StepTask & {#task: "website-collect-metal-diagnostics"}
-			}, {
-				name: "Retain personal-metal evidence"
-				if:   "always() && needs.plan.outputs.metal_action != ''"
-				uses: gha.pin."upload-artifact".ref
-				with: {
-					name:                "personal-metal-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
-					path:                "${{ runner.temp }}/personal-metal/"
-					"if-no-files-found": "warn"
-					"retention-days":    90
-				}
 			}, {
 				name: "Retain deployment evidence"
 				if:   "always()"
@@ -750,7 +622,6 @@ tasks: {
 	"website-resolve-guest-tools-pin": #Script & {_script: "tools/workflows/website/resolve-guest-tools-pin.sh", _production: true}
 	"website-activate-upload-admission": #Script & {_script: "tools/workflows/website/activate-upload-admission.sh", _production: true}
 	"website-verify-deploy-revision": #Script & {_script: "tools/workflows/website/verify-deploy-revision.sh"}
-	"website-restore-metal-evidence": #Script & {_script: "tools/workflows/website/restore-metal-evidence.sh"}
 	"website-download-tested-artifact": #Script & {_script: "tools/workflows/website/download-tested-artifact.sh"}
 	"website-pin-production-config": #Script & {_script: "tools/workflows/website/pin-production-config.sh"}
 	"website-inject-guest-tools-pin": #Script & {_script: "tools/workflows/website/inject-guest-tools-pin.sh"}
@@ -758,7 +629,6 @@ tasks: {
 	"website-plan-d1-migrations": #Script & {_script: "tools/workflows/website/plan-d1-migrations.sh", _production: true}
 	"website-capture-pre-migration-d1-evidence": #Script & {_script: "tools/workflows/website/capture-pre-migration-d1-evidence.sh", _production: true}
 	"website-inspect-registry-cleanup": #Script & {_script: "tools/workflows/website/inspect-registry-cleanup.sh", _production: true}
-	"website-run-personal-metal-action": #Script & {_script: "tools/workflows/website/run-personal-metal-action.sh", _production: true}
 	"website-prepare-bootstrap-config": #Script & {_script: "tools/workflows/website/prepare-bootstrap-config.sh"}
 	"website-prepare-maintenance-config": #Script & {_script: "tools/workflows/website/prepare-maintenance-config.sh"}
 	"website-hold-registry-collector": #Script & {_script: "tools/workflows/website/hold-registry-collector.sh", _production: true}
@@ -771,5 +641,4 @@ tasks: {
 	"website-release-registry-collector": #Script & {_script: "tools/workflows/website/release-registry-collector.sh", _production: true}
 	"website-verify-report-only-collector": #Script & {_script: "tools/workflows/website/verify-report-only-collector.sh", _production: true}
 	"website-run-registry-cleanup": #Script & {_script: "tools/workflows/website/run-registry-cleanup.sh", _production: true}
-	"website-collect-metal-diagnostics": #Script & {_script: "tools/workflows/website/collect-metal-diagnostics.sh"}
 }

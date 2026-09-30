@@ -16,21 +16,6 @@ run-name: |-
         options:
           - validate
           - deploy
-          - metal-deploy
-          - metal-open-platform-registration
-          - metal-open-admission
-      metal_revision:
-        description: Full commit SHA; keep main at this revision for every metal action
-        type: string
-      metal_deploy_run_id:
-        description: Prior metal-deploy run ID for recovery; successful run required for open actions
-        type: string
-      metal_checks:
-        description: Fleet checks JSON for an open action; record actual checks only
-        type: string
-      metal_proof_artifact_id:
-        description: Admission only; artifact containing personal-metal-proof.evidence from the actual NAT tests
-        type: string
       maintenance:
         description: auto follows pending migrations, on holds the control plane closed for a deliberate release, off returns the release to service
         required: false
@@ -49,10 +34,6 @@ run-name: |-
           - preserve
           - report-only
           - delete
-      confirmation:
-        description: Type DEPLOY WEB RELEASE to deploy from a manual dispatch
-        required: false
-        type: string
   push:
     branches:
       - main
@@ -146,9 +127,9 @@ jobs:
           name: website-dist-${{ github.sha }}
           path: apps/web/dist
           include-hidden-files: true
-          overwrite: ${{ !startsWith(inputs.operation, 'metal-') }}
+          overwrite: true
           if-no-files-found: error
-          retention-days: ${{ inputs.operation == 'metal-deploy' && 90 || 1 }}
+          retention-days: 1
       - name: Record the tested artifact identity
         id: artifact
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -200,12 +181,7 @@ jobs:
     needs:
       - validate
       - ui
-    if: |-
-      github.ref == 'refs/heads/main' && ((vars.PERSONAL_METAL_ROLLOUT != 'active' &&
-        (github.event_name == 'push' ||
-         (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))) ||
-       (vars.PERSONAL_METAL_ROLLOUT == 'active' && github.event_name == 'workflow_dispatch' &&
-        contains(fromJSON('["metal-deploy","metal-open-platform-registration","metal-open-admission"]'), inputs.operation)))
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))
     runs-on: namespace-profile-intar-dev
     env:
       BUCKET: intar-dev-vm-image-registry-20260709
@@ -214,7 +190,6 @@ jobs:
       url: https://intar.dev
     outputs:
       static_pin_json: ${{ steps.pin.outputs.static_pin_json }}
-      metal_action: ${{ steps.request.outputs.metal_action }}
       maintenance: ${{ steps.request.outputs.maintenance }}
       registry_cleanup_mode: ${{ steps.request.outputs.registry_cleanup_mode }}
       artifact_id: ${{ needs.validate.outputs.artifact_id }}
@@ -225,12 +200,6 @@ jobs:
         id: request
         env:
           EVENT_NAME: ${{ github.event_name }}
-          OPERATION: ${{ inputs.operation }}
-          METAL_REVISION: ${{ inputs.metal_revision }}
-          METAL_DEPLOY_RUN_ID: ${{ inputs.metal_deploy_run_id }}
-          METAL_CHECKS: ${{ inputs.metal_checks }}
-          METAL_PROOF_ARTIFACT_ID: ${{ inputs.metal_proof_artifact_id }}
-          CONFIRMATION: ${{ inputs.confirmation }}
           REQUESTED_MAINTENANCE: ${{ inputs.maintenance || 'auto' }}
           REQUESTED_CLEANUP_MODE: ${{ inputs.registry_cleanup_mode || 'preserve' }}
         run: |
@@ -245,43 +214,12 @@ jobs:
               test "${REQUESTED_MAINTENANCE}" = auto
               test "${REQUESTED_CLEANUP_MODE}" = preserve
               ;;
-            workflow_dispatch)
-              test "${CONFIRMATION}" = 'DEPLOY WEB RELEASE'
-              ;;
+            workflow_dispatch) ;;
             *)
               echo "unsupported release event: ${EVENT_NAME}" >&2
               exit 1
               ;;
           esac
-          metal_action=""
-          case "${OPERATION}" in
-            metal-deploy|metal-open-platform-registration|metal-open-admission)
-              # Use a fresh dispatch for recovery; never replace source artifacts.
-              test "${GITHUB_RUN_ATTEMPT}" = 1
-              [[ "${METAL_REVISION}" =~ ^[0-9a-f]{40}$ ]] || exit 1
-              test "${METAL_REVISION}" = "${GITHUB_SHA}"
-              test "${REQUESTED_MAINTENANCE}" = auto
-              test "${REQUESTED_CLEANUP_MODE}" = preserve
-              metal_action="${OPERATION#metal-}"
-              if [ "${metal_action}" = deploy ]; then
-                test -z "${METAL_CHECKS}${METAL_PROOF_ARTIFACT_ID}"
-                if [ -n "${METAL_DEPLOY_RUN_ID}" ]; then
-                  [[ "${METAL_DEPLOY_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
-                fi
-                REQUESTED_MAINTENANCE=on
-              else
-                [[ "${METAL_DEPLOY_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
-                printf '%s' "${METAL_CHECKS}" | jq -e --arg sha "${GITHUB_SHA}" '.revision == $sha' >/dev/null
-                REQUESTED_MAINTENANCE=off
-                if [ "${metal_action}" = open-admission ]; then
-                  [[ "${METAL_PROOF_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
-                else
-                  test -z "${METAL_PROOF_ARTIFACT_ID}"
-                fi
-              fi
-              ;;
-          esac
-          printf 'metal_action=%s\n' "${metal_action}" >> "${GITHUB_OUTPUT}"
           case "${REQUESTED_MAINTENANCE}" in
             auto|on|off) ;;
             *) echo 'maintenance must be auto, on, or off' >&2; exit 1 ;;
@@ -308,7 +246,6 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Resolve the verified guest-tools pin
         id: pin
-        if: steps.request.outputs.metal_action == '' || (steps.request.outputs.metal_action == 'deploy' && inputs.metal_deploy_run_id == '')
         env:
           GH_TOKEN: ${{ github.token }}
           MAINTENANCE_MODE: ${{ steps.request.outputs.maintenance }}
@@ -316,7 +253,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: cuenv task -p ci --package ci website-resolve-guest-tools-pin
       - name: Activate the D1 upload admission switch for a delete release
-        if: steps.request.outputs.metal_action == '' && steps.request.outputs.registry_cleanup_mode == 'delete'
+        if: steps.request.outputs.registry_cleanup_mode == 'delete'
         env:
           REGISTRY_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
         run: cuenv task -p ci --package ci website-activate-upload-admission
@@ -333,7 +270,6 @@ jobs:
           retention-days: 30
   deploy:
     name: Deploy production
-    if: (vars.PERSONAL_METAL_ROLLOUT != 'active' && needs.plan.outputs.metal_action == '') || (vars.PERSONAL_METAL_ROLLOUT == 'active' && needs.plan.outputs.metal_action != '')
     needs:
       - plan
     runs-on: namespace-profile-intar-dev
@@ -356,20 +292,11 @@ jobs:
         uses: ./.github/actions/setup-cuenv
       - name: Verify exact-main deployment revision
         run: cuenv task -p ci --package ci website-verify-deploy-revision
-      - name: Restore metal retirement evidence
-        if: needs.plan.outputs.metal_action != '' && inputs.metal_deploy_run_id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ inputs.metal_deploy_run_id }}
-          METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
-          PROOF_ARTIFACT_ID: ${{ inputs.metal_proof_artifact_id }}
-        run: cuenv task -p ci --package ci website-restore-metal-evidence
       - name: Download tested deployment artifact
         env:
           GH_TOKEN: ${{ github.token }}
           TESTED_ARTIFACT_ID: ${{ needs.plan.outputs.artifact_id }}
           TESTED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.artifact_digest }}
-          METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
         run: cuenv task -p ci --package ci website-download-tested-artifact
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
@@ -384,7 +311,6 @@ jobs:
         run: cuenv task -p ci --package ci website-pin-production-config
       - name: Inject the verified ABI 2 guest-tools pin
         env:
-          METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
           GUEST_TOOLS_PIN_JSON: ${{ needs.plan.outputs.static_pin_json }}
           MAINTENANCE_MODE: ${{ needs.plan.outputs.maintenance }}
         run: cuenv task -p ci --package ci website-inject-guest-tools-pin
@@ -396,10 +322,9 @@ jobs:
         run: cuenv task -p ci --package ci website-prepare-runtime-secrets
       - name: Plan production D1 migrations
         id: migrations
-        if: needs.plan.outputs.metal_action == '' || needs.plan.outputs.metal_action == 'deploy'
         run: cuenv task -p ci --package ci website-plan-d1-migrations
       - name: Rehearse pending migrations on disposable D1
-        if: (needs.plan.outputs.metal_action == '' || needs.plan.outputs.metal_action == 'deploy') && steps.migrations.outputs.pending == 'true'
+        if: steps.migrations.outputs.pending == 'true'
         env:
           APPLIED_MIGRATION_COUNT: ${{ steps.migrations.outputs.applied }}
         run: |
@@ -407,49 +332,30 @@ jobs:
             --applied "$APPLIED_MIGRATION_COUNT" \
             --evidence "${RUNNER_TEMP}/d1-removal-rehearsal.json"
       - name: Capture pre-migration D1 evidence
-        if: needs.plan.outputs.metal_action == 'deploy' || (needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'))
+        if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'
         env:
           REQUIRE_DRAINED_GATE: ${{ needs.plan.outputs.maintenance != 'auto' }}
-          METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
         run: cuenv task -p ci --package ci website-capture-pre-migration-d1-evidence
       - name: Inspect the image registry cleanup deployment
         id: registry-cleanup-state
         env:
           REGISTRY_CLEANUP_INTENT: ${{ needs.plan.outputs.registry_cleanup_mode }}
         run: cuenv task -p ci --package ci website-inspect-registry-cleanup
-      - name: Retain immutable personal-metal release inputs
-        if: needs.plan.outputs.metal_action == 'deploy'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: personal-metal-inputs-${{ github.sha }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/personal-metal/release.json
-            ${{ runner.temp }}/personal-metal/release-static-pin.json
-          if-no-files-found: error
-          retention-days: 90
-      - name: Run the staged personal-metal action
-        if: needs.plan.outputs.metal_action != ''
-        env:
-          METAL_ACTION: ${{ needs.plan.outputs.metal_action }}
-          METAL_CHECKS: ${{ inputs.metal_checks }}
-          PERSONAL_METAL_RELEASE_INPUTS_FILE: ${{ runner.temp }}/personal-metal/release.json
-          COLLECTOR_PRESENT: ${{ steps.registry-cleanup-state.outputs.child_present }}
-        run: cuenv task -p ci --package ci website-run-personal-metal-action
       - name: Prepare the parent bootstrap configuration
-        if: needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-state.outputs.child_present != 'true')
+        if: (steps.registry-cleanup-state.outputs.child_present != 'true')
         working-directory: .
         run: cuenv task -p ci --package ci website-prepare-bootstrap-config
       - name: Prepare maintenance configuration
-        if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
+        if: (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
         working-directory: .
         run: cuenv task -p ci --package ci website-prepare-maintenance-config
       - name: Hold the image registry collector before the migration
-        if: needs.plan.outputs.metal_action == '' && (needs.plan.outputs.maintenance != 'off')
+        if: (needs.plan.outputs.maintenance != 'off')
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: cuenv task -p ci --package ci website-hold-registry-collector
       - name: Enable maintenance for pending migrations
-        if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
+        if: (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
         env:
           WEB_DEPLOY_LABEL: maintenance
         run: |
@@ -459,33 +365,31 @@ jobs:
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/web-maintenance.json"
       - name: Drain and recheck maintenance
-        if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
+        if: (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
         run: cuenv task -p ci --package ci website-drain-maintenance
       - name: Deploy the parent revision for the first cleanup rollout
-        if: needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto')
+        if: (steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto')
         env:
           WEB_DEPLOY_LABEL: bootstrap
         run: cuenv task -p ci --package ci website-deploy-bootstrap-parent
       - name: Apply pending D1 migrations
-        if: needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true')
+        if: (steps.migrations.outputs.pending == 'true')
         env:
           CLOUDFLARE_DATABASE_ID: ${{ env.DATABASE_ID }}
           MIGRATION_APPLY_EVIDENCE: ${{ runner.temp }}/production-d1-migrate.json
         run: cuenv task -p ci --package ci website-apply-d1-migrations
       - name: Verify production D1 schema
-        if: needs.plan.outputs.metal_action == ''
         run: cuenv task -p ci --package ci website-verify-d1-schema
       - name: Verify the deployed image registry cleanup worker
         id: registry-cleanup-child
-        if: needs.plan.outputs.metal_action == '' && (needs.plan.outputs.maintenance == 'off')
+        if: (needs.plan.outputs.maintenance == 'off')
         env:
           REGISTRY_CLEANUP_OPERATION: reopen
         run: cuenv task -p ci --package ci website-verify-deployed-registry-cleanup
       - name: Deploy the image registry cleanup worker
-        if: needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-child.outputs.skip != 'true')
+        if: (steps.registry-cleanup-child.outputs.skip != 'true')
         run: cuenv task -p ci --package ci website-deploy-registry-cleanup
       - name: Deploy production at 100 percent
-        if: needs.plan.outputs.metal_action == ''
         env:
           WEB_DEPLOY_LABEL: standard
         run: |
@@ -495,17 +399,17 @@ jobs:
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/web-production.json"
       - name: Release the image registry collector
-        if: needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on')
+        if: (always() && needs.plan.outputs.maintenance != 'on')
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: cuenv task -p ci --package ci website-release-registry-collector
       - name: Verify the report-only collector through the parent binding
-        if: needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only')
+        if: (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only')
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: cuenv task -p ci --package ci website-verify-report-only-collector
       - name: Run the image registry cleanup to completion
-        if: needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete')
+        if: (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete')
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
           REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
@@ -513,17 +417,6 @@ jobs:
       - name: Remove runtime secret file
         if: always() && steps.runtime-secrets.outcome != 'skipped'
         run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
-      - name: Collect personal-metal diagnostics
-        if: always() && needs.plan.outputs.metal_action != ''
-        run: cuenv task -p ci --package ci website-collect-metal-diagnostics
-      - name: Retain personal-metal evidence
-        if: always() && needs.plan.outputs.metal_action != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: personal-metal-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/personal-metal/
-          if-no-files-found: warn
-          retention-days: 90
       - name: Retain deployment evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

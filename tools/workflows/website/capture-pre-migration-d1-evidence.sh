@@ -32,10 +32,6 @@ jq -e '
   )
 ' "${bookmark}" >/dev/null
 
-# Metal retirement preserves incomplete uploads and ends active work.
-# Its own transaction checks the closed gates after maintenance.
-if [ "${METAL_ACTION}" = deploy ]; then exit 0; fi
-
 d1_readonly_query() {
   local sql="$1"
   local evidence="$2"

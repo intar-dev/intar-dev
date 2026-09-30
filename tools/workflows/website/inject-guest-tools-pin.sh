@@ -5,9 +5,6 @@ case "${MAINTENANCE_MODE}" in
   auto|on|off) ;;
   *) echo "maintenance input must be auto, on, or off" >&2; exit 1 ;;
 esac
-if [ -f "${RUNNER_TEMP}/personal-metal/release-static-pin.json" ]; then
-  GUEST_TOOLS_PIN_JSON="$(cat "${RUNNER_TEMP}/personal-metal/release-static-pin.json")"
-fi
 if [ -z "${GUEST_TOOLS_PIN_JSON}" ]; then
   echo 'SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON is not set.' >&2
   echo 'The ABI 2 release has no dynamic channel fallback, so the' >&2
@@ -19,9 +16,6 @@ pin_check="${RUNNER_TEMP}/release-static-pin-check.json"
 printf '%s' "${GUEST_TOOLS_PIN_JSON}" > "${pin_file}"
 bun tools/deploy/guest-tools-pin.ts check --pin "${pin_file}" > "${pin_check}"
 jq -e '.status == "valid"' "${pin_check}" >/dev/null
-if [ "${METAL_ACTION}" = deploy ]; then
-  cp "${pin_file}" "${RUNNER_TEMP}/personal-metal/release-static-pin.json"
-fi
 # The Worker reads this variable as a JSON string and then parses it,
 # so store the serialized form. The assertion checks the type and that
 # parsing it returns the verified pin; an object is not accepted.
