@@ -103,6 +103,8 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
           namespace-cache: ${{ matrix.runner != 'ubuntu-24.04' }}
+      - name: Run checks
+        run: cuenv task verify
       - name: Build release artifacts
         env:
           PACKAGE: ${{ matrix.package }}

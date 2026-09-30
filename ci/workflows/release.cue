@@ -10,8 +10,8 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 //   - release-pr rebuilds release/next with the bumps git-cliff finds since
 //     each product's latest tag (tools/workflows/release/cliff.toml and
 //     products.json);
-//   - build packages each draft from its tag, and publish attests the payload
-//     and publishes the draft.
+//   - build checks and packages each draft from its tag, and publish attests
+//     the payload and publishes the draft.
 //
 // A draft left by a failed run is rebuilt by the next run, so re-running or
 // dispatching the workflow resumes it.
@@ -97,7 +97,9 @@ let _gitCliff = {
 			]
 		}
 
-		// The payload is built from the tag alone, with read-only access.
+		// The payload is built from the tag alone, with read-only access. The
+		// workspace gate runs on the tag too: nothing requires the release pull
+		// request's CI to pass before it merges.
 		build: {
 			name:      "Build ${{ matrix.tag }}"
 			needs:     "plan"
@@ -129,6 +131,10 @@ let _gitCliff = {
 					targets:           "aarch64-unknown-linux-musl"
 					"namespace-cache": "${{ matrix.runner != 'ubuntu-24.04' }}"
 				}},
+				gha.#Run & {
+					name:  "Run checks"
+					#task: "verify"
+				},
 				{
 					name: "Build release artifacts"
 					env: {

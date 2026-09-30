@@ -49,9 +49,10 @@ other registry.
   across a change to `.github/workflows`, so such a push to main replaces the
   pull request with a new one.
 - **Publishing:** merging that pull request tags each new version on main and
-  opens a draft release. The workflow builds and smoke-tests each draft from its
-  tag, attests the payload, and publishes it. A failed build leaves its draft,
-  and the next run of the workflow rebuilds and publishes it.
+  opens a draft release. The workflow runs the workspace checks on each draft's
+  tag, builds and smoke-tests it from that tag, attests the payload, and
+  publishes it. A failed build leaves its draft, and the next run of the
+  workflow rebuilds and publishes it.
 - **After an image CLI release,** the workflow opens a pull request that points
   the website at the new scenario compiler. **After a Stargate release,** the
   run summary prints the `stargate-deploy` plan command.
