@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Deploy the image registry cleanup worker".
+# deploy.yml, job deploy-web, step "Deploy the image registry cleanup worker".
 set -euo pipefail
 # Astro builds this auxiliary worker next to the parent configuration,
 # and the tested artifact carries both. The collector reads the live

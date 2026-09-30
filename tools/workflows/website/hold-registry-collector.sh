@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Hold the image registry collector before the migration".
+# deploy.yml, job deploy-web, step "Hold the image registry collector before the migration".
 set -euo pipefail
 case "${REGISTRY_CLEANUP_MODE}" in
   report-only|delete) ;;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Drain and recheck maintenance".
+# deploy.yml, job deploy-web, step "Drain and recheck maintenance".
 set -euo pipefail
 sleep 30
 expected_version_id="$(jq -er '.deployed_version_id' \

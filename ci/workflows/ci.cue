@@ -1,11 +1,16 @@
 package workflows
 
-import "github.com/intar-dev/intar-dev/ci/gha"
+import (
+	"list"
+
+	"github.com/intar-dev/intar-dev/ci/gha"
+)
 
 // One CI workflow for pull requests and main. `changes` picks the lanes a
 // pull request needs (lanes.cue), every lane runs on a push to main or a
 // dispatch, and ci-ok is the one required check: it always runs, fails when
-// any job failed or was cancelled, and counts a skipped job as passed.
+// any job failed or was cancelled, and counts a skipped job as passed. On main,
+// a lane with a dist uploads the build it checked, and deploy.yml deploys it.
 //
 // No paths filter, so every pull request reports ci-ok.
 "workflows": ci: {
@@ -46,7 +51,22 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				if:                "needs.changes.outputs.\(name) == 'true'"
 				"timeout-minutes": lane.timeout
 				permissions: contents: "read"
-				steps: laneSteps[name]
+				let _artifact = "\(name)-dist-${{ github.sha }}"
+				steps: list.Concat([laneSteps[name], [if lane.dist != _|_ {
+					name: "Upload the tested build"
+					if:   "github.ref == 'refs/heads/main'"
+					uses: gha.pin."upload-artifact".ref
+					with: {
+						name:                   _artifact
+						path:                   lane.dist.path
+						"include-hidden-files": lane.dist.hidden
+						// A re-run of the job replaces it.
+						overwrite:           true
+						"if-no-files-found": "error"
+						// Long enough for a dispatch of deploy.yml to find it.
+						"retention-days": 14
+					}
+				}]])
 			}
 		}
 
@@ -118,4 +138,26 @@ files: ".github/workflows/ci.yml": !~"secrets\\.|github\\.token"
 
 tasks: {
 	"ci-release-plan": #Script & {_script: "tools/workflows/ci/release-plan.sh"}
+}
+
+// deploy.yml and release.yml run after this workflow on main, and act only on a
+// run that passed for a push or dispatch of main's tip. github.sha is main's tip
+// when the run finished, so a run for an older commit is left to the run for
+// the newer one. The event check refuses a fork's pull request from a branch
+// named main, which triggers them too. A dispatch from main also passes.
+afterCI: {
+	on: workflow_run: {
+		workflows: ["CI"]
+		types: ["completed"]
+		branches: ["main"]
+	}
+	if: """
+		(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+		(github.event_name == 'workflow_run' &&
+		github.event.workflow_run.conclusion == 'success' &&
+		(github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+		github.event.workflow_run.head_branch == 'main' &&
+		github.event.workflow_run.head_repository.full_name == github.repository &&
+		github.event.workflow_run.head_sha == github.sha)
+		"""
 }

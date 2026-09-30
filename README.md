@@ -55,11 +55,14 @@ other registry.
 - **Dry run:** CI builds and smoke-tests every product whose version a pull
   request changes, the release pull request included, with the release build's
   own steps. A change to the release build dry-runs every product.
-- **Publishing:** merging that pull request tags each new version on main and
-  opens a draft release. The workflow runs the workspace checks on each draft's
-  tag, builds and smoke-tests it from that tag, attests the payload, and
-  publishes it. A failed build leaves its draft, and the next run of the
-  workflow rebuilds and publishes it.
+- **Publishing:** once CI passes on main's tip after that pull request merges,
+  the Release workflow tags each new version on main and opens a draft
+  release. It builds and smoke-tests each draft from its tag, attests the
+  payload, and publishes it. CI's rust lane already ran the workspace checks,
+  so the build runs them again only for a tag whose commit never passed CI on
+  main. A failed build leaves its draft, and the next run of the workflow
+  rebuilds and publishes it: after the next CI run that passes on main, a
+  re-run, or a dispatch from main.
 - **After an image CLI release,** the workflow opens a pull request that points
   the website at the new scenario compiler. **After a Stargate release,** the
   run summary prints the `stargate-deploy` plan command.

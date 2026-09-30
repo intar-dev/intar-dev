@@ -3,7 +3,8 @@
 # A product whose manifest version on main has no tag gets an annotated
 # <prefix>/vX.Y.Z tag on the commit that set that version and a draft release
 # with git-cliff notes. Every release still in draft goes into the build
-# matrix, which is how a failed run resumes.
+# matrix, which is how a failed run resumes. The matrix says whether CI passed
+# on the tag's commit on main: build runs the workspace gate only when not.
 set -euo pipefail
 products=tools/workflows/release/products.json
 git config user.name "github-actions[bot]"
@@ -50,8 +51,10 @@ for product in "${product_list[@]}"; do
     gh release create "${tag}" --draft --verify-tag \
       --title "${project} v${version}" --notes "${notes}"
   fi
-  matrix="$(jq -c --argjson product "${product}" --arg tag "${tag}" --arg version "${version}" \
-    '. + [$product + {tag: $tag, version: $version} | del(.paths)]' <<<"${matrix}")"
+  ci_passed="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&head_sha=$(git rev-parse "${tag}^{commit}")&status=success" \
+    --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")] | length > 0')"
+  matrix="$(jq -c --argjson product "${product}" --arg tag "${tag}" --arg version "${version}" --argjson ci_passed "${ci_passed}" \
+    '. + [$product + {tag: $tag, version: $version, ci_passed: $ci_passed} | del(.paths)]' <<<"${matrix}")"
 done
 echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
 echo "Release matrix: ${matrix}"

@@ -291,7 +291,7 @@ schema.#Project & {
 			}]
 		}
 
-		// The web build website.yml deploys: the image registry cleanup worker it
+		// The web build deploy.yml deploys: the image registry cleanup worker it
 		// deploys from the artifact has no route and no public surface.
 		"check-web-artifact": #Host & {command: "tools/workflows/website/verify-registry-cleanup-artifact.sh"}
 

@@ -15,6 +15,13 @@ lanes: [string]: close({
 	// Root tasks, run in order.
 	steps: [...string]
 	timeout: int
+	// The build the lane checks, which deploy.yml deploys: on main, ci.yml
+	// uploads this directory as the artifact <lane>-dist-<sha>.
+	dist?: {
+		path!: string
+		// Whether the upload keeps dotfiles.
+		hidden!: bool
+	}
 })
 
 // A change to one of these runs every lane: they define the lanes, the tasks
@@ -119,14 +126,17 @@ lanes: {
 		]
 	}
 
-	// website.yml deploys the build this lane checks; see laneSteps.
+	// deploy.yml deploys the build this lane checks, with the deploy tooling
+	// below; ci/workflows/deploy.cue is a shared input.
 	web: {
 		setup: [gha.#SetupRuntime, gha.#BunCache]
 		steps: ["install-js", "test.js", "build.js", "check-web-artifact"]
 		timeout: 30
+		dist: {path: "apps/web/dist", hidden: true}
 		inputs: [
-			".github/workflows/website.yml",
+			".github/workflows/deploy.yml",
 			".github/actions/setup-runtime/**",
+			"tools/workflows/deploy/**",
 			"tools/workflows/website/**",
 			"Cargo.toml",
 			"Cargo.lock",
@@ -147,23 +157,23 @@ lanes: {
 		]
 	}
 
-	// docs.yml deploys the build this lane checks; see laneSteps.
+	// deploy.yml deploys the build this lane checks.
 	docs: {
 		setup: [gha.#SetupRuntime]
 		steps: ["check-docs"]
 		timeout: 10
+		dist: {path: "docs/dist", hidden: false}
 		inputs: [
-			".github/workflows/docs.yml",
+			".github/workflows/deploy.yml",
 			".github/actions/setup-runtime/**",
+			"tools/workflows/deploy/**",
 			"apps/web/.node-version",
 			"docs/**",
 		]
 	}
 }
 
-// Each lane's job steps. website.yml and docs.yml build what they deploy with
-// these same steps, so the pull request check and the deployed build cannot
-// drift apart.
+// Each lane's job steps, which `cuenv task lanes.<name>` runs locally too.
 laneSteps: {
 	for name, lane in lanes {
 		(name): [

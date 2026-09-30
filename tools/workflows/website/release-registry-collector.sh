@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Release the image registry collector".
+# deploy.yml, job deploy-web, step "Release the image registry collector".
 set -euo pipefail
 # The hold lives in the shared admission row and does not expire, so
 # this step runs after the parent reopened with the binding and must

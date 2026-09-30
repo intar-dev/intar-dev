@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # release.yml, job release-pr, step "Update the release pull request".
-# Rebuilds release/next from this main commit, which the plan job has just
-# tagged: each product git-cliff finds changes for gets its bumped manifest
-# version, Cargo.lock entry, and changelog. The app token pushes, so CI runs on
-# the pull request; with nothing to release, the pull request is closed.
+# Rebuilds release/next from this main commit: each product git-cliff finds
+# changes for gets its bumped manifest version, Cargo.lock entry, and
+# changelog. The app token pushes, so CI runs on the pull request; with nothing
+# to release, the pull request is closed.
 set -euo pipefail
 # A re-run keeps its run's commit. Only the run for main's tip may rewrite the
 # pull request; a push that moved main has a run of its own that follows.
@@ -33,9 +33,16 @@ for product in "${product_list[@]}"; do
   prefix="$(jq -r .prefix <<<"${product}")"
   manifest="$(jq -r .manifest <<<"${product}")"
   current="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "${manifest}" | head -n 1)"
+  # The plan job tags a new manifest version only once CI passes on main, which
+  # can follow this push. Until then, a local tag where plan-release.sh puts it
+  # counts that version as released; it is never pushed.
+  if ! git rev-parse --quiet --verify "refs/tags/${prefix}/v${current}" >/dev/null; then
+    git tag "${prefix}/v${current}" \
+      "$(git log --first-parent -1 --format=%H -G '^version = "' -- "${manifest}")"
+  fi
   mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
-  # With nothing to release, git-cliff prints the latest tag, which the plan
-  # job has just made the manifest version.
+  # With nothing to release, git-cliff prints the latest tag, the manifest
+  # version.
   next="$(git-cliff --config "${config}" "${cliff[@]}" --unreleased --bumped-version)"
   if [ "${next}" = "${prefix}/v${current}" ]; then
     continue

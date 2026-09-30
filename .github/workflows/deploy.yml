@@ -1,85 +1,60 @@
-# Generated from ci/workflows/website.cue by cuenv; do not edit manually.
+# Generated from ci/workflows/deploy.cue by cuenv; do not edit manually.
 # Regenerate with: cuenv sync codegen
-name: Website
-run-name: Website release main @ ${{ github.sha }}
+name: Deploy
+run-name: Deploy main @ ${{ github.event.workflow_run.head_sha || github.sha }}
 "on":
   workflow_dispatch: {}
-  push:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
     branches:
       - main
-    paths:
-      - apps/web/**
-      - '!apps/web/tests/**'
-      - '!apps/web/**/*.test.ts'
-      - package.json
-      - bun.lock
-      - patches/**
-      - tsconfig.base.json
-      - .github/workflows/website.yml
-      - .github/actions/setup-cuenv/**
-      - .github/actions/setup-runtime/**
-      - ci/workflows/website.cue
-      - ci/workflows/tasks.cue
-      - tools/workflows/website/**
-      - tools/deploy/**
-      - tools/database/**
-permissions:
-  actions: read
-  contents: read
-concurrency:
-  group: website
-  cancel-in-progress: false
+permissions: {}
 jobs:
-  validate:
-    name: Test and build
-    runs-on: namespace-profile-intar-dev
+  resolve:
+    name: Find the tested builds
+    if: |-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_sha == github.sha)
+    runs-on: ubuntu-24.04
     outputs:
-      artifact_id: ${{ steps.artifact.outputs.artifact_id }}
-      artifact_digest: ${{ steps.artifact.outputs.artifact_digest }}
-    timeout-minutes: 30
+      run_id: ${{ steps.builds.outputs.run_id }}
+      web_artifact: ${{ steps.builds.outputs.web_artifact }}
+      web_digest: ${{ steps.builds.outputs.web_digest }}
+      docs_artifact: ${{ steps.builds.outputs.docs_artifact }}
+      docs_digest: ${{ steps.builds.outputs.docs_digest }}
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Set up cuenv
         uses: ./.github/actions/setup-cuenv
-      - name: Set up the CI runtime
-        uses: ./.github/actions/setup-runtime
-      - name: Set up Bun cache
-        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
-        with:
-          path: ~/.bun/install/cache
-      - name: install-js
-        run: cuenv task install-js
-      - name: test.js
-        run: cuenv task test.js
-      - name: build.js
-        run: cuenv task build.js
-      - name: check-web-artifact
-        run: cuenv task check-web-artifact
-      - name: Upload tested deployment artifact
-        if: github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: website-dist-${{ github.sha }}
-          path: apps/web/dist
-          include-hidden-files: true
-          overwrite: true
-          if-no-files-found: error
-          retention-days: 1
-      - name: Record the tested artifact identity
-        id: artifact
-        if: github.ref == 'refs/heads/main'
+      - name: Find the tested builds
+        id: builds
         env:
           GH_TOKEN: ${{ github.token }}
-        run: cuenv task -p ci --package ci website-record-artifact-identity
-  deploy:
-    name: Deploy production
-    needs:
-      - validate
-    if: github.ref == 'refs/heads/main'
+          CI_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: cuenv task -p ci --package ci deploy-find-builds
+  deploy-web:
+    name: Deploy the website
+    needs: resolve
+    if: needs.resolve.outputs.web_artifact != ''
     runs-on: namespace-profile-intar-dev
+    permissions:
+      actions: read
+      contents: read
     concurrency:
       group: website-production
       cancel-in-progress: false
@@ -101,13 +76,15 @@ jobs:
       - name: Verify exact-main deployment revision
         env:
           GH_TOKEN: ${{ github.token }}
-        run: cuenv task -p ci --package ci website-verify-deploy-revision
+        run: cuenv task -p ci --package ci deploy-verify-revision
       - name: Download tested deployment artifact
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TESTED_ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
-          TESTED_ARTIFACT_DIGEST: ${{ needs.validate.outputs.artifact_digest }}
-        run: cuenv task -p ci --package ci website-download-tested-artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+          artifact-ids: ${{ needs.resolve.outputs.web_artifact }}
+          path: apps/web/dist
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
       - name: Set up Bun cache
@@ -175,7 +152,7 @@ jobs:
       - name: Summarize the deployment
         if: always()
         env:
-          TESTED_ARTIFACT_DIGEST: ${{ needs.validate.outputs.artifact_digest }}
+          TESTED_ARTIFACT_DIGEST: ${{ needs.resolve.outputs.web_digest }}
         run: cuenv task -p ci --package ci website-summarize-deploy
       - name: Retain deployment evidence
         if: always()
@@ -208,3 +185,50 @@ jobs:
             ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-standard/
           if-no-files-found: warn
           retention-days: 30
+  deploy-docs:
+    name: Deploy the docs
+    needs: resolve
+    if: needs.resolve.outputs.docs_artifact != ''
+    runs-on: namespace-profile-intar-dev
+    concurrency:
+      group: docs-production
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: docs
+    environment:
+      name: production
+      url: https://docs.intar.dev
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Verify exact-main deployment revision
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cuenv task -p ci --package ci deploy-verify-revision
+      - name: Download tested docs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+          artifact-ids: ${{ needs.resolve.outputs.docs_artifact }}
+          path: docs/dist
+      - name: Set up the CI runtime
+        uses: ./.github/actions/setup-runtime
+      - name: Install docs deployment dependencies
+        run: bun install --frozen-lockfile
+      - name: Deploy docs
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: bunx --no-install wrangler deploy

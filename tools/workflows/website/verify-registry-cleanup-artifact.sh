@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# `cuenv task check-web-artifact`, the last step of the web lane, which
-# website.yml's validate job runs before it uploads the tested artifact.
+# `cuenv task check-web-artifact`, the last step of the web lane, which ci.yml
+# runs before it uploads the tested build that deploy.yml deploys.
 set -euo pipefail
 # The site build emits an auxiliary worker for the image registry
 # cleanup. The deploy lane deploys the built configuration out of this

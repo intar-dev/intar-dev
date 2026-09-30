@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Summarize the deployment".
+# deploy.yml, job deploy-web, step "Summarize the deployment".
 set -uo pipefail
 # Runs after every deploy, also a failed one, so it reads whatever
 # evidence exists and never fails: a missing file prints "none".

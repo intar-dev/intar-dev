@@ -1,87 +1,54 @@
 package workflows
 
-import (
-	"list"
+import "github.com/intar-dev/intar-dev/ci/gha"
 
-	"github.com/intar-dev/intar-dev/ci/gha"
-)
-
-"workflows": website: {
-	name:       "Website"
-	"run-name": "Website release main @ ${{ github.sha }}"
-
-	// Deploys main: every push that changes what can be deployed, and a manual
-	// dispatch, for a revision a push did not deploy. ci.yml's web lane checks
-	// pull requests with the same build steps, and the deploy job refuses any
-	// other ref. Maintenance turns on only while D1 migrations are pending.
-	on: {
-		workflow_dispatch: {}
-		// What can be deployed and the lane itself: the web app without its
-		// tests, the workspace manifests, and the deploy tooling.
-		push: {
-			branches: ["main"]
-			paths: [
-				"apps/web/**",
-				"!apps/web/tests/**",
-				"!apps/web/**/*.test.ts",
-				"package.json",
-				"bun.lock",
-				"patches/**",
-				"tsconfig.base.json",
-				".github/workflows/website.yml",
-				".github/actions/setup-cuenv/**",
-				".github/actions/setup-runtime/**",
-				"ci/workflows/website.cue",
-				"ci/workflows/tasks.cue",
-				"tools/workflows/website/**",
-				"tools/deploy/**",
-				"tools/database/**",
+// Deploys the builds CI tested on main. Once a CI run on main passes for main's
+// tip (afterCI in ci.cue), `resolve` finds the build each lane uploaded in that
+// run, and the website and the docs deploy it. A lane that did not run uploaded
+// nothing, and its deploy skips. A dispatch from main deploys main's tip from
+// its latest successful CI run.
+"workflows": deploy: {
+	name:       "Deploy"
+	"run-name": "Deploy main @ ${{ github.event.workflow_run.head_sha || github.sha }}"
+	on: afterCI.on & {workflow_dispatch: {}}
+	jobs: {
+		resolve: {
+			name:              "Find the tested builds"
+			if:                afterCI.if
+			"runs-on":         "ubuntu-24.04"
+			"timeout-minutes": 5
+			permissions: {
+				actions:  "read"
+				contents: "read"
+			}
+			outputs: {
+				for key in ["run_id", "web_artifact", "web_digest", "docs_artifact", "docs_digest"] {
+					(key): "${{ steps.builds.outputs.\(key) }}"
+				}
+			}
+			steps: [
+				gha.#Checkout,
+				gha.#SetupCuenv,
+				{
+					name: "Find the tested builds"
+					id:   "builds"
+					env: {
+						GH_TOKEN:  "${{ github.token }}"
+						CI_RUN_ID: "${{ github.event.workflow_run.id }}"
+					}
+					#StepTask & {#task: "deploy-find-builds"}
+				},
 			]
 		}
-	}
-	permissions: {
-		actions:  "read"
-		contents: "read"
-	}
-	// Each run waits for the one before it, deploy included, so an older
-	// revision never deploys over a newer one. The deploy job's own group
-	// differs: one shared group would deadlock the run with its own job.
-	concurrency: gha.#ProductionConcurrency & {group: "website"}
-	jobs: {
-		validate: {
-			name:              "Test and build"
-			"runs-on":         gha.runner
-			"timeout-minutes": lanes.web.timeout
-			outputs: {
-				artifact_id:     "${{ steps.artifact.outputs.artifact_id }}"
-				artifact_digest: "${{ steps.artifact.outputs.artifact_digest }}"
-			}
-			steps: list.Concat([laneSteps.web, [{
-				name: "Upload tested deployment artifact"
-				// The deploy job takes this exact artifact from this run.
-				if:   "github.ref == 'refs/heads/main'"
-				uses: gha.pin."upload-artifact".ref
-				with: {
-					name:                   "website-dist-${{ github.sha }}"
-					path:                   "apps/web/dist"
-					"include-hidden-files": true
-					overwrite:              true
-					"if-no-files-found":    "error"
-					"retention-days":       1
-				}
-			}, {
-				name: "Record the tested artifact identity"
-				id:   "artifact"
-				if:   "github.ref == 'refs/heads/main'"
-				env: GH_TOKEN: "${{ github.token }}"
-				#StepTask & {#task: "website-record-artifact-identity"}
-			}]])
-		}
-		deploy: {
-			name: "Deploy production"
-			needs: ["validate"]
-			if:        "github.ref == 'refs/heads/main'"
+		"deploy-web": {
+			name:      "Deploy the website"
+			needs:     "resolve"
+			if:        "needs.resolve.outputs.web_artifact != ''"
 			"runs-on": "namespace-profile-intar-dev"
+			permissions: {
+				actions:  "read"
+				contents: "read"
+			}
 			env: {
 				CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 				CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
@@ -104,18 +71,12 @@ import (
 			}, {
 				name: "Set up cuenv"
 				uses: "./.github/actions/setup-cuenv"
-			}, {
-				name: "Verify exact-main deployment revision"
-				env: GH_TOKEN: "${{ github.token }}"
-				#StepTask & {#task: "website-verify-deploy-revision"}
-			}, {
+			}, _verifyRevision, _downloadBuild & {
 				name: "Download tested deployment artifact"
-				env: {
-					GH_TOKEN:               "${{ github.token }}"
-					TESTED_ARTIFACT_ID:     "${{ needs.validate.outputs.artifact_id }}"
-					TESTED_ARTIFACT_DIGEST: "${{ needs.validate.outputs.artifact_digest }}"
+				with: {
+					"artifact-ids": "${{ needs.resolve.outputs.web_artifact }}"
+					path:           "apps/web/dist"
 				}
-				#StepTask & {#task: "website-download-tested-artifact"}
 			}, {
 				name: "Set up the CI runtime"
 				uses: "./.github/actions/setup-runtime"
@@ -217,7 +178,7 @@ import (
 			}, {
 				name: "Summarize the deployment"
 				if:   "always()"
-				env: TESTED_ARTIFACT_DIGEST: "${{ needs.validate.outputs.artifact_digest }}"
+				env: TESTED_ARTIFACT_DIGEST: "${{ needs.resolve.outputs.web_digest }}"
 				#StepTask & {#task: "website-summarize-deploy"}
 			}, {
 				name: "Retain deployment evidence"
@@ -256,15 +217,79 @@ import (
 				}
 			}]
 		}
+
+		"deploy-docs": {
+			name:              "Deploy the docs"
+			needs:             "resolve"
+			if:                "needs.resolve.outputs.docs_artifact != ''"
+			"runs-on":         "namespace-profile-intar-dev"
+			"timeout-minutes": 10
+			permissions: {
+				actions:  "read"
+				contents: "read"
+			}
+			environment: {
+				name: "production"
+				url:  "https://docs.intar.dev"
+			}
+			concurrency: gha.#ProductionConcurrency & {group: "docs-production"}
+			defaults: run: "working-directory": "docs"
+			steps: [
+				gha.#Checkout,
+				gha.#SetupCuenv,
+				_verifyRevision & {"working-directory": "."},
+				_downloadBuild & {
+					name: "Download tested docs"
+					with: {
+						"artifact-ids": "${{ needs.resolve.outputs.docs_artifact }}"
+						path:           "docs/dist"
+					}
+				},
+				gha.#SetupRuntime,
+				{
+					name: "Install docs deployment dependencies"
+					run:  "bun install --frozen-lockfile"
+				},
+				{
+					name: "Deploy docs"
+					env: {
+						CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
+						CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
+					}
+					run: "bunx --no-install wrangler deploy"
+				},
+			]
+		}
 	}
 }
 
-// The run steps above, one script each; see tasks.cue. A production step
-// uses production credentials or changes something outside the runner.
+// Both deploys refuse a revision other than the one checked out, and a re-run
+// once main has moved on.
+let _verifyRevision = {
+	name: "Verify exact-main deployment revision"
+	env: GH_TOKEN: "${{ github.token }}"
+	#StepTask & {#task: "deploy-verify-revision"}
+}
+
+// The lane's build from the CI run resolve found, by the artifact id it
+// checked. The action fails when the download's SHA-256 differs from the
+// digest GitHub recorded at the upload.
+let _downloadBuild = {
+	uses: gha.pin."download-artifact".ref
+	with: {
+		"run-id":          "${{ needs.resolve.outputs.run_id }}"
+		"github-token":    "${{ github.token }}"
+		"digest-mismatch": "error"
+	}
+}
+
+// The run steps above, one script each; see tasks.cue. The website deploy's
+// own steps keep their website- names and live in tools/workflows/website. A
+// production step uses production credentials or changes something outside the
+// runner.
 tasks: {
-	"website-record-artifact-identity": #Script & {_script: "tools/workflows/website/record-artifact-identity.sh"}
-	"website-verify-deploy-revision": #Script & {_script: "tools/workflows/website/verify-deploy-revision.sh"}
-	"website-download-tested-artifact": #Script & {_script: "tools/workflows/website/download-tested-artifact.sh"}
+	"deploy-find-builds": #Script & {_script: "tools/workflows/deploy/find-builds.sh"}
+	"deploy-verify-revision": #Script & {_script: "tools/workflows/deploy/verify-revision.sh"}
 	"website-pin-production-config": #Script & {_script: "tools/workflows/website/pin-production-config.sh"}
 	"website-pin-guest-tools": #Script & {_script: "tools/workflows/website/pin-guest-tools.sh", _production: true}
 	"website-prepare-runtime-secrets": #Script & {_script: "tools/workflows/website/prepare-runtime-secrets.sh", _production: true}

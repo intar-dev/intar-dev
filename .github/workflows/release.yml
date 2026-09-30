@@ -6,16 +6,38 @@ name: Release
     branches:
       - main
   workflow_dispatch: {}
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
 permissions: {}
 concurrency:
-  group: release
+  group: |-
+    release-${{ github.event_name == 'push' && 'pr' || ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+    (github.event_name == 'workflow_run' &&
+    github.event.workflow_run.conclusion == 'success' &&
+    (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+    github.event.workflow_run.head_branch == 'main' &&
+    github.event.workflow_run.head_repository.full_name == github.repository &&
+    github.event.workflow_run.head_sha == github.sha)) && 'publish' || github.run_id }}
   cancel-in-progress: false
 jobs:
   plan:
     name: Plan releases
-    if: github.ref == 'refs/heads/main'
+    if: |-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_sha == github.sha)
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: write
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -39,7 +61,7 @@ jobs:
         run: cuenv task -p ci --package ci release-plan
   release-pr:
     name: Update the release pull request
-    needs: plan
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     environment: release-pr
     steps:
@@ -104,6 +126,7 @@ jobs:
           targets: aarch64-unknown-linux-musl
           namespace-cache: ${{ matrix.runner != 'ubuntu-24.04' }}
       - name: Run checks
+        if: matrix.ci_passed != true
         run: cuenv task verify
       - name: Build release artifacts
         env:

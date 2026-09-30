@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Resolve and inject the verified guest-tools pin".
+# deploy.yml, job deploy-web, step "Resolve and inject the verified guest-tools pin".
 set -euo pipefail
 release_dir="${RUNNER_TEMP}/guest-tools-release"
 mkdir -p "${release_dir}"

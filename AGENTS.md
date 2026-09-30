@@ -26,7 +26,7 @@
 - The kino protobuf source belongs to `crates/intar-kino-proto/proto/kino/v1/probes.proto`.
 - `apps/web/AGENTS.md` contains website, Worker, and database migration guidance.
 - Repository tasks live in `env.cue` and run with `cuenv task <name>`; `cuenv task` lists them. Workflow step tasks belong to the `intar-ci` project in `ci/env.cue` and run with `cuenv task -p ci --package ci <name>`. Every workflow except `scenario-publish.yml` is rendered from `ci/workflows/*.cue`, typed by the `ci/gha` library and pinned through `ci/gha/pins.cue`, with `cuenv sync codegen`. Edit the CUE, never the YAML; `cuenv task sync-check` fails when they drift. `scenario-publish.yml` is an external contract and stays hand-written. `ci/README.md` describes the workflows, the lanes, and pin bumps.
-- `ci.yml` checks every pull request; its `ci-ok` job is the one required check. The lanes are defined once in `ci/workflows/lanes.cue`, and the website and docs deploys build with the same lane steps.
+- `ci.yml` checks every pull request and every push to main; its `ci-ok` job is the one required check. The lanes are defined once in `ci/workflows/lanes.cue`. Once CI passes on main's tip, `deploy.yml` deploys the website and docs builds its `web` and `docs` lanes uploaded, and `release.yml` tags and publishes releases.
 - Use Conventional Commits with one scope, for example `fix(web): ...`, `feat(intar-agent): ...`, or `chore(stargate): ...`. Use a lowercase subject after the colon, and mark breaking changes with `!`.
 
 ## Releasing

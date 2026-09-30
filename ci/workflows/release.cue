@@ -3,15 +3,18 @@ package workflows
 import "github.com/intar-dev/intar-dev/ci/gha"
 
 // Product releases through a release pull request; nothing is published to a
-// package registry. On every push to main:
+// package registry.
+//
+// On every push to main, release-pr rebuilds release/next with the bumps
+// git-cliff finds since each product's latest tag
+// (tools/workflows/release/cliff.toml and products.json).
+//
+// Once CI passes on main's tip (afterCI in ci.cue), or on a dispatch from main:
 //
 //   - plan tags each product whose manifest version is new, opens its draft
 //     release, and lists every draft for the build;
-//   - release-pr rebuilds release/next with the bumps git-cliff finds since
-//     each product's latest tag (tools/workflows/release/cliff.toml and
-//     products.json);
-//   - build checks and packages each draft from its tag, and publish attests
-//     the payload and publishes the draft;
+//   - build packages each draft from its tag, and publish attests the payload
+//     and publishes the draft;
 //   - web-pins opens the website pin pull request once the image CLI version
 //     on main is published.
 //
@@ -53,18 +56,28 @@ let _gitCliff = {
 
 "workflows": release: {
 	name: "Release"
-	on: {
+	on: afterCI.on & {
 		push: branches: ["main"]
 		workflow_dispatch: {}
 	}
-	concurrency: gha.#ProductionConcurrency & {group: "release"}
+	// A push only updates the release pull request, so it queues apart from the
+	// runs that tag and publish. A CI run this workflow ignores gets a group of
+	// its own: GitHub keeps one pending run per group, and the ignored run must
+	// not replace one that publishes.
+	concurrency: gha.#ProductionConcurrency & {
+		group: "release-${{ github.event_name == 'push' && 'pr' || (\(afterCI.if)) && 'publish' || github.run_id }}"
+	}
 	jobs: {
 		plan: {
 			name:      "Plan releases"
-			if:        "github.ref == 'refs/heads/main'"
+			if:        afterCI.if
 			"runs-on": "ubuntu-24.04"
-			permissions: contents: "write"
-			outputs: matrix:       "${{ steps.plan.outputs.matrix }}"
+			permissions: {
+				// Whether CI passed on a draft's tag, for build.
+				actions:  "read"
+				contents: "write"
+			}
+			outputs: matrix: "${{ steps.plan.outputs.matrix }}"
 			steps: [
 				gha.#Checkout & {with: "fetch-depth": 0},
 				gha.#SetupCuenv,
@@ -80,7 +93,7 @@ let _gitCliff = {
 
 		"release-pr": {
 			name:        "Update the release pull request"
-			needs:       "plan"
+			if:          "github.event_name == 'push'"
 			"runs-on":   "ubuntu-24.04"
 			environment: "release-pr"
 			steps: [
@@ -99,9 +112,7 @@ let _gitCliff = {
 			]
 		}
 
-		// The payload is built from the tag alone, with read-only access. The
-		// workspace gate runs on the tag too: nothing requires the release pull
-		// request's CI to pass before it merges.
+		// The payload is built from the tag alone, with read-only access.
 		build: #ReleaseBuild & {
 			#plan:   "plan"
 			#dryRun: false
@@ -220,9 +231,14 @@ let _gitCliff = {
 			targets:           "aarch64-unknown-linux-musl"
 			"namespace-cache": "${{ matrix.runner != 'ubuntu-24.04' }}"
 		}},
+		// CI's rust lane runs the workspace gate on every push to main. A tag
+		// whose commit CI never passed there, such as a release merge that a
+		// quicker push overtook, a dispatch, or a draft left from before, runs
+		// it here.
 		if !#dryRun {
 			gha.#Run & {
 				name:  "Run checks"
+				if:    "matrix.ci_passed != true"
 				#task: "verify"
 			}
 		},

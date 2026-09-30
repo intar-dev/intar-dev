@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Verify production D1 schema".
+# deploy.yml, job deploy-web, step "Verify production D1 schema".
 set -euo pipefail
 evidence="${RUNNER_TEMP}/production-d1-verified.json"
 bun tools/database/verify-generated-d1-schema.ts \

@@ -64,12 +64,12 @@ Drizzle Kit's D1 HTTP driver and requires `CLOUDFLARE_ACCOUNT_ID`,
 `CLOUDFLARE_API_TOKEN`. Do not apply schema files with `wrangler d1 execute`,
 run Wrangler's D1 migration commands, or edit either migration ledger by hand.
 Pull requests run the web lane of the CI workflow (the checks, tests, and
-build) and one Chromium smoke check. A matching push to `main` builds with the
-same lane steps in the Website workflow and then deploys that tested artifact
-automatically. The deploy verifies the exact source revision and production
-bindings, applies pending Drizzle migrations, deploys the full Worker
-configuration at 100 percent, and checks the homepage, favicon, and D1-backed
-health API.
+build) and one Chromium smoke check. On a push to `main`, the web lane uploads
+the build it tested, and once that CI run passes for `main`'s tip, the Deploy
+workflow deploys that build automatically. The deploy verifies the exact source
+revision, the build's digest, and the production bindings, applies pending
+Drizzle migrations, deploys the full Worker configuration at 100 percent, and
+checks the homepage, favicon, and D1-backed health API.
 
 Maintenance mode is enabled only when a migration is pending. The workflow
 drains old requests before applying that migration. It does not roll back: a
@@ -103,7 +103,7 @@ states are:
    production deploy. Its release meets its own maintenance version, leaves the
    collector held, and passes; the step that failed is the one that reports.
    The fenced collector can't sweep, and nothing can reach it to release it.
-3. **Recovery.** The next deploy, a fix push, a Website dispatch from `main`,
+3. **Recovery.** The next deploy, a fix push, a Deploy dispatch from `main`,
    or a re-run while its revision is still `main`'s tip, finds a
    `web-<sha12>-maintenance` version serving with maintenance on. Its hold reads
    the D1 admission row instead of the gate and requires that no sweep is in
@@ -142,8 +142,11 @@ To roll out new guest tools, run these from `main` in order:
 3. image-ops `tools-promote` with a verified build `revision` to warm and
    check against, and `expected_candidate_sha256`, the SHA-256 of that
    artifact's `candidate.json`. It makes the candidate the stable channel.
-4. A Website dispatch from `main` (`gh workflow run website.yml --ref main`).
-   Every deploy pins the stable channel, so this one pins the promoted tools.
+4. A Deploy dispatch from `main` (`gh workflow run deploy.yml --ref main`). It
+   deploys `main`'s tip from its latest successful CI run, and every deploy
+   pins the stable channel, so this one pins the promoted tools. When that CI
+   run's builds have expired, dispatch CI instead
+   (`gh workflow run ci.yml --ref main`); it deploys once it passes.
 5. image-ops `gate-open`.
 
 ## Sign-ups

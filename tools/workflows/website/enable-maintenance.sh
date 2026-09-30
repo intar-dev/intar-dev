@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Enable maintenance for pending migrations".
+# deploy.yml, job deploy-web, step "Enable maintenance for pending migrations".
 set -euo pipefail
 # The maintenance version is the tested configuration with only the
 # maintenance variable changed. It keeps the binding to the collector,

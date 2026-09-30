@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Pin and verify production configuration".
+# deploy.yml, job deploy-web, step "Pin and verify production configuration".
 cd apps/web
 set -euo pipefail
 config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler.json"

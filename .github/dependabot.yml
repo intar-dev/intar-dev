@@ -17,8 +17,7 @@ updates:
       - "/.github/actions/*"
     exclude-paths:
       - ".github/workflows/ci.yml"
-      - ".github/workflows/website.yml"
-      - ".github/workflows/docs.yml"
+      - ".github/workflows/deploy.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/image-ops.yml"
       - ".github/workflows/stargate-deploy.yml"

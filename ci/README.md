@@ -36,7 +36,9 @@ One workflow checks pull requests and every push to main:
    a dispatch runs every lane.
 2. **One job per lane** (`rust`, `security`, `images`, `web`, `docs`), skipped
    when its output is false. `web-ui` runs the Chromium smoke in the Playwright
-   container when `web` runs.
+   container when `web` runs. On main, a lane with a `dist` (`web`, `docs`)
+   uploads the build it checked as `<lane>-dist-<sha>`, which `deploy.yml`
+   deploys.
 3. **`release-plan`** lists the products the pull request would release: each
    whose manifest version differs from the base, or all of them when the
    release build itself changed (`tools/workflows/ci/release-plan.sh`).
@@ -67,12 +69,27 @@ base of `origin/main`.
 
 ## Deployment workflows
 
-- **`website.yml` and `docs.yml`** deploy main: on a push that changes what
-  they deploy, or a dispatch from main. Their build jobs use the lane's own
-  steps (`laneSteps.web`, `laneSteps.docs`), so the pull request check and the
-  deployed build cannot drift apart.
-- **`release.yml`** maintains the release pull request and publishes merged
-  releases; see "Releasing" in the root README.
+`deploy.yml` and `release.yml` run after `ci.yml` on main (`workflow_run`) and
+act only on a CI run that passed for a push or dispatch of the commit that is
+still main's tip (`afterCI` in `ci.cue`). A CI run for an older commit is left
+to the run for the newer one, and a failed CI run deploys and publishes
+nothing.
+
+- **`deploy.yml`** deploys what CI built and tested. `resolve` finds each
+  lane's build in the CI run (`tools/workflows/deploy/find-builds.sh`), and
+  `deploy-web` and `deploy-docs` download it by that artifact id, which fails
+  on a digest mismatch, and deploy it. A lane that did not run uploaded no
+  build, so its deploy skips; a push to main runs every lane. A re-run deploys
+  only while its revision is main's tip.
+  - `gh workflow run deploy.yml --ref main` deploys main's tip from its latest
+    successful CI run, for example after a guest-tools promotion.
+  - When that run's builds have expired (14 days), or no CI run passed for the
+    tip, `gh workflow run ci.yml --ref main` builds everything again and
+    deploys once it passes.
+- **`release.yml`** rebuilds the release pull request on every push to main.
+  After CI, or on a dispatch from main, it tags and publishes merged releases;
+  see "Releasing" in the root README. A build reruns the workspace gate only
+  for a tag whose commit never passed CI on main.
 - **`image-ops.yml`** and **`stargate-deploy.yml`** are dispatched by hand
   from main.
 

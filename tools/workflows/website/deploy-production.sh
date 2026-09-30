@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Deploy production at 100 percent".
+# deploy.yml, job deploy-web, step "Deploy production at 100 percent".
 set -euo pipefail
 # The tested configuration with the verified pin, maintenance off. From
 # a maintenance version this deploy is what reopens the site.

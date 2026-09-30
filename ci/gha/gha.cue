@@ -36,6 +36,11 @@ runner: "namespace-profile-intar-dev"
 		types?: [...string]
 	}
 	schedule?: [...{cron!: string}]
+	workflow_run?: {
+		workflows!: [...string]
+		types?: [...string]
+		branches?: [...string]
+	}
 }
 
 #Input: {

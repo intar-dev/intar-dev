@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Capture pre-migration D1 evidence".
+# deploy.yml, job deploy-web, step "Capture pre-migration D1 evidence".
 set -euo pipefail
 d1_info="${RUNNER_TEMP}/production-d1-info.json"
 bookmark="${RUNNER_TEMP}/production-d1-bookmark.json"
