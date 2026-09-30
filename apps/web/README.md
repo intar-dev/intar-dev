@@ -103,7 +103,8 @@ states are:
    production deploy. Its release meets its own maintenance version, leaves the
    collector held, and passes; the step that failed is the one that reports.
    The fenced collector can't sweep, and nothing can reach it to release it.
-3. **Recovery.** The next deploy, a re-run or a fix push, finds a
+3. **Recovery.** The next deploy, a fix push, a Website dispatch from `main`,
+   or a re-run while its revision is still `main`'s tip, finds a
    `web-<sha12>-maintenance` version serving with maintenance on. Its hold reads
    the D1 admission row instead of the gate and requires that no sweep is in
    flight and, in `delete` mode, that upload admission is enforced. The run

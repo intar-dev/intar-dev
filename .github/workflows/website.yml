@@ -99,6 +99,8 @@ jobs:
       - name: Set up cuenv
         uses: ./.github/actions/setup-cuenv
       - name: Verify exact-main deployment revision
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: cuenv task -p ci --package ci website-verify-deploy-revision
       - name: Download tested deployment artifact
         env:

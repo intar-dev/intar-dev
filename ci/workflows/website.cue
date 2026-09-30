@@ -106,6 +106,7 @@ import (
 				uses: "./.github/actions/setup-cuenv"
 			}, {
 				name: "Verify exact-main deployment revision"
+				env: GH_TOKEN: "${{ github.token }}"
 				#StepTask & {#task: "website-verify-deploy-revision"}
 			}, {
 				name: "Download tested deployment artifact"
