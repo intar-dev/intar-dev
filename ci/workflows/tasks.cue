@@ -13,10 +13,12 @@ import (
 tasks: [string]: schema.#Task
 
 // A step that runs one of the tasks above. An unknown name fails evaluation.
+// The package is named after the directory: CUE unifies the root package cuenv
+// files into a package cuenv below them (see ci/env.cue).
 #StepTask: {
-	gha.#Run
-	#project: "ci"
-	#task: or([for name, _ in tasks {name}])
+	gha.#Step
+	#task!: or([for name, _ in tasks {name}])
+	run: "cuenv task -p ci --package ci \(#task)"
 }
 
 // One step body in tools/workflows/<workflow>/<step>.sh. It runs from the

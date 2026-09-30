@@ -6,7 +6,9 @@ package gha
 // workflow needs it.
 //
 // Helper parameters are #definition fields: a hidden _field set in another
-// package is a different field, so it would be silently ignored.
+// package is a different field, so it would be silently ignored. Closedness
+// does not check #fields either, so a parameter that changes the output has no
+// default: a misspelt one leaves it unset and fails evaluation.
 
 runner: "namespace-profile-intar-dev"
 
@@ -169,13 +171,9 @@ runner: "namespace-profile-intar-dev"
 	with: path: "~/.bun/install/cache"
 }
 
-// `cuenv task <task>` for a root task. A nested project names its CUE package
-// after its directory, because CUE unifies the root package cuenv files into a
-// package cuenv below them, so #project renders `-p <dir> --package <dir>`.
+// `cuenv task <task>` for a root task.
 #Run: {
 	#Step
-	#task!:   string
-	#project: *"" | string
-	if #project == "" {run: "cuenv task \(#task)"}
-	if #project != "" {run: "cuenv task -p \(#project) --package \(#project) \(#task)"}
+	#task!: string
+	run:    "cuenv task \(#task)"
 }
