@@ -170,3 +170,33 @@ jobs:
           TAG: ${{ matrix.tag }}
           TITLE: ${{ matrix.project }} v${{ matrix.version }}
         run: cuenv task -p ci --package ci release-publish-tagged-github-release
+  web-pins:
+    name: Pin the website to the new image CLI
+    needs:
+      - plan
+      - publish
+    if: contains(needs.plan.outputs.matrix, '"prefix":"image-cli"')
+    runs-on: ubuntu-24.04
+    environment: release-pr
+    steps:
+      - name: Create the release app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Open the website pin pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: cuenv task -p ci --package ci release-web-pins
