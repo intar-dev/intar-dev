@@ -177,7 +177,7 @@ jobs:
     needs:
       - plan
       - publish
-    if: contains(needs.plan.outputs.matrix, '"prefix":"image-cli"')
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-24.04
     environment: release-pr
     steps:

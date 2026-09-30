@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # release.yml, job web-pins, step "Open the website pin pull request".
-# Points the website's scenario compiler at the intar-image-cli release this
-# run published: its version, the published archive digests, and the digest of
-# the base-images.hcl it ships.
+# Points the website's scenario compiler at the published intar-image-cli
+# release that main's manifest names: its version, the published archive
+# digests, and the digest of the base-images.hcl it ships.
 set -euo pipefail
 version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' crates/intar-image-cli/Cargo.toml | head -n 1)"
 tag="image-cli/v${version}"
-test "$(gh release view "${tag}" --json isDraft --jq .isDraft)" = false
+draft="$(gh release view "${tag}" --json isDraft --jq .isDraft)"
+if [ "${draft}" != false ]; then
+  echo "${tag} is not published yet; a later run pins the website once it is."
+  exit 0
+fi
 sums="$(mktemp -d)/checksums.txt"
 gh release download "${tag}" --pattern "intar-image-cli_${version}_checksums.txt" --output "${sums}"
 base_images_sha256="$(git show "${tag}^{commit}:content/scenarios/base-images.hcl" | sha256sum | cut -d ' ' -f 1)"

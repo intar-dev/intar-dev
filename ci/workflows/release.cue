@@ -11,7 +11,9 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 //     each product's latest tag (tools/workflows/release/cliff.toml and
 //     products.json);
 //   - build checks and packages each draft from its tag, and publish attests
-//     the payload and publishes the draft.
+//     the payload and publishes the draft;
+//   - web-pins opens the website pin pull request once the image CLI version
+//     on main is published.
 //
 // A draft left by a failed run is rebuilt by the next run, so re-running or
 // dispatching the workflow resumes it.
@@ -219,10 +221,14 @@ let _gitCliff = {
 			]
 		}
 
+		// Every run checks the pins, not only a run that published the image
+		// CLI: when another product's build fails, the run that resumes it no
+		// longer lists the published image CLI. web-pins.sh does nothing until
+		// that version is published, or once the website pins it.
 		"web-pins": {
 			name: "Pin the website to the new image CLI"
 			needs: ["plan", "publish"]
-			if:          "contains(needs.plan.outputs.matrix, '\"prefix\":\"image-cli\"')"
+			if:          "${{ !cancelled() && needs.plan.result == 'success' }}"
 			"runs-on":   "ubuntu-24.04"
 			environment: "release-pr"
 			steps: [
