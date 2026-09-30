@@ -25,7 +25,8 @@
 - Shared wire and guest contracts belong in `crates/intar-contracts`. Regenerate web outputs with `cuenv task generate-contracts`; never edit `apps/web/src/generated/` by hand.
 - The kino protobuf source belongs to `crates/intar-kino-proto/proto/kino/v1/probes.proto`.
 - `apps/web/AGENTS.md` contains website, Worker, and database migration guidance.
-- Repository tasks live in `env.cue` and run with `cuenv task <name>`; `cuenv task` lists them. Workflow step tasks belong to the `intar-ci` project in `ci/env.cue` and run with `cuenv task -p ci --package ci <name>`. Every workflow except `scenario-publish.yml` is generated: the `intar-*.yml` lanes from the `env.cue` pipelines with `cuenv sync ci`, and the rest from `ci/workflows/*.cue`, typed by the `ci/gha` library and pinned through `ci/gha/pins.cue`, with `cuenv sync codegen`. Edit the CUE, never the YAML; `cuenv task sync-check` fails when they drift. `scenario-publish.yml` is an external contract and stays hand-written.
+- Repository tasks live in `env.cue` and run with `cuenv task <name>`; `cuenv task` lists them. Workflow step tasks belong to the `intar-ci` project in `ci/env.cue` and run with `cuenv task -p ci --package ci <name>`. Every workflow except `scenario-publish.yml` is rendered from `ci/workflows/*.cue`, typed by the `ci/gha` library and pinned through `ci/gha/pins.cue`, with `cuenv sync codegen`. Edit the CUE, never the YAML; `cuenv task sync-check` fails when they drift. `scenario-publish.yml` is an external contract and stays hand-written. `ci/README.md` describes the workflows, the lanes, and pin bumps.
+- `ci.yml` checks every pull request; its `ci-ok` job is the one required check. The lanes are defined once in `ci/workflows/lanes.cue`, and the website and docs deploys build with the same lane steps.
 - Use Conventional Commits with one scope, for example `fix(web): ...`, `feat(intar-agent): ...`, or `chore(stargate): ...`. Use a lowercase subject after the colon, and mark breaking changes with `!`.
 
 ## Releasing
@@ -38,4 +39,4 @@
 
 - Local and CI Clippy checks MUST use `-D warnings` (`cuenv task clippy`). Do not add `#[allow(...)]`, `#![allow(...)]`, or Clippy-specific suppressions unless necessary and justified. Prefer removing dead code, exercising it, or narrowing visibility.
 - The workspace lints forbid `unsafe` code and deny `unwrap()`, `dbg!`, and `todo!()`. Handle or propagate errors explicitly.
-- Format Rust changes with `cuenv task fmt`. `cuenv task verify` runs the formatting, Clippy, and test gate. `cuenv task lanes.rust`, `lanes.security`, and `lanes.images` run exactly what each CI lane runs.
+- Format Rust changes with `cuenv task fmt`. `cuenv task verify` runs the formatting, Clippy, and test gate. `cuenv task lanes.<name>` runs exactly what that CI lane runs, `cuenv task ci` runs every lane, and `cuenv task ci-changes` shows which lanes a change needs.

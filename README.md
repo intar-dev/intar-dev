@@ -17,6 +17,10 @@ cuenv task build
 cuenv task check-generated
 ```
 
+`cuenv task ci` runs every CI lane, and `cuenv task lanes.<name>` runs one
+(`rust`, `security`, `images`, `web`, or `docs`). The workflows are rendered
+from CUE; see [`ci/README.md`](ci/README.md).
+
 `cuenv task clean-generated` removes only allowlisted repository output. It preserves
 the root `node_modules/`, Bun cache, Cargo cache, and root `target/`.
 
