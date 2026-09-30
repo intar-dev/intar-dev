@@ -332,6 +332,9 @@ schema.#Project & {
 			_script: """
 				cuenv sync ci --check
 				cuenv sync codegen --check
+				# No sync loads the intar-ci project in ci/env.cue that every
+				# workflow step task runs in.
+				cuenv task -p ci --package ci -o json >/dev/null
 				if ! diff <(printf '%s\\n' "$@" | sort) <(find .github/workflows -type f | sort) >&2; then
 				  echo 'Every workflow must be rendered by cuenv or be scenario-publish.yml.' >&2
 				  exit 1
