@@ -28,6 +28,12 @@
 - Repository tasks live in `env.cue` and run with `cuenv task <name>`; `cuenv task` lists them. Workflow step tasks belong to the `intar-ci` project in `ci/env.cue` and run with `cuenv task -p ci --package ci <name>`. Every workflow except `scenario-publish.yml` is generated: the `intar-*.yml` lanes from the `env.cue` pipelines with `cuenv sync ci`, and the rest from `ci/workflows/*.cue`, typed by the `ci/gha` library and pinned through `ci/gha/pins.cue`, with `cuenv sync codegen`. Edit the CUE, never the YAML; `cuenv task sync-check` fails when they drift. `scenario-publish.yml` is an external contract and stays hand-written.
 - Use Conventional Commits with one scope, for example `fix(web): ...`, `feat(intar-agent): ...`, or `chore(stargate): ...`. Use a lowercase subject after the colon, and mark breaking changes with `!`.
 
+## Releasing
+
+- Product releases come from the bot-maintained `release/next` pull request (see "Releasing" in README.md). Never bump a product version in `Cargo.toml` or `Cargo.lock`, edit a product `CHANGELOG.md`, or create a `<prefix>/v*` tag as part of other work. To release a version other than the one the release pull request proposes, change it in a pull request of its own.
+- Nothing is published to crates.io or any other registry.
+- A workspace crate that a product builds from belongs in that product's paths in `tools/workflows/release/products.json`; `bun test tools/ci` checks it.
+
 ## Rust quality
 
 - Local and CI Clippy checks MUST use `-D warnings` (`cuenv task clippy`). Do not add `#[allow(...)]`, `#![allow(...)]`, or Clippy-specific suppressions unless necessary and justified. Prefer removing dead code, exercising it, or narrowing visibility.
