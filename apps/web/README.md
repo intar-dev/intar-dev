@@ -72,8 +72,9 @@ health API.
 
 Maintenance mode is enabled only when a migration is pending. The workflow
 drains old requests before applying that migration. It does not roll back: a
-failed post-migration activation leaves maintenance enabled, and a failed live
-check leaves the deployed version active while the workflow reports failure.
+failed live check leaves the deployed version active while the workflow
+reports failure, and a failure after maintenance was enabled leaves maintenance
+serving until the next deploy recovers it (below).
 
 Every deploy holds the image registry cleanup worker before it changes
 anything and releases it at the end, also after a failure. The worker runs in
@@ -83,6 +84,35 @@ hold also needs D1 upload admission enforcement. If it has been switched off,
 re-enable it with `POST https://intar.dev/registry/v1/admission/enforcement`,
 body `{"mode":"enforce"}` and `Authorization: Bearer $INTAR_IMAGE_PUBLISH_TOKEN`,
 or commit `report-only` as the worker mode.
+
+### Recovery after a failed migration deploy
+
+The collector's gate route sits behind the maintenance fence, so the deploy
+states are:
+
+1. **Open.** A deploy holds the collector through the gate: it reads the D1
+   admission state, in `delete` mode takes a report inventory, then pauses the
+   collector and waits for it to be idle. With migrations pending it then
+   deploys a maintenance version, tagged `web-<sha12>-maintenance`.
+2. **Maintenance left serving.** The run failed after it enabled maintenance:
+   at the drain, the migration, the schema check, or the collector or
+   production deploy. Its release meets its own maintenance version, leaves the
+   collector held, and passes; the step that failed is the one that reports.
+   The fenced collector can't sweep, and nothing can reach it to release it.
+3. **Recovery.** The next deploy, a re-run or a fix push, finds a
+   `web-<sha12>-maintenance` version serving with maintenance on. Its hold reads
+   the D1 admission row instead of the gate and requires that no sweep is in
+   flight and, in `delete` mode, that upload admission is enforced. The run
+   then applies the migrations that are still pending under its own
+   maintenance version, verifies the schema, deploys the collector in the
+   committed mode, and deploys production, which reopens the site. Its release
+   goes through the open gate and resumes the collector (state 1). If it fails
+   again, the state stays 2 and the next deploy recovers.
+
+A recovery hold has no report inventory, because the fenced collector can't
+plan, so it deploys `delete` only over a collector that already deletes. It
+never turns deletes on. Maintenance that this lane didn't deploy still stops
+the hold.
 
 To roll out new guest tools, run these from `main` in order:
 

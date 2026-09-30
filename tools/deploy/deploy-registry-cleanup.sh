@@ -158,6 +158,11 @@ readonly first_deployment
 #      admission session from the first probe to the publish and cannot race
 #      the collector. That state is image_registry_admission.enforcement; the
 #      learner-run CLI rollout variable is unrelated and is never read here.
+# A recovery hold, taken behind the lane's own maintenance version, can not
+# take condition 2: the fenced collector can not plan. It proves condition 3
+# from the D1 admission row instead, and it is accepted only when the live
+# collector already deletes, so the deploy keeps the authority it replaces and
+# never turns deletes on.
 if [ "${mode}" = delete ]; then
   if [ "${first_deployment}" = true ]; then
     echo "the first deployment of the collector cannot delete" >&2
@@ -191,10 +196,12 @@ if [ "${mode}" = delete ]; then
   # come from the hold evidence this rollout recorded while the control plane
   # still served. Boolean fields are tested with has(), because jq `//` treats
   # false as absent and would report a present false as a missing field.
-  inventory_problem="$(jq -r '
+  inventory_problem="$(jq -r --arg previous_mode "${previous_mode}" '
     (.inventory // {}) as $inventory |
     (.admission // {}) as $admission |
-    if ($inventory | has("ok") | not) or $inventory.ok != true
+    if .gate == "recovery" and $previous_mode != "delete"
+      then "a recovery hold can not turn deletes on (the live collector is " + $previous_mode + ")"
+    elif .gate != "recovery" and (($inventory | has("ok") | not) or $inventory.ok != true)
       then "the hold step recorded no fault-free report inventory"
         + (if ($inventory | has("status")) then " (status=" + ($inventory.status | tostring) + ")" else "" end)
     elif ($admission | has("ok") | not) or $admission.ok != true then "the hold step recorded no collector status"

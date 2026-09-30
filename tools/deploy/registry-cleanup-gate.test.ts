@@ -178,6 +178,12 @@ interface RunOptions {
   /** One header block per delete pass; the last one answers every later pass. */
   runHeaders?: string[];
   runPasses?: number;
+  /** The tag and maintenance flag of the parent version that serves. */
+  parentTag?: string;
+  parentMaintenance?: string;
+  /** The D1 query answer a recovery hold reads the admission row from. */
+  d1Status?: string;
+  d1Body?: string;
 }
 
 /**
@@ -190,6 +196,16 @@ function fakeBunx(): string {
     "#!/usr/bin/env bash",
     "set -u",
     "shift",
+    // The parent answers its own version: the tag and the maintenance flag
+    // the recovery path reads.
+    'if [[ " $* " == *" --name intar-dev "* ]]; then',
+    '  case "$1 $2" in',
+    '    "deployments status") jq -cn \'{versions:[{version_id:"parent-version",percentage:100}]}\' ;;',
+    '    "versions view") jq -cn --arg tag "$MOCK_PARENT_TAG" --arg flag "$MOCK_PARENT_MAINTENANCE" \'{id:"parent-version",annotations:{"workers/tag":$tag},resources:{bindings:[{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:$flag}]}}\' ;;',
+    "    *) exit 91 ;;",
+    "  esac",
+    "  exit 0",
+    "fi",
     'case "$1 $2" in',
     '  "deployments status")',
     '    if [ "$MOCK_DEPLOYMENTS_FAIL" = true ]; then exit 90; fi',
@@ -241,6 +257,11 @@ function fakeCurl(): string {
     '    write_headers "$MOCK_HEADERS"',
     '    printf "%s" "$MOCK_SCRIPT_BODY" > "$output"',
     '    printf "%s" "$MOCK_SCRIPT_STATUS"',
+    "    ;;",
+    "  */d1/database/*/query)",
+    '    printf "d1\\n" >> "$MOCK_CURL_D1"',
+    '    printf "%s" "$MOCK_D1_BODY" > "$output"',
+    '    printf "%s" "$MOCK_D1_STATUS"',
     "    ;;",
     '  "$MOCK_GATE_URL")',
     '    printf "gate\\n" >> "$MOCK_CURL_GATE"',
@@ -311,6 +332,7 @@ function runGate(options: RunOptions = {}) {
   const curlArgs = join(root, "curl-args");
   const curlStdin = join(root, "curl-stdin");
   const curlGate = join(root, "curl-gate");
+  const curlD1 = join(root, "curl-d1");
   const runBodies = join(root, "run-bodies.json");
   const runStatuses = join(root, "run-statuses.json");
   const runHeaders = join(root, "run-headers.json");
@@ -410,7 +432,13 @@ function runGate(options: RunOptions = {}) {
     MOCK_CURL_ARGS: curlArgs,
     MOCK_CURL_STDIN: curlStdin,
     MOCK_CURL_GATE: curlGate,
+    MOCK_CURL_D1: curlD1,
     ACTIVE_VERSION_ID: activeVersionId,
+    MOCK_PARENT_TAG: options.parentTag ?? "web-" + sourceSha.slice(0, 12) + "-standard",
+    MOCK_PARENT_MAINTENANCE: options.parentMaintenance ?? "off",
+    MOCK_D1_STATUS: options.d1Status ?? "200",
+    MOCK_D1_BODY: options.d1Body ?? d1AdmissionBody(),
+    DATABASE_ID: "33333333-4444-4555-8666-777777777777",
   };
   if (options.secret === null) {
     env.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET = "";
@@ -442,6 +470,7 @@ function runGate(options: RunOptions = {}) {
     // the account API.
     curlCalled: existsSync(curlGate),
     // One line per gate call, so a test can prove a single call is one scan.
+    d1Called: existsSync(curlD1),
     gateCalls: existsSync(curlGate)
       ? readFileSync(curlGate, "utf8").trim().split("\n").filter(Boolean).length
       : 0,
@@ -450,6 +479,27 @@ function runGate(options: RunOptions = {}) {
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+/** A D1 query answer for the admission row, as the account API returns it. */
+function d1AdmissionBody(row: Record<string, unknown> | null = {
+  enforcement: "enforce",
+  state: "open",
+  sweep_held: 0,
+  paused: 1,
+  pause_reason: "registry_cleanup_hold",
+}): string {
+  return JSON.stringify({
+    success: true,
+    errors: [],
+    result: [{ success: true, results: row === null ? [] : [row] }],
+  });
+}
+
+/** The parent a failed migration deploy leaves serving. */
+const laneMaintenance = {
+  parentTag: "web-" + "b".repeat(12) + "-maintenance",
+  parentMaintenance: "on",
+};
 
 /** The `--max-time` value of the last call the gate made, as recorded. */
 function recordedMaxTime(curlArgs: string | null): string | null {
@@ -1609,6 +1659,225 @@ describe("registry cleanup deployment gate", () => {
     expect(script).not.toContain("hold_ms");
     expect(script).toContain("chmod 700");
     expect(script).not.toContain("/registry/v1/cleanup");
+  });
+}, SPAWN_TIMEOUT_MS);
+
+const fenceBody =
+  '{"error":"control-plane maintenance is in progress","code":"maintenance"}';
+
+describe("registry cleanup recovery behind the lane's maintenance fence", () => {
+  it("holds from the D1 admission row without calling the fenced gate", () => {
+    const run = runGate({
+      ...laneMaintenance,
+      action: "hold",
+      targetMode: "delete",
+      liveMode: "delete",
+      status: "503",
+      body: fenceBody,
+    });
+    try {
+      expect(run.result.status, run.result.stderr).toBe(0);
+      expect(run.curlCalled).toBe(false);
+      expect(run.d1Called).toBe(true);
+      expect(run.evidence).toMatchObject({
+        action: "hold",
+        gate: "recovery",
+        live_mode: "delete",
+        target_mode: "delete",
+        recovery: {
+          parent_version_id: "parent-version",
+          parent_tag: laneMaintenance.parentTag,
+          problem: null,
+        },
+        admission: {
+          ok: true,
+          source: "d1",
+          enforcement: "enforce",
+          sessionRequired: true,
+          paused: true,
+          sweepActive: false,
+        },
+        inventory: null,
+        paused: true,
+        idle: true,
+        hold_leave: "none",
+      });
+      expect(run.evidenceText).not.toContain(bypassSecret);
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("reads an absent admission row the way the application does", () => {
+    const report = runGate({ ...laneMaintenance, d1Body: d1AdmissionBody(null) });
+    const remove = runGate({
+      ...laneMaintenance,
+      targetMode: "delete",
+      liveMode: "delete",
+      d1Body: d1AdmissionBody(null),
+    });
+    try {
+      expect(report.result.status, report.result.stderr).toBe(0);
+      expect(report.evidence).toMatchObject({
+        admission: { enforcement: "report_only", paused: false, sweepActive: false },
+        idle: true,
+      });
+      expect(remove.result.status).not.toBe(0);
+      expect(remove.result.stderr).toContain(
+        "delete mode needs D1 upload admission enforcement, but it is report_only",
+      );
+    } finally {
+      report.cleanup();
+      remove.cleanup();
+    }
+  });
+
+  it("refuses a recovery hold while a sweep is in flight", () => {
+    const run = runGate({
+      ...laneMaintenance,
+      liveMode: "delete",
+      d1Body: d1AdmissionBody({
+        enforcement: "enforce",
+        state: "sweeping",
+        sweep_held: 1,
+        paused: 0,
+        pause_reason: null,
+      }),
+    });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.result.stderr).toContain("a sweep holds the D1 admission gate");
+      expect(run.curlCalled).toBe(false);
+      expect(run.evidence).toMatchObject({
+        gate: "recovery",
+        idle: false,
+        recovery: { problem: "a sweep holds the D1 admission gate, so the collector is not idle" },
+      });
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("refuses a delete recovery hold while D1 admission is report_only", () => {
+    const run = runGate({
+      ...laneMaintenance,
+      targetMode: "delete",
+      liveMode: "delete",
+      d1Body: d1AdmissionBody({
+        enforcement: "report_only",
+        state: "open",
+        sweep_held: 0,
+        paused: 1,
+        pause_reason: "registry_cleanup_hold",
+      }),
+    });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.result.stderr).toContain(
+        "delete mode needs D1 upload admission enforcement, but it is report_only",
+      );
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("refuses a recovery hold that can not read the admission row", () => {
+    for (const answer of [
+      { d1Status: "403", d1Body: '{"success":false,"errors":[{"code":10000}]}' },
+      { d1Status: "200", d1Body: "not json" },
+      { d1Status: "200", d1Body: '{"success":true,"result":[{"success":false}]}' },
+    ]) {
+      const run = runGate({ ...laneMaintenance, liveMode: "delete", ...answer });
+      try {
+        expect(run.result.status, answer.d1Body).not.toBe(0);
+        expect(run.result.stderr).toContain("the D1 admission row could not be read");
+        expect(run.curlCalled).toBe(false);
+      } finally {
+        run.cleanup();
+      }
+    }
+  });
+
+  it("keeps every other fence fatal", () => {
+    // Maintenance that this lane did not deploy, and a lane maintenance tag
+    // whose version no longer fences, both take the ordinary path.
+    for (const parent of [
+      { parentTag: "manual-maintenance", parentMaintenance: "on" },
+      { parentTag: "web-" + "b".repeat(12) + "-standard", parentMaintenance: "on" },
+      { parentTag: laneMaintenance.parentTag, parentMaintenance: "off" },
+    ]) {
+      const run = runGate({ ...parent, liveMode: "delete", status: "503", body: fenceBody });
+      try {
+        expect(run.result.status, parent.parentTag).not.toBe(0);
+        expect(run.result.stderr).toContain("the gate is fenced");
+        expect(run.curlCalled).toBe(true);
+        expect(run.d1Called).toBe(false);
+      } finally {
+        run.cleanup();
+      }
+    }
+  });
+
+  it("leaves the hold for the deploy that reopens the parent", () => {
+    const run = runGate({
+      ...laneMaintenance,
+      action: "release",
+      liveMode: "delete",
+      status: "503",
+      body: fenceBody,
+      holdEvidence: "held",
+    });
+    try {
+      expect(run.result.status, run.result.stderr).toBe(0);
+      expect(run.result.stdout).toContain("The collector stays held");
+      expect(run.curlCalled).toBe(false);
+      expect(run.d1Called).toBe(false);
+      expect(run.evidence).toMatchObject({
+        action: "release",
+        gate: "recovery",
+        hold_leave: "left",
+        admission: null,
+        paused: null,
+      });
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("recovers a failed migration deploy on the next run", () => {
+    // The failed run's release meets its own maintenance version and leaves
+    // the hold. The next run holds behind that fence from D1, completes the
+    // migration and reopens the parent, and then releases through the gate.
+    const failedRelease = runGate({
+      ...laneMaintenance,
+      action: "release",
+      liveMode: "delete",
+      holdEvidence: "nested-held",
+    });
+    const recoveryHold = runGate({
+      ...laneMaintenance,
+      action: "hold",
+      targetMode: "delete",
+      liveMode: "delete",
+    });
+    const reopenedRelease = runGate({
+      action: "release",
+      liveMode: "delete",
+      body: '{"action":"resume","result":{"paused":false,"idle":true}}',
+    });
+    try {
+      expect(failedRelease.result.status, failedRelease.result.stderr).toBe(0);
+      expect(failedRelease.evidence).toMatchObject({ gate: "recovery", hold_leave: "left" });
+      expect(recoveryHold.result.status, recoveryHold.result.stderr).toBe(0);
+      expect(recoveryHold.evidence).toMatchObject({ gate: "recovery", paused: true, idle: true });
+      expect(reopenedRelease.result.status, reopenedRelease.result.stderr).toBe(0);
+      expect(reopenedRelease.request).toContain('"action":"resume"');
+      expect(reopenedRelease.evidence).toMatchObject({ gate: "ok", paused: false });
+    } finally {
+      failedRelease.cleanup();
+      recoveryHold.cleanup();
+      reopenedRelease.cleanup();
+    }
   });
 }, SPAWN_TIMEOUT_MS);
 

@@ -11,6 +11,8 @@
 # Two pieces of live state decide what this script does:
 #   * the Cloudflare API says whether a collector version exists at all;
 #   * the collector's own status says what D1 upload admission enforcement is.
+# A hold or release that finds the lane's own maintenance version serving takes
+# the recovery path below instead of calling the fenced gate.
 # An unreadable answer of either kind stops the deployment. Nothing here reads
 # LEARNER_RUN_CLI_V1_ENFORCEMENT: that variable controls the learner-run CLI
 # rollout and has nothing to do with registry admission.
@@ -25,6 +27,7 @@ readonly action="$1"
 readonly target_mode="$2"
 readonly evidence="$3"
 readonly worker_name="intar-dev-image-registry-cleanup"
+readonly parent_worker_name="intar-dev"
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly gate_url="${REGISTRY_CLEANUP_GATE_URL:-https://intar.dev/api/maintenance/registry-cleanup}"
 # The adapter compares a present Origin against the canonical one, so the lane
@@ -61,6 +64,10 @@ readonly campaign_passes="${runtime_root}/campaign-passes.json"
 readonly campaign_record="${runtime_root}/campaign-record.json"
 readonly final_report_proof_json="${runtime_root}/final-report-proof.json"
 readonly state="${runtime_root}/state.json"
+readonly parent_deployment="${runtime_root}/parent-deployment.json"
+readonly parent_version="${runtime_root}/parent-version.json"
+readonly d1_admission_request="${runtime_root}/d1-admission-request.json"
+readonly d1_admission="${runtime_root}/d1-admission.json"
 readonly hold_evidence="${RUNNER_TEMP:-/tmp}/registry-cleanup-hold.json"
 
 # Every file this step writes is uploaded as deployment evidence, even when
@@ -606,6 +613,148 @@ test "${child_present}" = true || test "${child_present}" = false || {
 }
 live_mode="$(jq -er '.mode' "${state}")"
 active_version_id="$(jq -r '.active_version_id // ""' "${state}")"
+
+# A deploy that failed after it enabled maintenance leaves the lane's own
+# maintenance version serving: deploy-web.sh tags it web-<sha12>-maintenance
+# and it serves CONTROL_PLANE_MAINTENANCE=on. That fence answers every call to
+# this gate, so the collector can not be held or released through it until a
+# later deploy reopens the parent. Only this exact state takes the recovery
+# path; any other fence still fails below, and a parent that can not be read
+# is not this state.
+lane_maintenance_serves() {
+  local parent_version_id
+  bunx wrangler deployments status --name "${parent_worker_name}" --json \
+    > "${parent_deployment}" || return 1
+  parent_version_id="$(jq -er '
+    .versions | select(length == 1) | .[0] |
+    select(.percentage == 100) | .version_id
+  ' "${parent_deployment}")" || return 1
+  bunx wrangler versions view "${parent_version_id}" \
+    --name "${parent_worker_name}" --json > "${parent_version}" || return 1
+  jq -e '
+    ((.annotations["workers/tag"] // "") | test("^web-[0-9a-f]{12}-maintenance$")) and
+    ([.resources.bindings[]? |
+      select(.type == "plain_text" and .name == "CONTROL_PLANE_MAINTENANCE") |
+      .text] == ["on"])
+  ' "${parent_version}" >/dev/null
+}
+
+# The recovery path. The collector is out of reach, and it is also fenced: it
+# reads the maintenance flag from the serving parent and refuses to sweep, and
+# no uploader passes the fence either. A hold proves the rest from the shared
+# D1 admission row, the same row the collector's status reads: no sweep is in
+# flight, and a delete target has upload admission enforced. The row is read,
+# never written. It records no inventory, because a fenced collector can not
+# plan; deploy-registry-cleanup.sh therefore accepts this hold only for a
+# collector that already deletes. A release leaves the hold in place for the
+# deploy that reopens the parent, and exits cleanly: a held collector is the
+# safe state. Writes the evidence and exits.
+recover_behind_lane_maintenance() {
+  local d1_status="" problem="" admission='null'
+  if [ "${action}" = hold ]; then
+    test -n "${DATABASE_ID:-}" || {
+      echo 'a recovery hold reads the D1 admission row and needs DATABASE_ID' >&2
+      exit 1
+    }
+    jq -cn --arg sql "SELECT enforcement, state, sweep_token IS NOT NULL AS sweep_held,
+        paused_at IS NOT NULL AS paused, pause_reason
+      FROM image_registry_admission WHERE key = 'image_registry_admission'" \
+      '{sql: $sql, params: []}' > "${d1_admission_request}"
+    d1_status="$(curl --silent --show-error --max-time 60 \
+      --request POST \
+      --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+      --header 'Content-Type: application/json' \
+      --data-binary "@${d1_admission_request}" \
+      --output "${d1_admission}" --write-out '%{http_code}' \
+      "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${DATABASE_ID}/query" \
+      || true)"
+    if [ "${d1_status}" = 200 ] && jq -e '
+        .success == true and (.result | type == "array" and length == 1) and
+        .result[0].success == true and (.result[0].results | type == "array")
+      ' "${d1_admission}" >/dev/null 2>&1; then
+      # An absent row reads as the application reads it: report_only, open,
+      # not paused.
+      admission="$(jq -c '
+        (.result[0].results[0] // {}) as $row |
+        ($row.enforcement // "report_only") as $enforcement |
+        {ok: true, source: "d1", enforcement: $enforcement,
+         sessionRequired: ($enforcement == "enforce"),
+         paused: (($row.paused // 0) == 1),
+         pauseReason: ($row.pause_reason // null),
+         sweepActive: ((($row.state // "open") == "sweeping") and
+                       (($row.sweep_held // 0) == 1))}
+      ' "${d1_admission}")"
+      if [ "$(jq -r '.sweepActive' <<<"${admission}")" = true ]; then
+        problem="a sweep holds the D1 admission gate, so the collector is not idle"
+      elif [ "${target_mode}" = delete ] && \
+        [ "$(jq -r '.enforcement' <<<"${admission}")" != enforce ]; then
+        problem="delete mode needs D1 upload admission enforcement, but it is $(jq -r '.enforcement' <<<"${admission}")"
+      fi
+    else
+      problem="the D1 admission row could not be read (HTTP ${d1_status:-none})"
+    fi
+  fi
+
+  jq -n \
+    --arg source_sha "${GITHUB_SHA}" \
+    --arg action "${action}" \
+    --arg worker_name "${worker_name}" \
+    --arg url "${gate_url}" \
+    --arg origin "${gate_origin}" \
+    --arg live_mode "${live_mode}" \
+    --arg target_mode "${target_mode}" \
+    --arg active_version_id "${active_version_id}" \
+    --arg problem "${problem}" \
+    --argjson admission "${admission}" \
+    --slurpfile parent_deployment "${parent_deployment}" \
+    --slurpfile parent_version "${parent_version}" \
+    --slurpfile probe "${state}" \
+    '{
+      schema_version: 1,
+      operation: "registry-cleanup-gate",
+      source_sha: $source_sha,
+      action: $action,
+      worker_name: $worker_name,
+      url: $url,
+      origin: $origin,
+      gate: "recovery",
+      live_mode: $live_mode,
+      target_mode: $target_mode,
+      child_present: true,
+      active_version_id: (if $active_version_id == "" then null else $active_version_id end),
+      recovery: {
+        parent_version_id: ($parent_deployment[0].versions[0].version_id // null),
+        parent_tag: ($parent_version[0].annotations["workers/tag"] // null),
+        problem: (if $problem == "" then null else $problem end)
+      },
+      hold_leave: (if $action == "release" then "left" else "none" end),
+      admission: $admission,
+      inventory: null,
+      paused: (if $admission == null then null else $admission.paused end),
+      idle: (if $admission == null then null else ($admission.sweepActive | not) end),
+      enforced: false,
+      probe: $probe[0]
+    }' > "${evidence}"
+  require_clean_evidence
+
+  if [ -n "${problem}" ]; then
+    echo "the recovery hold refused: ${problem}." >&2
+    exit 1
+  fi
+  if [ "${action}" = release ]; then
+    echo "the lane's maintenance version $(jq -r '.recovery.parent_tag' "${evidence}") serves, so the gate is fenced."
+    echo 'The collector stays held until the deploy that reopens the parent releases it.'
+    exit 0
+  fi
+  echo "recovery hold behind $(jq -r '.recovery.parent_tag' "${evidence}"): $(jq -c '.admission | {enforcement, paused, sweepActive}' "${evidence}")"
+  exit 0
+}
+
+if [ "${child_present}" = true ] && \
+  { [ "${action}" = hold ] || [ "${action}" = release ]; } && \
+  lane_maintenance_serves; then
+  recover_behind_lane_maintenance
+fi
 
 gate_class="skipped"
 gate_code=""
