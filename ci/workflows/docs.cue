@@ -4,16 +4,12 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 
 "workflows": docs: {
 	name:       "Docs"
-	"run-name": "${{ github.event_name == 'pull_request' && format('Docs validate PR #{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && (inputs.confirmation != 'DEPLOY DOCS' || github.ref != 'refs/heads/main') && format('Docs validate {0} @ {1}', github.ref_name, github.sha) || format('Docs deploy main @ {0}', github.sha) }}"
+	"run-name": "${{ github.event_name == 'pull_request' && format('Docs validate PR #{0}', github.event.pull_request.number) || github.ref != 'refs/heads/main' && format('Docs validate {0} @ {1}', github.ref_name, github.sha) || format('Docs deploy main @ {0}', github.sha) }}"
 
-	// A push to main deploys. A manual dispatch validates, and deploys main only
-	// with the confirmation, for when a push never started a run.
+	// A push to main deploys. A manual dispatch from main deploys too, for when a
+	// push never started a run; from another branch it only validates.
 	on: {
-		workflow_dispatch: inputs: confirmation: {
-			description: "Type DEPLOY DOCS to deploy main from a manual dispatch"
-			required:    false
-			type:        "string"
-		}
+		workflow_dispatch: {}
 		pull_request: paths: [
 			".github/workflows/docs.yml",
 			".github/actions/setup-runtime/**",
@@ -58,7 +54,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				run:  "bunx --no-install wrangler deploy --dry-run"
 			}, {
 				name: "Upload tested docs"
-				if:   "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY DOCS')"
+				if:   "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')"
 				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "docs-dist-${{ github.sha }}"
@@ -71,7 +67,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 		}
 		deploy: {
 			name:              "Deploy production"
-			if:                "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY DOCS')"
+			if:                "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')"
 			needs:             "build"
 			"runs-on":         "namespace-profile-intar-dev"
 			"timeout-minutes": 10
