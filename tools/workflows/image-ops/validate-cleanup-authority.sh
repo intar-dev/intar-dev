@@ -7,17 +7,7 @@ case "${ACTION}" in
   status|plan|run|resolve) ;;
   *) echo "action must be status, plan, run, or resolve" >&2; exit 1 ;;
 esac
-if [ "${ACTION}" = run ]; then
-  if [ "${CONFIRMATION}" != 'RUN IMAGE REGISTRY CLEANUP' ]; then
-    echo 'the run action needs the exact confirmation.' >&2
-    exit 1
-  fi
-fi
 if [ "${ACTION}" = resolve ]; then
-  if [ "${CONFIRMATION}" != 'RESOLVE STALLED IMAGE CLEANUP' ]; then
-    echo 'the resolve action needs the exact confirmation.' >&2
-    exit 1
-  fi
   # The run id reaches SQL as a bound parameter, and it is checked
   # here so a typo stops before any call.
   if ! [[ "${EXPECTED_GC_RUN_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then

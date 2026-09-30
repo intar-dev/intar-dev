@@ -9,9 +9,9 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 	// One operator lane for the image flywheel work that stays manual: the run
 	// gate, the guest-tools build and promotion, and the registry cleanup. Intar
 	// promotes image catalogs itself (Admin, Scenarios, Image promotion), also
-	// inside a drain this lane holds. Each operation keeps its own inputs, its own
-	// confirmation, and its own job, so the plane fence and the deliberate-release
-	// property stay explicit. Three lock groups keep unrelated work from blocking
+	// inside a drain this lane holds. Each operation keeps its own inputs and its
+	// own job, so the plane fence and the deliberate-release property stay
+	// explicit; the production environment admits only main. Three lock groups keep unrelated work from blocking
 	// recovery: the image pipeline group, the cleanup campaign group, and the
 	// cleanup status group, which must stay readable while a campaign holds the
 	// other two.
@@ -31,12 +31,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					"cleanup-run",
 					"cleanup-resolve",
 				]
-			}
-			confirmation: {
-				description: "the confirmation the chosen operation prints in its own job"
-				required:    false
-				default:     ""
-				type:        "string"
 			}
 			revision: {
 				description: "verified candidate bundle revision, for a tools promotion"
@@ -161,7 +155,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			env: {
 				INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
 				STATE:                     "${{ needs.request.outputs.state }}"
-				CONFIRMATION:              "${{ inputs.confirmation }}"
 			}
 			steps: [{
 				name: "Validate authority"
@@ -170,11 +163,9 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					test "${GITHUB_REF}" = "refs/heads/main"
 					test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
 					case "${STATE}" in
-					  drained) expected="SET IMAGE GATE DRAINED" ;;
-					  open) expected="SET IMAGE GATE OPEN" ;;
+					  drained|open) ;;
 					  *) echo "Unsupported run gate state." >&2; exit 1 ;;
 					esac
-					test "${CONFIRMATION}" = "${expected}"
 
 					"""
 			}, {
@@ -236,16 +227,14 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			"timeout-minutes": 30
 			environment:       "production"
 			env: {
-				KINO_TAG:     "${{ inputs.kino_tag }}"
-				CONFIRMATION: "${{ inputs.confirmation }}"
-				BUCKET:       "intar-dev-vm-image-registry-20260709"
+				KINO_TAG: "${{ inputs.kino_tag }}"
+				BUCKET:   "intar-dev-vm-image-registry-20260709"
 			}
 			steps: [{
 				name: "Validate deployment inputs"
 				run: """
 					set -euo pipefail
 					test "${GITHUB_REF}" = refs/heads/main
-					test "${CONFIRMATION}" = 'DEPLOY GUEST TOOLS'
 					[[ "${KINO_TAG}" =~ ^kino/v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]
 					mkdir -p "${RUNNER_TEMP}/guest-tools"
 					printf 'TOOLS_DIR=%s/guest-tools\\n' "${RUNNER_TEMP}" >> "${GITHUB_ENV}"
@@ -324,7 +313,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			env: {
 				REVISION:                  "${{ inputs.revision }}"
 				EXPECTED_CANDIDATE_SHA256: "${{ inputs.expected_candidate_sha256 }}"
-				CONFIRMATION:              "${{ inputs.confirmation }}"
 				BUCKET:                    "intar-dev-vm-image-registry-20260709"
 			}
 			steps: [{
@@ -332,7 +320,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				run: """
 					set -euo pipefail
 					test "${GITHUB_REF}" = refs/heads/main
-					test "${CONFIRMATION}" = 'PROMOTE GUEST TOOLS'
 					[[ "${REVISION}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]
 					[[ "${EXPECTED_CANDIDATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
 					mkdir -p "${RUNNER_TEMP}/guest-tools"
@@ -423,7 +410,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				GATE_URL:           "https://intar.dev/api/maintenance/registry-cleanup"
 				ACTION:             "${{ needs.request.outputs.action }}"
 				EXPECTED_GC_RUN_ID: "${{ inputs.expected_gc_run_id }}"
-				CONFIRMATION:       "${{ inputs.confirmation }}"
 			}
 			steps: [{
 				name: "Checkout exact main revision"

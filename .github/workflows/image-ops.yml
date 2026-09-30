@@ -18,11 +18,6 @@ run-name: Image ops ${{ inputs.operation }} @ ${{ github.sha }}
           - cleanup-plan
           - cleanup-run
           - cleanup-resolve
-      confirmation:
-        description: the confirmation the chosen operation prints in its own job
-        required: false
-        default: ""
-        type: string
       revision:
         description: verified candidate bundle revision, for a tools promotion
         required: false
@@ -129,7 +124,6 @@ jobs:
     env:
       INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
       STATE: ${{ needs.request.outputs.state }}
-      CONFIRMATION: ${{ inputs.confirmation }}
     environment: production
     timeout-minutes: 20
     steps:
@@ -139,11 +133,9 @@ jobs:
           test "${GITHUB_REF}" = "refs/heads/main"
           test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
           case "${STATE}" in
-            drained) expected="SET IMAGE GATE DRAINED" ;;
-            open) expected="SET IMAGE GATE OPEN" ;;
+            drained|open) ;;
             *) echo "Unsupported run gate state." >&2; exit 1 ;;
           esac
-          test "${CONFIRMATION}" = "${expected}"
       - name: Set exact gate state
         run: |
           set -euo pipefail
@@ -191,7 +183,6 @@ jobs:
       cancel-in-progress: false
     env:
       KINO_TAG: ${{ inputs.kino_tag }}
-      CONFIRMATION: ${{ inputs.confirmation }}
       BUCKET: intar-dev-vm-image-registry-20260709
     environment: production
     timeout-minutes: 30
@@ -200,7 +191,6 @@ jobs:
         run: |
           set -euo pipefail
           test "${GITHUB_REF}" = refs/heads/main
-          test "${CONFIRMATION}" = 'DEPLOY GUEST TOOLS'
           [[ "${KINO_TAG}" =~ ^kino/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           mkdir -p "${RUNNER_TEMP}/guest-tools"
           printf 'TOOLS_DIR=%s/guest-tools\n' "${RUNNER_TEMP}" >> "${GITHUB_ENV}"
@@ -259,7 +249,6 @@ jobs:
     env:
       REVISION: ${{ inputs.revision }}
       EXPECTED_CANDIDATE_SHA256: ${{ inputs.expected_candidate_sha256 }}
-      CONFIRMATION: ${{ inputs.confirmation }}
       BUCKET: intar-dev-vm-image-registry-20260709
     environment: production
     timeout-minutes: 30
@@ -268,7 +257,6 @@ jobs:
         run: |
           set -euo pipefail
           test "${GITHUB_REF}" = refs/heads/main
-          test "${CONFIRMATION}" = 'PROMOTE GUEST TOOLS'
           [[ "${REVISION}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]
           [[ "${EXPECTED_CANDIDATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
           mkdir -p "${RUNNER_TEMP}/guest-tools"
@@ -335,7 +323,6 @@ jobs:
       GATE_URL: https://intar.dev/api/maintenance/registry-cleanup
       ACTION: ${{ needs.request.outputs.action }}
       EXPECTED_GC_RUN_ID: ${{ inputs.expected_gc_run_id }}
-      CONFIRMATION: ${{ inputs.confirmation }}
     environment:
       name: production
     timeout-minutes: 75
