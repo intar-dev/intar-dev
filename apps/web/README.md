@@ -119,6 +119,20 @@ plan, so it deploys `delete` only over a collector that already deletes. It
 never turns deletes on. Maintenance that this lane didn't deploy still stops
 the hold.
 
+A release can also fail while the site serves, for example on a transient gate
+error. The collector then stays paused with the deploy's own pause reason,
+`registry_cleanup_hold`, and a paused collector refuses the report inventory a
+`delete` hold takes. Website deploys run one at a time, so the next deploy's
+hold treats that pause as a leftover: it resumes it, takes the inventory, and
+pauses again, and the hold evidence records the resume under `leftover_hold`.
+The hold doesn't resume a pause with another reason, such as an operator's
+pause through `/registry/v1/admission/pause`, or a collector with a sweep in
+flight; a `delete` hold then fails on its inventory. A deploy still doesn't
+keep an operator's pause: the release resumes any pause, also after a failed
+hold, and a hold's own pause replaces an existing reason with
+`registry_cleanup_hold`. Pause the collector again after a website deploy if it
+must stay paused.
+
 To roll out new guest tools, run these from `main` in order:
 
 1. image-ops `gate-drained`, which stops new runs and waits for the fleet to

@@ -68,6 +68,7 @@ readonly parent_deployment="${runtime_root}/parent-deployment.json"
 readonly parent_version="${runtime_root}/parent-version.json"
 readonly d1_admission_request="${runtime_root}/d1-admission-request.json"
 readonly d1_admission="${runtime_root}/d1-admission.json"
+readonly leftover_response="${runtime_root}/leftover-resume-response.json"
 readonly hold_evidence="${RUNNER_TEMP:-/tmp}/registry-cleanup-hold.json"
 
 # Every file this step writes is uploaded as deployment evidence, even when
@@ -128,7 +129,7 @@ chmod 700 "${runtime_root}"
 # The evidence step reads these with jq --slurpfile, so they exist even when a
 # skipped gate makes no call at all.
 touch "${deployment}" "${response}" "${plan_response}" "${status_response}"
-touch "${pass_response}" "${final_report_response}"
+touch "${pass_response}" "${final_report_response}" "${leftover_response}"
 # The record starts as null, so the evidence build always has a file to read.
 printf 'null\n' > "${campaign_record}"
 test ! -e "${evidence}"
@@ -283,6 +284,8 @@ take_admission_proof() {
                           else null end),
         paused: (if $report.paused == true then true
                  elif $report.paused == false then false else null end),
+        pauseReason: (($report.pauseReason // null) |
+                      if type == "string" then . else null end),
         sweepActive: (if $report.sweepActive == true then true
                       elif $report.sweepActive == false then false else null end),
         activeSessions: ($report.activeSessions // null),
@@ -324,6 +327,41 @@ take_inventory_proof() {
     return 0
   fi
   evaluate_plan_file "${plan_response}"
+}
+
+# A release that failed while the site served leaves the deploy's pause in the
+# shared admission row, and a paused collector answers a plan with "paused", so
+# the next delete-mode hold would fail on its inventory, and only that failed
+# run's release would clear the pause. Website deploys are serialized and this
+# hold has not paused yet, so a pause that carries the deploy's own reason,
+# registry_cleanup_hold, is taken as such a leftover: it is resumed here, and
+# the hold takes it again after the inventory. A pause with any other reason,
+# such as an operator's, and a collector with a sweep in flight are not resumed
+# here, so the inventory fails. That does not keep an operator's pause across a
+# deploy: the release resumes any pause, also after a failed hold, and a hold's
+# own pause overwrites an existing reason with registry_cleanup_hold.
+# Sets leftover_json.
+resume_leftover_deploy_hold() {
+  local resume_status resume_class
+  leftover_json="null"
+  jq -e '.ok == true and .paused == true and .sweepActive == false and
+         .pauseReason == "registry_cleanup_hold"' <<<"${admission_json}" >/dev/null \
+    || return 0
+  resume_status="$(call_gate resume "${leftover_response}")"
+  resume_class="$(classify_gate_response "${resume_status}" "${leftover_response}")"
+  if [ "${resume_class}" != ok ]; then
+    explain_fatal_gate_class "${resume_class}" "${resume_status}" "${leftover_response}"
+    echo 'an earlier deploy left the collector held, and the hold could not resume it.' >&2
+    exit 1
+  fi
+  if ! jq -e '((.result // .) | .paused) == false' "${leftover_response}" >/dev/null 2>&1; then
+    echo 'an earlier deploy left the collector held, and the resume did not report it unpaused.' >&2
+    exit 1
+  fi
+  leftover_json="$(jq -cn --arg status "${resume_status}" \
+    '{pause_reason: "registry_cleanup_hold", resumed: true,
+      http_status: ($status | tonumber? // null)}')"
+  echo 'resumed a hold an earlier deploy left in place; the collector is held again after the inventory.'
 }
 
 # A refusal is not a plan, so the inventory records the class that answered
@@ -764,6 +802,7 @@ idle=null
 skipped_reason=""
 inventory_json="null"
 admission_json="null"
+leftover_json="null"
 # The campaign record starts as null in its own file, and every later state of
 # it is written there as well: the record carries the pass key lists, which are
 # far larger than an argument may be.
@@ -794,6 +833,7 @@ else
         echo 'That state is image_registry_admission.enforcement, which the collector reads from the shared database.' >&2
         exit 1
       fi
+      resume_leftover_deploy_hold
       take_inventory_proof
       if [ "${inventory_problem}" != ok ]; then
         echo "the delete mode needs a completed, fault-free report inventory, but ${inventory_problem}." >&2
@@ -962,6 +1002,7 @@ jq -n \
   --argjson child_present "${child_present}" \
   --argjson inventory "${inventory_json}" \
   --argjson admission "${admission_json}" \
+  --argjson leftover_hold "${leftover_json}" \
   --slurpfile run "${campaign_record}" \
   --argjson preview "${preview_json}" \
   --slurpfile response "${response}" \
@@ -988,6 +1029,7 @@ jq -n \
     hold_leave: $hold_leave,
     inventory: $inventory,
     admission: $admission,
+    leftover_hold: $leftover_hold,
     run: ($run[0] // null),
     preview: $preview,
     paused: $paused,

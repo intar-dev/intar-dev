@@ -171,6 +171,9 @@ interface RunOptions {
   statusStatus?: string;
   planBody?: string;
   planStatus?: string;
+  /** The answer to a resume, which only a hold that finds a leftover sends. */
+  resumeBody?: string;
+  resumeStatus?: string;
   /** One body per delete pass; the last one answers every later pass. */
   runBodies?: string[];
   /** One HTTP status per delete pass; the last one answers every later pass. */
@@ -264,7 +267,7 @@ function fakeCurl(): string {
     '    printf "%s" "$MOCK_D1_STATUS"',
     "    ;;",
     '  "$MOCK_GATE_URL")',
-    '    printf "gate\\n" >> "$MOCK_CURL_GATE"',
+    '    printf "%s\\n" "${call_action:-gate}" >> "$MOCK_CURL_GATE"',
     '    case "$call_action" in',
     '      status)',
     '        write_headers "$MOCK_HEADERS"',
@@ -275,6 +278,11 @@ function fakeCurl(): string {
     '        write_headers "$MOCK_HEADERS"',
     '        printf "%s" "$MOCK_PLAN_BODY" > "$output"',
     '        printf "%s" "$MOCK_PLAN_STATUS"',
+    '        ;;',
+    '      resume)',
+    '        write_headers "$MOCK_HEADERS"',
+    '        printf "%s" "$MOCK_RESUME_BODY" > "$output"',
+    '        printf "%s" "$MOCK_RESUME_STATUS"',
     '        ;;',
       '      run)',
       '        index="$(cat "$MOCK_RUN_COUNTER" 2>/dev/null || echo 0)"',
@@ -420,6 +428,10 @@ function runGate(options: RunOptions = {}) {
       // The shape the core builds: a complete, unfaulted plan that allows
       // deletes by reference.
       '{"action":"plan","status":"report-only","plan":{"candidateObjects":[{"key":"image-chunks/v1/zstd6/aa"}],"objectsScanned":42,"truncated":false,"details":{"faults":[],"deleteAllowedByReferences":true,"candidateTotal":1}}}',
+    // A release is a resume too, so without its own answer a resume gets the
+    // gate answer every other action gets.
+    MOCK_RESUME_STATUS: options.resumeStatus ?? options.status ?? "200",
+    MOCK_RESUME_BODY: options.resumeBody ?? options.body ?? '{"paused":true,"idle":true}',
     MOCK_RUN_BODIES: runBodies,
     MOCK_RUN_STATUSES: runStatuses,
     MOCK_RUN_HEADERS: runHeaders,
@@ -474,6 +486,10 @@ function runGate(options: RunOptions = {}) {
     gateCalls: existsSync(curlGate)
       ? readFileSync(curlGate, "utf8").trim().split("\n").filter(Boolean).length
       : 0,
+    /** The gate actions in the order the script sent them. */
+    gateActions: existsSync(curlGate)
+      ? readFileSync(curlGate, "utf8").trim().split("\n").filter(Boolean)
+      : [],
     runtimeRoot,
     runtimeRootMode: existsSync(runtimeRoot) ? statSync(runtimeRoot).mode & 0o777 : null,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
@@ -1069,6 +1085,144 @@ describe("registry cleanup deployment gate", () => {
     } finally {
       run.cleanup();
     }
+  });
+
+  describe("a hold an earlier deploy left in place", () => {
+    const leftoverStatus = (overrides: Record<string, unknown> = {}) =>
+      JSON.stringify({
+        action: "status",
+        result: {
+          enforcement: "enforce",
+          sessionRequired: true,
+          paused: true,
+          pauseReason: "registry_cleanup_hold",
+          sweepActive: false,
+          activeSessions: 0,
+          activeWriters: 0,
+          ...overrides,
+        },
+      });
+    // A paused collector refuses to plan, which is what used to fail every later
+    // delete-mode hold.
+    const pausedPlan = '{"action":"plan","status":"paused"}';
+    const unpaused =
+      '{"action":"resume","result":{"paused":false,"pauseReason":null,"idle":true,"stalled":false}}';
+
+    it("is resumed before the inventory and held again after it", () => {
+      const run = runGate({
+        targetMode: "delete",
+        liveMode: "delete",
+        statusBody: leftoverStatus(),
+        resumeBody: unpaused,
+      });
+      try {
+        expect(run.result.status, run.result.stderr).toBe(0);
+        expect(run.gateActions).toEqual(["status", "resume", "plan", "pause"]);
+        expect(run.result.stdout).toContain("resumed a hold an earlier deploy left in place");
+        expect(run.evidence).toMatchObject({
+          action: "hold",
+          paused: true,
+          idle: true,
+          leftover_hold: {
+            pause_reason: "registry_cleanup_hold",
+            resumed: true,
+            http_status: 200,
+          },
+          admission: { paused: true, pauseReason: "registry_cleanup_hold" },
+          inventory: { ok: true },
+        });
+      } finally {
+        run.cleanup();
+      }
+    });
+
+    it("does not resume a pause with another reason, such as an operator's", () => {
+      const run = runGate({
+        targetMode: "delete",
+        liveMode: "delete",
+        statusBody: leftoverStatus({ pauseReason: "operator_pause" }),
+        planBody: pausedPlan,
+      });
+      try {
+        expect(run.result.status).not.toBe(0);
+        expect(run.gateActions).not.toContain("resume");
+        expect(run.gateActions).not.toContain("pause");
+        expect(run.result.stderr).toContain('the collector status is "paused"');
+      } finally {
+        run.cleanup();
+      }
+    });
+
+    it("leaves a collector with a sweep in flight alone", () => {
+      const run = runGate({
+        targetMode: "delete",
+        liveMode: "delete",
+        statusBody: leftoverStatus({ sweepActive: true }),
+        planBody: pausedPlan,
+      });
+      try {
+        expect(run.result.status).not.toBe(0);
+        expect(run.gateActions).not.toContain("resume");
+      } finally {
+        run.cleanup();
+      }
+    });
+
+    it("stops before the inventory when the resume does not unpause", () => {
+      for (const { expected, ...resume } of [
+        {
+          // A refusal is not a resume, even when its body reads unpaused.
+          resumeStatus: "503",
+          resumeBody: '{"code":"registry_cleanup_gate_failed","result":{"paused":false}}',
+          expected: "the hold could not resume it",
+        },
+        {
+          resumeBody:
+            '{"action":"resume","result":{"paused":true,"pauseReason":"registry_cleanup_hold","idle":true,"stalled":false}}',
+          expected: "the resume did not report it unpaused",
+        },
+      ]) {
+        const run = runGate({
+          targetMode: "delete",
+          liveMode: "delete",
+          statusBody: leftoverStatus(),
+          ...resume,
+        });
+        try {
+          expect(run.result.status).not.toBe(0);
+          expect(run.result.stderr).toContain(expected);
+          expect(run.gateActions).toEqual(["status", "resume"]);
+        } finally {
+          run.cleanup();
+        }
+      }
+    });
+
+    it("is not touched by a report-only hold, which needs no inventory", () => {
+      const run = runGate({
+        targetMode: "report-only",
+        liveMode: "report-only",
+        statusBody: leftoverStatus(),
+      });
+      try {
+        expect(run.result.status, run.result.stderr).toBe(0);
+        expect(run.gateActions).not.toContain("resume");
+        expect(run.evidence).toMatchObject({ leftover_hold: null, paused: true });
+      } finally {
+        run.cleanup();
+      }
+    });
+
+    it("is absent on a normal hold, which makes no resume call", () => {
+      const run = runGate({ targetMode: "delete", liveMode: "delete" });
+      try {
+        expect(run.result.status, run.result.stderr).toBe(0);
+        expect(run.gateActions).toEqual(["status", "plan", "pause"]);
+        expect(run.evidence).toMatchObject({ leftover_hold: null });
+      } finally {
+        run.cleanup();
+      }
+    });
   });
 
   it("refuses delete mode when the collector lists no plan", () => {
