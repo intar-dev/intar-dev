@@ -1,6 +1,6 @@
 import { appError } from "@/lib/app-error";
 
-/** The operators' drain: image-ops and the metal release scripts own it. */
+/** The operators' drain: image-ops owns it. */
 export const IMAGE_CUTOVER_GATE = "image_cutover";
 
 /** Intar's own hold while it promotes an image catalog. Only Intar writes it. */
