@@ -319,7 +319,7 @@ schema.#Project & {
 			"""}
 
 		"workflow-policy": #Bash & {_script: """
-			bun test tools/ci/check-workflow-security.test.ts
+			bun test tools/ci
 			bun tools/ci/check-workflow-security.ts
 			"""}
 
