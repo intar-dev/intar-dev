@@ -20,27 +20,21 @@ run-name: |-
     branches:
       - main
     paths:
-      - .github/workflows/website.yml
-      - .github/actions/setup-runtime/**
-      - .github/actions/setup-cuenv/**
-      - ci/workflows/website.cue
-      - ci/workflows/tasks.cue
-      - tools/workflows/website/**
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
+      - apps/web/**
+      - '!apps/web/tests/**'
+      - '!apps/web/**/*.test.ts'
       - package.json
       - bun.lock
       - patches/**
       - tsconfig.base.json
-      - tools/check-import-boundaries.ts
-      - tools/database/**
+      - .github/workflows/website.yml
+      - .github/actions/setup-cuenv/**
+      - .github/actions/setup-runtime/**
+      - ci/workflows/website.cue
+      - ci/workflows/tasks.cue
+      - tools/workflows/website/**
       - tools/deploy/**
-      - tools/vm-boot-benchmark/**
-      - tools/vm-boot-benchmark.py
-      - tools/test_vm_boot_benchmark.py
-      - crates/intar-image-scenario/**
-      - apps/web/**
+      - tools/database/**
   pull_request:
     paths:
       - .github/workflows/website.yml
@@ -158,54 +152,12 @@ jobs:
             .tmp/website-playwright/test-results
           if-no-files-found: warn
           retention-days: 7
-  plan:
-    name: Plan the release
+  deploy:
+    name: Deploy production
     needs:
       - validate
       - ui
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))
-    runs-on: namespace-profile-intar-dev
-    env:
-      BUCKET: intar-dev-vm-image-registry-20260709
-    environment:
-      name: production
-      url: https://intar.dev
-    outputs:
-      static_pin_json: ${{ steps.pin.outputs.static_pin_json }}
-      artifact_id: ${{ needs.validate.outputs.artifact_id }}
-      artifact_digest: ${{ needs.validate.outputs.artifact_digest }}
-    timeout-minutes: 30
-    steps:
-      - name: Checkout exact main revision
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
-        with:
-          persist-credentials: false
-      - name: Set up cuenv
-        uses: ./.github/actions/setup-cuenv
-      - name: Set up the CI runtime
-        uses: ./.github/actions/setup-runtime
-      - name: Install locked workspace tools
-        run: bun install --frozen-lockfile
-      - name: Resolve the verified guest-tools pin
-        id: pin
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: cuenv task -p ci --package ci website-resolve-guest-tools-pin
-      - name: Retain release evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: website-release-${{ github.sha }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/release-static-pin.json
-            ${{ runner.temp }}/release-static-pin-evidence.json
-          if-no-files-found: warn
-          retention-days: 30
-  deploy:
-    name: Deploy production
-    needs:
-      - plan
     runs-on: namespace-profile-intar-dev
     concurrency:
       group: website-production
@@ -213,6 +165,7 @@ jobs:
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      BUCKET: intar-dev-vm-image-registry-20260709
     environment:
       name: production
       url: https://intar.dev
@@ -229,8 +182,8 @@ jobs:
       - name: Download tested deployment artifact
         env:
           GH_TOKEN: ${{ github.token }}
-          TESTED_ARTIFACT_ID: ${{ needs.plan.outputs.artifact_id }}
-          TESTED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.artifact_digest }}
+          TESTED_ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
+          TESTED_ARTIFACT_DIGEST: ${{ needs.validate.outputs.artifact_digest }}
         run: cuenv task -p ci --package ci website-download-tested-artifact
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
@@ -243,10 +196,8 @@ jobs:
       - name: Pin and verify production configuration
         working-directory: .
         run: cuenv task -p ci --package ci website-pin-production-config
-      - name: Inject the verified ABI 2 guest-tools pin
-        env:
-          GUEST_TOOLS_PIN_JSON: ${{ needs.plan.outputs.static_pin_json }}
-        run: cuenv task -p ci --package ci website-inject-guest-tools-pin
+      - name: Resolve and inject the verified guest-tools pin
+        run: cuenv task -p ci --package ci website-pin-guest-tools
       - name: Prepare runtime secrets
         id: runtime-secrets
         env:
@@ -267,25 +218,14 @@ jobs:
       - name: Capture pre-migration D1 evidence
         if: steps.migrations.outputs.pending == 'true'
         run: cuenv task -p ci --package ci website-capture-pre-migration-d1-evidence
-      - name: Prepare maintenance configuration
-        if: steps.migrations.outputs.pending == 'true'
-        working-directory: .
-        run: cuenv task -p ci --package ci website-prepare-maintenance-config
-      - name: Hold the image registry collector before the migration
+      - name: Hold the image registry collector
         id: hold
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: cuenv task -p ci --package ci website-hold-registry-collector
       - name: Enable maintenance for pending migrations
         if: steps.migrations.outputs.pending == 'true'
-        env:
-          WEB_DEPLOY_LABEL: maintenance
-        run: |
-          tools/deploy/deploy-web.sh \
-            "${MAINTENANCE_DEPLOYMENT_CONFIG}" \
-            "${DATABASE_ID}" \
-            "${ACTIVATION_SECRETS_FILE}" \
-            "${RUNNER_TEMP}/web-maintenance.json"
+        run: cuenv task -p ci --package ci website-enable-maintenance
       - name: Drain and recheck maintenance
         if: steps.migrations.outputs.pending == 'true'
         run: cuenv task -p ci --package ci website-drain-maintenance
@@ -300,14 +240,7 @@ jobs:
       - name: Deploy the image registry cleanup worker
         run: cuenv task -p ci --package ci website-deploy-registry-cleanup
       - name: Deploy production at 100 percent
-        env:
-          WEB_DEPLOY_LABEL: standard
-        run: |
-          tools/deploy/deploy-web.sh \
-            "${DEPLOYMENT_CONFIG}" \
-            "${DATABASE_ID}" \
-            "${ACTIVATION_SECRETS_FILE}" \
-            "${RUNNER_TEMP}/web-production.json"
+        run: cuenv task -p ci --package ci website-deploy-production
       - name: Release the image registry collector
         if: always() && steps.hold.outcome != 'skipped'
         env:
@@ -316,12 +249,19 @@ jobs:
       - name: Remove runtime secret file
         if: always() && steps.runtime-secrets.outcome != 'skipped'
         run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
+      - name: Summarize the deployment
+        if: always()
+        env:
+          TESTED_ARTIFACT_DIGEST: ${{ needs.validate.outputs.artifact_digest }}
+        run: cuenv task -p ci --package ci website-summarize-deploy
       - name: Retain deployment evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: website-production-${{ github.sha }}-${{ github.run_id }}
           path: |
+            ${{ runner.temp }}/release-static-pin.json
+            ${{ runner.temp }}/release-static-pin-evidence.json
             ${{ runner.temp }}/production-d1-plan.json
             ${{ runner.temp }}/d1-removal-rehearsal.json
             ${{ runner.temp }}/production-d1-info.json
@@ -344,4 +284,4 @@ jobs:
             ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-maintenance/
             ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-standard/
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30

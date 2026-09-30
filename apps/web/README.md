@@ -74,7 +74,10 @@ Maintenance mode is enabled only when a migration is pending. The workflow
 drains old requests before applying that migration. It does not roll back: a
 failed live check leaves the deployed version active while the workflow
 reports failure, and a failure after maintenance was enabled leaves maintenance
-serving until the next deploy recovers it (below).
+serving until the next deploy recovers it (below). The job summary of every
+deploy names the Worker version that served before the run and the
+`bunx wrangler rollback <id> --name intar-dev` command for it. That rollback is
+the break-glass path for the Worker only: D1 migrations don't roll back.
 
 Every deploy holds the image registry cleanup worker before it changes
 anything and releases it at the end, also after a failure. The worker runs in

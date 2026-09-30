@@ -27,30 +27,27 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				]
 			}
 		}
+		// A push deploys, so it runs for what can be deployed and for the lane
+		// itself: the web app without its tests, the workspace manifests, and the
+		// deploy tooling. Pull requests keep the wider validation list.
 		push: {
 			branches: ["main"]
 			paths: [
-				".github/workflows/website.yml",
-				".github/actions/setup-runtime/**",
-				".github/actions/setup-cuenv/**",
-				"ci/workflows/website.cue",
-				"ci/workflows/tasks.cue",
-				"tools/workflows/website/**",
-				"Cargo.toml",
-				"Cargo.lock",
-				"rust-toolchain.toml",
+				"apps/web/**",
+				"!apps/web/tests/**",
+				"!apps/web/**/*.test.ts",
 				"package.json",
 				"bun.lock",
 				"patches/**",
 				"tsconfig.base.json",
-				"tools/check-import-boundaries.ts",
-				"tools/database/**",
+				".github/workflows/website.yml",
+				".github/actions/setup-cuenv/**",
+				".github/actions/setup-runtime/**",
+				"ci/workflows/website.cue",
+				"ci/workflows/tasks.cue",
+				"tools/workflows/website/**",
 				"tools/deploy/**",
-				"tools/vm-boot-benchmark/**",
-				"tools/vm-boot-benchmark.py",
-				"tools/test_vm_boot_benchmark.py",
-				"crates/intar-image-scenario/**",
-				"apps/web/**",
+				"tools/database/**",
 			]
 		}
 		pull_request: paths: [
@@ -201,79 +198,29 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				}
 			}]
 		}
-		plan: {
-			name: "Plan the release"
+		deploy: {
+			name: "Deploy production"
 			needs: [
 				"validate",
 				"ui",
 			]
 			if:        "github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))"
 			"runs-on": "namespace-profile-intar-dev"
-			env: BUCKET: "intar-dev-vm-image-registry-20260709"
-			environment: {
-				name: "production"
-				url:  "https://intar.dev"
-			}
-			"timeout-minutes": 30
-			outputs: {
-				static_pin_json: "${{ steps.pin.outputs.static_pin_json }}"
-				artifact_id:     "${{ needs.validate.outputs.artifact_id }}"
-				artifact_digest: "${{ needs.validate.outputs.artifact_digest }}"
-			}
-			steps: [{
-				name: "Checkout exact main revision"
-				uses: gha.pin."nscloud-checkout".ref
-				with: "persist-credentials": false
-			}, {
-				name: "Set up cuenv"
-				uses: "./.github/actions/setup-cuenv"
-			}, {
-				name: "Set up the CI runtime"
-				uses: "./.github/actions/setup-runtime"
-			}, {
-				name: "Install locked workspace tools"
-				run:  "bun install --frozen-lockfile"
-			}, {
-				name: "Resolve the verified guest-tools pin"
-				id:   "pin"
-				env: {
-					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
-					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
-				}
-				#StepTask & {#task: "website-resolve-guest-tools-pin"}
-			}, {
-				name: "Retain release evidence"
-				if:   "always()"
-				uses: gha.pin."upload-artifact".ref
-				with: {
-					name: "website-release-${{ github.sha }}-${{ github.run_id }}"
-					path: """
-						${{ runner.temp }}/release-static-pin.json
-						${{ runner.temp }}/release-static-pin-evidence.json
-
-						"""
-					"if-no-files-found": "warn"
-					"retention-days":    30
-				}
-			}]
-		}
-		deploy: {
-			name: "Deploy production"
-			needs: ["plan"]
-			"runs-on": "namespace-profile-intar-dev"
 			env: {
 				CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 				CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
+				BUCKET:                "intar-dev-vm-image-registry-20260709"
 			}
 			environment: {
 				name: "production"
 				url:  "https://intar.dev"
 			}
 			"timeout-minutes": 45
-			concurrency: {
-				group:                "website-production"
-				"cancel-in-progress": false
-			}
+			concurrency: gha.#ProductionConcurrency & {group: "website-production"}
+			// Only the migration steps depend on data: they run while D1 migrations
+			// are pending. The hold and release recognise a maintenance version that
+			// a failed deploy left serving, so a re-run or a fix push completes the
+			// migration and reopens the site without an input.
 			steps: [{
 				name: "Checkout exact main revision"
 				uses: gha.pin."nscloud-checkout".ref
@@ -288,8 +235,8 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Download tested deployment artifact"
 				env: {
 					GH_TOKEN:               "${{ github.token }}"
-					TESTED_ARTIFACT_ID:     "${{ needs.plan.outputs.artifact_id }}"
-					TESTED_ARTIFACT_DIGEST: "${{ needs.plan.outputs.artifact_digest }}"
+					TESTED_ARTIFACT_ID:     "${{ needs.validate.outputs.artifact_id }}"
+					TESTED_ARTIFACT_DIGEST: "${{ needs.validate.outputs.artifact_digest }}"
 				}
 				#StepTask & {#task: "website-download-tested-artifact"}
 			}, {
@@ -307,9 +254,8 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				"working-directory": "."
 				#StepTask & {#task: "website-pin-production-config"}
 			}, {
-				name: "Inject the verified ABI 2 guest-tools pin"
-				env: GUEST_TOOLS_PIN_JSON: "${{ needs.plan.outputs.static_pin_json }}"
-				#StepTask & {#task: "website-inject-guest-tools-pin"}
+				name: "Resolve and inject the verified guest-tools pin"
+				#StepTask & {#task: "website-pin-guest-tools"}
 			}, {
 				name: "Prepare runtime secrets"
 				id:   "runtime-secrets"
@@ -341,34 +287,22 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				if:   "steps.migrations.outputs.pending == 'true'"
 				#StepTask & {#task: "website-capture-pre-migration-d1-evidence"}
 			}, {
-				name:                "Prepare maintenance configuration"
-				"working-directory": "."
-				if:                  "steps.migrations.outputs.pending == 'true'"
-				#StepTask & {#task: "website-prepare-maintenance-config"}
-			}, {
-				name: "Hold the image registry collector before the migration"
+				name: "Hold the image registry collector"
 				id:   "hold"
 				env: {
 					// The collector has no public route: the parent worker holds the
 					// service binding, and the gate route on that worker is the only path
 					// to it. The route sits behind the maintenance fence, so the hold
-					// happens here, while the control plane still serves. A no-op when no
-					// collector version is deployed yet.
+					// happens here, while the control plane still serves, or, behind a
+					// maintenance version a failed deploy left serving, from the D1
+					// admission row. A no-op when no collector version is deployed yet.
 					CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
 				}
 				#StepTask & {#task: "website-hold-registry-collector"}
 			}, {
 				name: "Enable maintenance for pending migrations"
 				if:   "steps.migrations.outputs.pending == 'true'"
-				env: WEB_DEPLOY_LABEL: "maintenance"
-				run: """
-					tools/deploy/deploy-web.sh \\
-					  "${MAINTENANCE_DEPLOYMENT_CONFIG}" \\
-					  "${DATABASE_ID}" \\
-					  "${ACTIVATION_SECRETS_FILE}" \\
-					  "${RUNNER_TEMP}/web-maintenance.json"
-
-					"""
+				#StepTask & {#task: "website-enable-maintenance"}
 			}, {
 				name: "Drain and recheck maintenance"
 				if:   "steps.migrations.outputs.pending == 'true'"
@@ -389,19 +323,13 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				#StepTask & {#task: "website-deploy-registry-cleanup"}
 			}, {
 				name: "Deploy production at 100 percent"
-				env: WEB_DEPLOY_LABEL: "standard"
-				run: """
-					tools/deploy/deploy-web.sh \\
-					  "${DEPLOYMENT_CONFIG}" \\
-					  "${DATABASE_ID}" \\
-					  "${ACTIVATION_SECRETS_FILE}" \\
-					  "${RUNNER_TEMP}/web-production.json"
-
-					"""
+				#StepTask & {#task: "website-deploy-production"}
 			}, {
 				name: "Release the image registry collector"
 				// The hold does not expire, so every run that reached it releases the
-				// collector again, also after a failed deploy.
+				// collector again, also after a failed deploy. Behind a maintenance
+				// version that this failure left serving, the release leaves the hold
+				// for the deploy that reopens the site.
 				if: "always() && steps.hold.outcome != 'skipped'"
 				env: CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
 				#StepTask & {#task: "website-release-registry-collector"}
@@ -410,12 +338,19 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				if:   "always() && steps.runtime-secrets.outcome != 'skipped'"
 				run:  "rm -f \"${RUNNER_TEMP}/website-runtime-secrets.json\""
 			}, {
+				name: "Summarize the deployment"
+				if:   "always()"
+				env: TESTED_ARTIFACT_DIGEST: "${{ needs.validate.outputs.artifact_digest }}"
+				#StepTask & {#task: "website-summarize-deploy"}
+			}, {
 				name: "Retain deployment evidence"
 				if:   "always()"
 				uses: gha.pin."upload-artifact".ref
 				with: {
 					name: "website-production-${{ github.sha }}-${{ github.run_id }}"
 					path: """
+						${{ runner.temp }}/release-static-pin.json
+						${{ runner.temp }}/release-static-pin-evidence.json
 						${{ runner.temp }}/production-d1-plan.json
 						${{ runner.temp }}/d1-removal-rehearsal.json
 						${{ runner.temp }}/production-d1-info.json
@@ -440,7 +375,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 
 						"""
 					"if-no-files-found": "warn"
-					"retention-days":    14
+					"retention-days":    30
 				}
 			}]
 		}
@@ -453,19 +388,20 @@ tasks: {
 	"website-check-web-contracts": #Script & {_script: "tools/workflows/website/check-web-contracts.sh"}
 	"website-verify-registry-cleanup-artifact": #Script & {_script: "tools/workflows/website/verify-registry-cleanup-artifact.sh"}
 	"website-record-artifact-identity": #Script & {_script: "tools/workflows/website/record-artifact-identity.sh"}
-	"website-resolve-guest-tools-pin": #Script & {_script: "tools/workflows/website/resolve-guest-tools-pin.sh", _production: true}
 	"website-verify-deploy-revision": #Script & {_script: "tools/workflows/website/verify-deploy-revision.sh"}
 	"website-download-tested-artifact": #Script & {_script: "tools/workflows/website/download-tested-artifact.sh"}
 	"website-pin-production-config": #Script & {_script: "tools/workflows/website/pin-production-config.sh"}
-	"website-inject-guest-tools-pin": #Script & {_script: "tools/workflows/website/inject-guest-tools-pin.sh"}
+	"website-pin-guest-tools": #Script & {_script: "tools/workflows/website/pin-guest-tools.sh", _production: true}
 	"website-prepare-runtime-secrets": #Script & {_script: "tools/workflows/website/prepare-runtime-secrets.sh", _production: true}
 	"website-plan-d1-migrations": #Script & {_script: "tools/workflows/website/plan-d1-migrations.sh", _production: true}
 	"website-capture-pre-migration-d1-evidence": #Script & {_script: "tools/workflows/website/capture-pre-migration-d1-evidence.sh", _production: true}
-	"website-prepare-maintenance-config": #Script & {_script: "tools/workflows/website/prepare-maintenance-config.sh"}
 	"website-hold-registry-collector": #Script & {_script: "tools/workflows/website/hold-registry-collector.sh", _production: true}
+	"website-enable-maintenance": #Script & {_script: "tools/workflows/website/enable-maintenance.sh", _production: true}
 	"website-drain-maintenance": #Script & {_script: "tools/workflows/website/drain-maintenance.sh", _production: true}
 	"website-apply-d1-migrations": #Script & {_script: "tools/workflows/website/apply-d1-migrations.sh", _production: true}
 	"website-verify-d1-schema": #Script & {_script: "tools/workflows/website/verify-d1-schema.sh", _production: true}
 	"website-deploy-registry-cleanup": #Script & {_script: "tools/workflows/website/deploy-registry-cleanup.sh", _production: true}
+	"website-deploy-production": #Script & {_script: "tools/workflows/website/deploy-production.sh", _production: true}
 	"website-release-registry-collector": #Script & {_script: "tools/workflows/website/release-registry-collector.sh", _production: true}
+	"website-summarize-deploy": #Script & {_script: "tools/workflows/website/summarize-deploy.sh"}
 }
