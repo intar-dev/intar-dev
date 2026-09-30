@@ -663,9 +663,9 @@ else
         > "${campaign_record}"
     else
       # The delete authority is proven here, from the serving parent, right
-      # before the first delete. A reopen cannot reuse the hold evidence of
-      # the cutover that closed the plane: its runner is fresh, so the
-      # campaign takes the same proof itself.
+      # before the first delete. The campaign runs in its own lane (image-ops
+      # cleanup-run), which holds no hold evidence, so it takes the same proof
+      # itself.
       take_admission_proof
       if [ "${admission_problem}" != ok ]; then
         run_refusal "the delete campaign needs the D1 admission state, but ${admission_problem}." \

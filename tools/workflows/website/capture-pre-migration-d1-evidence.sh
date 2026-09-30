@@ -53,10 +53,8 @@ d1_readonly_query() {
 }
 
 run_drain_sql="SELECT
-    -- Evidence only for the enabled-host count: the cutover keeps the
-    -- host enabled while the fleet gate is drained, so an admin proof
-    -- run can be placed. The gate state and the two zero counts are
-    -- the enforced conditions.
+    -- The two zero counts are enforced. The enabled-host count and the
+    -- cutover gate state are evidence only.
     (SELECT COUNT(*) FROM scenario_runs
       WHERE hidden_at IS NULL AND
         (active_key IS NOT NULL OR state NOT IN ('completed', 'failed')))
@@ -71,13 +69,10 @@ run_drain_sql="SELECT
       WHERE key = 'image_cutover')
       AS cutover_gate_state;"
 d1_readonly_query "${run_drain_sql}" "${run_drain_audit}"
-jq -e --argjson require_drained "${REQUIRE_DRAINED_GATE}" '
+jq -e '
   (.result[0].results | length == 1) and
   .result[0].results[0].active_scenario_run_count == 0 and
-  .result[0].results[0].non_uploaded_run_artifact_count == 0 and
-  (if $require_drained then
-    .result[0].results[0].cutover_gate_state == "drained"
-  else true end)
+  .result[0].results[0].non_uploaded_run_artifact_count == 0
 ' "${run_drain_audit}" >/dev/null
 
 assignment_counts_sql='SELECT organization_id, scenario_id,

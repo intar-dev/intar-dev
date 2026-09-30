@@ -16,24 +16,6 @@ run-name: |-
         options:
           - validate
           - deploy
-      maintenance:
-        description: auto follows pending migrations, on holds the control plane closed for a deliberate release, off returns the release to service
-        required: false
-        default: auto
-        type: choice
-        options:
-          - auto
-          - "on"
-          - "off"
-      registry_cleanup_mode:
-        description: Image registry cleanup worker mode for this release
-        required: false
-        default: preserve
-        type: choice
-        options:
-          - preserve
-          - report-only
-          - delete
   push:
     branches:
       - main
@@ -190,50 +172,10 @@ jobs:
       url: https://intar.dev
     outputs:
       static_pin_json: ${{ steps.pin.outputs.static_pin_json }}
-      maintenance: ${{ steps.request.outputs.maintenance }}
-      registry_cleanup_mode: ${{ steps.request.outputs.registry_cleanup_mode }}
       artifact_id: ${{ needs.validate.outputs.artifact_id }}
       artifact_digest: ${{ needs.validate.outputs.artifact_digest }}
     timeout-minutes: 30
     steps:
-      - name: Validate the release request
-        id: request
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REQUESTED_MAINTENANCE: ${{ inputs.maintenance || 'auto' }}
-          REQUESTED_CLEANUP_MODE: ${{ inputs.registry_cleanup_mode || 'preserve' }}
-        run: |
-          set -euo pipefail
-          test "${GITHUB_REF}" = refs/heads/main
-          case "${EVENT_NAME}" in
-            push)
-              # A push releases what the tests proved. It never closes the
-              # plane on its own and never asks for the delete campaign, so an
-              # unattended release can not change the runtime contract or
-              # remove registry objects.
-              test "${REQUESTED_MAINTENANCE}" = auto
-              test "${REQUESTED_CLEANUP_MODE}" = preserve
-              ;;
-            workflow_dispatch) ;;
-            *)
-              echo "unsupported release event: ${EVENT_NAME}" >&2
-              exit 1
-              ;;
-          esac
-          case "${REQUESTED_MAINTENANCE}" in
-            auto|on|off) ;;
-            *) echo 'maintenance must be auto, on, or off' >&2; exit 1 ;;
-          esac
-          case "${REQUESTED_CLEANUP_MODE}" in
-            preserve|report-only|delete) ;;
-            *) echo 'registry_cleanup_mode must be preserve, report-only, or delete' >&2; exit 1 ;;
-          esac
-          {
-            printf 'maintenance=%s\n' "${REQUESTED_MAINTENANCE}"
-            printf 'registry_cleanup_mode=%s\n' "${REQUESTED_CLEANUP_MODE}"
-          } >> "${GITHUB_OUTPUT}"
-          printf 'maintenance=%s registry_cleanup_mode=%s\n' \
-            "${REQUESTED_MAINTENANCE}" "${REQUESTED_CLEANUP_MODE}"
       - name: Checkout exact main revision
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
@@ -247,16 +189,9 @@ jobs:
       - name: Resolve the verified guest-tools pin
         id: pin
         env:
-          GH_TOKEN: ${{ github.token }}
-          MAINTENANCE_MODE: ${{ steps.request.outputs.maintenance }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: cuenv task -p ci --package ci website-resolve-guest-tools-pin
-      - name: Activate the D1 upload admission switch for a delete release
-        if: steps.request.outputs.registry_cleanup_mode == 'delete'
-        env:
-          REGISTRY_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: cuenv task -p ci --package ci website-activate-upload-admission
       - name: Retain release evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -265,7 +200,6 @@ jobs:
           path: |
             ${{ runner.temp }}/release-static-pin.json
             ${{ runner.temp }}/release-static-pin-evidence.json
-            ${{ runner.temp }}/registry-cleanup-activation.json
           if-no-files-found: warn
           retention-days: 30
   deploy:
@@ -282,7 +216,7 @@ jobs:
     environment:
       name: production
       url: https://intar.dev
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
       - name: Checkout exact main revision
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
@@ -312,7 +246,6 @@ jobs:
       - name: Inject the verified ABI 2 guest-tools pin
         env:
           GUEST_TOOLS_PIN_JSON: ${{ needs.plan.outputs.static_pin_json }}
-          MAINTENANCE_MODE: ${{ needs.plan.outputs.maintenance }}
         run: cuenv task -p ci --package ci website-inject-guest-tools-pin
       - name: Prepare runtime secrets
         id: runtime-secrets
@@ -332,30 +265,19 @@ jobs:
             --applied "$APPLIED_MIGRATION_COUNT" \
             --evidence "${RUNNER_TEMP}/d1-removal-rehearsal.json"
       - name: Capture pre-migration D1 evidence
-        if: steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'
-        env:
-          REQUIRE_DRAINED_GATE: ${{ needs.plan.outputs.maintenance != 'auto' }}
+        if: steps.migrations.outputs.pending == 'true'
         run: cuenv task -p ci --package ci website-capture-pre-migration-d1-evidence
-      - name: Inspect the image registry cleanup deployment
-        id: registry-cleanup-state
-        env:
-          REGISTRY_CLEANUP_INTENT: ${{ needs.plan.outputs.registry_cleanup_mode }}
-        run: cuenv task -p ci --package ci website-inspect-registry-cleanup
-      - name: Prepare the parent bootstrap configuration
-        if: (steps.registry-cleanup-state.outputs.child_present != 'true')
-        working-directory: .
-        run: cuenv task -p ci --package ci website-prepare-bootstrap-config
       - name: Prepare maintenance configuration
-        if: (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
+        if: steps.migrations.outputs.pending == 'true'
         working-directory: .
         run: cuenv task -p ci --package ci website-prepare-maintenance-config
       - name: Hold the image registry collector before the migration
-        if: (needs.plan.outputs.maintenance != 'off')
+        id: hold
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: cuenv task -p ci --package ci website-hold-registry-collector
       - name: Enable maintenance for pending migrations
-        if: (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
+        if: steps.migrations.outputs.pending == 'true'
         env:
           WEB_DEPLOY_LABEL: maintenance
         run: |
@@ -365,29 +287,17 @@ jobs:
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/web-maintenance.json"
       - name: Drain and recheck maintenance
-        if: (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')
+        if: steps.migrations.outputs.pending == 'true'
         run: cuenv task -p ci --package ci website-drain-maintenance
-      - name: Deploy the parent revision for the first cleanup rollout
-        if: (steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto')
-        env:
-          WEB_DEPLOY_LABEL: bootstrap
-        run: cuenv task -p ci --package ci website-deploy-bootstrap-parent
       - name: Apply pending D1 migrations
-        if: (steps.migrations.outputs.pending == 'true')
+        if: steps.migrations.outputs.pending == 'true'
         env:
           CLOUDFLARE_DATABASE_ID: ${{ env.DATABASE_ID }}
           MIGRATION_APPLY_EVIDENCE: ${{ runner.temp }}/production-d1-migrate.json
         run: cuenv task -p ci --package ci website-apply-d1-migrations
       - name: Verify production D1 schema
         run: cuenv task -p ci --package ci website-verify-d1-schema
-      - name: Verify the deployed image registry cleanup worker
-        id: registry-cleanup-child
-        if: (needs.plan.outputs.maintenance == 'off')
-        env:
-          REGISTRY_CLEANUP_OPERATION: reopen
-        run: cuenv task -p ci --package ci website-verify-deployed-registry-cleanup
       - name: Deploy the image registry cleanup worker
-        if: (steps.registry-cleanup-child.outputs.skip != 'true')
         run: cuenv task -p ci --package ci website-deploy-registry-cleanup
       - name: Deploy production at 100 percent
         env:
@@ -399,21 +309,10 @@ jobs:
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/web-production.json"
       - name: Release the image registry collector
-        if: (always() && needs.plan.outputs.maintenance != 'on')
+        if: always() && steps.hold.outcome != 'skipped'
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: cuenv task -p ci --package ci website-release-registry-collector
-      - name: Verify the report-only collector through the parent binding
-        if: (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only')
-        env:
-          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
-        run: cuenv task -p ci --package ci website-verify-report-only-collector
-      - name: Run the image registry cleanup to completion
-        if: (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete')
-        env:
-          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
-          REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
-        run: cuenv task -p ci --package ci website-run-registry-cleanup
       - name: Remove runtime secret file
         if: always() && steps.runtime-secrets.outcome != 'skipped'
         run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
@@ -439,15 +338,7 @@ jobs:
             ${{ runner.temp }}/web-production.json
             ${{ runner.temp }}/registry-cleanup-hold.json
             ${{ runner.temp }}/registry-cleanup-release.json
-            ${{ runner.temp }}/registry-cleanup-run.json
-            ${{ runner.temp }}/registry-cleanup-preview.json
-            ${{ runner.temp }}/registry-cleanup-child.json
             ${{ runner.temp }}/registry-cleanup-deploy.json
-            ${{ runner.temp }}/registry-cleanup-state.json
-            ${{ runner.temp }}/registry-cleanup-active-deployment.json
-            ${{ runner.temp }}/registry-cleanup-active-version.json
-            ${{ runner.temp }}/registry-cleanup-mode.json
-            ${{ runner.temp }}/web-bootstrap.json
             ${{ runner.temp }}/intar-registry-cleanup-deploy-${{ github.run_id }}/
             ${{ runner.temp }}/intar-registry-cleanup-gate-${{ github.run_id }}/
             ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-maintenance/

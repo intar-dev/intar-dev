@@ -779,7 +779,7 @@ describe("image registry cleanup deployment", () => {
     }
   }, DEPLOY_LIVENESS_TIMEOUT_MS);
 
-  it("proves the bootstrap parent: this revision, binding still absent", () => {
+  it("proves a parent of this revision by its tag, even without the binding", () => {
     const run = runDeployment({ parentBinding: false });
     try {
       expect(run.result.status, run.result.stderr).toBe(0);

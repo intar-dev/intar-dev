@@ -75,6 +75,28 @@ drains old requests before applying that migration. It does not roll back: a
 failed post-migration activation leaves maintenance enabled, and a failed live
 check leaves the deployed version active while the workflow reports failure.
 
+Every deploy holds the image registry cleanup worker before it changes
+anything and releases it at the end, also after a failure. The worker runs in
+the mode committed in `workers/image-registry-cleanup/wrangler.jsonc`; image-ops
+`cleanup-run` and the worker's 6-hour cron do the deleting. In `delete` mode the
+hold also needs D1 upload admission enforcement. If it has been switched off,
+re-enable it with `POST https://intar.dev/registry/v1/admission/enforcement`,
+body `{"mode":"enforce"}` and `Authorization: Bearer $INTAR_IMAGE_PUBLISH_TOKEN`,
+or commit `report-only` as the worker mode.
+
+To roll out new guest tools, run these from `main` in order:
+
+1. image-ops `gate-drained`, which stops new runs and waits for the fleet to
+   drain.
+2. image-ops `tools-build` with the published `kino_tag`. It uploads the
+   candidate and keeps it in the `guest-tools-deployment-<run_id>` artifact.
+3. image-ops `tools-promote` with a verified build `revision` to warm and
+   check against, and `expected_candidate_sha256`, the SHA-256 of that
+   artifact's `candidate.json`. It makes the candidate the stable channel.
+4. A Website dispatch with `operation=deploy`. Every deploy pins the stable
+   channel, so this one pins the promoted tools.
+5. image-ops `gate-open`.
+
 ## Sign-ups
 
 Anyone can create an account with GitHub, or through an organization's

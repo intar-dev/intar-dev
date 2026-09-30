@@ -21,7 +21,7 @@ test -f "${cleanup_config}"
 jq -e '
   (.name == "intar-dev-image-registry-cleanup") and
   (.triggers.crons == ["17 */6 * * *"]) and
-  (.vars.REGISTRY_CLEANUP_MODE == "report-only") and
+  (.vars.REGISTRY_CLEANUP_MODE == "report-only" or .vars.REGISTRY_CLEANUP_MODE == "delete") and
   (((.routes // []) | length) == 0) and
   ((.workers_dev // false) == false) and
   ((.preview_urls // false) == false) and

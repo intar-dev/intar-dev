@@ -11,9 +11,9 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 		"""
 
 	// One lane for the website: validate and smoke on every change, then release
-	// the tested artifact. A push to main deploys it. A manual dispatch may deploy
-	// deliberately (maintenance on or off, or the registry delete campaign) or
-	// validate only, which is what the default operation does.
+	// the tested artifact. A push to main deploys it. A manual dispatch deploys
+	// with the deploy operation, or validates only, which is the default.
+	// Maintenance turns on only while D1 migrations are pending.
 	on: {
 		workflow_dispatch: inputs: {
 			operation: {
@@ -24,28 +24,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				options: [
 					"validate",
 					"deploy",
-				]
-			}
-			maintenance: {
-				description: "auto follows pending migrations, on holds the control plane closed for a deliberate release, off returns the release to service"
-				required:    false
-				default:     "auto"
-				type:        "choice"
-				options: [
-					"auto",
-					"on",
-					"off",
-				]
-			}
-			registry_cleanup_mode: {
-				description: "Image registry cleanup worker mode for this release"
-				required:    false
-				default:     "preserve"
-				type:        "choice"
-				options: [
-					"preserve",
-					"report-only",
-					"delete",
 				]
 			}
 		}
@@ -238,55 +216,11 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			}
 			"timeout-minutes": 30
 			outputs: {
-				static_pin_json:       "${{ steps.pin.outputs.static_pin_json }}"
-				maintenance:           "${{ steps.request.outputs.maintenance }}"
-				registry_cleanup_mode: "${{ steps.request.outputs.registry_cleanup_mode }}"
-				artifact_id:           "${{ needs.validate.outputs.artifact_id }}"
-				artifact_digest:       "${{ needs.validate.outputs.artifact_digest }}"
+				static_pin_json: "${{ steps.pin.outputs.static_pin_json }}"
+				artifact_id:     "${{ needs.validate.outputs.artifact_id }}"
+				artifact_digest: "${{ needs.validate.outputs.artifact_digest }}"
 			}
 			steps: [{
-				name: "Validate the release request"
-				id:   "request"
-				env: {
-					EVENT_NAME:             "${{ github.event_name }}"
-					REQUESTED_MAINTENANCE:  "${{ inputs.maintenance || 'auto' }}"
-					REQUESTED_CLEANUP_MODE: "${{ inputs.registry_cleanup_mode || 'preserve' }}"
-				}
-				run: """
-					set -euo pipefail
-					test "${GITHUB_REF}" = refs/heads/main
-					case "${EVENT_NAME}" in
-					  push)
-					    # A push releases what the tests proved. It never closes the
-					    # plane on its own and never asks for the delete campaign, so an
-					    # unattended release can not change the runtime contract or
-					    # remove registry objects.
-					    test "${REQUESTED_MAINTENANCE}" = auto
-					    test "${REQUESTED_CLEANUP_MODE}" = preserve
-					    ;;
-					  workflow_dispatch) ;;
-					  *)
-					    echo "unsupported release event: ${EVENT_NAME}" >&2
-					    exit 1
-					    ;;
-					esac
-					case "${REQUESTED_MAINTENANCE}" in
-					  auto|on|off) ;;
-					  *) echo 'maintenance must be auto, on, or off' >&2; exit 1 ;;
-					esac
-					case "${REQUESTED_CLEANUP_MODE}" in
-					  preserve|report-only|delete) ;;
-					  *) echo 'registry_cleanup_mode must be preserve, report-only, or delete' >&2; exit 1 ;;
-					esac
-					{
-					  printf 'maintenance=%s\\n' "${REQUESTED_MAINTENANCE}"
-					  printf 'registry_cleanup_mode=%s\\n' "${REQUESTED_CLEANUP_MODE}"
-					} >> "${GITHUB_OUTPUT}"
-					printf 'maintenance=%s registry_cleanup_mode=%s\\n' \\
-					  "${REQUESTED_MAINTENANCE}" "${REQUESTED_CLEANUP_MODE}"
-
-					"""
-			}, {
 				name: "Checkout exact main revision"
 				uses: gha.pin."nscloud-checkout".ref
 				with: "persist-credentials": false
@@ -303,20 +237,10 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Resolve the verified guest-tools pin"
 				id:   "pin"
 				env: {
-					GH_TOKEN:              "${{ github.token }}"
-					MAINTENANCE_MODE:      "${{ steps.request.outputs.maintenance }}"
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
 				#StepTask & {#task: "website-resolve-guest-tools-pin"}
-			}, {
-				name: "Activate the D1 upload admission switch for a delete release"
-				// An explicit prerequisite: only a dispatch that asked for delete turns
-				// this on. It runs before the deploy job closes the plane, because the
-				// registry sits behind the maintenance fence.
-				if: "steps.request.outputs.registry_cleanup_mode == 'delete'"
-				env: REGISTRY_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				#StepTask & {#task: "website-activate-upload-admission"}
 			}, {
 				name: "Retain release evidence"
 				if:   "always()"
@@ -326,7 +250,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					path: """
 						${{ runner.temp }}/release-static-pin.json
 						${{ runner.temp }}/release-static-pin-evidence.json
-						${{ runner.temp }}/registry-cleanup-activation.json
 
 						"""
 					"if-no-files-found": "warn"
@@ -346,9 +269,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "production"
 				url:  "https://intar.dev"
 			}
-			// Preparation is the plan job now, so this bound covers the deployment
-			// phases plus the delete campaign's sixty minutes.
-			"timeout-minutes": 90
+			"timeout-minutes": 45
 			concurrency: {
 				group:                "website-production"
 				"cancel-in-progress": false
@@ -387,10 +308,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				#StepTask & {#task: "website-pin-production-config"}
 			}, {
 				name: "Inject the verified ABI 2 guest-tools pin"
-				env: {
-					GUEST_TOOLS_PIN_JSON: "${{ needs.plan.outputs.static_pin_json }}"
-					MAINTENANCE_MODE:     "${{ needs.plan.outputs.maintenance }}"
-				}
+				env: GUEST_TOOLS_PIN_JSON: "${{ needs.plan.outputs.static_pin_json }}"
 				#StepTask & {#task: "website-inject-guest-tools-pin"}
 			}, {
 				name: "Prepare runtime secrets"
@@ -420,35 +338,16 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					"""
 			}, {
 				name: "Capture pre-migration D1 evidence"
-				if:   "steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance != 'auto'"
-				env: {
-					// Both cutover operations, the pin deploy and the return to service,
-					// require the drained gate and a whole-fleet zero state. The normal
-					// migration path keeps only its original run and artifact checks.
-					REQUIRE_DRAINED_GATE: "${{ needs.plan.outputs.maintenance != 'auto' }}"
-				}
+				if:   "steps.migrations.outputs.pending == 'true'"
 				#StepTask & {#task: "website-capture-pre-migration-d1-evidence"}
-			}, {
-				name: "Inspect the image registry cleanup deployment"
-				id:   "registry-cleanup-state"
-				env: REGISTRY_CLEANUP_INTENT: "${{ needs.plan.outputs.registry_cleanup_mode }}"
-				#StepTask & {#task: "website-inspect-registry-cleanup"}
-			}, {
-				name:                "Prepare the parent bootstrap configuration"
-				"working-directory": "."
-				if:                  "(steps.registry-cleanup-state.outputs.child_present != 'true')"
-				#StepTask & {#task: "website-prepare-bootstrap-config"}
 			}, {
 				name:                "Prepare maintenance configuration"
 				"working-directory": "."
-				if:                  "(steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
+				if:                  "steps.migrations.outputs.pending == 'true'"
 				#StepTask & {#task: "website-prepare-maintenance-config"}
 			}, {
 				name: "Hold the image registry collector before the migration"
-				// A reopen already holds a paused collector, and the control plane is
-				// still closed at this point, so its hold would travel to a fenced
-				// route. The release step below is what the reopen needs.
-				if: "(needs.plan.outputs.maintenance != 'off')"
+				id:   "hold"
 				env: {
 					// The collector has no public route: the parent worker holds the
 					// service binding, and the gate route on that worker is the only path
@@ -460,7 +359,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				#StepTask & {#task: "website-hold-registry-collector"}
 			}, {
 				name: "Enable maintenance for pending migrations"
-				if:   "(steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
+				if:   "steps.migrations.outputs.pending == 'true'"
 				env: WEB_DEPLOY_LABEL: "maintenance"
 				run: """
 					tools/deploy/deploy-web.sh \\
@@ -472,16 +371,11 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					"""
 			}, {
 				name: "Drain and recheck maintenance"
-				if:   "(steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
+				if:   "steps.migrations.outputs.pending == 'true'"
 				#StepTask & {#task: "website-drain-maintenance"}
 			}, {
-				name: "Deploy the parent revision for the first cleanup rollout"
-				if:   "(steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto')"
-				env: WEB_DEPLOY_LABEL: "bootstrap"
-				#StepTask & {#task: "website-deploy-bootstrap-parent"}
-			}, {
 				name: "Apply pending D1 migrations"
-				if:   "(steps.migrations.outputs.pending == 'true')"
+				if:   "steps.migrations.outputs.pending == 'true'"
 				env: {
 					CLOUDFLARE_DATABASE_ID:   "${{ env.DATABASE_ID }}"
 					MIGRATION_APPLY_EVIDENCE: "${{ runner.temp }}/production-d1-migrate.json"
@@ -491,26 +385,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Verify production D1 schema"
 				#StepTask & {#task: "website-verify-d1-schema"}
 			}, {
-				name: "Verify the deployed image registry cleanup worker"
-				// The reopen operation runs with the control plane already closed and in
-				// a fresh runner, so the hold evidence that a delete-capable child
-				// deploy requires can never exist here. This gate decides instead: when
-				// the collector that serves is already this revision in this mode, the
-				// reopen keeps it, releases it, and lets the campaign prove the delete
-				// authority from the open parent. When it would have to replace a
-				// delete-capable collector, it refuses with the operation to run instead
-				// of deadlocking on evidence the fenced control plane can not produce.
-				id: "registry-cleanup-child"
-				if: "(needs.plan.outputs.maintenance == 'off')"
-				env: REGISTRY_CLEANUP_OPERATION: "reopen"
-				#StepTask & {#task: "website-verify-deployed-registry-cleanup"}
-			}, {
 				name: "Deploy the image registry cleanup worker"
-				// A reopen verifies the deployed collector instead of replacing it: the
-				// verification step above sets skip, and the reopen then only reopens
-				// the parent, releases the collector, and runs the campaign. A skipped
-				// verification step leaves skip empty, so every other path still deploys.
-				if: "(steps.registry-cleanup-child.outputs.skip != 'true')"
 				#StepTask & {#task: "website-deploy-registry-cleanup"}
 			}, {
 				name: "Deploy production at 100 percent"
@@ -525,44 +400,11 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					"""
 			}, {
 				name: "Release the image registry collector"
-				// A cutover keeps the control plane closed, so the collector stays held
-				// and the reopen operation releases it after its maintenance-off deploy.
-				// A paused collector can not retire anything, and it can not refuse a
-				// learner either.
-				if: "(always() && needs.plan.outputs.maintenance != 'on')"
+				// The hold does not expire, so every run that reached it releases the
+				// collector again, also after a failed deploy.
+				if: "always() && steps.hold.outcome != 'skipped'"
 				env: CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
 				#StepTask & {#task: "website-release-registry-collector"}
-			}, {
-				name: "Verify the report-only collector through the parent binding"
-				// The rollout verification of the report-only phase: the parent now
-				// serves with maintenance off and the collector has been released, so
-				// one plan call proves the first report child binding. The collector
-				// must report that it read the maintenance flag from the control plane
-				// version that serves traffic, and that version must be open, and the
-				// plan must be complete and fault free. That is the evidence a later
-				// delete release needs from the report-only rollout before it turns
-				// deletes on. A plan is a read, so it deletes nothing.
-				if: "(always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only')"
-				env: CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
-				#StepTask & {#task: "website-verify-report-only-collector"}
-			}, {
-				name: "Run the image registry cleanup to completion"
-				// The release that turns deletes on, and the reopen that follows a
-				// cutover, clear the backlog in the same rollout: a report-only
-				// collector never deletes, so this step runs only in delete mode. The
-				// campaign is bounded by passes and by wall clock inside the script,
-				// and it proves the result with a fresh report whose keyset digest is
-				// the one the finished campaign recorded.
-				if: "(always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'delete')"
-				env: {
-					CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
-					// A full plan takes roughly 90 seconds plus its post-scan, so the
-					// script's 15-minute manual default can not finish a large backlog.
-					// CI gets 60 minutes here, inside the job's 75. Early completion still
-					// returns immediately.
-					REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
-				}
-				#StepTask & {#task: "website-run-registry-cleanup"}
 			}, {
 				name: "Remove runtime secret file"
 				if:   "always() && steps.runtime-secrets.outcome != 'skipped'"
@@ -590,15 +432,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 						${{ runner.temp }}/web-production.json
 						${{ runner.temp }}/registry-cleanup-hold.json
 						${{ runner.temp }}/registry-cleanup-release.json
-						${{ runner.temp }}/registry-cleanup-run.json
-						${{ runner.temp }}/registry-cleanup-preview.json
-						${{ runner.temp }}/registry-cleanup-child.json
 						${{ runner.temp }}/registry-cleanup-deploy.json
-						${{ runner.temp }}/registry-cleanup-state.json
-						${{ runner.temp }}/registry-cleanup-active-deployment.json
-						${{ runner.temp }}/registry-cleanup-active-version.json
-						${{ runner.temp }}/registry-cleanup-mode.json
-						${{ runner.temp }}/web-bootstrap.json
 						${{ runner.temp }}/intar-registry-cleanup-deploy-${{ github.run_id }}/
 						${{ runner.temp }}/intar-registry-cleanup-gate-${{ github.run_id }}/
 						${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-maintenance/
@@ -620,7 +454,6 @@ tasks: {
 	"website-verify-registry-cleanup-artifact": #Script & {_script: "tools/workflows/website/verify-registry-cleanup-artifact.sh"}
 	"website-record-artifact-identity": #Script & {_script: "tools/workflows/website/record-artifact-identity.sh"}
 	"website-resolve-guest-tools-pin": #Script & {_script: "tools/workflows/website/resolve-guest-tools-pin.sh", _production: true}
-	"website-activate-upload-admission": #Script & {_script: "tools/workflows/website/activate-upload-admission.sh", _production: true}
 	"website-verify-deploy-revision": #Script & {_script: "tools/workflows/website/verify-deploy-revision.sh"}
 	"website-download-tested-artifact": #Script & {_script: "tools/workflows/website/download-tested-artifact.sh"}
 	"website-pin-production-config": #Script & {_script: "tools/workflows/website/pin-production-config.sh"}
@@ -628,17 +461,11 @@ tasks: {
 	"website-prepare-runtime-secrets": #Script & {_script: "tools/workflows/website/prepare-runtime-secrets.sh", _production: true}
 	"website-plan-d1-migrations": #Script & {_script: "tools/workflows/website/plan-d1-migrations.sh", _production: true}
 	"website-capture-pre-migration-d1-evidence": #Script & {_script: "tools/workflows/website/capture-pre-migration-d1-evidence.sh", _production: true}
-	"website-inspect-registry-cleanup": #Script & {_script: "tools/workflows/website/inspect-registry-cleanup.sh", _production: true}
-	"website-prepare-bootstrap-config": #Script & {_script: "tools/workflows/website/prepare-bootstrap-config.sh"}
 	"website-prepare-maintenance-config": #Script & {_script: "tools/workflows/website/prepare-maintenance-config.sh"}
 	"website-hold-registry-collector": #Script & {_script: "tools/workflows/website/hold-registry-collector.sh", _production: true}
 	"website-drain-maintenance": #Script & {_script: "tools/workflows/website/drain-maintenance.sh", _production: true}
-	"website-deploy-bootstrap-parent": #Script & {_script: "tools/workflows/website/deploy-bootstrap-parent.sh", _production: true}
 	"website-apply-d1-migrations": #Script & {_script: "tools/workflows/website/apply-d1-migrations.sh", _production: true}
 	"website-verify-d1-schema": #Script & {_script: "tools/workflows/website/verify-d1-schema.sh", _production: true}
-	"website-verify-deployed-registry-cleanup": #Script & {_script: "tools/workflows/website/verify-deployed-registry-cleanup.sh", _production: true}
 	"website-deploy-registry-cleanup": #Script & {_script: "tools/workflows/website/deploy-registry-cleanup.sh", _production: true}
 	"website-release-registry-collector": #Script & {_script: "tools/workflows/website/release-registry-collector.sh", _production: true}
-	"website-verify-report-only-collector": #Script & {_script: "tools/workflows/website/verify-report-only-collector.sh", _production: true}
-	"website-run-registry-cleanup": #Script & {_script: "tools/workflows/website/run-registry-cleanup.sh", _production: true}
 }

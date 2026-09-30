@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # Website workflow, deploy job, step "Inject the verified ABI 2 guest-tools pin".
 set -euo pipefail
-case "${MAINTENANCE_MODE}" in
-  auto|on|off) ;;
-  *) echo "maintenance input must be auto, on, or off" >&2; exit 1 ;;
-esac
 if [ -z "${GUEST_TOOLS_PIN_JSON}" ]; then
   echo 'SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON is not set.' >&2
   echo 'The ABI 2 release has no dynamic channel fallback, so the' >&2
@@ -31,6 +27,3 @@ jq -e --slurpfile pin "${pin_file}" '
 ' "${DEPLOYMENT_CONFIG}" >/dev/null
 printf 'deployment pin sha256: %s\n' \
   "$(jq -er '.static_pin_sha256' "${pin_check}")"
-{
-  printf 'MAINTENANCE_MODE=%s\n' "${MAINTENANCE_MODE}"
-} >> "${GITHUB_ENV}"

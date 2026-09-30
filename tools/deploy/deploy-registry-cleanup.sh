@@ -88,11 +88,8 @@ jq -e \
   ' "${config}" >/dev/null
 
 # The collector reads the live maintenance flag from the parent version that
-# serves traffic, so that version must exist before the collector does. The
-# parent bootstrap deploy of this revision therefore runs first, and this
-# check proves it is the version now serving. That bootstrap version omits the
-# REGISTRY_CLEANUP binding, because a binding to a service that does not exist
-# yet fails the parent deploy.
+# serves traffic, so that version must exist before the collector does. This
+# check reads which version serves now.
 bunx wrangler deployments status --name "${parent_worker_name}" --json \
   > "${parent_deployment}"
 parent_active_version_id="$(jq -er '
@@ -102,9 +99,8 @@ parent_active_version_id="$(jq -er '
 bunx wrangler versions view "${parent_active_version_id}" \
   --name "${parent_worker_name}" --json > "${parent_version}"
 parent_tag="$(jq -r '.annotations["workers/tag"] // ""' "${parent_version}")"
-# The REGISTRY_CLEANUP binding belongs to the parent phase that runs after this
-# deploy. The bootstrap parent omits it on purpose and the full parent adds it,
-# so its presence is recorded rather than required.
+# A parent of this revision proves the capability by its tag, so the
+# REGISTRY_CLEANUP binding is recorded rather than required.
 parent_binding_count="$(jq \
   --arg binding "${parent_binding}" '
     [.resources.bindings[] | select(.type == "service" and .name == $binding)] |
@@ -115,8 +111,8 @@ readonly parent_binding_count
 # The collector needs a parent that exports MaintenanceState, the fence it reads
 # on every run, and the gate route that a deployment holds it through. Two live
 # parents satisfy that:
-#   - the bootstrap parent of this rollout, which serves this revision and omits
-#     the binding because the collector does not exist yet;
+#   - a parent of this revision, such as the maintenance deploy that serves
+#     while migrations are pending;
 #   - an earlier parent from this feature, which carries the binding whose
 #     service already answers.
 parent_revision_proven=false
@@ -165,7 +161,7 @@ readonly first_deployment
 if [ "${mode}" = delete ]; then
   if [ "${first_deployment}" = true ]; then
     echo "the first deployment of the collector cannot delete" >&2
-    echo "Deploy the report-only preview, read its candidate list, then deploy delete." >&2
+    echo "Commit report-only, deploy it, read its candidate list, then commit delete." >&2
     exit 1
   fi
   case "${previous_mode}" in

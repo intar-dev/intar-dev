@@ -9,9 +9,9 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": {
-    // Report-only until the production rollout proves a run. A run in this
-    // mode lists candidates and writes no delete.
-    "REGISTRY_CLEANUP_MODE": "report-only"
+    // The live mode, deployed as committed on every release. "report-only"
+    // lists candidates and writes no delete.
+    "REGISTRY_CLEANUP_MODE": "delete"
   },
   "triggers": {
     // Every six hours at minute 17 UTC: 00:17, 06:17, 12:17, 18:17. A publish

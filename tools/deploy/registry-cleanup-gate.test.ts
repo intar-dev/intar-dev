@@ -716,9 +716,9 @@ describe("registry cleanup delete campaign", () => {
   });
 
   it("proves the delete authority from the serving parent before the first pass", () => {
-    // A reopen has no hold evidence: its runner is fresh and the cutover that
-    // holds the collector is a different run. The campaign takes the same
-    // proof itself, from the parent that serves at that moment.
+    // The campaign lane (image-ops cleanup-run) has no hold evidence, so the
+    // campaign takes the same proof itself, from the parent that serves at
+    // that moment.
     const run = runGate({
       action: "run",
       targetMode: "delete",
