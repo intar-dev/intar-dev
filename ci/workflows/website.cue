@@ -1,35 +1,23 @@
 package workflows
 
-import "github.com/intar-dev/intar-dev/ci/gha"
+import (
+	"list"
+
+	"github.com/intar-dev/intar-dev/ci/gha"
+)
 
 "workflows": website: {
-	name: "Website"
-	"run-name": """
-		${{ github.event_name == 'pull_request'
-		    && format('Website validate PR #{0}', github.event.pull_request.number)
-		    || format('Website release main @ {0}', github.sha) }}
-		"""
+	name:       "Website"
+	"run-name": "Website release main @ ${{ github.sha }}"
 
-	// One lane for the website: validate and smoke on every change, then release
-	// the tested artifact. A push to main deploys it. A manual dispatch deploys
-	// with the deploy operation, or validates only, which is the default.
-	// Maintenance turns on only while D1 migrations are pending.
+	// Deploys main: every push that changes what can be deployed, and a manual
+	// dispatch, for a revision a push did not deploy. ci.yml's web lane checks
+	// pull requests with the same build steps, and the deploy job refuses any
+	// other ref. Maintenance turns on only while D1 migrations are pending.
 	on: {
-		workflow_dispatch: inputs: {
-			operation: {
-				description: "validate runs the checks only, deploy releases this revision"
-				required:    false
-				default:     "validate"
-				type:        "choice"
-				options: [
-					"validate",
-					"deploy",
-				]
-			}
-		}
-		// A push deploys, so it runs for what can be deployed and for the lane
-		// itself: the web app without its tests, the workspace manifests, and the
-		// deploy tooling. Pull requests keep the wider validation list.
+		workflow_dispatch: {}
+		// What can be deployed and the lane itself: the web app without its
+		// tests, the workspace manifests, and the deploy tooling.
 		push: {
 			branches: ["main"]
 			paths: [
@@ -50,87 +38,28 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				"tools/database/**",
 			]
 		}
-		pull_request: paths: [
-			".github/workflows/website.yml",
-			".github/actions/setup-runtime/**",
-			".github/actions/setup-cuenv/**",
-			"ci/workflows/website.cue",
-			"ci/workflows/tasks.cue",
-			"tools/workflows/website/**",
-			"Cargo.toml",
-			"Cargo.lock",
-			"rust-toolchain.toml",
-			"package.json",
-			"bun.lock",
-			"patches/**",
-			"tsconfig.base.json",
-			"tools/check-import-boundaries.ts",
-			"tools/database/**",
-			"tools/deploy/**",
-			"tools/vm-boot-benchmark/**",
-			"tools/vm-boot-benchmark.py",
-			"tools/test_vm_boot_benchmark.py",
-			"crates/intar-image-scenario/**",
-			"apps/web/**"]
 	}
 	permissions: {
 		actions:  "read"
 		contents: "read"
 	}
-	concurrency: {
-		// Validation never shares a group with the deploy job, which waits for this
-		// run: one shared group could deadlock both.
-		group:                "website-validate-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}"
-		"cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
-	}
+	// Each run waits for the one before it, deploy included, so an older
+	// revision never deploys over a newer one. The deploy job's own group
+	// differs: one shared group would deadlock the run with its own job.
+	concurrency: gha.#ProductionConcurrency & {group: "website"}
 	jobs: {
 		validate: {
-			name:      "Test and build"
-			"runs-on": "namespace-profile-intar-dev"
+			name:              "Test and build"
+			"runs-on":         gha.runner
+			"timeout-minutes": lanes.web.timeout
 			outputs: {
 				artifact_id:     "${{ steps.artifact.outputs.artifact_id }}"
 				artifact_digest: "${{ steps.artifact.outputs.artifact_digest }}"
 			}
-			steps: [{
-				name: "Checkout"
-				uses: gha.pin."nscloud-checkout".ref
-				with: "persist-credentials": false
-			}, {
-				name: "Set up cuenv"
-				uses: "./.github/actions/setup-cuenv"
-			}, {
-				name: "Set up the CI runtime"
-				uses: "./.github/actions/setup-runtime"
-			}, {
-				name: "Set up Bun cache"
-				uses: gha.pin."nscloud-cache".ref
-				with: path: "~/.bun/install/cache"
-			}, {
-				name: "Install dependencies"
-				run:  "bun install --frozen-lockfile"
-			}, {
-				name: "Check web contracts"
-				#StepTask & {#task: "website-check-web-contracts"}
-			}, {
-				name:                "Test"
-				"working-directory": "apps/web"
-				run:                 "bun run test"
-			}, {
-				name:                "Build"
-				"working-directory": "apps/web"
-				run:                 "bun run build"
-			}, {
-				name: "Verify the image registry cleanup worker artifact"
-				#StepTask & {#task: "website-verify-registry-cleanup-artifact"}
-			}, {
+			steps: list.Concat([laneSteps.web, [{
 				name: "Upload tested deployment artifact"
-				// The release workflow pushes its version commit with GITHUB_TOKEN,
-				// and GitHub suppresses workflow triggers for that token, so a release
-				// SHA can reach main with no Website run. A manual dispatch of this
-				// same workflow on that same main revision is the supported way to
-				// produce the tested artifact, and the deploy lane accepts either
-				// event as long as the revision matches exactly.
-				if:   "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'"
+				// The deploy job takes this exact artifact from this run.
+				if:   "github.ref == 'refs/heads/main'"
 				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                   "website-dist-${{ github.sha }}"
@@ -143,68 +72,15 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			}, {
 				name: "Record the tested artifact identity"
 				id:   "artifact"
-				if:   "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'"
+				if:   "github.ref == 'refs/heads/main'"
 				env: GH_TOKEN: "${{ github.token }}"
 				#StepTask & {#task: "website-record-artifact-identity"}
-			}]
-		}
-		ui: {
-			name:      "Chromium smoke"
-			"runs-on": "namespace-profile-intar-dev"
-			container: {
-				image:   "mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27"
-				options: "--ipc=host"
-			}
-			steps: [{
-				name: "Checkout"
-				uses: gha.pin.checkout.ref
-				with: "persist-credentials": false
-			}, {
-				name: "Set up Node"
-				uses: gha.pin."setup-node".ref
-				with: "node-version-file": "apps/web/.node-version"
-			}, {
-				name:                "Install Bun setup prerequisite"
-				"working-directory": "apps/web"
-				run:                 "apt-get update && apt-get install --yes --no-install-recommends unzip=6.0-28ubuntu4.1"
-			}, {
-				name: "Set up Bun"
-				uses: gha.pin."setup-bun".ref
-				with: "bun-version": "1.3.14"
-			}, {
-				name: "Install dependencies"
-				run:  "bun install --frozen-lockfile"
-			}, {
-				name:                "Run Chromium smoke"
-				"working-directory": "apps/web"
-				env: {
-					CI:   "true"
-					HOME: "/root"
-				}
-				run: "bunx playwright test tests/ui/smoke.spec.ts --project=chromium-smoke"
-			}, {
-				name: "Upload smoke report"
-				if:   "always()"
-				uses: gha.pin."upload-artifact".ref
-				with: {
-					name: "website-smoke-${{ github.run_attempt }}"
-					path: """
-						.tmp/website-playwright/playwright-report
-						.tmp/website-playwright/test-results
-
-						"""
-					"if-no-files-found": "warn"
-					"retention-days":    7
-				}
-			}]
+			}]])
 		}
 		deploy: {
 			name: "Deploy production"
-			needs: [
-				"validate",
-				"ui",
-			]
-			if:        "github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))"
+			needs: ["validate"]
+			if:        "github.ref == 'refs/heads/main'"
 			"runs-on": "namespace-profile-intar-dev"
 			env: {
 				CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
@@ -385,8 +261,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 // The run steps above, one script each; see tasks.cue. A production step
 // uses production credentials or changes something outside the runner.
 tasks: {
-	"website-check-web-contracts": #Script & {_script: "tools/workflows/website/check-web-contracts.sh"}
-	"website-verify-registry-cleanup-artifact": #Script & {_script: "tools/workflows/website/verify-registry-cleanup-artifact.sh"}
 	"website-record-artifact-identity": #Script & {_script: "tools/workflows/website/record-artifact-identity.sh"}
 	"website-verify-deploy-revision": #Script & {_script: "tools/workflows/website/verify-deploy-revision.sh"}
 	"website-download-tested-artifact": #Script & {_script: "tools/workflows/website/download-tested-artifact.sh"}

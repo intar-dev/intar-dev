@@ -1,60 +1,40 @@
 package workflows
 
-import "github.com/intar-dev/intar-dev/ci/gha"
+import (
+	"list"
+
+	"github.com/intar-dev/intar-dev/ci/gha"
+)
 
 "workflows": docs: {
 	name:       "Docs"
-	"run-name": "${{ github.event_name == 'pull_request' && format('Docs validate PR #{0}', github.event.pull_request.number) || github.ref != 'refs/heads/main' && format('Docs validate {0} @ {1}', github.ref_name, github.sha) || format('Docs deploy main @ {0}', github.sha) }}"
+	"run-name": "${{ github.ref != 'refs/heads/main' && format('Docs validate {0} @ {1}', github.ref_name, github.sha) || format('Docs deploy main @ {0}', github.sha) }}"
 
 	// A push to main deploys. A manual dispatch from main deploys too, for when a
-	// push never started a run; from another branch it only validates.
+	// push never started a run; from another branch it only builds. ci.yml's
+	// docs lane checks pull requests with the same build steps.
 	on: {
 		workflow_dispatch: {}
-		pull_request: paths: [
-			".github/workflows/docs.yml",
-			".github/actions/setup-runtime/**",
-			"apps/web/.node-version",
-			"docs/**",
-		]
 		push: {
 			branches: ["main"]
 			paths: [
 				".github/workflows/docs.yml",
+				".github/actions/setup-cuenv/**",
 				".github/actions/setup-runtime/**",
 				"apps/web/.node-version",
 				"docs/**"]
 		}
 	}
 	permissions: contents: "read"
-	concurrency: {
-		group:                "docs-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'production' }}"
-		"cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
-	}
-	defaults: run: "working-directory": "docs"
+	concurrency: gha.#ProductionConcurrency & {group: "docs-production"}
 	jobs: {
 		build: {
 			name:              "Test and build"
-			"runs-on":         "namespace-profile-intar-dev"
-			"timeout-minutes": 10
-			steps: [{
-				name: "Checkout"
-				uses: gha.pin.checkout.ref
-				with: "persist-credentials": false
-			}, {
-				name: "Set up the CI runtime"
-				uses: "./.github/actions/setup-runtime"
-			}, {
-				name: "Install docs dependencies"
-				run:  "bun install --frozen-lockfile"
-			}, {
-				name: "Build docs"
-				run:  "bun run build"
-			}, {
-				name: "Validate Cloudflare deployment"
-				run:  "bunx --no-install wrangler deploy --dry-run"
-			}, {
+			"runs-on":         gha.runner
+			"timeout-minutes": lanes.docs.timeout
+			steps: list.Concat([laneSteps.docs, [{
 				name: "Upload tested docs"
-				if:   "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')"
+				if:   "github.ref == 'refs/heads/main'"
 				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "docs-dist-${{ github.sha }}"
@@ -63,11 +43,11 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					"if-no-files-found": "error"
 					"retention-days":    1
 				}
-			}]
+			}]])
 		}
 		deploy: {
 			name:              "Deploy production"
-			if:                "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')"
+			if:                "github.ref == 'refs/heads/main'"
 			needs:             "build"
 			"runs-on":         "namespace-profile-intar-dev"
 			"timeout-minutes": 10
@@ -75,6 +55,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "production"
 				url:  "https://docs.intar.dev"
 			}
+			defaults: run: "working-directory": "docs"
 			steps: [{
 				name: "Checkout"
 				uses: gha.pin.checkout.ref

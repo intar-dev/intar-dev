@@ -63,8 +63,9 @@ Drizzle Kit's D1 HTTP driver and requires `CLOUDFLARE_ACCOUNT_ID`,
 `CLOUDFLARE_DATABASE_ID`, and either `CLOUDFLARE_D1_TOKEN` or
 `CLOUDFLARE_API_TOKEN`. Do not apply schema files with `wrangler d1 execute`,
 run Wrangler's D1 migration commands, or edit either migration ledger by hand.
-Pull requests run the web tests, build, and one Chromium smoke check. A matching
-push to `main` runs the same fixed lane and then deploys its tested artifact
+Pull requests run the web lane of the CI workflow (the checks, tests, and
+build) and one Chromium smoke check. A matching push to `main` builds with the
+same lane steps in the Website workflow and then deploys that tested artifact
 automatically. The deploy verifies the exact source revision and production
 bindings, applies pending Drizzle migrations, deploys the full Worker
 configuration at 100 percent, and checks the homepage, favicon, and D1-backed

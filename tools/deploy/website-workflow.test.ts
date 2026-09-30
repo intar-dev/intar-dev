@@ -3,8 +3,11 @@ import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
 
 // Bun is the CI runtime and supplies the YAML parser; no new dependency.
-const parsed = spawnSync("bun", ["-e", 'console.log(JSON.stringify(Bun.YAML.parse(await Bun.file(".github/workflows/website.yml").text())))'], { encoding: "utf8" });
-if (parsed.status !== 0) throw new Error(parsed.stderr);
+function parse(path: string) {
+  const parsed = spawnSync("bun", ["-e", `console.log(JSON.stringify(Bun.YAML.parse(await Bun.file("${path}").text())))`], { encoding: "utf8" });
+  if (parsed.status !== 0) throw new Error(parsed.stderr);
+  return JSON.parse(parsed.stdout) as { on: Record<string, unknown>; jobs: Record<string, Job> };
+}
 type Step = { name: string; id?: string; if?: string; run?: string; with?: Record<string, unknown> };
 type Job = {
   if?: string;
@@ -13,7 +16,8 @@ type Job = {
   environment?: Record<string, unknown>;
   steps: Step[];
 };
-const workflow = JSON.parse(parsed.stdout) as { jobs: Record<string, Job> };
+const workflow = parse(".github/workflows/website.yml");
+const ci = parse(".github/workflows/ci.yml");
 const deploy = workflow.jobs.deploy!;
 const pending = "steps.migrations.outputs.pending == 'true'";
 
@@ -39,10 +43,17 @@ it("parses every workflow shell block", () => {
   }
 });
 
-it("deploys from one production job after the tests and the smoke", () => {
-  expect(Object.keys(workflow.jobs).sort()).toEqual(["deploy", "ui", "validate"]);
-  expect(deploy.needs).toEqual(["validate", "ui"]);
+it("deploys main from one production job after the tests", () => {
+  expect(Object.keys(workflow.jobs).sort()).toEqual(["deploy", "validate"]);
+  expect(Object.keys(workflow.on).sort()).toEqual(["push", "workflow_dispatch"]);
+  expect(deploy.needs).toEqual(["validate"]);
+  expect(deploy.if).toBe("github.ref == 'refs/heads/main'");
   expect(deploy.environment).toEqual({ name: "production", url: "https://intar.dev" });
+});
+
+it("builds with the web lane's steps, so pull requests check the deployed build", () => {
+  const lane = ci.jobs.web!.steps;
+  expect(workflow.jobs.validate!.steps.slice(0, lane.length)).toEqual(lane);
 });
 
 it("never cancels a deploy in progress", () => {

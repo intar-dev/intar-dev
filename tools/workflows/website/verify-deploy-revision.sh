@@ -5,8 +5,7 @@ test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
 test "${GITHUB_REF}" = refs/heads/main
 test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
 # Deployment is deliberate in this file: a push to main, or a manual
-# dispatch that named the deploy operation. The plan job's condition
-# admitted that request before this job started.
+# dispatch from main.
 case "${GITHUB_EVENT_NAME}" in
   push|workflow_dispatch) ;;
   *)
