@@ -1,14 +1,21 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
+import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import { user } from "@/db/schema";
 import type { UserContext } from "./agent-bridge";
 import { createHostEnrollment, claimHostEnrollment, randomHostSecret } from "./host-enrollment";
 import { handleHostEnrollment } from "@/control-plane/host-enrollment";
 import { resetD1Database } from "@/test/d1-migrations";
 import { ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtures";
+import { POST as createEnrollmentRoute } from "@/pages/api/servers/enrollments";
+
+const auth = vi.hoisted(() => ({ requireUserContext: vi.fn() }));
+vi.mock("@/lib/agent-bridge", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/agent-bridge")>(), ...auth,
+}));
 
 let context: UserContext;
 beforeEach(async () => {
@@ -72,14 +79,30 @@ it("claims an enrollment through the public endpoint without a registration gate
   await expect(response.json()).resolves.toMatchObject({ hostId: enrollment.hostId, ownerUserId: "owner", scope: "personal" });
 });
 
+// Production D1 keeps the retired gate rows; nothing may read them any more.
+const seedDrainedRegistrationGates = () => env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES " +
+  "('personal_metal_registration','drained',1), ('platform_metal_registration','drained',1)").run();
+
 it("ignores leftover drained registration gate rows", async () => {
-  // Production D1 keeps the retired gate rows; nothing may read them any more.
-  await env.DB.prepare("INSERT INTO runtime_operation_gates (key,state,updated_at) VALUES " +
-    "('personal_metal_registration','drained',1), ('platform_metal_registration','drained',1)").run();
+  await seedDrainedRegistrationGates();
   await env.DB.prepare("UPDATE user SET role = 'admin' WHERE id = 'owner'").run();
   const admin = { ...context, isAdmin: true };
   const personal = await createHostEnrollment(env.DB, admin, { name: "Personal", scope: "personal", role: "agent" });
   const platform = await createHostEnrollment(env.DB, admin, { name: "Builder", scope: "platform", role: "builder" });
   expect(await claimHostEnrollment(env.DB, personal.enrollmentToken, randomHostSecret())).toMatchObject({ scope: "personal" });
   expect(await claimHostEnrollment(env.DB, platform.enrollmentToken, randomHostSecret())).toMatchObject({ scope: "platform" });
+});
+
+it("creates personal and platform enrollments through the route despite drained gate rows", async () => {
+  await seedDrainedRegistrationGates();
+  const post = (body: unknown) => createEnrollmentRoute({ request: new Request("https://intar.dev/api/servers/enrollments", {
+    method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" },
+  }) } as unknown as Parameters<APIRoute>[0]) as Promise<Response>;
+  auth.requireUserContext.mockResolvedValue({ ok: true, context });
+  const personal = await post({ name: "Personal", scope: "personal", role: "agent" });
+  expect(personal.status).toBe(201);
+  await expect(personal.json()).resolves.toMatchObject({ hostId: expect.any(String), enrollmentToken: expect.any(String) });
+  await env.DB.prepare("UPDATE user SET role = 'admin' WHERE id = 'owner'").run();
+  auth.requireUserContext.mockResolvedValue({ ok: true, context: { ...context, isAdmin: true } });
+  expect((await post({ name: "Builder", scope: "platform", role: "builder" })).status).toBe(201);
 });
