@@ -202,12 +202,89 @@ jobs:
             .tmp/website-playwright/test-results
           if-no-files-found: warn
           retention-days: 7
+  release-plan:
+    name: release-plan
+    needs: changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Plan the release dry run
+        id: plan
+        env:
+          BASE_SHA: ${{ needs.changes.outputs.base }}
+        run: cuenv task -p ci --package ci ci-release-plan
+  release-dry-run:
+    name: Release dry run ${{ matrix.tag }}
+    needs: release-plan
+    if: needs.release-plan.outputs.matrix != '[]'
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.release-plan.outputs.matrix) }}
+      fail-fast: false
+    timeout-minutes: 45
+    steps:
+      - name: Checkout on Namespace
+        if: matrix.runner != 'ubuntu-24.04'
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+      - name: Checkout jailed agent release
+        if: matrix.runner == 'ubuntu-24.04'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Preflight jailed release runner
+        if: matrix.project == 'intar-agent'
+        run: cuenv task -p ci --package ci release-preflight-jailed-release-runner
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          targets: aarch64-unknown-linux-musl
+          namespace-cache: ${{ matrix.runner != 'ubuntu-24.04' }}
+      - name: Build release artifacts
+        env:
+          PACKAGE: ${{ matrix.package }}
+          BINARY: ${{ matrix.binary }}
+          VERSION: ${{ matrix.version }}
+        run: cuenv task -p ci --package ci release-build-release-artifacts
+      - name: Test personal-host installer
+        if: matrix.project == 'intar-agent'
+        run: cuenv task installer-tests
+      - name: Run privileged agent package smoke
+        if: matrix.project == 'intar-agent'
+        env:
+          VERSION: ${{ matrix.version }}
+        run: cuenv task -p ci --package ci release-privileged-agent-package-smoke
+      - name: Smoke-test image CLI release package
+        if: matrix.project == 'intar-image-cli'
+        env:
+          VERSION: ${{ matrix.version }}
+        run: cuenv task -p ci --package ci release-smoke-test-image-cli-package
   ci-ok:
     name: ci-ok
     if: always()
     needs:
       - changes
       - web-ui
+      - release-plan
+      - release-dry-run
       - rust
       - security
       - images

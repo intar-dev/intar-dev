@@ -57,6 +57,36 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			permissions: contents: "read"
 		}
 
+		// The products this pull request would release: each whose version
+		// differs from the base, or all of them when the release build changed.
+		"release-plan": {
+			name:              "release-plan"
+			needs:             "changes"
+			if:                "github.event_name == 'pull_request'"
+			"runs-on":         "ubuntu-24.04"
+			"timeout-minutes": 10
+			permissions: contents: "read"
+			outputs: matrix:       "${{ steps.plan.outputs.matrix }}"
+			steps: [
+				gha.#Checkout & {with: "fetch-depth": 2},
+				gha.#SetupCuenv,
+				{
+					name: "Plan the release dry run"
+					id:   "plan"
+					env: BASE_SHA: "${{ needs.changes.outputs.base }}"
+					#StepTask & {#task: "ci-release-plan"}
+				},
+			]
+		}
+
+		// release.yml's build, run on the pull request without publishing.
+		"release-dry-run": #ReleaseBuild & {
+			#plan:             "release-plan"
+			#dryRun:           true
+			name:              "Release dry run ${{ matrix.tag }}"
+			"timeout-minutes": 45
+		}
+
 		"ci-ok": {
 			name: "ci-ok"
 			if:   "always()"
@@ -85,3 +115,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 	jobs: [string]: permissions?: [string]: "read" | "none"
 }
 files: ".github/workflows/ci.yml": !~"secrets\\.|github\\.token"
+
+tasks: {
+	"ci-release-plan": #Script & {_script: "tools/workflows/ci/release-plan.sh"}
+}

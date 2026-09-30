@@ -48,6 +48,9 @@ other registry.
   entry, and prepends its `CHANGELOG.md`. The app cannot move the branch
   across a change to `.github/workflows`, so such a push to main replaces the
   pull request with a new one.
+- **Dry run:** CI builds and smoke-tests every product whose version a pull
+  request changes, the release pull request included, with the release build's
+  own steps. A change to the release build dry-runs every product.
 - **Publishing:** merging that pull request tags each new version on main and
   opens a draft release. The workflow runs the workspace checks on each draft's
   tag, builds and smoke-tests it from that tag, attests the payload, and

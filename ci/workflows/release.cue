@@ -102,80 +102,10 @@ let _gitCliff = {
 		// The payload is built from the tag alone, with read-only access. The
 		// workspace gate runs on the tag too: nothing requires the release pull
 		// request's CI to pass before it merges.
-		build: {
-			name:      "Build ${{ matrix.tag }}"
-			needs:     "plan"
-			if:        _hasReleases
-			strategy:  _releases
-			"runs-on": "${{ matrix.runner }}"
-			permissions: contents: "read"
-			steps: [
-				gha.#Checkout & {
-					name: "Checkout on Namespace"
-					if:   "matrix.runner != 'ubuntu-24.04'"
-					uses: gha.pin."nscloud-checkout".ref
-					with: ref: "${{ matrix.tag }}"
-				},
-				// The jailed agent release needs a host kernel with Landlock
-				// enabled, which Namespace's runner kernel disables at boot.
-				gha.#Checkout & {
-					name: "Checkout jailed agent release"
-					if:   "matrix.runner == 'ubuntu-24.04'"
-					with: ref: "${{ matrix.tag }}"
-				},
-				gha.#SetupCuenv,
-				{
-					name: "Preflight jailed release runner"
-					if:   "matrix.project == 'intar-agent'"
-					#StepTask & {#task: "release-preflight-jailed-release-runner"}
-				},
-				gha.#SetupRust & {with: {
-					targets:           "aarch64-unknown-linux-musl"
-					"namespace-cache": "${{ matrix.runner != 'ubuntu-24.04' }}"
-				}},
-				gha.#Run & {
-					name:  "Run checks"
-					#task: "verify"
-				},
-				{
-					name: "Build release artifacts"
-					env: {
-						PACKAGE: "${{ matrix.package }}"
-						BINARY:  "${{ matrix.binary }}"
-						VERSION: "${{ matrix.version }}"
-					}
-					#StepTask & {#task: "release-build-release-artifacts"}
-				},
-				gha.#Run & {
-					name:  "Test personal-host installer"
-					if:    "matrix.project == 'intar-agent'"
-					#task: "installer-tests"
-				},
-				{
-					name: "Run privileged agent package smoke"
-					if:   "matrix.project == 'intar-agent'"
-					env: VERSION: "${{ matrix.version }}"
-					#StepTask & {#task: "release-privileged-agent-package-smoke"}
-				},
-				{
-					name: "Smoke-test image CLI release package"
-					if:   "matrix.project == 'intar-image-cli'"
-					env: VERSION: "${{ matrix.version }}"
-					#StepTask & {#task: "release-smoke-test-image-cli-package"}
-				},
-				{
-					name: "Preserve exact release payload"
-					uses: gha.pin."upload-artifact".ref
-					with: {
-						name:                "release-${{ matrix.prefix }}"
-						path:                "dist/"
-						"if-no-files-found": "error"
-						"compression-level": 0
-						overwrite:           true
-						"retention-days":    7
-					}
-				},
-			]
+		build: #ReleaseBuild & {
+			#plan:   "plan"
+			#dryRun: false
+			name:    "Build ${{ matrix.tag }}"
 		}
 
 		// Each product publishes on its own, so one failed build leaves only
@@ -246,6 +176,95 @@ let _gitCliff = {
 			]
 		}
 	}
+}
+
+// One product's build from a plan job's matrix. release.yml builds each draft
+// from its tag and keeps the payload for publish. ci.yml's release dry run
+// builds the pull request with the same steps, minus the workspace gate its
+// rust lane runs and the payload upload, since nothing publishes it.
+#ReleaseBuild: gha.#Job & {
+	#plan!:   string
+	#dryRun!: bool
+	let _checkout = {
+		if !#dryRun {ref: "${{ matrix.tag }}"}
+	}
+	needs: #plan
+	if:    "needs.\(#plan).outputs.matrix != '[]'"
+	strategy: {
+		matrix: include: "${{ fromJSON(needs.\(#plan).outputs.matrix) }}"
+		"fail-fast": false
+	}
+	"runs-on": "${{ matrix.runner }}"
+	permissions: contents: "read"
+	steps: [
+		gha.#Checkout & {
+			name: "Checkout on Namespace"
+			if:   "matrix.runner != 'ubuntu-24.04'"
+			uses: gha.pin."nscloud-checkout".ref
+			with: _checkout
+		},
+		// The jailed agent release needs a host kernel with Landlock
+		// enabled, which Namespace's runner kernel disables at boot.
+		gha.#Checkout & {
+			name: "Checkout jailed agent release"
+			if:   "matrix.runner == 'ubuntu-24.04'"
+			with: _checkout
+		},
+		gha.#SetupCuenv,
+		{
+			name: "Preflight jailed release runner"
+			if:   "matrix.project == 'intar-agent'"
+			#StepTask & {#task: "release-preflight-jailed-release-runner"}
+		},
+		gha.#SetupRust & {with: {
+			targets:           "aarch64-unknown-linux-musl"
+			"namespace-cache": "${{ matrix.runner != 'ubuntu-24.04' }}"
+		}},
+		if !#dryRun {
+			gha.#Run & {
+				name:  "Run checks"
+				#task: "verify"
+			}
+		},
+		{
+			name: "Build release artifacts"
+			env: {
+				PACKAGE: "${{ matrix.package }}"
+				BINARY:  "${{ matrix.binary }}"
+				VERSION: "${{ matrix.version }}"
+			}
+			#StepTask & {#task: "release-build-release-artifacts"}
+		},
+		gha.#Run & {
+			name:  "Test personal-host installer"
+			if:    "matrix.project == 'intar-agent'"
+			#task: "installer-tests"
+		},
+		{
+			name: "Run privileged agent package smoke"
+			if:   "matrix.project == 'intar-agent'"
+			env: VERSION: "${{ matrix.version }}"
+			#StepTask & {#task: "release-privileged-agent-package-smoke"}
+		},
+		{
+			name: "Smoke-test image CLI release package"
+			if:   "matrix.project == 'intar-image-cli'"
+			env: VERSION: "${{ matrix.version }}"
+			#StepTask & {#task: "release-smoke-test-image-cli-package"}
+		},
+		if !#dryRun {
+			name: "Preserve exact release payload"
+			uses: gha.pin."upload-artifact".ref
+			with: {
+				name:                "release-${{ matrix.prefix }}"
+				path:                "dist/"
+				"if-no-files-found": "error"
+				"compression-level": 0
+				overwrite:           true
+				"retention-days":    7
+			}
+		},
+	]
 }
 
 // Every release step runs only in GitHub Actions: they tag, publish, open pull
