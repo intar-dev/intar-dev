@@ -128,8 +128,8 @@ To roll out new guest tools, run these from `main` in order:
 3. image-ops `tools-promote` with a verified build `revision` to warm and
    check against, and `expected_candidate_sha256`, the SHA-256 of that
    artifact's `candidate.json`. It makes the candidate the stable channel.
-4. A Website dispatch with `operation=deploy`. Every deploy pins the stable
-   channel, so this one pins the promoted tools.
+4. A Website dispatch from `main` (`gh workflow run website.yml --ref main`).
+   Every deploy pins the stable channel, so this one pins the promoted tools.
 5. image-ops `gate-open`.
 
 ## Sign-ups
