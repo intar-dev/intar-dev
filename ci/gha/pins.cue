@@ -20,9 +20,7 @@ pin: {
 	"download-artifact": {repo: "actions/download-artifact", sha: "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", tag: "v8"}
 	"setup-node": {repo: "actions/setup-node", sha: "820762786026740c76f36085b0efc47a31fe5020", tag: "v7"}
 	"upload-artifact": {repo: "actions/upload-artifact", sha: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", tag: "v7"}
-	"setup-zig": {repo: "mlugg/setup-zig", sha: "d1434d08867e3ee9daa34448df10607b98908d29", tag: "v2"}
 	"nscloud-cache": {repo: "namespacelabs/nscloud-cache-action", sha: "1124a6f3ce44e5cf84cc22111530961f4d2a15f9", tag: "v1"}
 	"nscloud-checkout": {repo: "namespacelabs/nscloud-checkout-action", sha: "66f2dc6f6c42a8ac6c4e53473c4840006822831e", tag: "v9"}
 	"setup-bun": {repo: "oven-sh/setup-bun", sha: "0c5077e51419868618aeaa5fe8019c62421857d6", tag: "v2"}
-	"install-action": {repo: "taiki-e/install-action", sha: "4cef1412cce204788f482e778a0b9187f9626a29", tag: "v2"}
 }

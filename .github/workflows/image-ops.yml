@@ -216,20 +216,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: cuenv task -p ci --package ci image-ops-verify-kino-source
-      - name: Install Rust toolchain
-        run: cuenv task -p ci --package ci image-ops-install-rust-toolchain
-      - name: Set up Rust cache
-        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
-        with:
-          cache: rust
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
-        with:
-          tool: cargo-zigbuild@0.23.0
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          version: 0.16.0
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
       - name: Verify runner disk tools
         run: cuenv task -p ci --package ci image-ops-verify-runner-disk-tools
       - name: Prepare Kino source workspace

@@ -193,7 +193,7 @@ jobs:
   });
 
   it("checks install pins in workflow step scripts", () => {
-    const script = "tools/workflows/release/install-rust-toolchain.sh";
+    const script = "tools/workflows/release/example-step.sh";
     const violations = check("jobs: {}\n", undefined, undefined, {
       [script]: `#!/usr/bin/env bash
 # rustup toolchain install stable

@@ -124,25 +124,13 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					TAG_PREFIX: "${{ steps.project.outputs.tag_prefix }}"
 				}
 				#StepTask & {#task: "release-determine-release-tag"}
-			}, {
-				name: "Install Rust toolchain"
-				if:   "steps.next.outputs.resume != 'true'"
-				#StepTask & {#task: "release-install-rust-toolchain"}
-			}, {
-				name: "Set up Namespace caches"
-				if:   "inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'"
-				uses: gha.pin."nscloud-cache".ref
-				with: cache: "rust"
-			}, {
-				name: "Install tools"
-				if:   "steps.next.outputs.resume != 'true'"
-				uses: gha.pin."install-action".ref
-				with: tool: "cargo-nextest@0.9.143,cargo-zigbuild@0.23.0"
-			}, {
-				name: "Install Zig"
-				if:   "steps.next.outputs.resume != 'true'"
-				uses: gha.pin."setup-zig".ref
-				with: version: "0.16.0"
+			}, gha.#SetupRust & {
+				if: "steps.next.outputs.resume != 'true'"
+				with: {
+					targets: "aarch64-unknown-linux-musl"
+					// The jailed agent release runs on a GitHub-hosted runner.
+					"namespace-cache": "${{ inputs.project != 'intar-agent' }}"
+				}
 			}, {
 				name: "Apply release version"
 				if:   "steps.next.outputs.resume != 'true'"
@@ -276,7 +264,6 @@ tasks: {
 	"release-preflight-jailed-release-runner": #Script & {_script: "tools/workflows/release/preflight-jailed-release-runner.sh"}
 	"release-resolve-project": #Script & {_script: "tools/workflows/release/resolve-project.sh"}
 	"release-determine-release-tag": #Script & {_script: "tools/workflows/release/determine-release-tag.sh"}
-	"release-install-rust-toolchain": #Script & {_script: "tools/workflows/release/install-rust-toolchain.sh"}
 	"release-apply-release-version": #Script & {_script: "tools/workflows/release/apply-release-version.sh"}
 	"release-build-release-artifacts": #Script & {_script: "tools/workflows/release/build-release-artifacts.sh"}
 	"release-privileged-agent-package-smoke": #Script & {_script: "tools/workflows/release/privileged-agent-package-smoke.sh"}

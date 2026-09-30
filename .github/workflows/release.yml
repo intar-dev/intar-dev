@@ -98,24 +98,12 @@ jobs:
           RESUME_TAG: ${{ inputs.resume_tag }}
           TAG_PREFIX: ${{ steps.project.outputs.tag_prefix }}
         run: cuenv task -p ci --package ci release-determine-release-tag
-      - name: Install Rust toolchain
+      - name: Set up Rust
         if: steps.next.outputs.resume != 'true'
-        run: cuenv task -p ci --package ci release-install-rust-toolchain
-      - name: Set up Namespace caches
-        if: inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'
-        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
+        uses: ./.github/actions/setup-rust
         with:
-          cache: rust
-      - name: Install tools
-        if: steps.next.outputs.resume != 'true'
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
-        with:
-          tool: cargo-nextest@0.9.143,cargo-zigbuild@0.23.0
-      - name: Install Zig
-        if: steps.next.outputs.resume != 'true'
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          version: 0.16.0
+          targets: aarch64-unknown-linux-musl
+          namespace-cache: ${{ inputs.project != 'intar-agent' }}
       - name: Apply release version
         if: steps.next.outputs.resume != 'true'
         env:

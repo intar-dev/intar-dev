@@ -268,22 +268,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Verify published Kino source"
 				env: GH_TOKEN: "${{ github.token }}"
 				#StepTask & {#task: "image-ops-verify-kino-source"}
-			}, {
-				name: "Install Rust toolchain"
-				#StepTask & {#task: "image-ops-install-rust-toolchain"}
-			}, {
-				name: "Set up Rust cache"
-				uses: gha.pin."nscloud-cache".ref
-				with: cache: "rust"
-			}, {
-				name: "Install cargo-zigbuild"
-				uses: gha.pin."install-action".ref
-				with: tool: "cargo-zigbuild@0.23.0"
-			}, {
-				name: "Install Zig"
-				uses: gha.pin."setup-zig".ref
-				with: version: "0.16.0"
-			}, {
+			}, gha.#SetupRust, {
 				name: "Verify runner disk tools"
 				#StepTask & {#task: "image-ops-verify-runner-disk-tools"}
 			}, {
@@ -536,7 +521,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 // that authenticates to production or changes anything outside the runner is
 // _production; the authority check and the evidence scrub touch only the runner.
 tasks: {
-	"image-ops-install-rust-toolchain": #Script & {_script: "tools/workflows/image-ops/install-rust-toolchain.sh"}
 	"image-ops-verify-runner-disk-tools": #Script & {_script: "tools/workflows/image-ops/verify-runner-disk-tools.sh"}
 	"image-ops-verify-kino-source": #Script & {_script: "tools/workflows/image-ops/verify-kino-source.sh"}
 	"image-ops-prepare-kino-source": #Script & {_script: "tools/workflows/image-ops/prepare-kino-source.sh"}
