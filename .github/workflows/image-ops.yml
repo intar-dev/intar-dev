@@ -215,9 +215,9 @@ jobs:
       - name: Verify published Kino source
         env:
           GH_TOKEN: ${{ github.token }}
-        run: cuenv task image-ops-verify-kino-source
+        run: cuenv task -p ci --package ci image-ops-verify-kino-source
       - name: Install Rust toolchain
-        run: cuenv task image-ops-install-rust-toolchain
+        run: cuenv task -p ci --package ci image-ops-install-rust-toolchain
       - name: Set up Rust cache
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
@@ -231,11 +231,11 @@ jobs:
         with:
           version: 0.16.0
       - name: Verify runner disk tools
-        run: cuenv task image-ops-verify-runner-disk-tools
+        run: cuenv task -p ci --package ci image-ops-verify-runner-disk-tools
       - name: Prepare Kino source workspace
-        run: cuenv task image-ops-prepare-kino-source
+        run: cuenv task -p ci --package ci image-ops-prepare-kino-source
       - name: Build guest Kino and tools disk
-        run: cuenv task image-ops-build-guest-tools
+        run: cuenv task -p ci --package ci image-ops-build-guest-tools
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
       - name: Install pinned Wrangler
@@ -245,13 +245,13 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: cuenv task image-ops-upload-tools-candidate
+        run: cuenv task -p ci --package ci image-ops-upload-tools-candidate
       - name: Verify uploaded objects by re-download
         working-directory: .
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: cuenv task image-ops-verify-tools-upload
+        run: cuenv task -p ci --package ci image-ops-verify-tools-upload
       - name: Retain build and deployment evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -301,14 +301,14 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: cuenv task image-ops-read-tools-candidate
+        run: cuenv task -p ci --package ci image-ops-read-tools-candidate
       - name: Require drained host and retain previous stable pin
         working-directory: .
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: cuenv task image-ops-require-drain-retain-stable
+        run: cuenv task -p ci --package ci image-ops-require-drain-retain-stable
       - name: Retain rollback pin before promotion
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -318,11 +318,11 @@ jobs:
       - name: Warm every host and wait for the candidate cache
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: cuenv task image-ops-warm-tools-candidate
+        run: cuenv task -p ci --package ci image-ops-warm-tools-candidate
       - name: Promote the exact candidate while drained
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: cuenv task image-ops-promote-tools-candidate
+        run: cuenv task -p ci --package ci image-ops-promote-tools-candidate
       - name: Retain promotion evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -372,29 +372,29 @@ jobs:
         if: needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'
         run: bun install --frozen-lockfile
       - name: Validate cleanup authority
-        run: cuenv task image-ops-validate-cleanup-authority
+        run: cuenv task -p ci --package ci image-ops-validate-cleanup-authority
       - name: Read the collector status and the shared ledger
-        run: cuenv task image-ops-read-cleanup-state
+        run: cuenv task -p ci --package ci image-ops-read-cleanup-state
       - name: List the candidate set
         if: needs.request.outputs.action == 'plan'
-        run: cuenv task image-ops-plan-cleanup
+        run: cuenv task -p ci --package ci image-ops-plan-cleanup
       - name: Run the delete campaign
         if: needs.request.outputs.action == 'run'
         env:
           REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
-        run: cuenv task image-ops-run-cleanup
+        run: cuenv task -p ci --package ci image-ops-run-cleanup
       - name: Resolve one stalled sweep
         if: needs.request.outputs.action == 'resolve'
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
           REAP_URL: https://intar.dev/registry/v1/admission/reap
           STALE_MS: "600000"
-        run: cuenv task image-ops-resolve-stalled-sweep
+        run: cuenv task -p ci --package ci image-ops-resolve-stalled-sweep
       - name: Remove any response that reflected the machine credential
         if: always()
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: cuenv task image-ops-scrub-cleanup-evidence
+        run: cuenv task -p ci --package ci image-ops-scrub-cleanup-evidence
       - name: Retain cleanup evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

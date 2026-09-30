@@ -160,7 +160,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				run:  "bun install --frozen-lockfile"
 			}, {
 				name: "Check web contracts"
-				run:  "cuenv task website-check-web-contracts"
+				#StepTask & {#task: "website-check-web-contracts"}
 			}, {
 				name:                "Test"
 				"working-directory": "apps/web"
@@ -171,7 +171,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				run:                 "bun run build"
 			}, {
 				name: "Verify the image registry cleanup worker artifact"
-				run:  "cuenv task website-verify-registry-cleanup-artifact"
+				#StepTask & {#task: "website-verify-registry-cleanup-artifact"}
 			}, {
 				name: "Upload tested deployment artifact"
 				// The release workflow pushes its version commit with GITHUB_TOKEN,
@@ -195,7 +195,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				id:   "artifact"
 				if:   "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'"
 				env: GH_TOKEN: "${{ github.token }}"
-				run: "cuenv task website-record-artifact-identity"
+				#StepTask & {#task: "website-record-artifact-identity"}
 			}]
 		}
 		ui: {
@@ -380,7 +380,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
-				run: "cuenv task website-resolve-guest-tools-pin"
+				#StepTask & {#task: "website-resolve-guest-tools-pin"}
 			}, {
 				name: "Activate the D1 upload admission switch for a delete release"
 				// An explicit prerequisite: only a dispatch that asked for delete turns
@@ -388,7 +388,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// registry sits behind the maintenance fence.
 				if: "steps.request.outputs.metal_action == '' && steps.request.outputs.registry_cleanup_mode == 'delete'"
 				env: REGISTRY_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				run: "cuenv task website-activate-upload-admission"
+				#StepTask & {#task: "website-activate-upload-admission"}
 			}, {
 				name: "Retain release evidence"
 				if:   "always()"
@@ -436,7 +436,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				uses: "./.github/actions/setup-cuenv"
 			}, {
 				name: "Verify exact-main deployment revision"
-				run:  "cuenv task website-verify-deploy-revision"
+				#StepTask & {#task: "website-verify-deploy-revision"}
 			}, {
 				name: "Restore metal retirement evidence"
 				if:   "needs.plan.outputs.metal_action != '' && inputs.metal_deploy_run_id != ''"
@@ -446,7 +446,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					METAL_ACTION:      "${{ needs.plan.outputs.metal_action }}"
 					PROOF_ARTIFACT_ID: "${{ inputs.metal_proof_artifact_id }}"
 				}
-				run: "cuenv task website-restore-metal-evidence"
+				#StepTask & {#task: "website-restore-metal-evidence"}
 			}, {
 				name: "Download tested deployment artifact"
 				env: {
@@ -455,7 +455,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					TESTED_ARTIFACT_DIGEST: "${{ needs.plan.outputs.artifact_digest }}"
 					METAL_ACTION:           "${{ needs.plan.outputs.metal_action }}"
 				}
-				run: "cuenv task website-download-tested-artifact"
+				#StepTask & {#task: "website-download-tested-artifact"}
 			}, {
 				name: "Set up the CI runtime"
 				uses: "./.github/actions/setup-runtime"
@@ -469,7 +469,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			}, {
 				name:                "Pin and verify production configuration"
 				"working-directory": "."
-				run:                 "cuenv task website-pin-production-config"
+				#StepTask & {#task: "website-pin-production-config"}
 			}, {
 				name: "Inject the verified ABI 2 guest-tools pin"
 				env: {
@@ -477,7 +477,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					GUEST_TOOLS_PIN_JSON: "${{ needs.plan.outputs.static_pin_json }}"
 					MAINTENANCE_MODE:     "${{ needs.plan.outputs.maintenance }}"
 				}
-				run: "cuenv task website-inject-guest-tools-pin"
+				#StepTask & {#task: "website-inject-guest-tools-pin"}
 			}, {
 				name: "Prepare runtime secrets"
 				id:   "runtime-secrets"
@@ -485,12 +485,12 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
 					STARGATE_EGRESS_IPV4_CIDRS:              "${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}"
 				}
-				run: "cuenv task website-prepare-runtime-secrets"
+				#StepTask & {#task: "website-prepare-runtime-secrets"}
 			}, {
 				name: "Plan production D1 migrations"
 				if:   "needs.plan.outputs.metal_action == '' || needs.plan.outputs.metal_action == 'deploy'"
 				id:   "migrations"
-				run:  "cuenv task website-plan-d1-migrations"
+				#StepTask & {#task: "website-plan-d1-migrations"}
 			}, {
 				name: "Rehearse pending migrations on disposable D1"
 				if:   "(needs.plan.outputs.metal_action == '' || needs.plan.outputs.metal_action == 'deploy') && steps.migrations.outputs.pending == 'true'"
@@ -515,12 +515,12 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					REQUIRE_DRAINED_GATE: "${{ needs.plan.outputs.maintenance != 'auto' }}"
 					METAL_ACTION:         "${{ needs.plan.outputs.metal_action }}"
 				}
-				run: "cuenv task website-capture-pre-migration-d1-evidence"
+				#StepTask & {#task: "website-capture-pre-migration-d1-evidence"}
 			}, {
 				name: "Inspect the image registry cleanup deployment"
 				id:   "registry-cleanup-state"
 				env: REGISTRY_CLEANUP_INTENT: "${{ needs.plan.outputs.registry_cleanup_mode }}"
-				run: "cuenv task website-inspect-registry-cleanup"
+				#StepTask & {#task: "website-inspect-registry-cleanup"}
 			}, {
 				name: "Retain immutable personal-metal release inputs"
 				if:   "needs.plan.outputs.metal_action == 'deploy'"
@@ -544,17 +544,17 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					PERSONAL_METAL_RELEASE_INPUTS_FILE: "${{ runner.temp }}/personal-metal/release.json"
 					COLLECTOR_PRESENT:                  "${{ steps.registry-cleanup-state.outputs.child_present }}"
 				}
-				run: "cuenv task website-run-personal-metal-action"
+				#StepTask & {#task: "website-run-personal-metal-action"}
 			}, {
 				name:                "Prepare the parent bootstrap configuration"
 				"working-directory": "."
 				if:                  "needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-state.outputs.child_present != 'true')"
-				run:                 "cuenv task website-prepare-bootstrap-config"
+				#StepTask & {#task: "website-prepare-bootstrap-config"}
 			}, {
 				name:                "Prepare maintenance configuration"
 				"working-directory": "."
 				if:                  "needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
-				run:                 "cuenv task website-prepare-maintenance-config"
+				#StepTask & {#task: "website-prepare-maintenance-config"}
 			}, {
 				name: "Hold the image registry collector before the migration"
 				// A reopen already holds a paused collector, and the control plane is
@@ -569,7 +569,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					// collector version is deployed yet.
 					CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
 				}
-				run: "cuenv task website-hold-registry-collector"
+				#StepTask & {#task: "website-hold-registry-collector"}
 			}, {
 				name: "Enable maintenance for pending migrations"
 				if:   "needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
@@ -585,12 +585,12 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			}, {
 				name: "Drain and recheck maintenance"
 				if:   "needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true' || needs.plan.outputs.maintenance == 'on')"
-				run:  "cuenv task website-drain-maintenance"
+				#StepTask & {#task: "website-drain-maintenance"}
 			}, {
 				name: "Deploy the parent revision for the first cleanup rollout"
 				if:   "needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-state.outputs.child_present != 'true' && steps.migrations.outputs.pending != 'true' && needs.plan.outputs.maintenance == 'auto')"
 				env: WEB_DEPLOY_LABEL: "bootstrap"
-				run: "cuenv task website-deploy-bootstrap-parent"
+				#StepTask & {#task: "website-deploy-bootstrap-parent"}
 			}, {
 				name: "Apply pending D1 migrations"
 				if:   "needs.plan.outputs.metal_action == '' && (steps.migrations.outputs.pending == 'true')"
@@ -598,11 +598,11 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					CLOUDFLARE_DATABASE_ID:   "${{ env.DATABASE_ID }}"
 					MIGRATION_APPLY_EVIDENCE: "${{ runner.temp }}/production-d1-migrate.json"
 				}
-				run: "cuenv task website-apply-d1-migrations"
+				#StepTask & {#task: "website-apply-d1-migrations"}
 			}, {
 				name: "Verify production D1 schema"
 				if:   "needs.plan.outputs.metal_action == ''"
-				run:  "cuenv task website-verify-d1-schema"
+				#StepTask & {#task: "website-verify-d1-schema"}
 			}, {
 				name: "Verify the deployed image registry cleanup worker"
 				// The reopen operation runs with the control plane already closed and in
@@ -616,15 +616,15 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				id: "registry-cleanup-child"
 				if: "needs.plan.outputs.metal_action == '' && (needs.plan.outputs.maintenance == 'off')"
 				env: REGISTRY_CLEANUP_OPERATION: "reopen"
-				run: "cuenv task website-verify-deployed-registry-cleanup"
+				#StepTask & {#task: "website-verify-deployed-registry-cleanup"}
 			}, {
 				name: "Deploy the image registry cleanup worker"
 				// A reopen verifies the deployed collector instead of replacing it: the
 				// verification step above sets skip, and the reopen then only reopens
 				// the parent, releases the collector, and runs the campaign. A skipped
 				// verification step leaves skip empty, so every other path still deploys.
-				if:  "needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-child.outputs.skip != 'true')"
-				run: "cuenv task website-deploy-registry-cleanup"
+				if: "needs.plan.outputs.metal_action == '' && (steps.registry-cleanup-child.outputs.skip != 'true')"
+				#StepTask & {#task: "website-deploy-registry-cleanup"}
 			}, {
 				name: "Deploy production at 100 percent"
 				if:   "needs.plan.outputs.metal_action == ''"
@@ -645,7 +645,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// learner either.
 				if: "needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on')"
 				env: CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
-				run: "cuenv task website-release-registry-collector"
+				#StepTask & {#task: "website-release-registry-collector"}
 			}, {
 				name: "Verify the report-only collector through the parent binding"
 				// The rollout verification of the report-only phase: the parent now
@@ -658,7 +658,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// deletes on. A plan is a read, so it deletes nothing.
 				if: "needs.plan.outputs.metal_action == '' && (always() && needs.plan.outputs.maintenance != 'on' && env.REGISTRY_CLEANUP_MODE == 'report-only')"
 				env: CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
-				run: "cuenv task website-verify-report-only-collector"
+				#StepTask & {#task: "website-verify-report-only-collector"}
 			}, {
 				name: "Run the image registry cleanup to completion"
 				// The release that turns deletes on, and the reopen that follows a
@@ -676,7 +676,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					// returns immediately.
 					REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
 				}
-				run: "cuenv task website-run-registry-cleanup"
+				#StepTask & {#task: "website-run-registry-cleanup"}
 			}, {
 				name: "Remove runtime secret file"
 				if:   "always() && steps.runtime-secrets.outcome != 'skipped'"
@@ -684,7 +684,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			}, {
 				name: "Collect personal-metal diagnostics"
 				if:   "always() && needs.plan.outputs.metal_action != ''"
-				run:  "cuenv task website-collect-metal-diagnostics"
+				#StepTask & {#task: "website-collect-metal-diagnostics"}
 			}, {
 				name: "Retain personal-metal evidence"
 				if:   "always() && needs.plan.outputs.metal_action != ''"

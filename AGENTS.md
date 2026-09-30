@@ -25,7 +25,7 @@
 - Shared wire and guest contracts belong in `crates/intar-contracts`. Regenerate web outputs with `cuenv task generate-contracts`; never edit `apps/web/src/generated/` by hand.
 - The kino protobuf source belongs to `crates/intar-kino-proto/proto/kino/v1/probes.proto`.
 - `apps/web/AGENTS.md` contains website, Worker, and database migration guidance.
-- Repository tasks live in `env.cue` and run with `cuenv task <name>`; `cuenv task` lists them. Every workflow except `scenario-publish.yml` is generated: the `intar-*.yml` lanes from the `env.cue` pipelines with `cuenv sync ci`, and the rest from `ci/workflows/*.cue` with `cuenv sync codegen`. Edit the CUE, never the YAML; `cuenv task sync-check` fails when they drift. `scenario-publish.yml` is an external contract and stays hand-written.
+- Repository tasks live in `env.cue` and run with `cuenv task <name>`; `cuenv task` lists them. Workflow step tasks belong to the `intar-ci` project in `ci/env.cue` and run with `cuenv task -p ci --package ci <name>`. Every workflow except `scenario-publish.yml` is generated: the `intar-*.yml` lanes from the `env.cue` pipelines with `cuenv sync ci`, and the rest from `ci/workflows/*.cue`, typed by the `ci/gha` library and pinned through `ci/gha/pins.cue`, with `cuenv sync codegen`. Edit the CUE, never the YAML; `cuenv task sync-check` fails when they drift. `scenario-publish.yml` is an external contract and stays hand-written.
 - Use Conventional Commits with one scope, for example `fix(web): ...`, `feat(intar-agent): ...`, or `chore(stargate): ...`. Use a lowercase subject after the colon, and mark breaking changes with `!`.
 
 ## Rust quality

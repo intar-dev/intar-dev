@@ -69,10 +69,10 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					CONFIRMATION:                 "${{ inputs.confirmation }}"
 					SINGLE_OPERATOR_CONFIRMATION: "${{ inputs.single_operator_confirmation }}"
 				}
-				run: "cuenv task stargate-deploy-validate-operation"
+				#StepTask & {#task: "stargate-deploy-validate-operation"}
 			}, {
 				name: "Validate host deployment scripts"
-				run:  "cuenv task stargate-deploy-validate-host-deployment-scripts"
+				#StepTask & {#task: "stargate-deploy-validate-host-deployment-scripts"}
 			}]
 		}
 		deploy: {
@@ -107,12 +107,12 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				uses: "./.github/actions/setup-cuenv"
 			}, {
 				name: "Verify protected production dispatch"
-				run:  "cuenv task stargate-deploy-verify-protected-production-dispatch"
+				#StepTask & {#task: "stargate-deploy-verify-protected-production-dispatch"}
 			}, {
 				name: "Verify release provenance"
 				if:   "inputs.operation != 'rollback'"
 				env: RELEASE_TAG: "${{ inputs.release_tag }}"
-				run: "cuenv task stargate-deploy-verify-release-provenance"
+				#StepTask & {#task: "stargate-deploy-verify-release-provenance"}
 			}, {
 				name: "Configure pinned SSH identity"
 				id:   "ssh"
@@ -123,20 +123,20 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					STARGATE_DEPLOY_SSH_PRIVATE_KEY: "${{ secrets.STARGATE_DEPLOY_SSH_PRIVATE_KEY }}"
 					STARGATE_DEPLOY_KNOWN_HOSTS:     "${{ secrets.STARGATE_DEPLOY_KNOWN_HOSTS }}"
 				}
-				run: "cuenv task stargate-deploy-configure-pinned-ssh-identity"
+				#StepTask & {#task: "stargate-deploy-configure-pinned-ssh-identity"}
 			}, {
 				name: "Read host deployment plan"
-				run:  "cuenv task stargate-deploy-read-host-deployment-plan"
+				#StepTask & {#task: "stargate-deploy-read-host-deployment-plan"}
 			}, {
 				name: "Download and verify release"
 				id:   "release"
 				if:   "inputs.operation == 'apply'"
 				env: RELEASE_TAG: "${{ inputs.release_tag }}"
-				run: "cuenv task stargate-deploy-download-and-verify-release"
+				#StepTask & {#task: "stargate-deploy-download-and-verify-release"}
 			}, {
 				name: "Recheck sole-operator mutation window"
 				if:   "inputs.operation != 'plan'"
-				run:  "cuenv task stargate-deploy-recheck-sole-operator-mutation-window"
+				#StepTask & {#task: "stargate-deploy-recheck-sole-operator-mutation-window"}
 			}, {
 				name: "Apply release"
 				if:   "inputs.operation == 'apply'"
@@ -147,27 +147,27 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					ARCHIVE_SHA256: "${{ steps.release.outputs.archive_sha256 }}"
 					BINARY_SHA256:  "${{ steps.release.outputs.binary_sha256 }}"
 				}
-				run: "cuenv task stargate-deploy-apply-release"
+				#StepTask & {#task: "stargate-deploy-apply-release"}
 			}, {
 				name: "Roll back release"
 				if:   "inputs.operation == 'rollback'"
 				env: ROLLBACK_BACKUP: "${{ inputs.rollback_backup }}"
-				run: "cuenv task stargate-deploy-roll-back-release"
+				#StepTask & {#task: "stargate-deploy-roll-back-release"}
 			}, {
 				name: "Verify public routing"
 				if:   "inputs.operation != 'plan'"
 				id:   "public"
 				env: OPERATION: "${{ inputs.operation }}"
-				run: "cuenv task stargate-deploy-verify-public-routing"
+				#StepTask & {#task: "stargate-deploy-verify-public-routing"}
 			}, {
 				name: "Restore prior release after failed public verification"
 				if:   "failure() && inputs.operation == 'apply' && steps.apply.outcome == 'success' && steps.public.outcome == 'failure'"
 				env: BACKUP_ID: "${{ steps.apply.outputs.backup_id }}"
-				run: "cuenv task stargate-deploy-restore-prior-release"
+				#StepTask & {#task: "stargate-deploy-restore-prior-release"}
 			}, {
 				name: "Read final host state"
 				if:   "always() && steps.ssh.outcome == 'success'"
-				run:  "cuenv task stargate-deploy-read-final-host-state"
+				#StepTask & {#task: "stargate-deploy-read-final-host-state"}
 			}]
 		}
 	}

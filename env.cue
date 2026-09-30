@@ -70,10 +70,8 @@ schema.#Project & {
 	]
 
 	// The workflows cuenv's CI generator cannot express are GitHub Actions
-	// data in ci/workflows, rendered here. See ci/workflows/render.cue.
-	// Workflow steps run as tasks from ci/workflows; see ci/workflows/tasks.cue.
-	tasks: {for name, task in workflows.tasks {(name): task}}
-
+	// data in ci/workflows, rendered here. See ci/workflows/render.cue. Their
+	// steps run as tasks of the intar-ci project in ci/env.cue.
 	codegen: files: {
 		for path, rendered in workflows.files {
 			(path): gen.#YAMLFile & {content: rendered, gitignore: false}

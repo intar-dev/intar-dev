@@ -56,9 +56,9 @@ jobs:
           ROLLBACK_BACKUP: ${{ inputs.rollback_backup }}
           CONFIRMATION: ${{ inputs.confirmation }}
           SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
-        run: cuenv task stargate-deploy-validate-operation
+        run: cuenv task -p ci --package ci stargate-deploy-validate-operation
       - name: Validate host deployment scripts
-        run: cuenv task stargate-deploy-validate-host-deployment-scripts
+        run: cuenv task -p ci --package ci stargate-deploy-validate-host-deployment-scripts
   deploy:
     name: ${{ inputs.operation }} production Stargate
     needs: preflight
@@ -87,12 +87,12 @@ jobs:
       - name: Set up cuenv
         uses: ./.github/actions/setup-cuenv
       - name: Verify protected production dispatch
-        run: cuenv task stargate-deploy-verify-protected-production-dispatch
+        run: cuenv task -p ci --package ci stargate-deploy-verify-protected-production-dispatch
       - name: Verify release provenance
         if: inputs.operation != 'rollback'
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: cuenv task stargate-deploy-verify-release-provenance
+        run: cuenv task -p ci --package ci stargate-deploy-verify-release-provenance
       - name: Configure pinned SSH identity
         id: ssh
         env:
@@ -101,18 +101,18 @@ jobs:
           STARGATE_DEPLOY_USER: ${{ vars.STARGATE_DEPLOY_USER }}
           STARGATE_DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.STARGATE_DEPLOY_SSH_PRIVATE_KEY }}
           STARGATE_DEPLOY_KNOWN_HOSTS: ${{ secrets.STARGATE_DEPLOY_KNOWN_HOSTS }}
-        run: cuenv task stargate-deploy-configure-pinned-ssh-identity
+        run: cuenv task -p ci --package ci stargate-deploy-configure-pinned-ssh-identity
       - name: Read host deployment plan
-        run: cuenv task stargate-deploy-read-host-deployment-plan
+        run: cuenv task -p ci --package ci stargate-deploy-read-host-deployment-plan
       - name: Download and verify release
         id: release
         if: inputs.operation == 'apply'
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: cuenv task stargate-deploy-download-and-verify-release
+        run: cuenv task -p ci --package ci stargate-deploy-download-and-verify-release
       - name: Recheck sole-operator mutation window
         if: inputs.operation != 'plan'
-        run: cuenv task stargate-deploy-recheck-sole-operator-mutation-window
+        run: cuenv task -p ci --package ci stargate-deploy-recheck-sole-operator-mutation-window
       - name: Apply release
         id: apply
         if: inputs.operation == 'apply'
@@ -121,23 +121,23 @@ jobs:
           ARCHIVE: ${{ steps.release.outputs.archive }}
           ARCHIVE_SHA256: ${{ steps.release.outputs.archive_sha256 }}
           BINARY_SHA256: ${{ steps.release.outputs.binary_sha256 }}
-        run: cuenv task stargate-deploy-apply-release
+        run: cuenv task -p ci --package ci stargate-deploy-apply-release
       - name: Roll back release
         if: inputs.operation == 'rollback'
         env:
           ROLLBACK_BACKUP: ${{ inputs.rollback_backup }}
-        run: cuenv task stargate-deploy-roll-back-release
+        run: cuenv task -p ci --package ci stargate-deploy-roll-back-release
       - name: Verify public routing
         id: public
         if: inputs.operation != 'plan'
         env:
           OPERATION: ${{ inputs.operation }}
-        run: cuenv task stargate-deploy-verify-public-routing
+        run: cuenv task -p ci --package ci stargate-deploy-verify-public-routing
       - name: Restore prior release after failed public verification
         if: failure() && inputs.operation == 'apply' && steps.apply.outcome == 'success' && steps.public.outcome == 'failure'
         env:
           BACKUP_ID: ${{ steps.apply.outputs.backup_id }}
-        run: cuenv task stargate-deploy-restore-prior-release
+        run: cuenv task -p ci --package ci stargate-deploy-restore-prior-release
       - name: Read final host state
         if: always() && steps.ssh.outcome == 'success'
-        run: cuenv task stargate-deploy-read-final-host-state
+        run: cuenv task -p ci --package ci stargate-deploy-read-final-host-state

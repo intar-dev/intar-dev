@@ -267,10 +267,10 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// then colours its --json output, which jq can not parse.
 				name: "Verify published Kino source"
 				env: GH_TOKEN: "${{ github.token }}"
-				run: "cuenv task image-ops-verify-kino-source"
+				#StepTask & {#task: "image-ops-verify-kino-source"}
 			}, {
 				name: "Install Rust toolchain"
-				run:  "cuenv task image-ops-install-rust-toolchain"
+				#StepTask & {#task: "image-ops-install-rust-toolchain"}
 			}, {
 				name: "Set up Rust cache"
 				uses: gha.pin."nscloud-cache".ref
@@ -285,13 +285,13 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				with: version: "0.16.0"
 			}, {
 				name: "Verify runner disk tools"
-				run:  "cuenv task image-ops-verify-runner-disk-tools"
+				#StepTask & {#task: "image-ops-verify-runner-disk-tools"}
 			}, {
 				name: "Prepare Kino source workspace"
-				run:  "cuenv task image-ops-prepare-kino-source"
+				#StepTask & {#task: "image-ops-prepare-kino-source"}
 			}, {
 				name: "Build guest Kino and tools disk"
-				run:  "cuenv task image-ops-build-guest-tools"
+				#StepTask & {#task: "image-ops-build-guest-tools"}
 			}, {
 				name: "Set up the CI runtime"
 				uses: "./.github/actions/setup-runtime"
@@ -305,7 +305,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
-				run: "cuenv task image-ops-upload-tools-candidate"
+				#StepTask & {#task: "image-ops-upload-tools-candidate"}
 			}, {
 				name:                "Verify uploaded objects by re-download"
 				"working-directory": "."
@@ -313,7 +313,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
-				run: "cuenv task image-ops-verify-tools-upload"
+				#StepTask & {#task: "image-ops-verify-tools-upload"}
 			}, {
 				name: "Retain build and deployment evidence"
 				if:   "always()"
@@ -377,7 +377,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
-				run: "cuenv task image-ops-read-tools-candidate"
+				#StepTask & {#task: "image-ops-read-tools-candidate"}
 			}, {
 				name:                "Require drained host and retain previous stable pin"
 				"working-directory": "."
@@ -386,7 +386,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					CLOUDFLARE_API_TOKEN:      "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 					INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
 				}
-				run: "cuenv task image-ops-require-drain-retain-stable"
+				#StepTask & {#task: "image-ops-require-drain-retain-stable"}
 			}, {
 				name: "Retain rollback pin before promotion"
 				uses: gha.pin."upload-artifact".ref
@@ -398,11 +398,11 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			}, {
 				name: "Warm every host and wait for the candidate cache"
 				env: INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				run: "cuenv task image-ops-warm-tools-candidate"
+				#StepTask & {#task: "image-ops-warm-tools-candidate"}
 			}, {
 				name: "Promote the exact candidate while drained"
 				env: INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				run: "cuenv task image-ops-promote-tools-candidate"
+				#StepTask & {#task: "image-ops-promote-tools-candidate"}
 			}, {
 				name: "Retain promotion evidence"
 				if:   "always()"
@@ -466,14 +466,14 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				run:  "bun install --frozen-lockfile"
 			}, {
 				name: "Validate cleanup authority"
-				run:  "cuenv task image-ops-validate-cleanup-authority"
+				#StepTask & {#task: "image-ops-validate-cleanup-authority"}
 			}, {
 				name: "Read the collector status and the shared ledger"
-				run:  "cuenv task image-ops-read-cleanup-state"
+				#StepTask & {#task: "image-ops-read-cleanup-state"}
 			}, {
 				name: "List the candidate set"
 				if:   "needs.request.outputs.action == 'plan'"
-				run:  "cuenv task image-ops-plan-cleanup"
+				#StepTask & {#task: "image-ops-plan-cleanup"}
 			}, {
 				name: "Run the delete campaign"
 				if:   "needs.request.outputs.action == 'run'"
@@ -483,7 +483,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					// CI gets 60 minutes here, inside the job's 75.
 					REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
 				}
-				run: "cuenv task image-ops-run-cleanup"
+				#StepTask & {#task: "image-ops-run-cleanup"}
 			}, {
 				name: "Resolve one stalled sweep"
 				if:   "needs.request.outputs.action == 'resolve'"
@@ -494,7 +494,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					// and the service's grace window can not disagree.
 					STALE_MS: "600000"
 				}
-				run: "cuenv task image-ops-resolve-stalled-sweep"
+				#StepTask & {#task: "image-ops-resolve-stalled-sweep"}
 			}, {
 				name: "Remove any response that reflected the machine credential"
 				if:   "always()"
@@ -502,7 +502,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					// The scrub compares both credentials, and keeps neither.
 					INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
 				}
-				run: "cuenv task image-ops-scrub-cleanup-evidence"
+				#StepTask & {#task: "image-ops-scrub-cleanup-evidence"}
 			}, {
 				name: "Retain cleanup evidence"
 				if:   "always()"

@@ -107,12 +107,12 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			}, {
 				name: "Preflight jailed release runner"
 				if:   "inputs.project == 'intar-agent'"
-				run:  "cuenv task release-preflight-jailed-release-runner"
+				#StepTask & {#task: "release-preflight-jailed-release-runner"}
 			}, {
 				name: "Resolve project"
 				id:   "project"
 				env: PROJECT: "${{ inputs.project }}"
-				run: "cuenv task release-resolve-project"
+				#StepTask & {#task: "release-resolve-project"}
 			}, {
 				name: "Determine release tag"
 				id:   "next"
@@ -123,11 +123,11 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					RESUME_TAG: "${{ inputs.resume_tag }}"
 					TAG_PREFIX: "${{ steps.project.outputs.tag_prefix }}"
 				}
-				run: "cuenv task release-determine-release-tag"
+				#StepTask & {#task: "release-determine-release-tag"}
 			}, {
 				name: "Install Rust toolchain"
 				if:   "steps.next.outputs.resume != 'true'"
-				run:  "cuenv task release-install-rust-toolchain"
+				#StepTask & {#task: "release-install-rust-toolchain"}
 			}, {
 				name: "Set up Namespace caches"
 				if:   "inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'"
@@ -151,7 +151,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					VERSION:  "${{ steps.next.outputs.version }}"
 					PACKAGE:  "${{ steps.project.outputs.package }}"
 				}
-				run: "cuenv task release-apply-release-version"
+				#StepTask & {#task: "release-apply-release-version"}
 			}, {
 				name: "Set up Bun for pinned content hydration"
 				if:   "steps.next.outputs.resume != 'true'"
@@ -174,7 +174,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					BINARY:  "${{ steps.project.outputs.binary }}"
 					VERSION: "${{ steps.next.outputs.version }}"
 				}
-				run: "cuenv task release-build-release-artifacts"
+				#StepTask & {#task: "release-build-release-artifacts"}
 			}, {
 				name: "Test personal-host installer"
 				if:   "inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'"
@@ -183,12 +183,12 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Run privileged agent package smoke"
 				if:   "inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'"
 				env: VERSION: "${{ steps.next.outputs.version }}"
-				run: "cuenv task release-privileged-agent-package-smoke"
+				#StepTask & {#task: "release-privileged-agent-package-smoke"}
 			}, {
 				name: "Smoke-test image CLI release package"
 				if:   "inputs.project == 'intar-image-cli' && steps.next.outputs.resume != 'true'"
 				env: VERSION: "${{ steps.next.outputs.version }}"
-				run: "cuenv task release-smoke-test-image-cli-package"
+				#StepTask & {#task: "release-smoke-test-image-cli-package"}
 			}, {
 				name: "Preserve exact release payload"
 				id:   "release_payload"
@@ -215,7 +215,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					RESUME_RUN_ID:     "${{ steps.next.outputs.payload_run_id }}"
 					RESUME_SOURCE_SHA: "${{ steps.next.outputs.payload_source_sha }}"
 				}
-				run: "cuenv task release-resolve-release-payload"
+				#StepTask & {#task: "release-resolve-release-payload"}
 			}, {
 				name: "Validate preserved resume payload"
 				if:   "steps.next.outputs.resume == 'true'"
@@ -227,7 +227,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					PAYLOAD_RUN_ID:     "${{ steps.payload.outputs.run_id }}"
 					PAYLOAD_SOURCE_SHA: "${{ steps.payload.outputs.source_sha }}"
 				}
-				run: "cuenv task release-validate-resume-payload"
+				#StepTask & {#task: "release-validate-resume-payload"}
 			}, {
 				name: "Restore exact release payload"
 				if:   "steps.next.outputs.resume == 'true'"
@@ -248,7 +248,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					VERSION_TAG: "${{ steps.next.outputs.version_tag }}"
 					PROJECT:     "${{ inputs.project }}"
 				}
-				run: "cuenv task release-commit-release-version"
+				#StepTask & {#task: "release-commit-release-version"}
 			}, {
 				name: "Publish tagged GitHub release"
 				env: {
@@ -264,7 +264,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					TAG:                "${{ steps.next.outputs.tag }}"
 					VERSION_TAG:        "${{ steps.next.outputs.version_tag }}"
 				}
-				run: "cuenv task release-publish-tagged-github-release"
+				#StepTask & {#task: "release-publish-tagged-github-release"}
 			}]
 		}
 	}

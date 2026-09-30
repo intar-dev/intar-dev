@@ -83,12 +83,12 @@ jobs:
         uses: ./.github/actions/setup-cuenv
       - name: Preflight jailed release runner
         if: inputs.project == 'intar-agent'
-        run: cuenv task release-preflight-jailed-release-runner
+        run: cuenv task -p ci --package ci release-preflight-jailed-release-runner
       - name: Resolve project
         id: project
         env:
           PROJECT: ${{ inputs.project }}
-        run: cuenv task release-resolve-project
+        run: cuenv task -p ci --package ci release-resolve-project
       - name: Determine release tag
         id: next
         env:
@@ -97,10 +97,10 @@ jobs:
           PROJECT: ${{ inputs.project }}
           RESUME_TAG: ${{ inputs.resume_tag }}
           TAG_PREFIX: ${{ steps.project.outputs.tag_prefix }}
-        run: cuenv task release-determine-release-tag
+        run: cuenv task -p ci --package ci release-determine-release-tag
       - name: Install Rust toolchain
         if: steps.next.outputs.resume != 'true'
-        run: cuenv task release-install-rust-toolchain
+        run: cuenv task -p ci --package ci release-install-rust-toolchain
       - name: Set up Namespace caches
         if: inputs.project != 'intar-agent' && steps.next.outputs.resume != 'true'
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
@@ -122,7 +122,7 @@ jobs:
           MANIFEST: ${{ steps.project.outputs.manifest }}
           VERSION: ${{ steps.next.outputs.version }}
           PACKAGE: ${{ steps.project.outputs.package }}
-        run: cuenv task release-apply-release-version
+        run: cuenv task -p ci --package ci release-apply-release-version
       - name: Set up Bun for pinned content hydration
         if: steps.next.outputs.resume != 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -142,7 +142,7 @@ jobs:
           PACKAGE: ${{ steps.project.outputs.package }}
           BINARY: ${{ steps.project.outputs.binary }}
           VERSION: ${{ steps.next.outputs.version }}
-        run: cuenv task release-build-release-artifacts
+        run: cuenv task -p ci --package ci release-build-release-artifacts
       - name: Test personal-host installer
         if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
         run: cuenv task installer-tests
@@ -150,12 +150,12 @@ jobs:
         if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
         env:
           VERSION: ${{ steps.next.outputs.version }}
-        run: cuenv task release-privileged-agent-package-smoke
+        run: cuenv task -p ci --package ci release-privileged-agent-package-smoke
       - name: Smoke-test image CLI release package
         if: inputs.project == 'intar-image-cli' && steps.next.outputs.resume != 'true'
         env:
           VERSION: ${{ steps.next.outputs.version }}
-        run: cuenv task release-smoke-test-image-cli-package
+        run: cuenv task -p ci --package ci release-smoke-test-image-cli-package
       - name: Preserve exact release payload
         id: release_payload
         if: steps.next.outputs.resume != 'true'
@@ -178,7 +178,7 @@ jobs:
           RESUME_ID: ${{ steps.next.outputs.payload_id }}
           RESUME_RUN_ID: ${{ steps.next.outputs.payload_run_id }}
           RESUME_SOURCE_SHA: ${{ steps.next.outputs.payload_source_sha }}
-        run: cuenv task release-resolve-release-payload
+        run: cuenv task -p ci --package ci release-resolve-release-payload
       - name: Validate preserved resume payload
         if: steps.next.outputs.resume == 'true'
         env:
@@ -188,7 +188,7 @@ jobs:
           PAYLOAD_NAME: ${{ steps.payload.outputs.name }}
           PAYLOAD_RUN_ID: ${{ steps.payload.outputs.run_id }}
           PAYLOAD_SOURCE_SHA: ${{ steps.payload.outputs.source_sha }}
-        run: cuenv task release-validate-resume-payload
+        run: cuenv task -p ci --package ci release-validate-resume-payload
       - name: Restore exact release payload
         if: steps.next.outputs.resume == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -205,7 +205,7 @@ jobs:
           RESUME_SHA: ${{ steps.next.outputs.release_sha }}
           VERSION_TAG: ${{ steps.next.outputs.version_tag }}
           PROJECT: ${{ inputs.project }}
-        run: cuenv task release-commit-release-version
+        run: cuenv task -p ci --package ci release-commit-release-version
       - name: Publish tagged GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -219,4 +219,4 @@ jobs:
           RESUME: ${{ steps.next.outputs.resume }}
           TAG: ${{ steps.next.outputs.tag }}
           VERSION_TAG: ${{ steps.next.outputs.version_tag }}
-        run: cuenv task release-publish-tagged-github-release
+        run: cuenv task -p ci --package ci release-publish-tagged-github-release

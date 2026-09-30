@@ -16,10 +16,10 @@ const steps = workflow.jobs.deploy.steps;
 const request = workflow.jobs.plan.steps.find(step => step.name === "Validate the release request")!;
 const sha = "a".repeat(40);
 
-// A step runs its body inline or as `cuenv task website-<name>`, whose body is
-// tools/workflows/website/<name>.sh.
+// A step runs its body inline or as `cuenv task -p ci --package ci
+// website-<name>`, whose body is tools/workflows/website/<name>.sh.
 function body(step: Step) {
-  const task = /^cuenv task website-([a-z0-9-]+)$/.exec(step.run ?? "");
+  const task = /^cuenv task -p ci --package ci website-([a-z0-9-]+)$/.exec(step.run ?? "");
   return task ? readFileSync(`tools/workflows/website/${task[1]}.sh`, "utf8") : step.run;
 }
 
