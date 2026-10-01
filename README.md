@@ -118,9 +118,29 @@ checks the downloads. `gh attestation verify <archive> --repo intar-dev/intar-de
 checks that this repository's release workflow built them; releases published
 before the workflow attested them have no attestation. Then:
 
-- **Agent:** on each scenario host, `sudo intar-host update`, or
+- **Agent on a personal host:** `sudo intar-host update`, or
   `--version X.Y.Z` for a specific release. It downloads the release from GitHub
   itself; see `deploy/personal-metal/README.md`.
+- **Agent on a platform host:** the release's `deploy/install.sh` installs it,
+  and refuses while the agent or any VM still runs.
+  1. Unpack the checked archive as root into
+     `/var/lib/intar/releases/agent-vX.Y.Z` (mode 0700), and check it with
+     `sha256sum --check --strict deploy/SHA256SUMS` there. Unpack the running
+     release the same way, as the rollback target.
+  2. Dispatch image-ops `gate-drained`, and check that no
+     `intar-vm-*.service` unit is left.
+  3. `systemctl stop intar-agent`, then `sh deploy/install.sh` in the new
+     release directory.
+  4. `systemctl restart intar-platform-check`, which re-runs the jailer
+     self-test and the agent doctor on the new binaries (it stays active after
+     boot, so starting the agent alone skips it), then
+     `systemctl start intar-agent`.
+  5. Check that the installed binaries match the release and that the journal
+     shows `bridge v8 handshake complete` with no warnings. Then dispatch
+     image-ops `gate-open`, after any Kino rollout that shares the drain.
+
+  If a check fails, stop the agent and run `install.sh` from the rollback
+  release's directory instead.
 - **Builder:** on the builder host, run the new binary's
   `sudo ./intar-builder doctor --config /etc/intar-builder/config.toml`. Wait
   until the host is idle: the latest `applied builder desired state` journal line
