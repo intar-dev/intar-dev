@@ -19,6 +19,3 @@ gh release download "${TAG}" --dir "${verify}"
 diff <(cd dist && sha256sum -- * | LC_ALL=C sort) <(cd "${verify}" && sha256sum -- * | LC_ALL=C sort)
 gh release edit "${TAG}" --draft=false
 test "$(gh release view "${TAG}" --json isDraft,isPrerelease,name --jq '[.isDraft, .isPrerelease, .name] | @json')" = "$(jq -cn --arg title "${TITLE}" '[false, false, $title]')"
-if [[ "${TAG}" == stargate/* ]]; then
-  printf 'Deploy it with:\n\n    gh workflow run stargate-deploy.yml --ref main -f operation=plan -f release_tag=%s\n' "${TAG}" >> "${GITHUB_STEP_SUMMARY}"
-fi

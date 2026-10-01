@@ -202,17 +202,11 @@ jobs:
           persist-credentials: false
       - name: Set up cuenv
         uses: ./.github/actions/setup-cuenv
-      - name: Verify published Kino source
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: cuenv task -p ci --package ci image-ops-verify-kino-source
-      - name: Set up Rust
-        uses: ./.github/actions/setup-rust
       - name: Verify runner disk tools
         run: cuenv task -p ci --package ci image-ops-verify-runner-disk-tools
-      - name: Prepare Kino source workspace
-        run: cuenv task -p ci --package ci image-ops-prepare-kino-source
-      - name: Build guest Kino and tools disk
+      - name: Build the tools disk from the releases
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: cuenv task -p ci --package ci image-ops-build-guest-tools
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime

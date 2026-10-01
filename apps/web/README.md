@@ -142,8 +142,10 @@ To roll out new guest tools, run these from `main` in order:
 
 1. image-ops `gate-drained`, which stops new runs and waits for the fleet to
    drain.
-2. image-ops `tools-build` with the published `kino_tag`. It uploads the
-   candidate and keeps it in the `guest-tools-deployment-<run_id>` artifact.
+2. image-ops `tools-build` with the published `kino_tag`. It builds the tools
+   disk from that Kino release and the image CLI release the website pins,
+   uploads the candidate, and keeps it in the `guest-tools-deployment-<run_id>`
+   artifact.
 3. image-ops `tools-promote` with a verified build `revision` to warm and
    check against, and `expected_candidate_sha256`, the SHA-256 of that
    artifact's `candidate.json`. It makes the candidate the stable channel.

@@ -33,6 +33,7 @@
 
 - Product releases come from the bot-maintained `release/next` pull request (see "Releasing" in README.md). Never bump a product version in `Cargo.toml` or `Cargo.lock`, edit a product `CHANGELOG.md`, or create a `<prefix>/v*` tag as part of other work. To release a version other than the one the release pull request proposes, change it in a pull request of its own.
 - Nothing is published to crates.io or any other registry.
+- Every Rust tool is built only by `release.yml` and ships only as its GitHub release. Never add a workflow or step that builds a tool another way or installs one on a host. Rollouts run from the operator's machine and take the release from GitHub ("Rolling out" in README.md).
 - A Rust dependency update that should release the products shipping it is a `fix(deps)` (or `build(deps)`, `feat(deps)`) pull request that changes only the root `Cargo.toml` and `Cargo.lock`; the release pull request then bumps each product whose `Cargo.lock` dependency closure holds a changed package, or whose crates use a changed `[workspace.dependencies]` entry directly, and every product for any other root `Cargo.toml` change (`tools/workflows/release/deps-commits.py`).
 - A workspace crate that a product builds from, and a file it compiles in or packages, belongs in that product's paths in `tools/workflows/release/products.json`; `bun test tools/ci` checks it.
 

@@ -45,8 +45,8 @@ other registry.
 - **Release pull request:** on every push to main, the Release workflow
   rebuilds `release/next`. git-cliff reads the Conventional Commits since each
   product's latest tag, scoped to the paths in
-  `tools/workflows/release/products.json`. Once main takes only squash merges
-  named after the pull request title ("Merge settings" in `ci/README.md`),
+  `tools/workflows/release/products.json`. Main takes only squash merges
+  named after the pull request title ("Merge settings" in `ci/README.md`), so
   each commit is a pull request title, which CI's `pr-title` job checks. A
   `feat` bumps the minor version, and a `fix`, `perf`, `refactor`, or `build`
   bumps the patch version. A breaking change bumps the minor version while a
@@ -78,8 +78,7 @@ other registry.
   rebuilds and publishes it: after the next CI run that passes on main, a
   re-run, or a dispatch from main.
 - **After an image CLI release,** the workflow opens a pull request that points
-  the website at the new scenario compiler. **After a Stargate release,** the
-  run summary prints the `stargate-deploy` plan command.
+  the website at the new scenario compiler.
 
 Never bump a product version, edit a product `CHANGELOG.md`, or create a
 product tag as part of other work, and never push a tag by hand. To release a
@@ -101,3 +100,38 @@ because pushes made with the workflow's own token do not run CI. To set it up:
    `main`.
 3. In that environment, add the app's client ID as the `RELEASE_APP_CLIENT_ID`
    variable and a private key as the `RELEASE_APP_PRIVATE_KEY` secret.
+
+## Rolling out
+
+The release workflow is the only place a tool is built: every product, Kino
+included, is built by the same steps and ships only as its GitHub release.
+Kino's release is the guest build that runs inside scenario VMs. No workflow
+installs a tool on a host. Rollouts run from an operator's machine, by hand or
+through an agent, and take the release straight from GitHub:
+
+```bash
+gh release download <prefix>/vX.Y.Z --repo intar-dev/intar-dev --dir release
+```
+
+In `release`, `sha256sum --check --ignore-missing <binary>_X.Y.Z_checksums.txt`
+checks the downloads. `gh attestation verify <archive> --repo intar-dev/intar-dev`
+checks that this repository's release workflow built them; releases published
+before the workflow attested them have no attestation. Then:
+
+- **Agent:** on each scenario host, `sudo intar-host update`, or
+  `--version X.Y.Z` for a specific release. It downloads the release from GitHub
+  itself; see `deploy/personal-metal/README.md`.
+- **Builder:** on the builder host, run the new binary's
+  `sudo ./intar-builder doctor --config /etc/intar-builder/config.toml`. Wait
+  until the host is idle: the latest `applied builder desired state` journal line
+  shows `"desired_builds":0`, and nothing matches `pgrep -f '^/usr/bin/qemu'`.
+  Then `systemctl stop intar-builder`, keep the old binary as
+  `/usr/local/bin/intar-builder.pre-vX.Y.Z`, `install -m 0755` the new one,
+  start the service, and check the journal for the handshake and the desired
+  state with no warnings. The binary has no `--version`; tell releases apart by
+  their SHA-256.
+- **Stargate:** see "Rolling out" in `deploy/stargate/README.md`.
+- **Kino:** image-ops `tools-build` with the `kino_tag`, then the guest-tools
+  steps in `apps/web/README.md`.
+- **Image CLI:** merge the website pin pull request that the release opens. The
+  next website deploy uses it, and `tools-build` builds tools disks with it.

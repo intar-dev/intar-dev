@@ -88,8 +88,6 @@ lanes: {
 			"crates/**",
 			"tools/ci/**",
 			"tools/workflows/**",
-			"tools/deploy/configure-stargate-ssh.sh",
-			"tools/deploy/configure-stargate-ssh.test.ts",
 			"tools/image-build/**",
 		]
 	}

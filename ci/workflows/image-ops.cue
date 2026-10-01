@@ -252,19 +252,13 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Set up cuenv"
 				uses: "./.github/actions/setup-cuenv"
 			}, {
-				// Stays inline: cuenv task sets CLICOLOR_FORCE=1 when it is unset, and gh
-				// then colours its --json output, which jq can not parse.
-				name: "Verify published Kino source"
-				env: GH_TOKEN: "${{ github.token }}"
-				#StepTask & {#task: "image-ops-verify-kino-source"}
-			}, gha.#SetupRust, {
 				name: "Verify runner disk tools"
 				#StepTask & {#task: "image-ops-verify-runner-disk-tools"}
 			}, {
-				name: "Prepare Kino source workspace"
-				#StepTask & {#task: "image-ops-prepare-kino-source"}
-			}, {
-				name: "Build guest Kino and tools disk"
+				// Kino's published release is its guest build, and the image CLI
+				// release the website pins builds the disk, so nothing compiles here.
+				name: "Build the tools disk from the releases"
+				env: GH_TOKEN: "${{ github.token }}"
 				#StepTask & {#task: "image-ops-build-guest-tools"}
 			}, {
 				name: "Set up the CI runtime"
@@ -508,8 +502,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 // _production; the authority check and the evidence scrub touch only the runner.
 tasks: {
 	"image-ops-verify-runner-disk-tools": #Script & {_script: "tools/workflows/image-ops/verify-runner-disk-tools.sh"}
-	"image-ops-verify-kino-source": #Script & {_script: "tools/workflows/image-ops/verify-kino-source.sh"}
-	"image-ops-prepare-kino-source": #Script & {_script: "tools/workflows/image-ops/prepare-kino-source.sh"}
 	"image-ops-build-guest-tools": #Script & {_script: "tools/workflows/image-ops/build-guest-tools.sh"}
 	"image-ops-upload-tools-candidate": #Script & {_script: "tools/workflows/image-ops/upload-tools-candidate.sh", _production: true}
 	"image-ops-verify-tools-upload": #Script & {_script: "tools/workflows/image-ops/verify-tools-upload.sh", _production: true}

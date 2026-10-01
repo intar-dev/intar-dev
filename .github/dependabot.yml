@@ -20,7 +20,6 @@ updates:
       - ".github/workflows/deploy.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/image-ops.yml"
-      - ".github/workflows/stargate-deploy.yml"
     schedule:
       interval: weekly
     # ci.yml's pr-title job requires a Conventional Commit title with one

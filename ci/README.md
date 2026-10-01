@@ -103,8 +103,8 @@ nothing.
   After CI, or on a dispatch from main, it tags and publishes merged releases;
   see "Releasing" in the root README. A build reruns the workspace gate only
   for a tag whose commit never passed CI on main.
-- **`image-ops.yml`** and **`stargate-deploy.yml`** are dispatched by hand
-  from main.
+- **`image-ops.yml`** is dispatched by hand from main. No workflow rolls a
+  tool out to a host; see "Rolling out" in the root README.
 
 Production jobs queue behind each other and are never cancelled halfway. The
 `production` and `release-pr` environments admit main only; that is a

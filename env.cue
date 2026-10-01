@@ -211,7 +211,6 @@ schema.#Project & {
 			for script in \\
 			  deploy/stargate/scripts/intar-deploy-stargate \\
 			  deploy/stargate/scripts/bootstrap-deploy-user \\
-			  tools/deploy/configure-stargate-ssh.sh \\
 			  tools/ci/*.sh \\
 			  tools/workflows/*/*.sh; do
 			  test -x "${script}"
@@ -229,7 +228,6 @@ schema.#Project & {
 			if git grep -nI -E '[[:blank:]]+$' -- \\
 			  '.github/workflows/*.yml' \\
 			  'deploy/stargate/scripts/*' \\
-			  'tools/deploy/configure-stargate-ssh.sh' \\
 			  'tools/ci/*.sh' \\
 			  'tools/workflows/*/*.sh'; then
 			  echo 'Trailing whitespace found in a workflow or a host script.' >&2
