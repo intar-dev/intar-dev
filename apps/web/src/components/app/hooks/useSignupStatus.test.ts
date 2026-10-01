@@ -105,7 +105,7 @@ describe("sign-up status query", () => {
     unsubscribe();
 
     await expect(
-      client.fetchQuery(signupStatusQueryOptions({ enabled: true })),
+      client.query(signupStatusQueryOptions({ enabled: true })),
     ).resolves.toMatchObject({ remaining: 12, open: true });
     expect(fetchMock).toHaveBeenCalledOnce();
     client.clear();

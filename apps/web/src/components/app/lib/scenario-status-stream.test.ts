@@ -129,7 +129,7 @@ describe("scenario status transport", () => {
     });
     queryClient.setQueryData(key, status(99));
 
-    const poll = queryClient.fetchQuery({
+    const poll = queryClient.query({
       queryKey: key,
       queryFn: async () =>
         preferNewerScenarioStatusResult(
