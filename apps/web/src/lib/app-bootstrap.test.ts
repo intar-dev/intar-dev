@@ -83,8 +83,8 @@ describe("app bootstrap client", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const [first, second] = await Promise.all([
-      appQueryClient.fetchQuery(appBootstrapQueryOptions()),
-      appQueryClient.fetchQuery(appBootstrapQueryOptions()),
+      appQueryClient.query(appBootstrapQueryOptions()),
+      appQueryClient.query(appBootstrapQueryOptions()),
     ]);
     const sessionObserver = new QueryObserver(
       appQueryClient,

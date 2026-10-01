@@ -629,7 +629,7 @@ async function requireSignedInRoute({
 }
 
 async function loadAppBootstrap() {
-  return appQueryClient.fetchQuery(appBootstrapQueryOptions());
+  return appQueryClient.query(appBootstrapQueryOptions());
 }
 
 declare module "@tanstack/react-router" {

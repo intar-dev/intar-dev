@@ -588,12 +588,14 @@ function scenarioStartAccessRevoked() {
  * or the error text: a wake failure can echo a request body, and the address
  * space of a scenario host is not a log field.
  */
-function deliveryHint(hostId: string): Promise<void> {
-  return tryWakeHostRuntime(hostId).catch(() => {
+async function deliveryHint(hostId: string): Promise<void> {
+  try {
+    await tryWakeHostRuntime(hostId);
+  } catch {
     console.warn(
       JSON.stringify({ event: "scenario_start_delivery_hint_failed" }),
     );
-  });
+  }
 }
 
 /**

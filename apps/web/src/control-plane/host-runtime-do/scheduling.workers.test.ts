@@ -1,16 +1,17 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { runInDurableObject } from "cloudflare:test";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   testImageKey,
   seedHost,
   connectHost,
   sendBridge,
   waitForBridgeMessage,
+  runDurableObjectAlarm,
   runNextScheduledAlarm,
   waitForMessageCount,
   waitForHostActualState,
-  sleep,
   seedEnabledScenario,
   stateReport,
   env,
@@ -24,7 +25,13 @@ import {
   mutateStoredHostDesiredState,
   startScenarioRunForUser,
   resetHostRuntimeTestDatabase,
+  type BridgeMessageV8,
 } from "./test-fixtures";
+import {
+  DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
+  RUNTIME_ALARM_KEY,
+  type SocketAttachment,
+} from "./base";
 import {
   hostResourceReservations,
   runtimeExecutions,
@@ -495,61 +502,84 @@ describe("HostRuntimeDO scheduling and capacity", () => {
   });
 
   it("re-pushes a lagging desired version from the alarm loop after the dispatch threshold", async () => {
-    const hostId = "host-lag-repush";
-    await seedHost(hostId);
-    const db = drizzle(env.DB);
-    // Platform hosts retain manually staged cache entries during reconciliation.
-    await db.update(agentHosts).set({ scope: "platform" }).where(eq(agentHosts.id, hostId));
-    const { messages, stub, ws } = await connectHost(hostId);
-    await waitForBridgeMessage(
-      messages,
-      (message) => message.type === "server_hello",
-    );
-
-    await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
-      upsertDesiredCachedImage(draft, {
-        image_key: testImageKey,
-        image_id: "4".repeat(64),
-      });
-    });
-
-    sendBridge(ws, {
-      type: "sync_request",
-      protocol_version: 8,
-      host_id: hostId,
-      reason: "operator_requested",
-    });
-    await waitForBridgeMessage(
-      messages,
-      (message) =>
-        message.type === "desired_state" && message.desired_state.version === 1,
-    );
-
-    sendBridge(
-      ws,
-      stateReport(hostId, {
-        observedAt: Date.now(),
-        appliedDesiredVersion: 0,
-      }),
-    );
-    await waitForHostActualState(
-      db,
-      hostId,
-      (row) => row.appliedDesiredVersion === 0,
-    );
-    await sleep(10_050);
-
-    await runNextScheduledAlarm(stub);
-    expect(
-      await waitForMessageCount(
-        messages,
-        (message) =>
-          message.type === "desired_state" &&
-          message.desired_state.version === 1,
-        2,
-        2_000,
-      ),
-    ).toBe(2);
+    const { messages, stub, ws } = await connectLaggingHost("host-lag-repush");
+    // Run the alarm loop once, just past the threshold since the last dispatch.
+    // Waiting in real time instead lets the Durable Object's own alarms fire,
+    // so the number of re-pushes would depend on milliseconds between a
+    // dispatch and the alarm armed around it.
+    const clock = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS + 1);
+    try {
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(await waitForMessageCount(messages, isDesiredVersion1, 2, 2_000)).toBe(2);
     ws.close();
-  }, 15_000);
+  });
+
+  it("re-pushes at the threshold when a fallback alarm armed before the dispatch fires first", async () => {
+    const hostId = "host-lag-early-alarm";
+    const { messages, stub, ws } = await connectLaggingHost(hostId);
+    const lastDispatch = await runInDurableObject(stub, (_instance, state) => {
+      const [socket] = state.getWebSockets(`host:${hostId}`);
+      return (socket?.deserializeAttachment() as SocketAttachment | null)
+        ?.lastDesiredDispatchAtMs;
+    });
+    if (typeof lastDispatch !== "number") throw new Error("no desired-state dispatch recorded");
+
+    // The wake, hello, and VM-report paths arm a fallback alarm from their own
+    // clock reading, which can predate the dispatch it backs up.
+    const early = lastDispatch + DESIRED_VERSION_LAG_REPUSH_AFTER_MS - 5;
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put(RUNTIME_ALARM_KEY, early);
+      await state.storage.setAlarm(early);
+    });
+    await runNextScheduledAlarm(stub);
+    // Short of the threshold it does not re-push, and it re-arms for one tick
+    // past the threshold rather than a whole threshold later.
+    expect(
+      await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm()),
+    ).toBe(lastDispatch + DESIRED_VERSION_LAG_REPUSH_AFTER_MS + 1);
+    await runNextScheduledAlarm(stub);
+    expect(await waitForMessageCount(messages, isDesiredVersion1, 2, 2_000)).toBe(2);
+    ws.close();
+  });
 });
+
+function isDesiredVersion1(message: BridgeMessageV8): boolean {
+  return message.type === "desired_state" && message.desired_state.version === 1;
+}
+
+/**
+ * Connect a platform host, deliver desired version 1, and have the host report
+ * version 0 applied, so the host runtime sees it lagging.
+ */
+async function connectLaggingHost(hostId: string) {
+  await seedHost(hostId);
+  const db = drizzle(env.DB);
+  // Platform hosts retain manually staged cache entries during reconciliation.
+  await db.update(agentHosts).set({ scope: "platform" }).where(eq(agentHosts.id, hostId));
+  const connection = await connectHost(hostId);
+  const { messages, ws } = connection;
+  await waitForBridgeMessage(messages, (message) => message.type === "server_hello");
+
+  await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
+    upsertDesiredCachedImage(draft, {
+      image_key: testImageKey,
+      image_id: "4".repeat(64),
+    });
+  });
+  sendBridge(ws, {
+    type: "sync_request",
+    protocol_version: 8,
+    host_id: hostId,
+    reason: "operator_requested",
+  });
+  await waitForBridgeMessage(messages, isDesiredVersion1);
+
+  sendBridge(ws, stateReport(hostId, { observedAt: Date.now(), appliedDesiredVersion: 0 }));
+  await waitForHostActualState(db, hostId, (row) => row.appliedDesiredVersion === 0);
+  return connection;
+}
