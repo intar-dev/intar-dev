@@ -291,6 +291,10 @@ schema.#Project & {
 			}]
 		}
 
+		// ci.yml's pr-title job: PR_TITLE must be a Conventional Commit with one
+		// scope.
+		"pr-title": #Host & {command: "tools/ci/check-pr-title.sh"}
+
 		// The web build deploy.yml deploys: the image registry cleanup worker it
 		// deploys from the artifact has no route and no public surface.
 		"check-web-artifact": #Host & {command: "tools/workflows/website/verify-registry-cleanup-artifact.sh"}

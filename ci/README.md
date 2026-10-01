@@ -45,7 +45,15 @@ One workflow checks pull requests and every push to main:
    **`release-dry-run`** builds and smoke-tests each with `release.yml`'s build
    steps (`#ReleaseBuild` in `release.cue`), without the workspace gate the
    `rust` lane runs and without keeping the payload. Nothing is published.
-4. **`ci-ok`** always runs. It fails when `changes` did not succeed or any job
+4. **`pr-title`** fails unless the pull request title is a Conventional
+   Commit with one scope (`tools/ci/check-pr-title.sh`, `cuenv task
+   pr-title`): pull requests are squash-merged, so the title becomes the
+   commit that git-cliff versions the releases from. The title reaches the
+   script through the environment, never as script text. Editing the title or
+   description re-runs the whole workflow, not only this job: a skipped job
+   counts as passed, so a run that checked only the title would report a
+   `ci-ok` that never saw the lanes.
+5. **`ci-ok`** always runs. It fails when `changes` did not succeed or any job
    failed or was cancelled, and counts a skipped job as passed. It is the only
    check a ruleset needs to require.
 

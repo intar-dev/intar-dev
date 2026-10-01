@@ -23,6 +23,11 @@ updates:
       - ".github/workflows/stargate-deploy.yml"
     schedule:
       interval: weekly
+    # ci.yml's pr-title job requires a Conventional Commit title with one
+    # scope: "ci(deps): bump ...".
+    commit-message:
+      prefix: ci
+      include: scope
     groups:
       actions:
         patterns:

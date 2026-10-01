@@ -27,12 +27,13 @@
 - `apps/web/AGENTS.md` contains website, Worker, and database migration guidance.
 - Repository tasks live in `env.cue` and run with `cuenv task <name>`; `cuenv task` lists them. Workflow step tasks belong to the `intar-ci` project in `ci/env.cue` and run with `cuenv task -p ci --package ci <name>`. Every workflow except `scenario-publish.yml` is rendered from `ci/workflows/*.cue`, typed by the `ci/gha` library and pinned through `ci/gha/pins.cue`, with `cuenv sync codegen`. Edit the CUE, never the YAML; `cuenv task sync-check` fails when they drift. `scenario-publish.yml` is an external contract and stays hand-written. `ci/README.md` describes the workflows, the lanes, and pin bumps.
 - `ci.yml` checks every pull request and every push to main; its `ci-ok` job is the one required check. The lanes are defined once in `ci/workflows/lanes.cue`. Once CI passes on main's tip, `deploy.yml` deploys the website and docs builds its `web` and `docs` lanes uploaded, and `release.yml` tags and publishes releases.
-- Use Conventional Commits with one scope, for example `fix(web): ...`, `feat(intar-agent): ...`, or `chore(stargate): ...`. Use a lowercase subject after the colon, and mark breaking changes with `!`.
+- Use Conventional Commits with one scope, for example `fix(web): ...`, `feat(intar-agent): ...`, or `chore(stargate): ...`. Use a lowercase subject after the colon, and mark breaking changes with `!`. Pull requests are squash-merged, so the pull request title becomes the commit git-cliff versions the releases from: it follows the same format, and CI's `pr-title` job (`tools/ci/check-pr-title.sh`) fails otherwise.
 
 ## Releasing
 
 - Product releases come from the bot-maintained `release/next` pull request (see "Releasing" in README.md). Never bump a product version in `Cargo.toml` or `Cargo.lock`, edit a product `CHANGELOG.md`, or create a `<prefix>/v*` tag as part of other work. To release a version other than the one the release pull request proposes, change it in a pull request of its own.
 - Nothing is published to crates.io or any other registry.
+- A Rust dependency update that should release the products shipping it is a `fix(deps)` (or `build(deps)`, `feat(deps)`) pull request that changes only the root `Cargo.toml` and `Cargo.lock`; the release pull request then bumps each product whose `Cargo.lock` dependency closure holds a changed package (`tools/workflows/release/deps-commits.py`).
 - A workspace crate that a product builds from, and a file it compiles in or packages, belongs in that product's paths in `tools/workflows/release/products.json`; `bun test tools/ci` checks it.
 
 ## Rust quality

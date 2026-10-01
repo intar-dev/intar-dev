@@ -2,8 +2,10 @@
 # release.yml, job release-pr, step "Update the release pull request".
 # Rebuilds release/next from this main commit: each product git-cliff finds
 # changes for gets its bumped manifest version, Cargo.lock entry, and
-# changelog. The app token pushes, so CI runs on the pull request; with nothing
-# to release, the pull request is closed.
+# changelog. A dependency fix in the root Cargo.toml and Cargo.lock counts for
+# each product that ships a crate it changed (deps-commits.py). The app token
+# pushes, so CI runs on the pull request; with nothing to release, the pull
+# request is closed.
 set -euo pipefail
 # A re-run keeps its run's commit. Only the run for main's tip may rewrite the
 # pull request; a push that moved main has a run of its own that follows.
@@ -31,6 +33,7 @@ EOF
 tags=()
 for product in "${product_list[@]}"; do
   prefix="$(jq -r .prefix <<<"${product}")"
+  package="$(jq -r .package <<<"${product}")"
   manifest="$(jq -r .manifest <<<"${product}")"
   current="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "${manifest}" | head -n 1)"
   # plan-release.sh tags only the manifest version on main's tip, once CI
@@ -42,6 +45,15 @@ for product in "${product_list[@]}"; do
     continue
   fi
   mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
+  # git-cliff sees no product path in a root Cargo.lock change, so each
+  # dependency fix that changed a crate this product ships joins its commits
+  # and bumps the version like any other.
+  deps="$(python3 tools/workflows/release/deps-commits.py "${package}" "${prefix}/v${current}")"
+  if [ -n "${deps}" ]; then
+    while IFS= read -r commit; do
+      cliff+=(--with-commit "${commit}")
+    done <<<"${deps}"
+  fi
   # With nothing to release, git-cliff prints the latest tag, the manifest
   # version.
   next="$(git-cliff --config "${config}" "${cliff[@]}" --unreleased --bumped-version)"
@@ -53,11 +65,13 @@ for product in "${product_list[@]}"; do
     echo "git-cliff proposed ${next} for ${prefix}." >&2
     exit 1
   fi
-  MANIFEST="${manifest}" PACKAGE="$(jq -r .package <<<"${product}")" VERSION="${version}" \
+  MANIFEST="${manifest}" PACKAGE="${package}" VERSION="${version}" \
     tools/workflows/release/apply-release-version.sh
+  # --bump names the section ${next}, computed from the same commits. --tag
+  # would put the --with-commit commits in a section of their own.
   changelog="$(dirname "${manifest}")/CHANGELOG.md"
-  git-cliff --config "${config}" "${cliff[@]}" --unreleased --tag "${next}" --prepend "${changelog}"
-  notes="$(git-cliff --config "${config}" "${cliff[@]}" --unreleased --tag "${next}" --strip all)"
+  git-cliff --config "${config}" "${cliff[@]}" --unreleased --bump --prepend "${changelog}"
+  notes="$(git-cliff --config "${config}" "${cliff[@]}" --unreleased --bump --strip all)"
   printf '%s\n' "${notes}" >>"${body}"
   git add "${manifest}" Cargo.lock "${changelog}"
   tags+=("${next}")

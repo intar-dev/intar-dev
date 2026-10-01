@@ -45,24 +45,32 @@ other registry.
 - **Release pull request:** on every push to main, the Release workflow
   rebuilds `release/next`. git-cliff reads the Conventional Commits since each
   product's latest tag, scoped to the paths in
-  `tools/workflows/release/products.json`. A `feat` bumps the minor version,
-  and a `fix`, `perf`, `refactor`, or `build` bumps the patch version. A
-  breaking change bumps the minor version while a product is on 0.x. The pull
-  request bumps each changed product's `Cargo.toml` version and `Cargo.lock`
-  entry, and prepends its `CHANGELOG.md`. A product whose manifest version is
-  not tagged yet, because CI has not passed on main's tip since it merged, is
-  left out until the first push after its tag, so no version is skipped. The
-  app cannot move the branch across a change to `.github/workflows`, so such a
-  push to main replaces the pull request with a new one.
+  `tools/workflows/release/products.json`. Pull requests are squash-merged, so
+  each commit is a pull request title, which CI's `pr-title` job checks. A
+  `feat` bumps the minor version, and a `fix`, `perf`, `refactor`, or `build`
+  bumps the patch version. A breaking change bumps the minor version while a
+  product is on 0.x. The root `Cargo.toml` and `Cargo.lock` belong to no
+  product, so a `feat(deps)`, `fix(deps)`, or `build(deps)` commit that changes
+  only those two files counts for each product whose dependency closure in
+  `Cargo.lock` holds a package it changed
+  (`tools/workflows/release/deps-commits.py`): it bumps that product like any
+  other commit and gets a line in its changelog. The pull request bumps each
+  changed product's `Cargo.toml` version and `Cargo.lock` entry, and prepends
+  its `CHANGELOG.md`. A product whose manifest version is not tagged yet,
+  because CI has not passed on main's tip since it merged, is left out until
+  the first push after its tag, so no version is skipped. The app cannot move
+  the branch across a change to `.github/workflows`, so such a push to main
+  replaces the pull request with a new one.
 - **Dry run:** CI builds and smoke-tests every product whose version a pull
   request changes, the release pull request included, with the release build's
   own steps. A change to the release build dry-runs every product.
 - **Publishing:** once CI passes on main's tip after that pull request merges,
   the Release workflow tags each new version on main and opens a draft
-  release. It builds and smoke-tests each draft from its tag, attests the
-  payload, and publishes it. CI's rust lane already ran the workspace checks,
-  so the build runs them again only for a tag whose commit never passed CI on
-  main. A failed build leaves its draft, and the next run of the workflow
+  release with that version's changelog section as its notes. It builds and
+  smoke-tests each draft from its tag, attests the payload, and publishes it.
+  CI's rust lane already ran the workspace checks, so the build runs them again
+  only for a tag whose commit never passed CI on main. A failed build leaves
+  its draft, and the next run of the workflow
   rebuilds and publishes it: after the next CI run that passes on main, a
   re-run, or a dispatch from main.
 - **After an image CLI release,** the workflow opens a pull request that points
@@ -72,11 +80,12 @@ other registry.
 Never bump a product version, edit a product `CHANGELOG.md`, or create a
 product tag as part of other work, and never push a tag by hand. To release a
 version other than the one the release pull request proposes, change the
-version in a pull request of its own; the next run tags and publishes it. That
-is also how a dependency update ships, such as a security fix in the root
-`Cargo.lock`: the root `Cargo.toml` and `Cargo.lock` bump no product. The
-release pull request is rebuilt on every push to main, so edits made on it are
-lost.
+version in a pull request of its own; the next run tags and publishes it. A
+Rust dependency update, such as a security fix in the root `Cargo.lock`, ships
+through the release pull request when it is a `fix(deps)` pull request that
+changes nothing but the root `Cargo.toml` and `Cargo.lock`; together with other
+files it releases only the products whose paths those files touch. The release
+pull request is rebuilt on every push to main, so edits made on it are lost.
 
 The workflow needs a GitHub App to push `release/next` and open pull requests,
 because pushes made with the workflow's own token do not run CI. To set it up:

@@ -2,7 +2,7 @@
 # release.yml, job plan, step "Plan releases".
 # A product whose manifest version on main has no tag gets an annotated
 # <prefix>/vX.Y.Z tag on the commit that set that version and a draft release
-# with git-cliff notes. Every release still in draft goes into the build
+# with its changelog notes. Every release still in draft goes into the build
 # matrix, which is how a failed run resumes. The matrix says whether CI passed
 # on the tag's commit on main: build runs the workspace gate only when not.
 set -euo pipefail
@@ -46,8 +46,15 @@ for product in "${product_list[@]}"; do
     continue
   fi
   if [ "${draft}" = missing ]; then
-    mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
-    notes="$(git-cliff --config tools/workflows/release/cliff.toml "${cliff[@]}" --latest --strip all)"
+    # The notes are the changelog section the release pull request wrote,
+    # which also lists the dependency fixes git-cliff cannot map to a product.
+    # A version set by hand has none, so git-cliff writes them.
+    notes="$(git show "${tag}^{commit}:$(dirname "${manifest}")/CHANGELOG.md" |
+      awk -v head="## ${tag} (" '/^## / { on = index($0, head) == 1 } on')"
+    if [ -z "${notes}" ]; then
+      mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
+      notes="$(git-cliff --config tools/workflows/release/cliff.toml "${cliff[@]}" --latest --strip all)"
+    fi
     gh release create "${tag}" --draft --verify-tag \
       --title "${project} v${version}" --notes "${notes}"
   fi

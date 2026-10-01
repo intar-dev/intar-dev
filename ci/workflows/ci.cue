@@ -12,11 +12,14 @@ import (
 // any job failed or was cancelled, and counts a skipped job as passed. On main,
 // a lane with a dist uploads the build it checked, and deploy.yml deploys it.
 //
-// No paths filter, so every pull request reports ci-ok.
+// No paths filter, so every pull request reports ci-ok. Editing the title or
+// description re-runs every job, not only pr-title: a skipped job counts as
+// passed, so a run that checked only the title would report a ci-ok that never
+// saw the lanes.
 "workflows": ci: {
 	name: "CI"
 	on: {
-		pull_request: {}
+		pull_request: types: ["opened", "edited", "synchronize", "reopened"]
 		push: branches: ["main"]
 		workflow_dispatch: {}
 	}
@@ -105,6 +108,25 @@ import (
 			#dryRun:           true
 			name:              "Release dry run ${{ matrix.tag }}"
 			"timeout-minutes": 45
+		}
+
+		// A squash merge commits the title, and git-cliff versions the releases
+		// from those commits. The title reaches the check only as data.
+		"pr-title": {
+			name:              "pr-title"
+			if:                "github.event_name == 'pull_request'"
+			"runs-on":         "ubuntu-24.04"
+			"timeout-minutes": 5
+			permissions: contents: "read"
+			steps: [
+				gha.#Checkout,
+				gha.#SetupCuenv,
+				gha.#Run & {
+					name: "Check the pull request title"
+					env: PR_TITLE: "${{ github.event.pull_request.title }}"
+					#task: "pr-title"
+				},
+			]
 		}
 
 		"ci-ok": {

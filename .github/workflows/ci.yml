@@ -2,7 +2,12 @@
 # Regenerate with: cuenv sync codegen
 name: CI
 "on":
-  pull_request: {}
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
   push:
     branches:
       - main
@@ -297,6 +302,24 @@ jobs:
         env:
           VERSION: ${{ matrix.version }}
         run: cuenv task -p ci --package ci release-smoke-test-image-cli-package
+  pr-title:
+    name: pr-title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Check the pull request title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: cuenv task pr-title
   ci-ok:
     name: ci-ok
     if: always()
@@ -305,6 +328,7 @@ jobs:
       - web-ui
       - release-plan
       - release-dry-run
+      - pr-title
       - rust
       - security
       - images
