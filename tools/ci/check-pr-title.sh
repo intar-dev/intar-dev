@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# ci.yml, job pr-title. A squash merge commits the pull request title, and
-# git-cliff versions and describes the releases from those commits, so the
-# title must be a Conventional Commit with one scope (see AGENTS.md):
+# ci.yml, job pr-title. A squash merge commits the pull request title (merge
+# settings in ci/README.md), and git-cliff versions and describes the releases
+# from those commits, so the title must be a Conventional Commit with one scope
+# (see AGENTS.md):
 # type(scope): subject, with an optional ! before the colon and a subject that
 # does not start with a capital. The title arrives in PR_TITLE, never as script
 # text, and is never printed.

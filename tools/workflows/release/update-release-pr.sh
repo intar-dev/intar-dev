@@ -45,10 +45,10 @@ for product in "${product_list[@]}"; do
     continue
   fi
   mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
-  # git-cliff sees no product path in a root Cargo.lock change, so each
-  # dependency fix that changed a crate this product ships joins its commits
-  # and bumps the version like any other.
-  deps="$(python3 tools/workflows/release/deps-commits.py "${package}" "${prefix}/v${current}")"
+  # git-cliff sees no product path in a root Cargo.toml or Cargo.lock change,
+  # so each dependency fix that changed a crate this product ships joins its
+  # commits and bumps the version like any other.
+  deps="$(python3 tools/workflows/release/deps-commits.py "${prefix}/v${current}" "${product}")"
   if [ -n "${deps}" ]; then
     while IFS= read -r commit; do
       cliff+=(--with-commit "${commit}")

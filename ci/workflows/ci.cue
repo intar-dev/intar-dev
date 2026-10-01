@@ -110,8 +110,9 @@ import (
 			"timeout-minutes": 45
 		}
 
-		// A squash merge commits the title, and git-cliff versions the releases
-		// from those commits. The title reaches the check only as data.
+		// A squash merge commits the title (merge settings in ci/README.md), and
+		// git-cliff versions the releases from those commits. The title reaches
+		// the check only as data.
 		"pr-title": {
 			name:              "pr-title"
 			if:                "github.event_name == 'pull_request'"

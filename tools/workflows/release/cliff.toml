@@ -1,10 +1,10 @@
 # git-cliff 2.14.2 configuration for the product releases in products.json.
 # The release scripts pass each product's --tag-pattern and --include-path, and
-# update-release-pr.sh passes the dependency fixes in the root Cargo.lock that
-# change the product's crates as --with-commit (deps-commits.py). They parse
-# like any commit: fix(deps) and build(deps) bump a patch, feat(deps) a minor
-# version, and chore(deps) releases nothing. Nothing here runs cargo or reaches
-# the network.
+# update-release-pr.sh passes the dependency fixes in the root Cargo.toml and
+# Cargo.lock that change what the product ships as --with-commit
+# (deps-commits.py). They parse like any commit: fix(deps) and build(deps) bump
+# a patch, feat(deps) a minor version, and chore(deps) releases nothing.
+# Nothing here runs cargo or reaches the network.
 
 [changelog]
 header = "# Changelog\n"

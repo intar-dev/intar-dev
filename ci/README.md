@@ -47,8 +47,8 @@ One workflow checks pull requests and every push to main:
    `rust` lane runs and without keeping the payload. Nothing is published.
 4. **`pr-title`** fails unless the pull request title is a Conventional
    Commit with one scope (`tools/ci/check-pr-title.sh`, `cuenv task
-   pr-title`): pull requests are squash-merged, so the title becomes the
-   commit that git-cliff versions the releases from. The title reaches the
+   pr-title`): with the merge settings below, the title becomes the commit
+   that git-cliff versions the releases from. The title reaches the
    script through the environment, never as script text. Editing the title or
    description re-runs the whole workflow, not only this job: a skipped job
    counts as passed, so a run that checked only the title would report a
@@ -151,6 +151,19 @@ repos/intar-dev/intar-dev/rulesets/<id> --input <file>`.
 
 Also require approval before workflows run for a fork's pull request: pull
 request runs write the shared Namespace caches.
+
+## Merge settings
+
+git-cliff versions the releases from main's commits, so each must be a pull
+request title that `pr-title` checked. That takes squash merges named after the
+title, which are not set yet: GitHub names a single-commit squash after its
+commit (`COMMIT_OR_PR_TITLE`), and a rebase merge lands every commit as it is.
+Apply them with `gh api -X PATCH repos/intar-dev/intar-dev -f
+squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=COMMIT_MESSAGES
+-F allow_rebase_merge=false -F allow_merge_commit=false`, and check them with
+`gh api repos/intar-dev/intar-dev --jq '{allow_squash_merge, allow_merge_commit,
+allow_rebase_merge, squash_merge_commit_title}'`. Stage B also allows only
+squash merges.
 
 ## Returning to `cuenv sync ci`
 
