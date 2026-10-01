@@ -34,7 +34,7 @@ export const MAX_PENDING_HOST_SOCKETS = 4;
 export const MAX_STATUS_SOCKETS_PER_USER = 8;
 export const MAX_STATUS_SOCKETS = 512;
 export const STATUS_SOCKET_LIFETIME_MS = 15 * 60_000;
-const RUNTIME_ALARM_KEY = "runtime-alarm-at-ms";
+export const RUNTIME_ALARM_KEY = "runtime-alarm-at-ms";
 
 export interface SocketAttachment {
   kind: "agent";
@@ -488,7 +488,18 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       candidates.push(Math.max(now + 1, nextReservationExpiry + 1));
     }
     if (lag.lagging && activeSocket) {
-      candidates.push(now + DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
+      // The re-push waits for the threshold after the last dispatch, so aim one
+      // tick past it. A fallback alarm armed from a reading taken before that
+      // dispatch fires just short of it, and timing from that alarm's own clock
+      // would leave the re-push a whole threshold late. Once that time passed
+      // without a re-push, keep the threshold cadence rather than spin.
+      const repushAt =
+        (activeSocket.attachment.lastDesiredDispatchAtMs ?? now) +
+        DESIRED_VERSION_LAG_REPUSH_AFTER_MS +
+        1;
+      candidates.push(
+        repushAt > now ? repushAt : now + DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
+      );
     }
     return Math.min(...candidates);
   }
