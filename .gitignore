@@ -1,14 +1,11 @@
 .env
 .DS_Store
-.stardrive/
 target/
 node_modules/
 __pycache__/
-.gocache/
 .tmp/
 .work/
 dist/
-config.vm.local.toml
 
 # wrangler local state
 .wrangler/
