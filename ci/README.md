@@ -156,13 +156,11 @@ request runs write the shared Namespace caches.
 
 git-cliff versions the releases from main's commits, so each must be a pull
 request title that `pr-title` checked. That takes squash merges named after the
-title, which are not set yet: GitHub names a single-commit squash after its
-commit (`COMMIT_OR_PR_TITLE`), and a rebase merge lands every commit as it is.
-Apply them with `gh api -X PATCH repos/intar-dev/intar-dev -f
-squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=COMMIT_MESSAGES
--F allow_rebase_merge=false -F allow_merge_commit=false`, and check them with
-`gh api repos/intar-dev/intar-dev --jq '{allow_squash_merge, allow_merge_commit,
-allow_rebase_merge, squash_merge_commit_title}'`. Stage B also allows only
+title. The repository is set that way: squash merges only, the squash commit
+titled after the pull request (`squash_merge_commit_title=PR_TITLE`), and no
+merge or rebase merges. Check it with `gh api repos/intar-dev/intar-dev --jq
+'{allow_squash_merge, allow_merge_commit, allow_rebase_merge,
+squash_merge_commit_title}'`. Stage B also allows only
 squash merges.
 
 ## Returning to `cuenv sync ci`
