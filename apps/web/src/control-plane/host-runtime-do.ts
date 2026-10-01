@@ -101,10 +101,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
   >();
 
   override async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (controlPlaneMaintenanceEnabled(this.env) && url.pathname !== "/_internal/retire") {
+    if (controlPlaneMaintenanceEnabled(this.env)) {
       return maintenanceJsonResponse();
     }
+    const url = new URL(request.url);
 
     if (url.pathname === "/connect") {
       return traceOperation("host.handleConnect", () => this.handleConnect(request));

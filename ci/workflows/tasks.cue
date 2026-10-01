@@ -1,11 +1,25 @@
 package workflows
 
-import "github.com/cuenv/cuenv/schema"
+import (
+	"github.com/cuenv/cuenv/schema"
+
+	"github.com/intar-dev/intar-dev/ci/gha"
+)
 
 // The run steps of the workflows in this package, as cuenv tasks named
-// <workflow>-<step>. env.cue merges them into the project, and each step runs
-// `cuenv task <name>` with the environment GitHub gives it.
+// <workflow>-<step>. They belong to the intar-ci project in ci/env.cue, so a
+// step runs `cuenv task -p ci --package ci <name>` with the environment GitHub
+// gives it.
 tasks: [string]: schema.#Task
+
+// A step that runs one of the tasks above. An unknown name fails evaluation.
+// The package is named after the directory: CUE unifies the root package cuenv
+// files into a package cuenv below them (see ci/env.cue).
+#StepTask: {
+	gha.#Step
+	#task!: or([for name, _ in tasks {name}])
+	run: "cuenv task -p ci --package ci \(#task)"
+}
 
 // One step body in tools/workflows/<workflow>/<step>.sh. It runs from the
 // repository root with the step's whole environment, as bash with errexit

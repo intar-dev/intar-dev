@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Prepare runtime secrets".
+# deploy.yml, job deploy-web, step "Prepare runtime secrets".
 set -euo pipefail
 test "${#CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" -ge 43
 test -n "${STARGATE_EGRESS_IPV4_CIDRS}"

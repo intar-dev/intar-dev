@@ -17,6 +17,10 @@ cuenv task build
 cuenv task check-generated
 ```
 
+`cuenv task ci` runs every CI lane, and `cuenv task lanes.<name>` runs one
+(`rust`, `security`, `images`, `web`, or `docs`). The workflows are rendered
+from CUE; see [`ci/README.md`](ci/README.md).
+
 `cuenv task clean-generated` removes only allowlisted repository output. It preserves
 the root `node_modules/`, Bun cache, Cargo cache, and root `target/`.
 
@@ -31,3 +35,103 @@ and `bun run check:database-migrations` before committing it.
 `course.md` and ordered Lecture directories. Each Lecture contains `lecture.md`
 and can contain a technical `scenario.hcl`. The base image catalog remains at
 `content/scenarios/base-images.hcl`.
+
+## Releasing
+
+The agent, builder, image CLI, kino, and Stargate are released as GitHub
+releases tagged `<prefix>/vX.Y.Z`. Nothing is published to crates.io or any
+other registry.
+
+- **Release pull request:** on every push to main, the Release workflow
+  rebuilds `release/next`. git-cliff reads the Conventional Commits since each
+  product's latest tag, scoped to the paths in
+  `tools/workflows/release/products.json`. Main takes only squash merges
+  named after the pull request title ("Merge settings" in `ci/README.md`), so
+  each commit is a pull request title, which CI's `pr-title` job checks. A
+  `feat` bumps the minor version, and a `fix`, `perf`, `refactor`, or `build`
+  bumps the patch version. A breaking change bumps the minor version while a
+  product is on 0.x. The root `Cargo.toml` and `Cargo.lock` belong to no
+  product, so a `feat(deps)`, `fix(deps)`, or `build(deps)` commit that changes
+  only those two files counts for each product that ships what it changed
+  (`tools/workflows/release/deps-commits.py`): a `Cargo.lock` package in the
+  dependency closure of the product's crates, including the jailer and jailerd
+  in the agent's archive, or a `[workspace.dependencies]` entry those crates
+  use directly. Any other root `Cargo.toml` change, such as a profile or a
+  patch, counts for every product. Such a commit bumps the product like any
+  other and gets a line in its changelog. The pull request bumps each
+  changed product's `Cargo.toml` version and `Cargo.lock` entry, and prepends
+  its `CHANGELOG.md`. A product whose manifest version is not tagged yet,
+  because CI has not passed on main's tip since it merged, is left out until
+  the first push after its tag, so no version is skipped. The app cannot move
+  the branch across a change to `.github/workflows`, so such a push to main
+  replaces the pull request with a new one.
+- **Dry run:** CI builds and smoke-tests every product whose version a pull
+  request changes, the release pull request included, with the release build's
+  own steps. A change to the release build dry-runs every product.
+- **Publishing:** once CI passes on main's tip after that pull request merges,
+  the Release workflow tags each new version on main and opens a draft
+  release with that version's changelog section as its notes. It builds and
+  smoke-tests each draft from its tag, attests the payload, and publishes it.
+  CI's rust lane already ran the workspace checks, so the build runs them again
+  only for a tag whose commit never passed CI on main. A failed build leaves
+  its draft, and the next run of the workflow
+  rebuilds and publishes it: after the next CI run that passes on main, a
+  re-run, or a dispatch from main.
+- **After an image CLI release,** the workflow opens a pull request that points
+  the website at the new scenario compiler.
+
+Never bump a product version, edit a product `CHANGELOG.md`, or create a
+product tag as part of other work, and never push a tag by hand. To release a
+version other than the one the release pull request proposes, change the
+version in a pull request of its own; the next run tags and publishes it. A
+Rust dependency update, such as a security fix in the root `Cargo.lock`, ships
+through the release pull request when it is a `fix(deps)` pull request that
+changes nothing but the root `Cargo.toml` and `Cargo.lock`, as described
+above; together with other files it releases only the products whose paths
+those files touch. The release pull request is rebuilt on every push to main,
+so edits made on it are lost.
+
+The workflow needs a GitHub App to push `release/next` and open pull requests,
+because pushes made with the workflow's own token do not run CI. To set it up:
+
+1. Create the `intar-release` GitHub App with contents and pull requests read
+   and write, and install it only on this repository.
+2. Create the `release-pr` environment and limit its deployment branches to
+   `main`.
+3. In that environment, add the app's client ID as the `RELEASE_APP_CLIENT_ID`
+   variable and a private key as the `RELEASE_APP_PRIVATE_KEY` secret.
+
+## Rolling out
+
+The release workflow is the only place a tool is built: every product, Kino
+included, is built by the same steps and ships only as its GitHub release.
+Kino's release is the guest build that runs inside scenario VMs. No workflow
+installs a tool on a host. Rollouts run from an operator's machine, by hand or
+through an agent, and take the release straight from GitHub:
+
+```bash
+gh release download <prefix>/vX.Y.Z --repo intar-dev/intar-dev --dir release
+```
+
+In `release`, `sha256sum --check --ignore-missing <binary>_X.Y.Z_checksums.txt`
+checks the downloads. `gh attestation verify <archive> --repo intar-dev/intar-dev`
+checks that this repository's release workflow built them; releases published
+before the workflow attested them have no attestation. Then:
+
+- **Agent:** on each scenario host, `sudo intar-host update`, or
+  `--version X.Y.Z` for a specific release. It downloads the release from GitHub
+  itself; see `deploy/personal-metal/README.md`.
+- **Builder:** on the builder host, run the new binary's
+  `sudo ./intar-builder doctor --config /etc/intar-builder/config.toml`. Wait
+  until the host is idle: the latest `applied builder desired state` journal line
+  shows `"desired_builds":0`, and nothing matches `pgrep -f '^/usr/bin/qemu'`.
+  Then `systemctl stop intar-builder`, keep the old binary as
+  `/usr/local/bin/intar-builder.pre-vX.Y.Z`, `install -m 0755` the new one,
+  start the service, and check the journal for the handshake and the desired
+  state with no warnings. The binary has no `--version`; tell releases apart by
+  their SHA-256.
+- **Stargate:** see "Rolling out" in `deploy/stargate/README.md`.
+- **Kino:** image-ops `tools-build` with the `kino_tag`, then the guest-tools
+  steps in `apps/web/README.md`.
+- **Image CLI:** merge the website pin pull request that the release opens. The
+  next website deploy uses it, and `tools-build` builds tools disks with it.

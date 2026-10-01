@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# release.yml, job release, step "Run privileged agent package smoke".
+# release.yml, job build, step "Run privileged agent package smoke".
 set -euo pipefail
 package_root="$(mktemp -d)"
 tar -xzf "dist/intar-agent_${VERSION}_linux_amd64.tar.gz" -C "${package_root}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# release.yml, job release, step "Build release artifacts".
+# release.yml, job build, step "Build release artifacts".
 set -euo pipefail
 dist_dir="${PWD}/dist"
 mkdir -p "${dist_dir}"
@@ -10,18 +10,24 @@ build_archive() {
   local target="$2"
   local archive="${BINARY}_${VERSION}_linux_${arch}"
   local target_dir="${PWD}/target/${target}"
-  local binary="${target_dir}/${target}/release/${BINARY}"
+  # Kino runs inside guest VMs, so its release is the size-optimised guest
+  # build that the guest-tools disk ships.
+  local profile=release
+  if [ "${PACKAGE}" = "kino" ]; then
+    profile=guest
+  fi
+  local binary="${target_dir}/${target}/${profile}/${BINARY}"
   local workdir
   if [ "${PACKAGE}" = "intar-builder" ] || [ "${PACKAGE}" = "intar-image-cli" ]; then
     CARGO_TARGET_DIR="${target_dir}" LIBNBD_BUILD_ROOT="${target_dir}/libnbd" \
       tools/image-build/with-libnbd-env.sh --target "${target}" \
-        cargo zigbuild --locked --release -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
+        cargo zigbuild --locked --profile "${profile}" -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
   else
     # This package does not link libnbd, but Cargo still has to
     # resolve the workspace path dependency, so prepare first.
     CARGO_TARGET_DIR="${target_dir}" \
       tools/image-build/with-libnbd-env.sh --rust-only \
-        cargo zigbuild --locked --release -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
+        cargo zigbuild --locked --profile "${profile}" -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
   fi
   file "${binary}"
   workdir="$(mktemp -d)"

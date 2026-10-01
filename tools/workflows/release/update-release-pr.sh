@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# release.yml, job release-pr, step "Update the release pull request".
+# Rebuilds release/next from this main commit: each product git-cliff finds
+# changes for gets its bumped manifest version, Cargo.lock entry, and
+# changelog. A dependency fix in the root Cargo.toml and Cargo.lock counts for
+# each product that ships a crate it changed (deps-commits.py). The app token
+# pushes, so CI runs on the pull request; with nothing to release, the pull
+# request is closed.
+set -euo pipefail
+# A re-run keeps its run's commit. Only the run for main's tip may rewrite the
+# pull request; a push that moved main has a run of its own that follows.
+main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+if [ "${main}" != "${GITHUB_SHA}" ]; then
+  echo "main moved on to ${main}; its run updates the release pull request."
+  exit 0
+fi
+branch=release/next
+config=tools/workflows/release/cliff.toml
+bot="${APP_SLUG}[bot]"
+bot_id="$(gh api "users/${bot}" --jq .id)"
+git config user.name "${bot}"
+git config user.email "${bot_id}+${bot}@users.noreply.github.com"
+gh auth setup-git --hostname github.com
+git checkout -B "${branch}" "${GITHUB_SHA}"
+
+# One product's git-cliff scope: its anchored tags and its path globs.
+cliff_args='"--tag-pattern", "^\(.prefix)/v[0-9]+\\.[0-9]+\\.[0-9]+$", (.paths[] | "--include-path", .)'
+mapfile -t product_list < <(jq -c '.[]' tools/workflows/release/products.json)
+body="$(mktemp)"
+cat >"${body}" <<'EOF'
+Merging this pull request tags and publishes the releases below. It is rebuilt from main on every push, so a change made here is lost: set a different version through a normal pull request instead.
+EOF
+tags=()
+for product in "${product_list[@]}"; do
+  prefix="$(jq -r .prefix <<<"${product}")"
+  package="$(jq -r .package <<<"${product}")"
+  manifest="$(jq -r .manifest <<<"${product}")"
+  current="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "${manifest}" | head -n 1)"
+  # plan-release.sh tags only the manifest version on main's tip, once CI
+  # passes there, which can follow this push. A bump past a version it has not
+  # tagged yet would skip that version for good, so the product waits: the
+  # first push after the tag proposes its next release.
+  if ! git rev-parse --quiet --verify "refs/tags/${prefix}/v${current}" >/dev/null; then
+    echo "${prefix}/v${current} is not tagged yet; ${prefix} waits for its release."
+    continue
+  fi
+  mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
+  # git-cliff sees no product path in a root Cargo.toml or Cargo.lock change,
+  # so each dependency fix that changed a crate this product ships joins its
+  # commits and bumps the version like any other.
+  deps="$(python3 tools/workflows/release/deps-commits.py "${prefix}/v${current}" "${product}")"
+  if [ -n "${deps}" ]; then
+    while IFS= read -r commit; do
+      cliff+=(--with-commit "${commit}")
+    done <<<"${deps}"
+  fi
+  # With nothing to release, git-cliff prints the latest tag, the manifest
+  # version.
+  next="$(git-cliff --config "${config}" "${cliff[@]}" --unreleased --bumped-version)"
+  if [ "${next}" = "${prefix}/v${current}" ]; then
+    continue
+  fi
+  version="${next#"${prefix}/v"}"
+  if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "git-cliff proposed ${next} for ${prefix}." >&2
+    exit 1
+  fi
+  MANIFEST="${manifest}" PACKAGE="${package}" VERSION="${version}" \
+    tools/workflows/release/apply-release-version.sh
+  # --bump names the section ${next}, computed from the same commits. --tag
+  # would put the --with-commit commits in a section of their own.
+  changelog="$(dirname "${manifest}")/CHANGELOG.md"
+  git-cliff --config "${config}" "${cliff[@]}" --unreleased --bump --prepend "${changelog}"
+  notes="$(git-cliff --config "${config}" "${cliff[@]}" --unreleased --bump --strip all)"
+  printf '%s\n' "${notes}" >>"${body}"
+  git add "${manifest}" Cargo.lock "${changelog}"
+  tags+=("${next}")
+done
+
+open_pr() {
+  gh pr list --head "${branch}" --base main --state open --json number --jq '.[0].number // empty'
+}
+if [ "${#tags[@]}" -eq 0 ]; then
+  pr="$(open_pr)"
+  if [ -n "${pr}" ]; then
+    gh pr close "${pr}" --delete-branch --comment "Nothing to release at ${GITHUB_SHA}."
+  fi
+  echo "Nothing to release."
+  exit 0
+fi
+joined="${tags[*]}"
+title="chore(release): ${joined// /, }"
+git commit --quiet -m "${title}"
+tools/workflows/release/push-bot-branch.sh "${branch}"
+pr="$(open_pr)"
+if [ -n "${pr}" ]; then
+  gh pr edit "${pr}" --title "${title}" --body-file "${body}"
+else
+  gh pr create --base main --head "${branch}" --title "${title}" --body-file "${body}"
+fi
+echo "${title}" >> "${GITHUB_STEP_SUMMARY}"

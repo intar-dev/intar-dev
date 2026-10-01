@@ -24,7 +24,6 @@ const serverData = (
   overrides: Partial<MyServersResponse> = {},
 ): MyServersResponse => ({
   placement: "organization",
-  registrationOpen: true,
   installerCommand: "curl -fsSL https://intar.dev/install.sh | sudo sh",
   servers: [server()],
   enrollments: [],
@@ -407,13 +406,13 @@ test("removal keeps shared placement until the last server and handles concurren
   );
 });
 
-test("closed registration and a failed load keep retry available to members", async ({
+test("a failed load keeps retry available to members, who cannot add servers", async ({
   page,
   ui,
 }) => {
   await mockServers(
     page,
-    serverData({ placement: "platform", servers: [], registrationOpen: false }),
+    serverData({ placement: "platform", servers: [] }),
   );
   let fail = true;
   await page.route(`**${api}`, async (route) => {
@@ -437,9 +436,6 @@ test("closed registration and a failed load keep retry available to members", as
   await section(page).getByRole("button", { name: "Try again" }).click();
   await expect(section(page)).toContainText(
     "No organization servers connected yet.",
-  );
-  await expect(section(page)).toContainText(
-    "New server registration is not available yet.",
   );
   await expect(section(page).getByRole("button")).toHaveCount(0);
 });

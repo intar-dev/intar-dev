@@ -61,6 +61,8 @@ interface RunOptions {
   admissionOk?: boolean;
   probeStatus?: string;
   holdInventory?: boolean;
+  /** Writes the hold a run takes behind the lane's own maintenance fence. */
+  holdRecovery?: boolean;
 }
 
 function fakeBunx(): string {
@@ -247,6 +249,35 @@ function runDeployment(options: RunOptions = {}) {
           sessionRequired: options.admissionSessionRequired ?? true,
         },
         inventory: { ok: true, status: "report-only", candidates: 5, scanned_objects: 42 },
+      }),
+    );
+  }
+  if (options.holdRecovery === true) {
+    // The recovery hold reads the D1 admission row; the fenced collector
+    // could not plan, so it records no inventory.
+    writeFileSync(
+      join(runnerTemp, "registry-cleanup-hold.json"),
+      JSON.stringify({
+        schema_version: 1,
+        operation: "registry-cleanup-gate",
+        action: "hold",
+        gate: "recovery",
+        recovery: {
+          parent_version_id: parentVersionId,
+          parent_tag: "web-" + "b".repeat(12) + "-maintenance",
+          problem: null,
+        },
+        paused: true,
+        idle: true,
+        admission: {
+          ok: true,
+          source: "d1",
+          enforcement: options.admissionEnforcement ?? "enforce",
+          sessionRequired: options.admissionSessionRequired ?? true,
+          paused: true,
+          sweepActive: false,
+        },
+        inventory: null,
       }),
     );
   }
@@ -510,6 +541,68 @@ describe("image registry cleanup deployment", () => {
       run.cleanup();
     }
   }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("deploys delete behind a recovery hold when the live collector already deletes", () => {
+    // A failed migration deploy left the lane's maintenance version serving.
+    // The recovery hold proves D1 admission from the shared row, and the
+    // deploy keeps the delete authority it replaces.
+    const run = runDeployment({
+      mode: "delete",
+      liveChildMode: "delete",
+      holdInventory: false,
+      holdRecovery: true,
+      parentTag: "web-" + "b".repeat(12) + "-maintenance",
+    });
+    try {
+      expect(run.result.status, run.result.stderr).toBe(0);
+      expect(run.state).toBe(deployedVersionId);
+      expect(run.evidence).toMatchObject({
+        cleanup_mode: "delete",
+        previous_mode: "delete",
+        parent_revision_proven: false,
+        parent_binding_present: true,
+      });
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("refuses a recovery hold that would turn deletes on", () => {
+    const run = runDeployment({
+      mode: "delete",
+      liveChildMode: "report-only",
+      holdInventory: false,
+      holdRecovery: true,
+    });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.result.stderr).toContain(
+        "a recovery hold can not turn deletes on (the live collector is report-only)",
+      );
+      expect(run.state).toBe(beforeVersionId);
+      expect(run.evidence).toBeNull();
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("refuses a recovery hold without D1 admission enforcement", () => {
+    const run = runDeployment({
+      mode: "delete",
+      liveChildMode: "delete",
+      holdInventory: false,
+      holdRecovery: true,
+      admissionEnforcement: "report_only",
+      admissionSessionRequired: false,
+    });
+    try {
+      expect(run.result.status).not.toBe(0);
+      expect(run.result.stderr).toContain("D1 upload admission enforcement is not enforce");
+      expect(run.state).toBe(beforeVersionId);
+    } finally {
+      run.cleanup();
+    }
+  });
 
   it("refuses delete mode while the D1 admission state is not enforcing", () => {
     const run = runDeployment({
@@ -779,7 +872,7 @@ describe("image registry cleanup deployment", () => {
     }
   }, DEPLOY_LIVENESS_TIMEOUT_MS);
 
-  it("proves the bootstrap parent: this revision, binding still absent", () => {
+  it("proves a parent of this revision by its tag, even without the binding", () => {
     const run = runDeployment({ parentBinding: false });
     try {
       expect(run.result.status, run.result.stderr).toBe(0);

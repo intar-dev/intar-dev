@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Website workflow, deploy job, step "Pin and verify production configuration".
+# deploy.yml, job deploy-web, step "Pin and verify production configuration".
 cd apps/web
 set -euo pipefail
 config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler.json"
@@ -24,9 +24,15 @@ test -f "${GITHUB_WORKSPACE}/apps/web/dist/client/favicon.svg"
 test -f "${GITHUB_WORKSPACE}/apps/web/dist/client/_headers"
 # The image registry cleanup worker is an auxiliary worker of this
 # site. Its built configuration travels in the same tested artifact,
-# so this lane refuses an artifact that lost it.
+# so this lane refuses an artifact that lost it. Its mode is committed
+# in its wrangler.jsonc, and this release deploys that mode.
 cleanup_config="${GITHUB_WORKSPACE}/apps/web/dist/intar_dev_image_registry_cleanup/wrangler.json"
 test -f "${cleanup_config}"
+cleanup_mode="$(jq -er '.vars.REGISTRY_CLEANUP_MODE' "${cleanup_config}")"
+case "${cleanup_mode}" in
+  report-only|delete) ;;
+  *) echo "the artifact's REGISTRY_CLEANUP_MODE must be report-only or delete" >&2; exit 1 ;;
+esac
 jq -e \
   --arg database_id "${database_id}" \
   --arg bucket_name "$(jq -er '
@@ -44,7 +50,6 @@ jq -e \
     ($buckets[0].bucket_name == $bucket_name) and
     ($buckets[0].jurisdiction == "eu") and
     (.triggers.crons == [$cron]) and
-    (.vars.REGISTRY_CLEANUP_MODE == "report-only") and
     (((.routes // []) | length) == 0) and
     ((.workers_dev // false) == false) and
     ((.preview_urls // false) == false) and
@@ -55,4 +60,5 @@ jq -e \
 {
   printf 'DATABASE_ID=%s\n' "${database_id}"
   printf 'DEPLOYMENT_CONFIG=%s\n' "${config}"
+  printf 'REGISTRY_CLEANUP_MODE=%s\n' "${cleanup_mode}"
 } >> "${GITHUB_ENV}"

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# release.yml, job plan, step "Plan releases".
+# A product whose manifest version on main has no tag gets an annotated
+# <prefix>/vX.Y.Z tag on the commit that set that version and a draft release
+# with its changelog notes. Every release still in draft goes into the build
+# matrix, which is how a failed run resumes. The matrix says whether CI passed
+# on the tag's commit on main: build runs the workspace gate only when not.
+set -euo pipefail
+products=tools/workflows/release/products.json
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+gh auth setup-git --hostname github.com
+manifest_version() {
+  sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -n 1
+}
+# One product's git-cliff scope: its anchored tags and its path globs.
+cliff_args='"--tag-pattern", "^\(.prefix)/v[0-9]+\\.[0-9]+\\.[0-9]+$", (.paths[] | "--include-path", .)'
+mapfile -t product_list < <(jq -c '.[]' "${products}")
+matrix='[]'
+for product in "${product_list[@]}"; do
+  project="$(jq -r .project <<<"${product}")"
+  prefix="$(jq -r .prefix <<<"${product}")"
+  package="$(jq -r .package <<<"${product}")"
+  manifest="$(jq -r .manifest <<<"${product}")"
+  version="$(manifest_version <"${manifest}")"
+  if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "${manifest} has no plain release version: ${version}" >&2
+    exit 1
+  fi
+  if [ "$(grep -A1 -Fx "name = \"${package}\"" Cargo.lock | grep -cFx "version = \"${version}\"")" != 1 ]; then
+    echo "Cargo.lock does not pin ${package} ${version}." >&2
+    exit 1
+  fi
+  tag="${prefix}/v${version}"
+  if ! git rev-parse --quiet --verify "refs/tags/${tag}" >/dev/null; then
+    source_sha="$(git log --first-parent -1 --format=%H -G '^version = "' -- "${manifest}")"
+    git tag -a "${tag}" "${source_sha}" -m "${project} v${version}"
+    git push origin "refs/tags/${tag}"
+  fi
+  test "$(git cat-file -t "refs/tags/${tag}")" = tag
+  git merge-base --is-ancestor "${tag}^{commit}" "${GITHUB_SHA}"
+  test "$(git show "${tag}^{commit}:${manifest}" | manifest_version)" = "${version}"
+
+  draft="$(gh release view "${tag}" --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
+  if [ "${draft}" = false ]; then
+    continue
+  fi
+  if [ "${draft}" = missing ]; then
+    # The notes are the changelog section the release pull request wrote,
+    # which also lists the dependency fixes git-cliff cannot map to a product.
+    # A version set by hand has none, so git-cliff writes them.
+    notes="$(git show "${tag}^{commit}:$(dirname "${manifest}")/CHANGELOG.md" |
+      awk -v head="## ${tag} (" '/^## / { on = index($0, head) == 1 } on')"
+    if [ -z "${notes}" ]; then
+      mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
+      notes="$(git-cliff --config tools/workflows/release/cliff.toml "${cliff[@]}" --latest --strip all)"
+    fi
+    gh release create "${tag}" --draft --verify-tag \
+      --title "${project} v${version}" --notes "${notes}"
+  fi
+  ci_passed="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&head_sha=$(git rev-parse "${tag}^{commit}")&status=success" \
+    --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")] | length > 0')"
+  matrix="$(jq -c --argjson product "${product}" --arg tag "${tag}" --arg version "${version}" --argjson ci_passed "${ci_passed}" \
+    '. + [$product + {tag: $tag, version: $version, ci_passed: $ci_passed} | del(.paths)]' <<<"${matrix}")"
+done
+echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+echo "Release matrix: ${matrix}"

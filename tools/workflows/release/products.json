@@ -1,0 +1,85 @@
+[
+  {
+    "project": "intar-agent",
+    "prefix": "agent",
+    "package": "intar-agent",
+    "binary": "intar-agent",
+    "manifest": "crates/intar-agent/Cargo.toml",
+    "runner": "ubuntu-24.04",
+    "paths": [
+      "crates/intar-agent/**",
+      "crates/cloud-hypervisor-client/**",
+      "crates/intar-contracts/**",
+      "crates/intar-jailer/**",
+      "crates/intar-jailer-protocol/**",
+      "crates/intar-jailerd/**",
+      "crates/intar-kino-proto/**",
+      "crates/intar-observability/**",
+      "crates/stargate-core/**",
+      "deploy/personal-metal/**",
+      "tools/workflows/release/build-release-artifacts.sh"
+    ]
+  },
+  {
+    "project": "intar-builder",
+    "prefix": "builder",
+    "package": "intar-builder",
+    "binary": "intar-builder",
+    "manifest": "crates/intar-builder/Cargo.toml",
+    "runner": "namespace-profile-intar-dev",
+    "paths": [
+      "crates/intar-builder/**",
+      "crates/intar-contracts/**",
+      "crates/intar-image-build/**",
+      "crates/intar-image-scenario/**",
+      "crates/intar-image-upload/**",
+      "crates/intar-observability/**",
+      "content/scenarios/base-images.hcl",
+      "tools/image-build/*libnbd*"
+    ]
+  },
+  {
+    "project": "intar-image-cli",
+    "prefix": "image-cli",
+    "package": "intar-image-cli",
+    "binary": "intar-image-cli",
+    "manifest": "crates/intar-image-cli/Cargo.toml",
+    "runner": "namespace-profile-intar-dev",
+    "paths": [
+      "crates/intar-image-cli/**",
+      "crates/intar-contracts/**",
+      "crates/intar-image-build/**",
+      "crates/intar-image-scenario/**",
+      "crates/intar-image-upload/**",
+      "content/scenarios/base-images.hcl",
+      "tools/image-build/*libnbd*"
+    ]
+  },
+  {
+    "project": "kino",
+    "prefix": "kino",
+    "package": "kino",
+    "binary": "kino",
+    "manifest": "crates/kino/Cargo.toml",
+    "runner": "namespace-profile-intar-dev",
+    "paths": [
+      "crates/kino/**",
+      "crates/intar-contracts/**",
+      "crates/intar-kino-proto/**"
+    ]
+  },
+  {
+    "project": "stargate",
+    "prefix": "stargate",
+    "package": "stargate-gateway",
+    "binary": "stargate",
+    "manifest": "crates/stargate-gateway/Cargo.toml",
+    "runner": "namespace-profile-intar-dev",
+    "paths": [
+      "crates/stargate-gateway/**",
+      "crates/intar-contracts/**",
+      "crates/intar-observability/**",
+      "crates/stargate-core/**"
+    ]
+  }
+]

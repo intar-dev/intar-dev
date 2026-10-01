@@ -63,17 +63,100 @@ Drizzle Kit's D1 HTTP driver and requires `CLOUDFLARE_ACCOUNT_ID`,
 `CLOUDFLARE_DATABASE_ID`, and either `CLOUDFLARE_D1_TOKEN` or
 `CLOUDFLARE_API_TOKEN`. Do not apply schema files with `wrangler d1 execute`,
 run Wrangler's D1 migration commands, or edit either migration ledger by hand.
-Pull requests run the web tests, build, and one Chromium smoke check. A matching
-push to `main` runs the same fixed lane and then deploys its tested artifact
-automatically. The deploy verifies the exact source revision and production
-bindings, applies pending Drizzle migrations, deploys the full Worker
-configuration at 100 percent, and checks the homepage, favicon, and D1-backed
-health API.
+Pull requests run the web lane of the CI workflow (the checks, tests, and
+build) and one Chromium smoke check. On a push to `main`, the web lane uploads
+the build it tested, and once that CI run passes for `main`'s tip, the Deploy
+workflow deploys that build automatically. The deploy verifies the exact source
+revision, the build's digest, and the production bindings, applies pending
+Drizzle migrations, deploys the full Worker configuration at 100 percent, and
+checks the homepage, favicon, and D1-backed health API.
 
 Maintenance mode is enabled only when a migration is pending. The workflow
 drains old requests before applying that migration. It does not roll back: a
-failed post-migration activation leaves maintenance enabled, and a failed live
-check leaves the deployed version active while the workflow reports failure.
+failed live check leaves the deployed version active while the workflow
+reports failure, and a failure after maintenance was enabled leaves maintenance
+serving until the next deploy recovers it (below). The job summary of every
+deploy names the Worker version that served before the run and the
+`bunx wrangler rollback <id> --name intar-dev` command for it. That rollback is
+the break-glass path for the Worker only: D1 migrations don't roll back.
+
+Every deploy holds the image registry cleanup worker before it changes
+anything and releases it at the end, also after a failure. The worker runs in
+the mode committed in `workers/image-registry-cleanup/wrangler.jsonc`; image-ops
+`cleanup-run` and the worker's 6-hour cron do the deleting. In `delete` mode the
+hold also needs D1 upload admission enforcement. If it has been switched off,
+re-enable it with `POST https://intar.dev/registry/v1/admission/enforcement`,
+body `{"mode":"enforce"}` and `Authorization: Bearer $INTAR_IMAGE_PUBLISH_TOKEN`,
+or commit `report-only` as the worker mode.
+
+### Recovery after a failed migration deploy
+
+The collector's gate route sits behind the maintenance fence, so the deploy
+states are:
+
+1. **Open.** A deploy holds the collector through the gate: it reads the D1
+   admission state, in `delete` mode takes a report inventory, then pauses the
+   collector and waits for it to be idle. With migrations pending it then
+   deploys a maintenance version, tagged `web-<sha12>-maintenance`.
+2. **Maintenance left serving.** The run failed after it enabled maintenance:
+   at the drain, the migration, the schema check, or the collector or
+   production deploy. Its release meets its own maintenance version, leaves the
+   collector held, and passes; the step that failed is the one that reports.
+   The fenced collector can't sweep, and nothing can reach it to release it.
+3. **Recovery.** The next deploy, a fix push, a Deploy dispatch from `main`,
+   or a re-run while its revision is still `main`'s tip, finds a
+   `web-<sha12>-maintenance` version serving with maintenance on. Its hold reads
+   the D1 admission row instead of the gate and requires that no sweep is in
+   flight and, in `delete` mode, that upload admission is enforced. The run
+   then applies the migrations that are still pending under its own
+   maintenance version, verifies the schema, deploys the collector in the
+   committed mode, and deploys production, which reopens the site. Its release
+   goes through the open gate and resumes the collector (state 1). If it fails
+   again, the state stays 2 and the next deploy recovers. When CI on `main`'s
+   tip fails outside the web lane, for example on a newly published advisory,
+   no deploy follows it: dispatch Deploy with break glass
+   (`gh workflow run deploy.yml --ref main -f break_glass=true`), which deploys
+   the tip's build once its own web lane and Chromium smoke passed.
+
+A recovery hold has no report inventory, because the fenced collector can't
+plan, so it deploys `delete` only over a collector that already deletes. It
+never turns deletes on. Maintenance that this lane didn't deploy still stops
+the hold.
+
+A release can also fail while the site serves, for example on a transient gate
+error. The collector then stays paused with the deploy's own pause reason,
+`registry_cleanup_hold`, and a paused collector refuses the report inventory a
+`delete` hold takes. Website deploys run one at a time, so the next deploy's
+hold treats that pause as a leftover: it resumes it, takes the inventory, and
+pauses again, and the hold evidence records the resume under `leftover_hold`.
+The hold doesn't resume a pause with another reason, such as an operator's
+pause through `/registry/v1/admission/pause`, or a collector with a sweep in
+flight; a `delete` hold then fails on its inventory before it pauses, and the
+release leaves the collector as the hold found it, so the operator's pause
+stays. A hold that does pause, such as a `report-only` one, replaces an
+existing reason with `registry_cleanup_hold`, and its release resumes the
+collector. Pause a `report-only` collector again after a website deploy if it
+must stay paused.
+
+To roll out new guest tools, run these from `main` in order:
+
+1. image-ops `gate-drained`, which stops new runs and waits for the fleet to
+   drain.
+2. image-ops `tools-build` with the published `kino_tag`. It builds the tools
+   disk from that Kino release and the image CLI release the website pins,
+   uploads the candidate, and keeps it in the `guest-tools-deployment-<run_id>`
+   artifact.
+3. image-ops `tools-promote` with a verified build `revision` to warm and
+   check against, and `expected_candidate_sha256`, the SHA-256 of that
+   artifact's `candidate.json`. It makes the candidate the stable channel.
+4. A Deploy dispatch from `main` (`gh workflow run deploy.yml --ref main`). It
+   deploys `main`'s tip from its latest successful CI run, and every deploy
+   pins the stable channel, so this one pins the promoted tools. When that CI
+   run's builds have expired, dispatch CI instead
+   (`gh workflow run ci.yml --ref main`); it deploys once it passes. When no CI
+   run passed for the tip because of a job outside the web lane, add
+   `-f break_glass=true` to the Deploy dispatch.
+5. image-ops `gate-open`.
 
 ## Sign-ups
 

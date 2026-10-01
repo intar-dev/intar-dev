@@ -1,5 +1,7 @@
 package workflows
 
+import "github.com/intar-dev/intar-dev/ci/gha"
+
 "workflows": "image-ops": {
 	name:       "Image operations"
 	"run-name": "Image ops ${{ inputs.operation }} @ ${{ github.sha }}"
@@ -7,9 +9,9 @@ package workflows
 	// One operator lane for the image flywheel work that stays manual: the run
 	// gate, the guest-tools build and promotion, and the registry cleanup. Intar
 	// promotes image catalogs itself (Admin, Scenarios, Image promotion), also
-	// inside a drain this lane holds. Each operation keeps its own inputs, its own
-	// confirmation, and its own job, so the plane fence and the deliberate-release
-	// property stay explicit. Three lock groups keep unrelated work from blocking
+	// inside a drain this lane holds. Each operation keeps its own inputs and its
+	// own job, so the plane fence and the deliberate-release property stay
+	// explicit; the production environment admits only main. Three lock groups keep unrelated work from blocking
 	// recovery: the image pipeline group, the cleanup campaign group, and the
 	// cleanup status group, which must stay readable while a campaign holds the
 	// other two.
@@ -29,12 +31,6 @@ package workflows
 					"cleanup-run",
 					"cleanup-resolve",
 				]
-			}
-			confirmation: {
-				description: "the confirmation the chosen operation prints in its own job"
-				required:    false
-				default:     ""
-				type:        "string"
 			}
 			revision: {
 				description: "verified candidate bundle revision, for a tools promotion"
@@ -159,7 +155,6 @@ package workflows
 			env: {
 				INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
 				STATE:                     "${{ needs.request.outputs.state }}"
-				CONFIRMATION:              "${{ inputs.confirmation }}"
 			}
 			steps: [{
 				name: "Validate authority"
@@ -168,11 +163,9 @@ package workflows
 					test "${GITHUB_REF}" = "refs/heads/main"
 					test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
 					case "${STATE}" in
-					  drained) expected="SET IMAGE GATE DRAINED" ;;
-					  open) expected="SET IMAGE GATE OPEN" ;;
+					  drained|open) ;;
 					  *) echo "Unsupported run gate state." >&2; exit 1 ;;
 					esac
-					test "${CONFIRMATION}" = "${expected}"
 
 					"""
 			}, {
@@ -234,16 +227,14 @@ package workflows
 			"timeout-minutes": 30
 			environment:       "production"
 			env: {
-				KINO_TAG:     "${{ inputs.kino_tag }}"
-				CONFIRMATION: "${{ inputs.confirmation }}"
-				BUCKET:       "intar-dev-vm-image-registry-20260709"
+				KINO_TAG: "${{ inputs.kino_tag }}"
+				BUCKET:   "intar-dev-vm-image-registry-20260709"
 			}
 			steps: [{
 				name: "Validate deployment inputs"
 				run: """
 					set -euo pipefail
 					test "${GITHUB_REF}" = refs/heads/main
-					test "${CONFIRMATION}" = 'DEPLOY GUEST TOOLS'
 					[[ "${KINO_TAG}" =~ ^kino/v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]
 					mkdir -p "${RUNNER_TEMP}/guest-tools"
 					printf 'TOOLS_DIR=%s/guest-tools\\n' "${RUNNER_TEMP}" >> "${GITHUB_ENV}"
@@ -251,7 +242,7 @@ package workflows
 					"""
 			}, {
 				name: "Checkout deployment revision"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: {
 					ref:                   "${{ github.sha }}"
 					"fetch-depth":         0
@@ -261,35 +252,14 @@ package workflows
 				name: "Set up cuenv"
 				uses: "./.github/actions/setup-cuenv"
 			}, {
-				// Stays inline: cuenv task sets CLICOLOR_FORCE=1 when it is unset, and gh
-				// then colours its --json output, which jq can not parse.
-				name: "Verify published Kino source"
-				env: GH_TOKEN: "${{ github.token }}"
-				run: "cuenv task image-ops-verify-kino-source"
-			}, {
-				name: "Install Rust toolchain"
-				run:  "cuenv task image-ops-install-rust-toolchain"
-			}, {
-				name: "Set up Rust cache"
-				uses: "namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9" // v1
-				with: cache: "rust"
-			}, {
-				name: "Install cargo-zigbuild"
-				uses: "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29" // v2
-				with: tool: "cargo-zigbuild@0.23.0"
-			}, {
-				name: "Install Zig"
-				uses: "mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29" // v2
-				with: version: "0.16.0"
-			}, {
 				name: "Verify runner disk tools"
-				run:  "cuenv task image-ops-verify-runner-disk-tools"
+				#StepTask & {#task: "image-ops-verify-runner-disk-tools"}
 			}, {
-				name: "Prepare Kino source workspace"
-				run:  "cuenv task image-ops-prepare-kino-source"
-			}, {
-				name: "Build guest Kino and tools disk"
-				run:  "cuenv task image-ops-build-guest-tools"
+				// Kino's published release is its guest build, and the image CLI
+				// release the website pins builds the disk, so nothing compiles here.
+				name: "Build the tools disk from the releases"
+				env: GH_TOKEN: "${{ github.token }}"
+				#StepTask & {#task: "image-ops-build-guest-tools"}
 			}, {
 				name: "Set up the CI runtime"
 				uses: "./.github/actions/setup-runtime"
@@ -303,7 +273,7 @@ package workflows
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
-				run: "cuenv task image-ops-upload-tools-candidate"
+				#StepTask & {#task: "image-ops-upload-tools-candidate"}
 			}, {
 				name:                "Verify uploaded objects by re-download"
 				"working-directory": "."
@@ -311,11 +281,11 @@ package workflows
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
-				run: "cuenv task image-ops-verify-tools-upload"
+				#StepTask & {#task: "image-ops-verify-tools-upload"}
 			}, {
 				name: "Retain build and deployment evidence"
 				if:   "always()"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "guest-tools-deployment-${{ github.run_id }}"
 					path:                "${{ runner.temp }}/guest-tools/"
@@ -337,7 +307,6 @@ package workflows
 			env: {
 				REVISION:                  "${{ inputs.revision }}"
 				EXPECTED_CANDIDATE_SHA256: "${{ inputs.expected_candidate_sha256 }}"
-				CONFIRMATION:              "${{ inputs.confirmation }}"
 				BUCKET:                    "intar-dev-vm-image-registry-20260709"
 			}
 			steps: [{
@@ -345,7 +314,6 @@ package workflows
 				run: """
 					set -euo pipefail
 					test "${GITHUB_REF}" = refs/heads/main
-					test "${CONFIRMATION}" = 'PROMOTE GUEST TOOLS'
 					[[ "${REVISION}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]
 					[[ "${EXPECTED_CANDIDATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
 					mkdir -p "${RUNNER_TEMP}/guest-tools"
@@ -354,7 +322,7 @@ package workflows
 					"""
 			}, {
 				name: "Checkout promotion revision"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: {
 					ref:                   "${{ github.sha }}"
 					"persist-credentials": false
@@ -375,7 +343,7 @@ package workflows
 					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 				}
-				run: "cuenv task image-ops-read-tools-candidate"
+				#StepTask & {#task: "image-ops-read-tools-candidate"}
 			}, {
 				name:                "Require drained host and retain previous stable pin"
 				"working-directory": "."
@@ -384,10 +352,10 @@ package workflows
 					CLOUDFLARE_API_TOKEN:      "${{ secrets.CLOUDFLARE_API_TOKEN }}"
 					INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
 				}
-				run: "cuenv task image-ops-require-drain-retain-stable"
+				#StepTask & {#task: "image-ops-require-drain-retain-stable"}
 			}, {
 				name: "Retain rollback pin before promotion"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "guest-tools-rollback-${{ github.run_id }}"
 					path:                "${{ runner.temp }}/guest-tools/previous-stable.json"
@@ -396,15 +364,15 @@ package workflows
 			}, {
 				name: "Warm every host and wait for the candidate cache"
 				env: INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				run: "cuenv task image-ops-warm-tools-candidate"
+				#StepTask & {#task: "image-ops-warm-tools-candidate"}
 			}, {
 				name: "Promote the exact candidate while drained"
 				env: INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				run: "cuenv task image-ops-promote-tools-candidate"
+				#StepTask & {#task: "image-ops-promote-tools-candidate"}
 			}, {
 				name: "Retain promotion evidence"
 				if:   "always()"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name:                "guest-tools-promotion-${{ github.run_id }}"
 					path:                "${{ runner.temp }}/guest-tools/"
@@ -436,11 +404,10 @@ package workflows
 				GATE_URL:           "https://intar.dev/api/maintenance/registry-cleanup"
 				ACTION:             "${{ needs.request.outputs.action }}"
 				EXPECTED_GC_RUN_ID: "${{ inputs.expected_gc_run_id }}"
-				CONFIRMATION:       "${{ inputs.confirmation }}"
 			}
 			steps: [{
 				name: "Checkout exact main revision"
-				uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" // v7
+				uses: gha.pin.checkout.ref
 				with: "persist-credentials": false
 			}, {
 				name: "Set up cuenv"
@@ -451,12 +418,12 @@ package workflows
 				// delegate to the gate script, which resolves wrangler through the locked
 				// dependency tree; without the locked install `bunx` may fetch a latest.
 				if:   "needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'"
-				uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6" // v2
+				uses: gha.pin."setup-bun".ref
 				with: "bun-version": "1.3.14"
 			}, {
 				name: "Set up Node"
 				if:   "needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'"
-				uses: "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020" // v7
+				uses: gha.pin."setup-node".ref
 				with: "node-version-file": "apps/web/.node-version"
 			}, {
 				name: "Install locked dependencies"
@@ -464,14 +431,14 @@ package workflows
 				run:  "bun install --frozen-lockfile"
 			}, {
 				name: "Validate cleanup authority"
-				run:  "cuenv task image-ops-validate-cleanup-authority"
+				#StepTask & {#task: "image-ops-validate-cleanup-authority"}
 			}, {
 				name: "Read the collector status and the shared ledger"
-				run:  "cuenv task image-ops-read-cleanup-state"
+				#StepTask & {#task: "image-ops-read-cleanup-state"}
 			}, {
 				name: "List the candidate set"
 				if:   "needs.request.outputs.action == 'plan'"
-				run:  "cuenv task image-ops-plan-cleanup"
+				#StepTask & {#task: "image-ops-plan-cleanup"}
 			}, {
 				name: "Run the delete campaign"
 				if:   "needs.request.outputs.action == 'run'"
@@ -481,7 +448,7 @@ package workflows
 					// CI gets 60 minutes here, inside the job's 75.
 					REGISTRY_CLEANUP_RUN_DEADLINE_MS: "3600000"
 				}
-				run: "cuenv task image-ops-run-cleanup"
+				#StepTask & {#task: "image-ops-run-cleanup"}
 			}, {
 				name: "Resolve one stalled sweep"
 				if:   "needs.request.outputs.action == 'resolve'"
@@ -492,7 +459,7 @@ package workflows
 					// and the service's grace window can not disagree.
 					STALE_MS: "600000"
 				}
-				run: "cuenv task image-ops-resolve-stalled-sweep"
+				#StepTask & {#task: "image-ops-resolve-stalled-sweep"}
 			}, {
 				name: "Remove any response that reflected the machine credential"
 				if:   "always()"
@@ -500,11 +467,11 @@ package workflows
 					// The scrub compares both credentials, and keeps neither.
 					INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
 				}
-				run: "cuenv task image-ops-scrub-cleanup-evidence"
+				#StepTask & {#task: "image-ops-scrub-cleanup-evidence"}
 			}, {
 				name: "Retain cleanup evidence"
 				if:   "always()"
-				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" // v7
+				uses: gha.pin."upload-artifact".ref
 				with: {
 					name: "image-registry-cleanup-${{ needs.request.outputs.action }}-${{ github.run_id }}"
 					path: """
@@ -534,10 +501,7 @@ package workflows
 // that authenticates to production or changes anything outside the runner is
 // _production; the authority check and the evidence scrub touch only the runner.
 tasks: {
-	"image-ops-install-rust-toolchain": #Script & {_script: "tools/workflows/image-ops/install-rust-toolchain.sh"}
 	"image-ops-verify-runner-disk-tools": #Script & {_script: "tools/workflows/image-ops/verify-runner-disk-tools.sh"}
-	"image-ops-verify-kino-source": #Script & {_script: "tools/workflows/image-ops/verify-kino-source.sh"}
-	"image-ops-prepare-kino-source": #Script & {_script: "tools/workflows/image-ops/prepare-kino-source.sh"}
 	"image-ops-build-guest-tools": #Script & {_script: "tools/workflows/image-ops/build-guest-tools.sh"}
 	"image-ops-upload-tools-candidate": #Script & {_script: "tools/workflows/image-ops/upload-tools-candidate.sh", _production: true}
 	"image-ops-verify-tools-upload": #Script & {_script: "tools/workflows/image-ops/verify-tools-upload.sh", _production: true}

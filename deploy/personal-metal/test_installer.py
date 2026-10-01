@@ -685,10 +685,13 @@ class InstallerTests(unittest.TestCase):
     def test_published_launcher_and_package_assets_are_connected(self):
         workflow = (REPO / '.github/workflows/release.yml').read_text()
         build = (REPO / 'tools/workflows/release/build-release-artifacts.sh').read_text()
-        self.assertIn('cuenv task release-build-release-artifacts', workflow)
+        self.assertIn('cuenv task -p ci --package ci release-build-release-artifacts', workflow)
         self.assertIn('sh deploy/personal-metal/package.sh', build)
         self.assertIn('intar-agent_${VERSION}_intar-host', build)
         self.assertLess(workflow.index('Run privileged agent package smoke'), workflow.index('Preserve exact release payload'))
+        # The publish job releases exactly the payload the smoked build preserved.
+        self.assertEqual(workflow.count('name: release-${{ matrix.prefix }}'), 2)
+        self.assertLess(workflow.index('Preserve exact release payload'), workflow.index('Publish tagged GitHub release'))
         launcher = (REPO / 'apps/web/public/install.sh').read_text()
         self.assertIn('intar-agent_{version}_intar-host', launcher)
         self.assertNotIn('enrollmentToken', launcher)

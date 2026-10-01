@@ -25,11 +25,20 @@
 - Shared wire and guest contracts belong in `crates/intar-contracts`. Regenerate web outputs with `cuenv task generate-contracts`; never edit `apps/web/src/generated/` by hand.
 - The kino protobuf source belongs to `crates/intar-kino-proto/proto/kino/v1/probes.proto`.
 - `apps/web/AGENTS.md` contains website, Worker, and database migration guidance.
-- Repository tasks live in `env.cue` and run with `cuenv task <name>`; `cuenv task` lists them. Every workflow except `scenario-publish.yml` is generated: the `intar-*.yml` lanes from the `env.cue` pipelines with `cuenv sync ci`, and the rest from `ci/workflows/*.cue` with `cuenv sync codegen`. Edit the CUE, never the YAML; `cuenv task sync-check` fails when they drift. `scenario-publish.yml` is an external contract and stays hand-written.
-- Use Conventional Commits with one scope, for example `fix(web): ...`, `feat(intar-agent): ...`, or `chore(stargate): ...`. Use a lowercase subject after the colon, and mark breaking changes with `!`.
+- Repository tasks live in `env.cue` and run with `cuenv task <name>`; `cuenv task` lists them. Workflow step tasks belong to the `intar-ci` project in `ci/env.cue` and run with `cuenv task -p ci --package ci <name>`. Every workflow except `scenario-publish.yml` is rendered from `ci/workflows/*.cue`, typed by the `ci/gha` library and pinned through `ci/gha/pins.cue`, with `cuenv sync codegen`. Edit the CUE, never the YAML; `cuenv task sync-check` fails when they drift. `scenario-publish.yml` is an external contract and stays hand-written. `ci/README.md` describes the workflows, the lanes, and pin bumps.
+- `ci.yml` checks every pull request and every push to main; its `ci-ok` job is the one required check. The lanes are defined once in `ci/workflows/lanes.cue`. Once CI passes on main's tip, `deploy.yml` deploys the website and docs builds its `web` and `docs` lanes uploaded, and `release.yml` tags and publishes releases.
+- Use Conventional Commits with one scope, for example `fix(web): ...`, `feat(intar-agent): ...`, or `chore(stargate): ...`. Use a lowercase subject after the colon, and mark breaking changes with `!`. Main takes only squash merges named after the pull request title ("Merge settings" in `ci/README.md`), so the title is the commit git-cliff versions the releases from: it follows the same format, and CI's `pr-title` job (`tools/ci/check-pr-title.sh`) fails otherwise.
+
+## Releasing
+
+- Product releases come from the bot-maintained `release/next` pull request (see "Releasing" in README.md). Never bump a product version in `Cargo.toml` or `Cargo.lock`, edit a product `CHANGELOG.md`, or create a `<prefix>/v*` tag as part of other work. To release a version other than the one the release pull request proposes, change it in a pull request of its own.
+- Nothing is published to crates.io or any other registry.
+- Every Rust tool is built only by `release.yml` and ships only as its GitHub release. Never add a workflow or step that builds a tool another way or installs one on a host. Rollouts run from the operator's machine and take the release from GitHub ("Rolling out" in README.md).
+- A Rust dependency update that should release the products shipping it is a `fix(deps)` (or `build(deps)`, `feat(deps)`) pull request that changes only the root `Cargo.toml` and `Cargo.lock`; the release pull request then bumps each product whose `Cargo.lock` dependency closure holds a changed package, or whose crates use a changed `[workspace.dependencies]` entry directly, and every product for any other root `Cargo.toml` change (`tools/workflows/release/deps-commits.py`).
+- A workspace crate that a product builds from, and a file it compiles in or packages, belongs in that product's paths in `tools/workflows/release/products.json`; `bun test tools/ci` checks it.
 
 ## Rust quality
 
 - Local and CI Clippy checks MUST use `-D warnings` (`cuenv task clippy`). Do not add `#[allow(...)]`, `#![allow(...)]`, or Clippy-specific suppressions unless necessary and justified. Prefer removing dead code, exercising it, or narrowing visibility.
 - The workspace lints forbid `unsafe` code and deny `unwrap()`, `dbg!`, and `todo!()`. Handle or propagate errors explicitly.
-- Format Rust changes with `cuenv task fmt`. `cuenv task verify` runs the formatting, Clippy, and test gate. `cuenv task lanes.rust`, `lanes.security`, and `lanes.images` run exactly what each CI lane runs.
+- Format Rust changes with `cuenv task fmt`. `cuenv task verify` runs the formatting, Clippy, and test gate. `cuenv task lanes.<name>` runs exactly what that CI lane runs, `cuenv task ci` runs every lane, and `cuenv task ci-changes` shows which lanes a change needs.

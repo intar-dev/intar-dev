@@ -2,6 +2,7 @@ package cuenv
 
 import (
 	"list"
+	"strings"
 
 	"github.com/cuenv/cuenv/schema"
 	gen "github.com/cuenv/cuenv/schema/codegen"
@@ -41,19 +42,12 @@ let _imageParams = {
 	config: {description: "Builder configuration", default: _builderConfig}
 }
 
-// Each CI lane is one leaf task, so cuenv's expanded mode emits one job for
-// it. Expanded mode turns groups and sequences into parallel jobs without
-// ordering, so the lane runs its steps in order through `cuenv task` instead.
-// Its inputs are the lane's trigger paths.
-#Lane: #Bash & {
+// Runs tasks in order through `cuenv task`, stopping at the first failure.
+// cuenv 0.56.7 evaluates a sequence that references another sequence, such as
+// verify, to null.
+#InOrder: #Bash & {
 	_steps: [...string]
 	_script: """
-		if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
-		  # The generated checkout persists the job token and the generated step
-		  # exports it. No lane step needs it, so keep it from build scripts.
-		  git config --local --unset-all http.https://github.com/.extraheader || true
-		  unset GITHUB_TOKEN
-		fi
 		for step in "$@"; do
 		  cuenv task "$step"
 		done
@@ -69,85 +63,12 @@ schema.#Project & {
 		#Host & {command: "git", args: ["diff", "--exit-code", "--", "apps/web/src/generated"]},
 	]
 
-	// The workflows cuenv's CI generator cannot express are GitHub Actions
-	// data in ci/workflows, rendered here. See ci/workflows/render.cue.
-	// Workflow steps run as tasks from ci/workflows; see ci/workflows/tasks.cue.
-	tasks: {for name, task in workflows.tasks {(name): task}}
-
+	// The workflows are GitHub Actions data in ci/workflows, rendered here. See
+	// ci/README.md. Their steps run as tasks of the intar-ci project in
+	// ci/env.cue, or as the root tasks below.
 	codegen: files: {
 		for path, rendered in workflows.files {
 			(path): gen.#YAMLFile & {content: rendered, gitignore: false}
-		}
-	}
-
-	ci: {
-		providers: ["github"]
-		provider: github: {
-			runner: "namespace-profile-intar-dev"
-			permissions: {
-				contents:        "read"
-				checks:          "none"
-				"pull-requests": "none"
-			}
-		}
-
-		// Setup runs as local composite actions after checkout, so every
-		// external action pin stays in hand-written YAML where Dependabot and
-		// the workflow policy can see its version comment.
-		contributors: [
-			{
-				id: "cuenv"
-				tasks: [{
-					id:       "cuenv.setup"
-					label:    "Set up cuenv"
-					priority: 10
-					provider: github: uses: "./.github/actions/setup-cuenv"
-				}]
-			},
-			{
-				id: "rust"
-				when: taskLabels: ["rust"]
-				tasks: [{
-					id:       "rust.setup"
-					label:    "Set up Rust"
-					priority: 5
-					provider: github: uses: "./.github/actions/setup-rust"
-				}]
-			},
-			{
-				id: "runtime"
-				when: taskLabels: ["js"]
-				tasks: [{
-					id:       "runtime.setup"
-					label:    "Set up the CI runtime"
-					priority: 6
-					provider: github: uses: "./.github/actions/setup-runtime"
-				}]
-			},
-		]
-
-		// ponytail: cuenv 0.56.7 hardcodes each workflow's concurrency group to
-		// the head branch name with cancel-in-progress, so a fork pull request
-		// from a branch named like another pull request's branch cancels that
-		// pull request's lanes. Re-run them; nothing merges on a cancelled lane
-		// without a human. Key pull requests on their number once cuenv lets a
-		// pipeline set its concurrency group.
-		pipelines: {
-			rust: {
-				mode: "expanded"
-				when: {branch: "main", pullRequest: true, manual: true}
-				tasks: [_t.lanes.rust]
-			}
-			security: {
-				mode: "expanded"
-				when: {branch: "main", pullRequest: true, manual: true}
-				tasks: [_t.lanes.security]
-			}
-			images: {
-				mode: "expanded"
-				when: {branch: "main", pullRequest: true, manual: true}
-				tasks: [_t.lanes.images]
-			}
 		}
 	}
 
@@ -165,13 +86,7 @@ schema.#Project & {
 		check: {
 			type: "group"
 			rust: #Libnbd & {args: ["--", "cargo", "check", "--workspace"]}
-			js: #Bash & {_script: """
-				bun run check:imports
-				bun run check:deploy
-				bun run check:database-migrations
-				bun run --cwd apps/web types:cf:check
-				bun run --cwd apps/web db:schema:check
-				"""}
+			js: #Host & {command: "bun", args: ["run", "check"]}
 		}
 
 		test: {
@@ -296,14 +211,14 @@ schema.#Project & {
 			for script in \\
 			  deploy/stargate/scripts/intar-deploy-stargate \\
 			  deploy/stargate/scripts/bootstrap-deploy-user \\
-			  tools/deploy/configure-stargate-ssh.sh \\
+			  tools/ci/*.sh \\
 			  tools/workflows/*/*.sh; do
 			  test -x "${script}"
 			  bash -n "${script}"
 			  # The workflow step bodies keep the full-severity shellcheck
 			  # actionlint gave them when they were inline.
 			  case "${script}" in
-			    tools/workflows/*) shellcheck "${script}" ;;
+			    tools/ci/* | tools/workflows/*) shellcheck "${script}" ;;
 			    *) shellcheck --severity=warning "${script}" ;;
 			  esac
 			done
@@ -313,7 +228,7 @@ schema.#Project & {
 			if git grep -nI -E '[[:blank:]]+$' -- \\
 			  '.github/workflows/*.yml' \\
 			  'deploy/stargate/scripts/*' \\
-			  'tools/deploy/configure-stargate-ssh.sh' \\
+			  'tools/ci/*.sh' \\
 			  'tools/workflows/*/*.sh'; then
 			  echo 'Trailing whitespace found in a workflow or a host script.' >&2
 			  exit 1
@@ -321,30 +236,30 @@ schema.#Project & {
 			"""}
 
 		"workflow-policy": #Bash & {_script: """
-			bun test tools/ci/check-workflow-security.test.ts
+			bun test tools/ci
 			bun tools/ci/check-workflow-security.ts
 			"""}
 
 		actionlint: #Host & {command: "tools/ci/actionlint.sh"}
 
-		// Generated workflows must match env.cue. The sync checks compare only
-		// the files they generate, so a leftover or hand-written workflow, or a
+		// Rendered workflows must match ci/workflows. The codegen check compares
+		// only the files it renders, so a leftover or hand-written workflow, or a
 		// rendered one Dependabot would edit, is caught here.
 		"sync-check": #Bash & {
 			_script: """
-				cuenv sync ci --check
 				cuenv sync codegen --check
+				# No sync loads the intar-ci project in ci/env.cue that every
+				# workflow step task runs in.
+				cuenv task -p ci --package ci -o json >/dev/null
 				if ! diff <(printf '%s\\n' "$@" | sort) <(find .github/workflows -type f | sort) >&2; then
 				  echo 'Every workflow must be rendered by cuenv or be scenario-publish.yml.' >&2
 				  exit 1
 				fi
 				for path in "$@"; do
-				  case "${path}" in
-				    */scenario-publish.yml) continue ;;
-				    */intar-*.yml) exclude='.github/workflows/intar-*.yml' ;;
-				    *) exclude="${path}" ;;
-				  esac
-				  if ! grep -qF -- "- \\"${exclude}\\"" .github/dependabot.yml; then
+				  if [[ "${path}" == */scenario-publish.yml ]]; then
+				    continue
+				  fi
+				  if ! grep -qF -- "- \\"${path}\\"" .github/dependabot.yml; then
 				    echo "${path} must be in the exclude-paths of .github/dependabot.yml." >&2
 				    exit 1
 				  fi
@@ -352,104 +267,51 @@ schema.#Project & {
 				"""
 			_argv: list.Concat([
 				[for path, _ in workflows.files {path}],
-				[for lane, _ in ci.pipelines {".github/workflows/intar-\(lane).yml"}],
 				[".github/workflows/scenario-publish.yml"],
 			])
 		}
 
+		// The CI lanes in ci/workflows/lanes.cue: `cuenv task lanes.<name>` runs
+		// the steps of that lane's ci.yml job, and `cuenv task ci` runs every lane.
 		lanes: {
 			type: "group"
-
-			rust: #Lane & {
-				labels: ["rust"]
-				_steps: ["installer-tests", "verify", "check-generated-contracts", "build-kino-guest"]
-				inputs: [
-					"Cargo.toml",
-					"Cargo.lock",
-					"rust-toolchain.toml",
-					"tools/image-build/**",
-					".github/actions/setup-cuenv/**",
-					".github/actions/setup-rust/**",
-					// deploy/personal-metal/test_installer.py reads release.yml and
-					// the release artifact build step.
-					".github/workflows/release.yml",
-					"tools/workflows/release/build-release-artifacts.sh",
-					"rustfmt.toml",
-					"package.json",
-					"bun.lock",
-					"content/scenarios/base-images.hcl",
-					"crates/**",
-					"deploy/personal-metal/**",
-					"apps/web/public/install.sh",
-					"apps/web/src/generated/**",
-				]
+			for name, lane in workflows.lanes {
+				(name): #InOrder & {_steps: lane.steps}
 			}
+		}
+		ci: #InOrder & {_steps: [for name, _ in workflows.lanes {"lanes.\(name)"}]}
 
-			// Script lint runs before the audits: a dependency audit must not
-			// stop the shell correctness check of the host deployment scripts.
-			security: #Lane & {
-				labels: ["rust", "js"]
-				timeout: "30m"
-				_steps: ["host-scripts", "whitespace", "sync-check", "install-js", "workflow-policy", "security", "actionlint"]
-				inputs: [
-					".github/**",
-					".cargo/audit.toml",
-					"**/Cargo.toml",
-					"Cargo.lock",
-					"rust-toolchain.toml",
-					"bun.lock",
-					"**/package.json",
-					"apps/web/.node-version",
-					"apps/web/public/_headers",
-					"apps/web/vitest.workers.config.ts",
-					"apps/web/wrangler.jsonc",
-					"apps/web/wrangler.local.jsonc",
-					"deploy/stargate/**",
-					"docs/public/_headers",
-					"docs/wrangler.jsonc",
-					// The Rust audit must still run for a Rust source change: it is
-					// the only audit that sees a newly published advisory.
-					"crates/**",
-					"tools/ci/**",
-					"tools/workflows/**",
-					"ci/**",
-					"tools/deploy/configure-stargate-ssh.sh",
-					"tools/deploy/configure-stargate-ssh.test.ts",
-					"tools/image-build/**",
-				]
-			}
+		// ci.yml's changes job: which lanes a pull request needs.
+		"ci-changes": #Host & {
+			command: "tools/ci/changed-lanes.sh"
+			args: [for name, lane in workflows.lanes {
+				strings.Join(list.Concat([[name], lane.inputs, workflows.sharedInputs]), " ")
+			}]
+		}
 
-			images: #Lane & {
-				labels: ["rust"]
-				_steps: ["validate-images", "render-images"]
-				inputs: [
-					"Cargo.toml",
-					"Cargo.lock",
-					"rust-toolchain.toml",
-					"tools/image-build/**",
-					".github/actions/setup-cuenv/**",
-					".github/actions/setup-rust/**",
-					"crates/intar-builder/**",
-					"crates/intar-contracts/**",
-					"crates/intar-contracts-typegen/**",
-					"crates/intar-image-*/**",
-					"content/scenarios/base-images.hcl",
-					"builder.*.hcl",
-					"content/courses/**",
-					"apps/web/migrations/**",
-					"apps/web/src/control-plane/auth.ts",
-					"apps/web/src/control-plane/bridge-v8.ts",
-					"apps/web/src/control-plane/host-runtime-do.ts",
-					"apps/web/src/control-plane/image-registry.ts",
-					"apps/web/src/generated/**",
-					"apps/web/src/lib/build-scheduler*.ts",
-					"apps/web/src/lib/desired-state*.ts",
-					"apps/web/src/lib/host-runtime-wake.ts",
-					"apps/web/src/lib/scenario-hosts.ts",
-					"apps/web/src/db/schema.ts",
-					"apps/web/src/pages/api/agent/hosts.ts",
-				]
-			}
+		// ci.yml's pr-title job: PR_TITLE must be a Conventional Commit with one
+		// scope.
+		"pr-title": #Host & {command: "tools/ci/check-pr-title.sh"}
+
+		// The web build deploy.yml deploys: the image registry cleanup worker it
+		// deploys from the artifact has no route and no public surface.
+		"check-web-artifact": #Host & {command: "tools/workflows/website/verify-registry-cleanup-artifact.sh"}
+
+		"check-docs": #Bash & {
+			dir: path: "docs"
+			_script: """
+				bun install --frozen-lockfile
+				bun run build
+				bunx --no-install wrangler deploy --dry-run
+				"""
+		}
+
+		// ci.yml's web-ui job. Install the browsers once with
+		// `bun run --cwd apps/web ui:install`.
+		"test-ui-smoke": #Host & {
+			command: "bunx"
+			args: ["playwright", "test", "tests/ui/smoke.spec.ts", "--project=chromium-smoke"]
+			dir: path: "apps/web"
 		}
 	}
 }

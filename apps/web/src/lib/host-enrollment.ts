@@ -3,13 +3,6 @@ import type { UserContext } from "@/lib/agent-bridge";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 
-// Check this inside each write transaction. A route check can become stale
-// while it reads the request body or hashes a credential.
-function registrationOpen(scopeSql: string): string {
-  return `EXISTS (SELECT 1 FROM runtime_operation_gates WHERE key = CASE WHEN ${scopeSql} = 'platform'
-    THEN 'platform_metal_registration' ELSE 'personal_metal_registration' END AND state = 'open')`;
-}
-
 export function randomHostSecret(): string {
   return [...crypto.getRandomValues(new Uint8Array(32))]
     .map(value => value.toString(16).padStart(2, "0")).join("");
@@ -34,7 +27,7 @@ export async function createHostEnrollment(db: D1Database, context: UserContext,
     "SELECT ?1, ?2, owner.id, ?3, ?4, ?5, ?6, ?8 FROM user owner " +
     "WHERE owner.id = ?7 AND coalesce(owner.banned, 0) = 0 AND owner.deleted_at IS NULL " +
     "AND (?4 <> 'organization' OR EXISTS (SELECT 1 FROM member WHERE user_id = ?7 AND organization_id = ?8 AND role IN ('owner', 'admin'))) " +
-    "AND (?4 <> 'platform' OR EXISTS (SELECT 1 FROM user WHERE id = ?7 AND instr(',' || replace(lower(coalesce(role, '')), ' ', '') || ',', ',admin,') > 0 AND coalesce(banned, 0) = 0 AND deleted_at IS NULL)) AND " + registrationOpen("?4") + " RETURNING host_id",
+    "AND (?4 <> 'platform' OR EXISTS (SELECT 1 FROM user WHERE id = ?7 AND instr(',' || replace(lower(coalesce(role, '')), ' ', '') || ',', ',admin,') > 0 AND coalesce(banned, 0) = 0 AND deleted_at IS NULL)) RETURNING host_id",
   ).bind(await sha256Hex(token), hostId, input.name, input.scope, input.role, expiresAt,
     context.userId, input.organizationId ?? null).first();
   if (!row) throw appError(409, "host_enrollment_changed", "Registration changed. Reload My servers and try again.");
@@ -47,8 +40,7 @@ export async function claimHostEnrollment(db: D1Database, token: string, credent
   const tokenHash = await sha256Hex(token);
   const credentialHash = await sha256Hex(credential);
   const now = Date.now();
-  const active = registrationOpen("enrollment.scope") +
-    " AND EXISTS (SELECT 1 FROM user WHERE id = enrollment.user_id AND coalesce(banned, 0) = 0 AND deleted_at IS NULL) " +
+  const active = "EXISTS (SELECT 1 FROM user WHERE id = enrollment.user_id AND coalesce(banned, 0) = 0 AND deleted_at IS NULL) " +
     "AND (enrollment.scope <> 'organization' OR (enrollment.role = 'agent' AND EXISTS (SELECT 1 FROM member " +
     "WHERE user_id = enrollment.user_id AND organization_id = enrollment.organization_id AND role IN ('owner', 'admin')))) " +
     "AND (enrollment.scope <> 'platform' OR EXISTS (SELECT 1 FROM user WHERE id = enrollment.user_id " +

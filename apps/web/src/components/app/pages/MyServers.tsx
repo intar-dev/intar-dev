@@ -24,7 +24,6 @@ import {
 
 export interface MyServersResponse {
   placement: "platform" | "personal" | "organization";
-  registrationOpen: boolean;
   installerCommand: string;
   servers: Array<{
     id: string;
@@ -160,7 +159,7 @@ export function MyServers(
           : "Use your own servers for all your runs, including organization courses."
       }
       actions={
-        canManage && data?.registrationOpen && !adding ? (
+        canManage && data && !adding ? (
           <Button
             onClick={() => {
               setNotice(null);
@@ -289,13 +288,7 @@ export function MyServers(
                 Could not cancel setup. {cancelSetup.error.message}
               </InlineFeedback>
             ) : null}
-            {!data.registrationOpen ? (
-              <p className="text-sm text-muted-foreground">
-                New server registration is not available yet.
-                {canManage ? " You can still manage your servers." : ""}
-              </p>
-            ) : null}
-            {canManage && adding && data.registrationOpen ? (
+            {canManage && adding ? (
               <AddServer
                 apiBase={apiBase}
                 organization={organization}

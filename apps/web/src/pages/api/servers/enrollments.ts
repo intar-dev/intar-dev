@@ -23,12 +23,6 @@ export const POST: APIRoute = async ({ request }) => {
   if (scope === "personal" && role !== "agent") {
     return jsonResponse({ error: "Personal servers cannot build images." }, { status: 400 });
   }
-  const gate = await env.DB.prepare("SELECT state FROM runtime_operation_gates WHERE key = ?")
-    .bind(scope === "platform" ? "platform_metal_registration" : "personal_metal_registration")
-    .first<{ state: string }>();
-  if (gate?.state !== "open") {
-    return jsonResponse({ error: "Server registration is not available yet." }, { status: 503, headers: { "cache-control": "no-store" } });
-  }
   try {
     const result = await createHostEnrollment(env.DB, auth.context, { name: input.name.trim(), scope, role });
     return jsonResponse(result, { status: 201, headers: { "cache-control": "no-store" } });

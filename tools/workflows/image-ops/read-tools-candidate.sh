@@ -6,11 +6,10 @@ bunx wrangler r2 object get "${BUCKET}/guest-tools/scenario/candidate.json" \
   --remote --jurisdiction eu --file "${TOOLS_DIR}/candidate.json"
 jq -e '.schema_version == 1 and .bootstrap_abi == 2' \
   "${TOOLS_DIR}/candidate.json" >/dev/null
-# Bind the promotion to the exact candidate the cutover pinned. The
-# build lane may run again between the cutover and this promotion, so
-# the downloaded manifest must equal the digest that was chosen, or
-# this run would promote a different release than the running worker
-# was deployed with.
+# Bind the promotion to the exact candidate the operator chose from
+# the tools build. The build lane may run again before this promotion,
+# so the downloaded manifest must equal the digest that was chosen, or
+# this run would promote a different release than the one verified.
 measured_sha="$(sha256sum "${TOOLS_DIR}/candidate.json" | cut -d ' ' -f 1)"
 if [ "${measured_sha}" != "${EXPECTED_CANDIDATE_SHA256}" ]; then
   echo 'The published candidate does not match the expected digest.' >&2

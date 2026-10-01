@@ -32,13 +32,12 @@ export async function listOrganizationServers(context: UserContext, organization
   await requireOrganizationRole({ organizationId, userId: context.userId });
   const db = drizzle(env.DB);
   const now = Date.now();
-  const [hosts, owners, gate, enrollments, activeRuns] = await Promise.all([
+  const [hosts, owners, enrollments, activeRuns] = await Promise.all([
     db.select({ host: agentHosts, report: hostActualState.reportJson, reportedAt: hostActualState.updatedAt })
       .from(agentHosts).leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
       .where(and(eq(agentHosts.organizationId, organizationId), eq(agentHosts.scope, "organization"),
         or(eq(agentHosts.disabled, false), isNull(agentHosts.ownerRemovalCompletedAt)))),
     db.select({ placement: organization.metalPlacement }).from(organization).where(eq(organization.id, organizationId)),
-    env.DB.prepare("SELECT state FROM runtime_operation_gates WHERE key = 'personal_metal_registration'").first<{ state: string }>(),
     env.DB.prepare(`SELECT enrollment.host_id AS id, enrollment.name, enrollment.expires_at AS expiresAt
       FROM host_enrollments enrollment
       JOIN member creator ON creator.user_id = enrollment.user_id AND creator.organization_id = enrollment.organization_id
@@ -55,7 +54,6 @@ export async function listOrganizationServers(context: UserContext, organization
   const reservations = await loadActiveRuntimeResourceSnapshot(now, hosts.map(({ host }) => host.id));
   return {
     placement: owners[0]?.placement ?? "platform",
-    registrationOpen: gate?.state === "open",
     installerCommand: "curl -fsSL https://intar.dev/install.sh | sudo sh",
     enrollments: enrollments.results,
     servers: hosts.map(row => serializeManagedServer(row, now, reservations,
