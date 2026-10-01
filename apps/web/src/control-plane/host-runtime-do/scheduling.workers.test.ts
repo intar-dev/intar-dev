@@ -1,16 +1,15 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   testImageKey,
   seedHost,
   connectHost,
   sendBridge,
   waitForBridgeMessage,
-  runNextScheduledAlarm,
+  runDurableObjectAlarm,
   waitForMessageCount,
   waitForHostActualState,
-  sleep,
   seedEnabledScenario,
   stateReport,
   env,
@@ -25,6 +24,7 @@ import {
   startScenarioRunForUser,
   resetHostRuntimeTestDatabase,
 } from "./test-fixtures";
+import { DESIRED_VERSION_LAG_REPUSH_AFTER_MS } from "./base";
 import {
   hostResourceReservations,
   runtimeExecutions,
@@ -537,9 +537,18 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       hostId,
       (row) => row.appliedDesiredVersion === 0,
     );
-    await sleep(10_050);
-
-    await runNextScheduledAlarm(stub);
+    // Run the alarm loop once, just past the threshold since the last dispatch.
+    // Waiting in real time instead lets the Durable Object's own alarms fire,
+    // so the number of re-pushes would depend on milliseconds between a
+    // dispatch and the alarm armed around it.
+    const clock = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS + 1);
+    try {
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
     expect(
       await waitForMessageCount(
         messages,
@@ -551,5 +560,5 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       ),
     ).toBe(2);
     ws.close();
-  }, 15_000);
+  });
 });
