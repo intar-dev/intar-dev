@@ -12,6 +12,9 @@ dist/
 
 # impeccable review screenshots (ephemeral)
 .impeccable/review/
+# impeccable hook cache and per-session question state (the shared config.json is tracked)
+.impeccable/hook.cache.json
+.impeccable/questions/
 
 # local Claude preview config
 .claude/launch.json
