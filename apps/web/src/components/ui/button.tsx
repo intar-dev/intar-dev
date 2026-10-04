@@ -13,7 +13,7 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          "bg-primary text-primary-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.2),0_1px_2px_rgb(25_28_34/0.2)] hover:bg-primary-hover dark:shadow-[inset_0_1px_0_rgb(255_255_255/0.28),0_1px_2px_rgb(0_0_0/0.35)]",
+          "bg-primary text-primary-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.2),0_1px_2px_rgb(31_26_20/0.2)] hover:bg-primary-hover dark:shadow-[inset_0_1px_0_rgb(255_255_255/0.28),0_1px_2px_rgb(0_0_0/0.35)]",
         outline:
           "border-input bg-card text-foreground shadow-[var(--highlight),var(--shadow-control)] hover:border-border-strong hover:bg-muted aria-expanded:border-border-strong aria-expanded:bg-muted dark:hover:bg-accent dark:aria-expanded:bg-accent",
         secondary:

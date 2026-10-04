@@ -10,6 +10,7 @@ import {
 import { cn } from "@/lib/utils";
 import { formatScenarioStepState } from "./run-support";
 import type { ScenarioRunRecord, ScenarioStatusStep } from "./run-types";
+import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
 export function ScenarioStepScreen(props: {
   title: string;
@@ -44,7 +45,8 @@ export function ScenarioStepScreen(props: {
           <div className="space-y-1">
             {props.steps.length ? (
               <p className="text-label" data-run-sequence-position>
-                Stage {currentStepIndex + 1} of {props.steps.length}
+                Stage <RollingNumber value={currentStepIndex + 1} /> of{" "}
+                {props.steps.length}
               </p>
             ) : null}
             <h2

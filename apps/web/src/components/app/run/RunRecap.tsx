@@ -52,6 +52,7 @@ import {
 } from "./run-recap-model";
 import type { ScenarioRunRecord, ScenarioStatusStep } from "./run-types";
 import { MAX_INLINE_REPLAY_BYTES, useStreamedText } from "./useStreamedText";
+import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
 const LazyAsciicastReplaySurface = lazy(() =>
   import("@/components/app/RunArtifactViewer").then(
@@ -211,7 +212,7 @@ export function RunRecap({
               Final checks
             </h2>
             <span className="text-caption tabular-nums">
-              {verifiedObjectives}/{objectives.length} verified
+              <RollingNumber value={verifiedObjectives} />/{objectives.length} verified
             </span>
           </div>
           <RunRecapProgress

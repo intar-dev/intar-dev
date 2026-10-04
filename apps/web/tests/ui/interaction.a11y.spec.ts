@@ -522,6 +522,30 @@ test("destructive dialog traps focus and restores it", async ({ page, ui }) => {
   await expect(trigger).toBeFocused();
 });
 
+test("SSH key removal asks again in place", async ({ page, ui }) => {
+  await ui.open({ ...routeCase("profile"), theme: "light" });
+  const rows = page.locator("[data-ssh-key-id]");
+  const before = await rows.count();
+  expect(before).toBeGreaterThan(0);
+  const row = rows.first();
+  const trigger = row.getByRole("button", { name: /^Remove the .+ key$/ });
+
+  await trigger.click();
+  const keep = row.getByRole("button", { name: "Keep" });
+  await expect(keep).toBeFocused();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(trigger).toBeFocused();
+  await expect(rows).toHaveCount(before);
+
+  await trigger.click();
+  await row.getByRole("button", { name: "Remove key" }).click();
+  await expect(
+    page.getByText("SSH key removed. It cannot be used for new routes."),
+  ).toBeVisible();
+  await expect(rows).toHaveCount(before - 1);
+});
+
 test("reduced motion disables authored animation", async ({ page, ui }) => {
   await ui.open({
     ...routeCase("run-workspace"),

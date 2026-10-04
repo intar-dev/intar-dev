@@ -812,6 +812,76 @@
   }
 }
 
+/* Icon verbs: the bin lid lifts on its hinge while its control is hovered,
+   focused or open. Movement only; reduced motion leaves the lid shut. */
+:root {
+  --turn-nudge: 14deg;
+}
+
+[data-bin-lid] {
+  transform-box: view-box;
+  transform-origin: 3px 6px;
+  transition: transform 200ms var(--ease-enter);
+}
+
+:is(button, a):is(:hover, :focus-visible, [aria-expanded="true"])
+  [data-bin-lid] {
+  transform: translateY(-1px) rotate(calc(-1 * var(--turn-nudge)));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-bin-lid] {
+    transform: none !important;
+  }
+}
+
+/* Rolling digits: each changed digit sits in a window taller than its glyph,
+   so it fades at the window's edge instead of being cut; ones roll first,
+   then tens. --move-digit is a movement distance reduced motion can zero. */
+:root {
+  --move-digit: 0.8em;
+}
+
+@keyframes intar-digit-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--digit-dir, 1) * var(--move-digit)));
+  }
+}
+
+@keyframes intar-digit-out {
+  to {
+    opacity: 0;
+    transform: translateY(calc(var(--digit-dir, 1) * -1 * var(--move-digit)));
+  }
+}
+
+.rolling-digit {
+  display: inline-grid;
+  margin-block: -0.25em;
+  padding-block: 0.25em;
+  mask-image: linear-gradient(
+    transparent,
+    #000 0.3em,
+    #000 calc(100% - 0.3em),
+    transparent
+  );
+}
+
+.rolling-digit > * {
+  grid-area: 1 / 1;
+}
+
+.rolling-digit > [data-in] {
+  animation: intar-digit-in 300ms var(--ease-enter) calc(var(--k, 0) * 40ms)
+    both;
+}
+
+.rolling-digit > [data-out] {
+  animation: intar-digit-out 300ms var(--ease-enter) calc(var(--k, 0) * 40ms)
+    both;
+}
+
 /* Landing: the run workspace leans back under the hero and settles flat as it
    scrolls into view. Scroll-driven where supported; still everywhere else and
    under reduced motion. */

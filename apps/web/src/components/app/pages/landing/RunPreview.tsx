@@ -11,6 +11,7 @@ import {
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { StatusToken } from "../../patterns/StatusToken";
+import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
 // A static replica of the live run workspace (ScenarioRun + RunLearningPanel +
 // WebSshTerminal) playing the broken-nginx scenario from the first course. The
@@ -383,7 +384,7 @@ function PreviewChecks({
       <div className="flex items-center gap-3">
         <p className="min-w-0 flex-1 text-sm font-semibold text-foreground">Checks</p>
         <span className="shrink-0 text-xs text-faint-foreground tabular-nums">
-          {passed}/{checks.length} verified
+          <RollingNumber value={passed} />/{checks.length} verified
         </span>
       </div>
       <span className="mt-3 flex gap-1">

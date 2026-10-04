@@ -18,6 +18,7 @@ import {
   type CourseLectureSummary,
   type CourseRouteRef,
 } from "./course-wire";
+import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
 interface CourseOutlineProps {
   course: CourseCatalogCourse;
@@ -77,7 +78,8 @@ export function CourseOutlineMobile(props: CourseOutlineProps) {
           <SheetHeader className="border-b pr-14">
             <SheetTitle>Course outline</SheetTitle>
             <SheetDescription>
-              Lecture {position} of {total} · {completed} complete
+              Lecture <RollingNumber value={position} /> of {total} ·{" "}
+          <RollingNumber value={completed} /> complete
             </SheetDescription>
           </SheetHeader>
           <div
@@ -115,7 +117,8 @@ function CourseOutlineContent({
           {course.title}
         </CourseLink>
         <p className="text-caption tabular-nums">
-          Lecture {position} of {total} · {completed} complete
+          Lecture <RollingNumber value={position} /> of {total} ·{" "}
+          <RollingNumber value={completed} /> complete
         </p>
         <LectureProgressTrack
           lectures={course.lectures}

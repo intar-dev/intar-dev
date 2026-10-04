@@ -48,6 +48,7 @@ import type {
   ScenarioRunRecord,
   ScenarioRunSolution,
 } from "./run-types";
+import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
 type LearningPanelState = "booting" | "running" | "solved";
 
@@ -585,7 +586,7 @@ function Checks(props: {
             className="shrink-0 text-xs text-faint-foreground tabular-nums"
             aria-label={`${props.passedChecks} of ${checks.length} checks verified`}
           >
-            {props.passedChecks}/{checks.length} verified
+            <RollingNumber value={props.passedChecks} />/{checks.length} verified
           </span>
         )}
         {props.action}
@@ -680,7 +681,8 @@ function Hints(props: {
         </p>
         {props.hints.length ? (
           <span className="text-xs text-faint-foreground tabular-nums">
-            {props.revealedHints}/{props.hints.length} used
+            <RollingNumber value={props.revealedHints} />/{props.hints.length}{" "}
+            used
           </span>
         ) : null}
       </div>
