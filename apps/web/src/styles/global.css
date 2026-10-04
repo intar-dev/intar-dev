@@ -1,7 +1,10 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "@fontsource-variable/geist";
-@import "@fontsource-variable/geist-mono";
+@import "@fontsource-variable/ibm-plex-sans";
+@import "@fontsource-variable/ibm-plex-sans/wght-italic.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -56,14 +59,14 @@
 
 @theme {
   --font-sans:
-    "Geist Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
-    sans-serif;
+    "IBM Plex Sans Variable", ui-sans-serif, system-ui,
+    -apple-system, "Segoe UI", sans-serif;
   --font-heading:
-    "Geist Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
-    sans-serif;
+    "IBM Plex Sans Variable", ui-sans-serif, system-ui,
+    -apple-system, "Segoe UI", sans-serif;
   --font-mono:
-    "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, Monaco,
-    Consolas, monospace;
+    "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    monospace;
 
   /* Motion: standard for hover and color, enter for reveals and panels,
      confirm (a small overshoot) only for a check turning verified. */
@@ -82,7 +85,7 @@
   @keyframes intar-rise {
     from {
       opacity: 0;
-      transform: translateY(6px);
+      transform: translateY(var(--move-rise, 6px));
     }
     to {
       opacity: 1;
@@ -93,7 +96,7 @@
   @keyframes intar-pop {
     from {
       opacity: 0;
-      transform: scale(0.5);
+      transform: scale(var(--scale-pop, 0.5));
     }
     to {
       opacity: 1;
@@ -105,13 +108,13 @@
      single live status in a view. */
   @keyframes intar-live {
     0% {
-      box-shadow: 0 0 0 0 color-mix(in oklch, currentColor 50%, transparent);
+      box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 50%, transparent);
     }
     70% {
-      box-shadow: 0 0 0 5px color-mix(in oklch, currentColor 0%, transparent);
+      box-shadow: 0 0 0 5px color-mix(in oklab, currentColor 0%, transparent);
     }
     100% {
-      box-shadow: 0 0 0 0 color-mix(in oklch, currentColor 0%, transparent);
+      box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 0%, transparent);
     }
   }
 
@@ -132,7 +135,7 @@
 
   @keyframes intar-verified {
     from {
-      background-color: color-mix(in oklch, var(--success) 16%, transparent);
+      background-color: color-mix(in oklab, var(--success) 16%, transparent);
     }
   }
 
@@ -216,8 +219,9 @@
   --color-terminal-info: var(--terminal-info);
 }
 
-/* Paper (light). Neutrals sit on oklch hue 85 with near-zero chroma; ink text
-   borrows the graphite hue so both themes read as one family. */
+/* Paper (light): a warm field manual. Slightly yellowed stock and warm ink, so
+   the oxide accent and the reading pages feel of one piece. Control edges
+   (input, border-strong) reach 3:1 against card and background. */
 :root {
   --radius: 0.5rem;
   --space-2xs: 0.25rem;
@@ -238,27 +242,27 @@
   --page-inset: 1rem;
   --app-bar-h: 3.25rem;
   /* Native <select> chevron, tinted like --muted-foreground. */
-  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23585c63' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  --canvas: #f5f3f0;
-  --background: #fdfdfc;
-  --foreground: #191c22;
-  --faint-foreground: #666a72;
-  --card: #ffffff;
-  --card-foreground: #191c22;
-  --popover: #ffffff;
-  --popover-foreground: #191c22;
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235b5348' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  --canvas: #ece5d9;
+  --background: #f9f5ee;
+  --foreground: #1f1a14;
+  --faint-foreground: #6a6155;
+  --card: #fffdf9;
+  --card-foreground: #1f1a14;
+  --popover: #fffdf9;
+  --popover-foreground: #1f1a14;
   --primary: #c74700;
   --primary-hover: #be4000;
   --primary-foreground: #fdfbf9;
   --brand-subtle: #f8ebe3;
   --brand-text: #a93800;
   --brand-border: #eec7b0;
-  --secondary: #efeeea;
-  --secondary-foreground: #191c22;
-  --muted: #efeeea;
-  --muted-foreground: #585c63;
-  --accent: #efeeea;
-  --accent-foreground: #191c22;
+  --secondary: #f0e9de;
+  --secondary-foreground: #1f1a14;
+  --muted: #f0e9de;
+  --muted-foreground: #5b5348;
+  --accent: #e9e1d4;
+  --accent-foreground: #1f1a14;
   --destructive: #ba2b2b;
   --destructive-foreground: #fdfbf9;
   --destructive-subtle: #f6e8e7;
@@ -267,34 +271,34 @@
   --success-foreground: #fdfbf9;
   --success-subtle: #e5f0ea;
   --success-border: #b4d5c4;
-  --warning: #955e11;
+  --warning: #87540f;
   --warning-foreground: #fdfbf9;
-  --warning-subtle: #f3ede5;
+  --warning-subtle: #f8ecd2;
   --warning-border: #decdb5;
   --info: #1e65aa;
   --info-subtle: #e7eef4;
   --info-border: #bacfe3;
-  --border: #e4e2de;
-  --border-strong: #c0bdb8;
-  --input: #cfccc6;
+  --border: #e3dacb;
+  --border-strong: #7d7365;
+  --input: #928777;
   --ring: #c74700;
   --chart-1: #c74700;
   --chart-2: #0b7643;
-  --chart-3: #955e11;
+  --chart-3: #87540f;
   --chart-4: #1e65aa;
   --chart-5: #7a4fb0;
-  --sidebar: #f5f3f0;
-  --sidebar-foreground: #191c22;
+  --sidebar: #ece5d9;
+  --sidebar-foreground: #1f1a14;
   --sidebar-primary: #c74700;
   --sidebar-primary-foreground: #fdfbf9;
-  --sidebar-accent: #ebe9e5;
-  --sidebar-accent-foreground: #191c22;
-  --sidebar-border: #e4e2de;
+  --sidebar-accent: #e5ddd0;
+  --sidebar-accent-foreground: #1f1a14;
+  --sidebar-border: #e3dacb;
   --sidebar-ring: #c74700;
-  --shadow-raised: 0 1px 2px rgb(25 28 34 / 0.05);
-  --shadow-control: 0 1px 2px rgb(25 28 34 / 0.06);
+  --shadow-raised: 0 1px 2px rgb(31 26 20 / 0.05);
+  --shadow-control: 0 1px 2px rgb(31 26 20 / 0.06);
   --shadow-overlay:
-    0 2px 6px rgb(25 28 34 / 0.05), 0 18px 40px -12px rgb(25 28 34 / 0.22);
+    0 2px 6px rgb(31 26 20 / 0.05), 0 18px 40px -12px rgb(31 26 20 / 0.22);
   --highlight: inset 0 1px 0 rgb(255 255 255 / 0.6);
   --terminal-background: #0f1114;
   --terminal-surface: #16181c;
@@ -326,30 +330,30 @@
   }
 }
 
-/* Graphite (dark). A cool, lifted ink instead of warm soot: calmer text
-   contrast, softer lines, and the oxide accent reads warmer against it. */
+/* Graphite (dark): a warm charcoal with a lifted ink. The tone steps canvas,
+   background and card stay distinct, and control edges keep 3:1. */
 .dark {
-  --canvas: #121418;
-  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a2a6ad' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  --background: #181a1e;
-  --foreground: #ebedf0;
-  --faint-foreground: #8c9097;
-  --card: #1e2025;
-  --card-foreground: #ebedf0;
-  --popover: #1e2025;
-  --popover-foreground: #ebedf0;
+  --canvas: #12100e;
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23aea597' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  --background: #1a1714;
+  --foreground: #efe8df;
+  --faint-foreground: #9d9386;
+  --card: #24201c;
+  --card-foreground: #efe8df;
+  --popover: #24201c;
+  --popover-foreground: #efe8df;
   --primary: #f88a3d;
   --primary-hover: #fc9d51;
   --primary-foreground: #21110a;
   --brand-subtle: #352922;
   --brand-text: #faa663;
   --brand-border: #644029;
-  --secondary: #25282c;
-  --secondary-foreground: #ebedf0;
-  --muted: #22252a;
-  --muted-foreground: #a2a6ad;
-  --accent: #292c32;
-  --accent-foreground: #ebedf0;
+  --secondary: #2a2622;
+  --secondary-foreground: #efe8df;
+  --muted: #2a2622;
+  --muted-foreground: #aea597;
+  --accent: #312c27;
+  --accent-foreground: #efe8df;
   --destructive: #f97772;
   --destructive-foreground: #2a0e0d;
   --destructive-subtle: #352629;
@@ -365,22 +369,22 @@
   --info: #81bcf3;
   --info-subtle: #262f3a;
   --info-border: #3c5166;
-  --border: #282b30;
-  --border-strong: #44484e;
-  --input: #3a3d44;
+  --border: #322c26;
+  --border-strong: #8a8073;
+  --input: #73695e;
   --ring: #f88a3d;
   --chart-1: #f88a3d;
   --chart-2: #62d397;
   --chart-3: #efc469;
   --chart-4: #81bcf3;
   --chart-5: #c9a2e8;
-  --sidebar: #121418;
-  --sidebar-foreground: #ebedf0;
+  --sidebar: #12100e;
+  --sidebar-foreground: #efe8df;
   --sidebar-primary: #f88a3d;
   --sidebar-primary-foreground: #21110a;
-  --sidebar-accent: #1a1c20;
-  --sidebar-accent-foreground: #ebedf0;
-  --sidebar-border: #25282c;
+  --sidebar-accent: #1f1b18;
+  --sidebar-accent-foreground: #efe8df;
+  --sidebar-border: #2b2621;
   --sidebar-ring: #f88a3d;
   --shadow-raised: 0 1px 3px rgb(0 0 0 / 0.28);
   --shadow-control: 0 1px 2px rgb(0 0 0 / 0.3);
@@ -408,6 +412,71 @@
   --term-color-13: #dbbdf1;
   --term-color-14: #97e0e0;
   --term-color-15: #f6f7f9;
+}
+
+/* Replay control bar in the terminal palette: the played part of the track is
+   oxide on a quiet rail, the clock is mono at 12px, and buttons take a quiet
+   hover fill. The separator is an inset line, so no bar height changes. This
+   is colour and type only, so it applies to every replay, operations tools
+   included; sizing stays with the learner recap below. */
+.run-artifact-player div.ap-control-bar {
+  background: var(--terminal-surface);
+  box-shadow: inset 0 1px 0 var(--terminal-border);
+}
+
+.run-artifact-player div.ap-control-bar svg.ap-icon path {
+  fill: var(--terminal-foreground);
+}
+
+.run-artifact-player div.ap-control-bar button.ap-button {
+  border-radius: var(--radius-md);
+  transition: background-color 150ms var(--ease-standard);
+}
+
+.run-artifact-player div.ap-control-bar button.ap-button:hover {
+  background: color-mix(in oklab, var(--terminal-foreground) 8%, transparent);
+}
+
+.run-artifact-player div.ap-control-bar .ap-progressbar .ap-bar .ap-gutter {
+  border-radius: 999px;
+}
+
+.run-artifact-player
+  div.ap-control-bar
+  .ap-progressbar
+  .ap-bar
+  .ap-gutter-empty {
+  background-color: color-mix(
+    in oklab,
+    var(--terminal-foreground) 18%,
+    transparent
+  );
+}
+
+.run-artifact-player
+  div.ap-control-bar
+  .ap-progressbar
+  .ap-bar
+  .ap-gutter-full {
+  background-color: var(--terminal-brand);
+}
+
+.run-artifact-player div.ap-control-bar span.ap-timer {
+  font-size: 0.75rem;
+  color: var(--terminal-muted);
+}
+
+.run-artifact-player div.ap-control-bar span.ap-timer span {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The vendor loader spins forever; under reduced motion it holds still. */
+@media (prefers-reduced-motion: reduce) {
+  .ap-player .ap-loader {
+    animation: none !important;
+  }
 }
 
 /* The learner recap is intentionally flat and touch-safe. Keep the vendor
@@ -487,6 +556,10 @@
     padding: 0.5rem;
   }
 
+  [data-run-sequence-track] {
+    display: none;
+  }
+
   [data-run-sequence-connector] {
     top: 1.25rem;
     right: -1.75rem;
@@ -525,14 +598,16 @@
   }
 }
 
-/* Display type is fluid on public surfaces; app type is fixed in rem. Geist
-   carries every role, so hierarchy comes from size, weight, and tracking. */
+/* IBM Plex Sans carries every role and IBM Plex Mono the machine voice, so
+   hierarchy comes from size, weight and tracking. Titles tighten as they grow;
+   12px labels and captions open up. Display and the reading roles are fluid
+   between phone and desktop; interface roles are fixed in rem. */
 @utility text-display {
   font-family: var(--font-heading);
-  font-size: clamp(2.5rem, 6vw, 5.25rem);
+  font-size: clamp(2.5rem, 1.75rem + 3.75vw, 4.5rem);
   line-height: 1.02;
   font-weight: 600;
-  letter-spacing: -0.045em;
+  letter-spacing: -0.03em;
 }
 
 @utility text-feature-title {
@@ -540,7 +615,23 @@
   font-size: 2rem;
   line-height: 1.15;
   font-weight: 600;
-  letter-spacing: -0.025em;
+  letter-spacing: -0.02em;
+}
+
+/* Lecture and course titles where the content begins. */
+@utility text-content-title {
+  font-family: var(--font-heading);
+  font-size: clamp(1.75rem, 1.6rem + 0.6vw, 2rem);
+  line-height: 1.15;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+/* The one-sentence summary under a content title. */
+@utility text-lede {
+  font-size: clamp(1.125rem, 1.1rem + 0.15vw, 1.1875rem);
+  line-height: 1.5;
+  color: var(--color-muted-foreground);
 }
 
 @utility text-page-title {
@@ -548,15 +639,15 @@
   font-size: 1.5rem;
   line-height: 1.25;
   font-weight: 600;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.015em;
 }
 
 @utility text-section-title {
   font-family: var(--font-heading);
-  font-size: 1.0625rem;
-  line-height: 1.35;
+  font-size: 1.125rem;
+  line-height: 1.33;
   font-weight: 600;
-  letter-spacing: -0.012em;
+  letter-spacing: -0.01em;
 }
 
 @utility text-card-title {
@@ -564,12 +655,33 @@
   font-size: 0.9375rem;
   line-height: 1.4;
   font-weight: 600;
-  letter-spacing: -0.008em;
+  letter-spacing: -0.005em;
+}
+
+/* Lecture and course reading text: 17px on a 1.65 line (16px on phones). */
+@utility text-prose {
+  font-size: clamp(1rem, 0.97rem + 0.15vw, 1.0625rem);
+  line-height: 1.65;
+}
+
+@utility text-prose-heading {
+  font-family: var(--font-heading);
+  font-size: clamp(1.25rem, 1.2rem + 0.25vw, 1.375rem);
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+
+@utility text-prose-subheading {
+  font-family: var(--font-heading);
+  font-size: 1.125rem;
+  line-height: 1.4;
+  font-weight: 600;
 }
 
 @utility text-body {
   font-size: 1rem;
-  line-height: 1.7;
+  line-height: 1.6;
 }
 
 @utility text-metadata {
@@ -587,6 +699,7 @@
 @utility text-caption {
   font-size: 0.75rem;
   line-height: 1.45;
+  letter-spacing: 0.01em;
   color: var(--color-faint-foreground);
 }
 
@@ -594,6 +707,7 @@
   font-size: 0.75rem;
   line-height: 1.4;
   font-weight: 500;
+  letter-spacing: 0.01em;
   color: var(--color-faint-foreground);
 }
 
@@ -603,8 +717,9 @@
   line-height: 1.6;
 }
 
+/* Reading text caps at about 70 characters; the column around it stays fluid. */
 @utility prose-measure {
-  max-width: 68ch;
+  max-width: 36em;
 }
 
 @utility terminal-surface {
@@ -630,7 +745,7 @@
 @utility dot-grid {
   background-image: radial-gradient(
     circle at 1px 1px,
-    color-mix(in oklch, var(--foreground) 9%, transparent) 1px,
+    color-mix(in oklab, var(--foreground) 9%, transparent) 1px,
     transparent 0
   );
   background-size: 24px 24px;
@@ -644,7 +759,7 @@
   background-image: linear-gradient(
     90deg,
     transparent 0%,
-    color-mix(in oklch, var(--foreground) 6%, transparent) 45%,
+    color-mix(in oklab, var(--foreground) 6%, transparent) 45%,
     transparent 90%
   );
   background-size: 48rem 100%;
@@ -713,18 +828,38 @@
     outline-offset: 2px;
   }
 
+  /* Reduce, don't remove: under reduced motion nothing travels, grows or
+     turns, but fades, colour changes and drawn checks still play, so every
+     action still answers. Loops play once (keep them motion-safe) and
+     transitions are instant. tw-animate-css moves only through its
+     --tw-enter-* and --tw-exit-* variables, so neutralising them keeps its
+     fades; intar-rise and intar-pop move through --move-rise and --scale-pop. */
   @media (prefers-reduced-motion: reduce) {
     html {
       scroll-behavior: auto;
+    }
+
+    :root {
+      --move-rise: 0px;
+      --scale-pop: 1;
     }
 
     *,
     *::before,
     *::after {
       scroll-behavior: auto !important;
-      animation-duration: 0.01ms !important;
       animation-iteration-count: 1 !important;
       transition-duration: 0.01ms !important;
+      --tw-enter-translate-x: 0 !important;
+      --tw-enter-translate-y: 0 !important;
+      --tw-enter-scale: 1 !important;
+      --tw-enter-rotate: 0 !important;
+      --tw-enter-blur: 0 !important;
+      --tw-exit-translate-x: 0 !important;
+      --tw-exit-translate-y: 0 !important;
+      --tw-exit-scale: 1 !important;
+      --tw-exit-rotate: 0 !important;
+      --tw-exit-blur: 0 !important;
     }
   }
 }
@@ -764,6 +899,204 @@
   [data-slot="native-select"] {
     font-size: 1rem !important;
   }
+}
+
+/* Run sequence: a stage's connector fills downward when it finishes, a check
+   draws itself when a stage finishes while the screen is open, and the working
+   stage sweeps once as it starts (the header status keeps the view's pulse). */
+[data-run-sequence-connector] > [data-fill] {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklab, var(--success) 60%, transparent);
+  transform: scaleY(0);
+  transform-origin: top;
+  transition: transform 500ms var(--ease-enter) 150ms;
+}
+
+[data-run-sequence-connector][data-filled] > [data-fill] {
+  transform: none;
+}
+
+/* Short landscape lays the stages out in a row, so connectors fill rightward. */
+@media (max-height: 500px) and (min-width: 640px) {
+  [data-run-sequence-connector] > [data-fill] {
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+}
+
+@keyframes intar-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.draw-check path {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: intar-draw 300ms var(--ease-enter) 80ms forwards;
+}
+
+@keyframes intar-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+.stage-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  border-radius: inherit;
+  background: var(--primary);
+  animation: intar-sweep 2.2s var(--ease-standard) 300ms both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-run-sequence-connector] > [data-fill] {
+    transition: none;
+  }
+
+  .stage-sweep::after {
+    display: none;
+  }
+}
+
+/* Course outline: the raised card glides to the current lecture, and a
+   quieter highlight follows the pointer over the other rows. Both are
+   absolutely placed, so their height may animate without reflowing a row. */
+:is([data-outline-pill], [data-outline-ghost]) {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  border-radius: 0.625rem;
+  pointer-events: none;
+}
+
+[data-outline-pill] {
+  background: var(--card);
+  box-shadow:
+    inset 0 0 0 1px var(--border),
+    var(--shadow-control);
+}
+
+[data-ready] > [data-outline-pill] {
+  transition:
+    transform 300ms var(--ease-enter),
+    height 300ms var(--ease-enter);
+}
+
+[data-outline-ghost] {
+  background: var(--muted);
+  opacity: 0;
+  transition: opacity 150ms var(--ease-standard);
+}
+
+.dark [data-outline-ghost] {
+  background: color-mix(in oklab, var(--accent) 60%, transparent);
+}
+
+[data-outline-ghost][data-on] {
+  opacity: 1;
+}
+
+[data-outline-ghost][data-glide] {
+  transition:
+    opacity 150ms var(--ease-standard),
+    transform 200ms var(--ease-enter),
+    height 200ms var(--ease-enter);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :is([data-outline-pill], [data-outline-ghost]) {
+    transition-property: opacity !important;
+  }
+}
+
+/* Icon verbs: the bin lid lifts on its hinge while its control is hovered,
+   focused or open. Movement only; reduced motion leaves the lid shut. */
+:root {
+  --turn-nudge: 14deg;
+}
+
+[data-bin-lid] {
+  transform-box: view-box;
+  transform-origin: 3px 6px;
+  transition: transform 200ms var(--ease-enter);
+}
+
+:is(button, a):is(:hover, :focus-visible, [aria-expanded="true"])
+  [data-bin-lid] {
+  transform: translateY(-1px) rotate(calc(-1 * var(--turn-nudge)));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-bin-lid] {
+    transform: none !important;
+  }
+}
+
+/* Rolling digits: each changed digit sits in a window taller than its glyph,
+   so it fades at the window's edge instead of being cut; ones roll first,
+   then tens. --move-digit is a movement distance reduced motion can zero. */
+:root {
+  --move-digit: 0.8em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --move-digit: 0em;
+  }
+}
+
+@keyframes intar-digit-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--digit-dir, 1) * var(--move-digit)));
+  }
+}
+
+@keyframes intar-digit-out {
+  to {
+    opacity: 0;
+    transform: translateY(calc(var(--digit-dir, 1) * -1 * var(--move-digit)));
+  }
+}
+
+.rolling-digit {
+  display: inline-grid;
+  margin-block: -0.25em;
+  padding-block: 0.25em;
+  mask-image: linear-gradient(
+    transparent,
+    #000 0.3em,
+    #000 calc(100% - 0.3em),
+    transparent
+  );
+}
+
+.rolling-digit > *,
+.rolling-digit::before {
+  grid-area: 1 / 1;
+}
+
+.rolling-digit > [data-in] {
+  animation: intar-digit-in 300ms var(--ease-enter) calc(var(--k, 0) * 40ms)
+    both;
+}
+
+/* The outgoing digit is generated content, so it never reaches textContent,
+   and its empty alt text keeps it out of the accessibility tree. */
+.rolling-digit::before {
+  content: attr(data-prev);
+  content: attr(data-prev) / "";
+  animation: intar-digit-out 300ms var(--ease-enter) calc(var(--k, 0) * 40ms)
+    both;
 }
 
 /* Landing: the run workspace leans back under the hero and settles flat as it

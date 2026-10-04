@@ -16,6 +16,8 @@ interface ContentHeaderProps {
   /** Transitional slot — page actions belong in the app bar. */
   actions?: ReactNode;
   titleClassName?: string;
+  /** Lecture and course pages: the title and summary use the reading roles. */
+  reading?: boolean;
 }
 
 export function ContentHeader({
@@ -25,6 +27,7 @@ export function ContentHeader({
   meta,
   actions,
   titleClassName,
+  reading = false,
 }: ContentHeaderProps) {
   return (
     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -32,7 +35,8 @@ export function ContentHeader({
         <div className="flex flex-wrap items-center gap-2">
           <p
             className={cn(
-              "text-page-title text-pretty [overflow-wrap:anywhere]",
+              reading ? "text-content-title" : "text-page-title",
+              "text-pretty [overflow-wrap:anywhere]",
               titleClassName,
             )}
           >
@@ -41,7 +45,11 @@ export function ContentHeader({
           {badge}
         </div>
         {summary ? (
-          <p className="text-support text-muted-foreground">
+          <p
+            className={
+              reading ? "text-lede" : "text-support text-muted-foreground"
+            }
+          >
             {summary}
           </p>
         ) : null}

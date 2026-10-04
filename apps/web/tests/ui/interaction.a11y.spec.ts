@@ -8,6 +8,7 @@ import {
 } from "./support/layout";
 import {
   REPLAY_TERMINAL_COLS,
+  REPLAY_TERMINAL_FONT_LOAD,
   REPLAY_TERMINAL_LINE_HEIGHT,
   REPLAY_TERMINAL_ROWS,
 } from "../../src/lib/replay/config";
@@ -521,7 +522,91 @@ test("destructive dialog traps focus and restores it", async ({ page, ui }) => {
   await expect(trigger).toBeFocused();
 });
 
-test("reduced motion disables authored animation", async ({ page, ui }) => {
+test("SSH key removal asks again in place", async ({ page, ui }) => {
+  await ui.open({ ...routeCase("profile"), theme: "light" });
+  // Motion on: the confirm cross-fades over its trigger, and focus must
+  // survive real transitions (ui.open emulates reduced motion).
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  const rows = page.locator("[data-ssh-key-id]");
+  await expect(rows).toHaveCount(1);
+  const row = rows.first();
+  const trigger = row.getByRole("button", { name: /^Remove the .+ key$/ });
+  const keep = row.getByRole("button", { name: "Keep" });
+  const confirm = row.getByRole("button", { name: "Remove key" });
+
+  await trigger.click();
+  await expect(keep).toBeFocused();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(trigger).toBeFocused();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+  await trigger.click();
+  await page.getByRole("heading", { name: "SSH keys" }).click();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+  // A failed removal keeps the question open and focus on its button.
+  await page.route(
+    (url) => /^\/api\/profile\/ssh-keys\/[^/]+$/.test(url.pathname),
+    (route) => {
+      ui.server.expectedUnavailable += 1;
+      return route.fulfill({
+        status: 503,
+        json: { error: "Key storage is unavailable." },
+      });
+    },
+    { times: 1 },
+  );
+  await trigger.click();
+  await confirm.click();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "Key storage is unavailable." }),
+  ).toBeVisible();
+  await expect(confirm).toBeFocused();
+  await expect(rows).toHaveCount(1);
+
+  // The retry removes the key, the notice is announced, and focus lands on
+  // the empty state instead of the page.
+  await confirm.click();
+  await expect(
+    page
+      .getByRole("status")
+      .filter({ hasText: "SSH key removed. It cannot be used for new routes." }),
+  ).toBeVisible();
+  await expect(rows).toHaveCount(0);
+  await expect(page.locator("#ssh-keys-empty")).toBeFocused();
+});
+
+test("the outline's raised card follows the current lecture", async ({ page, ui }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await ui.open({ ...routeCase("lecture"), theme: "light" });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  const rail = page.locator("[data-course-outline-rail]");
+  const misalignment = () =>
+    rail.evaluate((element) => {
+      const pill = element.querySelector("[data-outline-pill]");
+      const row = element.querySelector("li[data-current] > *");
+      if (!pill || !row) return Number.POSITIVE_INFINITY;
+      const a = pill.getBoundingClientRect();
+      const b = row.getBoundingClientRect();
+      return Math.round(Math.abs(a.top - b.top) + Math.abs(a.height - b.height));
+    });
+  await expect.poll(misalignment).toBe(0);
+
+  const items = rail.locator("li[data-lecture-state]");
+  const index = await items.evaluateAll((lis) =>
+    lis.findIndex(
+      (li) => !li.hasAttribute("data-current") && li.querySelector(":scope > a"),
+    ),
+  );
+  expect(index).toBeGreaterThanOrEqual(0);
+  const item = items.nth(index);
+  await item.locator(":scope > a").click();
+  await expect(item).toHaveAttribute("data-current", "true");
+  await expect.poll(misalignment).toBe(0);
+});
+
+test("reduced motion removes movement but keeps fades", async ({ page, ui }) => {
   await ui.open({
     ...routeCase("run-workspace"),
     theme: "dark",
@@ -534,22 +619,76 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
     ),
   ).toBe(true);
 
-  const offenders = await page.evaluate(() =>
-    [...document.querySelectorAll<HTMLElement>("*")]
-      .filter((element) => {
-        const style = getComputedStyle(element);
-        const duration = style.animationDuration
-          .split(",")
-          .some((entry) => Number.parseFloat(entry) > 0);
-        return style.animationName !== "none" && duration;
-      })
-      .map((element) => ({
-        tag: element.tagName,
-        className: element.className,
-        animationName: getComputedStyle(element).animationName,
-      })),
-  );
-  expect(offenders, "animations active under reduced motion").toEqual([]);
+  // Keep every animation that starts, so one that ends before the sample is
+  // still checked.
+  await page.evaluate(() => {
+    const started = new Set<Animation>();
+    Object.assign(window, { __started: started });
+    document.addEventListener(
+      "animationstart",
+      (event) => {
+        const target = event.target as Element;
+        for (const animation of target.getAnimations({ subtree: true })) {
+          started.add(animation);
+        }
+      },
+      true,
+    );
+  });
+
+  // A hint reveal rolls a count and raises the hint; the solution dialog
+  // fades in.
+  const panel = page.locator("[data-run-learning-panel]");
+  await panel.getByRole("button", { name: "Reveal", exact: true }).first().click();
+  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(panel.getByText("1/2 used", { exact: true })).toBeVisible();
+  await panel.getByRole("button", { name: "Reveal the full solution" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Reveal the full solution?" }),
+  ).toBeVisible();
+
+  // Pose each animation at its start, middle and end: nothing may loop, and
+  // nothing may move, grow or turn, but opacity may change. Transitions are
+  // instant under reduced motion, so only animations count.
+  const { fades, offenders } = await page.evaluate(() => {
+    const started = (window as unknown as { __started: Set<Animation> })
+      .__started;
+    let fades = 0;
+    const offenders: { name: string; problems: string[] }[] = [];
+    for (const animation of new Set([...started, ...document.getAnimations()])) {
+      const effect = animation.effect;
+      if (animation instanceof CSSTransition) continue;
+      if (!(effect instanceof KeyframeEffect) || !effect.target) continue;
+      const { target, pseudoElement } = effect;
+      const timing = effect.getComputedTiming();
+      const { currentTime, playState } = animation;
+      const delay = Number(timing.delay ?? 0);
+      const duration = Number(timing.duration ?? 0);
+      animation.pause();
+      const poses = [0, 0.5, 0.99].map((at) => {
+        animation.currentTime = delay + duration * at;
+        const style = getComputedStyle(target, pseudoElement);
+        return {
+          move: [style.transform, style.translate, style.scale, style.rotate].join(" "),
+          opacity: style.opacity,
+        };
+      });
+      if (currentTime !== null) animation.currentTime = currentTime;
+      if (playState === "running") animation.play();
+      if (new Set(poses.map((pose) => pose.opacity)).size > 1) fades += 1;
+      const moves = new Set(poses.map((pose) => pose.move));
+      const problems = [
+        ...(timing.iterations === Number.POSITIVE_INFINITY ? ["loops"] : []),
+        ...(moves.size > 1 ? [`moves: ${[...moves].join(" → ")}`] : []),
+      ];
+      if (problems.length) {
+        offenders.push({ name: (animation as CSSAnimation).animationName, problems });
+      }
+    }
+    return { fades, offenders };
+  });
+  expect(offenders, "moving or looping animation under reduced motion").toEqual([]);
+  expect(fades, "fades still play under reduced motion").toBeGreaterThan(0);
 
   const guidancePanel = page.locator("[data-run-learning-panel]");
   await expect(guidancePanel).toBeVisible();
@@ -1272,7 +1411,7 @@ test("legacy one-segment course scenario path is not redirected", async ({
   ).toBeVisible();
 });
 
-test("Geist Mono keeps terminal cell geometry stable", async ({
+test("IBM Plex Mono keeps terminal cell geometry stable", async ({
   page,
   ui,
 }) => {
@@ -1280,33 +1419,33 @@ test("Geist Mono keeps terminal cell geometry stable", async ({
 
   await expect
     .poll(() =>
-      page.evaluate(async () => {
+      page.evaluate(async (font) => {
         const faces = await document.fonts.load(
-          '400 14px "Geist Mono Variable"',
+          font,
           "Mi0W ",
         );
         return faces.filter((face) => face.status === "loaded").length;
-      }),
+      }, REPLAY_TERMINAL_FONT_LOAD),
     )
     .toBeGreaterThan(0);
 
-  const metrics = await page.evaluate(async () => {
+  const metrics = await page.evaluate(async (font) => {
     const faces = await document.fonts.load(
-      '400 14px "Geist Mono Variable"',
+      font,
       "Mi0W ",
     );
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
     if (!context) throw new Error("2D canvas context unavailable");
-    context.font = '14px "Geist Mono Variable"';
+    context.font = font;
     const glyphs = ["M", "i", "0", "W", " "];
     const widths = glyphs.map((glyph) => context.measureText(glyph).width);
     return {
-      loaded: document.fonts.check('14px "Geist Mono Variable"'),
+      loaded: document.fonts.check(font),
       faceCount: faces.length,
       widths,
     };
-  });
+  }, REPLAY_TERMINAL_FONT_LOAD);
 
   expect(metrics.loaded).toBe(true);
   expect(metrics.faceCount).toBeGreaterThan(0);

@@ -460,27 +460,41 @@ function maintenancePage(): Response {
     <meta name="robots" content="noindex,nofollow">
     <title>Maintenance · intar.dev</title>
     <style nonce="${nonce}">
-      html{color-scheme:light dark;font-family:ui-sans-serif,system-ui,sans-serif;background:#171613;color:#f3efe4}
+      html{color-scheme:light dark;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#f9f5ee;color:#1f1a14}
       body{min-height:100vh;margin:0;display:grid;place-items:center}
-      main{width:min(38rem,calc(100% - 3rem));border-top:3px solid #d65f2f;padding-top:2rem}
-      p{max-width:60ch;color:#c9c1b2;line-height:1.6}
-      small{font-family:ui-monospace,monospace;color:#938b7d}
-      form{margin-top:2rem;padding-top:1.5rem;border-top:1px solid #4b463d}
-      label{display:block;margin-bottom:.5rem;font-weight:650}
-      input,button{box-sizing:border-box;font:inherit;border-radius:.35rem}
-      input{width:100%;padding:.75rem;border:1px solid #736a5d;background:#211f1b;color:#f3efe4}
-      input:focus-visible,button:focus-visible{outline:3px solid #ef8a5f;outline-offset:3px}
-      button{margin-top:1rem;padding:.7rem 1rem;border:0;background:#b84a20;color:#fff;cursor:pointer;font-weight:700}
+      main{width:min(38rem,calc(100% - 3rem));border-top:3px solid #c74700;padding-top:2rem}
+      h1{font-size:1.5rem;line-height:1.25;font-weight:600;letter-spacing:-.015em;text-wrap:balance}
+      p{max-width:60ch;color:#5b5348;line-height:1.6}
+      small{font-size:.75rem;font-weight:500;letter-spacing:.01em;color:#6a6155}
+      form{margin-top:2rem;padding-top:1.5rem;border-top:1px solid #e3dacb}
+      label{display:block;margin-bottom:.5rem;font-size:.875rem;font-weight:600}
+      input,button{box-sizing:border-box;font:inherit;border-radius:.5rem}
+      input{width:100%;padding:.625rem .75rem;border:1px solid #928777;background:#fffdf9;color:#1f1a14}
+      input:focus-visible,button:focus-visible{outline:2px solid #c74700;outline-offset:2px}
+      button{margin-top:1rem;padding:.625rem .875rem;border:0;background:#c74700;color:#fdfbf9;cursor:pointer;font-size:.875rem;font-weight:600}
+      button:hover{background:#be4000}
       button:disabled{cursor:wait;opacity:.65}
       #operator-status{min-height:1.6em;margin-bottom:0}
-      #operator-status[data-error="true"]{color:#ffb49a}
+      #operator-status[data-error="true"]{color:#ba2b2b}
+      @media (prefers-color-scheme:dark){
+        html{background:#1a1714;color:#efe8df}
+        main{border-top-color:#f88a3d}
+        p{color:#aea597}
+        small{color:#9d9386}
+        form{border-top-color:#322c26}
+        input{border-color:#73695e;background:#24201c;color:#efe8df}
+        input:focus-visible,button:focus-visible{outline-color:#f88a3d}
+        button{background:#f88a3d;color:#21110a}
+        button:hover{background:#fc9d51}
+        #operator-status[data-error="true"]{color:#f97772}
+      }
     </style>
   </head>
   <body>
     <main>
-      <small>PLANNED MAINTENANCE</small>
+      <small>Planned maintenance</small>
       <h1>The control plane is under maintenance</h1>
-      <p>We are completing planned maintenance. Existing sessions are temporarily unavailable until the checks finish.</p>
+      <p>Planned maintenance is in progress. Existing sessions are unavailable until the checks finish.</p>
       <p>Try again shortly.</p>
       <form id="operator-login" action="/api/maintenance/bypass" method="post">
         <label for="operator-secret">Operator maintenance secret</label>

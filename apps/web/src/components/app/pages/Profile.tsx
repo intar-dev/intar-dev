@@ -27,6 +27,7 @@ import { SSO_ERROR_MESSAGES } from "@/lib/organization-sso-errors";
 import { MyServers } from "./MyServers";
 import { fetchJson, mutationResponse } from "./organization-detail/types";
 import { githubCallbackMessage } from "./sign-in-helpers";
+import { InlineConfirm } from "@/components/app/patterns/InlineConfirm";
 
 // Link results return to Profile with an error code only; the message comes
 // from here.
@@ -99,6 +100,25 @@ function initials(name: string | null | undefined): string {
     .map((part) => part[0]?.toUpperCase() ?? "")
     .join("");
   return letters || "?";
+}
+
+/**
+ * After a key is removed, keep focus in the list: the neighbouring key, any
+ * key left on the page, or the empty state that says none are left.
+ */
+function focusAfterRemoval(nextKeyId: string | null) {
+  requestAnimationFrame(() => {
+    const trigger = "[data-inline-confirm-trigger]";
+    const next =
+      (nextKeyId
+        ? document.querySelector<HTMLElement>(
+            `[data-ssh-key-id="${CSS.escape(nextKeyId)}"] ${trigger}`,
+          )
+        : null) ??
+      document.querySelector<HTMLElement>(`[data-ssh-key-id] ${trigger}`) ??
+      document.getElementById("ssh-keys-empty");
+    next?.focus();
+  });
 }
 
 export function Profile() {
@@ -466,17 +486,25 @@ export function Profile() {
             >
               {(visibleKeys) => (
                 <ul className="divide-y overflow-hidden rounded-lg border">
-                  {visibleKeys.map((key) => {
+                  {visibleKeys.map((key, index) => {
                     const deleting =
                       deleteKey.isPending && deleteKey.variables === key.id;
+                    const keyName = key.label || key.comment || "unnamed";
+                    // Focus lands on the next key's action after a removal,
+                    // or the previous one when the last key goes.
+                    const nextKeyId =
+                      visibleKeys[index + 1]?.id ?? visibleKeys[index - 1]?.id ?? null;
 
                     return (
                       <li
                         key={key.id}
-                        className="flex flex-wrap items-start gap-4 p-4"
+                        data-ssh-key-id={key.id}
+                        className="flex flex-wrap items-start gap-4 p-4 transition-colors duration-200 has-[[data-inline-confirm][data-asking]]:bg-destructive-subtle/60"
                       >
                         <div className="min-w-0 flex-1 space-y-1">
-                          <div className="flex flex-wrap items-center gap-2">
+                          {/* As tall as the action, so Remove lines up with the
+                              key's name (the Row Rule). */}
+                          <div className="flex min-h-(--control-compact) flex-wrap items-center gap-2 pointer-coarse:min-h-11">
                             <p className="text-sm font-medium">
                               {key.label || key.comment || "Unnamed key"}
                             </p>
@@ -497,16 +525,20 @@ export function Profile() {
                             </pre>
                           </details>
                         </div>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          className="text-muted-foreground hover:text-destructive"
-                          disabled={deleting}
-                          onClick={() => deleteKey.mutate(key.id)}
-                        >
-                          {deleting ? "Removing…" : "Remove"}
-                        </Button>
+                        <InlineConfirm
+                          label="Remove"
+                          name={`Remove the ${keyName} key`}
+                          question={`Remove the ${keyName} key?`}
+                          confirmLabel="Remove key"
+                          pendingLabel="Removing…"
+                          pending={deleting}
+                          disabled={deleteKey.isPending && !deleting}
+                          onConfirm={() =>
+                            deleteKey.mutate(key.id, {
+                              onSuccess: () => focusAfterRemoval(nextKeyId),
+                            })
+                          }
+                        />
                       </li>
                     );
                   })}
@@ -514,7 +546,11 @@ export function Profile() {
               )}
             </PaginatedCollection>
           ) : (
-            <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-5 py-6 text-center">
+            <div
+              id="ssh-keys-empty"
+              tabIndex={-1}
+              className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-5 py-6 text-center"
+            >
               <KeyRound className="size-6 text-muted-foreground" />
               <div>
                 <p className="text-sm font-medium">No public keys yet</p>
@@ -583,9 +619,15 @@ export function Profile() {
               <InlineFeedback tone="error">{formError}</InlineFeedback>
             ) : null}
 
-            {formNotice ? (
-              <InlineFeedback tone="success">{formNotice}</InlineFeedback>
-            ) : null}
+            {/* Always mounted, so a notice that appears is announced; it
+                takes no room in the form while empty. */}
+            <div role="status" aria-live="polite" className="empty:mb-0">
+              {formNotice ? (
+                <InlineFeedback tone="success" announce={false}>
+                  {formNotice}
+                </InlineFeedback>
+              ) : null}
+            </div>
 
             <Button
               type="submit"

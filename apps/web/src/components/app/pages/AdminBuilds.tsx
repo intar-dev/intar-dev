@@ -417,7 +417,7 @@ function BuildRow(props: {
             className="lg:w-full"
           >
             <RefreshCcw
-              className={cn("size-4", props.retryPending ? "animate-spin" : "")}
+              className={cn("size-4", props.retryPending ? "motion-safe:animate-spin" : "")}
             />
             Retry
           </Button>

@@ -120,7 +120,12 @@ schema.#Project & {
 
 		security: {
 			type: "group"
-			js: #Host & {command: "bun", args: ["audit", "--audit-level=moderate"]}
+			// GHSA-ch52-4w7c-c8xp: http-cache-semantics <= 4.2.0 (every
+			// release) can serve a cached response across users through
+			// max-stale. Astro imports it only to cache remote images during
+			// the build (dist/assets/build/remote.js), where no response is
+			// shared between users. Drop the ignore once a patched release ships.
+			js: #Host & {command: "bun", args: ["audit", "--audit-level=moderate", "--ignore=GHSA-ch52-4w7c-c8xp"]}
 			rust: #Libnbd & {args: ["--rust-only", "--", "cargo", "audit", "--deny", "warnings"]}
 		}
 
