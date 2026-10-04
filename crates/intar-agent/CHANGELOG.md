@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.18.0 (2026-10-05)
+
+### Features
+
+- **intar-agent:** Record when each check first passes and write it into the session cast as an asciicast marker, so replays show verified checks on the track (523e6d48)
+
 ## agent/v0.17.0 (2026-10-01)
 
 ### Features
