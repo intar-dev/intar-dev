@@ -7,10 +7,13 @@ export function InlineFeedback({
   tone,
   children,
   className,
+  announce = true,
 }: {
   tone: FeedbackTone;
   children: React.ReactNode;
   className?: string;
+  /** False when a live region that is always mounted already announces it. */
+  announce?: boolean;
 }) {
   const Icon =
     tone === "pending"
@@ -21,8 +24,8 @@ export function InlineFeedback({
 
   return (
     <p
-      role={tone === "error" ? "alert" : "status"}
-      aria-live={tone === "error" ? "assertive" : "polite"}
+      role={announce ? (tone === "error" ? "alert" : "status") : undefined}
+      aria-live={announce ? (tone === "error" ? "assertive" : "polite") : undefined}
       className={cn(
         "flex min-h-6 items-start gap-2 text-sm",
         tone === "pending" && "text-muted-foreground",

@@ -1470,6 +1470,10 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         /^\/api\/profile\/ssh-keys\/[^/]+$/.test(pathname) &&
         method === "DELETE"
       ) {
+        const keyId = decodeURIComponent(pathname.split("/").pop() ?? "");
+        server.state.sshKeys = server.state.sshKeys.filter(
+          (key) => key.id !== keyId,
+        );
         await json(route, { deleted: true });
         return;
       }

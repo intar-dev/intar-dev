@@ -18,6 +18,7 @@ import { useSession } from "../hooks/useSession";
 import { NAV_SECTIONS, findActiveNavItem } from "./nav-config";
 import { SidebarUserMenu } from "./SidebarUserMenu";
 import { BrandMark } from "../patterns/BrandMark";
+import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
 export function AppSidebar() {
   const pathname = useRouterState({
@@ -105,7 +106,7 @@ export function AppSidebar() {
                           aria-hidden="true"
                         >
                           <span className="size-1.5 rounded-full bg-primary text-primary motion-safe:animate-live" />
-                          {badgeCount}
+                          <RollingNumber value={badgeCount} />
                         </SidebarMenuBadge>
                       ) : null}
                     </SidebarMenuItem>

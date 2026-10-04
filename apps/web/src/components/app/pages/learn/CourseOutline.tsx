@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef, useState } from "react";
 import { CheckCircle2, ListTree, LockKeyhole } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,6 +19,7 @@ import {
   type CourseLectureSummary,
   type CourseRouteRef,
 } from "./course-wire";
+import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
 interface CourseOutlineProps {
   course: CourseCatalogCourse;
@@ -77,7 +79,8 @@ export function CourseOutlineMobile(props: CourseOutlineProps) {
           <SheetHeader className="border-b pr-14">
             <SheetTitle>Course outline</SheetTitle>
             <SheetDescription>
-              Lecture {position} of {total} · {completed} complete
+              Lecture <RollingNumber value={position} /> of {total} ·{" "}
+          <RollingNumber value={completed} /> complete
             </SheetDescription>
           </SheetHeader>
           <div
@@ -94,6 +97,42 @@ export function CourseOutlineMobile(props: CourseOutlineProps) {
   );
 }
 
+/** Moves an absolutely placed highlight onto one outline row. */
+function placeAt(element: HTMLElement, item: HTMLElement) {
+  element.style.transform = `translateY(${item.offsetTop}px)`;
+  element.style.height = `${item.offsetHeight}px`;
+}
+
+/**
+ * Lectures that turned complete while the outline was open. One completed
+ * before the outline mounted shows its check still (the Moment Rule).
+ */
+function useJustCompleted(lectures: CourseLectureSummary[]) {
+  const previous = useRef<Map<string, CourseLectureSummary["state"]> | null>(null);
+  const [completed, setCompleted] = useState<ReadonlySet<string>>(new Set());
+  const signature = lectures
+    .map((lecture) => `${lecture.lectureId}:${lecture.state}`)
+    .join("|");
+  useLayoutEffect(() => {
+    const before = previous.current;
+    previous.current = new Map(
+      lectures.map((lecture) => [lecture.lectureId, lecture.state]),
+    );
+    if (!before) return;
+    const now = lectures
+      .filter(
+        (lecture) =>
+          lecture.state === "completed" &&
+          before.has(lecture.lectureId) &&
+          before.get(lecture.lectureId) !== "completed",
+      )
+      .map((lecture) => lecture.lectureId);
+    if (now.length) setCompleted((current) => new Set([...current, ...now]));
+    // `signature` captures every state change; `lectures` may be a new array each render.
+  }, [signature]);
+  return completed;
+}
+
 function CourseOutlineContent({
   course,
   route,
@@ -104,6 +143,46 @@ function CourseOutlineContent({
     course.lectures,
     currentLectureId,
   );
+  const list = useRef<HTMLDivElement>(null);
+  const pill = useRef<HTMLSpanElement>(null);
+  const ghost = useRef<HTMLSpanElement>(null);
+  const justCompleted = useJustCompleted(course.lectures);
+  const currentIndex = course.lectures.findIndex(
+    (lecture) => lecture.lectureId === currentLectureId,
+  );
+
+  // The raised card is one element that glides to the current lecture. It is
+  // placed without travel first, then glides on later changes; a resize (a
+  // title rewrapping) re-places it. A hidden rail measures 0, so the card
+  // waits and is placed without travel once the rail shows again.
+  useLayoutEffect(() => {
+    const container = list.current;
+    const raised = pill.current;
+    if (!container || !raised) return;
+    let ready = 0;
+    const place = () => {
+      const item = container.querySelector<HTMLElement>("li[data-current] > *");
+      raised.hidden = !item;
+      if (!item) return;
+      if (!container.offsetHeight) {
+        delete container.dataset.ready;
+        return;
+      }
+      placeAt(raised, item);
+      if (container.dataset.ready !== undefined) return;
+      cancelAnimationFrame(ready);
+      ready = requestAnimationFrame(() => {
+        container.dataset.ready = "";
+      });
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(container);
+    return () => {
+      cancelAnimationFrame(ready);
+      observer.disconnect();
+    };
+  }, [currentLectureId, course.lectures.length]);
 
   return (
     <nav aria-label={`${course.title} lectures`}>
@@ -115,24 +194,60 @@ function CourseOutlineContent({
           {course.title}
         </CourseLink>
         <p className="text-caption tabular-nums">
-          Lecture {position} of {total} · {completed} complete
+          Lecture <RollingNumber value={position} /> of {total} ·{" "}
+          <RollingNumber value={completed} /> complete
         </p>
         <LectureProgressTrack
           lectures={course.lectures}
-          className="pt-2 *:h-1 *:flex-1"
+          currentIndex={currentIndex}
+          className="pt-2 *:h-1 *:flex-1 *:data-current:grow-[3]"
         />
       </div>
-      <ol className={cn("space-y-1", compact ? "" : "mt-4")}>
-        {course.lectures.map((lecture, index) => (
-          <CourseOutlineItem
-            key={lecture.lectureId}
-            lecture={lecture}
-            route={route}
-            ordinal={index + 1}
-            current={lecture.lectureId === currentLectureId}
-          />
-        ))}
-      </ol>
+      <div
+        ref={list}
+        className={cn("group/outline relative", compact ? "" : "mt-4")}
+        onPointerOver={(event) => {
+          // Touch has no hover: a tap would leave the highlight behind.
+          if (event.pointerType !== "mouse") return;
+          const target = ghost.current;
+          const item = (event.target as HTMLElement).closest<HTMLElement>(
+            "li[data-lecture-state] > a",
+          );
+          if (!target || !item) return;
+          if (item.parentElement?.hasAttribute("data-current")) {
+            delete target.dataset.on;
+            return;
+          }
+          // Appear in place when arriving from outside; glide between rows.
+          if (target.dataset.on === undefined) {
+            delete target.dataset.glide;
+            placeAt(target, item);
+            void target.offsetWidth;
+          } else {
+            placeAt(target, item);
+          }
+          target.dataset.glide = "";
+          target.dataset.on = "";
+        }}
+        onPointerLeave={() => {
+          if (ghost.current) delete ghost.current.dataset.on;
+        }}
+      >
+        <span ref={pill} aria-hidden="true" data-outline-pill />
+        <span ref={ghost} aria-hidden="true" data-outline-ghost />
+        <ol className="relative space-y-1">
+          {course.lectures.map((lecture, index) => (
+            <CourseOutlineItem
+              key={lecture.lectureId}
+              lecture={lecture}
+              route={route}
+              ordinal={index + 1}
+              current={lecture.lectureId === currentLectureId}
+              justCompleted={justCompleted.has(lecture.lectureId)}
+            />
+          ))}
+        </ol>
+      </div>
     </nav>
   );
 }
@@ -142,11 +257,13 @@ function CourseOutlineItem({
   route,
   ordinal,
   current,
+  justCompleted,
 }: {
   lecture: CourseLectureSummary;
   route: CourseRouteRef;
   ordinal: number;
   current: boolean;
+  justCompleted: boolean;
 }) {
   const state = lectureStatePresentation(lecture.state);
   const content = (
@@ -165,7 +282,10 @@ function CourseOutlineItem({
         </span>
         <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-faint-foreground">
           {lecture.state === "completed" ? (
-            <CheckCircle2 className="size-3.5 text-success" aria-hidden="true" />
+            <CheckCircle2
+              className={cn("size-3.5 text-success", justCompleted && "draw-check")}
+              aria-hidden="true"
+            />
           ) : lecture.state === "locked" ? (
             <LockKeyhole className="size-3.5" aria-hidden="true" />
           ) : (
@@ -190,9 +310,7 @@ function CourseOutlineItem({
   );
   const className = cn(
     "grid min-h-14 grid-cols-[1.5rem_minmax(0,1fr)] gap-2 rounded-[0.625rem] px-3 py-2 text-left transition-colors duration-150 ease-standard",
-    current &&
-      "bg-card text-foreground shadow-[inset_0_0_0_1px_var(--border),var(--shadow-control)]",
-    !current && lecture.state !== "locked" && "hover:bg-muted dark:hover:bg-accent/60",
+    current && "text-foreground",
     lecture.state === "locked" && "text-muted-foreground",
   );
 

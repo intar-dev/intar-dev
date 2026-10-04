@@ -269,7 +269,7 @@ export function createMockApiState(input?: {
           title: briefing.title,
           summary: briefing.tagline,
           bodyMarkdown:
-            "## Service recovery\n\nA web service depends on process state, configuration, and network reachability. Check each boundary in order.",
+            "## Service recovery\n\nA web service depends on process state, configuration, and network reachability. Check each boundary in order, and *verify* each repair before you move on.\n\n### Service state\n\nRun `systemctl status nginx` to see whether the unit is enabled and running.\n\n```bash\nsudo systemctl enable --now nginx\n```\n\n| Check | Command |\n| --- | --- |\n| Configuration | `nginx -t` |\n| Port 80 | `curl -sI localhost` |",
           category: briefing.category,
           tags: briefing.tags,
           difficulty: "medium",

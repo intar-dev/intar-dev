@@ -1491,7 +1491,7 @@ export function ScenarioRun() {
                   className={cn(
                     "relative min-h-0 min-w-0 flex-1",
                     showTerminal
-                      ? "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:duration-200"
+                      ? "animate-in fade-in slide-in-from-bottom-1 duration-200"
                       : "hidden",
                   )}
                 >

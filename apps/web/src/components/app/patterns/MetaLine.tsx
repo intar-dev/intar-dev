@@ -38,7 +38,7 @@ export function MetaLine({ items, className }: MetaLineProps) {
           <span className="min-w-0 [overflow-wrap:anywhere]">{item}</span>
           {/* Trailing, so a wrapped line never starts with a separator. */}
           {index < visible.length - 1 ? (
-            <span aria-hidden="true" className="text-border-strong">
+            <span aria-hidden="true" className="text-faint-foreground/55">
               ·
             </span>
           ) : null}

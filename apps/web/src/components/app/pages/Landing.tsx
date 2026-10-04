@@ -62,7 +62,7 @@ export function Landing() {
 
       <main className="flex flex-1 flex-col">
         <section className="mx-auto flex w-full max-w-7xl flex-col items-center px-[var(--page-inset)] pt-10 text-center sm:pt-14 lg:pt-16">
-          <div className="flex flex-col items-center gap-6 motion-safe:animate-rise sm:gap-8">
+          <div className="flex flex-col items-center gap-6 animate-rise sm:gap-8">
             <p className="inline-flex items-center gap-2 rounded-full border bg-card px-3 py-1 text-caption font-medium text-muted-foreground shadow-[var(--highlight)]">
               <span
                 aria-hidden="true"

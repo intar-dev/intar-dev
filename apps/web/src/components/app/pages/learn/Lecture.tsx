@@ -238,12 +238,13 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
           <ContentHeader
             title={detail.lecture.title}
             titleClassName="max-sm:sr-only"
+            reading
             summary={detail.lecture.summary}
             meta={<LectureMeta lecture={detail.lecture} />}
           />
         </div>
 
-        <section aria-label="Lecture content" className="text-body">
+        <section aria-label="Lecture content">
           <Markdown pageContent>{detail.lecture.bodyMarkdown}</Markdown>
         </section>
 
@@ -309,7 +310,7 @@ function LectureActionPanel({
   return (
     <section
       aria-labelledby="lecture-next-action"
-      className="flex w-full flex-col gap-4 rounded-2xl border bg-card p-5 shadow-[var(--highlight),var(--shadow-raised)] motion-safe:animate-rise sm:flex-row sm:items-start sm:gap-5"
+      className="flex w-full flex-col gap-4 rounded-2xl border bg-card p-5 shadow-[var(--highlight),var(--shadow-raised)] animate-rise sm:flex-row sm:items-start sm:gap-5"
     >
       <span
         aria-hidden="true"

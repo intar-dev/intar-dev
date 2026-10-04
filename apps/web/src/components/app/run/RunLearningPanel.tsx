@@ -48,6 +48,7 @@ import type {
   ScenarioRunRecord,
   ScenarioRunSolution,
 } from "./run-types";
+import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
 type LearningPanelState = "booting" | "running" | "solved";
 
@@ -436,7 +437,7 @@ function CheckStatusIcon({
       <CheckCircle2
         className={cn(
           "size-4 text-success",
-          justVerified && "motion-safe:animate-pop",
+          justVerified && "animate-pop",
         )}
         aria-hidden="true"
       />
@@ -456,7 +457,7 @@ function CheckStatusIcon({
 const CHECK_SEGMENT_TONES: Record<LearnerCheckStatus, string> = {
   verified: "bg-success",
   checking: "bg-info/60",
-  needs_repair: "bg-border-strong/70",
+  needs_repair: "bg-border-strong/35",
 };
 
 const CHECK_LABEL_TONES: Record<LearnerCheckStatus, string> = {
@@ -585,7 +586,7 @@ function Checks(props: {
             className="shrink-0 text-xs text-faint-foreground tabular-nums"
             aria-label={`${props.passedChecks} of ${checks.length} checks verified`}
           >
-            {props.passedChecks}/{checks.length} verified
+            <RollingNumber value={props.passedChecks} />/{checks.length} verified
           </span>
         )}
         {props.action}
@@ -620,7 +621,7 @@ function Checks(props: {
                 data-check-status={check.status}
                 className={cn(
                   "grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 rounded-lg px-2 py-2",
-                  justVerified.has(check.key) && "motion-safe:animate-verified",
+                  justVerified.has(check.key) && "animate-verified",
                 )}
               >
                 <span className="mt-1">
@@ -680,7 +681,8 @@ function Hints(props: {
         </p>
         {props.hints.length ? (
           <span className="text-xs text-faint-foreground tabular-nums">
-            {props.revealedHints}/{props.hints.length} used
+            <RollingNumber value={props.revealedHints} />/{props.hints.length}{" "}
+            used
           </span>
         ) : null}
       </div>
@@ -747,7 +749,7 @@ function HintLadder(props: {
             return (
               <li
                 key={hint.key}
-                className="space-y-2 px-3 py-3 motion-safe:animate-rise"
+                className="space-y-2 px-3 py-3 animate-rise"
               >
                 <p className="flex items-center gap-2 text-sm font-medium">
                   <Lightbulb className="size-3.5 shrink-0 text-warning" aria-hidden="true" />

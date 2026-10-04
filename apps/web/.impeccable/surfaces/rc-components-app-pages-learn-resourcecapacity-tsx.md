@@ -14,7 +14,7 @@ Operate. Public and organization course catalog indexes show combined allocation
 
 THESIS: Two continuous meters make remaining CPU and memory capacity visible before a learner chooses a course.
 
-OWN-WORLD: Geist, raised graphite or paper cards, neutral tracks, a success-green fill, and direct labels.
+OWN-WORLD: IBM Plex Sans, raised graphite or paper cards, neutral tracks, a success-green fill, and direct labels.
 
 STORY: Read the available shares and amounts, then continue to assignments or courses.
 
@@ -28,7 +28,7 @@ FINISH: Visual review complete. Reviewer disposition: ship. All eight review scr
 
 - The capacity section follows the catalog heading and summary, before assignments, filters, and course rows. It stays visible in empty and filtered catalog states. Course detail pages have no capacity meters.
 - The heading uses the card-title style. CPU and memory each sit in a raised card (`card` fill, quiet border, highlight and raised shadow, 12px corners) with 16px by 18px padding.
-- Labels use Geist at 14px, medium. The available percentage uses the success color at 14px, medium. Amounts use the caption style at 12px in faint-foreground. Numbers use tabular figures.
+- Labels use IBM Plex Sans at 14px, medium. The available percentage uses the success color at 14px, medium. Amounts use the caption style at 12px in faint-foreground. Numbers use tabular figures.
 - CPU and memory stack with a 12px gap below the 640px breakpoint and use two equal columns with a 12px gap at 640px and above.
 - Each meter is a 6px rounded track (`muted`, `accent` in dark mode) with one rounded success fill scaled to the exact available share. The fill grows from zero on arrival and eases value changes over 500ms with the enter curve; reduced motion removes both.
 
