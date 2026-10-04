@@ -1,21 +1,42 @@
 import * as React from "react"
 
-// The persistent navigation rail begins at a true desktop width. Tablets use
-// the same drawer affordance as phones so operational pages keep usable space.
-const MOBILE_BREAKPOINT = 1024
+// The persistent navigation rail begins at bp-lg. The query is in rem, like
+// Tailwind's `lg:` that shows the sidebar, so JS and CSS agree at every
+// default font size. Tablets share the phone drawer below it. The app renders
+// on the client only, so matchMedia is safe in the initial state.
+const MOBILE_QUERY = "(width < 64rem)"
 
 export function useIsMobile() {
-  const [isMobile, setIsMobile] = React.useState<boolean | undefined>(undefined)
+  const [isMobile, setIsMobile] = React.useState<boolean>(
+    () => window.matchMedia(MOBILE_QUERY).matches,
+  )
 
   React.useEffect(() => {
-    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`)
-    const onChange = () => {
-      setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
-    }
+    const mql = window.matchMedia(MOBILE_QUERY)
+    const onChange = () => setIsMobile(mql.matches)
     mql.addEventListener("change", onChange)
-    setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
+    onChange()
     return () => mql.removeEventListener("change", onChange)
   }, [])
 
-  return !!isMobile
+  return isMobile
+}
+
+// bp-short: a landscape phone. Sheets come from the side and bars slim down.
+const SHORT_QUERY = "(height < 31.25rem)"
+
+export function useShortViewport() {
+  const [short, setShort] = React.useState<boolean>(
+    () => window.matchMedia(SHORT_QUERY).matches,
+  )
+
+  React.useEffect(() => {
+    const mql = window.matchMedia(SHORT_QUERY)
+    const onChange = () => setShort(mql.matches)
+    mql.addEventListener("change", onChange)
+    onChange()
+    return () => mql.removeEventListener("change", onChange)
+  }, [])
+
+  return short
 }

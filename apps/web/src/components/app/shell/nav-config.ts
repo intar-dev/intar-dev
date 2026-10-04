@@ -39,7 +39,6 @@ export interface NavSection {
 export const NAV_SECTIONS: NavSection[] = [
   {
     id: "learn",
-    label: "Learn",
     requires: "signedIn",
     items: [
       {

@@ -29,12 +29,16 @@ export function Section({
       as="section"
       variant={variant}
       size={density === "compact" ? "sm" : "default"}
-      className={cn(density === "compact" && "gap-3", className)}
+      className={className}
     >
       {title || actions || description ? (
         <div className="flex flex-col gap-2 px-(--card-spacing) sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-1">
-            {title ? <h2 className="text-section-title">{title}</h2> : null}
+            {title ? (
+              <h2 className={cn("text-section-title", actions && "sm:title-line")}>
+                {title}
+              </h2>
+            ) : null}
             {description ? (
               <p className="text-metadata">{description}</p>
             ) : null}

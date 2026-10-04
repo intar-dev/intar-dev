@@ -2,6 +2,7 @@
 import "../styles/global.css";
 import App from "../components/app/App";
 import { THEME_BOOTSTRAP_SCRIPT } from "../components/app/theme";
+import plexSansLatin from "@fontsource-variable/ibm-plex-sans/files/ibm-plex-sans-latin-wght-normal.woff2?url";
 ---
 
 <html lang="en">
@@ -13,6 +14,7 @@ import { THEME_BOOTSTRAP_SCRIPT } from "../components/app/theme";
 		<meta charset="utf-8" />
 		<script is:inline set:html={THEME_BOOTSTRAP_SCRIPT}></script>
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<link rel="preload" href={plexSansLatin} as="font" type="font/woff2" crossorigin />
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
 		<meta name="description" content="Learn systems theory and repair real infrastructure in guided scenarios." />
 		<meta name="generator" content={Astro.generator} />

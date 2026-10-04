@@ -1,4 +1,6 @@
-import { Trash2 } from "lucide-react";
+import { useRef } from "react";
+import { AsyncLabel } from "@/components/app/patterns/AsyncLabel";
+import { BinIcon } from "@/components/ui/bin-icon";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -21,19 +23,27 @@ export function ScenarioCancelDialog(props: {
   /** Render the inline trigger button; false when the app bar opens it. */
   trigger?: boolean;
 }) {
+  const safeAction = useRef<HTMLButtonElement>(null);
   return (
-    <Dialog open={props.open} onOpenChange={props.onOpenChange}>
+    <Dialog
+      open={props.open}
+      onOpenChange={(open) => {
+        // Escape and the backdrop wait while the request runs.
+        if (!open && props.pending) return;
+        props.onOpenChange(open);
+      }}
+    >
       {(props.trigger ?? true) ? (
         <DialogTrigger
           render={
             <Button size="sm" variant="destructive" className="w-full sm:w-auto">
-              <Trash2 className="size-4" />
+              <BinIcon />
               End run
             </Button>
           }
         />
       ) : null}
-      <DialogContent>
+      <DialogContent showCloseButton={false} initialFocus={safeAction}>
         <DialogHeader>
           <DialogTitle>
             {props.retry ? "Retry ending this run?" : "End this run?"}
@@ -46,14 +56,15 @@ export function ScenarioCancelDialog(props: {
         </DialogHeader>
         {props.error ? (
           <Alert variant="destructive">
-            <AlertTitle>Run could not be ended</AlertTitle>
+            <AlertTitle>Could not end run</AlertTitle>
             <AlertDescription>
-              {props.error} Try again when you are ready.
+              {props.error} Try ending the run again.
             </AlertDescription>
           </Alert>
         ) : null}
         <DialogFooter>
           <Button
+            ref={safeAction}
             variant="outline"
             onClick={() => props.onOpenChange(false)}
             disabled={props.pending}
@@ -64,13 +75,15 @@ export function ScenarioCancelDialog(props: {
             variant="danger"
             onClick={props.onConfirm}
             disabled={props.pending}
+            focusableWhenDisabled
+            aria-busy={props.pending || undefined}
           >
-            <Trash2 className="size-4" />
-            {props.pending
-              ? "Ending run…"
-              : props.retry
-                ? "Retry end"
-                : "End run"}
+            <BinIcon />
+            <AsyncLabel
+              state={props.pending ? "pending" : "idle"}
+              idle={props.retry ? "Retry end" : "End run"}
+              pending="Ending run…"
+            />
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -87,19 +100,26 @@ export function DeleteRunDialog(props: {
   /** Render the inline trigger button; false when the app bar opens it. */
   trigger?: boolean;
 }) {
+  const safeAction = useRef<HTMLButtonElement>(null);
   return (
-    <Dialog open={props.open} onOpenChange={props.onOpenChange}>
+    <Dialog
+      open={props.open}
+      onOpenChange={(open) => {
+        if (!open && props.pending) return;
+        props.onOpenChange(open);
+      }}
+    >
       {(props.trigger ?? true) ? (
         <DialogTrigger
           render={
             <Button size="sm" variant="destructive" className="w-full sm:w-auto">
-              <Trash2 className="size-4" />
+              <BinIcon />
               Delete run
             </Button>
           }
         />
       ) : null}
-      <DialogContent>
+      <DialogContent showCloseButton={false} initialFocus={safeAction}>
         <DialogHeader>
           <DialogTitle>Delete this run?</DialogTitle>
           <DialogDescription>
@@ -109,23 +129,34 @@ export function DeleteRunDialog(props: {
         </DialogHeader>
         {props.error ? (
           <Alert variant="destructive">
-            <AlertTitle>Run could not be deleted</AlertTitle>
+            <AlertTitle>Could not delete run</AlertTitle>
             <AlertDescription>
               Nothing was removed. Try again when you are ready.
             </AlertDescription>
           </Alert>
         ) : null}
         <DialogFooter>
-          <Button variant="outline" onClick={() => props.onOpenChange(false)}>
+          <Button
+            ref={safeAction}
+            variant="outline"
+            onClick={() => props.onOpenChange(false)}
+            disabled={props.pending}
+          >
             Keep run
           </Button>
           <Button
             variant="danger"
             onClick={props.onConfirm}
             disabled={props.pending}
+            focusableWhenDisabled
+            aria-busy={props.pending || undefined}
           >
-            <Trash2 className="size-4" />
-            {props.pending ? "Deleting..." : "Delete run"}
+            <BinIcon />
+            <AsyncLabel
+              state={props.pending ? "pending" : "idle"}
+              idle="Delete run"
+              pending="Deleting…"
+            />
           </Button>
         </DialogFooter>
       </DialogContent>

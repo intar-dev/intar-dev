@@ -11,6 +11,7 @@ import {
   fetchCourseLecture,
   findNextCourseLecture,
   invalidateCourseCatalogs,
+  lectureStatePresentation,
   type CourseCatalogCourse,
 } from "./course-wire";
 
@@ -33,6 +34,11 @@ afterEach(() => {
 });
 
 describe("course learner wire contract", () => {
+  it("shows an available lecture as neutral and only becoming states as warning", () => {
+    expect(lectureStatePresentation("available")).toEqual({ tone: "muted", word: "Ready" });
+    expect(lectureStatePresentation("waiting_for_scenario").tone).toBe("pending");
+  });
+
   it.each([401, 403, 404])("stops catalog retries and polling after HTTP %s", async (status) => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(
       Response.json({ error: "Access unavailable" }, { status }),

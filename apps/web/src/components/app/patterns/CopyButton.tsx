@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AsyncLabel } from "./AsyncLabel";
+import { CopyIcon } from "./CopyIcon";
 
 const COPIED_MS = 1600;
 
@@ -58,7 +58,7 @@ export function CopyButton({
         state={copied ? "done" : "idle"}
         idle={
           <>
-            <Copy className="size-3.5" aria-hidden="true" />
+            <CopyIcon />
             {label}
           </>
         }

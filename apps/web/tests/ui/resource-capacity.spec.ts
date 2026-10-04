@@ -40,7 +40,7 @@ test("capacity refresh failure keeps courses and last values, then recovers", as
     await page.clock.fastForward(5_000);
     return page.getByText(/Update failed/).count();
   }).toBe(1);
-  await expect(page.getByRole("status")).toContainText("Update failed");
+  await expect(page.getByRole("status").filter({ hasText: "Update failed" })).toHaveCount(1);
   await expect(page.getByRole("link", { name: /Linux operations/ })).toBeVisible();
   await expect(cpu).toHaveAttribute("aria-valuenow", "65.625");
 

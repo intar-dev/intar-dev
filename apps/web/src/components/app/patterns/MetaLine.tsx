@@ -12,21 +12,35 @@ export const SCENARIO_DIFFICULTIES: readonly ScenarioDifficulty[] = [
 interface MetaLineProps {
   items: Array<ReactNode | null | undefined | false>;
   className?: string;
+  /** A span inside links and other phrasing content; a paragraph otherwise. */
+  as?: "p" | "span";
+  /** The smaller size for dense lists. */
+  dense?: boolean;
 }
 
 // The one metadata treatment: a single quiet line of interpunct-separated
 // facts (`3 lectures · ~45 min · 1 VM`) in tabular sans. Mono is reserved for
 // commands, IDs, logs, and timers. Chips remain only where they are
 // interactive (filters).
-export function MetaLine({ items, className }: MetaLineProps) {
+export function MetaLine({
+  items,
+  className,
+  as: Tag = "p",
+  dense = false,
+}: MetaLineProps) {
   const visible = items.filter(
-    (item): item is ReactNode => item !== null && item !== undefined && item !== false,
+    (item): item is ReactNode =>
+      item !== null &&
+      item !== undefined &&
+      item !== false &&
+      !(typeof item === "string" && !item.trim()),
   );
   if (visible.length === 0) return null;
   return (
-    <p
+    <Tag
       className={cn(
-        "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[0.8125rem] leading-5 text-faint-foreground tabular-nums",
+        "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-faint-foreground tabular-nums",
+        dense ? "text-xs leading-4" : "text-metadata leading-5",
         className,
       )}
     >
@@ -44,7 +58,7 @@ export function MetaLine({ items, className }: MetaLineProps) {
           ) : null}
         </span>
       ))}
-    </p>
+    </Tag>
   );
 }
 
@@ -55,7 +69,7 @@ const DIFFICULTY_DOTS: Record<ScenarioDifficulty, string> = {
   hard: "bg-destructive",
 };
 
-const DIFFICULTY_LABELS: Record<ScenarioDifficulty, string> = {
+export const DIFFICULTY_LABELS: Record<ScenarioDifficulty, string> = {
   easy: "Easy",
   medium: "Medium",
   hard: "Hard",
@@ -72,7 +86,7 @@ export function MetaDifficulty({
     <span className={cn("inline-flex items-center gap-1.5", className)}>
       <span
         aria-hidden="true"
-        className={cn("size-2 rounded-full", DIFFICULTY_DOTS[difficulty])}
+        className={cn("size-2 shrink-0 rounded-full", DIFFICULTY_DOTS[difficulty])}
       />
       {DIFFICULTY_LABELS[difficulty]}
     </span>

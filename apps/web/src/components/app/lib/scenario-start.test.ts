@@ -234,7 +234,7 @@ describe("scenario capacity waiting", () => {
       onCapacityWait: vi.fn(),
     });
     const rejection = expect(result).rejects.toThrow(
-      "VM capacity did not become available within 60 seconds",
+      "No practice machine became free within 60 seconds",
     );
     await vi.advanceTimersByTimeAsync(60_000);
 
@@ -339,7 +339,7 @@ describe("scenario capacity waiting", () => {
       onCapacityWait,
     });
     const rejection = expect(result).rejects.toThrow(
-      "Could not reach the control plane. Check your connection and try starting the scenario again.",
+      "Could not reach Intar. Check your connection and try again.",
     );
     await vi.advanceTimersByTimeAsync(10_000);
     await rejection;
@@ -432,7 +432,7 @@ describe("scenario registry-busy waiting", () => {
       onCapacityWait: vi.fn(),
     });
     const rejection = expect(result).rejects.toThrow(
-      "The image registry stayed busy for 60 seconds. Try again shortly.",
+      "Image maintenance did not finish within 60 seconds. Try again shortly.",
     );
     await vi.advanceTimersByTimeAsync(60_000);
     await rejection;

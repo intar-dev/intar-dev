@@ -39,7 +39,7 @@ async function expectShutdownRunChrome(page: Page) {
   await expect(
     page.getByRole("navigation", { name: "Breadcrumb" }),
   ).toHaveCount(0);
-  if ((page.viewportSize()?.width ?? 0) >= 960) {
+  if ((page.viewportSize()?.width ?? 0) >= 768) {
     await expect(page.locator("[data-run-learning-panel]")).toBeVisible();
   } else {
     await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
@@ -261,7 +261,7 @@ test("small screens keep work open and show mission and hints in a bottom sheet"
   ).length;
   await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
   const trigger = page.getByRole("button", {
-    name: "Open lecture theory and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
+    name: "Checks 0/2. 0 of 2 hints revealed. Opens checks, lecture and hints.",
   });
   await expect(trigger).toBeVisible();
   await trigger.focus();
@@ -497,7 +497,7 @@ test("hint and solution failures use generic learner-safe messages", async ({
     .click();
   await expect(
     panel.getByRole("alert").filter({
-      hasText: "Could not reveal this hint. Try again.",
+      hasText: "Could not reveal this hint.",
     }),
   ).toBeVisible();
   await expect(panel).not.toContainText("worker-19");
@@ -512,7 +512,7 @@ test("hint and solution failures use generic learner-safe messages", async ({
     .click();
   await expect(
     panel.getByRole("alert").filter({
-      hasText: "Could not reveal the solution. Try again.",
+      hasText: "Could not reveal the solution.",
     }),
   ).toBeVisible();
   await expect(panel).not.toContainText("control-plane task 7c02c91");
@@ -538,7 +538,7 @@ test("a solved scenario makes finishing the first learner action", async ({ page
   await expect(
     panel.getByRole("button", { name: "Finish and save" }),
   ).toHaveCount(0);
-  await expect(panel.getByText("Verified", { exact: true })).toHaveCount(2);
+  await expect(panel.locator('[data-check-status="verified"]')).toHaveCount(2);
   const text = await panel.innerText();
 
   for (const forbidden of [
@@ -576,7 +576,7 @@ test("a failed solved-run save stays beside the visible action", async ({
     .getByRole("button", { name: "Finish and save" })
     .click();
   await expect(completionBar.getByRole("alert")).toHaveText(
-    "We could not save this run. Your work is still open. Try again.",
+    "Could not save this run. Your work is still open. Try again.",
   );
   await expect(completionBar).not.toContainText("host-17");
   await expect(completionBar).not.toContainText("run-vm-web");
@@ -598,9 +598,10 @@ test("the final check transition uses one useful live announcement", async ({
   ui.server.setRunState("solved");
   const completion = page
     .locator('[data-run-learning-panel] [aria-live="polite"]')
-    .filter({ hasText: "All 2 checks are verified." });
+    .filter({ hasText: "All checks verified" });
+  // Announced 650ms after the solve, together with the completion bar.
   await expect(completion).toHaveCount(1);
-  await expect(completion).toHaveText("All 2 checks are verified.");
+  await expect(completion).toHaveText("All checks verified");
   await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Finish and save" }),
@@ -711,7 +712,7 @@ test("ending a scenario moves from a calm saving state to a learner recap and re
   await expect(savingHeading).toBeVisible({ timeout: 5_000 });
   await expect(savingSteps).toBeVisible();
   const shutdownHeader = page.locator("[data-run-workspace-header]");
-  await expect(shutdownHeader).toContainText("Saving");
+  await expect(shutdownHeader).toContainText("Finishing");
   await expect(shutdownHeader).not.toContainText("Solved");
 
   ui.server.setRunState("replay");
@@ -727,15 +728,11 @@ test("ending a scenario moves from a calm saving state to a learner recap and re
   await expect(savingSteps).toHaveCount(0);
   await expect(recap).not.toHaveAttribute("aria-busy");
   await expect(recap.getByText("2/2 verified", { exact: true })).toBeVisible();
-  const progress = recap.getByRole("progressbar", {
-    name: "Final checks progress",
-  });
-  await expect(progress).toHaveAttribute("aria-valuenow", "2");
-  await expect(progress).toHaveAttribute("aria-valuemax", "2");
-  await expect(progress).toHaveAttribute(
-    "aria-valuetext",
-    "2 of 2 final checks verified",
-  );
+  // The bar is decorative and closed when every check verified; the visible
+  // count above carries the information.
+  const progress = recap.locator("[data-run-recap-progress]");
+  await expect(progress).toHaveAttribute("aria-hidden", "true");
+  await expect(progress).toHaveAttribute("data-closed", "true");
   await expect(recap.getByText("Hints used", { exact: true })).toBeVisible();
   await expect(recap.getByText("Full solution", { exact: true })).toBeVisible();
   await expect(recap.getByRole("button", { name: "Watch replay" })).toHaveCount(1);
@@ -903,13 +900,13 @@ test("a replay carousel keeps learner-facing parts in order", async ({
   await expect(next).toBeEnabled();
   await expect(order.getByRole("button")).toHaveCount(3);
   await expect(order.getByRole("button").nth(0)).toHaveAccessibleName(
-    "Show Part 1 of 3, web",
+    "Show part 1 of 3, web",
   );
   await expect(order.getByRole("button").nth(1)).toHaveAccessibleName(
-    "Show Part 2 of 3, web",
+    "Show part 2 of 3, web",
   );
   await expect(order.getByRole("button").nth(2)).toHaveAccessibleName(
-    "Show Part 3 of 3, worker",
+    "Show part 3 of 3, worker",
   );
   await expect
     .poll(() =>
@@ -927,7 +924,7 @@ test("a replay carousel keeps learner-facing parts in order", async ({
   await expect(next).toBeFocused();
   await expect(
     carousel.getByRole("status").filter({
-      hasText: "Showing Part 2 of 3",
+      hasText: "Showing part 2 of 3",
     }),
   ).toHaveCount(1);
   await expect
@@ -1255,10 +1252,11 @@ test("a replay failure stays inline and never exposes a server message", async (
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
   await recap.getByRole("button", { name: "Watch replay" }).click();
   await expect(
-    recap.getByText("Replay could not be loaded. Try again soon.", {
+    recap.getByRole("alert").getByText("Replay could not be loaded.", {
       exact: true,
     }),
   ).toBeVisible();
+  await expect(recap.getByRole("button", { name: "Try again" })).toBeVisible();
   await expect(recap).not.toContainText("host-eu-1");
   await expect(recap).not.toContainText("run-vm-web:0");
   await expect(recap.getByText("Transcript", { exact: true })).toHaveCount(0);

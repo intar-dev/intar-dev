@@ -39,13 +39,22 @@ function AppShellContent() {
 
   return (
     <SidebarProvider
+          // The collapsed rail is remembered across visits: setOpen writes the
+          // cookie. The app renders on the client only, so document exists.
+          defaultOpen={!/(?:^|; )sidebar_state=false/.test(document.cookie)}
           className={fullscreenWorkspace ? "min-h-[100dvh]" : undefined}
           keyboardShortcutEnabled={!fullscreenWorkspace}
         >
           <AppShellNavigation hidden={fullscreenWorkspace} />
           <SidebarInset
+            // The page panel is the named query container (bp-lecture and the
+            // panel-width grids use `@min-[..rem]/panel:`), so the result
+            // holds whether the sidebar is open or collapsed. Skipped for the
+            // fullscreen workspace, which has no panel to measure.
             className={
-              fullscreenWorkspace ? "min-h-[100dvh] min-w-0" : "min-w-0"
+              fullscreenWorkspace
+                ? "min-h-[100dvh] min-w-0"
+                : "@container/panel min-w-0"
             }
           >
             {fullscreenWorkspace ? null : <AppBar />}
@@ -73,7 +82,7 @@ function AppShellNavigation({ hidden }: { hidden: boolean }) {
     <>
       <a
         href="#main-content"
-        className="fixed top-3 left-3 z-[100] inline-flex min-h-11 -translate-y-24 items-center rounded-lg bg-primary px-4 py-2 font-semibold text-primary-foreground shadow-md transition-transform focus:translate-y-0 motion-reduce:transition-none"
+        className="fixed top-[max(0.75rem,env(safe-area-inset-top))] left-[max(0.75rem,env(safe-area-inset-left))] z-[100] inline-flex min-h-11 -translate-y-32 items-center rounded-lg bg-primary px-4 py-2 font-semibold text-primary-foreground shadow-(--shadow-overlay) transition-transform focus:translate-y-0 motion-reduce:transition-none"
       >
         Skip to main content
       </a>

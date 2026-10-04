@@ -8,10 +8,13 @@ import {
   useState,
 } from "react";
 import { Terminal } from "@xterm/xterm";
-import { Terminal as TerminalIcon } from "lucide-react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Button } from "@/components/ui/button";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
+import { RUN_QUERY } from "@/components/app/run/run-viewport";
 import { cn } from "@/lib/utils";
+import { TerminalKeyRow } from "./TerminalKeyRow";
+import { applyCtrl, arrowSequence, type CtrlState } from "./terminal-keys";
 import {
   Dialog,
   DialogClose,
@@ -53,6 +56,11 @@ interface WebSshTerminalProps {
    */
   visible?: boolean;
   /**
+   * Embedded variant only: show the key row (Esc, Tab, Ctrl, arrows, Paste,
+   * Hide keyboard) while the on-screen keyboard is up.
+   */
+  keyRow?: boolean;
+  /**
    * Reports the gateway-ready truth of this transport attempt. The parent
    * reveals the shell from this signal instead of waiting for the run
    * projection poll, and clears it on disconnect, error, and unmount.
@@ -75,6 +83,15 @@ type SessionStatus =
   | "connected"
   | "disconnected"
   | "error";
+
+// The connection state in a learner's words; the raw enum never shows.
+const STATUS_WORDS: Record<SessionStatus, string> = {
+  idle: "Not connected",
+  connecting: "Connecting…",
+  connected: "Connected",
+  disconnected: "Disconnected",
+  error: "Connection failed",
+};
 
 type TerminalControlMessage =
   | { type: "open"; cols: number; rows: number }
@@ -142,6 +159,7 @@ export function WebSshTerminal({
   showCloseButton = true,
   bootEvidence = null,
   visible = true,
+  keyRow = false,
   onTransportStateChange,
 }: WebSshTerminalProps) {
   const terminalContainerRef = useRef<HTMLDivElement | null>(null);
@@ -175,6 +193,33 @@ export function WebSshTerminal({
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(true);
+  // Ctrl on the key row is read by the input path below, which is why it is
+  // a ref as well as state: a latched Ctrl must catch the very next keystroke.
+  const [ctrl, setCtrl] = useState<CtrlState>("off");
+  const ctrlRef = useRef<CtrlState>("off");
+  const changeCtrl = useCallback((next: CtrlState) => {
+    ctrlRef.current = next;
+    setCtrl(next);
+  }, []);
+  const sendKey = useCallback((sequence: string) => {
+    // wasUserInput routes the bytes through onData, the one input path.
+    terminalRef.current?.input(sequence, true);
+  }, []);
+  const pasteFromClipboard = useCallback(() => {
+    void navigator.clipboard
+      ?.readText()
+      .then((text) => {
+        if (text) terminalRef.current?.paste(text);
+      })
+      .catch(() => {
+        // Clipboard access can be refused; typing and long-press paste remain.
+      });
+  }, []);
+  const hideKeyboard = useCallback(() => {
+    terminalRef.current?.blur();
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) active.blur();
+  }, []);
 
   const title = useMemo(
     () => titleOverride ?? `Web SSH · ${vmName}`,
@@ -233,6 +278,8 @@ export function WebSshTerminal({
       return terminalRef.current;
     }
 
+    // 13px on phones buys about four columns at 390px; 14px from bp-md.
+    const typeQuery = window.matchMedia(RUN_QUERY.terminalType);
     // 120x30 is only the pre-fit fallback; the grid reflows to the container
     // and every change is forwarded to the PTY as a resize control frame.
     const terminal = new Terminal({
@@ -242,10 +289,12 @@ export function WebSshTerminal({
       // xterm's blink is an animation the reduced-motion styles only shorten.
       cursorBlink: !window.matchMedia("(prefers-reduced-motion: reduce)")
         .matches,
+      // An unfocused terminal keeps a dimmed block (global.css), not an outline.
+      cursorInactiveStyle: "block",
       fontFamily: isReplayTerminalFontLoaded()
         ? REPLAY_TERMINAL_FONT_FAMILY
         : REPLAY_TERMINAL_FALLBACK_FONT_FAMILY,
-      fontSize: 14,
+      fontSize: typeQuery.matches ? 14 : 13,
       lineHeight: REPLAY_TERMINAL_LINE_HEIGHT,
       theme: REPLAY_TERMINAL_XTERM_THEME,
     });
@@ -258,7 +307,7 @@ export function WebSshTerminal({
     terminal.loadAddon(fitAddon);
     terminal.open(terminalContainerRef.current);
 
-    terminal.onData((data) => {
+    terminal.onData((input) => {
       const websocket = websocketRef.current;
       if (
         !websocket ||
@@ -266,6 +315,12 @@ export function WebSshTerminal({
         targetStateRef.current !== "ready"
       ) {
         return;
+      }
+      let data = input;
+      if (ctrlRef.current !== "off") {
+        data = applyCtrl(input);
+        // A latched Ctrl covers one key; a locked one stays until tapped.
+        if (ctrlRef.current === "latched") changeCtrl("off");
       }
       inputObservedRef.current = true;
       markTerminalStage("terminal-input");
@@ -313,6 +368,13 @@ export function WebSshTerminal({
       });
     };
     window.addEventListener("resize", scheduleFit);
+    // Crossing bp-md changes the type size, which changes the grid; the
+    // existing resize path forwards the new size to the PTY.
+    const applyTypeSize = () => {
+      terminal.options.fontSize = typeQuery.matches ? 14 : 13;
+      scheduleFit();
+    };
+    typeQuery.addEventListener("change", applyTypeSize);
     const resizeObserver =
       typeof ResizeObserver !== "undefined" && container
         ? new ResizeObserver(scheduleFit)
@@ -322,6 +384,7 @@ export function WebSshTerminal({
     }
     resizeCleanupRef.current = () => {
       window.removeEventListener("resize", scheduleFit);
+      typeQuery.removeEventListener("change", applyTypeSize);
       resizeObserver?.disconnect();
       if (fitFrame !== null) {
         cancelAnimationFrame(fitFrame);
@@ -332,7 +395,7 @@ export function WebSshTerminal({
     terminalRef.current = terminal;
     fitGridRef.current = fitGrid;
     return terminal;
-  }, [markTerminalStage]);
+  }, [changeCtrl, markTerminalStage]);
 
   const connect = useCallback(async () => {
     const connectionGeneration = connectionGenerationRef.current + 1;
@@ -565,41 +628,40 @@ export function WebSshTerminal({
     return (
       <div
         data-terminal-status={status}
-        className="flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)]"
+        data-run-terminal
+        // The terminal is always dark: its edge is a terminal colour and
+        // warms toward the brand while it has focus or the keyboard is up.
+        className="flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden rounded-xl border border-terminal-border bg-terminal-background text-terminal-foreground transition-[border-color] duration-(--duration-fast) ease-standard focus-within:border-[color-mix(in_oklab,var(--terminal-brand)_55%,var(--terminal-border))] group-data-[kb]/run:border-[color-mix(in_oklab,var(--terminal-brand)_55%,var(--terminal-border))]"
       >
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b px-2 py-1.5">
-          <div className="flex min-w-0 items-center gap-3">
-            <p className="inline-flex h-7 min-w-0 items-center gap-2 rounded-md bg-muted px-2.5 text-[0.8125rem] font-medium ring-1 ring-border dark:bg-accent/60">
-              <TerminalIcon
-                className="size-3.5 shrink-0 text-faint-foreground"
-                aria-hidden="true"
-              />
-              <span className="truncate">{title}</span>
+        {/* The machine is named by the region and the shell prompt, so this
+            strip shows only while the connection needs attention. It stays
+            in the DOM as the transport live region. */}
+        <div
+          className={
+            status === "connected" && !showCloseButton
+              ? "sr-only"
+              : "terminal-surface flex shrink-0 items-center justify-between gap-3 border-b px-3 py-1.5"
+          }
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            {status === "connected" ? null : (
               <span
                 aria-hidden="true"
                 className={cn(
                   "size-1.5 shrink-0 rounded-full",
-                  status === "connected"
-                    ? "bg-success"
-                    : needsRecovery
-                      ? "bg-destructive"
-                      : "bg-warning text-warning motion-safe:animate-live",
+                  needsRecovery ? "bg-terminal-destructive" : "bg-terminal-warning",
                 )}
               />
-            </p>
-            {/* Stays in the DOM as the transport live region; only shown
-                while the connection needs attention. */}
+            )}
             <p
               role="status"
               aria-live="polite"
               aria-atomic="true"
               className={
-                status === "connected"
-                  ? "sr-only"
-                  : "text-xs text-muted-foreground"
+                status === "connected" ? "sr-only" : "text-xs text-terminal-muted"
               }
             >
-              Terminal status: {status}
+              Terminal status: {STATUS_WORDS[status]}
             </p>
           </div>
           {showCloseButton ? (
@@ -609,7 +671,7 @@ export function WebSshTerminal({
           ) : null}
         </div>
 
-        <div className="min-h-0 flex-1 bg-terminal-background py-2 pr-2 pl-3 [@media(max-height:500px)]:py-1">
+        <div className="min-h-0 flex-1 bg-terminal-background py-2 pr-2 pl-3 short:py-1">
           <div className="relative h-full w-full">
             <div
               ref={terminalContainerRef}
@@ -618,9 +680,28 @@ export function WebSshTerminal({
           </div>
         </div>
 
+        {keyRow ? (
+          <TerminalKeyRow
+            ctrl={ctrl}
+            onCtrlChange={changeCtrl}
+            onKey={sendKey}
+            onArrow={(arrow) =>
+              sendKey(
+                arrowSequence(
+                  arrow,
+                  terminalRef.current?.modes.applicationCursorKeysMode ?? false,
+                ),
+              )
+            }
+            onPaste={pasteFromClipboard}
+            onHide={hideKeyboard}
+          />
+        ) : null}
+
         {needsRecovery ? (
           <TerminalRecoveryNotice
             error={error}
+            terminal
             onReconnect={() => {
               void connect();
             }}
@@ -641,11 +722,12 @@ export function WebSshTerminal({
       <DialogContent
         showCloseButton={false}
         data-terminal-status={status}
-        className="flex h-[min(52rem,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden rounded-lg bg-card p-0 sm:max-w-7xl"
+        className="flex h-[min(52rem,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-7xl"
       >
         <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <DialogTitle className="truncate text-sm font-semibold">
+            {/* A title wraps; it is never cut off. */}
+            <DialogTitle className="text-card-title text-balance [overflow-wrap:anywhere]">
               {title}
             </DialogTitle>
             <DialogDescription
@@ -658,7 +740,7 @@ export function WebSshTerminal({
                   : "text-xs text-muted-foreground"
               }
             >
-              Terminal status: {status}
+              Terminal status: {STATUS_WORDS[status]}
             </DialogDescription>
           </div>
           <div className="flex items-center gap-2">
@@ -705,27 +787,45 @@ export function WebSshTerminal({
 
 function TerminalRecoveryNotice({
   error,
+  terminal = false,
   onReconnect,
 }: {
   error: string | null;
+  /** The embedded frame is always dark, so its notice speaks in terminal colours. */
+  terminal?: boolean;
   onReconnect: () => void;
 }) {
   const hasError = error !== null;
 
   return (
-    <div className="flex shrink-0 flex-col gap-3 border-t px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-      <p
-        role={hasError ? "alert" : "status"}
-        aria-live={hasError ? "assertive" : "polite"}
-        aria-atomic="true"
-        className={`text-sm ${
-          hasError ? "text-destructive" : "text-muted-foreground"
-        }`}
-      >
-        {hasError
-          ? "The terminal connection needs recovery. Reconnect to try again."
-          : "The terminal session ended. Reconnect to continue."}
-      </p>
+    <div
+      className={cn(
+        "flex shrink-0 flex-col gap-3 border-t px-4 py-3 sm:flex-row sm:items-center sm:justify-between",
+        terminal && "terminal-surface",
+      )}
+    >
+      {/* Two elements, one per state, so the alert mounts fresh and is
+          announced; a node that changes its role is not re-announced. */}
+      {hasError ? (
+        <InlineFeedback
+          key="error"
+          tone="error"
+          {...(terminal ? { className: "text-terminal-destructive" } : {})}
+        >
+          Connection lost. Reconnect to try again.
+        </InlineFeedback>
+      ) : (
+        <p
+          key="ended"
+          role="status"
+          className={cn(
+            "text-support",
+            terminal ? "text-terminal-muted" : "text-muted-foreground",
+          )}
+        >
+          The terminal session ended. Reconnect to continue.
+        </p>
+      )}
       <Button
         size="sm"
         variant="outline"

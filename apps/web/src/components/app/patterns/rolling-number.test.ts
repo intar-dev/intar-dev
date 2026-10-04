@@ -36,8 +36,10 @@ describe("digitCells", () => {
 
 describe("rollDirection", () => {
   it("rolls up as a count grows and down as it shrinks", () => {
-    expect(rollDirection("1", "2")).toBe(1);
-    expect(rollDirection("2", "1")).toBe(-1);
-    expect(rollDirection("9", "10")).toBe(1);
+    expect(rollDirection(1, 2)).toBe(1);
+    expect(rollDirection(2, 1)).toBe(-1);
+    expect(rollDirection(9, 10)).toBe(1);
+    expect(rollDirection(999, 1000)).toBe(1);
+    expect(rollDirection(1000, 999)).toBe(-1);
   });
 });

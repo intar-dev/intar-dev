@@ -24,6 +24,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useSession } from "../hooks/useSession";
 import { useSignOut } from "../hooks/useSignOut";
 import { useTheme, type AppTheme } from "../theme";
@@ -50,18 +51,21 @@ export function SidebarUserMenu() {
             render={
               <SidebarMenuButton
                 size="lg"
-                className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+                // Named in the collapsed rail, where only the avatar shows.
+                tooltip={username}
+                className="font-normal tracking-normal"
               >
-                <span
-                  aria-hidden="true"
-                  className="flex size-7.5 shrink-0 items-center justify-center rounded-full bg-accent text-[0.8125rem] font-semibold text-foreground ring-1 ring-border"
-                >
-                  {username.slice(0, 1).toUpperCase()}
-                </span>
-                <span className="grid flex-1 text-left text-sm leading-tight">
-                  <span className="truncate font-medium text-foreground">{username}</span>
+                {/* The username beside it is the accessible name. */}
+                <Avatar aria-hidden="true">
+                  {user.image ? <AvatarImage src={user.image} alt="" /> : null}
+                  <AvatarFallback>
+                    {username.slice(0, 1).toUpperCase()}
+                  </AvatarFallback>
+                </Avatar>
+                <span className="grid flex-1 text-left">
+                  <span className="truncate text-support font-medium text-foreground">{username}</span>
                   {user.email ? (
-                    <span className="truncate text-xs font-normal text-faint-foreground">
+                    <span className="truncate text-caption font-normal text-faint-foreground">
                       {user.email}
                     </span>
                   ) : null}
@@ -119,6 +123,16 @@ export function SidebarUserMenu() {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {/* The menu has closed by the time a sign out fails, so say so here,
+            where the action was taken. */}
+        {signOut.isError ? (
+          <p
+            role="alert"
+            className="px-2.5 pt-1 text-caption text-destructive group-data-[collapsible=icon]:sr-only"
+          >
+            Couldn’t sign out. Try again.
+          </p>
+        ) : null}
       </SidebarMenuItem>
     </SidebarMenu>
   );

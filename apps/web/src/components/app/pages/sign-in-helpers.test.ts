@@ -37,7 +37,7 @@ describe("organization sign-in helpers", () => {
 
   it("explains GitHub callback codes and ignores prototype keys", () => {
     expect(githubCallbackMessage("state_not_found")).toBe(
-      "Your sign-in session expired. Please try again.",
+      "Your sign-in session expired. Try again.",
     );
     expect(githubCallbackMessage("Account not linked")).toContain(
       "already belongs to an Intar account",

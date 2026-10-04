@@ -15,13 +15,9 @@ export function AuthShell({
   children: ReactNode;
 }) {
   return (
-    <main className="relative min-h-svh overflow-hidden px-[var(--page-inset)] pb-6 lg:pb-8">
+    <main className="relative min-h-svh overflow-hidden pr-[max(var(--page-inset),env(safe-area-inset-right))] pb-[max(1.5rem,env(safe-area-inset-bottom))] pl-[max(var(--page-inset),env(safe-area-inset-left))] lg:pb-8">
       <div
-        className="pointer-events-none absolute inset-x-0 top-16 border-t opacity-60"
-        aria-hidden="true"
-      />
-      <div
-        className="pointer-events-none absolute inset-y-0 left-[calc(max(var(--page-inset),(100%-64rem)/2)-1rem)] hidden border-l opacity-40 lg:block"
+        className="pointer-events-none absolute inset-x-0 top-16 border-t"
         aria-hidden="true"
       />
       <div className="relative mx-auto w-full max-w-5xl">
@@ -30,7 +26,7 @@ export function AuthShell({
           <BrandMark native={standalone} />
         </div>
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_28rem] lg:items-center lg:gap-8">
-          <section className="order-1 rounded-xl border bg-card p-5 shadow-sm sm:p-6 lg:order-2">
+          <section className="order-1 surface-raised rounded-xl border p-5 sm:p-6 lg:order-2">
             <header className="space-y-2">
               <p className="text-label">{eyebrow}</p>
               <h1 className="text-page-title">{title}</h1>

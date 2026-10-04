@@ -8,12 +8,15 @@ export function InlineFeedback({
   children,
   className,
   announce = true,
+  id,
 }: {
   tone: FeedbackTone;
   children: React.ReactNode;
   className?: string;
   /** False when a live region that is always mounted already announces it. */
   announce?: boolean;
+  /** For aria-describedby when the message refuses a single field's value. */
+  id?: string;
 }) {
   const Icon =
     tone === "pending"
@@ -24,10 +27,14 @@ export function InlineFeedback({
 
   return (
     <p
+      id={id}
+      // A swapped tone or text remounts the line, so the new message rolls in
+      // again; a message that is already there never plays on load.
+      key={`${tone}:${typeof children === "string" ? children : ""}`}
       role={announce ? (tone === "error" ? "alert" : "status") : undefined}
       aria-live={announce ? (tone === "error" ? "assertive" : "polite") : undefined}
       className={cn(
-        "flex min-h-6 items-start gap-2 text-sm",
+        "roll-in flex min-h-6 items-start gap-2 py-0.5 text-support leading-5",
         tone === "pending" && "text-muted-foreground",
         tone === "success" && "text-success",
         tone === "error" && "text-destructive",

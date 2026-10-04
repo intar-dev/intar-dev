@@ -30,9 +30,22 @@ describe("safe dynamic app-bar labels", () => {
 
   it("leaves static pages and course catalogs unchanged", () => {
     expect(safeDynamicPageLabel("/runs")).toBeNull();
-    expect(safeDynamicPageLabel("/courses/linux-operations")).toBeNull();
+    expect(safeDynamicPageLabel("/courses")).toBeNull();
     expect(safeDynamicPageLabel("/admin/hosts")).toBeNull();
     expect(safeDynamicPageLabel("/admin/people")).toBeNull();
+  });
+
+  it("labels organization, scenario and course pages before data arrives", () => {
+    expect(safeDynamicPageLabel("/organizations/aB3dE5fG7hJ9kL")).toBe(
+      "Organization",
+    );
+    expect(safeDynamicPageLabel("/admin/scenarios/scn_technical_id")).toBe(
+      "Scenario",
+    );
+    expect(safeDynamicPageLabel("/courses/linux-operations")).toBe("Course");
+    expect(
+      safeDynamicPageLabel("/organizations/acme/courses/private/linux-ops"),
+    ).toBe("Course");
   });
 
   it("never exposes a user id while the person loads", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { ArrowUpRight } from "lucide-react";
 import {
@@ -23,14 +23,19 @@ import { BrandMark } from "../patterns/BrandMark";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
 /**
- * Glides the pill in from the row it left. The pill lives in the current row,
- * so it is always placed right, however the sidebar collapses or scrolls; the
- * glide only measures the two rows at the moment the page changes.
+ * Glides the pill in from where it left: the rect the outgoing pill had when
+ * it unmounted (mid-glide on a rapid second pick), else the row it left. The
+ * pill lives in the current row, so it is always placed right, however the
+ * sidebar collapses or scrolls; the glide only measures at the moment the page
+ * changes.
  */
-function glideFrom(pill: HTMLElement | null, from: Element | null | undefined) {
+function glideFrom(
+  pill: HTMLElement | null,
+  from: Element | DOMRect | null | undefined,
+) {
   if (!pill || !from) return;
   if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  const before = from.getBoundingClientRect();
+  const before = from instanceof DOMRect ? from : from.getBoundingClientRect();
   const after = pill.getBoundingClientRect();
   const dx = before.left - after.left;
   const dy = before.top - after.top;
@@ -67,9 +72,17 @@ export function AppSidebar() {
   const ongoingRunCount = runs.data?.activeCount ?? 0;
   const { isMobile, setOpenMobile } = useSidebar();
   const list = useRef<HTMLDivElement>(null);
-  const pill = useRef<HTMLSpanElement>(null);
+  const pill = useRef<HTMLSpanElement | null>(null);
   const ghost = useRef<HTMLSpanElement>(null);
   const lastActive = useRef(activeId);
+  // Where the outgoing pill was when it unmounted, in-flight glide included.
+  const leftPillRect = useRef<DOMRect | null>(null);
+  const pillRef = useCallback((el: HTMLSpanElement | null) => {
+    pill.current = el;
+    return () => {
+      if (el) leftPillRect.current = el.getBoundingClientRect();
+    };
+  }, []);
   // The count shrinks away still showing its last number, not "0".
   const [shownCount, setShownCount] = useState(ongoingRunCount);
 
@@ -82,7 +95,12 @@ export function AppSidebar() {
     lastActive.current = activeId;
     if (!from || from === activeId) return;
     if (ghost.current) delete ghost.current.dataset.on;
-    glideFrom(pill.current, list.current?.querySelector(`[data-nav-row="${from}"]`));
+    const left = leftPillRect.current;
+    leftPillRect.current = null;
+    glideFrom(
+      pill.current,
+      left ?? list.current?.querySelector(`[data-nav-row="${from}"]`),
+    );
   }, [activeId]);
 
   // Choosing a destination closes the phone and tablet drawer.
@@ -98,14 +116,16 @@ export function AppSidebar() {
   return (
     <Sidebar collapsible="icon" variant="inset">
       <SidebarHeader>
+        {/* The wordmark fades while the rail narrows and the link clips it. */}
         <BrandMark
           to="/courses"
-          className="px-1.5 group-data-[collapsible=icon]:[&_span]:hidden"
+          className="overflow-hidden px-2 group-data-[collapsible=icon]:px-1 [&>span]:transition-opacity [&>span]:duration-(--duration-fast) [&>span]:ease-standard group-data-[collapsible=icon]:[&>span]:opacity-0"
         />
       </SidebarHeader>
 
       <SidebarContent
         ref={list}
+        render={<nav aria-label="Main" />}
         className="relative"
         onPointerOver={(event) => {
           // The ghost follows the mouse only: touch has no hover, so a tap
@@ -155,6 +175,9 @@ export function AppSidebar() {
                   const active = !item.external && activeId === item.id;
                   const badgeCount =
                     item.id === "runs" ? ongoingRunCount : 0;
+                  // Exactly one row is current: the one the pill sits on.
+                  // Link's own fuzzy match would also mark ancestors such as
+                  // Overview on /admin/hosts.
                   const destination = item.external ? (
                     <a
                       href={item.to}
@@ -162,12 +185,16 @@ export function AppSidebar() {
                       rel="noopener noreferrer"
                     />
                   ) : (
-                    <Link to={item.to} />
+                    <Link
+                      to={item.to}
+                      activeOptions={{ exact: true }}
+                      aria-current={active ? "page" : undefined}
+                    />
                   );
                   return (
                     <SidebarMenuItem key={item.id} data-nav-row={item.id}>
                       {active ? (
-                        <span ref={pill} aria-hidden="true" data-nav-pill />
+                        <span ref={pillRef} aria-hidden="true" data-nav-pill />
                       ) : null}
                       <SidebarMenuButton
                         isActive={active}
@@ -178,7 +205,7 @@ export function AppSidebar() {
                         }
                         render={destination}
                         // The pill and the ghost paint the row, not the row itself.
-                        className="relative hover:bg-transparent data-active:bg-transparent data-active:shadow-none data-active:hover:bg-transparent"
+                        className="relative hover:bg-transparent data-active:bg-transparent data-active:shadow-none data-active:hover:bg-transparent data-active:active:bg-transparent!"
                       >
                         <Icon />
                         <span>{item.label}</span>
@@ -199,19 +226,21 @@ export function AppSidebar() {
                           </span>
                         ) : null}
                       </SidebarMenuButton>
-                      {item.id === "runs" ? (
-                        // The count pops in from zero, rolls while it changes,
-                        // and shrinks away at zero. Its dot is the frame's pulse.
+                      {item.id === "runs" && runs.data ? (
+                        // Mounted once the summary is in, so the count is already
+                        // in place on load. It pops in only when it crosses from
+                        // zero, rolls while it changes, and shrinks away at zero.
+                        // Its dot is the frame's pulse.
                         <SidebarMenuBadge
                           aria-hidden="true"
                           data-zero={badgeCount === 0 || undefined}
-                          className="gap-1.5 font-semibold text-brand-text transition-[opacity,scale] duration-(--duration-moderate) ease-enter data-zero:scale-50 data-zero:opacity-0 data-zero:duration-(--duration-fast) data-zero:ease-exit"
+                          className="gap-1.5 transition-[opacity,scale] duration-(--duration-moderate) ease-enter data-zero:scale-(--scale-pop) data-zero:opacity-0 data-zero:duration-(--duration-fast) data-zero:ease-exit"
                         >
                           <span
                             className={
                               badgeCount > 0
-                                ? "size-1.5 rounded-full bg-primary text-primary motion-safe:animate-live"
-                                : "size-1.5 rounded-full bg-primary"
+                                ? "size-2 rounded-full bg-primary text-primary motion-safe:animate-live"
+                                : "size-2 rounded-full bg-primary"
                             }
                           />
                           {/* Crossing zero pops instead of rolling. */}

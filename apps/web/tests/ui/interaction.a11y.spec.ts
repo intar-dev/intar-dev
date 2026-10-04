@@ -89,7 +89,7 @@ async function expectShutdownRunShell(page: Page) {
   await expect(
     page.getByRole("navigation", { name: "Breadcrumb" }),
   ).toHaveCount(0);
-  if ((page.viewportSize()?.width ?? 0) >= 960) {
+  if ((page.viewportSize()?.width ?? 0) >= 768) {
     await expect(page.locator("[data-run-learning-panel]")).toBeVisible();
   } else {
     await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
@@ -383,10 +383,12 @@ test("a theory-only lecture completes and exposes the next unit", async ({
   ).toBeVisible();
   await expect(
     page.getByText("Lecture only", { exact: true }).first(),
-  ).toHaveAttribute("title", "This lecture does not include a scenario.");
+  ).toBeVisible();
   await page.getByRole("button", { name: "Complete lecture" }).click();
 
-  await expect(page.getByRole("link", { name: next.title })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: `Continue to ${next.title}` }),
+  ).toBeVisible();
   expect(ui.server.requests).toContain(
     `POST /api/courses/${course.courseId}/lectures/${theory.lectureId}/complete`,
   );
@@ -404,33 +406,32 @@ test("course browsing shows available CPU and memory allocation", async ({
   await expect(page.getByText("10 / 16 GiB", { exact: true })).toBeVisible();
 });
 
-test("course filters stay compact until the learner needs them", async ({
+test("course filters sit in the bar and announce their result", async ({
   page,
   ui,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
 
-  const filterSummary = page.locator("summary").filter({ hasText: "Filters" });
-  await expect(filterSummary).toBeVisible();
-  await expect(page.getByRole("button", { name: "Easy" })).toBeHidden();
-  await filterSummary.focus();
-  await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: "Easy" })).toBeVisible();
   await page.getByLabel("Filter lectures by category").click();
   await page.getByRole("option", { name: "Linux services" }).click();
-  await expect(filterSummary).toContainText("Filters · 1");
+  await expect(
+    page.getByRole("status").filter({ hasText: /^Showing \d+ courses?$/ }),
+  ).toHaveCount(1);
   await expect
     .poll(() => new URL(page.url()).searchParams.get("category"))
     .toBe("Linux services");
   await expect(
     page.getByRole("link", { name: /Systems concepts/i }),
   ).toHaveCount(0);
-  await page.getByLabel("Filter lectures by tags").click();
+  await page.getByRole("button", { name: "Tags", exact: true }).click();
   await page
     .getByRole("menuitemcheckbox", { name: "operations" })
     .click();
-  await expect(filterSummary).toContainText("Filters · 2");
+  await expect(
+    page.getByRole("button", { name: "Tags, 1 selected" }),
+  ).toBeVisible();
   await expect
     .poll(() =>
       JSON.parse(
@@ -642,7 +643,7 @@ test("the sidebar's raised pill glides to the page you pick and a ghost follows 
 test("the navigation drawer shows its close button and closes after a choice", async ({ page, ui }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
-  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+  await page.getByRole("button", { name: "Open navigation" }).click();
   const drawer = page.locator('[data-slot="sidebar"][data-mobile="true"]');
   await expect(drawer).toBeVisible();
   await expect(drawer.getByRole("button", { name: "Close" })).toBeVisible();
@@ -1009,7 +1010,7 @@ test.describe("lecture reading flow", () => {
     await expect(courseAction).toBeVisible();
     await expect(
       courseAction.getByText("Scenario", { exact: true }),
-    ).toHaveAttribute("title", "This lecture includes a scenario.");
+    ).toBeVisible();
     await expect(
       page.getByRole("link", { name: /Operating model.*Lecture only/i }),
     ).toBeVisible();
@@ -1117,7 +1118,7 @@ test.describe("lecture reading flow", () => {
     await ui.settle();
 
     await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
-    await page.getByRole("button", { name: /Open course outline/ }).click();
+    await page.getByRole("button", { name: /Course outline, lecture/ }).click();
     const nextAction = page.getByRole("link", { name: longTitle });
     await expect(nextAction).toBeVisible();
     await expect(
@@ -1274,12 +1275,12 @@ test.describe("lecture reading flow", () => {
       if (viewport.width >= 1100) {
         await expect(page.locator("[data-course-outline-rail]")).toBeVisible();
         await expect(
-          page.getByRole("button", { name: /Open course outline/ }),
+          page.getByRole("button", { name: /Course outline, lecture/ }),
         ).toBeHidden();
       } else {
         await expect(page.locator("[data-course-outline-rail]")).toBeHidden();
         await expect(
-          page.getByRole("button", { name: /Open course outline/ }),
+          page.getByRole("button", { name: /Course outline, lecture/ }),
         ).toBeVisible();
       }
       await expectNoHorizontalOverflow(page);
@@ -1362,16 +1363,20 @@ test.describe("coarse pointer and mobile overflow", () => {
     await expect(page.locator(".run-artifact-player")).toBeVisible();
     const recapReplay = page.locator("[data-run-recap-replay-surface]");
     await expect(recapReplay).toBeVisible();
-    const playIcon = recapReplay.locator(
-      ".ap-overlay-start .ap-play-button svg",
+    // The learner replay has its own controls: the player's bar and its
+    // start overlay are off, and its text layer is not a second tab stop.
+    await expect(recapReplay.locator(".ap-control-bar")).toHaveCount(0);
+    await expect(recapReplay.locator(".ap-overlay-start")).toBeHidden();
+    await expect(recapReplay.locator(".ap-term-text")).toHaveAttribute(
+      "tabindex",
+      "-1",
     );
-    await expect(playIcon).toHaveCount(1);
-    expect(
-      await playIcon.evaluate((element) => getComputedStyle(element).filter),
-      "learner replay play icon must not have a drop shadow",
-    ).toBe("none");
+    const playbackButton = recapReplay.getByRole("button", {
+      name: "Play replay",
+    });
+    await expect(playbackButton).toBeEnabled();
     const playerControlSizes = await recapReplay
-      .locator(".ap-control-bar button.ap-button")
+      .locator(".replay-bar button, .replay-bar input")
       .evaluateAll((elements) =>
         elements.map((element) => {
           const bounds = element.getBoundingClientRect();
@@ -1387,27 +1392,22 @@ test.describe("coarse pointer and mobile overflow", () => {
     ).toBe(true);
     expect(
       await recapReplay.evaluate((surface) => {
-        const terminal = surface.querySelector<HTMLElement>(".ap-term");
-        const controls = surface.querySelector<HTMLElement>(".ap-control-bar");
-        if (!terminal || !controls) return Number.POSITIVE_INFINITY;
-        const terminalBounds = terminal.getBoundingClientRect();
-        const controlBounds = controls.getBoundingClientRect();
-        return Math.max(0, terminalBounds.bottom - controlBounds.top);
+        const screen = surface.querySelector<HTMLElement>(".replay-screen");
+        const controls = surface.querySelector<HTMLElement>(".replay-bar");
+        if (!screen || !controls) return Number.POSITIVE_INFINITY;
+        return Math.max(
+          0,
+          screen.getBoundingClientRect().bottom -
+            controls.getBoundingClientRect().top,
+        );
       }),
       "learner replay controls must not cover terminal rows",
     ).toBeLessThanOrEqual(0.5);
-    const playbackButton = recapReplay.locator(
-      ".ap-control-bar .ap-playback-button",
-    );
-    // Set keyboard modality before focusing the vendor control. Its parent
-    // must reveal the bar for the same focus-visible state reached by Tab.
+    // Set keyboard modality before focusing the control, so focus-visible
+    // matches the state reached by Tab.
     await page.keyboard.press("Tab");
     await playbackButton.focus();
     await expect(playbackButton).toBeFocused();
-    await expect(recapReplay.locator(".ap-control-bar")).toHaveCSS(
-      "opacity",
-      "1",
-    );
     expect(
       await playbackButton.evaluate((element) => {
         const style = getComputedStyle(element);

@@ -24,7 +24,7 @@ describe("run list item labels", () => {
 
   it("shows captured course context and its step when available", () => {
     expect(runCourseContextLabel(run().courseLocation)).toBe(
-      "Kubernetes DevOps Fundamentals · Step 4 of 8",
+      "Kubernetes DevOps Fundamentals · Lecture 4 of 8",
     );
   });
 });

@@ -69,6 +69,13 @@ export interface RunRecapProps {
   headingRef?: Ref<HTMLHeadingElement> | undefined;
   /** Optional override for embedding the recap in another learner flow. */
   nextAction?: ReactNode;
+  /**
+   * True only when the recap arrives live, right after the learner finished
+   * and saved (the Moment Rule). The header, check rows and summary rise and
+   * the solved mark pops. A saved run opened later renders still. The value at
+   * first render is kept, so a later re-render can't cut the arrival short.
+   */
+  animate?: boolean;
 }
 
 type RunSavingStage = NonNullable<ScenarioRunRecord["savingStage"]>;
@@ -157,7 +164,9 @@ export function RunRecap({
   nextLecture = null,
   headingRef,
   nextAction,
+  animate = false,
 }: RunRecapProps) {
+  const [play] = useState(animate);
   const recap = getRunRecapState(run);
 
   if (recap.kind === "saving") {
@@ -189,8 +198,8 @@ export function RunRecap({
       className="w-full space-y-6 md:space-y-8"
     >
       <header className="flex items-start gap-4 sm:items-center sm:gap-5">
-        <RecapBadge kind={recap.kind} />
-        <div className="min-w-0 animate-rise">
+        <RecapBadge kind={recap.kind} play={play} />
+        <div className={cn("min-w-0", play && "animate-rise")}>
           <h2
             id="run-recap-heading"
             ref={headingRef}
@@ -211,25 +220,33 @@ export function RunRecap({
             <h2 id="run-recap-checks-heading" className="text-section-title">
               Final checks
             </h2>
-            <span className="text-caption tabular-nums">
+            <span className="text-metadata">
               <RollingNumber value={verifiedObjectives} />/{objectives.length} verified
             </span>
           </div>
           <RunRecapProgress
             objectives={objectives}
-            verifiedObjectives={verifiedObjectives}
+            closed={verifiedObjectives === objectives.length}
           />
           <ol className="mt-3 divide-y overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)]">
             {objectives.map((objective, index) => (
               <li
                 key={objective.key}
-                className="grid min-h-12 grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 px-4 py-3 animate-rise"
-                style={{ animationDelay: `${120 + index * 70}ms` }}
+                className={cn(
+                  "grid min-h-12 grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 px-4 py-3",
+                  play && "animate-rise",
+                )}
+                // Rows arrive 40ms apart, capped at 200ms.
+                style={
+                  play
+                    ? { animationDelay: `${Math.min(index, 5) * 40}ms` }
+                    : undefined
+                }
               >
                 {objective.status === "verified" ? (
+                  // Verified before the recap opened: it never pops again.
                   <CheckCircle2
-                    className="mt-0.5 size-4 text-success animate-pop"
-                    style={{ animationDelay: `${200 + index * 70}ms` }}
+                    className="mt-0.5 size-4 text-success"
                     aria-hidden="true"
                   />
                 ) : (
@@ -261,34 +278,37 @@ export function RunRecap({
         </section>
       ) : null}
 
-      <section aria-label="Learning summary" className="animate-rise [animation-delay:80ms]">
+      <section
+        aria-label="Learning summary"
+        className={cn(play && "animate-rise [animation-delay:80ms]")}
+      >
         <dl className="grid overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)] max-sm:divide-y sm:auto-cols-fr sm:grid-flow-col sm:divide-x">
           {recap.kind === "solved" && run.solveDurationMs !== null ? (
             <div className="px-5 py-4">
-              <dt className="inline-flex items-center gap-2 text-caption font-medium">
+              <dt className="inline-flex items-center gap-2 text-label">
                 <Clock3 className="size-3.5" aria-hidden="true" />
                 Solve time
               </dt>
-              <dd className="mt-1 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em] tabular-nums">
+              <dd className="mt-1 text-stat">
                 {formatScenarioDurationMs(run.solveDurationMs)}
               </dd>
             </div>
           ) : null}
           <div className="px-5 py-4">
-            <dt className="inline-flex items-center gap-2 text-caption font-medium">
+            <dt className="inline-flex items-center gap-2 text-label">
               <Lightbulb className="size-3.5" aria-hidden="true" />
               Hints used
             </dt>
-            <dd className="mt-1 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em] tabular-nums">
+            <dd className="mt-1 text-stat">
               {revealedHints === 1 ? "1 hint" : `${revealedHints} hints`}
             </dd>
           </div>
           <div className="px-5 py-4">
-            <dt className="inline-flex items-center gap-2 text-caption font-medium">
+            <dt className="inline-flex items-center gap-2 text-label">
               <LockKeyhole className="size-3.5" aria-hidden="true" />
               Full solution
             </dt>
-            <dd className="mt-1 text-[1.375rem] leading-tight font-semibold tracking-[-0.02em]">
+            <dd className="mt-1 text-stat">
               {solutionUsed ? "Used" : "Not used"}
             </dd>
           </div>
@@ -389,33 +409,32 @@ function RunSavingProgress({
   );
 }
 
+// Decorative: the visible "n/N verified" count carries the information once.
+// A recap with every check verified draws the bar as one closed line, still.
 function RunRecapProgress({
   objectives,
-  verifiedObjectives,
+  closed,
 }: {
   objectives: readonly RunRecapObjective[];
-  verifiedObjectives: number;
+  closed: boolean;
 }) {
   return (
     <div
-      role="progressbar"
-      aria-label="Final checks progress"
-      aria-valuemin={0}
-      aria-valuemax={objectives.length}
-      aria-valuenow={verifiedObjectives}
-      aria-valuetext={`${verifiedObjectives} of ${objectives.length} final checks verified`}
+      aria-hidden="true"
       data-run-recap-progress
+      data-closed={closed || undefined}
       className="mt-3 flex gap-1"
     >
       {objectives.map((objective) => (
         <span
           key={objective.key}
-          aria-hidden="true"
           data-run-recap-progress-segment
           data-status={objective.status}
           className={cn(
-            "h-1 flex-1 rounded-full",
-            objective.status === "verified" ? "bg-success" : "bg-warning/50",
+            "h-1 flex-1 rounded-[0.125rem]",
+            objective.status === "verified"
+              ? "bg-success"
+              : "bg-border-strong/70",
           )}
         />
       ))}
@@ -423,16 +442,27 @@ function RunRecapProgress({
   );
 }
 
-// The solved moment gets one confirm motion: the check pops and a single ring
-// settles around it. Other outcomes stay still.
-function RecapBadge({ kind }: { kind: ReturnType<typeof getRunRecapState>["kind"] }) {
+// The solved moment gets one confirm motion: the check pops, and only when the
+// recap arrives live. Other outcomes stay still.
+function RecapBadge({
+  kind,
+  play,
+}: {
+  kind: ReturnType<typeof getRunRecapState>["kind"];
+  play: boolean;
+}) {
   if (kind === "solved") {
     return (
       <span
         aria-hidden="true"
-        className="flex size-13 shrink-0 items-center justify-center rounded-full bg-success-subtle text-success ring-1 ring-success-border motion-safe:[animation:intar-live_1.4s_var(--ease-standard)_350ms_1_both]"
+        className="flex size-10 shrink-0 items-center justify-center rounded-[0.625rem] bg-success-subtle text-success ring-1 ring-success-border/60"
       >
-        <Check className="size-6 stroke-[2.25] animate-pop [animation-delay:120ms]" />
+        <Check
+          className={cn(
+            "size-5",
+            play && "animate-pop [animation-delay:120ms]",
+          )}
+        />
       </span>
     );
   }
@@ -441,16 +471,16 @@ function RecapBadge({ kind }: { kind: ReturnType<typeof getRunRecapState>["kind"
     <span
       aria-hidden="true"
       className={cn(
-        "flex size-13 shrink-0 items-center justify-center rounded-full ring-1",
+        "flex size-10 shrink-0 items-center justify-center rounded-[0.625rem] ring-1",
         failed
-          ? "bg-destructive-subtle text-destructive ring-destructive-border"
+          ? "bg-destructive-subtle text-destructive ring-destructive-border/60"
           : "bg-muted text-muted-foreground ring-border",
       )}
     >
       {failed ? (
-        <CircleAlert className="size-6" />
+        <CircleAlert className="size-5" />
       ) : (
-        <CircleStop className="size-6" />
+        <CircleStop className="size-5" />
       )}
     </span>
   );
@@ -480,8 +510,8 @@ function DefaultNextAction({
   if (recapKind === "solved" && route && courseLocation) {
     return (
       <CourseLink route={route} className={linkClassName}>
-        Back to course
         <ArrowLeft className="size-4" aria-hidden="true" />
+        Back to course
       </CourseLink>
     );
   }
@@ -498,8 +528,8 @@ function DefaultNextAction({
   if (recapKind !== "solved" && route) {
     return (
       <CourseLink route={route} className={linkClassName}>
+        <ArrowLeft className="size-4" aria-hidden="true" />
         Back to course
-        <ArrowRight className="size-4" aria-hidden="true" />
       </CourseLink>
     );
   }
@@ -509,11 +539,16 @@ function DefaultNextAction({
       to={recapKind === "solved" ? "/runs" : "/courses"}
       className={linkClassName}
     >
-      {recapKind === "solved" ? "Back to My runs" : "Browse courses"}
       {recapKind === "solved" ? (
-        <ArrowLeft className="size-4" aria-hidden="true" />
+        <>
+          <ArrowLeft className="size-4" aria-hidden="true" />
+          Back to My runs
+        </>
       ) : (
-        <ArrowRight className="size-4" aria-hidden="true" />
+        <>
+          Browse courses
+          <ArrowRight className="size-4" aria-hidden="true" />
+        </>
       )}
     </Link>
   );
@@ -531,7 +566,6 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
     return (
       <section
         aria-labelledby="run-recap-replay-heading"
-        className="border-t pt-4 pb-4"
       >
         <div className="flex items-center gap-2">
           <PlayCircle
@@ -553,7 +587,6 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
     return (
       <section
         aria-labelledby="run-recap-replay-heading"
-        className="border-t pt-4 pb-4"
       >
         <div className="flex items-center gap-2">
           <PlayCircle
@@ -572,22 +605,18 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
   }
 
   return (
-    <section
-      aria-labelledby="run-recap-replay-heading"
-      className="border-t pt-4 pb-4"
-    >
+    <section aria-labelledby="run-recap-replay-heading">
       <DisclosureRow
-        title={
-          <span className="flex items-center gap-2">
-            <PlayCircle
-              className="size-4 text-muted-foreground"
-              aria-hidden="true"
-            />
-            <span id="run-recap-replay-heading">Watch replay</span>
-          </span>
+        leading={
+          <PlayCircle
+            className="size-4 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
         }
+        title={<span id="run-recap-replay-heading">Watch replay</span>}
         density="comfortable"
-        contentClassName="pt-3 pb-4"
+        // The row indents the panel under its title; phones give that back.
+        contentClassName="pt-3 pb-4 max-sm:pl-0"
       >
         <ReplayViewer runId={run.id} parts={parts} />
       </DisclosureRow>
@@ -648,7 +677,10 @@ export function ReplayViewer({
       className="space-y-4"
     >
       <div className="flex flex-wrap items-center gap-3">
-        <p className="min-w-0 text-card-title" data-run-replay-position>
+        <p
+          className="min-w-0 text-card-title tabular-nums"
+          data-run-replay-position
+        >
           {selected.partLabel} of {parts.length}
           {selected.machineLabel ? ` · ${selected.machineLabel}` : ""}
         </p>
@@ -684,7 +716,7 @@ export function ReplayViewer({
       >
         {announcedPart === null
           ? ""
-          : `Showing Part ${announcedPart + 1} of ${parts.length}`}
+          : `Showing part ${announcedPart + 1} of ${parts.length}`}
       </p>
 
       <ol
@@ -693,27 +725,30 @@ export function ReplayViewer({
       >
         {parts.map((part, index) => (
           <li key={part.key} className="shrink-0">
-            <button
+            <Button
               type="button"
-              className={cn(
-                "min-h-9 rounded-lg border px-3 text-support font-medium transition-colors focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
-                selected?.key === part.key
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-border bg-background hover:bg-muted",
-              )}
+              size="sm"
+              variant={selected.key === part.key ? "default" : "outline"}
+              className="min-h-9"
               aria-current={selected.key === part.key ? "step" : undefined}
-              aria-label={`Show ${part.partLabel} of ${parts.length}${
+              aria-label={`Show part ${index + 1} of ${parts.length}${
                 part.machineLabel ? `, ${part.machineLabel}` : ""
               }`}
               onClick={() => selectPart(index)}
             >
               {part.partLabel}
               {part.machineLabel ? (
-                <span className="ml-1 text-xs opacity-75">
+                // Full contrast on the selected chip; muted on the others.
+                <span
+                  className={cn(
+                    "font-normal",
+                    selected.key !== part.key && "text-muted-foreground",
+                  )}
+                >
                   · {part.machineLabel}
                 </span>
               ) : null}
-            </button>
+            </Button>
           </li>
         ))}
       </ol>
@@ -733,12 +768,26 @@ export function ReplayViewer({
   );
 }
 
-function ReplayPartSurface({
+// Retrying remounts the content, which starts the fetch again.
+function ReplayPartSurface(props: { runId: string; part: RunReplayPart }) {
+  const [attempt, setAttempt] = useState(0);
+  return (
+    <ReplayPartContent
+      key={attempt}
+      {...props}
+      onRetry={() => setAttempt((count) => count + 1)}
+    />
+  );
+}
+
+function ReplayPartContent({
   runId,
   part,
+  onRetry,
 }: {
   runId: string;
   part: RunReplayPart;
+  onRetry: () => void;
 }) {
   const contentUrl = part.castArtifactId
     ? scenarioRunArtifactContentPath(runId, part.castArtifactId)
@@ -770,12 +819,27 @@ function ReplayPartSurface({
       </Button>
     </div>
   ) : replay.error ? (
-    <p className="text-support text-muted-foreground" role="status">
-      Replay could not be loaded. Try again soon.
-    </p>
+    // The error replaces the replay, so it is announced, and says what to do.
+    <div
+      role="alert"
+      className="flex flex-col items-start gap-3 rounded-xl border border-terminal-border bg-terminal-background px-4 py-4"
+    >
+      <p className="text-support text-terminal-foreground">
+        Replay could not be loaded.
+      </p>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="border-terminal-border bg-terminal-surface text-terminal-foreground hover:border-terminal-muted hover:bg-terminal-surface dark:hover:bg-terminal-surface"
+        onClick={onRetry}
+      >
+        Try again
+      </Button>
+    </div>
   ) : (
     <div
-      className="overflow-hidden rounded-md border border-border/70 bg-terminal-background"
+      className="overflow-hidden rounded-xl border border-terminal-border bg-terminal-background"
       data-run-recap-replay-surface
     >
       <Suspense

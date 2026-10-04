@@ -4,8 +4,8 @@ import type { CourseLectureSummary } from "./course-wire";
 const PROGRESS_SEGMENT_TONES: Record<CourseLectureSummary["state"], string> = {
   completed: "bg-success",
   in_progress: "bg-primary",
-  available: "bg-border-strong/35",
-  waiting_for_scenario: "bg-border-strong/35",
+  available: "bg-border-strong/70",
+  waiting_for_scenario: "bg-border-strong/70",
   locked: "bg-border",
 };
 
@@ -29,7 +29,7 @@ export function LectureProgressTrack({
           key={index}
           data-current={index === currentIndex || undefined}
           className={cn(
-            "h-1 w-6 rounded-full transition-[background-color,flex-grow] duration-300 ease-enter motion-reduce:transition-none",
+            "h-1 w-6 rounded-full [transition:flex-grow_var(--duration-slow)_var(--ease-enter),background-color_var(--duration-reveal)_var(--ease-standard)] motion-reduce:transition-none",
             PROGRESS_SEGMENT_TONES[lecture.state],
           )}
         />

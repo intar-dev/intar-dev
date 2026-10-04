@@ -34,7 +34,9 @@ export function NativeSshDialog({
             expires.
           </DialogDescription>
         </DialogHeader>
-        {open ? <NativeSshConnectPanel sessionRequest={sessionRequest} /> : null}
+        {/* Always rendered: the panel keeps its content through the exit, and
+            Base UI unmounts the popup afterwards, so each open starts fresh. */}
+        <NativeSshConnectPanel sessionRequest={sessionRequest} />
       </DialogContent>
     </Dialog>
   );

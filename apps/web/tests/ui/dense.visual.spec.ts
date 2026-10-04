@@ -16,12 +16,11 @@ test.describe("dense tablet", () => {
       test(`${route.id} · ${theme}`, async ({ page, ui }) => {
         await ui.open({ ...route, theme });
         if (route.id === "run-workspace") {
-          await expect(
-            page.locator("[data-run-learning-panel]"),
-          ).not.toBeVisible();
+          // From 48rem the panel docks under the terminal; there is no sheet.
+          await expect(page.locator("[data-run-learning-panel]")).toBeVisible();
           await expect(
             page.locator("[data-run-learning-panel-trigger]"),
-          ).toBeVisible();
+          ).toBeHidden();
           await expect(
             page
               .getByRole("status")

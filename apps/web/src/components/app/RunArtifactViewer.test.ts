@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  AsciicastReplaySurface,
   ReadOnlyTextSurface,
   RunArtifactViewer,
   replayPlayerErrorCopy,
@@ -11,11 +12,85 @@ describe("replay player error copy", () => {
   it("keeps raw player failures out of the learner replay", () => {
     const raw = "asciinema import failed at internal worker path";
 
-    expect(replayPlayerErrorCopy(raw, true)).toBe(
-      "Replay could not be loaded. Try again soon.",
+    expect(replayPlayerErrorCopy(raw, true)).toEqual({
+      lead: "Replay could not be loaded. Try again soon.",
+      detail: null,
+    });
+    expect(JSON.stringify(replayPlayerErrorCopy(raw, true))).not.toContain(raw);
+  });
+
+  it("leads with a plain sentence and keeps the raw detail for operators", () => {
+    const raw = "asciinema import failed at internal worker path";
+
+    expect(replayPlayerErrorCopy(raw, false)).toEqual({
+      lead: "Replay could not be loaded.",
+      detail: raw,
+    });
+  });
+});
+
+describe("replay frame states", () => {
+  const surface = (content: string, loading: boolean, minimal = true) =>
+    renderToStaticMarkup(
+      createElement(AsciicastReplaySurface, {
+        contentId: "cast-1",
+        content,
+        loading,
+        minimal,
+        label: "Terminal replay of Broken nginx",
+      }),
     );
-    expect(replayPlayerErrorCopy(raw, true)).not.toContain(raw);
-    expect(replayPlayerErrorCopy(raw, false)).toBe(raw);
+
+  it("names the replay and says so in words when the cast is empty", () => {
+    const markup = surface("  \n", false);
+
+    expect(markup).toContain('role="group"');
+    expect(markup).toContain('aria-label="Terminal replay of Broken nginx"');
+    expect(markup).toContain("This replay is empty.");
+    expect(markup).not.toContain("replay-bar");
+  });
+
+  it("marks the frame busy with one plain loading line while the cast streams", () => {
+    const markup = surface('{"version":2,"width":80,"height":24}', true);
+
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).toContain("Preparing replay…");
+    expect(markup).not.toContain("animate-pulse");
+    expect(markup).not.toContain("`");
+  });
+
+  it("sizes the loading box from the cast header", () => {
+    const wide = surface('{"version":2,"width":120,"height":24}', true);
+    const tall = surface('{"version":2,"width":40,"height":40}', true);
+
+    expect(wide).toMatch(/aspect-ratio:\s*[2-9]/);
+    expect(tall).toMatch(/aspect-ratio:\s*0\./);
+  });
+
+  it("renders the learner controls: toggle, named slider, clock and speed", () => {
+    const markup = surface('{"version":2,"width":80,"height":24}\n', false);
+
+    expect(markup).toContain('aria-label="Play replay"');
+    expect(markup).toContain('aria-label="Replay position"');
+    expect(markup).toContain('type="range"');
+    expect(markup).toContain('aria-valuetext="0:00 of 0:00"');
+    expect(markup).toContain('aria-label="Playback speed: 1×"');
+    expect(markup).toContain("0:00 / 0:00");
+    // The player's own bar is off, so no second set of controls.
+    expect(markup).not.toContain("Toggle fullscreen");
+  });
+
+  it("keeps the player's own bar on the operations viewer", () => {
+    const markup = surface('{"version":2,"width":80,"height":24}\n', false, false);
+
+    expect(markup).not.toContain("replay-bar");
+  });
+
+  it("explains the wait to operators with the machine value in code", () => {
+    const markup = surface("", true, false);
+
+    expect(markup).toContain('<code class="text-code">.cast</code>');
+    expect(markup).not.toContain("`");
   });
 });
 

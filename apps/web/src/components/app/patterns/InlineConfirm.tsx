@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BinIcon } from "@/components/ui/bin-icon";
 import { cn } from "@/lib/utils";
+import { AsyncLabel } from "./AsyncLabel";
 
 export { BinIcon };
-
 
 interface InlineConfirmProps {
   /** Visible trigger label, such as "Remove". */
@@ -25,6 +24,8 @@ interface InlineConfirmProps {
   done?: boolean;
   disabled?: boolean;
   onConfirm: () => void;
+  /** The question closed without confirming (Keep, Escape, click or Tab away). */
+  onCancel?: () => void;
 }
 
 /**
@@ -47,6 +48,7 @@ export function InlineConfirm({
   done = false,
   disabled = false,
   onConfirm,
+  onCancel,
 }: InlineConfirmProps) {
   const [asking, setAsking] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -56,8 +58,15 @@ export function InlineConfirm({
   const busy = pending || done;
   const stage = done ? "done" : pending ? "pending" : "idle";
 
+  const cancel = useRef(onCancel);
+  cancel.current = onCancel;
+  // Clicking or tabbing anywhere in the same list row leaves the question
+  // open; only the outside of the row backs out.
+  const scope = () => root.current?.closest("li") ?? root.current;
+
   const close = (refocus: boolean) => {
     setAsking(false);
+    cancel.current?.();
     if (refocus) requestAnimationFrame(() => trigger.current?.focus());
   };
 
@@ -68,7 +77,10 @@ export function InlineConfirm({
   useEffect(() => {
     if (!asking || busy) return;
     const onPointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setAsking(false);
+      if (!scope()?.contains(event.target as Node)) {
+        setAsking(false);
+        cancel.current?.();
+      }
     };
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
@@ -88,8 +100,9 @@ export function InlineConfirm({
       }}
       onBlur={(event) => {
         const next = event.relatedTarget as Node | null;
-        if (asking && !busy && next && !root.current?.contains(next)) {
+        if (asking && !busy && next && !scope()?.contains(next)) {
           setAsking(false);
+          onCancel?.();
         }
       }}
     >
@@ -104,8 +117,8 @@ export function InlineConfirm({
         disabled={disabled}
         inert={open || undefined}
         className={cn(
-          "text-muted-foreground transition-[opacity,color,background-color] hover:text-destructive",
-          open && "pointer-events-none opacity-0",
+          "text-muted-foreground transition-[opacity,color,background-color] duration-(--duration-moderate) ease-enter hover:text-destructive",
+          open && "pointer-events-none opacity-0 duration-(--duration-fast) ease-exit",
         )}
         onClick={() => setAsking(true)}
       >
@@ -117,8 +130,9 @@ export function InlineConfirm({
         aria-label={question}
         inert={!open || undefined}
         className={cn(
-          "flex items-center gap-1.5 transition-opacity duration-200 ease-enter",
-          !open && "pointer-events-none opacity-0",
+          "flex items-center gap-1.5 transition-opacity duration-(--duration-moderate) ease-enter",
+          !open &&
+            "pointer-events-none opacity-0 duration-(--duration-fast) ease-exit",
         )}
       >
         <Button
@@ -128,8 +142,9 @@ export function InlineConfirm({
           variant="ghost"
           disabled={busy}
           className={cn(
-            "transition-[translate,opacity,background-color,color] duration-200 ease-enter motion-reduce:transition-none",
-            !open && "translate-x-2",
+            "transition-[translate,opacity,background-color,color] duration-(--duration-moderate) ease-enter",
+            !open &&
+              "translate-x-(--move-overlay) duration-(--duration-fast) ease-exit",
           )}
           onClick={() => close(true)}
         >
@@ -147,25 +162,12 @@ export function InlineConfirm({
         >
           {/* Every label shares one cell, so the button keeps the width of
               its widest one (the Steady Box Rule). */}
-          <span className="grid *:col-start-1 *:row-start-1 *:inline-flex *:items-center *:justify-center *:gap-1.5">
-            <span className={cn(stage !== "idle" && "invisible")}>
-              {confirmLabel}
-            </span>
-            <span className={cn(stage !== "pending" && "invisible")}>
-              <LoaderCircle
-                className="size-3.5 motion-safe:animate-spin"
-                aria-hidden="true"
-              />
-              {pendingLabel}
-            </span>
-            <span className={cn(stage !== "done" && "invisible")}>
-              <Check
-                className={cn("size-3.5", done && "draw-check")}
-                aria-hidden="true"
-              />
-              {doneLabel}
-            </span>
-          </span>
+          <AsyncLabel
+            state={stage}
+            idle={confirmLabel}
+            pending={pendingLabel}
+            done={doneLabel}
+          />
         </Button>
       </div>
     </div>

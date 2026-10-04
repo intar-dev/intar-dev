@@ -22,7 +22,7 @@ export function lectureStatePresentation(state: LectureState): {
     case "locked":
       return { tone: "muted", word: "Locked" };
     case "available":
-      return { tone: "pending", word: "Ready" };
+      return { tone: "muted", word: "Ready" };
     case "waiting_for_scenario":
       return { tone: "pending", word: "Preparing scenario" };
     case "in_progress":

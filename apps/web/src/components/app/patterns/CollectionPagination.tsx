@@ -92,8 +92,10 @@ export function PaginatedCollection<T>({
     }
   }, [pageState.page, pagination.page, resetKey, resetPending]);
 
+  // One flex item in every parent, so the pager sits exactly 20px below the
+  // list even inside a flex column with a gap.
   return (
-    <>
+    <div>
       {children(pagination.items)}
       <CollectionPagination
         page={pagination.page}
@@ -103,7 +105,7 @@ export function PaginatedCollection<T>({
         onPageChange={(page) => setPageState({ page, resetKey })}
         className={paginationClassName}
       />
-    </>
+    </div>
   );
 }
 
@@ -123,10 +125,19 @@ export function CollectionPagination({
   className?: string | undefined;
 }) {
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
-  if (totalPages <= 1) return null;
-
   const start = (page - 1) * pageSize + 1;
   const end = Math.min(page * pageSize, totalItems);
+  const range = `${start}–${end}`;
+  const compact = `Page ${page} of ${totalPages}`;
+  // The range and the compact label roll only after a page change, never on
+  // first render (the Moment Rule). Hooks sit above the early return.
+  const [seen, setSeen] = useState({ range, compact });
+  const [rolled, setRolled] = useState(false);
+  if (seen.range !== range || seen.compact !== compact) {
+    setSeen({ range, compact });
+    setRolled(true);
+  }
+  if (totalPages <= 1) return null;
   const visiblePages = buildVisiblePageNumbers(page, totalPages);
 
   return (
@@ -137,24 +148,36 @@ export function CollectionPagination({
         className,
       )}
     >
-      <p className="text-metadata tabular-nums" aria-live="polite">
-        {start}–{end} of {totalItems} {itemLabel}
+      <p
+        className="text-metadata tabular-nums"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        <span key={range} className={rolled ? "roll-in inline-block" : undefined}>
+          {range}
+        </span>{" "}
+        of {totalItems} {itemLabel}
       </p>
       <div className="flex items-center justify-between gap-2 sm:justify-end">
         <Button
           type="button"
           size="sm"
           variant="outline"
+          aria-label="Previous page"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
         >
           <ChevronLeft className="size-3.5" />
           <span className="hidden sm:inline">Previous</span>
-          <span className="sr-only sm:hidden">Previous page</span>
         </Button>
 
-        <span className="min-w-20 text-center text-sm font-medium tabular-nums sm:hidden">
-          Page {page} of {totalPages}
+        <span className="min-w-20 text-center text-support font-medium tabular-nums sm:hidden">
+          <span
+            key={compact}
+            className={rolled ? "roll-in inline-block" : undefined}
+          >
+            {compact}
+          </span>
         </span>
         <div className="hidden items-center gap-1 sm:flex">
           {visiblePages.map((pageNumber) => (
@@ -176,11 +199,11 @@ export function CollectionPagination({
           type="button"
           size="sm"
           variant="outline"
+          aria-label="Next page"
           disabled={page >= totalPages}
           onClick={() => onPageChange(page + 1)}
         >
           <span className="hidden sm:inline">Next</span>
-          <span className="sr-only sm:hidden">Next page</span>
           <ChevronRight className="size-3.5" />
         </Button>
       </div>

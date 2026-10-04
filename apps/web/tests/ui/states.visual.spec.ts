@@ -53,7 +53,7 @@ async function expectShutdownRunShell(
   await expect(page.locator("[data-run-shutdown-sequence]")).toBeVisible();
   await expect(page.locator("[data-run-back]")).toBeVisible();
   await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
-  if ((page.viewportSize()?.width ?? 0) >= 960) {
+  if ((page.viewportSize()?.width ?? 0) >= 768) {
     await expectDesktopMissionPane(page);
   } else {
     await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
@@ -117,10 +117,9 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "course-detail-light-mobile");
   });
 
-  test("course filters · mobile disclosure", async ({ page, ui }) => {
+  test("course filters · mobile", async ({ page, ui }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await ui.open({ ...routeCase("course-catalog"), theme: "light" });
-    await page.locator("summary").filter({ hasText: "Filters" }).click();
     await expect(page.getByRole("button", { name: "Easy" })).toBeVisible();
     await expectRouteScreenshot(page, "course-filters-open-light-mobile");
   });
@@ -162,7 +161,7 @@ test.describe("focused visual states", () => {
     await ui.settle();
 
     await expect(
-      page.getByRole("button", { name: /Open course outline/ }),
+      page.getByRole("button", { name: /Course outline, lecture/ }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
     await expectRouteScreenshot(
@@ -188,7 +187,7 @@ test.describe("focused visual states", () => {
     await ui.settle();
 
     await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
-    await page.getByRole("button", { name: /Open course outline/ }).click();
+    await page.getByRole("button", { name: /Course outline, lecture/ }).click();
     await expect(
       page.getByRole("link", {
         name: /Trace an intermittent DNS failure across a deliberately long production service boundary/,
@@ -386,7 +385,7 @@ test.describe("focused visual states", () => {
       page.getByRole("heading", { name: "Final checks" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("progressbar", { name: "Final checks progress" }),
+      page.locator("[data-run-recap-progress]"),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-settled-recap-dark-desktop");
   });
@@ -448,7 +447,7 @@ test.describe("focused visual states", () => {
     await ui.settle();
     await expect(page.getByRole("heading", { name: "Solved" })).toBeVisible();
     await expect(
-      page.getByRole("progressbar", { name: "Final checks progress" }),
+      page.locator("[data-run-recap-progress]"),
     ).toBeVisible();
     await page.getByRole("button", { name: "Watch replay" }).click();
     const carousel = page.locator("[data-run-replay-carousel]");
@@ -560,9 +559,8 @@ test.describe("focused visual states", () => {
     ui.server.state.signups = { ...ui.server.state.signups, taken: 50 };
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
-    await expect(
-      page.getByText("All 50 spots are taken · Members can still sign in"),
-    ).toBeVisible();
+    await expect(page.getByText("All 50 spots are taken")).toBeVisible();
+    await expect(page.getByText("Members can still sign in")).toBeVisible();
     await expectRouteScreenshot(page, "landing-signups-full-light-desktop");
   });
 
@@ -572,9 +570,8 @@ test.describe("focused visual states", () => {
       theme: "light",
       variant: "empty",
     });
-    await expect(
-      page.getByText("Sign-ups are closed · Members can still sign in"),
-    ).toBeVisible();
+    await expect(page.getByText("Sign-ups are closed")).toBeVisible();
+    await expect(page.getByText("Members can still sign in")).toBeVisible();
     await expectRouteScreenshot(page, "landing-signups-closed-light-desktop");
   });
 
@@ -732,7 +729,7 @@ test.describe("focused mobile workspace", () => {
       page.getByRole("heading", { name: "Could not finish" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("progressbar", { name: "Final checks progress" }),
+      page.locator("[data-run-recap-progress]"),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-failed-recap-light-mobile");
   });

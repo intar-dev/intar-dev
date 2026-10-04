@@ -162,8 +162,8 @@ function waitTimeoutMessage(
   contention: ScenarioStartContention | null,
 ): string {
   return contention === "registry"
-    ? "The image registry stayed busy for 60 seconds. Try again shortly."
-    : "VM capacity did not become available within 60 seconds. Try again shortly or choose another scenario.";
+    ? "Image maintenance did not finish within 60 seconds. Try again shortly."
+    : "No practice machine became free within 60 seconds. Try again shortly or choose another scenario.";
 }
 
 /**
@@ -227,7 +227,7 @@ async function requestScenarioStart(
   } catch (error) {
     if (signal.aborted) throw error;
     throw new ScenarioStartRequestError(
-      "Could not reach the control plane. Check your connection and try starting the scenario again.",
+      "Could not reach Intar. Check your connection and try again.",
       "connectivity_failed",
       DEFAULT_CAPACITY_RETRY_MS,
     );
@@ -250,7 +250,7 @@ async function requestScenarioStart(
     throw new ScenarioStartRequestError(
       body && "error" in body && typeof body.error === "string"
         ? body.error
-        : "Failed to start scenario",
+        : "The scenario could not start.",
       body && "code" in body && typeof body.code === "string"
         ? body.code
         : null,

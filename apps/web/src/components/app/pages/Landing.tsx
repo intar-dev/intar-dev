@@ -7,6 +7,7 @@ import hosttechLogoLight from "@/assets/hosttech-logo-light.svg?url";
 import namespaceLogo from "@/assets/namespace-logo.png";
 import { BrandMark } from "../patterns/BrandMark";
 import { InlineFeedback } from "../patterns/InlineFeedback";
+import { MetaLine } from "../patterns/MetaLine";
 import { useCallbackErrorCode } from "../hooks/useCallbackErrorCode";
 import { useMyRunsSummary } from "../hooks/useMyRuns";
 import { useSessionAccess } from "../hooks/useSession";
@@ -26,7 +27,7 @@ export function Landing() {
   const [errorCode, clearErrorCode] = useCallbackErrorCode();
   const errorMessage = errorCode
     ? (githubCallbackMessage(errorCode) ??
-      "Sign-in couldn't be completed. Please try again.")
+      "Could not complete sign-in. Try again.")
     : null;
   const { access } = useSessionAccess();
   const runs = useMyRunsSummary({ enabled: access === "active" });
@@ -45,25 +46,27 @@ export function Landing() {
   });
 
   return (
-    <div className="relative isolate flex min-h-svh flex-col overflow-hidden bg-canvas">
+    // The safe-area insets keep the header, sections and footer clear of a
+    // landscape notch and the home indicator; the page inset sits inside them.
+    <div className="relative isolate flex min-h-dvh flex-col overflow-hidden bg-canvas pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]">
       <header className="mx-auto flex min-h-14 w-full max-w-7xl shrink-0 items-center justify-between gap-4 px-[var(--page-inset)] sm:min-h-[4.75rem]">
         <BrandMark />
         <ThemeToggle />
       </header>
 
-      {errorMessage ? (
-        <div className="mx-auto w-full max-w-7xl px-[var(--page-inset)] pt-4">
-          <Alert variant="destructive">
-            <AlertTitle>Sign-in failed</AlertTitle>
-            <AlertDescription>{errorMessage}</AlertDescription>
-          </Alert>
-        </div>
-      ) : null}
-
       <main className="flex flex-1 flex-col">
+        {errorMessage ? (
+          <div className="mx-auto w-full max-w-7xl px-[var(--page-inset)] pt-4">
+            <Alert variant="destructive">
+              <AlertTitle>Could not sign in</AlertTitle>
+              <AlertDescription>{errorMessage}</AlertDescription>
+            </Alert>
+          </div>
+        ) : null}
+
         <section className="mx-auto flex w-full max-w-7xl flex-col items-center px-[var(--page-inset)] pt-10 text-center sm:pt-14 lg:pt-16">
-          <div className="flex flex-col items-center gap-6 animate-rise sm:gap-8">
-            <p className="inline-flex items-center gap-2 rounded-full border bg-card px-3 py-1 text-caption font-medium text-muted-foreground shadow-[var(--highlight)]">
+          <div className="flex flex-col items-center gap-6 sm:gap-8">
+            <p className="inline-flex items-center gap-2 text-label text-muted-foreground">
               <span
                 aria-hidden="true"
                 className="size-1.5 rounded-full bg-primary"
@@ -74,7 +77,7 @@ export function Landing() {
             <div className="space-y-5 sm:space-y-6">
               <h1 className="text-display text-balance">
                 <span className="block">Repair real systems.</span>
-                <span className="block text-faint-foreground">
+                <span className="block text-display-italic text-faint-foreground">
                   Prove the fix.
                   {/* The underscore cursor from the brand mark. */}
                   <span
@@ -155,9 +158,7 @@ export function Landing() {
                   again.
                 </p>
               ) : access === "signed-out" && signups.isSuccess ? (
-                <p className="text-caption text-muted-foreground tabular-nums">
-                  {signupSpotsLine(signups.data)}
-                </p>
+                <MetaLine items={signupSpotsLine(signups.data)} />
               ) : null}
             </div>
 
@@ -188,7 +189,7 @@ export function Landing() {
         <SponsorMarks />
       </main>
 
-      <footer className="mx-auto flex w-full max-w-7xl shrink-0 flex-col items-center gap-2 px-[var(--page-inset)] pb-8 text-[0.8125rem] text-faint-foreground sm:flex-row sm:justify-between">
+      <footer className="mx-auto flex w-full max-w-7xl shrink-0 flex-col items-center gap-2 px-[var(--page-inset)] pb-[max(2rem,env(safe-area-inset-bottom))] text-[0.8125rem] text-faint-foreground sm:flex-row sm:justify-between">
         <span>Built by Stefan Ruzitschka</span>
         <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
           <a href="https://github.com/intar-dev" className={footerLinkClassName}>

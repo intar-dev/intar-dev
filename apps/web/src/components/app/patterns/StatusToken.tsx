@@ -4,13 +4,14 @@ import { formatClockSeconds } from "../lib/format";
 
 export type StatusTone = "pending" | "live" | "success" | "danger" | "muted";
 
-// The text color feeds the live ring (currentColor), so each tone sets both.
+// The fill and the live ring both follow currentColor, so a tone change fades
+// them together.
 const DOT_TONES: Record<StatusTone, string> = {
-  pending: "bg-warning text-warning",
-  live: "bg-primary text-primary",
-  success: "bg-success text-success",
-  danger: "bg-destructive text-destructive",
-  muted: "bg-faint-foreground text-faint-foreground",
+  pending: "text-warning",
+  live: "text-primary",
+  success: "text-success",
+  danger: "text-destructive",
+  muted: "text-faint-foreground",
 };
 
 interface StatusTokenProps {
@@ -19,6 +20,11 @@ interface StatusTokenProps {
   word: string;
   /** Short visible label below 640px; assistive technology still gets one word. */
   compactWord?: string;
+  /**
+   * Every word this token can show. They stack in one box sized for the
+   * longest, so a change swaps in place and the clock beside it never moves.
+   */
+  words?: readonly string[];
   /** Preformatted static elapsed/duration text. */
   elapsed?: string | null;
   /** Self-ticking clock; freezes at frozenMs when set. Overrides `elapsed`. */
@@ -39,6 +45,7 @@ export function StatusToken({
   tone,
   word,
   compactWord,
+  words,
   elapsed,
   clock,
   pulse = false,
@@ -50,16 +57,35 @@ export function StatusToken({
       <span
         aria-hidden="true"
         className={cn(
-          "size-2 shrink-0 rounded-full",
+          "size-2 shrink-0 rounded-full bg-current transition-colors duration-(--duration-reveal) ease-standard",
           DOT_TONES[tone],
           pulse && "motion-safe:animate-live",
         )}
       />
+      {/* One announcer for the app bar token. The visible word may be a stack
+          of hidden layers, so it is not the live region itself. */}
+      {live ? (
+        <span role="status" className="sr-only">
+          {word}
+        </span>
+      ) : null}
       <span
-        role={live ? "status" : undefined}
-        className="truncate text-[0.8125rem] font-medium"
+        aria-hidden={live || undefined}
+        className="min-w-0 truncate text-[0.8125rem] font-medium text-foreground"
       >
-        {compactWord ? (
+        {words && words.length > 1 ? (
+          <span data-swap style={{ justifyItems: "start" }}>
+            {(words.includes(word) ? words : [...words, word]).map((w) => (
+              <span
+                key={w}
+                data-on={w === word ? "" : undefined}
+                className="whitespace-nowrap"
+              >
+                {w}
+              </span>
+            ))}
+          </span>
+        ) : compactWord ? (
           <>
             <span className="sm:hidden">{compactWord}</span>
             <span className="hidden sm:inline">{word}</span>
@@ -71,10 +97,7 @@ export function StatusToken({
       {clock ? (
         <TickingClock startedAt={clock.startedAt} frozenMs={clock.frozenMs} />
       ) : elapsed ? (
-        <span
-          aria-hidden="true"
-          className="font-mono text-xs text-faint-foreground tabular-nums"
-        >
+        <span className="animate-in fade-in-0 font-mono text-xs text-faint-foreground tabular-nums duration-(--duration-moderate) ease-enter">
           {elapsed}
         </span>
       ) : null}
@@ -100,10 +123,8 @@ function TickingClock(props: {
     : Math.max(0, Math.floor((now - props.startedAt) / 1000));
 
   return (
-    <span
-      aria-hidden="true"
-      className="font-mono text-xs text-faint-foreground tabular-nums"
-    >
+    // Read on demand, never announced: it sits outside the status region.
+    <span className="animate-in fade-in-0 font-mono text-xs text-faint-foreground tabular-nums duration-(--duration-moderate) ease-enter">
       {formatClockSeconds(seconds)}
     </span>
   );

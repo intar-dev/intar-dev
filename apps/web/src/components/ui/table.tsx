@@ -2,11 +2,43 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
-function Table({ className, ...props }: React.ComponentProps<"table">) {
+// The scroll region tracks its own position (global.css styles it from the
+// outside): data-scrolled once scrolled past 2px casts the pinned first
+// column's edge shadow, and --fade-end fades the right edge while more columns
+// wait. With a `label` it is a focusable, named region so the arrow keys scroll.
+function Table({
+  className,
+  label,
+  ...props
+}: React.ComponentProps<"table"> & { label?: string }) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const cue = () => {
+      el.toggleAttribute("data-scrolled", el.scrollLeft > 2);
+      const more = el.scrollLeft < el.scrollWidth - el.clientWidth - 2;
+      el.style.setProperty("--fade-end", more ? "2rem" : "0px");
+    };
+    cue();
+    el.addEventListener("scroll", cue, { passive: true });
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(cue);
+    observer?.observe(el);
+    if (el.firstElementChild) observer?.observe(el.firstElementChild);
+    return () => {
+      el.removeEventListener("scroll", cue);
+      observer?.disconnect();
+    };
+  }, []);
+
   return (
     <div
+      ref={containerRef}
       data-slot="table-container"
       className="relative w-full overflow-x-auto"
+      {...(label ? { tabIndex: 0, role: "region", "aria-label": label } : null)}
     >
       <table
         data-slot="table"
@@ -21,7 +53,7 @@ function TableHeader({ className, ...props }: React.ComponentProps<"thead">) {
   return (
     <thead
       data-slot="table-header"
-      className={cn("[&_tr]:border-b", className)}
+      className={className}
       {...props}
     />
   );
@@ -31,7 +63,7 @@ function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
   return (
     <tbody
       data-slot="table-body"
-      className={cn("[&_tr:last-child]:border-0", className)}
+      className={className}
       {...props}
     />
   );
@@ -41,10 +73,7 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
   return (
     <tr
       data-slot="table-row"
-      className={cn(
-        "border-b transition-colors hover:bg-muted/50 has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
-        className,
-      )}
+      className={className}
       {...props}
     />
   );
@@ -54,8 +83,24 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
   return (
     <th
       data-slot="table-head"
+      scope="col"
       className={cn(
-        "h-9 px-3 text-left align-middle text-xs font-medium whitespace-nowrap text-faint-foreground [&:has([role=checkbox])]:pr-0",
+        "h-9 px-3 text-left align-middle text-label whitespace-nowrap [&:has([role=checkbox])]:pr-0",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+/** The first cell of a body row: names the row for every cell after it. */
+function TableRowHeader({ className, ...props }: React.ComponentProps<"th">) {
+  return (
+    <th
+      data-slot="table-row-header"
+      scope="row"
+      className={cn(
+        "px-3 py-3 text-left align-middle font-semibold whitespace-nowrap text-foreground",
         className,
       )}
       {...props}
@@ -81,6 +126,7 @@ export {
   TableHeader,
   TableBody,
   TableHead,
+  TableRowHeader,
   TableRow,
   TableCell,
 };

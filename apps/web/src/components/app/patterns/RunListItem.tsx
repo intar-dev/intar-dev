@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { ArrowRight, PlayCircle } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { formatDurationMs, formatTimestamp } from "../lib/format";
+import { formatClockSeconds } from "../lib/format";
+import { MetaLine } from "./MetaLine";
 import { RelativeTime } from "./RelativeTime";
 import { StatusToken } from "./StatusToken";
 import type { CourseLocation, ScenarioRunActivity } from "@/lib/scenario-runs";
@@ -27,18 +27,32 @@ export interface RunListItemData {
 export function RunOutcomeToken({
   run,
 }: {
-  run: Pick<RunListItemData, "active" | "activity" | "outcome">;
+  run: Pick<
+    RunListItemData,
+    "active" | "activity" | "outcome" | "solveDurationMs"
+  >;
 }) {
   const activity = run.activity ?? (run.active ? "foreground" : "settled");
   if (activity === "foreground") {
     return <StatusToken tone="live" word="In progress" />;
   }
   if (activity === "background") {
-    return <StatusToken tone="pending" word="Finishing" pulse />;
+    // List rows never pulse: only the run header token breathes.
+    return <StatusToken tone="pending" word="Finishing" />;
   }
   switch (run.outcome) {
     case "succeeded":
-      return <StatusToken tone="success" word="Solved" />;
+      return (
+        <StatusToken
+          tone="success"
+          word="Solved"
+          elapsed={
+            run.solveDurationMs != null
+              ? formatClockSeconds(Math.floor(run.solveDurationMs / 1000))
+              : null
+          }
+        />
+      );
     case "failed":
       return <StatusToken tone="danger" word="Failed" />;
     case "cancelled":
@@ -54,11 +68,22 @@ export function runAttemptLabel(attemptNumber?: number): string | null {
     : null;
 }
 
+/** The course title and the lecture's place in it, as separate data-line items. */
+export function runCourseContextItems(
+  location: CourseLocation | null | undefined,
+): string[] {
+  if (!location) return [];
+  return [
+    location.courseTitle,
+    `Lecture ${location.step} of ${location.steps}`,
+  ];
+}
+
 export function runCourseContextLabel(
   location: CourseLocation | null | undefined,
 ): string | null {
-  if (!location) return null;
-  return `${location.courseTitle} · Step ${location.step} of ${location.steps}`;
+  const items = runCourseContextItems(location);
+  return items.length ? items.join(" · ") : null;
 }
 
 function runActionContext(run: RunListItemData): string {
@@ -91,7 +116,7 @@ export function RunListItem({
 }) {
   const activity = run.activity ?? (run.active ? "foreground" : "settled");
   const attemptLabel = runAttemptLabel(run.attemptNumber);
-  const courseContext = runCourseContextLabel(run.courseLocation);
+  const courseContext = runCourseContextItems(run.courseLocation);
   const actionLabel = runListItemActionLabel(run);
   return (
     <article className="flex flex-col gap-3 p-4 transition-colors sm:flex-row sm:items-center sm:gap-4">
@@ -105,25 +130,16 @@ export function RunListItem({
           >
             {run.title}
           </Link>
-          {attemptLabel ? <Badge variant="outline">{attemptLabel}</Badge> : null}
-          <RunOutcomeToken run={run} />
-          {run.solutionAssisted ? (
-            <Badge variant="outline">Solution used</Badge>
-          ) : null}
         </div>
-        <p className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground">
-          <span>
-            Started <RelativeTime at={run.createdAt} />
-            <span aria-hidden="true"> · </span>
-            <time dateTime={new Date(run.createdAt).toISOString()}>
-              {formatTimestamp(run.createdAt)}
-            </time>
-          </span>
-          {courseContext ? <span>{courseContext}</span> : null}
-          {run.solveDurationMs !== null ? (
-            <span>Solved in {formatDurationMs(run.solveDurationMs)}</span>
-          ) : null}
-        </p>
+        <MetaLine
+          items={[
+            <RunOutcomeToken key="status" run={run} />,
+            attemptLabel,
+            run.solutionAssisted ? "Solution used" : null,
+            ...courseContext,
+            <RelativeTime key="started" at={run.createdAt} />,
+          ]}
+        />
       </div>
       <div className="flex items-center gap-2 self-stretch sm:self-auto">
         <Button

@@ -6,7 +6,7 @@ import { formatCountdown, leaseInfo, type LeaseState } from "@/lib/run-lease";
 const TONE: Record<LeaseState, string> = {
   ok: "text-muted-foreground",
   warning: "text-warning",
-  critical: "text-destructive motion-safe:animate-pulse",
+  critical: "text-destructive",
   expired: "text-destructive",
 };
 
@@ -35,7 +35,10 @@ export function LeaseCountdown({
       aria-label={
         info.state === "expired"
           ? "Sandbox lease expired"
-          : `Time remaining: ${countdown}`
+          : info.state === "ok"
+            ? `Time remaining: ${countdown}`
+            : // Colour alone never carries the state.
+              `Sandbox ending soon, ${countdown} left`
       }
       className={cn(
         "inline-flex items-center gap-1.5 whitespace-nowrap text-xs tabular-nums",
@@ -51,7 +54,7 @@ export function LeaseCountdown({
         <span data-run-lease-countdown-text>Lease expired</span>
       ) : (
         <span data-run-lease-countdown-text>
-          {countdown}
+          <span className="font-mono">{countdown}</span>
           <span className="hidden sm:inline"> left</span>
         </span>
       )}

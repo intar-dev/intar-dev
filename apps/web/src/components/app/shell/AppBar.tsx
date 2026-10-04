@@ -1,13 +1,13 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ArrowLeft, ChevronRight, EllipsisVertical } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { ArrowLeft, EllipsisVertical } from "lucide-react";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { NewVersionButton } from "./NewVersionButton";
 import { NAV_ITEMS } from "./nav-config";
 import { useBreadcrumbOverrides, usePageChromeValue } from "./page-chrome";
@@ -73,6 +73,20 @@ export function safeDynamicPageLabel(pathname: string): string | null {
   }
   if (isLecturePage(pathname)) {
     return "Lecture";
+  }
+  if (/^\/organizations\/[^/]+$/.test(pathname)) {
+    return "Organization";
+  }
+  if (/^\/admin\/scenarios\/[^/]+$/.test(pathname)) {
+    return "Scenario";
+  }
+  if (
+    /^\/courses\/[^/]+$/.test(pathname) ||
+    /^\/organizations\/[^/]+\/courses\/(?:public|private)\/[^/]+$/.test(
+      pathname,
+    )
+  ) {
+    return "Course";
   }
   return null;
 }
@@ -160,75 +174,96 @@ export function AppBar() {
   });
   const overrides = useBreadcrumbOverrides();
   const chrome = usePageChromeValue(pathname);
-  const crumbs = buildCrumbs(pathname, overrides);
+  const reading = chrome?.reading === true;
+  const allCrumbs = buildCrumbs(pathname, overrides);
+  // Reading pages carry their title in the content (the h1 there), so the bar
+  // shows the course context instead: a lecture drops its own crumb.
+  const crumbs =
+    reading && isLecturePage(pathname) ? allCrumbs.slice(0, -1) : allCrumbs;
   const final = crumbs[crumbs.length - 1];
   const ancestors = crumbs.slice(0, -1);
   const parent = ancestors[ancestors.length - 1];
 
-  // Every app route's single visible h1, in every data state. Never wrap it
-  // in BreadcrumbPage or add aria-current — a role would strip the heading
+  // Every other app route's single visible h1, in every data state. Never wrap
+  // it in BreadcrumbPage or add aria-current: a role would strip the heading
   // semantics the a11y suite asserts on.
+  const titleClass = "min-w-0 truncate text-support font-semibold text-foreground";
   const heading = final ? (
-    <h1
-      title={final.label}
-      className={
-        ancestors.length
-          ? "min-w-0 truncate text-sm font-semibold text-foreground"
-          : "min-w-0 truncate text-[0.9375rem] font-semibold tracking-[-0.01em] text-foreground"
-      }
-    >
-      {final.label}
-    </h1>
+    reading ? (
+      final.to ? (
+        <Link
+          to={final.to}
+          className="inline-flex min-w-0 items-center rounded-sm text-support font-semibold text-foreground"
+        >
+          <span className="truncate">{final.label}</span>
+        </Link>
+      ) : (
+        <p className={titleClass}>{final.label}</p>
+      )
+    ) : (
+      <h1 title={final.label} className={titleClass}>
+        {final.label}
+      </h1>
+    )
   ) : null;
+  const showAncestors = !chrome?.back;
 
   return (
     // On desktop the inset panel's rounded top edge lives here: an 8px canvas
     // band hides scrolled content above the bar, and the bar redraws the
     // panel's top corners and side borders so it stays attached while sticky.
-    <header className="sticky top-0 z-30 shrink-0 bg-background lg:-mx-px lg:bg-sidebar lg:pt-2">
-      <div className="grid h-[var(--app-bar-h)] grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b bg-background px-[var(--page-inset)] lg:rounded-t-xl lg:border-x lg:border-t lg:border-sidebar-border lg:border-b-border">
+    <header className="sticky top-0 z-30 shrink-0 bg-background pt-[env(safe-area-inset-top)] lg:-mx-px lg:bg-sidebar lg:pt-2">
+      <div className="grid h-[var(--app-bar-h)] grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b bg-background pr-[max(0.5rem,env(safe-area-inset-right))] pl-[max(0.5rem,env(safe-area-inset-left))] lg:rounded-t-xl lg:border-x lg:border-t lg:border-sidebar-border lg:border-b-border">
       <div className="flex min-w-0 items-center gap-2" data-app-bar-leading>
-        <SidebarTrigger className="-ml-1" />
-        <Separator
-          orientation="vertical"
-          className="data-[orientation=vertical]:h-4"
-        />
+        <SidebarTrigger />
         {chrome?.back ? (
           <span className="flex min-w-0 items-center">{chrome.back}</span>
-        ) : parent?.to ? (
+        ) : !reading && parent?.to ? (
           <Link
             to={parent.to}
             aria-label={`Back to ${parent.label}`}
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground sm:hidden [@media(pointer:coarse)]:size-11"
+            className={buttonVariants({
+              variant: "ghost",
+              size: "icon",
+              className:
+                "text-muted-foreground sm:hidden [@media(pointer:coarse)]:size-11",
+            })}
           >
-            <ArrowLeft className="size-4" aria-hidden="true" />
+            <ArrowLeft aria-hidden="true" />
           </Link>
         ) : null}
       </div>
       <nav aria-label="Breadcrumb" className="flex min-w-0 items-center">
         <ol className="flex min-w-0 items-center gap-1.5">
-          {!chrome?.back
+          {showAncestors
             ? ancestors.map((ancestor) =>
                 ancestor.to ? (
                   <li
                     key={ancestor.to}
-                    className="hidden shrink-0 items-center gap-1.5 sm:flex"
+                    className={`min-w-0 shrink items-center gap-1.5 ${
+                      reading ? "flex" : "hidden sm:flex"
+                    }`}
                   >
                     <Link
                       to={ancestor.to}
-                      className="rounded-sm text-sm text-muted-foreground transition-colors duration-150 hover:text-foreground"
+                      className="inline-flex max-w-[16rem] min-w-0 items-center rounded-sm text-support font-medium text-faint-foreground transition-colors duration-150 hover:text-foreground"
                     >
-                      {ancestor.label}
+                      <span className="truncate">{ancestor.label}</span>
                     </Link>
-                    <ChevronRight
+                    <span
                       aria-hidden="true"
-                      className="size-3.5 text-faint-foreground/70"
-                    />
+                      className="shrink-0 text-support text-faint-foreground"
+                    >
+                      /
+                    </span>
                   </li>
                 ) : null,
               )
             : null}
-          <li className="flex min-w-0 items-center" data-app-bar-title>
+          <li
+            className="flex min-w-0 shrink-[0.5] items-center"
+            data-app-bar-title
+          >
             {heading}
           </li>
         </ol>
@@ -242,18 +277,27 @@ export function AppBar() {
         {chrome?.action}
         {chrome?.menu ? (
           <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className={chrome.action ? "sm:hidden" : undefined}
-                  aria-label="Page actions"
-                />
-              }
-            >
-              <EllipsisVertical />
-            </DropdownMenuTrigger>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <DropdownMenuTrigger
+                    render={
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className={chrome.action ? "sm:hidden" : undefined}
+                        aria-label="Page actions"
+                      />
+                    }
+                  />
+                }
+              >
+                <EllipsisVertical />
+              </TooltipTrigger>
+              <TooltipContent side="bottom" sideOffset={8}>
+                Page actions
+              </TooltipContent>
+            </Tooltip>
             <DropdownMenuContent align="end">{chrome.menu}</DropdownMenuContent>
           </DropdownMenu>
         ) : null}

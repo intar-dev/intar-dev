@@ -49,9 +49,35 @@ describe("RunCompletionBar", () => {
     expect(waiting).toContain("Getting your run ready to save…");
     expect(waiting).toContain("disabled");
     expect(saving).toContain("Saving your run…");
-    expect(saving).toContain("disabled");
+    // Busy keeps focus: aria-disabled, never the native disabled attribute.
+    expect(saving).toContain('aria-busy="true"');
+    expect(saving).not.toMatch(/<button[^>]*\sdisabled(?:=|>)/);
     expect(failed).toContain(
-      "We could not save this run. Your work is still open. Try again.",
+      "Could not save this run. Your work is still open. Try again.",
     );
+    expect(failed).not.toContain("We could not");
+  });
+
+  it("rises and pops only when the run just turned solved", () => {
+    const render = (animate?: boolean) =>
+      renderToStaticMarkup(
+        createElement(RunCompletionBar, {
+          canFinish: true,
+          pending: false,
+          error: false,
+          onFinish: vi.fn(),
+          ...(animate === undefined ? {} : { animate }),
+        }),
+      );
+
+    for (const still of [render(), render(false)]) {
+      expect(still).not.toContain("animate-rise");
+      expect(still).not.toContain("animate-pop");
+    }
+    const live = render(true);
+    expect(live).toContain("animate-rise");
+    expect(live).toContain("[animation-delay:650ms]");
+    expect(live).toContain("animate-pop");
+    expect(live).toContain("[animation-delay:770ms]");
   });
 });

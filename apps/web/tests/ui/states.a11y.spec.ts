@@ -110,7 +110,7 @@ async function expectShutdownRunChrome(page: Page, title: string) {
   await expectRunWorkspaceChrome(page);
   await expect(page.locator("[data-run-page]")).toHaveCount(1);
   await expect(page.locator("[data-run-shutdown-sequence]")).toHaveCount(1);
-  if ((page.viewportSize()?.width ?? 0) >= 960) {
+  if ((page.viewportSize()?.width ?? 0) >= 768) {
     await expect(runLearningPanel(page)).toBeVisible();
     await expect(runLearningTrigger(page)).toBeHidden();
   } else {
@@ -1068,7 +1068,6 @@ test.describe("focused state accessibility", () => {
       name: "Reveal the full solution?",
     });
     await expect(solutionDialog).toBeVisible();
-    await expectNoVisibleBoxShadow(solutionDialog);
     await page.keyboard.press("Escape");
     await expect(solutionDialog).toBeHidden();
     await expect(panel).toBeVisible();
@@ -1156,14 +1155,14 @@ test.describe("focused state accessibility", () => {
       runState: "ending",
       title: "Saving your run…",
       replay: null,
-      status: "Saving",
+      status: "Finishing",
       hasDeleteAction: false,
     },
     {
       runState: "rendering",
       title: "Saving your run…",
       replay: null,
-      status: "Saving",
+      status: "Finishing",
       hasDeleteAction: false,
     },
     {
@@ -1248,22 +1247,16 @@ test.describe("focused state accessibility", () => {
         await expect(
           page.getByRole("heading", { name: "Final checks" }),
         ).toHaveCount(0);
-        await expect(
-          page.getByRole("progressbar", { name: "Final checks progress" }),
-        ).toHaveCount(0);
+        await expect(page.locator("[data-run-recap-progress]")).toHaveCount(0);
       } else {
         await expect(
           page.getByRole("heading", { name: "Final checks" }),
         ).toBeVisible();
-        const progress = page.getByRole("progressbar", {
-          name: "Final checks progress",
-        });
+        // The bar is decorative: the visible count carries the information.
+        const progress = page.locator("[data-run-recap-progress]");
         await expect(progress).toBeVisible();
-        await expect(progress).toHaveAttribute("aria-valuemax", "2");
-        await expect(progress).toHaveAttribute(
-          "aria-valuetext",
-          /\d of 2 final checks verified/,
-        );
+        await expect(progress).toHaveAttribute("aria-hidden", "true");
+        await expect(page.getByText(/^\d\/2 verified$/)).toBeVisible();
         await expect(
           page.getByRole("heading", {
             name: /Keep learning|Give it another try/,
@@ -1360,15 +1353,10 @@ test.describe("focused state accessibility", () => {
     await expect(
       page.getByRole("link", { name: "Read lecture and try again" }),
     ).toBeVisible();
-    const progress = page.getByRole("progressbar", {
-      name: "Final checks progress",
-    });
+    const progress = page.locator("[data-run-recap-progress]");
     await expect(progress).toBeVisible();
-    await expect(progress).toHaveAttribute("aria-valuemax", "2");
-    await expect(progress).toHaveAttribute(
-      "aria-valuetext",
-      /\d of 2 final checks verified/,
-    );
+    await expect(progress).toHaveAttribute("aria-hidden", "true");
+    await expect(page.getByText(/^\d\/2 verified$/)).toBeVisible();
     await expectLearnerSafeRunCopy(page.locator("main"));
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
@@ -1454,7 +1442,7 @@ test.describe("focused mobile state accessibility", () => {
     const trigger = runLearningTrigger(page);
     await expect(trigger).toBeVisible();
     await expect(trigger).toHaveAccessibleName(
-      "Open lecture theory and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
+      "Checks 0/2. 0 of 2 hints revealed. Opens checks, lecture and hints.",
     );
     await expectCoarsePointerTarget(
       trigger,
@@ -1535,12 +1523,10 @@ test.describe("focused mobile state accessibility", () => {
       hasDeleteAction: false,
       hasPageMenu: true,
     });
-    const progress = page.getByRole("progressbar", {
-      name: "Final checks progress",
-    });
+    const progress = page.locator("[data-run-recap-progress]");
     await expect(progress).toBeVisible();
-    await expect(progress).toHaveAttribute("aria-valuemin", "0");
-    await expect(progress).toHaveAttribute("aria-valuemax", "2");
+    await expect(progress).toHaveAttribute("aria-hidden", "true");
+    await expect(page.getByText("0/2 verified", { exact: true })).toBeVisible();
     await expect(
       progress.locator('[data-run-recap-progress-segment="true"]'),
     ).toHaveCount(2);
@@ -1636,7 +1622,7 @@ test.describe("run workspace at tablet width", () => {
       .click();
     await expect(solutionDialog).toBeVisible();
 
-    await page.setViewportSize({ width: 800, height: 900 });
+    await page.setViewportSize({ width: 600, height: 900 });
     await expect(solutionDialog).toBeHidden();
     await expect(runLearningPanel(page)).toBeHidden();
     const trigger = runLearningTrigger(page);
@@ -2146,7 +2132,7 @@ test.describe("small-screen access management", () => {
     await expectRunWorkspaceChrome(page);
     const trigger = runLearningTrigger(page);
     await expect(trigger).toHaveAccessibleName(
-      "Open lecture theory and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
+      "Checks 0/2. 0 of 2 hints revealed. Opens checks, lecture and hints.",
     );
     await expectCoarsePointerTarget(
       trigger,

@@ -118,7 +118,7 @@ describe("control-plane maintenance fence", () => {
     expect(html).toContain("The control plane is under maintenance");
     expect(html).not.toMatch(/beta access|cutover|invite flow/iu);
     expect(html).toContain(
-      '<form id="operator-login" action="/api/maintenance/bypass" method="post">',
+      '<form id="operator-login" action="/api/maintenance/bypass" method="post" novalidate>',
     );
     expect(html).toContain(
       '<input id="operator-secret" type="password" autocomplete="off"',

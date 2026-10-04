@@ -15,6 +15,8 @@ interface ContentHeaderProps {
   meta?: ReactNode;
   /** Transitional slot — page actions belong in the app bar. */
   actions?: ReactNode;
+  /** A 12px label line above the title, e.g. "Course · Lecture 2 of 5". */
+  eyebrow?: ReactNode;
   titleClassName?: string;
   /** Lecture and course pages: the title and summary use the reading roles. */
   reading?: boolean;
@@ -26,17 +28,19 @@ export function ContentHeader({
   summary,
   meta,
   actions,
+  eyebrow,
   titleClassName,
   reading = false,
 }: ContentHeaderProps) {
   return (
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0 space-y-1">
+      <div className={cn("min-w-0", reading ? "space-y-2" : "space-y-1")}>
+        {eyebrow ? <p className="text-label">{eyebrow}</p> : null}
         <div className="flex flex-wrap items-center gap-2">
           <p
             className={cn(
-              reading ? "text-content-title" : "text-page-title",
-              "text-pretty [overflow-wrap:anywhere]",
+              reading ? "text-content-title text-balance" : "text-page-title text-pretty",
+              "[overflow-wrap:anywhere]",
               titleClassName,
             )}
           >

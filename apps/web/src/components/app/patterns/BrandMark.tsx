@@ -14,7 +14,7 @@ export function BrandMark({
 }) {
   const content = (
     <>
-      <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
+      <img src="/favicon.svg" alt="" className="size-7 shrink-0 rounded-md" />
       {!compact ? (
         <span className="text-[0.9375rem] leading-none font-semibold tracking-[-0.015em]">
           intar<span className="text-brand-text">.dev</span>

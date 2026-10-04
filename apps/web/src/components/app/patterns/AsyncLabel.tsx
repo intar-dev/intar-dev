@@ -25,17 +25,13 @@ export function AsyncLabel({
   pending: ReactNode;
   done?: ReactNode;
 }) {
-  const layer = (name: AsyncState) =>
-    cn(
-      "inline-flex items-center justify-center gap-1.5 transition-opacity",
-      state === name
-        ? "duration-(--duration-moderate) ease-enter"
-        : "invisible opacity-0 duration-(--duration-fast) ease-exit",
-    );
+  // The shared [data-swap] rules (global.css) fade the leaving layer out and
+  // rise the arriving one in; hidden layers are visibility: hidden.
+  const on = (name: AsyncState) => (state === name ? "" : undefined);
   return (
-    <span className="grid *:col-start-1 *:row-start-1">
-      <span className={layer("idle")}>{idle}</span>
-      <span className={layer("pending")}>
+    <span data-swap>
+      <span data-on={on("idle")}>{idle}</span>
+      <span data-on={on("pending")}>
         <LoaderCircle
           className="size-3.5 motion-safe:animate-spin"
           aria-hidden="true"
@@ -43,7 +39,7 @@ export function AsyncLabel({
         {pending}
       </span>
       {done ? (
-        <span className={layer("done")}>
+        <span data-on={on("done")}>
           <Check
             className={cn("size-3.5", state === "done" && "draw-check")}
             aria-hidden="true"

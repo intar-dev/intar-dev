@@ -6,11 +6,12 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type ReactNode,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, BookOpen, ListChecks } from "lucide-react";
 import {
   requestScenarioStartWithCapacityWait,
   ScenarioStartCancelledError,
@@ -34,14 +35,20 @@ import {
   retryHttpResponseError,
 } from "@/components/app/lib/http-response-error";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import { ErrorState } from "@/components/app/patterns/StateCard";
+import { useJustReached } from "@/components/app/patterns/use-just-reached";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
 import {
   StatusToken,
   type StatusTone,
 } from "@/components/app/patterns/StatusToken";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { formatClockSeconds } from "@/components/app/lib/format";
+import { BinIcon } from "@/components/ui/bin-icon";
+import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import { presentScenarioRun } from "@/lib/run-phase";
 import {
   courseCatalogQueryKey,
@@ -56,10 +63,23 @@ import {
 import { RunCompletionBar } from "@/components/app/run/RunCompletionBar";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import {
+  RunCheckBar,
+  RunCheckToast,
   RunLearningPanel,
   RunLearningPanelMobile,
   type RunLearningPanelProps,
 } from "@/components/app/run/RunLearningPanel";
+import {
+  RUN_QUERY,
+  RunFrameProvider,
+  RunSheetProvider,
+  useMediaQuery,
+  useRunFrame,
+  useRunKeyboard,
+  useRunSheet,
+  useRunSheetController,
+} from "@/components/app/run/run-viewport";
+import { planActiveRunStatus } from "@/components/app/run/run-status-display";
 import { ScenarioVmSelector } from "@/components/app/run/ScenarioVmSelector";
 import {
   ScenarioShellStatusCard,
@@ -253,6 +273,17 @@ export function ScenarioRunStart() {
     return () => abortRef.current?.abort();
   }, [startScenario]);
 
+  // Try again unmounts the button that holds focus; the sequence heading takes
+  // it once the retry has rendered, so keyboard users keep their place.
+  const sequenceHeadingRef = useRef<HTMLHeadingElement>(null);
+  const focusSequenceRef = useRef(false);
+  useEffect(() => {
+    if (focusSequenceRef.current && startState !== "failed") {
+      focusSequenceRef.current = false;
+      sequenceHeadingRef.current?.focus({ preventScroll: true });
+    }
+  }, [startState]);
+
   usePageChrome({ title, fullscreen: true });
 
   const waitingForCapacity = startState === "waiting";
@@ -299,9 +330,9 @@ export function ScenarioRunStart() {
       <div
         data-run-start-sequence
         role="region"
-        aria-label="Run start progress"
+        aria-label="Workspace startup progress"
         tabIndex={0}
-        className="flex min-h-0 flex-1 overflow-y-auto px-3 pt-1 pb-3 [@media(max-height:500px)]:!pb-2"
+        className="flex min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-2 md:px-3 md:pb-3 short:pb-2"
       >
         {/* The same insets as the run page's startup screen, so the card stays
             put when the run page takes the sequence over. */}
@@ -310,21 +341,42 @@ export function ScenarioRunStart() {
             title={failed ? "The run did not start" : "Preparing your workspace"}
             description={
               failed
-                ? (startError ?? "Could not start the scenario.")
-                  : waitingForRegistry
-                    ? "Image maintenance is in progress. We will retry for up to 60 seconds."
-                    : waitingForCapacity
-                      ? "A practice machine is busy. We will retry for up to 60 seconds."
-                      : "Starting your scenario."
+                ? (startError ?? "The scenario could not start.")
+                : waitingForRegistry
+                  ? "Image maintenance is in progress. Retrying for up to 60 seconds."
+                  : waitingForCapacity
+                    ? "A practice machine is busy. Retrying for up to 60 seconds."
+                    : getScenarioBootScreenCopy(null).description
             }
+            headingRef={sequenceHeadingRef}
             steps={steps}
             listLabel="Startup steps"
             handoffTo={`run-start:${scenarioId}`}
+            {...(waitingForCapacity
+              ? {
+                  // The wait changes the description and stage 1's detail, so
+                  // say so through the sequence's one live region.
+                  statusAnnouncement: `Stage 1 of ${steps.length}: ${steps[0]?.label ?? "Creating your run"}. ${steps[0]?.detail ?? ""}`,
+                }
+              : {})}
             footer={
               failed ? (
-                <Button type="button" onClick={startScenario}>
-                  Try again
-                </Button>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-metadata">
+                    The run stopped at stage{" "}
+                    {Math.max(1, steps.findIndex((step) => step.state === "failed") + 1)}.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      focusSequenceRef.current = true;
+                      startScenario();
+                    }}
+                  >
+                    Try again
+                  </Button>
+                </div>
               ) : undefined
             }
           />
@@ -345,6 +397,25 @@ export function ScenarioRun() {
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const [deleteRunDialogOpen, setDeleteRunDialogOpen] = useState(false);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
+  // The dialogs load lazily on first use and then stay mounted, so their exit
+  // plays before they go; unmounting on close would cut it off.
+  const [dialogsRequested, setDialogsRequested] = useState({
+    cancel: false,
+    delete: false,
+    ssh: false,
+  });
+  const openDeleteRunDialog = useCallback(() => {
+    setDialogsRequested((current) => ({ ...current, delete: true }));
+    setDeleteRunDialogOpen(true);
+  }, []);
+  const openSshDialog = useCallback(() => {
+    setDialogsRequested((current) => ({ ...current, ssh: true }));
+    setSshDialogOpen(true);
+  }, []);
+  // Bumped only by a learner's machine switch, so the startup sequence plays
+  // again from a standing start instead of replaying stages that did not
+  // just change.
+  const [sequenceKey, setSequenceKey] = useState(0);
   const recapHeadingRef = useRef<HTMLHeadingElement>(null);
   const focusRecapAfterShutdownRef = useRef(false);
   const focusedRecapActivityRef = useRef<"background" | "settled" | null>(
@@ -754,6 +825,13 @@ export function ScenarioRun() {
     },
     onSettled: endRunMutation,
   });
+  const { reset: resetDestroyScenario } = destroyScenario;
+  const openCancelDialog = useCallback(() => {
+    // A failure from an earlier attempt is not replayed when the dialog opens.
+    resetDestroyScenario();
+    setDialogsRequested((current) => ({ ...current, cancel: true }));
+    setCancelDialogOpen(true);
+  }, [resetDestroyScenario]);
 
   const deleteRun = useMutation({
     mutationFn: async () => {
@@ -904,6 +982,16 @@ export function ScenarioRun() {
     };
   }, [attemptData?.activity, bootEvidence]);
 
+  // The saving screen lives in the recap chunk; fetch it while the run is
+  // live so finishing shows it at once instead of a loading frame.
+  useEffect(() => {
+    if (attemptData?.activity === "foreground") {
+      void import("@/components/app/run/RunRecap").catch(() => {
+        // The lazy boundary reports a failed load when the recap is shown.
+      });
+    }
+  }, [attemptData?.activity]);
+
   useEffect(() => {
     if (bootEvidence && selectedVmShellReady) {
       markScenarioRunBootStage({ ...bootEvidence, stage: "status-ready" });
@@ -918,6 +1006,16 @@ export function ScenarioRun() {
       selectedVm.phase === "booting" ||
       selectedVm.phase === "waiting_for_target"),
   );
+  // A machine that failed before a shell ever opened keeps the startup
+  // sequence on screen, with the failed stage stretched and tinted. A shell
+  // lost after it was usable keeps the shell status card.
+  const vmFailedBeforeShell = Boolean(
+    attemptData &&
+      selectedVm?.phase === "failed" &&
+      !selectedVmShellReady &&
+      !terminalVisible,
+  );
+  const showBootSequence = showSelectedVmPreparation || vmFailedBeforeShell;
   const showBackgroundStatus = attemptData?.activity === "background";
   const acceptanceRetryNeeded = Boolean(
     attemptData?.activity === "foreground" &&
@@ -938,6 +1036,15 @@ export function ScenarioRun() {
     attemptData !== null &&
     attemptData.phase === "solved" &&
     attemptData.activity === "foreground";
+  // The Moment Rule: only a run that turns solved while this page is open
+  // plays the completion; one that loads solved shows it still.
+  const justSolved = useJustReached(
+    attemptData ? [["run", attemptData.phase] as const] : [],
+    "solved",
+  ).has("run");
+  // The recap arrives live only when this page watched the run finish.
+  const sawForeground = useRef(false);
+  if (attemptData?.activity === "foreground") sawForeground.current = true;
   const leaseDeadlineMs =
     attemptData !== null && attemptData.outcome === "in_progress"
       ? computeLeaseDeadline(
@@ -989,6 +1096,14 @@ export function ScenarioRun() {
       selectedVmSessionRequest &&
       attemptData?.activity === "foreground",
   );
+  // The shell arrives with a rise only when it becomes ready while the page
+  // is open; reloading a run whose shell is ready shows it still.
+  const terminalJustRevealed = useJustReached(
+    selectedVm
+      ? [[selectedVm.id, showTerminal ? "shown" : "hidden"] as const]
+      : [],
+    "shown",
+  ).has(selectedVm?.id ?? "");
 
   useEffect(() => {
     if (transportReady || selectedVmShellReady) {
@@ -1070,57 +1185,40 @@ export function ScenarioRun() {
   );
   const runStatusDisplay = useMemo(() => {
     if (!attemptData) return undefined;
-    if (showBackgroundStatus) {
+    const plan = planActiveRunStatus({
+      activity: attemptData.activity,
+      outcome: attemptData.outcome,
+      phase: attemptData.phase,
+      phaseTitle: attemptData.phaseTitle,
+      preparing: showSelectedVmPreparation,
+      vmPhaseTitle: selectedVm?.phaseTitle ?? null,
+    });
+    if (plan) {
       return (
         <ActiveRunStatus
-          tone="pending"
-          word="Saving"
-          compactWord="Saving"
+          tone={plan.tone}
+          word={plan.word}
           startedAt={attemptData.createdAt}
           leaseDeadlineMs={leaseDeadlineMs}
-          compact
-          pulse
-        />
-      );
-    }
-    if (attemptData.outcome === "in_progress") {
-      if (showSelectedVmPreparation) {
-        return (
-          <ActiveRunStatus
-            tone="pending"
-            word={attemptData.phaseTitle}
-            compactWord="Starting"
-            startedAt={attemptData.createdAt}
-            leaseDeadlineMs={leaseDeadlineMs}
-            pulse
-          />
-        );
-      }
-      if (attemptData.phase === "solved") {
-        return (
-          <ActiveRunStatus
-            tone="success"
-            word="Solved"
-            compactWord="Solved"
-            startedAt={attemptData.createdAt}
-            leaseDeadlineMs={leaseDeadlineMs}
-          />
-        );
-      }
-      return (
-        <ActiveRunStatus
-          tone="live"
-          word={attemptData.phaseTitle}
-          compactWord="Live"
-          startedAt={attemptData.createdAt}
-          leaseDeadlineMs={leaseDeadlineMs}
-          pulse
+          frozenMs={plan.frozen ? attemptData.solveDurationMs : null}
+          pulse={plan.pulse}
         />
       );
     }
     switch (attemptData.outcome) {
       case "succeeded":
-        return <StatusToken tone="success" word="Solved" />;
+        // The solve time stays beside the word once the page leaves the shell.
+        return (
+          <StatusToken
+            tone="success"
+            word="Solved"
+            elapsed={
+              attemptData.solveDurationMs != null
+                ? formatClockSeconds(Math.floor(attemptData.solveDurationMs / 1000))
+                : null
+            }
+          />
+        );
       case "failed":
         return <StatusToken tone="danger" word="Failed" />;
       default:
@@ -1129,8 +1227,8 @@ export function ScenarioRun() {
   }, [
     attemptData,
     leaseDeadlineMs,
+    selectedVm?.phaseTitle,
     showSelectedVmPreparation,
-    showBackgroundStatus,
   ]);
 
   const runIsLive = attemptData?.activity === "foreground";
@@ -1145,8 +1243,11 @@ export function ScenarioRun() {
           size="sm"
           variant="destructive"
           className="hidden sm:inline-flex"
-          onClick={() => setCancelDialogOpen(true)}
+          aria-haspopup="dialog"
+          aria-expanded={cancelDialogOpen}
+          onClick={openCancelDialog}
         >
+          <BinIcon />
           End run…
         </Button>
       ) : canDeleteRun ? (
@@ -1155,12 +1256,22 @@ export function ScenarioRun() {
           size="sm"
           variant="destructive"
           className="hidden sm:inline-flex"
-          onClick={() => setDeleteRunDialogOpen(true)}
+          aria-haspopup="dialog"
+          aria-expanded={deleteRunDialogOpen}
+          onClick={openDeleteRunDialog}
         >
+          <BinIcon />
           Delete run…
         </Button>
       ) : undefined,
-    [canDeleteRun, showEndRunAction],
+    [
+      canDeleteRun,
+      cancelDialogOpen,
+      deleteRunDialogOpen,
+      openCancelDialog,
+      openDeleteRunDialog,
+      showEndRunAction,
+    ],
   );
   const runMenu = useMemo(
     () =>
@@ -1168,7 +1279,8 @@ export function ScenarioRun() {
         <DropdownMenuItem
           variant="destructive"
           className="sm:hidden"
-          onClick={() => setCancelDialogOpen(true)}
+          aria-haspopup="dialog"
+          onClick={openCancelDialog}
         >
           End run…
         </DropdownMenuItem>
@@ -1176,12 +1288,13 @@ export function ScenarioRun() {
         <DropdownMenuItem
           variant="destructive"
           className="sm:hidden"
-          onClick={() => setDeleteRunDialogOpen(true)}
+          aria-haspopup="dialog"
+          onClick={openDeleteRunDialog}
         >
           Delete run…
         </DropdownMenuItem>
       ) : undefined,
-    [canDeleteRun, showEndRunAction],
+    [canDeleteRun, openCancelDialog, openDeleteRunDialog, showEndRunAction],
   );
   const runBackTarget = attemptData
     ? getRunReturnTarget(attemptData.courseLocation)
@@ -1189,15 +1302,21 @@ export function ScenarioRun() {
   const runBackNavigation = useMemo(() => {
     if (runUsesFocusedShell || !runBackTarget) return undefined;
     return (
-      <a
-        href={runBackTarget.href}
-        aria-label={runBackTarget.label}
-        data-run-back
-        className="inline-flex min-h-9 min-w-9 items-center justify-center gap-1.5 rounded-lg px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+      <Button
+        variant="ghost"
+        size="sm"
+        className="text-muted-foreground"
+        render={
+          <a
+            href={runBackTarget.href}
+            aria-label={runBackTarget.label}
+            data-run-back
+          />
+        }
       >
         <ArrowLeft className="size-4" aria-hidden="true" />
         <span className="hidden md:inline">{runBackTarget.text}</span>
-      </a>
+      </Button>
     );
   }, [
     runBackTarget?.href,
@@ -1228,7 +1347,9 @@ export function ScenarioRun() {
             size="sm"
             variant="outline"
             disabled={!selectedVmShellReady}
-            onClick={() => setSshDialogOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={sshDialogOpen}
+            onClick={openSshDialog}
           >
             SSH command
           </Button>
@@ -1238,8 +1359,11 @@ export function ScenarioRun() {
             type="button"
             size="sm"
             variant="destructive"
-            onClick={() => setCancelDialogOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={cancelDialogOpen}
+            onClick={openCancelDialog}
           >
+            <BinIcon />
             {acceptanceRetryNeeded ? "Retry end…" : "End run…"}
           </Button>
         ) : null}
@@ -1248,8 +1372,11 @@ export function ScenarioRun() {
             type="button"
             size="sm"
             variant="destructive"
-            onClick={() => setDeleteRunDialogOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={deleteRunDialogOpen}
+            onClick={openDeleteRunDialog}
           >
+            <BinIcon />
             Delete run…
           </Button>
         ) : null}
@@ -1261,7 +1388,8 @@ export function ScenarioRun() {
   useEffect(() => {
     if (!runIsLive || !scenarioName) return;
     const previous = document.title;
-    const live = `● ${scenarioName} · intar.dev`;
+    // A word, not a bare glyph: status is a word first.
+    const live = `In progress · ${scenarioName} · intar.dev`;
     document.title = live;
     return () => {
       // On route changes HeadContent has already committed the destination
@@ -1274,7 +1402,7 @@ export function ScenarioRun() {
 
   const runDialogs = (
     <>
-      {showCancelAction && cancelDialogOpen ? (
+      {dialogsRequested.cancel ? (
         <Suspense fallback={null}>
           <LazyScenarioCancelDialog
             trigger={false}
@@ -1291,7 +1419,7 @@ export function ScenarioRun() {
           />
         </Suspense>
       ) : null}
-      {canDeleteRun && deleteRunDialogOpen ? (
+      {dialogsRequested.delete ? (
         <Suspense fallback={null}>
           <LazyDeleteRunDialog
             trigger={false}
@@ -1306,7 +1434,7 @@ export function ScenarioRun() {
           />
         </Suspense>
       ) : null}
-      {selectedVm && selectedVmSessionRequest && sshDialogOpen ? (
+      {selectedVm && selectedVmSessionRequest && dialogsRequested.ssh ? (
         <Suspense fallback={null}>
           <LazyNativeSshDialog
             vmName={selectedVm.scenarioVmName}
@@ -1321,15 +1449,19 @@ export function ScenarioRun() {
 
   const errorAlerts = (
     <>
-      {attempt.error ? (
+      {/* With nothing cached the error takes the content's place below. This
+          is the stale-data case: the run is on screen and a refresh failed. */}
+      {attempt.error && attemptData ? (
         <Alert variant="destructive">
           <AlertTitle>Could not load this run</AlertTitle>
           <AlertDescription>
-            Refresh the page or return to My runs and try again.
+            The latest changes did not load. Try again in a moment.
           </AlertDescription>
         </Alert>
       ) : null}
 
+      {/* The dialog already raised and announced this failure; what is left
+          here is a still reminder, so it is not marked `just`. */}
       {destroyScenario.error && !cancelDialogOpen && !showFinishBar ? (
         <Alert variant="destructive">
           <AlertTitle>Could not end run</AlertTitle>
@@ -1346,6 +1478,13 @@ export function ScenarioRun() {
       <PageShell>
         {runDialogs}
         {errorAlerts}
+        {attempt.error ? (
+          <ErrorState
+            title="Could not load this run"
+            description="Check your connection and try again."
+            onRetry={() => attempt.refetch()}
+          />
+        ) : null}
         {!attempt.error ? (
           <p
             className="flex min-h-48 items-center justify-center text-sm text-muted-foreground"
@@ -1385,13 +1524,15 @@ export function ScenarioRun() {
 
   const runRecap = (
     <Suspense
+      // Neutral and silent: the saving sequence is what the learner reads, and
+      // the chunk is preloaded while the run is live, so this rarely shows.
       fallback={
-        <section
-          className="flex flex-1 items-center justify-center py-8 text-sm text-muted-foreground"
-          role="status"
+        <div
+          aria-hidden="true"
+          className="mx-auto w-full max-w-[36rem] flex-1 py-8"
         >
-          Loading your recap…
-        </section>
+          <Skeleton className="h-56 w-full rounded-xl" />
+        </div>
       }
     >
       <LazyRunRecap
@@ -1399,6 +1540,7 @@ export function ScenarioRun() {
         courseLocation={attemptData.courseLocation}
         nextLecture={nextCourseLecture}
         headingRef={recapHeadingRef}
+        animate={sawForeground.current}
       />
     </Suspense>
   );
@@ -1446,29 +1588,48 @@ export function ScenarioRun() {
       actions={runActions}
       returnTarget={getRunReturnTarget(attemptData.courseLocation)}
       guidance={guidanceProps}
+      solvedBeat={justSolved}
+      completion={
+        showFinishBar ? (
+          <RunCompletionBar
+            canFinish={attemptData.canDestroy}
+            pending={destroyScenario.isPending}
+            error={Boolean(destroyScenario.error)}
+            onFinish={requestDestroyScenario}
+          />
+        ) : null
+      }
     >
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 pt-1 pb-3 [@media(max-height:500px)]:!pb-2">
+      <RunWorkArea>
             <div className="shrink-0 space-y-2 empty:hidden">
               {errorAlerts}
             </div>
 
             {showFinishBar ? (
-              <RunCompletionBar
-                canFinish={attemptData.canDestroy}
-                pending={destroyScenario.isPending}
-                error={Boolean(destroyScenario.error)}
-                onFinish={requestDestroyScenario}
-              />
+              <RunCompletionSlot>
+                <RunCompletionBar
+                  canFinish={attemptData.canDestroy}
+                  pending={destroyScenario.isPending}
+                  error={Boolean(destroyScenario.error)}
+                  onFinish={requestDestroyScenario}
+                  animate={justSolved}
+                />
+              </RunCompletionSlot>
             ) : null}
 
             <section
-              aria-label="Terminal"
+              // While the startup sequence shows there is no terminal to
+              // name, and the sequence names itself.
+              aria-label={showTerminal ? "Terminal" : undefined}
               className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-2"
             >
               <ScenarioVmSelector
                 vms={attemptData.vms}
                 selectedVmId={selectedVmId}
-                onSelect={setSelectedVmId}
+                onSelect={(vmId) => {
+                  setSelectedVmId(vmId);
+                  setSequenceKey((key) => key + 1);
+                }}
               />
 
               {/* One transport instance for the whole run. It starts during VM
@@ -1482,7 +1643,8 @@ export function ScenarioRun() {
                   className={cn(
                     "relative min-h-0 min-w-0 flex-1",
                     showTerminal
-                      ? "animate-in fade-in slide-in-from-bottom-1 duration-200"
+                      ? terminalJustRevealed &&
+                          "animate-in fade-in-0 slide-in-from-bottom-[length:var(--move-swap)] duration-(--duration-moderate) ease-enter"
                       : "hidden",
                   )}
                 >
@@ -1498,7 +1660,7 @@ export function ScenarioRun() {
                       ) : null
                     }
                   >
-                    <LazyWebSshTerminal
+                    <RunTerminal
                       vmName={selectedVm.scenarioVmName}
                       sessionRequest={selectedVmSessionRequest!}
                       variant="embedded"
@@ -1522,25 +1684,51 @@ export function ScenarioRun() {
               {showTerminal ? null : (
                 <div
                   aria-label={
-                    showSelectedVmPreparation
-                      ? "Workspace startup progress"
-                      : undefined
+                    showBootSequence ? "Workspace startup progress" : undefined
                   }
                   className="relative flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto"
-                  role={showSelectedVmPreparation ? "region" : undefined}
-                  tabIndex={showSelectedVmPreparation ? 0 : undefined}
+                  role={showBootSequence ? "region" : undefined}
+                  tabIndex={showBootSequence ? 0 : undefined}
                 >
-                  {showSelectedVmPreparation ? (
+                  {showBootSequence ? (
                     <div
-                      className="m-auto w-full py-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none sm:px-1 sm:py-6"
+                      className="m-auto w-full py-4 transition-transform duration-(--duration-moderate) ease-enter motion-reduce:transition-none sm:px-1 sm:py-6"
                       data-run-sequence-frame
                     >
                       <ScenarioStepScreen
+                        key={sequenceKey}
                         title={bootScreenCopy.title}
                         description={bootScreenCopy.description}
                         steps={bootSteps}
                         listLabel="Startup steps"
                         handoffFrom={`run-start:${attemptData.scenarioId}`}
+                        footer={
+                          vmFailedBeforeShell ? (
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <p className="text-metadata">
+                                The run stopped at stage{" "}
+                                {Math.max(
+                                  1,
+                                  bootSteps.findIndex(
+                                    (step) => step.state === "failed",
+                                  ) + 1,
+                                )}
+                                .
+                              </p>
+                              {showEndRunAction ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  aria-haspopup="dialog"
+                                  aria-expanded={cancelDialogOpen}
+                                  onClick={openCancelDialog}
+                                >
+                                  End this run
+                                </Button>
+                              ) : null}
+                            </div>
+                          ) : undefined
+                        }
                       />
                     </div>
                   ) : (
@@ -1556,7 +1744,7 @@ export function ScenarioRun() {
                 </div>
               )}
             </section>
-      </div>
+      </RunWorkArea>
     </RunWorkspaceShell>
   );
 }
@@ -1568,6 +1756,8 @@ function RunWorkspaceShell({
   actions,
   returnTarget,
   guidance,
+  solvedBeat = false,
+  completion = null,
   children,
 }: {
   before?: ReactNode;
@@ -1576,43 +1766,184 @@ function RunWorkspaceShell({
   actions?: ReactNode;
   returnTarget: { href: string; label: string; text: string };
   guidance: RunLearningPanelProps;
+  /** The run turned solved while this page was open. */
+  solvedBeat?: boolean;
+  /** The finish block, shown in the phone sheet while it is open. */
+  completion?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <RunPageFrame>
+      <RunWorkspaceBody
+        before={before}
+        title={title}
+        status={status}
+        actions={actions}
+        returnTarget={returnTarget}
+        guidance={guidance}
+        solvedBeat={solvedBeat}
+        completion={completion}
+      >
+        {children}
+      </RunWorkspaceBody>
+    </RunPageFrame>
+  );
+}
+
+// The frame follows visualViewport.height while the on-screen keyboard is up,
+// so the prompt never sits under it, and it carries the lifted sheet state
+// that the dock, the landscape bar buttons and the completion beat share.
+function RunPageFrame({ children }: { children: ReactNode }) {
+  const frameRef = useRef<HTMLDivElement>(null);
+  const keyboardUp = useRunKeyboard(frameRef);
+  const frame = useMemo(() => ({ keyboardUp }), [keyboardUp]);
+  const sheet = useRunSheetController();
+
+  return (
+    <RunFrameProvider value={frame}>
+      <RunSheetProvider value={sheet}>
+        <div
+          ref={frameRef}
+          data-run-page
+          data-kb={keyboardUp ? "" : undefined}
+          // Safe areas are padded once, here; the dock and the sheets carry
+          // the bottom inset themselves.
+          className="group/run relative flex h-[var(--run-vh,100dvh)] max-h-[var(--run-vh,100dvh)] min-h-0 min-w-0 flex-col overflow-hidden bg-canvas pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] [--run-bar-h:3rem] dock:[--run-bar-h:3.25rem] short:[--run-bar-h:2.5rem]"
+        >
+          {children}
+        </div>
+      </RunSheetProvider>
+    </RunFrameProvider>
+  );
+}
+
+function RunWorkspaceBody({
+  before,
+  title,
+  status,
+  actions,
+  returnTarget,
+  guidance,
+  solvedBeat,
+  completion,
+  children,
+}: {
+  before?: ReactNode;
+  title: string;
+  status?: ReactNode;
+  actions?: ReactNode;
+  returnTarget: { href: string; label: string; text: string };
+  guidance: RunLearningPanelProps;
+  solvedBeat: boolean;
+  completion: ReactNode;
+  children: ReactNode;
+}) {
+  const { keyboardUp } = useRunFrame();
+  const sheet = useRunSheet();
+  const docked = useMediaQuery(RUN_QUERY.docked);
+  const split = useMediaQuery(RUN_QUERY.split);
+  // Reading and typing take turns on a phone: raising the keyboard lowers the
+  // sheet. On a tablet the panel folds away instead, so the terminal keeps
+  // the room; a hardware keyboard never raises either.
+  const folded = keyboardUp && docked && !split;
+  const closeSheet = sheet?.closeSheet;
+  useEffect(() => {
+    if (keyboardUp) closeSheet?.();
+  }, [keyboardUp, closeSheet]);
+
+  // When the last check verifies the circuit closes, then (650ms in) the
+  // keyboard lowers and, on a phone, the sheet rises to peek on the finish
+  // block. A run that loads solved does nothing.
+  const openSheet = sheet?.openSheet;
+  useEffect(() => {
+    if (!solvedBeat) return;
+    const timer = window.setTimeout(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active.closest("[data-run-terminal]")) {
+        active.blur();
+      }
+      if (!window.matchMedia(RUN_QUERY.docked).matches) {
+        openSheet?.("checks", { detent: "peek", opener: null });
+      }
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [solvedBeat, openSheet]);
+
+  return (
+    <>
       {before}
+      {/* The run bar and check bar span the full width above the split. */}
+      <div className="relative shrink-0">
+        <RunWorkspaceHeader
+          title={title}
+          status={status}
+          actions={actions}
+          returnTarget={returnTarget}
+        />
+        <RunCheckBar
+          probes={guidance.probes}
+          objectives={guidance.objectives}
+          vmName={guidance.vmName ?? null}
+          phase={guidance.phase}
+          className="mx-4 mb-2 dock:hidden"
+        />
+        <RunCheckToast
+          probes={guidance.probes}
+          objectives={guidance.objectives}
+          vmName={guidance.vmName ?? null}
+          active={!docked && !(sheet?.open ?? false)}
+        />
+      </div>
       <div
         data-run-workspace
-        className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden [@media(min-width:960px)]:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
+        className={cn(
+          "grid min-h-0 min-w-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden split:grid-cols-[minmax(0,2fr)_minmax(18rem,1fr)] split:grid-rows-[minmax(0,1fr)]",
+          folded
+            ? "dock:grid-rows-[minmax(0,1fr)_0]"
+            : "dock:grid-rows-[minmax(0,3fr)_minmax(0,2fr)]",
+        )}
       >
         <div
           data-run-work-area
           className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-canvas"
         >
-          <RunWorkspaceHeader
-            title={title}
-            status={status}
-            actions={actions}
-            returnTarget={returnTarget}
-            mobileGuidance={<RunLearningPanelMobile {...guidance} />}
-          />
           {children}
         </div>
-        <RunLearningPanel {...guidance} />
+        <RunLearningPanel
+          {...guidance}
+          {...(folded ? { className: "invisible" } : {})}
+        />
       </div>
-    </RunPageFrame>
+      <RunLearningPanelMobile {...guidance} completion={completion} />
+    </>
   );
 }
 
-function RunPageFrame({ children }: { children: ReactNode }) {
+// The terminal box sits 0.5rem from the screen sides on phones and takes the
+// main area's 0.75rem from bp-md. A landscape phone carries the bottom safe
+// area itself, since it has no dock.
+function RunWorkArea({ children }: { children: ReactNode }) {
   return (
-    <div
-      data-run-page
-      className="flex h-[100dvh] max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-canvas"
-    >
+    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-2 pt-1 pb-2 md:px-3 md:pb-3 short:pb-[max(0.5rem,env(safe-area-inset-bottom))] group-data-[kb]/run:short:pb-2">
       {children}
     </div>
   );
+}
+
+// On a phone the finish block moves into the sheet while it is open, so the
+// two never stand side by side as twin buttons.
+function RunCompletionSlot({ children }: { children: ReactNode }) {
+  const sheet = useRunSheet();
+  const docked = useMediaQuery(RUN_QUERY.docked);
+  return !docked && sheet?.open ? null : <>{children}</>;
+}
+
+// The key row rides on the on-screen keyboard: phones and tablets only, and
+// only while the terminal holds focus with the keyboard up.
+function RunTerminal(props: ComponentProps<typeof LazyWebSshTerminal>) {
+  const { keyboardUp } = useRunFrame();
+  const split = useMediaQuery(RUN_QUERY.split);
+  return <LazyWebSshTerminal {...props} keyRow={keyboardUp && !split} />;
 }
 
 function RunWorkspaceHeader({
@@ -1620,49 +1951,84 @@ function RunWorkspaceHeader({
   status,
   actions,
   returnTarget,
-  mobileGuidance,
 }: {
   title: string;
   status?: ReactNode;
   actions?: ReactNode;
   returnTarget: { href: string; label: string; text: string };
-  mobileGuidance?: ReactNode;
 }) {
+  const sheet = useRunSheet();
+  const short = useMediaQuery(RUN_QUERY.short);
+  const opens = (section: "checks" | "lecture") =>
+    sheet?.open && sheet.section === section;
+
   return (
     <header
-      className="flex shrink-0 flex-wrap items-center gap-2 bg-canvas px-3 pt-2 pb-1"
+      // One slim row on a phone: back, title, status. The run actions sit in
+      // a row under it and give way to the keyboard. In landscape the bar is
+      // 2.5rem and hides while the keyboard is up; the check bar stays.
+      className="flex min-h-(--run-bar-h) shrink-0 flex-wrap items-center gap-x-2 gap-y-1 bg-canvas px-2 pt-2 pb-1 md:px-3 short:flex-nowrap short:py-0 short:group-data-[kb]/run:hidden"
       data-run-navigation
       data-run-workspace-header
     >
       {/* Keep this a document navigation. Leaving the document guarantees that
           the terminal transport is released before the lecture loads. */}
-      <a
-        href={returnTarget.href}
-        className={buttonVariants({
-          variant: "ghost",
-          className:
-            "-ml-2 shrink-0 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11",
-        })}
-        aria-label={returnTarget.label}
-        data-run-back
+      <Button
+        variant="ghost"
+        size="sm"
+        className="-ml-2 shrink-0"
+        render={
+          <a
+            href={returnTarget.href}
+            aria-label={returnTarget.label}
+            data-run-back
+          />
+        }
       >
         <ArrowLeft className="size-4" aria-hidden="true" />
-        {returnTarget.text}
-      </a>
-      <h1 className="min-w-[min(16rem,100%)] flex-1 basis-64 text-[0.9375rem] leading-snug font-semibold tracking-[-0.01em]">
+        <span className="max-md:sr-only">{returnTarget.text}</span>
+      </Button>
+      {/* A title wraps; the bar never cuts it off. */}
+      <h1 className="min-w-0 flex-1 text-[0.9375rem] leading-snug font-semibold tracking-[-0.01em] md:min-w-[min(16rem,100%)] short:truncate">
         {title}
       </h1>
-      {/* Below sm the live status takes its own line so the guidance trigger
-          and run actions share one tidy row instead of wrapping raggedly. */}
-      <div className="flex max-w-full flex-wrap items-center gap-2">
-        {status ? (
-          <div className="mr-1 min-w-0 max-sm:mr-0 max-sm:basis-full">
-            {status}
-          </div>
-        ) : null}
-        {mobileGuidance}
-        {actions}
-      </div>
+      {status ? <div className="min-w-0 shrink-0">{status}</div> : null}
+      {short && sheet ? (
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Checks"
+            aria-haspopup="dialog"
+            aria-expanded={opens("checks")}
+            data-run-learning-panel-trigger
+            onClick={(event) =>
+              sheet.openSheet("checks", { opener: event.currentTarget })
+            }
+          >
+            <ListChecks aria-hidden="true" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Lecture and hints"
+            aria-haspopup="dialog"
+            aria-expanded={opens("lecture")}
+            onClick={(event) =>
+              sheet.openSheet("lecture", { opener: event.currentTarget })
+            }
+          >
+            <BookOpen aria-hidden="true" />
+          </Button>
+        </div>
+      ) : null}
+      {actions ? (
+        <div className="max-md:order-last max-md:flex max-md:basis-full max-md:justify-end max-md:group-data-[kb]/run:hidden short:order-none short:basis-auto">
+          {actions}
+        </div>
+      ) : null}
     </header>
   );
 }
@@ -1836,18 +2202,17 @@ async function navigateToRunCourse(
 function ActiveRunStatus({
   tone,
   word,
-  compactWord,
   startedAt,
   leaseDeadlineMs,
-  compact = false,
+  frozenMs = null,
   pulse = false,
 }: {
   tone: StatusTone;
   word: string;
-  compactWord: string;
   startedAt: number;
   leaseDeadlineMs: number | null;
-  compact?: boolean;
+  /** The clock stops here once the run is solved. */
+  frozenMs?: number | null;
   pulse?: boolean;
 }) {
   return (
@@ -1855,20 +2220,15 @@ function ActiveRunStatus({
       <StatusToken
         tone={tone}
         word={word}
-        compactWord={compactWord}
         pulse={pulse}
-        clock={leaseDeadlineMs === null && !compact ? { startedAt } : undefined}
+        clock={
+          leaseDeadlineMs === null ? { startedAt, frozenMs } : undefined
+        }
       />
       {leaseDeadlineMs !== null ? (
         <>
-          <span
-            aria-hidden="true"
-            className={cn("h-3 w-px bg-border", compact && "hidden sm:block")}
-          />
-          <LeaseCountdown
-            deadlineMs={leaseDeadlineMs}
-            {...(compact ? { className: "hidden sm:inline-flex" } : {})}
-          />
+          <Separator orientation="vertical" aria-hidden="true" className="h-3" />
+          <LeaseCountdown deadlineMs={leaseDeadlineMs} />
         </>
       ) : null}
     </span>

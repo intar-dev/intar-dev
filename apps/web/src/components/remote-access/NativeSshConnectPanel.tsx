@@ -10,6 +10,9 @@ import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Download, KeyRound, LoaderCircle } from "lucide-react";
 import { useSession } from "@/components/app/hooks/useSession";
+import { AsyncLabel } from "@/components/app/patterns/AsyncLabel";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -75,6 +78,28 @@ class NativeSshRequestError extends Error {
 }
 
 type CopyTarget = "command" | "knownHosts" | null;
+
+// Hold a copy confirmation for duration-flash, then return to "Copy".
+const COPIED_MS = 1600;
+
+// The thrown strings are for developers; the learner reads a sentence that
+// says what happened and what to do. Server-sent messages are already plain.
+const LEARNER_ERRORS: Record<string, string> = {
+  "temporary SSH key was not accepted by the route":
+    "The SSH route did not accept the temporary key. Try again.",
+  "native SSH route returned an unexpected temporary key":
+    "The SSH route returned an unexpected key. Try again.",
+  "native SSH session returned an invalid payload":
+    "The SSH route returned details that could not be used. Try again.",
+  "clipboard is not available":
+    "Copy is not available in this browser. Select the text and copy it.",
+  "downloads are not available in this browser":
+    "Downloads are not available in this browser. Use another browser to save the key.",
+};
+
+export function learnerSshError(message: string): string {
+  return LEARNER_ERRORS[message] ?? message;
+}
 
 // Issues a native-SSH route on mount and shows the credentials. Rendered
 // inline on the run page and inside NativeSshDialog's dialog.
@@ -211,6 +236,12 @@ export function NativeSshConnectPanel({
     return () => window.clearTimeout(timeout);
   }, [openSession, requestScope, sessionMutation.data]);
 
+  useEffect(() => {
+    if (copied === null) return;
+    const timeout = window.setTimeout(() => setCopied(null), COPIED_MS);
+    return () => window.clearTimeout(timeout);
+  }, [copied]);
+
   const copyText = async (value: string, target: Exclude<CopyTarget, null>) => {
     if (typeof navigator === "undefined" || !navigator.clipboard) {
       throw new Error("clipboard is not available");
@@ -269,9 +300,12 @@ export function NativeSshConnectPanel({
   if (sessionMutation.error) {
     return (
       <div className="space-y-3">
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-          {sessionMutation.error.message}
-        </div>
+        <Alert variant="destructive" just>
+          <AlertTitle>Could not open SSH access</AlertTitle>
+          <AlertDescription>
+            {learnerSshError(sessionMutation.error.message)}
+          </AlertDescription>
+        </Alert>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             type="button"
@@ -304,9 +338,13 @@ export function NativeSshConnectPanel({
   ) {
     return (
       <div className="space-y-3">
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-          The temporary private key is not available in this browser session.
-        </div>
+        <Alert>
+          <AlertTitle>Temporary key not available</AlertTitle>
+          <AlertDescription>
+            This browser session no longer has the private key. Create a new
+            one.
+          </AlertDescription>
+        </Alert>
         <Button
           type="button"
           size="sm"
@@ -380,14 +418,14 @@ export function NativeSshConnectPanel({
       ) : null}
 
       {downloadError ? (
-        <p role="alert" className="text-sm text-destructive">
-          {downloadError}
-        </p>
+        <InlineFeedback tone="error">
+          {learnerSshError(downloadError)}
+        </InlineFeedback>
       ) : null}
       {persistenceWarning ? (
         <p
           role="status"
-          className="rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-sm"
+          className="rounded-lg border border-warning-border bg-warning-subtle px-3 py-2 text-support"
         >
           {persistenceWarning}
         </p>
@@ -451,7 +489,7 @@ export function NativeSshConnectPanel({
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4 text-sm text-muted-foreground">
         {session.native.authMode === "profile_keys" ? (
-          <span className="font-mono text-xs">
+          <span className="text-code">
             {session.native.publicHostKeyFingerprintSha256}
           </span>
         ) : (
@@ -504,7 +542,7 @@ function SessionFact(props: {
     <div>
       <p className="text-label">{props.label}</p>
       <p
-        className={`mt-1 text-sm ${props.mono ? "font-mono text-xs" : "font-medium"}`}
+        className={`mt-1 ${props.mono ? "text-code break-all" : "text-sm font-medium"}`}
       >
         {props.value}
       </p>
@@ -541,7 +579,12 @@ function CopyableTextBlock(props: {
             });
           }}
         >
-          {props.copied ? "Copied" : "Copy"}
+          <AsyncLabel
+            state={props.copied ? "done" : "idle"}
+            idle="Copy"
+            pending={null}
+            done="Copied"
+          />
         </Button>
       </div>
       <Textarea
@@ -549,15 +592,13 @@ function CopyableTextBlock(props: {
         value={props.value}
         readOnly
         rows={props.rows ?? 3}
-        className="font-mono text-xs"
+        className="text-code"
       />
       <span role="status" aria-live="polite" className="sr-only">
         {props.copied ? `${props.label} copied.` : ""}
       </span>
       {copyError ? (
-        <p role="alert" className="text-xs text-destructive">
-          {copyError}
-        </p>
+        <InlineFeedback tone="error">{learnerSshError(copyError)}</InlineFeedback>
       ) : null}
     </div>
   );

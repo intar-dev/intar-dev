@@ -67,6 +67,7 @@
   --font-mono:
     "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     monospace;
+  --font-mono--font-feature-settings: "liga" 0, "calt" 0;
 
   /* Motion: standard for hover and color, enter for reveals and panels,
      confirm (a small overshoot) only for a check turning verified. */
@@ -75,12 +76,12 @@
   --ease-exit: cubic-bezier(0.4, 0, 1, 1);
   --ease-confirm: cubic-bezier(0.34, 1.56, 0.64, 1);
 
-  --animate-rise: intar-rise 0.5s var(--ease-enter) both;
-  --animate-pop: intar-pop 0.42s var(--ease-confirm) both;
-  --animate-live: intar-live 2.2s var(--ease-standard) infinite;
-  --animate-shimmer: intar-shimmer 1.6s linear infinite;
-  --animate-meter: intar-meter 1s var(--ease-enter) both;
-  --animate-verified: intar-verified 1.6s var(--ease-standard);
+  --animate-rise: intar-rise var(--duration-reveal) var(--ease-enter) both;
+  --animate-pop: intar-pop var(--duration-confirm) var(--ease-confirm) both;
+  --animate-live: intar-live var(--duration-live) var(--ease-standard) infinite;
+  --animate-shimmer: intar-shimmer var(--duration-flash) linear infinite;
+  --animate-meter: intar-meter var(--duration-meter) var(--ease-enter) both;
+  --animate-verified: intar-verified var(--duration-flash) var(--ease-standard);
   --animate-caret: intar-caret 1.06s steps(1) infinite;
 
   @keyframes intar-rise {
@@ -239,7 +240,6 @@
   --control-compact: 2rem;
   --control-standard: 2.25rem;
   --control-prominent: 2.75rem;
-  --replay-control-size: var(--control-compact);
   --page-inset: 1rem;
   --app-bar-h: 3.25rem;
   /* Native <select> chevron, tinted like --muted-foreground. */
@@ -480,57 +480,16 @@
   }
 }
 
-/* The learner recap is intentionally flat and touch-safe. Keep the vendor
- * player adjustments inside that surface so operations replay tools retain
- * their dense native controls. */
-[data-run-recap-replay-surface]
-  .ap-player
-  .ap-overlay-start
-  .ap-play-button
-  svg {
-  filter: none !important;
-}
-
-[data-run-recap-replay-surface] div.ap-player div.ap-control-bar {
-  height: var(--replay-control-size) !important;
-}
-
-/* Asciinema reserves 32px for its native control bar in JavaScript. The
- * learner touch bar is 44px plus its 2px separator, so reserve the exact
- * difference outside the calculated terminal height instead of covering the
- * final terminal row. */
-[data-run-recap-replay-surface] div.ap-wrapper div.ap-player {
-  padding-bottom: calc(var(--replay-control-size) + 2px - 32px) !important;
-}
-
-[data-run-recap-replay-surface] div.ap-control-bar button.ap-button {
-  display: inline-flex !important;
-  width: var(--replay-control-size) !important;
-  min-width: var(--replay-control-size) !important;
-  height: var(--replay-control-size) !important;
-  min-height: var(--replay-control-size) !important;
-  align-items: center;
-  justify-content: center;
-  margin: 0 !important;
-  padding: 0 !important;
-}
-
-[data-run-recap-replay-surface]
-  div.ap-control-bar
-  .ap-progressbar
-  .ap-bar
-  .ap-gutter {
-  top: calc((var(--replay-control-size) - 4px) / 2) !important;
-}
-
-[data-run-recap-replay-surface]
-  div.ap-control-bar
-  button.ap-button:focus-visible {
+/* The learner replay has its own controls (parity: replay at the end of the
+   file). What remains here is the operations viewer, which keeps the
+   player's own bar: its clipped buttons and text layer show the ring inset. */
+.run-artifact-player div.ap-control-bar button.ap-button:focus-visible,
+.run-artifact-player div.ap-term pre.ap-term-text:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: -3px;
 }
 
-[data-run-recap-replay-surface] .ap-wrapper:focus-within .ap-control-bar {
+.run-artifact-player .ap-wrapper:focus-within .ap-control-bar {
   opacity: 1 !important;
 }
 
@@ -539,6 +498,8 @@
 @media (max-height: 500px) and (min-width: 640px) {
   [data-run-sequence-screen] {
     --card-spacing: 1rem;
+    /* The rail runs the full width instead of the 36rem column. */
+    max-width: none;
   }
 
   [data-run-sequence-steps] {
@@ -587,6 +548,9 @@
 
   [data-run-sequence-step][aria-current="step"] [data-run-sequence-detail] {
     display: block;
+  }
+
+  [data-run-sequence-step][aria-current="step"] [data-run-sequence-detail] p {
     font-size: 0.75rem;
     line-height: 1.35;
   }
@@ -622,17 +586,26 @@
 /* Lecture and course titles where the content begins. */
 @utility text-content-title {
   font-family: var(--font-heading);
-  font-size: clamp(1.75rem, 1.6rem + 0.6vw, 2rem);
+  font-size: 2rem;
   line-height: 1.15;
   font-weight: 600;
   letter-spacing: -0.02em;
+
+  @media (width < 40rem) {
+    font-size: 1.75rem;
+  }
 }
 
 /* The one-sentence summary under a content title. */
 @utility text-lede {
-  font-size: clamp(1.125rem, 1.1rem + 0.15vw, 1.1875rem);
+  font-size: 1.1875rem;
   line-height: 1.5;
+  max-width: 46ch;
   color: var(--color-muted-foreground);
+
+  @media (width < 40rem) {
+    font-size: 1.125rem;
+  }
 }
 
 @utility text-page-title {
@@ -661,16 +634,24 @@
 
 /* Lecture and course reading text: 17px on a 1.65 line (16px on phones). */
 @utility text-prose {
-  font-size: clamp(1rem, 0.97rem + 0.15vw, 1.0625rem);
+  font-size: 1.0625rem;
   line-height: 1.65;
+
+  @media (width < 40rem) {
+    font-size: 1rem;
+  }
 }
 
 @utility text-prose-heading {
   font-family: var(--font-heading);
-  font-size: clamp(1.25rem, 1.2rem + 0.25vw, 1.375rem);
+  font-size: 1.375rem;
   line-height: 1.3;
   font-weight: 600;
   letter-spacing: -0.012em;
+
+  @media (width < 40rem) {
+    font-size: 1.25rem;
+  }
 }
 
 @utility text-prose-subheading {
@@ -716,6 +697,7 @@
   font-family: var(--font-mono);
   font-size: 0.8125rem;
   line-height: 1.6;
+  font-variant-ligatures: none;
 }
 
 /* Reading text caps at about 70 characters; the column around it stays fluid. */
@@ -788,6 +770,7 @@
     line-height: 1.5;
     font-kerning: normal;
     font-optical-sizing: auto;
+    font-synthesis: none;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -800,6 +783,12 @@
   h4 {
     font-family: var(--font-heading);
     text-wrap: balance;
+  }
+
+  /* Plex stops at 600 for strong text; preflight's `bolder` would reach 700. */
+  b,
+  strong {
+    font-weight: 600;
   }
 
   p {
@@ -868,10 +857,6 @@
 }
 
 @media (pointer: coarse) {
-  :root {
-    --replay-control-size: 2.75rem;
-  }
-
   button:not(:disabled),
   input:not([type="hidden"]):not(:disabled),
   select:not(:disabled),
@@ -884,7 +869,6 @@
   [data-slot="select-trigger"],
   [data-slot="native-select"],
   [data-slot="sidebar-trigger"],
-  [data-slot="sidebar-menu-button"],
   [data-slot="select-item"],
   [data-slot="dropdown-menu-item"],
   [data-slot="dropdown-menu-checkbox-item"],
@@ -910,10 +894,11 @@
 [data-run-sequence-connector] > [data-fill] {
   position: absolute;
   inset: 0;
-  background: color-mix(in oklab, var(--success) 60%, transparent);
+  background: var(--success);
   transform: scaleY(0);
   transform-origin: top;
-  transition: transform 500ms var(--ease-enter) 150ms;
+  transition: transform var(--duration-reveal) var(--ease-enter)
+    var(--duration-fast);
 }
 
 [data-run-sequence-connector][data-filled] > [data-fill] {
@@ -935,9 +920,9 @@
 }
 
 .draw-check path {
-  stroke-dasharray: 24;
-  stroke-dashoffset: 24;
-  animation: intar-draw 300ms var(--ease-enter) 80ms forwards;
+  stroke-dasharray: var(--draw-length, 24);
+  stroke-dashoffset: var(--draw-length, 24);
+  animation: intar-draw var(--duration-slow) var(--ease-enter) 60ms forwards;
 }
 
 @keyframes intar-sweep {
@@ -956,7 +941,8 @@
   width: 40%;
   border-radius: inherit;
   background: var(--primary);
-  animation: intar-sweep 2.2s var(--ease-standard) 300ms both;
+  animation: intar-sweep var(--duration-live) var(--ease-standard)
+    var(--duration-slow) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -979,6 +965,7 @@
   --duration-slow: 300ms;
   --duration-confirm: 420ms;
   --duration-reveal: 500ms;
+  --duration-meter: 1000ms;
   --duration-flash: 1600ms;
   --duration-hold: 2400ms;
   --duration-live: 2200ms;
@@ -1060,12 +1047,6 @@ html {
     height var(--duration-moderate) var(--ease-enter);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  [data-nav-ghost][data-glide] {
-    transition-property: opacity !important;
-  }
-}
-
 /* Course outline: the raised card glides to the current lecture, and a
    quieter highlight follows the pointer over the other rows. Both are
    absolutely placed, so their height may animate without reflowing a row. */
@@ -1124,21 +1105,28 @@ html {
   --turn-nudge: 14deg;
 }
 
+/* Every turn token is 0deg under reduced motion, like the move tokens. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --turn-nudge: 0deg;
+  }
+}
+
 [data-bin-lid] {
   transform-box: view-box;
   transform-origin: 3px 6px;
-  transition: transform 200ms var(--ease-enter);
+  transition: transform var(--duration-moderate) var(--ease-enter);
 }
 
-:is(button, a):is(:hover, :focus-visible, [aria-expanded="true"])
+:is(button, a, [role="menuitem"]):is(
+    :hover,
+    :focus-visible,
+    [aria-expanded="true"],
+    [data-highlighted]
+  )
   [data-bin-lid] {
-  transform: translateY(-1px) rotate(calc(-1 * var(--turn-nudge)));
-}
-
-@media (prefers-reduced-motion: reduce) {
-  [data-bin-lid] {
-    transform: none !important;
-  }
+  transform: translateY(calc(-1 * var(--move-press)))
+    rotate(calc(-1 * var(--turn-nudge)));
 }
 
 /* Rolling digits: each changed digit sits in a window taller than its glyph,
@@ -1186,8 +1174,8 @@ html {
 }
 
 .rolling-digit > [data-in] {
-  animation: intar-digit-in 300ms var(--ease-enter) calc(var(--k, 0) * 40ms)
-    both;
+  animation: intar-digit-in var(--duration-slow) var(--ease-enter)
+    calc(var(--k, 0) * 40ms) both;
 }
 
 /* The outgoing digit is generated content, so it never reaches textContent,
@@ -1195,8 +1183,8 @@ html {
 .rolling-digit::before {
   content: attr(data-prev);
   content: attr(data-prev) / "";
-  animation: intar-digit-out 300ms var(--ease-enter) calc(var(--k, 0) * 40ms)
-    both;
+  animation: intar-digit-out var(--duration-slow) var(--ease-enter)
+    calc(var(--k, 0) * 40ms) both;
 }
 
 /* Landing: the run workspace leans back under the hero and settles flat as it
@@ -1227,4 +1215,952 @@ html {
    closes (Base UI restores the trigger afterwards). */
 body:has([data-slot="dialog-content"][data-open]) a[href="#main-content"] {
   visibility: hidden;
+}
+
+/* parity: catalog */
+/* A word that joins a line rises move-swap and fades in. Under reduced motion
+   --move-swap is 0px, so it only fades. */
+@keyframes catalog-swap {
+  from {
+    opacity: 0;
+    transform: translateY(var(--move-swap));
+  }
+}
+
+.catalog-swap {
+  animation: catalog-swap var(--duration-moderate) var(--ease-enter) both;
+}
+
+/* parity: outline */
+@keyframes outline-roll {
+  from {
+    opacity: 0;
+    transform: translateY(var(--move-swap));
+  }
+}
+
+.animate-roll {
+  animation: outline-roll var(--duration-moderate) var(--ease-enter);
+}
+
+/* parity: lecture */
+/* Reading rhythm: paragraphs 1em apart, a heading ties to the text after it
+   (1.75em above, 0.5em below), rules sit 2em from their neighbours. */
+@utility prose-flow {
+  & > * {
+    margin: 0;
+  }
+  & > * + * {
+    margin-top: 1em;
+  }
+  & > h2 {
+    margin-top: 1.75em;
+  }
+  & > h3 {
+    margin-top: 1.5em;
+  }
+  & > h4 {
+    margin-top: 1.25em;
+  }
+  & > :is(h2, h3, h4) + * {
+    margin-top: 0.5em;
+  }
+  & > hr,
+  & > hr + * {
+    margin-top: 2em;
+  }
+  & > :first-child {
+    margin-top: 0;
+  }
+}
+
+/* Gate swap: todo, busy and done layers share one grid cell. The outgoing one
+   fades over duration-fast; the incoming one fades and rises move-swap over
+   duration-moderate. A layer mounted already on is still (Moment Rule). */
+[data-gate-swap] {
+  display: grid;
+}
+
+[data-gate-swap] > * {
+  grid-area: 1 / 1;
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(var(--move-swap));
+  transition:
+    opacity var(--duration-fast) var(--ease-exit),
+    transform 0s linear var(--duration-fast),
+    visibility 0s linear var(--duration-fast);
+}
+
+[data-gate-swap] > [data-on] {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity var(--duration-moderate) var(--ease-enter),
+    transform var(--duration-moderate) var(--ease-enter),
+    visibility 0s;
+}
+
+/* Scrolling strips (code blocks, Markdown tables) fade at the edge where more
+   waits; --fade-end is set from script while the strip overflows. */
+[data-scroll-fade] {
+  mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - var(--fade-end, 0px)),
+    transparent
+  );
+}
+
+/* The copy icon's front sheet slides off its twin while its control is
+   hovered or focused. */
+[data-copy-front] {
+  transition: transform var(--duration-moderate) var(--ease-enter);
+}
+
+:is(button, a):is(:hover, :focus-visible) [data-copy-front] {
+  transform: translate(var(--move-nudge), var(--move-nudge));
+}
+
+/* parity: app-frame */
+:root {
+  /* Page content stops growing here and centres in the panel. */
+  --app-max: 128rem;
+}
+
+/* bp-short: landscape phones get slim bars and side sheets. */
+@custom-variant short (@media (max-height: 31.25rem));
+
+@media (max-height: 31.25rem) and (min-width: 40rem) {
+  :root {
+    --app-bar-h: 2.5rem;
+  }
+}
+
+/* Anchors and focused fields clear the whole sticky header: the bar, the top
+   safe-area inset below lg, and room for the 4px focus ring. From lg the
+   header carries an 8px canvas band instead of the inset. */
+html {
+  scroll-padding-top: calc(
+    var(--app-bar-h) + env(safe-area-inset-top) + 0.75rem
+  );
+}
+
+@media (min-width: 64rem) {
+  html {
+    scroll-padding-top: calc(var(--app-bar-h) + 0.75rem);
+  }
+}
+
+/* parity: sidebar */
+/* Under reduced motion the ghost, the count and the row and icon colours still
+   fade; nothing travels. Same layer as the blanket rule and more specific, so
+   these durations win over its 0.01ms. */
+@layer base {
+  @media (prefers-reduced-motion: reduce) {
+    [data-nav-ghost],
+    [data-sidebar="menu-badge"] {
+      transition-property: opacity !important;
+      transition-duration: var(--duration-fast) !important;
+    }
+
+    [data-sidebar="menu-button"],
+    [data-sidebar="menu-button"] svg {
+      transition-property: color, background-color !important;
+      transition-duration: var(--duration-fast) !important;
+    }
+  }
+}
+
+/* Coarse pointers lift sidebar rows to 44px tall only: the collapsed rail keeps
+   its lane, so the pill, the tap area and the ring stay inside it. */
+@media (pointer: coarse) {
+  [data-slot="sidebar-menu-button"] {
+    min-height: 2.75rem !important;
+  }
+}
+
+[data-slot="sidebar"] [data-slot="sidebar-menu-button"] {
+  min-width: 0 !important;
+}
+
+/* parity: run-screens */
+
+/* Swap: layers stacked in one grid cell, so the box keeps its widest layer and
+   never shifts. The outgoing layer fades in place and the incoming one rises
+   --move-swap. Hidden layers are visibility:hidden, so only the current one is
+   read. Layered, so a utility such as justify-items-end can still align it. */
+@layer components {
+  .swap {
+    display: grid;
+    align-items: center;
+    justify-items: center;
+  }
+
+  .swap > * {
+    grid-area: 1 / 1;
+    display: inline-flex;
+    align-items: center;
+    gap: inherit;
+    visibility: hidden;
+    opacity: 0;
+    transform: translateY(var(--move-swap));
+    transition:
+      opacity var(--duration-fast) var(--ease-exit),
+      transform 0s linear var(--duration-fast),
+      visibility 0s linear var(--duration-fast);
+  }
+
+  .swap > [data-on] {
+    visibility: visible;
+    opacity: 1;
+    transform: none;
+    transition:
+      opacity var(--duration-moderate) var(--ease-enter),
+      transform var(--duration-moderate) var(--ease-enter),
+      visibility 0s;
+  }
+
+  /* A layer that is not showing never draws its check. */
+  .swap > :not([data-on]) .draw-check path {
+    animation: none;
+  }
+}
+
+/* The landing statement's payoff: Plex's real italic, regular weight. */
+@utility text-display-italic {
+  font-style: italic;
+  font-weight: 400;
+  letter-spacing: -0.025em;
+}
+
+/* Headline numbers in a recap (solve time, hints used). */
+@utility text-stat {
+  font-family: var(--font-heading);
+  font-size: 1.375rem;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A recap whose checks all verified draws its bar as one closed line, still. */
+[data-run-recap-progress][data-closed] {
+  gap: 0;
+}
+
+[data-run-recap-progress][data-closed] > :not(:first-child) {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+[data-run-recap-progress][data-closed] > :not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* parity: overlays */
+
+/* A user's theme change cross-fades the document (a fade, so it stays under
+   reduced motion). */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: var(--duration-moderate);
+  animation-timing-function: var(--ease-standard);
+}
+
+/* The new tab panel enters from the side the reader moved toward. */
+@keyframes intar-tab-panel {
+  from {
+    opacity: 0;
+    transform: translateX(calc(var(--tab-dir, 1) * var(--move-overlay)));
+  }
+}
+
+/* A scrolling strip fades at the edge where more waits; the hook that owns the
+   strip sets --fade-start and --fade-end to 2rem or 0px. */
+@utility scroll-fade {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 var(--fade-start, 0px),
+    #000 calc(100% - var(--fade-end, 0px)),
+    transparent
+  );
+}
+
+/* Theme trigger: sun, moon and monitor share one cell. The current one turns
+   into place while the others fade out; reduced motion keeps only the fade. */
+[data-theme-icon] {
+  display: inline-grid;
+}
+
+[data-theme-icon] > * {
+  grid-area: 1 / 1;
+  visibility: hidden;
+  opacity: 0;
+  transform: rotate(-60deg) scale(0.6);
+  transition:
+    opacity var(--duration-fast) var(--ease-exit),
+    transform var(--duration-moderate) var(--ease-standard),
+    visibility 0s var(--duration-fast);
+}
+
+[data-theme-icon] > [data-on] {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity var(--duration-moderate) var(--ease-enter),
+    transform var(--duration-moderate) var(--ease-enter),
+    visibility 0s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-theme-icon] > * {
+    transform: none;
+  }
+}
+
+/* parity: patterns */
+/* Label swap: every state of a label shares one grid cell, so the box keeps
+   its widest state (the Steady Box Rule). The leaving layer fades over
+   duration-fast with ease-exit; the arriving one (data-on) fades in and rises
+   move-swap over duration-moderate with ease-enter. Hidden layers are
+   visibility: hidden, so only the current one is read. `translate` moves the
+   layer, so it never fights a transform on the content. */
+[data-swap] {
+  display: inline-grid;
+  align-items: center;
+  justify-items: center;
+  gap: var(--swap-gap, 0.375rem);
+}
+
+[data-swap] > * {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: inherit;
+  visibility: hidden;
+  opacity: 0;
+  translate: 0 var(--move-swap);
+  transition:
+    opacity var(--duration-fast) var(--ease-exit),
+    translate 0s linear var(--duration-fast),
+    visibility 0s linear var(--duration-fast);
+}
+
+[data-swap] > [data-on] {
+  visibility: visible;
+  opacity: 1;
+  translate: none;
+  transition:
+    opacity var(--duration-moderate) var(--ease-enter),
+    translate var(--duration-moderate) var(--ease-enter),
+    visibility 0s;
+}
+
+/* A new message, count or label rolls into place: it fades in and rises
+   move-swap. Under reduced motion --move-swap is 0px, so only the fade stays. */
+@keyframes intar-roll {
+  from {
+    opacity: 0;
+    transform: translateY(var(--move-swap));
+  }
+}
+
+.roll-in {
+  animation: intar-roll var(--duration-moderate) var(--ease-enter) both;
+}
+
+/* Rows that arrive after a skeleton rise move-rise with a 40ms stagger,
+   capped at the fifth step. Set data-arrive only when the page mounted on its
+   skeleton (useArrived), so cached data stays still. */
+[data-arrive] > * {
+  animation: var(--animate-rise);
+  animation-delay: calc(var(--i, 0) * 40ms);
+}
+
+[data-arrive] > :nth-child(2) {
+  --i: 1;
+}
+
+[data-arrive] > :nth-child(3) {
+  --i: 2;
+}
+
+[data-arrive] > :nth-child(4) {
+  --i: 3;
+}
+
+[data-arrive] > :nth-child(5) {
+  --i: 4;
+}
+
+[data-arrive] > :nth-child(n + 6) {
+  --i: 5;
+}
+
+/* A refused value nudges its field once while the error swaps in. Unlayered,
+   so it still plays on a focused field (the base layer drops the ring's
+   animation there). */
+@keyframes intar-reject {
+  20% {
+    translate: calc(-1 * var(--move-swap)) 0;
+  }
+  45% {
+    translate: var(--move-swap) 0;
+  }
+  70% {
+    translate: calc(-0.5 * var(--move-swap)) 0;
+  }
+}
+
+[data-reject] {
+  animation: intar-reject var(--duration-slow) var(--ease-standard);
+}
+
+/* A title line as tall as the action beside it, so the title centres on the
+   action's label even when the row grows. */
+@utility title-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: var(--control-standard);
+
+  @media (pointer: coarse) {
+    min-height: 2.75rem;
+  }
+}
+
+/* Tailwind v4 leaves buttons on the arrow cursor; operable controls show the
+   pointer. Utilities (cursor-default on menu items) still win. */
+@layer base {
+  button:not(:disabled):not([aria-disabled="true"]),
+  [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
+}
+
+/* parity: ui-primitives */
+
+/* Fields stop at field-max; a form never stretches with the page. */
+:root {
+  --field-max: 28rem;
+}
+
+/* Touch keeps a textarea's 5rem minimum; the 44px rule above is for one-line
+   controls. Later and equally specific, so it wins over textarea:not(:disabled). */
+@media (pointer: coarse) {
+  textarea[data-slot="textarea"] {
+    min-height: 5rem !important;
+  }
+}
+
+/* Table: the first column stays pinned on an opaque card fill and casts an edge
+   shadow once the region has scrolled (the Table primitive sets data-scrolled
+   and --fade-end). Borders and fills sit on the cells, which needs separate
+   borders. Layered, so a cell's own utilities still win. */
+@layer components {
+  [data-slot="table-container"] {
+    mask-image: linear-gradient(
+      to right,
+      #000 calc(100% - var(--fade-end, 0px)),
+      transparent
+    );
+  }
+
+  /* An inset ring: the mask and a card's overflow would clip an outset one. */
+  [data-slot="table-container"]:focus-visible {
+    outline-offset: -2px;
+  }
+
+  [data-slot="table"] {
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  [data-slot="table"] :is(th, td) {
+    border-bottom: 1px solid var(--border);
+    transition: background-color var(--duration-fast) var(--ease-standard);
+  }
+
+  [data-slot="table-body"] tr:last-child > :is(th, td) {
+    border-bottom: 0;
+  }
+
+  [data-slot="table"] :is(th, td):first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background-color: var(--card);
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      box-shadow var(--duration-fast) var(--ease-standard);
+  }
+
+  [data-slot="table-container"][data-scrolled]
+    [data-slot="table"]
+    :is(th, td):first-child {
+    box-shadow:
+      1px 0 0 var(--border),
+      0.5rem 0 0.75rem -0.5rem rgb(31 26 20 / 0.18);
+  }
+
+  .dark
+    [data-slot="table-container"][data-scrolled]
+    [data-slot="table"]
+    :is(th, td):first-child {
+    box-shadow:
+      1px 0 0 var(--border),
+      0.5rem 0 0.75rem -0.5rem rgb(0 0 0 / 0.6);
+  }
+
+  /* Only body rows tint, on hover, while a menu in them is open, or selected. */
+  [data-slot="table-body"] tr:is(:hover, :has([aria-expanded="true"]))
+    > :is(th, td) {
+    background-color: color-mix(in srgb, var(--muted) 50%, transparent);
+  }
+
+  [data-slot="table-body"] tr:is(:hover, :has([aria-expanded="true"]))
+    > :is(th, td):first-child {
+    background-color: color-mix(in oklab, var(--card), var(--muted) 50%);
+  }
+
+  [data-slot="table-body"] tr[data-state="selected"] > :is(th, td) {
+    background-color: var(--muted);
+  }
+}
+
+/* parity: checks-panel */
+/* The segmented bar: segments hold a 0.125rem radius so the radius transition
+   interpolates (rounded-full cannot). When the run is solved the bar closes:
+   the gap goes to 0 and the inner corners square off, then one current runs
+   along the line (350ms after the close, so 700ms after the last verify). */
+[data-checks-bar] {
+  transition: gap var(--duration-reveal) var(--ease-enter);
+}
+
+[data-checks-bar] > span {
+  border-radius: 0.125rem;
+  transition:
+    background-color var(--duration-reveal) var(--ease-standard),
+    border-radius var(--duration-reveal) var(--ease-enter);
+}
+
+[data-checks-bar][data-closed] {
+  gap: 0;
+}
+
+[data-checks-bar][data-closed] > span:not(:first-child) {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+[data-checks-bar][data-closed] > span:not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+@keyframes intar-current {
+  from {
+    background-position: -70% 0;
+  }
+  to {
+    background-position: 170% 0;
+  }
+}
+
+[data-checks-bar][data-closed][data-current]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 0.125rem;
+  background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in oklab, var(--success), white 55%),
+      transparent
+    )
+    no-repeat;
+  background-size: 40% 100%;
+  animation: intar-current 900ms var(--ease-standard) 350ms both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-checks-bar][data-current]::after {
+    display: none;
+  }
+}
+
+/* The shared [data-swap] label swap (parity: patterns) stacks the check status
+   word and icon; the word hugs the row's right edge. */
+[data-swap="end"] {
+  justify-items: end;
+}
+
+/* A hint's body unfolds (grid-template-rows 0fr to 1fr) only at the reveal. */
+.hint-unfold {
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+@keyframes intar-unfold {
+  from {
+    grid-template-rows: 0fr;
+  }
+}
+
+.hint-unfold[data-just] {
+  animation: intar-unfold var(--duration-slow) var(--ease-enter) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hint-unfold[data-just] {
+    animation: none;
+  }
+}
+
+/* The check toast under the run bar: in over moderate, held by the component
+   for --duration-hold, then out over fast. */
+@keyframes intar-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--move-overlay) * -1));
+  }
+}
+
+@keyframes intar-toast-out {
+  to {
+    opacity: 0;
+  }
+}
+
+.check-toast {
+  animation: intar-toast-in var(--duration-moderate) var(--ease-enter) both;
+}
+
+[data-run-check-toast][data-leaving] .check-toast {
+  animation: intar-toast-out var(--duration-fast) var(--ease-exit) forwards;
+}
+
+/* parity: replay */
+/* The learner replay: one always-dark frame around the screen and its own
+   controls (the player's bar is off). The frame is an inline-size container,
+   so a narrow slot moves the track to its own row. */
+.replay-frame {
+  container: replay / inline-size;
+  overflow: hidden;
+  border: 1px solid var(--terminal-border);
+  border-radius: var(--radius-xl);
+  background: var(--terminal-background);
+  color: var(--terminal-foreground);
+  color-scheme: dark;
+}
+
+/* The frame is the one edge: a recap wrapper that still draws its own border
+   and corners around it steps aside. */
+[data-run-recap-replay-surface]:has(> * > .replay-frame, > .replay-frame) {
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* The bar owns play; the big start glyph is not part of the design. */
+.replay-custom .ap-overlay-start {
+  display: none;
+}
+
+/* Phones keep a 13px cell and scroll sideways inside the screen box. The
+   player clips itself to its wrapper, so let it overflow into the scroller
+   and start at the left edge (centring would cut off the first columns). */
+.replay-scroll div.ap-wrapper {
+  height: auto;
+  justify-content: flex-start;
+}
+
+.replay-scroll div.ap-wrapper div.ap-player {
+  max-width: none;
+}
+
+/* The scroller is a keyboard stop; its ring sits inside the clipping frame. */
+.replay-screen:focus-visible {
+  outline-offset: -2px;
+}
+
+.replay-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--terminal-border);
+  background: var(--terminal-surface);
+}
+
+.replay-tbtn {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: var(--control-compact);
+  height: var(--control-compact);
+  padding: 0 0.5rem;
+  border: 1px solid var(--terminal-border);
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--terminal-foreground);
+  font: 500 0.75rem/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    opacity var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard);
+}
+
+.replay-tbtn:hover {
+  border-color: color-mix(
+    in oklab,
+    var(--terminal-foreground) 35%,
+    var(--terminal-border)
+  );
+  background: color-mix(in oklab, var(--terminal-foreground) 8%, transparent);
+}
+
+.replay-tbtn:active {
+  transform: translateY(var(--move-press)) scale(var(--scale-press));
+  transition-duration: var(--duration-instant);
+}
+
+.replay-tbtn:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* Play and pause are one shape: the triangle splits into the two bars. */
+.replay-play {
+  position: relative;
+  display: block;
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.replay-play > i {
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  transition:
+    clip-path var(--duration-moderate) var(--ease-enter),
+    opacity var(--duration-fast) var(--ease-standard);
+}
+
+.replay-play > i:first-child {
+  clip-path: polygon(14% 0%, 56% 25%, 56% 75%, 14% 100%);
+}
+
+.replay-play > i:last-child {
+  clip-path: polygon(56% 25%, 100% 50%, 100% 50%, 56% 75%);
+}
+
+.replay-bar[data-playing] .replay-play > i:first-child {
+  clip-path: polygon(16% 4%, 41% 4%, 41% 96%, 16% 96%);
+}
+
+.replay-bar[data-playing] .replay-play > i:last-child {
+  clip-path: polygon(59% 4%, 84% 4%, 84% 96%, 59% 96%);
+}
+
+/* The play shape turns into the replay arrow at the end: the outgoing layer
+   fades in place, the incoming one turns in over duration-moderate. */
+.replay-swap {
+  display: inline-grid;
+  align-items: center;
+  justify-items: center;
+}
+
+.replay-swap > * {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  visibility: hidden;
+  opacity: 0;
+  transform: rotate(-60deg) scale(0.6);
+  transition:
+    opacity var(--duration-fast) var(--ease-exit),
+    transform 0s linear var(--duration-fast),
+    visibility 0s linear var(--duration-fast);
+}
+
+.replay-swap > [data-on] {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity var(--duration-moderate) var(--ease-enter),
+    transform var(--duration-moderate) var(--ease-enter),
+    visibility 0s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .replay-swap > * {
+    transform: none !important;
+  }
+}
+
+/* The track: oxide played part on a quiet rail. The fill and the thumb follow
+   --p; they glide over duration-moderate only for a jump (key, click,
+   restart), never for a drag or ordinary playback. */
+.replay-scrub {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  touch-action: none;
+}
+
+.replay-scrub[data-disabled] {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.replay-scrub:has(:focus-visible) {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  animation: intar-ring var(--duration-fast) var(--ease-enter);
+}
+
+.replay-scrub__control {
+  position: relative;
+  display: grid;
+  align-items: center;
+  height: 1.5rem;
+  touch-action: none;
+}
+
+.replay-scrub__rail {
+  position: relative;
+  height: 0.25rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--terminal-foreground) 18%, transparent);
+}
+
+.replay-scrub__fill {
+  position: absolute;
+  inset: 0;
+  background: var(--terminal-brand);
+  transform: scaleX(var(--p, 0));
+  transform-origin: left;
+}
+
+.replay-scrub__thumb {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 999px;
+  background: var(--terminal-foreground);
+  transform: scale(0.5);
+  opacity: 0;
+  transition:
+    transform var(--duration-fast) var(--ease-enter),
+    opacity var(--duration-fast) var(--ease-standard);
+}
+
+.replay-scrub:is(:hover, :has(:focus-visible), [data-dragging])
+  .replay-scrub__thumb {
+  transform: none;
+  opacity: 1;
+}
+
+.replay-scrub[data-jump] .replay-scrub__fill {
+  transition: transform var(--duration-moderate) var(--ease-enter);
+}
+
+.replay-scrub[data-jump] .replay-scrub__thumb {
+  transition:
+    inset-inline-start var(--duration-moderate) var(--ease-enter),
+    transform var(--duration-fast) var(--ease-enter),
+    opacity var(--duration-fast) var(--ease-standard);
+}
+
+/* The clock is aria-hidden: the slider's value text carries the time. */
+.replay-time {
+  min-width: 11ch;
+  font: 0.75rem/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--terminal-muted);
+  text-align: right;
+}
+
+/* In a narrow slot the track takes its own row above the controls. */
+@container replay (max-width: 26rem) {
+  .replay-bar {
+    flex-wrap: wrap;
+    row-gap: 0.25rem;
+  }
+
+  .replay-scrub {
+    order: -1;
+    flex-basis: 100%;
+  }
+
+  .replay-time {
+    margin-right: auto;
+    text-align: left;
+  }
+}
+
+/* On touch the controls grow to 44px and the thumb stays visible. */
+@media (pointer: coarse) {
+  .replay-tbtn {
+    min-width: 2.75rem;
+    height: 2.75rem;
+  }
+
+  .replay-scrub__control {
+    height: 2.75rem;
+  }
+
+  .replay-scrub__thumb {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* parity: phone-run */
+/* The run workspace's named thresholds (viewports.md). The same queries live
+   in run-viewport.tsx as RUN_QUERY, so a class and a matchMedia never drift.
+   bp-run is 60rem, which is 960px at the default size. short is defined in
+   the app-frame section. */
+@theme {
+  --breakpoint-run: 60rem;
+}
+
+/* bp-md and a landscape-safe height: the panel docks under the terminal. */
+@custom-variant dock (@media (min-width: 48rem) and (min-height: 31.25rem));
+/* bp-run: terminal and panel side by side, two to one. */
+@custom-variant split (@media (min-width: 60rem) and (min-height: 31.25rem));
+/* A portrait phone: the dock sits under the terminal. */
+@custom-variant phone (@media (max-width: 47.999rem) and (min-height: 31.25rem));
+
+:root {
+  --sheet-peek: 42dvh;
+  --sheet-full: 88dvh;
+  --key-width: 2.75rem;
+  --key-height: 2.5rem;
+}
+
+/* The caret blinks over 1.06s (xterm injects 1s). It is a block while the
+   terminal has focus and a dimmed one while it does not. */
+.xterm .xterm-cursor.xterm-cursor-blink {
+  animation-duration: 1.06s !important;
+}
+
+.xterm .xterm-rows:not(.xterm-focus) .xterm-cursor.xterm-cursor-block {
+  opacity: 0.35;
 }

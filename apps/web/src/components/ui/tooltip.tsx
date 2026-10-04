@@ -3,13 +3,15 @@ import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip"
 import { cn } from "@/lib/utils"
 
 function TooltipProvider({
-  delay = 0,
+  delay = 400,
+  timeout = 300,
   ...props
 }: TooltipPrimitive.Provider.Props) {
   return (
     <TooltipPrimitive.Provider
       data-slot="tooltip-provider"
       delay={delay}
+      timeout={timeout}
       {...props}
     />
   )
@@ -26,7 +28,7 @@ function TooltipTrigger({ ...props }: TooltipPrimitive.Trigger.Props) {
 function TooltipContent({
   className,
   side = "top",
-  sideOffset = 4,
+  sideOffset = 8,
   align = "center",
   alignOffset = 0,
   children,
@@ -43,18 +45,20 @@ function TooltipContent({
         alignOffset={alignOffset}
         side={side}
         sideOffset={sideOffset}
+        collisionPadding={8}
         className="isolate z-50"
       >
+        {/* Visual only: the trigger's aria-label is the name. */}
         <TooltipPrimitive.Popup
           data-slot="tooltip-content"
+          aria-hidden="true"
           className={cn(
-            "z-50 inline-flex w-fit max-w-xs origin-(--transform-origin) items-center gap-1.5 rounded-md bg-foreground px-2 py-1 text-xs font-medium text-background shadow-(--shadow-overlay) has-data-[slot=kbd]:pr-1.5 data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 **:data-[slot=kbd]:relative **:data-[slot=kbd]:isolate **:data-[slot=kbd]:z-50 **:data-[slot=kbd]:rounded-sm data-[state=delayed-open]:animate-in data-[state=delayed-open]:fade-in-0 data-[state=delayed-open]:zoom-in-95 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+            "z-50 inline-flex w-fit max-w-64 origin-(--transform-origin) items-center gap-1.5 rounded-md bg-foreground px-2 py-1 text-xs leading-[1.4] font-medium text-background shadow-(--shadow-overlay) duration-(--duration-fast) ease-enter data-[side=bottom]:slide-in-from-top-[length:var(--move-swap)] data-[side=inline-end]:slide-in-from-left-[length:var(--move-swap)] data-[side=inline-start]:slide-in-from-right-[length:var(--move-swap)] data-[side=left]:slide-in-from-right-[length:var(--move-swap)] data-[side=right]:slide-in-from-left-[length:var(--move-swap)] data-[side=top]:slide-in-from-bottom-[length:var(--move-swap)] data-open:animate-in data-open:fade-in-0 data-open:zoom-in-[var(--scale-popover)] data-[instant=delay]:animate-none data-closed:animate-out data-closed:fade-out-0 data-closed:duration-(--duration-instant) data-closed:ease-exit [&_kbd]:rounded-xs [&_kbd]:bg-background/20 [&_kbd]:px-1 [&_kbd]:font-sans [&_kbd]:text-[0.6875rem] [&_kbd]:leading-[1.4] [&_kbd]:font-medium",
             className
           )}
           {...props}
         >
           {children}
-          <TooltipPrimitive.Arrow className="z-50 size-2.5 translate-y-[calc(-50%-2px)] rotate-45 rounded-[2px] bg-foreground fill-foreground data-[side=bottom]:top-1 data-[side=inline-end]:top-1/2! data-[side=inline-end]:-left-1 data-[side=inline-end]:-translate-y-1/2 data-[side=inline-start]:top-1/2! data-[side=inline-start]:-right-1 data-[side=inline-start]:-translate-y-1/2 data-[side=left]:top-1/2! data-[side=left]:-right-1 data-[side=left]:-translate-y-1/2 data-[side=right]:top-1/2! data-[side=right]:-left-1 data-[side=right]:-translate-y-1/2 data-[side=top]:-bottom-2.5" />
         </TooltipPrimitive.Popup>
       </TooltipPrimitive.Positioner>
     </TooltipPrimitive.Portal>

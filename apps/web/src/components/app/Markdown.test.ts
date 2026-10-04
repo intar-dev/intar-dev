@@ -16,6 +16,21 @@ describe("Markdown page headings", () => {
     expect(markup).toContain("<pre");
   });
 
+  it("shows the fence language in a header bar and lets code use the full width", () => {
+    const markup = renderToStaticMarkup(
+      createElement(Markdown, {
+        pageContent: true,
+        children: "```bash\nls -la\n```\n\n#### Lead-in\n\n---\n\n> quoted",
+      }),
+    );
+    expect(markup).toContain(">bash<");
+    expect(markup).toContain("data-wide");
+    expect(markup).toContain("<h4");
+    expect(markup).toContain("<blockquote");
+    expect(markup).toContain("<hr");
+    expect(markup).toContain('aria-label="Copy code"');
+  });
+
   it("keeps authored headings below the app bar h1", () => {
     const markup = renderToStaticMarkup(
       createElement(Markdown, {
