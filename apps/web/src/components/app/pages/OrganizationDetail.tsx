@@ -2,12 +2,13 @@ import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { Link } from "@tanstack/react-router";
-import { Building2 } from "lucide-react";
+import { SearchX, Users } from "lucide-react";
+import { isAccessResponseError } from "../lib/http-response-error";
 import { ContentHeader } from "../patterns/ContentHeader";
 import { MetaLine } from "../patterns/MetaLine";
 import { PageShell } from "../patterns/PageShell";
 import { RelativeTime } from "../patterns/RelativeTime";
-import { ErrorState } from "../patterns/StateCard";
+import { EmptyState, ErrorState } from "../patterns/StateCard";
 import { usePageChrome } from "../shell/page-chrome";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -105,6 +106,27 @@ export function OrganizationDetail() {
   };
 
   if (organization.error) {
+    // A missing or forbidden organization cannot be fixed by retrying.
+    if (isAccessResponseError(organization.error, true)) {
+      return (
+        <PageShell>
+          <EmptyState
+            icon={<SearchX />}
+            title="Organization not found"
+            description="It may have been deleted, or you no longer have access."
+            action={
+              <Button
+                size="sm"
+                variant="outline"
+                render={<Link to="/organizations" />}
+              >
+                Back to organizations
+              </Button>
+            }
+          />
+        </PageShell>
+      );
+    }
     return (
       <PageShell>
         <ErrorState
@@ -114,7 +136,7 @@ export function OrganizationDetail() {
               ? organization.error.message
               : "Failed to load organization"
           }
-          onRetry={() => void organization.refetch()}
+          onRetry={() => organization.refetch()}
         />
       </PageShell>
     );
@@ -124,8 +146,19 @@ export function OrganizationDetail() {
       <PageShell variant="workspace" density="compact">
         <div role="status" className="space-y-4">
           <span className="sr-only">Loading organization…</span>
-          <Skeleton className="h-8 w-72 max-w-full" />
-          <Skeleton className="h-11 w-full" />
+          {/* The header and tab row, where the real ones land. */}
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <Skeleton className="h-8 w-72 max-w-full" />
+              <Skeleton className="h-3 w-40" />
+            </div>
+            <Skeleton className="h-(--control-compact) w-20" />
+          </div>
+          <div className="flex gap-4 border-b pb-1">
+            {Array.from({ length: 5 }, (_, index) => (
+              <Skeleton key={index} className="h-7 w-20" />
+            ))}
+          </div>
           <Skeleton className="h-48 w-full rounded-xl" />
         </div>
       </PageShell>
@@ -146,17 +179,20 @@ export function OrganizationDetail() {
         badge={
           <Badge variant={admin ? "secondary" : "outline"}>{roleLabel}</Badge>
         }
-        summary={`Private workspace · ${detail.slug}`}
         meta={
           <MetaLine
             items={[
+              "Private workspace",
+              <code key="slug" className="text-code">
+                {detail.slug}
+              </code>,
               <span key="members" className="inline-flex items-center gap-1.5">
-                <Building2 className="size-3.5" />
+                <Users className="size-3.5 shrink-0" />
                 {detail.members.length} member
                 {detail.members.length === 1 ? "" : "s"}
               </span>,
               <span key="created">
-                created <RelativeTime at={detail.createdAt} />
+                Created <RelativeTime at={detail.createdAt} />
               </span>,
             ]}
           />
@@ -217,7 +253,10 @@ export function OrganizationDetail() {
         </TabsContent>
         {admin ? (
           <TabsContent value="progress" className="min-w-0">
-            <ProgressSection detail={detail} />
+            <ProgressSection
+              detail={detail}
+              onAssign={() => setTab("assignments")}
+            />
           </TabsContent>
         ) : null}
         <TabsContent value="servers" className="min-w-0">

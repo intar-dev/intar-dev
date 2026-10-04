@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Hammer, Server } from "lucide-react";
+import { AsyncLabel } from "@/components/app/patterns/AsyncLabel";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -95,8 +96,8 @@ export function HostOnboardingPanel({
   };
 
   return (
-    <section className="grid gap-4 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
-      <div className="space-y-4 rounded-xl border bg-card p-4 shadow-xs">
+    <section className="grid gap-4 @min-[64rem]/panel:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
+      <div className="space-y-4 rounded-xl border bg-card p-4 shadow-[var(--highlight),var(--shadow-raised)]">
         <div className="space-y-1">
           <p className="text-label">{eyebrow}</p>
           <h2 className="text-section-title">{title}</h2>
@@ -139,25 +140,39 @@ export function HostOnboardingPanel({
 
         <form
           className="flex flex-col gap-2 sm:flex-row"
+          aria-busy={onboard.isPending || undefined}
           onSubmit={(event) => {
             event.preventDefault();
-            onboard.mutate();
+            if (!onboard.isPending) onboard.mutate();
           }}
         >
           <label htmlFor="host-onboarding-name" className="sr-only">
             Host name
           </label>
+          {/* readOnly, not disabled: focus stays in the field and the touch
+              height holds while the request runs. */}
           <Input
+            mono
             id="host-onboarding-name"
             name="hostName"
             placeholder="Host name"
+            autoComplete="off"
             value={hostName}
             onChange={(event) => setHostName(event.currentTarget.value)}
-            disabled={onboard.isPending}
-            className="flex-1"
+            readOnly={onboard.isPending}
+            className="flex-1 sm:max-w-field"
           />
-          <Button type="submit" disabled={onboard.isPending}>
-            {onboard.isPending ? "Generating..." : "Generate"}
+          <Button
+            type="submit"
+            aria-busy={onboard.isPending || undefined}
+            focusableWhenDisabled
+            disabled={onboard.isPending}
+          >
+            <AsyncLabel
+              state={onboard.isPending ? "pending" : "idle"}
+              idle="Generate"
+              pending="Generating…"
+            />
           </Button>
         </form>
 
@@ -176,7 +191,7 @@ export function HostOnboardingPanel({
           <div className="rounded-xl bg-muted/40 px-4 py-3">
             Host name
             <div className="mt-1 font-medium text-foreground">
-              {hostName.trim() || defaultHostName}
+              <code>{hostName.trim() || defaultHostName}</code>
             </div>
           </div>
           <div className="rounded-xl bg-muted/40 px-4 py-3">
@@ -202,7 +217,7 @@ export function HostOnboardingPanel({
         </div>
       </div>
 
-      <div className="rounded-xl border bg-card p-4 shadow-xs">
+      <div className="rounded-xl border bg-card p-4 shadow-[var(--highlight),var(--shadow-raised)]">
         {generated ? (
           <div className="space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -251,9 +266,9 @@ export function HostOnboardingPanel({
               role="region"
               tabIndex={0}
               aria-label="Generated bridge configuration"
-              className="h-[24rem] overflow-auto rounded-xl border bg-muted/30 outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+              className="h-[24rem] overflow-auto rounded-lg border border-terminal-border bg-terminal-background text-terminal-foreground focus-visible:-outline-offset-2"
             >
-              <pre className="p-4 text-xs leading-6 text-foreground">
+              <pre className="px-4 py-3 text-code leading-6">
                 <code>{generated.bridgeConfigToml}</code>
               </pre>
             </div>

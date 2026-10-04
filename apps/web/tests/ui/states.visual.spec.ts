@@ -140,7 +140,7 @@ test.describe("focused visual states", () => {
       page.getByRole("link", { name: "Trace an intermittent DNS failure" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Run again" }),
+      page.getByRole("link", { name: "Run again" }),
     ).toBeVisible();
     await expectRouteScreenshot(
       page,
@@ -163,7 +163,7 @@ test.describe("focused visual states", () => {
     await expect(
       page.getByRole("button", { name: /Course outline, lecture/ }),
     ).toBeVisible();
-    await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Run again" })).toBeVisible();
     await expectRouteScreenshot(
       page,
       "lecture-completed-scenario-actions-light-mobile",
@@ -186,7 +186,7 @@ test.describe("focused visual states", () => {
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
 
-    await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Run again" })).toBeVisible();
     await page.getByRole("button", { name: /Course outline, lecture/ }).click();
     await expect(
       page.getByRole("link", {
@@ -228,7 +228,7 @@ test.describe("focused visual states", () => {
       theme: "dark",
       runState: "archived",
     });
-    await page.getByRole("button", { name: "Run again" }).click();
+    await page.getByRole("link", { name: "Run again" }).click();
 
     try {
       await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
@@ -911,7 +911,7 @@ for (const viewport of [
         await ui.open({ ...routeCase("organization-detail"), theme });
         await page
           .locator("main")
-          .getByRole("button", { name: "Courses", exact: true })
+          .getByRole("link", { name: "Courses", exact: true })
           .click();
         await expect(
           page.getByRole("link", { name: /Platform repair sequence/ }),

@@ -10,6 +10,19 @@ export interface ActiveRunStatusPlan {
 }
 
 /**
+ * Every word planActiveRunStatus can pick. The status token stacks them in
+ * one box sized for the longest, so a change swaps in place and the clock
+ * beside it never moves.
+ */
+export const ACTIVE_RUN_STATUS_WORDS = [
+  "Starting",
+  "In progress",
+  "Solved",
+  "Finishing",
+  "Ending",
+] as const;
+
+/**
  * The word and its tone come from one place, so they always describe the same
  * state: "In progress" is the live primary state, becoming states (starting,
  * finishing, ending) are pending, and a failure does not breathe. Returns null

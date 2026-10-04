@@ -25,6 +25,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { initials } from "../lib/format";
 import { useSession } from "../hooks/useSession";
 import { useSignOut } from "../hooks/useSignOut";
 import { useTheme, type AppTheme } from "../theme";
@@ -58,9 +59,7 @@ export function SidebarUserMenu() {
                 {/* The username beside it is the accessible name. */}
                 <Avatar aria-hidden="true">
                   {user.image ? <AvatarImage src={user.image} alt="" /> : null}
-                  <AvatarFallback>
-                    {username.slice(0, 1).toUpperCase()}
-                  </AvatarFallback>
+                  <AvatarFallback>{initials(username)}</AvatarFallback>
                 </Avatar>
                 <span className="grid flex-1 text-left">
                   <span className="truncate text-support font-medium text-foreground">{username}</span>

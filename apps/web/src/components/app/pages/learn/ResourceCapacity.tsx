@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { ResourceCapacity as Capacity } from "@/lib/resource-capacity";
+import { MetaLine } from "@/components/app/patterns/MetaLine";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 import { useJustReached } from "@/components/app/patterns/use-just-reached";
 import { cn } from "@/lib/utils";
@@ -24,9 +25,14 @@ export function ResourceCapacity({
         <h2 id={titleId} className="text-card-title">Available for new runs</h2>
         {/* Always mounted: only its text changes, so screen readers announce it. */}
         <p role="status" className="text-caption text-muted-foreground">
-          {updateFailed
-            ? `Update failed${capacity ? " · Showing last values" : ""}`
-            : null}
+          <MetaLine
+            as="span"
+            items={
+              updateFailed
+                ? ["Update failed", capacity ? "Showing last values" : null]
+                : []
+            }
+          />
         </p>
       </div>
       {capacity ? (

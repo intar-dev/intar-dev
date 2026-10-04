@@ -61,8 +61,8 @@ export function RunPhoneSheet({
         overlayClassName={bottom && detent === "peek" ? "opacity-0!" : undefined}
         className={
           bottom
-            ? "h-(--sheet-full) max-h-(--sheet-full) gap-0 overflow-hidden bg-card shadow-none! pb-[max(1rem,env(safe-area-inset-bottom))]"
-            : "gap-0 overflow-hidden bg-card shadow-none! pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[max(0.5rem,env(safe-area-inset-bottom))]"
+            ? "h-(--sheet-full) max-h-(--sheet-full) gap-0 overflow-hidden bg-card pb-[max(1rem,env(safe-area-inset-bottom))]"
+            : "gap-0 overflow-hidden bg-card pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[max(0.5rem,env(safe-area-inset-bottom))]"
         }
       >
         {bottom ? (
@@ -74,9 +74,12 @@ export function RunPhoneSheet({
         {header}
         <DrawerBody
           data-run-learning-mobile-scroll
-          className="scroll-py-4 bg-card px-4 pt-2"
+          // At peek the popup is as tall as full and rests lower, so its foot
+          // is off screen; the gap between the detents as bottom padding lets
+          // the last lines scroll into view instead of waiting behind the edge.
+          className={`scroll-py-4 bg-card px-4 pt-2 focus-visible:-outline-offset-2 ${bottom && detent === "peek" ? "pb-[calc(var(--sheet-full)-var(--sheet-peek))]" : ""}`}
           role="region"
-          aria-label="Lecture theory and hints content"
+          aria-label="Checks, lecture and hints content"
           tabIndex={0}
         >
           {children}

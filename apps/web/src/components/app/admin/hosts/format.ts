@@ -39,15 +39,17 @@ export const formatDurationMs = (value: number | null | undefined) => {
 export const artifactKindLabel = (kind: string) => {
   switch (kind) {
     case "console_log":
-      return "Console";
+      return "Console log";
     case "serial_log":
-      return "Serial";
+      return "Serial log";
     case "ssh_recording_segment":
-      return "Session Cast";
+      return "Session cast";
     case "ssh_recording_raw":
-      return "Raw";
-    default:
-      return kind.replace(/_/g, " ");
+      return "Raw recording";
+    default: {
+      const words = kind.replace(/_/g, " ");
+      return words.charAt(0).toUpperCase() + words.slice(1);
+    }
   }
 };
 
@@ -81,22 +83,26 @@ export const runOutcomeTone = (outcome: AgentVmRunRecord["outcome"]) => {
   switch (outcome) {
     case "succeeded":
       return {
-        badgeVariant: "secondary" as const,
+        badgeVariant: "success" as const,
+        tone: "success" as const,
         label: "Succeeded",
       };
     case "cancelled":
       return {
         badgeVariant: "outline" as const,
+        tone: "muted" as const,
         label: "Cancelled",
       };
     case "failed":
       return {
         badgeVariant: "destructive" as const,
+        tone: "danger" as const,
         label: "Failed",
       };
     case "in_progress":
       return {
         badgeVariant: "outline" as const,
+        tone: "live" as const,
         label: "In progress",
       };
   }

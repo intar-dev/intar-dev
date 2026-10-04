@@ -156,10 +156,11 @@ export function RunArtifactViewer({
             <p className="text-support text-muted-foreground">Replay unavailable.</p>
           </div>
         ) : viewer.error ? (
-          <div className="flex min-h-[22rem] items-center justify-center">
-            <Alert variant="destructive" just>
-              <AlertDescription>{viewer.error}</AlertDescription>
-            </Alert>
+          // A learner never sees the server's message: a muted line says it.
+          <div className="flex min-h-[22rem] items-center justify-center text-center">
+            <p role="status" className="text-support text-muted-foreground">
+              Replay could not be loaded.
+            </p>
           </div>
         ) : canReplay ? (
           <AsciicastReplaySurface

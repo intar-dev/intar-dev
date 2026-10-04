@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitBranch, Hammer, Pause, Play, Unplug } from "lucide-react";
+import { CodeBlock } from "../../patterns/CodeBlock";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
 import { Section } from "../../patterns/Section";
@@ -77,6 +78,7 @@ export function ScenarioSourceSection({
             source={source}
             enabled={enabled}
             pending={change.isPending}
+            pendingMode={change.isPending ? change.variables?.mode : undefined}
             onChange={(body) => change.mutate(body)}
             onDisconnect={() => setDisconnectOpen(true)}
           />
@@ -119,8 +121,12 @@ export function ScenarioSourceSection({
                 value={repository}
                 onChange={(event) => setRepository(event.target.value)}
                 placeholder="owner/repository"
-                className="max-w-sm"
+                className="max-w-sm text-code"
                 aria-label="GitHub repository"
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
               />
               <Button
                 type="submit"
@@ -187,21 +193,28 @@ function ConnectedSource({
   source,
   enabled,
   pending,
+  pendingMode,
   onChange,
   onDisconnect,
 }: {
   source: ScenarioSourceView;
   enabled: boolean;
   pending: boolean;
+  /** The mode being saved, so the select holds it instead of snapping back. */
+  pendingMode: string | undefined;
   onChange: (body: Record<string, string>) => void;
   onDisconnect: () => void;
 }) {
   const commit = source.commit;
+  const modeId = useId();
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium">
-          Connected {source.repository} @ {source.defaultBranch}
+          Connected{" "}
+          <code className="text-code">
+            {source.repository} @ {source.defaultBranch}
+          </code>
         </span>
         <Badge variant={source.pauseReason ? "warning" : "success"}>
           {source.pauseReason ? PAUSE_LABELS[source.pauseReason] : "Active"}
@@ -209,13 +222,19 @@ function ConnectedSource({
       </div>
       <dl className="grid gap-3 sm:grid-cols-3">
         <div>
-          <dt className="text-label">Mode</dt>
+          <dt className="text-label">
+            <label htmlFor={modeId}>Delivery mode</label>
+          </dt>
           <dd className="mt-1">
             <NativeSelect
-              value={source.mode}
-              disabled={!enabled || pending}
-              onChange={(event) => onChange({ action: "mode", mode: event.target.value })}
-              aria-label="Delivery mode"
+              id={modeId}
+              value={pendingMode ?? source.mode}
+              disabled={!enabled}
+              aria-disabled={pending || undefined}
+              onChange={(event) => {
+                if (pending) return;
+                onChange({ action: "mode", mode: event.target.value });
+              }}
             >
               <option value="pull">Pull</option>
               <option value="push">Push</option>
@@ -224,8 +243,12 @@ function ConnectedSource({
         </div>
         <div>
           <dt className="text-label">Live commit</dt>
-          <dd className="mt-1 font-mono text-xs">
-            {source.liveSha?.slice(0, 12) ?? "None yet"}
+          <dd className="mt-1">
+            {source.liveSha ? (
+              <code className="text-code">{source.liveSha.slice(0, 12)}</code>
+            ) : (
+              "None yet"
+            )}
           </dd>
         </div>
         <div>
@@ -233,7 +256,7 @@ function ConnectedSource({
           <dd className="mt-1">
             {commit ? (
               <>
-                <span className="font-mono text-xs">{commit.sha.slice(0, 12)}</span>{" "}
+                <code className="text-code">{commit.sha.slice(0, 12)}</code>{" "}
                 {commit.state.replace("_", " ")}
               </>
             ) : (
@@ -288,8 +311,8 @@ function ConnectedSource({
 
 function Snippet({ children }: { children: string }) {
   return (
-    <pre className="mt-2 rounded-xl border bg-muted/30 p-3 text-xs leading-6 whitespace-pre-wrap break-all">
-      <code>{children}</code>
-    </pre>
+    <CodeBlock language="yaml" copyName="Copy the snippet" className="mt-2">
+      {children}
+    </CodeBlock>
   );
 }

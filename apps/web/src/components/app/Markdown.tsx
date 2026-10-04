@@ -1,13 +1,7 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-  type RefObject,
-} from "react";
+import { useRef, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AsyncLabel } from "@/components/app/patterns/AsyncLabel";
+import { CodeBlock, useScrollCue } from "@/components/app/patterns/CodeBlock";
 import { cn } from "@/lib/utils";
 
 export function Markdown({
@@ -183,115 +177,6 @@ export function Markdown({
   );
 }
 
-// Commands read as terminal material in both themes. Copy confirms in place:
-// the icon swaps to a check and the label says so, then settles back.
-function CodeBlock({
-  children,
-  language,
-}: {
-  children: ReactNode;
-  language?: string | undefined;
-}) {
-  const preRef = useRef<HTMLPreElement>(null);
-  const timer = useRef<number | null>(null);
-  const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");
-  const overflowing = useScrollCue(preRef);
-
-  useEffect(
-    () => () => {
-      if (timer.current) window.clearTimeout(timer.current);
-    },
-    [],
-  );
-
-  const copy = () => {
-    const text = preRef.current?.textContent ?? "";
-    const settle = (next: "copied" | "failed") => {
-      setStatus(next);
-      if (timer.current) window.clearTimeout(timer.current);
-      timer.current = window.setTimeout(() => setStatus("idle"), 1600);
-    };
-    if (!text || !navigator.clipboard) return settle("failed");
-    navigator.clipboard.writeText(text.replace(/\n$/, "")).then(
-      () => settle("copied"),
-      () => settle("failed"),
-    );
-  };
-
-  const copied = status === "copied";
-  return (
-    <div
-      data-wide
-      className="overflow-hidden rounded-lg border border-terminal-border bg-terminal-background selection:bg-terminal-brand/25 selection:text-terminal-foreground"
-    >
-      <div className="flex min-h-9 items-center justify-between gap-3 border-b border-terminal-border bg-terminal-surface pr-1.5 pl-4">
-        {language ? (
-          <span className="font-sans text-xs leading-none font-medium tracking-[0.01em] text-terminal-muted">
-            {language}
-          </span>
-        ) : null}
-        <button
-          type="button"
-          onClick={copy}
-          aria-label="Copy code"
-          className={cn(
-            "ml-auto inline-flex h-7 items-center rounded-md px-2 text-xs font-medium transition-[color,background-color] duration-(--duration-fast) ease-standard hover:bg-white/8 focus-visible:outline-terminal-brand",
-            copied
-              ? "text-terminal-success"
-              : "text-terminal-muted hover:text-terminal-foreground",
-          )}
-        >
-          <span aria-hidden="true">
-            <AsyncLabel
-              state={copied ? "done" : "idle"}
-              idle={
-                <>
-                  <CopyIcon />
-                  Copy
-                </>
-              }
-              pending={null}
-              done="Copied"
-            />
-          </span>
-        </button>
-        <span role="status" className="sr-only">
-          {copied ? "Code copied." : status === "failed" ? "Could not copy." : ""}
-        </span>
-      </div>
-      <pre
-        ref={preRef}
-        data-scroll-fade
-        {...(overflowing
-          ? { tabIndex: 0, role: "region", "aria-label": "Code" }
-          : {})}
-        className="m-0 overflow-x-auto px-4 py-3 text-[0.8125rem] leading-6 text-terminal-foreground focus-visible:outline-terminal-brand focus-visible:-outline-offset-2 [&_code]:border-0 [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-[1em] [&_code]:whitespace-pre [&_code]:text-inherit"
-      >
-        {children}
-      </pre>
-    </div>
-  );
-}
-
-/** Lucide's copy with its front sheet grouped, so it can slide off its twin. */
-function CopyIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className="size-3.5 overflow-visible"
-    >
-      <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
-      <rect data-copy-front width="14" height="14" x="8" y="8" rx="2" ry="2" />
-    </svg>
-  );
-}
-
 // The fence language from the code child's `language-xxx` class.
 function fenceLanguage(node: {
   children?: readonly unknown[];
@@ -307,39 +192,6 @@ function fenceLanguage(node: {
     if (match) return match[1];
   }
   return undefined;
-}
-
-/**
- * Sets --fade-end while more of a strip waits to the right, and reports
- * whether it overflows, so only a strip that scrolls takes a tab stop.
- */
-function useScrollCue(ref: RefObject<HTMLElement | null>): boolean {
-  const [overflowing, setOverflowing] = useState(false);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const cue = () => {
-      const over =
-        el.scrollWidth > el.clientWidth + 1 ||
-        el.scrollHeight > el.clientHeight + 1;
-      const more = el.scrollLeft < el.scrollWidth - el.clientWidth - 2;
-      el.style.setProperty("--fade-end", more ? "2rem" : "0px");
-      setOverflowing(over);
-    };
-    cue();
-    el.addEventListener("scroll", cue, { passive: true });
-    if (typeof ResizeObserver === "undefined") {
-      return () => el.removeEventListener("scroll", cue);
-    }
-    const observer = new ResizeObserver(cue);
-    observer.observe(el);
-    if (el.firstElementChild) observer.observe(el.firstElementChild);
-    return () => {
-      el.removeEventListener("scroll", cue);
-      observer.disconnect();
-    };
-  }, [ref]);
-  return overflowing;
 }
 
 function TableScroller({ children }: { children: ReactNode }) {

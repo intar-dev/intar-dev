@@ -43,6 +43,20 @@ export function formatMinutes(minutes: number): string {
   return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
 }
 
+/** Uppercase initials of a name's first `letters` words; `?` when empty. */
+export function initials(
+  name: string | null | undefined,
+  letters = 1,
+): string {
+  const parts = (name ?? "").trim().split(/\s+/).filter(Boolean);
+  const out = parts
+    .slice(0, letters)
+    .map((part) => Array.from(part)[0])
+    .join("")
+    .toUpperCase();
+  return out || "?";
+}
+
 /** Sentence case for display only; keep the authored value for matching. */
 export function sentenceCase(value: string): string {
   return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;

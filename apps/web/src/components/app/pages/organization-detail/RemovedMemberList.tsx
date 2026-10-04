@@ -3,6 +3,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import type { OrganizationRemovedMemberRecord } from "@/lib/organizations";
 import { formatRelativeTime } from "../../lib/format";
+import { MetaLine } from "../../patterns/MetaLine";
 import { initials } from "./types";
 
 /** People an organization's admins removed, each with Restore access. */
@@ -12,22 +13,25 @@ export function RemovedMemberList(props: {
   onRestore: (userId: string) => void;
 }) {
   return (
-    <ul className="divide-y overflow-hidden rounded-lg border">
+    <ul className="divide-y">
       {props.entries.map((entry) => (
         <li
           key={entry.userId}
-          className="flex flex-wrap items-center gap-3 px-4 py-3"
+          className="flex flex-wrap items-center gap-3 py-3"
         >
           <Avatar>
             <AvatarFallback>{initials(entry.name)}</AvatarFallback>
           </Avatar>
           <div className="min-w-0 flex-1">
             <p className="text-sm font-medium">{entry.name}</p>
-            <p className="text-caption">
-              {entry.email}
-              {entry.githubUsername ? ` · @${entry.githubUsername}` : ""} ·
-              removed {formatRelativeTime(entry.removedAt)}
-            </p>
+            <MetaLine
+              dense
+              items={[
+                entry.email,
+                entry.githubUsername ? `@${entry.githubUsername}` : null,
+                `Removed ${formatRelativeTime(entry.removedAt)}`,
+              ]}
+            />
           </div>
           <Button
             size="sm"

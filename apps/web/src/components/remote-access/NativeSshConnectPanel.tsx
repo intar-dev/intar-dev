@@ -1,20 +1,12 @@
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Download, KeyRound, LoaderCircle } from "lucide-react";
 import { useSession } from "@/components/app/hooks/useSession";
-import { AsyncLabel } from "@/components/app/patterns/AsyncLabel";
+import { CodeBlock } from "@/components/app/patterns/CodeBlock";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import {
   buildTemporaryNativeSshCommand,
   temporaryNativeSshKeyFilename,
@@ -77,11 +69,6 @@ class NativeSshRequestError extends Error {
   }
 }
 
-type CopyTarget = "command" | "knownHosts" | null;
-
-// Hold a copy confirmation for duration-flash, then return to "Copy".
-const COPIED_MS = 1600;
-
 // The thrown strings are for developers; the learner reads a sentence that
 // says what happened and what to do. Server-sent messages are already plain.
 const LEARNER_ERRORS: Record<string, string> = {
@@ -109,7 +96,6 @@ export function NativeSshConnectPanel({
   sessionRequest: NativeSshSessionRequest;
 }) {
   const { data: authenticatedSession, isLoading: sessionLoading } = useSession();
-  const [copied, setCopied] = useState<CopyTarget>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloaded, setDownloaded] = useState(false);
   const [persistenceWarning, setPersistenceWarning] = useState<string | null>(
@@ -184,7 +170,6 @@ export function NativeSshConnectPanel({
   const openSession = useCallback(
     (temporaryKey?: SshEd25519KeyPair) => {
       if (!requestScope) return;
-      setCopied(null);
       setDownloaded(
         Boolean(
           temporaryKey &&
@@ -236,23 +221,11 @@ export function NativeSshConnectPanel({
     return () => window.clearTimeout(timeout);
   }, [openSession, requestScope, sessionMutation.data]);
 
-  useEffect(() => {
-    if (copied === null) return;
-    const timeout = window.setTimeout(() => setCopied(null), COPIED_MS);
-    return () => window.clearTimeout(timeout);
-  }, [copied]);
-
-  const copyText = async (value: string, target: Exclude<CopyTarget, null>) => {
-    if (typeof navigator === "undefined" || !navigator.clipboard) {
-      throw new Error("clipboard is not available");
-    }
-    await navigator.clipboard.writeText(value);
-    setCopied(target);
-  };
-
+  // Each state keys its own root, so React never morphs one state's elements
+  // into another's (that would fade colours on nodes the new state hides).
   if (!requestScope) {
     return (
-      <div className="flex min-h-56 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+      <div key="account" className="flex min-h-56 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
         {sessionLoading ? (
           <LoaderCircle className="size-5 motion-safe:animate-spin" />
         ) : null}
@@ -276,7 +249,7 @@ export function NativeSshConnectPanel({
 
   if (sessionMutation.isPending) {
     return (
-      <div className="flex min-h-56 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+      <div key="opening" className="flex min-h-56 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
         <LoaderCircle className="size-5 motion-safe:animate-spin" />
         <p>
           {temporaryPublicKeyOpenssh
@@ -299,7 +272,7 @@ export function NativeSshConnectPanel({
 
   if (sessionMutation.error) {
     return (
-      <div className="space-y-3">
+      <div key="error" className="space-y-3">
         <Alert variant="destructive" just>
           <AlertTitle>Could not open SSH access</AlertTitle>
           <AlertDescription>
@@ -337,7 +310,7 @@ export function NativeSshConnectPanel({
     (!issuedTemporaryKey || !session.native.keyFilename)
   ) {
     return (
-      <div className="space-y-3">
+      <div key="no-key" className="space-y-3">
         <Alert>
           <AlertTitle>Temporary key not available</AlertTitle>
           <AlertDescription>
@@ -359,7 +332,7 @@ export function NativeSshConnectPanel({
   }
 
   return (
-    <div className="space-y-4">
+    <div key="ready" className="space-y-4">
       <div className="grid gap-x-5 gap-y-3 border-y py-3 text-sm sm:grid-cols-3">
         <SessionFact
           label="Access"
@@ -448,9 +421,6 @@ export function NativeSshConnectPanel({
             : "SSH command"
         }
         value={session.native.command}
-        copied={copied === "command"}
-        onCopy={() => copyText(session.native.command, "command")}
-        rows={Math.max(3, session.native.command.split("\n").length + 1)}
         copyDisabled={
           session.native.authMode === "issued_key" && !downloaded
         }
@@ -470,11 +440,6 @@ export function NativeSshConnectPanel({
             <CopyableTextBlock
               label="known_hosts entry"
               value={session.native.knownHostsLine}
-              copied={copied === "knownHosts"}
-              onCopy={() =>
-                copyText(session.native.knownHostsLine, "knownHosts")
-              }
-              rows={2}
             />
           </div>
         </details>
@@ -482,8 +447,6 @@ export function NativeSshConnectPanel({
         <CopyableTextBlock
           label="known_hosts entry"
           value={session.native.knownHostsLine}
-          copied={copied === "knownHosts"}
-          onCopy={() => copyText(session.native.knownHostsLine, "knownHosts")}
         />
       )}
 
@@ -553,52 +516,27 @@ function SessionFact(props: {
 function CopyableTextBlock(props: {
   label: string;
   value: string;
-  copied: boolean;
-  onCopy: () => Promise<void>;
-  rows?: number;
   copyDisabled?: boolean;
 }) {
-  const [copyError, setCopyError] = useState<string | null>(null);
-  const fieldId = useId();
+  const [copyFailed, setCopyFailed] = useState(false);
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between gap-3">
-        <label htmlFor={fieldId} className="block text-sm font-medium">
-          {props.label}
-        </label>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={props.copyDisabled}
-          onClick={() => {
-            setCopyError(null);
-            void props.onCopy().catch((error) => {
-              setCopyError(error instanceof Error ? error.message : String(error));
-            });
-          }}
-        >
-          <AsyncLabel
-            state={props.copied ? "done" : "idle"}
-            idle="Copy"
-            pending={null}
-            done="Copied"
-          />
-        </Button>
-      </div>
-      <Textarea
-        id={fieldId}
-        value={props.value}
-        readOnly
-        rows={props.rows ?? 3}
-        className="text-code"
-      />
-      <span role="status" aria-live="polite" className="sr-only">
-        {props.copied ? `${props.label} copied.` : ""}
-      </span>
-      {copyError ? (
-        <InlineFeedback tone="error">{learnerSshError(copyError)}</InlineFeedback>
+      {/* The block names itself through its Copy button; the confirmation
+          and the "Copied" label are its own. */}
+      <CodeBlock
+        language="bash"
+        copyName={`Copy ${props.label}`}
+        copyDisabled={props.copyDisabled ?? false}
+        onCopied={() => setCopyFailed(false)}
+        onCopyError={() => setCopyFailed(true)}
+      >
+        <code>{props.value}</code>
+      </CodeBlock>
+      {copyFailed ? (
+        <InlineFeedback tone="error">
+          {learnerSshError("clipboard is not available")}
+        </InlineFeedback>
       ) : null}
     </div>
   );

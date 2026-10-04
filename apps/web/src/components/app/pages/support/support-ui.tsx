@@ -1,10 +1,13 @@
-import { useId, useState } from "react";
+import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { CheckCircle2, CircleDot } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
+import { AsyncLabel } from "../../patterns/AsyncLabel";
+import { Field } from "../../patterns/Field";
+import { InlineConfirm } from "../../patterns/InlineConfirm";
 import {
   Dialog,
   DialogContent,
@@ -96,87 +99,103 @@ export function TopicForm({
   onSave: (input: TopicInput) => Promise<void>;
   onCancel?: () => void;
 }) {
-  const id = useId();
   const [title, setTitle] = useState(initial?.title ?? "");
   const [type, setType] = useState<SupportTopicType>(initial?.type ?? "bug");
   const [body, setBody] = useState(initial?.body ?? "");
   const save = useMutation({
     mutationFn: () => onSave({ title: title.trim(), type, body: body.trim() }),
   });
+  const pending = save.isPending;
   return (
     <form
+      aria-busy={pending || undefined}
       onSubmit={(event) => {
         event.preventDefault();
-        if (!save.isPending) save.mutate();
+        if (!pending) save.mutate();
       }}
     >
-      <fieldset disabled={save.isPending} className="min-w-0 space-y-4">
-        <div className="space-y-2">
-          <label htmlFor={`${id}-title`} className="block text-sm font-medium">
-            Title
-          </label>
-          <Input
-            id={`${id}-title`}
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            required
-            maxLength={SUPPORT_LIMITS.title}
-            placeholder="Describe the topic in one sentence"
-          />
-        </div>
-        <div className="flex flex-col items-start gap-2">
-          <label htmlFor={`${id}-type`} className="block text-sm font-medium">
-            Type
-          </label>
-          <NativeSelect
-            id={`${id}-type`}
-            value={type}
-            onChange={(event) =>
-              setType(event.target.value as SupportTopicType)
-            }
-          >
-            {Object.entries(SUPPORT_TYPES).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </NativeSelect>
-        </div>
-        <div className="space-y-2">
-          <label htmlFor={`${id}-body`} className="block text-sm font-medium">
-            Description
-          </label>
-          <Textarea
-            id={`${id}-body`}
-            value={body}
-            onChange={(event) => setBody(event.target.value)}
-            rows={9}
-            required
-            maxLength={SUPPORT_LIMITS.body}
-            aria-describedby={`${id}-help`}
-            placeholder="What happened? What did you expect? Include the steps or details that can help others."
-          />
-          <p id={`${id}-help`} className="text-sm text-muted-foreground">
-            Use Markdown for links and code blocks. All Intar users with active
-            access can read this topic.
-          </p>
-        </div>
+      {/* Fields stay focusable and keep their size while saving: readOnly, not
+          disabled, so focus is still in the field when a refusal comes back. */}
+      <div className="min-w-0 space-y-4">
+        <Field
+          label="Title"
+          hint="Describe the topic in one sentence."
+          className="max-w-field"
+        >
+          {(control) => (
+            <Input
+              {...control}
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              required
+              readOnly={pending}
+              // Editing opens onto the field; a new topic does not steal focus.
+              autoFocus={initial !== undefined}
+              maxLength={SUPPORT_LIMITS.title}
+            />
+          )}
+        </Field>
+        <Field label="Type">
+          {(control) => (
+            <NativeSelect
+              {...control}
+              value={type}
+              disabled={pending}
+              onChange={(event) =>
+                setType(event.target.value as SupportTopicType)
+              }
+            >
+              {Object.entries(SUPPORT_TYPES).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </NativeSelect>
+          )}
+        </Field>
+        <Field
+          label="Description"
+          hint="Use Markdown for links and code blocks. All Intar users with active access can read this topic."
+        >
+          {(control) => (
+            <Textarea
+              {...control}
+              value={body}
+              onChange={(event) => setBody(event.target.value)}
+              rows={9}
+              required
+              readOnly={pending}
+              maxLength={SUPPORT_LIMITS.body}
+              placeholder="What happened? What did you expect? Include the steps or details that can help others."
+            />
+          )}
+        </Field>
         <PostError error={save.error} />
         <div className="flex flex-wrap gap-2">
-          <Button type="submit" disabled={!title.trim() || !body.trim()}>
-            {save.isPending
-              ? "Saving…"
-              : initial
-                ? "Save changes"
-                : "Create topic"}
+          <Button
+            type="submit"
+            aria-busy={pending || undefined}
+            focusableWhenDisabled
+            disabled={pending || !title.trim() || !body.trim()}
+          >
+            <AsyncLabel
+              state={pending ? "pending" : "idle"}
+              idle={initial ? "Save changes" : "Create topic"}
+              pending="Saving…"
+            />
           </Button>
           {onCancel && (
-            <Button type="button" variant="outline" onClick={onCancel}>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending}
+              onClick={onCancel}
+            >
               Cancel
             </Button>
           )}
         </div>
-      </fieldset>
+      </div>
     </form>
   );
 }
@@ -190,53 +209,65 @@ export function CommentForm({
   onSave: (body: string) => Promise<void>;
   onCancel?: () => void;
 }) {
-  const id = useId();
   const [body, setBody] = useState(initial ?? "");
   const save = useMutation({
     mutationFn: () => onSave(body.trim()),
     onSuccess: () => setBody(""),
   });
+  const pending = save.isPending;
   return (
     <form
+      aria-busy={pending || undefined}
       onSubmit={(event) => {
         event.preventDefault();
-        if (!save.isPending) save.mutate();
+        if (!pending) save.mutate();
       }}
     >
-      <fieldset disabled={save.isPending} className="min-w-0 space-y-4">
-        <div className="space-y-2">
-          <label htmlFor={id} className="block text-sm font-medium">
-            {initial === undefined ? "Add a comment" : "Edit comment"}
-          </label>
-          <Textarea
-            id={id}
-            value={body}
-            onChange={(event) => setBody(event.target.value)}
-            required
-            maxLength={SUPPORT_LIMITS.comment}
-            rows={4}
-            aria-describedby={`${id}-help`}
-          />
-          <p id={`${id}-help`} className="text-sm text-muted-foreground">
-            Markdown, links, and code blocks are supported.
-          </p>
-        </div>
+      <div className="min-w-0 space-y-4">
+        <Field
+          label={initial === undefined ? "Add a comment" : "Edit comment"}
+          hint="Markdown, links, and code blocks are supported."
+        >
+          {(control) => (
+            <Textarea
+              {...control}
+              value={body}
+              onChange={(event) => setBody(event.target.value)}
+              required
+              readOnly={pending}
+              // Editing opens onto the field; a new comment does not steal focus.
+              autoFocus={initial !== undefined}
+              maxLength={SUPPORT_LIMITS.comment}
+              rows={4}
+            />
+          )}
+        </Field>
         <PostError error={save.error} />
         <div className="flex flex-wrap gap-2">
-          <Button type="submit" disabled={!body.trim()}>
-            {save.isPending
-              ? "Saving…"
-              : initial === undefined
-                ? "Post comment"
-                : "Save comment"}
+          <Button
+            type="submit"
+            aria-busy={pending || undefined}
+            focusableWhenDisabled
+            disabled={pending || !body.trim()}
+          >
+            <AsyncLabel
+              state={pending ? "pending" : "idle"}
+              idle={initial === undefined ? "Post comment" : "Save comment"}
+              pending="Saving…"
+            />
           </Button>
           {onCancel && (
-            <Button type="button" variant="outline" onClick={onCancel}>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending}
+              onClick={onCancel}
+            >
               Cancel
             </Button>
           )}
         </div>
-      </fieldset>
+      </div>
     </form>
   );
 }
@@ -253,6 +284,27 @@ export function DeletePost({
     mutationFn: onDelete,
     onSuccess: () => setOpen(false),
   });
+  // A comment is yours alone and the button's words carry the consequence, so
+  // it asks again in place; a topic also deletes other people's comments and
+  // keeps the dialog.
+  if (kind === "comment")
+    return (
+      <div className="flex flex-col items-start gap-1">
+        <InlineConfirm
+          label="Delete"
+          name="Delete comment"
+          question="Delete this comment?"
+          confirmLabel="Delete comment"
+          pendingLabel="Deleting…"
+          doneLabel="Deleted"
+          pending={remove.isPending}
+          done={remove.isSuccess}
+          onConfirm={() => remove.mutate()}
+          onCancel={() => remove.reset()}
+        />
+        <PostError error={remove.error} />
+      </div>
+    );
   return (
     <Dialog
       open={open}
@@ -264,16 +316,14 @@ export function DeletePost({
       }}
     >
       <DialogTrigger render={<Button variant="ghost" size="sm" />}>
-        Delete {kind}
+        Delete topic
       </DialogTrigger>
-      <DialogContent showCloseButton={!remove.isPending}>
+      <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete this {kind}?</DialogTitle>
+          <DialogTitle>Delete this topic?</DialogTitle>
           <DialogDescription>
-            {kind === "topic"
-              ? "This permanently deletes the topic and all its comments, including comments from other users."
-              : "This permanently deletes your selected comment."}{" "}
-            This action cannot be undone.
+            This permanently deletes the topic and all its comments, including
+            comments from other users. This action cannot be undone.
           </DialogDescription>
         </DialogHeader>
         <PostError error={remove.error} />
@@ -283,14 +333,20 @@ export function DeletePost({
             disabled={remove.isPending}
             onClick={() => setOpen(false)}
           >
-            Cancel
+            Keep topic
           </Button>
           <Button
             variant="destructive"
+            aria-busy={remove.isPending || undefined}
+            focusableWhenDisabled
             disabled={remove.isPending}
             onClick={() => remove.mutate()}
           >
-            {remove.isPending ? "Deleting…" : `Delete ${kind}`}
+            <AsyncLabel
+              state={remove.isPending ? "pending" : "idle"}
+              idle="Delete topic"
+              pending="Deleting…"
+            />
           </Button>
         </DialogFooter>
       </DialogContent>

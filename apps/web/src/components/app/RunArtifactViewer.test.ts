@@ -13,7 +13,7 @@ describe("replay player error copy", () => {
     const raw = "asciinema import failed at internal worker path";
 
     expect(replayPlayerErrorCopy(raw, true)).toEqual({
-      lead: "Replay could not be loaded. Try again soon.",
+      lead: "Replay could not be loaded.",
       detail: null,
     });
     expect(JSON.stringify(replayPlayerErrorCopy(raw, true))).not.toContain(raw);

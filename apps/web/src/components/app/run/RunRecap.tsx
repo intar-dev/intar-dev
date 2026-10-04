@@ -26,7 +26,13 @@ import {
 } from "lucide-react";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { ScenarioStepScreen } from "@/components/app/run/StatusScreens";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   CourseLink,
   LectureLink,
@@ -55,7 +61,7 @@ import { MAX_INLINE_REPLAY_BYTES, useStreamedText } from "./useStreamedText";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
 const LazyAsciicastReplaySurface = lazy(() =>
-  import("@/components/app/RunArtifactViewer").then(
+  import("@/components/app/RunArtifactViewerReplay").then(
     ({ AsciicastReplaySurface }) => ({ default: AsciicastReplaySurface }),
   ),
 );
@@ -338,6 +344,9 @@ export function RunRecap({
   );
 }
 
+const STALLED_NOTE =
+  "This is taking longer than usual. Your work is safe, and your recap will appear here.";
+
 function RunSavingProgress({
   stage,
   title,
@@ -391,16 +400,16 @@ function RunSavingProgress({
         headingId="run-recap-heading"
         headingRef={headingRef}
         listLabel="Saving steps"
-        statusAnnouncement={announcement}
+        // One live region reads the sequence: the stalled note joins it
+        // instead of speaking from a second status.
+        statusAnnouncement={isStalled ? `${announcement} ${STALLED_NOTE}` : announcement}
         footer={
           isStalled ? (
             <p
               className="text-support text-muted-foreground"
               data-run-saving-stalled
-              role="status"
             >
-              This is taking longer than usual. Your work is safe, and your
-              recap will appear here.
+              {STALLED_NOTE}
             </p>
           ) : null
         }
@@ -614,11 +623,16 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
           />
         }
         title={<span id="run-recap-replay-heading">Watch replay</span>}
+        heading="h2"
         density="comfortable"
         // The row indents the panel under its title; phones give that back.
         contentClassName="pt-3 pb-4 max-sm:pl-0"
       >
-        <ReplayViewer runId={run.id} parts={parts} />
+        <ReplayViewer
+          runId={run.id}
+          parts={parts}
+          scenarioName={run.scenarioName}
+        />
       </DisclosureRow>
     </section>
   );
@@ -627,9 +641,12 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
 export function ReplayViewer({
   runId,
   parts,
+  scenarioName,
 }: {
   runId: string;
   parts: RunReplayPart[];
+  /** Names the replay for assistive technology. */
+  scenarioName?: string;
 }) {
   const firstPart =
     parts.find((part) => part.castArtifactId) ?? parts[0] ?? null;
@@ -664,8 +681,11 @@ export function ReplayViewer({
     );
   }
 
+  const label = scenarioName
+    ? `Terminal replay of ${scenarioName}`
+    : "Terminal replay";
   if (parts.length === 1) {
-    return <ReplayPartSurface runId={runId} part={selected} />;
+    return <ReplayPartSurface runId={runId} part={selected} label={label} />;
   }
 
   return (
@@ -685,26 +705,40 @@ export function ReplayViewer({
           {selected.machineLabel ? ` · ${selected.machineLabel}` : ""}
         </p>
         <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="icon-sm"
-            aria-label="Previous replay part"
-            disabled={selectedIndex <= 0}
-            onClick={() => selectPart(selectedIndex - 1)}
-          >
-            <ChevronLeft className="size-4" aria-hidden="true" />
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="icon-sm"
-            aria-label="Next replay part"
-            disabled={selectedIndex >= parts.length - 1}
-            onClick={() => selectPart(selectedIndex + 1)}
-          >
-            <ChevronRight className="size-4" aria-hidden="true" />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label="Previous replay part"
+                  disabled={selectedIndex <= 0}
+                  onClick={() => selectPart(selectedIndex - 1)}
+                >
+                  <ChevronLeft className="size-4" aria-hidden="true" />
+                </Button>
+              }
+            />
+            <TooltipContent>Previous replay part</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label="Next replay part"
+                  disabled={selectedIndex >= parts.length - 1}
+                  onClick={() => selectPart(selectedIndex + 1)}
+                >
+                  <ChevronRight className="size-4" aria-hidden="true" />
+                </Button>
+              }
+            />
+            <TooltipContent>Next replay part</TooltipContent>
+          </Tooltip>
         </div>
       </div>
 
@@ -721,7 +755,7 @@ export function ReplayViewer({
 
       <ol
         aria-label="Replay order"
-        className="flex w-full min-w-0 max-w-full gap-2 overflow-x-auto pb-2"
+        className="flex w-full min-w-0 max-w-full gap-2 overflow-x-auto p-1"
       >
         {parts.map((part, index) => (
           <li key={part.key} className="shrink-0">
@@ -762,14 +796,24 @@ export function ReplayViewer({
         }`}
         data-run-replay-slide
       >
-        <ReplayPartSurface runId={runId} part={selected} />
+        <ReplayPartSurface
+          runId={runId}
+          part={selected}
+          label={`${label}, ${selected.partLabel.toLowerCase()}${
+            selected.machineLabel ? `, ${selected.machineLabel}` : ""
+          }`}
+        />
       </div>
     </div>
   );
 }
 
 // Retrying remounts the content, which starts the fetch again.
-function ReplayPartSurface(props: { runId: string; part: RunReplayPart }) {
+function ReplayPartSurface(props: {
+  runId: string;
+  part: RunReplayPart;
+  label: string;
+}) {
   const [attempt, setAttempt] = useState(0);
   return (
     <ReplayPartContent
@@ -783,10 +827,12 @@ function ReplayPartSurface(props: { runId: string; part: RunReplayPart }) {
 function ReplayPartContent({
   runId,
   part,
+  label,
   onRetry,
 }: {
   runId: string;
   part: RunReplayPart;
+  label: string;
   onRetry: () => void;
 }) {
   const contentUrl = part.castArtifactId
@@ -804,20 +850,24 @@ function ReplayPartContent({
       Replay unavailable.
     </p>
   ) : knownTooLarge || replay.truncated ? (
-    <div className="space-y-3 rounded-md border bg-muted/20 px-4 py-4">
-      <p className="text-support text-muted-foreground" role="status">
-        This replay is too large to play in the page.
-      </p>
-      <Button
-        variant="outline"
-        size="sm"
-        render={
-          <a href={contentUrl ?? undefined} download="terminal-session.cast" />
-        }
-      >
-        Download replay
-      </Button>
-    </div>
+    <Alert className="rounded-xl">
+      <AlertTitle>This replay is too large to play in the page.</AlertTitle>
+      <AlertDescription>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-2"
+          render={
+            <a
+              href={contentUrl ?? undefined}
+              download="terminal-session.cast"
+            />
+          }
+        >
+          Download replay
+        </Button>
+      </AlertDescription>
+    </Alert>
   ) : replay.error ? (
     // The error replaces the replay, so it is announced, and says what to do.
     <div
@@ -838,17 +888,15 @@ function ReplayPartContent({
       </Button>
     </div>
   ) : (
-    <div
-      className="overflow-hidden rounded-xl border border-terminal-border bg-terminal-background"
-      data-run-recap-replay-surface
-    >
+    // The replay frame draws its own edge, so this only marks the slot.
+    <div data-run-recap-replay-surface>
       <Suspense
         fallback={
           <div
-            className="flex aspect-video items-center justify-center text-support text-terminal-muted"
+            className="rounded-xl border border-terminal-border bg-terminal-background px-4 py-6 text-support text-terminal-muted"
             role="status"
           >
-            Opening replay…
+            Preparing replay…
           </div>
         }
       >
@@ -856,6 +904,7 @@ function ReplayPartContent({
           contentId={part.castArtifactId}
           content={replay.content}
           loading={replay.loading}
+          label={label}
           minimal
         />
       </Suspense>

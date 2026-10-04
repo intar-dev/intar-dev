@@ -213,7 +213,7 @@ export function AppBar() {
     // band hides scrolled content above the bar, and the bar redraws the
     // panel's top corners and side borders so it stays attached while sticky.
     <header className="sticky top-0 z-30 shrink-0 bg-background pt-[env(safe-area-inset-top)] lg:-mx-px lg:bg-sidebar lg:pt-2">
-      <div className="grid h-[var(--app-bar-h)] grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b bg-background pr-[max(0.5rem,env(safe-area-inset-right))] pl-[max(0.5rem,env(safe-area-inset-left))] lg:rounded-t-xl lg:border-x lg:border-t lg:border-sidebar-border lg:border-b-border">
+      <div className="grid h-[var(--app-bar-h)] grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b bg-background pr-[max(0.5rem,env(safe-area-inset-right))] pl-[max(0.5rem,env(safe-area-inset-left))] lg:rounded-t-xl lg:border-x lg:border-t lg:border-border lg:shadow-(--highlight)">
       <div className="flex min-w-0 items-center gap-2" data-app-bar-leading>
         <SidebarTrigger />
         {chrome?.back ? (
@@ -246,6 +246,7 @@ export function AppBar() {
                   >
                     <Link
                       to={ancestor.to}
+                      activeOptions={{ exact: true }}
                       className="inline-flex max-w-[16rem] min-w-0 items-center rounded-sm text-support font-medium text-faint-foreground transition-colors duration-150 hover:text-foreground"
                     >
                       <span className="truncate">{ancestor.label}</span>

@@ -4,8 +4,22 @@ import {
   formatDate,
   formatMinutes,
   formatRelativeTime,
+  initials,
   sentenceCase,
 } from "./format";
+
+describe("initials", () => {
+  it("takes the first letter of each requested word", () => {
+    expect(initials("  ada lovelace ")).toBe("A");
+    expect(initials("ada lovelace", 2)).toBe("AL");
+    expect(initials("😀 smile")).toBe("😀");
+  });
+
+  it("falls back to a question mark", () => {
+    expect(initials("")).toBe("?");
+    expect(initials(null)).toBe("?");
+  });
+});
 
 describe("format", () => {
   it("reads minutes in hours from 60", () => {

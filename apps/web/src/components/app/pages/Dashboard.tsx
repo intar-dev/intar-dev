@@ -13,6 +13,7 @@ import {
   Archive,
   CircleAlert,
   RefreshCw,
+  Search,
   Server,
   Shapes,
 } from "lucide-react";
@@ -23,21 +24,20 @@ import {
 } from "@/components/app/patterns/CollectionPagination";
 import { Section } from "@/components/app/patterns/Section";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
-import { TableSkeleton } from "@/components/app/patterns/Skeletons";
+import {
+  CardGridSkeleton,
+  TableSkeleton,
+} from "@/components/app/patterns/Skeletons";
+import { ConfirmDialog } from "@/components/app/patterns/ConfirmDialog";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
+import { RollingNumber } from "@/components/app/patterns/RollingNumber";
+import { EmptyState } from "@/components/app/patterns/StateCard";
 import type { RunArtifactViewerState } from "@/components/app/RunArtifactViewer";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { adminScenarioRunArtifactContentPath } from "@/lib/artifact-content-paths";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { parseTimestamp } from "@/components/app/admin/hosts/format";
 import { LiveScenarioRunCard } from "@/components/app/admin/hosts/LiveScenarioRunCard";
@@ -64,20 +64,22 @@ const ARTIFACT_TEXT_PREVIEW_BYTES = 256 * 1024;
 const ARTIFACT_REPLAY_PREVIEW_BYTES = 2 * 1024 * 1024;
 const ARTIFACT_PREVIEW_FLUSH_MS = 50;
 const DASHBOARD_ARCHIVE_PAGE_SIZE = 6;
-type ArchiveOutcomeFilter = AgentVmRunSummary["outcome"] | null;
+type ArchiveOutcome = AgentVmRunSummary["outcome"];
 
 const ARCHIVE_OUTCOME_FILTERS = [
   ["succeeded", "Succeeded"],
   ["cancelled", "Cancelled"],
   ["failed", "Failed"],
-] as const satisfies ReadonlyArray<
-  readonly [Exclude<ArchiveOutcomeFilter, null>, string]
->;
+] as const satisfies ReadonlyArray<readonly [ArchiveOutcome, string]>;
 
 // Admin overview: fleet-wide KPIs plus the live and archived scenario runs.
 // Host operations live on /admin/hosts.
 export function Dashboard() {
-  const [vmError, setVmError] = useState<string | null>(null);
+  const [vmError, setVmError] = useState<{
+    title: string;
+    message: string;
+  } | null>(null);
+  const archiveSearchRef = useRef<HTMLInputElement>(null);
   const [vmNotice, setVmNotice] = useState<string | null>(null);
   const [vmBusyKey, setVmBusyKey] = useState<string | null>(null);
   const [expandedActiveVms, setExpandedActiveVms] = useState<
@@ -116,8 +118,9 @@ export function Dashboard() {
   } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [archiveSearch, setArchiveSearch] = useState("");
-  const [archiveOutcomeFilter, setArchiveOutcomeFilter] =
-    useState<ArchiveOutcomeFilter>(null);
+  const [archiveOutcomes, setArchiveOutcomes] = useState<
+    readonly ArchiveOutcome[]
+  >([]);
 
   const {
     hosts,
@@ -420,9 +423,13 @@ export function Dashboard() {
       );
       await refreshHost(hostId);
     } catch (error) {
-      setVmError(
-        error instanceof Error ? error.message : "failed to request end run",
-      );
+      setVmError({
+        title: "Could not end run",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Your work is still open. Try ending the run again.",
+      });
     } finally {
       setVmBusyKey((current) => (current === busyKey ? null : current));
     }
@@ -491,9 +498,13 @@ export function Dashboard() {
       setDeleteTarget(null);
       setDeleteConfirm("");
     } catch (error) {
-      setVmError(
-        error instanceof Error ? error.message : "failed to delete run",
-      );
+      setVmError({
+        title: "Could not delete run",
+        message:
+          error instanceof Error
+            ? error.message
+            : "The run was not deleted. Try again.",
+      });
     } finally {
       setVmBusyKey((current) => (current === busyKey ? null : current));
     }
@@ -536,13 +547,56 @@ export function Dashboard() {
       filterArchivedScenarioRuns(
         archivedScenarioRuns,
         archiveSearch,
-        archiveOutcomeFilter,
+        archiveOutcomes,
       ),
-    [archiveOutcomeFilter, archiveSearch, archivedScenarioRuns],
+    [archiveOutcomes, archiveSearch, archivedScenarioRuns],
   );
   const archiveFiltersActive = Boolean(
-    archiveSearch.trim() || archiveOutcomeFilter,
+    archiveSearch.trim() || archiveOutcomes.length,
   );
+  const clearArchiveFilters = () => {
+    setArchiveSearch("");
+    setArchiveOutcomes([]);
+  };
+  // A ledger value is only claimed once its source has answered.
+  const fleetState: LedgerState = hosts.isPending
+    ? "pending"
+    : hosts.error && !hostRecords.length
+      ? "unavailable"
+      : "ready";
+  const scenarioState: LedgerState = scenarios.isPending
+    ? "pending"
+    : scenarios.error && !scenarios.data
+      ? "unavailable"
+      : "ready";
+  const archiveState: LedgerState = isArchivePending
+    ? "pending"
+    : archiveError && !archivedScenarioRuns.length
+      ? "unavailable"
+      : "ready";
+  const unknownDetail = (state: LedgerState) =>
+    state === "pending" ? "Waiting for host reports" : "Host reports unavailable";
+  const endPending =
+    endTarget !== null &&
+    vmBusyKey === `${endTarget.hostId}:destroy-run:${endTarget.runId}`;
+  const deletePending =
+    deleteTarget !== null &&
+    vmBusyKey === `${deleteTarget.hostId}:delete-run:${deleteTarget.runId}`;
+  const closeEndDialog = () => {
+    setEndTarget(null);
+    setVmError(null);
+  };
+  const closeDeleteDialog = () => {
+    setDeleteTarget(null);
+    setDeleteConfirm("");
+    setVmError(null);
+  };
+  const deleteMatches = deleteTarget?.runId === deleteConfirm;
+  const confirmDelete = () => {
+    if (deleteTarget && deleteMatches && !deletePending) {
+      void handleDeleteRun(deleteTarget.hostId, deleteTarget.runId);
+    }
+  };
   return (
     <PageShell variant="workspace" density="compact">
       <Section
@@ -551,23 +605,25 @@ export function Dashboard() {
         variant="flat"
         density="compact"
         className="rounded-none border-0 bg-transparent py-2"
-        bodyClassName="divide-y divide-border/50 px-0"
+        bodyClassName="divide-y px-0"
       >
         <LedgerRow
           icon={<CircleAlert />}
           label="Needs attention"
-          value={String(attentionHostCount)}
+          state={fleetState}
+          value={<RollingNumber value={attentionHostCount} />}
           detail={
-            attentionHostCount
-              ? "Offline, degraded, or disabled hosts"
-              : "No host exceptions"
+            fleetState !== "ready"
+              ? unknownDetail(fleetState)
+              : attentionHostCount
+                ? "Offline, degraded, or disabled hosts"
+                : "No host exceptions"
           }
           tone={attentionHostCount ? "warning" : "success"}
           action={
             <Button
-              size="xs"
-              variant="ghost"
-              className="h-5 min-w-8 px-0 text-caption font-medium sm:h-8 text-muted-foreground hover:bg-transparent hover:text-foreground"
+              size="sm"
+              variant="link"
               render={<Link to="/admin/hosts" />}
             >
               Review hosts
@@ -577,21 +633,31 @@ export function Dashboard() {
         <LedgerRow
           icon={<Server />}
           label="Fleet connectivity"
-          value={`${connectedHostCount}/${hostRecords.length}`}
-          detail="Hosts connected"
+          state={fleetState}
+          value={
+            <>
+              <RollingNumber value={connectedHostCount} />/
+              <RollingNumber value={hostRecords.length} />
+            </>
+          }
+          detail={
+            fleetState !== "ready"
+              ? unknownDetail(fleetState)
+              : "Hosts connected"
+          }
         />
         <LedgerRow
           icon={<Activity />}
           label="Live work"
-          value={String(activeVmCount)}
-          detail="Active scenario VMs"
+          state={fleetState}
+          value={<RollingNumber value={activeVmCount} />}
+          detail={
+            fleetState !== "ready"
+              ? unknownDetail(fleetState)
+              : "Active scenario VMs"
+          }
           action={
-            <Button
-              size="xs"
-              variant="ghost"
-              className="h-5 min-w-8 px-0 text-caption font-medium sm:h-8 text-muted-foreground hover:bg-transparent hover:text-foreground"
-              render={<a href="#live-runs" />}
-            >
+            <Button size="sm" variant="link" render={<a href="#live-runs" />}>
               Inspect live work
             </Button>
           }
@@ -599,24 +665,43 @@ export function Dashboard() {
         <LedgerRow
           icon={<Archive />}
           label="Run archive"
+          state={archiveState}
           value={
-            archiveTotalCount === null && hasMoreArchives
-              ? `${archivedRunCount}+`
-              : String(archivedRunCount)
+            <>
+              <RollingNumber value={archivedRunCount} />
+              {archiveTotalCount === null && hasMoreArchives ? "+" : ""}
+            </>
           }
-          detail="Retained sessions"
+          detail={
+            archiveState === "pending"
+              ? "Waiting for the archive"
+              : archiveState === "unavailable"
+                ? "Archive unavailable"
+                : "Retained sessions"
+          }
         />
         <LedgerRow
           icon={<Shapes />}
           label="Scenario availability"
-          value={`${enabledScenarioCount}/${launchableScenarios.length}`}
-          detail="Enabled for learners"
+          state={scenarioState}
+          value={
+            <>
+              <RollingNumber value={enabledScenarioCount} />/
+              <RollingNumber value={launchableScenarios.length} />
+            </>
+          }
+          detail={
+            scenarioState === "pending"
+              ? "Waiting for scenarios"
+              : scenarioState === "unavailable"
+                ? "Scenarios unavailable"
+                : "Enabled for learners"
+          }
           tone={enabledScenarioCount ? "default" : "warning"}
           action={
             <Button
-              size="xs"
-              variant="ghost"
-              className="h-5 min-w-8 px-0 text-caption font-medium sm:h-8 text-muted-foreground hover:bg-transparent hover:text-foreground"
+              size="sm"
+              variant="link"
               render={<Link to="/admin/scenarios" />}
             >
               Open registry
@@ -632,7 +717,7 @@ export function Dashboard() {
             <AlertDescription>
               {scenarios.error instanceof Error
                 ? scenarios.error.message
-                : "Failed to load scenarios"}
+                : "Refresh the page to try again."}
             </AlertDescription>
           </Alert>
         ) : null}
@@ -642,7 +727,7 @@ export function Dashboard() {
             <AlertDescription>
               {hosts.error instanceof Error
                 ? hosts.error.message
-                : "Failed to load hosts"}
+                : "Refresh the page to try again."}
             </AlertDescription>
           </Alert>
         ) : null}
@@ -652,17 +737,15 @@ export function Dashboard() {
             <AlertDescription>{archiveError.message}</AlertDescription>
           </Alert>
         ) : null}
-        {vmError ? (
+        {/* While a dialog is open the failure shows inside it, where it is announced. */}
+        {vmError && endTarget === null && deleteTarget === null ? (
           <Alert variant="destructive">
-            <AlertTitle>VM action failed</AlertTitle>
-            <AlertDescription>{vmError}</AlertDescription>
+            <AlertTitle>{vmError.title}</AlertTitle>
+            <AlertDescription>{vmError.message}</AlertDescription>
           </Alert>
         ) : null}
         {vmNotice ? (
-          <Alert>
-            <AlertTitle>Host update</AlertTitle>
-            <AlertDescription>{vmNotice}</AlertDescription>
-          </Alert>
+          <InlineFeedback tone="success">{vmNotice}</InlineFeedback>
         ) : null}
       </div>
 
@@ -672,15 +755,21 @@ export function Dashboard() {
           title="Live scenario runs"
           description="Everything currently running across the fleet."
           actions={
-            <Badge variant="outline">
-              {hasMoreLive
-                ? `Newest ${liveLoadedCount} of ${liveTotalCount} runs`
-                : `${liveTotalCount} active`}
-            </Badge>
+            fleetState === "ready" ? (
+              <span className="text-metadata tabular-nums">
+                {hasMoreLive
+                  ? `Newest ${liveLoadedCount} of ${liveTotalCount} runs`
+                  : `${liveTotalCount} active`}
+              </span>
+            ) : null
           }
         >
           {hosts.isPending ? (
-            <TableSkeleton rows={2} />
+            <CardGridSkeleton
+              cards={2}
+              className="sm:grid-cols-1"
+              cardClassName="h-52"
+            />
           ) : liveScenarioRuns.length ? (
             <PaginatedCollection
               items={liveScenarioRuns}
@@ -714,6 +803,7 @@ export function Dashboard() {
                         }}
                         onDelete={() => {
                           if (!vm.run_id) return;
+                          setVmError(null);
                           setEndTarget({
                             hostId: host.id,
                             runId: vm.run_id,
@@ -730,7 +820,9 @@ export function Dashboard() {
               )}
             </PaginatedCollection>
           ) : (
-            <OperationalEmptyState
+            <EmptyState
+              headingLevel={3}
+              icon={<Activity />}
               title="No active scenario runs"
               description="Runs launched by learners or from the Hosts page show up here in real time."
             />
@@ -744,14 +836,16 @@ export function Dashboard() {
         description="Finished runs with their captured artifacts."
         actions={
           <>
-            <Badge variant="outline">
-              {archiveTotalCount === null
-                ? `${archivedScenarioRuns.length}+ loaded`
-                : `${archivedRunCount} retained`}
-              {hasMoreArchives && archiveTotalCount !== null
-                ? ` · ${archivedScenarioRuns.length} shown`
-                : ""}
-            </Badge>
+            {archiveState === "pending" ? null : (
+              <span className="text-metadata tabular-nums">
+                {archiveTotalCount === null
+                  ? `${archivedScenarioRuns.length}+ loaded`
+                  : `${archivedRunCount} retained`}
+                {hasMoreArchives && archiveTotalCount !== null
+                  ? ` · ${archivedScenarioRuns.length} loaded`
+                  : ""}
+              </span>
+            )}
             <Button
               type="button"
               size="xs"
@@ -763,7 +857,7 @@ export function Dashboard() {
                 });
               }}
             >
-              <RefreshCw className="size-3.5" />
+              <RefreshCw />
               Refresh
             </Button>
           </>
@@ -773,7 +867,9 @@ export function Dashboard() {
         {isArchivePending ? (
           <TableSkeleton rows={2} />
         ) : archiveError && !archivedScenarioRuns.length ? (
-          <OperationalEmptyState
+          <EmptyState
+            headingLevel={3}
+            icon={<Archive />}
             title="Run archive unavailable"
             description="Refresh the page to try loading the archive again."
           />
@@ -782,14 +878,12 @@ export function Dashboard() {
             <FilterBar
               search={archiveSearch}
               onSearchChange={setArchiveSearch}
+              searchRef={archiveSearchRef}
               searchPlaceholder="Search runs, users, or hosts…"
               searchLabel="Search archived runs"
               stackSearchOnMobile
               filtersActive={archiveFiltersActive}
-              onClear={() => {
-                setArchiveSearch("");
-                setArchiveOutcomeFilter(null);
-              }}
+              onClear={clearArchiveFilters}
             >
               <div
                 className="flex flex-wrap items-center gap-2"
@@ -799,10 +893,12 @@ export function Dashboard() {
                 {ARCHIVE_OUTCOME_FILTERS.map(([value, label]) => (
                   <FilterChip
                     key={value}
-                    active={archiveOutcomeFilter === value}
+                    active={archiveOutcomes.includes(value)}
                     onClick={() =>
-                      setArchiveOutcomeFilter((current) =>
-                        current === value ? null : value,
+                      setArchiveOutcomes((current) =>
+                        current.includes(value)
+                          ? current.filter((outcome) => outcome !== value)
+                          : [...current, value],
                       )
                     }
                   >
@@ -825,9 +921,7 @@ export function Dashboard() {
                 items={filteredArchivedScenarioRuns}
                 pageSize={DASHBOARD_ARCHIVE_PAGE_SIZE}
                 itemLabel="archived runs"
-                resetKey={`${archiveSearch.trim().toLowerCase()}|${
-                  archiveOutcomeFilter ?? ""
-                }`}
+                resetKey={`${archiveSearch.trim().toLowerCase()}|${archiveOutcomes.join(",")}`}
               >
                 {(visibleRuns) => (
                   <div className="divide-y">
@@ -863,6 +957,7 @@ export function Dashboard() {
                           }}
                           onDelete={() => {
                             setDeleteConfirm("");
+                            setVmError(null);
                             setDeleteTarget({
                               hostId: host.id,
                               runId: run.id,
@@ -885,14 +980,30 @@ export function Dashboard() {
                 )}
               </PaginatedCollection>
             ) : (
-              <OperationalEmptyState
+              <EmptyState
+                headingLevel={3}
+                icon={<Search />}
                 title="No runs match these filters"
-                description="Clear a filter or use a different search term."
+                description="Clear the filters or try a different search term."
+                action={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      clearArchiveFilters();
+                      archiveSearchRef.current?.focus();
+                    }}
+                  >
+                    Clear filters
+                  </Button>
+                }
               />
             )}
           </>
         ) : (
-          <OperationalEmptyState
+          <EmptyState
+            headingLevel={3}
+            icon={<Archive />}
             title="No archived scenario runs yet"
             description="Finished runs land here once their recordings upload."
           />
@@ -933,98 +1044,62 @@ export function Dashboard() {
         </Suspense>
       ) : null}
 
-      <Dialog
+      <ConfirmDialog
         open={endTarget !== null}
-        onOpenChange={(open) => !open && setEndTarget(null)}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>End this run?</DialogTitle>
-            <DialogDescription>
-              This stops active work on {endTarget?.vmName}. Captured history
-              remains available after archival.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setEndTarget(null)}
-              disabled={vmBusyKey !== null}
-            >
-              Keep running
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={!endTarget || vmBusyKey !== null}
-              onClick={() => {
-                if (endTarget) {
-                  void handleDestroyRun(
-                    endTarget.hostId,
-                    endTarget.runId,
-                    endTarget.vmName,
-                  );
-                }
-              }}
-            >
-              {vmBusyKey ? "Ending…" : "End run"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={deleteTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setDeleteTarget(null);
-            setDeleteConfirm("");
+        onClose={closeEndDialog}
+        title="End this run?"
+        description={`This stops active work on ${endTarget?.vmName ?? "this run"}. Captured history remains available after archival.`}
+        error={endTarget ? (vmError?.message ?? null) : null}
+        pending={endPending}
+        confirmLabel="End run"
+        pendingLabel="Ending…"
+        cancelLabel="Keep running"
+        onConfirm={() => {
+          if (endTarget) {
+            void handleDestroyRun(
+              endTarget.hostId,
+              endTarget.runId,
+              endTarget.vmName,
+            );
           }
         }}
+      />
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onClose={closeDeleteDialog}
+        title="Delete this run?"
+        description="This permanently removes the archived history and captured artifacts. Type the run ID to confirm."
+        error={deleteTarget ? (vmError?.message ?? null) : null}
+        pending={deletePending}
+        confirmLabel="Delete run"
+        pendingLabel="Deleting…"
+        cancelLabel="Keep history"
+        confirmDisabled={!deleteMatches}
+        onConfirm={confirmDelete}
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete this run?</DialogTitle>
-            <DialogDescription>
-              This permanently removes the archived history and captured
-              artifacts. Type the run ID to confirm.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            <label htmlFor="delete-run-confirm" className="block text-code">
-              {deleteTarget?.runId}
-            </label>
-            <Input
-              id="delete-run-confirm"
-              value={deleteConfirm}
-              onChange={(event) => setDeleteConfirm(event.target.value)}
-              autoComplete="off"
-            />
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setDeleteTarget(null)}
-              disabled={vmBusyKey !== null}
-            >
-              Keep history
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={
-                !deleteTarget ||
-                deleteConfirm !== deleteTarget.runId ||
-                vmBusyKey !== null
+        <div className="space-y-2">
+          <label htmlFor="delete-run-confirm" className="block text-code">
+            {deleteTarget?.runId}
+          </label>
+          <Input
+            id="delete-run-confirm"
+            className="font-mono"
+            value={deleteConfirm}
+            onChange={(event) => setDeleteConfirm(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                confirmDelete();
               }
-              onClick={() => {
-                if (deleteTarget)
-                  void handleDeleteRun(deleteTarget.hostId, deleteTarget.runId);
-              }}
-            >
-              {vmBusyKey ? "Deleting…" : "Delete run"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            }}
+            autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+        </div>
+      </ConfirmDialog>
     </PageShell>
   );
 }
@@ -1032,11 +1107,11 @@ export function Dashboard() {
 export function filterArchivedScenarioRuns(
   runs: readonly ArchivedScenarioRunRecord[],
   search: string,
-  outcome: ArchiveOutcomeFilter,
+  outcomes: readonly ArchiveOutcome[],
 ): ArchivedScenarioRunRecord[] {
   const needle = search.trim().toLowerCase();
   return runs.filter(({ host, run }) => {
-    if (outcome && run.outcome !== outcome) return false;
+    if (outcomes.length && !outcomes.includes(run.outcome)) return false;
     if (!needle) return true;
     return [
       run.id,
@@ -1097,43 +1172,37 @@ export function artifactPreviewRequest(
     : { previewTruncated: false, requestInit: {} };
 }
 
-function OperationalEmptyState({
-  title,
-  description,
-}: {
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="rounded-lg bg-muted/30 px-4 py-3">
-      <h3 className="text-card-title">{title}</h3>
-      <p className="mt-1 text-metadata">{description}</p>
-    </div>
-  );
-}
+type LedgerState = "ready" | "pending" | "unavailable";
 
 function LedgerRow({
   icon,
   label,
   value,
   detail,
+  state = "ready",
   tone = "default",
   action,
 }: {
   icon: React.ReactNode;
   label: string;
-  value: string;
+  value: React.ReactNode;
   detail: string;
+  /** A value is shown only once its source has answered. */
+  state?: LedgerState;
   tone?: "default" | "success" | "warning";
   action?: React.ReactNode;
 }) {
+  const shownTone = state === "ready" ? tone : "default";
   return (
-    <div className="grid grid-cols-[1.4rem_minmax(0,1fr)_auto] items-center gap-x-3 px-4 py-3 sm:grid-cols-[1.4rem_minmax(12rem,1fr)_auto_minmax(7.5rem,auto)] sm:gap-x-4">
+    <div
+      aria-busy={state === "pending" ? true : undefined}
+      className="grid grid-cols-[1.4rem_minmax(0,1fr)_auto] items-center gap-x-3 px-4 py-3 sm:grid-cols-[1.4rem_minmax(12rem,1fr)_auto_minmax(7.5rem,auto)] sm:gap-x-4"
+    >
       <span
         className={cn(
-          tone === "warning"
+          shownTone === "warning"
             ? "text-warning"
-            : tone === "success"
+            : shownTone === "success"
               ? "text-success"
               : "text-muted-foreground",
         )}
@@ -1146,10 +1215,16 @@ function LedgerRow({
       </div>
       {/* On mobile the value shares the label line and the action the detail
           line, so rows with and without an action are the same height. */}
-      <div className="flex min-w-20 flex-col items-end gap-0.5 self-start text-right sm:contents">
-        <p className="text-support font-semibold tabular-nums sm:col-start-3 sm:justify-self-end">
-          {value}
-        </p>
+      <div className="flex min-w-20 flex-col items-end gap-0.5 self-center text-right sm:contents">
+        <div className="text-support font-semibold tabular-nums sm:col-start-3 sm:justify-self-end">
+          {state === "pending" ? (
+            <Skeleton className="h-4 w-10" />
+          ) : state === "unavailable" ? (
+            "—"
+          ) : (
+            value
+          )}
+        </div>
         {action ? (
           <div className="sm:col-start-4 sm:justify-self-end">{action}</div>
         ) : null}

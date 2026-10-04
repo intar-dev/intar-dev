@@ -1,8 +1,11 @@
 import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, Building2, LockKeyhole, Plus, Users } from "lucide-react";
+import { ArrowRight, Building2, LockKeyhole, Plus } from "lucide-react";
 import { formatRelativeTime } from "../lib/format";
+import { AsyncLabel } from "../patterns/AsyncLabel";
+import { Field } from "../patterns/Field";
+import { MetaLine } from "../patterns/MetaLine";
 import { PageShell } from "../patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
@@ -12,7 +15,6 @@ import { CardGridSkeleton } from "../patterns/Skeletons";
 import { EmptyState, ErrorState } from "../patterns/StateCard";
 import { usePageChrome } from "../shell/page-chrome";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -24,6 +26,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { ORGANIZATION_NAME_MAX, reject } from "./organization-detail/reject";
 
 interface OrganizationSummary {
   id: string;
@@ -47,6 +50,8 @@ export function Organizations() {
   const navigate = useNavigate();
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
+  // A refused submit (too short) says why at the field and nudges it.
+  const [nameProblem, setNameProblem] = useState<string | null>(null);
 
   const organizations = useQuery({
     queryKey: ["organizations", "list"],
@@ -58,9 +63,7 @@ export function Organizations() {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(
-          body?.error ?? `Failed to load organizations (${response.status})`,
-        );
+        throw new Error(body?.error ?? "Could not load your organizations.");
       }
       return (await response.json()) as OrganizationsResponse;
     },
@@ -80,9 +83,7 @@ export function Organizations() {
         error?: string;
       } | null;
       if (!response.ok || !body?.organization) {
-        throw new Error(
-          body?.error ?? `Failed to create organization (${response.status})`,
-        );
+        throw new Error(body?.error ?? "Could not create the organization.");
       }
       return body.organization;
     },
@@ -101,6 +102,7 @@ export function Organizations() {
   const openCreate = useCallback(() => {
     if (!creation?.enabled) return;
     setName("");
+    setNameProblem(null);
     createOrganization.reset();
     setCreateOpen(true);
   }, [createOrganization, creation?.enabled]);
@@ -145,27 +147,42 @@ export function Organizations() {
           </DialogHeader>
           <form
             id="create-organization-form"
+            noValidate
             onSubmit={(event) => {
               event.preventDefault();
-              if (name.trim().length >= 2 && !createOrganization.isPending) {
-                createOrganization.mutate();
+              if (createOrganization.isPending) return;
+              if (name.trim().length < 2) {
+                setNameProblem("Enter a name of 2 to 60 characters.");
+                reject(
+                  event.currentTarget.querySelector<HTMLInputElement>("input"),
+                );
+                return;
               }
+              createOrganization.mutate();
             }}
           >
-            <Input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Organization name"
-              aria-label="Organization name"
-              autoFocus
-            />
-            {createOrganization.error ? (
-              <p className="mt-2 text-sm text-destructive">
-                {createOrganization.error instanceof Error
-                  ? createOrganization.error.message
-                  : "Failed to create organization"}
-              </p>
-            ) : null}
+            <Field
+              label="Organization name"
+              error={
+                nameProblem ??
+                (createOrganization.error ? createOrganization.error.message : null)
+              }
+            >
+              {(control) => (
+                <Input
+                  {...control}
+                  value={name}
+                  onChange={(event) => {
+                    setName(event.target.value);
+                    setNameProblem(null);
+                  }}
+                  placeholder="Platform team"
+                  maxLength={ORGANIZATION_NAME_MAX}
+                  autoComplete="off"
+                  autoFocus
+                />
+              )}
+            </Field>
           </form>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
@@ -174,17 +191,22 @@ export function Organizations() {
             <Button
               type="submit"
               form="create-organization-form"
-              disabled={name.trim().length < 2 || createOrganization.isPending}
+              aria-busy={createOrganization.isPending || undefined}
+              disabled={createOrganization.isPending}
+              focusableWhenDisabled
             >
-              {createOrganization.isPending ? "Creating…" : "Create"}
+              <AsyncLabel
+                state={createOrganization.isPending ? "pending" : "idle"}
+                idle="Create"
+                pending="Creating…"
+              />
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {creation && !creation.enabled ? (
-        <Alert>
-          <LockKeyhole className="size-4" />
+        <Alert icon={<LockKeyhole />}>
           <AlertTitle>
             {creation.reason === "owner_limit_reached"
               ? "Organization ownership limit reached"
@@ -237,48 +259,36 @@ export function Organizations() {
             {(visibleOrganizations) => (
               <div className="space-y-3">
                 {visibleOrganizations.map((organization) => (
-                  <Link
+                  <Card
                     key={organization.id}
-                    to="/organizations/$orgId"
-                    params={{ orgId: organization.id }}
-                    className="group block rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+                    variant="interactive"
+                    className="group gap-3 px-(--card-spacing)"
+                    render={
+                      <Link
+                        to="/organizations/$orgId"
+                        params={{ orgId: organization.id }}
+                      />
+                    }
                   >
-                    <Card
-                      as="article"
-                      variant="interactive"
-                      className="gap-3 px-(--card-spacing)"
-                    >
-                      <div className="flex items-center gap-4">
-                        <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-brand-subtle text-brand-text">
-                          <Building2 className="size-5" />
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <h2 className="text-card-title transition-colors group-hover:text-brand-text">
-                            {organization.name}
-                          </h2>
-                          <p className="mt-1 flex items-start gap-1.5 text-metadata">
-                            <Users className="mt-0.5 size-3.5 shrink-0" />
-                            <span className="min-w-0">
-                              {organization.memberCount} member
-                              {organization.memberCount === 1 ? "" : "s"} ·
-                              created{" "}
-                              {formatRelativeTime(organization.createdAt)}
-                            </span>
-                          </p>
-                        </div>
-                        <Badge
-                          variant={
-                            organization.role === "member"
-                              ? "outline"
-                              : "secondary"
-                          }
-                        >
-                          {roleLabel(organization.role)}
-                        </Badge>
-                        <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+                    <div className="flex items-center gap-3.5">
+                      <span className="flex size-10 shrink-0 items-center justify-center rounded-[0.625rem] bg-brand-subtle text-brand-text ring-1 ring-brand-border/60">
+                        <Building2 className="size-5" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <h3 className="text-card-title">{organization.name}</h3>
+                        <MetaLine
+                          dense
+                          className="mt-1"
+                          items={[
+                            `${organization.memberCount} member${organization.memberCount === 1 ? "" : "s"}`,
+                            roleLabel(organization.role),
+                            `Created ${formatRelativeTime(organization.createdAt)}`,
+                          ]}
+                        />
                       </div>
-                    </Card>
-                  </Link>
+                      <ArrowRight className="size-4 shrink-0 text-faint-foreground transition-[translate,color] duration-(--duration-moderate) ease-enter group-hover:translate-x-(--move-nudge) group-hover:text-foreground group-focus-visible:translate-x-(--move-nudge) group-focus-visible:text-foreground" />
+                    </div>
+                  </Card>
                 ))}
               </div>
             )}

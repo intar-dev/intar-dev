@@ -31,7 +31,7 @@ function SelectTrigger({
       data-slot="select-trigger"
       data-size={size}
       className={cn(
-        "flex w-fit cursor-pointer items-center justify-between gap-1.5 rounded-lg border border-input bg-card py-2 pr-2.5 pl-3 text-sm whitespace-nowrap shadow-(--shadow-control) transition-[color,background-color,border-color,box-shadow] duration-150 ease-standard outline-none select-none hover:border-border-strong focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-60 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-placeholder:text-faint-foreground data-[size=default]:h-(--control-standard) data-[size=sm]:h-(--control-compact) dark:aria-invalid:border-destructive-border dark:aria-invalid:ring-destructive/30 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        "group/select-trigger flex w-fit cursor-pointer items-center justify-between gap-1.5 rounded-lg border border-input bg-card py-2 pr-2.5 pl-3 text-sm whitespace-nowrap shadow-(--shadow-control) transition-[color,background-color,border-color,box-shadow] duration-150 ease-standard outline-hidden select-none hover:border-border-strong focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-60 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-placeholder:text-faint-foreground data-[size=default]:h-(--control-standard) data-[size=sm]:h-(--control-compact) dark:aria-invalid:border-destructive-border dark:aria-invalid:ring-destructive/30 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         className,
       )}
       {...props}
@@ -39,7 +39,7 @@ function SelectTrigger({
       {children}
       <SelectPrimitive.Icon
         render={
-          <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground transition-transform duration-(--duration-moderate) ease-enter data-popup-open:rotate-180" />
+          <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground transition-transform duration-(--duration-moderate) ease-enter group-data-popup-open/select-trigger:rotate-180" />
         }
       />
     </SelectPrimitive.Trigger>

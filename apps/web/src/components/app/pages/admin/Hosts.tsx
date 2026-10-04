@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   EllipsisVertical,
@@ -15,7 +15,11 @@ import {
 } from "@/components/app/patterns/CollectionPagination";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { CardGridSkeleton } from "@/components/app/patterns/Skeletons";
-import { EmptyState } from "@/components/app/patterns/StateCard";
+import { EmptyState, ErrorState } from "@/components/app/patterns/StateCard";
+import {
+  Collapsible,
+  CollapsibleContent,
+} from "@/components/ui/collapsible";
 import { HostOnboardingPanel } from "@/components/app/HostOnboardingPanel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -96,7 +100,7 @@ export function AdminHosts() {
         setVmError(
           error instanceof Error
             ? error.message
-            : "failed to refresh host state",
+            : "Try refreshing again.",
         );
       })
       .finally(() => {
@@ -104,31 +108,32 @@ export function AdminHosts() {
       });
   };
 
+  const panelId = useId();
   usePageChrome({
     action: useMemo(
       () => (
         <Button
           size="sm"
+          aria-expanded={showOnboarding}
+          aria-controls={showOnboarding ? panelId : undefined}
           onClick={() => setShowOnboarding((current) => !current)}
         >
-          <Plus className="size-3.5" />
+          <Plus />
           Add host
         </Button>
       ),
-      [],
+      [showOnboarding, panelId],
     ),
   });
 
   return (
     <PageShell variant="workspace" density="compact">
       <div className="space-y-3 empty:hidden">
-        {hosts.error ? (
-          <Alert variant="destructive">
-            <AlertTitle>Could not load hosts</AlertTitle>
+        {hosts.error && hostRecords.length ? (
+          <Alert>
+            <AlertTitle>Host status may be out of date</AlertTitle>
             <AlertDescription>
-              {hosts.error instanceof Error
-                ? hosts.error.message
-                : "Failed to load hosts"}
+              The last loaded fleet is shown. It refreshes on its own.
             </AlertDescription>
           </Alert>
         ) : null}
@@ -150,9 +155,11 @@ export function AdminHosts() {
         ) : null}
       </div>
 
-      {showOnboarding ? (
-        <HostOnboardingPanel eyebrow="New host" title="Bridge config" />
-      ) : null}
+      <Collapsible open={showOnboarding}>
+        <CollapsibleContent id={panelId}>
+          <HostOnboardingPanel eyebrow="New host" title="Bridge config" />
+        </CollapsibleContent>
+      </Collapsible>
 
       {hosts.isPending ? (
         <CardGridSkeleton cards={4} cardClassName="h-40" />
@@ -202,17 +209,17 @@ export function AdminHosts() {
                             {host.status?.connected ? "Online" : "Offline"}
                           </Badge>
                           {host.actualState?.health === "degraded" ? (
-                            <Badge variant="destructive">Degraded</Badge>
+                            <Badge variant="warning">Degraded</Badge>
                           ) : host.actualState?.health === "unknown" ? (
                             <Badge variant="outline">Unknown health</Badge>
                           ) : null}
                           {host.disabled ? (
-                            <Badge variant="destructive">Disabled</Badge>
+                            <Badge variant="outline">Disabled</Badge>
                           ) : null}
                         </div>
                         <p className="text-caption">
                           {host.role === "builder" ? "Builder" : "Agent"} ·{" "}
-                          <span className="font-mono">{host.id}</span> ·{" "}
+                          <code>{host.id}</code> ·{" "}
                           {hostVms.length} live · {archiveTotalCount} archived
                         </p>
                       </div>
@@ -227,14 +234,14 @@ export function AdminHosts() {
                               />
                             }
                           >
-                            <EllipsisVertical className="size-4" />
+                            <EllipsisVertical />
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
                             <DropdownMenuItem
                               disabled={isRefreshing}
                               onClick={() => handleRefreshHost(host.id)}
                             >
-                              <RefreshCw className="size-4" />
+                              <RefreshCw />
                               {isRefreshing ? "Refreshing…" : "Refresh"}
                             </DropdownMenuItem>
                             <DropdownMenuItem
@@ -242,7 +249,7 @@ export function AdminHosts() {
                               disabled={isRemovingThisHost}
                               onClick={() => setRemoveTarget(host)}
                             >
-                              <Trash2 className="size-4" />
+                              <Trash2 />
                               Remove host
                             </DropdownMenuItem>
                           </DropdownMenuContent>
@@ -273,7 +280,6 @@ export function AdminHosts() {
                             ? `${capacity.reserved_cpu_millis}m host reserve · load ${formatLoad(capacity.load_avg_1m)} / ${formatLoad(capacity.load_avg_5m)} / ${formatLoad(capacity.load_avg_15m)}`
                             : "No CPU capacity reported"
                         }
-                        wrapDetail
                       />
                       <HostMetric
                         label="Memory"
@@ -281,14 +287,31 @@ export function AdminHosts() {
                         detail="Available / total"
                       />
                       <HostMetric
-                        label={`Disk ${capacity?.disk_probe_path ?? "/"}`}
+                        label="Disk"
                         value={diskSummary}
-                        detail="Available / total"
+                        detail={
+                          <>
+                            Available / total on{" "}
+                            <code>{capacity?.disk_probe_path ?? "/"}</code>
+                          </>
+                        }
                       />
                       <HostMetric
                         label="Network"
-                        value={capacity?.primary_ipv4 ?? "—"}
-                        detail={capacity?.primary_ipv6 ?? "No IPv6 reported"}
+                        value={
+                          capacity?.primary_ipv4 ? (
+                            <code>{capacity.primary_ipv4}</code>
+                          ) : (
+                            "—"
+                          )
+                        }
+                        detail={
+                          capacity?.primary_ipv6 ? (
+                            <code>{capacity.primary_ipv6}</code>
+                          ) : (
+                            "No IPv6 reported"
+                          )
+                        }
                       />
                     </dl>
                   </article>
@@ -297,6 +320,18 @@ export function AdminHosts() {
             </div>
           )}
         </PaginatedCollection>
+      ) : hosts.error && !hostRecords.length ? (
+        <ErrorState
+          title="Could not load hosts"
+          description={
+            hosts.error instanceof Error
+              ? hosts.error.message
+              : "Failed to load hosts"
+          }
+          onRetry={() => {
+            void hosts.refetch().catch(() => {});
+          }}
+        />
       ) : (
         <EmptyState
           icon={<Server />}
@@ -304,7 +339,7 @@ export function AdminHosts() {
           description="Generate a bridge config to register your first agent or builder host."
           action={
             <Button onClick={() => setShowOnboarding(true)}>
-              <Plus className="size-4" />
+              <Plus />
               Add host
             </Button>
           }
@@ -372,8 +407,8 @@ export function AdminHosts() {
                 removeConfirm !== removeTarget.name
               }
             >
-              <Trash2 className="size-4" />
-              {removeHost.isPending ? "Removing…" : "Remove host"}
+              <Trash2 />
+              {removeHost.isPending ? "Removing host…" : "Remove host"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -420,8 +455,6 @@ export function HostHeartbeatMetric({
         )
       }
       detail={detail}
-      wrapValue
-      wrapDetail
     />
   );
 }
@@ -430,34 +463,18 @@ export function HostMetric({
   label,
   value,
   detail,
-  wrapValue = false,
-  wrapDetail = false,
 }: {
   label: string;
   value: ReactNode;
-  detail: string;
-  wrapValue?: boolean;
-  wrapDetail?: boolean;
+  detail: ReactNode;
 }) {
   return (
     <div className="min-w-0">
       <dt className="text-label">{label}</dt>
-      <dd
-        className={
-          wrapValue
-            ? "mt-1 min-w-0 break-words text-sm font-medium tabular-nums"
-            : "mt-1 min-w-0 truncate text-sm font-medium tabular-nums"
-        }
-      >
+      <dd className="mt-1 min-w-0 text-sm font-medium tabular-nums [overflow-wrap:anywhere]">
         {value}
       </dd>
-      <dd
-        className={
-          wrapDetail
-            ? "mt-0.5 min-w-0 break-words text-metadata leading-5"
-            : "mt-0.5 min-w-0 truncate text-metadata"
-        }
-      >
+      <dd className="mt-0.5 min-w-0 text-metadata leading-5 [overflow-wrap:anywhere]">
         {detail}
       </dd>
     </div>

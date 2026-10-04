@@ -119,8 +119,13 @@ test("the full-screen boot screen keeps the mission visible and does not steal f
   expect(panelBox!.width).toBeLessThanOrEqual(
     page.viewportSize()!.width * 0.4 + 1,
   );
+  // The run bar spans the full width above the split, so the countdown may sit
+  // over the panel's column, but never inside the panel or off the screen.
   expect(leaseCountdownBox!.x + leaseCountdownBox!.width).toBeLessThanOrEqual(
-    workAreaBox!.x + workAreaBox!.width,
+    page.viewportSize()!.width,
+  );
+  expect(leaseCountdownBox!.y + leaseCountdownBox!.height).toBeLessThanOrEqual(
+    panelBox!.y + 1,
   );
   await expect(panel.getByText("nginx-listening")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "SSH command" })).toBeDisabled();
@@ -220,7 +225,9 @@ test("the permanent desktop guidance pane keeps progressive hints and solution h
     .first()
     .click();
   await revealResponse;
-  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(
+    panel.getByText("Inspect the service boundary", { exact: true }),
+  ).toBeVisible();
   await expect(panel.getByText("systemctl status nginx")).toBeVisible();
 
   await panel
@@ -350,7 +357,9 @@ test("compact status polls cannot hide a newly revealed hint", async ({
     .first()
     .click();
   await revealResponse;
-  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(
+    panel.getByText("Inspect the service boundary", { exact: true }),
+  ).toBeVisible();
 
   await expect
     .poll(
@@ -361,7 +370,9 @@ test("compact status polls cannot hide a newly revealed hint", async ({
         ).length,
   )
     .toBeGreaterThan(1);
-  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(
+    panel.getByText("Inspect the service boundary", { exact: true }),
+  ).toBeVisible();
   await expect(panel.getByText("1/2 used", { exact: true })).toBeVisible();
 });
 
@@ -712,8 +723,11 @@ test("ending a scenario moves from a calm saving state to a learner recap and re
   await expect(savingHeading).toBeVisible({ timeout: 5_000 });
   await expect(savingSteps).toBeVisible();
   const shutdownHeader = page.locator("[data-run-workspace-header]");
-  await expect(shutdownHeader).toContainText("Finishing");
-  await expect(shutdownHeader).not.toContainText("Solved");
+  // The status word swaps inside a box that stacks every word, so only the
+  // layer that is on counts as what the learner reads.
+  await expect(shutdownHeader.locator("[data-swap] > [data-on]")).toHaveText(
+    "Finishing",
+  );
 
   ui.server.setRunState("replay");
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
@@ -1004,7 +1018,7 @@ test("a rejected shutdown stays in the confirmation dialog with learner-safe cop
 
   await expect(dialog).toBeVisible();
   await expect(
-    dialog.getByText("Run could not be ended", { exact: true }),
+    dialog.getByText("Could not end run", { exact: true }),
   ).toBeVisible();
   await expect(dialog).toContainText(
     "The run could not be ended. Your work is still open.",
@@ -1078,7 +1092,7 @@ test("a failed saved-run deletion stays generic and recoverable", async ({
   await dialog.getByRole("button", { name: "Delete run" }).click();
 
   await expect(
-    dialog.getByText("Run could not be deleted", { exact: true }),
+    dialog.getByText("Could not delete run", { exact: true }),
   ).toBeVisible();
   await expect(dialog).toContainText(
     "Nothing was removed. Try again when you are ready.",

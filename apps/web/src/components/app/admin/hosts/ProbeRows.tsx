@@ -79,6 +79,6 @@ function verificationPresentation(probe: VmProbe) {
     label: verificationStatusLabel(probe.status),
     variant: isVerificationPassed(probe.status)
       ? ("success" as const)
-      : ("destructive" as const),
+      : ("warning" as const),
   };
 }

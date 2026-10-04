@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type Ref,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
@@ -22,7 +29,12 @@ import { PageShell } from "@/components/app/patterns/PageShell";
 import { ErrorState, EmptyState } from "@/components/app/patterns/StateCard";
 import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
-import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
+import {
+  FilterBar,
+  FilterChip,
+  FilterChipGroup,
+} from "@/components/app/patterns/FilterBar";
+import { formatMinutes, sentenceCase } from "@/components/app/lib/format";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -35,6 +47,7 @@ import {
   SelectContent,
   SelectItem,
   SelectTrigger,
+  SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -140,6 +153,7 @@ function CourseCatalogPage({
     [routeSearch],
   );
   const [searchText, setSearchText] = useState(searchState.q);
+  const searchRef = useRef<HTMLInputElement>(null);
   const catalog = useQuery({
     queryKey: courseCatalogQueryKey(organizationId),
     queryFn: async ({ queryKey, signal }) => {
@@ -257,7 +271,12 @@ function CourseCatalogPage({
     }, 250);
     return () => window.clearTimeout(timeout);
   }, [navigate, searchState, searchText]);
-  usePageChrome({ title: course?.title ?? (courseId ? "Course" : "Courses") });
+  // A loaded course owns its title as the content's h1; the bar then shows the
+  // context. The index, loading and error states keep the bar h1.
+  usePageChrome({
+    title: course?.title ?? (courseId ? "Course" : "Courses"),
+    reading: course !== null,
+  });
 
   const setFilter = (next: NormalizedCatalogSearch) =>
     void navigate({
@@ -281,6 +300,8 @@ function CourseCatalogPage({
       category: undefined,
       tags: [],
     });
+    // Both Clear buttons unmount; focus returns to the search field.
+    searchRef.current?.focus();
   };
   const filters = courses.length ? (
     <CourseFilters
@@ -292,12 +313,17 @@ function CourseCatalogPage({
       categories={allCategories}
       tags={allTags}
       filtersActive={filtersActive}
-      resultSummary={
-        filtersActive
-          ? course
-            ? `Showing ${visibleLectures.length} ${visibleLectures.length === 1 ? "lecture" : "lectures"}`
-            : `Showing ${visibleCourses.length} ${visibleCourses.length === 1 ? "course" : "courses"}`
-          : ""
+      searchRef={searchRef}
+      shown={course ? visibleLectures.length : visibleCourses.length}
+      total={course ? course.lectures.length : courses.length}
+      noun={
+        course
+          ? course.lectures.length === 1
+            ? "lecture"
+            : "lectures"
+          : courses.length === 1
+            ? "course"
+            : "courses"
       }
       onFilter={setFilter}
       onToggleTag={toggleTag}
@@ -470,7 +496,7 @@ function CourseIndexItem({
     <CourseLink
       route={route}
       search={search}
-      className="group grid min-h-24 gap-4 px-4 py-4 transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start sm:px-5 dark:hover:bg-accent/60"
+      className="group grid min-h-24 gap-4 px-4 py-4 transition-colors duration-(--duration-fast) ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start sm:px-5 dark:hover:bg-accent/60"
     >
       <span className="min-w-0 space-y-1">
         <span className="block text-card-title text-balance [overflow-wrap:anywhere]">
@@ -481,13 +507,14 @@ function CourseIndexItem({
         </span>
         <span className="block pt-1">
           <MetaLine
+            as="span"
             items={[
               course.organizationId
                 ? (course.organizationName ?? "Private course")
                 : "Public course",
               `${completed} of ${course.lectures.length} complete`,
               `${course.lectures.length} ${course.lectures.length === 1 ? "lecture" : "lectures"}`,
-              totalMinutes ? `~${totalMinutes} min` : null,
+              totalMinutes ? `~${formatMinutes(totalMinutes)}` : null,
             ]}
           />
         </span>
@@ -534,7 +561,6 @@ function CourseDetail({
         <CourseIndexBackLink route={route} />
         <ContentHeader
           title={course.title}
-          titleClassName="max-sm:sr-only"
           reading
           summary={course.summary}
           meta={
@@ -551,7 +577,7 @@ function CourseDetail({
         <section className="border-y py-6">
           <Markdown
             pageContent
-            className="prose-measure text-prose [&>*:first-child]:pt-0"
+            className="text-prose [&>:not([data-wide])]:prose-measure"
           >
             {course.bodyMarkdown}
           </Markdown>
@@ -671,14 +697,17 @@ function LectureListItem({
           {lecture.summary}
         </span>
         <MetaLine
-          className="text-xs"
+          as="span"
+          dense
           items={[
             `Lecture ${position} of ${total}`,
-            lecture.category || null,
+            lecture.category ? sentenceCase(lecture.category) : null,
             lecture.difficulty ? (
               <MetaDifficulty key="difficulty" difficulty={lecture.difficulty} />
             ) : null,
-            lecture.estimatedMinutes ? `~${lecture.estimatedMinutes} min` : null,
+            lecture.estimatedMinutes
+              ? `~${formatMinutes(lecture.estimatedMinutes)}`
+              : null,
             <LectureScenarioLabel
               key="scenario"
               scenarioId={lecture.scenarioId}
@@ -722,7 +751,7 @@ function LectureListItem({
     "group grid min-h-20 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2 px-4 py-4 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-start sm:gap-x-4 sm:px-5",
     lecture.state === "locked"
       ? "bg-muted/35 text-muted-foreground"
-      : "transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring dark:hover:bg-accent/60",
+      : "transition-colors duration-(--duration-fast) ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring dark:hover:bg-accent/60",
   );
   return lecture.state === "locked" ? (
     <div className={className} data-lecture-state="locked">
@@ -835,7 +864,7 @@ function AssignmentLink({
       </span>
     </>
   );
-  const className = "group grid min-h-16 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3 transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:px-5 dark:hover:bg-accent/60";
+  const className = "group grid min-h-16 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3 transition-colors duration-(--duration-fast) ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:px-5 dark:hover:bg-accent/60";
 
   return route && target ? (
     <LectureLink route={route} lectureId={target.lectureId} className={className}>
@@ -861,7 +890,10 @@ function CourseFilters({
   categories,
   tags,
   filtersActive,
-  resultSummary,
+  searchRef,
+  shown,
+  total,
+  noun,
   onFilter,
   onToggleTag,
   onClear,
@@ -874,14 +906,16 @@ function CourseFilters({
   categories: readonly string[];
   tags: readonly string[];
   filtersActive: boolean;
-  /** Announced politely after a filter change; empty while nothing filters. */
-  resultSummary: string;
+  searchRef: Ref<HTMLInputElement>;
+  /** The count line under the bar is announced politely after each change. */
+  shown: number;
+  total: number;
+  noun: string;
   onFilter: (next: NormalizedCatalogSearch) => void;
   onToggleTag: (tag: string) => void;
   onClear: () => void;
 }) {
   return (
-    <div>
     <FilterBar
       search={search}
       onSearchChange={onSearchChange}
@@ -890,12 +924,12 @@ function CourseFilters({
       filtersActive={filtersActive}
       stackSearchOnMobile
       onClear={onClear}
+      searchRef={searchRef}
+      shown={shown}
+      total={total}
+      noun={noun}
     >
-      <div
-        role="group"
-        aria-label="Filter lectures by difficulty"
-        className="flex flex-wrap items-center gap-2"
-      >
+      <FilterChipGroup label="Filter lectures by difficulty">
         {SCENARIO_DIFFICULTIES.map((difficulty) => (
           <FilterChip
             key={difficulty}
@@ -913,7 +947,7 @@ function CourseFilters({
             {difficulty}
           </FilterChip>
         ))}
-      </div>
+      </FilterChipGroup>
       {categories.length ? (
             <Select
               value={searchState.category ?? "all"}
@@ -932,13 +966,15 @@ function CourseFilters({
                 size="sm"
                 aria-label="Filter lectures by category"
               >
-                Category: {searchState.category ?? "All"}
+                <SelectValue>
+                  Category: {sentenceCase(searchState.category ?? "All")}
+                </SelectValue>
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent aria-label="Category">
                 <SelectItem value="all">All categories</SelectItem>
                 {categories.map((category) => (
                   <SelectItem key={category} value={category}>
-                    {category}
+                    {sentenceCase(category)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -981,10 +1017,6 @@ function CourseFilters({
         </DropdownMenu>
       ) : null}
     </FilterBar>
-    <p role="status" className="sr-only">
-      {resultSummary}
-    </p>
-    </div>
   );
 }
 

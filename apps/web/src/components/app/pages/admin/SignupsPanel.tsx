@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Field } from "../../patterns/Field";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
+import { RollingNumber } from "../../patterns/RollingNumber";
 import { RelativeTime } from "../../patterns/RelativeTime";
 import { Section } from "../../patterns/Section";
 import { CardGridSkeleton } from "../../patterns/Skeletons";
@@ -17,8 +19,6 @@ import {
 } from "@/lib/signup-status";
 
 const SIGNUPS_QUERY_KEY = ["admin", "signups"] as const;
-const LIMIT_HINT_ID = "signup-limit-hint";
-const LIMIT_ERROR_ID = "signup-limit-error";
 
 export function SignupsPanel() {
   const queryClient = useQueryClient();
@@ -50,7 +50,7 @@ export function SignupsPanel() {
       queryClient.invalidateQueries({ queryKey: SIGNUPS_QUERY_KEY }),
   });
 
-  if (status.error) {
+  if (status.error && !status.data) {
     return (
       <ErrorState
         title="Could not load sign-ups"
@@ -59,7 +59,7 @@ export function SignupsPanel() {
       />
     );
   }
-  if (status.isPending) {
+  if (!status.data) {
     return (
       <CardGridSkeleton
         cards={3}
@@ -78,12 +78,21 @@ export function SignupsPanel() {
       bodyClassName="space-y-4"
     >
       <div className="grid gap-3 tabular-nums sm:grid-cols-3">
-        <Stat size="sm" label="Taken" value={formatCount(current.taken)} />
-        <Stat size="sm" label="Limit" value={formatCount(current.limit)} />
+        <Stat
+          size="sm"
+          label="Taken"
+          value={<RollingNumber value={current.taken} format={formatCount} />}
+        />
+        <Stat
+          size="sm"
+          label="Limit"
+          value={<RollingNumber value={current.limit} format={formatCount} />}
+        />
         <Stat
           size="sm"
           label="Left"
-          value={formatCount(current.remaining)}
+          announce
+          value={<RollingNumber value={current.remaining} format={formatCount} />}
           detail={spotsDetail(current)}
         />
       </div>
@@ -123,74 +132,59 @@ function SignupLimitForm({
   onSave: (limit: number) => void;
 }) {
   const [draft, setDraft] = useState(String(status.limit));
+  // Reward early, flag late: a fix clears the error at once, a new mistake
+  // waits for blur or submit.
+  const [error, setError] = useState<string | null>(null);
   const limit = parseSignupLimit(draft);
-  const invalid = draft.trim() !== "" && limit === null;
+  const problem = draft.trim() !== "" && limit === null ? LIMIT_PROBLEM : null;
   const saveable = limit !== null && limit !== status.limit && !pending;
 
   return (
-    <div className="space-y-2">
-      <form
-        className="flex flex-wrap items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (saveable) onSave(limit);
-        }}
+    <form
+      className="flex flex-wrap items-start gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (problem) setError(problem);
+        else if (saveable) onSave(limit);
+      }}
+    >
+      <Field
+        label="Sign-up limit"
+        hint="Set 0 to close sign-ups. Members can still sign in, and a lower limit never removes anyone."
+        error={error}
+        className="min-w-0 flex-1 basis-72"
       >
-        <Field label="Sign-up limit">
+        {(control) => (
           <Input
-            type="number"
+            {...control}
+            type="text"
             inputMode="numeric"
-            min={0}
-            max={SIGNUP_LIMIT_MAX}
-            step={1}
+            autoComplete="off"
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              const next = event.target.value;
+              setDraft(next);
+              const nextLimit = parseSignupLimit(next);
+              if (nextLimit !== null || next.trim() === "") setError(null);
+            }}
+            onBlur={() => setError(problem)}
             className="w-40 tabular-nums"
-            aria-describedby={LIMIT_HINT_ID}
-            aria-invalid={invalid || undefined}
-            aria-errormessage={invalid ? LIMIT_ERROR_ID : undefined}
           />
-        </Field>
-        <Button
-          type="submit"
-          variant="outline"
-          className="min-h-11 sm:min-h-9"
-          disabled={!saveable}
-        >
-          {pending ? "Saving…" : "Save"}
-        </Button>
-      </form>
-      <p id={LIMIT_HINT_ID} className="text-caption">
-        Set 0 to close sign-ups. Members can still sign in, and a lower limit
-        never removes anyone.
-      </p>
-      {invalid ? (
-        <p
-          id={LIMIT_ERROR_ID}
-          aria-live="polite"
-          className="text-sm text-destructive"
-        >
-          Enter a whole number from 0 to {formatCount(SIGNUP_LIMIT_MAX)}.
-        </p>
-      ) : null}
-    </div>
+        )}
+      </Field>
+      <Button
+        type="submit"
+        variant="outline"
+        className="mt-[1.625rem]"
+        disabled={!saveable}
+      >
+        {pending ? "Saving…" : "Save"}
+      </Button>
+    </form>
   );
 }
 
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="flex flex-col gap-2 text-sm font-medium">
-      <span>{label}</span>
-      {children}
-    </label>
-  );
-}
+const LIMIT_PROBLEM = `Enter a whole number from 0 to ${formatCount(SIGNUP_LIMIT_MAX)}.`;
 
 async function fetchSignupStatus(): Promise<AdminSignupStatus> {
   const response = await fetch("/api/admin/signups", {

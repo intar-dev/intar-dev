@@ -89,7 +89,7 @@ export function ImagePromotionSection() {
           <dl className="grid gap-3 sm:grid-cols-3">
             <div>
               <dt className="text-label">Revision</dt>
-              <dd className="mt-1 font-mono text-xs break-all">{attempt.revision}</dd>
+              <dd className="mt-1 break-all"><code>{attempt.revision}</code></dd>
             </div>
             <div>
               <dt className="text-label">Status</dt>
@@ -114,7 +114,7 @@ export function ImagePromotionSection() {
                 disabled={change.isPending}
                 onClick={() => setConfirm({ kind: "start", revision: pendingRevision, forced: true })}
               >
-                <ImageUp className="size-4" />
+                <ImageUp />
                 Promote now
               </Button>
             ) : null}
@@ -124,7 +124,7 @@ export function ImagePromotionSection() {
                 disabled={change.isPending}
                 onClick={() => setConfirm({ kind: "release" })}
               >
-                <LockOpen className="size-4" />
+                <LockOpen />
                 {holdingRuns ? "Reopen runs" : "Cancel promotion"}
               </Button>
             ) : null}

@@ -1,11 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import {
-  ArrowRight,
-  BookOpen,
-  ChevronDown,
-  History,
-  LoaderCircle,
-} from "lucide-react";
+import { ArrowRight, BookOpen, ChevronDown, History } from "lucide-react";
 import { PageShell } from "../patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
@@ -13,13 +7,15 @@ import {
 } from "../patterns/CollectionPagination";
 import { RunListItem } from "../patterns/RunListItem";
 import { ListSkeleton } from "../patterns/Skeletons";
-import { EmptyState, ErrorState } from "../patterns/StateCard";
+import { MetaLine } from "../patterns/MetaLine";
+import { RelativeTime } from "../patterns/RelativeTime";
+import { StatusToken } from "../patterns/StatusToken";
+import { EmptyState, ErrorState, StaleNotice } from "../patterns/StateCard";
 import {
   groupMyRunsByActivity,
   useMyRuns,
   type MyRunEntry,
 } from "../hooks/useMyRuns";
-import { formatRelativeTime } from "../lib/format";
 import { Button } from "@/components/ui/button";
 import {
   Collapsible,
@@ -102,15 +98,15 @@ export function RunsList() {
 
   return (
     <PageShell density="comfortable">
-      {runs.error ? (
+      {runs.isLoadingError ? (
         <ErrorState
           title="Could not load runs"
           description={
             runs.error instanceof Error
               ? runs.error.message
-              : "Failed to load runs"
+              : "Refresh the page to try again."
           }
-          onRetry={() => void runs.refetch()}
+          onRetry={() => runs.refetch()}
         />
       ) : runs.isPending ? (
         <ListSkeleton />
@@ -120,14 +116,14 @@ export function RunsList() {
           title="No runs yet"
           description="Launch a scenario to get a VM-backed environment — finished runs keep their replay here."
           action={
-            <Button render={<Link to="/courses" />}>
-              <BookOpen className="size-4" />
+            <Button size="sm" render={<Link to="/courses" />}>
               Browse courses
             </Button>
           }
         />
       ) : (
         <>
+          {runs.isRefetchError ? <StaleNotice what="Your runs" /> : null}
           {activeRuns.length ? (
             <section
               className="space-y-4"
@@ -154,19 +150,13 @@ export function RunsList() {
               className="space-y-4"
               aria-labelledby="background-runs-heading"
             >
-              <div className="flex items-center gap-3 border-b pb-4">
-                <LoaderCircle
-                  className="size-4 text-primary motion-safe:animate-spin"
-                  aria-hidden="true"
-                />
-                <div>
-                  <h2
-                    id="background-runs-heading"
-                    className="text-section-title"
-                  >
-                    Finishing in background
-                  </h2>
-                </div>
+              <div className="flex items-center gap-3">
+                <h2
+                  id="background-runs-heading"
+                  className="text-section-title"
+                >
+                  Finishing in background
+                </h2>
               </div>
               <PaginatedCollection
                 items={backgroundRuns}
@@ -174,7 +164,7 @@ export function RunsList() {
                 itemLabel="finishing runs"
               >
                 {(visibleRuns) => (
-                  <div className="divide-y overflow-hidden rounded-xl border bg-card">
+                  <div className="divide-y overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)]">
                     {visibleRuns.map((run) => (
                       <RunListItem key={run.runId} run={run} />
                     ))}
@@ -189,16 +179,14 @@ export function RunsList() {
               className="space-y-4"
               aria-labelledby="run-archive-heading"
             >
-              <div className="flex items-center gap-3 border-b pb-4">
+              <div className="flex items-center gap-3">
                 <History className="size-4 text-muted-foreground" />
-                <div>
-                  <h2
-                    id="run-archive-heading"
-                    className="text-section-title"
-                  >
-                    History
-                  </h2>
-                </div>
+                <h2
+                  id="run-archive-heading"
+                  className="text-section-title"
+                >
+                  History
+                </h2>
               </div>
               <PaginatedCollection
                 items={pastRunGroups}
@@ -207,7 +195,7 @@ export function RunsList() {
                 resetKey={pastRuns.map((run) => run.runId).join("|")}
               >
                 {(visibleGroups) => (
-                  <div className="space-y-4">
+                  <div className="divide-y overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)]">
                     {visibleGroups.map((group) => (
                       <SettledRunGroupCard key={group.key} group={group} />
                     ))}
@@ -226,7 +214,6 @@ function SettledRunGroupCard({ group }: { group: SettledRunGroup }) {
   const olderAttemptCount = group.older.length;
   return (
     <section
-      className="overflow-hidden rounded-xl border bg-card"
       aria-label={`${group.title} run history`}
     >
       {olderAttemptCount ? (
@@ -254,7 +241,7 @@ function SettledRunGroupCard({ group }: { group: SettledRunGroup }) {
               }
             >
               Show all {group.totalAttempts} attempts
-              <ChevronDown className="size-3.5" />
+              <ChevronDown className="size-3.5 transition-transform duration-(--duration-moderate) ease-enter group-data-[panel-open]/button:rotate-180" />
             </CollapsibleTrigger>
             <CollapsibleContent className="mt-3">
               <div className="divide-y overflow-hidden rounded-lg border bg-background">
@@ -280,15 +267,21 @@ function ActiveRunCard({ run }: { run: MyRunEntry }) {
     <article className="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-[var(--highlight),var(--shadow-raised)] sm:flex-row sm:items-center sm:gap-4 sm:p-5">
       <span className="flex size-10 shrink-0 items-center justify-center rounded-[0.625rem] bg-brand-subtle text-brand-text ring-1 ring-brand-border/60">
         <span
-          className="size-2 rounded-full bg-primary text-primary motion-safe:animate-live"
+          className="size-2 rounded-full bg-primary text-primary"
           aria-hidden
         />
       </span>
       <div className="min-w-0 flex-1 space-y-1">
         <h3 className="text-card-title text-balance">{run.title}</h3>
-        <p className="text-metadata">
-          In progress · started {formatRelativeTime(run.createdAt)}
-        </p>
+        <MetaLine
+          items={[
+            <StatusToken key="status" tone="live" word="In progress" />,
+            run.courseLocation?.courseTitle ?? null,
+            <span key="started">
+              started <RelativeTime at={run.createdAt} />
+            </span>,
+          ]}
+        />
       </div>
       {/* Match the run workspace Back link: document navigation avoids the
           current router intent-preload failure on repeated resume cycles. */}

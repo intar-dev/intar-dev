@@ -2164,3 +2164,66 @@ html {
 .xterm .xterm-rows:not(.xterm-focus) .xterm-cursor.xterm-cursor-block {
   opacity: 0.35;
 }
+
+/* parity: servers-support */
+@theme {
+  /* Fields and single-column forms stop growing here (max-w-field). */
+  --container-field: 28rem;
+}
+
+/* A checkbox keeps its 16px box and gets its 44px target from its label; a
+   disabled control keeps its touch height so a form never shrinks while it
+   saves. Checked and focus rings keep the fade-and-lift. */
+@media (pointer: coarse) {
+  input:not([type="hidden"], [type="checkbox"], [type="radio"]):disabled,
+  select:disabled,
+  textarea:disabled,
+  button:disabled {
+    min-width: 2.75rem !important;
+    min-height: 2.75rem !important;
+  }
+
+  input:is([type="checkbox"], [type="radio"]):not([type="hidden"]):not(
+      [type="hidden"]
+    ) {
+    min-width: 0 !important;
+    min-height: 0 !important;
+  }
+
+  label:has(> input:is([type="checkbox"], [type="radio"])) {
+    min-height: 2.75rem;
+  }
+}
+
+input:is([type="checkbox"], [type="radio"]):focus-visible {
+  animation: intar-ring var(--duration-fast) var(--ease-enter);
+}
+
+/* parity: organizations */
+
+/* A refused submit nudges the field once. Unlayered, and as specific as the
+   focused-field rule, so it beats `animation: none`. --move-swap is 0px under
+   reduced motion, so nothing travels there. */
+@keyframes intar-reject {
+  20% {
+    translate: calc(-1 * var(--move-swap)) 0;
+  }
+  45% {
+    translate: var(--move-swap) 0;
+  }
+  70% {
+    translate: calc(-0.5 * var(--move-swap)) 0;
+  }
+}
+
+:is(input, textarea, select)[data-reject] {
+  animation: intar-reject var(--duration-slow) var(--ease-standard);
+}
+
+/* parity: fix-replay */
+
+/* The player's own `.ap-player .ap-overlay { display: flex }` ties with the
+   rule above and loads later, so the start glyph stayed. One class more wins. */
+.replay-custom .ap-player .ap-overlay-start {
+  display: none;
+}

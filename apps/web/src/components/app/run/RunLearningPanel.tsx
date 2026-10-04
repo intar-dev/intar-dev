@@ -13,6 +13,7 @@ import {
   CircleDashed,
   Eye,
   Lightbulb,
+  ListChecks,
   LoaderCircle,
   LockKeyhole,
   X,
@@ -240,7 +241,7 @@ export function RunLearningPanelMobile(
   const copy = props.checksPending
     ? {
         visibleLabel: "Checks loading",
-        accessibleLabel: "Open lecture theory. Checks are loading.",
+        accessibleLabel: "Checks loading. Opens checks, lecture and hints.",
       }
     : getRunLearningTriggerCopy({
         passedChecks,
@@ -248,6 +249,16 @@ export function RunLearningPanelMobile(
         revealedHints: countRevealedHints(hints),
         totalHints: hints.length,
       });
+  // The visible count rolls when a check verifies; the accessible name above
+  // already carries the same words as plain text.
+  const visibleLabel: ReactNode =
+    props.checksPending || props.probes.length === 0 ? (
+      copy.visibleLabel
+    ) : (
+      <>
+        Checks <RollingNumber value={passedChecks} />/{props.probes.length}
+      </>
+    );
   const announcement = useCheckAnnouncement(props);
 
   useEffect(() => {
@@ -317,7 +328,7 @@ export function RunLearningPanelMobile(
     <div data-run-learning-mobile className={cn("dock:hidden", className)}>
       {shell ? (
         <RunDock
-          checksLabel={copy.visibleLabel}
+          checksLabel={visibleLabel}
           checksAccessibleLabel={copy.accessibleLabel}
         />
       ) : (
@@ -335,8 +346,8 @@ export function RunLearningPanelMobile(
             handleOpenChange(true);
           }}
         >
-          <Lightbulb className="size-4" aria-hidden="true" />
-          {copy.visibleLabel}
+          <ListChecks className="size-4" aria-hidden="true" />
+          {visibleLabel}
         </Button>
       )}
       <RunPhoneSheet
@@ -486,9 +497,9 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
 function LearningPanelA11yHeader() {
   return (
     <SheetHeader className="sr-only">
-      <SheetTitle>Lecture theory and hints</SheetTitle>
+      <SheetTitle>Checks, lecture and hints</SheetTitle>
       <SheetDescription>
-        Your lecture theory, checks, hints, and solution.
+        Your checks, lecture theory, hints, and solution.
       </SheetDescription>
     </SheetHeader>
   );
@@ -502,7 +513,7 @@ function LearningPanelClose() {
           variant="ghost"
           size="icon-sm"
           className="-my-1.5 -mr-1.5"
-          aria-label="Close lecture theory and hints"
+          aria-label="Close checks, lecture and hints"
         />
       }
     >
@@ -818,7 +829,7 @@ function LectureTheory(props: {
       {theory ? (
         <Markdown
           headingOffset={1}
-          className="mt-3 space-y-3 text-sm leading-6"
+          className="mt-3 space-y-3 text-support"
         >
           {theory}
         </Markdown>

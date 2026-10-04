@@ -4,11 +4,12 @@ import {
   CheckCircle2,
   CircleDashed,
   Clock3,
-  Lightbulb,
+  ListChecks,
   LoaderCircle,
   Terminal as TerminalIcon,
 } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { StatusToken } from "../../patterns/StatusToken";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
@@ -235,10 +236,10 @@ export function RunPreview({ className }: { className?: string }) {
             <span className="mr-1 inline-flex min-w-max shrink-0 items-center gap-2 max-sm:hidden">
               <StatusToken
                 tone={solved ? "success" : "live"}
-                word={solved ? "Solved" : "Running"}
+                word={solved ? "Solved" : "In progress"}
                 pulse={!solved}
               />
-              <span className="h-3 w-px bg-border" />
+              <Separator orientation="vertical" className="h-3" />
               <span className="inline-flex items-center gap-1.5 text-xs whitespace-nowrap text-muted-foreground tabular-nums">
                 <Clock3 className="size-3.5" />
                 {formatLease(remaining)} left
@@ -251,7 +252,7 @@ export function RunPreview({ className }: { className?: string }) {
                 className: "gap-2 px-3 tabular-nums min-[960px]:hidden",
               })}
             >
-              <Lightbulb className="size-4" />
+              <ListChecks className="size-4" />
               Checks <RollingNumber value={passed} />/{CHECKS.length}
             </span>
             <span
@@ -318,7 +319,7 @@ function PreviewTerminal({ rows }: { rows: readonly TerminalRow[] }) {
       {/* Matches the xterm canvas: 14px IBM Plex Mono, 1.35 line height, the
           shared always-dark palette, and a block cursor in the brand orange.
           Rows fill from the top and scroll off the top once the pane is full. */}
-      <div className="flex min-h-0 flex-1 flex-col justify-end overflow-hidden bg-terminal-background py-2 pr-2 pl-3 font-mono text-[14px] leading-[1.35] text-terminal-foreground">
+      <div className="flex min-h-0 flex-1 flex-col justify-end overflow-hidden bg-terminal-background py-2 pr-2 pl-3 font-mono text-[13px] leading-[1.35] text-terminal-foreground md:text-[14px]">
         <div className="flex-[1_0_auto]">
           {rows.map((row, index) => (
             <p key={index} className="min-h-[1.35em] break-all whitespace-pre-wrap">
@@ -385,8 +386,8 @@ function PreviewChecks({
   return (
     <section className="border-b pb-2">
       <div className="flex items-center gap-3">
-        <p className="min-w-0 flex-1 text-sm font-semibold text-foreground">Checks</p>
-        <span className="shrink-0 text-xs text-faint-foreground tabular-nums">
+        <p className="min-w-0 flex-1 text-label">Checks</p>
+        <span className="shrink-0 text-metadata">
           <RollingNumber value={passed} />/{checks.length} verified
         </span>
       </div>

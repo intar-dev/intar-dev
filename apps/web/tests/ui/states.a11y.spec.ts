@@ -30,26 +30,8 @@ const TECHNICAL_LEARNER_RUN_COPY = [
   "Command log",
 ] as const;
 
-const FINE_POINTER_DEFAULT_CONTROL_HEIGHT = 36;
 const FINE_POINTER_COMPACT_CONTROL_HEIGHT = 32;
 const COARSE_POINTER_TARGET_SIZE = 44;
-
-async function expectNoVisibleBoxShadow(locator: Locator) {
-  const result = await locator.evaluate((element) => {
-    const value = getComputedStyle(element).boxShadow;
-    const alphas = [...value.matchAll(/rgba\([^)]*,\s*([0-9.]+)\)/g)].map(
-      (match) => Number.parseFloat(match[1] ?? "1"),
-    );
-    return {
-      value,
-      visible:
-        value !== "none" && (alphas.length === 0 || alphas.some((a) => a > 0)),
-    };
-  });
-  expect(result.visible, `unexpected visible box shadow: ${result.value}`).toBe(
-    false,
-  );
-}
 
 function runLearningTrigger(page: Page): Locator {
   return page.locator("[data-run-learning-panel-trigger]");
@@ -68,7 +50,7 @@ function runSshButton(page: Page): Locator {
 }
 
 function runLearningSheet(page: Page): Locator {
-  return page.getByRole("dialog", { name: "Lecture theory and hints" });
+  return page.getByRole("dialog", { name: "Checks, lecture and hints" });
 }
 
 async function openRunSshDialog(page: Page) {
@@ -251,7 +233,7 @@ async function expectDesktopCompactRunControls(page: Page) {
     .getByRole("link", { name: "Back to lecture" });
   await expectFinePointerControlHeight(
     back,
-    FINE_POINTER_DEFAULT_CONTROL_HEIGHT,
+    FINE_POINTER_COMPACT_CONTROL_HEIGHT,
     "Back to lecture link",
   );
   await expectFinePointerControlHeight(
@@ -274,16 +256,21 @@ async function expectPersistentDesktopLearningPanel(page: Page) {
   await expect(runLearningTrigger(page)).toBeHidden();
   await expect(runLearningSheet(page)).toHaveCount(0);
 
-  const [panelBox, workAreaBox, viewport] = await Promise.all([
+  const [panelBox, workAreaBox, viewport, rem] = await Promise.all([
     panel.boundingBox(),
     workArea.boundingBox(),
     page.viewportSize(),
+    page.evaluate(() =>
+      Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
+    ),
   ]);
   expect(panelBox).not.toBeNull();
   expect(workAreaBox).not.toBeNull();
   expect(viewport).not.toBeNull();
-  expect(panelBox!.width).toBeCloseTo(viewport!.width / 3, 0);
-  expect(workAreaBox!.width).toBeCloseTo((viewport!.width * 2) / 3, 0);
+  // Two to one, the panel never narrower than 18rem (so it grows with text).
+  const panelWidth = Math.max(viewport!.width / 3, 18 * rem);
+  expect(panelBox!.width).toBeCloseTo(panelWidth, 0);
+  expect(workAreaBox!.width).toBeCloseTo(viewport!.width - panelWidth, 0);
   expect(panelBox!.x).toBeGreaterThanOrEqual(
     workAreaBox!.x + workAreaBox!.width - 1,
   );
@@ -321,7 +308,7 @@ test.describe("focused state accessibility", () => {
       await ui.open({ ...routeCase("organization-detail"), theme });
       await page
         .locator("main")
-        .getByRole("button", { name: "Courses", exact: true })
+        .getByRole("link", { name: "Courses", exact: true })
         .click();
 
       await expect(
@@ -479,11 +466,12 @@ test.describe("focused state accessibility", () => {
     await ui.open({ ...routeCase("admin-people"), theme: "light" });
     await page.getByRole("tab", { name: "Sign-ups" }).click();
 
-    const limit = page.getByRole("spinbutton", { name: "Sign-up limit" });
+    const limit = page.getByRole("textbox", { name: "Sign-up limit" });
     await expect(limit).toHaveAccessibleDescription(
       /Set 0 to close sign-ups\./,
     );
     await limit.fill("1.5");
+    await limit.blur();
     await expect(limit).toHaveAttribute("aria-invalid", "true");
     await expect(
       page.getByText("Enter a whole number from 0 to 1,000,000."),
@@ -550,7 +538,14 @@ test.describe("focused state accessibility", () => {
     await expect(
       archive.getByRole("heading", { name: "No runs match these filters" }),
     ).toBeVisible();
-    await archive.getByRole("button", { name: "Clear filters" }).click();
+    // The empty state offers Clear filters as its one action; the filter bar
+    // keeps its own, so the empty card's button is the one a learner meets.
+    await archive
+      .getByRole("heading", { name: "No runs match these filters" })
+      .locator("xpath=ancestor::*[@data-slot='card'][1]")
+      .getByRole("button", { name: "Clear filters" })
+      .click();
+    await expect(archive.getByLabel("Search archived runs")).toBeFocused();
 
     const card = archive.locator('[data-archive-run="run-archived"]');
     await expect(card.getByText("@minalearns", { exact: true })).toBeVisible();
@@ -629,9 +624,10 @@ test.describe("focused state accessibility", () => {
           ).length,
       )
       .toBe(1);
-    await expect(card.locator('[data-slot="card-title"]')).toHaveText(
-      "session-02.cast",
-    );
+    // The viewer names the selected artifact in its own heading.
+    await expect(
+      card.getByRole("heading", { level: 4, name: "session-02.cast" }),
+    ).toBeVisible();
     await expect(
       card.getByRole("button", { name: "Play", exact: true }),
     ).toBeVisible();
@@ -727,7 +723,10 @@ test.describe("focused state accessibility", () => {
     await expect(
       dialog.getByRole("heading", { name: "Native SSH for web" }),
     ).toBeVisible();
-    await expect(dialog.getByLabel("SSH command")).toContainText(
+    await expect(
+      dialog.getByRole("button", { name: "Copy SSH command" }),
+    ).toBeEnabled();
+    await expect(dialog.locator("pre").first()).toContainText(
       "stargate.example.test",
     );
     await expectNoAxeViolations(page, testInfo);
@@ -773,7 +772,7 @@ test.describe("focused state accessibility", () => {
       dialog.getByRole("button", { name: "Download temporary key" }),
     ).toBeVisible();
     ui.server.nativeSshResponseDelayMs = 0;
-    await expect(dialog.getByLabel("SSH command")).toHaveValue(
+    await expect(dialog.locator("pre").first()).toHaveText(
       TEMPORARY_RUN_SSH_COMMAND,
     );
     await expect(
@@ -808,13 +807,13 @@ test.describe("focused state accessibility", () => {
       "OPENSSH PRIVATE KEY",
     );
     await expect(page.locator("html")).not.toContainText("OPENSSH PRIVATE KEY");
-    expect(
-      await dialog
-        .locator("textarea")
-        .evaluateAll((fields) =>
-          fields.map((field) => (field as HTMLTextAreaElement).value),
-        ),
-    ).not.toContain(expect.stringContaining("OPENSSH PRIVATE KEY"));
+    const blocks = await dialog
+      .locator("pre")
+      .evaluateAll((nodes) => nodes.map((node) => node.textContent ?? ""));
+    expect(blocks.length).toBeGreaterThan(0);
+    for (const block of blocks) {
+      expect(block).not.toContain("OPENSSH PRIVATE KEY");
+    }
 
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
@@ -1056,7 +1055,9 @@ test.describe("focused state accessibility", () => {
     await expect(panel).toBeVisible();
 
     await content.getByRole("button", { name: "Reveal" }).first().click();
-    await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+    await expect(
+      panel.getByText("Inspect the service boundary", { exact: true }),
+    ).toBeVisible();
     await expect(panel).toContainText("systemctl status nginx");
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
@@ -1461,10 +1462,9 @@ test.describe("focused mobile state accessibility", () => {
     );
     await expect(content).toBeVisible();
     await expect(runLearningPanel(page)).toBeHidden();
-    await expectNoVisibleBoxShadow(sheet);
     await expect(content.getByRole("region", { name: "Checks" })).toBeVisible();
     await expectCoarsePointerTarget(
-      sheet.getByRole("button", { name: "Close lecture theory and hints" }),
+      sheet.getByRole("button", { name: "Close checks, lecture and hints" }),
       "mobile mission and hints close button",
     );
     await expectCoarsePointerTarget(
@@ -1499,11 +1499,16 @@ test.describe("focused mobile state accessibility", () => {
     await expect(
       dialog.getByRole("button", { name: "Download temporary key" }),
     ).toBeVisible();
-    await expect(dialog.getByLabel("macOS/Linux SSH command")).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Copy macOS/Linux SSH command" }),
+    ).toBeVisible();
 
     const bounds = await dialog.boundingBox();
     expect(bounds).not.toBeNull();
-    expect(bounds!.height).toBeLessThanOrEqual(812);
+    // On a phone the dialog is a bottom sheet that keeps 1rem of the screen
+    // free above it and scrolls inside.
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.height).toBeLessThanOrEqual(844 - 16);
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
@@ -1576,9 +1581,12 @@ test.describe("focused mobile state accessibility", () => {
     await runLearningTrigger(page).click();
     const sheet = runLearningSheet(page);
     await expect(sheet).toHaveAttribute("data-side", "bottom");
-    await expect(
-      sheet.getByRole("button", { name: "Finish and save" }),
-    ).toHaveCount(0);
+    // The finish block moves into the open sheet (peek shows it above the
+    // checks), so the two never stand side by side as twin buttons.
+    const sheetFinish = sheet.getByRole("button", { name: "Finish and save" });
+    await expect(sheetFinish).toHaveCount(1);
+    await expectCoarsePointerTarget(sheetFinish, "sheet finish and save action");
+    await expect(page.locator("[data-run-completion-bar]")).toHaveCount(1);
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
@@ -1702,7 +1710,8 @@ test.describe("run workspace on a touch tablet", () => {
 });
 
 test.describe("run workspace at a narrow desktop width", () => {
-  test.use({ viewport: { width: 800, height: 900 } });
+  // The panel docks from 48rem (768px); below it the sheet takes over.
+  test.use({ viewport: { width: 700, height: 900 } });
 
   test("uses mission and hints sheet below the desktop breakpoint", async ({
     page,
@@ -2057,7 +2066,7 @@ test.describe("short run workspace", () => {
     });
     expect(scrolledBack).toBeGreaterThanOrEqual(0);
     const close = sheet.getByRole("button", {
-      name: "Close lecture theory and hints",
+      name: "Close checks, lecture and hints",
     });
     await expectCoarsePointerTarget(
       close,

@@ -136,11 +136,16 @@ describe("dashboard optional surfaces", () => {
     ];
 
     expect(
-      filterArchivedScenarioRuns(runs, "ADA", null).map(({ run }) => run.id),
+      filterArchivedScenarioRuns(runs, "ADA", []).map(({ run }) => run.id),
     ).toEqual(["run-succeeded"]);
     expect(
-      filterArchivedScenarioRuns(runs, "", "failed").map(({ run }) => run.id),
+      filterArchivedScenarioRuns(runs, "", ["failed"]).map(({ run }) => run.id),
     ).toEqual(["run-failed"]);
+    expect(
+      filterArchivedScenarioRuns(runs, "", ["failed", "succeeded"]).map(
+        ({ run }) => run.id,
+      ),
+    ).toEqual(["run-succeeded", "run-failed"]);
   });
 
   it("treats already-removed archive rows as idempotent deletes", () => {

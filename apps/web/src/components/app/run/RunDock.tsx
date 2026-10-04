@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { BookOpen, Lightbulb, ListChecks } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -18,8 +19,8 @@ export function RunDock({
   checksLabel,
   checksAccessibleLabel,
 }: {
-  /** "Checks 1/3" */
-  checksLabel: string;
+  /** "Checks 1/3", with the count free to roll. */
+  checksLabel: ReactNode;
   checksAccessibleLabel: string;
 }) {
   const sheet = useRunSheet();
@@ -32,7 +33,7 @@ export function RunDock({
   const entry = (
     section: RunSheetSection,
     icon: typeof ListChecks,
-    label: string,
+    label: ReactNode,
     extra: { accessibleLabel?: string; trigger?: boolean } = {},
   ) => {
     const Icon = icon;
@@ -45,7 +46,7 @@ export function RunDock({
         aria-label={extra.accessibleLabel}
         data-run-learning-panel-trigger={extra.trigger ? true : undefined}
         className={cn(
-          "grid min-h-11 justify-items-center gap-0.5 rounded-lg px-1 py-1.5 text-[0.6875rem] font-medium text-muted-foreground transition-colors duration-(--duration-fast) ease-standard active:bg-muted aria-expanded:text-primary",
+          "grid min-h-11 justify-items-center gap-0.5 rounded-lg px-1 py-1.5 text-[0.6875rem] font-medium text-muted-foreground transition-colors duration-(--duration-fast) ease-standard active:bg-muted aria-expanded:text-brand-text",
         )}
         onClick={(event) =>
           sheet.openSheet(section, { opener: event.currentTarget })

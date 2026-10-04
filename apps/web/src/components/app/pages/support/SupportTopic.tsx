@@ -1,5 +1,11 @@
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { SearchX } from "lucide-react";
 import {
   Link,
   useNavigate,
@@ -17,7 +23,11 @@ import {
 } from "@/lib/support-types";
 import { Markdown } from "../../Markdown";
 import { PageShell } from "../../patterns/PageShell";
+import { AsyncLabel } from "../../patterns/AsyncLabel";
 import { CollectionPagination } from "../../patterns/CollectionPagination";
+import { MetaLine } from "../../patterns/MetaLine";
+import { RollingNumber } from "../../patterns/RollingNumber";
+import { ListSkeleton } from "../../patterns/Skeletons";
 import { EmptyState, ErrorState } from "../../patterns/StateCard";
 import { usePageChrome } from "../../shell/page-chrome";
 import {
@@ -47,6 +57,19 @@ function TopicDetail({ topicId }: { topicId: string }) {
   const search = useSearch({ strict: false });
   const page = supportPage("page" in search ? search.page : 1);
   const [editing, setEditing] = useState(false);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef(false);
+  // Closing the edit form hands focus back to the button that opened it.
+  useEffect(() => {
+    if (!editing && returnFocus.current) {
+      returnFocus.current = false;
+      editButton.current?.focus();
+    }
+  }, [editing]);
+  const closeEdit = () => {
+    returnFocus.current = true;
+    setEditing(false);
+  };
   const detail = useQuery<{ topic: Topic }, Error>({
     queryKey: ["support", "topic", topicId],
     queryFn: () => supportRequest<{ topic: Topic }>(`/${topicId}`),
@@ -60,6 +83,9 @@ function TopicDetail({ topicId }: { topicId: string }) {
         `/${topicId}/comments?page=${page}`,
       ),
     enabled: Boolean(topic),
+    // A page change keeps the comments and the pager in place until the next
+    // page arrives, so focus stays on the button that was pressed.
+    placeholderData: keepPreviousData,
     retry: retryHttpResponseError,
   });
   const refresh = () => client.invalidateQueries({ queryKey: ["support"] });
@@ -80,7 +106,7 @@ function TopicDetail({ topicId }: { topicId: string }) {
   if (detail.isPending)
     return (
       <PageShell>
-        <p role="status">Loading topic…</p>
+        <ListSkeleton rows={2} action={false} label="Loading topic…" />
       </PageShell>
     );
   if (detail.error || !topic)
@@ -89,6 +115,7 @@ function TopicDetail({ topicId }: { topicId: string }) {
         {detail.error instanceof HttpResponseError &&
         detail.error.status === 404 ? (
           <EmptyState
+            icon={<SearchX />}
             title="Topic not found"
             description="This topic may have been deleted."
             action={
@@ -108,22 +135,24 @@ function TopicDetail({ topicId }: { topicId: string }) {
     );
   return (
     <PageShell>
-      <div className="w-full max-w-3xl space-y-6">
+      <div className="w-full space-y-6">
         <article className="min-w-0 space-y-5" aria-label="Topic">
           <h2 className="text-feature-title text-balance wrap-anywhere">
             {topic.title}
           </h2>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
-            <TopicStatus status={topic.status} />
-            <span>{SUPPORT_TYPES[topic.type]}</span>
-            <span className="wrap-anywhere">{topic.author.name}</span>
-            <PostTime at={topic.createdAt} />
-            {topic.updatedAt > topic.createdAt && (
-              <span>
-                Edited <PostTime at={topic.updatedAt} />
-              </span>
-            )}
-          </div>
+          <MetaLine
+            items={[
+              <TopicStatus key="status" status={topic.status} />,
+              SUPPORT_TYPES[topic.type],
+              topic.author.name,
+              <PostTime key="created" at={topic.createdAt} />,
+              topic.updatedAt > topic.createdAt ? (
+                <span key="edited">
+                  Edited <PostTime at={topic.updatedAt} />
+                </span>
+              ) : null,
+            ]}
+          />
           {topic.status === "solved" && topic.solvedAt !== null && (
             <p
               role="status"
@@ -136,18 +165,18 @@ function TopicDetail({ topicId }: { topicId: string }) {
           {editing ? (
             <TopicForm
               initial={topic}
-              onCancel={() => setEditing(false)}
+              onCancel={closeEdit}
               onSave={async (input) => {
                 await supportRequest(`/${topicId}`, "PATCH", input);
                 await refresh();
-                setEditing(false);
+                closeEdit();
               }}
             />
           ) : (
             <Markdown
               pageContent
               textOnly
-              className="min-w-0 text-body wrap-anywhere"
+              className="min-w-0 prose-measure text-body wrap-anywhere"
             >
               {topic.body}
             </Markdown>
@@ -157,18 +186,21 @@ function TopicDetail({ topicId }: { topicId: string }) {
               {topic.canResolve && (
                 <Button
                   variant={topic.status === "open" ? "default" : "outline"}
+                  aria-busy={resolve.isPending || undefined}
+                  focusableWhenDisabled
                   disabled={resolve.isPending}
                   onClick={() => resolve.mutate()}
                 >
-                  {resolve.isPending
-                    ? "Saving…"
-                    : topic.status === "open"
-                      ? "Mark as solved"
-                      : "Reopen"}
+                  <AsyncLabel
+                    state={resolve.isPending ? "pending" : "idle"}
+                    idle={topic.status === "open" ? "Mark as solved" : "Reopen"}
+                    pending="Saving…"
+                  />
                 </Button>
               )}
               {topic.canEdit && (
                 <Button
+                  ref={editButton}
                   variant="ghost"
                   size="sm"
                   onClick={() => setEditing(true)}
@@ -203,11 +235,11 @@ function TopicDetail({ topicId }: { topicId: string }) {
           <h2 id="comments-heading" className="text-section-title">
             Comments{" "}
             <span className="text-muted-foreground">
-              ({topic.commentCount})
+              (<RollingNumber value={topic.commentCount} />)
             </span>
           </h2>
           {comments.isPending ? (
-            <p role="status">Loading comments…</p>
+            <ListSkeleton rows={2} action={false} label="Loading comments…" />
           ) : comments.error ? (
             <ErrorState
               headingLevel={3}
@@ -217,7 +249,10 @@ function TopicDetail({ topicId }: { topicId: string }) {
             />
           ) : comments.data?.items.length ? (
             <>
-              <ol className="divide-y">
+              <ol
+                className="divide-y"
+                aria-busy={comments.isPlaceholderData || undefined}
+              >
                 {comments.data.items.map((comment) => (
                   <CommentItem
                     key={comment.id}
@@ -260,28 +295,43 @@ function CommentItem({
   refresh: () => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef(false);
+  // Closing the edit form hands focus back to the button that opened it.
+  useEffect(() => {
+    if (!editing && returnFocus.current) {
+      returnFocus.current = false;
+      editButton.current?.focus();
+    }
+  }, [editing]);
+  const closeEdit = () => {
+    returnFocus.current = true;
+    setEditing(false);
+  };
   const path = `/${comment.topicId}/comments/${comment.id}`;
   return (
     <li className="min-w-0 space-y-3 py-4 first:pt-0">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-        <span className="font-medium wrap-anywhere">{comment.author.name}</span>
-        <span className="text-muted-foreground">
-          <PostTime at={comment.createdAt} />
-        </span>
-        {comment.updatedAt > comment.createdAt && (
-          <span className="text-muted-foreground">
-            Edited <PostTime at={comment.updatedAt} />
-          </span>
-        )}
-      </div>
+      <MetaLine
+        items={[
+          <span key="author" className="font-medium text-foreground">
+            {comment.author.name}
+          </span>,
+          <PostTime key="created" at={comment.createdAt} />,
+          comment.updatedAt > comment.createdAt ? (
+            <span key="edited">
+              Edited <PostTime at={comment.updatedAt} />
+            </span>
+          ) : null,
+        ]}
+      />
       {editing ? (
         <CommentForm
           initial={comment.body}
-          onCancel={() => setEditing(false)}
+          onCancel={closeEdit}
           onSave={async (body) => {
             await supportRequest(path, "PATCH", { body });
             await refresh();
-            setEditing(false);
+            closeEdit();
           }}
         />
       ) : (
@@ -289,7 +339,7 @@ function CommentItem({
           <Markdown
             pageContent
             textOnly
-            className="min-w-0 text-body wrap-anywhere"
+            className="min-w-0 prose-measure text-body wrap-anywhere"
           >
             {comment.body}
           </Markdown>
@@ -297,6 +347,7 @@ function CommentItem({
             <div className="flex flex-wrap gap-2">
               {comment.canEdit && (
                 <Button
+                  ref={editButton}
                   size="sm"
                   variant="ghost"
                   onClick={() => setEditing(true)}

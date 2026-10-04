@@ -33,7 +33,7 @@ export function RunCompletionBar({
       aria-labelledby="run-completion-heading"
       data-run-completion-bar
       className={cn(
-        "shrink-0 rounded-xl border border-success-border bg-success-subtle px-4 py-3 shadow-(--shadow-raised) lg:px-5 [@media(max-height:500px)]:!px-3 [@media(max-height:500px)]:!py-2",
+        "shrink-0 rounded-xl border border-success-border bg-success-subtle px-4 py-3 shadow-(--shadow-raised) [@media(max-height:500px)]:!px-3 [@media(max-height:500px)]:!py-2",
         animate && "animate-rise [animation-delay:650ms]",
       )}
     >
@@ -56,8 +56,9 @@ export function RunCompletionBar({
         <Button
           type="button"
           size="sm"
+          variant="success"
           data-run-finish-and-save
-          className="w-full bg-success text-success-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.25)] hover:bg-[color-mix(in_oklab,var(--success),white_12%)] focus-visible:outline-success aria-busy:pointer-events-none sm:w-auto"
+          className="w-full sm:w-auto"
           aria-busy={pending || undefined}
           disabled={!canFinish || pending}
           // Keep focus on the button while the save runs, and after it fails.

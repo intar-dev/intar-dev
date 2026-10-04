@@ -60,7 +60,9 @@ test.describe("learner replay", () => {
     const replay = await openReplay(page, ui);
     const slider = replay.getByRole("slider", { name: "Replay position" });
     await expect(slider).toBeEnabled();
-    await expect(slider).toHaveAttribute("aria-valuemin", "0");
+    // A native range input: its min is the slider's lower bound for
+    // assistive technology, so no aria-valuemin is repeated on it.
+    await expect(slider).toHaveAttribute("min", "0");
     await expect(slider).toHaveAttribute("aria-valuetext", /^\d+:\d\d of \d+:\d\d$/);
 
     await slider.focus();

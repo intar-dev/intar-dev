@@ -32,7 +32,10 @@ export function BrandMark({
       {content}
     </a>
   ) : (
-    <Link to={to} aria-label="intar.dev home" className={linkClassName}>
+    <Link
+      to={to}
+      activeOptions={{ exact: true }}
+      aria-label="intar.dev home" className={linkClassName}>
       {content}
     </Link>
   );

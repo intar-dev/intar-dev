@@ -24,7 +24,7 @@ test.describe("phone, portrait", () => {
     await expect(dock).toBeVisible();
     await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
 
-    await dock.getByRole("button", { name: /^Open lecture theory/ }).click();
+    await dock.getByRole("button", { name: /^Checks/ }).click();
     const sheet = page.locator("[data-run-learning-mobile-sheet]");
     await expect(sheet).toBeVisible();
     await expect(sheet).toHaveAttribute("data-side", "bottom");
@@ -101,7 +101,11 @@ test.describe("phone, landscape", () => {
     ).toBeVisible();
 
     await checks.click();
-    await expect(checks).toHaveAttribute("aria-expanded", "true");
+    // The open sheet is modal, so the bar behind it leaves the accessibility
+    // tree; read the trigger's state by its attribute instead.
+    await expect(
+      page.locator("[data-run-workspace-header] [data-run-learning-panel-trigger]"),
+    ).toHaveAttribute("aria-expanded", "true");
     const sheet = page.locator("[data-run-learning-mobile-sheet]");
     await expect(sheet).toBeVisible();
     await expect(sheet).toHaveAttribute("data-side", "right");
@@ -163,7 +167,14 @@ test.describe("laptop", () => {
     await openRun(ui);
 
     const frame = page.locator("[data-run-terminal]");
-    const idle = await frame.evaluate((n) => getComputedStyle(n).borderTopColor);
+    // The terminal may take focus by itself once it connects, so settle it
+    // unfocused first and measure the idle edge after its fade has finished.
+    await expect(page.locator('[data-terminal-status="connected"]')).toBeVisible();
+    await frame.locator("textarea").evaluate((n) => (n as HTMLElement).blur());
+    const idle = await frame.evaluate(async (n) => {
+      await Promise.all(n.getAnimations().map((a) => a.finished));
+      return getComputedStyle(n).borderTopColor;
+    });
     await frame.locator("textarea").focus();
     await expect
       .poll(() => frame.evaluate((n) => getComputedStyle(n).borderTopColor))

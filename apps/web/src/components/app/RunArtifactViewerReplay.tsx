@@ -19,6 +19,7 @@ import type {
   AsciinemaPlayerMetadata,
 } from "asciinema-player";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
+import { Button } from "@/components/ui/button";
 import {
   REPLAY_IDLE_TIME_LIMIT_SECONDS,
   REPLAY_TERMINAL_FONT_FAMILY,
@@ -86,9 +87,7 @@ interface RestorePoint {
 
 export function replayPlayerErrorCopy(error: string, minimal: boolean) {
   const lead = "Replay could not be loaded.";
-  return minimal
-    ? { lead: `${lead} Try again soon.`, detail: null }
-    : { lead, detail: error };
+  return minimal ? { lead, detail: null } : { lead, detail: error };
 }
 
 /**
@@ -113,6 +112,8 @@ export function AsciicastReplaySurface({
   label?: string;
 }) {
   const [playerError, setPlayerError] = useState<string | null>(null);
+  // Try again re-mounts the player (a new key) with the same cast.
+  const [attempt, setAttempt] = useState(0);
   const wide = useIsWide();
   // While streaming, only the header is cheap to read; the full scan for
   // later resizes runs once, when the cast is complete.
@@ -130,7 +131,13 @@ export function AsciicastReplaySurface({
 
   useEffect(() => {
     setPlayerError(null);
+    setAttempt(0);
   }, [contentId]);
+
+  const retry = useCallback(() => {
+    setPlayerError(null);
+    setAttempt((count) => count + 1);
+  }, []);
 
   const empty = !loading && !content.trim();
   const sized = minimal && wide;
@@ -148,13 +155,29 @@ export function AsciicastReplaySurface({
     const copy = replayPlayerErrorCopy(playerError, minimal);
     body = (
       <div className={cn("flex items-center justify-center", boxClass)} style={boxStyle}>
-        <div role="alert" className="px-5 text-center">
-          <p className="text-support text-terminal-destructive">{copy.lead}</p>
-          {copy.detail ? (
-            <p className="mt-1 text-code break-words text-terminal-muted">
-              {copy.detail}
+        <div
+          role="alert"
+          className="flex flex-col items-center gap-3 px-5 text-center"
+        >
+          <div>
+            <p className="text-support text-terminal-destructive">
+              {copy.lead}
             </p>
-          ) : null}
+            {copy.detail ? (
+              <p className="mt-1 text-code break-words text-terminal-muted">
+                {copy.detail}
+              </p>
+            ) : null}
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="border-terminal-border bg-terminal-surface text-terminal-foreground hover:border-terminal-muted hover:bg-terminal-surface dark:hover:bg-terminal-surface"
+            onClick={retry}
+          >
+            Try again
+          </Button>
         </div>
       </div>
     );
@@ -185,7 +208,7 @@ export function AsciicastReplaySurface({
   } else {
     body = (
       <ReplayPlayer
-        key={contentId}
+        key={`${contentId}:${attempt}`}
         content={content}
         custom={minimal}
         wide={wide}

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { KeyRound, LoaderCircle } from "lucide-react";
+import { useRef, useState } from "react";
+import { ChevronDown, KeyRound } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
@@ -9,11 +9,23 @@ import {
 import { Section } from "@/components/app/patterns/Section";
 import { ConfirmDialog } from "@/components/app/patterns/ConfirmDialog";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
+import { Field } from "@/components/app/patterns/Field";
+import { RollingNumber } from "@/components/app/patterns/RollingNumber";
+import { ListSkeleton } from "@/components/app/patterns/Skeletons";
+import {
+  EmptyState,
+  ErrorState,
+} from "@/components/app/patterns/StateCard";
 import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import { useCallbackErrorCode } from "@/components/app/hooks/useCallbackErrorCode";
 import { useSession } from "@/components/app/hooks/useSession";
 import { formatTimestamp } from "@/components/app/lib/format";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { cn, reject } from "@/lib/utils";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -106,8 +118,8 @@ const wait = (ms: number) =>
   new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
 /**
- * After a key is removed, keep focus in the list: the neighbouring key, any
- * key left on the page, or the empty state that says none are left.
+ * Keep focus in the list once a key goes: the neighbouring key, or any key
+ * left on the page. Without one, the empty state takes it.
  */
 function focusAfterRemoval(nextKeyId: string | null) {
   requestAnimationFrame(() => {
@@ -118,10 +130,150 @@ function focusAfterRemoval(nextKeyId: string | null) {
             `[data-ssh-key-id="${CSS.escape(nextKeyId)}"] ${trigger}`,
           )
         : null) ??
-      document.querySelector<HTMLElement>(`[data-ssh-key-id] ${trigger}`) ??
+      document.querySelector<HTMLElement>(
+        `[data-ssh-key-id]:not([data-folding]) ${trigger}`,
+      ) ??
       document.getElementById("ssh-keys-empty");
     next?.focus();
   });
+}
+
+/** How the row names a key: by label or comment, else by its fingerprint tail. */
+function keyWording(key: UserSshKeyRecord) {
+  const name = key.label || key.comment;
+  const tail = key.fingerprintSha256.slice(-6);
+  return name
+    ? {
+        subject: `the ${name} key`,
+        removed: `${name} key removed. It can't be used for new routes.`,
+        failed: `The ${name} key couldn't be removed. Try again.`,
+      }
+    : {
+        subject: `the key ending ${tail}`,
+        removed: `Key ending ${tail} removed. It can't be used for new routes.`,
+        failed: `The key ending ${tail} couldn't be removed. Try again.`,
+      };
+}
+
+type RemovalPhase = "idle" | "done" | "folding";
+
+/**
+ * One key. Each row owns its removal, so only the row being removed is
+ * locked: "Removed" with a drawn check, then the row folds away and the list
+ * closes up.
+ */
+function SshKeyRow({
+  sshKey,
+  nextKeyId,
+  onFolding,
+  onGone,
+  onFailed,
+  onCancel,
+}: {
+  sshKey: UserSshKeyRecord;
+  nextKeyId: string | null;
+  onFolding: (message: string, nextKeyId: string | null) => void;
+  onGone: (keyId: string, nextKeyId: string | null) => void;
+  onFailed: (message: string) => void;
+  onCancel: () => void;
+}) {
+  const [phase, setPhase] = useState<RemovalPhase>("idle");
+  const item = useRef<HTMLLIElement>(null);
+  const wording = keyWording(sshKey);
+  const remove = useMutation({
+    mutationFn: async () => {
+      const response = await fetch(
+        `/api/profile/ssh-keys/${encodeURIComponent(sshKey.id)}`,
+        { method: "DELETE", credentials: "include" },
+      );
+      // Already gone (another tab or session): the key is removed all the same.
+      if (response.status === 404) return;
+      const body = (await response.json().catch(() => null)) as {
+        deleted?: true;
+      } | null;
+      if (!response.ok || body?.deleted !== true) {
+        throw new Error(`Failed to remove SSH key (${response.status})`);
+      }
+    },
+    onSuccess: async () => {
+      setPhase("done");
+      await wait(600);
+      setPhase("folding");
+      onFolding(wording.removed, nextKeyId);
+      // The row leaves when its own transitions end; none run under reduced
+      // motion. The timer only covers a transition that never reports back.
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await Promise.race([
+        Promise.all(
+          (item.current?.getAnimations() ?? []).map((animation) =>
+            animation.finished.catch(() => undefined),
+          ),
+        ),
+        wait(1000),
+      ]);
+      onGone(sshKey.id, nextKeyId);
+    },
+    onError: () => onFailed(wording.failed),
+  });
+  const removed = phase !== "idle";
+
+  return (
+    <li
+      ref={item}
+      data-ssh-key-id={sshKey.id}
+      data-folding={phase === "folding" || undefined}
+      // A removed row folds away (rows 1fr → 0fr) before the list refreshes.
+      // The padding and the divider sit on the inner row, so the fold reaches
+      // 0px and the rows below close up smoothly.
+      className="grid grid-rows-[1fr] [transition:grid-template-rows_var(--duration-slow)_var(--ease-enter),opacity_var(--duration-moderate)_var(--ease-exit),background-color_var(--duration-moderate)_var(--ease-standard)] has-[[data-inline-confirm][data-asking]]:bg-destructive-subtle/70 data-folding:grid-rows-[0fr] data-folding:opacity-0"
+    >
+      <div className="min-h-0 overflow-hidden">
+        <div className="flex flex-wrap items-start gap-x-4 gap-y-3 px-4 pt-2 pb-3.5 [li+li_&]:border-t">
+          <div className="min-w-0 flex-[1_1_14rem] space-y-1">
+            {/* As tall as the action, so Remove lines up with the key's name
+                (the Row Rule). */}
+            <div className="flex min-h-(--control-compact) flex-wrap items-center gap-2 pointer-coarse:min-h-11">
+              <p className="min-w-0 text-support font-medium wrap-anywhere">
+                {sshKey.label || sshKey.comment || "Unnamed key"}
+              </p>
+              <Badge variant="outline">{sshKey.keyType}</Badge>
+            </div>
+            <p className="font-mono text-xs break-all text-muted-foreground">
+              {sshKey.fingerprintSha256}
+            </p>
+            <p className="text-metadata">
+              Added {formatTimestamp(sshKey.createdAt)}
+            </p>
+            <Collapsible>
+              <CollapsibleTrigger className="group inline-flex cursor-pointer items-center gap-1 text-caption hover:text-foreground">
+                Show public key
+                <ChevronDown className="size-3 transition-transform duration-(--duration-moderate) ease-enter group-data-panel-open:rotate-180" />
+              </CollapsibleTrigger>
+              <CollapsibleContent className="pt-2">
+                <pre className="overflow-x-auto rounded-lg bg-muted/50 p-3 font-mono text-xs break-all whitespace-pre-wrap">
+                  {sshKey.publicKeyOpenssh}
+                </pre>
+              </CollapsibleContent>
+            </Collapsible>
+          </div>
+          <div className="ml-auto">
+            <InlineConfirm
+              label="Remove"
+              name={`Remove ${wording.subject}`}
+              question={`Remove ${wording.subject}?`}
+              confirmLabel="Remove key"
+              pendingLabel="Removing…"
+              doneLabel="Removed"
+              pending={remove.isPending}
+              done={removed}
+              onConfirm={() => remove.mutate()}
+              onCancel={onCancel}
+            />
+          </div>
+        </div>
+      </div>
+    </li>
+  );
 }
 
 export function Profile() {
@@ -129,8 +281,17 @@ export function Profile() {
   const { data: session } = useSession();
   const [label, setLabel] = useState("");
   const [publicKey, setPublicKey] = useState("");
+  // A refused key marks the field; anything else (network, server) is the
+  // form's own line.
+  const [fieldError, setFieldError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [formNotice, setFormNotice] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [removedSay, setRemovedSay] = useState("");
+  // Set when the list emptied through a removal here, so its empty state rises.
+  const [justEmptied, setJustEmptied] = useState(false);
+  const keyField = useRef<HTMLTextAreaElement>(null);
+  const lastRefused = useRef<string | null>(null);
 
   const sshKeys = useQuery({
     queryKey: ["profile", "ssh-keys"],
@@ -159,17 +320,14 @@ export function Profile() {
   });
 
   const addKey = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (input: { label: string; publicKey: string }) => {
       const response = await fetch("/api/profile/ssh-keys", {
         method: "POST",
         credentials: "include",
         headers: {
           "content-type": "application/json",
         },
-        body: JSON.stringify({
-          label,
-          publicKey,
-        }),
+        body: JSON.stringify(input),
       });
 
       const body = (await response.json().catch(() => null)) as {
@@ -178,7 +336,8 @@ export function Profile() {
       } | null;
 
       if (!response.ok || !body?.key) {
-        throw new Error(
+        throw new HttpResponseError(
+          response.status,
           body?.error ?? `Failed to add SSH key (${response.status})`,
         );
       }
@@ -188,50 +347,60 @@ export function Profile() {
     onSuccess: async () => {
       setLabel("");
       setPublicKey("");
+      setFieldError(null);
       setFormError(null);
+      lastRefused.current = null;
       setFormNotice("Key saved. New native SSH routes can use it.");
       await queryClient.invalidateQueries({
         queryKey: ["profile", "ssh-keys"],
       });
     },
-    onError: (error) => {
+    onError: (error, input) => {
       setFormNotice(null);
-      setFormError(error instanceof Error ? error.message : String(error));
-    },
-  });
-
-  const deleteKey = useMutation({
-    mutationFn: async (keyId: string) => {
-      const response = await fetch(
-        `/api/profile/ssh-keys/${encodeURIComponent(keyId)}`,
-        {
-          method: "DELETE",
-          credentials: "include",
-        },
-      );
-
-      const body = (await response.json().catch(() => null)) as {
-        deleted?: true;
-        error?: string;
-      } | null;
-
-      if (!response.ok || body?.deleted !== true) {
-        throw new Error(
-          body?.error ?? `Failed to delete SSH key (${response.status})`,
-        );
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        error instanceof HttpResponseError &&
+        error.status >= 400 &&
+        error.status < 500
+      ) {
+        setFormError(null);
+        setFieldError(message);
+        // The same refused value again: nudge the field and keep focus there.
+        if (lastRefused.current === input.publicKey) {
+          requestAnimationFrame(() => reject(keyField.current));
+        }
+        lastRefused.current = input.publicKey;
+      } else {
+        setFieldError(null);
+        setFormError(message);
       }
     },
-    // The row confirms and folds away first (see the remove action); the
-    // list refreshes after that.
-    onSuccess: () => {
-      setFormNotice("SSH key removed. It cannot be used for new routes.");
-      setFormError(null);
-    },
   });
-  const [removal, setRemoval] = useState<{
-    keyId: string;
-    folding: boolean;
-  } | null>(null);
+
+  const onKeyFolding = (message: string, nextKeyId: string | null) => {
+    setRemoveError(null);
+    // Clear first, so the same words announce again for the next key.
+    setRemovedSay("");
+    requestAnimationFrame(() => setRemovedSay(message));
+    if (nextKeyId) focusAfterRemoval(nextKeyId);
+  };
+  const onKeyGone = (keyId: string, nextKeyId: string | null) => {
+    const left =
+      (
+        queryClient.getQueryData<ProfileSshKeysResponse>([
+          "profile",
+          "ssh-keys",
+        ])?.keys ?? []
+      ).filter((item) => item.id !== keyId).length;
+    queryClient.setQueryData<ProfileSshKeysResponse>(
+      ["profile", "ssh-keys"],
+      (data) =>
+        data && { ...data, keys: data.keys.filter((item) => item.id !== keyId) },
+    );
+    if (left === 0) setJustEmptied(true);
+    if (!nextKeyId) focusAfterRemoval(null);
+    void queryClient.invalidateQueries({ queryKey: ["profile", "ssh-keys"] });
+  };
 
   const user = session?.user ?? null;
   // Organization providers never sign in a platform admin.
@@ -305,10 +474,17 @@ export function Profile() {
             <AvatarFallback>{initials(user?.name)}</AvatarFallback>
           </Avatar>
           <dl className="grid flex-1 gap-x-8 gap-y-4 sm:grid-cols-2">
+            {/* The avatar's initials come from this name, so it shows. */}
+            {user?.name && user.name !== user.username ? (
+              <div>
+                <dt className="text-label">Name</dt>
+                <dd className="mt-1 text-sm font-medium">{user.name}</dd>
+              </div>
+            ) : null}
             <div>
               <dt className="text-label">Username</dt>
               <dd className="mt-1 text-sm font-medium">
-                {user?.username ?? user?.name ?? "—"}
+                {user?.username ?? "—"}
               </dd>
             </div>
             <div>
@@ -323,18 +499,18 @@ export function Profile() {
                 <div className="flex flex-wrap items-center gap-2 font-medium">
                   {github ? (
                     <>
-                      <Badge variant="secondary">
-                        GitHub
-                        {user?.username ? (
-                          <span className="font-mono">@{user.username}</span>
-                        ) : null}
-                      </Badge>
+                      <Badge variant="secondary">GitHub</Badge>
+                      {user?.username ? (
+                        <span className="text-metadata font-normal">
+                          @{user.username}
+                        </span>
+                      ) : null}
                       {/* Keep at least one way to sign in. */}
                       {usableCount > 1 ? (
                         <Button
                           size="sm"
-                          variant="ghost"
-                          className="text-muted-foreground hover:text-destructive"
+                          variant="destructive"
+                          aria-haspopup="dialog"
                           disabled={disconnect.isPending}
                           onClick={() => openDisconnectDialog(github)}
                         >
@@ -388,8 +564,8 @@ export function Profile() {
                           </div>
                           <Button
                             size="sm"
-                            variant="ghost"
-                            className="text-muted-foreground hover:text-destructive"
+                            variant="destructive"
+                            aria-haspopup="dialog"
                             disabled={
                               lastSignIn || removed || disconnect.isPending
                             }
@@ -468,22 +644,32 @@ export function Profile() {
       <Section
         title="SSH keys"
         description="Saved public keys are optional credentials for native SSH routes. They are never added to scenario VMs."
+        actions={
+          sshKeys.data ? (
+            <p className="text-metadata tabular-nums">
+              <RollingNumber value={sshKeys.data.keys.length} />{" "}
+              {sshKeys.data.keys.length === 1 ? "key" : "keys"}
+            </p>
+          ) : null
+        }
       >
         <div className="space-y-5">
-          {sshKeys.isLoading ? (
-            <div className="flex items-center gap-3 py-6 text-sm text-muted-foreground">
-              <LoaderCircle className="size-4 motion-safe:animate-spin" />
-              Loading SSH keys…
-            </div>
-          ) : sshKeys.error ? (
-            <Alert variant="destructive">
-              <AlertTitle>Could not load SSH keys</AlertTitle>
-              <AlertDescription>
-                {sshKeys.error instanceof Error
-                  ? sshKeys.error.message
-                  : "Failed to load SSH keys"}
-              </AlertDescription>
-            </Alert>
+          {/* Always mounted, so a removal is announced when the row folds. */}
+          <p role="status" className="sr-only">
+            {removedSay}
+          </p>
+          {sshKeys.isPending ? (
+            <ListSkeleton
+              rows={2}
+              label="Loading SSH keys…"
+              className="rounded-lg bg-transparent shadow-none"
+            />
+          ) : sshKeys.error && !sshKeys.data ? (
+            <ErrorState
+              headingLevel={3}
+              title="Could not load SSH keys"
+              onRetry={() => sshKeys.refetch()}
+            />
           ) : sshKeys.data?.keys.length ? (
             <PaginatedCollection
               items={sshKeys.data.keys}
@@ -491,97 +677,27 @@ export function Profile() {
               itemLabel="SSH keys"
             >
               {(visibleKeys) => (
-                <ul className="divide-y overflow-hidden rounded-lg border">
-                  {visibleKeys.map((key, index) => {
-                    const deleting =
-                      deleteKey.isPending && deleteKey.variables === key.id;
-                    const removed = removal?.keyId === key.id;
-                    const folding = removed && removal.folding;
-                    const keyName = key.label || key.comment || "unnamed";
-                    // Focus lands on the next key's action after a removal,
-                    // or the previous one when the last key goes.
-                    const nextKeyId =
-                      visibleKeys[index + 1]?.id ?? visibleKeys[index - 1]?.id ?? null;
-
-                    return (
-                      <li
-                        key={key.id}
-                        data-ssh-key-id={key.id}
-                        data-folding={folding || undefined}
-                        // A removed row folds away (rows 1fr → 0fr) before the
-                        // list refreshes, so the rows below close up smoothly.
-                        className="grid grid-rows-[1fr] transition-[grid-template-rows,opacity,background-color] duration-(--duration-slow) ease-enter has-[[data-inline-confirm][data-asking]]:bg-destructive-subtle/60 data-folding:grid-rows-[0fr] data-folding:opacity-0"
-                      >
-                        <div className="flex min-h-0 flex-wrap items-start gap-4 overflow-hidden p-4">
-                        <div className="min-w-0 flex-1 space-y-1">
-                          {/* As tall as the action, so Remove lines up with the
-                              key's name (the Row Rule). */}
-                          <div className="flex min-h-(--control-compact) flex-wrap items-center gap-2 pointer-coarse:min-h-11">
-                            <p className="text-sm font-medium">
-                              {key.label || key.comment || "Unnamed key"}
-                            </p>
-                            <Badge variant="outline">{key.keyType}</Badge>
-                          </div>
-                          <p className="font-mono text-xs break-all text-muted-foreground">
-                            {key.fingerprintSha256}
-                          </p>
-                          <p className="text-caption">
-                            Added {formatTimestamp(key.createdAt)}
-                          </p>
-                          <details>
-                            <summary className="cursor-pointer text-xs text-muted-foreground transition-colors hover:text-foreground">
-                              Show public key
-                            </summary>
-                            <pre className="mt-2 overflow-x-auto rounded-lg bg-muted/50 p-3 font-mono text-xs break-all whitespace-pre-wrap">
-                              {key.publicKeyOpenssh}
-                            </pre>
-                          </details>
-                        </div>
-                        <InlineConfirm
-                          label="Remove"
-                          name={`Remove the ${keyName} key`}
-                          question={`Remove the ${keyName} key?`}
-                          confirmLabel="Remove key"
-                          pendingLabel="Removing…"
-                          doneLabel="Removed"
-                          pending={deleting}
-                          done={removed}
-                          disabled={
-                            (deleteKey.isPending && !deleting) ||
-                            (removal !== null && !removed)
-                          }
-                          onConfirm={() =>
-                            deleteKey.mutate(key.id, {
-                              onSuccess: async () => {
-                                // "Removed" with a drawn check, then the row
-                                // folds away and the list closes up.
-                                setRemoval({ keyId: key.id, folding: false });
-                                await wait(600);
-                                setRemoval({ keyId: key.id, folding: true });
-                                await wait(300);
-                                queryClient.setQueryData<ProfileSshKeysResponse>(
-                                  ["profile", "ssh-keys"],
-                                  (data) =>
-                                    data && {
-                                      ...data,
-                                      keys: data.keys.filter(
-                                        (item) => item.id !== key.id,
-                                      ),
-                                    },
-                                );
-                                setRemoval(null);
-                                focusAfterRemoval(nextKeyId);
-                                await queryClient.invalidateQueries({
-                                  queryKey: ["profile", "ssh-keys"],
-                                });
-                              },
-                            })
-                          }
-                        />
-                        </div>
-                      </li>
-                    );
-                  })}
+                <ul
+                  aria-label="SSH keys"
+                  className="overflow-hidden rounded-lg border"
+                >
+                  {visibleKeys.map((key, index) => (
+                    <SshKeyRow
+                      key={key.id}
+                      sshKey={key}
+                      // Focus lands on the next key's action as the row
+                      // folds, or the previous one when the last key goes.
+                      nextKeyId={
+                        visibleKeys[index + 1]?.id ??
+                        visibleKeys[index - 1]?.id ??
+                        null
+                      }
+                      onFolding={onKeyFolding}
+                      onGone={onKeyGone}
+                      onFailed={setRemoveError}
+                      onCancel={() => setRemoveError(null)}
+                    />
+                  ))}
                 </ul>
               )}
             </PaginatedCollection>
@@ -589,92 +705,92 @@ export function Profile() {
             <div
               id="ssh-keys-empty"
               tabIndex={-1}
-              className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-5 py-6 text-center"
+              className={cn("outline-none", justEmptied && "animate-rise")}
             >
-              <KeyRound className="size-6 text-muted-foreground" />
-              <div>
-                <p className="text-sm font-medium">No public keys yet</p>
-                <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                  Intar can issue a temporary key for each run. Save a public
-                  key if you want native SSH to reuse your local identity.
-                </p>
-              </div>
+              <EmptyState
+                headingLevel={3}
+                icon={<KeyRound />}
+                title="No public keys yet"
+                description="Intar can issue a temporary key for each run. Save a public key if you want native SSH to reuse your local identity."
+              />
             </div>
           )}
 
-          {deleteKey.error ? (
-            <InlineFeedback tone="error">
-              {deleteKey.error instanceof Error
-                ? deleteKey.error.message
-                : "Could not remove SSH key"}
-            </InlineFeedback>
+          {removeError ? (
+            <InlineFeedback tone="error">{removeError}</InlineFeedback>
           ) : null}
 
           <form
-            className="space-y-4 border-t pt-5"
+            className="space-y-4"
             onSubmit={(event) => {
               event.preventDefault();
               if (addKey.isPending) return;
               setFormError(null);
               setFormNotice(null);
-              addKey.mutate();
+              addKey.mutate({ label, publicKey });
             }}
           >
-            <div>
-              <h3 className="text-card-title">Add a public key</h3>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Paste an OpenSSH public key from ~/.ssh/*.pub — one key per
-                save. Saved keys are optional credentials for future native SSH
-                routes; they are never injected into scenario VMs.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <label htmlFor="ssh-key-label" className="block text-sm font-medium">
-                Label
-              </label>
-              <Input
-                id="ssh-key-label"
-                value={label}
-                onChange={(event) => setLabel(event.target.value)}
-                placeholder="MacBook Pro, YubiKey, Workstation"
-                maxLength={80}
-                className="max-w-sm"
-              />
-            </div>
-            <div className="space-y-2">
-              <label htmlFor="ssh-key-public" className="block text-sm font-medium">
-                Public key
-              </label>
-              <Textarea
-                id="ssh-key-public"
-                value={publicKey}
-                onChange={(event) => setPublicKey(event.target.value)}
-                rows={5}
-                placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI..."
-                className="font-mono text-xs"
-              />
-            </div>
+            <h3 className="text-card-title">Add a public key</h3>
+            {/* Saving locks the fields, so a paste made meanwhile isn't wiped. */}
+            <fieldset disabled={addKey.isPending} className="min-w-0 space-y-4">
+              <Field label="Label">
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={label}
+                    onChange={(event) => setLabel(event.target.value)}
+                    placeholder="MacBook Pro, YubiKey, Workstation"
+                    maxLength={80}
+                  />
+                )}
+              </Field>
+              <Field
+                label="Public key"
+                hint={
+                  <>
+                    Paste one OpenSSH public key from <code>~/.ssh/*.pub</code>{" "}
+                    per save.
+                  </>
+                }
+                error={fieldError}
+              >
+                {(control) => (
+                  <Textarea
+                    {...control}
+                    ref={keyField}
+                    mono
+                    value={publicKey}
+                    onChange={(event) => {
+                      setPublicKey(event.target.value);
+                      setFieldError(null);
+                    }}
+                    rows={5}
+                    placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI…"
+                  />
+                )}
+              </Field>
 
-            {formError ? (
-              <InlineFeedback tone="error">{formError}</InlineFeedback>
-            ) : null}
-
-            {/* Always mounted, so a notice that appears is announced; it
-                takes no room in the form while empty. */}
-            <div role="status" aria-live="polite" className="empty:mb-0">
-              {formNotice ? (
-                <InlineFeedback tone="success" announce={false}>
-                  {formNotice}
-                </InlineFeedback>
+              {formError ? (
+                <InlineFeedback tone="error">{formError}</InlineFeedback>
               ) : null}
-            </div>
 
-            <Button
-              type="submit"
-              disabled={addKey.isPending || !publicKey.trim()}
-            >
-              {addKey.isPending ? "Saving key…" : "Save public key"}
-            </Button>
+              {/* Always mounted, so a notice that appears is announced; it
+                  takes no room in the form while empty. */}
+              <div role="status" aria-live="polite" className="empty:mb-0">
+                {formNotice ? (
+                  <InlineFeedback tone="success" announce={false}>
+                    {formNotice}
+                  </InlineFeedback>
+                ) : null}
+              </div>
+
+              <Button
+                type="submit"
+                disabled={addKey.isPending || !publicKey.trim()}
+              >
+                {addKey.isPending ? "Saving key…" : "Save public key"}
+              </Button>
+            </fieldset>
           </form>
         </div>
       </Section>

@@ -30,9 +30,7 @@ describe("verification collection status", () => {
     );
 
     expect(markup).toContain("Verification unavailable");
-    expect(markup).toContain(
-      "We cannot confirm verification progress right now.",
-    );
+    expect(markup).toContain("Verification progress is unavailable right now.");
     expect(markup).not.toContain("retrying");
     expect(markup).not.toContain("automatically");
     expect(markup).not.toContain(hiddenError);

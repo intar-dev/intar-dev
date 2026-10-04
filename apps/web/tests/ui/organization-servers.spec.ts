@@ -175,7 +175,9 @@ for (const role of ["owner", "admin"] as const) {
       dialog.getByRole("button", { name: "Remove server", exact: true }),
     ).toBeDisabled();
     await dialog.getByRole("checkbox").check();
-    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await dialog
+      .getByRole("button", { name: "Keep server", exact: true })
+      .click();
     await section(page)
       .getByRole("button", { name: "Remove", exact: true })
       .click();
@@ -290,7 +292,8 @@ for (const width of [1440, 390]) {
         ).toBeVisible();
       }
       await expect(section(page)).toContainText(
-        "0 of 8 vCPUs available · Full",
+        // The facts are one data line; its separators are decorative.
+        /0 of 8 vCPUs available\s*·\s*Full/u,
       );
       await expect(section(page)).toContainText("Run sudo intar-host doctor");
       await expect(section(page)).toContainText("Waiting for installation");

@@ -49,6 +49,11 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { presentScenarioRun } from "@/lib/run-phase";
 import {
   courseCatalogQueryKey,
@@ -79,7 +84,10 @@ import {
   useRunSheet,
   useRunSheetController,
 } from "@/components/app/run/run-viewport";
-import { planActiveRunStatus } from "@/components/app/run/run-status-display";
+import {
+  ACTIVE_RUN_STATUS_WORDS,
+  planActiveRunStatus,
+} from "@/components/app/run/run-status-display";
 import { ScenarioVmSelector } from "@/components/app/run/ScenarioVmSelector";
 import {
   ScenarioShellStatusCard,
@@ -1200,6 +1208,9 @@ export function ScenarioRun() {
           word={plan.word}
           startedAt={attemptData.createdAt}
           leaseDeadlineMs={leaseDeadlineMs}
+          // Saving is already closing the sandbox, so a phone's slim run bar
+          // keeps its room for the saving sequence.
+          leaseHiddenOnPhone={attemptData.activity === "background"}
           frozenMs={plan.frozen ? attemptData.solveDurationMs : null}
           pulse={plan.pulse}
         />
@@ -1502,6 +1513,9 @@ export function ScenarioRun() {
     lectureMarkdown: attemptData.lectureBodyMarkdown ?? null,
     lectureTitle: attemptData.lectureTitle ?? null,
     phase: attemptData.phase,
+    // Solved stays solved through saving, archiving and deleting, so the
+    // check circuit stays closed.
+    runSolved: attemptData.phase === "solved" || attemptData.solvedAt !== null,
     probes: selectedProbes,
     vmName: selectedVm?.scenarioVmName ?? null,
     objectives: attemptData.objectives,
@@ -1880,13 +1894,7 @@ function RunWorkspaceBody({
           actions={actions}
           returnTarget={returnTarget}
         />
-        <RunCheckBar
-          probes={guidance.probes}
-          objectives={guidance.objectives}
-          vmName={guidance.vmName ?? null}
-          phase={guidance.phase}
-          className="mx-4 mb-2 dock:hidden"
-        />
+        <RunCheckBar {...guidance} className="mx-4 mb-2 dock:hidden" />
         <RunCheckToast
           probes={guidance.probes}
           objectives={guidance.objectives}
@@ -1995,33 +2003,47 @@ function RunWorkspaceHeader({
       {status ? <div className="min-w-0 shrink-0">{status}</div> : null}
       {short && sheet ? (
         <div className="flex shrink-0 items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Checks"
-            aria-haspopup="dialog"
-            aria-expanded={opens("checks")}
-            data-run-learning-panel-trigger
-            onClick={(event) =>
-              sheet.openSheet("checks", { opener: event.currentTarget })
-            }
-          >
-            <ListChecks aria-hidden="true" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Lecture and hints"
-            aria-haspopup="dialog"
-            aria-expanded={opens("lecture")}
-            onClick={(event) =>
-              sheet.openSheet("lecture", { opener: event.currentTarget })
-            }
-          >
-            <BookOpen aria-hidden="true" />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Checks"
+                  aria-haspopup="dialog"
+                  aria-expanded={opens("checks")}
+                  data-run-learning-panel-trigger
+                  onClick={(event) =>
+                    sheet.openSheet("checks", { opener: event.currentTarget })
+                  }
+                >
+                  <ListChecks aria-hidden="true" />
+                </Button>
+              }
+            />
+            <TooltipContent side="bottom">Checks</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Lecture and hints"
+                  aria-haspopup="dialog"
+                  aria-expanded={opens("lecture")}
+                  onClick={(event) =>
+                    sheet.openSheet("lecture", { opener: event.currentTarget })
+                  }
+                >
+                  <BookOpen aria-hidden="true" />
+                </Button>
+              }
+            />
+            <TooltipContent side="bottom">Lecture and hints</TooltipContent>
+          </Tooltip>
         </div>
       ) : null}
       {actions ? (
@@ -2204,6 +2226,7 @@ function ActiveRunStatus({
   word,
   startedAt,
   leaseDeadlineMs,
+  leaseHiddenOnPhone = false,
   frozenMs = null,
   pulse = false,
 }: {
@@ -2211,6 +2234,8 @@ function ActiveRunStatus({
   word: string;
   startedAt: number;
   leaseDeadlineMs: number | null;
+  /** Drop the lease countdown below sm; it stays from sm up. */
+  leaseHiddenOnPhone?: boolean;
   /** The clock stops here once the run is solved. */
   frozenMs?: number | null;
   pulse?: boolean;
@@ -2220,6 +2245,7 @@ function ActiveRunStatus({
       <StatusToken
         tone={tone}
         word={word}
+        words={ACTIVE_RUN_STATUS_WORDS}
         pulse={pulse}
         clock={
           leaseDeadlineMs === null ? { startedAt, frozenMs } : undefined
@@ -2227,8 +2253,15 @@ function ActiveRunStatus({
       />
       {leaseDeadlineMs !== null ? (
         <>
-          <Separator orientation="vertical" aria-hidden="true" className="h-3" />
-          <LeaseCountdown deadlineMs={leaseDeadlineMs} />
+          <Separator
+            orientation="vertical"
+            aria-hidden="true"
+            className={cn("h-3", leaseHiddenOnPhone && "max-sm:hidden")}
+          />
+          <LeaseCountdown
+            deadlineMs={leaseDeadlineMs}
+            {...(leaseHiddenOnPhone ? { className: "max-sm:hidden" } : {})}
+          />
         </>
       ) : null}
     </span>

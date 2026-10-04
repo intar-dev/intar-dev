@@ -99,7 +99,7 @@ describe("scenario run archive artifacts", () => {
     expect(markup).toContain(
       'href="/api/admin/runs/run-1/artifacts/vm-1:0/content?download=1"',
     );
-    expect(markup).toContain("Raw Recording Bundle");
+    expect(markup).toContain("Raw recording bundle");
     expect(markup).toContain("Download");
     const detailsId = markup.match(/aria-controls="([^"]+)"/)?.[1];
     expect(detailsId).toBeDefined();

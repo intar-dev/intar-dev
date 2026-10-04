@@ -151,9 +151,7 @@ export function ScenarioStepScreen(props: {
             >
               {props.title}
             </h2>
-            <CardDescription className="text-support leading-6">
-              {props.description}
-            </CardDescription>
+            <CardDescription>{props.description}</CardDescription>
           </div>
           {props.topRight ? (
             <div className="shrink-0 self-start">{props.topRight}</div>
@@ -182,7 +180,8 @@ export function ScenarioStepScreen(props: {
               key={step.id}
               className={cn(
                 // The stretch glides over slow; fill and hairline fade over reveal.
-                "relative h-2 overflow-hidden rounded-full [transition:flex-grow_var(--duration-slow)_var(--ease-enter),flex-basis_var(--duration-slow)_var(--ease-enter),background-color_var(--duration-reveal)_var(--ease-standard),box-shadow_var(--duration-reveal)_var(--ease-standard)] motion-reduce:transition-none",
+                // Under reduced motion the stretch is instant; the fills still fade.
+                "relative h-2 overflow-hidden rounded-full [transition:flex-grow_var(--duration-slow)_var(--ease-enter),flex-basis_var(--duration-slow)_var(--ease-enter),background-color_var(--duration-reveal)_var(--ease-standard),box-shadow_var(--duration-reveal)_var(--ease-standard)] motion-reduce:[transition:background-color_var(--duration-reveal)_var(--ease-standard),box-shadow_var(--duration-reveal)_var(--ease-standard)]",
                 step.state === "active" || step.state === "failed"
                   ? "grow basis-0"
                   : "grow-0 basis-2",
@@ -218,7 +217,7 @@ export function ScenarioStepScreen(props: {
                 data-run-sequence-step
                 data-state={step.state}
                 className={cn(
-                  "relative grid min-h-12 grid-cols-[1.5rem_minmax(0,1fr)_auto] items-start gap-x-3 rounded-lg px-3 py-3 transition-colors duration-(--duration-slow) ease-standard motion-reduce:transition-none",
+                  "relative grid min-h-12 grid-cols-[1.5rem_minmax(0,1fr)_auto] items-start gap-x-3 rounded-lg px-3 py-3 transition-colors duration-(--duration-slow) ease-standard",
                   step.state === "active" && "bg-primary/6",
                   step.state === "failed" && "bg-destructive/8",
                 )}
@@ -239,7 +238,7 @@ export function ScenarioStepScreen(props: {
                   aria-hidden="true"
                   data-run-sequence-marker
                   className={cn(
-                    "swap relative z-10 size-6 rounded-full border text-xs font-semibold tabular-nums transition-[background-color,border-color,color] duration-(--duration-moderate) ease-standard motion-reduce:transition-none",
+                    "swap relative z-10 size-6 rounded-full border text-xs font-semibold tabular-nums transition-[background-color,border-color,color] duration-(--duration-moderate) ease-standard",
                     step.state === "done"
                       ? "border-success bg-success text-success-foreground"
                       : step.state === "active"
@@ -276,7 +275,7 @@ export function ScenarioStepScreen(props: {
                 <div className="contents" data-run-sequence-copy>
                   <p
                     className={cn(
-                      "col-start-2 min-w-0 text-support leading-6 font-medium transition-colors duration-(--duration-slow) ease-standard motion-reduce:transition-none",
+                      "col-start-2 min-w-0 text-support leading-6 font-medium transition-colors duration-(--duration-slow) ease-standard",
                       step.state === "done"
                         ? "text-success"
                         : "text-foreground",
@@ -363,12 +362,12 @@ export function ScenarioShellStatusCard(props: {
           <LoaderCircle className="size-8 text-primary motion-safe:animate-spin" />
         ) : null}
         <div className="space-y-1">
-          <p className="text-sm font-medium text-foreground">
+          <p className="text-support font-medium text-foreground">
             {props.phase === "failed"
               ? "Scenario run stopped"
               : "Shell unavailable"}
           </p>
-          <p className="text-sm leading-6 text-muted-foreground">
+          <p className="text-support text-muted-foreground">
             {props.phase === "failed"
               ? "This scenario stopped before the browser terminal opened. End the run and try again."
               : "The browser terminal will open when your workspace is ready."}

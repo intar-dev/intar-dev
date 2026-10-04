@@ -20,7 +20,12 @@ import {
   SCENARIO_DIFFICULTIES,
   type ScenarioDifficulty,
 } from "@/components/app/patterns/MetaLine";
-import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
+import {
+  FilterBar,
+  FilterChip,
+  FilterChipGroup,
+} from "@/components/app/patterns/FilterBar";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { TableSkeleton } from "@/components/app/patterns/Skeletons";
 import { EmptyState, ErrorState } from "@/components/app/patterns/StateCard";
 import { formatRelativeTime } from "@/components/app/lib/format";
@@ -187,15 +192,31 @@ export function ScenarioRegistry() {
               </dd>
             </div>
           </dl>
+          <Section
+            density="compact"
+            title="Registry"
+            description="Each scenario is keyed by its stable scenario ID; new uploads replace the stored scenario for that ID."
+            bodyClassName="space-y-4"
+          >
+          {setEnabled.error ? (
+            <InlineFeedback tone="error">
+              {setEnabled.error instanceof Error
+                ? setEnabled.error.message
+                : "Could not update the scenario."}
+            </InlineFeedback>
+          ) : null}
           <FilterBar
             search={search}
             onSearchChange={setSearch}
-            searchPlaceholder="Search registry…"
+            searchPlaceholder="Search scenarios…"
             searchLabel="Search scenarios"
             filtersActive={filtersActive}
             onClear={clearFilters}
+            shown={filteredScenarios.length}
+            total={scenarioList.length}
+            noun="scenarios"
           >
-            <div className="flex items-center gap-2">
+            <FilterChipGroup label="Availability">
               <FilterChip
                 active={stateFilter === "enabled"}
                 onClick={() =>
@@ -216,8 +237,8 @@ export function ScenarioRegistry() {
               >
                 Disabled
               </FilterChip>
-            </div>
-            <div className="flex items-center gap-2">
+            </FilterChipGroup>
+            <FilterChipGroup label="Difficulty">
               {SCENARIO_DIFFICULTIES.map((level) => (
                 <FilterChip
                   key={level}
@@ -231,9 +252,9 @@ export function ScenarioRegistry() {
                   {level}
                 </FilterChip>
               ))}
-            </div>
+            </FilterChipGroup>
             {categories.length > 1 ? (
-              <div className="flex items-center gap-2">
+              <FilterChipGroup label="Category">
                 {categories.map((entry) => (
                   <FilterChip
                     key={entry}
@@ -248,22 +269,16 @@ export function ScenarioRegistry() {
                     {entry}
                   </FilterChip>
                 ))}
-              </div>
+              </FilterChipGroup>
             ) : null}
           </FilterBar>
-
-          {filtersActive && filteredScenarios.length ? (
-            <p className="text-caption">
-              Showing {filteredScenarios.length} of {scenarioList.length}{" "}
-              scenarios.
-            </p>
-          ) : null}
 
           {!filteredScenarios.length ? (
             <EmptyState
               icon={<Search />}
               title="No scenarios match your filters"
               description="Clear the filters or try a different search term."
+              headingLevel={3}
               action={
                 <Button variant="outline" onClick={clearFilters}>
                   Clear filters
@@ -271,18 +286,6 @@ export function ScenarioRegistry() {
               }
             />
           ) : (
-            <Section
-              density="compact"
-              title="Registry"
-              description="Each scenario is keyed by its stable scenario ID; new uploads replace the stored scenario for that ID."
-            >
-              {setEnabled.error ? (
-                <p className="pb-4 text-sm text-destructive">
-                  {setEnabled.error instanceof Error
-                    ? setEnabled.error.message
-                    : "Failed to update scenario"}
-                </p>
-              ) : null}
               <PaginatedCollection
                 items={filteredScenarios}
                 pageSize={COLLECTION_PAGE_SIZE.dense}
@@ -318,8 +321,8 @@ export function ScenarioRegistry() {
                   </div>
                 )}
               </PaginatedCollection>
-            </Section>
           )}
+          </Section>
         </>
       )}
     </PageShell>
@@ -365,7 +368,7 @@ function ScenarioRegistryRow({
         </h3>
         <MetaLine
           items={[
-            scenario.scenarioId,
+            <code key="id">{scenario.scenarioId}</code>,
             <MetaDifficulty
               key="difficulty"
               difficulty={scenario.difficulty}
@@ -381,7 +384,7 @@ function ScenarioRegistryRow({
         >
           <RegistryFact
             label="Availability"
-            value={scenario.enabled ? "Enabled for learners" : "Unavailable"}
+            value={scenario.enabled ? "Enabled for learners" : "Disabled"}
             tone={scenario.enabled ? "success" : "muted"}
           />
           <RegistryFact
@@ -399,11 +402,11 @@ function ScenarioRegistryRow({
           />
           <RegistryFact
             label="Inventory"
-            value={`${scenario.vmCount} VM · ${scenario.probeCount} probes`}
+            value={`${scenario.vmCount} ${scenario.vmCount === 1 ? "VM" : "VMs"} · ${scenario.probeCount} ${scenario.probeCount === 1 ? "probe" : "probes"}`}
           />
           <RegistryFact
             label="Guidance"
-            value={`${scenario.scenarioHintCount} hints · ~${scenario.estimatedMinutes} min`}
+            value={`${scenario.scenarioHintCount} ${scenario.scenarioHintCount === 1 ? "hint" : "hints"} · ~${scenario.estimatedMinutes} min`}
           />
           <RegistryFact
             className="col-span-2"
@@ -425,17 +428,15 @@ function ScenarioRegistryRow({
         <Button
           size="sm"
           variant="outline"
-          className="min-h-9 lg:w-full"
+          className="lg:w-full"
           disabled={disabled}
           onClick={onToggle}
         >
-          {scenario.enabled ? (
-            <CircleOff className="size-4" />
-          ) : (
-            <CircleCheckBig className="size-4" />
-          )}
+          {scenario.enabled ? <CircleOff /> : <CircleCheckBig />}
           {pending
-            ? "Updating…"
+            ? scenario.enabled
+              ? "Disabling…"
+              : "Enabling…"
             : scenario.enabled
               ? "Disable scenario"
               : "Enable scenario"}
@@ -443,7 +444,8 @@ function ScenarioRegistryRow({
         <Button
           size="sm"
           variant="ghost"
-          className="min-h-9 lg:w-full"
+          className="lg:w-full"
+          aria-label={`Inspect ${scenario.title}`}
           render={
             <Link
               to="/admin/scenarios/$scenarioId"
@@ -452,7 +454,7 @@ function ScenarioRegistryRow({
           }
         >
           Inspect
-          <ArrowRight className="size-4" />
+          <ArrowRight />
         </Button>
       </div>
     </div>

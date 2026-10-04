@@ -102,6 +102,14 @@ export async function coarsePointerTargetViolations(page: Page) {
       "a[href]",
     ].join(",");
 
+    // A checkbox or radio keeps its 16px box; its wrapping label is the 44px
+    // target (viewports.md: Forms).
+    const targetOf = (element: HTMLElement): HTMLElement =>
+      element instanceof HTMLInputElement &&
+      (element.type === "checkbox" || element.type === "radio")
+        ? (element.closest("label") ?? element)
+        : element;
+
     return [...document.querySelectorAll<HTMLElement>(selector)]
       .filter((element) => {
         const inlineTextLink =
@@ -112,7 +120,7 @@ export async function coarsePointerTargetViolations(page: Page) {
         if (inlineTextLink) return false;
 
         const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
+        const rect = targetOf(element).getBoundingClientRect();
         return (
           element.tabIndex >= 0 &&
           style.display !== "none" &&
@@ -122,7 +130,7 @@ export async function coarsePointerTargetViolations(page: Page) {
         );
       })
       .map((element) => {
-        const rect = element.getBoundingClientRect();
+        const rect = targetOf(element).getBoundingClientRect();
         return {
           label:
             element.getAttribute("aria-label") ??

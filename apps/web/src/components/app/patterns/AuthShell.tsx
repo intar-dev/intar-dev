@@ -15,7 +15,7 @@ export function AuthShell({
   children: ReactNode;
 }) {
   return (
-    <main className="relative min-h-svh overflow-hidden pr-[max(var(--page-inset),env(safe-area-inset-right))] pb-[max(1.5rem,env(safe-area-inset-bottom))] pl-[max(var(--page-inset),env(safe-area-inset-left))] lg:pb-8">
+    <main className="relative min-h-dvh overflow-hidden pt-[env(safe-area-inset-top)] pr-[max(var(--page-inset),env(safe-area-inset-right))] pb-[max(1.5rem,env(safe-area-inset-bottom))] pl-[max(var(--page-inset),env(safe-area-inset-left))] lg:pb-8">
       <div
         className="pointer-events-none absolute inset-x-0 top-16 border-t"
         aria-hidden="true"
@@ -68,7 +68,7 @@ export function AuthShell({
                   key={number}
                   className="grid grid-cols-[2.5rem_8rem_1fr] items-baseline gap-3 border-b py-3 last:border-b-0"
                 >
-                  <span className="font-heading text-caption font-semibold text-brand-text tabular-nums">
+                  <span className="font-heading text-label font-semibold text-brand-text tabular-nums">
                     {number}
                   </span>
                   <span className="font-semibold">{label}</span>

@@ -173,7 +173,7 @@ test("organization courses use their own path instead of a tab query", async ({
   await expect(page.getByRole("tab", { name: "Courses" })).toHaveCount(0);
   await page
     .locator("main")
-    .getByRole("button", { name: "Courses", exact: true })
+    .getByRole("link", { name: "Courses", exact: true })
     .click();
   await expect(page).toHaveURL("/organizations/org-platform/courses");
   expect(new URL(page.url()).searchParams.has("tab")).toBe(false);
@@ -417,7 +417,9 @@ test("course filters sit in the bar and announce their result", async ({
   await page.getByLabel("Filter lectures by category").click();
   await page.getByRole("option", { name: "Linux services" }).click();
   await expect(
-    page.getByRole("status").filter({ hasText: /^Showing \d+ courses?$/ }),
+    page
+      .locator('p[aria-live="polite"]')
+      .filter({ hasText: /^Showing \d+ of \d+ courses?\.$/ }),
   ).toHaveCount(1);
   await expect
     .poll(() => new URL(page.url()).searchParams.get("category"))
@@ -561,7 +563,9 @@ test("SSH key removal asks again in place", async ({ page, ui }) => {
   await trigger.click();
   await confirm.click();
   await expect(
-    page.getByRole("alert").filter({ hasText: "Key storage is unavailable." }),
+    page.getByRole("alert").filter({
+      hasText: "The Training laptop key couldn't be removed. Try again.",
+    }),
   ).toBeVisible();
   await expect(confirm).toBeFocused();
   await expect(rows).toHaveCount(1);
@@ -574,7 +578,7 @@ test("SSH key removal asks again in place", async ({ page, ui }) => {
   await expect(
     page
       .getByRole("status")
-      .filter({ hasText: "SSH key removed. It cannot be used for new routes." }),
+      .filter({ hasText: "Training laptop key removed." }),
   ).toBeVisible();
   await expect(rows).toHaveCount(0);
   await expect(page.locator("#ssh-keys-empty")).toBeFocused();
@@ -699,7 +703,7 @@ test("the startup rail carries on from the start screen instead of loading again
   const position = page.locator("[data-run-sequence-position]");
   const track = page.locator("[data-run-sequence-track] > span");
 
-  await page.getByRole("button", { name: "Run again" }).click();
+  await page.getByRole("link", { name: "Run again" }).click();
   try {
     await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
     await expect(position).toHaveText("Stage 1 of 4");
@@ -793,7 +797,9 @@ test("reduced motion removes movement but keeps fades", async ({ page, ui }) => 
   // fades in.
   const panel = page.locator("[data-run-learning-panel]");
   await panel.getByRole("button", { name: "Reveal", exact: true }).first().click();
-  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(
+    panel.getByText("Inspect the service boundary", { exact: true }),
+  ).toBeVisible();
   await expect(panel.getByText("1/2 used", { exact: true })).toBeVisible();
   await panel.getByRole("button", { name: "Reveal the full solution" }).click();
   await expect(
@@ -863,21 +869,30 @@ test("reduced motion removes movement but keeps fades", async ({ page, ui }) => 
   await expect(
     savingSteps.locator('[aria-current="step"]'),
   ).toHaveText(/Save requested/);
-  expect(
-    await savingSteps
-      .locator("[data-run-sequence-marker]")
-      .first()
-      .evaluate((element) => {
-        const style = getComputedStyle(element);
-        return (
-          style.transitionProperty === "none" ||
-          style.transitionDuration
-            .split(",")
-            .every((entry) => Number.parseFloat(entry) === 0)
-        );
-      }),
-    "saving-step transitions must stop under reduced motion",
-  ).toBe(true);
+  // The marker and the stage track keep their colour fades but nothing that
+  // moves: no stretch, no transform, no size.
+  const FADES = new Set([
+    "none",
+    "color",
+    "background-color",
+    "border-color",
+    "box-shadow",
+    "opacity",
+  ]);
+  for (const target of [
+    savingSteps.locator("[data-run-sequence-marker]").first(),
+    page.locator("[data-run-sequence-track] > span").first(),
+  ]) {
+    const properties = await target.evaluate((element) =>
+      getComputedStyle(element)
+        .transitionProperty.split(",")
+        .map((entry) => entry.trim()),
+    );
+    expect(
+      properties.filter((property) => !FADES.has(property)),
+      "saving-step transitions may only fade under reduced motion",
+    ).toEqual([]);
+  }
 });
 
 test("archived course run stays in the learner frame", async ({ page, ui }) => {
@@ -919,7 +934,9 @@ test.describe("wide operational density", () => {
 
     expect(liveBox).not.toBeNull();
     expect(archiveBox).not.toBeNull();
-    expect(liveBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(170);
+    // The empty state is the design system's raised StateCard (icon, title,
+    // description) rather than a muted note, so a section holds one card.
+    expect(liveBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(280);
     expect(
       (archiveBox?.y ?? 0) -
         ((liveBox?.y ?? 0) + (liveBox?.height ?? Number.POSITIVE_INFINITY)),
@@ -962,7 +979,7 @@ test.describe("lecture reading flow", () => {
       { waitUntil: "domcontentloaded" },
     );
     await ui.settle();
-    await page.getByRole("button", { name: "Run again" }).click();
+    await page.getByRole("link", { name: "Run again" }).click();
 
     try {
       await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
@@ -1017,7 +1034,7 @@ test.describe("lecture reading flow", () => {
     await courseAction.click();
 
     const theory = page.getByRole("heading", { name: "Service recovery" });
-    const rerun = page.getByRole("button", { name: "Run again" });
+    const rerun = page.getByRole("link", { name: "Run again" });
     await expect(theory).toBeVisible();
     await expect(rerun).toBeVisible();
     await expect(page.getByText("Review runs", { exact: true })).toHaveCount(0);
@@ -1086,11 +1103,9 @@ test.describe("lecture reading flow", () => {
     await expect(
       page.getByRole("heading", { name: "Continue your scenario" }),
     ).toBeVisible();
-    const resume = page.getByRole("button", { name: "Resume scenario" });
+    const resume = page.getByRole("link", { name: "Resume scenario" });
     await expect(resume).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Run again" }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Run again" })).toHaveCount(0);
     await resume.click();
     await expect(page).toHaveURL("/runs/run-active");
   });
@@ -1117,7 +1132,7 @@ test.describe("lecture reading flow", () => {
     );
     await ui.settle();
 
-    await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Run again" })).toBeVisible();
     await page.getByRole("button", { name: /Course outline, lecture/ }).click();
     const nextAction = page.getByRole("link", { name: longTitle });
     await expect(nextAction).toBeVisible();
@@ -1168,7 +1183,7 @@ test.describe("lecture reading flow", () => {
     await expect(
       page.getByRole("link", { name: "Back to course" }),
     ).toHaveAttribute("href", `/courses/${course.courseId}`);
-    await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Run again" })).toBeVisible();
   });
 
   test("a completed lecture explains when rerun is preparing", async ({
@@ -1193,9 +1208,7 @@ test.describe("lecture reading flow", () => {
         hasText: "Run again will become available when the scenario image is ready.",
       }),
     ).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Run again" }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Run again" })).toHaveCount(0);
   });
 
   test("mobile keeps theory before the scenario action", async ({ page, ui }) => {
@@ -1203,7 +1216,7 @@ test.describe("lecture reading flow", () => {
     await ui.open({ ...routeCase("lecture"), theme: "light" });
 
     const theory = page.getByRole("heading", { name: "Service recovery" });
-    const action = page.getByRole("button", { name: "Resume scenario" });
+    const action = page.getByRole("link", { name: "Resume scenario" });
     await expect(theory).toBeVisible();
     await expect(
       page.getByText(/A web service depends on process state/i),
@@ -1267,12 +1280,15 @@ test.describe("lecture reading flow", () => {
         page.getByRole("heading", { name: "Service recovery" }),
       ).toBeVisible();
       await expect(
-        page.getByRole("button", { name: "Resume scenario" }),
+        page.getByRole("link", { name: "Resume scenario" }),
       ).toBeVisible();
       await expect(
         page.locator('[data-page-variant="page"]'),
       ).toHaveCSS("max-width", "none");
-      if (viewport.width >= 1100) {
+      // The rail needs 58rem of page panel (a container query on the inset),
+      // so the sidebar's width counts: 1100px leaves a 844px panel and keeps
+      // the outline trigger; 1440px leaves 1184px and shows the rail.
+      if (viewport.width >= 1280) {
         await expect(page.locator("[data-course-outline-rail]")).toBeVisible();
         await expect(
           page.getByRole("button", { name: /Course outline, lecture/ }),
@@ -1297,7 +1313,7 @@ test.describe("lecture reading flow", () => {
     });
     await page.waitForTimeout(100);
 
-    const action = page.getByRole("button", { name: "Resume scenario" });
+    const action = page.getByRole("link", { name: "Resume scenario" });
     await action.scrollIntoViewIfNeeded();
     await expect(action).toBeVisible();
     await expect(
@@ -1489,7 +1505,7 @@ test("organization courses remain operable at 200% text", async ({
   await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
   await page
     .locator("main")
-    .getByRole("button", { name: "Courses", exact: true })
+    .getByRole("link", { name: "Courses", exact: true })
     .click();
   await page.evaluate(() => {
     document.documentElement.style.fontSize = "200%";
@@ -1546,7 +1562,7 @@ for (const legacyPath of [
     await expect(page).toHaveURL(new RegExp(`${legacyPath}$`));
     await expect(page.getByText("That route is not in the manual")).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Browse courses" }),
+      page.getByRole("link", { name: "Browse courses" }),
     ).toHaveAttribute("href", "/courses");
   });
 }

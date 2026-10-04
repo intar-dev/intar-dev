@@ -78,7 +78,9 @@ test.describe("hints", () => {
       .first()
       .click();
 
-    await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+    await expect(
+      panel.getByText("Inspect the service boundary", { exact: true }),
+    ).toBeVisible();
     const body = panel.locator("[data-hint-state='revealed'] [tabindex='-1']");
     await expect(body.first()).toBeFocused();
     await expect(

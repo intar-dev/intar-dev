@@ -456,13 +456,13 @@ function maintenancePage(): Response {
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
     <meta name="robots" content="noindex,nofollow">
     <title>Maintenance · intar.dev</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <style nonce="${nonce}">
       html{color-scheme:light dark;font-family:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#f9f5ee;color:#1f1a14}
-      body{min-height:100vh;margin:0;display:grid;place-items:center}
+      body{min-height:100vh;min-height:100dvh;margin:0;display:grid;place-items:center}
       main{width:min(38rem,calc(100% - 2rem));border-top:3px solid #c74700;padding-top:2rem}
       @media (min-width:40rem){main{width:min(38rem,calc(100% - 3rem))}}
       .brand{display:flex;align-items:center;gap:.5rem;margin-bottom:1.5rem}

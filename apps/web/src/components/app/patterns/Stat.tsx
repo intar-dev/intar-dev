@@ -74,7 +74,7 @@ export function Stat({
       )}
     >
       <p className="text-label">{label}</p>
-      <p className="mt-1 text-page-title">
+      <p className="mt-1 text-stat">
         {value}
       </p>
       {detail ? (

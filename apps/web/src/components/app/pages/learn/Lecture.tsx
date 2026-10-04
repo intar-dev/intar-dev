@@ -28,6 +28,7 @@ import {
   clearPendingScenarioRunBootEvidence,
   markPendingScenarioRunBootStage,
 } from "@/lib/scenario-run-performance";
+import { formatMinutes, sentenceCase } from "@/components/app/lib/format";
 import { loadReplayTerminalFont } from "@/lib/replay/config";
 import { cn } from "@/lib/utils";
 import { CourseLink, LectureLink } from "./course-links";
@@ -92,9 +93,11 @@ function LectureLayout({
     <PageShell>
       <div
         className={cn(
-          "mx-auto grid w-full max-w-[128rem] min-w-0 gap-6 min-[1100px]:gap-8",
+          // The rail needs 58rem of page panel, which the sidebar's width
+          // changes: a panel query, not a viewport one.
+          "mx-auto grid w-full max-w-[128rem] min-w-0 gap-6 @min-[58rem]/panel:gap-8",
           outline !== "none" &&
-            "min-[1100px]:grid-cols-[minmax(0,1fr)_minmax(15rem,18rem)] min-[1100px]:items-start",
+            "@min-[58rem]/panel:grid-cols-[minmax(0,1fr)_minmax(15rem,18rem)] @min-[58rem]/panel:items-start",
         )}
       >
         <div className="min-w-0">{children}</div>
@@ -108,7 +111,7 @@ function LectureLayout({
           <aside
             aria-hidden="true"
             data-course-outline-placeholder
-            className="hidden min-w-0 space-y-3 py-1 pl-2 min-[1100px]:block"
+            className="hidden min-w-0 space-y-3 py-1 pl-2 @min-[58rem]/panel:block"
           >
             <Skeleton className="h-4 w-40" />
             <Skeleton className="h-3 w-32" />
@@ -119,7 +122,7 @@ function LectureLayout({
         ) : outline === "error" ? (
           <aside
             aria-label="Course outline"
-            className="hidden min-w-0 space-y-2 py-1 pl-2 min-[1100px]:block"
+            className="hidden min-w-0 space-y-2 py-1 pl-2 @min-[58rem]/panel:block"
           >
             <InlineFeedback tone="error">
               Could not load the course outline.
@@ -211,10 +214,13 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
       ) : undefined,
     [lectureId, outlineCourse, route],
   );
+  // Once the lecture is on screen its title is the content's h1 and the bar
+  // shows the course context; loading, locked and error states keep the bar h1.
   usePageChrome({
     title: detail?.lecture.title ?? "Lecture",
     breadcrumbLabels,
     utility: outlineUtility,
+    reading: detail !== null,
   });
 
   if (lockedError) {
@@ -228,6 +234,7 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
         lectureId={lectureId}
       >
         <EmptyState
+          icon={<LockKeyhole />}
           title="This lecture is locked"
           description={
             blocker
@@ -302,8 +309,9 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
             </AlertDescription>
           </Alert>
         ) : null}
-        <article aria-label={detail.lecture.title} className="min-w-0 space-y-8">
+        <article aria-labelledby="lecture-title" className="min-w-0 space-y-8">
           <ContentHeader
+            titleId="lecture-title"
             eyebrow={`${detail.course.title} · Lecture ${detail.lecture.lectureOrdinal} of ${detail.lecture.lectureCount}`}
             title={detail.lecture.title}
             reading
@@ -333,13 +341,13 @@ function LectureMeta({ lecture }: { lecture: CourseLectureDetail }) {
     <MetaLine
       items={[
         <StatusToken key="status" tone={state.tone} word={state.word} />,
-        lecture.category
-          ? lecture.category.charAt(0).toUpperCase() + lecture.category.slice(1)
-          : null,
+        lecture.category ? sentenceCase(lecture.category) : null,
         lecture.difficulty ? (
           <MetaDifficulty key="difficulty" difficulty={lecture.difficulty} />
         ) : null,
-        lecture.estimatedMinutes ? `~${lecture.estimatedMinutes} min` : null,
+        lecture.estimatedMinutes
+          ? `~${formatMinutes(lecture.estimatedMinutes)}`
+          : null,
         <LectureScenarioLabel
           key="scenario"
           scenarioId={lecture.scenarioId}
@@ -412,8 +420,9 @@ function LectureActionPanel({
   }, [justDone]);
 
   const continueLink = next ? (
+    // The label carries the next title, so it wraps instead of stretching the page.
     <Button
-      className="w-full [@media(pointer:coarse)]:min-h-11 sm:w-auto"
+      className="h-auto min-h-(--control-standard) w-full max-w-full py-2 text-left whitespace-normal [overflow-wrap:anywhere] sm:w-auto [@media(pointer:coarse)]:min-h-11"
       render={
         <LectureLink
           route={{ ...route, courseId: next.courseId }}
@@ -501,7 +510,10 @@ function LectureActionPanel({
             <span {...layer(!done)}>{copy.todoText}</span>
             <span {...layer(done)}>{copy.doneText}</span>
           </p>
-          <div data-gate-swap className="mt-4 justify-items-start">
+          <div
+            data-gate-swap
+            className="mt-4 grid-cols-[minmax(0,1fr)] justify-items-start"
+          >
             <div {...layer(!done)}>{completeButton}</div>
             <div ref={doneAction} {...layer(done)}>
               {courseComplete ? backToCourse : continueLink}
@@ -517,7 +529,9 @@ function LectureActionPanel({
               (lecture.state === "completed" && lecture.activeRunId)
             ? "Continue your scenario"
             : lecture.state === "completed"
-              ? "Scenario complete"
+              ? courseComplete
+                ? copy.doneHeading
+                : "Scenario complete"
               : "Start the scenario"}
       </h2>
 
@@ -588,9 +602,7 @@ function LinkedLectureAction({
         <ArrowRight className="size-4" />
       </Button>
     ) : (
-      <p role="status" className="text-support text-muted-foreground">
-        Loading your active scenario…
-      </p>
+      <InlineFeedback tone="pending">Loading your active scenario…</InlineFeedback>
     );
   }
   if (lecture.state === "waiting_for_scenario" || lecture.scenarioReady === false) {

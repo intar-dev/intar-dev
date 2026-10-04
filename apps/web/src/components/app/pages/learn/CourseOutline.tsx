@@ -9,6 +9,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import { useShortViewport } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { CourseLink, LectureLink } from "./course-links";
 import { LectureScenarioLabel } from "./LectureScenarioLabel";
@@ -32,11 +33,12 @@ export function CourseOutlineRail(props: CourseOutlineProps) {
   return (
     <aside
       aria-label="Course outline"
-      className="hidden min-w-0 min-[1100px]:block"
+      className="hidden min-w-0 @min-[58rem]/panel:block"
       data-course-outline-rail
     >
+      {/* Below lg the bar also clears the top safe area (a notch). */}
       <div
-        className="sticky top-[calc(var(--app-bar-h)+2rem)] max-h-[calc(100dvh-var(--app-bar-h)-3.5rem)] overflow-y-auto overscroll-contain py-1 pl-2 pr-1"
+        className="sticky top-[calc(var(--app-bar-h)+env(safe-area-inset-top)+2rem)] max-h-[calc(100dvh-var(--app-bar-h)-env(safe-area-inset-top)-3.5rem)] overflow-y-auto overscroll-contain py-1 pl-2 pr-1 lg:top-[calc(var(--app-bar-h)+2rem)] lg:max-h-[calc(100dvh-var(--app-bar-h)-3.5rem)]"
       >
         <CourseOutlineContent {...props} />
       </div>
@@ -51,28 +53,33 @@ export function CourseOutlineMobile(props: CourseOutlineProps) {
   );
 
   const [open, setOpen] = useState(false);
+  const short = useShortViewport();
   // Tablets and landscape phones get a side sheet; portrait phones a bottom
   // one. Chosen when it opens, so it never flips under the reader's hands.
   const [side, setSide] = useState<"bottom" | "right">("bottom");
 
-  // The trigger is hidden once the rail shows; a sheet left open would stay
-  // a modal over a page that no longer has a trigger.
+  // The trigger is hidden once the rail shows (a panel at least 58rem wide,
+  // which only the page's own container can tell); a sheet left open would
+  // stay a modal over a page that no longer has a trigger.
   useEffect(() => {
-    const wide = window.matchMedia("(min-width: 1100px)");
-    const close = () => wide.matches && setOpen(false);
-    wide.addEventListener("change", close);
-    return () => wide.removeEventListener("change", close);
+    const panel = document.getElementById("main-content");
+    if (!panel) return;
+    const observer = new ResizeObserver(() => {
+      const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+      if (panel.clientWidth >= 58 * rem) setOpen(false);
+    });
+    observer.observe(panel);
+    return () => observer.disconnect();
   }, []);
 
   return (
-    <div className="min-[1100px]:hidden" data-course-outline-mobile>
+    <div className="@min-[58rem]/panel:hidden" data-course-outline-mobile>
       <Sheet
         open={open}
         onOpenChange={(next) => {
           if (next) {
             setSide(
-              window.matchMedia("(min-width: 48rem), (max-height: 31.25rem)")
-                .matches
+              short || window.matchMedia("(min-width: 48rem)").matches
                 ? "right"
                 : "bottom",
             );
@@ -95,7 +102,8 @@ export function CourseOutlineMobile(props: CourseOutlineProps) {
         </SheetTrigger>
         <SheetContent
           side={side}
-          className="gap-0 overflow-hidden data-[side=bottom]:max-h-[min(82dvh,48rem)] data-[side=bottom]:rounded-t-2xl data-[side=bottom]:border-x data-[side=bottom]:pb-[max(1rem,env(safe-area-inset-bottom))] data-[side=right]:rounded-l-2xl data-[side=right]:pt-[env(safe-area-inset-top)] data-[side=right]:pr-[env(safe-area-inset-right)]"
+          handleLabel="Close course outline"
+          className="overflow-hidden data-[side=right]:gap-0 data-[side=right]:rounded-l-2xl"
           data-course-outline-sheet
         >
           <SheetHeader className="border-b pr-14">
@@ -188,7 +196,7 @@ function CourseOutlineContent({
         <div className="space-y-1 px-3">
           <CourseLink
             route={route}
-            className="inline-flex rounded-sm text-card-title transition-colors duration-150 ease-standard hover:text-brand-text"
+            className="inline-flex rounded-sm text-card-title transition-colors duration-(--duration-fast) ease-standard hover:text-brand-text"
           >
             {course.title}
           </CourseLink>
@@ -284,7 +292,7 @@ function CourseOutlineItem({
     <>
       <span
         className={cn(
-          "pt-0.5 text-xs font-medium tabular-nums transition-colors duration-200 ease-standard",
+          "pt-0.5 text-xs font-medium tabular-nums transition-colors duration-(--duration-moderate) ease-standard",
           current ? "text-brand-text" : "text-faint-foreground",
         )}
       >
@@ -350,7 +358,7 @@ function CourseOutlineItem({
     </>
   );
   const className = cn(
-    "grid min-h-14 grid-cols-[1.5rem_minmax(0,1fr)] gap-2 rounded-[0.625rem] px-3 py-2 text-left transition-colors duration-150 ease-standard",
+    "grid min-h-14 grid-cols-[1.5rem_minmax(0,1fr)] gap-2 rounded-[0.625rem] px-3 py-2 text-left transition-colors duration-(--duration-fast) ease-standard",
     current && "text-foreground",
     lecture.state === "locked" && "text-muted-foreground",
   );

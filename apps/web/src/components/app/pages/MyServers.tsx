@@ -5,8 +5,13 @@ import {
   HttpResponseError,
   pollingIntervalUnlessAccessError,
 } from "@/components/app/lib/http-response-error";
+import { AsyncLabel } from "@/components/app/patterns/AsyncLabel";
+import { CodeBlock } from "@/components/app/patterns/CodeBlock";
+import { Field } from "@/components/app/patterns/Field";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
+import { MetaLine } from "@/components/app/patterns/MetaLine";
 import { Section } from "@/components/app/patterns/Section";
+import { ListSkeleton } from "@/components/app/patterns/Skeletons";
 import {
   StatusToken,
   type StatusTone,
@@ -63,6 +68,8 @@ type Enrollment = {
   enrollmentToken: string;
   expiresAt: number;
 };
+// A notice carries its own tone: only a fully successful action is a success.
+type Notice = { tone: "success" | "error"; text: string };
 type Removal = {
   removed: true;
   placement: "platform" | "personal" | "organization";
@@ -115,7 +122,7 @@ export function MyServers(
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [canceledHostId, setCanceledHostId] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const servers = useQuery({
     queryKey,
     queryFn: ({ signal }) =>
@@ -140,7 +147,7 @@ export function MyServers(
       ),
     onSuccess: async (_, id) => {
       setCanceledHostId(id);
-      setNotice("Setup canceled.");
+      setNotice({ tone: "success", text: "Setup canceled." });
       await refresh();
     },
   });
@@ -173,7 +180,7 @@ export function MyServers(
     >
       <div className="space-y-5">
         {servers.isPending ? (
-          <InlineFeedback tone="pending">Loading servers…</InlineFeedback>
+          <ListSkeleton rows={2} action={false} label="Loading servers…" />
         ) : null}
         {servers.error ? (
           <div className="space-y-3">
@@ -182,10 +189,16 @@ export function MyServers(
             </InlineFeedback>
             <Button
               variant="outline"
+              aria-busy={servers.isFetching || undefined}
+              focusableWhenDisabled
               disabled={servers.isFetching}
               onClick={() => void servers.refetch()}
             >
-              Try again
+              <AsyncLabel
+                state={servers.isFetching ? "pending" : "idle"}
+                idle="Try again"
+                pending="Trying again…"
+              />
             </Button>
           </div>
         ) : null}
@@ -212,10 +225,13 @@ export function MyServers(
               </p>
             </div>
             {notice ? (
-              <InlineFeedback tone="success">{notice}</InlineFeedback>
+              <InlineFeedback tone={notice.tone}>{notice.text}</InlineFeedback>
             ) : null}
             {data.servers.length ? (
-              <ul aria-label={title} className="divide-y border-y">
+              <ul
+                aria-label={title}
+                className="divide-y overflow-hidden rounded-lg border"
+              >
                 {data.servers.map((server) => (
                   <ServerRow
                     key={server.id}
@@ -253,24 +269,38 @@ export function MyServers(
                       key={enrollment.id}
                       className="flex flex-wrap items-center justify-between gap-2"
                     >
-                      <p className="min-w-0 break-words">
-                        <span className="font-medium">{enrollment.name}</span>
-                        <span className="text-muted-foreground">
-                          {" "}
-                          · Token expires{" "}
-                          {formatTimestamp(enrollment.expiresAt)}
-                        </span>
-                      </p>
+                      <div className="min-w-0 space-y-0.5">
+                        <p className="font-medium break-words">
+                          {enrollment.name}
+                        </p>
+                        <MetaLine
+                          items={[
+                            `Token expires ${formatTimestamp(enrollment.expiresAt)}`,
+                          ]}
+                        />
+                      </div>
                       {canManage ? (
                         <Button
                           variant="outline"
+                          aria-busy={
+                            (cancelSetup.isPending &&
+                              cancelSetup.variables === enrollment.id) ||
+                            undefined
+                          }
+                          focusableWhenDisabled
                           disabled={cancelSetup.isPending}
                           onClick={() => cancelSetup.mutate(enrollment.id)}
                         >
-                          {cancelSetup.isPending &&
-                          cancelSetup.variables === enrollment.id
-                            ? "Canceling…"
-                            : "Cancel setup"}
+                          <AsyncLabel
+                            state={
+                              cancelSetup.isPending &&
+                              cancelSetup.variables === enrollment.id
+                                ? "pending"
+                                : "idle"
+                            }
+                            idle="Cancel setup"
+                            pending="Canceling…"
+                          />
                         </Button>
                       ) : null}
                     </li>
@@ -329,7 +359,7 @@ function AddServer({
   const [revealed, setRevealed] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const abort = useRef<AbortController | null>(null);
   useEffect(() => {
     abort.current = new AbortController();
@@ -342,10 +372,10 @@ function AddServer({
     );
   useEffect(() => {
     if (!enrollment) return;
-    const clearToken = (message: string) => {
+    const clearToken = (text: string, tone: Notice["tone"] = "success") => {
       setEnrollment(null);
       setRevealed(false);
-      setNotice(message);
+      setNotice({ tone, text });
     };
     if (connected) {
       clearToken(
@@ -359,7 +389,7 @@ function AddServer({
     }
     const timeout = window.setTimeout(
       () => {
-        clearToken("Token expired. Create a new token to continue.");
+        clearToken("Token expired. Create a new token to continue.", "error");
       },
       Math.max(0, enrollment.expiresAt - Date.now()),
     );
@@ -370,7 +400,7 @@ function AddServer({
     setError(null);
     try {
       await navigator.clipboard.writeText(value);
-      setNotice(`${label} copied.`);
+      setNotice({ tone: "success", text: `${label} copied.` });
     } catch {
       setNotice(null);
       setError(
@@ -415,15 +445,22 @@ function AddServer({
           </p>
           <div className="space-y-2">
             <p className="text-sm font-medium">Installer command</p>
-            <pre className="rounded-lg bg-muted/50 p-3 font-mono text-xs break-all whitespace-pre-wrap">
-              <code>{installerCommand}</code>
-            </pre>
-            <Button
-              variant="outline"
-              onClick={() => void copy(installerCommand, "Installer command")}
+            <CodeBlock
+              language="bash"
+              copyName="Copy installer command"
+              onCopied={() => {
+                setError(null);
+                setNotice({ tone: "success", text: "Installer command copied." });
+              }}
+              onCopyError={() => {
+                setNotice(null);
+                setError(
+                  "Could not copy installer command. Select and copy it manually.",
+                );
+              }}
             >
-              Copy installer command
-            </Button>
+              <code>{installerCommand}</code>
+            </CodeBlock>
           </div>
           <div className="space-y-2" data-private>
             <p className="text-sm font-medium">Enrollment token</p>
@@ -452,7 +489,10 @@ function AddServer({
                 onClick={() => {
                   if (enrollment.expiresAt <= Date.now()) {
                     setEnrollment(null);
-                    setNotice("Token expired. Create a new token to continue.");
+                    setNotice({
+                      tone: "error",
+                      text: "Token expired. Create a new token to continue.",
+                    });
                     return;
                   }
                   void copy(enrollment.enrollmentToken, "Token");
@@ -498,39 +538,42 @@ function AddServer({
             }
           }}
         >
-          <div className="space-y-2">
-            <label
-              htmlFor={
-                organization ? "organization-server-name" : "personal-server-name"
-              }
-              className="block text-sm font-medium"
-            >
-              Server name
-            </label>
-            <Input
-              id={
-                organization ? "organization-server-name" : "personal-server-name"
-              }
-              className="max-w-sm"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              required
-              maxLength={80}
-              disabled={pending}
-              placeholder={organization ? "Team server" : "Home server"}
+          <Field
+            label="Server name"
+            hint="Create a token, then run the installer on your server. The installer command contains no secret."
+          >
+            {(control) => (
+              <Input
+                {...control}
+                className="max-w-field"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                required
+                maxLength={80}
+                // readOnly keeps focus and the touch height while it saves.
+                readOnly={pending}
+                placeholder={organization ? "Team server" : "Home server"}
+              />
+            )}
+          </Field>
+          <Button
+            type="submit"
+            aria-busy={pending || undefined}
+            focusableWhenDisabled
+            disabled={pending || !name.trim()}
+          >
+            <AsyncLabel
+              state={pending ? "pending" : "idle"}
+              idle="Create token"
+              pending="Creating token…"
             />
-            <p className="text-sm text-muted-foreground">
-              Create a token, then run the installer on your server. The installer
-              command contains no secret.
-            </p>
-          </div>
-          <Button type="submit" disabled={pending || !name.trim()}>
-            {pending ? "Creating token…" : "Create token"}
           </Button>
         </form>
       )}
       {error ? <InlineFeedback tone="error">{error}</InlineFeedback> : null}
-      {notice ? <InlineFeedback tone="success">{notice}</InlineFeedback> : null}
+      {notice ? (
+        <InlineFeedback tone={notice.tone}>{notice.text}</InlineFeedback>
+      ) : null}
     </div>
   );
 }
@@ -551,10 +594,12 @@ function ServerRow({
   server: Server;
   lastServer: boolean;
   onChanged: () => Promise<void>;
-  onRemoved: (notice: string) => void;
+  onRemoved: (notice: Notice) => void;
   onRemovalOpen: (open: boolean) => void;
 }) {
   const [renaming, setRenaming] = useState(false);
+  const renameButton = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef(false);
   const [name, setName] = useState(server.name);
   const [action, setAction] = useState<"pause" | "resume" | "remove" | null>(
     null,
@@ -562,7 +607,11 @@ function ServerRow({
   const [cloudConsent, setCloudConsent] = useState(false);
   const [lastServerConflict, setLastServerConflict] = useState(false);
   const needsCloudConsent = lastServer || lastServerConflict;
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const closeRename = () => {
+    returnFocus.current = true;
+    setRenaming(false);
+  };
   const change = useMutation({
     mutationFn: (body: { name: string } | { paused: boolean }) =>
       serverRequest(`${apiBase}/${encodeURIComponent(server.id)}`, {
@@ -571,15 +620,17 @@ function ServerRow({
         body: JSON.stringify(body),
       }),
     onSuccess: async (_, body) => {
-      setRenaming(false);
+      if ("name" in body) closeRename();
       setAction(null);
-      setNotice(
-        "name" in body
-          ? "Server renamed."
-          : body.paused
-            ? "Server paused."
-            : "Server resumed.",
-      );
+      setNotice({
+        tone: "success",
+        text:
+          "name" in body
+            ? "Server renamed."
+            : body.paused
+              ? "Server paused."
+              : "Server resumed.",
+      });
       await onChanged();
     },
   });
@@ -595,8 +646,10 @@ function ServerRow({
     onSuccess: async (result) => {
       setAction(null);
       onRemovalOpen(false);
-      onRemoved(
-        `Server removed. ${
+      onRemoved({
+        // Unconfirmed cleanup needs follow-up work, so it is not a success.
+        tone: result.physicalCleanup === "unconfirmed" ? "error" : "success",
+        text: `Server removed. ${
           organization
             ? result.placement === "platform"
               ? "New organization runs use the cloud. Users with personal servers keep using their own servers."
@@ -605,7 +658,7 @@ function ServerRow({
               ? "New runs use the cloud or organization servers."
               : "Your runs still use your personal servers."
         } ${result.physicalCleanup === "unconfirmed" ? "Cleanup on the server could not be confirmed. Stop the agent and remove remaining virtual machines on that server." : "Cleanup on the server is confirmed."}`,
-      );
+      });
       await onChanged();
     },
     onError: (error) => {
@@ -619,6 +672,14 @@ function ServerRow({
     },
   });
   const busy = change.isPending || remove.isPending;
+  // The Rename button disables itself while the field is open; focus returns
+  // to it once it is enabled again.
+  useEffect(() => {
+    if (!renaming && !busy && returnFocus.current) {
+      returnFocus.current = false;
+      renameButton.current?.focus();
+    }
+  }, [renaming, busy]);
   const mutationError = change.error ?? remove.error;
   const openAction = (next: typeof action) => {
     change.reset();
@@ -631,7 +692,7 @@ function ServerRow({
   };
 
   return (
-    <li className="space-y-3 py-4">
+    <li className="space-y-3 p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 flex-1 space-y-1">
           <h3 className="text-card-title break-words">{server.name}</h3>
@@ -643,6 +704,7 @@ function ServerRow({
         {canManage ? (
           <div className="flex flex-wrap gap-2">
             <Button
+              ref={renameButton}
               variant="outline"
               disabled={
                 busy ||
@@ -654,6 +716,7 @@ function ServerRow({
                 change.reset();
                 setNotice(null);
                 setName(server.name);
+                returnFocus.current = false;
                 setRenaming(true);
               }}
             >
@@ -683,18 +746,23 @@ function ServerRow({
           </div>
         ) : null}
       </div>
-      <p className="font-mono text-xs text-muted-foreground break-words">
-        {server.connected ? "Connected" : "Disconnected"} · {server.activeRuns}{" "}
-        active {server.activeRuns === 1 ? "run" : "runs"} ·{" "}
-        {server.capacity
-          ? `${server.capacity.available} of ${server.capacity.total} vCPUs available`
-          : "Capacity not reported"}
-        {server.capacity?.available === 0 ? " · Full" : ""}
-      </p>
-      <p className="text-caption">
-        Added {formatTimestamp(server.createdAt)} · Last seen{" "}
-        {server.lastSeenAt ? formatTimestamp(server.lastSeenAt) : "Never"}
-      </p>
+      <MetaLine
+        items={[
+          server.connected ? "Connected" : "Disconnected",
+          `${server.activeRuns} active ${server.activeRuns === 1 ? "run" : "runs"}`,
+          server.capacity
+            ? `${server.capacity.available} of ${server.capacity.total} vCPUs available`
+            : "Capacity not reported",
+          server.capacity?.available === 0 ? "Full" : null,
+        ]}
+      />
+      <MetaLine
+        dense
+        items={[
+          `Added ${formatTimestamp(server.createdAt)}`,
+          `Last seen ${server.lastSeenAt ? formatTimestamp(server.lastSeenAt) : "Never"}`,
+        ]}
+      />
       {server.repairAction ? (
         <p className="text-sm break-words">
           <strong>Next step: </strong>
@@ -709,27 +777,44 @@ function ServerRow({
             if (name.trim() && !busy) change.mutate({ name: name.trim() });
           }}
         >
-          <label className="flex flex-col gap-2 text-sm font-medium">
+          <label className="flex flex-col gap-1.5 text-sm font-medium">
             <span className="block">New server name</span>
             <Input
+              autoFocus
               value={name}
               onChange={(event) => setName(event.target.value)}
+              onFocus={(event) => event.currentTarget.select()}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                if (!busy) {
+                  closeRename();
+                  change.reset();
+                }
+              }}
               required
               maxLength={80}
-              disabled={busy}
+              readOnly={busy}
+              className="max-w-field"
             />
           </label>
           <Button
             type="submit"
+            aria-busy={change.isPending || undefined}
+            focusableWhenDisabled
             disabled={busy || !name.trim() || name.trim() === server.name}
           >
-            {change.isPending ? "Saving…" : "Save name"}
+            <AsyncLabel
+              state={change.isPending ? "pending" : "idle"}
+              idle="Save name"
+              pending="Saving…"
+            />
           </Button>
           <Button
             variant="ghost"
             disabled={busy}
             onClick={() => {
-              setRenaming(false);
+              closeRename();
               change.reset();
             }}
           >
@@ -740,7 +825,9 @@ function ServerRow({
       {!action && mutationError ? (
         <InlineFeedback tone="error">{mutationError.message}</InlineFeedback>
       ) : null}
-      {notice ? <InlineFeedback tone="success">{notice}</InlineFeedback> : null}
+      {notice ? (
+        <InlineFeedback tone={notice.tone}>{notice.text}</InlineFeedback>
+      ) : null}
       <Dialog
         open={action !== null}
         onOpenChange={(open) => {
@@ -750,9 +837,9 @@ function ServerRow({
           }
         }}
       >
-        <DialogContent showCloseButton={!busy}>
+        <DialogContent>
           <DialogHeader>
-            <DialogTitle className="break-words">
+            <DialogTitle>
               {action === "remove"
                 ? "Remove"
                 : action === "pause"
@@ -816,10 +903,12 @@ function ServerRow({
                 onRemovalOpen(false);
               }}
             >
-              Cancel
+              {action === "remove" ? "Keep server" : "Cancel"}
             </Button>
             <Button
               variant={action === "remove" ? "destructive" : "default"}
+              aria-busy={busy || undefined}
+              focusableWhenDisabled
               disabled={
                 busy ||
                 (action === "remove" && needsCloudConsent && !cloudConsent)
@@ -829,13 +918,17 @@ function ServerRow({
                 else change.mutate({ paused: action === "pause" });
               }}
             >
-              {busy
-                ? "Saving…"
-                : action === "remove"
-                  ? "Remove server"
-                  : action === "pause"
-                    ? "Pause server"
-                    : "Resume server"}
+              <AsyncLabel
+                state={busy ? "pending" : "idle"}
+                idle={
+                  action === "remove"
+                    ? "Remove server"
+                    : action === "pause"
+                      ? "Pause server"
+                      : "Resume server"
+                }
+                pending="Saving…"
+              />
             </Button>
           </DialogFooter>
         </DialogContent>

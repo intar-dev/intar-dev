@@ -427,7 +427,7 @@ async function activateWarmRoute(
     return;
   }
   if (route.id === "run-active") {
-    await page.getByRole("button", { name: "Resume scenario" }).click();
+    await page.getByRole("link", { name: "Resume scenario" }).click();
     return;
   }
 }

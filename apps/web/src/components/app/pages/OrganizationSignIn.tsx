@@ -5,7 +5,9 @@ import { ArrowRight, Building2, ShieldCheck } from "lucide-react";
 import { useCallbackErrorCode } from "../hooks/useCallbackErrorCode";
 import { useSessionAccess } from "../hooks/useSession";
 import { useSignOut } from "../hooks/useSignOut";
+import { AsyncLabel } from "../patterns/AsyncLabel";
 import { BrandMark } from "../patterns/BrandMark";
+import { Field } from "../patterns/Field";
 import { InlineFeedback } from "../patterns/InlineFeedback";
 import { ThemeToggle } from "../theme";
 import { Button } from "@/components/ui/button";
@@ -19,6 +21,7 @@ import {
   organizationSignInErrorMessage,
   organizationSignInStartErrorMessage,
 } from "./sign-in-helpers";
+import { reject } from "./organization-detail/reject";
 
 export function OrganizationSignIn() {
   const { session, access } = useSessionAccess();
@@ -49,6 +52,8 @@ export function OrganizationSignIn() {
   // capitals and surrounding spaces are tidied only for the request.
   const [slug, setSlug] = useState(directSlug);
   const normalizedSlug = normalizeOrganizationSlug(slug);
+  // A refused submit says why at the field and nudges it.
+  const [slugProblem, setSlugProblem] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const signIn = useMutation({
     mutationFn: () => {
@@ -83,13 +88,13 @@ export function OrganizationSignIn() {
         <ThemeToggle />
       </header>
       <main className="mx-auto flex w-full max-w-7xl flex-1 items-center justify-center px-[var(--page-inset)] py-12">
-        <Card className="w-full max-w-lg overflow-hidden border-brand-border pt-0 shadow-xl shadow-black/5">
-          <CardHeader className="gap-4 border-b bg-brand-subtle pt-(--card-spacing)">
-            <span className="flex size-11 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+        <Card className="w-full max-w-lg overflow-hidden rounded-2xl pt-0">
+          <CardHeader className="gap-4 border-b pt-(--card-spacing)">
+            <span className="flex size-10 items-center justify-center rounded-[0.625rem] bg-brand-subtle text-brand-text ring-1 ring-brand-border/60">
               <Building2 className="size-5" />
             </span>
             <div className="space-y-2">
-              <p className="text-label text-brand-text">Organization access</p>
+              <p className="text-label">Organization access</p>
               <h1 className="text-page-title">
                 {signedInAs
                   ? "Connect your organization"
@@ -119,7 +124,7 @@ export function OrganizationSignIn() {
                     disconnect it from your profile.
                   </>
                 ) : (
-                  "Sign in with your organization's identity provider. First time? We'll create your account."
+                  "Sign in with your organization's identity provider. First time? Intar creates your account."
                 )}
               </p>
             </div>
@@ -141,39 +146,62 @@ export function OrganizationSignIn() {
             ) : (
               <form
                 className="space-y-4"
+                noValidate
                 onSubmit={(event) => {
                   event.preventDefault();
-                  if (normalizedSlug && !signIn.isPending) signIn.mutate();
+                  if (signIn.isPending) return;
+                  if (!normalizedSlug) {
+                    setSlugProblem(
+                      "Enter the slug with lowercase letters, numbers and dashes, like example-org-ab12cd.",
+                    );
+                    reject(
+                      event.currentTarget.querySelector<HTMLInputElement>(
+                        "input",
+                      ),
+                    );
+                    return;
+                  }
+                  signIn.mutate();
                 }}
               >
-                <div className="space-y-2">
-                  <label
-                    htmlFor="organization-slug"
-                    className="block text-label"
-                  >
-                    Organization slug
-                  </label>
-                  <Input
-                    id="organization-slug"
-                    value={slug}
-                    onChange={(event) => setSlug(event.target.value)}
-                    placeholder="example-org-ab12cd"
-                    maxLength={128}
-                    autoComplete="organization"
-                    spellCheck={false}
-                    autoFocus={!directSlug}
-                  />
-                </div>
+                <Field label="Organization slug" error={slugProblem}>
+                  {(control) => (
+                    <Input
+                      {...control}
+                      value={slug}
+                      onChange={(event) => {
+                        setSlug(event.target.value);
+                        setSlugProblem(null);
+                      }}
+                      className="text-code"
+                      placeholder="example-org-ab12cd"
+                      maxLength={128}
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      autoFocus={!directSlug}
+                    />
+                  )}
+                </Field>
                 <Button
                   type="submit"
                   size="lg"
                   className="w-full"
-                  disabled={!normalizedSlug || signIn.isPending}
+                  aria-busy={signIn.isPending || undefined}
+                  disabled={signIn.isPending}
+                  focusableWhenDisabled
                 >
-                  {signIn.isPending
-                    ? "Opening identity provider…"
-                    : actionLabel}
-                  {!signIn.isPending ? <ArrowRight className="size-4" /> : null}
+                  <AsyncLabel
+                    state={signIn.isPending ? "pending" : "idle"}
+                    idle={
+                      <>
+                        {actionLabel}
+                        <ArrowRight className="size-4" />
+                      </>
+                    }
+                    pending="Opening identity provider…"
+                  />
                 </Button>
               </form>
             )}
@@ -187,7 +215,7 @@ export function OrganizationSignIn() {
               </InlineFeedback>
             ) : null}
             <div className="flex gap-3 rounded-xl bg-muted/40 p-4 text-support text-muted-foreground">
-              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-brand-text" />
+              <ShieldCheck className="mt-0.5 size-4 shrink-0" />
               <div className="space-y-2">
                 {signedInAs ? (
                   <p>

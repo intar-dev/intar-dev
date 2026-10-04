@@ -22,7 +22,6 @@ import { PanelLeftIcon } from "lucide-react"
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 const SIDEBAR_WIDTH = "16rem"
-const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
 
@@ -97,7 +96,7 @@ function SidebarProvider({
       }
 
       // This sets the cookie to keep the sidebar state.
-      document.cookie = `${SIDEBAR_COOKIE_NAME}=${openState}; path=/; max-age=${SIDEBAR_COOKIE_MAX_AGE}`
+      document.cookie = `${SIDEBAR_COOKIE_NAME}=${openState}; path=/; max-age=${SIDEBAR_COOKIE_MAX_AGE}; SameSite=Lax`
     },
     [setOpenProp, open]
   )
@@ -203,14 +202,9 @@ function Sidebar({
           data-sidebar="sidebar"
           data-slot="sidebar"
           data-mobile="true"
-          // Same variant as the sheet's own width so tailwind-merge replaces
-          // it: the drawer is sheet-width (18rem), never 75% of the viewport.
-          className="bg-sidebar p-0 text-sidebar-foreground data-[side=left]:w-(--sidebar-width) data-[side=left]:max-w-[calc(100vw-2rem)] data-[side=left]:sm:max-w-none [&>button]:top-[calc(env(safe-area-inset-top)+0.75rem)]"
-          style={
-            {
-              "--sidebar-width": SIDEBAR_WIDTH_MOBILE,
-            } as React.CSSProperties
-          }
+          // The sheet's left side already gives w-72 (18rem) and the
+          // safe-area padding.
+          className="bg-sidebar text-sidebar-foreground"
           side={side}
           // Any destination closes the drawer, including the page you are on
           // and external links. The path effect in AppSidebar still covers
@@ -228,7 +222,7 @@ function Sidebar({
           <SheetHeader className="sr-only">
             <SheetTitle>Navigation</SheetTitle>
           </SheetHeader>
-          <div className="flex h-full w-full flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]">
+          <div className="flex h-full w-full flex-col">
             {children}
           </div>
         </SheetContent>
@@ -307,12 +301,7 @@ function SidebarTrigger({
             data-slot="sidebar-trigger"
             variant="ghost"
             size="icon-sm"
-            // Keep desktop chrome compact while the coarse-pointer rule in
-            // global.css still guarantees a 44px target on touch.
-            className={cn(
-              "size-8 text-muted-foreground hover:text-foreground",
-              className
-            )}
+            className={className}
             aria-label={name}
             aria-expanded={isMobile ? openMobile : open}
             aria-haspopup={isMobile ? "dialog" : undefined}
