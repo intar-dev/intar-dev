@@ -67,6 +67,7 @@ import {
 } from "@/components/app/run/StatusScreens";
 import {
   buildScenarioBootSteps,
+  buildScenarioStartSteps,
   getScenarioBootScreenCopy,
   hasPendingInfrastructureTeardown,
   hasUsableTerminalTarget,
@@ -77,7 +78,6 @@ import {
   type ScenarioRunStatus,
   type ScenarioRunResponse,
   type ScenarioDestroyAcceptedResponse,
-  type ScenarioStatusStep,
 } from "@/components/app/run/run-types";
 import type {
   CourseLocation,
@@ -261,28 +261,16 @@ export function ScenarioRunStart() {
   // A registry wait is a wait on admission, not on a machine.
   const waitingForMachineCapacity = waitingForCapacity && !waitingForRegistry;
   const failed = startState === "failed";
-  const steps: ScenarioStatusStep[] = [
-    {
-      id: "request",
-      label: "Start requested",
-      detail: failed
-        ? "The scenario run could not be created."
-        : "Creating a secure scenario run.",
-      state: failed ? "failed" : waitingForMachineCapacity ? "done" : "active",
-    },
-    {
-      id: "capacity",
-      label: "Reserve capacity",
-      detail: "Waiting for an available practice machine.",
-      state: waitingForMachineCapacity ? "active" : "pending",
-    },
-    {
-      id: "workspace",
-      label: "Prepare workspace",
-      detail: "Machine startup continues as soon as the run is accepted.",
-      state: "pending",
-    },
-  ];
+  const steps = buildScenarioStartSteps({
+    failed,
+    detail: failed
+      ? "The scenario run could not be created."
+      : waitingForRegistry
+        ? "Waiting for image maintenance to finish."
+        : waitingForMachineCapacity
+          ? "Waiting for an available practice machine."
+          : "Creating a secure scenario run.",
+  });
 
   return (
     <RunWorkspaceShell
@@ -313,9 +301,11 @@ export function ScenarioRunStart() {
         role="region"
         aria-label="Run start progress"
         tabIndex={0}
-        className="flex min-h-0 flex-1 overflow-y-auto p-3 sm:p-4"
+        className="flex min-h-0 flex-1 overflow-y-auto px-3 pt-1 pb-3 [@media(max-height:500px)]:!pb-2"
       >
-        <div className="m-auto w-full" data-run-sequence-frame>
+        {/* The same insets as the run page's startup screen, so the card stays
+            put when the run page takes the sequence over. */}
+        <div className="m-auto w-full py-4 sm:px-1 sm:py-6" data-run-sequence-frame>
           <ScenarioStepScreen
             title={failed ? "The run did not start" : "Preparing your workspace"}
             description={
@@ -329,6 +319,7 @@ export function ScenarioRunStart() {
             }
             steps={steps}
             listLabel="Startup steps"
+            handoffTo={`run-start:${scenarioId}`}
             footer={
               failed ? (
                 <Button type="button" onClick={startScenario}>
@@ -1549,6 +1540,7 @@ export function ScenarioRun() {
                         description={bootScreenCopy.description}
                         steps={bootSteps}
                         listLabel="Startup steps"
+                        handoffFrom={`run-start:${attemptData.scenarioId}`}
                       />
                     </div>
                   ) : (

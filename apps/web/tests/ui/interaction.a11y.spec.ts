@@ -577,6 +577,147 @@ test("SSH key removal asks again in place", async ({ page, ui }) => {
   await expect(page.locator("#ssh-keys-empty")).toBeFocused();
 });
 
+test("the sidebar's raised pill glides to the page you pick and a ghost follows the mouse", async ({ page, ui }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  // Count the pill's glides: it moves rows by a Web Animation, not CSS.
+  await page.evaluate(() => {
+    const glides: unknown[] = [];
+    Object.assign(window, { __glides: glides });
+    const animate = Element.prototype.animate;
+    Element.prototype.animate = function (
+      this: Element,
+      ...args: Parameters<Element["animate"]>
+    ) {
+      if (this.matches("[data-nav-pill]")) glides.push(args[0]);
+      return animate.apply(this, args);
+    };
+  });
+  const nav = page.locator('[data-sidebar="content"]');
+  const ghost = nav.locator("[data-nav-ghost]");
+  const pillRow = () =>
+    nav.evaluate(
+      (list) =>
+        list.querySelector("[data-nav-pill]")?.closest<HTMLElement>("[data-nav-row]")
+          ?.dataset.navRow ?? null,
+    );
+  const ghostOffset = (rowId: string) =>
+    nav.evaluate((list, id) => {
+      const a = list.querySelector("[data-nav-ghost]")!.getBoundingClientRect();
+      const b = list
+        .querySelector(`[data-nav-row="${id}"] [data-sidebar="menu-button"]`)!
+        .getBoundingClientRect();
+      return Math.round(Math.abs(a.top - b.top) + Math.abs(a.left - b.left) + Math.abs(a.height - b.height));
+    }, rowId);
+  const row = (id: string) =>
+    nav.locator(`[data-nav-row="${id}"] [data-sidebar="menu-button"]`);
+
+  await expect.poll(pillRow).toBe("courses");
+
+  // The ghost appears under the mouse, glides between rows, steps aside on
+  // the current page and fades when the mouse leaves.
+  await row("runs").hover();
+  await expect(ghost).toHaveAttribute("data-on", "");
+  await expect.poll(() => ghostOffset("runs")).toBe(0);
+  await row("organizations").hover();
+  await expect.poll(() => ghostOffset("organizations")).toBe(0);
+  await row("courses").hover();
+  await expect(ghost).not.toHaveAttribute("data-on");
+  await page.mouse.move(900, 500);
+  await expect(ghost).not.toHaveAttribute("data-on");
+
+  // Picking a page moves the one pill there with a single glide.
+  await row("runs").click();
+  await expect(page).toHaveURL(/\/runs$/);
+  await expect.poll(pillRow).toBe("runs");
+  expect(
+    await page.evaluate(() => (window as unknown as { __glides: unknown[] }).__glides.length),
+  ).toBe(1);
+  await expect(row("runs")).toHaveAttribute("aria-current", "page");
+});
+
+test("the navigation drawer shows its close button and closes after a choice", async ({ page, ui }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+  const drawer = page.locator('[data-slot="sidebar"][data-mobile="true"]');
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "Close" })).toBeVisible();
+  await drawer.getByRole("link", { name: /^My runs/ }).click();
+  await expect(page).toHaveURL(/\/runs$/);
+  await expect(drawer).toBeHidden();
+});
+
+test("the startup rail carries on from the start screen instead of loading again", async ({ page, ui }) => {
+  const course = ui.server.state.courseCatalog[0]!;
+  const lecture = course.lectures[1]!;
+  let releaseStart: (() => void) | undefined;
+  const startGate = new Promise<void>((resolve) => {
+    releaseStart = resolve;
+  });
+  await page.route("**/api/scenarios/*/start", async (route) => {
+    await startGate;
+    ui.server.setRunState("launching");
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        accepted: true,
+        runId: "run-active",
+        scenarioId: "repair-nginx",
+        acceptedAt: Date.now(),
+        reused: false,
+        run: ui.server.state.run,
+      }),
+    });
+  });
+  await ui.open({
+    path: `/courses/${course.courseId}/lectures/${lecture.lectureId}`,
+    sessionRole: "learner",
+    theme: "dark",
+    runState: "archived",
+  });
+  // Motion on, so the hand-off and the sweep really play.
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.evaluate(() => {
+    const sweeps: string[] = [];
+    Object.assign(window, { __sweeps: sweeps });
+    document.addEventListener(
+      "animationstart",
+      (event) => {
+        if (event.animationName === "intar-sweep") sweeps.push(event.animationName);
+      },
+      true,
+    );
+  });
+  const sweeps = () =>
+    page.evaluate(() => (window as unknown as { __sweeps: string[] }).__sweeps.length);
+  const position = page.locator("[data-run-sequence-position]");
+  const track = page.locator("[data-run-sequence-track] > span");
+
+  await page.getByRole("button", { name: "Run again" }).click();
+  try {
+    await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
+    await expect(position).toHaveText("Stage 1 of 4");
+    await expect(track).toHaveCount(4);
+  } finally {
+    releaseStart?.();
+  }
+
+  // The run page takes over the same four stages: the first finishes (its
+  // check draws) and only the stage that just started sweeps, once.
+  await expect(page).toHaveURL(/\/runs\/run-active/);
+  await expect(position).toHaveText("Stage 2 of 4");
+  await expect(track).toHaveCount(4);
+  await expect(
+    page.locator('[data-run-sequence-step][data-state="done"] .draw-check'),
+  ).toHaveCount(1);
+  await expect.poll(sweeps).toBe(1);
+  await page.waitForTimeout(1_000);
+  expect(await sweeps(), "the rail swept again").toBe(1);
+});
+
 test("the outline's raised card follows the current lecture", async ({ page, ui }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await ui.open({ ...routeCase("lecture"), theme: "light" });

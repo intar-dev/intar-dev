@@ -59,6 +59,44 @@ export function scenarioRunOutcomeMeta(outcome: ScenarioRunRecord["outcome"]) {
   }
 }
 
+/**
+ * The startup stages while the run is still being created, on the start
+ * route. They are the run page's boot stages with the first one working, so
+ * the sequence carries on when the run page takes over instead of starting
+ * again.
+ */
+export function buildScenarioStartSteps(start: {
+  failed: boolean;
+  detail: string;
+}): ScenarioStatusStep[] {
+  return [
+    {
+      id: "accepted",
+      label: "Creating your run",
+      detail: start.detail,
+      state: start.failed ? "failed" : "active",
+    },
+    {
+      id: "starting-vm",
+      label: "Starting your workspace",
+      detail: "Preparing a clean place for you to work.",
+      state: "pending",
+    },
+    {
+      id: "checking-workspace",
+      label: "Checking the workspace",
+      detail: "Checking services and shell prerequisites.",
+      state: "pending",
+    },
+    {
+      id: "opening-shell",
+      label: "Opening the shell",
+      detail: "Waiting for startup checks to finish.",
+      state: "pending",
+    },
+  ];
+}
+
 export function buildScenarioBootSteps(
   attempt: ScenarioRunRecord | null,
   selectedVm?: ScenarioRunVmRecord | null,
@@ -84,7 +122,7 @@ export function buildScenarioBootSteps(
   return [
     {
       id: "accepted",
-      label: "Request accepted",
+      label: "Creating your run",
       detail: "The run is registered and its work order is available.",
       state: "done",
     },

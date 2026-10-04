@@ -1,4 +1,11 @@
-import { useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type Ref,
+} from "react";
 import { Check, CircleAlert, LoaderCircle } from "lucide-react";
 import {
   Card,
@@ -12,25 +19,53 @@ import { formatScenarioStepState } from "./run-support";
 import type { ScenarioRunRecord, ScenarioStatusStep } from "./run-types";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
 
+type StepState = ScenarioStatusStep["state"];
+
 /**
- * Steps that finished while this screen was open. A stage that was already
- * done when the screen mounted shows its check still (the Moment Rule).
+ * Steps that reached `state` while this screen was open. A stage that was
+ * already there when the screen mounted stays still (the Moment Rule): no
+ * check draws itself and no sweep plays on load or revisit.
  */
-function useJustFinished(steps: ScenarioStatusStep[]) {
-  const previous = useRef<Map<string, ScenarioStatusStep["state"]> | null>(null);
-  const [finished, setFinished] = useState<ReadonlySet<string>>(new Set());
+function useJustBecame(steps: ScenarioStatusStep[], state: StepState) {
+  const previous = useRef<Map<string, StepState> | null>(null);
+  const [reached, setReached] = useState<ReadonlySet<string>>(new Set());
   const signature = steps.map((step) => `${step.id}:${step.state}`).join("|");
   useLayoutEffect(() => {
     const before = previous.current;
     previous.current = new Map(steps.map((step) => [step.id, step.state]));
     if (!before) return;
     const now = steps
-      .filter((step) => step.state === "done" && before.has(step.id) && before.get(step.id) !== "done")
+      .filter(
+        (step) =>
+          step.state === state &&
+          before.has(step.id) &&
+          before.get(step.id) !== state,
+      )
       .map((step) => step.id);
-    if (now.length) setFinished((current) => new Set([...current, ...now]));
+    if (now.length) setReached((current) => new Set([...current, ...now]));
     // `signature` captures every state change; `steps` is a new array each render.
   }, [signature]);
-  return finished;
+  return reached;
+}
+
+/**
+ * One startup sequence spans two screens: the start route, then the run
+ * page. The first leaves its stage states under a key and the second takes
+ * them, so the track carries on from where it was instead of loading again.
+ */
+const handoffs = new Map<
+  string,
+  { states: ReadonlyMap<string, StepState>; at: number }
+>();
+const HANDOFF_TTL_MS = 15_000;
+
+function takeHandoff(key: string | undefined) {
+  if (!key) return null;
+  const handoff = handoffs.get(key);
+  handoffs.delete(key);
+  return handoff && Date.now() - handoff.at < HANDOFF_TTL_MS
+    ? handoff.states
+    : null;
 }
 
 export function ScenarioStepScreen(props: {
@@ -43,25 +78,54 @@ export function ScenarioStepScreen(props: {
   topRight?: ReactNode;
   statusAnnouncement?: string;
   footer?: ReactNode;
+  /** Leave this sequence's states for the next screen under this key. */
+  handoffTo?: string;
+  /** Carry on from the states another screen left under this key. */
+  handoffFrom?: string;
 }) {
-  const currentStep = props.steps.find(
+  // A handed-off sequence paints its previous states once, then advances, so
+  // the stages that moved on in between animate like any other hand-off.
+  const [handoff] = useState(() => takeHandoff(props.handoffFrom));
+  const [advanced, setAdvanced] = useState(!handoff);
+  const root = useRef<HTMLDivElement>(null);
+  const steps =
+    advanced || !handoff
+      ? props.steps
+      : props.steps.map((step) => ({
+          ...step,
+          state: handoff.get(step.id) ?? step.state,
+        }));
+  const justFinished = useJustBecame(steps, "done");
+  const justStarted = useJustBecame(steps, "active");
+  useLayoutEffect(() => {
+    if (advanced) return;
+    // Style the handed-off states before advancing, so the change transitions.
+    void root.current?.offsetWidth;
+    setAdvanced(true);
+  }, [advanced]);
+  useEffect(() => {
+    if (!props.handoffTo) return;
+    handoffs.set(props.handoffTo, {
+      states: new Map(props.steps.map((step) => [step.id, step.state])),
+      at: Date.now(),
+    });
+  });
+
+  const currentStep = steps.find(
     (step) => step.state === "active" || step.state === "failed",
   );
-  const nextStepIndex = props.steps.findIndex(
-    (step) => step.state === "pending",
-  );
+  const nextStepIndex = steps.findIndex((step) => step.state === "pending");
   const currentStepIndex = currentStep
-    ? props.steps.findIndex((step) => step.id === currentStep.id)
+    ? steps.findIndex((step) => step.id === currentStep.id)
     : nextStepIndex >= 0
       ? nextStepIndex
-      : Math.max(0, props.steps.length - 1);
+      : Math.max(0, steps.length - 1);
   const currentStatus = currentStep
     ? formatScenarioStepState(currentStep.state)
     : null;
-  const justFinished = useJustFinished(props.steps);
 
   return (
-    <Card data-run-sequence-screen>
+    <Card ref={root} data-run-sequence-screen>
       <CardHeader>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-1">
@@ -101,14 +165,14 @@ export function ScenarioStepScreen(props: {
               ? `Stage ${currentStepIndex + 1} of ${props.steps.length}: ${currentStep.label}. ${currentStatus}.`
               : props.title)}
         </p>
-        {/* The stage track: finished stages settle into dots, the working
-            stage stretches into a bar with one slow sweep. */}
+        {/* The stage track: finished stages settle into dots, and the working
+            stage stretches into a bar that one sweep crosses as it starts. */}
         <div
           aria-hidden="true"
           className="flex items-center gap-1.5"
           data-run-sequence-track
         >
-          {props.steps.map((step) => (
+          {steps.map((step) => (
             <span
               key={step.id}
               className={cn(
@@ -118,7 +182,10 @@ export function ScenarioStepScreen(props: {
                   : "grow-0 basis-2",
                 step.state === "done" && "bg-success",
                 step.state === "active" &&
-                  "stage-sweep bg-brand-subtle shadow-[inset_0_0_0_1px_var(--brand-border)]",
+                  "bg-brand-subtle shadow-[inset_0_0_0_1px_var(--brand-border)]",
+                step.state === "active" &&
+                  justStarted.has(step.id) &&
+                  "stage-sweep",
                 step.state === "failed" && "bg-destructive",
                 step.state === "pending" && "bg-border-strong/35",
               )}
@@ -130,7 +197,7 @@ export function ScenarioStepScreen(props: {
           className="space-y-1"
           data-run-sequence-steps
         >
-          {props.steps.map((step, index) => {
+          {steps.map((step, index) => {
             const isCurrent = currentStep?.id === step.id;
             const statusLabel = formatScenarioStepState(step.state);
 

@@ -32,7 +32,7 @@ describe("scenario startup milestones", () => {
     const steps = buildScenarioBootSteps(run([vm]), vm);
 
     expect(steps.map((step) => step.label)).toEqual([
-      "Request accepted",
+      "Creating your run",
       "Starting your workspace",
       "Checking the workspace",
       "Opening the shell",
