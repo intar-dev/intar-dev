@@ -824,9 +824,16 @@
     color: var(--foreground);
   }
 
+  /* The ring fades in and lifts out to its offset. Fields answer with their
+     edge and halo instead. A component's own animation (a utility) wins. */
   :focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
+    animation: intar-ring var(--duration-fast) var(--ease-enter);
+  }
+
+  :is(input, textarea, select):focus-visible {
+    animation: none;
   }
 
   /* Reduce, don't remove: under reduced motion nothing travels, grows or
@@ -838,11 +845,6 @@
   @media (prefers-reduced-motion: reduce) {
     html {
       scroll-behavior: auto;
-    }
-
-    :root {
-      --move-rise: 0px;
-      --scale-pop: 1;
     }
 
     *,
@@ -980,6 +982,46 @@
   --duration-flash: 1600ms;
   --duration-hold: 2400ms;
   --duration-live: 2200ms;
+
+  /* Distances and scales move through tokens, so reduced motion can zero
+     them in one place (below, beside the defaults so it wins the cascade). */
+  --move-press: 1px;
+  --move-nudge: 2px;
+  --move-swap: 4px;
+  --move-rise: 6px;
+  --move-overlay: 8px;
+  --move-sheet: 2.5rem;
+  --scale-press: 0.985;
+  --scale-dialog: 0.97;
+  --scale-popover: 0.95;
+  --scale-pop: 0.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --move-press: 0px;
+    --move-nudge: 0px;
+    --move-swap: 0px;
+    --move-rise: 0px;
+    --move-overlay: 0px;
+    --move-sheet: 0px;
+    --scale-press: 1;
+    --scale-dialog: 1;
+    --scale-popover: 1;
+    --scale-pop: 1;
+  }
+}
+
+@keyframes intar-ring {
+  from {
+    outline-color: transparent;
+    outline-offset: calc(2px - var(--move-nudge));
+  }
+}
+
+/* Anchored scrolling stops below the sticky app bar. */
+html {
+  scroll-padding-top: var(--app-bar-h);
 }
 
 /* Sidebar: the raised pill sits in the current row and glides there from the

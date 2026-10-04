@@ -4,7 +4,7 @@ import { Outlet } from "@tanstack/react-router";
 // theme follows the user's choice (or system preference) via <html>.
 export function MarketingShell() {
   return (
-    <div className="min-h-screen text-foreground">
+    <div className="min-h-dvh text-foreground">
       <Outlet />
     </div>
   );
