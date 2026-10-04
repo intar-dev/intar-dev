@@ -1,4 +1,4 @@
-import type { ReactNode, Ref } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Check, CircleAlert, LoaderCircle } from "lucide-react";
 import {
   Card,
@@ -11,6 +11,27 @@ import { cn } from "@/lib/utils";
 import { formatScenarioStepState } from "./run-support";
 import type { ScenarioRunRecord, ScenarioStatusStep } from "./run-types";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
+
+/**
+ * Steps that finished while this screen was open. A stage that was already
+ * done when the screen mounted shows its check still (the Moment Rule).
+ */
+function useJustFinished(steps: ScenarioStatusStep[]) {
+  const previous = useRef<Map<string, ScenarioStatusStep["state"]> | null>(null);
+  const [finished, setFinished] = useState<ReadonlySet<string>>(new Set());
+  const signature = steps.map((step) => `${step.id}:${step.state}`).join("|");
+  useLayoutEffect(() => {
+    const before = previous.current;
+    previous.current = new Map(steps.map((step) => [step.id, step.state]));
+    if (!before) return;
+    const now = steps
+      .filter((step) => step.state === "done" && before.has(step.id) && before.get(step.id) !== "done")
+      .map((step) => step.id);
+    if (now.length) setFinished((current) => new Set([...current, ...now]));
+    // `signature` captures every state change; `steps` is a new array each render.
+  }, [signature]);
+  return finished;
+}
 
 export function ScenarioStepScreen(props: {
   title: string;
@@ -37,6 +58,7 @@ export function ScenarioStepScreen(props: {
   const currentStatus = currentStep
     ? formatScenarioStepState(currentStep.state)
     : null;
+  const justFinished = useJustFinished(props.steps);
 
   return (
     <Card data-run-sequence-screen>
@@ -79,6 +101,30 @@ export function ScenarioStepScreen(props: {
               ? `Stage ${currentStepIndex + 1} of ${props.steps.length}: ${currentStep.label}. ${currentStatus}.`
               : props.title)}
         </p>
+        {/* The stage track: finished stages settle into dots, the working
+            stage stretches into a bar with one slow sweep. */}
+        <div
+          aria-hidden="true"
+          className="flex items-center gap-1.5"
+          data-run-sequence-track
+        >
+          {props.steps.map((step) => (
+            <span
+              key={step.id}
+              className={cn(
+                "relative h-2 overflow-hidden rounded-full transition-[flex-grow,flex-basis,background-color,box-shadow] duration-300 ease-enter motion-reduce:transition-none",
+                step.state === "active" || step.state === "failed"
+                  ? "grow basis-0"
+                  : "grow-0 basis-2",
+                step.state === "done" && "bg-success",
+                step.state === "active" &&
+                  "stage-sweep bg-brand-subtle shadow-[inset_0_0_0_1px_var(--brand-border)]",
+                step.state === "failed" && "bg-destructive",
+                step.state === "pending" && "bg-border-strong/35",
+              )}
+            />
+          ))}
+        </div>
         <ol
           aria-label={props.listLabel}
           className="space-y-1"
@@ -95,7 +141,7 @@ export function ScenarioStepScreen(props: {
                 data-run-sequence-step
                 data-state={step.state}
                 className={cn(
-                  "relative grid min-h-12 grid-cols-[2rem_minmax(0,1fr)_auto] items-start gap-x-3 rounded-lg px-3 py-3 text-sm",
+                  "relative grid min-h-12 grid-cols-[2rem_minmax(0,1fr)_auto] items-start gap-x-3 rounded-lg px-3 py-3 text-sm transition-colors duration-300 motion-reduce:transition-none",
                   step.state === "active" && "bg-primary/6",
                   step.state === "failed" && "bg-destructive/8",
                 )}
@@ -104,13 +150,11 @@ export function ScenarioStepScreen(props: {
                   <span
                     aria-hidden="true"
                     data-run-sequence-connector
-                    className={cn(
-                      "absolute top-9 bottom-[-1rem] left-6 w-px",
-                      step.state === "done"
-                        ? "bg-success/60"
-                        : "bg-muted-foreground/40",
-                    )}
-                  />
+                    data-filled={step.state === "done" || undefined}
+                    className="absolute top-9 bottom-[-1rem] left-6 w-px bg-muted-foreground/40"
+                  >
+                    <span data-fill />
+                  </span>
                 ) : null}
                 <span
                   aria-hidden="true"
@@ -127,7 +171,12 @@ export function ScenarioStepScreen(props: {
                   )}
                 >
                   {step.state === "done" ? (
-                    <Check className="size-3.5" />
+                    <Check
+                      className={cn(
+                        "size-3.5",
+                        justFinished.has(step.id) && "draw-check",
+                      )}
+                    />
                   ) : step.state === "failed" ? (
                     <CircleAlert className="size-3.5" />
                   ) : (

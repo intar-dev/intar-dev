@@ -290,7 +290,7 @@ Motion explains a change of state, or it does not happen.
 - **Press:** a half-pixel drop and a 1.5% shrink on every button.
 - **Nudge:** arrows lean 2px toward their destination on hover.
 
-Reduced motion drops every duration to 0.01ms and stops loops. Any animated illustration shows a meaningful still frame instead.
+**Reduce, don't remove.** Under reduced motion nothing travels, grows or turns: keyframe animations keep their fades but lose translation, scale and rotation, loops play once, and transitions are instant. Fades, colour changes and drawn checks still play, so every action still answers. Any animated illustration shows a meaningful still frame instead.
 
 ### Named Rules
 
@@ -305,7 +305,7 @@ Reduced motion drops every duration to 0.01ms and stops loops. Any animated illu
 - **Shape:** 8px corners. 36px default, 32px small, 44px prominent and on coarse pointers.
 - **Primary:** oxide fill with a faint top light. Hover uses primary-hover.
 - **Outline:** card fill, input edge, control shadow. Hover strengthens the edge and fills with muted.
-- **Destructive:** quiet outline with destructive text; hover fills destructive-subtle. **Danger** is the solid variant, reserved for the final confirm inside a dialog.
+- **Destructive:** quiet outline with destructive text; hover fills destructive-subtle. **Danger** is the solid variant, reserved for the final confirm: inside a dialog, or in an inline confirm whose button names the consequence ("Remove key").
 - **Focus:** a 2px ring outline with a 2px offset on every control.
 
 ### Fields

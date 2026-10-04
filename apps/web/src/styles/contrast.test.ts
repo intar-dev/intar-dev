@@ -59,3 +59,17 @@ describe.each([
     expect(contrast(t[edge] ?? "", t[bg] ?? "")).toBeGreaterThanOrEqual(3);
   });
 });
+
+// The maintenance page is served without this stylesheet, so it copies the
+// palette's hex values. Every colour it uses must still be a palette token.
+it("keeps the maintenance page on the palette", () => {
+  const page = readFileSync(new URL("../maintenance.ts", import.meta.url), "utf8");
+  const palette = new Set(
+    [...Object.values(tokens(":root")), ...Object.values(tokens(".dark"))].map(
+      (hex) => String(hex).toLowerCase(),
+    ),
+  );
+  const used = [...page.matchAll(/#[0-9a-f]{6}\b/gi)].map((m) => m[0].toLowerCase());
+  expect(used.length).toBeGreaterThan(0);
+  expect(used.filter((hex) => !palette.has(hex))).toEqual([]);
+});

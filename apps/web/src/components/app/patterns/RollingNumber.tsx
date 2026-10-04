@@ -11,8 +11,9 @@ interface Roll {
 
 /**
  * A count whose changed digits roll into place: up as it grows, down as it
- * shrinks. Nothing moves on first render (the Moment Rule), and the digit
- * rolling out is hidden from assistive technology, which reads one number.
+ * shrinks. Nothing moves on first render (the Moment Rule). The digit rolling
+ * out is generated content (`data-prev`), so text and assistive technology
+ * only ever read the new number.
  */
 export function RollingNumber({
   value,
@@ -62,11 +63,9 @@ export function RollingNumber({
           <span
             key={index}
             className="rolling-digit"
+            data-prev={cell.previous}
             style={{ "--k": cell.order } as CSSProperties}
           >
-            <span data-out aria-hidden="true">
-              {cell.previous}
-            </span>
             <span data-in>{cell.char}</span>
           </span>
         ),

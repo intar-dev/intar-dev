@@ -163,7 +163,7 @@ describe("run learning panel", () => {
     const markup = renderContent({ probes, objectives });
 
     expect(markup.match(/Needs repair/g)).toHaveLength(8);
-    expect(markup).toContain("0/8 verified");
+    expect(markup.replace(/<[^>]+>/g, "")).toContain("0/8 verified");
     expect(markup).toContain("Learner check 8");
   });
 

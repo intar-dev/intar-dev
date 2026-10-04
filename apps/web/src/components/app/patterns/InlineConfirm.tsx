@@ -153,6 +153,8 @@ export function InlineConfirm({
           variant="danger"
           aria-busy={pending || undefined}
           disabled={pending}
+          // Keep focus here while the request runs, and after it fails.
+          focusableWhenDisabled
           onClick={onConfirm}
         >
           {pending ? (

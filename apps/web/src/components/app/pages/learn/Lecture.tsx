@@ -310,7 +310,7 @@ function LectureActionPanel({
   return (
     <section
       aria-labelledby="lecture-next-action"
-      className="flex w-full flex-col gap-4 rounded-2xl border bg-card p-5 shadow-[var(--highlight),var(--shadow-raised)] motion-safe:animate-rise sm:flex-row sm:items-start sm:gap-5"
+      className="flex w-full flex-col gap-4 rounded-2xl border bg-card p-5 shadow-[var(--highlight),var(--shadow-raised)] animate-rise sm:flex-row sm:items-start sm:gap-5"
     >
       <span
         aria-hidden="true"

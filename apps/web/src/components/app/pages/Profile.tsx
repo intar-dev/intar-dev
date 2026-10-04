@@ -102,15 +102,22 @@ function initials(name: string | null | undefined): string {
   return letters || "?";
 }
 
-/** After a key is removed, keep focus in the list instead of losing it to the page. */
+/**
+ * After a key is removed, keep focus in the list: the neighbouring key, any
+ * key left on the page, or the empty state that says none are left.
+ */
 function focusAfterRemoval(nextKeyId: string | null) {
   requestAnimationFrame(() => {
-    const next = nextKeyId
-      ? document.querySelector<HTMLElement>(
-          `[data-ssh-key-id="${CSS.escape(nextKeyId)}"] [data-inline-confirm-trigger]`,
-        )
-      : null;
-    (next ?? document.getElementById("ssh-key-label"))?.focus();
+    const trigger = "[data-inline-confirm-trigger]";
+    const next =
+      (nextKeyId
+        ? document.querySelector<HTMLElement>(
+            `[data-ssh-key-id="${CSS.escape(nextKeyId)}"] ${trigger}`,
+          )
+        : null) ??
+      document.querySelector<HTMLElement>(`[data-ssh-key-id] ${trigger}`) ??
+      document.getElementById("ssh-keys-empty");
+    next?.focus();
   });
 }
 
@@ -497,7 +504,7 @@ export function Profile() {
                         <div className="min-w-0 flex-1 space-y-1">
                           {/* As tall as the action, so Remove lines up with the
                               key's name (the Row Rule). */}
-                          <div className="flex min-h-(--control-compact) flex-wrap items-center gap-2">
+                          <div className="flex min-h-(--control-compact) flex-wrap items-center gap-2 pointer-coarse:min-h-11">
                             <p className="text-sm font-medium">
                               {key.label || key.comment || "Unnamed key"}
                             </p>
@@ -539,7 +546,11 @@ export function Profile() {
               )}
             </PaginatedCollection>
           ) : (
-            <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-5 py-6 text-center">
+            <div
+              id="ssh-keys-empty"
+              tabIndex={-1}
+              className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-5 py-6 text-center"
+            >
               <KeyRound className="size-6 text-muted-foreground" />
               <div>
                 <p className="text-sm font-medium">No public keys yet</p>
@@ -608,9 +619,15 @@ export function Profile() {
               <InlineFeedback tone="error">{formError}</InlineFeedback>
             ) : null}
 
-            {formNotice ? (
-              <InlineFeedback tone="success">{formNotice}</InlineFeedback>
-            ) : null}
+            {/* Always mounted, so a notice that appears is announced; it
+                takes no room in the form while empty. */}
+            <div role="status" aria-live="polite" className="empty:mb-0">
+              {formNotice ? (
+                <InlineFeedback tone="success" announce={false}>
+                  {formNotice}
+                </InlineFeedback>
+              ) : null}
+            </div>
 
             <Button
               type="submit"

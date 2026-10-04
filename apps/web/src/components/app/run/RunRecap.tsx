@@ -190,7 +190,7 @@ export function RunRecap({
     >
       <header className="flex items-start gap-4 sm:items-center sm:gap-5">
         <RecapBadge kind={recap.kind} />
-        <div className="min-w-0 motion-safe:animate-rise">
+        <div className="min-w-0 animate-rise">
           <h2
             id="run-recap-heading"
             ref={headingRef}
@@ -223,12 +223,12 @@ export function RunRecap({
             {objectives.map((objective, index) => (
               <li
                 key={objective.key}
-                className="grid min-h-12 grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 px-4 py-3 motion-safe:animate-rise"
+                className="grid min-h-12 grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 px-4 py-3 animate-rise"
                 style={{ animationDelay: `${120 + index * 70}ms` }}
               >
                 {objective.status === "verified" ? (
                   <CheckCircle2
-                    className="mt-0.5 size-4 text-success motion-safe:animate-pop"
+                    className="mt-0.5 size-4 text-success animate-pop"
                     style={{ animationDelay: `${200 + index * 70}ms` }}
                     aria-hidden="true"
                   />
@@ -261,7 +261,7 @@ export function RunRecap({
         </section>
       ) : null}
 
-      <section aria-label="Learning summary" className="motion-safe:animate-rise [animation-delay:80ms]">
+      <section aria-label="Learning summary" className="animate-rise [animation-delay:80ms]">
         <dl className="grid overflow-hidden rounded-xl border bg-card shadow-[var(--highlight),var(--shadow-raised)] max-sm:divide-y sm:auto-cols-fr sm:grid-flow-col sm:divide-x">
           {recap.kind === "solved" && run.solveDurationMs !== null ? (
             <div className="px-5 py-4">
@@ -432,7 +432,7 @@ function RecapBadge({ kind }: { kind: ReturnType<typeof getRunRecapState>["kind"
         aria-hidden="true"
         className="flex size-13 shrink-0 items-center justify-center rounded-full bg-success-subtle text-success ring-1 ring-success-border motion-safe:[animation:intar-live_1.4s_var(--ease-standard)_350ms_1_both]"
       >
-        <Check className="size-6 stroke-[2.25] motion-safe:animate-pop [animation-delay:120ms]" />
+        <Check className="size-6 stroke-[2.25] animate-pop [animation-delay:120ms]" />
       </span>
     );
   }

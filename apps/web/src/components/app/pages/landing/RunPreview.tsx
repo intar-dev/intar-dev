@@ -406,7 +406,7 @@ function PreviewChecks({
           >
             <span className="mt-1">
               {check.status === "verified" ? (
-                <CheckCircle2 className="size-4 text-success motion-safe:animate-pop" />
+                <CheckCircle2 className="size-4 text-success animate-pop" />
               ) : check.status === "checking" ? (
                 <LoaderCircle className="size-4 text-info motion-safe:animate-spin" />
               ) : (

@@ -163,7 +163,7 @@ function CodeBlock({ children }: { children: ReactNode }) {
         )}
       >
         {copied ? (
-          <Check className="size-3.5 motion-safe:animate-pop" aria-hidden="true" />
+          <Check className="size-3.5 animate-pop" aria-hidden="true" />
         ) : (
           <Copy className="size-3.5" aria-hidden="true" />
         )}

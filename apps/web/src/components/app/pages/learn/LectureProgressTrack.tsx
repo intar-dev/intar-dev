@@ -13,9 +13,12 @@ const PROGRESS_SEGMENT_TONES: Record<CourseLectureSummary["state"], string> = {
 // left. The adjacent "n of m complete" meta line carries the same fact in words.
 export function LectureProgressTrack({
   lectures,
+  currentIndex = -1,
   className,
 }: {
   lectures: readonly Pick<CourseLectureSummary, "state">[];
+  /** The lecture you are on; its segment can stretch (the outline does). */
+  currentIndex?: number;
   className?: string;
 }) {
   if (!lectures.length) return null;
@@ -24,8 +27,9 @@ export function LectureProgressTrack({
       {lectures.map((lecture, index) => (
         <span
           key={index}
+          data-current={index === currentIndex || undefined}
           className={cn(
-            "h-1 w-6 rounded-full transition-colors duration-300",
+            "h-1 w-6 rounded-full transition-[background-color,flex-grow] duration-300 ease-enter motion-reduce:transition-none",
             PROGRESS_SEGMENT_TONES[lecture.state],
           )}
         />

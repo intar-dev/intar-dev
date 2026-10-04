@@ -85,7 +85,7 @@
   @keyframes intar-rise {
     from {
       opacity: 0;
-      transform: translateY(6px);
+      transform: translateY(var(--move-rise, 6px));
     }
     to {
       opacity: 1;
@@ -96,7 +96,7 @@
   @keyframes intar-pop {
     from {
       opacity: 0;
-      transform: scale(0.5);
+      transform: scale(var(--scale-pop, 0.5));
     }
     to {
       opacity: 1;
@@ -414,6 +414,71 @@
   --term-color-15: #f6f7f9;
 }
 
+/* Replay control bar in the terminal palette: the played part of the track is
+   oxide on a quiet rail, the clock is mono at 12px, and buttons take a quiet
+   hover fill. The separator is an inset line, so no bar height changes. This
+   is colour and type only, so it applies to every replay, operations tools
+   included; sizing stays with the learner recap below. */
+.run-artifact-player div.ap-control-bar {
+  background: var(--terminal-surface);
+  box-shadow: inset 0 1px 0 var(--terminal-border);
+}
+
+.run-artifact-player div.ap-control-bar svg.ap-icon path {
+  fill: var(--terminal-foreground);
+}
+
+.run-artifact-player div.ap-control-bar button.ap-button {
+  border-radius: var(--radius-md);
+  transition: background-color 150ms var(--ease-standard);
+}
+
+.run-artifact-player div.ap-control-bar button.ap-button:hover {
+  background: color-mix(in oklab, var(--terminal-foreground) 8%, transparent);
+}
+
+.run-artifact-player div.ap-control-bar .ap-progressbar .ap-bar .ap-gutter {
+  border-radius: 999px;
+}
+
+.run-artifact-player
+  div.ap-control-bar
+  .ap-progressbar
+  .ap-bar
+  .ap-gutter-empty {
+  background-color: color-mix(
+    in oklab,
+    var(--terminal-foreground) 18%,
+    transparent
+  );
+}
+
+.run-artifact-player
+  div.ap-control-bar
+  .ap-progressbar
+  .ap-bar
+  .ap-gutter-full {
+  background-color: var(--terminal-brand);
+}
+
+.run-artifact-player div.ap-control-bar span.ap-timer {
+  font-size: 0.75rem;
+  color: var(--terminal-muted);
+}
+
+.run-artifact-player div.ap-control-bar span.ap-timer span {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The vendor loader spins forever; under reduced motion it holds still. */
+@media (prefers-reduced-motion: reduce) {
+  .ap-player .ap-loader {
+    animation: none !important;
+  }
+}
+
 /* The learner recap is intentionally flat and touch-safe. Keep the vendor
  * player adjustments inside that surface so operations replay tools retain
  * their dense native controls. */
@@ -489,6 +554,10 @@
     grid-template-rows: 1.5rem 1fr auto;
     gap: 0.25rem;
     padding: 0.5rem;
+  }
+
+  [data-run-sequence-track] {
+    display: none;
   }
 
   [data-run-sequence-connector] {
@@ -759,18 +828,38 @@
     outline-offset: 2px;
   }
 
+  /* Reduce, don't remove: under reduced motion nothing travels, grows or
+     turns, but fades, colour changes and drawn checks still play, so every
+     action still answers. Loops play once (keep them motion-safe) and
+     transitions are instant. tw-animate-css moves only through its
+     --tw-enter-* and --tw-exit-* variables, so neutralising them keeps its
+     fades; intar-rise and intar-pop move through --move-rise and --scale-pop. */
   @media (prefers-reduced-motion: reduce) {
     html {
       scroll-behavior: auto;
+    }
+
+    :root {
+      --move-rise: 0px;
+      --scale-pop: 1;
     }
 
     *,
     *::before,
     *::after {
       scroll-behavior: auto !important;
-      animation-duration: 0.01ms !important;
       animation-iteration-count: 1 !important;
       transition-duration: 0.01ms !important;
+      --tw-enter-translate-x: 0 !important;
+      --tw-enter-translate-y: 0 !important;
+      --tw-enter-scale: 1 !important;
+      --tw-enter-rotate: 0 !important;
+      --tw-enter-blur: 0 !important;
+      --tw-exit-translate-x: 0 !important;
+      --tw-exit-translate-y: 0 !important;
+      --tw-exit-scale: 1 !important;
+      --tw-exit-rotate: 0 !important;
+      --tw-exit-blur: 0 !important;
     }
   }
 }
@@ -812,6 +901,123 @@
   }
 }
 
+/* Run sequence: a stage's connector fills downward when it finishes, a check
+   draws itself when a stage finishes while the screen is open, and the working
+   stage sweeps once as it starts (the header status keeps the view's pulse). */
+[data-run-sequence-connector] > [data-fill] {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklab, var(--success) 60%, transparent);
+  transform: scaleY(0);
+  transform-origin: top;
+  transition: transform 500ms var(--ease-enter) 150ms;
+}
+
+[data-run-sequence-connector][data-filled] > [data-fill] {
+  transform: none;
+}
+
+/* Short landscape lays the stages out in a row, so connectors fill rightward. */
+@media (max-height: 500px) and (min-width: 640px) {
+  [data-run-sequence-connector] > [data-fill] {
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+}
+
+@keyframes intar-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.draw-check path {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: intar-draw 300ms var(--ease-enter) 80ms forwards;
+}
+
+@keyframes intar-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+.stage-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  border-radius: inherit;
+  background: var(--primary);
+  animation: intar-sweep 2.2s var(--ease-standard) 300ms both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-run-sequence-connector] > [data-fill] {
+    transition: none;
+  }
+
+  .stage-sweep::after {
+    display: none;
+  }
+}
+
+/* Course outline: the raised card glides to the current lecture, and a
+   quieter highlight follows the pointer over the other rows. Both are
+   absolutely placed, so their height may animate without reflowing a row. */
+:is([data-outline-pill], [data-outline-ghost]) {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  border-radius: 0.625rem;
+  pointer-events: none;
+}
+
+[data-outline-pill] {
+  background: var(--card);
+  box-shadow:
+    inset 0 0 0 1px var(--border),
+    var(--shadow-control);
+}
+
+[data-ready] > [data-outline-pill] {
+  transition:
+    transform 300ms var(--ease-enter),
+    height 300ms var(--ease-enter);
+}
+
+[data-outline-ghost] {
+  background: var(--muted);
+  opacity: 0;
+  transition: opacity 150ms var(--ease-standard);
+}
+
+.dark [data-outline-ghost] {
+  background: color-mix(in oklab, var(--accent) 60%, transparent);
+}
+
+[data-outline-ghost][data-on] {
+  opacity: 1;
+}
+
+[data-outline-ghost][data-glide] {
+  transition:
+    opacity 150ms var(--ease-standard),
+    transform 200ms var(--ease-enter),
+    height 200ms var(--ease-enter);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :is([data-outline-pill], [data-outline-ghost]) {
+    transition-property: opacity !important;
+  }
+}
+
 /* Icon verbs: the bin lid lifts on its hinge while its control is hovered,
    focused or open. Movement only; reduced motion leaves the lid shut. */
 :root {
@@ -842,6 +1048,12 @@
   --move-digit: 0.8em;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --move-digit: 0em;
+  }
+}
+
 @keyframes intar-digit-in {
   from {
     opacity: 0;
@@ -868,7 +1080,8 @@
   );
 }
 
-.rolling-digit > * {
+.rolling-digit > *,
+.rolling-digit::before {
   grid-area: 1 / 1;
 }
 
@@ -877,7 +1090,11 @@
     both;
 }
 
-.rolling-digit > [data-out] {
+/* The outgoing digit is generated content, so it never reaches textContent,
+   and its empty alt text keeps it out of the accessibility tree. */
+.rolling-digit::before {
+  content: attr(data-prev);
+  content: attr(data-prev) / "";
   animation: intar-digit-out 300ms var(--ease-enter) calc(var(--k, 0) * 40ms)
     both;
 }

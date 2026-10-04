@@ -437,7 +437,7 @@ function CheckStatusIcon({
       <CheckCircle2
         className={cn(
           "size-4 text-success",
-          justVerified && "motion-safe:animate-pop",
+          justVerified && "animate-pop",
         )}
         aria-hidden="true"
       />
@@ -621,7 +621,7 @@ function Checks(props: {
                 data-check-status={check.status}
                 className={cn(
                   "grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-3 rounded-lg px-2 py-2",
-                  justVerified.has(check.key) && "motion-safe:animate-verified",
+                  justVerified.has(check.key) && "animate-verified",
                 )}
               >
                 <span className="mt-1">
@@ -749,7 +749,7 @@ function HintLadder(props: {
             return (
               <li
                 key={hint.key}
-                className="space-y-2 px-3 py-3 motion-safe:animate-rise"
+                className="space-y-2 px-3 py-3 animate-rise"
               >
                 <p className="flex items-center gap-2 text-sm font-medium">
                   <Lightbulb className="size-3.5 shrink-0 text-warning" aria-hidden="true" />
