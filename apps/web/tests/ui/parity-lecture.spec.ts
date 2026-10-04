@@ -9,8 +9,10 @@ test.describe("lecture parity", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await ui.open({ ...routeCase("lecture"), theme: "light" });
     await expect(page.getByText(/ · Lecture \d+ of \d+$/)).toBeVisible();
-    const title = page.locator("article p.text-content-title");
+    // The reading page's title is its one h1, in the page, not only the bar.
+    const title = page.getByRole("article").getByRole("heading", { level: 1 });
     await expect(title).toBeVisible();
+    await expect(title).toHaveClass(/text-content-title/);
   });
 
   test("the outline column is an 18rem track beside the lecture", async ({

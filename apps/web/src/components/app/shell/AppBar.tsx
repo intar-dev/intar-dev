@@ -240,7 +240,7 @@ export function AppBar() {
                 ancestor.to ? (
                   <li
                     key={ancestor.to}
-                    className={`min-w-0 shrink items-center gap-1.5 ${
+                    className={`min-w-0 shrink-[2] items-center gap-1.5 ${
                       reading ? "flex" : "hidden sm:flex"
                     }`}
                   >
@@ -261,8 +261,12 @@ export function AppBar() {
                 ) : null,
               )
             : null}
+          {/* Ancestors shrink twice as fast as the title, but the title's own
+              factor stays at 1: factors summing below 1 shrink only part of
+              the overflow, which lets a long title push the page sideways when
+              the ancestors are hidden. */}
           <li
-            className="flex min-w-0 shrink-[0.5] items-center"
+            className="flex min-w-0 shrink items-center"
             data-app-bar-title
           >
             {heading}

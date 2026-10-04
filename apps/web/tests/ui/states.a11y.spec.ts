@@ -248,6 +248,22 @@ async function expectDesktopCompactRunControls(page: Page) {
   );
 }
 
+// Reduced motion gives every property change a 0.01ms transition, so a root
+// font-size set from a test still reads as the old size until a later frame.
+// Wait it out: a rem-based layout measured half-way pairs the new panel width
+// with the old rem.
+async function setRootTextScale200(page: Page) {
+  await page.evaluate(async () => {
+    const root = document.documentElement;
+    const rem = () => Number.parseFloat(getComputedStyle(root).fontSize);
+    const base = rem();
+    root.style.fontSize = "200%";
+    while (rem() < base * 2) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  });
+}
+
 async function expectPersistentDesktopLearningPanel(page: Page) {
   const panel = runLearningPanel(page);
   const workArea = page.locator("[data-run-work-area]");
@@ -1827,6 +1843,11 @@ test.describe("long check rows", () => {
     );
     const scroller = checks.getByRole("list");
     const terminal = page.locator(".xterm");
+    // The strip above the terminal shows only while the connection needs
+    // attention, so measure its box once it has collapsed to the live region.
+    await expect(
+      page.getByRole("status").filter({ hasText: /Terminal status:/i }),
+    ).toHaveText(/Terminal status:\s*connected/i);
     const [terminalBeforeScroll, pageScrollBefore] = await Promise.all([
       terminal.boundingBox(),
       page.evaluate(() => window.scrollY),
@@ -1896,9 +1917,7 @@ test.describe("run guidance at 200% text", () => {
       theme: "dark",
       runState: "booting",
     });
-    await page.evaluate(() => {
-      document.documentElement.style.fontSize = "200%";
-    });
+    await setRootTextScale200(page);
 
     await expect(
       page.getByRole("region", { name: "Workspace startup progress" }),
@@ -1930,9 +1949,7 @@ test.describe("run guidance at 200% text", () => {
       theme: "dark",
       runState: "running",
     });
-    await page.evaluate(() => {
-      document.documentElement.style.fontSize = "200%";
-    });
+    await setRootTextScale200(page);
 
     const panel = runLearningPanel(page);
     await expectPersistentDesktopLearningPanel(page);
@@ -1958,9 +1975,7 @@ test.describe("run guidance at 200% text", () => {
       theme: "dark",
       runState: "solved",
     });
-    await page.evaluate(() => {
-      document.documentElement.style.fontSize = "200%";
-    });
+    await setRootTextScale200(page);
 
     const finish = page.getByRole("button", { name: "Finish and save" });
     await expect(page.locator("[data-run-completion-bar]")).toBeVisible();

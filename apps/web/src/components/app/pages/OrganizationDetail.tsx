@@ -220,8 +220,8 @@ export function OrganizationDetail() {
         onValueChange={(value) => setTab(value as OrganizationDetailTab)}
         className="min-w-0 gap-4"
       >
-        <div className="min-w-0 max-w-full overflow-x-auto border-b px-1 pt-1">
-          <TabsList variant="line" className="min-w-max pb-1">
+        <div className="border-b">
+          <TabsList variant="line">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="people">Members</TabsTrigger>
             <TabsTrigger value="assignments">Assignments</TabsTrigger>
