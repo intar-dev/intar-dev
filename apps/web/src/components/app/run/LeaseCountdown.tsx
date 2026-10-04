@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Clock3 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Hint } from "@/components/app/patterns/Hint";
 import { formatCountdown, leaseInfo, type LeaseState } from "@/lib/run-lease";
 
 const TONE: Record<LeaseState, string> = {
@@ -31,23 +32,29 @@ export function LeaseCountdown({
   const countdown = formatCountdown(info.remainingMs);
 
   return (
-    <span
-      aria-label={
-        info.state === "expired"
-          ? "Sandbox lease expired"
-          : info.state === "ok"
-            ? `Time remaining: ${countdown}`
-            : // Colour alone never carries the state.
-              `Sandbox ending soon, ${countdown} left`
+    <Hint
+      essential
+      label="Time remaining before this sandbox is torn down"
+      side="bottom"
+      render={
+        <span
+          aria-label={
+            info.state === "expired"
+              ? "Sandbox lease expired"
+              : info.state === "ok"
+                ? `Time remaining: ${countdown}`
+                : // Colour alone never carries the state.
+                  `Sandbox ending soon, ${countdown} left`
+          }
+          className={cn(
+            "inline-flex items-center gap-1.5 whitespace-nowrap text-xs tabular-nums",
+            TONE[info.state],
+            className,
+          )}
+          data-run-lease-countdown
+          role="timer"
+        />
       }
-      className={cn(
-        "inline-flex items-center gap-1.5 whitespace-nowrap text-xs tabular-nums",
-        TONE[info.state],
-        className,
-      )}
-      data-run-lease-countdown
-      role="timer"
-      title="Time remaining before this sandbox is torn down"
     >
       <Clock3 className="size-3.5" aria-hidden="true" />
       {info.state === "expired" ? (
@@ -58,7 +65,7 @@ export function LeaseCountdown({
           <span className="hidden sm:inline"> left</span>
         </span>
       )}
-    </span>
+    </Hint>
   );
 }
 

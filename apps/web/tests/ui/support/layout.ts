@@ -143,3 +143,19 @@ export async function coarsePointerTargetViolations(page: Page) {
       .filter((target) => target.width < 44 || target.height < 44);
   });
 }
+
+// Reduced motion gives every property change a 0.01ms transition, so a root
+// font-size set from a test still reads as the old size until a later frame.
+// Wait it out: a rem-based layout measured half-way pairs the new panel width
+// with the old rem.
+export async function setRootTextScale200(page: Page) {
+  await page.evaluate(async () => {
+    const root = document.documentElement;
+    const rem = () => Number.parseFloat(getComputedStyle(root).fontSize);
+    const base = rem();
+    root.style.fontSize = "200%";
+    while (rem() < base * 2) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  });
+}

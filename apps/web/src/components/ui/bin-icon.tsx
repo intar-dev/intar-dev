@@ -23,3 +23,5 @@ export function BinIcon({ className }: { className?: string }) {
     </svg>
   );
 }
+
+BinIcon.displayName = "BinIcon";

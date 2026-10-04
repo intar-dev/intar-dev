@@ -1,3 +1,4 @@
+import { describeApiError } from "@/components/app/lib/api-errors";
 import { AuthFlowError } from "@/lib/auth-client";
 import {
   OIDC_EMAIL_MISSING_MESSAGE,
@@ -43,10 +44,26 @@ export function organizationSignInErrorMessage(
   return fallback ?? "Organization sign-in failed. Try again.";
 }
 
+/** Codes that say the slug itself is wrong, so the message belongs at its field. */
+const SLUG_CODES = new Set(["invalid_organization_slug", "organization_sso_unavailable"]);
+
+export function organizationSignInSlugRefused(error: unknown): boolean {
+  return (
+    error instanceof AuthFlowError &&
+    error.code !== null &&
+    SLUG_CODES.has(error.code)
+  );
+}
+
 export function organizationSignInStartErrorMessage(error: unknown): string {
-  return organizationSignInErrorMessage(
-    error instanceof AuthFlowError ? error.code : null,
-    error instanceof Error ? error.message : undefined,
+  const code = error instanceof AuthFlowError ? error.code : null;
+  if (code && Object.hasOwn(ORGANIZATION_SIGN_IN_MESSAGES, code)) {
+    return ORGANIZATION_SIGN_IN_MESSAGES[code]!;
+  }
+  return (
+    describeApiError(error, {
+      fallback: "Organization sign-in failed. Try again.",
+    })?.message ?? "Organization sign-in failed. Try again."
   );
 }
 

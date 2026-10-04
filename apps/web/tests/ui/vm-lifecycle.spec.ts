@@ -101,9 +101,7 @@ test("the full-screen boot screen keeps the mission visible and does not steal f
     panelContent.getByRole("region", { name: "Checks" }),
   ).toBeVisible();
   await expect(
-    panelContent.getByText("Lecture theory: Repair a broken nginx service", {
-      exact: true,
-    }),
+    panelContent.getByRole("heading", { name: "Lecture", exact: true }),
   ).toBeVisible();
   await expect(panelContent.getByText("Work order", { exact: true })).toBeVisible();
   await expect(
@@ -173,9 +171,7 @@ test("the permanent desktop guidance pane keeps progressive hints and solution h
   const panelContent = panel.locator("[data-run-learning-panel-content]");
   await expect(panel).toBeVisible();
   await expect(
-    panelContent.getByText("Lecture theory: Repair a broken nginx service", {
-      exact: true,
-    }),
+    panelContent.getByRole("heading", { name: "Lecture", exact: true }),
   ).toBeVisible();
   await expect(panelContent.getByText("Checks", { exact: true })).toBeVisible();
   await expect(panelContent.getByText("0/2 verified", { exact: true })).toBeVisible();
@@ -284,9 +280,7 @@ test("small screens keep work open and show mission and hints in a bottom sheet"
     ),
   ).toHaveLength(terminalRequestsBefore);
   await expect(
-    sheet.getByText("Lecture theory: Repair a broken nginx service", {
-      exact: true,
-    }),
+    sheet.getByRole("heading", { name: "Lecture", exact: true }),
   ).toBeVisible();
   await expect(sheet.getByText("Checks", { exact: true })).toBeVisible();
   await expect(sheet.getByText("Hints", { exact: true })).toBeVisible();

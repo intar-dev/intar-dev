@@ -1,4 +1,4 @@
-export const SUPPORT_PAGE_SIZE = 20;
+export const SUPPORT_PAGE_SIZE = 12;
 export const SUPPORT_LIMITS = {
   title: 160,
   body: 20_000,

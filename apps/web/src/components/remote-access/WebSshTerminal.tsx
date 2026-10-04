@@ -16,12 +16,12 @@ import { cn } from "@/lib/utils";
 import { TerminalKeyRow } from "./TerminalKeyRow";
 import { applyCtrl, arrowSequence, type CtrlState } from "./terminal-keys";
 import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import {
   REPLAY_TERMINAL_COLS,
   REPLAY_TERMINAL_FALLBACK_FONT_FAMILY,
@@ -44,7 +44,7 @@ interface WebSshTerminalProps {
     url: string;
     body: Record<string, unknown>;
   };
-  variant?: "modal" | "embedded";
+  variant?: "sheet" | "embedded";
   title?: string;
   onClose?: () => void;
   showCloseButton?: boolean;
@@ -153,7 +153,7 @@ function isTransientConnectError(message: string): boolean {
 export function WebSshTerminal({
   vmName,
   sessionRequest,
-  variant = "modal",
+  variant = "sheet",
   title: titleOverride,
   onClose,
   showCloseButton = true,
@@ -192,7 +192,7 @@ export function WebSshTerminal({
 
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [modalOpen, setModalOpen] = useState(true);
+  const [sheetOpen, setSheetOpen] = useState(true);
   // Ctrl on the key row is read by the input path below, which is why it is
   // a ref as well as state: a latched Ctrl must catch the very next keystroke.
   const [ctrl, setCtrl] = useState<CtrlState>("off");
@@ -711,26 +711,30 @@ export function WebSshTerminal({
     );
   }
 
+  // A tool, not a decision: it opens as a side sheet beside the page (the
+  // full width on a phone), never as a centred dialog.
   return (
-    <Dialog
-      open={modalOpen}
+    <Sheet
+      open={sheetOpen}
       onOpenChange={(open) => {
-        setModalOpen(open);
+        setSheetOpen(open);
         if (!open) closeTerminal();
       }}
     >
-      <DialogContent
+      <SheetContent
+        side="right"
         showCloseButton={false}
         data-terminal-status={status}
-        className="flex h-[min(52rem,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-7xl"
+        data-web-ssh-sheet
+        className="gap-0 overflow-hidden data-[side=right]:w-full data-[side=right]:sm:max-w-[min(72rem,calc(100%-3rem))] sm:data-[side=right]:rounded-l-2xl"
       >
         <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             {/* A title wraps; it is never cut off. */}
-            <DialogTitle className="text-card-title text-balance [overflow-wrap:anywhere]">
+            <SheetTitle className="text-card-title text-balance [overflow-wrap:anywhere]">
               {title}
-            </DialogTitle>
-            <DialogDescription
+            </SheetTitle>
+            <SheetDescription
               role="status"
               aria-live="polite"
               aria-atomic="true"
@@ -741,7 +745,7 @@ export function WebSshTerminal({
               }
             >
               Terminal status: {STATUS_WORDS[status]}
-            </DialogDescription>
+            </SheetDescription>
           </div>
           <div className="flex items-center gap-2">
             {status === "connected" ? (
@@ -756,9 +760,9 @@ export function WebSshTerminal({
               </Button>
             ) : null}
             {showCloseButton ? (
-              <DialogClose render={<Button size="sm" variant="outline" />}>
+              <SheetClose render={<Button size="sm" variant="outline" />}>
                 Close
-              </DialogClose>
+              </SheetClose>
             ) : null}
           </div>
         </div>
@@ -780,8 +784,8 @@ export function WebSshTerminal({
             }}
           />
         ) : null}
-      </DialogContent>
-    </Dialog>
+      </SheetContent>
+    </Sheet>
   );
 }
 

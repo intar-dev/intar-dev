@@ -16,6 +16,7 @@ export interface OrganizationDetailResponse {
       name: string;
       email: string;
       githubUsername: string | null;
+      image: string | null;
       role: OrganizationRole;
       joinedAt: number;
     }>;

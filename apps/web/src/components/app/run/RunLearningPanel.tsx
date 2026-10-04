@@ -464,7 +464,6 @@ export function RunLearningPanelContent(props: RunLearningPanelContentProps) {
         headingId={theoryHeadingId}
         briefingMarkdown={props.briefingMarkdown}
         lectureMarkdown={props.lectureMarkdown}
-        lectureTitle={props.lectureTitle}
       />
 
       {!props.checksPending ? (
@@ -819,16 +818,13 @@ function LectureTheory(props: {
   headingId: string;
   briefingMarkdown: string;
   lectureMarkdown?: string | null | undefined;
-  lectureTitle?: string | null | undefined;
 }) {
   const theory = (props.lectureMarkdown ?? props.briefingMarkdown).trim();
 
   return (
     <section aria-labelledby={props.headingId}>
       <h2 id={props.headingId} className="text-card-title">
-        {props.lectureTitle
-          ? `Lecture theory: ${props.lectureTitle}`
-          : "Lecture theory"}
+        Lecture
       </h2>
       {theory ? (
         <Markdown

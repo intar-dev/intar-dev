@@ -300,7 +300,7 @@ function SidebarTrigger({
             data-sidebar="trigger"
             data-slot="sidebar-trigger"
             variant="ghost"
-            size="icon-sm"
+            size="icon"
             className={className}
             aria-label={name}
             aria-expanded={isMobile ? openMobile : open}

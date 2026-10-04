@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import {
   createFleetSnapshotPoller,
   FLEET_SNAPSHOT_POLL_INTERVAL_MS,
@@ -20,13 +22,20 @@ interface SnapshotRequest {
 const FLEET_SNAPSHOT_PATH =
   "/api/admin/fleet-snapshot?includeArchiveSummaries=0";
 const EMPTY_HOST_RECORDS: HostRecord[] = [];
+// The last snapshot lives in the query cache, so a revisit shows its rows at
+// once and the poll refreshes them quietly. Signing out clears the cache.
+const FLEET_SNAPSHOT_CACHE_KEY = ["admin", "fleet-snapshot"] as const;
 
 // Shared host/live-run state for the admin Overview and Hosts pages. Retained
 // run history has its own non-polling global admin API.
 export function useHostFleet() {
-  const [snapshot, setSnapshot] = useState<FleetSnapshotResponse | null>(null);
+  const queryClient = useQueryClient();
+  const [snapshot, setSnapshot] = useState<FleetSnapshotResponse | null>(() =>
+    queryClient.getQueryData<FleetSnapshotResponse>(FLEET_SNAPSHOT_CACHE_KEY) ??
+    null,
+  );
   const [error, setError] = useState<Error | null>(null);
-  const [isPending, setIsPending] = useState(true);
+  const [isPending, setIsPending] = useState(snapshot === null);
   const mountedRef = useRef(false);
   const snapshotEpochRef = useRef(0);
   const snapshotRequestRef = useRef<SnapshotRequest | null>(null);
@@ -57,6 +66,7 @@ export function useHostFleet() {
             requestEpoch === snapshotEpochRef.current
           ) {
             setSnapshot(next);
+            queryClient.setQueryData(FLEET_SNAPSHOT_CACHE_KEY, next);
             setError(null);
             setIsPending(false);
           }
@@ -83,7 +93,7 @@ export function useHostFleet() {
       snapshotRequestRef.current = { controller, promise };
       return promise;
     },
-    [],
+    [queryClient],
   );
 
   useEffect(() => {
@@ -131,25 +141,29 @@ export function useHostFleet() {
     async (hostId: string) => {
       const next = await loadFreshSnapshot();
       if (!next.hostRecords.some((record) => record.host.id === hostId)) {
-        throw new Error("host not found");
+        throw new Error("That host no longer exists.");
       }
     },
     [loadFreshSnapshot],
   );
 
-  const forgetHost = useCallback((hostId: string) => {
-    snapshotEpochRef.current += 1;
-    setSnapshot((current) =>
-      current
-        ? {
-            ...current,
-            hostRecords: current.hostRecords.filter(
-              (record) => record.host.id !== hostId,
-            ),
-          }
-        : current,
-    );
-  }, []);
+  const forgetHost = useCallback(
+    (hostId: string) => {
+      snapshotEpochRef.current += 1;
+      const without = (current: FleetSnapshotResponse) => ({
+        ...current,
+        hostRecords: current.hostRecords.filter(
+          (record) => record.host.id !== hostId,
+        ),
+      });
+      setSnapshot((current) => current && without(current));
+      queryClient.setQueryData<FleetSnapshotResponse>(
+        FLEET_SNAPSHOT_CACHE_KEY,
+        (current) => current && without(current),
+      );
+    },
+    [queryClient],
+  );
 
   const hostRecords = snapshot?.hostRecords ?? EMPTY_HOST_RECORDS;
   const hosts = useMemo(
@@ -177,7 +191,11 @@ async function responseError(response: Response, fallback: string) {
   const body = (await response.json().catch(() => null)) as {
     error?: string;
   } | null;
-  return new Error(body?.error ?? `${fallback} (${response.status})`);
+  return HttpResponseError.fromBody(
+    response.status,
+    body,
+    `${fallback} (${response.status})`,
+  );
 }
 
 function forwardAbort(signal: AbortSignal | undefined, controller: AbortController) {

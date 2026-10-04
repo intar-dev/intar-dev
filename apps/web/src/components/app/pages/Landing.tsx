@@ -211,7 +211,7 @@ function SponsorMarks() {
   return (
     <aside
       aria-labelledby="landing-sponsors-heading"
-      className="mx-auto flex w-full max-w-7xl flex-col items-center gap-5 px-[var(--page-inset)] py-24 sm:py-32"
+      className="mx-auto flex w-full max-w-7xl flex-col items-center gap-5 px-[var(--page-inset)] py-12 sm:py-16"
     >
       <p id="landing-sponsors-heading" className="text-label">
         Infrastructure by

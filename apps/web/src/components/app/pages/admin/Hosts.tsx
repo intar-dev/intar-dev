@@ -7,7 +7,10 @@ import {
   Server,
   Trash2,
 } from "lucide-react";
+import { apiErrorMessage } from "@/components/app/lib/api-errors";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
+import { Hint } from "@/components/app/patterns/Hint";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
@@ -51,7 +54,11 @@ import type { AgentHostApi } from "@/components/app/admin/hosts/types";
 // action instead of ambient panels. Scenario runs launch from the scenario
 // pages; hosts are infrastructure only.
 export function AdminHosts() {
-  const [vmError, setVmError] = useState<string | null>(null);
+  // A failed refresh reports inside its host's row.
+  const [refreshError, setRefreshError] = useState<{
+    hostId: string;
+    message: string;
+  } | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<AgentHostApi | null>(null);
   const [removeConfirm, setRemoveConfirm] = useState("");
@@ -78,7 +85,11 @@ export function AdminHosts() {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(body?.error ?? `Remove failed (${response.status})`);
+        throw HttpResponseError.fromBody(
+          response.status,
+          body,
+          "The host couldn't be removed. Try again.",
+        );
       }
       return (await response.json()) as { ok: boolean; hostId: string };
     },
@@ -94,14 +105,15 @@ export function AdminHosts() {
   const handleRefreshHost = (hostId: string) => {
     const key = `${hostId}:refresh`;
     setBusyKey(key);
-    setVmError(null);
+    setRefreshError(null);
     void refreshHost(hostId)
       .catch((error) => {
-        setVmError(
-          error instanceof Error
-            ? error.message
-            : "Try refreshing again.",
-        );
+        setRefreshError({
+          hostId,
+          message:
+            apiErrorMessage(error, "Try refreshing again.") ??
+            "Try refreshing again.",
+        });
       })
       .finally(() => {
         setBusyKey((current) => (current === key ? null : current));
@@ -137,22 +149,6 @@ export function AdminHosts() {
             </AlertDescription>
           </Alert>
         ) : null}
-        {removeHost.error ? (
-          <Alert variant="destructive" just>
-            <AlertTitle>Host removal failed</AlertTitle>
-            <AlertDescription>
-              {removeHost.error instanceof Error
-                ? removeHost.error.message
-                : "Remove failed"}
-            </AlertDescription>
-          </Alert>
-        ) : null}
-        {vmError ? (
-          <Alert variant="destructive" just>
-            <AlertTitle>Host action failed</AlertTitle>
-            <AlertDescription>{vmError}</AlertDescription>
-          </Alert>
-        ) : null}
       </div>
 
       <Collapsible open={showOnboarding}>
@@ -175,6 +171,20 @@ export function AdminHosts() {
                 const isRemovingThisHost =
                   removeHost.isPending && removeHost.variables === host.id;
                 const isRefreshing = busyKey === `${host.id}:refresh`;
+                // The removal dialog shows its own failure while it is open.
+                const actionProblem =
+                  removeHost.error &&
+                  removeTarget === null &&
+                  removeHost.variables === host.id
+                    ? `Could not remove ${host.name}: ${
+                        apiErrorMessage(
+                          removeHost.error,
+                          "The host couldn't be removed. Try again.",
+                        ) ?? "The host couldn't be removed. Try again."
+                      }`
+                    : refreshError?.hostId === host.id
+                      ? `Could not refresh ${host.name}: ${refreshError.message}`
+                      : null;
                 const memorySummary = capacity
                   ? `${capacity.memory_available_mib} / ${capacity.memory_total_mib} MiB`
                   : "—";
@@ -247,7 +257,12 @@ export function AdminHosts() {
                             <DropdownMenuItem
                               variant="destructive"
                               disabled={isRemovingThisHost}
-                              onClick={() => setRemoveTarget(host)}
+                              onClick={() => {
+                                // Each opening starts clean: a failure of an
+                                // earlier removal is not this one's.
+                                if (!removeHost.isPending) removeHost.reset();
+                                setRemoveTarget(host);
+                              }}
                             >
                               <Trash2 />
                               Remove host
@@ -314,6 +329,9 @@ export function AdminHosts() {
                         }
                       />
                     </dl>
+                    {actionProblem ? (
+                      <InlineFeedback tone="error">{actionProblem}</InlineFeedback>
+                    ) : null}
                   </article>
                 );
               })}
@@ -381,9 +399,10 @@ export function AdminHosts() {
           </div>
           {removeHost.error ? (
             <InlineFeedback tone="error">
-              {removeHost.error instanceof Error
-                ? removeHost.error.message
-                : "Host removal failed"}
+              {apiErrorMessage(
+                removeHost.error,
+                "The host couldn't be removed. Try again.",
+              )}
             </InlineFeedback>
           ) : null}
           <DialogFooter>
@@ -443,13 +462,13 @@ export function HostHeartbeatMetric({
       label="Heartbeat"
       value={
         timestamp && absoluteTimestamp ? (
-          <time
-            dateTime={new Date(timestamp).toISOString()}
-            title={accessibleTimestamp}
-            aria-label={accessibleTimestamp}
+          <Hint
+            essential
+            label={accessibleTimestamp}
+            render={<time dateTime={new Date(timestamp).toISOString()} />}
           >
             {formatRelativeTime(timestamp)}
-          </time>
+          </Hint>
         ) : (
           "—"
         )

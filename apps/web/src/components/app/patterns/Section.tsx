@@ -40,7 +40,7 @@ export function Section({
               </h2>
             ) : null}
             {description ? (
-              <p className="text-metadata">{description}</p>
+              <p className="text-metadata text-muted-foreground">{description}</p>
             ) : null}
           </div>
           {actions ? (

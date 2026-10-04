@@ -8,6 +8,8 @@ import {
   HardDriveDownload,
   Search,
 } from "lucide-react";
+import { apiErrorMessage } from "@/components/app/lib/api-errors";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
@@ -80,9 +82,10 @@ export function ScenarioRegistry() {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(
-          body?.error ??
-            `Failed to ${params.enabled ? "enable" : "disable"} scenario`,
+        throw HttpResponseError.fromBody(
+          response.status,
+          body,
+          `Failed to ${params.enabled ? "enable" : "disable"} scenario`,
         );
       }
     },
@@ -198,13 +201,6 @@ export function ScenarioRegistry() {
             description="Each scenario is keyed by its stable scenario ID; new uploads replace the stored scenario for that ID."
             bodyClassName="space-y-4"
           >
-          {setEnabled.error ? (
-            <InlineFeedback tone="error">
-              {setEnabled.error instanceof Error
-                ? setEnabled.error.message
-                : "Could not update the scenario."}
-            </InlineFeedback>
-          ) : null}
           <FilterBar
             search={search}
             onSearchChange={setSearch}
@@ -310,6 +306,18 @@ export function ScenarioRegistry() {
                             scenario.scenarioId
                         }
                         disabled={setEnabled.isPending}
+                        error={
+                          setEnabled.error &&
+                          setEnabled.variables?.scenarioId ===
+                            scenario.scenarioId
+                            ? `Could not ${setEnabled.variables.enabled ? "enable" : "disable"} ${scenario.title}: ${
+                                apiErrorMessage(
+                                  setEnabled.error,
+                                  "Try again.",
+                                ) ?? "Try again."
+                              }`
+                            : null
+                        }
                         onToggle={() =>
                           setEnabled.mutate({
                             scenarioId: scenario.scenarioId,
@@ -336,6 +344,7 @@ function ScenarioRegistryRow({
   buildUnavailable,
   pending,
   disabled,
+  error,
   onToggle,
 }: {
   scenario: AdminScenarioSummary;
@@ -344,6 +353,8 @@ function ScenarioRegistryRow({
   buildUnavailable: boolean;
   pending: boolean;
   disabled: boolean;
+  /** The row's own failed toggle, named after the scenario. */
+  error: string | null;
   onToggle: () => void;
 }) {
   const buildValue = buildLoading
@@ -457,6 +468,11 @@ function ScenarioRegistryRow({
           <ArrowRight />
         </Button>
       </div>
+      {error ? (
+        <InlineFeedback tone="error" className="lg:col-span-2">
+          {error}
+        </InlineFeedback>
+      ) : null}
     </div>
   );
 }

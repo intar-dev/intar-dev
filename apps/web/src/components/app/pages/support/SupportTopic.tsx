@@ -25,6 +25,7 @@ import { Markdown } from "../../Markdown";
 import { PageShell } from "../../patterns/PageShell";
 import { AsyncLabel } from "../../patterns/AsyncLabel";
 import { CollectionPagination } from "../../patterns/CollectionPagination";
+import { ContentHeader } from "../../patterns/ContentHeader";
 import { MetaLine } from "../../patterns/MetaLine";
 import { RollingNumber } from "../../patterns/RollingNumber";
 import { ListSkeleton } from "../../patterns/Skeletons";
@@ -102,7 +103,9 @@ function TopicDetail({ topicId }: { topicId: string }) {
       params: { topicId },
       search: { page: next },
     });
-  usePageChrome({ title: "Topic" });
+  // Once the topic is on screen its title is the content's h1 and the bar shows
+  // the forum; loading and error states keep the bar's "Topic" h1.
+  usePageChrome({ title: topic?.title ?? "Topic", reading: Boolean(topic) });
   if (detail.isPending)
     return (
       <PageShell>
@@ -136,22 +139,29 @@ function TopicDetail({ topicId }: { topicId: string }) {
   return (
     <PageShell>
       <div className="w-full space-y-6">
-        <article className="min-w-0 space-y-5" aria-label="Topic">
-          <h2 className="text-feature-title text-balance wrap-anywhere">
-            {topic.title}
-          </h2>
-          <MetaLine
-            items={[
-              <TopicStatus key="status" status={topic.status} />,
-              SUPPORT_TYPES[topic.type],
-              topic.author.name,
-              <PostTime key="created" at={topic.createdAt} />,
-              topic.updatedAt > topic.createdAt ? (
-                <span key="edited">
-                  Edited <PostTime at={topic.updatedAt} />
-                </span>
-              ) : null,
-            ]}
+        <article
+          className="min-w-0 space-y-5"
+          aria-labelledby="topic-title"
+        >
+          <ContentHeader
+            titleId="topic-title"
+            title={topic.title}
+            reading
+            meta={
+              <MetaLine
+                items={[
+                  <TopicStatus key="status" status={topic.status} />,
+                  SUPPORT_TYPES[topic.type],
+                  topic.author.name,
+                  <PostTime key="created" at={topic.createdAt} />,
+                  topic.updatedAt > topic.createdAt ? (
+                    <span key="edited">
+                      Edited <PostTime at={topic.updatedAt} />
+                    </span>
+                  ) : null,
+                ]}
+              />
+            }
           />
           {topic.status === "solved" && topic.solvedAt !== null && (
             <p
@@ -226,7 +236,10 @@ function TopicDetail({ topicId }: { topicId: string }) {
               )}
             </div>
           )}
-          <PostError error={resolve.error} />
+          <PostError
+            error={resolve.error}
+            fallback="Couldn't update the topic. Try again."
+          />
         </article>
         <section
           className="space-y-5 border-t pt-6"

@@ -8,7 +8,7 @@ type DeferredModule = "terminal" | "nativeSsh" | "artifactViewer";
 
 const DEFERRED_MODULE_PATHS: Record<DeferredModule, string> = {
   terminal: "/src/components/remote-access/WebSshTerminal.tsx",
-  nativeSsh: "/src/components/remote-access/NativeSshDialogButton.tsx",
+  nativeSsh: "/src/components/remote-access/NativeSshSheet.tsx",
   artifactViewer: "/src/components/app/RunArtifactViewer.tsx",
 };
 

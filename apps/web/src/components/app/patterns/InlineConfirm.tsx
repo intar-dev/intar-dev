@@ -117,7 +117,7 @@ export function InlineConfirm({
         disabled={disabled}
         inert={open || undefined}
         className={cn(
-          "text-muted-foreground transition-[opacity,color,background-color] duration-(--duration-moderate) ease-enter hover:text-destructive",
+          "text-foreground transition-[opacity,color,background-color] duration-(--duration-moderate) ease-enter hover:text-destructive",
           open && "pointer-events-none opacity-0 duration-(--duration-fast) ease-exit",
         )}
         onClick={() => setAsking(true)}

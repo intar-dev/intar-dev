@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Hammer, Server } from "lucide-react";
+import { apiErrorMessage } from "@/components/app/lib/api-errors";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import { AsyncLabel } from "@/components/app/patterns/AsyncLabel";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -66,8 +68,10 @@ export function HostOnboardingPanel({
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(
-          body?.error ?? `Onboarding failed (${response.status})`,
+        throw HttpResponseError.fromBody(
+          response.status,
+          body,
+          "Onboarding failed. Try again.",
         );
       }
 
@@ -180,9 +184,7 @@ export function HostOnboardingPanel({
           <Alert variant="destructive" just>
             <AlertTitle>Onboarding failed</AlertTitle>
             <AlertDescription>
-              {onboard.error instanceof Error
-                ? onboard.error.message
-                : "Onboarding failed"}
+              {apiErrorMessage(onboard.error, "Onboarding failed. Try again.")}
             </AlertDescription>
           </Alert>
         ) : null}

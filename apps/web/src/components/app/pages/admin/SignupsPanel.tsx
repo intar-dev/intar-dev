@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { describeApiError } from "../../lib/api-errors";
 import { Field } from "../../patterns/Field";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
 import { RollingNumber } from "../../patterns/RollingNumber";
@@ -70,6 +71,11 @@ export function SignupsPanel() {
   }
 
   const current = status.data;
+  // A refused limit (a stale version, a number out of range) is the field's.
+  const saveFailure = describeApiError<"limit">(save.error, {
+    fallback: "Couldn't save the sign-up limit. Try again.",
+    defaultField: "limit",
+  });
   return (
     <Section
       density="compact"
@@ -101,13 +107,14 @@ export function SignupsPanel() {
         key={current.version}
         status={current}
         pending={save.isPending}
+        serverError={saveFailure?.field === "limit" ? saveFailure.message : null}
         onSave={(limit) =>
           save.mutate({ limit, expectedVersion: current.version })
         }
       />
 
-      {save.error ? (
-        <InlineFeedback tone="error">{save.error.message}</InlineFeedback>
+      {saveFailure && saveFailure.field === null ? (
+        <InlineFeedback tone="error">{saveFailure.message}</InlineFeedback>
       ) : save.isSuccess ? (
         <InlineFeedback tone="success">Sign-up limit saved.</InlineFeedback>
       ) : null}
@@ -125,10 +132,13 @@ export function SignupsPanel() {
 function SignupLimitForm({
   status,
   pending,
+  serverError,
   onSave,
 }: {
   status: AdminSignupStatus;
   pending: boolean;
+  /** The server's refusal of the last save, shown at the field. */
+  serverError: string | null;
   onSave: (limit: number) => void;
 }) {
   const [draft, setDraft] = useState(String(status.limit));
@@ -151,7 +161,7 @@ function SignupLimitForm({
       <Field
         label="Sign-up limit"
         hint="Set 0 to close sign-ups. Members can still sign in, and a lower limit never removes anyone."
-        error={error}
+        error={error ?? serverError}
         className="min-w-0 flex-1 basis-72"
       >
         {(control) => (

@@ -4,7 +4,7 @@ import { expect, test } from "./fixtures/test";
 import { makeMultiReplayRun } from "./fixtures/data";
 import { routeCase } from "./routes";
 import { expectNoAxeViolations } from "./support/axe";
-import { expectNoHorizontalOverflow } from "./support/layout";
+import { expectNoHorizontalOverflow, setRootTextScale200 } from "./support/layout";
 
 const TEMPORARY_RUN_SSH_COMMAND = buildTemporaryNativeSshCommand({
   username: "route-test-only",
@@ -246,22 +246,6 @@ async function expectDesktopCompactRunControls(page: Page) {
     FINE_POINTER_COMPACT_CONTROL_HEIGHT,
     "End run action",
   );
-}
-
-// Reduced motion gives every property change a 0.01ms transition, so a root
-// font-size set from a test still reads as the old size until a later frame.
-// Wait it out: a rem-based layout measured half-way pairs the new panel width
-// with the old rem.
-async function setRootTextScale200(page: Page) {
-  await page.evaluate(async () => {
-    const root = document.documentElement;
-    const rem = () => Number.parseFloat(getComputedStyle(root).fontSize);
-    const base = rem();
-    root.style.fontSize = "200%";
-    while (rem() < base * 2) {
-      await new Promise((resolve) => requestAnimationFrame(resolve));
-    }
-  });
 }
 
 async function expectPersistentDesktopLearningPanel(page: Page) {
@@ -1036,7 +1020,7 @@ test.describe("focused state accessibility", () => {
     const content = runLearningContent(panel);
     const checks = content.getByRole("region", { name: "Checks" });
     await expect(
-      content.getByRole("heading", { name: /^Lecture theory/ }),
+      content.getByRole("heading", { name: "Lecture", exact: true }),
     ).toBeVisible();
     await expect(checks).toBeVisible();
     await expect(checks).toContainText("Start the web server");
@@ -1496,7 +1480,7 @@ test.describe("focused mobile state accessibility", () => {
     await expect(trigger).toBeFocused();
   });
 
-  test("native SSH dialog stays reachable on a short phone", async ({
+  test("native SSH sheet stays reachable on a short phone", async ({
     page,
     ui,
   }, testInfo) => {
@@ -1520,11 +1504,13 @@ test.describe("focused mobile state accessibility", () => {
     ).toBeVisible();
 
     const bounds = await dialog.boundingBox();
+    const viewport = page.viewportSize();
     expect(bounds).not.toBeNull();
-    // On a phone the dialog is a bottom sheet that keeps 1rem of the screen
-    // free above it and scrolls inside.
+    // A tool, not a confirmation: on a phone it is a full-screen side sheet
+    // that fits the screen and scrolls inside.
     expect(bounds!.y).toBeGreaterThanOrEqual(0);
-    expect(bounds!.height).toBeLessThanOrEqual(844 - 16);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport!.height);
+    expect(bounds!.width).toBe(viewport!.width);
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });

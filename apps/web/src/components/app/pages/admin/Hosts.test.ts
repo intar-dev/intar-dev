@@ -37,8 +37,12 @@ describe("host capacity metrics", () => {
     );
 
     expect(markup).toContain('dateTime="2026-08-24T12:00:00.000Z"');
-    expect(markup).toMatch(/title="Last heartbeat: [^"]+"/);
-    expect(markup).toMatch(/aria-label="Last heartbeat: [^"]+"/);
+    // The full timestamp is the time's description, shown in the tooltip on
+    // hover and focus, not a title attribute.
+    expect(markup).not.toContain("title=");
+    expect(markup).toMatch(/<span id="[^"]+" hidden="">Last heartbeat: [^<]+<\/span>/);
+    expect(markup).toMatch(/aria-describedby="[^"]+"/);
+    expect(markup).toContain('tabindex="0"');
     expect(markup).not.toContain("truncate");
   });
 });

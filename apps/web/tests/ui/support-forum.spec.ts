@@ -1,5 +1,9 @@
 import type { Page } from "@playwright/test";
-import type { SupportComment, SupportTopic } from "../../src/lib/support-types";
+import {
+  SUPPORT_PAGE_SIZE,
+  type SupportComment,
+  type SupportTopic,
+} from "../../src/lib/support-types";
 import { FIXED_NOW } from "./fixtures/data";
 import { test, expect } from "./fixtures/test";
 import { expectNoAxeViolations } from "./support/axe";
@@ -69,14 +73,17 @@ async function mockForum(page: Page, initial = [fixtureTopic()]) {
         const all = state.comments.filter((item) => item.topicId === topicId);
         const pageNumber = Math.min(
           Number(url.searchParams.get("page")) || 1,
-          Math.max(1, Math.ceil(all.length / 20)),
+          Math.max(1, Math.ceil(all.length / SUPPORT_PAGE_SIZE)),
         );
         return route.fulfill({
           json: {
-            items: all.slice((pageNumber - 1) * 20, pageNumber * 20),
+            items: all.slice(
+            (pageNumber - 1) * SUPPORT_PAGE_SIZE,
+            pageNumber * SUPPORT_PAGE_SIZE,
+          ),
             totalItems: all.length,
             page: pageNumber,
-            pageSize: 20,
+            pageSize: SUPPORT_PAGE_SIZE,
           },
         });
       }
@@ -140,14 +147,17 @@ async function mockForum(page: Page, initial = [fixtureTopic()]) {
     );
     const pageNumber = Math.min(
       Number(url.searchParams.get("page")) || 1,
-      Math.max(1, Math.ceil(all.length / 20)),
+      Math.max(1, Math.ceil(all.length / SUPPORT_PAGE_SIZE)),
     );
     return route.fulfill({
       json: {
-        items: all.slice((pageNumber - 1) * 20, pageNumber * 20),
+        items: all.slice(
+            (pageNumber - 1) * SUPPORT_PAGE_SIZE,
+            pageNumber * SUPPORT_PAGE_SIZE,
+          ),
         totalItems: all.length,
         page: pageNumber,
-        pageSize: 20,
+        pageSize: SUPPORT_PAGE_SIZE,
       },
     });
   });

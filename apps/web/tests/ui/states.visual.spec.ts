@@ -69,7 +69,7 @@ async function expectDesktopMissionPane(
   const panel = page.locator("[data-run-learning-panel]");
   await expect(panel).toBeVisible();
   await expect(
-    panel.getByRole("heading", { name: /^Lecture theory/ }),
+    panel.getByRole("heading", { name: "Lecture", exact: true }),
   ).toBeVisible();
   await expect(
     page.locator("[data-run-learning-panel-trigger]"),
@@ -120,7 +120,10 @@ test.describe("focused visual states", () => {
   test("course filters · mobile", async ({ page, ui }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await ui.open({ ...routeCase("course-catalog"), theme: "light" });
-    await expect(page.getByRole("button", { name: "Easy" })).toBeVisible();
+    // On a phone the filters wait behind the Filters button, in a sheet.
+    await page.getByRole("button", { name: "Filters", exact: true }).click();
+    const sheet = page.locator("[data-filter-sheet]");
+    await expect(sheet.getByRole("button", { name: "Easy" })).toBeVisible();
     await expectRouteScreenshot(page, "course-filters-open-light-mobile");
   });
 
@@ -697,7 +700,7 @@ test.describe("focused mobile workspace", () => {
     await expectConnectedTerminal(page);
     const sheet = await openMobileMissionAndHints(page);
     await expect(
-      sheet.getByRole("heading", { name: /^Lecture theory:/ }),
+      sheet.getByRole("heading", { name: "Lecture", exact: true }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "run-running-guidance-dark-mobile");
   });

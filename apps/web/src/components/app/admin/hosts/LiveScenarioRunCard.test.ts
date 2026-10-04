@@ -10,10 +10,10 @@ import type { AgentHostApi, VmStatus } from "./types";
 
 const nativeSshModule = vi.hoisted(() => ({ loadCount: 0 }));
 
-vi.mock("@/components/remote-access/NativeSshDialogButton", () => {
+vi.mock("@/components/remote-access/NativeSshSheet", () => {
   nativeSshModule.loadCount += 1;
   return {
-    NativeSshDialog: () => null,
+    NativeSshSheet: () => null,
   };
 });
 

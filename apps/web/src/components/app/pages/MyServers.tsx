@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiErrorMessage, describeApiError } from "@/components/app/lib/api-errors";
 import { formatTimestamp } from "@/components/app/lib/format";
 import {
   HttpResponseError,
@@ -315,7 +316,10 @@ export function MyServers(
             ) : null}
             {cancelSetup.error ? (
               <InlineFeedback tone="error">
-                Could not cancel setup. {cancelSetup.error.message}
+                {apiErrorMessage(
+                  cancelSetup.error,
+                  "Couldn't cancel setup. Try again.",
+                )}
               </InlineFeedback>
             ) : null}
             {canManage && adding ? (
@@ -359,6 +363,8 @@ function AddServer({
   const [revealed, setRevealed] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A refused name is the field's to say; anything else is the form's line.
+  const [nameError, setNameError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const abort = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -511,6 +517,7 @@ function AddServer({
             if (pending || !name.trim()) return;
             setPending(true);
             setError(null);
+            setNameError(null);
             setNotice(null);
             try {
               const result = await serverRequest<Enrollment>(
@@ -527,12 +534,14 @@ function AddServer({
               setRevealed(false);
               void onCreated();
             } catch (cause) {
-              if (!abort.current?.signal.aborted)
-                setError(
-                  cause instanceof Error
-                    ? cause.message
-                    : "Could not create a token. Try again.",
-                );
+              if (!abort.current?.signal.aborted) {
+                const failure = describeApiError<"name">(cause, {
+                  fallback: "Couldn't create a token. Try again.",
+                  defaultField: "name",
+                });
+                if (failure?.field === "name") setNameError(failure.message);
+                else setError(failure?.message ?? null);
+              }
             } finally {
               if (!abort.current?.signal.aborted) setPending(false);
             }
@@ -541,13 +550,17 @@ function AddServer({
           <Field
             label="Server name"
             hint="Create a token, then run the installer on your server. The installer command contains no secret."
+            error={nameError}
           >
             {(control) => (
               <Input
                 {...control}
                 className="max-w-field"
                 value={name}
-                onChange={(event) => setName(event.target.value)}
+                onChange={(event) => {
+                  setName(event.target.value);
+                  setNameError(null);
+                }}
                 required
                 maxLength={80}
                 // readOnly keeps focus and the touch height while it saves.
@@ -680,7 +693,20 @@ function ServerRow({
       renameButton.current?.focus();
     }
   }, [renaming, busy]);
-  const mutationError = change.error ?? remove.error;
+  const mutationFailure = describeApiError<"name">(
+    change.error ?? remove.error,
+    {
+      fallback: "Couldn't update the server. Try again.",
+      defaultField: "name",
+    },
+  );
+  // A refused rename says why at the field; anything else is a line below.
+  const renameFieldError =
+    renaming && !remove.error && mutationFailure?.field === "name"
+      ? mutationFailure.message
+      : null;
+  const mutationError =
+    mutationFailure && !renameFieldError ? mutationFailure.message : null;
   const openAction = (next: typeof action) => {
     change.reset();
     remove.reset();
@@ -771,59 +797,65 @@ function ServerRow({
       ) : null}
       {renaming ? (
         <form
-          className="flex flex-wrap items-end gap-2"
+          className="space-y-3"
           onSubmit={(event) => {
             event.preventDefault();
             if (name.trim() && !busy) change.mutate({ name: name.trim() });
           }}
         >
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            <span className="block">New server name</span>
-            <Input
-              autoFocus
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              onFocus={(event) => event.currentTarget.select()}
-              onKeyDown={(event) => {
-                if (event.key !== "Escape") return;
-                event.preventDefault();
-                if (!busy) {
-                  closeRename();
-                  change.reset();
-                }
+          <Field label="New server name" error={renameFieldError}>
+            {(control) => (
+              <Input
+                {...control}
+                autoFocus
+                value={name}
+                onChange={(event) => {
+                  setName(event.target.value);
+                  if (renameFieldError) change.reset();
+                }}
+                onFocus={(event) => event.currentTarget.select()}
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape") return;
+                  event.preventDefault();
+                  if (!busy) {
+                    closeRename();
+                    change.reset();
+                  }
+                }}
+                required
+                maxLength={80}
+                readOnly={busy}
+              />
+            )}
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="submit"
+              aria-busy={change.isPending || undefined}
+              focusableWhenDisabled
+              disabled={busy || !name.trim() || name.trim() === server.name}
+            >
+              <AsyncLabel
+                state={change.isPending ? "pending" : "idle"}
+                idle="Save name"
+                pending="Saving…"
+              />
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                closeRename();
+                change.reset();
               }}
-              required
-              maxLength={80}
-              readOnly={busy}
-              className="max-w-field"
-            />
-          </label>
-          <Button
-            type="submit"
-            aria-busy={change.isPending || undefined}
-            focusableWhenDisabled
-            disabled={busy || !name.trim() || name.trim() === server.name}
-          >
-            <AsyncLabel
-              state={change.isPending ? "pending" : "idle"}
-              idle="Save name"
-              pending="Saving…"
-            />
-          </Button>
-          <Button
-            variant="ghost"
-            disabled={busy}
-            onClick={() => {
-              closeRename();
-              change.reset();
-            }}
-          >
-            Cancel
-          </Button>
+            >
+              Cancel
+            </Button>
+          </div>
         </form>
       ) : null}
       {!action && mutationError ? (
-        <InlineFeedback tone="error">{mutationError.message}</InlineFeedback>
+        <InlineFeedback tone="error">{mutationError}</InlineFeedback>
       ) : null}
       {notice ? (
         <InlineFeedback tone={notice.tone}>{notice.text}</InlineFeedback>
@@ -890,9 +922,7 @@ function ServerRow({
             </>
           ) : null}
           {mutationError ? (
-            <InlineFeedback tone="error">
-              {mutationError.message}
-            </InlineFeedback>
+            <InlineFeedback tone="error">{mutationError}</InlineFeedback>
           ) : null}
           <DialogFooter>
             <Button

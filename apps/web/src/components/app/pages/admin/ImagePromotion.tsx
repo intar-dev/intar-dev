@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ImageUp, LockOpen } from "lucide-react";
+import { apiErrorMessage, describeApiError } from "@/components/app/lib/api-errors";
 import { formatRelativeTime } from "@/components/app/lib/format";
 import { fetchJson, mutationResponse } from "@/components/app/pages/organization-detail/types";
 import { ConfirmDialog } from "@/components/app/patterns/ConfirmDialog";
+import { Field } from "@/components/app/patterns/Field";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { Section } from "@/components/app/patterns/Section";
 import { Badge } from "@/components/ui/badge";
@@ -64,6 +66,13 @@ export function ImagePromotionSection() {
       await queryClient.invalidateQueries({ queryKey });
     },
   });
+  const failure = describeApiError<"revision">(change.error, {
+    fallback: "Couldn't change the image promotion. Try again.",
+    fields: { revision: /revision|commit/i },
+  });
+  // With the confirmation closed, a refused revision says why at its field.
+  const revisionError =
+    confirm === null && failure?.field === "revision" ? failure.message : null;
   if (!view.data) return null;
   const { attempt, holdingRuns, operatorDrained, pendingRevision, runningVms } = view.data;
   const active = attempt !== null && !ENDED.has(attempt.phase);
@@ -131,7 +140,7 @@ export function ImagePromotionSection() {
           </div>
         ) : null}
         <form
-          className="flex flex-wrap items-center gap-2"
+          className="space-y-3"
           onSubmit={(event) => {
             event.preventDefault();
             if (revision.trim()) {
@@ -139,13 +148,19 @@ export function ImagePromotionSection() {
             }
           }}
         >
-          <Input
-            value={revision}
-            onChange={(event) => setRevision(event.target.value)}
-            placeholder="Candidate revision"
-            className="max-w-sm font-mono"
-            aria-label="Candidate revision"
-          />
+          <Field label="Candidate revision" error={revisionError}>
+            {(control) => (
+              <Input
+                {...control}
+                value={revision}
+                onChange={(event) => {
+                  setRevision(event.target.value);
+                  if (revisionError) change.reset();
+                }}
+                className="font-mono"
+              />
+            )}
+          </Field>
           <Button
             type="submit"
             variant="outline"
@@ -154,8 +169,8 @@ export function ImagePromotionSection() {
             Promote a revision
           </Button>
         </form>
-        {change.error && confirm === null ? (
-          <InlineFeedback tone="error">{change.error.message}</InlineFeedback>
+        {failure && confirm === null && !revisionError ? (
+          <InlineFeedback tone="error">{failure.message}</InlineFeedback>
         ) : null}
       </div>
       <ConfirmDialog
@@ -180,7 +195,10 @@ export function ImagePromotionSection() {
               : "Nothing is swapped. This revision will not be promoted automatically again; you can still promote it here."
             : "Once the images are ready, Intar pauses new runs without waiting for an idle moment, lets active runs finish, swaps the images and reopens runs. An operator drain stays in place."
         }
-        error={change.error ? change.error.message : null}
+        error={apiErrorMessage(
+          change.error,
+          "Couldn't change the image promotion. Try again.",
+        )}
         pending={change.isPending}
         confirmLabel={confirm?.kind === "release" ? (holdingRuns ? "Reopen runs" : "Cancel promotion") : "Promote"}
         pendingLabel={confirm?.kind === "release" ? "Reopening…" : "Starting…"}

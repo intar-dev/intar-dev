@@ -1,5 +1,5 @@
 import { RotateCcw } from "lucide-react";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import type { OrganizationRemovedMemberRecord } from "@/lib/organizations";
 import { formatRelativeTime } from "../../lib/format";
@@ -20,6 +20,7 @@ export function RemovedMemberList(props: {
           className="flex flex-wrap items-center gap-3 py-3"
         >
           <Avatar>
+            {entry.image ? <AvatarImage src={entry.image} alt="" /> : null}
             <AvatarFallback>{initials(entry.name)}</AvatarFallback>
           </Avatar>
           <div className="min-w-0 flex-1">

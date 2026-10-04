@@ -18,3 +18,5 @@ export function CopyIcon({ className }: { className?: string }) {
     </svg>
   );
 }
+
+CopyIcon.displayName = "CopyIcon";

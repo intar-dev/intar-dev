@@ -267,7 +267,7 @@ export function RunRecap({
                   </span>
                   <span
                     className={cn(
-                      "text-[0.8125rem] font-medium whitespace-nowrap",
+                      "text-metadata font-medium whitespace-nowrap",
                       objective.status === "verified"
                         ? "text-success"
                         : "text-warning",
@@ -906,6 +906,8 @@ function ReplayPartContent({
           content={replay.content}
           loading={replay.loading}
           label={label}
+          checks={part.checks}
+          checksScope={part.checksScope}
           minimal
         />
       </Suspense>

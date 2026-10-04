@@ -96,7 +96,7 @@ function CapacityMeter({ label, available, total, divisor, unit, animateArrival 
         aria-labelledby={labelId}
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={fraction * 100}
+        aria-valuenow={pct}
         aria-valuetext={`${pct}% available${low ? ", low" : ""}, ${valueText}`}
         className="h-1.5 overflow-hidden rounded-full bg-muted dark:bg-accent"
       >

@@ -110,7 +110,7 @@ describe("run learning panel", () => {
     expect(desktopMarkup).toContain("w-full");
     expect(desktopMarkup).not.toContain("max-w-[40dvw]");
     expect(desktopMarkup).toContain('data-run-pinned-checks="true"');
-    expect(desktopMarkup).toContain("Lecture theory");
+    expect(desktopMarkup).toContain(">Lecture</h2>");
     expect(desktopMarkup).toContain("Repair the service safely.");
     expect(desktopMarkup).not.toContain('data-run-learning-panel-trigger="true"');
     expect(desktopMarkup).not.toContain("data-run-guidance-rail");
@@ -190,12 +190,12 @@ describe("run learning panel", () => {
       briefingMarkdown: "Read the **service status** before you change it.",
     });
 
-    expect(markup).toContain("Lecture theory");
+    expect(markup).toContain(">Lecture</h2>");
     expect(markup).toContain("service status");
     expect(markup.indexOf("Checks")).toBeLessThan(
-      markup.indexOf("Lecture theory"),
+      markup.indexOf(">Lecture</h2>"),
     );
-    expect(markup.indexOf("Lecture theory")).toBeLessThan(
+    expect(markup.indexOf(">Lecture</h2>")).toBeLessThan(
       markup.indexOf("service status"),
     );
     expect(markup.indexOf("service status")).toBeLessThan(

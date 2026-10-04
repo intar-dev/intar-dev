@@ -35,9 +35,18 @@ import {
   formatReplayClock,
   nextReplaySpeed,
   REPLAY_SCRUB_STEP,
+  replayCheckMarkers,
   replayKeyTarget,
+  replayMarkerAnnouncement,
+  replayMarkerEdge,
+  replayMarkersPassed,
+  replayMarkerTip,
   replayValueText,
+  replayMarkerAt,
+  replayMarkersAnnouncement,
   snapReplayScrub,
+  type ReplayCheck,
+  type ReplayCheckMarker,
   type ReplaySpeed,
 } from "./RunArtifactViewerModel";
 
@@ -104,6 +113,8 @@ export function AsciicastReplaySurface({
   loading,
   minimal = false,
   label = "Terminal replay",
+  checks,
+  checksScope = "machine",
 }: {
   /** Stable identity of the cast (e.g. artifact id); resets error state. */
   contentId: string;
@@ -112,6 +123,13 @@ export function AsciicastReplaySurface({
   minimal?: boolean;
   /** Names the replay for assistive technology. */
   label?: string;
+  /** The replayed machine's checks; the cast marks when each first passed. */
+  checks?: readonly ReplayCheck[] | undefined;
+  /**
+   * "part": the cast is one of several sessions of the machine, so it holds
+   * only the checks that first passed in it and no total can be claimed.
+   */
+  checksScope?: "machine" | "part" | undefined;
 }) {
   const [playerError, setPlayerError] = useState<string | null>(null);
   // Try again re-mounts the player (a new key) with the same cast.
@@ -143,9 +161,11 @@ export function AsciicastReplaySurface({
 
   const empty = !loading && !content.trim();
   const sized = minimal && wide;
+  // A sized box carries the screen's inset outside its content box, which
+  // keeps the cast's aspect ratio for the player's fit (see .replay-inset).
   const boxClass = minimal
     ? sized
-      ? "max-h-[70dvh] w-full"
+      ? "replay-inset max-h-[calc(70dvh-1.75rem)]"
       : "min-h-48 w-full"
     : "aspect-video w-full";
   const boxStyle: CSSProperties | undefined = sized
@@ -216,6 +236,8 @@ export function AsciicastReplaySurface({
         wide={wide}
         boxStyle={boxStyle}
         label={label}
+        checks={checks}
+        checksScope={checksScope}
         onReady={handlePlayerReady}
         onError={handlePlayerError}
       />
@@ -248,6 +270,8 @@ function ReplayPlayer({
   wide,
   boxStyle,
   label,
+  checks,
+  checksScope,
   onReady,
   onError,
 }: {
@@ -257,6 +281,8 @@ function ReplayPlayer({
   wide: boolean;
   boxStyle: CSSProperties | undefined;
   label: string;
+  checks: readonly ReplayCheck[] | undefined;
+  checksScope: "machine" | "part";
   onReady: () => void;
   onError: (message: string) => void;
 }) {
@@ -291,6 +317,38 @@ function ReplayPlayer({
     timeRef.current = next;
     setTime(next);
   }, []);
+
+  // Check markers come from the cast itself; only the learner replay has a
+  // track to show them on.
+  const markers = useMemo(
+    () => (custom && checks?.length ? replayCheckMarkers(content, checks) : []),
+    [custom, checks, content],
+  );
+  const markersRef = useRef<readonly ReplayCheckMarker[]>(markers);
+  useEffect(() => {
+    markersRef.current = markers;
+  }, [markers]);
+  // Each announcement is a new status node (the key), so one that repeats the
+  // last (a replayed check) is still spoken.
+  const [announcement, setAnnouncement] = useState({ id: 0, text: "" });
+  const announce = useCallback(
+    (text: string) => setAnnouncement((last) => ({ id: last.id + 1, text })),
+    [],
+  );
+  // Playback moving forward: each check it passes is announced. Seeks and
+  // drags commit their time directly and stay quiet.
+  const playTo = useCallback(
+    (next: number) => {
+      const passed = replayMarkersPassed(
+        markersRef.current,
+        timeRef.current,
+        next,
+      );
+      if (passed.length) announce(replayMarkersAnnouncement(passed));
+      commitTime(next);
+    },
+    [announce, commitTime],
+  );
 
   // Whatever re-creates the player (a speed change, or the viewport crossing
   // bp-md, which changes how the cast fits) must not cost the learner their
@@ -361,12 +419,12 @@ function ReplayPlayer({
           setPlaying(false);
           setEnded(true);
           void Promise.resolve(source.getDuration()).then((value) => {
-            if (typeof value === "number") commitTime(value);
+            if (typeof value === "number") playTo(value);
           });
           break;
       }
     },
-    [commitTime],
+    [commitTime, playTo],
   );
 
   // The player has no time event: read its clock every frame while it plays.
@@ -387,7 +445,7 @@ function ReplayPlayer({
               seeks.current.epoch !== epoch ||
               drag.current !== null;
             if (!stopped && !moving && typeof value === "number") {
-              commitTime(value);
+              playTo(value);
             }
           })
           .catch(() => undefined)
@@ -402,7 +460,7 @@ function ReplayPlayer({
       stopped = true;
       cancelAnimationFrame(frame);
     };
-  }, [player, playing, commitTime]);
+  }, [player, playing, playTo]);
 
   useEffect(
     () => () => {
@@ -434,6 +492,7 @@ function ReplayPlayer({
   );
 
   const ready = Boolean(player) && duration > 0;
+  const thumbRef = useRef<HTMLDivElement | null>(null);
 
   const togglePlayback = async () => {
     if (!player || duration <= 0) return;
@@ -528,6 +587,15 @@ function ReplayPlayer({
   const max = duration > 0 ? duration : 1;
   const progress = duration > 0 ? Math.min(Math.max(time / duration, 0), 1) : 0;
   const showAgain = ended && !playing;
+  const markerTimes = markers.map((marker) => marker.time);
+  // A cast recorded before check markers existed says nothing about checks.
+  const checkCount = !markers.length
+    ? 0
+    : checksScope === "part"
+      ? null
+      : (checks?.length ?? 0);
+  const passedCount = (at: number) =>
+    markers.filter((marker) => marker.time <= at).length;
   const toggleLabel = playing
     ? "Pause replay"
     : ended
@@ -542,8 +610,10 @@ function ReplayPlayer({
         // below are the only keyboard model.
         onKeyDown={(event) => event.stopPropagation()}
         className={cn(
-          "replay-screen relative w-full",
-          scroll ? "overflow-x-auto" : "max-h-[70dvh]",
+          "replay-screen relative",
+          scroll
+            ? "w-full overflow-x-auto"
+            : "replay-inset max-h-[calc(70dvh-1.75rem)]",
         )}
         style={scroll ? undefined : boxStyle}
         // Sideways scrolling needs a keyboard stop, or the cut-off columns
@@ -597,11 +667,49 @@ function ReplayPlayer({
             <Slider.Track className="replay-scrub__rail">
               <span className="replay-scrub__fill" />
             </Slider.Track>
+            {duration > 0
+              ? markers.map((marker) => {
+                  const at = Math.min(marker.time / duration, 1);
+                  return (
+                    <span
+                      key={marker.number}
+                      className="replay-scrub__mark"
+                      style={{ "--at": at } as CSSProperties}
+                      data-edge={replayMarkerEdge(at)}
+                      data-passed={time >= marker.time ? "" : undefined}
+                      data-current={
+                        replayMarkerAt(markers, time) === marker ? "" : undefined
+                      }
+                      data-tip={replayMarkerTip(marker)}
+                      aria-hidden="true"
+                      // A marker is a jump target: it goes exactly to the
+                      // check instead of starting a drag.
+                      onPointerDown={(event) => {
+                        if (event.button !== 0 || !ready) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        thumbRef.current
+                          ?.querySelector<HTMLElement>("input")
+                          ?.focus({ preventScroll: true });
+                        seekTo(marker.time, true);
+                        announce(replayMarkerAnnouncement(marker));
+                      }}
+                    />
+                  );
+                })
+              : null}
             <Slider.Thumb
+              ref={thumbRef}
               className="replay-scrub__thumb"
               aria-label="Replay position"
               getAriaValueText={(_formatted, value) =>
-                replayValueText(value, duration)
+                replayValueText(
+                  value,
+                  duration,
+                  checkCount === 0
+                    ? undefined
+                    : { passed: passedCount(value), total: checkCount },
+                )
               }
               onKeyDown={(event) => {
                 if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -609,9 +717,13 @@ function ReplayPlayer({
                   event.key,
                   timeRef.current,
                   duration,
+                  markerTimes,
                 );
                 if (target === null) return;
                 event.preventDefault();
+                // A jump that lands on a check says which one.
+                const landed = replayMarkerAt(markersRef.current, target);
+                if (landed) announce(replayMarkerAnnouncement(landed));
                 seekTo(target, true);
               }}
             />
@@ -630,6 +742,11 @@ function ReplayPlayer({
           <RollingNumber value={speed} />×
         </button>
       </div>
+      {markers.length ? (
+        <p className="sr-only" role="status" aria-live="polite">
+          <span key={announcement.id}>{announcement.text}</span>
+        </p>
+      ) : null}
     </>
   );
 }

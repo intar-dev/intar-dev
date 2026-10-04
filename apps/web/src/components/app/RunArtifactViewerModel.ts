@@ -1,4 +1,5 @@
 import {
+  REPLAY_IDLE_TIME_LIMIT_SECONDS,
   REPLAY_TERMINAL_COLS,
   REPLAY_TERMINAL_LINE_HEIGHT,
   REPLAY_TERMINAL_ROWS,
@@ -37,20 +38,41 @@ export function formatReplayClock(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
 
-/** What assistive technology reads for the position: `0:21 of 0:28`. */
-export function replayValueText(time: number, duration: number): string {
-  return `${formatReplayClock(time)} of ${formatReplayClock(duration)}`;
+/**
+ * What assistive technology reads for the position: `0:21 of 0:28`, and with
+ * checks `0:21 of 0:28, 2 of 3 checks verified` (or, for one session of
+ * several, `0:21 of 0:28, 2 checks verified in this part`).
+ */
+export function replayValueText(
+  time: number,
+  duration: number,
+  checks?: { passed: number; total: number | null },
+): string {
+  const position = `${formatReplayClock(time)} of ${formatReplayClock(duration)}`;
+  if (!checks || checks.total === 0) return position;
+  // No total: one of several sessions of a machine, whose cast only holds the
+  // checks that first passed in it, so a fraction would undercount.
+  if (checks.total === null) {
+    const noun = checks.passed === 1 ? "check" : "checks";
+    return `${position}, ${checks.passed} ${noun} verified in this part`;
+  }
+  const noun = checks.total === 1 ? "check" : "checks";
+  return `${position}, ${checks.passed} of ${checks.total} ${noun} verified`;
 }
+
+/** Two marker times this close are the same place on the track. */
+const MARKER_EPSILON_SECONDS = 0.01;
 
 /**
  * Where a key on the position slider goes, or null for any other key. Arrows
  * step two seconds, Home and End go to either end, and Page Up and Page Down
- * jump between checks (with no check markers yet, to the start and the end).
+ * jump to the previous or next check (past the last one, to the ends).
  */
 export function replayKeyTarget(
   key: string,
   time: number,
   duration: number,
+  markerTimes: readonly number[] = [],
 ): number | null {
   switch (key) {
     case "ArrowRight":
@@ -60,14 +82,136 @@ export function replayKeyTarget(
     case "ArrowDown":
       return Math.max(0, time - REPLAY_KEY_STEP_SECONDS);
     case "Home":
-    case "PageUp":
       return 0;
     case "End":
-    case "PageDown":
       return duration;
+    case "PageUp":
+      return (
+        markerTimes.findLast((at) => at < time - MARKER_EPSILON_SECONDS) ?? 0
+      );
+    case "PageDown":
+      return Math.min(
+        duration,
+        markerTimes.find((at) => at > time + MARKER_EPSILON_SECONDS) ??
+          duration,
+      );
     default:
       return null;
   }
+}
+
+/** A check of the replayed machine, matched to the cast by its probe name. */
+export interface ReplayCheck {
+  probeName: string;
+  number: number;
+  title: string;
+}
+
+/** A check that first passed during this cast, at its playback time. */
+export interface ReplayCheckMarker {
+  time: number;
+  number: number;
+  title: string;
+}
+
+/**
+ * The cast's marker (`m`) events at playback time. The recorder writes a
+ * check's first pass as one; the times follow the player's own idle clamp, so
+ * a marker sits where the player shows it.
+ */
+export function castMarkers(
+  content: string,
+): { time: number; label: string }[] {
+  const lines = content.split("\n");
+  let intervals = false;
+  try {
+    intervals = (JSON.parse(lines[0] ?? "") as { version?: unknown }).version === 3;
+  } catch {
+    return [];
+  }
+  const markers: { time: number; label: string }[] = [];
+  let raw = 0;
+  let played = 0;
+  for (const line of lines.slice(1)) {
+    if (!line.startsWith("[")) continue;
+    const stamp = Number.parseFloat(line.slice(1));
+    if (!Number.isFinite(stamp)) continue;
+    const next = intervals ? raw + Math.max(stamp, 0) : Math.max(stamp, raw);
+    played += Math.min(next - raw, REPLAY_IDLE_TIME_LIMIT_SECONDS);
+    raw = next;
+    if (!/^\[[^,]*,\s*"m"/.test(line)) continue;
+    try {
+      const label = (JSON.parse(line) as unknown[])[2];
+      if (typeof label === "string") markers.push({ time: played, label });
+    } catch {
+      // A torn line marks nothing.
+    }
+  }
+  return markers;
+}
+
+/**
+ * The checks this cast marks, in playback order: each check once, at its
+ * first pass. Markers for anything that is not one of `checks` (a startup
+ * probe, another machine's check) are left out.
+ */
+export function replayCheckMarkers(
+  content: string,
+  checks: readonly ReplayCheck[],
+): ReplayCheckMarker[] {
+  const byProbe = new Map(checks.map((check) => [check.probeName, check]));
+  const seen = new Set<string>();
+  const markers: ReplayCheckMarker[] = [];
+  for (const { time, label } of castMarkers(content)) {
+    const check = byProbe.get(label);
+    if (!check || seen.has(label)) continue;
+    seen.add(label);
+    markers.push({ time, number: check.number, title: check.title });
+  }
+  return markers.sort((left, right) => left.time - right.time);
+}
+
+/** The tip on a marker: `Check 2 verified · 0:21`. */
+export function replayMarkerTip(marker: ReplayCheckMarker): string {
+  return `Check ${marker.number} verified · ${formatReplayClock(marker.time)}`;
+}
+
+/** What is announced as playback passes a marker. */
+export function replayMarkerAnnouncement(marker: ReplayCheckMarker): string {
+  return `Check ${marker.number} verified: ${marker.title}.`;
+}
+
+/** What is announced when playback crosses several markers at once. */
+export function replayMarkersAnnouncement(
+  markers: readonly ReplayCheckMarker[],
+): string {
+  return markers.map(replayMarkerAnnouncement).join(" ");
+}
+
+/** The marker sitting at `time` (a jump landed on it), if any. */
+export function replayMarkerAt(
+  markers: readonly ReplayCheckMarker[],
+  time: number,
+): ReplayCheckMarker | undefined {
+  return markers.find(
+    (marker) => Math.abs(marker.time - time) < MARKER_EPSILON_SECONDS,
+  );
+}
+
+/** Near an end of the track a marker's tip anchors inward. */
+export function replayMarkerEdge(at: number): "start" | "end" | undefined {
+  if (at <= 0.25) return "start";
+  if (at >= 0.75) return "end";
+  return undefined;
+}
+
+/** The markers playback crossed going from `from` to `to`. */
+export function replayMarkersPassed(
+  markers: readonly ReplayCheckMarker[],
+  from: number,
+  to: number,
+): ReplayCheckMarker[] {
+  return markers.filter((marker) => marker.time > from && marker.time <= to);
 }
 
 export interface CastGeometry {

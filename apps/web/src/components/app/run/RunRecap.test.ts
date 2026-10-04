@@ -151,7 +151,81 @@ describe("run recap model", () => {
         machineLabel: "web",
         partLabel: "Part 1",
         castArtifactId: "cast-web",
+        checks: [{ probeName: "site-ready", number: 1, title: "Restore the site" }],
       },
+    ]);
+  });
+
+  it("gives each replay part its own machine's checks, numbered as final checks", () => {
+    const parts = getRunReplayParts(
+      run({
+        replayState: "ready",
+        hasReplay: true,
+        objectives: [
+          { ...objective("db-up", "Start the database"), vmName: "database" },
+          objective("site-ready", "Restore the site"),
+          { ...objective("worker-up", "Start the worker"), vmName: "worker" },
+        ],
+        vms: [
+          vm({
+            id: "web-vm",
+            ordinal: 1,
+            scenarioVmName: "web",
+            sessions: [session({ castArtifactId: "cast-web" })],
+          }),
+          vm({
+            id: "database-vm",
+            ordinal: 2,
+            scenarioVmId: "database",
+            scenarioVmName: "database",
+            sessions: [session({ castArtifactId: "cast-db" })],
+          }),
+        ],
+      }),
+    );
+
+    expect(parts.map(({ castArtifactId, checks }) => ({ castArtifactId, checks }))).toEqual([
+      {
+        castArtifactId: "cast-web",
+        checks: [{ probeName: "site-ready", number: 2, title: "Restore the site" }],
+      },
+      {
+        castArtifactId: "cast-db",
+        checks: [{ probeName: "db-up", number: 1, title: "Start the database" }],
+      },
+    ]);
+  });
+
+  it("keeps a machine's checks off the total when it has several sessions", () => {
+    const parts = getRunReplayParts(
+      run({
+        replayState: "ready",
+        hasReplay: true,
+        vms: [
+          vm({
+            id: "web-vm",
+            ordinal: 1,
+            scenarioVmName: "web",
+            sessions: [
+              session({ index: 1, castArtifactId: "cast-1" }),
+              session({ index: 2, castArtifactId: "cast-2" }),
+            ],
+          }),
+          vm({
+            id: "db-vm",
+            ordinal: 2,
+            scenarioVmId: "db",
+            scenarioVmName: "db",
+            sessions: [session({ index: 1, castArtifactId: "cast-db" })],
+          }),
+        ],
+      }),
+    );
+
+    expect(parts.map(({ castArtifactId, checksScope }) => [castArtifactId, checksScope])).toEqual([
+      ["cast-1", "part"],
+      ["cast-2", "part"],
+      ["cast-db", undefined],
     ]);
   });
 
@@ -388,6 +462,10 @@ describe("RunRecap", () => {
     expect(markup.match(/data-status="needs_repair"/g)).toHaveLength(1);
     expect(markup).not.toContain("hidden raw error");
     expect(markup).not.toContain("command_json_path");
+    // State words and the count share the 13px metadata role, no arbitrary size.
+    expect(markup).toMatch(/text-metadata[^"]*text-success[^"]*">Verified</);
+    expect(markup).toMatch(/text-metadata[^"]*text-warning[^"]*">Needs repair</);
+    expect(markup).not.toContain("text-[0.8125rem]");
   });
 
   it("omits objective progress when the recap has no checks", () => {

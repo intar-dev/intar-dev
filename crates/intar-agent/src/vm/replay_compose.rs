@@ -20,7 +20,13 @@ use super::krec::{KrecEventData, ParsedKrec};
 /// the timeline honest.
 const IDLE_TIME_LIMIT_S: f64 = 1.5;
 
-pub(crate) fn compose_session(session: &ParsedKrec) -> Result<String> {
+/// `markers` are check passes as (seconds from the session start, probe id),
+/// in time order. They become `m` events on the clamped timeline, so a check
+/// lands where it happened in the replay; the player applies its own
+/// `markers` option after idle compression, which is why they live in the
+/// data. A marker never moves the events around it, and one past the last
+/// event marks the end.
+pub(crate) fn compose_session(session: &ParsedKrec, markers: &[(f64, String)]) -> Result<String> {
     let header = json!({
         "version": 3,
         "term": {
@@ -32,25 +38,42 @@ pub(crate) fn compose_session(session: &ParsedKrec) -> Result<String> {
     let mut out = serde_json::to_string(&header).context("failed to serialize cast header")?;
     out.push('\n');
 
+    let mut markers = markers.iter().peekable();
     let mut last_raw_s = 0.0_f64;
+    // Cast time already spent on markers since the last event.
+    let mut marked_s = 0.0_f64;
     for event in &session.events {
         let raw_s = event.time_s.max(last_raw_s);
-        let interval_s = (raw_s - last_raw_s).min(IDLE_TIME_LIMIT_S);
+        while let Some((at_s, label)) = markers.next_if(|(at_s, _)| *at_s <= raw_s) {
+            let offset_s = (at_s - last_raw_s).clamp(0.0, IDLE_TIME_LIMIT_S);
+            push_cast_event(&mut out, (offset_s - marked_s).max(0.0), "m", label)?;
+            marked_s = marked_s.max(offset_s);
+        }
+        let interval_s = ((raw_s - last_raw_s).min(IDLE_TIME_LIMIT_S) - marked_s).max(0.0);
         last_raw_s = raw_s;
+        marked_s = 0.0;
 
         let (kind, payload) = match &event.data {
             KrecEventData::Output(data) => ("o", data.clone()),
             KrecEventData::Input(data) => ("i", data.clone()),
             KrecEventData::Resize { cols, rows } => ("r", format!("{cols}x{rows}")),
         };
-        out.push_str(
-            &serde_json::to_string(&(round_cast_time(interval_s), kind, payload))
-                .context("failed to serialize cast event")?,
-        );
-        out.push('\n');
+        push_cast_event(&mut out, interval_s, kind, &payload)?;
+    }
+    for (_, label) in markers {
+        push_cast_event(&mut out, 0.0, "m", label)?;
     }
 
     Ok(out)
+}
+
+fn push_cast_event(out: &mut String, interval_s: f64, kind: &str, payload: &str) -> Result<()> {
+    out.push_str(
+        &serde_json::to_string(&(round_cast_time(interval_s), kind, payload))
+            .context("failed to serialize cast event")?,
+    );
+    out.push('\n');
+    Ok(())
 }
 
 fn round_cast_time(time_s: f64) -> f64 {
@@ -100,7 +123,7 @@ mod tests {
     #[test]
     fn casts_keep_the_recorded_geometry() -> Result<()> {
         let payload = "\u{1b}[1;31mhello\u{1b}[0m world";
-        let composed = compose_session(&session(80, 24, vec![output(0.5, payload)]))?;
+        let composed = compose_session(&session(80, 24, vec![output(0.5, payload)]), &[])?;
         let parsed = parse_cast(&composed)?;
 
         assert_eq!(parsed.width, 80);
@@ -117,7 +140,7 @@ mod tests {
 
     #[test]
     fn header_carries_the_session_start_timestamp() -> Result<()> {
-        let composed = compose_session(&session(120, 30, vec![output(0.0, "x")]))?;
+        let composed = compose_session(&session(120, 30, vec![output(0.0, "x")]), &[])?;
         let header = composed.lines().next().expect("header line");
         assert!(header.contains("\"version\":3"));
         assert!(header.contains("\"timestamp\":1700000000"));
@@ -126,15 +149,18 @@ mod tests {
 
     #[test]
     fn resize_events_pass_through_natively() -> Result<()> {
-        let composed = compose_session(&session(
-            80,
-            24,
-            vec![
-                output(0.0, "before"),
-                resize(1.0, 100, 30),
-                output(2.0, " after"),
-            ],
-        ))?;
+        let composed = compose_session(
+            &session(
+                80,
+                24,
+                vec![
+                    output(0.0, "before"),
+                    resize(1.0, 100, 30),
+                    output(2.0, " after"),
+                ],
+            ),
+            &[],
+        )?;
         let parsed = parse_cast(&composed)?;
 
         let resize_event = parsed
@@ -149,11 +175,14 @@ mod tests {
 
     #[test]
     fn idle_gaps_are_clamped_in_the_data() -> Result<()> {
-        let composed = compose_session(&session(
-            120,
-            30,
-            vec![output(0.0, "a"), output(60.0, "b"), output(60.2, "c")],
-        ))?;
+        let composed = compose_session(
+            &session(
+                120,
+                30,
+                vec![output(0.0, "a"), output(60.0, "b"), output(60.2, "c")],
+            ),
+            &[],
+        )?;
         let parsed = parse_cast(&composed)?;
 
         let time_of = |needle: &str| {
@@ -172,11 +201,10 @@ mod tests {
 
     #[test]
     fn corrupt_offsets_never_rewind_the_timeline() -> Result<()> {
-        let composed = compose_session(&session(
-            80,
-            24,
-            vec![output(2.0, "first"), output(1.0, "second")],
-        ))?;
+        let composed = compose_session(
+            &session(80, 24, vec![output(2.0, "first"), output(1.0, "second")]),
+            &[],
+        )?;
         let parsed = parse_cast(&composed)?;
         assert!(parsed.events.iter().all(|event| event.time_s >= 0.0));
         let times: Vec<f64> = parsed.events.iter().map(|event| event.time_s).collect();
@@ -186,17 +214,51 @@ mod tests {
 
     #[test]
     fn input_events_pass_through_for_the_command_log() -> Result<()> {
-        let composed = compose_session(&session(
-            80,
-            24,
-            vec![input(0.0, "ls\r"), output(0.5, "listing")],
-        ))?;
+        let composed = compose_session(
+            &session(80, 24, vec![input(0.0, "ls\r"), output(0.5, "listing")]),
+            &[],
+        )?;
         let parsed = parse_cast(&composed)?;
         assert!(
             parsed
                 .events
                 .iter()
                 .any(|event| event.kind == "i" && event.payload == "ls\r"),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn check_markers_land_on_the_clamped_timeline_without_moving_events() -> Result<()> {
+        let events = vec![output(0.0, "a"), output(60.0, "b"), output(61.0, "c")];
+        let markers = vec![
+            (0.4, "early".to_string()),
+            (30.0, "idle".to_string()),
+            (60.5, "between".to_string()),
+            (90.0, "after".to_string()),
+        ];
+        let plain = parse_cast(&compose_session(&session(80, 24, events.clone()), &[])?)?;
+        let marked = parse_cast(&compose_session(&session(80, 24, events), &markers)?)?;
+
+        let times = |cast: &super::super::replay_media::ParsedCast, kind: &str| {
+            cast.events
+                .iter()
+                .filter(|event| event.kind == kind)
+                .map(|event| (event.payload.clone(), event.time_s))
+                .collect::<Vec<_>>()
+        };
+        // The events keep their times: 0, the clamped 1.5 and 2.5.
+        assert_eq!(times(&marked, "o"), times(&plain, "o"));
+        assert_eq!(
+            times(&marked, "m"),
+            vec![
+                ("early".to_string(), 0.4),
+                // Inside a clamped idle gap a marker clamps with it.
+                ("idle".to_string(), 1.5),
+                ("between".to_string(), 2.0),
+                // Past the last event: the end of the replay.
+                ("after".to_string(), 2.5),
+            ]
         );
         Ok(())
     }

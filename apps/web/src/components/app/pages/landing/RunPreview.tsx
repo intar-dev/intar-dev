@@ -284,7 +284,7 @@ export function RunPreview({ className }: { className?: string }) {
           <div className="min-h-0 flex-1 space-y-5 overflow-hidden rounded-xl border bg-card px-4 py-4 shadow-[var(--highlight),var(--shadow-raised)]">
             <PreviewChecks checks={statuses} passed={passed} still={still} />
             <section>
-              <h2 className="text-card-title">Lecture theory: Broken Nginx</h2>
+              <h2 className="text-card-title">Lecture</h2>
               <div className="mt-3 space-y-3 text-sm leading-6">
                 <p>
                   Nginx is a web server. It accepts HTTP requests and returns

@@ -5,6 +5,7 @@ import { ROUTE_CASES, routeCase } from "./routes";
 import {
   coarsePointerTargetViolations,
   expectNoHorizontalOverflow,
+  setRootTextScale200,
 } from "./support/layout";
 import {
   REPLAY_TERMINAL_COLS,
@@ -400,7 +401,7 @@ test("course browsing shows available CPU and memory allocation", async ({
 }) => {
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
 
-  await expect(page.getByRole("meter", { name: "CPU", exact: true })).toHaveAttribute("aria-valuenow", "65.625");
+  await expect(page.getByRole("meter", { name: "CPU", exact: true })).toHaveAttribute("aria-valuenow", "65.6");
   await expect(page.getByRole("meter", { name: "Memory", exact: true })).toHaveAttribute("aria-valuenow", "62.5");
   await expect(page.getByText("5.25 / 8 vCPUs", { exact: true })).toBeVisible();
   await expect(page.getByText("10 / 16 GiB", { exact: true })).toBeVisible();
@@ -413,12 +414,17 @@ test("course filters sit in the bar and announce their result", async ({
   await page.setViewportSize({ width: 390, height: 844 });
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
 
+  // On a phone the chips, category and tags wait behind the Filters button.
+  await expect(page.getByRole("button", { name: "Easy" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Filters", exact: true }).click();
   await expect(page.getByRole("button", { name: "Easy" })).toBeVisible();
   await page.getByLabel("Filter lectures by category").click();
   await page.getByRole("option", { name: "Linux services" }).click();
+  // The page's own count is inert behind the open sheet, so the sheet's line
+  // is the one live region that announces the result.
   await expect(
     page
-      .locator('p[aria-live="polite"]')
+      .locator('[data-filter-sheet] p[aria-live="polite"]')
       .filter({ hasText: /^Showing \d+ of \d+ courses?\.$/ }),
   ).toHaveCount(1);
   await expect
@@ -441,6 +447,11 @@ test("course filters sit in the bar and announce their result", async ({
       ) as string[],
     )
     .toContain("operations");
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Done" }).click();
+  await expect(
+    page.getByRole("button", { name: "Filters, 2 active" }),
+  ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 
@@ -1377,10 +1388,7 @@ test.describe("lecture reading flow", () => {
     ui,
   }) => {
     await ui.open({ ...routeCase("lecture"), theme: "light" });
-    await page.evaluate(() => {
-      document.documentElement.style.fontSize = "200%";
-    });
-    await page.waitForTimeout(100);
+    await setRootTextScale200(page);
 
     const action = page.getByRole("link", { name: "Resume scenario" });
     await action.scrollIntoViewIfNeeded();
@@ -1522,10 +1530,7 @@ test("200% text remains operable without page overflow", async ({
   ui,
 }) => {
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
-  await page.evaluate(() => {
-    document.documentElement.style.fontSize = "200%";
-  });
-  await page.waitForTimeout(100);
+  await setRootTextScale200(page);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.getByRole("link", { name: /Linux operations/ }).click();
@@ -1548,9 +1553,7 @@ test("replay carousel remains ordered at 200% text", async ({ page, ui }) => {
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
   await expectSavedRunShell(page);
-  await page.evaluate(() => {
-    document.documentElement.style.fontSize = "200%";
-  });
+  await setRootTextScale200(page);
 
   await page.getByRole("button", { name: "Watch replay" }).click();
   const carousel = page.locator("[data-run-replay-carousel]");
@@ -1576,10 +1579,7 @@ test("organization courses remain operable at 200% text", async ({
     .locator("main")
     .getByRole("link", { name: "Courses", exact: true })
     .click();
-  await page.evaluate(() => {
-    document.documentElement.style.fontSize = "200%";
-  });
-  await page.waitForTimeout(100);
+  await setRootTextScale200(page);
   const courseButton = page.getByRole("link", {
     name: /Platform repair sequence/,
   });

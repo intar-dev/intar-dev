@@ -2,12 +2,20 @@ export class HttpResponseError extends Error {
   readonly status: number;
   /** The app's error code, when the response named one. */
   readonly code: string | null;
+  /** True when `message` is the response's own `error` text, not a fallback. */
+  readonly fromServer: boolean;
 
-  constructor(status: number, message: string, code: string | null = null) {
+  constructor(
+    status: number,
+    message: string,
+    code: string | null = null,
+    fromServer = false,
+  ) {
     super(message);
     this.name = "HttpResponseError";
     this.status = status;
     this.code = code;
+    this.fromServer = fromServer;
   }
 
   /** The error for a refused response whose body is the app's `{ error, code }`. */
@@ -24,6 +32,7 @@ export class HttpResponseError extends Error {
       status,
       typeof fields.error === "string" ? fields.error : fallback,
       typeof fields.code === "string" ? fields.code : null,
+      typeof fields.error === "string",
     );
   }
 }

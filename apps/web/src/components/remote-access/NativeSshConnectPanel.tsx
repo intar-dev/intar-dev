@@ -89,7 +89,7 @@ export function learnerSshError(message: string): string {
 }
 
 // Issues a native-SSH route on mount and shows the credentials. Rendered
-// inline on the run page and inside NativeSshDialog's dialog.
+// inline on the run page and inside NativeSshSheet.
 export function NativeSshConnectPanel({
   sessionRequest,
 }: {

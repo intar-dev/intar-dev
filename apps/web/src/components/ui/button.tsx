@@ -38,10 +38,10 @@ const buttonVariants = cva(
       },
       size: {
         default:
-          "h-(--control-standard) gap-1.5 px-3.5 has-data-[icon=inline-end]:pr-3 has-data-[icon=inline-start]:pl-3",
-        xs: "h-(--control-utility) gap-1 rounded-md px-2 text-xs in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3",
-        sm: "h-(--control-compact) gap-1.5 px-3 text-[0.8125rem] in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-2.5 has-data-[icon=inline-start]:pl-2.5 [&_svg:not([class*='size-'])]:size-3.5",
-        lg: "h-(--control-prominent) gap-2 rounded-[0.625rem] px-4 text-[0.9375rem] has-data-[icon=inline-end]:pr-3.5 has-data-[icon=inline-start]:pl-3.5",
+          "h-(--control-standard) gap-1.5 px-3.5 has-data-[icon=inline-end]:pr-3 has-data-[icon=inline-start]:pl-3 data-icon-end:pr-3 data-icon-start:pl-3",
+        xs: "h-(--control-utility) gap-1 rounded-md px-2 text-xs in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 data-icon-end:pr-1.5 data-icon-start:pl-1.5 [&_svg:not([class*='size-'])]:size-3",
+        sm: "h-(--control-compact) gap-1.5 px-3 text-[0.8125rem] in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-2.5 has-data-[icon=inline-start]:pl-2.5 data-icon-end:pr-2.5 data-icon-start:pl-2.5 [&_svg:not([class*='size-'])]:size-3.5",
+        lg: "h-(--control-prominent) gap-2 rounded-[0.625rem] px-4 text-[0.9375rem] has-data-[icon=inline-end]:pr-3.5 has-data-[icon=inline-start]:pl-3.5 data-icon-end:pr-3.5 data-icon-start:pl-3.5",
         icon: "size-(--control-standard) pointer-coarse:min-w-11",
         "icon-xs":
           "size-(--control-utility) rounded-md in-data-[slot=button-group]:rounded-lg pointer-coarse:min-w-11 [&_svg:not([class*='size-'])]:size-3",
@@ -58,6 +58,38 @@ const buttonVariants = cva(
   },
 )
 
+/** A leading or trailing icon trims its own side of the padding (the DS
+ *  Button). CSS cannot tell "Label<svg>" from "<svg>Label", because text
+ *  nodes are not children to it, so the first and last child are read here.
+ *  Icons are the components that carry a displayName: Lucide's and our own. */
+function isIcon(child: React.ReactNode) {
+  return (
+    isValidElement(child) &&
+    typeof child.type !== "string" &&
+    typeof (child.type as { displayName?: unknown }).displayName === "string"
+  )
+}
+
+/** Children with Fragments opened, so `<>Resume<ArrowRight /></>` reads as two. */
+function flatten(children: React.ReactNode): React.ReactNode[] {
+  return React.Children.toArray(children).flatMap((child) =>
+    isValidElement<{ children?: React.ReactNode }>(child) &&
+    child.type === React.Fragment
+      ? flatten(child.props.children)
+      : [child],
+  )
+}
+
+function iconSides(children: React.ReactNode, variant: string | null | undefined) {
+  if (variant === "link") return {}
+  const items = flatten(children)
+  if (items.length < 2) return {}
+  return {
+    "data-icon-start": isIcon(items[0]) || undefined,
+    "data-icon-end": isIcon(items[items.length - 1]) || undefined,
+  }
+}
+
 function ButtonLink({
   render,
   className,
@@ -73,7 +105,8 @@ function ButtonLink({
         className: cn(buttonVariants({ variant, size, className })),
         "data-slot": "button",
         "data-size": size ?? "default",
-      } as React.ComponentProps<"a">,
+        ...iconSides(props.children, variant),
+      } as unknown as React.ComponentProps<"a">,
       props,
     ),
   })
@@ -117,6 +150,7 @@ function Button({
     <ButtonPrimitive
       data-slot="button"
       data-size={size}
+      {...iconSides(props.children, variant)}
       className={cn(buttonVariants({ variant, size, className }))}
       nativeButton={resolvedNativeButton}
       render={render}

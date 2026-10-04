@@ -16,6 +16,7 @@ import {
   EmptyState,
   ErrorState,
 } from "@/components/app/patterns/StateCard";
+import { describeApiError } from "@/components/app/lib/api-errors";
 import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import { useCallbackErrorCode } from "@/components/app/hooks/useCallbackErrorCode";
 import { useSession } from "@/components/app/hooks/useSession";
@@ -67,18 +68,12 @@ const DISCONNECT_ERROR_MESSAGES: Record<string, string> = {
 };
 
 function disconnectErrorMessage(error: unknown): string {
-  if (error instanceof HttpResponseError) {
-    if (error.code && Object.hasOwn(DISCONNECT_ERROR_MESSAGES, error.code)) {
-      return DISCONNECT_ERROR_MESSAGES[error.code]!;
-    }
-    // Signed out elsewhere, or the account lost access: trying again won't
-    // help.
-    if (error.status === 401) {
-      return "You were signed out. Sign in again to change sign-in methods.";
-    }
-    if (error.status === 403) return "This account no longer has access.";
-  }
-  return "The sign-in method couldn't be disconnected. Try again.";
+  return (
+    describeApiError(error, {
+      fallback: "The sign-in method couldn't be disconnected. Try again.",
+      codes: DISCONNECT_ERROR_MESSAGES,
+    })?.message ?? ""
+  );
 }
 
 function connectErrorMessage(code: string | null): string {
@@ -336,9 +331,10 @@ export function Profile() {
       } | null;
 
       if (!response.ok || !body?.key) {
-        throw new HttpResponseError(
+        throw HttpResponseError.fromBody(
           response.status,
-          body?.error ?? `Failed to add SSH key (${response.status})`,
+          body,
+          "The key couldn't be saved. Try again.",
         );
       }
 
@@ -357,14 +353,13 @@ export function Profile() {
     },
     onError: (error, input) => {
       setFormNotice(null);
-      const message = error instanceof Error ? error.message : String(error);
-      if (
-        error instanceof HttpResponseError &&
-        error.status >= 400 &&
-        error.status < 500
-      ) {
+      const failure = describeApiError<"key">(error, {
+        fallback: "The key couldn't be saved. Try again.",
+        defaultField: "key",
+      });
+      if (failure?.field === "key") {
         setFormError(null);
-        setFieldError(message);
+        setFieldError(failure.message);
         // The same refused value again: nudge the field and keep focus there.
         if (lastRefused.current === input.publicKey) {
           requestAnimationFrame(() => reject(keyField.current));
@@ -372,7 +367,7 @@ export function Profile() {
         lastRefused.current = input.publicKey;
       } else {
         setFieldError(null);
-        setFormError(message);
+        setFormError(failure?.message ?? null);
       }
     },
   });

@@ -9,6 +9,7 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
+import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
 import { AsyncLabel } from "../../patterns/AsyncLabel";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
 import { CopyButton } from "../../patterns/CopyButton";
@@ -30,6 +31,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
+import { HttpResponseError } from "../../lib/http-response-error";
 import { startOrganizationSignIn } from "@/lib/auth-client";
 import { isAdminUser } from "@/lib/authz";
 import { useSession } from "../../hooks/useSession";
@@ -135,7 +137,11 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
         error?: string;
       } | null;
       if (!response.ok || !body?.provider) {
-        throw new Error(body?.error ?? "Could not register the provider.");
+        throw HttpResponseError.fromBody(
+          response.status,
+          body,
+          "The provider couldn't be registered. Try again.",
+        );
       }
       return body.provider;
     },
@@ -191,7 +197,21 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
     setRemoveProviderOpen(false);
     removeProvider.reset();
   };
-  const providerError = verify.error ?? refresh.error ?? setSignupPolicy.error;
+  const providerError = apiErrorMessage(
+    verify.error ?? refresh.error ?? setSignupPolicy.error,
+    "Couldn't update the provider. Try again.",
+  );
+  const renameFailure = describeApiError<"name">(rename.error, {
+    fallback: "Couldn't rename the organization. Try again.",
+    defaultField: "name",
+  });
+  const registerFailure = describeApiError<"issuer" | "domain" | "clientId">(
+    register.error,
+    {
+      fallback: "The provider couldn't be registered. Try again.",
+      fields: { issuer: /issuer|discovery|url/i, domain: /domain/i, clientId: /client/i },
+    },
+  );
   // Only the latest provider action's failure shows; one still running keeps
   // its own.
   const startProviderAction = () => {
@@ -279,12 +299,19 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
               if (name.trim().length >= 2 && !rename.isPending) rename.mutate();
             }}
           >
-            <Field label="Organization name" className="w-full max-w-sm">
+            <Field
+              label="Organization name"
+              className="w-full max-w-sm"
+              error={renameFailure?.field === "name" ? renameFailure.message : null}
+            >
               {(control) => (
                 <Input
                   {...control}
                   value={name}
-                  onChange={(event) => setName(event.target.value)}
+                  onChange={(event) => {
+                    setName(event.target.value);
+                    if (rename.error) rename.reset();
+                  }}
                   maxLength={ORGANIZATION_NAME_MAX}
                   autoComplete="off"
                 />
@@ -308,9 +335,9 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
               />
             </Button>
           </form>
-          {rename.error ? (
+          {renameFailure && renameFailure.field === null ? (
             <InlineFeedback tone="error" className="mt-2">
-              {rename.error.message}
+              {renameFailure.message}
             </InlineFeedback>
           ) : null}
         </Section>
@@ -542,9 +569,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                 <InlineFeedback tone="error">{copyError}</InlineFeedback>
               ) : null}
               {providerError ? (
-                <InlineFeedback tone="error">
-                  {providerError.message}
-                </InlineFeedback>
+                <InlineFeedback tone="error">{providerError}</InlineFeedback>
               ) : null}
             </div>
           ) : (
@@ -568,7 +593,15 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                 register.mutate();
               }}
             >
-              <Field label="Issuer URL" error={issuerProblem}>
+              <Field
+                label="Issuer URL"
+                error={
+                  issuerProblem ??
+                  (registerFailure?.field === "issuer"
+                    ? registerFailure.message
+                    : null)
+                }
+              >
                 {(control) => (
                   <Input
                     {...control}
@@ -576,6 +609,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                     onChange={(event) => {
                       setIssuer(event.target.value);
                       setIssuerProblem(null);
+                      if (register.error) register.reset();
                     }}
                     className="text-code"
                     placeholder="https://id.example.com"
@@ -587,12 +621,22 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   />
                 )}
               </Field>
-              <Field label="Organization domain">
+              <Field
+                label="Organization domain"
+                error={
+                  registerFailure?.field === "domain"
+                    ? registerFailure.message
+                    : null
+                }
+              >
                 {(control) => (
                   <Input
                     {...control}
                     value={domain}
-                    onChange={(event) => setDomain(event.target.value)}
+                    onChange={(event) => {
+                      setDomain(event.target.value);
+                      if (register.error) register.reset();
+                    }}
                     className="text-code"
                     placeholder="example.com"
                     required
@@ -602,12 +646,22 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   />
                 )}
               </Field>
-              <Field label="Client ID">
+              <Field
+                label="Client ID"
+                error={
+                  registerFailure?.field === "clientId"
+                    ? registerFailure.message
+                    : null
+                }
+              >
                 {(control) => (
                   <Input
                     {...control}
                     value={clientId}
-                    onChange={(event) => setClientId(event.target.value)}
+                    onChange={(event) => {
+                      setClientId(event.target.value);
+                      if (register.error) register.reset();
+                    }}
                     className="text-code"
                     required
                     spellCheck={false}
@@ -639,9 +693,9 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                     : "Register OIDC provider"}
                 </Button>
               </div>
-              {register.error ? (
+              {registerFailure && registerFailure.field === null ? (
                 <InlineFeedback tone="error" className="sm:col-span-2">
-                  {register.error.message}
+                  {registerFailure.message}
                 </InlineFeedback>
               ) : null}
             </form>
@@ -719,7 +773,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
         }}
         title={`Transfer ownership to ${transferMember?.name ?? "this member"}?`}
         description="You become an admin. Only they can transfer ownership back."
-        error={transfer.error ? transfer.error.message : null}
+        error={apiErrorMessage(
+          transfer.error,
+          "Couldn't transfer ownership. Try again.",
+        )}
         pending={transfer.isPending}
         confirmLabel="Transfer ownership"
         pendingLabel="Transferring…"
@@ -736,7 +793,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
         }}
         title={`Leave ${detail.name}?`}
         description="You lose access until you are invited again or sign in through its identity provider."
-        error={leave.error ? leave.error.message : null}
+        error={apiErrorMessage(
+          leave.error,
+          "Couldn't leave the organization. Try again.",
+        )}
         pending={leave.isPending}
         confirmLabel="Leave organization"
         pendingLabel="Leaving…"
@@ -749,7 +809,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
         onClose={closeRemoveProviderDialog}
         title="Remove the identity provider?"
         description="Everyone who connected it is signed out everywhere, except you here, and loses it as a way to sign in. Members keep their memberships and their other sign-in methods."
-        error={removeProvider.error ? removeProvider.error.message : null}
+        error={apiErrorMessage(
+          removeProvider.error,
+          "Couldn't remove the provider. Try again.",
+        )}
         pending={removeProvider.isPending}
         confirmLabel="Remove provider"
         pendingLabel="Removing…"
@@ -772,7 +835,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
           />
           {deleteOrganization.error ? (
             <InlineFeedback tone="error">
-              {deleteOrganization.error.message}
+              {apiErrorMessage(
+                deleteOrganization.error,
+                "Couldn't delete the organization. Try again.",
+              )}
             </InlineFeedback>
           ) : null}
           <DialogFooter>

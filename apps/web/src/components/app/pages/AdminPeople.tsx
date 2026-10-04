@@ -23,7 +23,9 @@ import { FilterBar } from "@/components/app/patterns/FilterBar";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { TableSkeleton } from "../patterns/Skeletons";
 import { EmptyState, ErrorState } from "../patterns/StateCard";
+import { SideSheet } from "../patterns/SideSheet";
 import { formatRelativeTime } from "../lib/format";
+import { apiErrorMessage } from "../lib/api-errors";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { BinIcon } from "@/components/ui/bin-icon";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -97,13 +99,13 @@ export function AdminPeople() {
             <TabsTrigger value="organizations">Organizations</TabsTrigger>
           </TabsList>
         </div>
-        <TabsContent value="users">
+        <TabsContent value="users" keepMounted>
           <UsersPanel />
         </TabsContent>
-        <TabsContent value="signups">
+        <TabsContent value="signups" keepMounted>
           <SignupsPanel />
         </TabsContent>
-        <TabsContent value="organizations">
+        <TabsContent value="organizations" keepMounted>
           <OrganizationsPanel />
         </TabsContent>
       </Tabs>
@@ -239,9 +241,33 @@ function UsersPanel() {
         : confirmation?.kind === "role"
           ? setRole.error
           : null;
-  const actionError =
-    finishCleanup.error ??
-    (confirmation === null ? revokeAccess.error : null);
+  // A row's own action reports inside that row, named after the person. A
+  // failure whose row left the list falls back to the section.
+  const rowError = (entry: AdminListedUser): string | null => {
+    if (finishCleanup.error && finishCleanup.variables?.userId === entry.id) {
+      return `Could not finish cleanup for ${entry.name}: ${errorText(finishCleanup.error, "The user could not be updated.")}`;
+    }
+    if (
+      confirmation === null &&
+      revokeAccess.error &&
+      revokeAccess.variables === entry.id
+    ) {
+      return `Could not finish revoking ${entry.name}: ${errorText(revokeAccess.error, "The user could not be updated.")}`;
+    }
+    return null;
+  };
+  const rowSuccess = (entry: AdminListedUser) =>
+    finishCleanup.isSuccess && finishCleanup.variables?.userId === entry.id;
+  const orphanError =
+    (finishCleanup.error &&
+    !filtered.some((entry) => entry.id === finishCleanup.variables?.userId)
+      ? finishCleanup.error
+      : null) ??
+    (confirmation === null &&
+    revokeAccess.error &&
+    !filtered.some((entry) => entry.id === revokeAccess.variables)
+      ? revokeAccess.error
+      : null);
   const openConfirmation = (next: UserConfirmation) => {
     setRole.reset();
     deleteUser.reset();
@@ -309,127 +335,136 @@ function UsersPanel() {
                   const finishing =
                     finishCleanup.isPending &&
                     finishCleanup.variables?.userId === entry.id;
+                  const problem = rowError(entry);
                   return (
-                    <div
-                      key={entry.id}
-                      className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
-                    >
-                      <div className="flex min-w-0 items-center gap-3">
-                        <Avatar>
-                          {entry.image ? (
-                            <AvatarImage src={entry.image} alt="" />
-                          ) : null}
-                          <AvatarFallback>
-                            {(entry.name || entry.username || "?")
-                              .slice(0, 1)
-                              .toUpperCase()}
-                          </AvatarFallback>
-                        </Avatar>
-                        <div className="min-w-0 space-y-0.5">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Link
-                              to="/admin/people/$userId"
-                              params={{ userId: entry.id }}
-                              className="inline-flex min-w-0 items-center text-sm font-medium hover:underline pointer-coarse:min-h-11"
-                            >
-                              <span className="truncate">{entry.name}</span>
-                            </Link>
-                            {entry.username ? (
-                              <code>@{entry.username}</code>
+                    <div key={entry.id} className="py-3">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <Avatar>
+                            {entry.image ? (
+                              <AvatarImage src={entry.image} alt="" />
                             ) : null}
-                            {isAdmin ? (
-                              <Badge variant="secondary">Admin</Badge>
-                            ) : (
-                              <Badge variant="outline">User</Badge>
-                            )}
-                            {revoked ? (
-                              <Badge variant="destructive">Access revoked</Badge>
-                            ) : (
-                              <Badge variant="success">Active</Badge>
-                            )}
+                            <AvatarFallback>
+                              {(entry.name || entry.username || "?")
+                                .slice(0, 1)
+                                .toUpperCase()}
+                            </AvatarFallback>
+                          </Avatar>
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Link
+                                to="/admin/people/$userId"
+                                params={{ userId: entry.id }}
+                                className="inline-flex min-w-0 items-center text-sm font-medium hover:underline pointer-coarse:min-h-11"
+                              >
+                                <span className="truncate">{entry.name}</span>
+                              </Link>
+                              {entry.username ? (
+                                <code>@{entry.username}</code>
+                              ) : null}
+                              {isAdmin ? (
+                                <Badge variant="secondary">Admin</Badge>
+                              ) : (
+                                <Badge variant="outline">User</Badge>
+                              )}
+                              {revoked ? (
+                                <Badge variant="destructive">Access revoked</Badge>
+                              ) : (
+                                <Badge variant="success">Active</Badge>
+                              )}
+                            </div>
+                            <p className="text-caption tabular-nums [overflow-wrap:anywhere]">
+                              {entry.email} · {signupOriginText(entry.origin)}{" "}
+                              {formatRelativeTime(
+                                new Date(entry.createdAt).getTime(),
+                              )}
+                              {revoked && entry.revokedAt !== null
+                                ? ` · revoked ${formatRelativeTime(entry.revokedAt)}`
+                                : null}
+                              {cleanupUnfinished ? " · cleanup unfinished" : null}
+                              {unrecorded ? " · no revocation record" : null}
+                            </p>
+                            <p className="text-caption">
+                              Flag targeting key: <code>{entry.id}</code>
+                            </p>
                           </div>
-                          <p className="text-caption tabular-nums [overflow-wrap:anywhere]">
-                            {entry.email} · {signupOriginText(entry.origin)}{" "}
-                            {formatRelativeTime(
-                              new Date(entry.createdAt).getTime(),
-                            )}
-                            {revoked && entry.revokedAt !== null
-                              ? ` · revoked ${formatRelativeTime(entry.revokedAt)}`
-                              : null}
-                            {cleanupUnfinished ? " · cleanup unfinished" : null}
-                            {unrecorded ? " · no revocation record" : null}
-                          </p>
-                          <p className="text-caption">
-                            Flag targeting key: <code>{entry.id}</code>
-                          </p>
+                        </div>
+
+                        <div className="flex shrink-0 flex-wrap items-center gap-2">
+                          {revoked ? (
+                            cleanupUnfinished && entry.revocationId !== null ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={busy}
+                                onClick={() => {
+                                  if (entry.revocationId === null) return;
+                                  setRole.reset();
+                                  revokeAccess.reset();
+                                  finishCleanup.mutate({
+                                    userId: entry.id,
+                                    revocationId: entry.revocationId,
+                                  });
+                                }}
+                              >
+                                <RefreshCw />
+                                {finishing ? "Finishing cleanup…" : "Finish cleanup"}
+                              </Button>
+                            ) : null
+                          ) : (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={busy}
+                                onClick={() =>
+                                  openConfirmation({
+                                    entry,
+                                    kind: "role",
+                                    nextRole: isAdmin ? "user" : "admin",
+                                  })
+                                }
+                              >
+                                <ShieldCheck />
+                                {isAdmin ? "Make user" : "Make admin"}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="text-muted-foreground hover:text-destructive"
+                                disabled={busy}
+                                onClick={() =>
+                                  openConfirmation({ entry, kind: "revoke" })
+                                }
+                              >
+                                <Ban />
+                                Revoke access
+                              </Button>
+                            </>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-muted-foreground hover:text-destructive"
+                            disabled={busy}
+                            onClick={() =>
+                              openConfirmation({ entry, kind: "delete" })
+                            }
+                          >
+                            <BinIcon />
+                            Delete
+                          </Button>
                         </div>
                       </div>
-
-                      <div className="flex shrink-0 flex-wrap items-center gap-2">
-                        {revoked ? (
-                          cleanupUnfinished && entry.revocationId !== null ? (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              disabled={busy}
-                              onClick={() => {
-                                if (entry.revocationId === null) return;
-                                setRole.reset();
-                                revokeAccess.reset();
-                                finishCleanup.mutate({
-                                  userId: entry.id,
-                                  revocationId: entry.revocationId,
-                                });
-                              }}
-                            >
-                              <RefreshCw />
-                              {finishing ? "Finishing cleanup…" : "Finish cleanup"}
-                            </Button>
-                          ) : null
-                        ) : (
-                          <>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              disabled={busy}
-                              onClick={() =>
-                                openConfirmation({
-                                  entry,
-                                  kind: "role",
-                                  nextRole: isAdmin ? "user" : "admin",
-                                })
-                              }
-                            >
-                              <ShieldCheck />
-                              {isAdmin ? "Make user" : "Make admin"}
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="text-muted-foreground hover:text-destructive"
-                              disabled={busy}
-                              onClick={() =>
-                                openConfirmation({ entry, kind: "revoke" })
-                              }
-                            >
-                              <Ban />
-                              Revoke access
-                            </Button>
-                          </>
-                        )}
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-muted-foreground hover:text-destructive"
-                          disabled={busy}
-                          onClick={() =>
-                            openConfirmation({ entry, kind: "delete" })
-                          }
-                        >
-                          <BinIcon />
-                          Delete
-                        </Button>
-                      </div>
+                    {problem ? (
+                      <InlineFeedback tone="error" className="mt-2">
+                        {problem}
+                      </InlineFeedback>
+                    ) : rowSuccess(entry) ? (
+                      <InlineFeedback tone="success" className="mt-2">
+                        Cleanup finished for {entry.name}.
+                      </InlineFeedback>
+                    ) : null}
                     </div>
                   );
                 })}
@@ -448,14 +483,10 @@ function UsersPanel() {
           />
         )}
 
-        {actionError ? (
+        {orphanError ? (
           <InlineFeedback tone="error">
-            {actionError instanceof Error
-              ? actionError.message
-              : "Failed to update user"}
+            {errorText(orphanError, "The user could not be updated.")}
           </InlineFeedback>
-        ) : finishCleanup.isSuccess ? (
-          <InlineFeedback tone="success">Cleanup finished.</InlineFeedback>
         ) : null}
       </Section>
 
@@ -486,13 +517,14 @@ function UsersPanel() {
           </div>
           {dialogError ? (
             <InlineFeedback tone="error">
-              {dialogError instanceof Error
-                ? dialogError.message
-                : confirmation?.kind === "revoke"
-                  ? "Access could not be revoked"
+              {errorText(
+                dialogError,
+                confirmation?.kind === "revoke"
+                  ? "Access could not be revoked."
                   : confirmation?.kind === "role"
-                    ? "The role could not be changed"
-                    : "The user could not be deleted"}
+                    ? "The role could not be changed."
+                    : "The user could not be deleted.",
+              )}
             </InlineFeedback>
           ) : null}
           <DialogFooter>
@@ -546,6 +578,10 @@ function UsersPanel() {
       </Dialog>
     </>
   );
+}
+
+function errorText(error: unknown, fallback: string): string {
+  return apiErrorMessage(error, fallback) ?? fallback;
 }
 
 function confirmationDescription({
@@ -628,9 +664,9 @@ function OrganizationsPanel() {
 
   const entries = organizations.data.organizations;
   const managed = entries.find((entry) => entry.id === managedId) ?? null;
-  // Keep the last organization so the dialog plays its exit.
+  // Keep the last organization so the sheet plays its exit.
   if (managed && lastManaged.current !== managed) lastManaged.current = managed;
-  const dialogOrganization = managed ?? lastManaged.current;
+  const sheetOrganization = managed ?? lastManaged.current;
 
   return (
     <Section
@@ -748,9 +784,9 @@ function OrganizationsPanel() {
           description="Selected users can create the first organization from the Organizations workspace."
         />
       )}
-      {dialogOrganization ? (
-        <OrganizationAccessDialog
-          organization={dialogOrganization}
+      {sheetOrganization ? (
+        <OrganizationAccessSheet
+          organization={sheetOrganization}
           open={managed !== null}
           onClose={() => setManagedId(null)}
         />
@@ -781,7 +817,7 @@ function organizationSignInSummary(organization: AdminOrganizationRow): string {
  * sign-ups with emails off its verified domain, and restoring people its
  * admins removed. Neither needs membership in the organization.
  */
-function OrganizationAccessDialog({
+function OrganizationAccessSheet({
   organization,
   open,
   onClose,
@@ -813,7 +849,7 @@ function OrganizationAccessDialog({
     },
     onSettled: refresh,
   });
-  // The dialog stays mounted to play its exit, so its mutations would carry a
+  // The sheet stays mounted to play its exit, so its mutations would carry a
   // failure into the next opening, or the next organization. Each opening
   // starts clean.
   const { reset: resetPolicy } = setPolicy;
@@ -828,79 +864,69 @@ function OrganizationAccessDialog({
   const removedMembers = removed.data?.removedMembers ?? [];
 
   return (
-    <Dialog
+    <SideSheet
       open={open}
       onOpenChange={(next) => {
         if (!next) onClose();
       }}
+      title={`${organization.name} sign-in`}
+      description="Changes apply to the organization's next sign-ins."
+      data-organization-access-sheet
     >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{organization.name} sign-in</DialogTitle>
-          <DialogDescription>
-            Changes apply to the organization's next sign-ins.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-5">
-          {oidc ? (
-            <div className="space-y-2">
-              <h3 className="text-sm font-medium">New accounts</h3>
-              <p className="text-caption">
-                {
-                  signupPolicyText(oidc.domain, oidc.allowExternalEmailSignups)
-                    .status
-                }
-              </p>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={setPolicy.isPending}
-                onClick={() => {
-                  if (!restore.isPending) restore.reset();
-                  setPolicy.mutate(!oidc.allowExternalEmailSignups);
-                }}
-              >
-                {
-                  signupPolicyText(oidc.domain, oidc.allowExternalEmailSignups)
-                    .action
-                }
-              </Button>
-            </div>
-          ) : null}
+      <div className="space-y-5">
+        {oidc ? (
           <div className="space-y-2">
-            <h3 className="text-sm font-medium">Removed people</h3>
-            {removed.error ? (
-              <InlineFeedback tone="error">
-                {removed.error instanceof Error
-                  ? removed.error.message
-                  : "Failed to load removed people"}
-              </InlineFeedback>
-            ) : removed.isPending ? (
-              <p className="text-caption">Loading…</p>
-            ) : removedMembers.length ? (
-              <RemovedMemberList
-                entries={removedMembers}
-                restoring={restore.isPending}
-                onRestore={(userId) => restore.mutate(userId)}
-              />
-            ) : (
-              <p className="text-caption">Nobody is removed.</p>
-            )}
+            <h3 className="text-sm font-medium">New accounts</h3>
+            <p className="text-caption">
+              {
+                signupPolicyText(oidc.domain, oidc.allowExternalEmailSignups)
+                  .status
+              }
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={setPolicy.isPending}
+              onClick={() => {
+                if (!restore.isPending) restore.reset();
+                setPolicy.mutate(!oidc.allowExternalEmailSignups);
+              }}
+            >
+              {
+                signupPolicyText(oidc.domain, oidc.allowExternalEmailSignups)
+                  .action
+              }
+            </Button>
           </div>
-          {actionError ? (
+        ) : null}
+        <div className="space-y-2">
+          <h3 className="text-sm font-medium">Removed people</h3>
+          {removed.error ? (
             <InlineFeedback tone="error">
-              {actionError instanceof Error
-                ? actionError.message
-                : "Action failed"}
+              {removed.error instanceof Error
+                ? removed.error.message
+                : "Failed to load removed people"}
             </InlineFeedback>
-          ) : null}
+          ) : removed.isPending ? (
+            <p className="text-caption">Loading…</p>
+          ) : removedMembers.length ? (
+            <RemovedMemberList
+              entries={removedMembers}
+              restoring={restore.isPending}
+              onRestore={(userId) => restore.mutate(userId)}
+            />
+          ) : (
+            <p className="text-caption">Nobody is removed.</p>
+          )}
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
-            Done
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        {actionError ? (
+          <InlineFeedback tone="error">
+            {actionError instanceof Error
+              ? actionError.message
+              : "Action failed"}
+          </InlineFeedback>
+        ) : null}
+      </div>
+    </SideSheet>
   );
 }

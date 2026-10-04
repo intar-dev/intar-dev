@@ -6,6 +6,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { Hint } from "./Hint";
 
 // The one disclosure idiom for console rails and expandable list rows: a
 // full-width trigger line (leading · title · meta · chevron) over a panel
@@ -49,12 +50,20 @@ export function DisclosureRow({
         )}
       >
         {leading}
-        <span
-          className="min-w-0 flex-1 truncate text-sm font-medium"
-          title={typeof title === "string" ? title : undefined}
-        >
-          {title}
-        </span>
+        {typeof title === "string" ? (
+          <Hint
+            label={title}
+            render={
+              <span className="min-w-0 flex-1 truncate text-sm font-medium" />
+            }
+          >
+            {title}
+          </Hint>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">
+            {title}
+          </span>
+        )}
         {meta ? (
           <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
             {meta}

@@ -27,7 +27,8 @@ const SHORT_QUERY = "(height < 31.25rem)"
 
 export function useShortViewport() {
   const [short, setShort] = React.useState<boolean>(
-    () => window.matchMedia(SHORT_QUERY).matches,
+    () =>
+      typeof window !== "undefined" && window.matchMedia(SHORT_QUERY).matches,
   )
 
   React.useEffect(() => {
@@ -39,4 +40,25 @@ export function useShortViewport() {
   }, [])
 
   return short
+}
+
+// bp-md: the width a filter bar sits inline from. Below it, a phone.
+const PHONE_QUERY = "(width < 48rem)"
+
+export function useIsPhone() {
+  // A server render (the pattern tests) has no window: inline, not a phone.
+  const [phone, setPhone] = React.useState<boolean>(
+    () =>
+      typeof window !== "undefined" && window.matchMedia(PHONE_QUERY).matches,
+  )
+
+  React.useEffect(() => {
+    const mql = window.matchMedia(PHONE_QUERY)
+    const onChange = () => setPhone(mql.matches)
+    mql.addEventListener("change", onChange)
+    onChange()
+    return () => mql.removeEventListener("change", onChange)
+  }, [])
+
+  return phone
 }

@@ -5,6 +5,7 @@ import {
   formatClockSeconds,
   formatRelativeTime,
 } from "@/components/app/lib/format";
+import { Hint } from "@/components/app/patterns/Hint";
 import { MetaLine } from "@/components/app/patterns/MetaLine";
 import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -92,9 +93,12 @@ export function ScenarioRunArchiveCard(props: {
               <Badge variant={tone.badgeVariant}>{tone.label}</Badge>
             </div>
           ) : null}
-          <h3 className="truncate text-sm font-semibold" title={scenarioName}>
+          <Hint
+            label={scenarioName}
+            render={<h3 className="truncate text-sm font-semibold" />}
+          >
             {scenarioName}
-          </h3>
+          </Hint>
           <MetaLine
             items={[
               <StatusToken
@@ -120,12 +124,14 @@ export function ScenarioRunArchiveCard(props: {
               <code key="v">{props.run.vmName}</code>,
             ]}
           />
-          <p
-            className="truncate font-mono text-xs text-muted-foreground"
-            title={props.run.id}
+          <Hint
+            label={props.run.id}
+            render={
+              <p className="truncate font-mono text-xs text-muted-foreground" />
+            }
           >
             {props.run.id}
-          </p>
+          </Hint>
         </div>
 
         <dl
@@ -441,11 +447,12 @@ function ArchiveDefinition({
 function ArchiveTime({ value }: { value: number | null | undefined }) {
   if (!value || !Number.isFinite(value)) return <>—</>;
   return (
-    <time
-      dateTime={new Date(value).toISOString()}
-      title={formatTimestampMs(value)}
+    <Hint
+      essential
+      label={formatTimestampMs(value)}
+      render={<time dateTime={new Date(value).toISOString()} />}
     >
       {formatRelativeTime(value)}
-    </time>
+    </Hint>
   );
 }

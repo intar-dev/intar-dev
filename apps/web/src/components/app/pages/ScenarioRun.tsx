@@ -142,9 +142,9 @@ const LazyWebSshTerminal = lazy(() =>
     ({ WebSshTerminal }) => ({ default: WebSshTerminal }),
   ),
 );
-const LazyNativeSshDialog = lazy(() =>
-  import("@/components/remote-access/NativeSshDialogButton").then(
-    ({ NativeSshDialog }) => ({ default: NativeSshDialog }),
+const LazyNativeSshSheet = lazy(() =>
+  import("@/components/remote-access/NativeSshSheet").then(
+    ({ NativeSshSheet }) => ({ default: NativeSshSheet }),
   ),
 );
 const LazyRunRecap = lazy(() =>
@@ -1437,7 +1437,7 @@ export function ScenarioRun() {
       ) : null}
       {selectedVm && selectedVmSessionRequest && dialogsRequested.ssh ? (
         <Suspense fallback={null}>
-          <LazyNativeSshDialog
+          <LazyNativeSshSheet
             vmName={selectedVm.scenarioVmName}
             sessionRequest={selectedVmSessionRequest}
             open={sshDialogOpen}

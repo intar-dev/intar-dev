@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Hint } from "@/components/app/patterns/Hint";
 import { NewVersionButton } from "./NewVersionButton";
 import { NAV_ITEMS } from "./nav-config";
 import { useBreadcrumbOverrides, usePageChromeValue } from "./page-chrome";
@@ -47,8 +48,10 @@ function labelForFinal(
   return SEGMENT_LABELS[segment] ?? trimSegment(segment);
 }
 
-// Page data replaces these labels after load. Until then, never put internal
-// scenario or run identifiers into the visible heading.
+function isTopicPage(pathname: string): boolean {
+  return /^\/support\/(?!new$)[^/]+$/.test(pathname);
+}
+
 function isLecturePage(pathname: string): boolean {
   return (
     /^\/courses\/[^/]+\/lectures\/[^/]+$/.test(pathname) ||
@@ -58,8 +61,10 @@ function isLecturePage(pathname: string): boolean {
   );
 }
 
+// Page data replaces these labels after load. Until then, never put internal
+// scenario or run identifiers into the visible heading.
 export function safeDynamicPageLabel(pathname: string): string | null {
-  if (/^\/support\/(?!new$)[^/]+$/.test(pathname)) {
+  if (isTopicPage(pathname)) {
     return "Topic";
   }
   if (/^\/runs\/[^/]+$/.test(pathname)) {
@@ -177,9 +182,11 @@ export function AppBar() {
   const reading = chrome?.reading === true;
   const allCrumbs = buildCrumbs(pathname, overrides);
   // Reading pages carry their title in the content (the h1 there), so the bar
-  // shows the course context instead: a lecture drops its own crumb.
+  // shows the context instead: a lecture or forum topic drops its own crumb.
   const crumbs =
-    reading && isLecturePage(pathname) ? allCrumbs.slice(0, -1) : allCrumbs;
+    reading && (isLecturePage(pathname) || isTopicPage(pathname))
+      ? allCrumbs.slice(0, -1)
+      : allCrumbs;
   const final = crumbs[crumbs.length - 1];
   const ancestors = crumbs.slice(0, -1);
   const parent = ancestors[ancestors.length - 1];
@@ -201,9 +208,9 @@ export function AppBar() {
         <p className={titleClass}>{final.label}</p>
       )
     ) : (
-      <h1 title={final.label} className={titleClass}>
+      <Hint label={final.label} side="bottom" render={<h1 className={titleClass} />}>
         {final.label}
-      </h1>
+      </Hint>
     )
   ) : null;
   const showAncestors = !chrome?.back;

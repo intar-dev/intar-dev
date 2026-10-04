@@ -2,6 +2,7 @@ import { lazy, Suspense, useRef, useState } from "react";
 import { ChevronDown, CircleHelpIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { WhyDisabled } from "@/components/app/patterns/Hint";
 import { MetaLine } from "@/components/app/patterns/MetaLine";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -10,11 +11,11 @@ import { groupVmProbesByScenario, ProbeRows } from "./ProbeRows";
 import { Stat } from "@/components/app/patterns/Stat";
 import type { AgentHostApi, VmProbeSummary, VmStatus } from "./types";
 
-const LazyNativeSshDialog = lazy(async () => {
-  const { NativeSshDialog } = await import(
-    "@/components/remote-access/NativeSshDialogButton"
+const LazyNativeSshSheet = lazy(async () => {
+  const { NativeSshSheet } = await import(
+    "@/components/remote-access/NativeSshSheet"
   );
-  return { default: NativeSshDialog };
+  return { default: NativeSshSheet };
 });
 
 export function LiveScenarioRunCard(props: {
@@ -171,9 +172,8 @@ export function LiveScenarioRunCard(props: {
               )}
             />
           </Button>
-          <div
-            className="inline-flex"
-            title={
+          <WhyDisabled
+            reason={
               terminalTarget.state === "ready"
                 ? undefined
                 : (terminalTarget.reason ?? undefined)
@@ -198,7 +198,7 @@ export function LiveScenarioRunCard(props: {
                 <CircleHelpIcon />
               ) : null}
             </Button>
-          </div>
+          </WhyDisabled>
           <Button
             ref={nativeSshTriggerRef}
             type="button"
@@ -291,7 +291,7 @@ export function LiveScenarioRunCard(props: {
 
       {nativeSshOpen ? (
         <Suspense fallback={null}>
-          <LazyNativeSshDialog
+          <LazyNativeSshSheet
             vmName={props.vmItem.name}
             sessionRequest={{
               url: `/api/scenarios/runs/${encodeURIComponent(props.vmItem.run_id ?? "")}/ssh`,

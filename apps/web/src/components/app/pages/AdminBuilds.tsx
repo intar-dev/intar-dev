@@ -36,6 +36,8 @@ import type { BuildPhase } from "@/generated/bridge";
 import { isAdminUser } from "@/lib/authz";
 import { isActiveImageBuild } from "@/lib/build-scheduler-core";
 import { cn } from "@/lib/utils";
+import { apiErrorMessage } from "@/components/app/lib/api-errors";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import { requestScenarioStartWithCapacityWait } from "@/components/app/lib/scenario-start";
 import { useSession } from "../hooks/useSession";
 import { usePageChrome } from "../shell/page-chrome";
@@ -152,10 +154,11 @@ export function AdminBuilds() {
         },
       );
       if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(body?.error ?? `Retry failed (${response.status})`);
+        throw HttpResponseError.fromBody(
+          response.status,
+          await response.json().catch(() => null),
+          `Retry failed (${response.status})`,
+        );
       }
     },
     onSuccess: async () => {
@@ -215,22 +218,6 @@ export function AdminBuilds() {
         />
       </Section>
 
-      {retryBuild.error ? (
-        <InlineFeedback tone="error">
-          {retryBuild.error instanceof Error
-            ? retryBuild.error.message
-            : "Failed to retry build"}
-        </InlineFeedback>
-      ) : null}
-
-      {runCandidate.error ? (
-        <InlineFeedback tone="error">
-          {runCandidate.error instanceof Error
-            ? runCandidate.error.message
-            : "Failed to start candidate run"}
-        </InlineFeedback>
-      ) : null}
-
       {builds.error ? (
         <ErrorState
           title="Could not load builds"
@@ -271,6 +258,11 @@ export function AdminBuilds() {
                       retryBuild.isPending && retryBuild.variables === build.id
                     }
                     retryDisabled={retryBuild.isPending || !build.canRetry}
+                    actionError={buildActionError(
+                      build.id,
+                      retryBuild,
+                      runCandidate,
+                    )}
                     runCandidatePending={
                       runCandidate.isPending &&
                       runCandidate.variables?.buildId === build.id
@@ -314,11 +306,31 @@ export function AdminBuilds() {
   );
 }
 
+function buildActionError(
+  buildId: string,
+  retry: { error: unknown; variables: string | undefined },
+  candidate: { error: unknown; variables: { buildId: string } | undefined },
+): string | null {
+  if (retry.error && retry.variables === buildId) {
+    return `Could not retry build ${buildId}: ${
+      apiErrorMessage(retry.error, "Try again.") ?? "Try again."
+    }`;
+  }
+  if (candidate.error && candidate.variables?.buildId === buildId) {
+    return `Could not start a candidate run for build ${buildId}: ${
+      apiErrorMessage(candidate.error, "Try again.") ?? "Try again."
+    }`;
+  }
+  return null;
+}
+
 function BuildRow(props: {
   build: ImageBuildRecord;
   manage: boolean;
   retryPending: boolean;
   retryDisabled: boolean;
+  /** The row's own failed action, named after the build. */
+  actionError: string | null;
   runCandidatePending: boolean;
   detail: ImageBuildDetailRecord | null | undefined;
   detailLoading: boolean;
@@ -457,6 +469,12 @@ function BuildRow(props: {
           </Button>
         )}
       </div>
+
+      {props.actionError ? (
+        <InlineFeedback tone="error" className="lg:col-span-2">
+          {props.actionError}
+        </InlineFeedback>
+      ) : null}
 
       <Collapsible open={props.detailOpen} className="lg:col-span-2">
         <CollapsibleContent id={detailId}>

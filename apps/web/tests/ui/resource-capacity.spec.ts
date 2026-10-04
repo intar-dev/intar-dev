@@ -8,7 +8,7 @@ test("capacity updates after 60 seconds and distinguishes zero from unavailable"
   await page.clock.install({ time: FIXED_NOW });
   await ui.open(routeCase("course-catalog"));
   const cpu = page.getByRole("meter", { name: "CPU", exact: true });
-  await expect(cpu).toHaveAttribute("aria-valuenow", "65.625");
+  await expect(cpu).toHaveAttribute("aria-valuenow", "65.6");
   const courseList = page.getByRole("link", { name: /Linux operations/ });
   await expect(courseList).toBeVisible();
 
@@ -32,7 +32,7 @@ test("capacity refresh failure keeps courses and last values, then recovers", as
   await page.clock.install({ time: FIXED_NOW });
   await ui.open(routeCase("course-catalog"));
   const cpu = page.getByRole("meter", { name: "CPU", exact: true });
-  await expect(cpu).toHaveAttribute("aria-valuenow", "65.625");
+  await expect(cpu).toHaveAttribute("aria-valuenow", "65.6");
   ui.server.state.variant = "error";
   await page.clock.fastForward(60_001);
   // Advance retries between completed network responses.
@@ -42,7 +42,7 @@ test("capacity refresh failure keeps courses and last values, then recovers", as
   }).toBe(1);
   await expect(page.getByRole("status").filter({ hasText: "Update failed" })).toHaveCount(1);
   await expect(page.getByRole("link", { name: /Linux operations/ })).toBeVisible();
-  await expect(cpu).toHaveAttribute("aria-valuenow", "65.625");
+  await expect(cpu).toHaveAttribute("aria-valuenow", "65.6");
 
   ui.server.state.variant = "populated";
   ui.server.state.resourceCapacity!.cpu.availableMillis = 8000;

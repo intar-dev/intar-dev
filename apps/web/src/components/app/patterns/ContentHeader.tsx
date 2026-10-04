@@ -50,7 +50,7 @@ export function ContentHeader({
             <h1
               id={titleId}
               className={cn(
-                "text-content-title text-balance [overflow-wrap:anywhere]",
+                "text-content-title max-w-[46rem] text-balance [overflow-wrap:anywhere]",
                 titleClassName,
               )}
             >

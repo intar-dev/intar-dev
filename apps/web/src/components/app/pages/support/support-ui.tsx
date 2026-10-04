@@ -7,6 +7,7 @@ import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { AsyncLabel } from "../../patterns/AsyncLabel";
 import { Field } from "../../patterns/Field";
+import { Hint } from "../../patterns/Hint";
 import { InlineConfirm } from "../../patterns/InlineConfirm";
 import {
   Dialog,
@@ -23,6 +24,7 @@ import {
   type SupportStatus,
   type SupportTopicType,
 } from "@/lib/support-types";
+import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
 import { HttpResponseError } from "../../lib/http-response-error";
 import { formatRelativeTime, formatTimestamp } from "../../lib/format";
 
@@ -42,24 +44,27 @@ export async function supportRequest<T>(
       : {}),
   });
   if (response.status === 204) return undefined as T;
-  const data = await response.json();
+  const data: unknown = await response.json().catch(() => null);
   if (!response.ok)
-    throw new HttpResponseError(
+    throw HttpResponseError.fromBody(
       response.status,
-      data &&
-        typeof data === "object" &&
-        "error" in data &&
-        typeof data.error === "string"
-        ? data.error
-        : "The request failed. Try again.",
+      data,
+      "The request failed. Try again.",
     );
   return data as T;
 }
 
-export function PostError({ error }: { error: Error | null }) {
-  return error ? (
+export function PostError({
+  error,
+  fallback = "Couldn't save that. Try again.",
+}: {
+  error: Error | null;
+  fallback?: string;
+}) {
+  const message = apiErrorMessage(error, fallback);
+  return message ? (
     <p role="alert" className="text-sm text-destructive">
-      {error.message}
+      {message}
     </p>
   ) : null;
 }
@@ -78,9 +83,13 @@ export function TopicStatus({ status }: { status: SupportStatus }) {
 
 export function PostTime({ at }: { at: number }) {
   return (
-    <time dateTime={new Date(at).toISOString()} title={formatTimestamp(at)}>
+    <Hint
+      essential
+      label={formatTimestamp(at)}
+      render={<time dateTime={new Date(at).toISOString()} />}
+    >
       {formatRelativeTime(at)}
-    </time>
+    </Hint>
   );
 }
 
@@ -106,6 +115,13 @@ export function TopicForm({
     mutationFn: () => onSave({ title: title.trim(), type, body: body.trim() }),
   });
   const pending = save.isPending;
+  // A refusal that names the title or the description says so at that field.
+  const failure = describeApiError<"title" | "body">(save.error, {
+    fallback: "Couldn't save the topic. Try again.",
+    fields: { title: /title/i, body: /description|body/i },
+  });
+  const titleError = failure?.field === "title" ? failure.message : null;
+  const bodyError = failure?.field === "body" ? failure.message : null;
   return (
     <form
       aria-busy={pending || undefined}
@@ -120,7 +136,7 @@ export function TopicForm({
         <Field
           label="Title"
           hint="Describe the topic in one sentence."
-          className="max-w-field"
+          error={titleError}
         >
           {(control) => (
             <Input
@@ -156,6 +172,7 @@ export function TopicForm({
         <Field
           label="Description"
           hint="Use Markdown for links and code blocks. All Intar users with active access can read this topic."
+          error={bodyError}
         >
           {(control) => (
             <Textarea
@@ -170,7 +187,9 @@ export function TopicForm({
             />
           )}
         </Field>
-        <PostError error={save.error} />
+        {failure && failure.field === null ? (
+          <PostError error={save.error} fallback="Couldn't save the topic. Try again." />
+        ) : null}
         <div className="flex flex-wrap gap-2">
           <Button
             type="submit"
@@ -215,6 +234,10 @@ export function CommentForm({
     onSuccess: () => setBody(""),
   });
   const pending = save.isPending;
+  const failure = describeApiError<"body">(save.error, {
+    fallback: "Couldn't save the comment. Try again.",
+    defaultField: "body",
+  });
   return (
     <form
       aria-busy={pending || undefined}
@@ -227,6 +250,7 @@ export function CommentForm({
         <Field
           label={initial === undefined ? "Add a comment" : "Edit comment"}
           hint="Markdown, links, and code blocks are supported."
+          error={failure?.field === "body" ? failure.message : null}
         >
           {(control) => (
             <Textarea
@@ -242,7 +266,12 @@ export function CommentForm({
             />
           )}
         </Field>
-        <PostError error={save.error} />
+        {failure && failure.field === null ? (
+          <PostError
+            error={save.error}
+            fallback="Couldn't save the comment. Try again."
+          />
+        ) : null}
         <div className="flex flex-wrap gap-2">
           <Button
             type="submit"
@@ -302,7 +331,10 @@ export function DeletePost({
           onConfirm={() => remove.mutate()}
           onCancel={() => remove.reset()}
         />
-        <PostError error={remove.error} />
+        <PostError
+          error={remove.error}
+          fallback="Couldn't delete the comment. Try again."
+        />
       </div>
     );
   return (
@@ -326,7 +358,10 @@ export function DeletePost({
             comments from other users. This action cannot be undone.
           </DialogDescription>
         </DialogHeader>
-        <PostError error={remove.error} />
+        <PostError
+          error={remove.error}
+          fallback="Couldn't delete the topic. Try again."
+        />
         <DialogFooter>
           <Button
             variant="outline"

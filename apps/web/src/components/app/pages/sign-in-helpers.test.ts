@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { AuthFlowError } from "@/lib/auth-client";
 import {
   githubCallbackMessage,
   normalizeOrganizationSlug,
   organizationSignInErrorMessage,
+  organizationSignInSlugRefused,
+  organizationSignInStartErrorMessage,
 } from "./sign-in-helpers";
 
 describe("organization sign-in helpers", () => {
@@ -52,5 +55,19 @@ describe("organization sign-in helpers", () => {
     for (const code of [null, "", "unknown", "__proto__", "constructor"]) {
       expect(githubCallbackMessage(code)).toBeNull();
     }
+  });
+});
+
+describe("organization sign-in start errors", () => {
+  it("says a lost connection in plain words and sends a wrong slug to its field", () => {
+    expect(organizationSignInStartErrorMessage(new TypeError("Failed to fetch"))).toBe(
+      "Couldn't reach Intar. Check your connection and try again.",
+    );
+    const unknown = new AuthFlowError("organization_sso_unavailable", "x");
+    expect(organizationSignInSlugRefused(unknown)).toBe(true);
+    expect(organizationSignInStartErrorMessage(unknown)).toContain("hasn't set up");
+    expect(
+      organizationSignInSlugRefused(new AuthFlowError("signed_out", "x")),
+    ).toBe(false);
   });
 });

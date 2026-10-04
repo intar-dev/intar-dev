@@ -334,6 +334,7 @@ test("admins confirm removals and restore removed people", async ({
                   name: "Rita Removed",
                   email: "rita@platform.example",
                   githubUsername: null,
+                  image: null,
                   removedAt: FIXED_NOW - day,
                 },
               ],
@@ -586,6 +587,7 @@ test("platform admins manage an organization's sign-in without membership", asyn
               name: "Rita Removed",
               email: "rita@platform.example",
               githubUsername: null,
+              image: null,
               removedAt: FIXED_NOW - day,
             },
           ],
@@ -648,7 +650,7 @@ test("a failed sign-in change does not follow the admin dialog into its next ope
     "Policy store unavailable",
   );
 
-  await dialog.getByRole("button", { name: "Done" }).click();
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await page.getByRole("button", { name: "Manage" }).click();
   await expect(page.getByRole("dialog")).toContainText("Removed people");

@@ -269,6 +269,6 @@ test.describe("landing", () => {
     await ui.open({ ...routeCase("landing"), theme: "light" });
     await page.setViewportSize({ width: 980, height: 900 });
 
-    await expect(page.getByText("Lecture theory: Broken Nginx")).toBeVisible();
+    await expect(page.locator("figure h2", { hasText: /^Lecture$/ })).toBeVisible();
   });
 });

@@ -12,9 +12,10 @@ import {
 } from "../../patterns/CollectionPagination";
 import { MetaLine } from "../../patterns/MetaLine";
 import { Section } from "../../patterns/Section";
+import { Stat } from "../../patterns/Stat";
 import { ListSkeleton } from "../../patterns/Skeletons";
 import { EmptyState, ErrorState } from "../../patterns/StateCard";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
@@ -36,6 +37,7 @@ import {
   type CourseLectureSummary,
 } from "../learn/course-wire";
 import type { OrganizationDetailTab } from "../tab-search";
+import { apiErrorMessage } from "../../lib/api-errors";
 import { invalidateOrganizationDetail } from "./queries";
 import { RemovedMemberList } from "./RemovedMemberList";
 import {
@@ -66,7 +68,7 @@ export function OrganizationOverview({
       title="Organization"
       description="Manage members, courses, and private content."
     >
-      <dl className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-3">
         <OverviewMetric
           label="Members"
           value={detail.members.length}
@@ -91,11 +93,12 @@ export function OrganizationOverview({
           action={admin ? "Identity settings" : "Open settings"}
           onClick={() => setTab("settings")}
         />
-      </dl>
+      </div>
     </Section>
   );
 }
 
+// The DS Stat tile; the action sits in its detail line.
 function OverviewMetric({
   label,
   value,
@@ -108,17 +111,16 @@ function OverviewMetric({
   onClick: () => void;
 }) {
   return (
-    <div className="rounded-lg bg-muted/40 p-3">
-      <dt className="text-label">{label}</dt>
-      <dd>
-        <span className="mt-1 block text-section-title tabular-nums">
-          {value}
-        </span>
-        <Button variant="link" className="mt-1 h-auto p-0" onClick={onClick}>
+    <Stat
+      size="sm"
+      label={label}
+      value={value}
+      detail={
+        <Button variant="link" className="h-auto p-0" onClick={onClick}>
           {action}
         </Button>
-      </dd>
-    </div>
+      }
+    />
   );
 }
 
@@ -219,6 +221,9 @@ export function MembersSection({ detail }: { detail: Detail }) {
                 className="flex flex-wrap items-center gap-3 py-3"
               >
                 <Avatar>
+                  {entry.image ? (
+                    <AvatarImage src={entry.image} alt="" />
+                  ) : null}
                   <AvatarFallback>{initials(entry.name)}</AvatarFallback>
                 </Avatar>
                 <div className="min-w-0 flex-1">
@@ -328,7 +333,7 @@ export function MembersSection({ detail }: { detail: Detail }) {
       ) : null}
       {actionError ? (
         <InlineFeedback tone="error" className="mt-4">
-          {actionError instanceof Error ? actionError.message : "Action failed"}
+          {apiErrorMessage(actionError, "Couldn't update the member. Try again.")}
         </InlineFeedback>
       ) : null}
       <ConfirmDialog
@@ -336,7 +341,10 @@ export function MembersSection({ detail }: { detail: Detail }) {
         onClose={closeRemoveDialog}
         title={`Remove ${removeTarget?.name}?`}
         description="They lose access to this organization and can't sign in through its identity provider until an admin restores them. If they connected it, they're signed out everywhere now."
-        error={remove.error ? remove.error.message : null}
+        error={apiErrorMessage(
+          remove.error,
+          "Couldn't remove the member. Try again.",
+        )}
         pending={remove.isPending}
         confirmLabel="Remove member"
         pendingLabel="Removing…"
@@ -587,7 +595,10 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
       )}
       {actionError ? (
         <InlineFeedback tone="error" className="mt-4">
-          {actionError.message}
+          {apiErrorMessage(
+            actionError,
+            "Couldn't update the assignment. Try again.",
+          )}
         </InlineFeedback>
       ) : null}
     </Section>

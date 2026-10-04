@@ -12,7 +12,6 @@ import {
 import { useShortViewport } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { CourseLink, LectureLink } from "./course-links";
-import { LectureScenarioLabel } from "./LectureScenarioLabel";
 import { LectureProgressTrack } from "./LectureProgressTrack";
 import {
   lectureStatePresentation,
@@ -351,10 +350,6 @@ function CourseOutlineItem({
             )}
           >
             {word}
-          </span>
-          <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-            <span aria-hidden="true">·</span>
-            <LectureScenarioLabel scenarioId={lecture.scenarioId} />
           </span>
         </span>
       </span>

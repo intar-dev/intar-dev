@@ -16,8 +16,12 @@ function useDragPick() {
   }
 }
 
-function DropdownMenu({ ...props }: MenuPrimitive.Root.Props) {
-  return <MenuPrimitive.Root data-slot="dropdown-menu" {...props} />
+/** Non-modal, as the design system shows: opening a menu leaves the page
+ *  scrollable and outside controls reachable; a click outside closes it. */
+function DropdownMenu({ modal = false, ...props }: MenuPrimitive.Root.Props) {
+  return (
+    <MenuPrimitive.Root data-slot="dropdown-menu" modal={modal} {...props} />
+  )
 }
 
 function DropdownMenuTrigger({ ...props }: MenuPrimitive.Trigger.Props) {

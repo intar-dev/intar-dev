@@ -197,7 +197,7 @@ test("a revoke whose cleanup didn't finish hands over to Finish cleanup", async 
   expect((await cleanupRequest).postDataJSON()).toEqual({
     revocationId: "revocation-user-learner",
   });
-  await expect(page.getByText("Cleanup finished.")).toBeVisible();
+  await expect(page.getByText("Cleanup finished for Mina Learner.")).toBeVisible();
   await expect(finish).toBeHidden();
 });
 

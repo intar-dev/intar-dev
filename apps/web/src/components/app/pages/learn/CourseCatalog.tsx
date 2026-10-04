@@ -930,7 +930,12 @@ function CourseFilters({
       searchPlaceholder={searchPlaceholder}
       searchLabel={searchLabel}
       filtersActive={filtersActive}
-      stackSearchOnMobile
+      collapseOnPhone
+      activeCount={
+        (searchState.difficulty ? 1 : 0) +
+        (searchState.category ? 1 : 0) +
+        searchState.tags.length
+      }
       onClear={onClear}
       searchRef={searchRef}
       shown={shown}

@@ -16,9 +16,11 @@ import { Input } from "@/components/ui/input";
 import { appBootstrapQueryKey } from "@/lib/app-bootstrap";
 import { AuthFlowError, startOrganizationSignIn } from "@/lib/auth-client";
 import { isAdminUser } from "@/lib/authz";
+import { apiErrorMessage } from "../lib/api-errors";
 import {
   normalizeOrganizationSlug,
   organizationSignInErrorMessage,
+  organizationSignInSlugRefused,
   organizationSignInStartErrorMessage,
 } from "./sign-in-helpers";
 import { reject } from "./organization-detail/reject";
@@ -76,6 +78,8 @@ export function OrganizationSignIn() {
       }
     },
   });
+  // A wrong slug is the field's to say; everything else is the form's.
+  const slugRefused = organizationSignInSlugRefused(signIn.error);
   const signOut = useSignOut();
   const actionLabel = signedInAs
     ? "Connect organization"
@@ -164,7 +168,15 @@ export function OrganizationSignIn() {
                   signIn.mutate();
                 }}
               >
-                <Field label="Organization slug" error={slugProblem}>
+                <Field
+                  label="Organization slug"
+                  error={
+                    slugProblem ??
+                    (slugRefused
+                      ? organizationSignInStartErrorMessage(signIn.error)
+                      : null)
+                  }
+                >
                   {(control) => (
                     <Input
                       {...control}
@@ -172,6 +184,7 @@ export function OrganizationSignIn() {
                       onChange={(event) => {
                         setSlug(event.target.value);
                         setSlugProblem(null);
+                        if (slugRefused) signIn.reset();
                       }}
                       className="text-code"
                       placeholder="example-org-ab12cd"
@@ -205,13 +218,16 @@ export function OrganizationSignIn() {
                 </Button>
               </form>
             )}
-            {signIn.error ? (
+            {signIn.error && !slugRefused ? (
               <InlineFeedback tone="error">
                 {organizationSignInStartErrorMessage(signIn.error)}
               </InlineFeedback>
             ) : signOut.error ? (
               <InlineFeedback tone="error">
-                {signOut.error.message}
+                {apiErrorMessage(
+                  signOut.error,
+                  "Couldn't sign you out. Try again.",
+                )}
               </InlineFeedback>
             ) : null}
             <div className="flex gap-3 rounded-xl bg-muted/40 p-4 text-support text-muted-foreground">

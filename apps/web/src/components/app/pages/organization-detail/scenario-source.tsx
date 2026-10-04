@@ -1,8 +1,10 @@
 import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitBranch, Hammer, Pause, Play, Unplug } from "lucide-react";
+import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
 import { CodeBlock } from "../../patterns/CodeBlock";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
+import { Field } from "../../patterns/Field";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
 import { Section } from "../../patterns/Section";
 import { Badge } from "@/components/ui/badge";
@@ -54,10 +56,17 @@ export function ScenarioSourceSection({
       await queryClient.invalidateQueries({ queryKey });
     },
   });
+  const failure = describeApiError<"repository">(change.error, {
+    fallback: "Couldn't change the scenario source. Try again.",
+    fields: { repository: /repositor|github|install/i },
+  });
   if (!card.data || !scenarioSourceCardVisible(card.data)) return null;
   const { enabled, appSlug } = card.data;
   const source = card.data.source?.disconnectedAt === null ? card.data.source : null;
   const branch = source?.defaultBranch ?? "main";
+  // Connecting a repository can refuse it; the field says why.
+  const repositoryError =
+    !source && failure?.field === "repository" ? failure.message : null;
 
   return (
     <Section
@@ -109,7 +118,7 @@ export function ScenarioSourceSection({
               <li>Push at least one commit to the repository's default branch.</li>
             </ol>
             <form
-              className="flex flex-wrap items-center gap-2"
+              className="space-y-3"
               onSubmit={(event) => {
                 event.preventDefault();
                 if (!change.isPending) {
@@ -117,17 +126,24 @@ export function ScenarioSourceSection({
                 }
               }}
             >
-              <Input
-                value={repository}
-                onChange={(event) => setRepository(event.target.value)}
-                placeholder="owner/repository"
-                className="max-w-sm text-code"
-                aria-label="GitHub repository"
-                autoComplete="off"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-              />
+              <Field label="GitHub repository" error={repositoryError}>
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={repository}
+                    onChange={(event) => {
+                      setRepository(event.target.value);
+                      if (repositoryError) change.reset();
+                    }}
+                    placeholder="owner/repository"
+                    className="text-code"
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                )}
+              </Field>
               <Button
                 type="submit"
                 disabled={!enabled || !repository.trim() || change.isPending}
@@ -138,8 +154,8 @@ export function ScenarioSourceSection({
             </form>
           </>
         )}
-        {change.error ? (
-          <InlineFeedback tone="error">{change.error.message}</InlineFeedback>
+        {failure && !repositoryError ? (
+          <InlineFeedback tone="error">{failure.message}</InlineFeedback>
         ) : null}
         <p className="text-muted-foreground">{MODE_NOTE}</p>
         <details>
@@ -173,7 +189,10 @@ export function ScenarioSourceSection({
         }}
         title="Disconnect the repository?"
         description="Updates stop and the live courses stay. Connecting a repository again keeps them live until its first deploy."
-        error={change.error ? change.error.message : null}
+        error={apiErrorMessage(
+          change.error,
+          "Couldn't disconnect the repository. Try again.",
+        )}
         pending={change.isPending}
         confirmLabel="Disconnect"
         pendingLabel="Disconnecting…"
