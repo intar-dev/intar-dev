@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { CheckCircle2, ListTree, LockKeyhole } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +20,7 @@ import {
   type CourseRouteRef,
 } from "./course-wire";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
+import { useJustReached } from "@/components/app/patterns/use-just-reached";
 
 interface CourseOutlineProps {
   course: CourseCatalogCourse;
@@ -103,36 +104,6 @@ function placeAt(element: HTMLElement, item: HTMLElement) {
   element.style.height = `${item.offsetHeight}px`;
 }
 
-/**
- * Lectures that turned complete while the outline was open. One completed
- * before the outline mounted shows its check still (the Moment Rule).
- */
-function useJustCompleted(lectures: CourseLectureSummary[]) {
-  const previous = useRef<Map<string, CourseLectureSummary["state"]> | null>(null);
-  const [completed, setCompleted] = useState<ReadonlySet<string>>(new Set());
-  const signature = lectures
-    .map((lecture) => `${lecture.lectureId}:${lecture.state}`)
-    .join("|");
-  useLayoutEffect(() => {
-    const before = previous.current;
-    previous.current = new Map(
-      lectures.map((lecture) => [lecture.lectureId, lecture.state]),
-    );
-    if (!before) return;
-    const now = lectures
-      .filter(
-        (lecture) =>
-          lecture.state === "completed" &&
-          before.has(lecture.lectureId) &&
-          before.get(lecture.lectureId) !== "completed",
-      )
-      .map((lecture) => lecture.lectureId);
-    if (now.length) setCompleted((current) => new Set([...current, ...now]));
-    // `signature` captures every state change; `lectures` may be a new array each render.
-  }, [signature]);
-  return completed;
-}
-
 function CourseOutlineContent({
   course,
   route,
@@ -146,7 +117,10 @@ function CourseOutlineContent({
   const list = useRef<HTMLDivElement>(null);
   const pill = useRef<HTMLSpanElement>(null);
   const ghost = useRef<HTMLSpanElement>(null);
-  const justCompleted = useJustCompleted(course.lectures);
+  const justCompleted = useJustReached(
+    course.lectures.map((lecture) => [lecture.lectureId, lecture.state] as const),
+    "completed",
+  );
   const currentIndex = course.lectures.findIndex(
     (lecture) => lecture.lectureId === currentLectureId,
   );
@@ -210,11 +184,13 @@ function CourseOutlineContent({
           // Touch has no hover: a tap would leave the highlight behind.
           if (event.pointerType !== "mouse") return;
           const target = ghost.current;
-          const item = (event.target as HTMLElement).closest<HTMLElement>(
-            "li[data-lecture-state] > a",
+          const row = (event.target as HTMLElement).closest<HTMLElement>(
+            "li[data-lecture-state]",
           );
-          if (!target || !item) return;
-          if (item.parentElement?.hasAttribute("data-current")) {
+          if (!target || !row) return;
+          // The current and locked rows aren't links: the ghost steps aside.
+          const item = row.querySelector<HTMLElement>(":scope > a");
+          if (!item) {
             delete target.dataset.on;
             return;
           }

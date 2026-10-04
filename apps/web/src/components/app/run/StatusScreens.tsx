@@ -18,35 +18,9 @@ import { cn } from "@/lib/utils";
 import { formatScenarioStepState } from "./run-support";
 import type { ScenarioRunRecord, ScenarioStatusStep } from "./run-types";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
+import { useJustReached } from "@/components/app/patterns/use-just-reached";
 
 type StepState = ScenarioStatusStep["state"];
-
-/**
- * Steps that reached `state` while this screen was open. A stage that was
- * already there when the screen mounted stays still (the Moment Rule): no
- * check draws itself and no sweep plays on load or revisit.
- */
-function useJustBecame(steps: ScenarioStatusStep[], state: StepState) {
-  const previous = useRef<Map<string, StepState> | null>(null);
-  const [reached, setReached] = useState<ReadonlySet<string>>(new Set());
-  const signature = steps.map((step) => `${step.id}:${step.state}`).join("|");
-  useLayoutEffect(() => {
-    const before = previous.current;
-    previous.current = new Map(steps.map((step) => [step.id, step.state]));
-    if (!before) return;
-    const now = steps
-      .filter(
-        (step) =>
-          step.state === state &&
-          before.has(step.id) &&
-          before.get(step.id) !== state,
-      )
-      .map((step) => step.id);
-    if (now.length) setReached((current) => new Set([...current, ...now]));
-    // `signature` captures every state change; `steps` is a new array each render.
-  }, [signature]);
-  return reached;
-}
 
 /**
  * One startup sequence spans two screens: the start route, then the run
@@ -95,8 +69,9 @@ export function ScenarioStepScreen(props: {
           ...step,
           state: handoff.get(step.id) ?? step.state,
         }));
-  const justFinished = useJustBecame(steps, "done");
-  const justStarted = useJustBecame(steps, "active");
+  const stepStates = steps.map((step) => [step.id, step.state] as const);
+  const justFinished = useJustReached(stepStates, "done");
+  const justStarted = useJustReached(stepStates, "active");
   useLayoutEffect(() => {
     if (advanced) return;
     // Style the handed-off states before advancing, so the change transitions.

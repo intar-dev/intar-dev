@@ -736,6 +736,15 @@ test("the outline's raised card follows the current lecture", async ({ page, ui 
     });
   await expect.poll(misalignment).toBe(0);
 
+  // The ghost follows the mouse over other lectures and steps aside on the
+  // current one instead of staying on the last row it visited.
+  const ghost = rail.locator("[data-outline-ghost]");
+  const other = rail.locator("li[data-lecture-state]:not([data-current]) > a").first();
+  await other.hover();
+  await expect(ghost).toHaveAttribute("data-on", "");
+  await rail.locator("li[data-current] > *").hover();
+  await expect(ghost).not.toHaveAttribute("data-on");
+
   const items = rail.locator("li[data-lecture-state]");
   const index = await items.evaluateAll((lis) =>
     lis.findIndex(

@@ -49,6 +49,7 @@ import type {
   ScenarioRunSolution,
 } from "./run-types";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
+import { useJustReached } from "@/components/app/patterns/use-just-reached";
 
 type LearningPanelState = "booting" | "running" | "solved";
 
@@ -466,22 +467,6 @@ const CHECK_LABEL_TONES: Record<LearnerCheckStatus, string> = {
   needs_repair: "text-warning",
 };
 
-/** Keys of checks that turned verified since the previous render. */
-function useJustVerified(checks: readonly LearnerCheck[]) {
-  const previous = useRef<ReadonlyMap<string, LearnerCheckStatus>>(new Map());
-  const justVerified = new Set<string>();
-  for (const check of checks) {
-    const before = previous.current.get(check.key);
-    if (before && before !== "verified" && check.status === "verified") {
-      justVerified.add(check.key);
-    }
-  }
-  useEffect(() => {
-    previous.current = new Map(checks.map((check) => [check.key, check.status]));
-  });
-  return justVerified;
-}
-
 function LectureTheory(props: {
   headingId: string;
   briefingMarkdown: string;
@@ -560,7 +545,10 @@ function Checks(props: {
   action?: ReactNode;
 }) {
   const checks = getLearnerChecks(props.probes, props.objectives);
-  const justVerified = useJustVerified(checks);
+  const justVerified = useJustReached(
+    checks.map((check) => [check.key, check.status] as const),
+    "verified",
+  );
 
   return (
     <section
