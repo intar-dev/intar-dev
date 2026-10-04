@@ -114,7 +114,7 @@ describe("control-plane maintenance fence", () => {
     expect(firstCsp).not.toContain("'unsafe-inline'");
     expect(html).toContain(`<style nonce="${firstNonce}">`);
     expect(html).toContain(`<script nonce="${firstNonce}">`);
-    expect(html).toContain("PLANNED MAINTENANCE");
+    expect(html).toContain("Planned maintenance");
     expect(html).toContain("The control plane is under maintenance");
     expect(html).not.toMatch(/beta access|cutover|invite flow/iu);
     expect(html).toContain(
