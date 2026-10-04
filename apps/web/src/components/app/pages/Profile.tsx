@@ -102,6 +102,9 @@ function initials(name: string | null | undefined): string {
   return letters || "?";
 }
 
+const wait = (ms: number) =>
+  new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
 /**
  * After a key is removed, keep focus in the list: the neighbouring key, any
  * key left on the page, or the empty state that says none are left.
@@ -218,14 +221,17 @@ export function Profile() {
         );
       }
     },
-    onSuccess: async () => {
+    // The row confirms and folds away first (see the remove action); the
+    // list refreshes after that.
+    onSuccess: () => {
       setFormNotice("SSH key removed. It cannot be used for new routes.");
       setFormError(null);
-      await queryClient.invalidateQueries({
-        queryKey: ["profile", "ssh-keys"],
-      });
     },
   });
+  const [removal, setRemoval] = useState<{
+    keyId: string;
+    folding: boolean;
+  } | null>(null);
 
   const user = session?.user ?? null;
   // Organization providers never sign in a platform admin.
@@ -489,6 +495,8 @@ export function Profile() {
                   {visibleKeys.map((key, index) => {
                     const deleting =
                       deleteKey.isPending && deleteKey.variables === key.id;
+                    const removed = removal?.keyId === key.id;
+                    const folding = removed && removal.folding;
                     const keyName = key.label || key.comment || "unnamed";
                     // Focus lands on the next key's action after a removal,
                     // or the previous one when the last key goes.
@@ -499,8 +507,12 @@ export function Profile() {
                       <li
                         key={key.id}
                         data-ssh-key-id={key.id}
-                        className="flex flex-wrap items-start gap-4 p-4 transition-colors duration-200 has-[[data-inline-confirm][data-asking]]:bg-destructive-subtle/60"
+                        data-folding={folding || undefined}
+                        // A removed row folds away (rows 1fr → 0fr) before the
+                        // list refreshes, so the rows below close up smoothly.
+                        className="grid grid-rows-[1fr] transition-[grid-template-rows,opacity,background-color] duration-(--duration-slow) ease-enter has-[[data-inline-confirm][data-asking]]:bg-destructive-subtle/60 data-folding:grid-rows-[0fr] data-folding:opacity-0"
                       >
+                        <div className="flex min-h-0 flex-wrap items-start gap-4 overflow-hidden p-4">
                         <div className="min-w-0 flex-1 space-y-1">
                           {/* As tall as the action, so Remove lines up with the
                               key's name (the Row Rule). */}
@@ -531,14 +543,42 @@ export function Profile() {
                           question={`Remove the ${keyName} key?`}
                           confirmLabel="Remove key"
                           pendingLabel="Removing…"
+                          doneLabel="Removed"
                           pending={deleting}
-                          disabled={deleteKey.isPending && !deleting}
+                          done={removed}
+                          disabled={
+                            (deleteKey.isPending && !deleting) ||
+                            (removal !== null && !removed)
+                          }
                           onConfirm={() =>
                             deleteKey.mutate(key.id, {
-                              onSuccess: () => focusAfterRemoval(nextKeyId),
+                              onSuccess: async () => {
+                                // "Removed" with a drawn check, then the row
+                                // folds away and the list closes up.
+                                setRemoval({ keyId: key.id, folding: false });
+                                await wait(600);
+                                setRemoval({ keyId: key.id, folding: true });
+                                await wait(300);
+                                queryClient.setQueryData<ProfileSshKeysResponse>(
+                                  ["profile", "ssh-keys"],
+                                  (data) =>
+                                    data && {
+                                      ...data,
+                                      keys: data.keys.filter(
+                                        (item) => item.id !== key.id,
+                                      ),
+                                    },
+                                );
+                                setRemoval(null);
+                                focusAfterRemoval(nextKeyId);
+                                await queryClient.invalidateQueries({
+                                  queryKey: ["profile", "ssh-keys"],
+                                });
+                              },
                             })
                           }
                         />
+                        </div>
                       </li>
                     );
                   })}

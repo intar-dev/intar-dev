@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { LoaderCircle } from "lucide-react";
+import { Check, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -38,7 +38,11 @@ interface InlineConfirmProps {
   confirmLabel: string;
   /** Present tense while the request runs: "Removing…". */
   pendingLabel: string;
+  /** Past tense once it worked: "Removed". */
+  doneLabel: string;
   pending?: boolean;
+  /** The request worked: a check draws itself before the row leaves. */
+  done?: boolean;
   disabled?: boolean;
   onConfirm: () => void;
 }
@@ -58,7 +62,9 @@ export function InlineConfirm({
   question,
   confirmLabel,
   pendingLabel,
+  doneLabel,
   pending = false,
+  done = false,
   disabled = false,
   onConfirm,
 }: InlineConfirmProps) {
@@ -66,7 +72,9 @@ export function InlineConfirm({
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const keep = useRef<HTMLButtonElement>(null);
-  const open = asking || pending;
+  const open = asking || pending || done;
+  const busy = pending || done;
+  const stage = done ? "done" : pending ? "pending" : "idle";
 
   const close = (refocus: boolean) => {
     setAsking(false);
@@ -78,13 +86,13 @@ export function InlineConfirm({
   }, [asking]);
 
   useEffect(() => {
-    if (!asking || pending) return;
+    if (!asking || busy) return;
     const onPointerDown = (event: PointerEvent) => {
       if (!root.current?.contains(event.target as Node)) setAsking(false);
     };
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, [asking, pending]);
+  }, [asking, busy]);
 
   return (
     <div
@@ -93,14 +101,14 @@ export function InlineConfirm({
       data-asking={open || undefined}
       className="grid shrink-0 items-center justify-items-end *:[grid-area:1/1]"
       onKeyDown={(event) => {
-        if (event.key !== "Escape" || !asking || pending) return;
+        if (event.key !== "Escape" || !asking || busy) return;
         event.preventDefault();
         event.stopPropagation();
         close(true);
       }}
       onBlur={(event) => {
         const next = event.relatedTarget as Node | null;
-        if (asking && !pending && next && !root.current?.contains(next)) {
+        if (asking && !busy && next && !root.current?.contains(next)) {
           setAsking(false);
         }
       }}
@@ -138,7 +146,7 @@ export function InlineConfirm({
           type="button"
           size="sm"
           variant="ghost"
-          disabled={pending}
+          disabled={busy}
           className={cn(
             "transition-[translate,opacity,background-color,color] duration-200 ease-enter motion-reduce:transition-none",
             !open && "translate-x-2",
@@ -152,22 +160,32 @@ export function InlineConfirm({
           size="sm"
           variant="danger"
           aria-busy={pending || undefined}
-          disabled={pending}
+          disabled={busy}
           // Keep focus here while the request runs, and after it fails.
           focusableWhenDisabled
           onClick={onConfirm}
         >
-          {pending ? (
-            <>
+          {/* Every label shares one cell, so the button keeps the width of
+              its widest one (the Steady Box Rule). */}
+          <span className="grid *:col-start-1 *:row-start-1 *:inline-flex *:items-center *:justify-center *:gap-1.5">
+            <span className={cn(stage !== "idle" && "invisible")}>
+              {confirmLabel}
+            </span>
+            <span className={cn(stage !== "pending" && "invisible")}>
               <LoaderCircle
                 className="size-3.5 motion-safe:animate-spin"
                 aria-hidden="true"
               />
               {pendingLabel}
-            </>
-          ) : (
-            confirmLabel
-          )}
+            </span>
+            <span className={cn(stage !== "done" && "invisible")}>
+              <Check
+                className={cn("size-3.5", done && "draw-check")}
+                aria-hidden="true"
+              />
+              {doneLabel}
+            </span>
+          </span>
         </Button>
       </div>
     </div>

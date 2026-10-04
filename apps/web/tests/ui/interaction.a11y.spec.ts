@@ -565,9 +565,11 @@ test("SSH key removal asks again in place", async ({ page, ui }) => {
   await expect(confirm).toBeFocused();
   await expect(rows).toHaveCount(1);
 
-  // The retry removes the key, the notice is announced, and focus lands on
-  // the empty state instead of the page.
+  // The retry removes the key: a drawn check and "Removed", then the row
+  // folds away, the notice is announced, and focus lands on the empty state
+  // instead of the page.
   await confirm.click();
+  await expect(row.getByRole("button", { name: "Removed" })).toBeVisible();
   await expect(
     page
       .getByRole("status")
