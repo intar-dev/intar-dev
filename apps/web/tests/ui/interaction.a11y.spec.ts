@@ -964,9 +964,13 @@ test.describe("lecture reading flow", () => {
       await expect(
         page.getByRole("heading", { name: "Preparing your workspace" }),
       ).toBeVisible();
-      await expect(
-        page.getByRole("list", { name: "Startup steps" }).getByRole("listitem"),
-      ).toHaveCount(3);
+      // The same four stages the run page carries on with.
+      const startupSteps = page
+        .getByRole("list", { name: "Startup steps" })
+        .getByRole("listitem");
+      await expect(startupSteps).toHaveCount(4);
+      await expect(startupSteps.first()).toContainText("Creating your run");
+      await expect(startupSteps.first()).toHaveAttribute("aria-current", "step");
       await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
       await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
       await expect(page.getByRole("region", { name: "Lecture content" })).toHaveCount(
