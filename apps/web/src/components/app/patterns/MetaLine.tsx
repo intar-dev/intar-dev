@@ -48,23 +48,35 @@ export function MetaLine({
     const mark = () => {
       let previous = Number.NEGATIVE_INFINITY;
       let shift = 0;
-      (Array.from(root.children) as HTMLElement[]).forEach((item, index) => {
-        // Items on one line share a centre; the next line sits a line lower.
-        // Rects, not offsets: a translated item becomes its children's
-        // offset parent.
-        const box = item.getBoundingClientRect();
-        const centre = box.top + box.height / 2;
-        const lineStart = index > 0 && centre - previous > 4;
-        if (index === 0) shift = 0;
-        else if (lineStart) {
-          const text = item.lastElementChild as HTMLElement;
-          shift = text.getBoundingClientRect().left - box.left;
-        }
+      // Every rect is read before any write, so a resize costs one layout and
+      // not one per item. A translate or a hidden dot moves no item's line or
+      // its text's offset within it, so the reads do not depend on the writes.
+      const marks = (Array.from(root.children) as HTMLElement[]).map(
+        (item, index) => {
+          // Items on one line share a centre; the next line sits a line lower.
+          // Rects, not offsets: a translated item becomes its children's
+          // offset parent.
+          const box = item.getBoundingClientRect();
+          const centre = box.top + box.height / 2;
+          const lineStart = index > 0 && centre - previous > 4;
+          if (index === 0) shift = 0;
+          else if (lineStart) {
+            const text = item.lastElementChild as HTMLElement;
+            shift = text.getBoundingClientRect().left - box.left;
+          }
+          previous = centre;
+          return { item, lineStart, shift };
+        },
+      );
+      for (const { item, lineStart, shift: offset } of marks) {
         item.toggleAttribute("data-line-start", lineStart);
-        item.toggleAttribute("data-shifted", shift > 0);
-        item.style.setProperty("--shift", `${shift}px`);
-        previous = centre;
-      });
+        item.toggleAttribute("data-shifted", offset > 0);
+        // A steady state writes nothing, so it dirties no style.
+        const value = `${offset}px`;
+        if (item.style.getPropertyValue("--shift") !== value) {
+          item.style.setProperty("--shift", value);
+        }
+      }
     };
     mark();
     if (typeof ResizeObserver === "undefined") return;

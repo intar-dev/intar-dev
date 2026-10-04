@@ -14,6 +14,18 @@ export type ReplaySpeed = (typeof REPLAY_SPEEDS)[number];
 /** Seconds an arrow key moves the replay. */
 export const REPLAY_KEY_STEP_SECONDS = 2;
 
+/** The scrub track's step, in seconds. */
+export const REPLAY_SCRUB_STEP = 0.01;
+
+/**
+ * A scrub value on the cast. The track's step grid can stop short of the
+ * cast's end (28.12 for a 28.1234 s cast), which would leave the end out of
+ * reach of a drag or a click on the track, so the last step snaps to it.
+ */
+export function snapReplayScrub(value: number, duration: number): number {
+  return duration - value < REPLAY_SCRUB_STEP ? duration : value;
+}
+
 export function nextReplaySpeed(speed: ReplaySpeed): ReplaySpeed {
   const index = REPLAY_SPEEDS.indexOf(speed);
   return REPLAY_SPEEDS[(index + 1) % REPLAY_SPEEDS.length] ?? 1;

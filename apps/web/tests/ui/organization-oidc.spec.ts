@@ -619,3 +619,38 @@ test("platform admins manage an organization's sign-in without membership", asyn
   await dialog.getByRole("button", { name: "Restore access" }).click();
   await expect.poll(() => restored).toBe("user-removed");
 });
+
+test("a failed sign-in change does not follow the admin dialog into its next opening", async ({
+  page,
+  ui,
+}) => {
+  await page.route(
+    "**/api/admin/organizations/org-platform/removed-members",
+    (route) => route.fulfill({ json: { removedMembers: [] } }),
+  );
+  await page.route(
+    "**/api/admin/organizations/org-platform/sso-policy",
+    (route) =>
+      route.fulfill({ status: 503, json: { error: "Policy store unavailable" } }),
+  );
+  await ui.open({
+    ...routeCase("admin-people"),
+    path: "/admin/people?tab=organizations",
+  });
+  ui.server.expectedUnavailable = 1;
+
+  await page.getByRole("button", { name: "Manage" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog
+    .getByRole("button", { name: "Allow other email domains" })
+    .click();
+  await expect(dialog.getByRole("alert")).toContainText(
+    "Policy store unavailable",
+  );
+
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole("button", { name: "Manage" }).click();
+  await expect(page.getByRole("dialog")).toContainText("Removed people");
+  await expect(page.getByRole("dialog").getByRole("alert")).toHaveCount(0);
+});

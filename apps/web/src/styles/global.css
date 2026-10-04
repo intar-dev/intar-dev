@@ -1247,6 +1247,14 @@ body:has([data-slot="dialog-content"][data-open]) a[href="#main-content"] {
   animation: outline-roll var(--duration-moderate) var(--ease-enter);
 }
 
+/* The One Pulse Rule: at most one element breathes in a view, and it is a
+   live run. The outline's current-lecture dot is the one that gives way: it
+   breathes only while no [data-pulse="live"] dot (the sidebar's run badge, an
+   app bar status) is on the page. */
+body:has([data-pulse="live"]) [data-pulse="yields"] {
+  animation: none;
+}
+
 /* parity: lecture */
 /* Reading rhythm: paragraphs 1em apart, a heading ties to the text after it
    (1.75em above, 0.5em below), rules sit 2em from their neighbours. */
@@ -1332,8 +1340,11 @@ body:has([data-slot="dialog-content"][data-open]) a[href="#main-content"] {
   --app-max: 128rem;
 }
 
-/* bp-short: landscape phones get slim bars and side sheets. */
-@custom-variant short (@media (max-height: 31.25rem));
+/* bp-short: landscape phones get slim bars and side sheets. Exclusive at
+   31.25rem, where the docked run layout starts, and bp-sm wide, so a portrait
+   phone whose layout the keyboard shrinks does not count. Kept in step with
+   RUN_QUERY.short. */
+@custom-variant short (@media (height < 31.25rem) and (min-width: 40rem));
 
 @media (max-height: 31.25rem) and (min-width: 40rem) {
   :root {
@@ -2149,8 +2160,10 @@ html {
 @custom-variant dock (@media (min-width: 48rem) and (min-height: 31.25rem));
 /* bp-run: terminal and panel side by side, two to one. */
 @custom-variant split (@media (min-width: 60rem) and (min-height: 31.25rem));
-/* A portrait phone: the dock sits under the terminal. */
-@custom-variant phone (@media (max-width: 47.999rem) and (min-height: 31.25rem));
+/* Under bp-md the dock sits under the terminal. RunDock renders nothing while
+   `short` (a landscape phone), so the height is not repeated here. Kept in step
+   with RUN_QUERY.phone. */
+@custom-variant phone (@media (max-width: 47.999rem));
 
 :root {
   --sheet-peek: 42dvh;

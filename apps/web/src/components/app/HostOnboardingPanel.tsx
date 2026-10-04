@@ -177,7 +177,7 @@ export function HostOnboardingPanel({
         </form>
 
         {onboard.error ? (
-          <Alert variant="destructive">
+          <Alert variant="destructive" just>
             <AlertTitle>Onboarding failed</AlertTitle>
             <AlertDescription>
               {onboard.error instanceof Error

@@ -26,7 +26,11 @@ import {
   SCENARIO_DIFFICULTIES,
 } from "@/components/app/patterns/MetaLine";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { ErrorState, EmptyState } from "@/components/app/patterns/StateCard";
+import {
+  ErrorState,
+  EmptyState,
+  StaleNotice,
+} from "@/components/app/patterns/StateCard";
 import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
 import {
@@ -271,11 +275,14 @@ function CourseCatalogPage({
     }, 250);
     return () => window.clearTimeout(timeout);
   }, [navigate, searchState, searchText]);
+  // A refresh that fails over cached data keeps that data on screen: the index
+  // says so in its capacity line and a course in a stale notice.
+  const loadFailed = catalogLoadFailed(catalog.error, catalog.data !== undefined);
   // A loaded course owns its title as the content's h1; the bar then shows the
   // context. The index, loading and error states keep the bar h1.
   usePageChrome({
     title: course?.title ?? (courseId ? "Course" : "Courses"),
-    reading: course !== null,
+    reading: course !== null && !loadFailed,
   });
 
   const setFilter = (next: NormalizedCatalogSearch) =>
@@ -335,10 +342,7 @@ function CourseCatalogPage({
   if (catalog.isPending) {
     return <CourseCatalogLoading showCapacity={!courseId} />;
   }
-  if (
-    catalog.error &&
-    (courseId || !catalog.data || isAccessResponseError(catalog.error, true))
-  ) {
+  if (loadFailed) {
     return (
       <PageShell>
         <ErrorState
@@ -381,6 +385,7 @@ function CourseCatalogPage({
         filters={filters}
         filtersActive={filtersActive}
         onClearFilters={clearFilters}
+        refreshFailed={catalog.isError}
       />
     );
   }
@@ -542,6 +547,7 @@ function CourseDetail({
   filters,
   filtersActive,
   onClearFilters,
+  refreshFailed,
 }: {
   course: CourseCatalogCourse;
   lectures: readonly CourseLectureSummary[];
@@ -549,6 +555,7 @@ function CourseDetail({
   filters: ReactNode;
   filtersActive: boolean;
   onClearFilters: () => void;
+  refreshFailed: boolean;
 }) {
   const route = courseRouteForCatalogCourse(course, organizationId);
   const complete = course.lectures.filter(
@@ -557,6 +564,7 @@ function CourseDetail({
 
   return (
     <PageShell>
+      {refreshFailed ? <StaleNotice what="This course" /> : null}
       <div className="space-y-4">
         <CourseIndexBackLink route={route} />
         <ContentHeader
@@ -1018,6 +1026,15 @@ function CourseFilters({
       ) : null}
     </FilterBar>
   );
+}
+
+/**
+ * Whether a failed catalog request replaces the page. A refresh that fails
+ * over cached data does not, so a course on screen keeps its h1; only a first
+ * load, or a denied one, has nothing left to show.
+ */
+export function catalogLoadFailed(error: unknown, hasData: boolean): boolean {
+  return Boolean(error) && (!hasData || isAccessResponseError(error, true));
 }
 
 export function filterCourses(

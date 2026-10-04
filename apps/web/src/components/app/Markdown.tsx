@@ -4,6 +4,9 @@ import remarkGfm from "remark-gfm";
 import { CodeBlock, useScrollCue } from "@/components/app/patterns/CodeBlock";
 import { cn } from "@/lib/utils";
 
+/** About 60 characters of 13px mono fit the narrowest reading column from bp-sm. */
+const KEEP_ON_ONE_LINE_MAX = 60;
+
 export function Markdown({
   children,
   className,
@@ -136,7 +139,15 @@ export function Markdown({
               className={cn(
                 "box-decoration-clone rounded-xs border border-border bg-muted px-[0.3125rem] py-px font-mono font-normal tracking-normal text-foreground",
                 pageContent
-                  ? "text-[0.8125em] max-sm:[overflow-wrap:anywhere] sm:whitespace-nowrap"
+                  ? cn(
+                      "text-[0.8125em] [overflow-wrap:anywhere]",
+                      // A path stays on one line from bp-sm, but only one that
+                      // fits the reading column; a longer span would spill out
+                      // of it, so it wraps anywhere instead.
+                      typeof children === "string" &&
+                        children.length <= KEEP_ON_ONE_LINE_MAX &&
+                        "sm:whitespace-nowrap",
+                    )
                   : "text-code",
               )}
             >

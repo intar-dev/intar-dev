@@ -52,10 +52,14 @@ export function StatusToken({
   live = false,
   className,
 }: StatusTokenProps) {
+  // The Moment Rule: a clock that is there when the token mounts (a page load,
+  // a list row) stays still; one that appears after, as a run starts, fades in.
+  const [arrivedWithTime] = useState(() => Boolean(clock) || Boolean(elapsed));
   return (
     <span className={cn("inline-flex min-w-0 items-center gap-1.5", className)}>
       <span
         aria-hidden="true"
+        data-pulse={pulse ? "live" : undefined}
         className={cn(
           "size-2 shrink-0 rounded-full bg-current transition-colors duration-(--duration-reveal) ease-standard",
           DOT_TONES[tone],
@@ -95,9 +99,13 @@ export function StatusToken({
         )}
       </span>
       {clock ? (
-        <TickingClock startedAt={clock.startedAt} frozenMs={clock.frozenMs} />
+        <TickingClock
+          startedAt={clock.startedAt}
+          frozenMs={clock.frozenMs}
+          fadeIn={!arrivedWithTime}
+        />
       ) : elapsed ? (
-        <span className="animate-in fade-in-0 font-mono text-xs text-faint-foreground tabular-nums duration-(--duration-moderate) ease-enter">
+        <span className={cn(TIME_CLASS, !arrivedWithTime && FADE_IN)}>
           {elapsed}
         </span>
       ) : null}
@@ -105,10 +113,14 @@ export function StatusToken({
   );
 }
 
+const TIME_CLASS = "font-mono text-xs text-faint-foreground tabular-nums";
+const FADE_IN = "animate-in fade-in-0 duration-(--duration-moderate) ease-enter";
+
 // Isolated so the 1s interval re-renders only this span, not the caller.
 function TickingClock(props: {
   startedAt: number;
   frozenMs?: number | null | undefined;
+  fadeIn: boolean;
 }) {
   const frozen = props.frozenMs != null;
   const [now, setNow] = useState(() => Date.now());
@@ -124,7 +136,7 @@ function TickingClock(props: {
 
   return (
     // Read on demand, never announced: it sits outside the status region.
-    <span className="animate-in fade-in-0 font-mono text-xs text-faint-foreground tabular-nums duration-(--duration-moderate) ease-enter">
+    <span className={cn(TIME_CLASS, props.fadeIn && FADE_IN)}>
       {formatClockSeconds(seconds)}
     </span>
   );

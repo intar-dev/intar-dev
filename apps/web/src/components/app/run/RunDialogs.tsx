@@ -55,7 +55,7 @@ export function ScenarioCancelDialog(props: {
           </DialogDescription>
         </DialogHeader>
         {props.error ? (
-          <Alert variant="destructive">
+          <Alert variant="destructive" just>
             <AlertTitle>Could not end run</AlertTitle>
             <AlertDescription>
               {props.error} Try ending the run again.
@@ -128,7 +128,7 @@ export function DeleteRunDialog(props: {
           </DialogDescription>
         </DialogHeader>
         {props.error ? (
-          <Alert variant="destructive">
+          <Alert variant="destructive" just>
             <AlertTitle>Could not delete run</AlertTitle>
             <AlertDescription>
               Nothing was removed. Try again when you are ready.

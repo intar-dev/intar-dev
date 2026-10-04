@@ -138,7 +138,7 @@ export function AdminHosts() {
           </Alert>
         ) : null}
         {removeHost.error ? (
-          <Alert variant="destructive">
+          <Alert variant="destructive" just>
             <AlertTitle>Host removal failed</AlertTitle>
             <AlertDescription>
               {removeHost.error instanceof Error
@@ -148,7 +148,7 @@ export function AdminHosts() {
           </Alert>
         ) : null}
         {vmError ? (
-          <Alert variant="destructive">
+          <Alert variant="destructive" just>
             <AlertTitle>Host action failed</AlertTitle>
             <AlertDescription>{vmError}</AlertDescription>
           </Alert>

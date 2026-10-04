@@ -403,25 +403,31 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
     id: string;
     folding: boolean;
   } | null>(null);
-  const removeAssignment = (id: string) =>
-    unassign.mutate(id, {
-      onSuccess: async () => {
-        setRemoval({ id, folding: false });
-        await wait(600);
-        setRemoval({ id, folding: true });
-        await wait(300);
-        queryClient.setQueryData<AssignmentsResponse>(
-          ["organizations", detail.id, "assignments"],
-          (data) =>
-            data && {
-              ...data,
-              assignments: data.assignments.filter((item) => item.id !== id),
-            },
-        );
-        setRemoval(null);
-        await invalidate();
-      },
-    });
+  // Awaited rather than passed as `mutate` callbacks, which never run once this
+  // section has unmounted: the list must still catch up if the admin leaves
+  // the tab before the delete answers.
+  const removeAssignment = async (id: string) => {
+    try {
+      await unassign.mutateAsync(id);
+    } catch {
+      // `unassign.error` shows it.
+      return;
+    }
+    setRemoval({ id, folding: false });
+    await wait(600);
+    setRemoval({ id, folding: true });
+    await wait(300);
+    queryClient.setQueryData<AssignmentsResponse>(
+      ["organizations", detail.id, "assignments"],
+      (data) =>
+        data && {
+          ...data,
+          assignments: data.assignments.filter((item) => item.id !== id),
+        },
+    );
+    setRemoval(null);
+    await invalidate();
+  };
 
   const entries = assignments.data?.assignments ?? [];
   const assignedIds = new Set(entries.map((entry) => entry.scenarioId));
@@ -563,7 +569,7 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
                             unassign.variables !== entry.id) ||
                           (removal !== null && !removed)
                         }
-                        onConfirm={() => removeAssignment(entry.id)}
+                        onConfirm={() => void removeAssignment(entry.id)}
                       />
                     ) : null}
                     </div>

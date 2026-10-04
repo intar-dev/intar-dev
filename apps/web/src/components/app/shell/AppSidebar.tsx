@@ -237,6 +237,7 @@ export function AppSidebar() {
                           className="gap-1.5 transition-[opacity,scale] duration-(--duration-moderate) ease-enter data-zero:scale-(--scale-pop) data-zero:opacity-0 data-zero:duration-(--duration-fast) data-zero:ease-exit"
                         >
                           <span
+                            data-pulse={badgeCount > 0 ? "live" : undefined}
                             className={
                               badgeCount > 0
                                 ? "size-2 rounded-full bg-primary text-primary motion-safe:animate-live"

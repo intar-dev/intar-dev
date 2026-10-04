@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { OrganizationRemovedMemberRecord } from "@/lib/organizations";
 import {
   signupPolicyText,
@@ -813,6 +813,16 @@ function OrganizationAccessDialog({
     },
     onSettled: refresh,
   });
+  // The dialog stays mounted to play its exit, so its mutations would carry a
+  // failure into the next opening, or the next organization. Each opening
+  // starts clean.
+  const { reset: resetPolicy } = setPolicy;
+  const { reset: resetRestore } = restore;
+  useLayoutEffect(() => {
+    if (!open) return;
+    resetPolicy();
+    resetRestore();
+  }, [open, organization.id, resetPolicy, resetRestore]);
   const actionError = setPolicy.error ?? restore.error;
   const oidc = organization.oidc;
   const removedMembers = removed.data?.removedMembers ?? [];

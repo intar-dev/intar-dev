@@ -7,6 +7,7 @@ import {
   nextReplaySpeed,
   replayKeyTarget,
   replayValueText,
+  snapReplayScrub,
 } from "./RunArtifactViewerModel";
 
 describe("replay clock", () => {
@@ -42,6 +43,20 @@ describe("replay slider keys", () => {
   it("leaves every other key alone", () => {
     expect(replayKeyTarget("a", 10, 28)).toBeNull();
     expect(replayKeyTarget(" ", 10, 28)).toBeNull();
+  });
+});
+
+describe("replay scrub", () => {
+  it("reaches the end of a cast that is not on the step grid", () => {
+    // The track rounds 28.1234 s to 28.12, one step short of the end.
+    expect(snapReplayScrub(28.12, 28.1234)).toBe(28.1234);
+    expect(snapReplayScrub(28.1234, 28.1234)).toBe(28.1234);
+  });
+
+  it("leaves every other position where it is", () => {
+    expect(snapReplayScrub(0, 28.1234)).toBe(0);
+    expect(snapReplayScrub(14.5, 28.1234)).toBe(14.5);
+    expect(snapReplayScrub(28.1, 28.1234)).toBe(28.1);
   });
 });
 

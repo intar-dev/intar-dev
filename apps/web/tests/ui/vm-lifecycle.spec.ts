@@ -1020,6 +1020,8 @@ test("a rejected shutdown stays in the confirmation dialog with learner-safe cop
   await expect(
     dialog.getByText("Could not end run", { exact: true }),
   ).toBeVisible();
+  // The failure answers the click, so it is announced assertively.
+  await expect(dialog.getByRole("alert")).toContainText("Could not end run");
   await expect(dialog).toContainText(
     "The run could not be ended. Your work is still open.",
   );
@@ -1055,7 +1057,10 @@ test("course recaps keep a course return in the shared app bar", async ({
   await expectSavedRunChrome(page);
   await expect(page.getByRole("button", { name: "Delete run…" })).toBeVisible();
   const courseBack = page.locator("[data-run-back]");
-  await expect(courseBack).toHaveAccessibleName("Back to course");
+  // The words on the link are in its name (label in name).
+  await expect(courseBack).toHaveAccessibleName(
+    "Back to course: Platform repair sequence",
+  );
   await expect(courseBack).toContainText("Platform repair sequence");
   await expect(courseBack).toHaveAttribute(
     "href",
@@ -1094,6 +1099,7 @@ test("a failed saved-run deletion stays generic and recoverable", async ({
   await expect(
     dialog.getByText("Could not delete run", { exact: true }),
   ).toBeVisible();
+  await expect(dialog.getByRole("alert")).toContainText("Could not delete run");
   await expect(dialog).toContainText(
     "Nothing was removed. Try again when you are ready.",
   );

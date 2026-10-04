@@ -43,4 +43,19 @@ describe("Markdown page headings", () => {
     expect(markup.match(/<h2/g)).toHaveLength(2);
     expect(markup).toContain("<h3");
   });
+
+  it("keeps a short inline path on one line but lets a long span wrap", () => {
+    const long = "kubectl get pods -n kube-system --field-selector=status.phase!=Running -o wide";
+    const markup = renderToStaticMarkup(
+      createElement(Markdown, {
+        pageContent: true,
+        children: `Open \`/etc/nginx/nginx.conf\`, then run \`${long}\`.`,
+      }),
+    );
+    const spans = markup.match(/<code[^>]*>[^<]*<\/code>/g) ?? [];
+    expect(spans).toHaveLength(2);
+    expect(spans[0]).toContain("sm:whitespace-nowrap");
+    expect(spans[1]).not.toContain("sm:whitespace-nowrap");
+    expect(spans[1]).toContain("[overflow-wrap:anywhere]");
+  });
 });

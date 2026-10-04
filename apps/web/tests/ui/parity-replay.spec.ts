@@ -5,6 +5,24 @@ import { routeCase } from "./routes";
 // Design-system parity for the learner replay: one terminal frame with its own
 // controls (play toggle, "Replay position" slider, clock, speed button).
 
+// The fixture cast lasts 0.2 s, too short to hold a position. This one runs
+// 11.3412 s, which is off the scrub track's 0.01 s step grid.
+const LONG_CAST = [
+  '{"version":2,"width":120,"height":30,"timestamp":1783670400,"env":{"TERM":"xterm-256color"}}',
+  ...Array.from({ length: 11 }, (_, index) => `[${index + 1},"o","line ${index + 1}\\r\\n"]`),
+  '[11.3412,"o","done\\r\\n"]',
+].join("\n");
+
+async function useLongCast(page: Page) {
+  await page.route("**/api/runs/*/artifacts/*/content", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/plain; charset=utf-8",
+      body: LONG_CAST,
+    }),
+  );
+}
+
 async function openReplay(page: Page, ui: UiHarness) {
   await ui.open({
     ...routeCase("run-workspace"),
@@ -99,6 +117,52 @@ test.describe("learner replay", () => {
     await expect(replay.locator(".replay-time")).toHaveText(
       /^\d+:\d\d \/ \d+:\d\d$/,
     );
+  });
+
+  test("crossing bp-md keeps the position instead of restarting the replay", async ({
+    page,
+    ui,
+  }) => {
+    await useLongCast(page);
+    const replay = await openReplay(page, ui);
+    const slider = replay.getByRole("slider", { name: "Replay position" });
+    const clock = replay.locator(".replay-time");
+    await expect(slider).toBeEnabled();
+    await slider.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(clock).toHaveText(/^0:02 \//);
+
+    // The cast fits another way below bp-md, so the player is created again.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(replay.locator(".ap-player")).toHaveCSS("font-size", "13px");
+    await expect(slider).toBeEnabled();
+    await expect(clock).toHaveText(/^0:02 \//);
+    await expect(
+      replay.getByRole("button", { name: "Play replay" }),
+    ).toBeVisible();
+  });
+
+  test("dragging the thumb to the far end reaches the end of the cast", async ({
+    page,
+    ui,
+  }) => {
+    await useLongCast(page);
+    const replay = await openReplay(page, ui);
+    const control = replay.locator(".replay-scrub__control");
+    await expect(
+      replay.getByRole("slider", { name: "Replay position" }),
+    ).toBeEnabled();
+    await control.scrollIntoViewIfNeeded();
+    const box = await control.boundingBox();
+    const y = box!.y + box!.height / 2;
+    await page.mouse.move(box!.x + box!.width / 2, y);
+    await page.mouse.down();
+    await page.mouse.move(box!.x + box!.width + 40, y, { steps: 4 });
+    await page.mouse.up();
+
+    await expect(
+      replay.getByRole("button", { name: "Replay from the start" }),
+    ).toBeVisible();
   });
 
   test("on a phone the screen scrolls sideways and takes a keyboard stop", async ({

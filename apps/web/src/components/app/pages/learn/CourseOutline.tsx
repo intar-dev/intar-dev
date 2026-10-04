@@ -331,6 +331,9 @@ function CourseOutlineItem({
               <LockKeyhole className="size-3.5" />
             ) : (
               <span
+                // The One Pulse Rule: the dot breathes only while no run's
+                // live state does (global.css).
+                data-pulse={kind === "live" ? "yields" : undefined}
                 className={cn(
                   "size-2 rounded-full",
                   kind === "live"

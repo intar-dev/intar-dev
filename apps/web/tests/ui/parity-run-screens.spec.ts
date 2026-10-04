@@ -6,6 +6,21 @@ import { routeCase } from "./routes";
 
 const ARRIVAL_ANIMATIONS = ["intar-rise", "intar-pop", "intar-live"];
 
+test.describe("terminal region", () => {
+  test("is named by its machine, since the embedded terminal has no header chip", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+
+    await expect(page.getByRole("region", { name: "web terminal" })).toBeVisible();
+  });
+});
+
 test.describe("completion bar", () => {
   test("a run that loads solved shows the bar still", async ({ page, ui }) => {
     await ui.open({

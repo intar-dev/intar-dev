@@ -7,8 +7,10 @@ const COPIED_MS = 1600;
 
 /**
  * Copies `text` and confirms in place: "Copy" swaps to a drawn check and
- * "Copied" for duration-flash, and the accessible name follows. A failure
- * calls `onError` so the caller can show it beside the control.
+ * "Copied" for duration-flash. One always-mounted polite region says "Copied"
+ * once per copy; the button's own name stays put, so the click is announced
+ * once. A failure calls `onError` so the caller can show it beside the
+ * control.
  */
 export function CopyButton({
   text,
@@ -37,34 +39,39 @@ export function CopyButton({
   }, []);
 
   return (
-    <Button
-      type="button"
-      variant={variant}
-      size={size}
-      className={className}
-      aria-label={copied ? copiedLabel : name}
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
-          setCopied(true);
-          if (timer.current) window.clearTimeout(timer.current);
-          timer.current = window.setTimeout(() => setCopied(false), COPIED_MS);
-        } catch (error) {
-          onError?.(error);
-        }
-      }}
-    >
-      <AsyncLabel
-        state={copied ? "done" : "idle"}
-        idle={
-          <>
-            <CopyIcon />
-            {label}
-          </>
-        }
-        pending={null}
-        done={copiedLabel}
-      />
-    </Button>
+    <>
+      <Button
+        type="button"
+        variant={variant}
+        size={size}
+        className={className}
+        aria-label={name}
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            if (timer.current) window.clearTimeout(timer.current);
+            timer.current = window.setTimeout(() => setCopied(false), COPIED_MS);
+          } catch (error) {
+            onError?.(error);
+          }
+        }}
+      >
+        <AsyncLabel
+          state={copied ? "done" : "idle"}
+          idle={
+            <>
+              <CopyIcon />
+              {label}
+            </>
+          }
+          pending={null}
+          done={copiedLabel}
+        />
+      </Button>
+      <span role="status" className="sr-only">
+        {copied ? copiedLabel : ""}
+      </span>
+    </>
   );
 }

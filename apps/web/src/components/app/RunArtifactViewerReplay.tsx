@@ -34,8 +34,10 @@ import {
   castHeaderGeometry,
   formatReplayClock,
   nextReplaySpeed,
+  REPLAY_SCRUB_STEP,
   replayKeyTarget,
   replayValueText,
+  snapReplayScrub,
   type ReplaySpeed,
 } from "./RunArtifactViewerModel";
 
@@ -268,17 +270,59 @@ function ReplayPlayer({
   const timeRef = useRef(0);
   const restoreRef = useRef<RestorePoint | null>(null);
   const jumpTimer = useRef<number | null>(null);
+  // The player answers a seek later than it is asked, and its clock keeps
+  // reporting the old position until then. While a seek or a drag is under
+  // way, the frame loop must not write that stale time over the position
+  // the learner just chose.
+  const drag = useRef<{ wasPlaying: boolean } | null>(null);
+  const seeks = useRef({ inFlight: 0, epoch: 0 });
+  const trackSeek = useCallback((request: Promise<void> | void) => {
+    seeks.current.inFlight += 1;
+    seeks.current.epoch += 1;
+    void Promise.resolve(request)
+      .catch(() => undefined)
+      .finally(() => {
+        seeks.current.inFlight -= 1;
+        seeks.current.epoch += 1;
+      });
+  }, []);
 
   const commitTime = useCallback((next: number) => {
     timeRef.current = next;
     setTime(next);
   }, []);
 
-  const takeRestore = useCallback(() => {
-    const point = restoreRef.current;
-    restoreRef.current = null;
-    return point;
+  // Whatever re-creates the player (a speed change, or the viewport crossing
+  // bp-md, which changes how the cast fits) must not cost the learner their
+  // place: the player saves its position as it is torn down.
+  const playingRef = useRef(false);
+  useEffect(() => {
+    playingRef.current = playing;
+  }, [playing]);
+  const saveRestore = useCallback(() => {
+    restoreRef.current = { time: timeRef.current, playing: playingRef.current };
   }, []);
+  // The new player's "ready": put it where the old one was. The seek counts as
+  // one under way, so the new player's clock (still at 0) is not read meanwhile.
+  const restoreInto = useCallback(
+    (next: AsciinemaPlayerInstance) => {
+      const point = restoreRef.current;
+      restoreRef.current = null;
+      if (!point) return false;
+      trackSeek(
+        (async () => {
+          try {
+            await next.seek(point.time);
+            if (point.playing) await next.play();
+          } catch {
+            // A position the new player rejects stays at the start.
+          }
+        })(),
+      );
+      return true;
+    },
+    [trackSeek],
+  );
 
   const handleEvent = useCallback(
     (
@@ -335,9 +379,16 @@ function ReplayPlayer({
       if (stopped) return;
       if (!reading) {
         reading = true;
+        const { epoch } = seeks.current;
         void Promise.resolve(player.getCurrentTime())
           .then((value) => {
-            if (!stopped && typeof value === "number") commitTime(value);
+            const moving =
+              seeks.current.inFlight > 0 ||
+              seeks.current.epoch !== epoch ||
+              drag.current !== null;
+            if (!stopped && !moving && typeof value === "number") {
+              commitTime(value);
+            }
           })
           .catch(() => undefined)
           .finally(() => {
@@ -377,9 +428,9 @@ function ReplayPlayer({
       glide(withGlide);
       commitTime(next);
       if (next < duration) setEnded(false);
-      void Promise.resolve(player.seek(next)).catch(() => undefined);
+      trackSeek(player.seek(next));
     },
-    [player, duration, glide, commitTime],
+    [player, duration, glide, commitTime, trackSeek],
   );
 
   const ready = Boolean(player) && duration > 0;
@@ -405,14 +456,12 @@ function ReplayPlayer({
 
   const cycleSpeed = () => {
     if (!player) return;
-    restoreRef.current = { time: timeRef.current, playing };
     setSpeed(nextReplaySpeed(speed));
   };
 
   // Scrubbing: a drag pauses, follows the pointer (one seek per frame, since
   // the player re-renders from the nearest keyframe) and resumes if it was
   // playing.
-  const drag = useRef<{ wasPlaying: boolean } | null>(null);
   const pendingSeek = useRef<number | null>(null);
   const seekFrame = useRef(0);
 
@@ -421,10 +470,8 @@ function ReplayPlayer({
     seekFrame.current = 0;
     const target = pendingSeek.current;
     pendingSeek.current = null;
-    if (target !== null && player) {
-      void Promise.resolve(player.seek(target)).catch(() => undefined);
-    }
-  }, [player]);
+    if (target !== null && player) trackSeek(player.seek(target));
+  }, [player, trackSeek]);
 
   const scheduleSeek = (target: number) => {
     pendingSeek.current = target;
@@ -467,7 +514,8 @@ function ReplayPlayer({
       custom={custom}
       onPlayer={setPlayer}
       onEvent={handleEvent}
-      takeRestore={takeRestore}
+      saveRestore={saveRestore}
+      restoreInto={restoreInto}
       onReady={onReady}
       onError={onError}
     />
@@ -531,12 +579,13 @@ function ReplayPlayer({
           value={Math.min(time, max)}
           min={0}
           max={max}
-          step={0.01}
+          step={REPLAY_SCRUB_STEP}
           disabled={!ready}
           data-jump={jump ? "" : undefined}
           style={{ "--p": progress } as CSSProperties}
           onPointerDown={beginDrag}
-          onValueChange={(next, details) => {
+          onValueChange={(raw, details) => {
+            const next = snapReplayScrub(raw, duration);
             if (details.reason === "drag") glide(false);
             else glide(true);
             commitTime(next);
@@ -592,7 +641,8 @@ const MountedAsciicastPlayer = memo(function MountedAsciicastPlayer({
   custom,
   onPlayer,
   onEvent,
-  takeRestore,
+  saveRestore,
+  restoreInto,
   onReady,
   onError,
 }: {
@@ -606,7 +656,10 @@ const MountedAsciicastPlayer = memo(function MountedAsciicastPlayer({
     name: PlayerEventName,
     payload: PlayerEventPayload & AsciinemaPlayerMetadata,
   ) => void;
-  takeRestore: () => RestorePoint | null;
+  /** Called as the player is torn down; the next one's "ready" restores it. */
+  saveRestore: () => void;
+  /** Moves a new player to the saved point; false when there is none. */
+  restoreInto: (player: AsciinemaPlayerInstance) => boolean;
   onReady: () => void;
   onError: (message: string) => void;
 }) {
@@ -674,19 +727,9 @@ const MountedAsciicastPlayer = memo(function MountedAsciicastPlayer({
               return;
             }
             dropTabStop();
-            const restore = takeRestore();
-            onEvent(player, name, { restored: restore !== null });
+            const restored = restoreInto(player);
+            onEvent(player, name, { restored });
             onReady();
-            if (restore) {
-              void (async () => {
-                try {
-                  await player.seek(restore.time);
-                  if (restore.playing) await player.play();
-                } catch {
-                  // A position the new player rejects stays at the start.
-                }
-              })();
-            }
           });
         }
         // The player throws from addEventListener for unknown event names,
@@ -715,6 +758,7 @@ const MountedAsciicastPlayer = memo(function MountedAsciicastPlayer({
       cancelled = true;
       const player = playerRef.current;
       playerRef.current = null;
+      if (player) saveRestore();
       player?.dispose?.();
       onPlayer(null);
     };
@@ -725,7 +769,8 @@ const MountedAsciicastPlayer = memo(function MountedAsciicastPlayer({
     custom,
     onPlayer,
     onEvent,
-    takeRestore,
+    saveRestore,
+    restoreInto,
     onReady,
     onError,
   ]);

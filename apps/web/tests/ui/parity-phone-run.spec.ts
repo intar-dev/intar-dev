@@ -112,6 +112,27 @@ test.describe("phone, portrait", () => {
       await bar.evaluate((node) => getComputedStyle(node).animationName),
     ).toBe("none");
   });
+
+  test("closing the sheet brings the completion bar back without replaying its rise", async ({
+    page,
+    ui,
+  }) => {
+    await openRun(ui);
+    ui.server.setRunState("solved");
+
+    // The solved beat lifts the sheet 650ms in and takes the bar into it.
+    const sheet = page.locator("[data-run-learning-mobile-sheet]");
+    await expect(sheet).toBeVisible();
+    await expect(page.locator("[data-run-completion-bar]")).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(sheet).toBeHidden();
+
+    const bar = page.locator("[data-run-completion-bar]");
+    await expect(bar).toBeVisible();
+    expect(
+      await bar.evaluate((node) => getComputedStyle(node).animationName),
+    ).toBe("none");
+  });
 });
 
 test.describe("phone, landscape", () => {
@@ -168,6 +189,44 @@ test.describe("phone, landscape run actions", () => {
     await expect(
       page.getByRole("dialog", { name: "End this run?" }),
     ).toBeVisible();
+  });
+});
+
+test.describe("the 31.25rem height edge", () => {
+  test.use({ viewport: { width: 800, height: 500 }, hasTouch: true });
+
+  test("exactly 500px tall is docked, never also a landscape phone", async ({
+    page,
+    ui,
+  }) => {
+    await openRun(ui);
+
+    await expect(page.locator("[data-run-learning-panel]")).toBeVisible();
+    await expect(
+      page.locator("[data-run-workspace-header] [data-run-learning-panel-trigger]"),
+    ).toHaveCount(0);
+    await expect(page.locator("[data-run-dock]")).toHaveCount(0);
+  });
+});
+
+test.describe("phone, portrait with the layout shrunk by the keyboard", () => {
+  // Chrome on Android resizes the layout with the keyboard, so a 360x640 phone
+  // can be 360x340 while typing. That is not a phone on its side.
+  test.use({ viewport: { width: 360, height: 340 }, hasTouch: true });
+
+  test("keeps the run bar and the bottom sheet", async ({ page, ui }) => {
+    await openRun(ui);
+
+    await expect(page.locator("[data-run-workspace-header]")).toBeVisible();
+    await expect(page.locator("[data-run-dock]")).toBeVisible();
+    await page
+      .locator("[data-run-dock]")
+      .getByRole("button", { name: /^Checks/ })
+      .click();
+    await expect(page.locator("[data-run-learning-mobile-sheet]")).toHaveAttribute(
+      "data-side",
+      "bottom",
+    );
   });
 });
 

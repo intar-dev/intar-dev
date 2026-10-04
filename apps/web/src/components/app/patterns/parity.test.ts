@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { CollectionPagination } from "./CollectionPagination";
+import { CopyButton } from "./CopyButton";
 import { FilterBar, FilterChipGroup } from "./FilterBar";
 import { InlineFeedback } from "./InlineFeedback";
 import { MetaLine } from "./MetaLine";
@@ -101,5 +102,31 @@ describe("pattern parity", () => {
     expect(out).toContain("data-swap");
     expect(out.match(/role="status"/g)).toHaveLength(1);
     expect(out).toContain("text-foreground");
+  });
+
+  it("keeps one quiet status region mounted for the copy confirmation", () => {
+    const out = html(
+      createElement(CopyButton, { text: "x", name: "Copy token" }),
+    );
+    expect(out.match(/role="status"/g)).toHaveLength(1);
+    expect(out).toContain('aria-label="Copy token"');
+    expect(out).toContain('<span role="status" class="sr-only"></span>');
+  });
+
+  it("keeps a clock that is there on mount still", () => {
+    const clocked = html(
+      createElement(StatusToken, {
+        tone: "live",
+        word: "Running",
+        clock: { startedAt: Date.now() },
+      }),
+    );
+    expect(clocked).toContain("tabular-nums");
+    expect(clocked).not.toContain("animate-in");
+    const elapsed = html(
+      createElement(StatusToken, { tone: "success", word: "Solved", elapsed: "12:48" }),
+    );
+    expect(elapsed).toContain("12:48");
+    expect(elapsed).not.toContain("animate-in");
   });
 });

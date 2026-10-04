@@ -241,7 +241,7 @@ export function ScenarioDetails() {
           />
 
           {enableScenario.error ? (
-            <Alert variant="destructive">
+            <Alert variant="destructive" just>
               <AlertTitle>Enable failed</AlertTitle>
               <AlertDescription>
                 {enableScenario.error instanceof Error
@@ -252,7 +252,7 @@ export function ScenarioDetails() {
           ) : null}
 
           {disableScenario.error ? (
-            <Alert variant="destructive">
+            <Alert variant="destructive" just>
               <AlertTitle>Disable failed</AlertTitle>
               <AlertDescription>
                 {disableScenario.error instanceof Error

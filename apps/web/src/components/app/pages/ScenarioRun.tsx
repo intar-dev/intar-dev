@@ -1610,21 +1610,30 @@ export function ScenarioRun() {
             </div>
 
             {showFinishBar ? (
-              <RunCompletionSlot>
-                <RunCompletionBar
-                  canFinish={attemptData.canDestroy}
-                  pending={destroyScenario.isPending}
-                  error={Boolean(destroyScenario.error)}
-                  onFinish={requestDestroyScenario}
-                  animate={justSolved}
-                />
+              <RunCompletionSlot animate={justSolved}>
+                {(animate) => (
+                  <RunCompletionBar
+                    canFinish={attemptData.canDestroy}
+                    pending={destroyScenario.isPending}
+                    error={Boolean(destroyScenario.error)}
+                    onFinish={requestDestroyScenario}
+                    animate={animate}
+                  />
+                )}
               </RunCompletionSlot>
             ) : null}
 
             <section
               // While the startup sequence shows there is no terminal to
-              // name, and the sequence names itself.
-              aria-label={showTerminal ? "Terminal" : undefined}
+              // name, and the sequence names itself. The machine is named
+              // here: the embedded terminal has no header chip any more.
+              aria-label={
+                showTerminal
+                  ? selectedVm
+                    ? `${selectedVm.scenarioVmName} terminal`
+                    : "Terminal"
+                  : undefined
+              }
               className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-2"
             >
               <ScenarioVmSelector
@@ -1929,11 +1938,24 @@ function RunWorkArea({ children }: { children: ReactNode }) {
 }
 
 // On a phone the finish block moves into the sheet while it is open, so the
-// two never stand side by side as twin buttons.
-function RunCompletionSlot({ children }: { children: ReactNode }) {
+// two never stand side by side as twin buttons. The bar's rise is a moment
+// that plays once: when the sheet takes the bar away the moment is spent, and
+// the bar comes back still.
+function RunCompletionSlot({
+  animate,
+  children,
+}: {
+  animate: boolean;
+  children: (animate: boolean) => ReactNode;
+}) {
   const sheet = useRunSheet();
   const docked = useMediaQuery(RUN_QUERY.docked);
-  return !docked && sheet?.open ? null : <>{children}</>;
+  const away = !docked && (sheet?.open ?? false);
+  const [spent, setSpent] = useState(false);
+  useEffect(() => {
+    if (away) setSpent(true);
+  }, [away]);
+  return away ? null : <>{children(animate && !spent)}</>;
 }
 
 // The key row rides on the on-screen keyboard: phones and tablets only, and
@@ -2251,12 +2273,17 @@ function getRunReturnTarget(location: CourseLocation | null | undefined): {
 
   const courseId = encodeURIComponent(route.courseId);
   if (!location?.lectureId) {
+    // The link shows the course title from md, so its name has to hold it.
+    const courseText = location?.courseTitle ?? "Course";
+    const courseLabel = location?.courseTitle
+      ? `Back to course: ${location.courseTitle}`
+      : "Back to course";
     switch (route.scope) {
       case "public":
         return {
           href: `/courses/${courseId}`,
-          label: "Back to course",
-          text: location?.courseTitle ?? "Course",
+          label: courseLabel,
+          text: courseText,
         };
       case "organization-public":
       case "organization-private": {
@@ -2265,8 +2292,8 @@ function getRunReturnTarget(location: CourseLocation | null | undefined): {
           route.scope === "organization-private" ? "private" : "public";
         return {
           href: `/organizations/${organizationId}/courses/${visibility}/${courseId}`,
-          label: "Back to course",
-          text: location?.courseTitle ?? "Course",
+          label: courseLabel,
+          text: courseText,
         };
       }
     }

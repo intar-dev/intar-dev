@@ -30,3 +30,38 @@ test.describe("course outline sheet", () => {
     await expect(sheet).toBeHidden();
   });
 });
+
+test.describe("one pulse", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  const animationName = (page: import("@playwright/test").Page) =>
+    page
+      .locator('[data-pulse="yields"]')
+      .first()
+      .evaluate((node) => getComputedStyle(node).animationName);
+
+  test("the current lecture's dot yields to a live run's pulse", async ({
+    page,
+    ui,
+  }) => {
+    // The sidebar badge's dot is the live run's pulse.
+    await ui.open({ ...routeCase("lecture"), theme: "light" });
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await expect(
+      page.getByRole("link", { name: /My runs.*ongoing run/i }),
+    ).toBeVisible();
+    await expect(page.locator('[data-pulse="live"]').first()).toBeVisible();
+    expect(await animationName(page)).toBe("none");
+  });
+
+  test("with no live run it is the one that breathes", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("lecture"), theme: "light" });
+    ui.server.state.runs = [];
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await expect(page.locator('[data-pulse="yields"]').first()).toBeVisible();
+    await expect(page.locator('[data-pulse="live"]')).toHaveCount(0);
+    expect(await animationName(page)).toBe("intar-live");
+  });
+});

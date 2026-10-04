@@ -1,6 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures/test";
-import { makeMultiReplayRun } from "./fixtures/data";
+import { FIXED_NOW, makeMultiReplayRun } from "./fixtures/data";
 import { ROUTE_CASES, routeCase } from "./routes";
 import {
   coarsePointerTargetViolations,
@@ -458,6 +458,75 @@ test("organization assignments point to the required lecture", async ({
     "/organizations/org-platform/courses/private/platform-repair/lectures/01-private-context",
   );
   await expect(page.getByText(/Complete “Private service context” first/)).toBeVisible();
+});
+
+test("a failed refresh keeps the cached course and its one h1", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    path: "/courses/operations",
+    sessionRole: "learner",
+    theme: "light",
+  });
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+
+  // The catalog goes stale after 10 s; refocusing the window then refetches it.
+  await page.route("**/api/courses", (route) =>
+    route.fulfill({ status: 503, json: { error: "Catalog unavailable" } }),
+  );
+  // Query retries each log the failed request: the first try and three more.
+  ui.server.expectedUnavailable = 4;
+  await page.clock.setFixedTime(FIXED_NOW + 60_000);
+  await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+
+  await expect(page.getByText("This course may be out of date")).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(
+    "Linux operations",
+  );
+});
+
+test("an assignment removed just before leaving the tab is gone on return", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("organization-detail"), theme: "light" });
+  await page.getByRole("tab", { name: "Assignments" }).click();
+
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    "**/api/organizations/org-platform/assignments/*",
+    async (route) => {
+      if (route.request().method() !== "DELETE") {
+        await route.fallback();
+        return;
+      }
+      await held;
+      ui.server.state.assignments = [];
+      await route.fulfill({ status: 204 });
+    },
+  );
+  await page
+    .getByRole("button", { name: /^Remove the .* assignment$/ })
+    .click();
+  await page.getByRole("button", { name: "Remove assignment" }).click();
+  // Leave before the delete answers: the section unmounts with it in flight.
+  await page.getByRole("tab", { name: "Settings" }).click();
+  release();
+
+  await expect(async () => {
+    await page.getByRole("tab", { name: "Settings" }).click();
+    await page.getByRole("tab", { name: "Assignments" }).click();
+    await expect(page.getByText("No scenarios are assigned yet.")).toBeVisible({
+      timeout: 500,
+    });
+  }).toPass({ timeout: 10_000 });
 });
 
 test("course API exposes lectures and no standalone scenario collection", async ({
