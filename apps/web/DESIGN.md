@@ -34,52 +34,69 @@ colors:
   terminal-foreground: "var(--terminal-foreground)"
 typography:
   display:
-    fontFamily: "\"Geist Variable\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
-    fontSize: "clamp(2.5rem, 4.6vw, 4rem)"
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontSize: "clamp(2.5rem, 1.75rem + 3.75vw, 4.5rem)"
     fontWeight: 600
     lineHeight: 1.02
-    letterSpacing: "-0.045em"
+    letterSpacing: "-0.03em"
   feature-title:
-    fontFamily: "\"Geist Variable\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
     fontSize: "2rem"
     fontWeight: 600
     lineHeight: 1.15
-    letterSpacing: "-0.025em"
+    letterSpacing: "-0.02em"
+  content-title:
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontSize: "clamp(1.75rem, 1.6rem + 0.6vw, 2rem)"
+    fontWeight: 600
+    lineHeight: 1.15
+    letterSpacing: "-0.02em"
+  lede:
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontSize: "clamp(1.125rem, 1.1rem + 0.15vw, 1.1875rem)"
+    fontWeight: 400
+    lineHeight: 1.5
   page-title:
-    fontFamily: "\"Geist Variable\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
     fontSize: "1.5rem"
     fontWeight: 600
     lineHeight: 1.25
-    letterSpacing: "-0.02em"
+    letterSpacing: "-0.015em"
   section-title:
-    fontFamily: "\"Geist Variable\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
-    fontSize: "1.0625rem"
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontSize: "1.125rem"
     fontWeight: 600
-    lineHeight: 1.35
-    letterSpacing: "-0.012em"
+    lineHeight: 1.33
+    letterSpacing: "-0.01em"
   card-title:
-    fontFamily: "\"Geist Variable\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
     fontSize: "0.9375rem"
     fontWeight: 600
     lineHeight: 1.4
-    letterSpacing: "-0.008em"
+    letterSpacing: "-0.005em"
+  prose:
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontSize: "clamp(1rem, 0.97rem + 0.15vw, 1.0625rem)"
+    fontWeight: 400
+    lineHeight: 1.65
   body:
-    fontFamily: "\"Geist Variable\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
     fontSize: "1rem"
     fontWeight: 400
-    lineHeight: 1.7
+    lineHeight: 1.6
   label:
-    fontFamily: "\"Geist Variable\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
     fontSize: "0.75rem"
     fontWeight: 500
     lineHeight: 1.4
+    letterSpacing: "0.01em"
   mono:
-    fontFamily: "\"Geist Mono Variable\", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+    fontFamily: "\"IBM Plex Mono\", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
     fontSize: "0.8125rem"
     fontWeight: 400
-    lineHeight: 1.6
+    lineHeight: "1.5rem"
   button:
-    fontFamily: "\"Geist Variable\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    fontFamily: "\"IBM Plex Sans Variable\", \"IBM Plex Sans\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
     fontSize: "0.875rem"
     fontWeight: 600
     lineHeight: "1.25rem"
@@ -155,9 +172,9 @@ Nothing is decorated for its own sake. Hierarchy comes from size, weight, and tr
 
 **Key Characteristics:**
 
-- Cool graphite and soft paper neutrals that share one ink.
+- Warm field-manual neutrals, a slightly yellowed paper and a warm charcoal, that share one ink.
 - One oxide accent for the main action, focus, and the live state.
-- Geist for every role; Geist Mono only for commands, IDs, logs, and timers.
+- IBM Plex Sans for every role; IBM Plex Mono only for commands, IDs, logs, and timers.
 - An inset app panel with a sticky bar that carries its top edge.
 - Quiet borders, raised surfaces with a top light, and no glow or glass.
 - Motion that confirms, reveals, or reports live state, and nothing else.
@@ -173,7 +190,7 @@ Neutrals carry structure, oxide carries action, and four semantic hues carry sta
 - **Card:** raised surfaces inside the panel: lists, fields, meters, and action gates.
 - **Muted and accent:** hover and pressed fills. Accent is one step stronger than muted.
 - **Foreground tiers:** foreground for primary text, muted-foreground for supporting text, faint-foreground for captions, labels, and metadata.
-- **Lines:** border for cards and dividers, input for control edges, border-strong for hover.
+- **Lines:** border for cards and dividers, input for control edges, border-strong for hover. A control's edge (input, border-strong, ring) meets 3:1 against card and background, so a field reads as a field without its shadow or placeholder.
 - **Terminal:** always dark in both themes. Terminal colors are only for terminal, code, and replay content.
 
 ### Primary
@@ -196,21 +213,25 @@ Neutrals carry structure, oxide carries action, and four semantic hues carry sta
 
 **The Always-Dark Terminal Rule.** Terminal surfaces use the terminal palette in both themes, so commands look the same everywhere.
 
+**The Mix-in-Oklab Rule.** Derive tints and hovers with `color-mix(in oklab, …)`, never `in oklch`: Chrome renders a low-chroma oklch mix at hue 0, so a warm neutral turns pink.
+
 ## Typography
 
-**Family:** Geist Variable for display, titles, interface, and reading. Geist Mono Variable for commands, code, IDs, logs, and running timers.
+**Family:** IBM Plex Sans Variable for display, titles, interface, and reading, with a real italic. IBM Plex Mono for commands, code, IDs, logs, and running timers.
 
-**Character:** Geist is precise without being cold, and its mono shares the same skeleton, so terminal content and interface copy sit together without a seam.
+**Character:** Plex is an engineering superfamily: sober, legible at small sizes, and warmer than a neo-grotesque. Its mono shares the same proportions, so terminal content and interface copy sit together without a seam.
 
 ### Hierarchy
 
 - **Display:** rare public statements. Two-tone: the claim in foreground, the payoff in faint-foreground.
 - **Feature title:** the main title of a recap or feature block.
-- **Page title:** content headers and course titles.
+- **Content title:** lecture and course titles where the content begins, with the **lede** (the one-sentence summary) under them.
+- **Page title:** headers of operational pages.
 - **Section title:** short structural headings.
 - **Card title:** list rows, panels, and dense headings.
-- **Body:** instructions and Markdown reading at 1.7 line height, capped at 68ch.
-- **Label:** sentence-case group labels and small headings in faint-foreground. No uppercase tracking.
+- **Prose:** lecture and course reading at 17px on a 1.65 line (16px on phones), capped at 36em, about 70 characters. `##` and `###` take the prose heading roles; inline code is 0.8125em.
+- **Body:** interface sentences and panel Markdown at a 1.6 line height.
+- **Label:** sentence-case group labels and small headings in faint-foreground, opened up by 0.01em. No uppercase.
 - **Mono:** commands, code blocks, IDs, and timers only.
 
 ### Named Rules

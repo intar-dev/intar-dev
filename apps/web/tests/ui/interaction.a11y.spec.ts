@@ -8,6 +8,7 @@ import {
 } from "./support/layout";
 import {
   REPLAY_TERMINAL_COLS,
+  REPLAY_TERMINAL_FONT_LOAD,
   REPLAY_TERMINAL_LINE_HEIGHT,
   REPLAY_TERMINAL_ROWS,
 } from "../../src/lib/replay/config";
@@ -1272,7 +1273,7 @@ test("legacy one-segment course scenario path is not redirected", async ({
   ).toBeVisible();
 });
 
-test("Geist Mono keeps terminal cell geometry stable", async ({
+test("IBM Plex Mono keeps terminal cell geometry stable", async ({
   page,
   ui,
 }) => {
@@ -1280,33 +1281,33 @@ test("Geist Mono keeps terminal cell geometry stable", async ({
 
   await expect
     .poll(() =>
-      page.evaluate(async () => {
+      page.evaluate(async (font) => {
         const faces = await document.fonts.load(
-          '400 14px "Geist Mono Variable"',
+          font,
           "Mi0W ",
         );
         return faces.filter((face) => face.status === "loaded").length;
-      }),
+      }, REPLAY_TERMINAL_FONT_LOAD),
     )
     .toBeGreaterThan(0);
 
-  const metrics = await page.evaluate(async () => {
+  const metrics = await page.evaluate(async (font) => {
     const faces = await document.fonts.load(
-      '400 14px "Geist Mono Variable"',
+      font,
       "Mi0W ",
     );
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
     if (!context) throw new Error("2D canvas context unavailable");
-    context.font = '14px "Geist Mono Variable"';
+    context.font = font;
     const glyphs = ["M", "i", "0", "W", " "];
     const widths = glyphs.map((glyph) => context.measureText(glyph).width);
     return {
-      loaded: document.fonts.check('14px "Geist Mono Variable"'),
+      loaded: document.fonts.check(font),
       faceCount: faces.length,
       widths,
     };
-  });
+  }, REPLAY_TERMINAL_FONT_LOAD);
 
   expect(metrics.loaded).toBe(true);
   expect(metrics.faceCount).toBeGreaterThan(0);

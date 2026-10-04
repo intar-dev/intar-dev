@@ -1,10 +1,10 @@
 export const REPLAY_IDLE_TIME_LIMIT_SECONDS = 1.5;
 export const REPLAY_TERMINAL_THEME = "intar";
 export const REPLAY_TERMINAL_FONT_FAMILY =
-  '"Geist Mono Variable", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace';
+  '"IBM Plex Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace';
 export const REPLAY_TERMINAL_FALLBACK_FONT_FAMILY =
   '"SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace';
-export const REPLAY_TERMINAL_FONT_LOAD = '400 14px "Geist Mono Variable"';
+export const REPLAY_TERMINAL_FONT_LOAD = '400 14px "IBM Plex Mono"';
 
 let replayTerminalFontLoad: Promise<boolean> | null = null;
 let replayTerminalFontLoaded = false;

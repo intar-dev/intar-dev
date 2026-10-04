@@ -480,6 +480,7 @@ function CourseDetail({
         <ContentHeader
           title={course.title}
           titleClassName="max-sm:sr-only"
+          reading
           summary={course.summary}
           meta={
             <MetaLine
@@ -492,10 +493,10 @@ function CourseDetail({
         />
       </div>
       {course.bodyMarkdown.trim() ? (
-        <section className="border-y py-6 text-body leading-7">
+        <section className="border-y py-6">
           <Markdown
             pageContent
-            className="text-body [&>*:first-child]:pt-0"
+            className="prose-measure text-prose [&>*:first-child]:pt-0"
           >
             {course.bodyMarkdown}
           </Markdown>

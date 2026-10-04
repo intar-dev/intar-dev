@@ -41,7 +41,7 @@ export function RunCompletionBar({
           type="button"
           size="sm"
           data-run-finish-and-save
-          className="w-full bg-success text-success-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.25)] hover:bg-[color-mix(in_oklch,var(--success),white_12%)] focus-visible:outline-success sm:w-auto"
+          className="w-full bg-success text-success-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.25)] hover:bg-[color-mix(in_oklab,var(--success),white_12%)] focus-visible:outline-success sm:w-auto"
           disabled={!canFinish || pending}
           onClick={onFinish}
         >

@@ -24,7 +24,12 @@ export function Markdown({
   const Heading2 = pageContent ? "h2" : headingOffset ? "h3" : "h2";
   const Heading3 = pageContent ? "h3" : headingOffset ? "h4" : "h3";
   return (
-    <div className={cn("space-y-4", className ?? "text-body")}>
+    <div
+      className={cn(
+        "space-y-4",
+        className ?? (pageContent ? "prose-measure text-prose" : "text-body"),
+      )}
+    >
       <ReactMarkdown
         skipHtml={textOnly}
         disallowedElements={textOnly ? ["img"] : undefined}
@@ -34,9 +39,7 @@ export function Markdown({
             <Heading1
               className={cn(
                 "text-balance",
-                pageContent
-                  ? "pt-5 text-[1.25rem] leading-snug font-semibold tracking-[-0.015em]"
-                  : "text-section-title",
+                pageContent ? "pt-5 text-prose-heading" : "text-section-title",
               )}
             >
               {children}
@@ -46,9 +49,7 @@ export function Markdown({
             <Heading2
               className={cn(
                 "text-balance",
-                pageContent
-                  ? "pt-5 text-[1.25rem] leading-snug font-semibold tracking-[-0.015em]"
-                  : "text-card-title",
+                pageContent ? "pt-5 text-prose-heading" : "text-card-title",
               )}
             >
               {children}
@@ -57,8 +58,10 @@ export function Markdown({
           h3: ({ children }) => (
             <Heading3
               className={cn(
-                "text-base font-semibold text-balance",
-                pageContent && "pt-3",
+                "text-balance",
+                pageContent
+                  ? "pt-3 text-prose-subheading"
+                  : "text-base font-semibold",
               )}
             >
               {children}
@@ -87,7 +90,7 @@ export function Markdown({
           ),
           li: ({ children }) => <li className="pl-1">{children}</li>,
           code: ({ children }) => (
-            <code className="box-decoration-clone rounded-[0.3125rem] border border-border bg-muted px-1.5 py-px font-mono text-[0.85em] text-foreground">
+            <code className="box-decoration-clone rounded-[0.3125rem] border border-border bg-muted px-1.5 py-px font-mono text-[0.8125em] text-foreground">
               {children}
             </code>
           ),
@@ -105,7 +108,7 @@ export function Markdown({
             </th>
           ),
           td: ({ children }) => (
-            <td className="border-b px-3 py-2 align-top last:border-b-0">
+            <td className="border-b px-3 py-2 align-top [tr:last-child>&]:border-b-0">
               {children}
             </td>
           ),

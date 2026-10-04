@@ -12,6 +12,11 @@ const twMerge = extendTailwindMerge({
           text: [
             "display",
             "feature-title",
+            "content-title",
+            "lede",
+            "prose",
+            "prose-heading",
+            "prose-subheading",
             "page-title",
             "section-title",
             "card-title",

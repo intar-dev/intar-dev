@@ -17,13 +17,13 @@ const buttonVariants = cva(
         outline:
           "border-input bg-card text-foreground shadow-[var(--highlight),var(--shadow-control)] hover:border-border-strong hover:bg-muted aria-expanded:border-border-strong aria-expanded:bg-muted dark:hover:bg-accent dark:aria-expanded:bg-accent",
         secondary:
-          "bg-secondary text-secondary-foreground hover:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_6%)] aria-expanded:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_6%)]",
+          "bg-secondary text-secondary-foreground hover:bg-[color-mix(in_oklab,var(--secondary),var(--foreground)_6%)] aria-expanded:bg-[color-mix(in_oklab,var(--secondary),var(--foreground)_6%)]",
         ghost:
           "hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground",
         destructive:
           "border-destructive-border bg-transparent text-destructive hover:border-destructive/60 hover:bg-destructive-subtle aria-expanded:bg-destructive-subtle",
         danger:
-          "bg-destructive text-destructive-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.22)] hover:bg-[color-mix(in_oklch,var(--destructive),var(--foreground)_10%)] dark:hover:bg-[color-mix(in_oklch,var(--destructive),white_14%)]",
+          "bg-destructive text-destructive-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.22)] hover:bg-[color-mix(in_oklab,var(--destructive),var(--foreground)_10%)] dark:hover:bg-[color-mix(in_oklab,var(--destructive),white_14%)]",
         link: "text-brand-text underline-offset-4 hover:underline",
       },
       size: {

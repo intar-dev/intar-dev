@@ -314,7 +314,7 @@ function PreviewTerminal({ rows }: { rows: readonly TerminalRow[] }) {
           <span className="size-1.5 shrink-0 rounded-full bg-success" />
         </p>
       </div>
-      {/* Matches the xterm canvas: 14px Geist Mono, 1.35 line height, the
+      {/* Matches the xterm canvas: 14px IBM Plex Mono, 1.35 line height, the
           shared always-dark palette, and a block cursor in the brand orange.
           Rows fill from the top and scroll off the top once the pane is full. */}
       <div className="flex min-h-0 flex-1 flex-col justify-end overflow-hidden bg-terminal-background py-2 pr-2 pl-3 font-mono text-[14px] leading-[1.35] text-terminal-foreground">
@@ -356,7 +356,7 @@ function Cursor({ blink }: { blink: boolean }) {
 const SEGMENT_TONES: Record<CheckStatus, string> = {
   verified: "bg-success",
   checking: "bg-info/60",
-  needs_repair: "bg-border-strong/70",
+  needs_repair: "bg-border-strong/35",
 };
 
 const LABEL_TONES: Record<CheckStatus, string> = {

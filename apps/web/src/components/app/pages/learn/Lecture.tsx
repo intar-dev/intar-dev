@@ -238,12 +238,13 @@ function LecturePage({ route, lectureId }: { route: CourseRouteRef; lectureId: s
           <ContentHeader
             title={detail.lecture.title}
             titleClassName="max-sm:sr-only"
+            reading
             summary={detail.lecture.summary}
             meta={<LectureMeta lecture={detail.lecture} />}
           />
         </div>
 
-        <section aria-label="Lecture content" className="text-body">
+        <section aria-label="Lecture content">
           <Markdown pageContent>{detail.lecture.bodyMarkdown}</Markdown>
         </section>
 

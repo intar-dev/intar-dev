@@ -4,8 +4,8 @@ import type { CourseLectureSummary } from "./course-wire";
 const PROGRESS_SEGMENT_TONES: Record<CourseLectureSummary["state"], string> = {
   completed: "bg-success",
   in_progress: "bg-primary",
-  available: "bg-border-strong/70",
-  waiting_for_scenario: "bg-border-strong/70",
+  available: "bg-border-strong/35",
+  waiting_for_scenario: "bg-border-strong/35",
   locked: "bg-border",
 };
 

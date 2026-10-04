@@ -7,20 +7,20 @@
       "canvas": {
         "role": "neutral",
         "displayName": "Canvas",
-        "canonical": "#f5f3f0",
-        "darkCanonical": "#121418"
+        "canonical": "#ece5d9",
+        "darkCanonical": "#12100e"
       },
       "background": {
         "role": "neutral",
         "displayName": "Panel Surface",
-        "canonical": "#fdfdfc",
-        "darkCanonical": "#181a1e"
+        "canonical": "#f9f5ee",
+        "darkCanonical": "#1a1714"
       },
       "card": {
         "role": "neutral",
         "displayName": "Raised Surface",
-        "canonical": "#ffffff",
-        "darkCanonical": "#1e2025"
+        "canonical": "#fffdf9",
+        "darkCanonical": "#24201c"
       },
       "primary": {
         "role": "primary",
@@ -43,8 +43,8 @@
       "border": {
         "role": "neutral",
         "displayName": "Quiet Line",
-        "canonical": "#e4e2de",
-        "darkCanonical": "#282b30"
+        "canonical": "#e3dacb",
+        "darkCanonical": "#322c26"
       },
       "success": {
         "role": "secondary",
@@ -55,7 +55,7 @@
       "warning": {
         "role": "secondary",
         "displayName": "Needs Repair Amber",
-        "canonical": "#955e11",
+        "canonical": "#87540f",
         "darkCanonical": "#efc469"
       },
       "info": {
@@ -78,27 +78,27 @@
     },
     "typographyMeta": {
       "display": {
-        "displayName": "Geist Display",
+        "displayName": "IBM Plex Sans Display",
         "purpose": "Rare public statements, two-tone."
       },
       "feature-title": {
-        "displayName": "Geist Feature Title",
+        "displayName": "IBM Plex Sans Feature Title",
         "purpose": "Main title in a recap or feature block."
       },
       "page-title": {
-        "displayName": "Geist Page Title",
+        "displayName": "IBM Plex Sans Page Title",
         "purpose": "Content headers and course titles."
       },
       "body": {
-        "displayName": "Geist Reading Text",
+        "displayName": "IBM Plex Sans Reading Text",
         "purpose": "Instructions and Markdown reading."
       },
       "label": {
-        "displayName": "Geist Label",
+        "displayName": "IBM Plex Sans Label",
         "purpose": "Sentence-case group labels and small headings."
       },
       "mono": {
-        "displayName": "Geist Mono",
+        "displayName": "IBM Plex Mono",
         "purpose": "Commands, code, IDs, logs, timers, and terminal content."
       }
     },
@@ -111,7 +111,7 @@
       {
         "name": "raised",
         "value": "0 1px 3px rgb(0 0 0 / 0.28)",
-        "purpose": "Cards and the inset app panel (light: 0 1px 2px rgb(25 28 34 / 0.05))."
+        "purpose": "Cards and the inset app panel (light: 0 1px 2px rgb(31 26 20 / 0.05))."
       },
       {
         "name": "control",
@@ -178,7 +178,7 @@
       "refersTo": "button-primary",
       "description": "The one main action in a local area.",
       "html": "<button class='ds-btn-primary' type='button'>Start scenario <span aria-hidden='true'>→</span></button>",
-      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem; height: var(--control-standard); padding: 0 0.875rem; border: 1px solid transparent; border-radius: var(--radius-lg); background: var(--primary); color: var(--primary-foreground); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.22), 0 1px 2px rgb(0 0 0 / 0.25); font-family: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 0.875rem; font-weight: 600; line-height: 1.25rem; transition: color 150ms cubic-bezier(0.2, 0, 0, 1), background-color 150ms cubic-bezier(0.2, 0, 0, 1), box-shadow 150ms cubic-bezier(0.2, 0, 0, 1), transform 150ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-primary:hover { background: var(--primary-hover); } .ds-btn-primary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; } .ds-btn-primary:active { transform: translateY(1px) scale(0.985); }"
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem; height: var(--control-standard); padding: 0 0.875rem; border: 1px solid transparent; border-radius: var(--radius-lg); background: var(--primary); color: var(--primary-foreground); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.22), 0 1px 2px rgb(0 0 0 / 0.25); font-family: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 0.875rem; font-weight: 600; line-height: 1.25rem; transition: color 150ms cubic-bezier(0.2, 0, 0, 1), background-color 150ms cubic-bezier(0.2, 0, 0, 1), box-shadow 150ms cubic-bezier(0.2, 0, 0, 1), transform 150ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-primary:hover { background: var(--primary-hover); } .ds-btn-primary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; } .ds-btn-primary:active { transform: translateY(1px) scale(0.985); }"
     },
     {
       "name": "Outline Button",
@@ -186,7 +186,7 @@
       "refersTo": "button-outline",
       "description": "A secondary action with a quiet boundary.",
       "html": "<button class='ds-btn-outline' type='button'>Review runs</button>",
-      "css": ".ds-btn-outline { display: inline-flex; align-items: center; justify-content: center; height: var(--control-standard); padding: 0 0.875rem; border: 1px solid var(--input); border-radius: var(--radius-lg); background: var(--card); color: var(--foreground); box-shadow: var(--highlight), var(--shadow-control); font-family: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 0.875rem; font-weight: 600; line-height: 1.25rem; transition: color 150ms cubic-bezier(0.2, 0, 0, 1), background-color 150ms cubic-bezier(0.2, 0, 0, 1), border-color 150ms cubic-bezier(0.2, 0, 0, 1), transform 150ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-outline:hover { border-color: var(--border-strong); background: var(--muted); } .ds-btn-outline:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; } .ds-btn-outline:active { transform: translateY(1px) scale(0.985); }"
+      "css": ".ds-btn-outline { display: inline-flex; align-items: center; justify-content: center; height: var(--control-standard); padding: 0 0.875rem; border: 1px solid var(--input); border-radius: var(--radius-lg); background: var(--card); color: var(--foreground); box-shadow: var(--highlight), var(--shadow-control); font-family: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 0.875rem; font-weight: 600; line-height: 1.25rem; transition: color 150ms cubic-bezier(0.2, 0, 0, 1), background-color 150ms cubic-bezier(0.2, 0, 0, 1), border-color 150ms cubic-bezier(0.2, 0, 0, 1), transform 150ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-outline:hover { border-color: var(--border-strong); background: var(--muted); } .ds-btn-outline:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; } .ds-btn-outline:active { transform: translateY(1px) scale(0.985); }"
     },
     {
       "name": "Text Field",
@@ -194,7 +194,7 @@
       "refersTo": "input",
       "description": "The standard field for compact app input.",
       "html": "<input class='ds-input' type='text' value='Search courses' aria-label='Search courses' />",
-      "css": ".ds-input { width: 100%; height: var(--control-standard); padding: 0 0.75rem; border: 1px solid var(--input); border-radius: var(--radius-lg); background: var(--card); color: var(--foreground); box-shadow: var(--shadow-control); font-family: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 0.875rem; line-height: 1.25rem; transition: border-color 150ms cubic-bezier(0.2, 0, 0, 1), box-shadow 150ms cubic-bezier(0.2, 0, 0, 1); } .ds-input::placeholder { color: var(--faint-foreground); } .ds-input:hover { border-color: var(--border-strong); } .ds-input:focus-visible { border-color: var(--ring); outline: none; box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 20%, transparent); } .ds-input:disabled { background: var(--muted); cursor: not-allowed; opacity: 0.6; }"
+      "css": ".ds-input { width: 100%; height: var(--control-standard); padding: 0 0.75rem; border: 1px solid var(--input); border-radius: var(--radius-lg); background: var(--card); color: var(--foreground); box-shadow: var(--shadow-control); font-family: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 0.875rem; line-height: 1.25rem; transition: border-color 150ms cubic-bezier(0.2, 0, 0, 1), box-shadow 150ms cubic-bezier(0.2, 0, 0, 1); } .ds-input::placeholder { color: var(--faint-foreground); } .ds-input:hover { border-color: var(--border-strong); } .ds-input:focus-visible { border-color: var(--ring); outline: none; box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 20%, transparent); } .ds-input:disabled { background: var(--muted); cursor: not-allowed; opacity: 0.6; }"
     },
     {
       "name": "Card Surface",
@@ -202,7 +202,7 @@
       "refersTo": "card",
       "description": "A quiet contained surface for grouped content.",
       "html": "<article class='ds-card'><h3>Course lectures</h3><p>Read the theory, then complete the next unit.</p></article>",
-      "css": ".ds-card { display: flex; flex-direction: column; gap: 1.25rem; padding: 1.25rem; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-xl); background: var(--card); color: var(--card-foreground); box-shadow: var(--highlight), var(--shadow-raised); font-family: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 0.875rem; transition: border-color 150ms cubic-bezier(0.2, 0, 0, 1), background-color 150ms cubic-bezier(0.2, 0, 0, 1); } .ds-card h3 { margin: 0; font-size: 0.9375rem; font-weight: 600; line-height: 1.4; letter-spacing: -0.008em; } .ds-card p { margin: 0; color: var(--muted-foreground); line-height: 1.55; } .ds-card:hover { border-color: var(--border-strong); }"
+      "css": ".ds-card { display: flex; flex-direction: column; gap: 1.25rem; padding: 1.25rem; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-xl); background: var(--card); color: var(--card-foreground); box-shadow: var(--highlight), var(--shadow-raised); font-family: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 0.875rem; transition: border-color 150ms cubic-bezier(0.2, 0, 0, 1), background-color 150ms cubic-bezier(0.2, 0, 0, 1); } .ds-card h3 { margin: 0; font-size: 0.9375rem; font-weight: 600; line-height: 1.4; letter-spacing: -0.008em; } .ds-card p { margin: 0; color: var(--muted-foreground); line-height: 1.55; } .ds-card:hover { border-color: var(--border-strong); }"
     },
     {
       "name": "Sidebar Navigation",
@@ -210,7 +210,7 @@
       "refersTo": "sidebar-nav-active",
       "description": "The persistent app navigation row.",
       "html": "<nav class='ds-sidebar' aria-label='Main navigation'><a class='ds-sidebar-link ds-sidebar-link-active' href='#courses'>Courses</a><a class='ds-sidebar-link' href='#runs'>My runs</a></nav>",
-      "css": ".ds-sidebar { width: 16rem; padding: 0.5rem; background: var(--sidebar); color: var(--sidebar-foreground); font-family: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; } .ds-sidebar-link { display: flex; align-items: center; gap: 0.625rem; height: 2.125rem; padding: 0 0.625rem; border-radius: var(--radius-lg); color: var(--muted-foreground); font-size: 0.875rem; font-weight: 500; text-decoration: none; transition: background-color 150ms cubic-bezier(0.2, 0, 0, 1), color 150ms cubic-bezier(0.2, 0, 0, 1); } .ds-sidebar-link:hover { background: var(--sidebar-accent); color: var(--foreground); } .ds-sidebar-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; } .ds-sidebar-link-active { background: var(--card); color: var(--foreground); box-shadow: inset 0 0 0 1px var(--sidebar-border), var(--shadow-control); }"
+      "css": ".ds-sidebar { width: 16rem; padding: 0.5rem; background: var(--sidebar); color: var(--sidebar-foreground); font-family: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; } .ds-sidebar-link { display: flex; align-items: center; gap: 0.625rem; height: 2.125rem; padding: 0 0.625rem; border-radius: var(--radius-lg); color: var(--muted-foreground); font-size: 0.875rem; font-weight: 500; text-decoration: none; transition: background-color 150ms cubic-bezier(0.2, 0, 0, 1), color 150ms cubic-bezier(0.2, 0, 0, 1); } .ds-sidebar-link:hover { background: var(--sidebar-accent); color: var(--foreground); } .ds-sidebar-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; } .ds-sidebar-link-active { background: var(--card); color: var(--foreground); box-shadow: inset 0 0 0 1px var(--sidebar-border), var(--shadow-control); }"
     },
     {
       "name": "Status Token",
@@ -218,7 +218,7 @@
       "refersTo": "status-live",
       "description": "A direct state label with an optional elapsed value.",
       "html": "<span class='ds-status'><span class='ds-status-dot' aria-hidden='true'></span><span>In progress</span><span class='ds-status-time' aria-hidden='true'>12:04</span></span>",
-      "css": ".ds-status { display: inline-flex; min-width: 0; align-items: center; gap: 0.375rem; color: var(--foreground); font-family: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 0.8125rem; font-weight: 500; } .ds-status-dot { width: 0.5rem; height: 0.5rem; flex: 0 0 auto; border-radius: 999px; background: var(--primary); color: var(--primary); animation: ds-live 2.2s cubic-bezier(0.2, 0, 0, 1) infinite; } @keyframes ds-live { 0% { box-shadow: 0 0 0 0 color-mix(in oklch, currentColor 50%, transparent); } 70%, 100% { box-shadow: 0 0 0 5px transparent; } } .ds-status-time { color: var(--faint-foreground); font-family: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; } @media (prefers-reduced-motion: reduce) { .ds-status-dot { animation: none; } }"
+      "css": ".ds-status { display: inline-flex; min-width: 0; align-items: center; gap: 0.375rem; color: var(--foreground); font-family: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 0.8125rem; font-weight: 500; } .ds-status-dot { width: 0.5rem; height: 0.5rem; flex: 0 0 auto; border-radius: 999px; background: var(--primary); color: var(--primary); animation: ds-live 2.2s cubic-bezier(0.2, 0, 0, 1) infinite; } @keyframes ds-live { 0% { box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 50%, transparent); } 70%, 100% { box-shadow: 0 0 0 5px transparent; } } .ds-status-time { color: var(--faint-foreground); font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; } @media (prefers-reduced-motion: reduce) { .ds-status-dot { animation: none; } }"
     },
     {
       "name": "Reading Action Gate",
@@ -226,16 +226,16 @@
       "refersTo": "reading-action-gate",
       "description": "The action card that follows one reading unit.",
       "html": "<section class='ds-action-gate'><span class='ds-gate-icon' aria-hidden='true'>&gt;_</span><div><h2>Continue your scenario</h2><button class='ds-gate-button' type='button'>Resume scenario <span aria-hidden='true'>→</span></button></div></section>",
-      "css": ".ds-action-gate { display: flex; gap: 1.25rem; align-items: flex-start; padding: 1.25rem 1.5rem; border: 1px solid var(--border); border-radius: var(--radius-2xl); background: var(--card); box-shadow: var(--highlight), var(--shadow-raised); font-family: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; } .ds-gate-icon { display: flex; width: 2.5rem; height: 2.5rem; flex: 0 0 auto; align-items: center; justify-content: center; border-radius: 0.625rem; background: var(--brand-subtle); color: var(--brand-text); } .ds-action-gate h2 { margin: 0 0 1rem; font-size: 1.0625rem; font-weight: 600; line-height: 1.35; letter-spacing: -0.012em; } .ds-gate-button { display: inline-flex; align-items: center; gap: 0.375rem; height: var(--control-standard); padding: 0 0.875rem; border: 0; border-radius: var(--radius-lg); background: var(--primary); color: var(--primary-foreground); font-size: 0.875rem; font-weight: 600; } .ds-gate-button:hover { background: var(--primary-hover); } .ds-gate-button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }"
+      "css": ".ds-action-gate { display: flex; gap: 1.25rem; align-items: flex-start; padding: 1.25rem 1.5rem; border: 1px solid var(--border); border-radius: var(--radius-2xl); background: var(--card); box-shadow: var(--highlight), var(--shadow-raised); font-family: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; } .ds-gate-icon { display: flex; width: 2.5rem; height: 2.5rem; flex: 0 0 auto; align-items: center; justify-content: center; border-radius: 0.625rem; background: var(--brand-subtle); color: var(--brand-text); } .ds-action-gate h2 { margin: 0 0 1rem; font-size: 1.0625rem; font-weight: 600; line-height: 1.35; letter-spacing: -0.012em; } .ds-gate-button { display: inline-flex; align-items: center; gap: 0.375rem; height: var(--control-standard); padding: 0 0.875rem; border: 0; border-radius: var(--radius-lg); background: var(--primary); color: var(--primary-foreground); font-size: 0.875rem; font-weight: 600; } .ds-gate-button:hover { background: var(--primary-hover); } .ds-gate-button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }"
     }
   ],
   "narrative": {
     "northStar": "The Calm Control Room",
     "overview": "Intar is a quiet instrument for learning and repair. Two neutral grounds, Graphite (dark) and Paper (light), carry almost everything. One oxide accent marks the next useful action, and one shared motion language explains every change of state. The app lives in a floating panel beside the navigation.\n\nNothing is decorated for its own sake. Hierarchy comes from size, weight, and tracking in a single type family. Depth comes from tone first, then a hairline, then a faint top light. Motion appears only when something changes.",
     "keyCharacteristics": [
-      "Cool graphite and soft paper neutrals that share one ink.",
+      "Warm field-manual neutrals, a slightly yellowed paper and a warm charcoal, that share one ink.",
       "One oxide accent for the main action, focus, and the live state.",
-      "Geist for every role; Geist Mono only for commands, IDs, logs, and timers.",
+      "IBM Plex Sans for every role; IBM Plex Mono only for commands, IDs, logs, and timers.",
       "An inset app panel with a sticky bar that carries its top edge.",
       "Motion that confirms, reveals, or reports live state, and nothing else."
     ],
@@ -279,7 +279,7 @@
     "dos": [
       "Do use the semantic color properties so light and dark themes keep the same roles.",
       "Do keep direct status words with dots, icons, and live feedback.",
-      "Do let long Markdown use its fluid page or panel column, capped at 68ch.",
+      "Do let long Markdown use its fluid page or panel column, capped at 36em (about 70 characters).",
       "Do use the tabular sans data line for static counts, durations, and course facts.",
       "Do use the oxide action color for the one main action in a local area."
     ],

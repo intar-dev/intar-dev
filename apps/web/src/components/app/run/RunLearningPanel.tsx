@@ -456,7 +456,7 @@ function CheckStatusIcon({
 const CHECK_SEGMENT_TONES: Record<LearnerCheckStatus, string> = {
   verified: "bg-success",
   checking: "bg-info/60",
-  needs_repair: "bg-border-strong/70",
+  needs_repair: "bg-border-strong/35",
 };
 
 const CHECK_LABEL_TONES: Record<LearnerCheckStatus, string> = {
