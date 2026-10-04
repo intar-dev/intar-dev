@@ -1,22 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  ArrowRight,
-  BookOpen,
-  Plus,
-  UserMinus,
-  Users,
-} from "lucide-react";
+import { BookOpen, Check, Plus, Users } from "lucide-react";
 import { useState } from "react";
 import { useSession } from "../../hooks/useSession";
 import { formatDurationMs, formatRelativeTime } from "../../lib/format";
+import { BinIcon, InlineConfirm } from "../../patterns/InlineConfirm";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
 import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
 } from "../../patterns/CollectionPagination";
+import { MetaLine } from "../../patterns/MetaLine";
 import { Section } from "../../patterns/Section";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Stat } from "../../patterns/Stat";
+import { ListSkeleton } from "../../patterns/Skeletons";
+import { EmptyState, ErrorState } from "../../patterns/StateCard";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
@@ -28,6 +27,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  TableRowHeader,
 } from "@/components/ui/table";
 import { LectureLink } from "../learn/course-links";
 import {
@@ -37,6 +37,7 @@ import {
   type CourseLectureSummary,
 } from "../learn/course-wire";
 import type { OrganizationDetailTab } from "../tab-search";
+import { apiErrorMessage } from "../../lib/api-errors";
 import { invalidateOrganizationDetail } from "./queries";
 import { RemovedMemberList } from "./RemovedMemberList";
 import {
@@ -67,7 +68,7 @@ export function OrganizationOverview({
       title="Organization"
       description="Manage members, courses, and private content."
     >
-      <dl className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-3">
         <OverviewMetric
           label="Members"
           value={detail.members.length}
@@ -92,11 +93,12 @@ export function OrganizationOverview({
           action={admin ? "Identity settings" : "Open settings"}
           onClick={() => setTab("settings")}
         />
-      </dl>
+      </div>
     </Section>
   );
 }
 
+// The DS Stat tile; the action sits in its detail line.
 function OverviewMetric({
   label,
   value,
@@ -109,19 +111,21 @@ function OverviewMetric({
   onClick: () => void;
 }) {
   return (
-    <div className="rounded-lg bg-muted/40 p-3">
-      <dt className="text-label">{label}</dt>
-      <dd>
-        <span className="mt-1 block text-section-title tabular-nums">
-          {value}
-        </span>
-        <Button variant="link" className="mt-1 h-auto p-0" onClick={onClick}>
+    <Stat
+      size="sm"
+      label={label}
+      value={value}
+      detail={
+        <Button variant="link" className="h-auto p-0" onClick={onClick}>
           {action}
         </Button>
-      </dd>
-    </div>
+      }
+    />
   );
 }
+
+const wait = (ms: number) =>
+  new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
 export function MembersSection({ detail }: { detail: Detail }) {
   const queryClient = useQueryClient();
@@ -205,24 +209,33 @@ export function MembersSection({ detail }: { detail: Detail }) {
         itemLabel="members"
       >
         {(visibleMembers) => (
-          <ul className="divide-y overflow-hidden rounded-lg border">
-            {visibleMembers.map((entry) => (
+          <ul className="divide-y">
+            {visibleMembers.map((entry) => {
+              // The select keeps the role just picked while it saves.
+              const saving =
+                changeRole.isPending &&
+                changeRole.variables?.memberId === entry.memberId;
+              return (
               <li
                 key={entry.memberId}
-                className="flex flex-wrap items-center gap-3 px-4 py-3"
+                className="flex flex-wrap items-center gap-3 py-3"
               >
                 <Avatar>
+                  {entry.image ? (
+                    <AvatarImage src={entry.image} alt="" />
+                  ) : null}
                   <AvatarFallback>{initials(entry.name)}</AvatarFallback>
                 </Avatar>
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">{entry.name}</p>
-                  <p className="text-caption">
-                    {entry.email}
-                    {entry.githubUsername
-                      ? ` · @${entry.githubUsername}`
-                      : ""}{" "}
-                    · joined {formatRelativeTime(entry.joinedAt)}
-                  </p>
+                  <MetaLine
+                    dense
+                    items={[
+                      entry.email,
+                      entry.githubUsername ? `@${entry.githubUsername}` : null,
+                      `Joined ${formatRelativeTime(entry.joinedAt)}`,
+                    ]}
+                  />
                 </div>
                 {/* Fixed role and action columns keep the badge, selects and
                     Remove buttons on shared edges across rows. */}
@@ -236,14 +249,19 @@ export function MembersSection({ detail }: { detail: Detail }) {
                     {admin && entry.role !== "owner" ? (
                       <NativeSelect
                         className="w-full"
-                        value={entry.role}
-                        onChange={(event) =>
+                        value={
+                          saving && changeRole.variables
+                            ? changeRole.variables.role
+                            : entry.role
+                        }
+                        onChange={(event) => {
+                          if (saving) return;
                           changeRole.mutate({
                             memberId: entry.memberId,
                             role: event.target.value as "admin" | "member",
-                          })
-                        }
-                        disabled={changeRole.isPending}
+                          });
+                        }}
+                        aria-disabled={saving || undefined}
                         aria-label={`Role for ${entry.name}`}
                       >
                         <option value="admin">Admin</option>
@@ -283,7 +301,7 @@ export function MembersSection({ detail }: { detail: Detail }) {
                             setRemoveOpen(true);
                           }}
                         >
-                          <UserMinus className="size-3.5" />
+                          <BinIcon />
                           Remove
                         </Button>
                       ) : null}
@@ -291,7 +309,8 @@ export function MembersSection({ detail }: { detail: Detail }) {
                   ) : null}
                 </div>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </PaginatedCollection>
@@ -314,7 +333,7 @@ export function MembersSection({ detail }: { detail: Detail }) {
       ) : null}
       {actionError ? (
         <InlineFeedback tone="error" className="mt-4">
-          {actionError instanceof Error ? actionError.message : "Action failed"}
+          {apiErrorMessage(actionError, "Couldn't update the member. Try again.")}
         </InlineFeedback>
       ) : null}
       <ConfirmDialog
@@ -322,7 +341,10 @@ export function MembersSection({ detail }: { detail: Detail }) {
         onClose={closeRemoveDialog}
         title={`Remove ${removeTarget?.name}?`}
         description="They lose access to this organization and can't sign in through its identity provider until an admin restores them. If they connected it, they're signed out everywhere now."
-        error={remove.error ? remove.error.message : null}
+        error={apiErrorMessage(
+          remove.error,
+          "Couldn't remove the member. Try again.",
+        )}
         pending={remove.isPending}
         confirmLabel="Remove member"
         pendingLabel="Removing…"
@@ -383,8 +405,37 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
       );
       await mutationResponse(response, "Failed to remove assignment");
     },
-    onSuccess: invalidate,
   });
+  // A removed row shows "Removed" with a drawn check, then folds away.
+  const [removal, setRemoval] = useState<{
+    id: string;
+    folding: boolean;
+  } | null>(null);
+  // Awaited rather than passed as `mutate` callbacks, which never run once this
+  // section has unmounted: the list must still catch up if the admin leaves
+  // the tab before the delete answers.
+  const removeAssignment = async (id: string) => {
+    try {
+      await unassign.mutateAsync(id);
+    } catch {
+      // `unassign.error` shows it.
+      return;
+    }
+    setRemoval({ id, folding: false });
+    await wait(600);
+    setRemoval({ id, folding: true });
+    await wait(300);
+    queryClient.setQueryData<AssignmentsResponse>(
+      ["organizations", detail.id, "assignments"],
+      (data) =>
+        data && {
+          ...data,
+          assignments: data.assignments.filter((item) => item.id !== id),
+        },
+    );
+    setRemoval(null);
+    await invalidate();
+  };
 
   const entries = assignments.data?.assignments ?? [];
   const assignedIds = new Set(entries.map((entry) => entry.scenarioId));
@@ -411,7 +462,7 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
       description="Assignment markers are separate from catalog visibility: every member can browse the organization library."
       actions={
         admin && assignable.length ? (
-          <div className="flex flex-wrap items-center gap-2">
+          <>
             <NativeSelect
               value={scenarioId}
               onChange={(event) => setScenarioId(event.target.value)}
@@ -431,18 +482,27 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
               <Plus className="size-4" />
               Assign
             </Button>
-          </div>
+          </>
         ) : null
       }
     >
-      {entries.length ? (
+      {assignments.isPending ? (
+        <ListSkeleton rows={2} className="divide-y border-0 bg-transparent shadow-none *:px-0" />
+      ) : assignments.error ? (
+        <ErrorState
+          headingLevel={3}
+          title="Could not load assignments"
+          description="The assignments could not be loaded."
+          onRetry={() => assignments.refetch()}
+        />
+      ) : entries.length ? (
         <PaginatedCollection
           items={entries}
           pageSize={COLLECTION_PAGE_SIZE.list}
           itemLabel="assignments"
         >
           {(visibleAssignments) => (
-            <ul className="divide-y overflow-hidden rounded-lg border">
+            <ul className="divide-y">
               {visibleAssignments.map((entry) => {
                 const catalogLecture = catalogLectureByScenarioId.get(
                   entry.scenarioId,
@@ -462,11 +522,17 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
                         organizationId: detail.id,
                       }
                     : null;
+                const title = target?.title ?? entry.scenarioTitle ?? entry.scenarioId;
+                const removed = removal?.id === entry.id;
                 return (
                   <li
                     key={entry.id}
-                    className="flex flex-wrap items-center gap-3 px-4 py-3"
+                    data-folding={(removed && removal.folding) || undefined}
+                    // A removed row folds away (rows 1fr → 0fr) before the
+                    // list refreshes, so the rows below close up smoothly.
+                    className="grid grid-rows-[1fr] transition-[grid-template-rows,opacity,background-color] duration-(--duration-slow) ease-enter has-[[data-inline-confirm][data-asking]]:bg-destructive-subtle/60 data-folding:grid-rows-[0fr] data-folding:opacity-0"
                   >
+                    <div className="flex min-h-0 flex-wrap items-center gap-3 overflow-hidden py-3">
                     <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
                       <BookOpen className="size-4" />
                     </span>
@@ -484,25 +550,37 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
                           {entry.scenarioTitle ?? entry.scenarioId}
                         </span>
                       )}
-                      <p className="text-caption">
-                        {lecture?.state === "locked" && lecture.blockedBy
-                          ? `Complete “${lecture.blockedBy.title}” first · `
-                          : ""}
-                        Assigned {formatRelativeTime(entry.createdAt)}
-                      </p>
+                      <MetaLine
+                        dense
+                        items={[
+                          lecture?.state === "locked" && lecture.blockedBy
+                            ? `Complete “${lecture.blockedBy.title}” first`
+                            : null,
+                          `Assigned ${formatRelativeTime(entry.createdAt)}`,
+                        ]}
+                      />
                     </div>
                     {admin ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={unassign.isPending}
-                        onClick={() => unassign.mutate(entry.id)}
-                      >
-                        Remove
-                      </Button>
-                    ) : (
-                      <ArrowRight className="size-4 text-muted-foreground" />
-                    )}
+                      <InlineConfirm
+                        label="Remove"
+                        name={`Remove the ${title} assignment`}
+                        question={`Remove the ${title} assignment?`}
+                        confirmLabel="Remove assignment"
+                        pendingLabel="Removing…"
+                        doneLabel="Removed"
+                        pending={
+                          unassign.isPending && unassign.variables === entry.id
+                        }
+                        done={removed}
+                        disabled={
+                          (unassign.isPending &&
+                            unassign.variables !== entry.id) ||
+                          (removal !== null && !removed)
+                        }
+                        onConfirm={() => void removeAssignment(entry.id)}
+                      />
+                    ) : null}
+                    </div>
                   </li>
                 );
               })}
@@ -517,9 +595,10 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
       )}
       {actionError ? (
         <InlineFeedback tone="error" className="mt-4">
-          {actionError instanceof Error
-            ? actionError.message
-            : "Assignment action failed"}
+          {apiErrorMessage(
+            actionError,
+            "Couldn't update the assignment. Try again.",
+          )}
         </InlineFeedback>
       ) : null}
     </Section>
@@ -544,7 +623,21 @@ function assignmentLecture(
   };
 }
 
-export function ProgressSection({ detail }: { detail: Detail }) {
+const PROGRESS_LABEL = {
+  not_started: "Not started",
+  in_progress: "In progress",
+  solved: "Solved",
+  // An assisted solve is a solve; the caption says the solution was used.
+  assisted: "Solved",
+} as const;
+
+export function ProgressSection({
+  detail,
+  onAssign,
+}: {
+  detail: Detail;
+  onAssign: () => void;
+}) {
   const progress = useQuery({
     queryKey: ["organizations", detail.id, "progress"],
     queryFn: () =>
@@ -555,15 +648,6 @@ export function ProgressSection({ detail }: { detail: Detail }) {
     // it, so read it fresh each time the tab opens.
     staleTime: 0,
   });
-  if (progress.error) {
-    return (
-      <InlineFeedback tone="error">
-        {progress.error instanceof Error
-          ? progress.error.message
-          : "Failed to load progress"}
-      </InlineFeedback>
-    );
-  }
   const data = progress.data?.progress;
   return (
     <Section
@@ -571,12 +655,26 @@ export function ProgressSection({ detail }: { detail: Detail }) {
       title="Progress"
       description="Latest learner status across assigned scenarios."
     >
-      {!data ? (
-        <p className="text-sm text-muted-foreground">Loading progress…</p>
+      {!data && progress.error ? (
+        <ErrorState
+          headingLevel={3}
+          title="Could not load progress"
+          description="The learner progress could not be loaded."
+          onRetry={() => progress.refetch()}
+        />
+      ) : !data ? (
+        <ListSkeleton rows={3} action={false} label="Loading progress…" className="divide-y border-0 bg-transparent shadow-none *:px-0" />
       ) : !data.scenarios.length ? (
-        <p className="text-sm text-muted-foreground">
-          Assign a scenario to start tracking progress.
-        </p>
+        <EmptyState
+          headingLevel={3}
+          title="No scenarios assigned"
+          description="Assign a scenario to start tracking progress."
+          action={
+            <Button size="sm" variant="outline" onClick={onAssign}>
+              Open assignments
+            </Button>
+          }
+        />
       ) : (
         <PaginatedCollection
           items={data.rows}
@@ -584,13 +682,17 @@ export function ProgressSection({ detail }: { detail: Detail }) {
           itemLabel="members"
         >
           {(visibleRows) => (
-            <Table>
+            <Table label="Learner progress">
               <TableHeader>
                 <TableRow>
                   <TableHead>Member</TableHead>
                   {data.scenarios.map((scenario) => (
                     <TableHead key={scenario.scenarioId}>
-                      {scenario.title ?? scenario.scenarioId}
+                      {scenario.title ?? (
+                        <code className="text-xs font-normal">
+                          {scenario.scenarioId}
+                        </code>
+                      )}
                     </TableHead>
                   ))}
                 </TableRow>
@@ -598,32 +700,43 @@ export function ProgressSection({ detail }: { detail: Detail }) {
               <TableBody>
                 {visibleRows.map((row) => (
                   <TableRow key={row.userId}>
-                    <TableCell>
+                    <TableRowHeader>
                       <p className="font-medium">{row.name}</p>
                       {row.githubUsername ? (
                         <p className="text-caption">@{row.githubUsername}</p>
                       ) : null}
-                    </TableCell>
-                    {row.cells.map((cell) => (
-                      <TableCell key={cell.scenarioId}>
-                        <Badge
-                          variant={
-                            cell.status === "solved"
-                              ? "success"
-                              : cell.status === "in_progress"
-                                ? "secondary"
-                                : "outline"
-                          }
-                        >
-                          {cell.status.replace("_", " ")}
-                        </Badge>
-                        {cell.solveDurationMs !== null ? (
-                          <p className="mt-1 text-caption">
-                            {formatDurationMs(cell.solveDurationMs)}
-                          </p>
-                        ) : null}
-                      </TableCell>
-                    ))}
+                    </TableRowHeader>
+                    {row.cells.map((cell) => {
+                      const solved =
+                        cell.status === "solved" || cell.status === "assisted";
+                      const caption = [
+                        cell.solveDurationMs !== null
+                          ? formatDurationMs(cell.solveDurationMs)
+                          : null,
+                        cell.status === "assisted" ? "Solution used" : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ");
+                      return (
+                        <TableCell key={cell.scenarioId}>
+                          <Badge
+                            variant={
+                              solved
+                                ? "success"
+                                : cell.status === "in_progress"
+                                  ? "secondary"
+                                  : "outline"
+                            }
+                          >
+                            {solved ? <Check /> : null}
+                            {PROGRESS_LABEL[cell.status]}
+                          </Badge>
+                          {caption ? (
+                            <p className="mt-1 text-caption">{caption}</p>
+                          ) : null}
+                        </TableCell>
+                      );
+                    })}
                   </TableRow>
                 ))}
               </TableBody>

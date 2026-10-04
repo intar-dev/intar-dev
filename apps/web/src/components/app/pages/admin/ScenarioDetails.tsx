@@ -167,7 +167,7 @@ export function ScenarioDetails() {
               onClick={() => disableScenario.mutate()}
               disabled={disableScenario.isPending || enableScenario.isPending}
             >
-              <CircleOff className="size-3.5" />
+              <CircleOff />
               {disableScenario.isPending ? "Disabling…" : "Disable scenario"}
             </Button>
           ) : (
@@ -176,7 +176,7 @@ export function ScenarioDetails() {
               onClick={() => enableScenario.mutate()}
               disabled={enableScenario.isPending || disableScenario.isPending}
             >
-              <CircleCheckBig className="size-3.5" />
+              <CircleCheckBig />
               {enableScenario.isPending ? "Enabling…" : "Enable scenario"}
             </Button>
           )
@@ -241,7 +241,7 @@ export function ScenarioDetails() {
           />
 
           {enableScenario.error ? (
-            <Alert variant="destructive">
+            <Alert variant="destructive" just>
               <AlertTitle>Enable failed</AlertTitle>
               <AlertDescription>
                 {enableScenario.error instanceof Error
@@ -252,7 +252,7 @@ export function ScenarioDetails() {
           ) : null}
 
           {disableScenario.error ? (
-            <Alert variant="destructive">
+            <Alert variant="destructive" just>
               <AlertTitle>Disable failed</AlertTitle>
               <AlertDescription>
                 {disableScenario.error instanceof Error
@@ -300,7 +300,7 @@ function LearnerCourseAction({
           />
         }
       >
-        <ExternalLink className="size-3.5" />
+        <ExternalLink />
         View as learner
       </Button>
     );
@@ -322,7 +322,7 @@ function LearnerCourseAction({
           />
         }
       >
-        <ExternalLink className="size-3.5" />
+        <ExternalLink />
         View as learner
       </Button>
     );
@@ -343,7 +343,7 @@ function LearnerCourseAction({
           />
         }
       >
-        <ExternalLink className="size-3.5" />
+        <ExternalLink />
         View as learner
       </Button>
     );
@@ -359,7 +359,7 @@ export function scenarioVerificationSummary(
   const repairObjectives = probes.filter(
     (probe) => probe.phase === "scenario",
   ).length;
-  return `${bootChecks} boot checks · ${repairObjectives} repair objectives · ${enabled ? "enabled" : "disabled"}`;
+  return `${bootChecks} boot ${bootChecks === 1 ? "check" : "checks"} · ${repairObjectives} repair ${repairObjectives === 1 ? "objective" : "objectives"} · ${enabled ? "enabled" : "disabled"}`;
 }
 
 export function ScenarioLearnerPreview({
@@ -440,7 +440,7 @@ export function ScenarioVerificationContract({
           <div className="mt-4 border-t">
             <DisclosureRow
               title="Probe implementation"
-              meta={`${probes.length} probes`}
+              meta={`${probes.length} ${probes.length === 1 ? "probe" : "probes"}`}
               density="compact"
               contentClassName="divide-y"
             >
@@ -548,6 +548,7 @@ function TechnicalProbeRecord({
         <div className="border-t pt-2">
           <DisclosureRow
             title="Probe hints"
+            label={`Probe hints for probe ${index + 1}`}
             meta={`${probe.hints.length} available`}
             density="compact"
             contentClassName="space-y-3"

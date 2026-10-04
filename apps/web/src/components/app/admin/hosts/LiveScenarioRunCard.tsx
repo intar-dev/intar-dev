@@ -1,17 +1,21 @@
 import { lazy, Suspense, useRef, useState } from "react";
-import { CircleHelpIcon } from "lucide-react";
+import { ChevronDown, CircleHelpIcon } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { WhyDisabled } from "@/components/app/patterns/Hint";
+import { MetaLine } from "@/components/app/patterns/MetaLine";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { formatTimestamp } from "./format";
 import { groupVmProbesByScenario, ProbeRows } from "./ProbeRows";
 import { Stat } from "@/components/app/patterns/Stat";
 import type { AgentHostApi, VmProbeSummary, VmStatus } from "./types";
 
-const LazyNativeSshDialog = lazy(async () => {
-  const { NativeSshDialog } = await import(
-    "@/components/remote-access/NativeSshDialogButton"
+const LazyNativeSshSheet = lazy(async () => {
+  const { NativeSshSheet } = await import(
+    "@/components/remote-access/NativeSshSheet"
   );
-  return { default: NativeSshDialog };
+  return { default: NativeSshSheet };
 });
 
 export function LiveScenarioRunCard(props: {
@@ -48,24 +52,19 @@ export function LiveScenarioRunCard(props: {
       <div className="flex flex-col gap-4 px-4 py-4 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0 flex-1 space-y-3">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge
-              variant={
-                props.vmItem.state.trim().toLowerCase() === "running"
-                  ? "success"
-                  : "warning"
-              }
-            >
+            <Badge variant={vmStateVariant(props.vmItem.state)}>
               {props.vmItem.state}
             </Badge>
-            <span className="text-xs font-semibold text-foreground">
-              {scenarioMeta?.scenarioName ?? "Legacy run"}
-            </span>
-            <span aria-hidden="true" className="text-muted-foreground">
-              ·
-            </span>
-            <span className="font-mono text-xs text-muted-foreground">
-              {props.host.name}
-            </span>
+            <MetaLine
+              as="span"
+              dense
+              items={[
+                <span key="s" className="font-semibold text-foreground">
+                  {scenarioMeta?.scenarioName ?? "Legacy run"}
+                </span>,
+                <code key="h">{props.host.name}</code>,
+              ]}
+            />
             {binarySummary ? (
               <span
                 data-numeric
@@ -79,7 +78,7 @@ export function LiveScenarioRunCard(props: {
                   Verified
                 </span>
                 <span>
-                  <strong className="text-destructive">
+                  <strong className="text-warning">
                     {binarySummary.needsRepair}
                   </strong>{" "}
                   Needs repair
@@ -92,41 +91,66 @@ export function LiveScenarioRunCard(props: {
             <h3 className="text-lg font-semibold tracking-tight">
               {props.vmItem.name}
             </h3>
-            <p className="text-sm text-muted-foreground">
-              {scenarioMeta?.scenarioVmName ?? "Legacy VM"} • Run{" "}
-              {props.vmItem.run_id ?? "—"}
-            </p>
+            <MetaLine
+              items={[
+                scenarioMeta?.scenarioVmName ?? "Legacy VM",
+                <>
+                  Run <code>{props.vmItem.run_id ?? "—"}</code>
+                </>,
+              ]}
+            />
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-5">
-            <Stat size="sm"
-              label="Guest IP"
-              value={props.vmItem.details?.guest_ip ?? "—"}
-            />
-            <Stat size="sm"
-              label="Updated"
-              value={formatTimestamp(props.vmItem.updated_at)}
-            />
-            <Stat size="sm"
-              label="Probe update"
-              value={formatTimestamp(probeState?.updated_at)}
-            />
-            <Stat size="sm"
-              label="Target"
-              value={
-                terminalTarget.host
-                  ? `${terminalTarget.host}:${terminalTarget.port}`
-                  : "Pending"
-              }
-              detail={terminalTarget.state === "ready" ? "Ready" : "Bootstrap pending"}
-            />
-            <Stat size="sm" label="Host" value={props.host.name} detail={props.host.id} />
+          <div className="@container">
+            <div className="grid gap-3 @md:grid-cols-3 @4xl:grid-cols-5">
+              <Stat
+                size="sm"
+                label="Guest IP"
+                value={
+                  props.vmItem.details?.guest_ip ? (
+                    <code>{props.vmItem.details.guest_ip}</code>
+                  ) : (
+                    "—"
+                  )
+                }
+              />
+              <Stat
+                size="sm"
+                label="Updated"
+                value={formatTimestamp(props.vmItem.updated_at)}
+              />
+              <Stat
+                size="sm"
+                label="Probe update"
+                value={formatTimestamp(probeState?.updated_at)}
+              />
+              <Stat
+                size="sm"
+                label="Target"
+                value={
+                  terminalTarget.host ? (
+                    <code>{`${terminalTarget.host}:${terminalTarget.port}`}</code>
+                  ) : (
+                    "Pending"
+                  )
+                }
+                detail={
+                  terminalTarget.state === "ready" ? "Ready" : "Bootstrap pending"
+                }
+              />
+              <Stat
+                size="sm"
+                label="Host"
+                value={props.host.name}
+                detail={<code>{props.host.id}</code>}
+              />
+            </div>
           </div>
 
           {props.vmItem.error ? (
-            <div className="rounded-2xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-              {props.vmItem.error}
-            </div>
+            <Alert variant="destructive">
+              <AlertDescription>{props.vmItem.error}</AlertDescription>
+            </Alert>
           ) : null}
         </div>
 
@@ -135,14 +159,21 @@ export function LiveScenarioRunCard(props: {
             type="button"
             size="sm"
             variant="outline"
+            aria-label={`Details for ${props.vmItem.name}`}
             aria-expanded={props.isExpanded}
             onClick={props.onToggle}
           >
-            {props.isExpanded ? "Hide details" : "Details"}
+            Details
+            <ChevronDown
+              aria-hidden="true"
+              className={cn(
+                "transition-transform duration-(--duration-moderate) ease-enter",
+                props.isExpanded && "rotate-180",
+              )}
+            />
           </Button>
-          <div
-            className="inline-flex"
-            title={
+          <WhyDisabled
+            reason={
               terminalTarget.state === "ready"
                 ? undefined
                 : (terminalTarget.reason ?? undefined)
@@ -162,12 +193,12 @@ export function LiveScenarioRunCard(props: {
                 !terminalTarget.host
               }
             >
-              Open Web SSH
+              Open web SSH
               {terminalTarget.state !== "ready" || !terminalTarget.host ? (
-                <CircleHelpIcon size={12} />
+                <CircleHelpIcon />
               ) : null}
             </Button>
-          </div>
+          </WhyDisabled>
           <Button
             ref={nativeSshTriggerRef}
             type="button"
@@ -260,7 +291,7 @@ export function LiveScenarioRunCard(props: {
 
       {nativeSshOpen ? (
         <Suspense fallback={null}>
-          <LazyNativeSshDialog
+          <LazyNativeSshSheet
             vmName={props.vmItem.name}
             sessionRequest={{
               url: `/api/scenarios/runs/${encodeURIComponent(props.vmItem.run_id ?? "")}/ssh`,
@@ -282,6 +313,12 @@ export function LiveScenarioRunCard(props: {
   );
 }
 
+function vmStateVariant(state: string) {
+  const normalized = state.trim().toLowerCase();
+  if (normalized === "failed" || normalized === "error") return "destructive";
+  return normalized === "running" ? "secondary" : "warning";
+}
+
 export function binaryProbeSummary(summary: VmProbeSummary) {
   return {
     verified: summary.pass,
@@ -297,19 +334,12 @@ export function VerificationCollectionStatus(props: {
   const unavailable = Boolean(props.error?.trim()) || props.state === "error";
   if (!unavailable) return null;
   return (
-    <div
-      role="status"
-      className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-destructive"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="font-medium">Verification unavailable</p>
-        <p className="text-xs">
-          Updated {formatTimestamp(props.generatedAt)}
-        </p>
-      </div>
-      <p className="mt-1 text-xs">
-        We cannot confirm verification progress right now.
-      </p>
-    </div>
+    <Alert variant="destructive">
+      <AlertTitle>Verification unavailable</AlertTitle>
+      <AlertDescription>
+        Verification progress is unavailable right now. Updated{" "}
+        {formatTimestamp(props.generatedAt)}.
+      </AlertDescription>
+    </Alert>
   );
 }

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod check_passes;
 mod krec;
 mod mac;
 mod manager;

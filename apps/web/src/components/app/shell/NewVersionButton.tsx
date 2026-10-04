@@ -9,15 +9,13 @@ export function NewVersionButton() {
   return (
     <Button
       variant="ghost"
-      size="sm"
-      title="Reload to get the new version"
       onClick={() => window.location.reload()}
     >
       <span
         aria-hidden="true"
-        className="size-2 shrink-0 rounded-full bg-primary motion-safe:animate-live"
+        className="size-2 shrink-0 rounded-full bg-primary"
       />
-      New version
+      <span className="max-sm:sr-only">New version</span>
       <span className="sr-only">{" available, reload to update"}</span>
     </Button>
   );

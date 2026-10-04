@@ -8,7 +8,7 @@ test("capacity updates after 60 seconds and distinguishes zero from unavailable"
   await page.clock.install({ time: FIXED_NOW });
   await ui.open(routeCase("course-catalog"));
   const cpu = page.getByRole("meter", { name: "CPU", exact: true });
-  await expect(cpu).toHaveAttribute("aria-valuenow", "65.625");
+  await expect(cpu).toHaveAttribute("aria-valuenow", "65.6");
   const courseList = page.getByRole("link", { name: /Linux operations/ });
   await expect(courseList).toBeVisible();
 
@@ -32,7 +32,7 @@ test("capacity refresh failure keeps courses and last values, then recovers", as
   await page.clock.install({ time: FIXED_NOW });
   await ui.open(routeCase("course-catalog"));
   const cpu = page.getByRole("meter", { name: "CPU", exact: true });
-  await expect(cpu).toHaveAttribute("aria-valuenow", "65.625");
+  await expect(cpu).toHaveAttribute("aria-valuenow", "65.6");
   ui.server.state.variant = "error";
   await page.clock.fastForward(60_001);
   // Advance retries between completed network responses.
@@ -40,9 +40,9 @@ test("capacity refresh failure keeps courses and last values, then recovers", as
     await page.clock.fastForward(5_000);
     return page.getByText(/Update failed/).count();
   }).toBe(1);
-  await expect(page.getByRole("status")).toContainText("Update failed");
+  await expect(page.getByRole("status").filter({ hasText: "Update failed" })).toHaveCount(1);
   await expect(page.getByRole("link", { name: /Linux operations/ })).toBeVisible();
-  await expect(cpu).toHaveAttribute("aria-valuenow", "65.625");
+  await expect(cpu).toHaveAttribute("aria-valuenow", "65.6");
 
   ui.server.state.variant = "populated";
   ui.server.state.resourceCapacity!.cpu.availableMillis = 8000;
@@ -57,15 +57,17 @@ test("catalog meters retain exact shares, fit mobile, and respect reduced motion
   const cpu = page.getByRole("meter", { name: "CPU", exact: true });
   await expect(cpu).toHaveAttribute("aria-valuetext", "65.6% available, 5.25 / 8 vCPUs");
   // One continuous fill carries the exact share; it eases in on arrival and
-  // holds still under reduced motion.
+  // holds still under reduced motion: no grow animation and no transform
+  // transition, only the colour fade stays.
   await expect(cpu.locator(":scope > span")).toHaveCount(1);
   const fill = cpu.locator(":scope > span");
   await expect(fill).toHaveCSS("transform", "matrix(0.65625, 0, 0, 1, 0, 0)");
-  await expect(fill).toHaveCSS("transition-property", "none");
+  await expect(fill).toHaveCSS("animation-name", "none");
+  await expect(fill).toHaveCSS("transition-property", "background-color");
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await expect(fill).toHaveCSS("transition-duration", "0.5s");
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.getByRole("textbox", { name: "Search courses and lectures" }).fill("nothing-matches-this-course");
+  await page.getByRole("searchbox", { name: "Search courses and lectures" }).fill("nothing-matches-this-course");
   await expect(page.getByText("No courses match your filters", { exact: true })).toBeVisible();
   await expect(cpu).toBeVisible();
   await expectNoHorizontalOverflow(page);
@@ -79,7 +81,7 @@ test("organization catalog reads its own capacity and course detail has no meter
     cpu: { availableMillis: 1000, totalMillis: 2000 },
     memory: { availableMib: 1024, totalMib: 4096 },
   };
-  await page.locator("main").getByRole("button", { name: "Courses", exact: true }).click();
+  await page.locator("main").getByRole("link", { name: "Courses", exact: true }).click();
   await expect(page.getByRole("meter", { name: "CPU", exact: true })).toHaveAttribute("aria-valuenow", "50");
   await expect(page.getByText("1 / 4 GiB", { exact: true })).toBeVisible();
   await expectNoAxeViolations(page, testInfo);

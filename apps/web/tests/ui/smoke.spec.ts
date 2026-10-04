@@ -197,7 +197,7 @@ test("a revoke whose cleanup didn't finish hands over to Finish cleanup", async 
   expect((await cleanupRequest).postDataJSON()).toEqual({
     revocationId: "revocation-user-learner",
   });
-  await expect(page.getByText("Cleanup finished.")).toBeVisible();
+  await expect(page.getByText("Cleanup finished for Mina Learner.")).toBeVisible();
   await expect(finish).toBeHidden();
 });
 
@@ -368,7 +368,12 @@ for (const { action, sessionRole, status } of [
         .fill("Platform Repair Crew");
       await dialog.getByRole("button", { name: "Delete organization" }).click();
     } else {
+      // Leaving asks first, in a dialog that names the consequence.
       await page.getByRole("button", { name: "Leave organization" }).click();
+      await page
+        .getByRole("dialog", { name: "Leave Platform Repair Crew?" })
+        .getByRole("button", { name: "Leave organization" })
+        .click();
     }
 
     // The old hang retried refused reads for about 7s.
@@ -399,8 +404,10 @@ test("a refused organization read shows its error without retrying", async ({
 
   // Retrying with backoff held the skeleton for about seven seconds.
   await expect(
-    page.getByText("This organization no longer exists."),
+    page.getByRole("heading", { name: "Organization not found" }),
   ).toBeVisible({ timeout: 3_000 });
+  // A missing organization cannot be fixed by retrying.
+  await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
   // Past the first retry delay: still the one read.
   await page.waitForTimeout(1_500);
   expect(reads).toBe(1);
@@ -478,7 +485,7 @@ test("admin role changes use the app-owned user endpoint", async ({
       request.method() === "POST" &&
       request.url().endsWith("/api/admin/users/user-learner/role"),
   );
-  await dialog.getByRole("button", { name: "Confirm change" }).click();
+  await dialog.getByRole("button", { name: "Grant admin" }).click();
 
   expect((await roleRequest).postDataJSON()).toEqual({ role: "admin" });
   expect(ui.server.requests).toContain(
@@ -509,7 +516,7 @@ test("a refused role change explains itself in its dialog", async ({
   await page.getByRole("button", { name: "Make admin" }).first().click();
   const dialog = page.getByRole("dialog", { name: "Grant admin access?" });
   await expect(dialog).toContainText("They're signed out now");
-  await dialog.getByRole("button", { name: "Confirm change" }).click();
+  await dialog.getByRole("button", { name: "Grant admin" }).click();
   await expect(dialog).toContainText(
     "Ask them to connect GitHub from their profile first.",
   );

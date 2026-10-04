@@ -1,18 +1,18 @@
-import type { ReactNode } from "react";
-import { TriangleAlert } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { CircleAlert, TriangleAlert } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { AsyncLabel } from "./AsyncLabel";
 
 interface StateShellProps {
   icon?: ReactNode;
   title: string;
   description?: string | undefined;
   action?: ReactNode;
-  /** A keyboard hint rendered under the action, e.g. a <kbd> chip. */
-  hint?: ReactNode;
   className?: string | undefined;
-  contentClassName?: string | undefined;
+  /** An error that replaces content is announced. */
+  role?: "alert";
   /** The app bar owns every route's h1 — states start at h2. */
   headingLevel?: 2 | 3 | undefined;
 }
@@ -22,21 +22,15 @@ function StateShell({
   title,
   description,
   action,
-  hint,
   className,
-  contentClassName,
+  role,
   headingLevel = 2,
 }: StateShellProps) {
   const Heading = headingLevel === 3 ? "h3" : "h2";
 
   return (
-    <Card size="sm" className={className}>
-      <CardContent
-        className={cn(
-          "flex flex-col items-center justify-center gap-3 py-5 text-center sm:py-6",
-          contentClassName,
-        )}
-      >
+    <Card size="sm" className={className} role={role}>
+      <CardContent className="flex flex-col items-center justify-center gap-3 py-5 text-center sm:py-6">
         <div className="space-y-1">
           <Heading className="inline-flex items-center gap-2 text-base font-semibold">
             {icon ? (
@@ -47,15 +41,12 @@ function StateShell({
             {title}
           </Heading>
           {description ? (
-            <p className="text-sm leading-6 text-muted-foreground">
+            <p className="mx-auto max-w-[42ch] text-support text-muted-foreground">
               {description}
             </p>
           ) : null}
         </div>
         {action}
-        {hint ? (
-          <p className="text-xs text-muted-foreground">{hint}</p>
-        ) : null}
       </CardContent>
     </Card>
   );
@@ -65,35 +56,81 @@ export function EmptyState(props: StateShellProps) {
   return <StateShell {...props} />;
 }
 
+/**
+ * Replaces content that never loaded. Try again swaps to a spinner and
+ * "Trying again…" while the request runs, keeps focus and ignores presses;
+ * return the refetch promise from `onRetry` so the card knows when it ends.
+ */
 export function ErrorState({
   title = "Something went wrong",
   description,
   onRetry,
-  retryLabel = "Try again",
   className,
   headingLevel,
 }: {
   title?: string;
   description?: string;
-  onRetry?: () => void;
-  retryLabel?: string;
+  onRetry?: () => unknown;
   className?: string;
   headingLevel?: 2 | 3 | undefined;
 }) {
+  const [retrying, setRetrying] = useState(false);
+  const retry = () => {
+    if (retrying || !onRetry) return;
+    setRetrying(true);
+    const started = Date.now();
+    // Hold the busy state for a moment so a fast refetch does not flicker.
+    const settle = () =>
+      window.setTimeout(
+        () => setRetrying(false),
+        Math.max(0, 400 - (Date.now() - started)),
+      );
+    Promise.resolve(onRetry()).then(settle, settle);
+  };
+
   return (
     <StateShell
       className={className}
+      role="alert"
       icon={<TriangleAlert className="text-destructive" />}
       title={title}
       description={description}
       headingLevel={headingLevel}
       action={
         onRetry ? (
-          <Button variant="outline" size="sm" onClick={onRetry}>
-            {retryLabel}
+          <Button
+            variant="outline"
+            size="sm"
+            aria-busy={retrying || undefined}
+            focusableWhenDisabled
+            className="aria-busy:pointer-events-none"
+            onClick={retry}
+          >
+            <AsyncLabel
+              state={retrying ? "pending" : "idle"}
+              idle="Try again"
+              pending="Trying again…"
+            />
           </Button>
         ) : undefined
       }
     />
+  );
+}
+
+/**
+ * A quiet notice for a refresh that failed while data is already on screen:
+ * the data stays, and this says it may be out of date. Gate ErrorState on
+ * `isLoadingError` and render this on `isRefetchError`.
+ */
+export function StaleNotice({ what }: { what: string }) {
+  return (
+    <Alert role="status">
+      <CircleAlert aria-hidden="true" />
+      <AlertTitle>{what} may be out of date</AlertTitle>
+      <AlertDescription>
+        The last loaded data is shown. Refresh to try again.
+      </AlertDescription>
+    </Alert>
   );
 }

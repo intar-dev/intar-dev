@@ -59,6 +59,44 @@ export function scenarioRunOutcomeMeta(outcome: ScenarioRunRecord["outcome"]) {
   }
 }
 
+/**
+ * The startup stages while the run is still being created, on the start
+ * route. They are the run page's boot stages with the first one working, so
+ * the sequence carries on when the run page takes over instead of starting
+ * again.
+ */
+export function buildScenarioStartSteps(start: {
+  failed: boolean;
+  detail: string;
+}): ScenarioStatusStep[] {
+  return [
+    {
+      id: "accepted",
+      label: "Creating your run",
+      detail: start.detail,
+      state: start.failed ? "failed" : "active",
+    },
+    {
+      id: "starting-vm",
+      label: "Starting your workspace",
+      detail: "Preparing a clean place for you to work.",
+      state: "pending",
+    },
+    {
+      id: "checking-workspace",
+      label: "Checking the workspace",
+      detail: "Checking services and shell prerequisites.",
+      state: "pending",
+    },
+    {
+      id: "opening-shell",
+      label: "Opening the shell",
+      detail: "Waiting for startup checks to finish.",
+      state: "pending",
+    },
+  ];
+}
+
 export function buildScenarioBootSteps(
   attempt: ScenarioRunRecord | null,
   selectedVm?: ScenarioRunVmRecord | null,
@@ -81,54 +119,83 @@ export function buildScenarioBootSteps(
     vm && vm.phase !== "launching" && vm.phase !== "booting",
   );
 
+  // A failed machine fails the one stage that was working, judged from what it
+  // had reported. Earlier stages stay done and later ones stay up next.
+  const failedIndex =
+    vm && vmFailed
+      ? !hasReportedProbeResults(vm.bootProbes) && !vm.canOpenTerminal
+        ? 1
+        : !bootChecksComplete
+          ? 2
+          : 3
+      : -1;
+  const stateAt = (
+    index: number,
+    natural: ScenarioStatusStep["state"],
+  ): ScenarioStatusStep["state"] =>
+    failedIndex < 0
+      ? natural
+      : index < failedIndex
+        ? "done"
+        : index === failedIndex
+          ? "failed"
+          : "pending";
+
   return [
     {
       id: "accepted",
-      label: "Request accepted",
+      label: "Creating your run",
       detail: "The run is registered and its work order is available.",
       state: "done",
     },
     {
       id: "starting-vm",
       label: "Starting your workspace",
-      detail: vmStarting
-        ? "Preparing a clean place for you to work."
-        : "Your workspace has started.",
-      state: vmFailed ? "failed" : vmStarting ? "active" : "done",
+      detail:
+        failedIndex === 1
+          ? "The workspace could not start."
+          : vmStarting
+            ? "Preparing a clean place for you to work."
+            : "Your workspace has started.",
+      state: stateAt(1, vmStarting ? "active" : "done"),
     },
     {
       id: "checking-workspace",
       label: "Checking the workspace",
-      detail: bootChecksComplete
-        ? "Startup checks are passing."
-        : vmFailed
+      detail:
+        failedIndex === 2
           ? "The workspace did not pass its startup checks."
-          : "Checking services and shell prerequisites.",
-      state: vmFailed
-        ? "failed"
-        : bootChecksComplete || shellReady
+          : bootChecksComplete
+            ? "Startup checks are passing."
+            : "Checking services and shell prerequisites.",
+      state: stateAt(
+        2,
+        bootChecksComplete || shellReady
           ? "done"
           : workspaceCheckStarted
             ? "active"
             : "pending",
+      ),
     },
     {
       id: "opening-shell",
       label: "Opening the shell",
-      detail: shellReady
-        ? "Shell access is ready."
-        : vmFailed
+      detail:
+        failedIndex === 3
           ? "Shell access could not be opened."
-          : bootChecksComplete || vm?.canOpenTerminal
-            ? "Connecting the browser terminal."
-            : "Waiting for startup checks to finish.",
-      state: shellReady
-        ? "done"
-        : vmFailed
-          ? "failed"
+          : shellReady
+            ? "Shell access is ready."
+            : bootChecksComplete || vm?.canOpenTerminal
+              ? "Connecting the browser terminal."
+              : "Waiting for startup checks to finish.",
+      state: stateAt(
+        3,
+        shellReady
+          ? "done"
           : bootChecksComplete || vm?.canOpenTerminal
             ? "active"
             : "pending",
+      ),
     },
   ];
 }

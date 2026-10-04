@@ -39,7 +39,7 @@ async function expectShutdownRunChrome(page: Page) {
   await expect(
     page.getByRole("navigation", { name: "Breadcrumb" }),
   ).toHaveCount(0);
-  if ((page.viewportSize()?.width ?? 0) >= 960) {
+  if ((page.viewportSize()?.width ?? 0) >= 768) {
     await expect(page.locator("[data-run-learning-panel]")).toBeVisible();
   } else {
     await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
@@ -101,9 +101,7 @@ test("the full-screen boot screen keeps the mission visible and does not steal f
     panelContent.getByRole("region", { name: "Checks" }),
   ).toBeVisible();
   await expect(
-    panelContent.getByText("Lecture theory: Repair a broken nginx service", {
-      exact: true,
-    }),
+    panelContent.getByRole("heading", { name: "Lecture", exact: true }),
   ).toBeVisible();
   await expect(panelContent.getByText("Work order", { exact: true })).toBeVisible();
   await expect(
@@ -119,8 +117,13 @@ test("the full-screen boot screen keeps the mission visible and does not steal f
   expect(panelBox!.width).toBeLessThanOrEqual(
     page.viewportSize()!.width * 0.4 + 1,
   );
+  // The run bar spans the full width above the split, so the countdown may sit
+  // over the panel's column, but never inside the panel or off the screen.
   expect(leaseCountdownBox!.x + leaseCountdownBox!.width).toBeLessThanOrEqual(
-    workAreaBox!.x + workAreaBox!.width,
+    page.viewportSize()!.width,
+  );
+  expect(leaseCountdownBox!.y + leaseCountdownBox!.height).toBeLessThanOrEqual(
+    panelBox!.y + 1,
   );
   await expect(panel.getByText("nginx-listening")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "SSH command" })).toBeDisabled();
@@ -168,9 +171,7 @@ test("the permanent desktop guidance pane keeps progressive hints and solution h
   const panelContent = panel.locator("[data-run-learning-panel-content]");
   await expect(panel).toBeVisible();
   await expect(
-    panelContent.getByText("Lecture theory: Repair a broken nginx service", {
-      exact: true,
-    }),
+    panelContent.getByRole("heading", { name: "Lecture", exact: true }),
   ).toBeVisible();
   await expect(panelContent.getByText("Checks", { exact: true })).toBeVisible();
   await expect(panelContent.getByText("0/2 verified", { exact: true })).toBeVisible();
@@ -220,7 +221,9 @@ test("the permanent desktop guidance pane keeps progressive hints and solution h
     .first()
     .click();
   await revealResponse;
-  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(
+    panel.getByText("Inspect the service boundary", { exact: true }),
+  ).toBeVisible();
   await expect(panel.getByText("systemctl status nginx")).toBeVisible();
 
   await panel
@@ -261,7 +264,7 @@ test("small screens keep work open and show mission and hints in a bottom sheet"
   ).length;
   await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
   const trigger = page.getByRole("button", {
-    name: "Open lecture theory and hints. 0 of 2 hints revealed. 0 of 2 checks verified.",
+    name: "Checks 0/2. 0 of 2 hints revealed. Opens checks, lecture and hints.",
   });
   await expect(trigger).toBeVisible();
   await trigger.focus();
@@ -277,9 +280,7 @@ test("small screens keep work open and show mission and hints in a bottom sheet"
     ),
   ).toHaveLength(terminalRequestsBefore);
   await expect(
-    sheet.getByText("Lecture theory: Repair a broken nginx service", {
-      exact: true,
-    }),
+    sheet.getByRole("heading", { name: "Lecture", exact: true }),
   ).toBeVisible();
   await expect(sheet.getByText("Checks", { exact: true })).toBeVisible();
   await expect(sheet.getByText("Hints", { exact: true })).toBeVisible();
@@ -350,7 +351,9 @@ test("compact status polls cannot hide a newly revealed hint", async ({
     .first()
     .click();
   await revealResponse;
-  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(
+    panel.getByText("Inspect the service boundary", { exact: true }),
+  ).toBeVisible();
 
   await expect
     .poll(
@@ -361,7 +364,9 @@ test("compact status polls cannot hide a newly revealed hint", async ({
         ).length,
   )
     .toBeGreaterThan(1);
-  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(
+    panel.getByText("Inspect the service boundary", { exact: true }),
+  ).toBeVisible();
   await expect(panel.getByText("1/2 used", { exact: true })).toBeVisible();
 });
 
@@ -497,7 +502,7 @@ test("hint and solution failures use generic learner-safe messages", async ({
     .click();
   await expect(
     panel.getByRole("alert").filter({
-      hasText: "Could not reveal this hint. Try again.",
+      hasText: "Could not reveal this hint.",
     }),
   ).toBeVisible();
   await expect(panel).not.toContainText("worker-19");
@@ -512,7 +517,7 @@ test("hint and solution failures use generic learner-safe messages", async ({
     .click();
   await expect(
     panel.getByRole("alert").filter({
-      hasText: "Could not reveal the solution. Try again.",
+      hasText: "Could not reveal the solution.",
     }),
   ).toBeVisible();
   await expect(panel).not.toContainText("control-plane task 7c02c91");
@@ -538,7 +543,7 @@ test("a solved scenario makes finishing the first learner action", async ({ page
   await expect(
     panel.getByRole("button", { name: "Finish and save" }),
   ).toHaveCount(0);
-  await expect(panel.getByText("Verified", { exact: true })).toHaveCount(2);
+  await expect(panel.locator('[data-check-status="verified"]')).toHaveCount(2);
   const text = await panel.innerText();
 
   for (const forbidden of [
@@ -576,7 +581,7 @@ test("a failed solved-run save stays beside the visible action", async ({
     .getByRole("button", { name: "Finish and save" })
     .click();
   await expect(completionBar.getByRole("alert")).toHaveText(
-    "We could not save this run. Your work is still open. Try again.",
+    "Could not save this run. Your work is still open. Try again.",
   );
   await expect(completionBar).not.toContainText("host-17");
   await expect(completionBar).not.toContainText("run-vm-web");
@@ -598,9 +603,10 @@ test("the final check transition uses one useful live announcement", async ({
   ui.server.setRunState("solved");
   const completion = page
     .locator('[data-run-learning-panel] [aria-live="polite"]')
-    .filter({ hasText: "All 2 checks are verified." });
+    .filter({ hasText: "All checks verified" });
+  // Announced 650ms after the solve, together with the completion bar.
   await expect(completion).toHaveCount(1);
-  await expect(completion).toHaveText("All 2 checks are verified.");
+  await expect(completion).toHaveText("All checks verified");
   await expect(page.locator("[data-run-completion-bar]")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Finish and save" }),
@@ -711,8 +717,11 @@ test("ending a scenario moves from a calm saving state to a learner recap and re
   await expect(savingHeading).toBeVisible({ timeout: 5_000 });
   await expect(savingSteps).toBeVisible();
   const shutdownHeader = page.locator("[data-run-workspace-header]");
-  await expect(shutdownHeader).toContainText("Saving");
-  await expect(shutdownHeader).not.toContainText("Solved");
+  // The status word swaps inside a box that stacks every word, so only the
+  // layer that is on counts as what the learner reads.
+  await expect(shutdownHeader.locator("[data-swap] > [data-on]")).toHaveText(
+    "Finishing",
+  );
 
   ui.server.setRunState("replay");
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
@@ -727,15 +736,11 @@ test("ending a scenario moves from a calm saving state to a learner recap and re
   await expect(savingSteps).toHaveCount(0);
   await expect(recap).not.toHaveAttribute("aria-busy");
   await expect(recap.getByText("2/2 verified", { exact: true })).toBeVisible();
-  const progress = recap.getByRole("progressbar", {
-    name: "Final checks progress",
-  });
-  await expect(progress).toHaveAttribute("aria-valuenow", "2");
-  await expect(progress).toHaveAttribute("aria-valuemax", "2");
-  await expect(progress).toHaveAttribute(
-    "aria-valuetext",
-    "2 of 2 final checks verified",
-  );
+  // The bar is decorative and closed when every check verified; the visible
+  // count above carries the information.
+  const progress = recap.locator("[data-run-recap-progress]");
+  await expect(progress).toHaveAttribute("aria-hidden", "true");
+  await expect(progress).toHaveAttribute("data-closed", "true");
   await expect(recap.getByText("Hints used", { exact: true })).toBeVisible();
   await expect(recap.getByText("Full solution", { exact: true })).toBeVisible();
   await expect(recap.getByRole("button", { name: "Watch replay" })).toHaveCount(1);
@@ -903,13 +908,13 @@ test("a replay carousel keeps learner-facing parts in order", async ({
   await expect(next).toBeEnabled();
   await expect(order.getByRole("button")).toHaveCount(3);
   await expect(order.getByRole("button").nth(0)).toHaveAccessibleName(
-    "Show Part 1 of 3, web",
+    "Show part 1 of 3, web",
   );
   await expect(order.getByRole("button").nth(1)).toHaveAccessibleName(
-    "Show Part 2 of 3, web",
+    "Show part 2 of 3, web",
   );
   await expect(order.getByRole("button").nth(2)).toHaveAccessibleName(
-    "Show Part 3 of 3, worker",
+    "Show part 3 of 3, worker",
   );
   await expect
     .poll(() =>
@@ -927,7 +932,7 @@ test("a replay carousel keeps learner-facing parts in order", async ({
   await expect(next).toBeFocused();
   await expect(
     carousel.getByRole("status").filter({
-      hasText: "Showing Part 2 of 3",
+      hasText: "Showing part 2 of 3",
     }),
   ).toHaveCount(1);
   await expect
@@ -1007,8 +1012,10 @@ test("a rejected shutdown stays in the confirmation dialog with learner-safe cop
 
   await expect(dialog).toBeVisible();
   await expect(
-    dialog.getByText("Run could not be ended", { exact: true }),
+    dialog.getByText("Could not end run", { exact: true }),
   ).toBeVisible();
+  // The failure answers the click, so it is announced assertively.
+  await expect(dialog.getByRole("alert")).toContainText("Could not end run");
   await expect(dialog).toContainText(
     "The run could not be ended. Your work is still open.",
   );
@@ -1044,7 +1051,10 @@ test("course recaps keep a course return in the shared app bar", async ({
   await expectSavedRunChrome(page);
   await expect(page.getByRole("button", { name: "Delete run…" })).toBeVisible();
   const courseBack = page.locator("[data-run-back]");
-  await expect(courseBack).toHaveAccessibleName("Back to course");
+  // The words on the link are in its name (label in name).
+  await expect(courseBack).toHaveAccessibleName(
+    "Back to course: Platform repair sequence",
+  );
   await expect(courseBack).toContainText("Platform repair sequence");
   await expect(courseBack).toHaveAttribute(
     "href",
@@ -1081,8 +1091,9 @@ test("a failed saved-run deletion stays generic and recoverable", async ({
   await dialog.getByRole("button", { name: "Delete run" }).click();
 
   await expect(
-    dialog.getByText("Run could not be deleted", { exact: true }),
+    dialog.getByText("Could not delete run", { exact: true }),
   ).toBeVisible();
+  await expect(dialog.getByRole("alert")).toContainText("Could not delete run");
   await expect(dialog).toContainText(
     "Nothing was removed. Try again when you are ready.",
   );
@@ -1255,10 +1266,11 @@ test("a replay failure stays inline and never exposes a server message", async (
   const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
   await recap.getByRole("button", { name: "Watch replay" }).click();
   await expect(
-    recap.getByText("Replay could not be loaded. Try again soon.", {
+    recap.getByRole("alert").getByText("Replay could not be loaded.", {
       exact: true,
     }),
   ).toBeVisible();
+  await expect(recap.getByRole("button", { name: "Try again" })).toBeVisible();
   await expect(recap).not.toContainText("host-eu-1");
   await expect(recap).not.toContainText("run-vm-web:0");
   await expect(recap.getByText("Transcript", { exact: true })).toHaveCount(0);

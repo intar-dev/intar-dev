@@ -192,7 +192,9 @@ for (const viewport of [
       await expect(servers).toContainText(
         "Runs stay on your personal servers. They do not move to the cloud or organization servers.",
       );
-      await expect(servers).toContainText("0 of 8 vCPUs available · Full");
+      // The facts are one MetaLine; its dots are decoration, not text.
+      await expect(servers).toContainText("0 of 8 vCPUs available");
+      await expect(servers.getByText("Full", { exact: true })).toBeVisible();
       await expect(servers).toContainText(
         "Next step: Run sudo intar-host doctor on this server.",
       );
@@ -401,7 +403,7 @@ test("last server removal needs explicit cloud consent and reports unconfirmed c
   await dialog.getByRole("checkbox").check();
   await expect(remove).toBeEnabled();
   await expectNoAxeViolations(page, testInfo);
-  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await dialog.getByRole("button", { name: "Keep server" }).click();
   expect(requests.some((request) => request.method === "DELETE")).toBe(false);
   await section(page)
     .getByRole("button", { name: "Remove", exact: true })

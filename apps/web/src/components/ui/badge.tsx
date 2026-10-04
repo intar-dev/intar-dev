@@ -5,7 +5,7 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 
 const badgeVariants = cva(
-  "group/badge inline-flex h-5 w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-md border border-transparent px-1.5 py-0.5 text-xs font-semibold whitespace-nowrap transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/40 has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 aria-invalid:border-destructive aria-invalid:ring-destructive/20 [&>svg]:pointer-events-none [&>svg]:size-3!",
+  "group/badge inline-flex h-5 w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-md border border-transparent px-1.5 py-0.5 text-xs font-semibold whitespace-nowrap transition-colors duration-(--duration-fast) ease-standard has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&>svg]:pointer-events-none [&>svg]:size-3!",
   {
     variants: {
       variant: {
@@ -13,16 +13,16 @@ const badgeVariants = cva(
         secondary:
           "bg-secondary text-secondary-foreground [a]:hover:bg-secondary/80",
         destructive:
-          "border-destructive-border bg-destructive-subtle text-destructive focus-visible:ring-destructive/20 [a]:hover:bg-destructive [a]:hover:text-destructive-foreground",
+          "border-destructive-border bg-destructive-subtle text-destructive [a]:hover:bg-destructive [a]:hover:text-destructive-foreground",
         outline:
           "border-border text-foreground [a]:hover:bg-muted [a]:hover:text-muted-foreground",
         ghost:
-          "hover:bg-muted hover:text-muted-foreground dark:hover:bg-muted/50",
+          "[a]:hover:bg-muted [a]:hover:text-muted-foreground dark:[a]:hover:bg-muted/50",
         success:
           "border-success-border bg-success-subtle text-success [a]:hover:bg-success [a]:hover:text-success-foreground",
         warning:
           "border-warning-border bg-warning-subtle text-warning [a]:hover:bg-warning [a]:hover:text-warning-foreground",
-        link: "text-brand-text underline-offset-4 hover:underline",
+        link: "text-brand-text underline-offset-4 [a]:hover:underline",
       },
     },
     defaultVariants: {

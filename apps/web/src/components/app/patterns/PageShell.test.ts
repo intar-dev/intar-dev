@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { PageShell } from "./PageShell";
 
 describe("PageShell", () => {
-  it("keeps page and workspace content fluid", () => {
+  it("keeps page and workspace content fluid up to app-max", () => {
     const page = renderToStaticMarkup(
       createElement(PageShell, {
         children: createElement("p", null, "Page"),
@@ -19,7 +19,8 @@ describe("PageShell", () => {
 
     expect(page).toContain('data-page-variant="page"');
     expect(workspace).toContain('data-page-variant="workspace"');
-    expect(page).not.toContain("max-w-");
-    expect(workspace).not.toContain("max-w-");
+    // The padded outer div stays fluid; only the inner column stops at app-max.
+    expect(page).toContain("max-w-(--app-max)");
+    expect(workspace).toContain("max-w-(--app-max)");
   });
 });

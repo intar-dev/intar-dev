@@ -17,6 +17,7 @@ import { Section } from "@/components/app/patterns/Section";
 import { EmptyState, ErrorState } from "@/components/app/patterns/StateCard";
 import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -132,7 +133,7 @@ export function AdminUserDetails() {
               setDialog("revoke");
             }}
           >
-            <Ban className="size-3.5" />
+            <Ban />
             Revoke access
           </Button>
         );
@@ -148,7 +149,7 @@ export function AdminUserDetails() {
               setDialog("revoke");
             }}
           >
-            <Ban className="size-3.5" />
+            <Ban />
             Record revocation
           </Button>
         );
@@ -164,8 +165,8 @@ export function AdminUserDetails() {
               finish(revocation.revocationId);
             }}
           >
-            <RefreshCw className="size-3.5" />
-            {finishCleanup.isPending ? "Finishing…" : "Finish cleanup"}
+            <RefreshCw />
+            {finishCleanup.isPending ? "Finishing cleanup…" : "Finish cleanup"}
           </Button>
         );
       }
@@ -180,7 +181,7 @@ export function AdminUserDetails() {
             void refetch();
           }}
         >
-          <RotateCcw className="size-3.5" />
+          <RotateCcw />
           Restore access
         </Button>
       );
@@ -208,10 +209,7 @@ export function AdminUserDetails() {
             action={
               <Link
                 to="/admin/people"
-                className={buttonVariants({
-                  variant: "outline",
-                  className: "min-h-11 sm:min-h-9 pointer-coarse:min-h-11",
-                })}
+                className={buttonVariants({ variant: "outline" })}
               >
                 Back to people
               </Link>
@@ -428,20 +426,22 @@ export function AdminUserDetails() {
         error={restore.error ? restoreErrorMessage(restore.error) : null}
         pending={restore.isPending}
         confirmLabel="Restore access"
-        pendingLabel="Restoring…"
+        pendingLabel="Restoring access…"
         confirmVariant="default"
         confirmDisabled={
           details.isFetching || preview.unavailable !== null || !revocation
         }
-        contentClassName="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg"
+        contentClassName="max-h-[calc(100dvh-2rem)] overflow-y-auto"
         onConfirm={() => {
           if (revocation) restore.mutate(revocation.revocationId);
         }}
       >
         {preview.unavailable !== null && !details.isFetching ? (
-          <InlineFeedback tone="error">
-            {restoreUnavailableMessage(preview.unavailable)}
-          </InlineFeedback>
+          <Alert variant="destructive">
+            <AlertDescription>
+              {restoreUnavailableMessage(preview.unavailable)}
+            </AlertDescription>
+          </Alert>
         ) : null}
         <RestoreAccessSummary person={person} preview={preview} />
       </ConfirmDialog>

@@ -1,5 +1,9 @@
 import type { Page } from "@playwright/test";
-import type { SupportComment, SupportTopic } from "../../src/lib/support-types";
+import {
+  SUPPORT_PAGE_SIZE,
+  type SupportComment,
+  type SupportTopic,
+} from "../../src/lib/support-types";
 import { FIXED_NOW } from "./fixtures/data";
 import { test, expect } from "./fixtures/test";
 import { expectNoAxeViolations } from "./support/axe";
@@ -69,14 +73,17 @@ async function mockForum(page: Page, initial = [fixtureTopic()]) {
         const all = state.comments.filter((item) => item.topicId === topicId);
         const pageNumber = Math.min(
           Number(url.searchParams.get("page")) || 1,
-          Math.max(1, Math.ceil(all.length / 20)),
+          Math.max(1, Math.ceil(all.length / SUPPORT_PAGE_SIZE)),
         );
         return route.fulfill({
           json: {
-            items: all.slice((pageNumber - 1) * 20, pageNumber * 20),
+            items: all.slice(
+            (pageNumber - 1) * SUPPORT_PAGE_SIZE,
+            pageNumber * SUPPORT_PAGE_SIZE,
+          ),
             totalItems: all.length,
             page: pageNumber,
-            pageSize: 20,
+            pageSize: SUPPORT_PAGE_SIZE,
           },
         });
       }
@@ -140,14 +147,17 @@ async function mockForum(page: Page, initial = [fixtureTopic()]) {
     );
     const pageNumber = Math.min(
       Number(url.searchParams.get("page")) || 1,
-      Math.max(1, Math.ceil(all.length / 20)),
+      Math.max(1, Math.ceil(all.length / SUPPORT_PAGE_SIZE)),
     );
     return route.fulfill({
       json: {
-        items: all.slice((pageNumber - 1) * 20, pageNumber * 20),
+        items: all.slice(
+            (pageNumber - 1) * SUPPORT_PAGE_SIZE,
+            pageNumber * SUPPORT_PAGE_SIZE,
+          ),
         totalItems: all.length,
         page: pageNumber,
-        pageSize: 20,
+        pageSize: SUPPORT_PAGE_SIZE,
       },
     });
   });
@@ -161,7 +171,7 @@ test("create, comment, solve, reopen, edit, and delete a topic", async ({
   await mockForum(page, []);
   await ui.open({ path: "/support", sessionRole: "learner" });
   await expect(
-    page.getByRole("heading", { name: "Start a conversation" }),
+    page.getByRole("heading", { name: "No topics yet" }),
   ).toBeVisible();
   await page.getByRole("link", { name: "New topic" }).first().click();
   await page.getByLabel("Title", { exact: true }).fill("Terminal disconnects");
@@ -213,15 +223,20 @@ test("create, comment, solve, reopen, edit, and delete a topic", async ({
   await expect(
     page.getByText("Updated reproduction steps.", { exact: true }),
   ).toBeVisible();
-  await page
-    .getByRole("listitem")
-    .filter({
-      has: page.getByText("Updated reproduction steps.", { exact: true }),
+  // A comment asks again in place; only a topic opens a dialog.
+  const comment = page.getByRole("listitem").filter({
+    has: page.getByText("Updated reproduction steps.", { exact: true }),
+  });
+  await comment
+    .getByRole("button", {
+      name: "Delete comment",
+      exact: true,
+      expanded: false,
     })
-    .getByRole("button", { name: "Delete comment", exact: true })
     .click();
-  await page
-    .getByRole("dialog")
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await comment
+    .getByRole("group", { name: "Delete this comment?" })
     .getByRole("button", { name: "Delete comment", exact: true })
     .click();
   await expect(
@@ -244,7 +259,7 @@ test("create, comment, solve, reopen, edit, and delete a topic", async ({
   );
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Cancel", exact: true })
+    .getByRole("button", { name: "Keep topic", exact: true })
     .click();
   await expect(page.getByRole("dialog")).toBeHidden();
   await page.getByRole("button", { name: "Delete topic", exact: true }).click();
@@ -253,7 +268,7 @@ test("create, comment, solve, reopen, edit, and delete a topic", async ({
     .getByRole("button", { name: "Delete topic", exact: true })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Start a conversation" }),
+    page.getByRole("heading", { name: "No topics yet" }),
   ).toBeVisible();
 });
 
@@ -268,23 +283,36 @@ test("keeps search, filters, and pagination in the URL", async ({
     ),
   );
   await ui.open({ path: "/support", sessionRole: "learner" });
-  await page.getByRole("button", { name: "Next", exact: true }).click();
+  const next = page.getByRole("button", { name: "Next page", exact: true });
+  await next.click();
   await expect(page).toHaveURL(/page=2/);
   await expect(
     page.getByRole("link", { name: "Terminal report 22", exact: true }),
   ).toBeVisible();
-  await page.getByLabel("Search topics", { exact: true }).fill("report 22");
-  await page.getByRole("button", { name: "Search", exact: true }).click();
+  // Searching is live: typing writes the URL after a pause and goes to page 1.
+  const search = page.getByLabel("Search forum topics", { exact: true });
+  await search.fill("report 22");
+  await expect(page).toHaveURL(/q=report(\+|%20)22/);
   await expect(page).toHaveURL(/page=1/);
-  await page.getByLabel("Type", { exact: true }).selectOption("bug");
-  await page.getByLabel("Status", { exact: true }).selectOption("solved");
+  await expect(search).toBeFocused();
+  const type = page.getByRole("group", { name: "Filter topics by type" });
+  const status = page.getByRole("group", { name: "Filter topics by status" });
+  await type.getByRole("button", { name: "Bug", exact: true }).click();
+  await status.getByRole("button", { name: "Solved", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "No topics match these filters" }),
   ).toBeVisible();
   await page.goBack();
-  await expect(page.getByLabel("Status", { exact: true })).toHaveValue("all");
-  await page.getByLabel("My topics", { exact: true }).check();
+  await expect(
+    status.getByRole("button", { name: "Solved", exact: true }),
+  ).toHaveAttribute("aria-pressed", "false");
+  await page
+    .getByRole("button", { name: "My topics", exact: true })
+    .click();
   await expect.poll(() => state.requests.at(-1)).toContain("mine=true");
+  await page.getByRole("button", { name: "Clear filters" }).first().click();
+  await expect(search).toHaveValue("");
+  await expect(page).not.toHaveURL(/mine=true/);
 });
 
 test("preserves drafts after failed writes and shows missing topics", async ({

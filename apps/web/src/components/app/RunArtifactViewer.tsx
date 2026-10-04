@@ -1,31 +1,37 @@
-import "asciinema-player/dist/bundle/asciinema-player.css";
-
 import {
-  useCallback,
   useDeferredValue,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
-import type { AsciinemaPlayerInstance } from "asciinema-player";
+import { MetaLine } from "@/components/app/patterns/MetaLine";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
-  REPLAY_IDLE_TIME_LIMIT_SECONDS,
-  REPLAY_TERMINAL_FONT_FAMILY,
-  REPLAY_TERMINAL_LINE_HEIGHT,
-  REPLAY_TERMINAL_THEME,
-} from "@/lib/replay/config";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import {
+  AsciicastReplaySurface,
+  replayPlayerErrorCopy,
+} from "./RunArtifactViewerReplay";
+
+export { AsciicastReplaySurface, replayPlayerErrorCopy };
+
+// How long Copied holds: the design system's duration-flash (1600ms).
+function copiedHoldMs() {
+  try {
+    const token = Number.parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue(
+        "--duration-flash",
+      ),
+    );
+    return token > 0 ? token : 1600;
+  } catch {
+    return 1600;
+  }
+}
 
 export interface RunArtifactFile {
   id: string;
@@ -80,6 +86,7 @@ export function RunArtifactViewer({
     "idle",
   );
   const copyResetTimeoutRef = useRef<number | null>(null);
+  const headingId = useId();
 
   const artifactId = viewer?.artifact.id ?? null;
   const isCast = viewer ? isCastArtifact(viewer.artifact) : false;
@@ -138,7 +145,7 @@ export function RunArtifactViewer({
     copyResetTimeoutRef.current = window.setTimeout(() => {
       setCopyState("idle");
       copyResetTimeoutRef.current = null;
-    }, 1800);
+    }, copiedHoldMs());
   };
 
   if (minimalCastReplay) {
@@ -149,16 +156,18 @@ export function RunArtifactViewer({
             <p className="text-support text-muted-foreground">Replay unavailable.</p>
           </div>
         ) : viewer.error ? (
-          <div className="flex min-h-[22rem] items-center justify-center">
-            <div className="text-support text-destructive">
-              {viewer.error}
-            </div>
+          // A learner never sees the server's message: a muted line says it.
+          <div className="flex min-h-[22rem] items-center justify-center text-center">
+            <p role="status" className="text-support text-muted-foreground">
+              Replay could not be loaded.
+            </p>
           </div>
         ) : canReplay ? (
           <AsciicastReplaySurface
             contentId={viewer.artifact.id}
             content={viewer.content}
             loading={viewer.loading}
+            label={`Terminal replay of ${viewer.artifact.filename}`}
             minimal
           />
         ) : (
@@ -171,21 +180,21 @@ export function RunArtifactViewer({
   }
 
   return (
-    <Card className="overflow-hidden">
-      <CardHeader className="gap-5">
+    // Only ever embedded in a run row inside a card, so it is a plain section
+    // on that panel (a raised card here would sit on another raised card).
+    <section aria-labelledby={headingId} className="space-y-4 border-t pt-4">
+      <div className="space-y-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="space-y-2">
-            <CardDescription>{title}</CardDescription>
-            <div className="space-y-1">
-              <CardTitle className="text-card-title">
-                {viewer
-                  ? (selectedLabel ?? viewer.artifact.filename)
-                  : emptyLabel}
-              </CardTitle>
-              <p className="text-support text-muted-foreground">
-                {viewer ? progressLabel : emptyDescription}
-              </p>
-            </div>
+          <div className="space-y-1">
+            <p className="text-label">{title}</p>
+            <h4 id={headingId} className="text-card-title">
+              {viewer
+                ? (selectedLabel ?? viewer.artifact.filename)
+                : emptyLabel}
+            </h4>
+            <p className="text-support text-muted-foreground">
+              {viewer ? progressLabel : emptyDescription}
+            </p>
           </div>
 
           {viewer ? (
@@ -199,7 +208,7 @@ export function RunArtifactViewer({
                 </>
               ) : null}
               {!isCast || castTab === "raw" ? (
-                <ArtifactMeta label="Length" value={`${lineCount} lines`} subdued />
+                <ArtifactMeta label="Length" value={lineCountLabel(lineCount)} subdued />
               ) : null}
             </dl>
           ) : null}
@@ -209,20 +218,15 @@ export function RunArtifactViewer({
           <div className="flex flex-col gap-3 border-t pt-5 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-2">
               {canReplay ? (
-                <>
-                  <ToolbarTab
-                    active={castTab === "replay"}
-                    onClick={() => setCastTab("replay")}
-                  >
-                    Replay
-                  </ToolbarTab>
-                  <ToolbarTab
-                    active={castTab === "raw"}
-                    onClick={() => setCastTab("raw")}
-                  >
-                    Raw
-                  </ToolbarTab>
-                </>
+                <Tabs
+                  value={castTab}
+                  onValueChange={(value) => setCastTab(value as CastTab)}
+                >
+                  <TabsList aria-label="View">
+                    <TabsTrigger value="replay">Replay</TabsTrigger>
+                    <TabsTrigger value="raw">Raw</TabsTrigger>
+                  </TabsList>
+                </Tabs>
               ) : null}
             </div>
 
@@ -230,29 +234,36 @@ export function RunArtifactViewer({
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   type="button"
-                  variant={
-                    copyState === "copied"
-                      ? "secondary"
-                      : copyState === "error"
-                        ? "destructive"
-                        : "outline"
-                  }
+                  variant="outline"
                   size="sm"
                   onClick={() => void copyContent()}
                   disabled={!viewer.content}
                 >
-                  {copyState === "copied" ? (
-                    <CheckIcon className="size-3.5" />
-                  ) : (
-                    <CopyIcon className="size-3.5" />
-                  )}
-                  {copyState === "copied"
-                    ? "Copied"
-                    : copyState === "error"
-                      ? "Copy failed"
-                      : viewer.previewTruncated
-                        ? "Copy preview"
-                        : "Copy file"}
+                  {/* Every label shares one cell, so the button keeps the
+                      width of its widest state and Download never shifts. */}
+                  <span className="grid *:col-start-1 *:row-start-1">
+                    <span className={copyLayer(copyState === "idle")}>
+                      <CopyIcon className="size-3.5" />
+                      {viewer.previewTruncated ? "Copy preview" : "Copy file"}
+                    </span>
+                    <span className={copyLayer(copyState === "copied")}>
+                      <CheckIcon
+                        className={cn(
+                          "size-3.5",
+                          copyState === "copied" && "draw-check",
+                        )}
+                      />
+                      Copied
+                    </span>
+                    <span
+                      className={cn(
+                        copyLayer(copyState === "error"),
+                        "text-destructive",
+                      )}
+                    >
+                      Copy failed
+                    </span>
+                  </span>
                 </Button>
                 {viewer.downloadUrl ? (
                   <Button
@@ -294,14 +305,19 @@ export function RunArtifactViewer({
               <span className="text-caption">
                 {viewer.previewTruncated
                   ? "The inline preview is capped for speed. Download the full file when needed."
-                  : "Text panes support selection and `Cmd/Ctrl+F`."}
+                  : (
+                    <>
+                      Text panes support selection and{" "}
+                      <code className="text-code">Cmd/Ctrl+F</code>.
+                    </>
+                  )}
               </span>
             </div>
           </div>
         ) : null}
-      </CardHeader>
+      </div>
 
-      <CardContent className="pt-0">
+      <div>
         <div className="min-h-[22rem] rounded-lg border bg-muted/20">
           {!viewer ? (
             <div className="flex min-h-[22rem] flex-col items-center justify-center px-5 py-6 text-center">
@@ -313,15 +329,16 @@ export function RunArtifactViewer({
             </div>
           ) : viewer.error ? (
             <div className="flex min-h-[22rem] items-center justify-center px-5 py-6">
-              <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-support text-destructive">
-                {viewer.error}
-              </div>
+              <Alert variant="destructive" just className="max-w-xl">
+                <AlertDescription>{viewer.error}</AlertDescription>
+              </Alert>
             </div>
           ) : canReplay && (hideViewerControls || castTab === "replay") ? (
             <AsciicastReplaySurface
               contentId={viewer.artifact.id}
               content={viewer.content}
               loading={viewer.loading}
+              label={`Terminal replay of ${viewer.artifact.filename}`}
             />
           ) : (
             <ReadOnlyTextSurface
@@ -331,189 +348,28 @@ export function RunArtifactViewer({
             />
           )}
         </div>
-      </CardContent>
+      </div>
 
       {viewer ? (
-        <CardFooter className="flex flex-col items-start gap-1 border-t bg-muted/10 text-caption sm:flex-row sm:justify-between">
-          <span>{progressLabel}</span>
-          <span>
-            {canReplay && castTab === "replay"
-              ? viewer.loading
+        <div className="rounded-b-lg border-t bg-muted/40 px-4 py-3 text-caption">
+          {canReplay && castTab === "replay" ? (
+            <p>
+              {viewer.loading
                 ? "Replay starts when the full cast arrives. Use Raw for live bytes."
-                : "Replay is interactive and backed by the archived cast file."
-              : `${lineCount} lines • ${formatBytes(viewer.receivedBytes || viewer.artifact.sizeBytes)}`}
-          </span>
-        </CardFooter>
-      ) : null}
-    </Card>
-  );
-}
-
-export function AsciicastReplaySurface({
-  contentId,
-  content,
-  loading,
-  minimal = false,
-}: {
-  /** Stable identity of the cast (e.g. artifact id); resets error state. */
-  contentId: string;
-  content: string;
-  loading: boolean;
-  minimal?: boolean;
-}) {
-  const [playerError, setPlayerError] = useState<string | null>(null);
-
-  const handlePlayerReady = useCallback(() => {
-    setPlayerError(null);
-  }, []);
-  const handlePlayerError = useCallback((message: string) => {
-    setPlayerError(message);
-  }, []);
-
-  useEffect(() => {
-    setPlayerError(null);
-  }, [contentId]);
-
-  if (playerError) {
-    return (
-      <div className={minimal ? "p-0" : "p-4"}>
-        <div className="flex aspect-video w-full items-center justify-center rounded-md bg-muted/20 px-5">
-          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-support text-destructive">
-            {replayPlayerErrorCopy(playerError, minimal)}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (loading) {
-    return (
-      <div className={minimal ? "p-0" : "p-4"}>
-        <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-md bg-muted/20 px-5 text-center">
-          <div className="h-2 w-44 overflow-hidden rounded-full bg-secondary">
-            <div className="h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse" />
-          </div>
-          <p className="text-support font-medium">
-            {minimal ? "Preparing replay" : "Preparing replay surface"}
-          </p>
-          {!minimal ? (
-            <p className="text-support text-muted-foreground">
-              Cast playback waits for the complete `.cast` stream so timing and
-              frame boundaries stay correct. The Raw tab remains available
-              while bytes are arriving.
+                : "Replay is interactive and backed by the archived cast file."}
             </p>
-          ) : null}
+          ) : (
+            <MetaLine
+              items={[
+                lineCountLabel(lineCount),
+                formatBytes(viewer.receivedBytes || viewer.artifact.sizeBytes),
+              ]}
+            />
+          )}
         </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className={minimal ? "p-0" : "p-4"}>
-      <div
-        className={
-          minimal ? "" : "overflow-hidden rounded-md border bg-background"
-        }
-      >
-        <MountedAsciicastPlayer
-          key={contentId}
-          content={content}
-          onReady={handlePlayerReady}
-          onError={handlePlayerError}
-        />
-      </div>
-    </div>
+      ) : null}
+    </section>
   );
-}
-
-function MountedAsciicastPlayer({
-  content,
-  onReady,
-  onError,
-}: {
-  content: string;
-  onReady: () => void;
-  onError: (message: string) => void;
-}) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const playerRef = useRef<AsciinemaPlayerInstance | null>(null);
-
-  useEffect(() => {
-    if (!content.trim() || !containerRef.current) {
-      return;
-    }
-
-    let cancelled = false;
-
-    const mountPlayer = async () => {
-      try {
-        const mod = await import("asciinema-player");
-        if (cancelled || !containerRef.current) {
-          return;
-        }
-
-        const player = mod.create(
-          { data: content },
-          containerRef.current,
-          {
-            autoPlay: false,
-            preload: true,
-            controls: true,
-            // The cast plays at its recorded geometry: the player fills the
-            // container width and derives its height from the cast's rows,
-            // preserving the original aspect ratio.
-            fit: "width",
-            terminalLineHeight: REPLAY_TERMINAL_LINE_HEIGHT,
-            idleTimeLimit: REPLAY_IDLE_TIME_LIMIT_SECONDS,
-            terminalFontFamily: REPLAY_TERMINAL_FONT_FAMILY,
-            theme: REPLAY_TERMINAL_THEME,
-          },
-        );
-        playerRef.current = player;
-        player.addEventListener("ready", () => {
-          if (!cancelled && playerRef.current === player) {
-            onReady();
-          }
-        });
-        // The player throws from addEventListener for unknown event names,
-        // and its error event is named "error" (not "errored").
-        player.addEventListener("error", () => {
-          if (!cancelled && playerRef.current === player) {
-            onError("asciinema player failed to initialize this recording");
-          }
-        });
-      } catch (error) {
-        if (cancelled) {
-          return;
-        }
-        onError(
-          error instanceof Error
-            ? error.message
-            : "failed to initialize cast replay",
-        );
-      }
-    };
-
-    void mountPlayer();
-
-    return () => {
-      cancelled = true;
-      const player = playerRef.current;
-      playerRef.current = null;
-      player?.dispose?.();
-    };
-  }, [content, onError, onReady]);
-
-  return (
-    <div
-      ref={containerRef}
-      className="run-artifact-player w-full overflow-hidden rounded-md bg-terminal-background [&_.ap-player]:w-full"
-    />
-  );
-}
-
-export function replayPlayerErrorCopy(error: string, minimal: boolean) {
-  return minimal ? "Replay could not be loaded. Try again soon." : error;
 }
 
 export function ReadOnlyTextSurface({
@@ -556,7 +412,7 @@ export function ReadOnlyTextSurface({
 
   if (compact) {
     return (
-      <div className="overflow-hidden rounded-md border bg-background">
+      <div className="overflow-hidden rounded-lg border bg-background">
         {textPane}
       </div>
     );
@@ -564,7 +420,7 @@ export function ReadOnlyTextSurface({
 
   return (
     <div className="p-4">
-      <div className="overflow-hidden rounded-md border bg-background">
+      <div className="overflow-hidden rounded-lg border bg-background">
         <div className="border-b px-4 py-2 text-support text-muted-foreground">
           {loading ? "Streaming text" : "Archived text"}
         </div>
@@ -598,26 +454,18 @@ function ArtifactMeta({
   );
 }
 
-function ToolbarTab({
-  active,
-  children,
-  onClick,
-}: {
-  active: boolean;
-  children: string;
-  onClick: () => void;
-}) {
-  return (
-    <Button
-      type="button"
-      variant={active ? "secondary" : "outline"}
-      size="sm"
-      aria-pressed={active}
-      onClick={onClick}
-    >
-      {children}
-    </Button>
+/** One layer of the Copy button's label stack (the active one is visible). */
+function copyLayer(active: boolean) {
+  return cn(
+    "inline-flex items-center justify-center gap-1.5 transition-opacity",
+    active
+      ? "duration-(--duration-moderate) ease-enter"
+      : "invisible opacity-0 duration-(--duration-fast) ease-exit",
   );
+}
+
+function lineCountLabel(count: number) {
+  return `${count} ${count === 1 ? "line" : "lines"}`;
 }
 
 function isCastArtifact(artifact: RunArtifactFile) {
@@ -631,15 +479,17 @@ function isCastArtifact(artifact: RunArtifactFile) {
 function artifactKindLabel(kind: string) {
   switch (kind) {
     case "console_log":
-      return "Console Log";
+      return "Console log";
     case "serial_log":
-      return "Serial Log";
+      return "Serial log";
     case "ssh_recording_segment":
-      return "Session Cast";
+      return "Session cast";
     case "ssh_recording_raw":
-      return "Raw Recording";
-    default:
-      return kind.replace(/_/g, " ");
+      return "Raw recording";
+    default: {
+      const words = kind.replace(/_/g, " ");
+      return words.charAt(0).toUpperCase() + words.slice(1);
+    }
   }
 }
 

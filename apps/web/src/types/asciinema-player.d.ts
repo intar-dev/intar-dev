@@ -21,9 +21,16 @@ declare module "asciinema-player" {
     terminalFontFamily?: string;
     terminalFontSize?: string | number;
     terminalLineHeight?: number;
+    /** Reduced motion uses "steady": the blink is a script timer, not CSS. */
+    cursorMode?: "blinking" | "steady" | "hidden";
     cols?: number;
     rows?: number;
     logger?: Console;
+  }
+
+  /** Payload of the "metadata" event; duration is in seconds. */
+  export interface AsciinemaPlayerMetadata {
+    duration?: number;
   }
 
   export interface AsciinemaPlayerInstance {

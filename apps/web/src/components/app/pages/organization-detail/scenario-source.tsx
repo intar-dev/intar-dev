@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitBranch, Hammer, Pause, Play, Unplug } from "lucide-react";
+import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
+import { CodeBlock } from "../../patterns/CodeBlock";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
+import { Field } from "../../patterns/Field";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
 import { Section } from "../../patterns/Section";
 import { Badge } from "@/components/ui/badge";
@@ -53,10 +56,17 @@ export function ScenarioSourceSection({
       await queryClient.invalidateQueries({ queryKey });
     },
   });
+  const failure = describeApiError<"repository">(change.error, {
+    fallback: "Couldn't change the scenario source. Try again.",
+    fields: { repository: /repositor|github|install/i },
+  });
   if (!card.data || !scenarioSourceCardVisible(card.data)) return null;
   const { enabled, appSlug } = card.data;
   const source = card.data.source?.disconnectedAt === null ? card.data.source : null;
   const branch = source?.defaultBranch ?? "main";
+  // Connecting a repository can refuse it; the field says why.
+  const repositoryError =
+    !source && failure?.field === "repository" ? failure.message : null;
 
   return (
     <Section
@@ -77,6 +87,7 @@ export function ScenarioSourceSection({
             source={source}
             enabled={enabled}
             pending={change.isPending}
+            pendingMode={change.isPending ? change.variables?.mode : undefined}
             onChange={(body) => change.mutate(body)}
             onDisconnect={() => setDisconnectOpen(true)}
           />
@@ -107,7 +118,7 @@ export function ScenarioSourceSection({
               <li>Push at least one commit to the repository's default branch.</li>
             </ol>
             <form
-              className="flex flex-wrap items-center gap-2"
+              className="space-y-3"
               onSubmit={(event) => {
                 event.preventDefault();
                 if (!change.isPending) {
@@ -115,13 +126,24 @@ export function ScenarioSourceSection({
                 }
               }}
             >
-              <Input
-                value={repository}
-                onChange={(event) => setRepository(event.target.value)}
-                placeholder="owner/repository"
-                className="max-w-sm"
-                aria-label="GitHub repository"
-              />
+              <Field label="GitHub repository" error={repositoryError}>
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={repository}
+                    onChange={(event) => {
+                      setRepository(event.target.value);
+                      if (repositoryError) change.reset();
+                    }}
+                    placeholder="owner/repository"
+                    className="text-code"
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                )}
+              </Field>
               <Button
                 type="submit"
                 disabled={!enabled || !repository.trim() || change.isPending}
@@ -132,8 +154,8 @@ export function ScenarioSourceSection({
             </form>
           </>
         )}
-        {change.error ? (
-          <InlineFeedback tone="error">{change.error.message}</InlineFeedback>
+        {failure && !repositoryError ? (
+          <InlineFeedback tone="error">{failure.message}</InlineFeedback>
         ) : null}
         <p className="text-muted-foreground">{MODE_NOTE}</p>
         <details>
@@ -167,7 +189,10 @@ export function ScenarioSourceSection({
         }}
         title="Disconnect the repository?"
         description="Updates stop and the live courses stay. Connecting a repository again keeps them live until its first deploy."
-        error={change.error ? change.error.message : null}
+        error={apiErrorMessage(
+          change.error,
+          "Couldn't disconnect the repository. Try again.",
+        )}
         pending={change.isPending}
         confirmLabel="Disconnect"
         pendingLabel="Disconnecting…"
@@ -187,21 +212,28 @@ function ConnectedSource({
   source,
   enabled,
   pending,
+  pendingMode,
   onChange,
   onDisconnect,
 }: {
   source: ScenarioSourceView;
   enabled: boolean;
   pending: boolean;
+  /** The mode being saved, so the select holds it instead of snapping back. */
+  pendingMode: string | undefined;
   onChange: (body: Record<string, string>) => void;
   onDisconnect: () => void;
 }) {
   const commit = source.commit;
+  const modeId = useId();
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium">
-          Connected {source.repository} @ {source.defaultBranch}
+          Connected{" "}
+          <code className="text-code">
+            {source.repository} @ {source.defaultBranch}
+          </code>
         </span>
         <Badge variant={source.pauseReason ? "warning" : "success"}>
           {source.pauseReason ? PAUSE_LABELS[source.pauseReason] : "Active"}
@@ -209,13 +241,19 @@ function ConnectedSource({
       </div>
       <dl className="grid gap-3 sm:grid-cols-3">
         <div>
-          <dt className="text-label">Mode</dt>
+          <dt className="text-label">
+            <label htmlFor={modeId}>Delivery mode</label>
+          </dt>
           <dd className="mt-1">
             <NativeSelect
-              value={source.mode}
-              disabled={!enabled || pending}
-              onChange={(event) => onChange({ action: "mode", mode: event.target.value })}
-              aria-label="Delivery mode"
+              id={modeId}
+              value={pendingMode ?? source.mode}
+              disabled={!enabled}
+              aria-disabled={pending || undefined}
+              onChange={(event) => {
+                if (pending) return;
+                onChange({ action: "mode", mode: event.target.value });
+              }}
             >
               <option value="pull">Pull</option>
               <option value="push">Push</option>
@@ -224,8 +262,12 @@ function ConnectedSource({
         </div>
         <div>
           <dt className="text-label">Live commit</dt>
-          <dd className="mt-1 font-mono text-xs">
-            {source.liveSha?.slice(0, 12) ?? "None yet"}
+          <dd className="mt-1">
+            {source.liveSha ? (
+              <code className="text-code">{source.liveSha.slice(0, 12)}</code>
+            ) : (
+              "None yet"
+            )}
           </dd>
         </div>
         <div>
@@ -233,7 +275,7 @@ function ConnectedSource({
           <dd className="mt-1">
             {commit ? (
               <>
-                <span className="font-mono text-xs">{commit.sha.slice(0, 12)}</span>{" "}
+                <code className="text-code">{commit.sha.slice(0, 12)}</code>{" "}
                 {commit.state.replace("_", " ")}
               </>
             ) : (
@@ -288,8 +330,8 @@ function ConnectedSource({
 
 function Snippet({ children }: { children: string }) {
   return (
-    <pre className="mt-2 rounded-xl border bg-muted/30 p-3 text-xs leading-6 whitespace-pre-wrap break-all">
-      <code>{children}</code>
-    </pre>
+    <CodeBlock language="yaml" copyName="Copy the snippet" className="mt-2">
+      {children}
+    </CodeBlock>
   );
 }

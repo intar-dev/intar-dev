@@ -36,6 +36,6 @@ export function digitCells(from: string, to: string): DigitCell[] {
 }
 
 /** Digits roll up as a number grows and down as it shrinks. */
-export function rollDirection(from: string, to: string): 1 | -1 {
-  return Number.parseFloat(to) < Number.parseFloat(from) ? -1 : 1;
+export function rollDirection(from: number, to: number): 1 | -1 {
+  return to < from ? -1 : 1;
 }

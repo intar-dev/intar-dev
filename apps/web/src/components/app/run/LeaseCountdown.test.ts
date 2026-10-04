@@ -34,7 +34,19 @@ describe("LeaseCountdown", () => {
     );
 
     expect(markup).toContain('role="timer"');
-    expect(markup).toContain('aria-label="Time remaining: 01:05"');
+    expect(markup).toContain('aria-label="Sandbox ending soon, 01:05 left"');
     expect(markup).toContain("01:05");
+    expect(markup).not.toContain("animate-pulse");
+  });
+
+  it("keeps the plain label while plenty of time is left", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+
+    const markup = renderToStaticMarkup(
+      createElement(LeaseCountdown, { deadlineMs: 1_000 + 40 * 60_000 }),
+    );
+
+    expect(markup).toContain('aria-label="Time remaining: 40:00"');
   });
 });

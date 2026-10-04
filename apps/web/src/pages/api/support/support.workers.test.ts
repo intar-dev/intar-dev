@@ -363,8 +363,8 @@ describe("support forum API", () => {
       actor,
       validateSupportSearch({ page: 2 }),
     );
-    expect(first.items).toHaveLength(20);
-    expect(second.items).toHaveLength(3);
+    expect(first.items).toHaveLength(12);
+    expect(second.items).toHaveLength(11);
     expect(first.items[0]!.id).toBe("topic-22");
     expect(
       (
@@ -413,9 +413,9 @@ describe("support forum API", () => {
       "/topic-00/comments?page=2",
     );
     const page = (await response.json()) as SupportPage<SupportComment>;
-    expect(page).toMatchObject({ totalItems: 22, page: 2, pageSize: 20 });
+    expect(page).toMatchObject({ totalItems: 22, page: 2, pageSize: 12 });
     expect(page.items.map((entry) => entry.body)).toEqual([
-      "Reply 20",
+      ...Array.from({ length: 9 }, (_, i) => `Reply ${i + 12}`),
       "New activity",
     ]);
   });

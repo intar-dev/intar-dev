@@ -1,35 +1,48 @@
 import * as React from "react"
+import { mergeProps } from "@base-ui/react/merge-props"
+import { useRender } from "@base-ui/react/use-render"
 
 import { cn } from "@/lib/utils"
 
 export type CardVariant = "default" | "flat" | "interactive"
 
+// `render` makes the card itself the link (or any element), so hover, press and
+// the focus ring belong to one rounded box and assistive tech meets one link.
 function Card({
   className,
   size = "default",
   variant = "default",
-  as: Component = "div",
+  as = "div",
+  render,
   ...props
-}: React.ComponentProps<"div"> & {
+}: useRender.ComponentProps<"div"> & {
   size?: "default" | "sm"
   variant?: CardVariant
   as?: "div" | "section" | "article"
 }) {
-  return (
-    <Component
-      data-slot="card"
-      data-size={size}
-      data-variant={variant}
-      className={cn(
-        "group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-xl border border-border bg-card py-(--card-spacing) text-sm text-card-foreground [--card-spacing:var(--space-lg)] has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:var(--space-md)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
-        variant === "default" && "shadow-[var(--highlight),var(--shadow-raised)]",
-        variant === "flat" && "rounded-lg bg-transparent shadow-none",
-        variant === "interactive" && "shadow-[var(--highlight),var(--shadow-raised)] transition-[border-color,background-color,box-shadow] duration-150 ease-standard hover:border-border-strong/40 hover:bg-[color-mix(in_oklab,var(--card),var(--foreground)_3%)] motion-reduce:transition-none",
-        className
-      )}
-      {...props}
-    />
-  )
+  return useRender({
+    defaultTagName: as,
+    render,
+    props: mergeProps<"div">(
+      {
+        "data-slot": "card",
+        "data-size": size,
+        "data-variant": variant,
+        className: cn(
+          "group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-xl border border-border bg-card py-(--card-spacing) text-sm text-card-foreground [--card-spacing:var(--space-lg)] has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:var(--space-md)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
+          variant === "default" && "shadow-[var(--highlight),var(--shadow-raised)]",
+          variant === "flat" && "bg-transparent shadow-none",
+          // The edge strengthens, the fill shifts 3% toward foreground, and the
+          // card drops move-press while pressed (down over duration-instant,
+          // back over duration-fast). move-press is zero under reduced motion.
+          variant === "interactive" &&
+            "shadow-[var(--highlight),var(--shadow-raised)] transition-[border-color,background-color,box-shadow,translate] duration-(--duration-fast) ease-standard hover:border-border-strong hover:bg-[color-mix(in_oklab,var(--card),var(--foreground)_3%)] active:translate-y-(--move-press) active:duration-(--duration-instant)",
+          className
+        ),
+      } as React.ComponentProps<"div">,
+      props,
+    ),
+  })
 }
 
 function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
@@ -55,10 +68,7 @@ function CardTitle({
   return (
     <Component
       data-slot="card-title"
-      className={cn(
-        "text-card-title group-data-[size=sm]/card:text-sm",
-        className
-      )}
+      className={cn("text-card-title", className)}
       {...props}
     />
   )
@@ -68,7 +78,7 @@ function CardDescription({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-description"
-      className={cn("text-sm text-muted-foreground", className)}
+      className={cn("text-support text-muted-foreground", className)}
       {...props}
     />
   )

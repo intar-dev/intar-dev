@@ -1,13 +1,21 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type Ref,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   ArrowLeft,
   ArrowRight,
+  BookOpen,
   Check,
   ChevronDown,
-  ListFilter,
   LockKeyhole,
+  SearchX,
   Users,
 } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
@@ -18,10 +26,19 @@ import {
   SCENARIO_DIFFICULTIES,
 } from "@/components/app/patterns/MetaLine";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { ErrorState, EmptyState } from "@/components/app/patterns/StateCard";
+import {
+  ErrorState,
+  EmptyState,
+  StaleNotice,
+} from "@/components/app/patterns/StateCard";
 import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
-import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
+import {
+  FilterBar,
+  FilterChip,
+  FilterChipGroup,
+} from "@/components/app/patterns/FilterBar";
+import { formatMinutes, sentenceCase } from "@/components/app/lib/format";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -34,6 +51,7 @@ import {
   SelectContent,
   SelectItem,
   SelectTrigger,
+  SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -139,6 +157,7 @@ function CourseCatalogPage({
     [routeSearch],
   );
   const [searchText, setSearchText] = useState(searchState.q);
+  const searchRef = useRef<HTMLInputElement>(null);
   const catalog = useQuery({
     queryKey: courseCatalogQueryKey(organizationId),
     queryFn: async ({ queryKey, signal }) => {
@@ -182,9 +201,14 @@ function CourseCatalogPage({
     staleTime: 30_000,
   });
   const courses = catalog.data?.courses ?? [];
+  // Results follow each keystroke; only the URL write is debounced.
+  const liveSearch = useMemo(
+    () => ({ ...searchState, q: searchText.trim() }),
+    [searchState, searchText],
+  );
   const visibleCourses = useMemo(
-    () => filterCourses(courses, searchState),
-    [courses, searchState],
+    () => filterCourses(courses, liveSearch),
+    [courses, liveSearch],
   );
   const course = useMemo(
     () =>
@@ -198,28 +222,45 @@ function CourseCatalogPage({
     [courseId, courses, organizationId, requestedScope],
   );
   const visibleLectures = useMemo(
-    () => (course ? filterLectures(course, searchState) : []),
-    [course, searchState],
+    () => (course ? filterLectures(course, liveSearch) : []),
+    [course, liveSearch],
   );
+  // Offer only what the list on screen can match, so a pick never empties it.
+  // A deep-linked category stays so the Select keeps a matching item.
   const allCategories = useMemo(
     () =>
-      [...new Set(courses.flatMap((item) => item.lectures.map((lecture) => lecture.category)))]
-        .filter(Boolean)
-        .sort(),
-    [courses],
+      [
+        ...new Set(
+          [
+            ...(course ? [course] : courses).flatMap((item) =>
+              item.lectures.map((lecture) => lecture.category),
+            ),
+            searchState.category,
+          ].filter((value): value is string => Boolean(value)),
+        ),
+      ].sort(),
+    [courses, course, searchState.category],
   );
   const allTags = useMemo(
-    () => [...new Set(courses.flatMap((item) => item.lectures.flatMap((lecture) => lecture.tags)))].sort(),
-    [courses],
+    () =>
+      [
+        ...new Set(
+          (course ? [course] : courses).flatMap((item) =>
+            item.lectures.flatMap((lecture) => lecture.tags),
+          ),
+        ),
+      ].sort(),
+    [courses, course],
   );
   const filtersActive = Boolean(
-    searchState.q ||
+    liveSearch.q ||
       searchState.difficulty ||
       searchState.category ||
       searchState.tags.length,
   );
   useEffect(() => {
-    setSearchText((current) => (current === searchState.q ? current : searchState.q));
+    // Whitespace the user typed is not a difference: the URL value is trimmed.
+    setSearchText((current) => (current.trim() === searchState.q ? current : searchState.q));
   }, [searchState.q]);
   useEffect(() => {
     const query = searchText.trim();
@@ -228,15 +269,29 @@ function CourseCatalogPage({
       void navigate({
         to: ".",
         replace: true,
+        resetScroll: false,
         search: compactCatalogSearch({ ...searchState, q: query }),
       });
     }, 250);
     return () => window.clearTimeout(timeout);
   }, [navigate, searchState, searchText]);
-  usePageChrome({ title: course?.title ?? (courseId ? "Course" : "Courses") });
+  // A refresh that fails over cached data keeps that data on screen: the index
+  // says so in its capacity line and a course in a stale notice.
+  const loadFailed = catalogLoadFailed(catalog.error, catalog.data !== undefined);
+  // A loaded course owns its title as the content's h1; the bar then shows the
+  // context. The index, loading and error states keep the bar h1.
+  usePageChrome({
+    title: course?.title ?? (courseId ? "Course" : "Courses"),
+    reading: course !== null && !loadFailed,
+  });
 
   const setFilter = (next: NormalizedCatalogSearch) =>
-    void navigate({ to: ".", replace: true, search: compactCatalogSearch(next) });
+    void navigate({
+      to: ".",
+      replace: true,
+      resetScroll: false,
+      search: compactCatalogSearch(next),
+    });
   const toggleTag = (tag: string) =>
     setFilter({
       ...searchState,
@@ -252,6 +307,8 @@ function CourseCatalogPage({
       category: undefined,
       tags: [],
     });
+    // Both Clear buttons unmount; focus returns to the search field.
+    searchRef.current?.focus();
   };
   const filters = courses.length ? (
     <CourseFilters
@@ -263,19 +320,29 @@ function CourseCatalogPage({
       categories={allCategories}
       tags={allTags}
       filtersActive={filtersActive}
+      searchRef={searchRef}
+      shown={course ? visibleLectures.length : visibleCourses.length}
+      total={course ? course.lectures.length : courses.length}
+      noun={
+        course
+          ? course.lectures.length === 1
+            ? "lecture"
+            : "lectures"
+          : courses.length === 1
+            ? "course"
+            : "courses"
+      }
       onFilter={setFilter}
       onToggleTag={toggleTag}
       onClear={clearFilters}
     />
   ) : null;
 
-  if (catalog.isLoading && !catalog.data) {
+  // isPending, not isLoading: a first fetch paused offline still shows bones.
+  if (catalog.isPending) {
     return <CourseCatalogLoading showCapacity={!courseId} />;
   }
-  if (
-    catalog.error &&
-    (courseId || !catalog.data || isAccessResponseError(catalog.error, true))
-  ) {
+  if (loadFailed) {
     return (
       <PageShell>
         <ErrorState
@@ -293,9 +360,18 @@ function CourseCatalogPage({
   if (courseId && !course) {
     return (
       <PageShell>
-        <ErrorState
+        <EmptyState
+          icon={<SearchX />}
           title="Course not available"
           description="This course is not available in the current catalog."
+          action={
+            <Link
+              to="/courses"
+              className={buttonVariants({ size: "sm", className: "pointer-coarse:min-h-11" })}
+            >
+              Browse courses
+            </Link>
+          }
         />
       </PageShell>
     );
@@ -309,6 +385,7 @@ function CourseCatalogPage({
         filters={filters}
         filtersActive={filtersActive}
         onClearFilters={clearFilters}
+        refreshFailed={catalog.isError}
       />
     );
   }
@@ -316,6 +393,7 @@ function CourseCatalogPage({
     <CourseIndex
       capacity={catalog.data?.resourceCapacity ?? null}
       capacityUpdateFailed={catalog.isError}
+      animateArrival={catalog.isFetchedAfterMount}
       courses={visibleCourses}
       organizationId={organizationId}
       filters={filters}
@@ -333,6 +411,7 @@ function CourseCatalogPage({
 function CourseIndex({
   capacity,
   capacityUpdateFailed,
+  animateArrival,
   courses,
   organizationId,
   filters,
@@ -343,6 +422,7 @@ function CourseIndex({
 }: {
   capacity: Capacity | null;
   capacityUpdateFailed: boolean;
+  animateArrival: boolean;
   courses: readonly CourseCatalogCourse[];
   organizationId: string | null;
   filters: ReactNode;
@@ -358,11 +438,15 @@ function CourseIndex({
         titleClassName="max-sm:sr-only"
         summary="Learn the idea first, then apply it in a scenario."
       />
-      <ResourceCapacity capacity={capacity} updateFailed={capacityUpdateFailed} />
+      <ResourceCapacity
+        capacity={capacity}
+        updateFailed={capacityUpdateFailed}
+        animateArrival={animateArrival}
+      />
       {assignments.length ? <CourseAssignments assignments={assignments} /> : null}
       {filters}
       {courses.length ? (
-        <ul className="divide-y overflow-hidden rounded-xl border bg-card">
+        <ul className="surface-raised divide-y overflow-hidden rounded-xl border bg-card">
           {courses.map((course) => (
             <li key={`${course.organizationId ?? "public"}:${course.courseId}`}>
               <CourseIndexItem
@@ -375,6 +459,7 @@ function CourseIndex({
         </ul>
       ) : (
         <EmptyState
+          icon={filtersActive ? <SearchX /> : <BookOpen />}
           title={filtersActive ? "No courses match your filters" : "No courses are available"}
           description={
             filtersActive
@@ -411,43 +496,45 @@ function CourseIndexItem({
     (total, lecture) => total + (lecture.estimatedMinutes ?? 0),
     0,
   );
-  const courseScope = course.organizationId ? "private" : "public";
 
   return (
     <CourseLink
       route={route}
       search={search}
-      className="group grid min-h-24 gap-4 px-4 py-4 transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:px-5 dark:hover:bg-accent/60"
+      className="group grid min-h-24 gap-4 px-4 py-4 transition-colors duration-(--duration-fast) ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start sm:px-5 dark:hover:bg-accent/60"
     >
       <span className="min-w-0 space-y-1">
-        <span className="block text-base font-semibold tracking-[-0.01em] text-balance [overflow-wrap:anywhere]">
+        <span className="block text-card-title text-balance [overflow-wrap:anywhere]">
           {course.title}
         </span>
-        <span className="block text-sm text-muted-foreground text-pretty">
+        <span className="block text-support text-muted-foreground text-pretty">
           {course.summary}
         </span>
         <span className="block pt-1">
           <MetaLine
+            as="span"
             items={[
-              organizationId ? `${courseScope} course` : course.organizationName,
+              course.organizationId
+                ? (course.organizationName ?? "Private course")
+                : "Public course",
               `${completed} of ${course.lectures.length} complete`,
               `${course.lectures.length} ${course.lectures.length === 1 ? "lecture" : "lectures"}`,
-              totalMinutes ? `~${totalMinutes} min` : null,
+              totalMinutes ? `~${formatMinutes(totalMinutes)}` : null,
             ]}
           />
         </span>
       </span>
       <span className="flex flex-col gap-2 sm:items-end sm:justify-self-end">
-        <LectureProgressTrack lectures={course.lectures} />
-        <span className="inline-flex min-h-8 items-center gap-2 text-sm font-semibold text-brand-text">
+        <span className="inline-flex min-h-(--control-standard) items-center gap-2 text-sm font-semibold text-brand-text">
           {course.lectures.length > 0 && completed === course.lectures.length
             ? "Review course"
             : "Open course"}
           <ArrowRight
-            className="size-4 transition-transform duration-200 ease-enter group-hover:translate-x-0.5 motion-reduce:transition-none"
+            className="size-4 transition-transform duration-(--duration-moderate) ease-enter group-hover:translate-x-(--move-nudge)"
             aria-hidden
           />
         </span>
+        <LectureProgressTrack lectures={course.lectures} />
       </span>
     </CourseLink>
   );
@@ -460,6 +547,7 @@ function CourseDetail({
   filters,
   filtersActive,
   onClearFilters,
+  refreshFailed,
 }: {
   course: CourseCatalogCourse;
   lectures: readonly CourseLectureSummary[];
@@ -467,6 +555,7 @@ function CourseDetail({
   filters: ReactNode;
   filtersActive: boolean;
   onClearFilters: () => void;
+  refreshFailed: boolean;
 }) {
   const route = courseRouteForCatalogCourse(course, organizationId);
   const complete = course.lectures.filter(
@@ -475,11 +564,11 @@ function CourseDetail({
 
   return (
     <PageShell>
+      {refreshFailed ? <StaleNotice what="This course" /> : null}
       <div className="space-y-4">
         <CourseIndexBackLink route={route} />
         <ContentHeader
           title={course.title}
-          titleClassName="max-sm:sr-only"
           reading
           summary={course.summary}
           meta={
@@ -496,7 +585,7 @@ function CourseDetail({
         <section className="border-y py-6">
           <Markdown
             pageContent
-            className="prose-measure text-prose [&>*:first-child]:pt-0"
+            className="text-prose [&>:not([data-wide])]:prose-measure"
           >
             {course.bodyMarkdown}
           </Markdown>
@@ -513,7 +602,7 @@ function CourseDetail({
         </div>
         {filters}
         {lectures.length ? (
-          <ol className="divide-y overflow-hidden rounded-xl border bg-card">
+          <ol className="surface-raised divide-y overflow-hidden rounded-xl border bg-card">
             {lectures.map((lecture) => {
               const position = course.lectures.findIndex(
                 (candidate) => candidate.lectureId === lecture.lectureId,
@@ -532,8 +621,13 @@ function CourseDetail({
           </ol>
         ) : (
           <EmptyState
-            title="No lectures match your filters"
-            description="Clear the filters to see the full course sequence."
+            icon={filtersActive ? <SearchX /> : <BookOpen />}
+            title={filtersActive ? "No lectures match your filters" : "No lectures yet"}
+            description={
+              filtersActive
+                ? "Clear the filters to see the full course sequence."
+                : "Lectures appear here when the course is published."
+            }
             action={
               filtersActive ? (
                 <Button variant="outline" onClick={onClearFilters}>
@@ -551,21 +645,23 @@ function CourseDetail({
 // Private organization courses are listed on /courses too, so only an
 // organization's view of a public course returns to the organization catalog.
 function CourseIndexBackLink({ route }: { route: CourseRouteRef }) {
+  // A ghost Button supplies the ring, the leaning arrow and the touch height.
+  const className = buttonVariants({
+    variant: "ghost",
+    className: "-ml-3 pointer-coarse:min-h-11",
+  });
   return route.scope === "organization-public" && route.organizationId ? (
     <Link
       to="/organizations/$orgId/courses"
       params={{ orgId: route.organizationId }}
-      className="-ml-2 inline-flex min-h-11 items-center gap-2 rounded-md px-2 text-sm font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+      className={className}
     >
-      <ArrowLeft className="size-4" aria-hidden />
+      <ArrowLeft aria-hidden />
       All organization courses
     </Link>
   ) : (
-    <Link
-      to="/courses"
-      className="-ml-2 inline-flex min-h-11 items-center gap-2 rounded-md px-2 text-sm font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-    >
-      <ArrowLeft className="size-4" aria-hidden />
+    <Link to="/courses" className={className}>
+      <ArrowLeft aria-hidden />
       All courses
     </Link>
   );
@@ -599,7 +695,7 @@ function LectureListItem({
         )}
       </span>
       <span className="min-w-0 flex-1 space-y-1">
-        <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="flex flex-wrap items-center gap-x-3 gap-y-1 sm:min-h-(--control-standard)">
           <span className="text-card-title [overflow-wrap:anywhere]">
             {lecture.title}
           </span>
@@ -609,14 +705,17 @@ function LectureListItem({
           {lecture.summary}
         </span>
         <MetaLine
-          className="text-xs"
+          as="span"
+          dense
           items={[
             `Lecture ${position} of ${total}`,
-            lecture.category || null,
+            lecture.category ? sentenceCase(lecture.category) : null,
             lecture.difficulty ? (
               <MetaDifficulty key="difficulty" difficulty={lecture.difficulty} />
             ) : null,
-            lecture.estimatedMinutes ? `~${lecture.estimatedMinutes} min` : null,
+            lecture.estimatedMinutes
+              ? `~${formatMinutes(lecture.estimatedMinutes)}`
+              : null,
             <LectureScenarioLabel
               key="scenario"
               scenarioId={lecture.scenarioId}
@@ -637,13 +736,18 @@ function LectureListItem({
           </span>
         ) : null}
       </span>
-      <span className="col-start-2 flex min-h-11 items-center gap-2 text-sm font-semibold text-brand-text sm:col-start-auto sm:justify-self-end">
+      <span
+        className={cn(
+          "col-start-2 flex min-h-11 items-center gap-2 text-sm font-semibold sm:col-start-auto sm:min-h-(--control-standard) sm:justify-self-end pointer-coarse:min-h-11",
+          lecture.state === "locked" ? "text-muted-foreground" : "text-brand-text",
+        )}
+      >
         {lectureActionLabel(lecture)}
         {lecture.state === "locked" ? (
           <LockKeyhole className="size-4" aria-hidden />
         ) : (
           <ArrowRight
-            className="size-4 transition-transform duration-200 ease-enter group-hover:translate-x-0.5 motion-reduce:transition-none"
+            className="size-4 transition-transform duration-(--duration-moderate) ease-enter group-hover:translate-x-(--move-nudge)"
             aria-hidden
           />
         )}
@@ -652,10 +756,10 @@ function LectureListItem({
   );
 
   const className = cn(
-    "group grid min-h-20 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2 px-4 py-4 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:gap-x-4 sm:px-5",
+    "group grid min-h-20 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2 px-4 py-4 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-start sm:gap-x-4 sm:px-5",
     lecture.state === "locked"
       ? "bg-muted/35 text-muted-foreground"
-      : "transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring dark:hover:bg-accent/60",
+      : "transition-colors duration-(--duration-fast) ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring dark:hover:bg-accent/60",
   );
   return lecture.state === "locked" ? (
     <div className={className} data-lecture-state="locked">
@@ -674,7 +778,7 @@ function LectureListItem({
 
 function LectureStatus({ lecture }: { lecture: CourseLectureSummary }) {
   const { tone, word } = lectureStatePresentation(lecture.state);
-  return <StatusToken tone={tone} word={word} pulse={lecture.state === "in_progress"} />;
+  return <StatusToken tone={tone} word={word} />;
 }
 
 function lectureActionLabel(lecture: CourseLectureSummary) {
@@ -717,7 +821,7 @@ function CourseAssignments({
       <h2 id="course-assignments-heading" className="text-section-title">
         Assignments
       </h2>
-      <ul className="divide-y overflow-hidden rounded-xl border bg-card">
+      <ul className="surface-raised divide-y overflow-hidden rounded-xl border bg-card">
         {assignments.map((assignment) => (
           <li key={assignment.assignmentId}>
             <AssignmentLink assignment={assignment} />
@@ -746,11 +850,11 @@ function AssignmentLink({
   const locked = lecture?.state === "locked";
   const content = (
     <>
-      <span className="flex size-9 shrink-0 items-center justify-center rounded-[0.5625rem] bg-brand-subtle text-brand-text ring-1 ring-brand-border/60">
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-[0.625rem] bg-brand-subtle text-brand-text ring-1 ring-brand-border/60">
         <Users className="size-4" aria-hidden />
       </span>
       <span className="min-w-0 flex-1 space-y-1">
-        <span className="block text-sm font-semibold [overflow-wrap:anywhere]">
+        <span className="block text-card-title [overflow-wrap:anywhere]">
           {locked ? target?.title : lecture?.title ?? assignment.scenarioTitle ?? "Assigned lecture"}
         </span>
         <span className="block text-caption">
@@ -762,13 +866,13 @@ function AssignmentLink({
       <span className="col-start-2 inline-flex min-h-11 items-center gap-2 text-sm font-semibold text-brand-text sm:col-start-auto">
         {locked ? "Open requirement" : "Open lecture"}
         <ArrowRight
-          className="size-4 transition-transform duration-200 ease-enter group-hover:translate-x-0.5 motion-reduce:transition-none"
+          className="size-4 transition-transform duration-(--duration-moderate) ease-enter group-hover:translate-x-(--move-nudge)"
           aria-hidden
         />
       </span>
     </>
   );
-  const className = "group grid min-h-16 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3 transition-colors duration-150 ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:px-5 dark:hover:bg-accent/60";
+  const className = "group grid min-h-16 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3 transition-colors duration-(--duration-fast) ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:px-5 dark:hover:bg-accent/60";
 
   return route && target ? (
     <LectureLink route={route} lectureId={target.lectureId} className={className}>
@@ -794,6 +898,10 @@ function CourseFilters({
   categories,
   tags,
   filtersActive,
+  searchRef,
+  shown,
+  total,
+  noun,
   onFilter,
   onToggleTag,
   onClear,
@@ -806,15 +914,15 @@ function CourseFilters({
   categories: readonly string[];
   tags: readonly string[];
   filtersActive: boolean;
+  searchRef: Ref<HTMLInputElement>;
+  /** The count line under the bar is announced politely after each change. */
+  shown: number;
+  total: number;
+  noun: string;
   onFilter: (next: NormalizedCatalogSearch) => void;
   onToggleTag: (tag: string) => void;
   onClear: () => void;
 }) {
-  const activeFilterCount =
-    Number(Boolean(searchState.difficulty)) +
-    Number(Boolean(searchState.category)) +
-    searchState.tags.length;
-
   return (
     <FilterBar
       search={search}
@@ -822,47 +930,38 @@ function CourseFilters({
       searchPlaceholder={searchPlaceholder}
       searchLabel={searchLabel}
       filtersActive={filtersActive}
-      stackSearchOnMobile
+      collapseOnPhone
+      activeCount={
+        (searchState.difficulty ? 1 : 0) +
+        (searchState.category ? 1 : 0) +
+        searchState.tags.length
+      }
       onClear={onClear}
+      searchRef={searchRef}
+      shown={shown}
+      total={total}
+      noun={noun}
     >
-      <details className="group relative max-sm:w-full">
-        <summary
-          className={cn(
-            buttonVariants({ variant: "outline" }),
-            "cursor-pointer list-none [&::-webkit-details-marker]:hidden",
-          )}
-        >
-          <ListFilter className="size-3.5" aria-hidden />
-          Filters{activeFilterCount ? ` · ${activeFilterCount}` : ""}
-          <ChevronDown
-            className="size-3.5 transition-transform group-open:rotate-180 motion-reduce:transition-none"
-            aria-hidden
-          />
-        </summary>
-        <div className="mt-2 grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:absolute sm:left-0 sm:z-20 sm:w-80">
-          <fieldset className="space-y-2">
-            <legend className="text-label">Difficulty</legend>
-            <div className="flex flex-wrap items-center gap-2">
-              {SCENARIO_DIFFICULTIES.map((difficulty) => (
-                <FilterChip
-                  key={difficulty}
-                  active={searchState.difficulty === difficulty}
-                  onClick={() =>
-                    onFilter({
-                      ...searchState,
-                      difficulty:
-                        searchState.difficulty === difficulty
-                          ? undefined
-                          : difficulty,
-                    })
-                  }
-                >
-                  {difficulty}
-                </FilterChip>
-              ))}
-            </div>
-          </fieldset>
-          {categories.length ? (
+      <FilterChipGroup label="Filter lectures by difficulty">
+        {SCENARIO_DIFFICULTIES.map((difficulty) => (
+          <FilterChip
+            key={difficulty}
+            active={searchState.difficulty === difficulty}
+            onClick={() =>
+              onFilter({
+                ...searchState,
+                difficulty:
+                  searchState.difficulty === difficulty
+                    ? undefined
+                    : difficulty,
+              })
+            }
+          >
+            {difficulty}
+          </FilterChip>
+        ))}
+      </FilterChipGroup>
+      {categories.length ? (
             <Select
               value={searchState.category ?? "all"}
               onValueChange={(value) =>
@@ -876,65 +975,71 @@ function CourseFilters({
               }
             >
               <SelectTrigger
-                className="w-full"
+                className="w-auto min-w-44"
                 size="sm"
                 aria-label="Filter lectures by category"
               >
-                Category: {searchState.category ?? "All"}
+                <SelectValue>
+                  Category: {sentenceCase(searchState.category ?? "All")}
+                </SelectValue>
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent aria-label="Category">
                 <SelectItem value="all">All categories</SelectItem>
                 {categories.map((category) => (
                   <SelectItem key={category} value={category}>
-                    {category}
+                    {sentenceCase(category)}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-          ) : null}
-          {tags.length ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  render={
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      aria-label="Filter lectures by tags"
-                    />
-                  }
-                >
-                  Tags{searchState.tags.length ? ` · ${searchState.tags.length}` : ""}
-                </DropdownMenuTrigger>
-                <DropdownMenuContent className="max-h-72 min-w-48">
-                  {tags.map((tag) => (
-                    <DropdownMenuCheckboxItem
-                      key={tag}
-                      checked={searchState.tags.includes(tag)}
-                      onCheckedChange={() => onToggleTag(tag)}
-                    >
-                      {tag}
-                    </DropdownMenuCheckboxItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-              {searchState.tags.map((tag) => (
-                <FilterChip
-                  key={tag}
-                  active
-                  onClick={() => onToggleTag(tag)}
-                  className="normal-case"
-                >
-                  {tag}
-                </FilterChip>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </details>
+      ) : null}
+      {tags.length ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-label={
+                  searchState.tags.length
+                    ? `Tags, ${searchState.tags.length} selected`
+                    : "Tags"
+                }
+              />
+            }
+          >
+            Tags{searchState.tags.length ? ` · ${searchState.tags.length}` : ""}
+            <ChevronDown
+              data-icon="inline-end"
+              aria-hidden
+              className="transition-transform duration-(--duration-moderate) ease-enter group-aria-expanded/button:rotate-180"
+            />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent className="max-h-[min(18rem,var(--available-height))] min-w-48">
+            {tags.map((tag) => (
+              <DropdownMenuCheckboxItem
+                key={tag}
+                checked={searchState.tags.includes(tag)}
+                onCheckedChange={() => onToggleTag(tag)}
+              >
+                {tag}
+              </DropdownMenuCheckboxItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
     </FilterBar>
   );
+}
+
+/**
+ * Whether a failed catalog request replaces the page. A refresh that fails
+ * over cached data does not, so a course on screen keeps its h1; only a first
+ * load, or a denied one, has nothing left to show.
+ */
+export function catalogLoadFailed(error: unknown, hasData: boolean): boolean {
+  return Boolean(error) && (!hasData || isAccessResponseError(error, true));
 }
 
 export function filterCourses(
@@ -980,12 +1085,26 @@ function CourseCatalogLoading({ showCapacity }: { showCapacity: boolean }) {
         <Skeleton className="h-8 w-72 max-w-full" />
         <Skeleton className="h-5 w-96 max-w-full" />
         {showCapacity ? (
-          <div className="grid gap-3 sm:grid-cols-2" aria-hidden="true">
-            <Skeleton className="h-24 w-full rounded-xl" />
-            <Skeleton className="h-24 w-full rounded-xl" />
+          <div className="space-y-3" aria-hidden="true">
+            <Skeleton className="h-[1.3125rem] w-48 max-w-full" />
+            <div className="grid gap-3 sm:grid-cols-2">
+              {[0, 1].map((index) => (
+                <div
+                  key={index}
+                  className="surface-raised space-y-3 rounded-xl border bg-card p-4"
+                >
+                  <div className="flex h-[1.35rem] items-center justify-between">
+                    <Skeleton className="h-3.5 w-14" />
+                    <Skeleton className="h-3.5 w-28" />
+                  </div>
+                  <Skeleton className="h-1.5 w-full rounded-full" />
+                  <Skeleton className="h-3 w-32" />
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
-        <div className="divide-y overflow-hidden rounded-xl border bg-card">
+        <div className="surface-raised divide-y overflow-hidden rounded-xl border bg-card">
           <Skeleton className="h-28 w-full rounded-none" />
           <Skeleton className="h-28 w-full rounded-none" />
           <Skeleton className="h-28 w-full rounded-none" />

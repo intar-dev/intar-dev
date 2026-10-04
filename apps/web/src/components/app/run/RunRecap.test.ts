@@ -151,7 +151,81 @@ describe("run recap model", () => {
         machineLabel: "web",
         partLabel: "Part 1",
         castArtifactId: "cast-web",
+        checks: [{ probeName: "site-ready", number: 1, title: "Restore the site" }],
       },
+    ]);
+  });
+
+  it("gives each replay part its own machine's checks, numbered as final checks", () => {
+    const parts = getRunReplayParts(
+      run({
+        replayState: "ready",
+        hasReplay: true,
+        objectives: [
+          { ...objective("db-up", "Start the database"), vmName: "database" },
+          objective("site-ready", "Restore the site"),
+          { ...objective("worker-up", "Start the worker"), vmName: "worker" },
+        ],
+        vms: [
+          vm({
+            id: "web-vm",
+            ordinal: 1,
+            scenarioVmName: "web",
+            sessions: [session({ castArtifactId: "cast-web" })],
+          }),
+          vm({
+            id: "database-vm",
+            ordinal: 2,
+            scenarioVmId: "database",
+            scenarioVmName: "database",
+            sessions: [session({ castArtifactId: "cast-db" })],
+          }),
+        ],
+      }),
+    );
+
+    expect(parts.map(({ castArtifactId, checks }) => ({ castArtifactId, checks }))).toEqual([
+      {
+        castArtifactId: "cast-web",
+        checks: [{ probeName: "site-ready", number: 2, title: "Restore the site" }],
+      },
+      {
+        castArtifactId: "cast-db",
+        checks: [{ probeName: "db-up", number: 1, title: "Start the database" }],
+      },
+    ]);
+  });
+
+  it("keeps a machine's checks off the total when it has several sessions", () => {
+    const parts = getRunReplayParts(
+      run({
+        replayState: "ready",
+        hasReplay: true,
+        vms: [
+          vm({
+            id: "web-vm",
+            ordinal: 1,
+            scenarioVmName: "web",
+            sessions: [
+              session({ index: 1, castArtifactId: "cast-1" }),
+              session({ index: 2, castArtifactId: "cast-2" }),
+            ],
+          }),
+          vm({
+            id: "db-vm",
+            ordinal: 2,
+            scenarioVmId: "db",
+            scenarioVmName: "db",
+            sessions: [session({ index: 1, castArtifactId: "cast-db" })],
+          }),
+        ],
+      }),
+    );
+
+    expect(parts.map(({ castArtifactId, checksScope }) => [castArtifactId, checksScope])).toEqual([
+      ["cast-1", "part"],
+      ["cast-2", "part"],
+      ["cast-db", undefined],
     ]);
   });
 
@@ -218,6 +292,51 @@ describe("run recap model", () => {
 });
 
 describe("RunRecap", () => {
+  it("renders still unless it arrives live, and never pops an old check", () => {
+    const solved = () =>
+      run({
+        outcome: "succeeded",
+        solvedAt: 31_000,
+        solveDurationMs: 30_000,
+        replayState: "none",
+        objectives: [
+          {
+            probeName: "probe-1",
+            vmName: "web",
+            label: "label",
+            title: "Restore the default site",
+            bodyMarkdown: "detail",
+            hintCount: 0,
+          },
+        ],
+        vms: [
+          vm({
+            scenarioProbes: [probe({ id: "probe-1", status: "pass" })],
+          }),
+        ],
+      });
+    const render = (animate?: boolean) =>
+      renderToStaticMarkup(
+        createElement(RunRecap, {
+          run: solved(),
+          nextAction: createElement("button", { type: "button" }, "Continue"),
+          ...(animate === undefined ? {} : { animate }),
+        }),
+      );
+
+    for (const still of [render(), render(false)]) {
+      expect(still).not.toContain("animate-rise");
+      expect(still).not.toContain("animate-pop");
+      expect(still).not.toContain("intar-live");
+    }
+    const live = render(true);
+    expect(live).toContain("animate-rise");
+    expect(live).toContain("animate-pop");
+    // Rows stagger 40ms apart; the verified row's check has no pop of its own.
+    expect(live).toContain("animation-delay:0ms");
+    expect(live.match(/animate-pop/g)).toHaveLength(1);
+  });
+
   it("renders a learner-only solved recap", () => {
     const markup = renderToStaticMarkup(
       createElement(RunRecap, {
@@ -279,11 +398,12 @@ describe("RunRecap", () => {
     expect(markup).toContain("Final checks");
     expect(markup).toContain("Restore the default site");
     expect(markup).toContain("Verified");
-    expect(markup).toContain('role="progressbar"');
-    expect(markup).toContain('aria-label="Final checks progress"');
-    expect(markup).toContain('aria-valuenow="1"');
-    expect(markup).toContain('aria-valuemax="1"');
-    expect(markup).toContain('aria-valuetext="1 of 1 final checks verified"');
+    // The bar is decorative: the visible count carries the information, and a
+    // recap with every check verified draws it closed.
+    expect(markup).not.toContain('role="progressbar"');
+    expect(markup).toContain('data-run-recap-progress="true"');
+    expect(markup).toContain('data-closed="true"');
+    expect(markup).toContain("verified</span>");
     expect(markup).toContain('data-status="verified"');
     expect(markup).toContain("00:30");
     expect(markup).toContain("1 hint");
@@ -336,13 +456,16 @@ describe("RunRecap", () => {
       }),
     );
 
-    expect(markup).toContain('aria-valuenow="2"');
-    expect(markup).toContain('aria-valuemax="3"');
-    expect(markup).toContain('aria-valuetext="2 of 3 final checks verified"');
+    expect(markup.replace(/<[^>]+>/g, "")).toContain("2/3 verified");
+    expect(markup).not.toContain("data-closed");
     expect(markup.match(/data-status="verified"/g)).toHaveLength(2);
     expect(markup.match(/data-status="needs_repair"/g)).toHaveLength(1);
     expect(markup).not.toContain("hidden raw error");
     expect(markup).not.toContain("command_json_path");
+    // State words and the count share the 13px metadata role, no arbitrary size.
+    expect(markup).toMatch(/text-metadata[^"]*text-success[^"]*">Verified</);
+    expect(markup).toMatch(/text-metadata[^"]*text-warning[^"]*">Needs repair</);
+    expect(markup).not.toContain("text-[0.8125rem]");
   });
 
   it("omits objective progress when the recap has no checks", () => {
@@ -377,7 +500,8 @@ describe("RunRecap", () => {
 
     expect(markup).toContain("Saving your run…");
     expect(markup).toContain("Your recap will be ready in a moment.");
-    expect(markup).toContain("Stage 3 of 5");
+    // The rolling stage number is its own element, so read the text.
+    expect(markup.replace(/<[^>]+>/g, "")).toContain("Stage 3 of 5");
     expect(markup).not.toContain('aria-busy="true"');
     expect(markup).toContain('aria-label="Saving steps"');
     expect(markup).toContain("Save requested");
@@ -492,8 +616,8 @@ describe("RunRecap", () => {
     expect(multiPart).toContain("Part 1 of 2");
     expect(multiPart).toContain('aria-label="Previous replay part"');
     expect(multiPart).toContain('aria-label="Next replay part"');
-    expect(multiPart.indexOf("Show Part 1 of 2")).toBeLessThan(
-      multiPart.indexOf("Show Part 2 of 2"),
+    expect(multiPart.indexOf("Show part 1 of 2")).toBeLessThan(
+      multiPart.indexOf("Show part 2 of 2"),
     );
     expect(singlePart).not.toContain("data-run-replay-carousel");
     expect(singlePart).not.toContain("Previous replay part");

@@ -1,7 +1,14 @@
 import { lazy, Suspense, useId, type ReactNode } from "react";
 import { ChevronDown, EllipsisVertical, Trash2 } from "lucide-react";
 import type { RunArtifactViewerState } from "@/components/app/RunArtifactViewer";
-import { formatRelativeTime } from "@/components/app/lib/format";
+import {
+  formatClockSeconds,
+  formatRelativeTime,
+} from "@/components/app/lib/format";
+import { Hint } from "@/components/app/patterns/Hint";
+import { MetaLine } from "@/components/app/patterns/MetaLine";
+import { StatusToken } from "@/components/app/patterns/StatusToken";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
@@ -81,30 +88,50 @@ export function ScenarioRunArchiveCard(props: {
     >
       <div className="grid gap-4 xl:grid-cols-[minmax(16rem,0.85fr)_minmax(30rem,1.35fr)_auto] xl:items-center">
         <div className="min-w-0 space-y-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={tone.badgeVariant}>{tone.label}</Badge>
-            <Badge variant={outcome.badgeVariant}>{outcome.label}</Badge>
-          </div>
-          <h3 className="truncate text-sm font-semibold" title={scenarioName}>
+          {props.run.uploadStatus !== "complete" ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={tone.badgeVariant}>{tone.label}</Badge>
+            </div>
+          ) : null}
+          <Hint
+            label={scenarioName}
+            render={<h3 className="truncate text-sm font-semibold" />}
+          >
             {scenarioName}
-          </h3>
-          <p className="truncate text-metadata">
-            {props.run.scenarioMeta?.scenarioVmName ?? "Legacy VM"} ·{" "}
-            {props.run.vmName}
-          </p>
-          <p className="flex flex-wrap items-center gap-x-2 text-metadata">
-            <span className="font-medium text-foreground">
-              {archiveOwnerLabel(props.run)}
-            </span>
-            <span aria-hidden="true">·</span>
-            <span className="font-mono">{props.host.name}</span>
-          </p>
-          <p
-            className="truncate font-mono text-xs text-muted-foreground"
-            title={props.run.id}
+          </Hint>
+          <MetaLine
+            items={[
+              <StatusToken
+                key="s"
+                tone={outcome.tone}
+                word={outcome.label}
+                elapsed={
+                  props.run.outcome === "succeeded" &&
+                  props.run.solveDurationMs != null
+                    ? formatClockSeconds(
+                        Math.floor(props.run.solveDurationMs / 1000),
+                      )
+                    : null
+                }
+              />,
+              archiveOwnerLabel(props.run),
+              <code key="h">{props.host.name}</code>,
+            ]}
+          />
+          <MetaLine
+            items={[
+              props.run.scenarioMeta?.scenarioVmName ?? "Legacy VM",
+              <code key="v">{props.run.vmName}</code>,
+            ]}
+          />
+          <Hint
+            label={props.run.id}
+            render={
+              <p className="truncate font-mono text-xs text-muted-foreground" />
+            }
           >
             {props.run.id}
-          </p>
+          </Hint>
         </div>
 
         <dl
@@ -142,15 +169,16 @@ export function ScenarioRunArchiveCard(props: {
             type="button"
             size="sm"
             variant="outline"
-            className="min-h-9"
+            aria-label={`Details for ${scenarioName}`}
             aria-expanded={props.isExpanded}
-            aria-controls={detailsId}
+            aria-controls={props.isExpanded ? detailsId : undefined}
             onClick={props.onToggle}
           >
             Details
             <ChevronDown
+              aria-hidden="true"
               className={cn(
-                "size-3.5 transition-transform duration-150 motion-reduce:transition-none",
+                "transition-transform duration-(--duration-moderate) ease-enter",
                 props.isExpanded && "rotate-180",
               )}
             />
@@ -162,12 +190,11 @@ export function ScenarioRunArchiveCard(props: {
                   type="button"
                   size="icon-sm"
                   variant="ghost"
-                  className="min-h-9 min-w-9"
                   aria-label={`Actions for ${scenarioName}`}
                 />
               }
             >
-              <EllipsisVertical className="size-4" />
+              <EllipsisVertical />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem
@@ -175,7 +202,7 @@ export function ScenarioRunArchiveCard(props: {
                 onClick={props.onDelete}
                 disabled={!canDelete || props.isDeleting}
               >
-                <Trash2 className="size-4" />
+                <Trash2 />
                 {props.isDeleting
                   ? "Deleting…"
                   : canDelete
@@ -200,12 +227,9 @@ export function ScenarioRunArchiveCard(props: {
               Loading run details…
             </p>
           ) : props.detailError ? (
-            <div
-              role="alert"
-              className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive"
-            >
-              {props.detailError}
-            </div>
+            <Alert variant="destructive" just>
+              <AlertDescription>{props.detailError}</AlertDescription>
+            </Alert>
           ) : props.detail ? (
             <ArchiveRunDetails
               run={props.detail}
@@ -255,14 +279,14 @@ function ArchiveRunDetails(props: {
         <ArchiveDefinition label="Upload state" value={props.run.uploadStatus} />
         <ArchiveDefinition
           label="User ID"
-          value={<span className="font-mono text-xs">{props.run.userId}</span>}
+          value={<code>{props.run.userId}</code>}
         />
       </dl>
 
       {props.run.uploadError ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-          {props.run.uploadError}
-        </div>
+        <Alert variant="destructive">
+          <AlertDescription>{props.run.uploadError}</AlertDescription>
+        </Alert>
       ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
@@ -333,7 +357,7 @@ function ArchiveRunDetails(props: {
                     );
                     const label = `${artifact.ordinal}. ${
                       artifact.kind === "ssh_recording_raw_bundle"
-                        ? "Raw Recording Bundle"
+                        ? "Raw recording bundle"
                         : artifactKindLabel(artifact.kind)
                     }`;
                     const metadata = (
@@ -423,11 +447,12 @@ function ArchiveDefinition({
 function ArchiveTime({ value }: { value: number | null | undefined }) {
   if (!value || !Number.isFinite(value)) return <>—</>;
   return (
-    <time
-      dateTime={new Date(value).toISOString()}
-      title={formatTimestampMs(value)}
+    <Hint
+      essential
+      label={formatTimestampMs(value)}
+      render={<time dateTime={new Date(value).toISOString()} />}
     >
       {formatRelativeTime(value)}
-    </time>
+    </Hint>
   );
 }

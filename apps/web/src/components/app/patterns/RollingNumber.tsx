@@ -17,25 +17,28 @@ interface Roll {
  */
 export function RollingNumber({
   value,
+  format = String,
   className,
 }: {
   value: number;
+  /** Renders the number, e.g. with thousands separators. */
+  format?: (value: number) => string;
   className?: string;
 }) {
-  const text = String(value);
-  const previous = useRef(text);
+  const text = format(value);
+  const previous = useRef({ text, value });
   const [roll, setRoll] = useState<Roll | null>(null);
 
   useLayoutEffect(() => {
-    if (previous.current === text) return;
+    if (previous.current.text === text) return;
     const from = previous.current;
-    previous.current = text;
+    previous.current = { text, value };
     setRoll((current) => ({
-      cells: digitCells(from, text),
-      direction: rollDirection(from, text),
+      cells: digitCells(from.text, text),
+      direction: rollDirection(from.value, value),
       id: (current?.id ?? 0) + 1,
     }));
-  }, [text]);
+  }, [text, value]);
 
   // Settle back to plain text once the roll has played (300ms plus the
   // stagger). A timer, not animationend, so a skipped animation never leaves

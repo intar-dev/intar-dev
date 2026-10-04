@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   EllipsisVertical,
@@ -7,7 +7,10 @@ import {
   Server,
   Trash2,
 } from "lucide-react";
+import { apiErrorMessage } from "@/components/app/lib/api-errors";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
+import { Hint } from "@/components/app/patterns/Hint";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
@@ -15,7 +18,11 @@ import {
 } from "@/components/app/patterns/CollectionPagination";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { CardGridSkeleton } from "@/components/app/patterns/Skeletons";
-import { EmptyState } from "@/components/app/patterns/StateCard";
+import { EmptyState, ErrorState } from "@/components/app/patterns/StateCard";
+import {
+  Collapsible,
+  CollapsibleContent,
+} from "@/components/ui/collapsible";
 import { HostOnboardingPanel } from "@/components/app/HostOnboardingPanel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -47,7 +54,11 @@ import type { AgentHostApi } from "@/components/app/admin/hosts/types";
 // action instead of ambient panels. Scenario runs launch from the scenario
 // pages; hosts are infrastructure only.
 export function AdminHosts() {
-  const [vmError, setVmError] = useState<string | null>(null);
+  // A failed refresh reports inside its host's row.
+  const [refreshError, setRefreshError] = useState<{
+    hostId: string;
+    message: string;
+  } | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<AgentHostApi | null>(null);
   const [removeConfirm, setRemoveConfirm] = useState("");
@@ -74,7 +85,11 @@ export function AdminHosts() {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(body?.error ?? `Remove failed (${response.status})`);
+        throw HttpResponseError.fromBody(
+          response.status,
+          body,
+          "The host couldn't be removed. Try again.",
+        );
       }
       return (await response.json()) as { ok: boolean; hostId: string };
     },
@@ -90,69 +105,57 @@ export function AdminHosts() {
   const handleRefreshHost = (hostId: string) => {
     const key = `${hostId}:refresh`;
     setBusyKey(key);
-    setVmError(null);
+    setRefreshError(null);
     void refreshHost(hostId)
       .catch((error) => {
-        setVmError(
-          error instanceof Error
-            ? error.message
-            : "failed to refresh host state",
-        );
+        setRefreshError({
+          hostId,
+          message:
+            apiErrorMessage(error, "Try refreshing again.") ??
+            "Try refreshing again.",
+        });
       })
       .finally(() => {
         setBusyKey((current) => (current === key ? null : current));
       });
   };
 
+  const panelId = useId();
   usePageChrome({
     action: useMemo(
       () => (
         <Button
           size="sm"
+          aria-expanded={showOnboarding}
+          aria-controls={showOnboarding ? panelId : undefined}
           onClick={() => setShowOnboarding((current) => !current)}
         >
-          <Plus className="size-3.5" />
+          <Plus />
           Add host
         </Button>
       ),
-      [],
+      [showOnboarding, panelId],
     ),
   });
 
   return (
     <PageShell variant="workspace" density="compact">
       <div className="space-y-3 empty:hidden">
-        {hosts.error ? (
-          <Alert variant="destructive">
-            <AlertTitle>Could not load hosts</AlertTitle>
+        {hosts.error && hostRecords.length ? (
+          <Alert>
+            <AlertTitle>Host status may be out of date</AlertTitle>
             <AlertDescription>
-              {hosts.error instanceof Error
-                ? hosts.error.message
-                : "Failed to load hosts"}
+              The last loaded fleet is shown. It refreshes on its own.
             </AlertDescription>
-          </Alert>
-        ) : null}
-        {removeHost.error ? (
-          <Alert variant="destructive">
-            <AlertTitle>Host removal failed</AlertTitle>
-            <AlertDescription>
-              {removeHost.error instanceof Error
-                ? removeHost.error.message
-                : "Remove failed"}
-            </AlertDescription>
-          </Alert>
-        ) : null}
-        {vmError ? (
-          <Alert variant="destructive">
-            <AlertTitle>Host action failed</AlertTitle>
-            <AlertDescription>{vmError}</AlertDescription>
           </Alert>
         ) : null}
       </div>
 
-      {showOnboarding ? (
-        <HostOnboardingPanel eyebrow="New host" title="Bridge config" />
-      ) : null}
+      <Collapsible open={showOnboarding}>
+        <CollapsibleContent id={panelId}>
+          <HostOnboardingPanel eyebrow="New host" title="Bridge config" />
+        </CollapsibleContent>
+      </Collapsible>
 
       {hosts.isPending ? (
         <CardGridSkeleton cards={4} cardClassName="h-40" />
@@ -168,6 +171,20 @@ export function AdminHosts() {
                 const isRemovingThisHost =
                   removeHost.isPending && removeHost.variables === host.id;
                 const isRefreshing = busyKey === `${host.id}:refresh`;
+                // The removal dialog shows its own failure while it is open.
+                const actionProblem =
+                  removeHost.error &&
+                  removeTarget === null &&
+                  removeHost.variables === host.id
+                    ? `Could not remove ${host.name}: ${
+                        apiErrorMessage(
+                          removeHost.error,
+                          "The host couldn't be removed. Try again.",
+                        ) ?? "The host couldn't be removed. Try again."
+                      }`
+                    : refreshError?.hostId === host.id
+                      ? `Could not refresh ${host.name}: ${refreshError.message}`
+                      : null;
                 const memorySummary = capacity
                   ? `${capacity.memory_available_mib} / ${capacity.memory_total_mib} MiB`
                   : "—";
@@ -202,17 +219,17 @@ export function AdminHosts() {
                             {host.status?.connected ? "Online" : "Offline"}
                           </Badge>
                           {host.actualState?.health === "degraded" ? (
-                            <Badge variant="destructive">Degraded</Badge>
+                            <Badge variant="warning">Degraded</Badge>
                           ) : host.actualState?.health === "unknown" ? (
                             <Badge variant="outline">Unknown health</Badge>
                           ) : null}
                           {host.disabled ? (
-                            <Badge variant="destructive">Disabled</Badge>
+                            <Badge variant="outline">Disabled</Badge>
                           ) : null}
                         </div>
                         <p className="text-caption">
                           {host.role === "builder" ? "Builder" : "Agent"} ·{" "}
-                          <span className="font-mono">{host.id}</span> ·{" "}
+                          <code>{host.id}</code> ·{" "}
                           {hostVms.length} live · {archiveTotalCount} archived
                         </p>
                       </div>
@@ -227,22 +244,27 @@ export function AdminHosts() {
                               />
                             }
                           >
-                            <EllipsisVertical className="size-4" />
+                            <EllipsisVertical />
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
                             <DropdownMenuItem
                               disabled={isRefreshing}
                               onClick={() => handleRefreshHost(host.id)}
                             >
-                              <RefreshCw className="size-4" />
+                              <RefreshCw />
                               {isRefreshing ? "Refreshing…" : "Refresh"}
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               variant="destructive"
                               disabled={isRemovingThisHost}
-                              onClick={() => setRemoveTarget(host)}
+                              onClick={() => {
+                                // Each opening starts clean: a failure of an
+                                // earlier removal is not this one's.
+                                if (!removeHost.isPending) removeHost.reset();
+                                setRemoveTarget(host);
+                              }}
                             >
-                              <Trash2 className="size-4" />
+                              <Trash2 />
                               Remove host
                             </DropdownMenuItem>
                           </DropdownMenuContent>
@@ -273,7 +295,6 @@ export function AdminHosts() {
                             ? `${capacity.reserved_cpu_millis}m host reserve · load ${formatLoad(capacity.load_avg_1m)} / ${formatLoad(capacity.load_avg_5m)} / ${formatLoad(capacity.load_avg_15m)}`
                             : "No CPU capacity reported"
                         }
-                        wrapDetail
                       />
                       <HostMetric
                         label="Memory"
@@ -281,22 +302,54 @@ export function AdminHosts() {
                         detail="Available / total"
                       />
                       <HostMetric
-                        label={`Disk ${capacity?.disk_probe_path ?? "/"}`}
+                        label="Disk"
                         value={diskSummary}
-                        detail="Available / total"
+                        detail={
+                          <>
+                            Available / total on{" "}
+                            <code>{capacity?.disk_probe_path ?? "/"}</code>
+                          </>
+                        }
                       />
                       <HostMetric
                         label="Network"
-                        value={capacity?.primary_ipv4 ?? "—"}
-                        detail={capacity?.primary_ipv6 ?? "No IPv6 reported"}
+                        value={
+                          capacity?.primary_ipv4 ? (
+                            <code>{capacity.primary_ipv4}</code>
+                          ) : (
+                            "—"
+                          )
+                        }
+                        detail={
+                          capacity?.primary_ipv6 ? (
+                            <code>{capacity.primary_ipv6}</code>
+                          ) : (
+                            "No IPv6 reported"
+                          )
+                        }
                       />
                     </dl>
+                    {actionProblem ? (
+                      <InlineFeedback tone="error">{actionProblem}</InlineFeedback>
+                    ) : null}
                   </article>
                 );
               })}
             </div>
           )}
         </PaginatedCollection>
+      ) : hosts.error && !hostRecords.length ? (
+        <ErrorState
+          title="Could not load hosts"
+          description={
+            hosts.error instanceof Error
+              ? hosts.error.message
+              : "Failed to load hosts"
+          }
+          onRetry={() => {
+            void hosts.refetch().catch(() => {});
+          }}
+        />
       ) : (
         <EmptyState
           icon={<Server />}
@@ -304,7 +357,7 @@ export function AdminHosts() {
           description="Generate a bridge config to register your first agent or builder host."
           action={
             <Button onClick={() => setShowOnboarding(true)}>
-              <Plus className="size-4" />
+              <Plus />
               Add host
             </Button>
           }
@@ -346,9 +399,10 @@ export function AdminHosts() {
           </div>
           {removeHost.error ? (
             <InlineFeedback tone="error">
-              {removeHost.error instanceof Error
-                ? removeHost.error.message
-                : "Host removal failed"}
+              {apiErrorMessage(
+                removeHost.error,
+                "The host couldn't be removed. Try again.",
+              )}
             </InlineFeedback>
           ) : null}
           <DialogFooter>
@@ -372,8 +426,8 @@ export function AdminHosts() {
                 removeConfirm !== removeTarget.name
               }
             >
-              <Trash2 className="size-4" />
-              {removeHost.isPending ? "Removing…" : "Remove host"}
+              <Trash2 />
+              {removeHost.isPending ? "Removing host…" : "Remove host"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -408,20 +462,18 @@ export function HostHeartbeatMetric({
       label="Heartbeat"
       value={
         timestamp && absoluteTimestamp ? (
-          <time
-            dateTime={new Date(timestamp).toISOString()}
-            title={accessibleTimestamp}
-            aria-label={accessibleTimestamp}
+          <Hint
+            essential
+            label={accessibleTimestamp}
+            render={<time dateTime={new Date(timestamp).toISOString()} />}
           >
             {formatRelativeTime(timestamp)}
-          </time>
+          </Hint>
         ) : (
           "—"
         )
       }
       detail={detail}
-      wrapValue
-      wrapDetail
     />
   );
 }
@@ -430,34 +482,18 @@ export function HostMetric({
   label,
   value,
   detail,
-  wrapValue = false,
-  wrapDetail = false,
 }: {
   label: string;
   value: ReactNode;
-  detail: string;
-  wrapValue?: boolean;
-  wrapDetail?: boolean;
+  detail: ReactNode;
 }) {
   return (
     <div className="min-w-0">
       <dt className="text-label">{label}</dt>
-      <dd
-        className={
-          wrapValue
-            ? "mt-1 min-w-0 break-words text-sm font-medium tabular-nums"
-            : "mt-1 min-w-0 truncate text-sm font-medium tabular-nums"
-        }
-      >
+      <dd className="mt-1 min-w-0 text-sm font-medium tabular-nums [overflow-wrap:anywhere]">
         {value}
       </dd>
-      <dd
-        className={
-          wrapDetail
-            ? "mt-0.5 min-w-0 break-words text-metadata leading-5"
-            : "mt-0.5 min-w-0 truncate text-metadata"
-        }
-      >
+      <dd className="mt-0.5 min-w-0 text-metadata leading-5 [overflow-wrap:anywhere]">
         {detail}
       </dd>
     </div>

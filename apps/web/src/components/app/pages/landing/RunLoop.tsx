@@ -7,7 +7,7 @@ export function RunLoop() {
   return (
     <section
       aria-labelledby="landing-loop-heading"
-      className="mx-auto w-full max-w-7xl px-[var(--page-inset)] pt-24 sm:pt-32"
+      className="mx-auto w-full max-w-7xl px-[var(--page-inset)] pt-12 sm:pt-16"
     >
       <div className="mx-auto max-w-2xl text-center">
         <p className="text-label">How a run works</p>

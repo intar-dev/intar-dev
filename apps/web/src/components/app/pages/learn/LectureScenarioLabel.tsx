@@ -9,14 +9,7 @@ export function LectureScenarioLabel({
   const Icon = includesScenario ? SquareTerminal : BookOpen;
 
   return (
-    <span
-      className="inline-flex items-center gap-1.5"
-      title={
-        includesScenario
-          ? "This lecture includes a scenario."
-          : "This lecture does not include a scenario."
-      }
-    >
+    <span className="inline-flex items-center gap-1.5">
       <Icon className="size-3.5" aria-hidden />
       {includesScenario ? "Scenario" : "Lecture only"}
     </span>

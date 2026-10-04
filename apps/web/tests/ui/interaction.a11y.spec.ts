@@ -1,10 +1,11 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures/test";
-import { makeMultiReplayRun } from "./fixtures/data";
+import { FIXED_NOW, makeMultiReplayRun } from "./fixtures/data";
 import { ROUTE_CASES, routeCase } from "./routes";
 import {
   coarsePointerTargetViolations,
   expectNoHorizontalOverflow,
+  setRootTextScale200,
 } from "./support/layout";
 import {
   REPLAY_TERMINAL_COLS,
@@ -89,7 +90,7 @@ async function expectShutdownRunShell(page: Page) {
   await expect(
     page.getByRole("navigation", { name: "Breadcrumb" }),
   ).toHaveCount(0);
-  if ((page.viewportSize()?.width ?? 0) >= 960) {
+  if ((page.viewportSize()?.width ?? 0) >= 768) {
     await expect(page.locator("[data-run-learning-panel]")).toBeVisible();
   } else {
     await expect(page.locator("[data-run-learning-panel]")).toBeHidden();
@@ -173,7 +174,7 @@ test("organization courses use their own path instead of a tab query", async ({
   await expect(page.getByRole("tab", { name: "Courses" })).toHaveCount(0);
   await page
     .locator("main")
-    .getByRole("button", { name: "Courses", exact: true })
+    .getByRole("link", { name: "Courses", exact: true })
     .click();
   await expect(page).toHaveURL("/organizations/org-platform/courses");
   expect(new URL(page.url()).searchParams.has("tab")).toBe(false);
@@ -383,10 +384,12 @@ test("a theory-only lecture completes and exposes the next unit", async ({
   ).toBeVisible();
   await expect(
     page.getByText("Lecture only", { exact: true }).first(),
-  ).toHaveAttribute("title", "This lecture does not include a scenario.");
+  ).toBeVisible();
   await page.getByRole("button", { name: "Complete lecture" }).click();
 
-  await expect(page.getByRole("link", { name: next.title })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: `Continue to ${next.title}` }),
+  ).toBeVisible();
   expect(ui.server.requests).toContain(
     `POST /api/courses/${course.courseId}/lectures/${theory.lectureId}/complete`,
   );
@@ -398,39 +401,45 @@ test("course browsing shows available CPU and memory allocation", async ({
 }) => {
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
 
-  await expect(page.getByRole("meter", { name: "CPU", exact: true })).toHaveAttribute("aria-valuenow", "65.625");
+  await expect(page.getByRole("meter", { name: "CPU", exact: true })).toHaveAttribute("aria-valuenow", "65.6");
   await expect(page.getByRole("meter", { name: "Memory", exact: true })).toHaveAttribute("aria-valuenow", "62.5");
   await expect(page.getByText("5.25 / 8 vCPUs", { exact: true })).toBeVisible();
   await expect(page.getByText("10 / 16 GiB", { exact: true })).toBeVisible();
 });
 
-test("course filters stay compact until the learner needs them", async ({
+test("course filters sit in the bar and announce their result", async ({
   page,
   ui,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
 
-  const filterSummary = page.locator("summary").filter({ hasText: "Filters" });
-  await expect(filterSummary).toBeVisible();
-  await expect(page.getByRole("button", { name: "Easy" })).toBeHidden();
-  await filterSummary.focus();
-  await page.keyboard.press("Enter");
+  // On a phone the chips, category and tags wait behind the Filters button.
+  await expect(page.getByRole("button", { name: "Easy" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Filters", exact: true }).click();
   await expect(page.getByRole("button", { name: "Easy" })).toBeVisible();
   await page.getByLabel("Filter lectures by category").click();
   await page.getByRole("option", { name: "Linux services" }).click();
-  await expect(filterSummary).toContainText("Filters · 1");
+  // The page's own count is inert behind the open sheet, so the sheet's line
+  // is the one live region that announces the result.
+  await expect(
+    page
+      .locator('[data-filter-sheet] p[aria-live="polite"]')
+      .filter({ hasText: /^Showing \d+ of \d+ courses?\.$/ }),
+  ).toHaveCount(1);
   await expect
     .poll(() => new URL(page.url()).searchParams.get("category"))
     .toBe("Linux services");
   await expect(
     page.getByRole("link", { name: /Systems concepts/i }),
   ).toHaveCount(0);
-  await page.getByLabel("Filter lectures by tags").click();
+  await page.getByRole("button", { name: "Tags", exact: true }).click();
   await page
     .getByRole("menuitemcheckbox", { name: "operations" })
     .click();
-  await expect(filterSummary).toContainText("Filters · 2");
+  await expect(
+    page.getByRole("button", { name: "Tags, 1 selected" }),
+  ).toBeVisible();
   await expect
     .poll(() =>
       JSON.parse(
@@ -438,6 +447,11 @@ test("course filters stay compact until the learner needs them", async ({
       ) as string[],
     )
     .toContain("operations");
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Done" }).click();
+  await expect(
+    page.getByRole("button", { name: "Filters, 2 active" }),
+  ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 
@@ -455,6 +469,75 @@ test("organization assignments point to the required lecture", async ({
     "/organizations/org-platform/courses/private/platform-repair/lectures/01-private-context",
   );
   await expect(page.getByText(/Complete “Private service context” first/)).toBeVisible();
+});
+
+test("a failed refresh keeps the cached course and its one h1", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    path: "/courses/operations",
+    sessionRole: "learner",
+    theme: "light",
+  });
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+
+  // The catalog goes stale after 10 s; refocusing the window then refetches it.
+  await page.route("**/api/courses", (route) =>
+    route.fulfill({ status: 503, json: { error: "Catalog unavailable" } }),
+  );
+  // Query retries each log the failed request: the first try and three more.
+  ui.server.expectedUnavailable = 4;
+  await page.clock.setFixedTime(FIXED_NOW + 60_000);
+  await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+
+  await expect(page.getByText("This course may be out of date")).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(
+    "Linux operations",
+  );
+});
+
+test("an assignment removed just before leaving the tab is gone on return", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("organization-detail"), theme: "light" });
+  await page.getByRole("tab", { name: "Assignments" }).click();
+
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    "**/api/organizations/org-platform/assignments/*",
+    async (route) => {
+      if (route.request().method() !== "DELETE") {
+        await route.fallback();
+        return;
+      }
+      await held;
+      ui.server.state.assignments = [];
+      await route.fulfill({ status: 204 });
+    },
+  );
+  await page
+    .getByRole("button", { name: /^Remove the .* assignment$/ })
+    .click();
+  await page.getByRole("button", { name: "Remove assignment" }).click();
+  // Leave before the delete answers: the section unmounts with it in flight.
+  await page.getByRole("tab", { name: "Settings" }).click();
+  release();
+
+  await expect(async () => {
+    await page.getByRole("tab", { name: "Settings" }).click();
+    await page.getByRole("tab", { name: "Assignments" }).click();
+    await expect(page.getByText("No scenarios are assigned yet.")).toBeVisible({
+      timeout: 500,
+    });
+  }).toPass({ timeout: 10_000 });
 });
 
 test("course API exposes lectures and no standalone scenario collection", async ({
@@ -560,21 +643,166 @@ test("SSH key removal asks again in place", async ({ page, ui }) => {
   await trigger.click();
   await confirm.click();
   await expect(
-    page.getByRole("alert").filter({ hasText: "Key storage is unavailable." }),
+    page.getByRole("alert").filter({
+      hasText: "The Training laptop key couldn't be removed. Try again.",
+    }),
   ).toBeVisible();
   await expect(confirm).toBeFocused();
   await expect(rows).toHaveCount(1);
 
-  // The retry removes the key, the notice is announced, and focus lands on
-  // the empty state instead of the page.
+  // The retry removes the key: a drawn check and "Removed", then the row
+  // folds away, the notice is announced, and focus lands on the empty state
+  // instead of the page.
   await confirm.click();
+  await expect(row.getByRole("button", { name: "Removed" })).toBeVisible();
   await expect(
     page
       .getByRole("status")
-      .filter({ hasText: "SSH key removed. It cannot be used for new routes." }),
+      .filter({ hasText: "Training laptop key removed." }),
   ).toBeVisible();
   await expect(rows).toHaveCount(0);
   await expect(page.locator("#ssh-keys-empty")).toBeFocused();
+});
+
+test("the sidebar's raised pill glides to the page you pick and a ghost follows the mouse", async ({ page, ui }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  // Count the pill's glides: it moves rows by a Web Animation, not CSS.
+  await page.evaluate(() => {
+    const glides: unknown[] = [];
+    Object.assign(window, { __glides: glides });
+    const animate = Element.prototype.animate;
+    Element.prototype.animate = function (
+      this: Element,
+      ...args: Parameters<Element["animate"]>
+    ) {
+      if (this.matches("[data-nav-pill]")) glides.push(args[0]);
+      return animate.apply(this, args);
+    };
+  });
+  const nav = page.locator('[data-sidebar="content"]');
+  const ghost = nav.locator("[data-nav-ghost]");
+  const pillRow = () =>
+    nav.evaluate(
+      (list) =>
+        list.querySelector("[data-nav-pill]")?.closest<HTMLElement>("[data-nav-row]")
+          ?.dataset.navRow ?? null,
+    );
+  const ghostOffset = (rowId: string) =>
+    nav.evaluate((list, id) => {
+      const a = list.querySelector("[data-nav-ghost]")!.getBoundingClientRect();
+      const b = list
+        .querySelector(`[data-nav-row="${id}"] [data-sidebar="menu-button"]`)!
+        .getBoundingClientRect();
+      return Math.round(Math.abs(a.top - b.top) + Math.abs(a.left - b.left) + Math.abs(a.height - b.height));
+    }, rowId);
+  const row = (id: string) =>
+    nav.locator(`[data-nav-row="${id}"] [data-sidebar="menu-button"]`);
+
+  await expect.poll(pillRow).toBe("courses");
+
+  // The ghost appears under the mouse, glides between rows, steps aside on
+  // the current page and fades when the mouse leaves.
+  await row("runs").hover();
+  await expect(ghost).toHaveAttribute("data-on", "");
+  await expect.poll(() => ghostOffset("runs")).toBe(0);
+  await row("organizations").hover();
+  await expect.poll(() => ghostOffset("organizations")).toBe(0);
+  await row("courses").hover();
+  await expect(ghost).not.toHaveAttribute("data-on");
+  await page.mouse.move(900, 500);
+  await expect(ghost).not.toHaveAttribute("data-on");
+
+  // Picking a page moves the one pill there with a single glide.
+  await row("runs").click();
+  await expect(page).toHaveURL(/\/runs$/);
+  await expect.poll(pillRow).toBe("runs");
+  expect(
+    await page.evaluate(() => (window as unknown as { __glides: unknown[] }).__glides.length),
+  ).toBe(1);
+  await expect(row("runs")).toHaveAttribute("aria-current", "page");
+});
+
+test("the navigation drawer shows its close button and closes after a choice", async ({ page, ui }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await ui.open({ ...routeCase("course-catalog"), theme: "light" });
+  await page.getByRole("button", { name: "Open navigation" }).click();
+  const drawer = page.locator('[data-slot="sidebar"][data-mobile="true"]');
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "Close" })).toBeVisible();
+  await drawer.getByRole("link", { name: /^My runs/ }).click();
+  await expect(page).toHaveURL(/\/runs$/);
+  await expect(drawer).toBeHidden();
+});
+
+test("the startup rail carries on from the start screen instead of loading again", async ({ page, ui }) => {
+  const course = ui.server.state.courseCatalog[0]!;
+  const lecture = course.lectures[1]!;
+  let releaseStart: (() => void) | undefined;
+  const startGate = new Promise<void>((resolve) => {
+    releaseStart = resolve;
+  });
+  await page.route("**/api/scenarios/*/start", async (route) => {
+    await startGate;
+    ui.server.setRunState("launching");
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        accepted: true,
+        runId: "run-active",
+        scenarioId: "repair-nginx",
+        acceptedAt: Date.now(),
+        reused: false,
+        run: ui.server.state.run,
+      }),
+    });
+  });
+  await ui.open({
+    path: `/courses/${course.courseId}/lectures/${lecture.lectureId}`,
+    sessionRole: "learner",
+    theme: "dark",
+    runState: "archived",
+  });
+  // Motion on, so the hand-off and the sweep really play.
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.evaluate(() => {
+    const sweeps: string[] = [];
+    Object.assign(window, { __sweeps: sweeps });
+    document.addEventListener(
+      "animationstart",
+      (event) => {
+        if (event.animationName === "intar-sweep") sweeps.push(event.animationName);
+      },
+      true,
+    );
+  });
+  const sweeps = () =>
+    page.evaluate(() => (window as unknown as { __sweeps: string[] }).__sweeps.length);
+  const position = page.locator("[data-run-sequence-position]");
+  const track = page.locator("[data-run-sequence-track] > span");
+
+  await page.getByRole("link", { name: "Run again" }).click();
+  try {
+    await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
+    await expect(position).toHaveText("Stage 1 of 4");
+    await expect(track).toHaveCount(4);
+  } finally {
+    releaseStart?.();
+  }
+
+  // The run page takes over the same four stages: the first finishes (its
+  // check draws) and only the stage that just started sweeps, once.
+  await expect(page).toHaveURL(/\/runs\/run-active/);
+  await expect(position).toHaveText("Stage 2 of 4");
+  await expect(track).toHaveCount(4);
+  await expect(
+    page.locator('[data-run-sequence-step][data-state="done"] .draw-check'),
+  ).toHaveCount(1);
+  await expect.poll(sweeps).toBe(1);
+  await page.waitForTimeout(1_000);
+  expect(await sweeps(), "the rail swept again").toBe(1);
 });
 
 test("the outline's raised card follows the current lecture", async ({ page, ui }) => {
@@ -592,6 +820,15 @@ test("the outline's raised card follows the current lecture", async ({ page, ui 
       return Math.round(Math.abs(a.top - b.top) + Math.abs(a.height - b.height));
     });
   await expect.poll(misalignment).toBe(0);
+
+  // The ghost follows the mouse over other lectures and steps aside on the
+  // current one instead of staying on the last row it visited.
+  const ghost = rail.locator("[data-outline-ghost]");
+  const other = rail.locator("li[data-lecture-state]:not([data-current]) > a").first();
+  await other.hover();
+  await expect(ghost).toHaveAttribute("data-on", "");
+  await rail.locator("li[data-current] > *").hover();
+  await expect(ghost).not.toHaveAttribute("data-on");
 
   const items = rail.locator("li[data-lecture-state]");
   const index = await items.evaluateAll((lis) =>
@@ -640,7 +877,9 @@ test("reduced motion removes movement but keeps fades", async ({ page, ui }) => 
   // fades in.
   const panel = page.locator("[data-run-learning-panel]");
   await panel.getByRole("button", { name: "Reveal", exact: true }).first().click();
-  await expect(panel.getByText("Inspect the service boundary")).toBeVisible();
+  await expect(
+    panel.getByText("Inspect the service boundary", { exact: true }),
+  ).toBeVisible();
   await expect(panel.getByText("1/2 used", { exact: true })).toBeVisible();
   await panel.getByRole("button", { name: "Reveal the full solution" }).click();
   await expect(
@@ -710,21 +949,30 @@ test("reduced motion removes movement but keeps fades", async ({ page, ui }) => 
   await expect(
     savingSteps.locator('[aria-current="step"]'),
   ).toHaveText(/Save requested/);
-  expect(
-    await savingSteps
-      .locator("[data-run-sequence-marker]")
-      .first()
-      .evaluate((element) => {
-        const style = getComputedStyle(element);
-        return (
-          style.transitionProperty === "none" ||
-          style.transitionDuration
-            .split(",")
-            .every((entry) => Number.parseFloat(entry) === 0)
-        );
-      }),
-    "saving-step transitions must stop under reduced motion",
-  ).toBe(true);
+  // The marker and the stage track keep their colour fades but nothing that
+  // moves: no stretch, no transform, no size.
+  const FADES = new Set([
+    "none",
+    "color",
+    "background-color",
+    "border-color",
+    "box-shadow",
+    "opacity",
+  ]);
+  for (const target of [
+    savingSteps.locator("[data-run-sequence-marker]").first(),
+    page.locator("[data-run-sequence-track] > span").first(),
+  ]) {
+    const properties = await target.evaluate((element) =>
+      getComputedStyle(element)
+        .transitionProperty.split(",")
+        .map((entry) => entry.trim()),
+    );
+    expect(
+      properties.filter((property) => !FADES.has(property)),
+      "saving-step transitions may only fade under reduced motion",
+    ).toEqual([]);
+  }
 });
 
 test("archived course run stays in the learner frame", async ({ page, ui }) => {
@@ -766,7 +1014,9 @@ test.describe("wide operational density", () => {
 
     expect(liveBox).not.toBeNull();
     expect(archiveBox).not.toBeNull();
-    expect(liveBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(170);
+    // The empty state is the design system's raised StateCard (icon, title,
+    // description) rather than a muted note, so a section holds one card.
+    expect(liveBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(280);
     expect(
       (archiveBox?.y ?? 0) -
         ((liveBox?.y ?? 0) + (liveBox?.height ?? Number.POSITIVE_INFINITY)),
@@ -809,7 +1059,7 @@ test.describe("lecture reading flow", () => {
       { waitUntil: "domcontentloaded" },
     );
     await ui.settle();
-    await page.getByRole("button", { name: "Run again" }).click();
+    await page.getByRole("link", { name: "Run again" }).click();
 
     try {
       await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
@@ -821,9 +1071,13 @@ test.describe("lecture reading flow", () => {
       await expect(
         page.getByRole("heading", { name: "Preparing your workspace" }),
       ).toBeVisible();
-      await expect(
-        page.getByRole("list", { name: "Startup steps" }).getByRole("listitem"),
-      ).toHaveCount(3);
+      // The same four stages the run page carries on with.
+      const startupSteps = page
+        .getByRole("list", { name: "Startup steps" })
+        .getByRole("listitem");
+      await expect(startupSteps).toHaveCount(4);
+      await expect(startupSteps.first()).toContainText("Creating your run");
+      await expect(startupSteps.first()).toHaveAttribute("aria-current", "step");
       await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
       await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
       await expect(page.getByRole("region", { name: "Lecture content" })).toHaveCount(
@@ -853,14 +1107,14 @@ test.describe("lecture reading flow", () => {
     await expect(courseAction).toBeVisible();
     await expect(
       courseAction.getByText("Scenario", { exact: true }),
-    ).toHaveAttribute("title", "This lecture includes a scenario.");
+    ).toBeVisible();
     await expect(
       page.getByRole("link", { name: /Operating model.*Lecture only/i }),
     ).toBeVisible();
     await courseAction.click();
 
     const theory = page.getByRole("heading", { name: "Service recovery" });
-    const rerun = page.getByRole("button", { name: "Run again" });
+    const rerun = page.getByRole("link", { name: "Run again" });
     await expect(theory).toBeVisible();
     await expect(rerun).toBeVisible();
     await expect(page.getByText("Review runs", { exact: true })).toHaveCount(0);
@@ -929,11 +1183,9 @@ test.describe("lecture reading flow", () => {
     await expect(
       page.getByRole("heading", { name: "Continue your scenario" }),
     ).toBeVisible();
-    const resume = page.getByRole("button", { name: "Resume scenario" });
+    const resume = page.getByRole("link", { name: "Resume scenario" });
     await expect(resume).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Run again" }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Run again" })).toHaveCount(0);
     await resume.click();
     await expect(page).toHaveURL("/runs/run-active");
   });
@@ -960,8 +1212,8 @@ test.describe("lecture reading flow", () => {
     );
     await ui.settle();
 
-    await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
-    await page.getByRole("button", { name: /Open course outline/ }).click();
+    await expect(page.getByRole("link", { name: "Run again" })).toBeVisible();
+    await page.getByRole("button", { name: /Course outline, lecture/ }).click();
     const nextAction = page.getByRole("link", { name: longTitle });
     await expect(nextAction).toBeVisible();
     await expect(
@@ -1011,7 +1263,7 @@ test.describe("lecture reading flow", () => {
     await expect(
       page.getByRole("link", { name: "Back to course" }),
     ).toHaveAttribute("href", `/courses/${course.courseId}`);
-    await expect(page.getByRole("button", { name: "Run again" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Run again" })).toBeVisible();
   });
 
   test("a completed lecture explains when rerun is preparing", async ({
@@ -1036,9 +1288,7 @@ test.describe("lecture reading flow", () => {
         hasText: "Run again will become available when the scenario image is ready.",
       }),
     ).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Run again" }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Run again" })).toHaveCount(0);
   });
 
   test("mobile keeps theory before the scenario action", async ({ page, ui }) => {
@@ -1046,7 +1296,7 @@ test.describe("lecture reading flow", () => {
     await ui.open({ ...routeCase("lecture"), theme: "light" });
 
     const theory = page.getByRole("heading", { name: "Service recovery" });
-    const action = page.getByRole("button", { name: "Resume scenario" });
+    const action = page.getByRole("link", { name: "Resume scenario" });
     await expect(theory).toBeVisible();
     await expect(
       page.getByText(/A web service depends on process state/i),
@@ -1110,20 +1360,23 @@ test.describe("lecture reading flow", () => {
         page.getByRole("heading", { name: "Service recovery" }),
       ).toBeVisible();
       await expect(
-        page.getByRole("button", { name: "Resume scenario" }),
+        page.getByRole("link", { name: "Resume scenario" }),
       ).toBeVisible();
       await expect(
         page.locator('[data-page-variant="page"]'),
       ).toHaveCSS("max-width", "none");
-      if (viewport.width >= 1100) {
+      // The rail needs 58rem of page panel (a container query on the inset),
+      // so the sidebar's width counts: 1100px leaves a 844px panel and keeps
+      // the outline trigger; 1440px leaves 1184px and shows the rail.
+      if (viewport.width >= 1280) {
         await expect(page.locator("[data-course-outline-rail]")).toBeVisible();
         await expect(
-          page.getByRole("button", { name: /Open course outline/ }),
+          page.getByRole("button", { name: /Course outline, lecture/ }),
         ).toBeHidden();
       } else {
         await expect(page.locator("[data-course-outline-rail]")).toBeHidden();
         await expect(
-          page.getByRole("button", { name: /Open course outline/ }),
+          page.getByRole("button", { name: /Course outline, lecture/ }),
         ).toBeVisible();
       }
       await expectNoHorizontalOverflow(page);
@@ -1135,12 +1388,9 @@ test.describe("lecture reading flow", () => {
     ui,
   }) => {
     await ui.open({ ...routeCase("lecture"), theme: "light" });
-    await page.evaluate(() => {
-      document.documentElement.style.fontSize = "200%";
-    });
-    await page.waitForTimeout(100);
+    await setRootTextScale200(page);
 
-    const action = page.getByRole("button", { name: "Resume scenario" });
+    const action = page.getByRole("link", { name: "Resume scenario" });
     await action.scrollIntoViewIfNeeded();
     await expect(action).toBeVisible();
     await expect(
@@ -1206,16 +1456,20 @@ test.describe("coarse pointer and mobile overflow", () => {
     await expect(page.locator(".run-artifact-player")).toBeVisible();
     const recapReplay = page.locator("[data-run-recap-replay-surface]");
     await expect(recapReplay).toBeVisible();
-    const playIcon = recapReplay.locator(
-      ".ap-overlay-start .ap-play-button svg",
+    // The learner replay has its own controls: the player's bar and its
+    // start overlay are off, and its text layer is not a second tab stop.
+    await expect(recapReplay.locator(".ap-control-bar")).toHaveCount(0);
+    await expect(recapReplay.locator(".ap-overlay-start")).toBeHidden();
+    await expect(recapReplay.locator(".ap-term-text")).toHaveAttribute(
+      "tabindex",
+      "-1",
     );
-    await expect(playIcon).toHaveCount(1);
-    expect(
-      await playIcon.evaluate((element) => getComputedStyle(element).filter),
-      "learner replay play icon must not have a drop shadow",
-    ).toBe("none");
+    const playbackButton = recapReplay.getByRole("button", {
+      name: "Play replay",
+    });
+    await expect(playbackButton).toBeEnabled();
     const playerControlSizes = await recapReplay
-      .locator(".ap-control-bar button.ap-button")
+      .locator(".replay-bar button, .replay-bar input")
       .evaluateAll((elements) =>
         elements.map((element) => {
           const bounds = element.getBoundingClientRect();
@@ -1231,27 +1485,22 @@ test.describe("coarse pointer and mobile overflow", () => {
     ).toBe(true);
     expect(
       await recapReplay.evaluate((surface) => {
-        const terminal = surface.querySelector<HTMLElement>(".ap-term");
-        const controls = surface.querySelector<HTMLElement>(".ap-control-bar");
-        if (!terminal || !controls) return Number.POSITIVE_INFINITY;
-        const terminalBounds = terminal.getBoundingClientRect();
-        const controlBounds = controls.getBoundingClientRect();
-        return Math.max(0, terminalBounds.bottom - controlBounds.top);
+        const screen = surface.querySelector<HTMLElement>(".replay-screen");
+        const controls = surface.querySelector<HTMLElement>(".replay-bar");
+        if (!screen || !controls) return Number.POSITIVE_INFINITY;
+        return Math.max(
+          0,
+          screen.getBoundingClientRect().bottom -
+            controls.getBoundingClientRect().top,
+        );
       }),
       "learner replay controls must not cover terminal rows",
     ).toBeLessThanOrEqual(0.5);
-    const playbackButton = recapReplay.locator(
-      ".ap-control-bar .ap-playback-button",
-    );
-    // Set keyboard modality before focusing the vendor control. Its parent
-    // must reveal the bar for the same focus-visible state reached by Tab.
+    // Set keyboard modality before focusing the control, so focus-visible
+    // matches the state reached by Tab.
     await page.keyboard.press("Tab");
     await playbackButton.focus();
     await expect(playbackButton).toBeFocused();
-    await expect(recapReplay.locator(".ap-control-bar")).toHaveCSS(
-      "opacity",
-      "1",
-    );
     expect(
       await playbackButton.evaluate((element) => {
         const style = getComputedStyle(element);
@@ -1281,10 +1530,7 @@ test("200% text remains operable without page overflow", async ({
   ui,
 }) => {
   await ui.open({ ...routeCase("course-catalog"), theme: "light" });
-  await page.evaluate(() => {
-    document.documentElement.style.fontSize = "200%";
-  });
-  await page.waitForTimeout(100);
+  await setRootTextScale200(page);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.getByRole("link", { name: /Linux operations/ }).click();
@@ -1307,9 +1553,7 @@ test("replay carousel remains ordered at 200% text", async ({ page, ui }) => {
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
   await expectSavedRunShell(page);
-  await page.evaluate(() => {
-    document.documentElement.style.fontSize = "200%";
-  });
+  await setRootTextScale200(page);
 
   await page.getByRole("button", { name: "Watch replay" }).click();
   const carousel = page.locator("[data-run-replay-carousel]");
@@ -1333,12 +1577,9 @@ test("organization courses remain operable at 200% text", async ({
   await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
   await page
     .locator("main")
-    .getByRole("button", { name: "Courses", exact: true })
+    .getByRole("link", { name: "Courses", exact: true })
     .click();
-  await page.evaluate(() => {
-    document.documentElement.style.fontSize = "200%";
-  });
-  await page.waitForTimeout(100);
+  await setRootTextScale200(page);
   const courseButton = page.getByRole("link", {
     name: /Platform repair sequence/,
   });
@@ -1390,7 +1631,7 @@ for (const legacyPath of [
     await expect(page).toHaveURL(new RegExp(`${legacyPath}$`));
     await expect(page.getByText("That route is not in the manual")).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Browse courses" }),
+      page.getByRole("link", { name: "Browse courses" }),
     ).toHaveAttribute("href", "/courses");
   });
 }

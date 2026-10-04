@@ -35,6 +35,11 @@ export interface PageChrome {
    * internal shell state, not a browser Fullscreen API request.
    */
   fullscreen?: boolean | undefined;
+  /**
+   * Reading pages (lecture, course intro) own their title in the content h1.
+   * The bar then shows the course context instead of a copy of the title.
+   */
+  reading?: boolean | undefined;
 }
 
 interface PageChromeSetters {
@@ -62,6 +67,7 @@ function chromeEquals(a: PageChrome | undefined, b: PageChrome): boolean {
     Object.is(a.action, b.action) &&
     Object.is(a.menu, b.menu) &&
     a.fullscreen === b.fullscreen &&
+    a.reading === b.reading &&
     equalBreadcrumbLabels(a.breadcrumbLabels, b.breadcrumbLabels)
   );
 }
@@ -160,6 +166,7 @@ export function usePageChrome(chrome: PageChrome): void {
     menu,
     breadcrumbLabels,
     fullscreen,
+    reading,
   } = chrome;
 
   useEffect(() => {
@@ -185,6 +192,7 @@ export function usePageChrome(chrome: PageChrome): void {
       menu,
       breadcrumbLabels,
       fullscreen,
+      reading,
     });
     return () => clear(pathname);
   }, [
@@ -199,5 +207,6 @@ export function usePageChrome(chrome: PageChrome): void {
     menu,
     breadcrumbLabels,
     fullscreen,
+    reading,
   ]);
 }

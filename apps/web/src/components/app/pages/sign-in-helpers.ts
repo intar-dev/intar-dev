@@ -1,3 +1,4 @@
+import { describeApiError } from "@/components/app/lib/api-errors";
 import { AuthFlowError } from "@/lib/auth-client";
 import {
   OIDC_EMAIL_MISSING_MESSAGE,
@@ -43,10 +44,26 @@ export function organizationSignInErrorMessage(
   return fallback ?? "Organization sign-in failed. Try again.";
 }
 
+/** Codes that say the slug itself is wrong, so the message belongs at its field. */
+const SLUG_CODES = new Set(["invalid_organization_slug", "organization_sso_unavailable"]);
+
+export function organizationSignInSlugRefused(error: unknown): boolean {
+  return (
+    error instanceof AuthFlowError &&
+    error.code !== null &&
+    SLUG_CODES.has(error.code)
+  );
+}
+
 export function organizationSignInStartErrorMessage(error: unknown): string {
-  return organizationSignInErrorMessage(
-    error instanceof AuthFlowError ? error.code : null,
-    error instanceof Error ? error.message : undefined,
+  const code = error instanceof AuthFlowError ? error.code : null;
+  if (code && Object.hasOwn(ORGANIZATION_SIGN_IN_MESSAGES, code)) {
+    return ORGANIZATION_SIGN_IN_MESSAGES[code]!;
+  }
+  return (
+    describeApiError(error, {
+      fallback: "Organization sign-in failed. Try again.",
+    })?.message ?? "Organization sign-in failed. Try again."
   );
 }
 
@@ -57,22 +74,24 @@ const GITHUB_CALLBACK_MESSAGES: Record<string, string> = {
     "No sign-up spots are open right now. Members can still sign in.",
   access_revoked: "This account no longer has access.",
   banned_user: "This account no longer has access.",
-  validation_failed: "We couldn't check this sign-in. Please try again.",
-  unable_to_create_session: "We couldn't complete sign-in. Please try again.",
-  unable_to_create_user: "We couldn't create your account. Please try again.",
+  validation_failed: "Could not check this sign-in. Try again.",
+  unable_to_create_session: "Could not complete sign-in. Try again.",
+  unable_to_create_user: "Could not create your account. Try again.",
   signup_disabled: "Sign-ups are disabled for this provider.",
-  state_mismatch: "Your sign-in session expired. Please try again.",
-  state_not_found: "Your sign-in session expired. Please try again.",
-  please_restart_the_process: "Your sign-in session expired. Please try again.",
-  invalid_callback_request: "Sign-in failed. Please try again.",
-  internal_server_error: "Sign-in failed. Please try again.",
-  invalid_code: "GitHub sign-in was canceled or expired. Please try again.",
-  no_callback_url: "Sign-in failed to return to the app. Please try again.",
+  state_mismatch: "Your sign-in session expired. Try again.",
+  state_not_found: "Your sign-in session expired. Try again.",
+  please_restart_the_process: "Your sign-in session expired. Try again.",
+  invalid_callback_request:
+    "Something went wrong on the way back from GitHub. Try again.",
+  internal_server_error:
+    "Something went wrong on the way back from GitHub. Try again.",
+  invalid_code: "GitHub sign-in was canceled or expired. Try again.",
+  no_callback_url: "Sign-in could not return to the app. Try again.",
   oauth_provider_not_found:
-    "GitHub sign-in isn't configured. Please try again later.",
-  unable_to_get_user_info: "GitHub didn't return user info. Please try again.",
+    "GitHub sign-in isn't configured. Try again later.",
+  unable_to_get_user_info: "GitHub didn't return user info. Try again.",
   email_not_found:
-    "GitHub didn't return an email. Please check your GitHub email settings.",
+    "GitHub didn't return an email. Check your GitHub email settings.",
   // GitHub's email belongs to an existing account without this GitHub
   // identity, for example one created through organization sign-in.
   account_not_linked:
@@ -83,7 +102,7 @@ const GITHUB_CALLBACK_MESSAGES: Record<string, string> = {
     "This email belongs to an Intar account that signs in with a different GitHub account. Sign in with that one.",
   github_already_connected:
     "This Intar account already has a GitHub account connected. Sign in with that one.",
-  github_flow_invalid: "The GitHub sign-in didn't match. Please try again.",
+  github_flow_invalid: "The GitHub sign-in didn't match. Try again.",
   link_session_ended: SSO_ERROR_MESSAGES.link_session_ended,
   // Intar refuses an impersonation session at an app's authorization link.
   impersonation_oauth_forbidden: "Stop impersonating before authorizing apps.",

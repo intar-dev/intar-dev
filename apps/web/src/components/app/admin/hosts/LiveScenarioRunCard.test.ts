@@ -10,10 +10,10 @@ import type { AgentHostApi, VmStatus } from "./types";
 
 const nativeSshModule = vi.hoisted(() => ({ loadCount: 0 }));
 
-vi.mock("@/components/remote-access/NativeSshDialogButton", () => {
+vi.mock("@/components/remote-access/NativeSshSheet", () => {
   nativeSshModule.loadCount += 1;
   return {
-    NativeSshDialog: () => null,
+    NativeSshSheet: () => null,
   };
 });
 
@@ -30,9 +30,7 @@ describe("verification collection status", () => {
     );
 
     expect(markup).toContain("Verification unavailable");
-    expect(markup).toContain(
-      "We cannot confirm verification progress right now.",
-    );
+    expect(markup).toContain("Verification progress is unavailable right now.");
     expect(markup).not.toContain("retrying");
     expect(markup).not.toContain("automatically");
     expect(markup).not.toContain(hiddenError);

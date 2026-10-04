@@ -248,7 +248,7 @@ The app bar is 3.25rem high and sticky. On desktop it also draws the panel's top
 
 Authenticated page shells fill the available app viewport through 2048px. Page inset grows from 1rem to 1.5rem at 40rem and to 2rem at 64rem. Page content must not add a maximum width that leaves unused app space.
 
-Lecture pages use one fluid column below 1100px and a three-to-one content and course-outline grid from 1100px. The mobile app bar opens the same course outline in a bottom sheet. Live run workspaces put the terminal and the learning panel on the canvas as two rounded cards, two-to-one from 960px. The learning panel's checks stay pinned above long theory and hints.
+Lecture pages use one fluid column while the page panel is narrower than 58rem and a content plus course-outline rail (a `@min-[58rem]/panel` container query on the inset, so the sidebar's width counts) from 58rem. Below that the app bar opens the same course outline in a bottom sheet, or a side sheet on tablets and landscape phones. Live run workspaces put the terminal and the learning panel on the canvas as two rounded cards, two-to-one from 960px. The learning panel's checks stay pinned above long theory and hints.
 
 ### Named Rules
 

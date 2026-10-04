@@ -4,11 +4,12 @@ import {
   CheckCircle2,
   CircleDashed,
   Clock3,
-  Lightbulb,
+  ListChecks,
   LoaderCircle,
   Terminal as TerminalIcon,
 } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { StatusToken } from "../../patterns/StatusToken";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
@@ -219,7 +220,7 @@ export function RunPreview({ className }: { className?: string }) {
       <div
         ref={frameRef}
         aria-hidden="true"
-        className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden rounded-2xl border bg-canvas shadow-[var(--highlight),var(--shadow-overlay)] select-none lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
+        className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden rounded-3xl border bg-canvas shadow-[var(--highlight),var(--shadow-overlay)] select-none min-[960px]:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
       >
         <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
           <header className="flex shrink-0 items-center gap-2 px-3 pt-2 pb-1">
@@ -235,10 +236,10 @@ export function RunPreview({ className }: { className?: string }) {
             <span className="mr-1 inline-flex min-w-max shrink-0 items-center gap-2 max-sm:hidden">
               <StatusToken
                 tone={solved ? "success" : "live"}
-                word={solved ? "Solved" : "Running"}
+                word={solved ? "Solved" : "In progress"}
                 pulse={!solved}
               />
-              <span className="h-3 w-px bg-border" />
+              <Separator orientation="vertical" className="h-3" />
               <span className="inline-flex items-center gap-1.5 text-xs whitespace-nowrap text-muted-foreground tabular-nums">
                 <Clock3 className="size-3.5" />
                 {formatLease(remaining)} left
@@ -248,11 +249,13 @@ export function RunPreview({ className }: { className?: string }) {
               className={buttonVariants({
                 variant: "outline",
                 size: "sm",
-                className: "gap-2 px-3 lg:hidden",
+                className: "gap-2 px-3 tabular-nums min-[960px]:hidden",
               })}
             >
-              <Lightbulb className="size-4" />
-              Checks {passed}/{CHECKS.length}
+              <ListChecks className="size-4" />
+              <span className="whitespace-nowrap">
+                Checks <RollingNumber value={passed} />/{CHECKS.length}
+              </span>
             </span>
             <span
               className={buttonVariants({
@@ -277,11 +280,11 @@ export function RunPreview({ className }: { className?: string }) {
             <PreviewTerminal rows={terminalRows(t)} />
           </div>
         </div>
-        <div className="hidden min-h-0 min-w-0 flex-col pt-2 pr-3 pb-3 lg:flex">
+        <div className="hidden min-h-0 min-w-0 flex-col pt-2 pr-3 pb-3 min-[960px]:flex">
           <div className="min-h-0 flex-1 space-y-5 overflow-hidden rounded-xl border bg-card px-4 py-4 shadow-[var(--highlight),var(--shadow-raised)]">
-            <PreviewChecks checks={statuses} passed={passed} />
+            <PreviewChecks checks={statuses} passed={passed} still={still} />
             <section>
-              <h2 className="text-card-title">Lecture theory: Broken Nginx</h2>
+              <h2 className="text-card-title">Lecture</h2>
               <div className="mt-3 space-y-3 text-sm leading-6">
                 <p>
                   Nginx is a web server. It accepts HTTP requests and returns
@@ -318,7 +321,7 @@ function PreviewTerminal({ rows }: { rows: readonly TerminalRow[] }) {
       {/* Matches the xterm canvas: 14px IBM Plex Mono, 1.35 line height, the
           shared always-dark palette, and a block cursor in the brand orange.
           Rows fill from the top and scroll off the top once the pane is full. */}
-      <div className="flex min-h-0 flex-1 flex-col justify-end overflow-hidden bg-terminal-background py-2 pr-2 pl-3 font-mono text-[14px] leading-[1.35] text-terminal-foreground">
+      <div className="flex min-h-0 flex-1 flex-col justify-end overflow-hidden bg-terminal-background py-2 pr-2 pl-3 font-mono text-[13px] leading-[1.35] text-terminal-foreground md:text-[14px]">
         <div className="flex-[1_0_auto]">
           {rows.map((row, index) => (
             <p key={index} className="min-h-[1.35em] break-all whitespace-pre-wrap">
@@ -328,8 +331,8 @@ function PreviewTerminal({ rows }: { rows: readonly TerminalRow[] }) {
                 <Cursor blink={false} />
               ) : (
                 <>
-                  <span className="font-bold text-terminal-success">ubuntu@webserver</span>
-                  :<span className="font-bold text-terminal-info">~</span>$ {row.text}
+                  <span className="font-medium text-terminal-success">ubuntu@webserver</span>
+                  :<span className="font-medium text-terminal-info">~</span>$ {row.text}
                   {row.cursor !== "none" ? (
                     <Cursor blink={row.cursor === "blink"} />
                   ) : null}
@@ -357,7 +360,7 @@ function Cursor({ blink }: { blink: boolean }) {
 const SEGMENT_TONES: Record<CheckStatus, string> = {
   verified: "bg-success",
   checking: "bg-info/60",
-  needs_repair: "bg-border-strong/35",
+  needs_repair: "bg-border-strong/70",
 };
 
 const LABEL_TONES: Record<CheckStatus, string> = {
@@ -375,15 +378,18 @@ const STATUS_LABELS: Record<CheckStatus, string> = {
 function PreviewChecks({
   checks,
   passed,
+  still,
 }: {
   checks: readonly { key: CheckKey; title: string; status: CheckStatus }[];
   passed: number;
+  /** A still preview shows the solved state without popping on load. */
+  still: boolean;
 }) {
   return (
     <section className="border-b pb-2">
       <div className="flex items-center gap-3">
-        <p className="min-w-0 flex-1 text-sm font-semibold text-foreground">Checks</p>
-        <span className="shrink-0 text-xs text-faint-foreground tabular-nums">
+        <p className="min-w-0 flex-1 text-label">Checks</p>
+        <span className="shrink-0 text-metadata">
           <RollingNumber value={passed} />/{checks.length} verified
         </span>
       </div>
@@ -392,7 +398,7 @@ function PreviewChecks({
           <span
             key={check.key}
             className={cn(
-              "h-1 flex-1 rounded-full transition-colors duration-500 ease-standard",
+              "h-1 flex-1 rounded-full transition-colors duration-(--duration-reveal) ease-standard",
               SEGMENT_TONES[check.status],
             )}
           />
@@ -406,20 +412,22 @@ function PreviewChecks({
           >
             <span className="mt-1">
               {check.status === "verified" ? (
-                <CheckCircle2 className="size-4 text-success animate-pop" />
+                <CheckCircle2
+                  className={cn("size-4 text-success", !still && "animate-pop")}
+                />
               ) : check.status === "checking" ? (
                 <LoaderCircle className="size-4 text-info motion-safe:animate-spin" />
               ) : (
                 <CircleDashed className="size-4 text-warning" />
               )}
             </span>
-            <span className="flex min-w-0 items-start justify-between gap-x-3">
-              <span className="min-w-0 flex-1 truncate text-sm font-medium leading-6">
+            <span className="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-1">
+              <span className="min-w-0 flex-1 text-sm font-medium leading-6 [overflow-wrap:anywhere]">
                 {check.title}
               </span>
               <span
                 className={cn(
-                  "text-xs leading-6 font-medium whitespace-nowrap transition-colors duration-300",
+                  "text-xs leading-6 font-medium whitespace-nowrap transition-colors duration-(--duration-slow) ease-standard",
                   LABEL_TONES[check.status],
                 )}
               >

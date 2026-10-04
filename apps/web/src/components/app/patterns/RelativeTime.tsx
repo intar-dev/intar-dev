@@ -1,7 +1,8 @@
 import { formatRelativeTime, formatTimestamp } from "../lib/format";
+import { Hint } from "./Hint";
 
-// Relative wording with the absolute moment on hover — the inverse affordance
-// (absolute text, relative title) belongs to timeline entries.
+// Relative wording with the absolute moment in a tooltip (hover or focus) — the
+// inverse affordance (absolute text, relative title) belongs to timeline entries.
 export function RelativeTime({
   at,
   className,
@@ -10,12 +11,12 @@ export function RelativeTime({
   className?: string;
 }) {
   return (
-    <time
-      dateTime={new Date(at).toISOString()}
-      title={formatTimestamp(at)}
-      className={className}
+    <Hint
+      essential
+      label={formatTimestamp(at)}
+      render={<time dateTime={new Date(at).toISOString()} className={className} />}
     >
       {formatRelativeTime(at)}
-    </time>
+    </Hint>
   );
 }

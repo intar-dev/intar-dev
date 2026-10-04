@@ -36,3 +36,16 @@ const twMerge = extendTailwindMerge({
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
+
+/**
+ * A refused value nudges its field once (see `[data-reject]` in global.css)
+ * and keeps focus there. Call it from the submit handler when the value is
+ * still wrong, after setting `aria-invalid` and the field's message.
+ */
+export function reject(field: HTMLElement | null | undefined) {
+  if (!field) return;
+  field.removeAttribute("data-reject");
+  void field.offsetWidth; // restart the animation if it is already playing
+  field.setAttribute("data-reject", "");
+  field.focus();
+}

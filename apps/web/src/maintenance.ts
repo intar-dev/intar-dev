@@ -448,7 +448,7 @@ function maintenancePage(): Response {
   const headers = maintenanceHeaders("text/html; charset=utf-8");
   headers.set(
     "content-security-policy",
-    `default-src 'none'; connect-src 'self'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+    `default-src 'none'; connect-src 'self'; img-src 'self'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
   );
   headers.set("x-robots-tag", "noindex, nofollow");
   return new Response(
@@ -456,51 +456,76 @@ function maintenancePage(): Response {
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
     <meta name="robots" content="noindex,nofollow">
     <title>Maintenance · intar.dev</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <style nonce="${nonce}">
-      html{color-scheme:light dark;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#f9f5ee;color:#1f1a14}
-      body{min-height:100vh;margin:0;display:grid;place-items:center}
-      main{width:min(38rem,calc(100% - 3rem));border-top:3px solid #c74700;padding-top:2rem}
+      html{color-scheme:light dark;font-family:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#f9f5ee;color:#1f1a14}
+      body{min-height:100vh;min-height:100dvh;margin:0;display:grid;place-items:center}
+      main{width:min(38rem,calc(100% - 2rem));border-top:3px solid #c74700;padding-top:2rem}
+      @media (min-width:40rem){main{width:min(38rem,calc(100% - 3rem))}}
+      .brand{display:flex;align-items:center;gap:.5rem;margin-bottom:1.5rem}
+      .brand img{display:block;width:28px;height:28px}
+      .wm{font-size:.9375rem;font-weight:600;letter-spacing:-.015em}
+      .wm b{font-weight:inherit;color:#a93800}
       h1{font-size:1.5rem;line-height:1.25;font-weight:600;letter-spacing:-.015em;text-wrap:balance}
       p{max-width:60ch;color:#5b5348;line-height:1.6}
       small{font-size:.75rem;font-weight:500;letter-spacing:.01em;color:#6a6155}
       form{margin-top:2rem;padding-top:1.5rem;border-top:1px solid #e3dacb}
-      label{display:block;margin-bottom:.5rem;font-size:.875rem;font-weight:600}
-      input,button{box-sizing:border-box;font:inherit;border-radius:.5rem}
-      input{width:100%;padding:.625rem .75rem;border:1px solid #928777;background:#fffdf9;color:#1f1a14}
-      input:focus-visible,button:focus-visible{outline:2px solid #c74700;outline-offset:2px}
-      button{margin-top:1rem;padding:.625rem .875rem;border:0;background:#c74700;color:#fdfbf9;cursor:pointer;font-size:.875rem;font-weight:600}
+      label{display:block;margin-bottom:.375rem;font-size:.8125rem;font-weight:500}
+      input,button{box-sizing:border-box;font:inherit;border-radius:.5rem;height:2.25rem}
+      input{width:100%;padding:0 .75rem;border:1px solid #928777;background:#fffdf9;color:#1f1a14;box-shadow:0 1px 2px rgb(31 26 20/.06);outline:none}
+      input:hover{border-color:#7d7365}
+      input:focus-visible{border-color:#c74700;box-shadow:0 0 0 3px color-mix(in oklab,#c74700 20%,transparent)}
+      input[aria-invalid="true"]{border-color:#ba2b2b;box-shadow:0 0 0 3px color-mix(in oklab,#ba2b2b 20%,transparent)}
+      button:focus-visible{outline:2px solid #c74700;outline-offset:2px}
+      button{margin-top:1rem;padding:0 .875rem;border:0;background:#c74700;color:#fdfbf9;cursor:pointer;font-size:.875rem;font-weight:600;box-shadow:inset 0 1px 0 rgb(255 255 255/.2),0 1px 2px rgb(31 26 20/.2)}
       button:hover{background:#be4000}
-      button:disabled{cursor:wait;opacity:.65}
-      #operator-status{min-height:1.6em;margin-bottom:0}
-      #operator-status[data-error="true"]{color:#ba2b2b}
+      button:disabled{cursor:wait;opacity:.45}
+      #operator-status,#operator-alert{min-height:1.25rem;margin:.75rem 0 0;font-size:.875rem;line-height:1.25rem}
+      #operator-status[data-tone="success"]{color:#0b7643}
+      #operator-alert{color:#ba2b2b}
+      @media (pointer:coarse){input,button{min-height:2.75rem}}
+      @media (prefers-reduced-motion:no-preference){
+        input{transition:border-color 150ms cubic-bezier(.2,0,0,1),box-shadow 150ms cubic-bezier(.2,0,0,1)}
+        button{transition:background-color 150ms cubic-bezier(.2,0,0,1),transform 150ms cubic-bezier(.2,0,0,1)}
+        button:active:not(:disabled){transform:translateY(1px) scale(.985);transition-duration:100ms}
+        button:focus-visible{animation:ring 150ms cubic-bezier(.2,0,0,1)}
+        @keyframes ring{from{outline-color:transparent;outline-offset:0}}
+      }
       @media (prefers-color-scheme:dark){
         html{background:#1a1714;color:#efe8df}
         main{border-top-color:#f88a3d}
+        .wm b{color:#faa663}
         p{color:#aea597}
         small{color:#9d9386}
         form{border-top-color:#322c26}
-        input{border-color:#73695e;background:#24201c;color:#efe8df}
-        input:focus-visible,button:focus-visible{outline-color:#f88a3d}
-        button{background:#f88a3d;color:#21110a}
+        input{border-color:#73695e;background:#24201c;color:#efe8df;box-shadow:0 1px 2px rgb(0 0 0/.3)}
+        input:hover{border-color:#8a8073}
+        input:focus-visible{border-color:#f88a3d;box-shadow:0 0 0 3px color-mix(in oklab,#f88a3d 20%,transparent)}
+        input[aria-invalid="true"]{border-color:#f97772;box-shadow:0 0 0 3px color-mix(in oklab,#f97772 20%,transparent)}
+        button:focus-visible{outline-color:#f88a3d}
+        button{background:#f88a3d;color:#21110a;box-shadow:inset 0 1px 0 rgb(255 255 255/.28),0 1px 2px rgb(0 0 0/.35)}
         button:hover{background:#fc9d51}
-        #operator-status[data-error="true"]{color:#f97772}
+        #operator-status[data-tone="success"]{color:#62d397}
+        #operator-alert{color:#f97772}
       }
     </style>
   </head>
   <body>
     <main>
+      <div class="brand"><img src="/favicon.svg" width="28" height="28" alt=""><span class="wm">intar<b>.dev</b></span></div>
       <small>Planned maintenance</small>
       <h1>The control plane is under maintenance</h1>
       <p>Planned maintenance is in progress. Existing sessions are unavailable until the checks finish.</p>
       <p>Try again shortly.</p>
-      <form id="operator-login" action="/api/maintenance/bypass" method="post">
+      <form id="operator-login" action="/api/maintenance/bypass" method="post" novalidate>
         <label for="operator-secret">Operator maintenance secret</label>
-        <input id="operator-secret" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+        <input id="operator-secret" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required aria-describedby="operator-status operator-alert">
         <button id="operator-submit" type="submit">Verify maintenance fence</button>
         <p id="operator-status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <p id="operator-alert" role="alert"></p>
       </form>
     </main>
     <script nonce="${nonce}">
@@ -510,10 +535,27 @@ function maintenancePage(): Response {
         const secretInput = document.getElementById("operator-secret");
         const submitButton = document.getElementById("operator-submit");
         const status = document.getElementById("operator-status");
+        const alertBox = document.getElementById("operator-alert");
         if (!(form instanceof HTMLFormElement) ||
             !(secretInput instanceof HTMLInputElement) ||
             !(submitButton instanceof HTMLButtonElement) ||
-            !(status instanceof HTMLParagraphElement)) return;
+            !(status instanceof HTMLParagraphElement) ||
+            !(alertBox instanceof HTMLParagraphElement)) return;
+
+        const say = (tone, text) => {
+          status.removeAttribute("data-tone");
+          status.textContent = "";
+          alertBox.textContent = "";
+          secretInput.removeAttribute("aria-invalid");
+          if (tone === "error") {
+            alertBox.textContent = text;
+            secretInput.setAttribute("aria-invalid", "true");
+            secretInput.focus();
+            return;
+          }
+          if (tone === "success") status.setAttribute("data-tone", "success");
+          status.textContent = text;
+        };
 
         window.addEventListener("pagehide", () => {
           secretInput.value = "";
@@ -521,10 +563,13 @@ function maintenancePage(): Response {
 
         form.addEventListener("submit", async (event) => {
           event.preventDefault();
+          if (!secretInput.value) {
+            say("error", "Enter the maintenance secret.");
+            return;
+          }
           form.setAttribute("aria-busy", "true");
           submitButton.disabled = true;
-          status.removeAttribute("data-error");
-          status.textContent = "Checking operator access…";
+          say("pending", "Checking operator access…");
           let requestBody = "";
           try {
             requestBody = JSON.stringify({ secret: secretInput.value });
@@ -539,9 +584,7 @@ function maintenancePage(): Response {
             });
             requestBody = "";
             if (!response.ok) {
-              status.setAttribute("data-error", "true");
-              status.textContent = "Operator access was denied. Check the secret and try again.";
-              secretInput.focus();
+              say("error", "Operator access was denied. Check the secret and try again.");
               return;
             }
             const statusResponse = await fetch("/api/maintenance/status", {
@@ -551,11 +594,9 @@ function maintenancePage(): Response {
               redirect: "error",
             });
             if (!statusResponse.ok) throw new Error("status check failed");
-            status.textContent = "Maintenance fence verified. Application access remains blocked.";
+            say("success", "Maintenance fence verified. Application access remains blocked.");
           } catch {
-            status.setAttribute("data-error", "true");
-            status.textContent = "Operator access could not be checked. Try again.";
-            secretInput.focus();
+            say("error", "Operator access could not be checked. Try again.");
           } finally {
             requestBody = "";
             secretInput.value = "";

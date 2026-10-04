@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeft,
+  ChevronDown,
   ExternalLink,
   Hammer,
   Info,
@@ -23,12 +24,20 @@ import {
   formatRelativeTime,
   formatTimestamp,
 } from "@/components/app/lib/format";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+} from "@/components/ui/collapsible";
+import { MetaLine } from "@/components/app/patterns/MetaLine";
 import type { BuildPhase } from "@/generated/bridge";
 import { isAdminUser } from "@/lib/authz";
 import { isActiveImageBuild } from "@/lib/build-scheduler-core";
 import { cn } from "@/lib/utils";
+import { apiErrorMessage } from "@/components/app/lib/api-errors";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import { requestScenarioStartWithCapacityWait } from "@/components/app/lib/scenario-start";
 import { useSession } from "../hooks/useSession";
 import { usePageChrome } from "../shell/page-chrome";
@@ -102,14 +111,15 @@ export function AdminBuilds() {
   const back = useMemo(
     () =>
       manage ? undefined : (
-        <Link
-          to="/organizations"
-          aria-label="Back to Organizations"
-          className="inline-flex min-h-9 min-w-9 items-center justify-center gap-1.5 rounded-lg px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label="Back to organizations"
+          render={<Link to="/organizations" />}
         >
-          <ArrowLeft className="size-4" aria-hidden="true" />
+          <ArrowLeft aria-hidden="true" />
           <span className="hidden md:inline">Organizations</span>
-        </Link>
+        </Button>
       ),
     [manage],
   );
@@ -144,10 +154,11 @@ export function AdminBuilds() {
         },
       );
       if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(body?.error ?? `Retry failed (${response.status})`);
+        throw HttpResponseError.fromBody(
+          response.status,
+          await response.json().catch(() => null),
+          `Retry failed (${response.status})`,
+        );
       }
     },
     onSuccess: async () => {
@@ -207,22 +218,6 @@ export function AdminBuilds() {
         />
       </Section>
 
-      {retryBuild.error ? (
-        <InlineFeedback tone="error">
-          {retryBuild.error instanceof Error
-            ? retryBuild.error.message
-            : "Failed to retry build"}
-        </InlineFeedback>
-      ) : null}
-
-      {runCandidate.error ? (
-        <InlineFeedback tone="error">
-          {runCandidate.error instanceof Error
-            ? runCandidate.error.message
-            : "Failed to start candidate run"}
-        </InlineFeedback>
-      ) : null}
-
       {builds.error ? (
         <ErrorState
           title="Could not load builds"
@@ -263,6 +258,11 @@ export function AdminBuilds() {
                       retryBuild.isPending && retryBuild.variables === build.id
                     }
                     retryDisabled={retryBuild.isPending || !build.canRetry}
+                    actionError={buildActionError(
+                      build.id,
+                      retryBuild,
+                      runCandidate,
+                    )}
                     runCandidatePending={
                       runCandidate.isPending &&
                       runCandidate.variables?.buildId === build.id
@@ -306,11 +306,31 @@ export function AdminBuilds() {
   );
 }
 
+function buildActionError(
+  buildId: string,
+  retry: { error: unknown; variables: string | undefined },
+  candidate: { error: unknown; variables: { buildId: string } | undefined },
+): string | null {
+  if (retry.error && retry.variables === buildId) {
+    return `Could not retry build ${buildId}: ${
+      apiErrorMessage(retry.error, "Try again.") ?? "Try again."
+    }`;
+  }
+  if (candidate.error && candidate.variables?.buildId === buildId) {
+    return `Could not start a candidate run for build ${buildId}: ${
+      apiErrorMessage(candidate.error, "Try again.") ?? "Try again."
+    }`;
+  }
+  return null;
+}
+
 function BuildRow(props: {
   build: ImageBuildRecord;
   manage: boolean;
   retryPending: boolean;
   retryDisabled: boolean;
+  /** The row's own failed action, named after the build. */
+  actionError: string | null;
   runCandidatePending: boolean;
   detail: ImageBuildDetailRecord | null | undefined;
   detailLoading: boolean;
@@ -345,9 +365,11 @@ function BuildRow(props: {
           <p className="truncate font-mono text-sm font-medium">
             {build.scenarioId}
           </p>
-          <p className="truncate font-mono text-xs text-muted-foreground">
-            {build.id} - {shortHash(build.contentHash)} - {build.rev}
-          </p>
+          <MetaLine
+            dense
+            className="font-mono"
+            items={[build.id, shortHash(build.contentHash), build.rev]}
+          />
         </div>
 
         <div className="grid gap-x-6 gap-y-2 text-sm md:grid-cols-2 xl:grid-cols-4">
@@ -369,28 +391,15 @@ function BuildRow(props: {
         </div>
 
         {build.error ? (
-          <p
-            className={cn(
-              "rounded-md border px-3 py-2 text-sm",
-              build.status === "stale" && !build.canRetry
-                ? "border-warning-border bg-warning-subtle text-warning"
-                : "border-destructive-border bg-destructive-subtle text-destructive",
-            )}
-          >
-            {build.error}
-          </p>
-        ) : null}
-
-        {props.detailOpen ? (
-          <BuildDetails
-            id={detailId}
-            build={build}
-            detail={props.detail}
-            loading={props.detailLoading}
-            error={props.detailError}
-            runCandidatePending={props.runCandidatePending}
-            onRunCandidate={props.onRunCandidate}
-          />
+          build.status === "stale" && !build.canRetry ? (
+            <Alert>
+              <AlertDescription>{build.error}</AlertDescription>
+            </Alert>
+          ) : (
+            <Alert variant="destructive">
+              <AlertDescription>{build.error}</AlertDescription>
+            </Alert>
+          )
         ) : null}
       </div>
 
@@ -398,14 +407,22 @@ function BuildRow(props: {
         <Button
           type="button"
           size="sm"
-          variant={props.detailOpen ? "secondary" : "outline"}
+          variant="outline"
+          aria-label={`Details for build ${build.id}`}
           aria-expanded={props.detailOpen}
-          aria-controls={detailId}
+          aria-controls={props.detailOpen ? detailId : undefined}
           onClick={props.onToggleDetails}
-          className="lg:w-full"
+          className="group lg:w-full"
         >
-          <Info className="size-4" />
+          <Info />
           Details
+          <ChevronDown
+            aria-hidden="true"
+            className={cn(
+              "transition-transform duration-(--duration-moderate) ease-enter",
+              props.detailOpen && "rotate-180",
+            )}
+          />
         </Button>
         {props.manage ? (
           <Button
@@ -417,7 +434,7 @@ function BuildRow(props: {
             className="lg:w-full"
           >
             <RefreshCcw
-              className={cn("size-4", props.retryPending ? "motion-safe:animate-spin" : "")}
+              className={props.retryPending ? "motion-safe:animate-spin" : ""}
             />
             Retry
           </Button>
@@ -436,7 +453,7 @@ function BuildRow(props: {
               />
             }
           >
-            <ExternalLink className="size-4" />
+            <ExternalLink />
             Log
           </Button>
         ) : (
@@ -447,11 +464,30 @@ function BuildRow(props: {
             disabled
             className="lg:w-full"
           >
-            <ExternalLink className="size-4" />
+            <ExternalLink />
             Log
           </Button>
         )}
       </div>
+
+      {props.actionError ? (
+        <InlineFeedback tone="error" className="lg:col-span-2">
+          {props.actionError}
+        </InlineFeedback>
+      ) : null}
+
+      <Collapsible open={props.detailOpen} className="lg:col-span-2">
+        <CollapsibleContent id={detailId}>
+          <BuildDetails
+            build={build}
+            detail={props.detail}
+            loading={props.detailLoading}
+            error={props.detailError}
+            runCandidatePending={props.runCandidatePending}
+            onRunCandidate={props.onRunCandidate}
+          />
+        </CollapsibleContent>
+      </Collapsible>
     </div>
   );
 }
@@ -493,7 +529,6 @@ async function fetchBuildDetail(
 
 // Only platform admins load `detail`: the builder host and candidate proof.
 function BuildDetails(props: {
-  id: string;
   build: ImageBuildRecord;
   detail: ImageBuildDetailRecord | null | undefined;
   loading: boolean;
@@ -504,7 +539,7 @@ function BuildDetails(props: {
   if (props.loading) {
     return (
       <div
-        id={props.id}
+        role="status"
         className="border-t pt-3 text-sm text-muted-foreground"
       >
         Loading build details…
@@ -514,17 +549,21 @@ function BuildDetails(props: {
 
   if (props.error) {
     return (
-      <div id={props.id} className="border-t pt-3 text-sm text-destructive">
-        {props.error instanceof Error
-          ? props.error.message
-          : "Failed to load build details"}
+      <div className="border-t pt-3">
+        <Alert variant="destructive" just>
+          <AlertDescription>
+            {props.error instanceof Error
+              ? props.error.message
+              : "Could not load build details."}
+          </AlertDescription>
+        </Alert>
       </div>
     );
   }
 
   const { build, detail } = props;
   return (
-    <div id={props.id} className="border-t pt-3">
+    <div className="border-t pt-3">
       <div className="grid gap-x-6 gap-y-2 text-sm md:grid-cols-2 xl:grid-cols-4">
         <BuildMeta label="Bundle" value={detail?.bundle.r2Key ?? build.rev} />
         {detail ? (
@@ -538,13 +577,13 @@ function BuildDetails(props: {
           value={formatTimestamp(build.timings.startedAt)}
         />
       </div>
-      <dl className="terminal-surface mt-3 grid gap-x-6 gap-y-3 rounded-lg border p-3 text-xs md:grid-cols-2">
+      <dl className="mt-3 grid gap-x-6 gap-y-3 rounded-lg border bg-muted/50 p-3 text-xs md:grid-cols-2">
         <DetailPair label="Created" value={formatTimestamp(build.createdAt)} />
         <DetailPair
           label="Finished"
           value={formatTimestamp(build.timings.finishedAt)}
         />
-        <DetailPair label="Content hash" value={build.contentHash} />
+        <DetailPair mono label="Content hash" value={build.contentHash} />
         {detail ? (
           <DetailPair
             label="Host heartbeat"
@@ -560,7 +599,7 @@ function BuildDetails(props: {
             onClick={() => props.onRunCandidate(detail)}
             disabled={props.runCandidatePending}
           >
-            <Play className="size-4" />
+            <Play />
             Run candidate
           </Button>
         </div>
@@ -595,11 +634,18 @@ function BuildCount({
   );
 }
 
-function DetailPair(props: { label: string; value: string }) {
+function DetailPair(props: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="min-w-0">
       <dt className="text-label">{props.label}</dt>
-      <dd className="mt-1 truncate font-mono text-foreground">{props.value}</dd>
+      <dd
+        className={cn(
+          "mt-1 text-foreground [overflow-wrap:anywhere]",
+          props.mono ? "font-mono" : "text-metadata",
+        )}
+      >
+        {props.value}
+      </dd>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { filterCourses, filterLectures } from "./CourseCatalog";
+import { HttpResponseError } from "@/components/app/lib/http-response-error";
+import { catalogLoadFailed, filterCourses, filterLectures } from "./CourseCatalog";
 import type { CourseCatalogCourse } from "./course-wire";
 
 const course: CourseCatalogCourse = {
@@ -109,3 +110,23 @@ function lecture(
     ...overrides,
   };
 }
+
+describe("catalog load failure", () => {
+  it("keeps a cached course on screen when only the refresh failed", () => {
+    const outage = new Error("network");
+    expect(catalogLoadFailed(null, true)).toBe(false);
+    expect(catalogLoadFailed(outage, true)).toBe(false);
+    expect(catalogLoadFailed(outage, false)).toBe(true);
+    expect(catalogLoadFailed(new HttpResponseError(500, "boom", null), true)).toBe(
+      false,
+    );
+  });
+
+  it("replaces the page when access was denied or the course is gone", () => {
+    for (const status of [401, 403, 404]) {
+      expect(catalogLoadFailed(new HttpResponseError(status, "no", null), true)).toBe(
+        true,
+      );
+    }
+  });
+});

@@ -16,6 +16,21 @@ describe("Markdown page headings", () => {
     expect(markup).toContain("<pre");
   });
 
+  it("shows the fence language in a header bar and lets code use the full width", () => {
+    const markup = renderToStaticMarkup(
+      createElement(Markdown, {
+        pageContent: true,
+        children: "```bash\nls -la\n```\n\n#### Lead-in\n\n---\n\n> quoted",
+      }),
+    );
+    expect(markup).toContain(">bash<");
+    expect(markup).toContain("data-wide");
+    expect(markup).toContain("<h4");
+    expect(markup).toContain("<blockquote");
+    expect(markup).toContain("<hr");
+    expect(markup).toContain('aria-label="Copy code"');
+  });
+
   it("keeps authored headings below the app bar h1", () => {
     const markup = renderToStaticMarkup(
       createElement(Markdown, {
@@ -27,5 +42,20 @@ describe("Markdown page headings", () => {
     expect(markup).not.toContain("<h1");
     expect(markup.match(/<h2/g)).toHaveLength(2);
     expect(markup).toContain("<h3");
+  });
+
+  it("keeps a short inline path on one line but lets a long span wrap", () => {
+    const long = "kubectl get pods -n kube-system --field-selector=status.phase!=Running -o wide";
+    const markup = renderToStaticMarkup(
+      createElement(Markdown, {
+        pageContent: true,
+        children: `Open \`/etc/nginx/nginx.conf\`, then run \`${long}\`.`,
+      }),
+    );
+    const spans = markup.match(/<code[^>]*>[^<]*<\/code>/g) ?? [];
+    expect(spans).toHaveLength(2);
+    expect(spans[0]).toContain("sm:whitespace-nowrap");
+    expect(spans[1]).not.toContain("sm:whitespace-nowrap");
+    expect(spans[1]).toContain("[overflow-wrap:anywhere]");
   });
 });

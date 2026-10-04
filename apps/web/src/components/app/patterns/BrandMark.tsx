@@ -14,7 +14,7 @@ export function BrandMark({
 }) {
   const content = (
     <>
-      <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
+      <img src="/favicon.svg" alt="" className="size-7 shrink-0 rounded-md" />
       {!compact ? (
         <span className="text-[0.9375rem] leading-none font-semibold tracking-[-0.015em]">
           intar<span className="text-brand-text">.dev</span>
@@ -32,7 +32,10 @@ export function BrandMark({
       {content}
     </a>
   ) : (
-    <Link to={to} aria-label="intar.dev home" className={linkClassName}>
+    <Link
+      to={to}
+      activeOptions={{ exact: true }}
+      aria-label="intar.dev home" className={linkClassName}>
       {content}
     </Link>
   );

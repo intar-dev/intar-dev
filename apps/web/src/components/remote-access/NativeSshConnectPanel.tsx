@@ -1,17 +1,12 @@
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Download, KeyRound, LoaderCircle } from "lucide-react";
 import { useSession } from "@/components/app/hooks/useSession";
+import { CodeBlock } from "@/components/app/patterns/CodeBlock";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import {
   buildTemporaryNativeSshCommand,
   temporaryNativeSshKeyFilename,
@@ -74,17 +69,33 @@ class NativeSshRequestError extends Error {
   }
 }
 
-type CopyTarget = "command" | "knownHosts" | null;
+// The thrown strings are for developers; the learner reads a sentence that
+// says what happened and what to do. Server-sent messages are already plain.
+const LEARNER_ERRORS: Record<string, string> = {
+  "temporary SSH key was not accepted by the route":
+    "The SSH route did not accept the temporary key. Try again.",
+  "native SSH route returned an unexpected temporary key":
+    "The SSH route returned an unexpected key. Try again.",
+  "native SSH session returned an invalid payload":
+    "The SSH route returned details that could not be used. Try again.",
+  "clipboard is not available":
+    "Copy is not available in this browser. Select the text and copy it.",
+  "downloads are not available in this browser":
+    "Downloads are not available in this browser. Use another browser to save the key.",
+};
+
+export function learnerSshError(message: string): string {
+  return LEARNER_ERRORS[message] ?? message;
+}
 
 // Issues a native-SSH route on mount and shows the credentials. Rendered
-// inline on the run page and inside NativeSshDialog's dialog.
+// inline on the run page and inside NativeSshSheet.
 export function NativeSshConnectPanel({
   sessionRequest,
 }: {
   sessionRequest: NativeSshSessionRequest;
 }) {
   const { data: authenticatedSession, isLoading: sessionLoading } = useSession();
-  const [copied, setCopied] = useState<CopyTarget>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloaded, setDownloaded] = useState(false);
   const [persistenceWarning, setPersistenceWarning] = useState<string | null>(
@@ -159,7 +170,6 @@ export function NativeSshConnectPanel({
   const openSession = useCallback(
     (temporaryKey?: SshEd25519KeyPair) => {
       if (!requestScope) return;
-      setCopied(null);
       setDownloaded(
         Boolean(
           temporaryKey &&
@@ -211,17 +221,11 @@ export function NativeSshConnectPanel({
     return () => window.clearTimeout(timeout);
   }, [openSession, requestScope, sessionMutation.data]);
 
-  const copyText = async (value: string, target: Exclude<CopyTarget, null>) => {
-    if (typeof navigator === "undefined" || !navigator.clipboard) {
-      throw new Error("clipboard is not available");
-    }
-    await navigator.clipboard.writeText(value);
-    setCopied(target);
-  };
-
+  // Each state keys its own root, so React never morphs one state's elements
+  // into another's (that would fade colours on nodes the new state hides).
   if (!requestScope) {
     return (
-      <div className="flex min-h-56 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+      <div key="account" className="flex min-h-56 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
         {sessionLoading ? (
           <LoaderCircle className="size-5 motion-safe:animate-spin" />
         ) : null}
@@ -245,7 +249,7 @@ export function NativeSshConnectPanel({
 
   if (sessionMutation.isPending) {
     return (
-      <div className="flex min-h-56 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+      <div key="opening" className="flex min-h-56 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
         <LoaderCircle className="size-5 motion-safe:animate-spin" />
         <p>
           {temporaryPublicKeyOpenssh
@@ -268,10 +272,13 @@ export function NativeSshConnectPanel({
 
   if (sessionMutation.error) {
     return (
-      <div className="space-y-3">
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-          {sessionMutation.error.message}
-        </div>
+      <div key="error" className="space-y-3">
+        <Alert variant="destructive" just>
+          <AlertTitle>Could not open SSH access</AlertTitle>
+          <AlertDescription>
+            {learnerSshError(sessionMutation.error.message)}
+          </AlertDescription>
+        </Alert>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             type="button"
@@ -303,10 +310,14 @@ export function NativeSshConnectPanel({
     (!issuedTemporaryKey || !session.native.keyFilename)
   ) {
     return (
-      <div className="space-y-3">
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-          The temporary private key is not available in this browser session.
-        </div>
+      <div key="no-key" className="space-y-3">
+        <Alert>
+          <AlertTitle>Temporary key not available</AlertTitle>
+          <AlertDescription>
+            This browser session no longer has the private key. Create a new
+            one.
+          </AlertDescription>
+        </Alert>
         <Button
           type="button"
           size="sm"
@@ -321,7 +332,7 @@ export function NativeSshConnectPanel({
   }
 
   return (
-    <div className="space-y-4">
+    <div key="ready" className="space-y-4">
       <div className="grid gap-x-5 gap-y-3 border-y py-3 text-sm sm:grid-cols-3">
         <SessionFact
           label="Access"
@@ -380,14 +391,14 @@ export function NativeSshConnectPanel({
       ) : null}
 
       {downloadError ? (
-        <p role="alert" className="text-sm text-destructive">
-          {downloadError}
-        </p>
+        <InlineFeedback tone="error">
+          {learnerSshError(downloadError)}
+        </InlineFeedback>
       ) : null}
       {persistenceWarning ? (
         <p
           role="status"
-          className="rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-sm"
+          className="rounded-lg border border-warning-border bg-warning-subtle px-3 py-2 text-support"
         >
           {persistenceWarning}
         </p>
@@ -410,9 +421,6 @@ export function NativeSshConnectPanel({
             : "SSH command"
         }
         value={session.native.command}
-        copied={copied === "command"}
-        onCopy={() => copyText(session.native.command, "command")}
-        rows={Math.max(3, session.native.command.split("\n").length + 1)}
         copyDisabled={
           session.native.authMode === "issued_key" && !downloaded
         }
@@ -432,11 +440,6 @@ export function NativeSshConnectPanel({
             <CopyableTextBlock
               label="known_hosts entry"
               value={session.native.knownHostsLine}
-              copied={copied === "knownHosts"}
-              onCopy={() =>
-                copyText(session.native.knownHostsLine, "knownHosts")
-              }
-              rows={2}
             />
           </div>
         </details>
@@ -444,14 +447,12 @@ export function NativeSshConnectPanel({
         <CopyableTextBlock
           label="known_hosts entry"
           value={session.native.knownHostsLine}
-          copied={copied === "knownHosts"}
-          onCopy={() => copyText(session.native.knownHostsLine, "knownHosts")}
         />
       )}
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4 text-sm text-muted-foreground">
         {session.native.authMode === "profile_keys" ? (
-          <span className="font-mono text-xs">
+          <span className="text-code">
             {session.native.publicHostKeyFingerprintSha256}
           </span>
         ) : (
@@ -504,7 +505,7 @@ function SessionFact(props: {
     <div>
       <p className="text-label">{props.label}</p>
       <p
-        className={`mt-1 text-sm ${props.mono ? "font-mono text-xs" : "font-medium"}`}
+        className={`mt-1 ${props.mono ? "text-code break-all" : "text-sm font-medium"}`}
       >
         {props.value}
       </p>
@@ -515,49 +516,27 @@ function SessionFact(props: {
 function CopyableTextBlock(props: {
   label: string;
   value: string;
-  copied: boolean;
-  onCopy: () => Promise<void>;
-  rows?: number;
   copyDisabled?: boolean;
 }) {
-  const [copyError, setCopyError] = useState<string | null>(null);
-  const fieldId = useId();
+  const [copyFailed, setCopyFailed] = useState(false);
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between gap-3">
-        <label htmlFor={fieldId} className="block text-sm font-medium">
-          {props.label}
-        </label>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={props.copyDisabled}
-          onClick={() => {
-            setCopyError(null);
-            void props.onCopy().catch((error) => {
-              setCopyError(error instanceof Error ? error.message : String(error));
-            });
-          }}
-        >
-          {props.copied ? "Copied" : "Copy"}
-        </Button>
-      </div>
-      <Textarea
-        id={fieldId}
-        value={props.value}
-        readOnly
-        rows={props.rows ?? 3}
-        className="font-mono text-xs"
-      />
-      <span role="status" aria-live="polite" className="sr-only">
-        {props.copied ? `${props.label} copied.` : ""}
-      </span>
-      {copyError ? (
-        <p role="alert" className="text-xs text-destructive">
-          {copyError}
-        </p>
+      {/* The block names itself through its Copy button; the confirmation
+          and the "Copied" label are its own. */}
+      <CodeBlock
+        language="bash"
+        copyName={`Copy ${props.label}`}
+        copyDisabled={props.copyDisabled ?? false}
+        onCopied={() => setCopyFailed(false)}
+        onCopyError={() => setCopyFailed(true)}
+      >
+        <code>{props.value}</code>
+      </CodeBlock>
+      {copyFailed ? (
+        <InlineFeedback tone="error">
+          {learnerSshError("clipboard is not available")}
+        </InlineFeedback>
       ) : null}
     </div>
   );

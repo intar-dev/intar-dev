@@ -78,7 +78,7 @@ test("a lecture start click records terminal-start evidence", async ({ page, ui 
       response.url().endsWith("/api/scenarios/repair-nginx/start") &&
       response.status() === 202,
   );
-  await page.getByRole("button", { name: "Start scenario" }).click();
+  await page.getByRole("link", { name: "Start scenario" }).click();
   await startResponse;
   await expect(page).toHaveURL("/runs/run-active");
   await expect(page.locator('[data-terminal-status="connected"]')).toBeVisible();

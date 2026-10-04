@@ -4,7 +4,8 @@
 //! into per-session replay media: one asciicast per SSH session plus a
 //! timeline document (session metadata and plain-text transcripts) that the
 //! agent submits to the control plane. Only the casts become R2 artifacts;
-//! the timeline lives in the control plane's database.
+//! the timeline lives in the control plane's database. Checks that passed
+//! during a session are `m` (marker) events in its cast.
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +13,7 @@ use anyhow::{Context as _, Result};
 use serde::Serialize;
 use tracing::warn;
 
+use super::check_passes::{load_check_passes, session_check_markers};
 use super::krec::{ParsedKrec, parse_krec};
 use super::replay_compose::compose_session;
 use super::transcript::{render_transcript, trim_transcript_to_byte_limit};
@@ -89,27 +91,37 @@ pub(crate) async fn render_session_media_into(
     // lexicographic order is the chronological order.
     krec_paths.sort();
 
+    let artifacts_dir = artifacts_dir.to_path_buf();
     let output_dir = output_dir.to_path_buf();
     let rendered = tokio::task::spawn_blocking(move || -> Result<Option<RenderedSessionMedia>> {
         let mut cast_paths = Vec::new();
         let mut sessions = Vec::new();
+        let check_passes = load_check_passes(&artifacts_dir);
 
-        for path in &krec_paths {
-            let session = match parse_krec_file(path) {
-                Ok(session) => session,
+        // Parsed one ahead: a session's check markers end where the next
+        // session starts.
+        let mut parsed = krec_paths
+            .iter()
+            .filter_map(|path| match parse_krec_file(path) {
+                Ok(session) => Some((path, session)),
                 Err(error) => {
                     warn!(
                         error = %error,
                         recording = %path.display(),
                         "skipping unparseable session recording"
                     );
-                    continue;
+                    None
                 }
-            };
+            })
+            .peekable();
 
+        while let Some((path, session)) = parsed.next() {
+            let next_start_ms = parsed.peek().map(|(_, next)| next.start_timestamp_ms);
+            let markers =
+                session_check_markers(&check_passes, session.start_timestamp_ms, next_start_ms);
             let index = u32::try_from(sessions.len() + 1).unwrap_or(u32::MAX);
             let cast_filename = format!("session-{index:02}.cast");
-            let cast = compose_session(&session)
+            let cast = compose_session(&session, &markers)
                 .with_context(|| format!("failed to compose {}", path.display()))?;
             let cast_path = output_dir.join(&cast_filename);
             std::fs::write(&cast_path, cast)
@@ -294,6 +306,7 @@ mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
+    use super::super::check_passes::CHECK_PASSES_FILENAME;
     use super::{
         TIMELINE_TRANSCRIPT_MAX_BYTES, TIMELINE_VERSION, TimelineSession,
         apply_timeline_transcript_budget, parse_cast, render_session_media_into,
@@ -384,6 +397,52 @@ mod tests {
             );
             assert!(parsed.events.iter().all(|event| event.time_s >= 0.0));
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn check_passes_become_markers_in_the_session_they_followed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        tokio::fs::write(
+            dir.path().join("ssh-session-1700000000000-10.krec"),
+            krec_fixture(80, 24, 1_700_000_000_000, &[(0, "a"), (1000, "b")]),
+        )
+        .await?;
+        tokio::fs::write(
+            dir.path().join("ssh-session-1700000100000-11.krec"),
+            krec_fixture(80, 24, 1_700_000_100_000, &[(0, "c"), (2000, "d")]),
+        )
+        .await?;
+        tokio::fs::write(
+            dir.path().join(CHECK_PASSES_FILENAME),
+            r#"{"nginx":1700000000500,"site":1700000005000,"port":1700000101000,"boot":1699999999000}"#,
+        )
+        .await?;
+
+        let rendered = render_session_media_into(dir.path(), dir.path())
+            .await?
+            .expect("session media should render");
+        let mut markers = Vec::new();
+        for path in &rendered.cast_paths {
+            let parsed = parse_cast(&tokio::fs::read_to_string(path).await?)?;
+            markers.push(
+                parsed
+                    .events
+                    .into_iter()
+                    .filter(|event| event.kind == "m")
+                    .map(|event| (event.payload, event.time_s))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(
+            markers,
+            vec![
+                // "site" passed after the first session's last output, before
+                // the second began: it marks the end of the first.
+                vec![("nginx".to_string(), 0.5), ("site".to_string(), 1.0)],
+                vec![("port".to_string(), 1.0)],
+            ]
+        );
         Ok(())
     }
 

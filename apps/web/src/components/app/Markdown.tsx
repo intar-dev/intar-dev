@@ -1,8 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, Copy } from "lucide-react";
+import { CodeBlock, useScrollCue } from "@/components/app/patterns/CodeBlock";
 import { cn } from "@/lib/utils";
+
+/** About 60 characters of 13px mono fit the narrowest reading column from bp-sm. */
+const KEEP_ON_ONE_LINE_MAX = 60;
 
 export function Markdown({
   children,
@@ -23,11 +26,24 @@ export function Markdown({
   const Heading1 = pageContent ? "h2" : headingOffset ? "h2" : "h1";
   const Heading2 = pageContent ? "h2" : headingOffset ? "h3" : "h2";
   const Heading3 = pageContent ? "h3" : headingOffset ? "h4" : "h3";
+  const Heading4 = pageContent ? "h4" : headingOffset ? "h5" : "h4";
+  const listRhythm = pageContent
+    ? "[&_li+li]:mt-[0.375em] [&_li>:is(ul,ol)]:mt-[0.375em]"
+    : "space-y-2";
+  const headingRest = cn(
+    "text-balance",
+    pageContent ? "font-semibold" : "text-label",
+  );
+  // Only reading text holds the measure; code blocks and tables use the
+  // column's full width.
   return (
     <div
       className={cn(
-        "space-y-4",
-        className ?? (pageContent ? "prose-measure text-prose" : "text-body"),
+        pageContent ? "prose-flow" : "space-y-4",
+        className ??
+          (pageContent
+            ? "text-prose [&>:not([data-wide])]:prose-measure"
+            : "text-support"),
       )}
     >
       <ReactMarkdown
@@ -39,7 +55,7 @@ export function Markdown({
             <Heading1
               className={cn(
                 "text-balance",
-                pageContent ? "pt-5 text-prose-heading" : "text-section-title",
+                pageContent ? "text-prose-heading" : "text-card-title",
               )}
             >
               {children}
@@ -49,7 +65,7 @@ export function Markdown({
             <Heading2
               className={cn(
                 "text-balance",
-                pageContent ? "pt-5 text-prose-heading" : "text-card-title",
+                pageContent ? "text-prose-heading" : "text-card-title",
               )}
             >
               {children}
@@ -60,18 +76,39 @@ export function Markdown({
               className={cn(
                 "text-balance",
                 pageContent
-                  ? "pt-3 text-prose-subheading"
-                  : "text-base font-semibold",
+                  ? "text-prose-subheading"
+                  : "text-support font-semibold",
               )}
             >
               {children}
             </Heading3>
           ),
+          h4: ({ children }) => (
+            <Heading4 className={headingRest}>{children}</Heading4>
+          ),
+          h5: ({ children }) => (
+            <Heading4 className={headingRest}>{children}</Heading4>
+          ),
+          h6: ({ children }) => (
+            <Heading4 className={headingRest}>{children}</Heading4>
+          ),
           p: ({ children }) => <p>{children}</p>,
+          hr: () => <hr className={pageContent ? undefined : "my-4"} />,
+          blockquote: ({ children }) => (
+            <blockquote
+              className={
+                pageContent
+                  ? "border-l border-border-strong pl-[1em] text-muted-foreground italic"
+                  : "border-l border-border-strong pl-3 text-muted-foreground"
+              }
+            >
+              {children}
+            </blockquote>
+          ),
           a: ({ children, ...props }) => (
             <a
               {...props}
-              className="font-medium text-brand-text underline decoration-brand-border underline-offset-4 transition-colors duration-150 hover:decoration-current"
+              className="text-brand-text underline decoration-1 decoration-[color-mix(in_oklab,var(--brand-text)_35%,transparent)] underline-offset-[0.18em] transition-[text-decoration-color] duration-(--duration-fast) ease-standard hover:decoration-current"
               target={props.href?.startsWith("http") ? "_blank" : undefined}
               rel={props.href?.startsWith("http") ? "noreferrer" : undefined}
             >
@@ -79,36 +116,67 @@ export function Markdown({
             </a>
           ),
           ul: ({ children }) => (
-            <ul className="list-disc space-y-2 pl-5 marker:text-faint-foreground">
+            <ul className={cn("list-disc pl-5 marker:text-faint-foreground", listRhythm)}>
               {children}
             </ul>
           ),
           ol: ({ children }) => (
-            <ol className="list-decimal space-y-2 pl-5 marker:font-medium marker:text-faint-foreground">
+            <ol
+              className={cn(
+                "list-decimal pl-5 marker:text-faint-foreground",
+                !pageContent && "marker:font-medium",
+                listRhythm,
+              )}
+            >
               {children}
             </ol>
           ),
-          li: ({ children }) => <li className="pl-1">{children}</li>,
+          li: ({ children }) => (
+            <li className={pageContent ? undefined : "pl-1"}>{children}</li>
+          ),
           code: ({ children }) => (
-            <code className="box-decoration-clone rounded-[0.3125rem] border border-border bg-muted px-1.5 py-px font-mono text-[0.8125em] text-foreground">
+            <code
+              className={cn(
+                "box-decoration-clone rounded-xs border border-border bg-muted px-[0.3125rem] py-px font-mono font-normal tracking-normal text-foreground",
+                pageContent
+                  ? cn(
+                      "text-[0.8125em] [overflow-wrap:anywhere]",
+                      // A path stays on one line from bp-sm, but only one that
+                      // fits the reading column; a longer span would spill out
+                      // of it, so it wraps anywhere instead.
+                      typeof children === "string" &&
+                        children.length <= KEEP_ON_ONE_LINE_MAX &&
+                        "sm:whitespace-nowrap",
+                    )
+                  : "text-code",
+              )}
+            >
               {children}
             </code>
           ),
-          pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+          pre: ({ node, children }) => (
+            <CodeBlock language={fenceLanguage(node)}>{children}</CodeBlock>
+          ),
           table: ({ children }) => (
-            <div className="overflow-x-auto rounded-lg border">
+            <TableScroller>
               <table className="w-full border-collapse text-left text-sm">
                 {children}
               </table>
-            </div>
+            </TableScroller>
           ),
-          th: ({ children }) => (
-            <th className="border-b bg-muted/60 px-3 py-2 text-xs font-medium text-faint-foreground">
+          th: ({ children, style }) => (
+            <th
+              style={style}
+              className="h-9 border-b px-3 text-left text-label whitespace-nowrap"
+            >
               {children}
             </th>
           ),
-          td: ({ children }) => (
-            <td className="border-b px-3 py-2 align-top [tr:last-child>&]:border-b-0">
+          td: ({ children, style }) => (
+            <td
+              style={style}
+              className="border-b px-3 py-2 align-top [tr:last-child>&]:border-b-0"
+            >
               {children}
             </td>
           ),
@@ -120,55 +188,37 @@ export function Markdown({
   );
 }
 
-// Commands read as terminal material in both themes. Copy confirms in place:
-// the icon swaps to a check and the label says so, then settles back.
-function CodeBlock({ children }: { children: ReactNode }) {
-  const preRef = useRef<HTMLPreElement>(null);
-  const [copied, setCopied] = useState(false);
+// The fence language from the code child's `language-xxx` class.
+function fenceLanguage(node: {
+  children?: readonly unknown[];
+} | undefined): string | undefined {
+  const code = node?.children?.[0] as
+    | { type?: string; properties?: { className?: unknown } }
+    | undefined;
+  if (code?.type !== "element") return undefined;
+  const names = code.properties?.className;
+  const list = Array.isArray(names) ? names : [names];
+  for (const name of list) {
+    const match = /^language-(\S+)$/.exec(String(name ?? ""));
+    if (match) return match[1];
+  }
+  return undefined;
+}
 
-  useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 1600);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
-
-  const copy = () => {
-    const text = preRef.current?.textContent ?? "";
-    if (!text || !navigator.clipboard) return;
-    navigator.clipboard.writeText(text.replace(/\n$/, "")).then(
-      () => setCopied(true),
-      () => {
-        // Clipboard access can be denied; the block stays selectable.
-      },
-    );
-  };
-
+function TableScroller({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const overflowing = useScrollCue(ref);
   return (
-    <div className="group/code relative">
-      <pre
-        ref={preRef}
-        className="overflow-x-auto rounded-lg border border-terminal-border bg-terminal-background py-3 pr-20 pl-4 text-[0.8125rem] leading-6 text-terminal-foreground [&_code]:border-0 [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-[1em] [&_code]:text-inherit"
-      >
-        {children}
-      </pre>
-      <button
-        type="button"
-        onClick={copy}
-        aria-label={copied ? "Copied" : "Copy code"}
-        className={cn(
-          "absolute top-1.5 right-1.5 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-[color,background-color,opacity] duration-150 ease-standard hover:bg-white/8 focus-visible:opacity-100 sm:opacity-0 sm:group-hover/code:opacity-100 [@media(pointer:coarse)]:opacity-100",
-          copied
-            ? "text-terminal-success sm:opacity-100"
-            : "text-terminal-muted hover:text-terminal-foreground",
-        )}
-      >
-        {copied ? (
-          <Check className="size-3.5 animate-pop" aria-hidden="true" />
-        ) : (
-          <Copy className="size-3.5" aria-hidden="true" />
-        )}
-        <span aria-hidden="true">{copied ? "Copied" : "Copy"}</span>
-      </button>
+    <div
+      ref={ref}
+      data-wide
+      data-scroll-fade
+      {...(overflowing
+        ? { tabIndex: 0, role: "region", "aria-label": "Table" }
+        : {})}
+      className="overflow-x-auto rounded-xl border bg-card"
+    >
+      {children}
     </div>
   );
 }

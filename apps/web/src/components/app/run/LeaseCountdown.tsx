@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { Clock3 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Hint } from "@/components/app/patterns/Hint";
 import { formatCountdown, leaseInfo, type LeaseState } from "@/lib/run-lease";
 
 const TONE: Record<LeaseState, string> = {
   ok: "text-muted-foreground",
   warning: "text-warning",
-  critical: "text-destructive motion-safe:animate-pulse",
+  critical: "text-destructive",
   expired: "text-destructive",
 };
 
@@ -31,31 +32,40 @@ export function LeaseCountdown({
   const countdown = formatCountdown(info.remainingMs);
 
   return (
-    <span
-      aria-label={
-        info.state === "expired"
-          ? "Sandbox lease expired"
-          : `Time remaining: ${countdown}`
+    <Hint
+      essential
+      label="Time remaining before this sandbox is torn down"
+      side="bottom"
+      render={
+        <span
+          aria-label={
+            info.state === "expired"
+              ? "Sandbox lease expired"
+              : info.state === "ok"
+                ? `Time remaining: ${countdown}`
+                : // Colour alone never carries the state.
+                  `Sandbox ending soon, ${countdown} left`
+          }
+          className={cn(
+            "inline-flex items-center gap-1.5 whitespace-nowrap text-xs tabular-nums",
+            TONE[info.state],
+            className,
+          )}
+          data-run-lease-countdown
+          role="timer"
+        />
       }
-      className={cn(
-        "inline-flex items-center gap-1.5 whitespace-nowrap text-xs tabular-nums",
-        TONE[info.state],
-        className,
-      )}
-      data-run-lease-countdown
-      role="timer"
-      title="Time remaining before this sandbox is torn down"
     >
       <Clock3 className="size-3.5" aria-hidden="true" />
       {info.state === "expired" ? (
         <span data-run-lease-countdown-text>Lease expired</span>
       ) : (
         <span data-run-lease-countdown-text>
-          {countdown}
+          <span className="font-mono">{countdown}</span>
           <span className="hidden sm:inline"> left</span>
         </span>
       )}
-    </span>
+    </Hint>
   );
 }
 

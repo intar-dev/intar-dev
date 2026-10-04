@@ -3,10 +3,13 @@ import {
   type ReactNode,
   useContext,
   useEffect,
+  useCallback,
   useMemo,
+  useRef,
   useState,
 } from "react";
-import { Laptop2, Moon, Sun } from "lucide-react";
+import { flushSync } from "react-dom";
+import { Monitor, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -45,8 +48,28 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 export function ThemeProvider(props: { children: ReactNode }) {
-  const [theme, setTheme] = useState<AppTheme>(getInitialTheme);
+  const [theme, setThemeState] = useState<AppTheme>(getInitialTheme);
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
   const resolvedTheme = resolveTheme(theme);
+
+  // A user's choice that changes the resolved theme cross-fades the whole
+  // document (a View Transition). The load, and a system change, never do.
+  const setTheme = useCallback((next: AppTheme) => {
+    const commit = () => flushSync(() => setThemeState(next));
+    const root = document.documentElement;
+    const changes = root.classList.contains("dark") !== (resolveTheme(next) === "dark");
+    if (!changes || typeof document.startViewTransition !== "function") {
+      commit();
+      return;
+    }
+    document
+      .startViewTransition(() => {
+        applyTheme(next);
+        commit();
+      })
+      .ready.catch(() => {});
+  }, []);
 
   useEffect(() => {
     applyTheme(theme);
@@ -72,10 +95,10 @@ export function ThemeProvider(props: { children: ReactNode }) {
     () => ({
       theme,
       resolvedTheme,
-      cycleTheme: () => setTheme((current) => getNextTheme(current)),
+      cycleTheme: () => setTheme(getNextTheme(themeRef.current)),
       setTheme,
     }),
-    [resolvedTheme, theme],
+    [resolvedTheme, setTheme, theme],
   );
 
   return (
@@ -87,7 +110,9 @@ export function ThemeProvider(props: { children: ReactNode }) {
 
 export function ThemeToggle({ className }: { className?: string }) {
   const { theme, cycleTheme } = useTheme();
-  const { icon, label, nextLabel } = getThemeMeta(theme);
+  const { nextLabel } = getThemeMeta(theme);
+  // One short, input-neutral phrase names the control and fills the tooltip.
+  const name = `Switch to ${nextLabel} theme`;
 
   return (
     <Tooltip>
@@ -99,15 +124,18 @@ export function ThemeToggle({ className }: { className?: string }) {
             size="icon-sm"
             className={className}
             onClick={cycleTheme}
-            aria-label={`Theme: ${label}. Click to switch to ${nextLabel}.`}
+            aria-label={name}
           >
-            {icon}
+            {/* The three icons share one cell; the current one turns into place. */}
+            <span data-theme-icon="" aria-hidden="true">
+              <Sun className="size-4" data-on={theme === "light" || undefined} />
+              <Moon className="size-4" data-on={theme === "dark" || undefined} />
+              <Monitor className="size-4" data-on={theme === "system" || undefined} />
+            </span>
           </Button>
         }
       />
-      <TooltipContent side="bottom" sideOffset={8}>
-        {label} theme
-      </TooltipContent>
+      <TooltipContent side="bottom">{name}</TooltipContent>
     </Tooltip>
   );
 }
@@ -166,22 +194,10 @@ function getNextTheme(theme: AppTheme): AppTheme {
 function getThemeMeta(theme: AppTheme) {
   switch (theme) {
     case "light":
-      return {
-        icon: <Sun className="size-4" />,
-        label: "Light",
-        nextLabel: "Dark",
-      };
+      return { nextLabel: "Dark" };
     case "dark":
-      return {
-        icon: <Moon className="size-4" />,
-        label: "Dark",
-        nextLabel: "System",
-      };
+      return { nextLabel: "System" };
     default:
-      return {
-        icon: <Laptop2 className="size-4" />,
-        label: "System",
-        nextLabel: "Light",
-      };
+      return { nextLabel: "Light" };
   }
 }

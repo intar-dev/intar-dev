@@ -152,10 +152,38 @@ pub(super) async fn apply_kino_ready_snapshot(
         }
         committed
     };
+    record_vm_check_passes(inner, vm_name, &update).await;
     if may_project {
         let _ = inner.probe_updates_tx.send(update);
     }
     Ok(())
+}
+
+/// Keeps each check's first pass beside the VM's artifacts, where the replay
+/// renderer turns it into a marker. Legacy rows without a per-VM spool get
+/// no markers. A failure costs only the markers, never the snapshot.
+#[cfg(target_os = "linux")]
+async fn record_vm_check_passes(inner: &Inner, vm_name: &str, update: &ProbeUpdateEnvelope) {
+    let artifacts_dir = {
+        let states = inner.states.read().await;
+        states
+            .get(vm_name)
+            .and_then(|vm| vm.details.as_ref())
+            .and_then(|details| details.spool_dir.as_deref())
+            .map(|spool_dir| Path::new(spool_dir).join("artifacts"))
+    };
+    let Some(artifacts_dir) = artifacts_dir else {
+        return;
+    };
+    if let Err(error) = crate::vm::check_passes::record_check_passes(
+        &artifacts_dir,
+        &update.probes,
+        update.generated_at_ms,
+    )
+    .await
+    {
+        warn!(error = %error, vm = vm_name, "failed to record check passes");
+    }
 }
 
 #[cfg(target_os = "linux")]

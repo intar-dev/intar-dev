@@ -28,7 +28,7 @@ describe("run learning panel", () => {
     ).toEqual({
       visibleLabel: "Checks 1/3",
       accessibleLabel:
-        "Open lecture theory and hints. 1 of 2 hints revealed. 1 of 3 checks verified.",
+        "Checks 1/3. 1 of 2 hints revealed. Opens checks, lecture and hints.",
     });
     expect(
       getRunLearningTriggerCopy({
@@ -40,7 +40,22 @@ describe("run learning panel", () => {
     ).toEqual({
       visibleLabel: "Checks 3/3",
       accessibleLabel:
-        "Open lecture theory and hints. No hints are available. 3 of 3 checks verified.",
+        "Checks 3/3. No hints are available. Opens checks, lecture and hints.",
+    });
+  });
+
+  it("shows no count in the trigger while there are no checks", () => {
+    expect(
+      getRunLearningTriggerCopy({
+        passedChecks: 0,
+        totalChecks: 0,
+        revealedHints: 0,
+        totalHints: 0,
+      }),
+    ).toEqual({
+      visibleLabel: "Checks",
+      accessibleLabel:
+        "Checks. No hints are available. Opens checks, lecture and hints.",
     });
   });
 
@@ -87,15 +102,15 @@ describe("run learning panel", () => {
 
     expect(desktopMarkup).toContain('data-run-learning-panel="true"');
     expect(desktopMarkup).toContain('data-run-learning-panel-scroll="true"');
-    expect(desktopMarkup).toContain('aria-label="Lecture theory and hints"');
+    expect(desktopMarkup).toContain('aria-label="Checks, lecture and hints"');
     expect(desktopMarkup).toContain(
-      'aria-label="Lecture theory and hints content"',
+      'aria-label="Checks, lecture and hints content"',
     );
     expect(desktopMarkup).toContain('tabindex="0"');
     expect(desktopMarkup).toContain("w-full");
     expect(desktopMarkup).not.toContain("max-w-[40dvw]");
     expect(desktopMarkup).toContain('data-run-pinned-checks="true"');
-    expect(desktopMarkup).toContain("Lecture theory");
+    expect(desktopMarkup).toContain(">Lecture</h2>");
     expect(desktopMarkup).toContain("Repair the service safely.");
     expect(desktopMarkup).not.toContain('data-run-learning-panel-trigger="true"');
     expect(desktopMarkup).not.toContain("data-run-guidance-rail");
@@ -106,9 +121,12 @@ describe("run learning panel", () => {
     expect(mobileMarkup).toContain('data-run-learning-panel-trigger="true"');
     expect(mobileMarkup).toContain("Checks 0/1");
     expect(mobileMarkup).toContain(
-      'aria-label="Open lecture theory and hints. 0 of 2 hints revealed. 0 of 1 checks verified."',
+      'aria-label="Checks 0/1. 0 of 2 hints revealed. Opens checks, lecture and hints."',
     );
     expect(mobileMarkup).toContain("h-11");
+    // One nowrap box: in a flex or grid parent (the dock tab) the label would
+    // otherwise split into "Checks", "0" and "/1" items.
+    expect(mobileMarkup).toMatch(/<span class="whitespace-nowrap">Checks /);
     expect(mobileMarkup).not.toContain("data-run-guidance-rail");
   });
 
@@ -162,7 +180,7 @@ describe("run learning panel", () => {
     }));
     const markup = renderContent({ probes, objectives });
 
-    expect(markup.match(/Needs repair/g)).toHaveLength(8);
+    expect(markup.match(/data-check-status="needs_repair"/g)).toHaveLength(8);
     expect(markup.replace(/<[^>]+>/g, "")).toContain("0/8 verified");
     expect(markup).toContain("Learner check 8");
   });
@@ -172,12 +190,12 @@ describe("run learning panel", () => {
       briefingMarkdown: "Read the **service status** before you change it.",
     });
 
-    expect(markup).toContain("Lecture theory");
+    expect(markup).toContain(">Lecture</h2>");
     expect(markup).toContain("service status");
     expect(markup.indexOf("Checks")).toBeLessThan(
-      markup.indexOf("Lecture theory"),
+      markup.indexOf(">Lecture</h2>"),
     );
-    expect(markup.indexOf("Lecture theory")).toBeLessThan(
+    expect(markup.indexOf(">Lecture</h2>")).toBeLessThan(
       markup.indexOf("service status"),
     );
     expect(markup.indexOf("service status")).toBeLessThan(
@@ -217,8 +235,8 @@ describe("run learning panel", () => {
       probes: [probe({ status: "pending" })],
     });
 
-    expect(markup).toContain("Checking");
-    expect(markup).not.toContain("Needs repair");
+    expect(markup).toContain('data-check-status="checking"');
+    expect(markup).not.toContain('data-check-status="needs_repair"');
   });
 
   it("scopes duplicate probe names to the selected authored machine", () => {
@@ -304,7 +322,8 @@ describe("run learning panel", () => {
       failedHintKey: "first",
     });
 
-    expect(markup).toContain("Could not reveal this hint. Try again.");
+    expect(markup).toContain("Could not reveal this hint.");
+    expect(markup).toContain('role="alert"');
     expect(markup).not.toContain(rawError);
   });
 
@@ -362,6 +381,61 @@ describe("run learning panel", () => {
     expect(markup).not.toContain("data-run-learning-sticky-summary");
     expect(markup).not.toContain("probe");
     expect(markup).not.toContain("machine itself");
+    expect(markup).not.toContain("0/0");
+  });
+
+  it("renders a run that loads solved as a closed line without the current", () => {
+    const solved = renderContent({
+      phase: "solved",
+      probes: [probe({ status: "passed" })],
+    });
+    expect(solved).toContain("data-checks-bar");
+    expect(solved).toContain('data-closed="true"');
+    expect(solved).not.toContain("data-current");
+
+    // Every check verified but the run is not solved (another machine is
+    // still open): the segments stay apart.
+    expect(
+      renderContent({
+        phase: "running",
+        runSolved: false,
+        probes: [probe({ status: "passed" })],
+      }),
+    ).not.toContain("data-closed");
+    expect(renderContent({ phase: "running" })).not.toContain("data-closed");
+  });
+
+  it("stacks every status word and icon in one box and marks only the current layer", () => {
+    const markup = renderContent({ probes: [probe({ status: "passed" })] });
+
+    expect(markup.match(/data-swap="end"/g)).toHaveLength(1);
+    expect(markup.match(/data-on="true"/g)).toHaveLength(2);
+    expect(renderContent()).toContain("bg-border-strong/70");
+  });
+
+  it("can leave the bar out when it is pinned elsewhere", () => {
+    expect(renderContent({ hideCircuit: true })).not.toContain(
+      "data-checks-bar",
+    );
+  });
+
+  it("keeps hint rows still on load and names each ladder", () => {
+    const markup = renderContent({
+      hints: [
+        hint({
+          key: "first",
+          revealed: true,
+          title: "Start here",
+          bodyMarkdown: "Read the service status.",
+        }),
+        hint({ key: "second", unlocked: true }),
+      ],
+    });
+
+    expect(markup).not.toContain("animate-rise");
+    expect(markup).not.toContain("data-just");
+    expect(markup).toContain('aria-labelledby="');
+    expect(markup).toContain('role="status"');
   });
 });
 

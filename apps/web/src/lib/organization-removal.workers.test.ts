@@ -145,6 +145,15 @@ it("lets a platform admin restore someone without being a member", async () => {
   expect(await env.DB.prepare("SELECT user_id FROM organization_member_removals").first()).toBeNull();
   await expect(restoreRemovedMemberAsPlatformAdmin({ organizationId: "org-a", userId: "learner", actorUserId: "platform-admin" })).rejects.toMatchObject({ code: "removed_member_not_found" });
 });
+it("carries each person's photo on members and removed members", async () => {
+  await env.DB.prepare("UPDATE user SET image = 'https://img.test/learner.png' WHERE id = 'learner'").run();
+  const before = await getOrganizationDetail({ organizationKey: "org-a", userId: "owner" });
+  expect(before.members.find((m) => m.userId === "learner")?.image).toBe("https://img.test/learner.png");
+  expect(before.members.find((m) => m.userId === "owner")?.image).toBeNull();
+  await removeOrganizationMember({ organizationId: "org-a", memberId: "learner-member", actorUserId: "owner" });
+  const after = await getOrganizationDetail({ organizationKey: "org-a", userId: "owner" });
+  expect(after.removedMembers[0]?.image).toBe("https://img.test/learner.png");
+});
 it("shows removed people to organization admins only", async () => {
   await removeOrganizationMember({ organizationId: "org-a", memberId: "learner-member", actorUserId: "owner" });
   const asOwner = await getOrganizationDetail({ organizationKey: "org-a", userId: "owner" });

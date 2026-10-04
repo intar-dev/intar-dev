@@ -1,3 +1,4 @@
+import type { ReplayCheck } from "@/components/app/RunArtifactViewerModel";
 import {
   isVerificationPassed,
   repairObjectiveTitle,
@@ -44,7 +45,21 @@ export interface RunReplayPart {
   castArtifactId: string | null;
   /** Used only to keep oversized casts out of browser memory. */
   sizeBytes?: number;
+  /**
+   * The checks of this part's machine. The cast marks when each one first
+   * passed by its probe name; the replay names it by number and title.
+   */
+  checks?: RunReplayCheck[];
+  /**
+   * "part" when the machine has several replay parts: each cast then holds only
+   * the checks that first passed in its session, so the part cannot claim a
+   * total. Absent when the part is the machine's whole history.
+   */
+  checksScope?: "part";
 }
+
+/** `number` is the objective's place among the run's final checks. */
+export type RunReplayCheck = ReplayCheck;
 
 export type RunReplayAvailability =
   | "ready"
@@ -150,23 +165,32 @@ export function getRunReplayParts(run: ScenarioRunRecord): RunReplayPart[] {
         ),
   );
 
-  return orderedSessions
-    .filter((entry) => entry.session.castArtifactId)
-    .map((entry, index) => {
-      const castArtifactId = entry.session.castArtifactId;
-      const sizeBytes = castArtifactId
-        ? replaySizeByArtifactId.get(castArtifactId)
-        : undefined;
-      return {
-        key: `replay-${castArtifactId}`,
-        machineLabel: hasMultipleMachines
-          ? authoredMachineLabel(entry.vm, entry.vmIndex)
-          : null,
-        partLabel: `Part ${index + 1}`,
-        castArtifactId,
-        ...(sizeBytes === undefined ? {} : { sizeBytes }),
-      };
-    });
+  const replayed = orderedSessions.filter(
+    (entry) => entry.session.castArtifactId,
+  );
+  const partsByVm = new Map<ScenarioRunVmRecord, number>();
+  for (const { vm } of replayed) partsByVm.set(vm, (partsByVm.get(vm) ?? 0) + 1);
+
+  return replayed.map((entry, index) => {
+    const castArtifactId = entry.session.castArtifactId;
+    const sizeBytes = castArtifactId
+      ? replaySizeByArtifactId.get(castArtifactId)
+      : undefined;
+    const checks = replayChecks(run, entry.vm);
+    return {
+      key: `replay-${castArtifactId}`,
+      machineLabel: hasMultipleMachines
+        ? authoredMachineLabel(entry.vm, entry.vmIndex)
+        : null,
+      partLabel: `Part ${index + 1}`,
+      castArtifactId,
+      ...(sizeBytes === undefined ? {} : { sizeBytes }),
+      ...(checks.length ? { checks } : {}),
+      ...(checks.length && (partsByVm.get(entry.vm) ?? 0) > 1
+        ? { checksScope: "part" as const }
+        : {}),
+    };
+  });
 }
 
 export function getRunReplayAvailability(
@@ -186,23 +210,42 @@ export function getRunReplayAvailability(
   }
 }
 
-function findObjectiveProbe(
-  run: ScenarioRunRecord,
-  objective: ScenarioObjective,
-) {
+/** The machines an objective's probe runs on. */
+function objectiveVms(run: ScenarioRunRecord, objective: ScenarioObjective) {
   const matchingVms = run.vms.filter(
     (vm) =>
       vm.scenarioVmName === objective.vmName ||
       vm.scenarioVmId === objective.vmName,
   );
-  const candidates =
-    matchingVms.length > 0
-      ? matchingVms
-      : run.vms.length === 1
-        ? run.vms
-        : [];
+  return matchingVms.length > 0
+    ? matchingVms
+    : run.vms.length === 1
+      ? run.vms
+      : [];
+}
 
-  return candidates
+function replayChecks(
+  run: ScenarioRunRecord,
+  vm: ScenarioRunVmRecord,
+): RunReplayCheck[] {
+  return run.objectives.flatMap((objective, index) =>
+    objectiveVms(run, objective).includes(vm)
+      ? [
+          {
+            probeName: objective.probeName,
+            number: index + 1,
+            title: repairObjectiveTitle(objective, index),
+          },
+        ]
+      : [],
+  );
+}
+
+function findObjectiveProbe(
+  run: ScenarioRunRecord,
+  objective: ScenarioObjective,
+) {
+  return objectiveVms(run, objective)
     .flatMap((vm) => vm.scenarioProbes)
     .find((probe) => probe.id === objective.probeName);
 }

@@ -1,29 +1,28 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, Building2, LockKeyhole, Plus, Users } from "lucide-react";
+import { ArrowRight, Building2, LockKeyhole, Plus } from "lucide-react";
+import { describeApiError } from "../lib/api-errors";
 import { formatRelativeTime } from "../lib/format";
+import { HttpResponseError } from "../lib/http-response-error";
+import { InlineFeedback } from "../patterns/InlineFeedback";
+import { AsyncLabel } from "../patterns/AsyncLabel";
+import { Field } from "../patterns/Field";
+import { WhyDisabled } from "../patterns/Hint";
+import { MetaLine } from "../patterns/MetaLine";
 import { PageShell } from "../patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
 } from "../patterns/CollectionPagination";
-import { CardGridSkeleton } from "../patterns/Skeletons";
+import { ListSkeleton } from "../patterns/Skeletons";
 import { EmptyState, ErrorState } from "../patterns/StateCard";
 import { usePageChrome } from "../shell/page-chrome";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { SideSheet } from "../patterns/SideSheet";
 import { Input } from "@/components/ui/input";
+import { ORGANIZATION_NAME_MAX, reject } from "./organization-detail/reject";
 
 interface OrganizationSummary {
   id: string;
@@ -46,7 +45,10 @@ export function Organizations() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [createOpen, setCreateOpen] = useState(false);
+  const nameInput = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
+  // A refused submit (too short) says why at the field and nudges it.
+  const [nameProblem, setNameProblem] = useState<string | null>(null);
 
   const organizations = useQuery({
     queryKey: ["organizations", "list"],
@@ -58,9 +60,7 @@ export function Organizations() {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(
-          body?.error ?? `Failed to load organizations (${response.status})`,
-        );
+        throw new Error(body?.error ?? "Could not load your organizations.");
       }
       return (await response.json()) as OrganizationsResponse;
     },
@@ -80,8 +80,10 @@ export function Organizations() {
         error?: string;
       } | null;
       if (!response.ok || !body?.organization) {
-        throw new Error(
-          body?.error ?? `Failed to create organization (${response.status})`,
+        throw HttpResponseError.fromBody(
+          response.status,
+          body,
+          "The organization couldn't be created. Try again.",
         );
       }
       return body.organization;
@@ -97,10 +99,15 @@ export function Organizations() {
     },
   });
 
+  const createFailure = describeApiError<"name">(createOrganization.error, {
+    fallback: "The organization couldn't be created. Try again.",
+    defaultField: "name",
+  });
   const creation = organizations.data?.creation;
   const openCreate = useCallback(() => {
     if (!creation?.enabled) return;
     setName("");
+    setNameProblem(null);
     createOrganization.reset();
     setCreateOpen(true);
   }, [createOrganization, creation?.enabled]);
@@ -108,11 +115,8 @@ export function Organizations() {
   usePageChrome({
     action: useMemo(
       () => (
-        <Button
-          size="sm"
-          onClick={openCreate}
-          disabled={!creation?.enabled}
-          title={
+        <WhyDisabled
+          reason={
             creation?.reason === "owner_limit_reached"
               ? "Each selected account can own one organization"
               : creation?.reason === "not_selected"
@@ -120,9 +124,11 @@ export function Organizations() {
                 : undefined
           }
         >
-          <Plus className="size-3.5" />
-          New organization
-        </Button>
+          <Button size="sm" onClick={openCreate} disabled={!creation?.enabled}>
+            <Plus className="size-3.5" />
+            New organization
+          </Button>
+        </WhyDisabled>
       ),
       [creation?.enabled, creation?.reason, openCreate],
     ),
@@ -134,57 +140,82 @@ export function Organizations() {
 
   return (
     <PageShell>
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Create an organization</DialogTitle>
-            <DialogDescription>
-              Set up private identity, scenario, and runner boundaries. You can
-              own one organization.
-            </DialogDescription>
-          </DialogHeader>
-          <form
-            id="create-organization-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (name.trim().length >= 2 && !createOrganization.isPending) {
-                createOrganization.mutate();
-              }
-            }}
-          >
-            <Input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Organization name"
-              aria-label="Organization name"
-              autoFocus
-            />
-            {createOrganization.error ? (
-              <p className="mt-2 text-sm text-destructive">
-                {createOrganization.error instanceof Error
-                  ? createOrganization.error.message
-                  : "Failed to create organization"}
-              </p>
-            ) : null}
-          </form>
-          <DialogFooter>
+      <SideSheet
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        title="Create an organization"
+        description="Set up private identity, scenario, and runner boundaries. You can own one organization."
+        initialFocus={nameInput}
+        data-create-organization-sheet
+        footer={
+          <>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
             <Button
               type="submit"
               form="create-organization-form"
-              disabled={name.trim().length < 2 || createOrganization.isPending}
+              aria-busy={createOrganization.isPending || undefined}
+              disabled={createOrganization.isPending}
+              focusableWhenDisabled
             >
-              {createOrganization.isPending ? "Creating…" : "Create"}
+              <AsyncLabel
+                state={createOrganization.isPending ? "pending" : "idle"}
+                idle="Create"
+                pending="Creating…"
+              />
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </>
+        }
+      >
+        <form
+          id="create-organization-form"
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (createOrganization.isPending) return;
+            if (name.trim().length < 2) {
+              setNameProblem("Enter a name of 2 to 60 characters.");
+              reject(
+                event.currentTarget.querySelector<HTMLInputElement>("input"),
+              );
+              return;
+            }
+            createOrganization.mutate();
+          }}
+        >
+          <Field
+            label="Organization name"
+            error={
+              nameProblem ??
+              (createFailure?.field === "name" ? createFailure.message : null)
+            }
+          >
+            {(control) => (
+              <Input
+                {...control}
+                value={name}
+                onChange={(event) => {
+                  setName(event.target.value);
+                  setNameProblem(null);
+                }}
+                placeholder="Platform team"
+                maxLength={ORGANIZATION_NAME_MAX}
+                autoComplete="off"
+                ref={nameInput}
+              />
+            )}
+          </Field>
+          {createFailure && createFailure.field === null ? (
+            <InlineFeedback tone="error" className="mt-3">
+              {createFailure.message}
+            </InlineFeedback>
+          ) : null}
+        </form>
+      </SideSheet>
 
       {creation && !creation.enabled ? (
-        <Alert>
-          <LockKeyhole className="size-4" />
+        <Alert icon={<LockKeyhole />}>
           <AlertTitle>
             {creation.reason === "owner_limit_reached"
               ? "Organization ownership limit reached"
@@ -209,11 +240,7 @@ export function Organizations() {
           onRetry={() => void organizations.refetch()}
         />
       ) : organizations.isPending ? (
-        <CardGridSkeleton
-          cards={3}
-          cardClassName="h-24"
-          className="sm:grid-cols-1"
-        />
+        <ListSkeleton rows={3} action={false} />
       ) : entries.length ? (
         <section className="space-y-4" aria-labelledby="organizations-heading">
           <div className="flex items-end justify-between gap-4">
@@ -235,52 +262,40 @@ export function Organizations() {
             itemLabel="organizations"
           >
             {(visibleOrganizations) => (
-              <div className="space-y-3">
+              <ul className="surface-raised divide-y overflow-hidden rounded-xl border bg-card">
                 {visibleOrganizations.map((organization) => (
-                  <Link
-                    key={organization.id}
-                    to="/organizations/$orgId"
-                    params={{ orgId: organization.id }}
-                    className="group block rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-                  >
-                    <Card
-                      as="article"
-                      variant="interactive"
-                      className="gap-3 px-(--card-spacing)"
+                  <li key={organization.id}>
+                    <Link
+                      to="/organizations/$orgId"
+                      params={{ orgId: organization.id }}
+                      className="group flex min-h-16 items-center gap-3.5 px-4 py-3 transition-colors duration-(--duration-fast) ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:px-5 dark:hover:bg-accent/60"
                     >
-                      <div className="flex items-center gap-4">
-                        <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-brand-subtle text-brand-text">
-                          <Building2 className="size-5" />
+                      <span className="flex size-10 shrink-0 items-center justify-center rounded-[0.625rem] bg-brand-subtle text-brand-text ring-1 ring-brand-border/60">
+                        <Building2 className="size-5" aria-hidden="true" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-card-title [overflow-wrap:anywhere]">
+                          {organization.name}
                         </span>
-                        <div className="min-w-0 flex-1">
-                          <h2 className="text-card-title transition-colors group-hover:text-brand-text">
-                            {organization.name}
-                          </h2>
-                          <p className="mt-1 flex items-start gap-1.5 text-metadata">
-                            <Users className="mt-0.5 size-3.5 shrink-0" />
-                            <span className="min-w-0">
-                              {organization.memberCount} member
-                              {organization.memberCount === 1 ? "" : "s"} ·
-                              created{" "}
-                              {formatRelativeTime(organization.createdAt)}
-                            </span>
-                          </p>
-                        </div>
-                        <Badge
-                          variant={
-                            organization.role === "member"
-                              ? "outline"
-                              : "secondary"
-                          }
-                        >
-                          {roleLabel(organization.role)}
-                        </Badge>
-                        <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
-                      </div>
-                    </Card>
-                  </Link>
+                        <MetaLine
+                          as="span"
+                          dense
+                          className="mt-1"
+                          items={[
+                            `${organization.memberCount} member${organization.memberCount === 1 ? "" : "s"}`,
+                            roleLabel(organization.role),
+                            `Created ${formatRelativeTime(organization.createdAt)}`,
+                          ]}
+                        />
+                      </span>
+                      <ArrowRight
+                        className="size-4 shrink-0 text-faint-foreground transition-[translate,color] duration-(--duration-moderate) ease-enter group-hover:translate-x-(--move-nudge) group-hover:text-foreground group-focus-visible:translate-x-(--move-nudge) group-focus-visible:text-foreground"
+                        aria-hidden="true"
+                      />
+                    </Link>
+                  </li>
                 ))}
-              </div>
+              </ul>
             )}
           </PaginatedCollection>
         </section>

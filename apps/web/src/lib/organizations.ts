@@ -51,6 +51,7 @@ export interface OrganizationMemberRecord {
   name: string;
   email: string;
   githubUsername: string | null;
+  image: string | null;
   role: OrganizationRole;
   joinedAt: number;
 }
@@ -61,6 +62,7 @@ export interface OrganizationRemovedMemberRecord {
   name: string;
   email: string;
   githubUsername: string | null;
+  image: string | null;
   removedAt: number;
 }
 
@@ -276,6 +278,7 @@ export async function getOrganizationDetail(params: {
         name: user.name,
         email: user.email,
         githubUsername: user.username,
+        image: user.image,
         role: member.role,
         joinedAt: member.createdAt,
       })
@@ -748,6 +751,7 @@ export async function listOrganizationRemovedMembers(
       name: user.name,
       email: user.email,
       githubUsername: user.username,
+      image: user.image,
       removedAt: organizationMemberRemovals.removedAt,
     })
     .from(organizationMemberRemovals)

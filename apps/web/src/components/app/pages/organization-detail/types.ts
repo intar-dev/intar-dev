@@ -16,6 +16,7 @@ export interface OrganizationDetailResponse {
       name: string;
       email: string;
       githubUsername: string | null;
+      image: string | null;
       role: OrganizationRole;
       joinedAt: number;
     }>;
@@ -89,12 +90,13 @@ export async function mutationResponse(
   );
 }
 
+/** One letter, as in every list row. */
 export function initials(name: string): string {
   return (
     name
       .split(/\s+/)
       .filter(Boolean)
-      .slice(0, 2)
+      .slice(0, 1)
       .map((part) => part[0]?.toUpperCase() ?? "")
       .join("") || "?"
   );

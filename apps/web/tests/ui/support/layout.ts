@@ -102,6 +102,14 @@ export async function coarsePointerTargetViolations(page: Page) {
       "a[href]",
     ].join(",");
 
+    // A checkbox or radio keeps its 16px box; its wrapping label is the 44px
+    // target (viewports.md: Forms).
+    const targetOf = (element: HTMLElement): HTMLElement =>
+      element instanceof HTMLInputElement &&
+      (element.type === "checkbox" || element.type === "radio")
+        ? (element.closest("label") ?? element)
+        : element;
+
     return [...document.querySelectorAll<HTMLElement>(selector)]
       .filter((element) => {
         const inlineTextLink =
@@ -112,7 +120,7 @@ export async function coarsePointerTargetViolations(page: Page) {
         if (inlineTextLink) return false;
 
         const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
+        const rect = targetOf(element).getBoundingClientRect();
         return (
           element.tabIndex >= 0 &&
           style.display !== "none" &&
@@ -122,7 +130,7 @@ export async function coarsePointerTargetViolations(page: Page) {
         );
       })
       .map((element) => {
-        const rect = element.getBoundingClientRect();
+        const rect = targetOf(element).getBoundingClientRect();
         return {
           label:
             element.getAttribute("aria-label") ??
@@ -133,5 +141,21 @@ export async function coarsePointerTargetViolations(page: Page) {
         };
       })
       .filter((target) => target.width < 44 || target.height < 44);
+  });
+}
+
+// Reduced motion gives every property change a 0.01ms transition, so a root
+// font-size set from a test still reads as the old size until a later frame.
+// Wait it out: a rem-based layout measured half-way pairs the new panel width
+// with the old rem.
+export async function setRootTextScale200(page: Page) {
+  await page.evaluate(async () => {
+    const root = document.documentElement;
+    const rem = () => Number.parseFloat(getComputedStyle(root).fontSize);
+    const base = rem();
+    root.style.fontSize = "200%";
+    while (rem() < base * 2) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
   });
 }

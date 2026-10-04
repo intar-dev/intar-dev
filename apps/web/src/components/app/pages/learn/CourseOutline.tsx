@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef, useState } from "react";
-import { CheckCircle2, ListTree, LockKeyhole } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ListOrdered, LockKeyhole } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -9,9 +9,9 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import { useShortViewport } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { CourseLink, LectureLink } from "./course-links";
-import { LectureScenarioLabel } from "./LectureScenarioLabel";
 import { LectureProgressTrack } from "./LectureProgressTrack";
 import {
   lectureStatePresentation,
@@ -20,6 +20,7 @@ import {
   type CourseRouteRef,
 } from "./course-wire";
 import { RollingNumber } from "@/components/app/patterns/RollingNumber";
+import { useJustReached } from "@/components/app/patterns/use-just-reached";
 
 interface CourseOutlineProps {
   course: CourseCatalogCourse;
@@ -31,14 +32,12 @@ export function CourseOutlineRail(props: CourseOutlineProps) {
   return (
     <aside
       aria-label="Course outline"
-      className="hidden min-w-0 min-[1100px]:block"
+      className="hidden min-w-0 @min-[58rem]/panel:block"
       data-course-outline-rail
     >
+      {/* Below lg the bar also clears the top safe area (a notch). */}
       <div
-        className="sticky top-[calc(var(--app-bar-h)+2rem)] max-h-[calc(100dvh-var(--app-bar-h)-3.5rem)] overflow-y-auto overscroll-contain pl-2 pr-1"
-        role="region"
-        aria-label="Course outline navigation"
-        tabIndex={0}
+        className="sticky top-[calc(var(--app-bar-h)+env(safe-area-inset-top)+2rem)] max-h-[calc(100dvh-var(--app-bar-h)-env(safe-area-inset-top)-3.5rem)] overflow-y-auto overscroll-contain py-1 pl-2 pr-1 lg:top-[calc(var(--app-bar-h)+2rem)] lg:max-h-[calc(100dvh-var(--app-bar-h)-3.5rem)]"
       >
         <CourseOutlineContent {...props} />
       </div>
@@ -52,28 +51,58 @@ export function CourseOutlineMobile(props: CourseOutlineProps) {
     props.currentLectureId,
   );
 
+  const [open, setOpen] = useState(false);
+  const short = useShortViewport();
+  // Tablets and landscape phones get a side sheet; portrait phones a bottom
+  // one. Chosen when it opens, so it never flips under the reader's hands.
+  const [side, setSide] = useState<"bottom" | "right">("bottom");
+
+  // The trigger is hidden once the rail shows (a panel at least 58rem wide,
+  // which only the page's own container can tell); a sheet left open would
+  // stay a modal over a page that no longer has a trigger.
+  useEffect(() => {
+    const panel = document.getElementById("main-content");
+    if (!panel) return;
+    const observer = new ResizeObserver(() => {
+      const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+      if (panel.clientWidth >= 58 * rem) setOpen(false);
+    });
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <div className="min-[1100px]:hidden" data-course-outline-mobile>
-      <Sheet>
+    <div className="@min-[58rem]/panel:hidden" data-course-outline-mobile>
+      <Sheet
+        open={open}
+        onOpenChange={(next) => {
+          if (next) {
+            setSide(
+              short || window.matchMedia("(min-width: 48rem)").matches
+                ? "right"
+                : "bottom",
+            );
+          }
+          setOpen(next);
+        }}
+      >
         <SheetTrigger
           render={
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
-              className="gap-1.5 px-2.5"
-              aria-label={`Open course outline. Lecture ${position} of ${total}. ${completed} complete.`}
+              aria-label={`Course outline, lecture ${position} of ${total}`}
             />
           }
         >
-          <ListTree className="size-4" aria-hidden="true" />
-          <span className="tabular-nums">
-            {position}/{total}
-          </span>
+          <ListOrdered aria-hidden="true" />
+          <span className="max-md:hidden">Outline</span>
         </SheetTrigger>
         <SheetContent
-          side="bottom"
-          className="max-h-[min(82dvh,48rem)] gap-0 overflow-hidden rounded-t-2xl border-x border-t pb-[max(1rem,env(safe-area-inset-bottom))] !shadow-none motion-reduce:transition-none"
+          side={side}
+          handleLabel="Close course outline"
+          className="overflow-hidden data-[side=right]:gap-0 data-[side=right]:rounded-l-2xl"
           data-course-outline-sheet
         >
           <SheetHeader className="border-b pr-14">
@@ -85,9 +114,10 @@ export function CourseOutlineMobile(props: CourseOutlineProps) {
           </SheetHeader>
           <div
             className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4"
-            role="region"
-            aria-label="Course outline navigation"
-            tabIndex={0}
+            onClickCapture={(event) => {
+              // Choosing a lecture closes the sheet so it leaves before the page changes.
+              if ((event.target as Element).closest("a[href]")) setOpen(false);
+            }}
           >
             <CourseOutlineContent {...props} compact />
           </div>
@@ -103,36 +133,6 @@ function placeAt(element: HTMLElement, item: HTMLElement) {
   element.style.height = `${item.offsetHeight}px`;
 }
 
-/**
- * Lectures that turned complete while the outline was open. One completed
- * before the outline mounted shows its check still (the Moment Rule).
- */
-function useJustCompleted(lectures: CourseLectureSummary[]) {
-  const previous = useRef<Map<string, CourseLectureSummary["state"]> | null>(null);
-  const [completed, setCompleted] = useState<ReadonlySet<string>>(new Set());
-  const signature = lectures
-    .map((lecture) => `${lecture.lectureId}:${lecture.state}`)
-    .join("|");
-  useLayoutEffect(() => {
-    const before = previous.current;
-    previous.current = new Map(
-      lectures.map((lecture) => [lecture.lectureId, lecture.state]),
-    );
-    if (!before) return;
-    const now = lectures
-      .filter(
-        (lecture) =>
-          lecture.state === "completed" &&
-          before.has(lecture.lectureId) &&
-          before.get(lecture.lectureId) !== "completed",
-      )
-      .map((lecture) => lecture.lectureId);
-    if (now.length) setCompleted((current) => new Set([...current, ...now]));
-    // `signature` captures every state change; `lectures` may be a new array each render.
-  }, [signature]);
-  return completed;
-}
-
 function CourseOutlineContent({
   course,
   route,
@@ -146,7 +146,10 @@ function CourseOutlineContent({
   const list = useRef<HTMLDivElement>(null);
   const pill = useRef<HTMLSpanElement>(null);
   const ghost = useRef<HTMLSpanElement>(null);
-  const justCompleted = useJustCompleted(course.lectures);
+  const justCompleted = useJustReached(
+    course.lectures.map((lecture) => [lecture.lectureId, lecture.state] as const),
+    "completed",
+  );
   const currentIndex = course.lectures.findIndex(
     (lecture) => lecture.lectureId === currentLectureId,
   );
@@ -175,6 +178,8 @@ function CourseOutlineContent({
         container.dataset.ready = "";
       });
     };
+    // Picking a lecture hides the hover ghost so it never covers the card.
+    if (ghost.current) delete ghost.current.dataset.on;
     place();
     const observer = new ResizeObserver(place);
     observer.observe(container);
@@ -186,23 +191,25 @@ function CourseOutlineContent({
 
   return (
     <nav aria-label={`${course.title} lectures`}>
-      <div className={cn("space-y-1 px-3", compact && "sr-only")}>
-        <CourseLink
-          route={route}
-          className="inline-flex rounded-sm text-card-title transition-colors duration-150 hover:text-brand-text"
-        >
-          {course.title}
-        </CourseLink>
-        <p className="text-caption tabular-nums">
-          Lecture <RollingNumber value={position} /> of {total} ·{" "}
-          <RollingNumber value={completed} /> complete
-        </p>
-        <LectureProgressTrack
-          lectures={course.lectures}
-          currentIndex={currentIndex}
-          className="pt-2 *:h-1 *:flex-1 *:data-current:grow-[3]"
-        />
-      </div>
+      {compact ? null : (
+        <div className="space-y-1 px-3">
+          <CourseLink
+            route={route}
+            className="inline-flex rounded-sm text-card-title transition-colors duration-(--duration-fast) ease-standard hover:text-brand-text"
+          >
+            {course.title}
+          </CourseLink>
+          <p className="text-metadata">
+            Lecture <RollingNumber value={position} /> of {total} ·{" "}
+            <RollingNumber value={completed} /> complete
+          </p>
+          <LectureProgressTrack
+            lectures={course.lectures}
+            currentIndex={currentIndex}
+            className="pt-2 *:h-1 *:flex-1 *:data-current:grow-[3]"
+          />
+        </div>
+      )}
       <div
         ref={list}
         className={cn("group/outline relative", compact ? "" : "mt-4")}
@@ -210,11 +217,13 @@ function CourseOutlineContent({
           // Touch has no hover: a tap would leave the highlight behind.
           if (event.pointerType !== "mouse") return;
           const target = ghost.current;
-          const item = (event.target as HTMLElement).closest<HTMLElement>(
-            "li[data-lecture-state] > a",
+          const row = (event.target as HTMLElement).closest<HTMLElement>(
+            "li[data-lecture-state]",
           );
-          if (!target || !item) return;
-          if (item.parentElement?.hasAttribute("data-current")) {
+          if (!target || !row) return;
+          // The current and locked rows aren't links: the ghost steps aside.
+          const item = row.querySelector<HTMLElement>(":scope > a");
+          if (!item) {
             delete target.dataset.on;
             return;
           }
@@ -266,11 +275,23 @@ function CourseOutlineItem({
   justCompleted: boolean;
 }) {
   const state = lectureStatePresentation(lecture.state);
+  const kind =
+    lecture.state === "completed"
+      ? "done"
+      : lecture.state === "locked"
+        ? "locked"
+        : current
+          ? "live"
+          : "ring";
+  const word = current ? `Current · ${state.word}` : state.word;
+  // Changes after the first render rise in; nothing animates on load.
+  const firstKind = useRef(kind);
+  const firstWord = useRef(word);
   const content = (
     <>
       <span
         className={cn(
-          "pt-0.5 text-xs font-medium tabular-nums",
+          "pt-0.5 text-xs font-medium tabular-nums transition-colors duration-(--duration-moderate) ease-standard",
           current ? "text-brand-text" : "text-faint-foreground",
         )}
       >
@@ -281,35 +302,61 @@ function CourseOutlineItem({
           {lecture.title}
         </span>
         <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-faint-foreground">
-          {lecture.state === "completed" ? (
-            <CheckCircle2
-              className={cn("size-3.5 text-success", justCompleted && "draw-check")}
-              aria-hidden="true"
-            />
-          ) : lecture.state === "locked" ? (
-            <LockKeyhole className="size-3.5" aria-hidden="true" />
-          ) : (
-            <span
-              className={cn(
-                "size-2 rounded-full",
-                current
-                  ? "bg-primary text-primary motion-safe:animate-live"
-                  : "border border-current",
-              )}
-              aria-hidden="true"
-            />
-          )}
-          <span>{current ? `Current · ${state.word}` : state.word}</span>
-          <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-            <span aria-hidden="true">·</span>
-            <LectureScenarioLabel scenarioId={lecture.scenarioId} />
+          <span
+            key={kind}
+            aria-hidden="true"
+            className={cn(
+              "inline-grid size-3.5 shrink-0 place-items-center",
+              kind !== firstKind.current && "animate-roll",
+            )}
+          >
+            {kind === "done" ? (
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={cn(
+                  "size-3.5 text-success [--draw-length:1]",
+                  justCompleted && "draw-check",
+                )}
+              >
+                <circle cx="12" cy="12" r="10" />
+                <path pathLength={1} d="m9 12 2 2 4-4" />
+              </svg>
+            ) : kind === "locked" ? (
+              <LockKeyhole className="size-3.5" />
+            ) : (
+              <span
+                // The One Pulse Rule: the dot breathes only while no run's
+                // live state does (global.css).
+                data-pulse={kind === "live" ? "yields" : undefined}
+                className={cn(
+                  "size-2 rounded-full",
+                  kind === "live"
+                    ? "bg-primary text-primary motion-safe:animate-live"
+                    : "border border-current",
+                )}
+              />
+            )}
+          </span>
+          <span
+            key={word}
+            className={cn(
+              "inline-block",
+              word !== firstWord.current && "animate-roll",
+            )}
+          >
+            {word}
           </span>
         </span>
       </span>
     </>
   );
   const className = cn(
-    "grid min-h-14 grid-cols-[1.5rem_minmax(0,1fr)] gap-2 rounded-[0.625rem] px-3 py-2 text-left transition-colors duration-150 ease-standard",
+    "grid min-h-14 grid-cols-[1.5rem_minmax(0,1fr)] gap-2 rounded-[0.625rem] px-3 py-2 text-left transition-colors duration-(--duration-fast) ease-standard",
     current && "text-foreground",
     lecture.state === "locked" && "text-muted-foreground",
   );

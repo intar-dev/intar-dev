@@ -3,7 +3,11 @@ import {
   buildScenarioBootSteps,
   hasPendingInfrastructureTeardown,
 } from "./run-support";
-import type { ScenarioRunRecord, ScenarioRunVmRecord } from "./run-types";
+import type {
+  ScenarioProbeStatus,
+  ScenarioRunRecord,
+  ScenarioRunVmRecord,
+} from "./run-types";
 
 describe("hasPendingInfrastructureTeardown", () => {
   it("keeps every unfinished VM destroyable", () => {
@@ -32,7 +36,7 @@ describe("scenario startup milestones", () => {
     const steps = buildScenarioBootSteps(run([vm]), vm);
 
     expect(steps.map((step) => step.label)).toEqual([
-      "Request accepted",
+      "Creating your run",
       "Starting your workspace",
       "Checking the workspace",
       "Opening the shell",
@@ -44,6 +48,28 @@ describe("scenario startup milestones", () => {
       "pending",
     ]);
   });
+
+  it.each([
+    ["nothing reported", [], false, 1],
+    ["boot checks incomplete", [probe("pending", "boot-a"), probe("fail", "boot-b")], false, 2],
+    ["boot checks passed", [probe("pass", "boot-a")], true, 3],
+  ])(
+    "fails only the one stage that was working when the machine failed: %s",
+    (_name, bootProbes, canOpenTerminal, failedAt) => {
+      const vm = { ...runVm({ phase: "failed" }), bootProbes, canOpenTerminal };
+      const steps = buildScenarioBootSteps(run([vm]), vm);
+
+      expect(steps.filter((step) => step.state === "failed")).toHaveLength(1);
+      expect(steps[failedAt]?.state).toBe("failed");
+      expect(steps.slice(0, failedAt).every((step) => step.state === "done")).toBe(
+        true,
+      );
+      expect(
+        steps.slice(failedAt + 1).every((step) => step.state === "pending"),
+      ).toBe(true);
+      expect(steps[failedAt]?.detail).toMatch(/could not|did not/);
+    },
+  );
 
   it("tracks the selected machine independently in a multi-VM run", () => {
     const ready = runVm({ id: "vm-ready", phase: "running", ready: true });
@@ -72,6 +98,18 @@ function run(
     activity: "foreground",
     ...overrides,
   } as ScenarioRunRecord;
+}
+
+function probe(status: string, id: string): ScenarioProbeStatus {
+  return {
+    id,
+    label: id,
+    kind: "tcp",
+    phase: "boot",
+    status,
+    error: null,
+    value: null,
+  };
 }
 
 function runVm(input: {

@@ -118,7 +118,7 @@ describe("control-plane maintenance fence", () => {
     expect(html).toContain("The control plane is under maintenance");
     expect(html).not.toMatch(/beta access|cutover|invite flow/iu);
     expect(html).toContain(
-      '<form id="operator-login" action="/api/maintenance/bypass" method="post">',
+      '<form id="operator-login" action="/api/maintenance/bypass" method="post" novalidate>',
     );
     expect(html).toContain(
       '<input id="operator-secret" type="password" autocomplete="off"',
@@ -130,6 +130,19 @@ describe("control-plane maintenance fence", () => {
     expect(html).toContain('fetch("/api/maintenance/bypass"');
     expect(html).toContain('"content-type": "application/json"');
     expect(html).not.toMatch(/localStorage|sessionStorage|console\./u);
+  });
+
+  it("tops the page with the oxide stripe in both colour schemes", async () => {
+    const response = await handleMaintenanceMode(
+      new Request("https://intar.dev/courses"),
+      maintenanceEnv,
+    );
+    const html = (await response?.text()) ?? "";
+
+    expect(html).toContain("border-top:3px solid #c74700");
+    expect(html).toMatch(
+      /prefers-color-scheme:dark\)\{[^]*main\{border-top-color:#f88a3d\}/u,
+    );
   });
 
   it("uses a same-origin JSON ceremony for a short-lived operator cookie", async () => {

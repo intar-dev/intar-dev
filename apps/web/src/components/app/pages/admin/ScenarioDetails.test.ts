@@ -89,7 +89,7 @@ describe("admin scenario detail disclosure", () => {
         [probe({ phase: "boot" }), probe({ phase: "scenario" })],
         true,
       ),
-    ).toBe("1 boot checks · 1 repair objectives · enabled");
+    ).toBe("1 boot check · 1 repair objective · enabled");
   });
 });
 

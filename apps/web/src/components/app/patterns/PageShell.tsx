@@ -23,15 +23,24 @@ export function PageShell({
       data-density={density}
       data-page-variant={variant}
       className={cn(
-        "flex w-full flex-1 flex-col",
-        density === "comfortable"
-          ? "gap-(--space-xl)"
-          : "gap-(--space-md)",
-        variant === "page" && "px-[var(--page-inset)] py-4 sm:py-6",
-        variant === "workspace" && "px-[var(--page-inset)] py-4",
+        "flex w-full flex-1 flex-col pr-[max(var(--page-inset),env(safe-area-inset-right))] pl-[max(var(--page-inset),env(safe-area-inset-left))]",
+        variant === "page" &&
+          "pt-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] md:pt-8 md:pb-8",
+        variant === "workspace" &&
+          "pt-4 pb-[max(1rem,env(safe-area-inset-bottom))]",
       )}
     >
-      {children}
+      {/* Content grows with the panel up to app-max, then centres. */}
+      <div
+        className={cn(
+          "mx-auto flex w-full max-w-(--app-max) flex-1 flex-col",
+          density === "comfortable"
+            ? "gap-(--space-2xl)"
+            : "gap-(--space-md)",
+        )}
+      >
+        {children}
+      </div>
     </div>
   );
 }

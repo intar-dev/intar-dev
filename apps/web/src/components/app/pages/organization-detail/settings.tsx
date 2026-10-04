@@ -4,16 +4,20 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArrowLeftRight,
   CheckCircle2,
-  Copy,
   KeyRound,
   LogOut,
   RefreshCw,
   ShieldCheck,
-  Trash2,
 } from "lucide-react";
+import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
+import { AsyncLabel } from "../../patterns/AsyncLabel";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
+import { CopyButton } from "../../patterns/CopyButton";
+import { Field } from "../../patterns/Field";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
 import { Section } from "../../patterns/Section";
+import { ErrorState } from "../../patterns/StateCard";
+import { BinIcon } from "@/components/ui/bin-icon";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,10 +31,12 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
+import { HttpResponseError } from "../../lib/http-response-error";
 import { startOrganizationSignIn } from "@/lib/auth-client";
 import { isAdminUser } from "@/lib/authz";
 import { useSession } from "../../hooks/useSession";
 import { invalidateOrganizationDetail } from "./queries";
+import { ORGANIZATION_NAME_MAX, reject } from "./reject";
 import { ScenarioSourceSection } from "./scenario-source";
 import {
   signupPolicyText,
@@ -79,8 +85,12 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
   const [issuer, setIssuer] = useState("");
   const [domain, setDomain] = useState("");
   const [clientId, setClientId] = useState("");
-  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  // A refused submit says why at the field and nudges it.
+  const [issuerProblem, setIssuerProblem] = useState<string | null>(null);
   const [transferTarget, setTransferTarget] = useState("");
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [removeProviderOpen, setRemoveProviderOpen] = useState(false);
@@ -127,8 +137,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
         error?: string;
       } | null;
       if (!response.ok || !body?.provider) {
-        throw new Error(
-          body?.error ?? `OIDC registration failed (${response.status})`,
+        throw HttpResponseError.fromBody(
+          response.status,
+          body,
+          "The provider couldn't be registered. Try again.",
         );
       }
       return body.provider;
@@ -185,7 +197,21 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
     setRemoveProviderOpen(false);
     removeProvider.reset();
   };
-  const providerError = verify.error ?? refresh.error ?? setSignupPolicy.error;
+  const providerError = apiErrorMessage(
+    verify.error ?? refresh.error ?? setSignupPolicy.error,
+    "Couldn't update the provider. Try again.",
+  );
+  const renameFailure = describeApiError<"name">(rename.error, {
+    fallback: "Couldn't rename the organization. Try again.",
+    defaultField: "name",
+  });
+  const registerFailure = describeApiError<"issuer" | "domain" | "clientId">(
+    register.error,
+    {
+      fallback: "The provider couldn't be registered. Try again.",
+      fields: { issuer: /issuer|discovery|url/i, domain: /domain/i, clientId: /client/i },
+    },
+  );
   // Only the latest provider action's failure shows; one still running keeps
   // its own.
   const startProviderAction = () => {
@@ -207,10 +233,14 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
       await mutationResponse(response, "Failed to transfer ownership");
     },
     onSuccess: async () => {
+      setTransferOpen(false);
       setTransferTarget("");
       await invalidateDetail();
     },
   });
+  const transferMember = detail.members.find(
+    (entry) => entry.memberId === transferTarget,
+  );
   // Leaving or deleting ends access to this organization, so refetching this
   // still-mounted page's queries could only fail, and retrying them held the
   // navigation for seconds. Mark them stale without refetching; the list page
@@ -250,14 +280,9 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
   const signInUrl = `${
     typeof window === "undefined" ? "https://intar.dev" : window.location.origin
   }/organizations/${encodeURIComponent(detail.slug)}/sign-in`;
-  const copy = async (value: string, label: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopyFeedback(`${label} copied.`);
-    } catch {
-      setCopyFeedback(`${label} could not be copied.`);
-    }
-  };
+  // A copy confirms on its own button; only a failure needs a line.
+  const copyFailed = () =>
+    setCopyError("Could not copy to the clipboard. Select the text and copy it.");
 
   return (
     <div className="space-y-4">
@@ -268,33 +293,51 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
           description="The slug remains stable so identity-provider links do not change when you rename the organization."
         >
           <form
-            className="flex flex-wrap items-center gap-2"
+            className="flex flex-wrap items-end gap-2"
             onSubmit={(event) => {
               event.preventDefault();
               if (name.trim().length >= 2 && !rename.isPending) rename.mutate();
             }}
           >
-            <Input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              className="max-w-sm"
-              aria-label="Organization name"
-            />
+            <Field
+              label="Organization name"
+              className="w-full max-w-sm"
+              error={renameFailure?.field === "name" ? renameFailure.message : null}
+            >
+              {(control) => (
+                <Input
+                  {...control}
+                  value={name}
+                  onChange={(event) => {
+                    setName(event.target.value);
+                    if (rename.error) rename.reset();
+                  }}
+                  maxLength={ORGANIZATION_NAME_MAX}
+                  autoComplete="off"
+                />
+              )}
+            </Field>
             <Button
               type="submit"
               variant="outline"
+              aria-busy={rename.isPending || undefined}
               disabled={
                 name.trim().length < 2 ||
                 name.trim() === detail.name ||
                 rename.isPending
               }
+              focusableWhenDisabled={rename.isPending}
             >
-              {rename.isPending ? "Saving…" : "Rename"}
+              <AsyncLabel
+                state={rename.isPending ? "pending" : "idle"}
+                idle="Rename"
+                pending="Saving…"
+              />
             </Button>
           </form>
-          {rename.error ? (
+          {renameFailure && renameFailure.field === null ? (
             <InlineFeedback tone="error" className="mt-2">
-              {rename.error.message}
+              {renameFailure.message}
             </InlineFeedback>
           ) : null}
         </Section>
@@ -307,15 +350,16 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
           description="One verified provider owns sign-in for this organization. Everyone who signs in through it joins as a member, and first-timers get an Intar account."
         >
           {oidc.isPending ? (
-            <p className="text-sm text-muted-foreground">
+            <InlineFeedback tone="pending">
               Loading identity provider…
-            </p>
-          ) : oidc.error ? (
-            <InlineFeedback tone="error">
-              {oidc.error instanceof Error
-                ? oidc.error.message
-                : "Failed to load the identity provider"}
             </InlineFeedback>
+          ) : oidc.error ? (
+            <ErrorState
+              headingLevel={3}
+              title="Could not load the identity provider"
+              description="The identity provider could not be loaded."
+              onRetry={() => oidc.refetch()}
+            />
           ) : provider ? (
             <div className="space-y-4">
               <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl border bg-muted/20 p-4">
@@ -328,7 +372,9 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   </div>
                   <div>
                     <dt className="text-label">Domain</dt>
-                    <dd className="mt-1 font-medium">{provider.domain}</dd>
+                    <dd className="mt-1">
+                      <code className="text-code">{provider.domain}</code>
+                    </dd>
                   </div>
                   <div>
                     <dt className="text-label">Client</dt>
@@ -383,7 +429,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                       ) : provider.allowExternalEmailSignups ? null : (
                         <span className="text-caption">
                           An Intar admin can allow other email domains from
-                          Admin → People → Organizations.
+                          Admin › People › Organizations.
                         </span>
                       )}
                     </dd>
@@ -398,7 +444,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                     setRemoveProviderOpen(true);
                   }}
                 >
-                  <Trash2 className="size-3.5" />
+                  <BinIcon />
                   Remove provider
                 </Button>
               </div>
@@ -407,38 +453,30 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                 <CopyValue
                   label="OIDC callback URL"
                   value={provider.callbackUrl}
-                  onCopy={() => void copy(provider.callbackUrl, "Callback URL")}
+                  onError={copyFailed}
                 />
                 <CopyValue
                   label="Member sign-in URL"
                   value={signInUrl}
-                  onCopy={() => void copy(signInUrl, "Sign-in URL")}
+                  onError={copyFailed}
                 />
               </div>
 
               {provider.verification ? (
-                <Alert>
-                  <ShieldCheck className="size-4" />
+                <Alert icon={<ShieldCheck />} role={undefined}>
                   <AlertTitle>Publish this DNS TXT record</AlertTitle>
                   <AlertDescription className="mt-3 space-y-3">
                     <CopyValue
                       label="Host"
                       value={provider.verification.host}
-                      onCopy={() =>
-                        void copy(provider.verification?.host ?? "", "DNS host")
-                      }
+                      onError={copyFailed}
                     />
                     <CopyValue
                       label="Value"
                       value={provider.verification.value}
-                      onCopy={() =>
-                        void copy(
-                          provider.verification?.value ?? "",
-                          "DNS value",
-                        )
-                      }
+                      onError={copyFailed}
                     />
-                    <p className="text-xs">
+                    <p className="text-metadata">
                       Token expires{" "}
                       {new Date(
                         provider.verification.expiresAt,
@@ -473,12 +511,14 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   </AlertDescription>
                 </Alert>
               ) : (
-                <Alert>
-                  <KeyRound className="size-4" />
+                <Alert icon={<KeyRound />}>
                   <AlertTitle>OIDC sign-in is active</AlertTitle>
                   <AlertDescription>
                     Share the member sign-in URL. Intar requests{" "}
-                    <code>{provider.scopes.join(" ")}</code> with PKCE S256.
+                    <code className="text-code">
+                      {provider.scopes.join(" ")}
+                    </code>{" "}
+                    with PKCE S256.
                   </AlertDescription>
                 </Alert>
               )}
@@ -525,50 +565,110 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                   ) : null}
                 </div>
               ) : null}
-              {copyFeedback ? (
-                <InlineFeedback
-                  tone={copyFeedback.endsWith("copied.") ? "success" : "error"}
-                >
-                  {copyFeedback}
-                </InlineFeedback>
+              {copyError ? (
+                <InlineFeedback tone="error">{copyError}</InlineFeedback>
               ) : null}
               {providerError ? (
-                <InlineFeedback tone="error">
-                  {providerError.message}
-                </InlineFeedback>
+                <InlineFeedback tone="error">{providerError}</InlineFeedback>
               ) : null}
             </div>
           ) : (
             <form
               className="grid gap-4 sm:grid-cols-2"
+              noValidate
               onSubmit={(event) => {
                 event.preventDefault();
-                if (!register.isPending) register.mutate();
+                if (register.isPending) return;
+                if (issuer && !URL.canParse(issuer)) {
+                  setIssuerProblem(
+                    "Enter the issuer as a URL, like https://id.example.com.",
+                  );
+                  reject(
+                    event.currentTarget.querySelector<HTMLInputElement>(
+                      "input",
+                    ),
+                  );
+                  return;
+                }
+                register.mutate();
               }}
             >
-              <Field label="Issuer URL">
-                <Input
-                  value={issuer}
-                  onChange={(event) => setIssuer(event.target.value)}
-                  placeholder="https://id.example.com"
-                  type="url"
-                  required
-                />
+              <Field
+                label="Issuer URL"
+                error={
+                  issuerProblem ??
+                  (registerFailure?.field === "issuer"
+                    ? registerFailure.message
+                    : null)
+                }
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={issuer}
+                    onChange={(event) => {
+                      setIssuer(event.target.value);
+                      setIssuerProblem(null);
+                      if (register.error) register.reset();
+                    }}
+                    className="text-code"
+                    placeholder="https://id.example.com"
+                    type="url"
+                    required
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                  />
+                )}
               </Field>
-              <Field label="Organization domain">
-                <Input
-                  value={domain}
-                  onChange={(event) => setDomain(event.target.value)}
-                  placeholder="example.com"
-                  required
-                />
+              <Field
+                label="Organization domain"
+                error={
+                  registerFailure?.field === "domain"
+                    ? registerFailure.message
+                    : null
+                }
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={domain}
+                    onChange={(event) => {
+                      setDomain(event.target.value);
+                      if (register.error) register.reset();
+                    }}
+                    className="text-code"
+                    placeholder="example.com"
+                    required
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                  />
+                )}
               </Field>
-              <Field label="Client ID">
-                <Input
-                  value={clientId}
-                  onChange={(event) => setClientId(event.target.value)}
-                  required
-                />
+              <Field
+                label="Client ID"
+                error={
+                  registerFailure?.field === "clientId"
+                    ? registerFailure.message
+                    : null
+                }
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={clientId}
+                    onChange={(event) => {
+                      setClientId(event.target.value);
+                      if (register.error) register.reset();
+                    }}
+                    className="text-code"
+                    required
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                  />
+                )}
               </Field>
               <p className="text-sm text-muted-foreground sm:col-span-2">
                 Use a public client without a client secret. The provider must
@@ -593,9 +693,9 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
                     : "Register OIDC provider"}
                 </Button>
               </div>
-              {register.error ? (
+              {registerFailure && registerFailure.field === null ? (
                 <InlineFeedback tone="error" className="sm:col-span-2">
-                  {register.error.message}
+                  {registerFailure.message}
                 </InlineFeedback>
               ) : null}
             </form>
@@ -634,41 +734,85 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
               </NativeSelect>
               <Button
                 variant="outline"
-                disabled={!transferTarget || transfer.isPending}
-                onClick={() => transfer.mutate()}
+                aria-haspopup="dialog"
+                disabled={!transferTarget}
+                onClick={() => {
+                  transfer.reset();
+                  setTransferOpen(true);
+                }}
               >
                 <ArrowLeftRight className="size-4" />
                 Transfer ownership
               </Button>
               <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
-                <Trash2 className="size-4" />
+                <BinIcon className="size-4" />
                 Delete organization
               </Button>
             </div>
           ) : (
             <Button
               variant="outline"
-              disabled={leave.isPending}
-              onClick={() => leave.mutate()}
+              aria-haspopup="dialog"
+              onClick={() => {
+                leave.reset();
+                setLeaveOpen(true);
+              }}
             >
               <LogOut className="size-4" />
-              {leave.isPending ? "Leaving…" : "Leave organization"}
+              Leave organization
             </Button>
           )}
-          {(transfer.error ?? leave.error) ? (
-            <InlineFeedback tone="error">
-              {(transfer.error ?? leave.error)?.message}
-            </InlineFeedback>
-          ) : null}
         </div>
       </Section>
+
+      <ConfirmDialog
+        open={transferOpen}
+        onClose={() => {
+          setTransferOpen(false);
+          transfer.reset();
+        }}
+        title={`Transfer ownership to ${transferMember?.name ?? "this member"}?`}
+        description="You become an admin. Only they can transfer ownership back."
+        error={apiErrorMessage(
+          transfer.error,
+          "Couldn't transfer ownership. Try again.",
+        )}
+        pending={transfer.isPending}
+        confirmLabel="Transfer ownership"
+        pendingLabel="Transferring…"
+        cancelLabel="Keep ownership"
+        confirmVariant="default"
+        onConfirm={() => transfer.mutate()}
+      />
+
+      <ConfirmDialog
+        open={leaveOpen}
+        onClose={() => {
+          setLeaveOpen(false);
+          leave.reset();
+        }}
+        title={`Leave ${detail.name}?`}
+        description="You lose access until you are invited again or sign in through its identity provider."
+        error={apiErrorMessage(
+          leave.error,
+          "Couldn't leave the organization. Try again.",
+        )}
+        pending={leave.isPending}
+        confirmLabel="Leave organization"
+        pendingLabel="Leaving…"
+        cancelLabel="Stay"
+        onConfirm={() => leave.mutate()}
+      />
 
       <ConfirmDialog
         open={removeProviderOpen}
         onClose={closeRemoveProviderDialog}
         title="Remove the identity provider?"
         description="Everyone who connected it is signed out everywhere, except you here, and loses it as a way to sign in. Members keep their memberships and their other sign-in methods."
-        error={removeProvider.error ? removeProvider.error.message : null}
+        error={apiErrorMessage(
+          removeProvider.error,
+          "Couldn't remove the provider. Try again.",
+        )}
         pending={removeProvider.isPending}
         confirmLabel="Remove provider"
         pendingLabel="Removing…"
@@ -691,7 +835,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
           />
           {deleteOrganization.error ? (
             <InlineFeedback tone="error">
-              {deleteOrganization.error.message}
+              {apiErrorMessage(
+                deleteOrganization.error,
+                "Couldn't delete the organization. Try again.",
+              )}
             </InlineFeedback>
           ) : null}
           <DialogFooter>
@@ -716,44 +863,26 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
   );
 }
 
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="flex flex-col gap-2 text-sm font-medium">
-      <span>{label}</span>
-      {children}
-    </label>
-  );
-}
-
 function CopyValue({
   label,
   value,
-  onCopy,
+  onError,
 }: {
   label: string;
   value: string;
-  onCopy: () => void;
+  onError: () => void;
 }) {
   return (
-    <div className="rounded-xl border bg-card p-3">
+    <div className="rounded-xl border bg-card p-4">
       <p className="text-label">{label}</p>
       <div className="mt-2 flex items-center gap-2">
-        <code className="min-w-0 flex-1 break-all text-xs">{value}</code>
-        <Button
-          type="button"
-          size="icon-sm"
+        <code className="min-w-0 flex-1 break-all text-code">{value}</code>
+        <CopyButton
+          text={value}
+          name={`Copy ${label}`}
           variant="ghost"
-          onClick={onCopy}
-          aria-label={`Copy ${label}`}
-        >
-          <Copy className="size-3.5" />
-        </Button>
+          onError={onError}
+        />
       </div>
     </div>
   );

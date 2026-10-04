@@ -1,31 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BinIcon } from "@/components/ui/bin-icon";
 import { cn } from "@/lib/utils";
+import { AsyncLabel } from "./AsyncLabel";
 
-/** Lucide's trash-2 with its lid grouped, so the lid can lift on its hinge. */
-export function BinIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className={cn("size-3.5 overflow-visible", className)}
-    >
-      <g data-bin-lid>
-        <path d="M3 6h18" />
-        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-      </g>
-      <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-      <path d="M10 11v6" />
-      <path d="M14 11v6" />
-    </svg>
-  );
-}
+export { BinIcon };
 
 interface InlineConfirmProps {
   /** Visible trigger label, such as "Remove". */
@@ -38,9 +17,15 @@ interface InlineConfirmProps {
   confirmLabel: string;
   /** Present tense while the request runs: "Removing…". */
   pendingLabel: string;
+  /** Past tense once it worked: "Removed". */
+  doneLabel: string;
   pending?: boolean;
+  /** The request worked: a check draws itself before the row leaves. */
+  done?: boolean;
   disabled?: boolean;
   onConfirm: () => void;
+  /** The question closed without confirming (Keep, Escape, click or Tab away). */
+  onCancel?: () => void;
 }
 
 /**
@@ -58,18 +43,30 @@ export function InlineConfirm({
   question,
   confirmLabel,
   pendingLabel,
+  doneLabel,
   pending = false,
+  done = false,
   disabled = false,
   onConfirm,
+  onCancel,
 }: InlineConfirmProps) {
   const [asking, setAsking] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const keep = useRef<HTMLButtonElement>(null);
-  const open = asking || pending;
+  const open = asking || pending || done;
+  const busy = pending || done;
+  const stage = done ? "done" : pending ? "pending" : "idle";
+
+  const cancel = useRef(onCancel);
+  cancel.current = onCancel;
+  // Clicking or tabbing anywhere in the same list row leaves the question
+  // open; only the outside of the row backs out.
+  const scope = () => root.current?.closest("li") ?? root.current;
 
   const close = (refocus: boolean) => {
     setAsking(false);
+    cancel.current?.();
     if (refocus) requestAnimationFrame(() => trigger.current?.focus());
   };
 
@@ -78,13 +75,16 @@ export function InlineConfirm({
   }, [asking]);
 
   useEffect(() => {
-    if (!asking || pending) return;
+    if (!asking || busy) return;
     const onPointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setAsking(false);
+      if (!scope()?.contains(event.target as Node)) {
+        setAsking(false);
+        cancel.current?.();
+      }
     };
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, [asking, pending]);
+  }, [asking, busy]);
 
   return (
     <div
@@ -93,15 +93,16 @@ export function InlineConfirm({
       data-asking={open || undefined}
       className="grid shrink-0 items-center justify-items-end *:[grid-area:1/1]"
       onKeyDown={(event) => {
-        if (event.key !== "Escape" || !asking || pending) return;
+        if (event.key !== "Escape" || !asking || busy) return;
         event.preventDefault();
         event.stopPropagation();
         close(true);
       }}
       onBlur={(event) => {
         const next = event.relatedTarget as Node | null;
-        if (asking && !pending && next && !root.current?.contains(next)) {
+        if (asking && !busy && next && !scope()?.contains(next)) {
           setAsking(false);
+          onCancel?.();
         }
       }}
     >
@@ -116,8 +117,8 @@ export function InlineConfirm({
         disabled={disabled}
         inert={open || undefined}
         className={cn(
-          "text-muted-foreground transition-[opacity,color,background-color] hover:text-destructive",
-          open && "pointer-events-none opacity-0",
+          "text-foreground transition-[opacity,color,background-color] duration-(--duration-moderate) ease-enter hover:text-destructive",
+          open && "pointer-events-none opacity-0 duration-(--duration-fast) ease-exit",
         )}
         onClick={() => setAsking(true)}
       >
@@ -129,8 +130,9 @@ export function InlineConfirm({
         aria-label={question}
         inert={!open || undefined}
         className={cn(
-          "flex items-center gap-1.5 transition-opacity duration-200 ease-enter",
-          !open && "pointer-events-none opacity-0",
+          "flex items-center gap-1.5 transition-opacity duration-(--duration-moderate) ease-enter",
+          !open &&
+            "pointer-events-none opacity-0 duration-(--duration-fast) ease-exit",
         )}
       >
         <Button
@@ -138,10 +140,11 @@ export function InlineConfirm({
           type="button"
           size="sm"
           variant="ghost"
-          disabled={pending}
+          disabled={busy}
           className={cn(
-            "transition-[translate,opacity,background-color,color] duration-200 ease-enter motion-reduce:transition-none",
-            !open && "translate-x-2",
+            "transition-[translate,opacity,background-color,color] duration-(--duration-moderate) ease-enter",
+            !open &&
+              "translate-x-(--move-overlay) duration-(--duration-fast) ease-exit",
           )}
           onClick={() => close(true)}
         >
@@ -152,22 +155,19 @@ export function InlineConfirm({
           size="sm"
           variant="danger"
           aria-busy={pending || undefined}
-          disabled={pending}
+          disabled={busy}
           // Keep focus here while the request runs, and after it fails.
           focusableWhenDisabled
           onClick={onConfirm}
         >
-          {pending ? (
-            <>
-              <LoaderCircle
-                className="size-3.5 motion-safe:animate-spin"
-                aria-hidden="true"
-              />
-              {pendingLabel}
-            </>
-          ) : (
-            confirmLabel
-          )}
+          {/* Every label shares one cell, so the button keeps the width of
+              its widest one (the Steady Box Rule). */}
+          <AsyncLabel
+            state={stage}
+            idle={confirmLabel}
+            pending={pendingLabel}
+            done={doneLabel}
+          />
         </Button>
       </div>
     </div>
