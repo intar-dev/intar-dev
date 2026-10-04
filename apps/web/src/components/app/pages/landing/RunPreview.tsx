@@ -253,7 +253,9 @@ export function RunPreview({ className }: { className?: string }) {
               })}
             >
               <ListChecks className="size-4" />
-              Checks <RollingNumber value={passed} />/{CHECKS.length}
+              <span className="whitespace-nowrap">
+                Checks <RollingNumber value={passed} />/{CHECKS.length}
+              </span>
             </span>
             <span
               className={buttonVariants({

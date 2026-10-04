@@ -473,27 +473,32 @@ export function Profile() {
             {user?.image ? <AvatarImage src={user.image} alt="" /> : null}
             <AvatarFallback>{initials(user?.name)}</AvatarFallback>
           </Avatar>
-          <dl className="grid flex-1 gap-x-8 gap-y-4 sm:grid-cols-2">
+          {/* Name, username and email share a row when there is room and wrap
+              as whole rows when there is not, so no value sits beside an empty
+              cell. */}
+          <dl className="flex flex-1 flex-wrap gap-x-8 gap-y-4">
             {/* The avatar's initials come from this name, so it shows. */}
             {user?.name && user.name !== user.username ? (
-              <div>
+              <div className="min-w-0 flex-[1_1_9rem]">
                 <dt className="text-label">Name</dt>
-                <dd className="mt-1 text-sm font-medium">{user.name}</dd>
+                <dd className="mt-1 text-sm font-medium [overflow-wrap:anywhere]">
+                  {user.name}
+                </dd>
               </div>
             ) : null}
-            <div>
+            <div className="min-w-0 flex-[1_1_9rem]">
               <dt className="text-label">Username</dt>
-              <dd className="mt-1 text-sm font-medium">
+              <dd className="mt-1 text-sm font-medium [overflow-wrap:anywhere]">
                 {user?.username ?? "—"}
               </dd>
             </div>
-            <div>
+            <div className="min-w-0 flex-[1_1_9rem]">
               <dt className="text-label">Email</dt>
-              <dd className="mt-1 text-sm font-medium">
+              <dd className="mt-1 text-sm font-medium [overflow-wrap:anywhere]">
                 {user?.email ?? "Unknown"}
               </dd>
             </div>
-            <div className="sm:col-span-2">
+            <div className="basis-full">
               <dt className="text-label">Sign-in methods</dt>
               <dd className="mt-1 space-y-2 text-sm">
                 <div className="flex flex-wrap items-center gap-2 font-medium">

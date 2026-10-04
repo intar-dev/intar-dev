@@ -44,7 +44,11 @@ export function Section({
             ) : null}
           </div>
           {actions ? (
-            <div className="flex flex-wrap items-center gap-2">{actions}</div>
+            // As tall as the title line, so a count or a button centres on it
+            // (the Row Rule) even when the description makes the row grow.
+            <div className="flex flex-wrap items-center gap-2 sm:title-line">
+              {actions}
+            </div>
           ) : null}
         </div>
       ) : null}

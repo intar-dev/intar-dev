@@ -40,3 +40,23 @@ test("the page content stops at app-max on a very wide screen", async ({
   const box = await column.boundingBox();
   expect(box?.width).toBeLessThanOrEqual(2048);
 });
+
+test("an overflowing line-tab strip starts at its first tab and keeps the open one in view", async ({
+  page,
+  ui,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await ui.open({ ...routeCase("organization-detail"), theme: "light" });
+
+  const list = page.locator('[data-slot="tabs-list"]').first();
+  const overview = page.getByRole("tab", { name: "Overview" });
+  await expect(overview).toBeVisible();
+  const [listBox, tabBox] = await Promise.all([
+    list.boundingBox(),
+    overview.boundingBox(),
+  ]);
+  // The strip overflows on a phone; centred overflow used to push the first
+  // tabs past the left edge, out of reach of any scroll.
+  expect(await list.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+  expect(tabBox!.x).toBeGreaterThanOrEqual(listBox!.x);
+});

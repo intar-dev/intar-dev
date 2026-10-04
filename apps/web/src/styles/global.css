@@ -510,6 +510,10 @@
 
   [data-run-sequence-step] {
     min-height: 5rem;
+    /* The list's space-y gives every step but the last a bottom margin, which
+       shortens its box. The grid gap already spaces the rail, and with the
+       margin gone every step ends on the same line, so the status labels do. */
+    margin: 0;
     grid-template-columns: minmax(0, 1fr);
     /* The copy row absorbs extra height so status labels share a baseline
        across steps even when a title wraps to two lines. */

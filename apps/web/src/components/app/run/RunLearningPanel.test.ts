@@ -124,6 +124,9 @@ describe("run learning panel", () => {
       'aria-label="Checks 0/1. 0 of 2 hints revealed. Opens checks, lecture and hints."',
     );
     expect(mobileMarkup).toContain("h-11");
+    // One nowrap box: in a flex or grid parent (the dock tab) the label would
+    // otherwise split into "Checks", "0" and "/1" items.
+    expect(mobileMarkup).toMatch(/<span class="whitespace-nowrap">Checks /);
     expect(mobileMarkup).not.toContain("data-run-guidance-rail");
   });
 

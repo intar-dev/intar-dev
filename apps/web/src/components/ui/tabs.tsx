@@ -30,7 +30,9 @@ const tabsListVariants = cva(
         default: "bg-muted",
         // The line strip is its own scroller: it fades at the edge where more
         // tabs wait (scroll-fade) and has no padding but the underline's 2px.
-        line: "scroll-fade max-w-full gap-1 overflow-x-auto bg-transparent p-0 pb-0.5 group-data-vertical/tabs:overflow-visible",
+        // It starts at the left: centred overflow would push the first tabs
+        // past an edge that cannot be scrolled back to.
+        line: "scroll-fade max-w-full justify-start gap-1 overflow-x-auto bg-transparent p-0 pb-0.5 group-data-vertical/tabs:overflow-visible",
       },
     },
     defaultVariants: {

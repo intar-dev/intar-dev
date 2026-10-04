@@ -137,7 +137,9 @@ test.describe("focused visual states", () => {
 
     await expect(page.getByText("Review runs", { exact: true })).toHaveCount(0);
     await expect(
-      page.getByRole("link", { name: "Trace an intermittent DNS failure" }),
+      page.getByRole("link", {
+        name: /^Continue to Trace an intermittent DNS failure/,
+      }),
     ).toBeVisible();
     await expect(
       page.getByRole("link", { name: "Run again" }),

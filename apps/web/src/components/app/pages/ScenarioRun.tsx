@@ -11,7 +11,13 @@ import {
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { ArrowLeft, BookOpen, ListChecks } from "lucide-react";
+import {
+  ArrowLeft,
+  BookOpen,
+  EllipsisVertical,
+  ListChecks,
+  SquareTerminal,
+} from "lucide-react";
 import {
   requestScenarioStartWithCapacityWait,
   ScenarioStartCancelledError,
@@ -46,7 +52,12 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { formatClockSeconds } from "@/components/app/lib/format";
 import { BinIcon } from "@/components/ui/bin-icon";
 import { Button } from "@/components/ui/button";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -1346,52 +1357,31 @@ export function ScenarioRun() {
 
   const runActions =
     showSshAction || showEndRunAction || canDeleteRun ? (
-      <div
-        className="flex flex-wrap items-center gap-2"
-        role="group"
-        aria-label="Run actions"
-        data-run-actions
-      >
-        {showSshAction ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={!selectedVmShellReady}
-            aria-haspopup="dialog"
-            aria-expanded={sshDialogOpen}
-            onClick={openSshDialog}
-          >
-            SSH command
-          </Button>
-        ) : null}
-        {showEndRunAction ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="destructive"
-            aria-haspopup="dialog"
-            aria-expanded={cancelDialogOpen}
-            onClick={openCancelDialog}
-          >
-            <BinIcon />
-            {acceptanceRetryNeeded ? "Retry end…" : "End run…"}
-          </Button>
-        ) : null}
-        {canDeleteRun ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="destructive"
-            aria-haspopup="dialog"
-            aria-expanded={deleteRunDialogOpen}
-            onClick={openDeleteRunDialog}
-          >
-            <BinIcon />
-            Delete run…
-          </Button>
-        ) : null}
-      </div>
+      <RunActions
+        ssh={
+          showSshAction
+            ? {
+                disabled: !selectedVmShellReady,
+                expanded: sshDialogOpen,
+                onOpen: openSshDialog,
+              }
+            : null
+        }
+        end={
+          showEndRunAction
+            ? {
+                label: acceptanceRetryNeeded ? "Retry end…" : "End run…",
+                expanded: cancelDialogOpen,
+                onOpen: openCancelDialog,
+              }
+            : null
+        }
+        remove={
+          canDeleteRun
+            ? { expanded: deleteRunDialogOpen, onOpen: openDeleteRunDialog }
+            : null
+        }
+      />
     ) : null;
 
   // The browser tab carries live-run state while the user is elsewhere.
@@ -1954,6 +1944,138 @@ function RunTerminal(props: ComponentProps<typeof LazyWebSshTerminal>) {
   return <LazyWebSshTerminal {...props} keyRow={keyboardUp && !split} />;
 }
 
+interface RunActionHandle {
+  expanded: boolean;
+  onOpen: () => void;
+}
+
+// The run's own actions. Beside the title they are text buttons; on a phone
+// they shrink to icon buttons that keep their words for assistive technology,
+// and in landscape, where the slim bar has no room, they fold into one menu.
+function RunActions({
+  ssh,
+  end,
+  remove,
+}: {
+  ssh: (RunActionHandle & { disabled: boolean }) | null;
+  end: (RunActionHandle & { label: string }) | null;
+  remove: RunActionHandle | null;
+}) {
+  const short = useMediaQuery(RUN_QUERY.short);
+  if (short) {
+    return (
+      <div role="group" aria-label="Run actions" data-run-actions>
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="More run actions"
+                    />
+                  }
+                />
+              }
+            >
+              <EllipsisVertical aria-hidden="true" />
+            </TooltipTrigger>
+            <TooltipContent side="bottom">More run actions</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="end">
+            {ssh ? (
+              <DropdownMenuItem
+                disabled={ssh.disabled}
+                aria-haspopup="dialog"
+                className="pointer-coarse:min-h-11"
+                onClick={ssh.onOpen}
+              >
+                SSH command
+              </DropdownMenuItem>
+            ) : null}
+            {end ? (
+              <DropdownMenuItem
+                variant="destructive"
+                aria-haspopup="dialog"
+                className="pointer-coarse:min-h-11"
+                onClick={end.onOpen}
+              >
+                {end.label}
+              </DropdownMenuItem>
+            ) : null}
+            {remove ? (
+              <DropdownMenuItem
+                variant="destructive"
+                aria-haspopup="dialog"
+                className="pointer-coarse:min-h-11"
+                onClick={remove.onOpen}
+              >
+                Delete run…
+              </DropdownMenuItem>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    );
+  }
+  const iconOnPhone = "max-md:min-w-11 max-md:px-0";
+  return (
+    <div
+      className="flex flex-wrap items-center gap-2"
+      role="group"
+      aria-label="Run actions"
+      data-run-actions
+    >
+      {ssh ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className={iconOnPhone}
+          disabled={ssh.disabled}
+          aria-haspopup="dialog"
+          aria-expanded={ssh.expanded}
+          onClick={ssh.onOpen}
+        >
+          <SquareTerminal className="size-4 md:hidden" aria-hidden="true" />
+          <span className="max-md:sr-only">SSH command</span>
+        </Button>
+      ) : null}
+      {end ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="destructive"
+          className={iconOnPhone}
+          aria-haspopup="dialog"
+          aria-expanded={end.expanded}
+          onClick={end.onOpen}
+        >
+          <BinIcon />
+          <span className="max-md:sr-only">{end.label}</span>
+        </Button>
+      ) : null}
+      {remove ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="destructive"
+          className={iconOnPhone}
+          aria-haspopup="dialog"
+          aria-expanded={remove.expanded}
+          onClick={remove.onOpen}
+        >
+          <BinIcon />
+          <span className="max-md:sr-only">Delete run…</span>
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 function RunWorkspaceHeader({
   title,
   status,
@@ -1972,10 +2094,13 @@ function RunWorkspaceHeader({
 
   return (
     <header
-      // One slim row on a phone: back, title, status. The run actions sit in
-      // a row under it and give way to the keyboard. In landscape the bar is
-      // 2.5rem and hides while the keyboard is up; the check bar stays.
-      className="flex min-h-(--run-bar-h) shrink-0 flex-wrap items-center gap-x-2 gap-y-1 bg-canvas px-2 pt-2 pb-1 md:px-3 short:flex-nowrap short:py-0 short:group-data-[kb]/run:hidden"
+      // On a phone a grid: back beside the title with its status line under
+      // it, and the run actions (icon buttons) in the third column, so they
+      // never wrap to a row of their own (below 21.5rem the status takes the
+      // row under both). They give way to the keyboard. From md it is one
+      // wrapping row. In landscape the bar is 2.5rem, one nowrap row, and
+      // hides while the keyboard is up; the check bar stays.
+      className="flex min-h-(--run-bar-h) shrink-0 flex-wrap items-center gap-x-2 gap-y-1 bg-canvas px-2 pt-2 pb-1 md:px-3 max-md:grid max-md:grid-cols-[auto_minmax(0,1fr)_auto] max-md:gap-y-0 short:flex short:flex-nowrap short:py-0 short:group-data-[kb]/run:hidden"
       data-run-navigation
       data-run-workspace-header
     >
@@ -1984,7 +2109,7 @@ function RunWorkspaceHeader({
       <Button
         variant="ghost"
         size="sm"
-        className="-ml-2 shrink-0"
+        className="-ml-2 shrink-0 max-md:row-span-2 max-[21.5rem]:row-span-1"
         render={
           <a
             href={returnTarget.href}
@@ -1997,10 +2122,14 @@ function RunWorkspaceHeader({
         <span className="max-md:sr-only">{returnTarget.text}</span>
       </Button>
       {/* A title wraps; the bar never cuts it off. */}
-      <h1 className="min-w-0 flex-1 text-[0.9375rem] leading-snug font-semibold tracking-[-0.01em] md:min-w-[min(16rem,100%)] short:truncate">
+      <h1 className="min-w-0 flex-1 text-[0.9375rem] leading-snug font-semibold tracking-[-0.01em] max-md:col-start-2 max-md:row-start-1 md:min-w-[min(16rem,100%)] short:truncate">
         {title}
       </h1>
-      {status ? <div className="min-w-0 shrink-0">{status}</div> : null}
+      {status ? (
+        <div className="min-w-0 shrink-0 max-md:col-start-2 max-md:row-start-2 max-md:shrink max-[21.5rem]:col-end-4">
+          {status}
+        </div>
+      ) : null}
       {short && sheet ? (
         <div className="flex shrink-0 items-center gap-1">
           <Tooltip>
@@ -2047,7 +2176,7 @@ function RunWorkspaceHeader({
         </div>
       ) : null}
       {actions ? (
-        <div className="max-md:order-last max-md:flex max-md:basis-full max-md:justify-end max-md:group-data-[kb]/run:hidden short:order-none short:basis-auto">
+        <div className="max-md:col-start-3 max-md:row-span-2 max-md:row-start-1 max-md:group-data-[kb]/run:hidden max-[21.5rem]:row-end-2">
           {actions}
         </div>
       ) : null}

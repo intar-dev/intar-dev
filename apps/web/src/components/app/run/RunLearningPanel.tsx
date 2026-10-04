@@ -193,7 +193,9 @@ export function RunLearningPanel(props: RunLearningPanelProps) {
     >
       <div
         data-run-learning-panel-scroll
-        className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain rounded-xl border bg-card px-4 py-4 shadow-[var(--highlight),var(--shadow-raised)]"
+        // The foot fades into the card while more waits below, so content cut
+        // by the panel's edge reads as scrolling, not as cramped.
+        className="min-h-0 flex-1 scroll-py-4 overflow-y-auto overscroll-contain rounded-xl border bg-card px-4 py-4 shadow-[var(--highlight),var(--shadow-raised)] after:pointer-events-none after:sticky after:bottom-0 after:-mx-4 after:-mb-4 after:block after:h-4 after:bg-linear-to-t after:from-card after:to-transparent"
         role="region"
         aria-label="Checks, lecture and hints content"
         tabIndex={0}
@@ -250,14 +252,16 @@ export function RunLearningPanelMobile(
         totalHints: hints.length,
       });
   // The visible count rolls when a check verifies; the accessible name above
-  // already carries the same words as plain text.
+  // already carries the same words as plain text. One nowrap box, so a flex or
+  // grid parent (the dock tab, the button) never splits "Checks", "0" and "/2"
+  // into separate items.
   const visibleLabel: ReactNode =
     props.checksPending || props.probes.length === 0 ? (
       copy.visibleLabel
     ) : (
-      <>
+      <span className="whitespace-nowrap">
         Checks <RollingNumber value={passedChecks} />/{props.probes.length}
-      </>
+      </span>
     );
   const announcement = useCheckAnnouncement(props);
 

@@ -468,7 +468,7 @@ function LectureActionPanel({
     <section
       aria-labelledby="lecture-next-action"
       data-done={done ? "" : undefined}
-      className="flex w-full max-w-[46rem] flex-col gap-4 rounded-2xl border bg-card p-5 shadow-[var(--highlight),var(--shadow-raised)] sm:flex-row sm:items-start sm:gap-5"
+      className="flex w-full flex-col gap-4 rounded-2xl border bg-card p-5 shadow-[var(--highlight),var(--shadow-raised)] sm:flex-row sm:items-start sm:gap-5"
     >
       <span
         aria-hidden="true"
@@ -574,10 +574,12 @@ function LectureActionPanel({
             : "Could not complete this lecture."}
         </InlineFeedback>
       ) : null}
+      </div>
+      {/* Outside the spaced column: an sr-only last child would still give
+          the content before it a margin, and the card empty space below. */}
       <p role="status" className="sr-only">
         {justDone ? copy.announcement : ""}
       </p>
-      </div>
     </section>
   );
 }

@@ -43,6 +43,8 @@ describe("pattern parity", () => {
     const out = html(createElement(MetaLine, { items: ["a", "", "b"], as: "span" }));
     expect(out.startsWith("<span")).toBe(true);
     expect((out.match(/·/g) ?? []).length).toBe(1);
+    // The dot leads the item after it, so it never ends a wrapped line.
+    expect(out).toMatch(/<span aria-hidden="true"[^>]*>·<\/span><span[^>]*>b<\/span>/);
   });
 
   it("links an error to its field and rolls it in", () => {

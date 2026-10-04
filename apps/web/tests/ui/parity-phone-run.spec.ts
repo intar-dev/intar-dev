@@ -63,6 +63,36 @@ test.describe("phone, portrait", () => {
     await expect(status.getByText("In progress")).toBeVisible();
   });
 
+  test("the dock tabs share one height and the run actions share the title's bar", async ({
+    page,
+    ui,
+  }) => {
+    await openRun(ui);
+
+    // "Checks 0/2" stays one line, so the three tabs are equally tall.
+    const heights = await page
+      .locator("[data-run-dock]")
+      .getByRole("button")
+      .evaluateAll((tabs) =>
+        tabs.map((tab) => Math.round(tab.getBoundingClientRect().height)),
+      );
+    expect(heights).toHaveLength(3);
+    expect(new Set(heights).size).toBe(1);
+
+    // SSH command and End run are icon buttons beside the title, not a row of
+    // their own under it: the bar stays slim and keeps 44px targets.
+    const header = page.locator("[data-run-workspace-header]");
+    const ssh = header.getByRole("button", { name: "SSH command" });
+    const [bar, sshBox] = await Promise.all([
+      header.boundingBox(),
+      ssh.boundingBox(),
+    ]);
+    expect(sshBox!.width).toBeLessThan(60);
+    expect(sshBox!.height).toBeGreaterThanOrEqual(44);
+    expect(bar!.height).toBeLessThan(70);
+    expect(sshBox!.y + sshBox!.height).toBeLessThanOrEqual(bar!.y + bar!.height);
+  });
+
   test("the terminal is 13px on phones", async ({ page, ui }) => {
     await openRun(ui);
     await expect(page.locator("[data-run-terminal] .xterm-rows")).toHaveCSS(
@@ -113,6 +143,31 @@ test.describe("phone, landscape", () => {
     const viewport = page.viewportSize()!;
     expect(box!.width / viewport.width).toBeGreaterThan(0.4);
     expect(box!.width / viewport.width).toBeLessThan(0.5);
+  });
+});
+
+test.describe("phone, landscape run actions", () => {
+  test.use({ viewport: { width: 667, height: 375 }, hasTouch: true });
+
+  test("the run actions fold into one menu in the slim bar", async ({
+    page,
+    ui,
+  }) => {
+    await openRun(ui);
+
+    const header = page.locator("[data-run-workspace-header]");
+    await expect(header.getByRole("button", { name: "SSH command" })).toHaveCount(
+      0,
+    );
+    const bar = await header.boundingBox();
+    expect(bar!.height).toBeLessThanOrEqual(48);
+
+    await header.getByRole("button", { name: "More run actions" }).click();
+    await expect(page.getByRole("menuitem", { name: "SSH command" })).toBeVisible();
+    await page.getByRole("menuitem", { name: "End run…" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "End this run?" }),
+    ).toBeVisible();
   });
 });
 

@@ -625,8 +625,9 @@ function RunReplaySection({ run }: { run: ScenarioRunRecord }) {
         title={<span id="run-recap-replay-heading">Watch replay</span>}
         heading="h2"
         density="comfortable"
-        // The row indents the panel under its title; phones give that back.
-        contentClassName="pt-3 pb-4 max-sm:pl-0"
+        // The row indents the panel under its title; the replay lines up
+        // with the sections around it instead.
+        contentClassName="pt-3 pb-4 pl-0"
       >
         <ReplayViewer
           runId={run.id}
