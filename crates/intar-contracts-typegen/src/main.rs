@@ -30,8 +30,10 @@ use intar_contracts::{
     },
     stargate::{
         ActivateTerminalTargetRequest, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
-        IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse,
-        StageTerminalTargetRequest, StageTerminalTargetResponse,
+        IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse, RunMirrorRequest,
+        SHARE_ID_LEN, SHARE_INGEST_CLOSE_ENDED, SHARE_INGEST_CLOSE_LIMIT,
+        SHARE_INGEST_CLOSE_STOPPED, SHARE_INGEST_PING, SHARE_INGEST_PONG, SHARE_WRITE_TOKEN_LEN,
+        ShareIngestMessage, StageTerminalTargetRequest, StageTerminalTargetResponse,
     },
 };
 use schemars::schema_for;
@@ -105,6 +107,14 @@ fn main() -> Result<()> {
     write_schema(
         &schema_dir.join("stargate-issue-workspace-app-session-response.schema.json"),
         &schema_for!(IssueWorkspaceAppSessionResponse),
+    )?;
+    write_schema(
+        &schema_dir.join("stargate-run-mirror-request.schema.json"),
+        &schema_for!(RunMirrorRequest),
+    )?;
+    write_schema(
+        &schema_dir.join("stargate-share-ingest-message.schema.json"),
+        &schema_for!(ShareIngestMessage),
     )?;
     write_schema(
         &schema_dir.join("catalog-scenario-manifest-v5.schema.json"),
@@ -197,6 +207,16 @@ fn main() -> Result<()> {
         "crates/intar-contracts/fixtures/stargate/issue-workspace-app-session-response.json",
         &fixture_dir.join("stargate/issue-workspace-app-session-response.json"),
     )?;
+    for fixture in [
+        "run-mirror-request.json",
+        "share-ingest-start.json",
+        "share-ingest-events.json",
+    ] {
+        copy_fixture(
+            &format!("crates/intar-contracts/fixtures/stargate/{fixture}"),
+            &fixture_dir.join("stargate").join(fixture),
+        )?;
+    }
     copy_fixture(
         "crates/intar-contracts/fixtures/catalog/scenario-manifest-v5.json",
         &fixture_dir.join("catalog/scenario-manifest-v5.json"),
@@ -317,6 +337,13 @@ export const SOURCE_COMPILER_PATH = "{}";
 export const AGENT_SOURCES_PATH = "{}";
 export const SOURCE_META_FIELD = "{}";
 export const SOURCE_BUNDLE_FIELD = "{}";
+export const SHARE_ID_LEN = {};
+export const SHARE_WRITE_TOKEN_LEN = {};
+export const SHARE_INGEST_PING = "{}";
+export const SHARE_INGEST_PONG = "{}";
+export const SHARE_INGEST_CLOSE_ENDED = {};
+export const SHARE_INGEST_CLOSE_LIMIT = {};
+export const SHARE_INGEST_CLOSE_STOPPED = {};
 
 export const runtimeEnvKeys = {{
   sshAuthorizedKeysB64: "{}",
@@ -348,6 +375,13 @@ export const runtimeEnvKeys = {{
         AGENT_SOURCES_PATH,
         SOURCE_META_FIELD,
         SOURCE_BUNDLE_FIELD,
+        SHARE_ID_LEN,
+        SHARE_WRITE_TOKEN_LEN,
+        SHARE_INGEST_PING,
+        SHARE_INGEST_PONG,
+        SHARE_INGEST_CLOSE_ENDED,
+        SHARE_INGEST_CLOSE_LIMIT,
+        SHARE_INGEST_CLOSE_STOPPED,
         ENV_SSH_AUTHORIZED_KEYS_B64,
         ENV_KINO_VSOCK_CID,
         ENV_KINO_VSOCK_PORT,
@@ -500,6 +534,38 @@ export interface IssueWorkspaceAppSessionResponse {
   bootstrap_expires_at: number;
   expires_at: number;
 }
+
+/** `PUT /v1/run-mirrors/{run_id}`: stream every PTY session of the run to the
+ * share. A PUT whose `claimed_at_ms` is older than the stored mirror's answers
+ * 409. `DELETE /v1/run-mirrors/{run_id}?share_id=` stops it, and answers 409
+ * when the run streams to a different share. */
+export interface RunMirrorRequest {
+  share_id: string;
+  write_token: string;
+  /** Unix milliseconds when the control plane claimed the share. */
+  claimed_at_ms: number;
+}
+
+/** `[milliseconds since the PTY started, code, data]`, the asciicast v2
+ * event shape. Resize data is `"COLSxROWS"`. */
+export type ShareEventCode = "o" | "r";
+export type ShareEvent = [number, ShareEventCode, string];
+
+/** One text frame on the share ingest socket: one socket per PTY session,
+ * output only. A repeated `start` with the same `session` resumes it. */
+export type ShareIngestMessage =
+  | {
+      type: "start";
+      session: string;
+      vm_id: string;
+      mode: TerminalSessionMode;
+      cols: number;
+      rows: number;
+      at_ms: number;
+      mid_session: boolean;
+    }
+  | { type: "events"; events: ShareEvent[] }
+  | { type: "gap"; bytes: number };
 "#
 }
 
@@ -1318,6 +1384,17 @@ mod tests {
                 !block(ts, "IssueTerminalSessionRequest").contains(absent),
                 "the create request must not carry {absent:?} at the top level"
             );
+        }
+        for required in [
+            "export interface RunMirrorRequest {",
+            "write_token: string;",
+            "claimed_at_ms: number;",
+            "export type ShareEvent = [number, ShareEventCode, string];",
+            "| { type: \"events\"; events: ShareEvent[] }",
+            "| { type: \"gap\"; bytes: number };",
+            "mid_session: boolean;",
+        ] {
+            assert!(ts.contains(required), "the emitter dropped {required:?}");
         }
         assert!(!ts.contains("TerminalTargetView"));
         assert!(

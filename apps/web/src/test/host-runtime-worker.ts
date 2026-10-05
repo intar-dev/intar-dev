@@ -1,4 +1,5 @@
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
+import { RunShareDO } from "@/control-plane/run-share-do";
 import { ScenarioSourceDO } from "@/control-plane/scenario-source-do";
 
 export default {
@@ -7,4 +8,4 @@ export default {
   },
 } satisfies ExportedHandler<Cloudflare.Env>;
 
-export { HostRuntimeDO, ScenarioSourceDO };
+export { HostRuntimeDO, RunShareDO, ScenarioSourceDO };

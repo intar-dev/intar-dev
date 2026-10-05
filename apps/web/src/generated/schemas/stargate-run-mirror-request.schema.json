@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunMirrorRequest",
+  "description": "`PUT /v1/run-mirrors/{run_id}`: stream every PTY session of the run to the\nshare. A PUT whose `claimed_at_ms` is older than the stored mirror's answers\n409, so a delayed call for an older share can not replace a newer one.\n`DELETE /v1/run-mirrors/{run_id}?share_id=` stops it, and answers 409 when\nthe run streams to a different share.",
+  "type": "object",
+  "properties": {
+    "claimed_at_ms": {
+      "description": "Unix milliseconds when the control plane claimed this share for the\nrun. Claims of one run are serialised, so newer claims are larger.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "share_id": {
+      "type": "string"
+    },
+    "write_token": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "share_id",
+    "write_token",
+    "claimed_at_ms"
+  ]
+}

@@ -1,4 +1,10 @@
 import { sessionFor } from "./fixtures/sessions";
+import {
+  openShare,
+  shareFrame,
+  shareHistory,
+  shareMission,
+} from "./fixtures/share-socket";
 import { expect, test } from "./fixtures/test";
 import { routeCase } from "./routes";
 
@@ -315,6 +321,28 @@ test("run workspace opens a deterministic terminal transport", async ({
   await expect(
     page.getByRole("button", { name: "Reconnect terminal" }),
   ).toHaveCount(0);
+});
+
+test("a shared run's public page mirrors the learner's terminals", async ({
+  page,
+  ui,
+}) => {
+  const sockets = await openShare(page, ui, { theme: "dark" });
+  (await sockets.nth(0)).send(shareFrame(...shareHistory));
+
+  await expect(
+    page.getByRole("heading", { level: 1, name: shareMission.title }),
+  ).toBeVisible();
+  const tabs = page
+    .getByRole("tablist", { name: "Terminal sessions" })
+    .getByRole("tab");
+  await expect(tabs).toHaveCount(2);
+  await expect(tabs.nth(0)).toContainText("web · 1");
+  await expect(tabs.nth(1)).toContainText("web · 2");
+  // The running session is in front, drawn at 16pt.
+  const screen = page.locator(".xterm-rows");
+  await expect(screen).toContainText("nginx.service: failed");
+  await expect(screen).toHaveCSS("font-size", "21px");
 });
 
 test("organization workspace keeps the active tab in the URL", async ({

@@ -38,6 +38,8 @@ export function hardenWorkerResponse(
   }
 
   const url = new URL(request.url);
+  // A public run share is reachable by link only, never by search.
+  if (url.pathname === "/watch") headers.set("x-robots-tag", "noindex, nofollow");
   if (url.pathname.startsWith("/api/")) {
     headers.set("cache-control", API_CACHE_CONTROL);
     headers.set("pragma", "no-cache");

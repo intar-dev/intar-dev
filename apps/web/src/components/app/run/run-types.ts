@@ -138,6 +138,13 @@ export interface ScenarioRunRecord {
     checkedAt: number | null;
   };
   canDestroy: boolean;
+  /** The public link while the run is shared; null while it is not. */
+  share: { url: string } | null;
+  /**
+   * Sharing may be turned on. Only the run view answers it: a record from the
+   * start or a hint response leaves it out, so absent means not asked.
+   */
+  canShare?: boolean;
   createdAt: number;
   updatedAt: number;
   bootProbes: ScenarioProbeStatus[];

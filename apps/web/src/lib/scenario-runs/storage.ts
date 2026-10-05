@@ -47,6 +47,7 @@ import {
 } from "@/lib/scenarios";
 import { recordLinkedCourseUnitCompletionForRun } from "@/lib/course-catalogs";
 import { type ScenarioRunRecord } from "./types";
+import { runShareUrl } from "@/lib/run-share/links";
 import {
   deriveScenarioRunActivity,
   deriveScenarioRunReplayState,
@@ -340,6 +341,7 @@ export function fromDbRow(row: typeof scenarioRuns.$inferSelect) {
     solvedAt: row.solvedAt,
     completedAt: row.completedAt,
     failedAt: row.failedAt,
+    shareId: row.shareId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     state: parseRunState(row.stateJson),
@@ -394,6 +396,7 @@ export function toScenarioRunRecord(
     savingStage: deriveScenarioRunSavingStage({ phase: row.state.phase }),
     replayState,
     hasReplay: replayState === "ready",
+    share: row.shareId ? { url: runShareUrl(row.shareId) } : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     ...row.state,

@@ -313,6 +313,7 @@ impl server::Handler for SshConnection {
         }
         let (controller, events) = spawn_pty_bridge(
             self.state.host_relays.clone(),
+            &self.state.run_mirrors,
             route,
             PtyBridgeOptions {
                 term: pty.term,
@@ -379,6 +380,7 @@ impl server::Handler for SshConnection {
         }) {
             let (controller, events) = spawn_pty_bridge(
                 self.state.host_relays.clone(),
+                &self.state.run_mirrors,
                 route,
                 PtyBridgeOptions {
                     term: pty.term,

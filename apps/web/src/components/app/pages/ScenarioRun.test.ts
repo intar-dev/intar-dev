@@ -6,9 +6,14 @@ import type {
   ScenarioRunVmRecord,
 } from "@/components/app/run/run-types";
 
+interface Chrome {
+  action?: ReactNode;
+  menu?: ReactNode;
+  status?: ReactNode;
+}
 const pageState = vi.hoisted(() => ({
   run: null as ScenarioRunRecord | null,
-  chrome: null as { action?: ReactNode; menu?: ReactNode } | null,
+  chrome: null as Chrome | null,
 }));
 const queryClient = vi.hoisted(() => ({
   cancelQueries: vi.fn(),
@@ -40,7 +45,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("@/components/app/shell/page-chrome", () => ({
-  usePageChrome: (chrome: { action?: ReactNode; menu?: ReactNode }) => {
+  usePageChrome: (chrome: Chrome) => {
     pageState.chrome = chrome;
   },
 }));
@@ -77,13 +82,46 @@ describe("scenario run terminal controls", () => {
   });
 });
 
-function renderRun(
-  run: ScenarioRunRecord,
-): { action?: ReactNode; menu?: ReactNode } | null {
+describe("scenario run sharing", () => {
+  beforeEach(() => {
+    pageState.run = null;
+    pageState.chrome = null;
+    vi.clearAllMocks();
+  });
+
+  const shared = {
+    url: "https://intar.example.test/watch#Zm9vYmFyYmF6cXV4cXV1eA",
+  };
+
+  it("lets a finished run that is still shared be stopped, and says it is shared", () => {
+    const chrome = renderRun({ ...run([vm("completed")]), share: shared });
+
+    expect(markup(chrome?.action)).toContain("Share");
+    expect(markup(chrome?.menu)).toContain("Share");
+    // The run's own action is still there beside it.
+    expect(markup(chrome?.action)).toContain("Delete run…");
+    expect(markup(chrome?.status)).toContain("Live · shared");
+  });
+
+  it("offers nothing to a finished run that is not shared", () => {
+    // Even where the server says sharing is allowed: the run is over.
+    const chrome = renderRun({
+      ...run([vm("completed")]),
+      share: null,
+      canShare: true,
+    });
+
+    expect(markup(chrome?.action)).not.toContain("Share");
+    expect(markup(chrome?.menu)).not.toContain("Share");
+    expect(markup(chrome?.status)).not.toContain("shared");
+  });
+});
+
+function renderRun(run: ScenarioRunRecord): Chrome | null {
   pageState.run = run;
   pageState.chrome = null;
   renderToStaticMarkup(createElement(ScenarioRun));
-  return pageState.chrome as { action?: ReactNode; menu?: ReactNode } | null;
+  return pageState.chrome as Chrome | null;
 }
 
 function markup(node: ReactNode | undefined) {
@@ -128,6 +166,7 @@ function run(vms: ScenarioRunVmRecord[]): ScenarioRunRecord {
     terminalPhase: "failed",
     canOpenTerminal: false,
     canDestroy: false,
+    share: null,
     createdAt: 1,
     updatedAt: 2,
     bootProbes: [],

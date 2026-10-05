@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "0d9331f0-b993-4f3a-a619-5843e6b48a39",
-  "prevId": "5129fc89-5f61-4962-b12b-0efad33e7eba",
+  "id": "12a3fb28-782d-4dff-a707-0bac26453c1f",
+  "prevId": "0d9331f0-b993-4f3a-a619-5843e6b48a39",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -6259,6 +6259,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "share_id": {
+          "name": "share_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -6281,6 +6288,13 @@
           "name": "scenario_runs_active_key_uidx",
           "columns": [
             "active_key"
+          ],
+          "isUnique": true
+        },
+        "scenario_runs_share_id_uidx": {
+          "name": "scenario_runs_share_id_uidx",
+          "columns": [
+            "share_id"
           ],
           "isUnique": true
         },

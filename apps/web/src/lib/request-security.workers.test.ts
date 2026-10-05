@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   MAX_API_JSON_BODY_BYTES,
+  clientNetwork,
   enforceRateLimit,
   guardBetterAuthRequest,
   guardCanonicalRequestPath,
@@ -533,5 +534,18 @@ describe("worker API request security", () => {
       expect(unavailable.response.status).toBe(503);
     }
     consoleError.mockRestore();
+  });
+});
+
+describe("clientNetwork", () => {
+  it("keys IPv4 by address and IPv6 by its /64", () => {
+    expect(clientNetwork("198.51.100.7")).toBe("198.51.100.7");
+    expect(clientNetwork("::ffff:198.51.100.7")).toBe("198.51.100.7");
+    expect(clientNetwork("2001:db8:0:1::1")).toBe("2001:db8:0:1::/64");
+    expect(clientNetwork("2001:0DB8:0000:0001:aaaa:bbbb:cccc:dddd")).toBe(
+      "2001:db8:0:1::/64",
+    );
+    expect(clientNetwork("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(clientNetwork("::1")).toBe("0:0:0:0::/64");
   });
 });

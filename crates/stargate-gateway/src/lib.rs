@@ -1,6 +1,7 @@
 mod admin;
 mod auth;
 mod host_relay;
+mod mirror;
 mod outbound;
 mod relay_api;
 mod runtime;
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router, middleware,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use http::StatusCode;
 use serde_json::json;
@@ -78,6 +79,7 @@ pub struct GatewayState {
     pub(crate) terminal_route_targets: TerminalRouteTargetRegistry,
     pub(crate) terminal_sockets: TerminalSocketRegistry,
     pub(crate) workspace_app_tunnels: WorkspaceAppTunnelPool,
+    pub(crate) run_mirrors: mirror::RunMirrors,
     pub admin_auth: AssertionValidator,
     pub public_web: PublicGatewayState,
 }
@@ -106,6 +108,7 @@ impl GatewayState {
             terminal_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             terminal_route_targets: TerminalRouteTargetRegistry::default(),
             terminal_sockets: TerminalSocketRegistry::default(),
+            run_mirrors: mirror::RunMirrors::default(),
             admin_auth: AssertionValidator::new(admin_auth)?,
             public_web: PublicGatewayState {
                 public_base_url: web.public_base_url.clone(),
@@ -129,6 +132,14 @@ impl GatewayState {
                 workspace_app_session_ttl_seconds: web.workspace_app_session_ttl_seconds,
             },
         })
+    }
+
+    /// Stream the terminals of shared runs to the control plane at
+    /// `ingest_base_url`, starting with the run mirrors in the store. Without
+    /// this call nothing is mirrored and the run mirror API answers 503.
+    pub async fn with_share_ingest(mut self, ingest_base_url: &url::Url) -> Result<Self> {
+        self.run_mirrors = mirror::RunMirrors::load(self.store.clone(), ingest_base_url).await?;
+        Ok(self)
     }
 
     /// Stage a target on a pending route. The call stores a validated target
@@ -204,6 +215,10 @@ pub fn build_admin_router(state: GatewayState) -> Router {
         .route(
             "/v1/workspace-app-sessions",
             post(admin::issue_workspace_app_session),
+        )
+        .route(
+            "/v1/run-mirrors/{run_id}",
+            put(admin::put_run_mirror).delete(admin::delete_run_mirror),
         )
         .route("/v1/routes/{username}", delete(admin::delete_route))
         .route(

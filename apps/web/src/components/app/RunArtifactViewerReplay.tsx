@@ -115,6 +115,7 @@ export function AsciicastReplaySurface({
   label = "Terminal replay",
   checks,
   checksScope = "machine",
+  fontSize,
 }: {
   /** Stable identity of the cast (e.g. artifact id); resets error state. */
   contentId: string;
@@ -130,6 +131,11 @@ export function AsciicastReplaySurface({
    * only the checks that first passed in it and no total can be claimed.
    */
   checksScope?: "machine" | "part" | undefined;
+  /**
+   * A text size in pixels the screen keeps at every width: the cast no longer
+   * fits its box, and a wider one scrolls sideways inside it.
+   */
+  fontSize?: number | undefined;
 }) {
   const [playerError, setPlayerError] = useState<string | null>(null);
   // Try again re-mounts the player (a new key) with the same cast.
@@ -160,7 +166,9 @@ export function AsciicastReplaySurface({
   }, []);
 
   const empty = !loading && !content.trim();
-  const sized = minimal && wide;
+  // A fixed text size never fits an aspect box, so the placeholders keep a
+  // plain one.
+  const sized = minimal && wide && fontSize === undefined;
   // A sized box carries the screen's inset outside its content box, which
   // keeps the cast's aspect ratio for the player's fit (see .replay-inset).
   const boxClass = minimal
@@ -238,6 +246,7 @@ export function AsciicastReplaySurface({
         label={label}
         checks={checks}
         checksScope={checksScope}
+        fontSize={fontSize}
         onReady={handlePlayerReady}
         onError={handlePlayerError}
       />
@@ -272,6 +281,7 @@ function ReplayPlayer({
   label,
   checks,
   checksScope,
+  fontSize,
   onReady,
   onError,
 }: {
@@ -283,6 +293,7 @@ function ReplayPlayer({
   label: string;
   checks: readonly ReplayCheck[] | undefined;
   checksScope: "machine" | "part";
+  fontSize: number | undefined;
   onReady: () => void;
   onError: (message: string) => void;
 }) {
@@ -564,11 +575,16 @@ function ReplayPlayer({
     window.addEventListener("pointercancel", finish);
   };
 
-  const scroll = custom && !wide;
+  // A set text size is never fitted: the screen keeps it and scrolls sideways.
+  const fixedSize = fontSize !== undefined;
+  const scroll = custom && (!wide || fixedSize);
   const mounted = (
     <MountedAsciicastPlayer
       content={content}
-      fit={custom && wide ? "both" : custom ? "none" : "width"}
+      fit={
+        fixedSize ? "none" : custom && wide ? "both" : custom ? "none" : "width"
+      }
+      fontSize={fontSize}
       speed={speed}
       custom={custom}
       onPlayer={setPlayer}
@@ -581,7 +597,11 @@ function ReplayPlayer({
   );
 
   if (!custom) {
-    return <div className="overflow-hidden">{mounted}</div>;
+    return (
+      <div className={fixedSize ? "overflow-x-auto" : "overflow-hidden"}>
+        {mounted}
+      </div>
+    );
   }
 
   const max = duration > 0 ? duration : 1;
@@ -754,6 +774,7 @@ function ReplayPlayer({
 const MountedAsciicastPlayer = memo(function MountedAsciicastPlayer({
   content,
   fit,
+  fontSize,
   speed,
   custom,
   onPlayer,
@@ -765,6 +786,8 @@ const MountedAsciicastPlayer = memo(function MountedAsciicastPlayer({
 }: {
   content: string;
   fit: "both" | "none" | "width";
+  /** Pixels; with fit "none" only. The phone cell (13px) when not set. */
+  fontSize: number | undefined;
   speed: ReplaySpeed;
   custom: boolean;
   onPlayer: (player: AsciinemaPlayerInstance | null) => void;
@@ -815,7 +838,9 @@ const MountedAsciicastPlayer = memo(function MountedAsciicastPlayer({
           // a 13px cell that scrolls sideways. The operations viewer fills
           // the container width.
           fit,
-          ...(fit === "none" ? { terminalFontSize: "13px" } : {}),
+          ...(fit === "none"
+            ? { terminalFontSize: `${fontSize ?? 13}px` }
+            : {}),
           speed,
           cursorMode: reducedMotion ? "steady" : "blinking",
           terminalLineHeight: REPLAY_TERMINAL_LINE_HEIGHT,
@@ -882,6 +907,7 @@ const MountedAsciicastPlayer = memo(function MountedAsciicastPlayer({
   }, [
     content,
     fit,
+    fontSize,
     speed,
     custom,
     onPlayer,

@@ -6,6 +6,9 @@ import { handleHostEnrollment } from "@/control-plane/host-enrollment";
 import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifacts";
 import { handleAgentRunCliRequest } from "@/control-plane/run-cli";
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
+import { RunShareDO } from "@/control-plane/run-share-do";
+import { SHARE_INGEST_PATH } from "@/lib/run-share/protocol";
+import { handleShareIngest } from "@/lib/run-share/service";
 import {
   ScenarioSourceDO,
   sweepScenarioSources,
@@ -86,6 +89,12 @@ export default {
       }
     }
 
+    // Stargate streams shared runs with a per-share bearer token that the
+    // share itself checks; it is not a browser API call.
+    if (url.pathname === SHARE_INGEST_PATH) {
+      return respond(await traceOperation("share.ingest", () => handleShareIngest(request)));
+    }
+
     // GitHub signs its deliveries instead of sending browser credentials, so
     // the webhook answers before the application API security layer.
     if (url.pathname === GITHUB_WEBHOOK_PATH) {
@@ -146,4 +155,4 @@ export default {
   },
 } satisfies ExportedHandler<Cloudflare.Env>;
 
-export { HostRuntimeDO, MaintenanceState, ScenarioSourceDO };
+export { HostRuntimeDO, MaintenanceState, RunShareDO, ScenarioSourceDO };

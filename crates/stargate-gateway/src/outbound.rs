@@ -14,7 +14,10 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use sha2::{Digest as _, Sha256};
 use std::borrow::Cow;
 
-use crate::HostRelayRegistry;
+use crate::{
+    HostRelayRegistry,
+    mirror::{RunMirrors, SessionMirror},
+};
 use russh::{
     ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, Preferred,
     client::{self, Msg},
@@ -90,6 +93,7 @@ pub fn spawn_exec_bridge(
         target_username,
         target,
         BridgeMode::Exec { command },
+        SessionMirror::default(),
         input_rx,
         events_tx,
         cancel.clone(),
@@ -104,8 +108,11 @@ pub fn spawn_exec_bridge(
     ))
 }
 
+/// A PTY bridge is what a share mirrors: browser terminals and native SSH
+/// sessions both open one, and an exec bridge has no terminal to show.
 pub fn spawn_pty_bridge(
     relays: HostRelayRegistry,
+    mirrors: &RunMirrors,
     route: StoredTerminalRoute,
     options: PtyBridgeOptions,
     cancel: CancellationToken,
@@ -113,11 +120,13 @@ pub fn spawn_pty_bridge(
     let (target, target_username) = prepared_target(&route, relays)?;
     let (events_tx, events_rx) = tokio_mpsc::channel(BRIDGE_EVENT_CAPACITY);
     let (input_tx, input_rx) = tokio_mpsc::channel(BRIDGE_INPUT_CAPACITY);
+    let mirror = mirrors.session(&route, options.cols, options.rows);
 
     tokio::spawn(run_bridge(
         target_username,
         target,
         BridgeMode::Pty(options),
+        mirror,
         input_rx,
         events_tx,
         cancel.clone(),
@@ -542,20 +551,25 @@ async fn run_bridge(
     target_username: String,
     target: PreparedSshTarget,
     mode: BridgeMode,
+    mirror: SessionMirror,
     input_rx: tokio_mpsc::Receiver<BridgeInput>,
     events_tx: tokio_mpsc::Sender<BridgeEvent>,
     cancel: CancellationToken,
 ) {
-    let exit_status = match run_bridge_inner(
+    let result = run_bridge_inner(
         target_username,
         target,
         mode,
+        &mirror,
         input_rx,
         &events_tx,
         &cancel,
     )
-    .await
-    {
+    .await;
+    // The PTY ended: the mirror sends what is left and closes its share socket
+    // as ended.
+    drop(mirror);
+    let exit_status = match result {
         Ok(status) => status,
         Err(error) => {
             // Log and surface the full anyhow cause chain: the outermost
@@ -593,6 +607,7 @@ async fn run_bridge_inner(
     target_username: String,
     target: PreparedSshTarget,
     mode: BridgeMode,
+    mirror: &SessionMirror,
     input_rx: tokio_mpsc::Receiver<BridgeInput>,
     events_tx: &tokio_mpsc::Sender<BridgeEvent>,
     cancel: &CancellationToken,
@@ -624,7 +639,7 @@ async fn run_bridge_inner(
         return Ok(255);
     }
     let (read_half, write_half) = channel.split();
-    let status = bridge_channel(read_half, write_half, input_rx, events_tx, cancel).await;
+    let status = bridge_channel(read_half, write_half, input_rx, events_tx, cancel, mirror).await;
 
     let _ = session
         .disconnect(Disconnect::ByApplication, "", "en")
@@ -675,10 +690,11 @@ async fn bridge_channel(
     input_rx: tokio_mpsc::Receiver<BridgeInput>,
     events_tx: &tokio_mpsc::Sender<BridgeEvent>,
     cancel: &CancellationToken,
+    mirror: &SessionMirror,
 ) -> anyhow::Result<u32> {
     drive_bridge_pumps(
-        pump_bridge_input(write_half, input_rx, cancel),
-        pump_bridge_output(read_half, events_tx, cancel),
+        pump_bridge_input(write_half, input_rx, cancel, mirror),
+        pump_bridge_output(read_half, events_tx, cancel, mirror),
     )
     .await
 }
@@ -700,6 +716,7 @@ async fn pump_bridge_input(
     write_half: ChannelWriteHalf<Msg>,
     mut input_rx: tokio_mpsc::Receiver<BridgeInput>,
     cancel: &CancellationToken,
+    mirror: &SessionMirror,
 ) -> anyhow::Result<u32> {
     loop {
         tokio::select! {
@@ -720,10 +737,12 @@ async fn pump_bridge_input(
                             .context("failed forwarding data to target")?;
                     }
                     BridgeInput::Resize { cols, rows } => {
+                        let (cols, rows) = (cols.max(1), rows.max(1));
                         write_half
-                            .window_change(u32::from(cols.max(1)), u32::from(rows.max(1)), 0, 0)
+                            .window_change(u32::from(cols), u32::from(rows), 0, 0)
                             .await
                             .context("failed forwarding target window size")?;
+                        mirror.resize(cols, rows);
                     }
                     BridgeInput::Eof => {
                         write_half.eof().await.context("failed sending target eof")?;
@@ -734,10 +753,13 @@ async fn pump_bridge_input(
     }
 }
 
+/// The mirror tap never awaits, so a slow share can not stall the terminal
+/// into `BRIDGE_OUTPUT_TIMEOUT`.
 async fn pump_bridge_output(
     mut read_half: ChannelReadHalf,
     events_tx: &tokio_mpsc::Sender<BridgeEvent>,
     cancel: &CancellationToken,
+    mirror: &SessionMirror,
 ) -> anyhow::Result<u32> {
     let mut exit_status = None;
 
@@ -747,6 +769,7 @@ async fn pump_bridge_output(
             message = read_half.wait() => {
                 match message {
                     Some(ChannelMsg::Data { data }) => {
+                        mirror.output(&data);
                         // This terminal owns its guest SSH connection. russh
                         // 0.62.2 awaits its bounded channel queue (capacity 4),
                         // so waiting here also bounds input and window updates.
@@ -755,6 +778,7 @@ async fn pump_bridge_output(
                             "terminal output stalled or closed");
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        mirror.output(&data);
                         anyhow::ensure!(send_bridge_event(events_tx, cancel, BridgeEvent::Stderr(data.to_vec())).await,
                             "terminal output stalled or closed");
                     }

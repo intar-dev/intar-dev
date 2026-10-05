@@ -187,6 +187,7 @@ function runRecord(): ScenarioRunRecord {
     terminalPhase: "ready",
     canOpenTerminal: true,
     canDestroy: true,
+    share: null,
     createdAt: 1,
     updatedAt: 100,
     bootProbes: [],

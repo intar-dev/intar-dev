@@ -45,6 +45,13 @@ pub struct TerminalTokenSettings {
     pub hs256_secret: String,
 }
 
+/// Public share links. Stargate streams the terminals of a shared run to the
+/// control plane at `<ingest_base_url>/share-ingest`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShareSettings {
+    pub ingest_base_url: url::Url,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceSettings {
     #[serde(default = "default_log_filter")]
@@ -64,6 +71,9 @@ pub struct ServerSettings {
     pub terminal_tokens: TerminalTokenSettings,
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
+    /// Without it nothing is mirrored and the run mirror API answers 503.
+    #[serde(default)]
+    pub share: Option<ShareSettings>,
     #[serde(default)]
     pub trace: Option<TraceSettings>,
 }

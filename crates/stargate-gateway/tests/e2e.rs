@@ -41,10 +41,10 @@ use sqlx::{
 use stargate_core::{
     ActivateTerminalTargetRequest, AdminAuthSettings, IssueTerminalSessionRequest,
     IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
-    IssueWorkspaceAppSessionResponse, NativeTerminalAuthMode, RouteMetadata,
-    StageTerminalTargetRequest, StageTerminalTargetResponse, TerminalSessionMode, TerminalTarget,
-    TerminalTargetState, TerminalTokenSettings, WebSettings, WorkspaceAppMetadata,
-    WorkspaceAppProtocol,
+    IssueWorkspaceAppSessionResponse, NativeTerminalAuthMode, RouteMetadata, RunMirrorRequest,
+    ShareEventCode, ShareIngestMessage, StageTerminalTargetRequest, StageTerminalTargetResponse,
+    TerminalSessionMode, TerminalTarget, TerminalTargetState, TerminalTokenSettings, WebSettings,
+    WorkspaceAppMetadata, WorkspaceAppProtocol,
 };
 use stargate_gateway::{
     GatewayState, SqliteRouteStore, build_admin_router, build_public_router, run_public_ssh_server,
@@ -927,6 +927,178 @@ async fn wildcard_workspace_app_origin_bootstraps_http_and_websocket() -> Result
     Ok(())
 }
 
+const SHARE_ID: &str = "share-id-0123456789abc";
+const OTHER_SHARE_ID: &str = "other-id-0123456789abc";
+const SHARE_WRITE_TOKEN: &str = "write-token-0123456789abcdefghijklmnopqrstu";
+
+#[tokio::test]
+async fn run_mirrors_answer_503_without_share_ingest() -> Result<()> {
+    let harness = Harness::start().await?;
+    assert_eq!(
+        harness.put_run_mirror(SHARE_ID, 1, true).await?.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE
+    );
+    harness.shutdown().await
+}
+
+#[tokio::test]
+async fn run_mirrors_require_the_admin_assertion_and_fence_by_share() -> Result<()> {
+    let ingest = TokioTcpListener::bind(("127.0.0.1", 0)).await?;
+    let harness =
+        Harness::start_with_share_ingest(format!("http://{}", ingest.local_addr()?).parse()?)
+            .await?;
+    assert_eq!(
+        harness.put_run_mirror(SHARE_ID, 200, false).await?.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        harness.put_run_mirror("short", 200, true).await?.status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        harness
+            .put_run_mirror(SHARE_ID, u64::MAX, true)
+            .await?
+            .status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        harness.put_run_mirror(SHARE_ID, 200, true).await?.status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    // A late call for an older claim must not replace the newer share.
+    let stale = harness.put_run_mirror(OTHER_SHARE_ID, 100, true).await?;
+    assert_eq!(stale.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        stale.json::<serde_json::Value>().await?,
+        serde_json::json!({ "error": "run streams to a newer share" })
+    );
+    // A repeat of the current share stays idempotent, and an older repeat
+    // does not lower the stored claim.
+    assert_eq!(
+        harness.put_run_mirror(SHARE_ID, 100, true).await?.status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        harness
+            .put_run_mirror(OTHER_SHARE_ID, 150, true)
+            .await?
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    assert_eq!(
+        harness.delete_run_mirror(SHARE_ID, false).await?,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    // Stopping an older share must not stop the share the run streams to.
+    assert_eq!(
+        harness.delete_run_mirror(OTHER_SHARE_ID, true).await?,
+        reqwest::StatusCode::CONFLICT
+    );
+    // An equal or newer claim replaces the share.
+    assert_eq!(
+        harness
+            .put_run_mirror(OTHER_SHARE_ID, 200, true)
+            .await?
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        harness.delete_run_mirror(SHARE_ID, true).await?,
+        reqwest::StatusCode::CONFLICT
+    );
+    assert_eq!(
+        harness.delete_run_mirror(OTHER_SHARE_ID, true).await?,
+        reqwest::StatusCode::NO_CONTENT
+    );
+    // A repeat finds the run stopped already.
+    assert_eq!(
+        harness.delete_run_mirror(OTHER_SHARE_ID, true).await?,
+        reqwest::StatusCode::NO_CONTENT
+    );
+    harness.shutdown().await
+}
+
+/// A native PTY session of a shared run streams its output to the ingest
+/// socket, and closes it as ended when the session exits.
+#[tokio::test]
+async fn a_shared_pty_session_streams_its_output_until_it_exits() -> Result<()> {
+    let ingest = TokioTcpListener::bind(("127.0.0.1", 0)).await?;
+    let harness =
+        Harness::start_with_share_ingest(format!("http://{}", ingest.local_addr()?).parse()?)
+            .await?;
+    let writer = tokio::spawn(accept_share_writer(ingest));
+    harness.issue_native_terminal_session(true).await?;
+    assert_eq!(
+        harness.put_run_mirror(SHARE_ID, 1, true).await?.status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+
+    let mut session = harness.open_public_ssh_session().await?;
+    assert!(
+        harness
+            .authenticate_public_key(&mut session, &harness.profile_client_private_key_openssh)
+            .await?
+    );
+    let mut channel = session.channel_open_session().await?;
+    channel
+        .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+        .await?;
+    channel.exec(true, "hostname").await?;
+    wait_for_native_channel_data(&mut channel, "exec:hostname").await?;
+    wait_for_native_channel_close(&mut channel).await?;
+
+    // The bearer header and the request target are checked in `mirror.rs`.
+    let (frames, close_code) = tokio::time::timeout(Duration::from_secs(10), writer).await???;
+    let Some(ShareIngestMessage::Start {
+        vm_id,
+        mode,
+        cols,
+        rows,
+        mid_session,
+        ..
+    }) = frames.first()
+    else {
+        anyhow::bail!("the first frame is not a start: {frames:?}");
+    };
+    assert_eq!(
+        (vm_id.as_str(), *mode, *cols, *rows, *mid_session),
+        ("vm-01", TerminalSessionMode::Native, 80, 24, false)
+    );
+    let shown = frames[1..]
+        .iter()
+        .flat_map(|frame| match frame {
+            ShareIngestMessage::Events { events } => events.as_slice(),
+            _ => &[],
+        })
+        .filter(|event| event.1 == ShareEventCode::Output)
+        .map(|event| event.2.as_str())
+        .collect::<String>();
+    assert!(shown.contains("exec:hostname"), "{shown:?}");
+    assert_eq!(close_code, Some(1000));
+    harness.shutdown().await
+}
+
+/// A stand-in for the control plane's ingest socket. It accepts one writer
+/// and returns every frame it sent, and its close code.
+async fn accept_share_writer(
+    listener: TokioTcpListener,
+) -> Result<(Vec<ShareIngestMessage>, Option<u16>)> {
+    let (stream, _) = listener.accept().await?;
+    let mut socket = tokio_tungstenite::accept_async(stream).await?;
+    let mut frames = Vec::new();
+    loop {
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => frames.push(serde_json::from_str(&text)?),
+            Some(Ok(Message::Close(frame))) => {
+                return Ok((frames, frame.map(|frame| u16::from(frame.code))));
+            }
+            Some(Ok(_)) => {}
+            other => anyhow::bail!("the writer left without a close frame: {other:?}"),
+        }
+    }
+}
+
 struct WorkspaceAppBrowserSession {
     base_url: url::Url,
     cookie: String,
@@ -987,21 +1159,27 @@ impl Harness {
     async fn start_with_workspace_app_domain(
         workspace_app_base_domain: Option<&str>,
     ) -> Result<Self> {
-        Self::start_with_workspace_app_settings(workspace_app_base_domain, 60, 15 * 60).await
+        Self::start_with_workspace_app_settings(workspace_app_base_domain, 60, 15 * 60, None).await
     }
 
     async fn start_with_workspace_app_session_ttl(ttl_seconds: u64) -> Result<Self> {
-        Self::start_with_workspace_app_settings(None, 60, ttl_seconds).await
+        Self::start_with_workspace_app_settings(None, 60, ttl_seconds, None).await
     }
 
     async fn start_with_workspace_app_bootstrap_ttl(ttl_seconds: u64) -> Result<Self> {
-        Self::start_with_workspace_app_settings(None, ttl_seconds, 15 * 60).await
+        Self::start_with_workspace_app_settings(None, ttl_seconds, 15 * 60, None).await
+    }
+
+    /// A gateway that streams shared runs to the ingest socket at `base_url`.
+    async fn start_with_share_ingest(base_url: url::Url) -> Result<Self> {
+        Self::start_with_workspace_app_settings(None, 60, 15 * 60, Some(base_url)).await
     }
 
     async fn start_with_workspace_app_settings(
         workspace_app_base_domain: Option<&str>,
         workspace_app_bootstrap_ttl_seconds: u64,
         workspace_app_session_ttl_seconds: u64,
+        share_ingest_base_url: Option<url::Url>,
     ) -> Result<Self> {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("stargate_gateway=debug,russh=debug")
@@ -1057,7 +1235,7 @@ impl Harness {
             workspace_app_bootstrap_ttl_seconds,
             workspace_app_session_ttl_seconds,
         };
-        let gateway = GatewayState::new(
+        let mut gateway = GatewayState::new(
             store,
             admin_auth.clone(),
             &web,
@@ -1068,6 +1246,9 @@ impl Harness {
                 hs256_secret: "terminal-secret".to_owned(),
             },
         )?;
+        if let Some(base_url) = share_ingest_base_url {
+            gateway = gateway.with_share_ingest(&base_url).await?;
+        }
 
         let admin_router = build_admin_router(gateway.clone());
         let public_router = build_public_router(gateway.clone());
@@ -2079,6 +2260,40 @@ impl Harness {
             }
         }
         Ok(output)
+    }
+
+    async fn put_run_mirror(
+        &self,
+        share_id: &str,
+        claimed_at_ms: u64,
+        authorized: bool,
+    ) -> Result<reqwest::Response> {
+        let mut request = reqwest::Client::new()
+            .put(format!("http://{}/v1/run-mirrors/run-01", self.admin_addr))
+            .json(&RunMirrorRequest {
+                share_id: share_id.to_owned(),
+                write_token: SHARE_WRITE_TOKEN.to_owned(),
+                claimed_at_ms,
+            });
+        if authorized {
+            request = request.header("x-stargate-admin-assertion", self.admin_token()?);
+        }
+        Ok(request.send().await?)
+    }
+
+    async fn delete_run_mirror(
+        &self,
+        share_id: &str,
+        authorized: bool,
+    ) -> Result<reqwest::StatusCode> {
+        let mut request = reqwest::Client::new().delete(format!(
+            "http://{}/v1/run-mirrors/run-01?share_id={share_id}",
+            self.admin_addr
+        ));
+        if authorized {
+            request = request.header("x-stargate-admin-assertion", self.admin_token()?);
+        }
+        Ok(request.send().await?.status())
     }
 
     fn admin_token(&self) -> Result<String> {

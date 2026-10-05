@@ -7,8 +7,9 @@ use intar_contracts::{
     source::SourceRefusalV1,
     stargate::{
         ActivateTerminalTargetRequest, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
-        IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse,
-        StageTerminalTargetRequest, StageTerminalTargetResponse,
+        IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse, RunMirrorRequest,
+        SHARE_ID_LEN, SHARE_WRITE_TOKEN_LEN, ShareIngestMessage, StageTerminalTargetRequest,
+        StageTerminalTargetResponse, validate_share_secret,
     },
 };
 
@@ -38,6 +39,43 @@ fn stargate_activate_request_fixture_round_trips() {
     assert_round_trip::<ActivateTerminalTargetRequest>(include_str!(
         "../fixtures/stargate/activate-terminal-target-request.json"
     ));
+}
+
+#[test]
+fn stargate_run_mirror_request_fixture_round_trips() {
+    let raw = include_str!("../fixtures/stargate/run-mirror-request.json");
+    assert_round_trip::<RunMirrorRequest>(raw);
+    let request: RunMirrorRequest = serde_json::from_str(raw).expect("fixture should decode");
+    assert!(validate_share_secret(&request.share_id, SHARE_ID_LEN).is_ok());
+    assert!(validate_share_secret(&request.write_token, SHARE_WRITE_TOKEN_LEN).is_ok());
+}
+
+#[test]
+fn stargate_share_ingest_fixtures_round_trip() {
+    assert_round_trip::<ShareIngestMessage>(include_str!(
+        "../fixtures/stargate/share-ingest-start.json"
+    ));
+    assert_round_trip::<ShareIngestMessage>(include_str!(
+        "../fixtures/stargate/share-ingest-events.json"
+    ));
+}
+
+/// The ingest socket carries terminal output only; an input event or an
+/// unknown field is a protocol error.
+#[test]
+fn stargate_share_ingest_rejects_input_events_and_unknown_fields() {
+    let input = serde_json::json!({ "type": "events", "events": [[0, "i", "secret"]] });
+    assert!(serde_json::from_value::<ShareIngestMessage>(input).is_err());
+    let extra = serde_json::json!({ "type": "gap", "bytes": 1, "data": "x" });
+    assert!(serde_json::from_value::<ShareIngestMessage>(extra).is_err());
+}
+
+#[test]
+fn share_secrets_must_be_exact_base64url() {
+    assert!(validate_share_secret("Zm9vYmFyYmF6cXV4cXV1eA", SHARE_ID_LEN).is_ok());
+    assert!(validate_share_secret("Zm9vYmFyYmF6cXV4cXV1e", SHARE_ID_LEN).is_err());
+    assert!(validate_share_secret("Zm9vYmFyYmF6cXV4cXV1e=", SHARE_ID_LEN).is_err());
+    assert!(validate_share_secret("Zm9vYmFyYmF6cXV4cXV1/A", SHARE_ID_LEN).is_err());
 }
 
 /// A stage call carries ready data only. A pending shape on that call is a

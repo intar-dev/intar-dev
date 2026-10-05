@@ -44,6 +44,9 @@
     // release tarball sha256 per target as JSON, e.g. {"linux_amd64":"<hex>"}.
     // While either is empty the descriptor answers 503.
     "SCENARIO_COMPILER_CLI_VERSION": "0.9.0",
+    // Public run shares keep their terminal logs next to the run recordings.
+    // Local workerd has no jurisdictions, so local configs leave this unset.
+    "RUN_SHARE_JURISDICTION": "eu",
     "SCENARIO_COMPILER_CLI_SHA256": "{\"linux_amd64\":\"ddba666ecc584f26811d0e149aaeb74d0c2407b058a5eab8a179a4447f4b5255\",\"linux_arm64\":\"3a368da215404ff450069a1dc4e2f286877675996fa730e336c4033246017afa\"}",
   },
   "vpc_services": [
@@ -113,6 +116,16 @@
         "period": 60,
       },
     },
+    {
+      // Public share viewers, per address. A classroom behind one NAT shares
+      // an address, so this sits well above the sensitive-action limiter.
+      "name": "SHARE_WATCH_RATE_LIMITER",
+      "namespace_id": "88427092",
+      "simple": {
+        "limit": 120,
+        "period": 60,
+      },
+    },
   ],
   "durable_objects": {
     "bindings": [
@@ -124,6 +137,13 @@
         // One per scenario source binding, named by its scope key.
         "name": "SCENARIO_SOURCE",
         "class_name": "ScenarioSourceDO",
+      },
+      {
+        // One per public run share, named by its share id in the EU
+        // jurisdiction: the share's terminal log, written once, read by
+        // every viewer.
+        "name": "RUN_SHARE",
+        "class_name": "RunShareDO",
       },
     ],
   },
@@ -156,6 +176,12 @@
       // `deleted_classes: ["ScenarioSourceDO"]` migration in the same deploy.
       "tag": "v5",
       "new_sqlite_classes": ["ScenarioSourceDO"],
+    },
+    {
+      // A revert that stops exporting RunShareDO must add a
+      // `deleted_classes: ["RunShareDO"]` migration in the same deploy.
+      "tag": "v6",
+      "new_sqlite_classes": ["RunShareDO"],
     },
   ],
   "observability": {

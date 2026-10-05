@@ -54,6 +54,7 @@ import {
   fromDbRow,
   toScenarioRunRecord,
 } from "./storage";
+import { stopRunShare } from "@/lib/run-share/service";
 
 export async function startScenarioRunForUser(params: {
   scenarioId: string;
@@ -339,6 +340,9 @@ async function deleteFinishedScenarioRun(params: {
     );
   }
 
+  // The public share goes first: a failed wipe stops the delete here, while
+  // the run still remembers the share id for the retry.
+  if (row.shareId) await stopRunShare(row.runId, row.shareId);
   await revokeScenarioRunRoutes(row);
   const storageCleanup = await deleteScenarioArtifactStorage(
     env.VM_RUN_ARTIFACTS_BUCKET,

@@ -135,3 +135,35 @@ export interface IssueWorkspaceAppSessionResponse {
   bootstrap_expires_at: number;
   expires_at: number;
 }
+
+/** `PUT /v1/run-mirrors/{run_id}`: stream every PTY session of the run to the
+ * share. A PUT whose `claimed_at_ms` is older than the stored mirror's answers
+ * 409. `DELETE /v1/run-mirrors/{run_id}?share_id=` stops it, and answers 409
+ * when the run streams to a different share. */
+export interface RunMirrorRequest {
+  share_id: string;
+  write_token: string;
+  /** Unix milliseconds when the control plane claimed the share. */
+  claimed_at_ms: number;
+}
+
+/** `[milliseconds since the PTY started, code, data]`, the asciicast v2
+ * event shape. Resize data is `"COLSxROWS"`. */
+export type ShareEventCode = "o" | "r";
+export type ShareEvent = [number, ShareEventCode, string];
+
+/** One text frame on the share ingest socket: one socket per PTY session,
+ * output only. A repeated `start` with the same `session` resumes it. */
+export type ShareIngestMessage =
+  | {
+      type: "start";
+      session: string;
+      vm_id: string;
+      mode: TerminalSessionMode;
+      cols: number;
+      rows: number;
+      at_ms: number;
+      mid_session: boolean;
+    }
+  | { type: "events"; events: ShareEvent[] }
+  | { type: "gap"; bytes: number };

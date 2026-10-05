@@ -157,6 +157,9 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
     hasReplay: state === "replay",
     createdAt: FIXED_NOW - 35 * minute,
     updatedAt: FIXED_NOW - minute,
+    // Off by default and not offered; a test turns sharing on for itself.
+    share: null,
+    canShare: false,
     phase: lifecycle.runPhase,
     phaseTitle: lifecycle.runPhase,
     phaseDetail:

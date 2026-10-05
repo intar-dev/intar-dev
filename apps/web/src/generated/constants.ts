@@ -20,6 +20,13 @@ export const SOURCE_COMPILER_PATH = "/registry/v1/sources/compiler";
 export const AGENT_SOURCES_PATH = "/agent/registry/sources";
 export const SOURCE_META_FIELD = "meta";
 export const SOURCE_BUNDLE_FIELD = "bundle";
+export const SHARE_ID_LEN = 22;
+export const SHARE_WRITE_TOKEN_LEN = 43;
+export const SHARE_INGEST_PING = "ping";
+export const SHARE_INGEST_PONG = "pong";
+export const SHARE_INGEST_CLOSE_ENDED = 1000;
+export const SHARE_INGEST_CLOSE_LIMIT = 1009;
+export const SHARE_INGEST_CLOSE_STOPPED = 4001;
 
 export const runtimeEnvKeys = {
   sshAuthorizedKeysB64: "INTAR_SSH_AUTHORIZED_KEYS_B64",

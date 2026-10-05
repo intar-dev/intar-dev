@@ -5261,6 +5261,7 @@ dependencies = [
  "jsonwebtoken",
  "reqwest",
  "russh",
+ "rustls",
  "sd-notify",
  "serde",
  "serde_json",

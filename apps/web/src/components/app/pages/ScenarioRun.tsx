@@ -16,6 +16,7 @@ import {
   BookOpen,
   EllipsisVertical,
   ListChecks,
+  Share2,
   SquareTerminal,
 } from "lucide-react";
 import {
@@ -49,6 +50,7 @@ import {
   type StatusTone,
 } from "@/components/app/patterns/StatusToken";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { formatClockSeconds } from "@/components/app/lib/format";
 import { BinIcon } from "@/components/ui/bin-icon";
 import { Button } from "@/components/ui/button";
@@ -160,6 +162,11 @@ const LazyScenarioCancelDialog = lazy(() =>
 const LazyDeleteRunDialog = lazy(() =>
   import("@/components/app/run/RunDialogs").then(({ DeleteRunDialog }) => ({
     default: DeleteRunDialog,
+  })),
+);
+const LazyRunShareDialog = lazy(() =>
+  import("@/components/app/run/RunShareDialog").then(({ RunShareDialog }) => ({
+    default: RunShareDialog,
   })),
 );
 
@@ -416,12 +423,14 @@ export function ScenarioRun() {
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const [deleteRunDialogOpen, setDeleteRunDialogOpen] = useState(false);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
   // The dialogs load lazily on first use and then stay mounted, so their exit
   // plays before they go; unmounting on close would cut it off.
   const [dialogsRequested, setDialogsRequested] = useState({
     cancel: false,
     delete: false,
     ssh: false,
+    share: false,
   });
   const openDeleteRunDialog = useCallback(() => {
     setDialogsRequested((current) => ({ ...current, delete: true }));
@@ -944,6 +953,62 @@ export function ScenarioRun() {
     onSettled: endRunMutation,
   });
 
+  const shareRun = useMutation({
+    onMutate: beginRunMutation,
+    mutationFn: async (enabled: boolean) => {
+      const response = await fetch(
+        `/api/scenarios/runs/${encodeURIComponent(runId)}/share`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        },
+      );
+      const body = (await response.json().catch(() => null)) as {
+        shareUrl?: string | null;
+        error?: string;
+      } | null;
+      if (!response.ok || !body || !("shareUrl" in body)) {
+        throw new Error(
+          body?.error ??
+            (enabled ? "Failed to share the run" : "Failed to stop sharing"),
+        );
+      }
+      return body.shareUrl ?? null;
+    },
+    onSuccess: (shareUrl) => {
+      // The run view says the same on its next read: sharing again after a
+      // stop is offered, and while it is on there is nothing to offer.
+      queryClient.setQueryData<ScenarioRunResponse>(runQueryKey, (current) =>
+        current
+          ? {
+              run: {
+                ...current.run,
+                share: shareUrl === null ? null : { url: shareUrl },
+                canShare: shareUrl === null && current.run.active,
+              },
+            }
+          : current,
+      );
+    },
+    onSettled: () => {
+      endRunMutation();
+      // Only now, with the fence down, does the read reach the server.
+      void queryClient.invalidateQueries({
+        queryKey: runQueryKey,
+        exact: true,
+      });
+    },
+  });
+  const { reset: resetShareRun } = shareRun;
+  const openShareDialog = useCallback(() => {
+    // A failure from an earlier attempt is not replayed when the dialog opens.
+    resetShareRun();
+    setDialogsRequested((current) => ({ ...current, share: true }));
+    setShareDialogOpen(true);
+  }, [resetShareRun]);
+
   const attemptData = attempt.data?.run ?? null;
   const bootEvidence = useMemo(
     () =>
@@ -1072,6 +1137,27 @@ export function ScenarioRun() {
         )
       : null;
   const selectedProbes = selectedVm?.scenarioProbes ?? [];
+  // Sharing is offered to a run that is active, and a shared run can always be
+  // stopped, even after it has finished. Only the run view answers whether it
+  // may be offered; a record from a hint or the start does not. The last
+  // answer stands, and the run view is asked once if there never was one.
+  const shareLink = attemptData?.share?.url ?? null;
+  const shareOffer = useRef<boolean | null>(null);
+  if (attemptData?.canShare !== undefined) {
+    shareOffer.current = attemptData.canShare;
+  }
+  const showShareAction = Boolean(
+    attemptData &&
+      (attemptData.share != null ||
+        (shareOffer.current === true && attemptData.active)),
+  );
+  const askedShareOffer = useRef<string | null>(null);
+  useEffect(() => {
+    if (!attemptData || shareOffer.current !== null) return;
+    if (askedShareOffer.current === attemptData.id) return;
+    askedShareOffer.current = attemptData.id;
+    void queryClient.invalidateQueries({ queryKey: runQueryKey, exact: true });
+  }, [attemptData?.id, attemptData?.canShare, queryClient, runQueryKey]);
   const canDeleteRun =
     attemptData !== null &&
     (attemptData.phase === "completed" || attemptData.phase === "failed") &&
@@ -1252,6 +1338,20 @@ export function ScenarioRun() {
     selectedVm?.phaseTitle,
     showSelectedVmPreparation,
   ]);
+  // While the run is shared the header says so, wherever the status shows.
+  const runShared = attemptData?.share != null;
+  const runStatusNode = useMemo(
+    () =>
+      runShared && runStatusDisplay ? (
+        <span className="inline-flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          {runStatusDisplay}
+          <SharedBadge />
+        </span>
+      ) : (
+        runStatusDisplay
+      ),
+    [runShared, runStatusDisplay],
+  );
 
   const runIsLive = attemptData?.activity === "foreground";
   const runUsesFocusedShell =
@@ -1318,6 +1418,63 @@ export function ScenarioRun() {
       ) : undefined,
     [canDeleteRun, openCancelDialog, openDeleteRunDialog, showEndRunAction],
   );
+  // Share sits beside the run's own action in the app bar, and in its menu on
+  // a phone, while it is offered or the run is shared.
+  const shareAction = useMemo(
+    () =>
+      showShareAction ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="hidden sm:inline-flex"
+          aria-haspopup="dialog"
+          aria-expanded={shareDialogOpen}
+          onClick={openShareDialog}
+        >
+          <Share2 aria-hidden="true" />
+          Share
+        </Button>
+      ) : null,
+    [openShareDialog, shareDialogOpen, showShareAction],
+  );
+  const shareMenuItem = useMemo(
+    () =>
+      showShareAction ? (
+        <DropdownMenuItem
+          className="sm:hidden"
+          aria-haspopup="dialog"
+          onClick={openShareDialog}
+        >
+          Share
+        </DropdownMenuItem>
+      ) : null,
+    [openShareDialog, showShareAction],
+  );
+  const pageAction = useMemo(
+    () =>
+      shareAction ? (
+        <>
+          {shareAction}
+          {runAction}
+        </>
+      ) : (
+        runAction
+      ),
+    [runAction, shareAction],
+  );
+  const pageMenu = useMemo(
+    () =>
+      shareMenuItem ? (
+        <>
+          {shareMenuItem}
+          {runMenu}
+        </>
+      ) : (
+        runMenu
+      ),
+    [runMenu, shareMenuItem],
+  );
   const runBackTarget = attemptData
     ? getRunReturnTarget(attemptData.courseLocation)
     : null;
@@ -1348,15 +1505,15 @@ export function ScenarioRun() {
   ]);
   usePageChrome({
     title: attemptData?.title ?? "Scenario run",
-    status: runUsesFocusedShell ? undefined : runStatusDisplay,
+    status: runUsesFocusedShell ? undefined : runStatusNode,
     back: runBackNavigation,
-    action: runUsesFocusedShell ? undefined : runAction,
-    menu: runUsesFocusedShell ? undefined : runMenu,
+    action: runUsesFocusedShell ? undefined : pageAction,
+    menu: runUsesFocusedShell ? undefined : pageMenu,
     fullscreen: runUsesFocusedShell,
   });
 
   const runActions =
-    showSshAction || showEndRunAction || canDeleteRun ? (
+    showSshAction || showShareAction || showEndRunAction || canDeleteRun ? (
       <RunActions
         ssh={
           showSshAction
@@ -1365,6 +1522,11 @@ export function ScenarioRun() {
                 expanded: sshDialogOpen,
                 onOpen: openSshDialog,
               }
+            : null
+        }
+        share={
+          showShareAction
+            ? { expanded: shareDialogOpen, onOpen: openShareDialog }
             : null
         }
         end={
@@ -1442,6 +1604,28 @@ export function ScenarioRun() {
             sessionRequest={selectedVmSessionRequest}
             open={sshDialogOpen}
             onOpenChange={setSshDialogOpen}
+          />
+        </Suspense>
+      ) : null}
+      {dialogsRequested.share ? (
+        <Suspense fallback={null}>
+          <LazyRunShareDialog
+            open={shareDialogOpen}
+            onOpenChange={(open) => {
+              setShareDialogOpen(open);
+              if (!open) resetShareRun();
+            }}
+            url={shareLink}
+            pending={shareRun.isPending}
+            error={
+              shareRun.error
+                ? shareRun.error instanceof Error
+                  ? shareRun.error.message
+                  : "Try again in a moment."
+                : null
+            }
+            onShare={() => shareRun.mutate(true)}
+            onStop={() => shareRun.mutate(false)}
           />
         </Suspense>
       ) : null}
@@ -1554,7 +1738,8 @@ export function ScenarioRun() {
       <RunWorkspaceShell
         before={runDialogs}
         title={attemptData.title}
-        status={runStatusDisplay}
+        status={runStatusNode}
+        actions={runActions}
         returnTarget={getRunReturnTarget(attemptData.courseLocation)}
         guidance={guidanceProps}
       >
@@ -1588,7 +1773,7 @@ export function ScenarioRun() {
     <RunWorkspaceShell
       before={runDialogs}
       title={attemptData.title}
-      status={runStatusDisplay}
+      status={runStatusNode}
       actions={runActions}
       returnTarget={getRunReturnTarget(attemptData.courseLocation)}
       guidance={guidanceProps}
@@ -1973,18 +2158,26 @@ interface RunActionHandle {
 
 // The run's own actions. Beside the title they are text buttons; on a phone
 // they shrink to icon buttons that keep their words for assistive technology,
-// and in landscape, where the slim bar has no room, they fold into one menu.
+// and in landscape, where the slim bar has no room, or with more than two on
+// a phone, they fold into one menu.
 function RunActions({
   ssh,
+  share,
   end,
   remove,
 }: {
   ssh: (RunActionHandle & { disabled: boolean }) | null;
+  share: RunActionHandle | null;
   end: (RunActionHandle & { label: string }) | null;
   remove: RunActionHandle | null;
 }) {
   const short = useMediaQuery(RUN_QUERY.short);
-  if (short) {
+  const phone = useMediaQuery(RUN_QUERY.phone);
+  // A phone has room for two icon buttons beside the title; a third would
+  // cover the status line, so three fold into the menu as well.
+  const crowded =
+    phone && [ssh, share, end, remove].filter(Boolean).length > 2;
+  if (short || crowded) {
     return (
       <div role="group" aria-label="Run actions" data-run-actions>
         <DropdownMenu>
@@ -2016,6 +2209,15 @@ function RunActions({
                 onClick={ssh.onOpen}
               >
                 SSH command
+              </DropdownMenuItem>
+            ) : null}
+            {share ? (
+              <DropdownMenuItem
+                aria-haspopup="dialog"
+                className="pointer-coarse:min-h-11"
+                onClick={share.onOpen}
+              >
+                Share
               </DropdownMenuItem>
             ) : null}
             {end ? (
@@ -2064,6 +2266,20 @@ function RunActions({
         >
           <SquareTerminal className="size-4 md:hidden" aria-hidden="true" />
           <span className="max-md:sr-only">SSH command</span>
+        </Button>
+      ) : null}
+      {share ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className={iconOnPhone}
+          aria-haspopup="dialog"
+          aria-expanded={share.expanded}
+          onClick={share.onOpen}
+        >
+          <Share2 className="size-4" aria-hidden="true" />
+          <span className="max-md:sr-only">Share</span>
         </Button>
       ) : null}
       {end ? (
@@ -2375,6 +2591,19 @@ async function navigateToRunCourse(
       break;
   }
   await navigate({ to: "/courses" });
+}
+
+/** The run is public: anyone with the link can watch it. */
+function SharedBadge() {
+  return (
+    <Badge variant="outline" className="gap-1.5">
+      <span
+        aria-hidden="true"
+        className="size-1.5 shrink-0 rounded-full bg-primary"
+      />
+      Live · shared
+    </Badge>
+  );
 }
 
 function ActiveRunStatus({

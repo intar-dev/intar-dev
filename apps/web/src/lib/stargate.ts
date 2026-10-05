@@ -5,6 +5,7 @@ import type {
   IssueTerminalSessionResponse as StargateApiTerminalSessionResponse,
   IssueTerminalSessionRequest as StargateCreateRequest,
   RouteMetadata as StargateRouteMetadata,
+  RunMirrorRequest,
   StageTerminalTargetRequest as StargateStageRequest,
   StageTerminalTargetResponse as StargateStageResponse,
   SshTargetTransport,
@@ -516,6 +517,66 @@ export async function deleteStargateRoute(
   if (!response.ok) {
     throw new Error(`stargate route delete failed (${response.status})`);
   }
+}
+
+async function adminAssertionHeaders(): Promise<Record<string, string>> {
+  return {
+    [assertionHeader(env.STARGATE_ADMIN_AUTH_HEADER)]:
+      await createAssertionToken({
+        secret: requiredValue(
+          env.STARGATE_ADMIN_AUTH_SECRET,
+          "STARGATE_ADMIN_AUTH_SECRET",
+        ),
+        issuer: requiredValue(
+          env.STARGATE_ADMIN_AUTH_ISSUER,
+          "STARGATE_ADMIN_AUTH_ISSUER",
+        ),
+        audience: requiredValue(
+          env.STARGATE_ADMIN_AUTH_AUDIENCE,
+          "STARGATE_ADMIN_AUTH_AUDIENCE",
+        ),
+        subject: "intar-admin",
+        ttlSeconds: 60,
+      }),
+  };
+}
+
+/** Streams every PTY session of the run to the share from now on. */
+export async function putStargateRunMirror(
+  runId: string,
+  request: RunMirrorRequest,
+): Promise<void> {
+  const response = await stargateAdminFetch(
+    `/v1/run-mirrors/${encodeURIComponent(requiredValue(runId, "runId"))}`,
+    {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        ...(await adminAssertionHeaders()),
+      },
+      body: JSON.stringify(request),
+    },
+  );
+  if (response.status !== 204) {
+    throw new Error(`stargate run mirror update failed (${response.status})`);
+  }
+}
+
+/**
+ * Stops the run's mirror to this share. 409 means the run already mirrors to
+ * a newer share, which this call must not stop.
+ */
+export async function deleteStargateRunMirror(
+  runId: string,
+  shareId: string,
+): Promise<void> {
+  const response = await stargateAdminFetch(
+    `/v1/run-mirrors/${encodeURIComponent(requiredValue(runId, "runId"))}` +
+      `?share_id=${encodeURIComponent(shareId)}`,
+    { method: "DELETE", headers: await adminAssertionHeaders() },
+  );
+  if (response.status === 204 || response.status === 409) return;
+  throw new Error(`stargate run mirror delete failed (${response.status})`);
 }
 
 export function stargateRouteTtlMs(): number {

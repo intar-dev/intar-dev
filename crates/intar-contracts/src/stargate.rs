@@ -315,3 +315,89 @@ fn valid_relay_id(id: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
+
+/// Public share links. A share id is 16 random bytes in unpadded base64url.
+pub const SHARE_ID_LEN: usize = 22;
+/// The per-share secret Stargate presents when it streams a run's terminals
+/// to the control plane: 32 random bytes in unpadded base64url.
+pub const SHARE_WRITE_TOKEN_LEN: usize = 43;
+/// Keepalive frames on the share ingest socket. The control plane answers
+/// them without waking its storage, so an idle shell costs nothing.
+pub const SHARE_INGEST_PING: &str = "ping";
+pub const SHARE_INGEST_PONG: &str = "pong";
+/// Close codes on the share ingest socket. Stargate closes with
+/// `SHARE_INGEST_CLOSE_ENDED` when the PTY ends; any other close means the
+/// writer detached and resumes the same session. The control plane closes
+/// with `SHARE_INGEST_CLOSE_LIMIT` or `SHARE_INGEST_CLOSE_STOPPED`, and either
+/// one stops the writer for good.
+pub const SHARE_INGEST_CLOSE_ENDED: u16 = 1000;
+pub const SHARE_INGEST_CLOSE_LIMIT: u16 = 1009;
+pub const SHARE_INGEST_CLOSE_STOPPED: u16 = 4001;
+
+/// Check a share id or write token: exactly `len` unpadded base64url bytes.
+pub fn validate_share_secret(value: &str, len: usize) -> Result<(), String> {
+    if value.len() == len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        Ok(())
+    } else {
+        Err(format!("expected {len} unpadded base64url characters"))
+    }
+}
+
+/// `PUT /v1/run-mirrors/{run_id}`: stream every PTY session of the run to the
+/// share. A PUT whose `claimed_at_ms` is older than the stored mirror's answers
+/// 409, so a delayed call for an older share can not replace a newer one.
+/// `DELETE /v1/run-mirrors/{run_id}?share_id=` stops it, and answers 409 when
+/// the run streams to a different share.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RunMirrorRequest {
+    pub share_id: String,
+    pub write_token: String,
+    /// Unix milliseconds when the control plane claimed this share for the
+    /// run. Claims of one run are serialised, so newer claims are larger.
+    pub claimed_at_ms: u64,
+}
+
+/// One text frame on the share ingest socket. Stargate opens one socket per
+/// PTY session and never sends keystrokes, only what the terminal shows.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ShareIngestMessage {
+    /// The first frame of a socket. After a reconnect the writer sends it
+    /// again with the same `session`, and the session continues.
+    Start {
+        session: String,
+        vm_id: String,
+        mode: TerminalSessionMode,
+        cols: u16,
+        rows: u16,
+        /// Unix milliseconds when the PTY started.
+        at_ms: u64,
+        /// The run started sharing after this PTY had already drawn output.
+        mid_session: bool,
+    },
+    Events {
+        events: Vec<ShareEvent>,
+    },
+    /// Output that was dropped instead of stalling the terminal.
+    Gap {
+        bytes: u64,
+    },
+}
+
+/// `[milliseconds since the PTY started, code, data]`, the asciicast v2 event
+/// shape. Resize data is `"COLSxROWS"`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct ShareEvent(pub u64, pub ShareEventCode, pub String);
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub enum ShareEventCode {
+    #[serde(rename = "o")]
+    Output,
+    #[serde(rename = "r")]
+    Resize,
+}

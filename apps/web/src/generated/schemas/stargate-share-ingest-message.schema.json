@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ShareIngestMessage",
+  "description": "One text frame on the share ingest socket. Stargate opens one socket per\nPTY session and never sends keystrokes, only what the terminal shows.",
+  "oneOf": [
+    {
+      "description": "The first frame of a socket. After a reconnect the writer sends it\nagain with the same `session`, and the session continues.",
+      "type": "object",
+      "properties": {
+        "at_ms": {
+          "description": "Unix milliseconds when the PTY started.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "mid_session": {
+          "description": "The run started sharing after this PTY had already drawn output.",
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/$defs/TerminalSessionMode"
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "session": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "start"
+        },
+        "vm_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "session",
+        "vm_id",
+        "mode",
+        "cols",
+        "rows",
+        "at_ms",
+        "mid_session"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ShareEvent"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "events"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "events"
+      ]
+    },
+    {
+      "description": "Output that was dropped instead of stalling the terminal.",
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "gap"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "bytes"
+      ]
+    }
+  ],
+  "$defs": {
+    "ShareEvent": {
+      "description": "`[milliseconds since the PTY started, code, data]`, the asciicast v2 event\nshape. Resize data is `\"COLSxROWS\"`.",
+      "type": "array",
+      "maxItems": 3,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        {
+          "$ref": "#/$defs/ShareEventCode"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ShareEventCode": {
+      "type": "string",
+      "enum": [
+        "o",
+        "r"
+      ]
+    },
+    "TerminalSessionMode": {
+      "type": "string",
+      "enum": [
+        "browser",
+        "native"
+      ]
+    }
+  }
+}

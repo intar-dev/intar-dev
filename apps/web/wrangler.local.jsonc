@@ -71,6 +71,16 @@
         "period": 60,
       },
     },
+    {
+      // Public share viewers, per address. A classroom behind one NAT shares
+      // an address, so this sits well above the sensitive-action limiter.
+      "name": "SHARE_WATCH_RATE_LIMITER",
+      "namespace_id": "88427092",
+      "simple": {
+        "limit": 120,
+        "period": 60,
+      },
+    },
   ],
   "durable_objects": {
     "bindings": [
@@ -82,6 +92,13 @@
         "name": "SCENARIO_SOURCE",
         "class_name": "ScenarioSourceDO",
       },
+      {
+        // One per public run share, named by its share id in the EU
+        // jurisdiction: the share's terminal log, written once, read by
+        // every viewer.
+        "name": "RUN_SHARE",
+        "class_name": "RunShareDO",
+      },
     ],
   },
   "migrations": [
@@ -92,6 +109,12 @@
     {
       "tag": "v5",
       "new_sqlite_classes": ["ScenarioSourceDO"],
+    },
+    {
+      // A revert that stops exporting RunShareDO must add a
+      // `deleted_classes: ["RunShareDO"]` migration in the same deploy.
+      "tag": "v6",
+      "new_sqlite_classes": ["RunShareDO"],
     },
   ],
 }

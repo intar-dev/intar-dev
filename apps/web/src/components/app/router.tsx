@@ -97,6 +97,24 @@ const organizationDirectSignInRoute = createRoute({
 });
 
 /* -------------------------------------------------------------------------- */
+/* Shared run (public, no sign-in). Its own page, outside both layouts.       */
+/* -------------------------------------------------------------------------- */
+
+// A share link is a secret: the page stays out of search results.
+const sharedRunRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "watch",
+  head: () =>
+    routeHead(
+      "Live run",
+      "Watch a learner work through a scenario run live.",
+      { noindex: true },
+    ),
+  pendingComponent: FullPageRoutePending,
+  component: lazyRouteComponent(() => import("./pages/SharedRun"), "SharedRun"),
+});
+
+/* -------------------------------------------------------------------------- */
 /* App surface (signed-in, dark). Guard lives here, once.                     */
 /* -------------------------------------------------------------------------- */
 
@@ -461,6 +479,7 @@ const routeTree = rootRoute.addChildren([
     adminPeopleRoute,
     adminUserDetailsRoute,
   ]),
+  sharedRunRoute,
 ]);
 
 export const router = createRouter({
@@ -474,11 +493,18 @@ export const router = createRouter({
 const DEFAULT_DESCRIPTION =
   "Learn systems theory and repair real infrastructure in guided scenarios.";
 
-function routeHead(title: string, description: string) {
+function routeHead(
+  title: string,
+  description: string,
+  options: { noindex?: boolean } = {},
+) {
   return {
     meta: [
       { title: `${title} · intar.dev` },
       { name: "description", content: description },
+      ...(options.noindex
+        ? [{ name: "robots", content: "noindex, nofollow" }]
+        : []),
     ],
   };
 }

@@ -364,6 +364,7 @@ async fn run_attached_terminal(
     };
     let (controller, mut events) = spawn_pty_bridge(
         state.host_relays.clone(),
+        &state.run_mirrors,
         route,
         PtyBridgeOptions {
             term: DEFAULT_TERM.to_owned(),
