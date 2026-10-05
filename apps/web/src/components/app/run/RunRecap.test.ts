@@ -713,6 +713,7 @@ function run(overrides: Partial<ScenarioRunRecord> = {}): ScenarioRunRecord {
     terminalPhase: "ready",
     canOpenTerminal: false,
     canDestroy: false,
+    share: null,
     createdAt: 1,
     updatedAt: 2,
     bootProbes: [],

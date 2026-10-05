@@ -31,6 +31,13 @@ issuer = "stargate"
 audience = "stargate-terminal"
 hs256_secret = "replace-me"
 
+# Public share links. Stargate streams the terminals of a shared run to
+# `<ingest_base_url>/share-ingest` (https only). Without this section nothing is
+# mirrored and the run mirror admin API answers 503. Environment override:
+# STARGATE_SHARE_INGEST_BASE_URL (empty disables it).
+[share]
+ingest_base_url = "https://intar.dev"
+
 [trace]
 filter = "info,stargate=debug"
 json = true

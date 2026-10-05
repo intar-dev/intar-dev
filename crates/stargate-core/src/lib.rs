@@ -5,17 +5,19 @@ mod terminal;
 mod workspace_app;
 
 pub use config::{
-    AdminAuthSettings, AssertionAuthSettings, ServerSettings, TerminalTokenSettings, TraceSettings,
-    WebSettings,
+    AdminAuthSettings, AssertionAuthSettings, ServerSettings, ShareSettings, TerminalTokenSettings,
+    TraceSettings, WebSettings,
 };
 pub use error::{Result, StargateError};
 pub use intar_contracts::stargate::{
     ActivateTerminalTargetRequest, BrowserTerminalSession, IssueTerminalSessionRequest,
     IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
     IssueWorkspaceAppSessionResponse, NativeTerminalAuthMode, NativeTerminalSession, RouteMetadata,
-    SessionKind, SshTargetTransport, StageTerminalTargetRequest, StageTerminalTargetResponse,
-    TerminalSessionMode, TerminalTarget, TerminalTargetState, WorkspaceAppMetadata,
-    WorkspaceAppProtocol, validate_route_username,
+    RunMirrorRequest, SHARE_ID_LEN, SHARE_INGEST_CLOSE_ENDED, SHARE_INGEST_CLOSE_LIMIT,
+    SHARE_INGEST_CLOSE_STOPPED, SHARE_INGEST_PING, SHARE_WRITE_TOKEN_LEN, SessionKind, ShareEvent,
+    ShareEventCode, ShareIngestMessage, SshTargetTransport, StageTerminalTargetRequest,
+    StageTerminalTargetResponse, TerminalSessionMode, TerminalTarget, TerminalTargetState,
+    WorkspaceAppMetadata, WorkspaceAppProtocol, validate_route_username, validate_share_secret,
 };
 pub use terminal::{
     ROUTE_TTL, StoredTarget, StoredTerminalRoute, allows_client_public_key,

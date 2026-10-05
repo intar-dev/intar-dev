@@ -27,6 +27,8 @@ export interface MockApiServer {
   expectedUnavailable: number;
   nativeSshResponseDelayMs: number;
   scenarioRunStatusRevision: number;
+  /** Links the share route has handed out; each new share is a new link. */
+  shareLinks: number;
   handle(route: Route): Promise<void>;
   setRunState(state: RunFixtureState): void;
 }
@@ -575,6 +577,20 @@ function adminSignupStatus(signups: MockApiState["signups"]) {
   };
 }
 
+/**
+ * Only the run view says whether sharing is offered. The other responses that
+ * carry the run (the start, a hint, the solution, ending it) leave it out.
+ */
+function withoutShareOffer(run: Record<string, unknown>) {
+  const { canShare: _omitted, ...rest } = run;
+  return rest;
+}
+
+/** A link in the shape of a real one: the page path and a 22-character id. */
+export function shareFixtureUrl(origin: string, ordinal: number): string {
+  return `${origin}/watch#${`share${ordinal}`.padEnd(22, "A")}`;
+}
+
 async function requestBody(route: Route): Promise<Record<string, unknown>> {
   try {
     return (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
@@ -596,10 +612,15 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
     expectedUnavailable: 0,
     nativeSshResponseDelayMs: 0,
     scenarioRunStatusRevision: 0,
+    shareLinks: 0,
     setRunState(runState) {
       server.scenarioRunStatusRevision += 1;
       server.state.runState = runState;
+      // Sharing belongs to the run, not to the state it is in.
+      const { share, canShare } = server.state.run;
       server.state.run = makeRun(runState);
+      server.state.run.share = share ?? null;
+      server.state.run.canShare = canShare ?? false;
       const listedRun = server.state.runs.find(
         (run) => run.runId === "run-active",
       );
@@ -1030,7 +1051,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
             scenarioId: "repair-nginx",
             acceptedAt: FIXED_NOW,
             reused: false,
-            run: server.state.run,
+            run: withoutShareOffer(server.state.run),
           },
           202,
         );
@@ -1060,7 +1081,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
             runId: "run-active",
             acceptedAt: FIXED_NOW,
             activeSlotReleased: true,
-            run: server.state.run,
+            run: withoutShareOffer(server.state.run),
           },
           202,
         );
@@ -1080,7 +1101,22 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
             hint.bodyMarkdown = "Start with `systemctl status nginx`.";
           }
         }
-        await json(route, { run: server.state.run });
+        await json(route, { run: withoutShareOffer(server.state.run) });
+        return;
+      }
+      if (
+        /^\/api\/scenarios\/runs\/[^/]+\/share$/.test(pathname) &&
+        method === "POST"
+      ) {
+        const body = await requestBody(route);
+        // Like the control plane: sharing again after a stop is a new link.
+        server.shareLinks += body.enabled === true ? 1 : 0;
+        const shareUrl =
+          body.enabled === true
+            ? shareFixtureUrl(url.origin, server.shareLinks)
+            : null;
+        server.state.run.share = shareUrl ? { url: shareUrl } : null;
+        await json(route, { shareUrl });
         return;
       }
       if (
@@ -1095,7 +1131,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           bodyMarkdown:
             "Validate the nginx configuration, restore the unit, and restart it.",
         };
-        await json(route, { run: server.state.run });
+        await json(route, { run: withoutShareOffer(server.state.run) });
         return;
       }
       if (

@@ -44,6 +44,13 @@
       "bucket_name": "intar-dev-local-vm-image-registry",
     },
     {
+      // Public run shares, served to viewers from the CDN by a custom domain
+      // (SHARE_LIVE_ORIGIN). Holds only what owners chose to share.
+      "binding": "SHARE_LIVE_BUCKET",
+      "bucket_name": "intar-dev-share-live-20261005",
+      "jurisdiction": "eu",
+    },
+    {
       "binding": "VM_RUN_ARTIFACTS_BUCKET",
       "bucket_name": "intar-dev-local-run-artifacts",
     },
@@ -82,6 +89,13 @@
         "name": "SCENARIO_SOURCE",
         "class_name": "ScenarioSourceDO",
       },
+      {
+        // One per public run share, named by its share id in the EU
+        // jurisdiction: the share's terminal log, written once, read by
+        // every viewer.
+        "name": "RUN_SHARE",
+        "class_name": "RunShareDO",
+      },
     ],
   },
   "migrations": [
@@ -92,6 +106,12 @@
     {
       "tag": "v5",
       "new_sqlite_classes": ["ScenarioSourceDO"],
+    },
+    {
+      // A revert that stops exporting RunShareDO must add a
+      // `deleted_classes: ["RunShareDO"]` migration in the same deploy.
+      "tag": "v6",
+      "new_sqlite_classes": ["RunShareDO"],
     },
   ],
 }

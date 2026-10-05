@@ -124,6 +124,10 @@ export interface ScenarioRunRecord extends RunStateDocument {
   savingStage: ScenarioRunSavingStage | null;
   replayState: ScenarioRunReplayState;
   hasReplay: boolean;
+  /** The public share link while the owner shares the run. */
+  share: { url: string } | null;
+  /** Resolved on the owner's run view: whether sharing may be turned on. */
+  canShare?: boolean;
   createdAt: number;
   updatedAt: number;
 }

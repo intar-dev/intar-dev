@@ -45,6 +45,7 @@ export default defineConfig({
               });
             }
             if (path.startsWith("/v1/host-relays/revoke")) return new Response(null, {status: 204});
+            if (path.startsWith("/v1/run-mirrors/")) return new Response(null, {status: 204});
             return new Response("test service has no such route", {status: 404});
           },
         },
@@ -58,8 +59,12 @@ export default defineConfig({
             className: "ScenarioSourceDO",
             useSQLite: true,
           },
+          RUN_SHARE: {
+            className: "RunShareDO",
+            useSQLite: true,
+          },
         },
-        r2Buckets: ["VM_IMAGE_REGISTRY_BUCKET", "VM_RUN_ARTIFACTS_BUCKET"],
+        r2Buckets: ["SHARE_LIVE_BUCKET", "VM_IMAGE_REGISTRY_BUCKET", "VM_RUN_ARTIFACTS_BUCKET"],
       },
     }),
   ],

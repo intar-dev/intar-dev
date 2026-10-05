@@ -2,6 +2,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -9,8 +10,9 @@ use stargate_core::{
     ActivateTerminalTargetRequest, BrowserTerminalSession, IssueTerminalSessionRequest,
     IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
     IssueWorkspaceAppSessionResponse, NativeTerminalAuthMode, NativeTerminalSession,
-    StageTerminalTargetRequest, StageTerminalTargetResponse, StargateError, StoredTarget,
-    StoredTerminalRoute, TerminalSessionMode, TerminalTarget, validate_activate_request,
+    RunMirrorRequest, SHARE_ID_LEN, SHARE_WRITE_TOKEN_LEN, StageTerminalTargetRequest,
+    StageTerminalTargetResponse, StargateError, StoredTarget, StoredTerminalRoute,
+    TerminalSessionMode, TerminalTarget, validate_activate_request, validate_share_secret,
     validate_stage_request, validate_terminal_session_request,
     validate_workspace_app_session_request,
 };
@@ -259,6 +261,90 @@ pub async fn delete_workspace_app_route(
     state.sessions.terminate_username(&route_id).await;
     state.workspace_app_tunnels.invalidate(&route_id).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Stream every PTY session of the run to the share. A repeat with the same
+/// share and token keeps the live streams; another share replaces them,
+/// unless the run streams to a share that was claimed later: then the call
+/// answers 409 and changes nothing.
+pub async fn put_run_mirror(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Json(request): Json<RunMirrorRequest>,
+) -> Result<Response, GatewayHttpError> {
+    state.admin_auth.validate_headers(&headers).await?;
+    validate_run_id(&run_id)?;
+    validate_share_field("share_id", &request.share_id, SHARE_ID_LEN)?;
+    validate_share_field("write_token", &request.write_token, SHARE_WRITE_TOKEN_LEN)?;
+    let claimed_at_ms = i64::try_from(request.claimed_at_ms).map_err(|_| {
+        GatewayHttpError(StargateError::Validation(
+            "claimed_at_ms is out of range".to_owned(),
+        ))
+    })?;
+    let Some(mirrors) = state.run_mirrors.enabled() else {
+        return Ok(share_ingest_unavailable());
+    };
+    if !mirrors
+        .put(
+            &run_id,
+            &request.share_id,
+            &request.write_token,
+            claimed_at_ms,
+        )
+        .await?
+    {
+        let body = Json(json!({ "error": "run streams to a newer share" }));
+        return Ok((StatusCode::CONFLICT, body).into_response());
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Stop streaming the run, fenced by the share: while the run streams to
+/// another share the call answers 409 and changes nothing. A run that streams
+/// nowhere is already stopped.
+pub async fn delete_run_mirror(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Query(query): Query<DeleteRunMirrorQuery>,
+) -> Result<Response, GatewayHttpError> {
+    state.admin_auth.validate_headers(&headers).await?;
+    validate_run_id(&run_id)?;
+    validate_share_field("share_id", &query.share_id, SHARE_ID_LEN)?;
+    let Some(mirrors) = state.run_mirrors.enabled() else {
+        return Ok(share_ingest_unavailable());
+    };
+    if !mirrors.delete(&run_id, &query.share_id).await? {
+        let body = Json(json!({ "error": "run streams to another share" }));
+        return Ok((StatusCode::CONFLICT, body).into_response());
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteRunMirrorQuery {
+    share_id: String,
+}
+
+/// The rule for the run id of a route, so that every routed run can stream.
+fn validate_run_id(run_id: &str) -> Result<(), GatewayHttpError> {
+    if run_id.is_empty() || run_id.len() > 128 {
+        return Err(GatewayHttpError(StargateError::Validation(
+            "run_id must be 1..=128 characters".to_owned(),
+        )));
+    }
+    Ok(())
+}
+
+fn validate_share_field(field: &str, value: &str, len: usize) -> Result<(), GatewayHttpError> {
+    validate_share_secret(value, len)
+        .map_err(|error| GatewayHttpError(StargateError::Validation(format!("{field}: {error}"))))
+}
+
+fn share_ingest_unavailable() -> Response {
+    let body = Json(json!({ "error": "share ingest is not configured" }));
+    (StatusCode::SERVICE_UNAVAILABLE, body).into_response()
 }
 
 async fn replace_terminal_route(

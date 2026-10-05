@@ -91,11 +91,15 @@ export const scenarioRuns = sqliteTable(
     completedAt: integer("completed_at"),
     failedAt: integer("failed_at"),
     hiddenAt: integer("hidden_at"),
+    // The public share link's id while the owner shares the run, else null.
+    // The share's terminal log lives in its RunShareDO, named by this id.
+    shareId: text("share_id"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
   (table) => [
     uniqueIndex("scenario_runs_active_key_uidx").on(table.activeKey),
+    uniqueIndex("scenario_runs_share_id_uidx").on(table.shareId),
     uniqueIndex("scenario_runs_request_idempotency_uidx").on(
       table.userId,
       table.requestIdempotencyKey,

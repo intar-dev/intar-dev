@@ -21,6 +21,7 @@ import {
   destroyScenarioRunForUser,
   revokeScenarioRoutesForUser,
 } from "@/lib/scenario-runs";
+import { stopRunSharesForUser } from "@/lib/run-share/service";
 
 interface CurrentRevocation {
   revocation_id: string;
@@ -283,6 +284,9 @@ export async function cleanupAccessRevocation(params: {
     );
     externalCleanupDispatched = true;
     await revokeScenarioRoutesForUser(params.userId).catch(error => { failures.push(error); });
+    // Public shares of every run, finished ones included. A failed wipe keeps
+    // the share id, so the retried cleanup finds it again.
+    await stopRunSharesForUser(params.userId).catch(error => { failures.push(error); });
 
     for (const host of personalHosts) {
       await assertRevocationFence(

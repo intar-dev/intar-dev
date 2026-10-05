@@ -20,10 +20,10 @@ bundle.
   remote-access, validation, and mobile-sheet states; and keyboard, focus,
   reduced-motion, coarse-pointer, overflow, 200%-text, and terminal-cell
   behavior.
-- `bun run test:ui:smoke` runs 16 workflow archetypes in Chromium, Firefox,
-  and WebKit, for 48 checks.
-- `bun run test:ui` runs the complete 458-test release gate, including 29 VM
-  lifecycle checks, 9 VM startup checks, and 10 performance checks, with one
+- `bun run test:ui:smoke` runs 22 workflow checks in each of Chromium, Firefox,
+  and WebKit, for 66 checks.
+- `bun run test:ui` runs the complete 629-test release gate, including 29 VM
+  lifecycle checks, 11 VM startup checks, and 11 performance checks, with one
   worker in CI.
 
 Install the browser revisions pinned by `@playwright/test` and `bun.lock` with:

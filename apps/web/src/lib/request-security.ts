@@ -22,7 +22,8 @@ type SensitiveRateLimitAction =
   | "scenario-start"
   | "ssh-issuance"
   | "build-retry"
-  | "scenario-source";
+  | "scenario-source"
+  | "run-share";
 
 export type ApiRequestSecurityResult =
   { ok: true; request: Request } | { ok: false; response: Response };
@@ -241,6 +242,9 @@ export function sensitiveRateLimitActionFor(
   }
   if (/^\/api\/scenarios\/runs\/[^/]+\/ssh$/u.test(pathname)) {
     return "ssh-issuance";
+  }
+  if (/^\/api\/scenarios\/runs\/[^/]+\/share$/u.test(pathname)) {
+    return "run-share";
   }
   if (/^\/api\/admin\/builds\/[^/]+\/retry$/u.test(pathname)) {
     return "build-retry";

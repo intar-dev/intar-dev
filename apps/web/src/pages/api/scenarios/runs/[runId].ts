@@ -5,6 +5,7 @@ import {
   deleteFinishedScenarioRunForUser,
   getScenarioRunForUser,
 } from "@/lib/scenario-runs";
+import { canShareRuns } from "@/lib/run-share/service";
 
 export const prerender = false;
 
@@ -22,6 +23,12 @@ export const GET: APIRoute = async ({ request, params }) => {
       runId,
       userId: authz.context.userId,
     });
+    // Only an active, unshared run offers to start sharing; the flag read is
+    // cached, because this view is polled while the VMs boot.
+    run.canShare =
+      run.active && run.share === null
+        ? await canShareRuns(authz.context.userId)
+        : false;
     return jsonResponse({ run });
   } catch (error) {
     const { status, body } = toErrorResponse(error, "failed to load scenario run");

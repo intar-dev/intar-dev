@@ -32,6 +32,10 @@ import {
   archiveStageRankForAgentStage,
   type AgentArchiveStage,
 } from "@/lib/scenario-runs/saving-stage";
+import {
+  notifyShareRecording,
+  notifyShareVmArchived,
+} from "@/lib/run-share/service";
 
 interface AgentRunBeginRequest {
   runId?: string;
@@ -678,6 +682,7 @@ async function handleRunComplete(
   // durable archive job after artifact writes have been sealed.
   if (runVm.artifactWritesSealed) {
     await transitionRunVmToCompleted(db, runVm, Date.now());
+    await notifyRunShareOfArchive(runVm);
     return jsonResponse({ ok: true });
   }
 
@@ -691,8 +696,15 @@ async function handleRunComplete(
 
   const now = Date.now();
   await transitionRunVmToCompleted(db, runVm, now);
+  await notifyRunShareOfArchive(runVm);
 
   return jsonResponse({ ok: true });
+}
+
+/** A shared run rebuilds its share once every shared VM finished archiving. */
+async function notifyRunShareOfArchive(runVm: ResolvedRunVm): Promise<void> {
+  if (runVm.domainKind !== "scenario") return;
+  await notifyShareVmArchived({ runId: runVm.domainId, vmId: runVm.vmId });
 }
 
 async function handleRunArchiveStage(
@@ -831,6 +843,23 @@ async function handleRunTimeline(
   });
   if (publication === "scenario_target_missing") {
     return runPurgedResponse();
+  }
+  if (runVm.domainKind === "scenario") {
+    await notifyShareRecording({
+      runId: runVm.domainId,
+      vmId: runVm.vmId,
+      sessions: timelineWork.flatMap(({ session, recordingArtifact }) =>
+        recordingArtifact
+          ? [
+              {
+                start_ms: session.entry.startTimestampMs,
+                duration_ms: session.entry.durationMs,
+                cast_key: recordingArtifact.r2Key,
+              },
+            ]
+          : [],
+      ),
+    });
   }
 
   return jsonResponse({ ok: true });

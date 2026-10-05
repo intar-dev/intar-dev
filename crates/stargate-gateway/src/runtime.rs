@@ -29,13 +29,19 @@ pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
     .await?;
     let store = SqliteRouteStore::connect(&settings.database_path).await?;
     ensure_private_file_permissions(&settings.database_path).await?;
-    let gateway = GatewayState::new(
+    let mut gateway = GatewayState::new(
         store,
         settings.admin_auth.clone(),
         &settings.web,
         host_key.public_key().clone(),
         settings.terminal_tokens.clone(),
     )?;
+    if let Some(share) = &settings.share {
+        gateway = gateway
+            .with_share_ingest(&share.ingest_base_url)
+            .await
+            .context("invalid share settings")?;
+    }
     let expiry_gateway = gateway.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -175,6 +181,16 @@ fn apply_env_overrides(settings: &mut ServerSettings) -> anyhow::Result<()> {
     }
     if let Ok(value) = env::var("STARGATE_WORKSPACE_APP_SESSION_TTL_SECONDS") {
         settings.web.workspace_app_session_ttl_seconds = value.parse()?;
+    }
+    if let Ok(value) = env::var("STARGATE_SHARE_INGEST_BASE_URL") {
+        let value = value.trim();
+        settings.share = if value.is_empty() {
+            None
+        } else {
+            Some(stargate_core::ShareSettings {
+                ingest_base_url: value.parse()?,
+            })
+        };
     }
     if let Ok(value) = env::var("STARGATE_DATABASE_PATH") {
         settings.database_path = value.into();

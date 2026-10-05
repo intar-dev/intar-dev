@@ -821,6 +821,85 @@ impl SqliteRouteStore {
         Ok(rows > 0)
     }
 
+    /// Every run mirror as `(run_id, share_id, write_token)`.
+    pub(crate) async fn list_run_mirrors(&self) -> Result<Vec<(String, String, String)>> {
+        Ok(
+            sqlx::query("SELECT run_id, share_id, write_token FROM run_mirrors")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(sqlx_error)?
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.get("run_id"),
+                        row.get("share_id"),
+                        row.get("write_token"),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Store the run's mirror unless the run streams to another share that
+    /// was claimed later. Returns false, and changes nothing, in that case. A
+    /// repeat of the stored share and token always succeeds and keeps the
+    /// newer claim.
+    pub(crate) async fn upsert_run_mirror(
+        &self,
+        run_id: &str,
+        share_id: &str,
+        write_token: &str,
+        claimed_at_ms: i64,
+    ) -> Result<bool> {
+        let rows = sqlx::query(
+            r#"
+            INSERT INTO run_mirrors (run_id, share_id, write_token, claimed_at_ms, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                share_id = excluded.share_id,
+                write_token = excluded.write_token,
+                claimed_at_ms = MAX(run_mirrors.claimed_at_ms, excluded.claimed_at_ms),
+                updated_at = excluded.updated_at
+            WHERE excluded.claimed_at_ms >= run_mirrors.claimed_at_ms
+               OR (excluded.share_id = run_mirrors.share_id
+                   AND excluded.write_token = run_mirrors.write_token)
+            "#,
+        )
+        .bind(run_id)
+        .bind(share_id)
+        .bind(write_token)
+        .bind(claimed_at_ms)
+        .bind(OffsetDateTime::now_utc().unix_timestamp())
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_error)?
+        .rows_affected();
+        Ok(rows > 0)
+    }
+
+    /// Delete the run's mirror only while it still streams to `share_id`, so
+    /// stopping an old share can not stop the share that replaced it. Returns
+    /// false, and deletes nothing, when the run streams to another share.
+    pub(crate) async fn delete_run_mirror(&self, run_id: &str, share_id: &str) -> Result<bool> {
+        let rows = sqlx::query("DELETE FROM run_mirrors WHERE run_id = ? AND share_id = ?")
+            .bind(run_id)
+            .bind(share_id)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_error)?
+            .rows_affected();
+        if rows > 0 {
+            return Ok(true);
+        }
+        let other_share = sqlx::query("SELECT 1 FROM run_mirrors WHERE run_id = ?")
+            .bind(run_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_error)?
+            .is_some();
+        Ok(!other_share)
+    }
+
     pub async fn delete_expired_workspace_app_routes(
         &self,
         now: OffsetDateTime,
