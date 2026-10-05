@@ -25,7 +25,9 @@ import type { ShareSession } from "@/lib/run-share/shared-run-model";
  *
  * It draws the session's log from the start when it mounts, then whatever the
  * log gains. `pausedAt` holds the screen at that many events while the log
- * keeps growing; lifting it writes the backlog.
+ * keeps growing; lifting it writes the backlog. A log that is replaced instead
+ * of grown (the share was rebuilt from the recordings) is not for this
+ * terminal to follow: the page mounts a new one for it.
  */
 export function SharedLiveTerminal({
   session,

@@ -301,68 +301,6 @@ export async function enforceRateLimit(
   return { ok: true, request };
 }
 
-/**
- * The caller's network, hashed: a whole IPv4 address, or the /64 of an IPv6
- * one, because one IPv6 client controls its whole /64.
- */
-export async function clientNetworkKey(request: Request): Promise<string> {
-  return sha256Prefix(
-    clientNetwork(request.headers.get("cf-connecting-ip")?.trim() || "unknown"),
-  );
-}
-
-export function clientNetwork(address: string): string {
-  if (!address.includes(":")) return address;
-  // An IPv4-mapped IPv6 address is the IPv4 client.
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/iu.exec(address);
-  if (mapped?.[1]) return mapped[1];
-  const [head = "", tail] = address.split("::");
-  const left = head ? head.split(":") : [];
-  const right = tail ? tail.split(":") : [];
-  const groups =
-    tail === undefined
-      ? left
-      : [...left, ...Array<string>(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
-  return `${groups
-    .slice(0, 4)
-    .map((group) => group.toLowerCase().replace(/^0+(?=.)/u, ""))
-    .join(":")}::/64`;
-}
-
-/**
- * Public share viewers, per network, on their own limiter: a classroom behind
- * one NAT must not exhaust the sensitive-action budget.
- */
-export async function enforceShareWatchRateLimit(
-  request: Request,
-  workerEnv: Pick<Cloudflare.Env, "SHARE_WATCH_RATE_LIMITER"> = env,
-): Promise<ApiRequestSecurityResult> {
-  const address = await clientNetworkKey(request);
-  try {
-    const result = await workerEnv.SHARE_WATCH_RATE_LIMITER.limit({
-      key: `share-watch:${address}`,
-    });
-    if (!result.success) {
-      return deny(429, "rate_limited", "too many requests", {
-        "retry-after": "60",
-      });
-    }
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        event: "share_watch_rate_limit_unavailable",
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    );
-    return deny(
-      503,
-      "rate_limit_unavailable",
-      "request rate limiting is temporarily unavailable",
-    );
-  }
-  return { ok: true, request };
-}
-
 function validateCanonicalBrowserOrigin(
   request: Request,
   workerEnv: Pick<Cloudflare.Env, "BETTER_AUTH_URL">,

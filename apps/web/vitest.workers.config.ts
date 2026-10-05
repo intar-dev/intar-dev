@@ -64,13 +64,7 @@ export default defineConfig({
             useSQLite: true,
           },
         },
-        ratelimits: {
-          SHARE_WATCH_RATE_LIMITER: {
-            namespace_id: "88427092",
-            simple: { limit: 120, period: 60 },
-          },
-        },
-        r2Buckets: ["VM_IMAGE_REGISTRY_BUCKET", "VM_RUN_ARTIFACTS_BUCKET"],
+        r2Buckets: ["SHARE_LIVE_BUCKET", "VM_IMAGE_REGISTRY_BUCKET", "VM_RUN_ARTIFACTS_BUCKET"],
       },
     }),
   ],

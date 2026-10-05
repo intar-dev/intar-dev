@@ -22,7 +22,7 @@ bundle.
   behavior.
 - `bun run test:ui:smoke` runs 22 workflow checks in each of Chromium, Firefox,
   and WebKit, for 66 checks.
-- `bun run test:ui` runs the complete 617-test release gate, including 29 VM
+- `bun run test:ui` runs the complete 629-test release gate, including 29 VM
   lifecycle checks, 11 VM startup checks, and 11 performance checks, with one
   worker in CI.
 

@@ -23,22 +23,14 @@ export interface SharedRunObjective {
 }
 
 /**
- * One message from a share's Durable Object to a viewer. A frame carries one
- * or more of them separated by "\n" (JSON escapes newlines, so the split is
- * unambiguous): history arrives coalesced, live updates one per frame.
- *
- * A session is one PTY at Stargate, so every reconnect and every native SSH
- * login is its own session. `start` with `resumed: true` continues a session
- * after Stargate's writer reconnected; `end` means the PTY ended; `detach`
- * means the writer dropped and may resume.
- *
- * Every stored message carries its log `seq`. A viewer that reconnects keeps
- * what it has and asks for `?after=<highest seq seen>`, so it only downloads
- * what it missed. Output past the storage cap is broadcast live without a
- * `seq` and is not replayed.
+ * One stored message of a share, as viewers read it from the published
+ * segments. A session is one PTY at Stargate, so every reconnect and every
+ * native SSH login is its own session. `start` with `resumed: true`
+ * continues a session after Stargate's writer reconnected; `end` means the
+ * PTY ended; `detach` means the writer dropped and may resume. `seq` numbers
+ * the messages of one generation.
  */
 export type ShareViewerMessage =
-  | { type: "hello"; mission: SharedRunMission; truncated: boolean }
   | {
       type: "start";
       seq?: number;
@@ -55,23 +47,51 @@ export type ShareViewerMessage =
   | { type: "gap"; seq?: number; session: string; bytes: number }
   | { type: "end"; seq?: number; session: string }
   | { type: "detach"; seq?: number; session: string }
-  /** The stored replay stops here; live updates continue. */
-  | { type: "truncated"; seq?: number }
-  /** Everything stored up to `seq` has been sent; later messages are live. */
-  | { type: "synced"; seq: number };
-
-export function parseShareViewerFrame(frame: string): ShareViewerMessage[] {
-  return frame
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as ShareViewerMessage);
-}
+  /** Output past the storage cap was not published. */
+  | { type: "truncated"; seq?: number };
 
 /** The public page. The share id rides in the fragment, so it never reaches
  * a server log. */
 export const SHARE_PAGE_PATH = "/watch";
-/** `GET ?s=<share id>[&after=<seq>]` upgrades to the viewer socket. */
-export const SHARE_STREAM_PATH = "/api/shares/stream";
+/**
+ * Viewers read a share as files from the CDN, never from the Worker:
+ * `<origin>/<share id>/mission.json`, `head.json` (cached about a second) and
+ * immutable `g<generation>/<n>.jsonl` segments of newline-separated stored
+ * messages. A 404 on the head means the share was stopped. When the run's
+ * archive is ready the share is republished from the complete recordings as
+ * the next generation (`recorded: true`); session ids carry over.
+ */
+export const SHARE_LIVE_ORIGIN: string =
+  (import.meta.env?.PUBLIC_SHARE_LIVE_ORIGIN as string | undefined) ??
+  "https://live.intar.dev";
+
+export interface ShareHead {
+  generation: number;
+  /** The newest written segment of this generation; 0 before the first. */
+  segment: number;
+  /**
+   * Complete checkpoints of this generation. Checkpoint k holds exactly the
+   * messages of segments (k - 1) * SHARE_CHECKPOINT_SEGMENTS + 1 through
+   * k * SHARE_CHECKPOINT_SEGMENTS, so a late joiner reads the checkpoints and
+   * then only the segments after the last one.
+   */
+  checkpoint: number;
+  seq: number;
+  /** Some output was not published because the share hit its size cap. */
+  truncated: boolean;
+  /** Rebuilt from the archived recordings: nothing is live anymore. */
+  recorded: boolean;
+}
+
+export const SHARE_CHECKPOINT_SEGMENTS = 60;
+
+export function shareSegmentPath(generation: number, segment: number): string {
+  return `g${generation}/${segment}.jsonl`;
+}
+
+export function shareCheckpointPath(generation: number, checkpoint: number): string {
+  return `g${generation}/c${checkpoint}.jsonl`;
+}
 /** Stargate's ingest socket, `GET ?s=<share id>` with a bearer write token. */
 export const SHARE_INGEST_PATH = "/share-ingest";
 

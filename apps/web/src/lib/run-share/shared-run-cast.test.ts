@@ -5,7 +5,9 @@ import {
   castHeaderGeometry,
   castMarkers,
 } from "@/components/app/RunArtifactViewerModel";
+import { REPLAY_IDLE_TIME_LIMIT_SECONDS } from "@/lib/replay/config";
 import { buildShareCast } from "./shared-run-cast";
+import { applyShareMessages, createSharedRunState } from "./shared-run-model";
 
 function session(
   events: ShareEvent[],
@@ -16,6 +18,22 @@ function session(
 
 function lines(cast: string): unknown[] {
   return cast.split("\n").map((line) => JSON.parse(line) as unknown);
+}
+
+/** The seconds each event waits for, as the cast says them. */
+function intervals(cast: string): number[] {
+  return lines(cast)
+    .slice(1)
+    .map((line) => (line as [number])[0]);
+}
+
+/**
+ * How long the player takes to play a cast. The replay model's own clock puts
+ * a marker where the player shows it, and that clock shortens a pause to the
+ * idle limit, so a marker after the last event is the length of the replay.
+ */
+function playedSeconds(cast: string): number {
+  return castMarkers(`${cast}\n[0,"m","end"]`)[0]?.time ?? 0;
 }
 
 describe("buildShareCast", () => {
@@ -149,5 +167,171 @@ describe("buildShareCast", () => {
 
   it("carries no check markers, so the surface has none to draw", () => {
     expect(castMarkers(buildShareCast(session([[0, "o", "x"]])))).toEqual([]);
+  });
+});
+
+describe("the speed of the replay", () => {
+  it("keeps the learner's real spacing: events at 0, 120, 250 and 400 ms", () => {
+    const cast = buildShareCast(
+      session([
+        [0, "o", "l"],
+        [120, "o", "s"],
+        [250, "o", " "],
+        [400, "o", "-la"],
+      ]),
+    );
+
+    expect(intervals(cast)).toEqual([0, 0.12, 0.13, 0.15]);
+    // Played back, the replay takes as long as the typing did.
+    expect(playedSeconds(cast)).toBeCloseTo(0.4, 6);
+  });
+
+  it("does not give the events of one batch one timestamp", () => {
+    // A learner typing fast: five keys in 120 ms, delivered as one row.
+    const state = applyShareMessages(createSharedRunState(), [
+      { type: "mission", mission: undefined as never },
+      {
+        type: "start",
+        session: "a",
+        vm_id: "vm_web",
+        mode: "native",
+        cols: 80,
+        rows: 24,
+        at_ms: 0,
+        mid_session: false,
+        resumed: false,
+      },
+      {
+        type: "events",
+        session: "a",
+        events: [
+          [0, "o", "e"],
+          [30, "o", "c"],
+          [60, "o", "h"],
+          [90, "o", "o"],
+          [120, "o", "\r\n"],
+        ],
+      },
+    ]);
+
+    expect(intervals(buildShareCast(state.sessions[0]!))).toEqual([
+      0, 0.03, 0.03, 0.03, 0.03,
+    ]);
+  });
+
+  it("keeps the spacing across the batches the events arrived in", () => {
+    const row = (events: ShareEvent[]) =>
+      ({ type: "events", session: "a", events }) as const;
+    const startA = {
+      type: "start",
+      session: "a",
+      vm_id: "vm_web",
+      mode: "native",
+      cols: 80,
+      rows: 24,
+      at_ms: 0,
+      mid_session: false,
+      resumed: false,
+    } as const;
+
+    // Two segments, then one batch: the same events, however they came.
+    const early = applyShareMessages(createSharedRunState(), [
+      startA,
+      row([
+        [0, "o", "a"],
+        [120, "o", "b"],
+      ]),
+    ]);
+    const late = applyShareMessages(early, [
+      row([
+        [250, "o", "c"],
+        [400, "o", "d"],
+      ]),
+    ]);
+    const together = applyShareMessages(createSharedRunState(), [
+      startA,
+      row([
+        [0, "o", "a"],
+        [120, "o", "b"],
+      ]),
+      row([
+        [250, "o", "c"],
+        [400, "o", "d"],
+      ]),
+    ]);
+
+    expect(intervals(buildShareCast(late.sessions[0]!))).toEqual([
+      0, 0.12, 0.13, 0.15,
+    ]);
+    expect(buildShareCast(late.sessions[0]!)).toBe(
+      buildShareCast(together.sessions[0]!),
+    );
+  });
+
+  it("shortens a pause of ten seconds to the idle limit, and only that", () => {
+    const cast = buildShareCast(
+      session([
+        [0, "o", "a"],
+        [120, "o", "b"],
+        [10_120, "o", "c"],
+        [10_250, "o", "d"],
+      ]),
+    );
+
+    // The cast keeps the pause as it was: shortening it is the player's job.
+    expect(intervals(cast)).toEqual([0, 0.12, 10, 0.13]);
+    expect(REPLAY_IDLE_TIME_LIMIT_SECONDS).toBe(1.5);
+    // The 120 and 130 ms stay as they were; the ten seconds become 1.5.
+    expect(playedSeconds(cast)).toBeCloseTo(
+      0.12 + REPLAY_IDLE_TIME_LIMIT_SECONDS + 0.13,
+      6,
+    );
+  });
+
+  it("keeps every gap up to the idle limit as it was", () => {
+    for (const gap of [0.2, 1, 1.4, 1.5]) {
+      const cast = buildShareCast(
+        session([
+          [0, "o", "a"],
+          [gap * 1000, "o", "b"],
+        ]),
+      );
+      expect(playedSeconds(cast)).toBeCloseTo(gap, 6);
+    }
+    // Past it, the player's limit takes over.
+    const longer = buildShareCast(
+      session([
+        [0, "o", "a"],
+        [1_600, "o", "b"],
+      ]),
+    );
+    expect(playedSeconds(longer)).toBeCloseTo(1.5, 6);
+  });
+
+  it("adds up to the log's own times, with no rounding that drifts", () => {
+    // Whole milliseconds, so a long session ends where the log ends.
+    const events: ShareEvent[] = Array.from({ length: 1_000 }, (_, index) => [
+      index * 1.7,
+      "o",
+      "x",
+    ]);
+    const total = intervals(buildShareCast(session(events))).reduce(
+      (sum, interval) => sum + interval,
+      0,
+    );
+
+    expect(total).toBeCloseTo(Math.round(999 * 1.7) / 1000, 6);
+  });
+
+  it("takes a time that is not a number to take no time", () => {
+    const cast = buildShareCast(
+      session([
+        [100, "o", "a"],
+        [Number.NaN, "o", "b"],
+        [200, "o", "c"],
+      ]),
+    );
+
+    expect(intervals(cast)).toEqual([0.1, 0, 0.1]);
   });
 });

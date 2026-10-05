@@ -62,15 +62,8 @@ export function SharedRun() {
   // The share id rides in the fragment, which no request ever carries.
   const fragment = useRouterState({ select: (state) => state.location.hash });
   const shareId = parseShareId(fragment);
-  if (!shareId) {
-    // Nothing is asked of the server for a link that cannot be a share's.
-    return (
-      <Unavailable
-        title="This link isn't shared (anymore)"
-        description="The learner may have stopped sharing, or the link is incomplete. Ask them for a new one."
-      />
-    );
-  }
+  // Nothing is requested for a link that cannot be a share's.
+  if (!shareId) return <NotShared />;
   return <Viewer key={shareId} shareId={shareId} />;
 }
 
@@ -80,6 +73,8 @@ const STATUS_TOKENS: Record<
 > = {
   connecting: { tone: "pending", word: "Connecting…", pulse: true },
   live: { tone: "live", word: "Live", pulse: true },
+  // The run is over and the share holds its recording.
+  recorded: { tone: "muted", word: "Recorded", pulse: false },
   reconnecting: { tone: "pending", word: "Reconnecting…", pulse: true },
   stopped: { tone: "muted", word: "Sharing stopped", pulse: false },
 };
@@ -101,18 +96,20 @@ function Viewer({ shareId }: { shareId: string }) {
     };
   }, [title]);
 
-  // The handshake kept failing, and a browser cannot tell a share that is gone
-  // from one that is busy (a rate limit, a full house), so the end state says
-  // both and offers another go.
+  // Reads kept failing (the network, a 5xx, a rate limit). A share that is
+  // gone answers 404, which is a different thing, so this offers another go.
   if (status === "unavailable") {
     return (
       <Unavailable
         title="This share isn't available"
-        description="It may have been stopped, or it's busy right now. Try again in a moment, and if it keeps failing, ask the learner for a new link."
+        description="The live run didn't load. Check your connection and try again, and if it keeps failing, ask the learner for a new link."
         onRetry={retry}
       />
     );
   }
+  // The files are gone and nothing was ever read: the link was stopped before
+  // this viewer arrived, so there is no run to show.
+  if (status === "stopped" && !mission) return <NotShared />;
 
   const token = STATUS_TOKENS[status];
   return (
@@ -154,8 +151,8 @@ function Viewer({ shareId }: { shareId: string }) {
           <Alert>
             <AlertTitle>Replay truncated</AlertTitle>
             <AlertDescription>
-              The recording of earlier output stops early. Live output keeps
-              arriving.
+              This share reached its size limit, so later output isn't shown.
+              Terminals that start after that still get a tab, but stay empty.
             </AlertDescription>
           </Alert>
         ) : null}
@@ -166,7 +163,7 @@ function Viewer({ shareId }: { shareId: string }) {
               Terminals
             </h2>
             {tabs.length > 0 ? (
-              <Terminals tabs={tabs} link={status} />
+              <Terminals tabs={tabs} link={status} generation={model.generation} />
             ) : (
               <EmptyTerminals status={status} />
             )}
@@ -196,6 +193,15 @@ function Frame({
       </header>
       {children}
     </div>
+  );
+}
+
+function NotShared() {
+  return (
+    <Unavailable
+      title="This link isn't shared (anymore)"
+      description="The learner may have stopped sharing, or the link is incomplete. Ask them for a new one."
+    />
   );
 }
 
@@ -232,7 +238,7 @@ function EmptyTerminals({ status }: { status: ShareStatus }) {
   const words =
     status === "live"
       ? "Waiting for the learner to open a terminal. It appears here as soon as they do."
-      : status === "stopped"
+      : status === "stopped" || status === "recorded"
         ? "No terminal was shared."
         : status === "reconnecting"
           ? "Reconnecting to the live run…"
@@ -319,6 +325,8 @@ type PanelMode = "live" | "replay";
 
 /** What a viewer has done to one tab; it survives switching away and back. */
 interface PanelState {
+  /** The generation of the log it was made in. */
+  generation: number | null;
   mode: PanelMode;
   /** The screen is held at this many events, or follows the log. */
   pausedAt: number | null;
@@ -326,20 +334,61 @@ interface PanelState {
   replay: { id: number; content: string } | null;
 }
 
-function Terminals({ tabs, link }: { tabs: ShareTab[]; link: ShareStatus }) {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+function Terminals({
+  tabs,
+  link,
+  generation,
+}: {
+  tabs: ShareTab[];
+  link: ShareStatus;
+  /** Which version of the share's log the tabs are from. */
+  generation: number | null;
+}) {
+  // The viewer's tab, with the generation they were in when they chose it.
+  const [selected, setSelected] = useState<{
+    id: string;
+    generation: number | null;
+  } | null>(null);
   const [panels, setPanels] = useState<Record<string, PanelState>>({});
   const [announcement, setAnnouncement] = useState("");
   const listRef = useRef<HTMLDivElement | null>(null);
   // A viewer who has not left the newest tab keeps following the newest one.
   const following = useRef(true);
   const known = useRef(0);
+  const seenGeneration = useRef(generation);
 
   const sessions = useMemo(() => tabs.map((tab) => tab.session), [tabs]);
   const followed = followedSession(sessions);
-  const activeId = tabs.some((tab) => tab.session.id === selectedId)
-    ? selectedId
-    : (followed?.id ?? tabs[0]?.session.id ?? null);
+  // A share rebuilt from its recordings keeps the session ids, so the viewer
+  // stays on their tab; if it is not there any more they start at the first.
+  const kept = tabs.some((tab) => tab.session.id === selected?.id)
+    ? (selected?.id ?? null)
+    : null;
+  const activeId =
+    kept ??
+    (selected !== null && selected.generation !== generation
+      ? tabs[0]?.session.id
+      : followed?.id) ??
+    tabs[0]?.session.id ??
+    null;
+  // A pause point or a replay of the log before it was rebuilt means nothing in
+  // the new one, so that is dropped. Which view the viewer was in is kept: one
+  // who is reading a terminal's final screen is not sent back to the start of
+  // a replay when the share is rebuilt a few minutes after the run ended.
+  const panelOf = (id: string): PanelState | undefined => {
+    const stored = panels[id];
+    if (!stored || stored.generation === generation) return stored;
+    return { generation, mode: stored.mode, pausedAt: null, replay: null };
+  };
+
+  useEffect(() => {
+    if (seenGeneration.current === generation) return;
+    seenGeneration.current = generation;
+    // Rebuilt from the recordings: no session starts after this, so there is
+    // nothing new to follow, and the tabs that come back are not announced.
+    following.current = false;
+    known.current = tabs.length;
+  }, [generation, tabs.length]);
 
   useEffect(() => {
     const before = known.current;
@@ -351,7 +400,7 @@ function Terminals({ tabs, link }: { tabs: ShareTab[]; link: ShareStatus }) {
     }
     if (!following.current) return;
     const next = before === 0 ? followed : newest?.session;
-    if (next) setSelectedId(next.id);
+    if (next) setSelected({ id: next.id, generation });
   }, [tabs.length]);
 
   // A tab that took the viewer's place in the strip comes into view.
@@ -361,19 +410,31 @@ function Terminals({ tabs, link }: { tabs: ShareTab[]; link: ShareStatus }) {
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [activeId]);
 
-  const change = useCallback((id: string, patch: Partial<PanelState>) => {
-    setPanels((current) => ({
-      ...current,
-      [id]: { ...(current[id] ?? DEFAULT_PANEL), ...patch },
-    }));
-  }, []);
+  const change = useCallback(
+    (id: string, patch: Partial<PanelState>) => {
+      setPanels((current) => {
+        const stored = current[id];
+        const base: PanelState =
+          stored && stored.generation === generation
+            ? stored
+            : { ...freshPanel(generation), mode: stored?.mode ?? "live" };
+        return { ...current, [id]: { ...base, ...patch } };
+      });
+    },
+    [generation],
+  );
   // A tab keeps the view it first opened in: a terminal being watched stays
   // on its live screen when it ends, instead of jumping to a replay.
-  const pin = useCallback((id: string, mode: PanelMode) => {
-    setPanels((current) =>
-      current[id] ? current : { ...current, [id]: { ...DEFAULT_PANEL, mode } },
-    );
-  }, []);
+  const pin = useCallback(
+    (id: string, mode: PanelMode) => {
+      setPanels((current) =>
+        current[id]
+          ? current
+          : { ...current, [id]: { ...freshPanel(generation), mode } },
+      );
+    },
+    [generation],
+  );
 
   return (
     <Tabs
@@ -381,7 +442,7 @@ function Terminals({ tabs, link }: { tabs: ShareTab[]; link: ShareStatus }) {
       onValueChange={(value) => {
         const id = String(value);
         following.current = id === tabs[tabs.length - 1]?.session.id;
-        setSelectedId(id);
+        setSelected({ id, generation });
       }}
       className="min-w-0 gap-3"
     >
@@ -394,14 +455,15 @@ function Terminals({ tabs, link }: { tabs: ShareTab[]; link: ShareStatus }) {
       </div>
       {tabs.map((tab) => (
         <TabsContent
-          key={tab.session.id}
+          // A new generation is a new log: the screen is made again from it.
+          key={`${generation ?? 0}:${tab.session.id}`}
           value={tab.session.id}
           className="flex min-w-0 flex-col gap-3"
         >
           <SessionPanel
             tab={tab}
             link={link}
-            panel={panels[tab.session.id]}
+            panel={panelOf(tab.session.id)}
             onChange={change}
             onPin={pin}
           />
@@ -414,10 +476,16 @@ function Terminals({ tabs, link }: { tabs: ShareTab[]; link: ShareStatus }) {
   );
 }
 
-const DEFAULT_PANEL: PanelState = { mode: "live", pausedAt: null, replay: null };
+const freshPanel = (generation: number | null): PanelState => ({
+  generation,
+  mode: "live",
+  pausedAt: null,
+  replay: null,
+});
 
 const PHASE_WORDS: Record<ShareSessionPhase, string> = {
   live: "Live",
+  loading: "Loading…",
   reconnecting: "Reconnecting…",
   interrupted: "Interrupted",
   stopped: "Stopped",
@@ -428,6 +496,7 @@ const PHASE_WORDS: Record<ShareSessionPhase, string> = {
 // dot, and one that is waiting on a connection is an empty ring.
 const PHASE_DOTS: Record<ShareSessionPhase, string> = {
   live: "bg-primary",
+  loading: "ring-1 ring-faint-foreground ring-inset",
   reconnecting: "ring-1 ring-faint-foreground ring-inset",
   interrupted: "ring-1 ring-faint-foreground ring-inset",
   stopped: "bg-faint-foreground/40",

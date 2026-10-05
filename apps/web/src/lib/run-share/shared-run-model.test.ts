@@ -15,6 +15,7 @@ import {
   shareTabs,
   type ShareSession,
   type ShareStatus,
+  type ShareUpdate,
   type SharedRunState,
 } from "./shared-run-model";
 
@@ -31,16 +32,13 @@ const mission: SharedRunMission = {
   ],
 };
 
-const hello = (truncated = false): ShareViewerMessage => ({
-  type: "hello",
-  mission,
-  truncated,
-});
+/** The mission file has been read. */
+const readMission = (): ShareUpdate => ({ type: "mission", mission });
 
 function start(
   session: string,
   overrides: Partial<Extract<ShareViewerMessage, { type: "start" }>> = {},
-): ShareViewerMessage {
+): ShareUpdate {
   return {
     type: "start",
     session,
@@ -59,14 +57,14 @@ const events = (
   session: string,
   list: ShareEvent[],
   seq?: number,
-): ShareViewerMessage => ({
+): ShareUpdate => ({
   type: "events",
   session,
   events: list,
   ...(seq === undefined ? {} : { seq }),
 });
 
-function apply(...messages: ShareViewerMessage[]): SharedRunState {
+function apply(...messages: ShareUpdate[]): SharedRunState {
   return applyShareMessages(createSharedRunState(), messages);
 }
 
@@ -92,7 +90,7 @@ describe("share id", () => {
 describe("sessions", () => {
   it("opens a new tab for every session that starts, in arrival order", () => {
     const state = apply(
-      hello(),
+      readMission(),
       start("a"),
       start("b", { mode: "native" }),
       start("c", { vm_id: "vm_db" }),
@@ -111,7 +109,7 @@ describe("sessions", () => {
 
   it("numbers the tabs per machine and names them from the mission", () => {
     const state = apply(
-      hello(),
+      readMission(),
       start("a"),
       start("b", { vm_id: "vm_db" }),
       start("c"),
@@ -129,7 +127,7 @@ describe("sessions", () => {
 
   it("keeps one tab when a session resumes, and makes it live again", () => {
     const state = apply(
-      hello(),
+      readMission(),
       start("a"),
       events("a", [[0, "o", "$ "]]),
       { type: "detach", session: "a" },
@@ -143,7 +141,7 @@ describe("sessions", () => {
 
   it("turns a size the writer reports on resume into a resize event", () => {
     const state = apply(
-      hello(),
+      readMission(),
       start("a"),
       events("a", [
         [0, "o", "$ "],
@@ -170,7 +168,7 @@ describe("sessions", () => {
 
   it("marks sessions ended and detached, and an ended one stays ended", () => {
     const state = apply(
-      hello(),
+      readMission(),
       start("a"),
       start("b"),
       start("c"),
@@ -189,7 +187,7 @@ describe("sessions", () => {
 
   it("appends events and counts dropped output per session", () => {
     const state = apply(
-      hello(),
+      readMission(),
       start("a"),
       start("b"),
       events("a", [[0, "o", "one"]]),
@@ -213,7 +211,7 @@ describe("sessions", () => {
   });
 
   it("does not mutate the state it was given", () => {
-    const first = apply(hello(), start("a"), events("a", [[0, "o", "x"]]));
+    const first = apply(readMission(), start("a"), events("a", [[0, "o", "x"]]));
     const frozenEvents = first.sessions[0]!.events;
     const second = applyShareMessages(first, [events("a", [[1, "o", "y"]])]);
 
@@ -224,7 +222,7 @@ describe("sessions", () => {
 
   it("ignores messages for a session it never saw start", () => {
     const state = apply(
-      hello(),
+      readMission(),
       events("ghost", [[0, "o", "x"]]),
       { type: "end", session: "ghost" },
       { type: "gap", session: "ghost", bytes: 1 },
@@ -234,7 +232,7 @@ describe("sessions", () => {
   });
 
   it("handles a long history without losing an event", () => {
-    const messages: ShareViewerMessage[] = [hello(), start("a")];
+    const messages: ShareUpdate[] = [readMission(), start("a")];
     for (let index = 0; index < 5_000; index += 1) {
       messages.push(events("a", [[index, "o", "x"]]));
     }
@@ -247,8 +245,8 @@ describe("sessions", () => {
 describe("a batch of messages", () => {
   it("applies the 20,000 rows of a long history in one batch, in order", () => {
     const rows = 20_000;
-    const messages: ShareViewerMessage[] = [
-      hello(),
+    const messages: ShareUpdate[] = [
+      readMission(),
       start("a"),
       start("b", { mode: "native" }),
     ];
@@ -266,7 +264,6 @@ describe("a batch of messages", () => {
         events("b", [[index, "o", `b${index}`]], index * 2 + 2),
       );
     }
-    messages.push({ type: "synced", seq: rows * 2 });
 
     const before = createSharedRunState();
     const state = applyShareMessages(before, messages);
@@ -280,7 +277,6 @@ describe("a batch of messages", () => {
       expect(b.events[index]).toEqual([index, "o", `b${index}`]);
     }
     expect(state.seq).toBe(rows * 2);
-    expect(state.synced).toBe(true);
     // The state it was given is as it was.
     expect(before).toEqual(createSharedRunState());
     expect(before.sessions).toEqual([]);
@@ -292,7 +288,7 @@ describe("a batch of messages", () => {
       { length: 300_000 },
       (_, index): ShareEvent => [index, "o", "x"],
     );
-    const state = apply(hello(), start("a"), events("a", row));
+    const state = apply(readMission(), start("a"), events("a", row));
 
     expect(state.sessions[0]?.events).toHaveLength(300_000);
     expect(state.sessions[0]?.events.at(-1)).toEqual([299_999, "o", "x"]);
@@ -346,7 +342,7 @@ describe("a batch of messages", () => {
 
   it("appends to the batch's own copy from the second row on", () => {
     const copied = new Set<string>();
-    let state = reduceShareMessage(createSharedRunState(), hello(), copied);
+    let state = reduceShareMessage(createSharedRunState(), readMission(), copied);
     state = reduceShareMessage(state, start("a"), copied);
     const given = state.sessions[0]!.events;
 
@@ -362,7 +358,7 @@ describe("a batch of messages", () => {
   });
 
   it("copies on every call when no batch owns the array", () => {
-    const first = apply(hello(), start("a"), events("a", [[0, "o", "x"]]));
+    const first = apply(readMission(), start("a"), events("a", [[0, "o", "x"]]));
     const second = reduceShareMessage(first, events("a", [[1, "o", "y"]]));
     const third = reduceShareMessage(second, events("a", [[2, "o", "z"]]));
 
@@ -374,7 +370,7 @@ describe("a batch of messages", () => {
 
   it("starts every batch with its own copy, so an earlier result stays whole", () => {
     const first = applyShareMessages(createSharedRunState(), [
-      hello(),
+      readMission(),
       start("a"),
       events("a", [[0, "o", "x"]]),
       events("a", [[1, "o", "y"]]),
@@ -397,7 +393,7 @@ describe("a batch of messages", () => {
 
   it("appends a resumed session's resize to the same copy as the rows around it", () => {
     const before = apply(
-      hello(),
+      readMission(),
       start("a"),
       events("a", [[100, "o", "$ "]]),
       { type: "detach", session: "a" },
@@ -430,9 +426,17 @@ describe("session phase", () => {
 
   it("is live only while the link is live", () => {
     expect(shareSessionPhase(live, "live")).toBe("live");
-    for (const link of ["connecting", "reconnecting", "unavailable"] as const) {
+    for (const link of ["reconnecting", "unavailable"] as const) {
       expect(shareSessionPhase(live, link)).toBe("reconnecting");
     }
+  });
+
+  it("is loading while the history of the share is still being read", () => {
+    // Not reconnecting: nothing was lost, the viewer has not caught up yet.
+    expect(shareSessionPhase(live, "connecting")).toBe("loading");
+    expect(shareSessionPhase({ status: "detached" }, "connecting")).toBe(
+      "interrupted",
+    );
   });
 
   it("is stopped for every session that had not ended once the share is stopped", () => {
@@ -445,6 +449,7 @@ describe("session phase", () => {
     const links: ShareStatus[] = [
       "connecting",
       "live",
+      "recorded",
       "reconnecting",
       "stopped",
       "unavailable",
@@ -454,48 +459,219 @@ describe("session phase", () => {
     }
   });
 
+  it("is ended on a recording, whatever its log leaves open", () => {
+    // A recording has nothing live in it.
+    expect(shareSessionPhase(live, "recorded")).toBe("ended");
+    expect(shareSessionPhase(detached, "recorded")).toBe("ended");
+    expect(shareSessionPhase(ended, "recorded")).toBe("ended");
+  });
+
   it("is interrupted while a dropped writer may still resume", () => {
     expect(shareSessionPhase(detached, "live")).toBe("interrupted");
     expect(shareSessionPhase(detached, "reconnecting")).toBe("interrupted");
   });
 });
 
-describe("truncation and sync", () => {
-  it("takes the truncated flag from hello and from a truncated message", () => {
-    expect(apply(hello(true)).truncated).toBe(true);
-    expect(apply(hello(false)).truncated).toBe(false);
-    expect(apply(hello(false), { type: "truncated" }).truncated).toBe(true);
+describe("truncation and mission", () => {
+  it("is truncated once a truncated message has said so", () => {
+    expect(apply(readMission()).truncated).toBe(false);
+    expect(apply(readMission(), { type: "truncated" }).truncated).toBe(true);
   });
 
-  it("is synced from the synced message until the next hello", () => {
-    const state = apply(hello(), start("a"));
-    expect(state.synced).toBe(false);
+  it("keeps the state it has when truncation is said again", () => {
+    const once = apply(readMission(), { type: "truncated", seq: 4 });
+    const again = reduceShareMessage(once, { type: "truncated" });
 
-    const synced = applyShareMessages(state, [{ type: "synced", seq: 1 }]);
-    expect(synced.synced).toBe(true);
-    expect(
-      applyShareMessages(synced, [events("a", [[0, "o", "x"]])]).synced,
-    ).toBe(true);
-    expect(applyShareMessages(synced, [hello()]).synced).toBe(false);
+    expect(again).toBe(once);
   });
 
-  it("keeps the mission once hello has brought it", () => {
+  it("holds the mission once it is read, and a mission read again is the same state", () => {
     expect(createSharedRunState().mission).toBeNull();
-    expect(apply(hello()).mission).toBe(mission);
+    const state = apply(readMission());
+    expect(state.mission).toBe(mission);
+    expect(reduceShareMessage(state, { type: "mission", mission })).toBe(state);
+
+    const renamed: SharedRunMission = { ...mission, title: "Renamed" };
+    expect(
+      reduceShareMessage(state, { type: "mission", mission: renamed }).mission,
+    ).toBe(renamed);
+  });
+
+  it("does not need the mission for the log: events apply before it is read", () => {
+    const state = apply(start("a"), events("a", [[0, "o", "x"]]));
+
+    expect(state.mission).toBeNull();
+    expect(state.sessions[0]?.events).toHaveLength(1);
   });
 });
 
-describe("log sequence and resumed connections", () => {
-  const seqStart = (session: string, seq: number): ShareViewerMessage => ({
+describe("generations", () => {
+  const generation = (value: number): ShareUpdate => ({
+    type: "generation",
+    generation: value,
+  });
+  const numbered = (
+    session: string,
+    seq: number,
+    text: string,
+  ): ShareUpdate => events(session, [[seq, "o", text]], seq);
+  const seqStart = (session: string, seq: number): ShareUpdate => ({
+    ...(start(session) as Extract<ShareViewerMessage, { type: "start" }>),
+    seq,
+  });
+
+  it("starts with none, and takes the first one without anything to drop", () => {
+    expect(createSharedRunState().generation).toBeNull();
+
+    const state = apply(readMission(), generation(1), seqStart("a", 1));
+    expect(state.generation).toBe(1);
+    expect(state.sessions.map((session) => session.id)).toEqual(["a"]);
+  });
+
+  it("drops every session when the share is rebuilt, and keeps the mission", () => {
+    const live = apply(
+      readMission(),
+      generation(1),
+      seqStart("a", 1),
+      numbered("a", 2, "live output"),
+      seqStart("b", 3),
+      { type: "truncated", seq: 4 },
+    );
+    expect(live.truncated).toBe(true);
+
+    const rebuilt = applyShareMessages(live, [generation(2)]);
+
+    expect(rebuilt.generation).toBe(2);
+    expect(rebuilt.sessions).toEqual([]);
+    expect(rebuilt.mission).toBe(mission);
+    // The rebuilt log has no stored replay to cut short, and starts over.
+    expect(rebuilt.truncated).toBe(false);
+    expect(rebuilt.seq).toBeNull();
+  });
+
+  it("numbers the new log from the start again: a low seq is new, not already applied", () => {
+    const live = apply(
+      readMission(),
+      generation(1),
+      seqStart("a", 1),
+      numbered("a", 2, "one"),
+      numbered("a", 3, "two"),
+    );
+    expect(live.seq).toBe(3);
+
+    // Without the reset these (seq 1 and 2) would be skipped as applied.
+    const rebuilt = applyShareMessages(live, [
+      generation(2),
+      seqStart("a", 1),
+      numbered("a", 2, "recorded"),
+    ]);
+
+    expect(rebuilt.sessions).toHaveLength(1);
+    expect(rebuilt.sessions[0]?.events).toEqual([[2, "o", "recorded"]]);
+    expect(rebuilt.seq).toBe(2);
+  });
+
+  it("brings a session with the same id back as a new one, from the rebuilt log", () => {
+    const live = apply(
+      readMission(),
+      generation(1),
+      seqStart("a", 1),
+      numbered("a", 2, "live"),
+    );
+    const before = live.sessions[0]!;
+
+    const rebuilt = applyShareMessages(live, [
+      generation(2),
+      seqStart("a", 1),
+      numbered("a", 2, "from the recording"),
+      { type: "end", session: "a", seq: 3 },
+    ]);
+
+    expect(rebuilt.sessions).toHaveLength(1);
+    expect(rebuilt.sessions[0]).not.toBe(before);
+    expect(rebuilt.sessions[0]?.events).toEqual([[2, "o", "from the recording"]]);
+    expect(rebuilt.sessions[0]?.status).toBe("ended");
+    // What the viewer held before is left as it was.
+    expect(before.events).toEqual([[2, "o", "live"]]);
+    expect(before.status).toBe("live");
+  });
+
+  it("rebuilds tabs in the new log's order, whatever the old one's was", () => {
+    const live = apply(
+      readMission(),
+      generation(1),
+      seqStart("b", 1),
+      seqStart("a", 2),
+    );
+    expect(live.sessions.map((session) => session.id)).toEqual(["b", "a"]);
+
+    const rebuilt = applyShareMessages(live, [
+      generation(2),
+      seqStart("a", 1),
+      seqStart("b", 2),
+      seqStart("c", 3),
+    ]);
+    expect(rebuilt.sessions.map((session) => session.id)).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+
+  it("keeps the same state when the generation is told again", () => {
+    const state = apply(readMission(), generation(2), seqStart("a", 1));
+
+    expect(reduceShareMessage(state, generation(2))).toBe(state);
+  });
+
+  it("takes a truncated flag the new generation's head carries", () => {
+    const rebuilt = apply(
+      readMission(),
+      generation(1),
+      { type: "truncated", seq: 1 },
+      generation(2),
+      { type: "truncated" },
+    );
+
+    expect(rebuilt.truncated).toBe(true);
+  });
+
+  it("switches in the middle of a batch without writing into what came before", () => {
+    const first = apply(
+      readMission(),
+      generation(1),
+      seqStart("a", 1),
+      numbered("a", 2, "live"),
+    );
+    const live = first.sessions[0]!.events;
+
+    // The old log's last rows and the new log's first, in one batch.
+    const next = applyShareMessages(first, [
+      numbered("a", 3, " more live"),
+      generation(2),
+      seqStart("a", 1),
+      numbered("a", 2, "recorded"),
+      numbered("a", 3, " and more"),
+    ]);
+
+    expect(next.sessions[0]?.events.map((event) => event[2]).join("")).toBe(
+      "recorded and more",
+    );
+    expect(live).toEqual([[2, "o", "live"]]);
+  });
+});
+
+describe("log sequence", () => {
+  const seqStart = (session: string, seq: number): ShareUpdate => ({
     ...(start(session) as Extract<ShareViewerMessage, { type: "start" }>),
     seq,
   });
 
   it("has no cursor until a stored message arrives, then the highest seq", () => {
-    expect(apply(hello()).seq).toBeNull();
+    expect(apply(readMission()).seq).toBeNull();
 
     const state = apply(
-      hello(),
+      readMission(),
       seqStart("a", 1),
       events("a", [[0, "o", "x"]], 2),
       { type: "end", session: "a", seq: 3 },
@@ -503,92 +679,56 @@ describe("log sequence and resumed connections", () => {
     expect(state.seq).toBe(3);
   });
 
-  it("takes the cursor from synced too, never moving it back", () => {
-    const state = apply(hello(), seqStart("a", 4), { type: "synced", seq: 9 });
-    expect(state.seq).toBe(9);
-
-    const stale = applyShareMessages(state, [{ type: "synced", seq: 5 }]);
-    expect(stale.seq).toBe(9);
-  });
-
-  it("applies live output that carries no seq without moving the cursor", () => {
+  it("applies a message that carries no seq without moving the cursor", () => {
     const state = apply(
-      hello(),
+      readMission(),
       seqStart("a", 1),
-      { type: "synced", seq: 1 },
-      events("a", [[5, "o", "past the cap"]]),
+      events("a", [[5, "o", "no seq"]]),
     );
 
     expect(state.seq).toBe(1);
-    expect(state.sessions[0]?.events).toEqual([[5, "o", "past the cap"]]);
+    expect(state.sessions[0]?.events).toEqual([[5, "o", "no seq"]]);
   });
 
-  it("applies a stored message once, so a repeat cannot draw twice", () => {
-    const first = apply(
-      hello(),
+  it("applies a stored message once, so a segment delivered twice cannot draw twice", () => {
+    const segment: ShareUpdate[] = [
       seqStart("a", 1),
       events("a", [[0, "o", "x"]], 2),
-    );
-    const again = applyShareMessages(first, [
-      seqStart("a", 1),
-      events("a", [[0, "o", "x"]], 2),
-    ]);
+    ];
+    const first = apply(readMission(), ...segment);
+    const again = applyShareMessages(first, segment);
 
     expect(again.sessions).toHaveLength(1);
     expect(again.sessions[0]?.events).toHaveLength(1);
     expect(again.seq).toBe(2);
   });
 
-  it("treats a seq that is not a number as none", () => {
-    const state = apply(
-      hello(),
-      {
-        ...(start("a") as Extract<ShareViewerMessage, { type: "start" }>),
-        seq: "7" as unknown as number,
-      },
-      { type: "synced", seq: undefined as unknown as number },
-    );
-
-    expect(state.sessions).toHaveLength(1);
-    expect(state.synced).toBe(true);
-    expect(state.seq).toBeNull();
-  });
-
-  it("keeps its sessions when a resumed connection says hello again", () => {
-    const before = apply(
-      hello(),
+  it("takes up where it was when the segments overlap the ones it has", () => {
+    const first = apply(
+      readMission(),
       seqStart("a", 1),
-      events("a", [[0, "o", "kept"]], 2),
-      seqStart("b", 3),
-      { type: "synced", seq: 3 },
+      events("a", [[0, "o", "one "]], 2),
     );
-
-    const refreshed: SharedRunMission = { ...mission, title: "Renamed" };
-    const after = applyShareMessages(before, [
-      { type: "hello", mission: refreshed, truncated: true },
-      events("a", [[10, "o", " and more"]], 4),
-      { type: "end", session: "b", seq: 5 },
-      { type: "synced", seq: 5 },
+    // The next read starts a segment early: what is new follows what is old.
+    const next = applyShareMessages(first, [
+      events("a", [[0, "o", "one "]], 2),
+      events("a", [[10, "o", "two"]], 3),
     ]);
 
-    expect(after.mission).toBe(refreshed);
-    expect(after.truncated).toBe(true);
-    expect(after.sessions.map((session) => session.id)).toEqual(["a", "b"]);
-    expect(
-      after.sessions[0]?.events.map((event) => event[2]).join(""),
-    ).toBe("kept and more");
-    expect(after.sessions[1]?.status).toBe("ended");
-    expect(after.synced).toBe(true);
-    expect(after.seq).toBe(5);
+    expect(next.sessions[0]?.events.map((event) => event[2]).join("")).toBe(
+      "one two",
+    );
+    expect(next.seq).toBe(3);
   });
 
-  it("is not synced between the new hello and the new synced", () => {
-    const before = apply(hello(), seqStart("a", 1), { type: "synced", seq: 1 });
-    const resumed = applyShareMessages(before, [hello()]);
+  it("treats a seq that is not a number as none", () => {
+    const state = apply(readMission(), {
+      ...(start("a") as Extract<ShareViewerMessage, { type: "start" }>),
+      seq: "7" as unknown as number,
+    });
 
-    expect(resumed.synced).toBe(false);
-    expect(resumed.sessions).toHaveLength(1);
-    expect(resumed.seq).toBe(1);
+    expect(state.sessions).toHaveLength(1);
+    expect(state.seq).toBeNull();
   });
 });
 
@@ -618,7 +758,7 @@ describe("grids", () => {
   });
 
   it("clamps the grid a session starts with", () => {
-    const state = apply(hello(), start("a", { cols: 100_000, rows: 0 }));
+    const state = apply(readMission(), start("a", { cols: 100_000, rows: 0 }));
 
     expect(state.sessions[0]).toMatchObject({
       cols: SHARE_MAX_CELLS,
@@ -630,7 +770,7 @@ describe("grids", () => {
 describe("following", () => {
   it("follows the newest terminal that is still running", () => {
     const state = apply(
-      hello(),
+      readMission(),
       start("a"),
       start("b"),
       start("c"),
@@ -645,7 +785,7 @@ describe("following", () => {
 
   it("falls back to the newest session when every one has ended", () => {
     const state = apply(
-      hello(),
+      readMission(),
       start("a"),
       start("b"),
       { type: "end", session: "a" },

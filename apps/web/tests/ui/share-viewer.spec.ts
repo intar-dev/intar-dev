@@ -1,21 +1,25 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures/test";
-import { SHARE_HANDSHAKE_FAILURES } from "@/lib/run-share/shared-run-stream";
+import { SHARE_CHECKPOINT_SEGMENTS } from "@/lib/run-share/protocol";
 import {
   SHARE_ID,
-  fastReconnects,
+  SHARE_LIVE_TEST_ORIGIN,
+  fastRetries,
   openShare,
-  shareFrame as frame,
-  shareHello as hello,
+  shareDetach,
+  shareEnd,
+  shareEvents,
+  shareGap,
   shareHistory as history,
   shareMission as mission,
-  shareStart as start,
-} from "./fixtures/share-socket";
+  shareStart,
+} from "./fixtures/share-live";
 import { expectNoAxeViolations } from "./support/axe";
 import { expectNoHorizontalOverflow } from "./support/layout";
 
-// The public page of a shared run, with the share replaced by a socket the
-// test drives (fixtures/share-socket.ts).
+// The public page of a shared run, reading a share's files from a CDN that the
+// test stands in for (fixtures/share-live.ts). New output reaches the page on
+// its next poll of the head, about a second after it is published.
 
 /**
  * Where an element is once it has stopped moving: the terminal draws again
@@ -39,6 +43,20 @@ const screenOf = (page: Page) => page.locator(".xterm-rows:visible");
 const tabs = (page: Page) =>
   page.getByRole("tablist", { name: "Terminal sessions" }).getByRole("tab");
 
+/** A long share: `count` segments, each one line of output on the learner's screen. */
+function longShare(count: number) {
+  return Array.from({ length: count }, (_, index) => {
+    const line = shareEvents("s-web", [
+      [index * 100, "o", `line ${index + 1}\r\n`],
+    ]);
+    return index === 0 ? [shareStart("s-web"), line] : [line];
+  });
+}
+
+/** The header's own word for the share, which is also said once more to screen readers. */
+const headerStatus = (page: Page, word: string) =>
+  page.getByText(word, { exact: true }).first();
+
 test.describe("shared run page", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
@@ -46,14 +64,10 @@ test.describe("shared run page", () => {
     page,
     ui,
   }) => {
-    const sockets = await openShare(page, ui);
+    // Slow answers, so the page can be seen while it is still reading.
+    const live = await openShare(page, ui, { history, delay: 1_000 });
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("Live run");
-    await expect(page.getByText("Connecting…").first()).toBeVisible();
-
-    const socket = await sockets.nth(0);
-    expect(sockets.urls[0]?.searchParams.get("s")).toBe(SHARE_ID);
-    expect(sockets.urls[0]?.searchParams.has("after")).toBe(false);
-    socket.send(frame(...history));
+    await expect(headerStatus(page, "Connecting…")).toBeVisible();
 
     // The mission: title, tagline, lecture, objectives (not their hidden detail) and the markdown.
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(
@@ -81,7 +95,7 @@ test.describe("shared run page", () => {
     // The newest running terminal is the one in front.
     await expect(tabs(page).nth(0)).toHaveAttribute("aria-selected", "true");
     await expect(page.locator("[data-share-dot='live']")).toHaveCount(1);
-    await expect(page.getByText("Live", { exact: true }).first()).toBeVisible();
+    await expect(headerStatus(page, "Live")).toBeVisible();
 
     const screen = page.locator(".xterm-rows");
     await expect(screen).toContainText("systemctl status nginx");
@@ -90,25 +104,115 @@ test.describe("shared run page", () => {
     await expect(screen).toHaveCSS("font-size", "21px");
     await expect(screen).toHaveCSS("font-family", /IBM Plex Mono/);
 
-    // Output that arrives later is drawn as it comes.
-    socket.send(
-      frame({
-        type: "events",
-        seq: 6,
-        session: "s-web",
-        events: [[2_000, "o", "live line two\r\n"]],
-      }),
-    );
+    // The files come from the CDN, under the share's id, head first.
+    expect(live.requests[0]).toBe("head.json");
+    expect(live.urls.every((url) => url.startsWith(`${SHARE_LIVE_TEST_ORIGIN}/${SHARE_ID}/`))).toBe(true);
+
+    // Output published later is drawn as it comes.
+    live.publish(shareEvents("s-web", [[2_000, "o", "live line two\r\n"]]));
     await expect(screen).toContainText("live line two");
+  });
+
+  test("polls the head about once a second, and reads every other file once", async ({
+    page,
+    ui,
+  }) => {
+    const live = await openShare(page, ui, { history });
+    await expect(tabs(page)).toHaveCount(2);
+
+    live.publish(shareEvents("s-web", [[2_000, "o", "second\r\n"]]));
+    await expect(screenOf(page)).toContainText("second");
+    live.publish(shareEvents("s-web", [[3_000, "o", "third\r\n"]]));
+    await expect(screenOf(page)).toContainText("third");
+
+    expect(live.count("head.json")).toBeGreaterThanOrEqual(3);
+    for (const file of [
+      "mission.json",
+      "g1/1.jsonl",
+      "g1/2.jsonl",
+      "g1/3.jsonl",
+      "g1/4.jsonl",
+    ]) {
+      expect(live.count(file), file).toBe(1);
+    }
+  });
+
+  test("joins a long share by reading every segment, once and in order", async ({
+    page,
+    ui,
+  }) => {
+    const segments = Array.from({ length: 30 }, (_, index) => {
+      const line = shareEvents("s-web", [
+        [index * 100, "o", `line ${index + 1}\r\n`],
+      ]);
+      return index === 0 ? [shareStart("s-web"), line] : [line];
+    });
+    const live = await openShare(page, ui, { history: segments });
+
+    // The last lines are on the screen, in order: none lost, none doubled. (A
+    // row's text runs straight into the next one's in the page.)
+    await expect(screenOf(page)).toContainText(
+      "line 20line 21line 22line 23line 24line 25line 26line 27line 28line 29line 30",
+    );
+    await expect(headerStatus(page, "Live")).toBeVisible();
+    for (let segment = 1; segment <= 30; segment += 1) {
+      expect(live.count(`g1/${segment}.jsonl`), `segment ${segment}`).toBe(1);
+    }
+  });
+
+  test("joins a share past its first checkpoint through the checkpoints, and reads only the segments after them", async ({
+    page,
+    ui,
+  }) => {
+    const N = SHARE_CHECKPOINT_SEGMENTS;
+    const live = await openShare(page, ui, { history: longShare(2 * N + 10) });
+
+    // Everything is on the screen, in order, from two checkpoints and ten segments.
+    await expect(screenOf(page)).toContainText(
+      `line ${2 * N + 8}line ${2 * N + 9}line ${2 * N + 10}`,
+    );
+    await expect(headerStatus(page, "Live")).toBeVisible();
+    await expect(tabs(page)).toHaveCount(1);
+    expect(live.count("g1/c1.jsonl")).toBe(1);
+    expect(live.count("g1/c2.jsonl")).toBe(1);
+    // None of the 120 segments the checkpoints hold is read on its own.
+    for (let segment = 1; segment <= 2 * N; segment += 1) {
+      expect(live.count(`g1/${segment}.jsonl`), `segment ${segment}`).toBe(0);
+    }
+    for (let segment = 2 * N + 1; segment <= 2 * N + 10; segment += 1) {
+      expect(live.count(`g1/${segment}.jsonl`), `segment ${segment}`).toBe(1);
+    }
+
+    // Following from here, it reads segments, and the new line is drawn.
+    live.publish(shareEvents("s-web", [[99_000, "o", "a line after joining\r\n"]]));
+    await expect(screenOf(page)).toContainText("a line after joining");
+    expect(live.count(`g1/${2 * N + 11}.jsonl`)).toBe(1);
+    expect(live.count("g1/c3.jsonl")).toBe(0);
+  });
+
+  test("keeps reading segments, never a checkpoint, while it keeps up", async ({
+    page,
+    ui,
+  }) => {
+    const N = SHARE_CHECKPOINT_SEGMENTS;
+    const live = await openShare(page, ui, { history: longShare(10) });
+    await expect(screenOf(page)).toContainText("line 10");
+
+    // A minute of output arrives at once, and a checkpoint is completed.
+    live.publishAll(longShare(N + 20).slice(10));
+    await expect(screenOf(page)).toContainText(`line ${N + 20}`);
+
+    expect(live.count("g1/c1.jsonl")).toBe(0);
+    for (let segment = 1; segment <= N + 20; segment += 1) {
+      expect(live.count(`g1/${segment}.jsonl`), `segment ${segment}`).toBe(1);
+    }
   });
 
   test("pauses the screen while output keeps arriving, and catches up on resume", async ({
     page,
     ui,
   }) => {
-    const sockets = await openShare(page, ui);
-    const socket = await sockets.nth(0);
-    socket.send(frame(...history));
+    const live = await openShare(page, ui, { history });
     const screen = page.locator(".xterm-rows");
     await expect(screen).toContainText("nginx.service: failed");
 
@@ -116,29 +220,17 @@ test.describe("shared run page", () => {
     await expect(
       page.getByText("New output is held until you resume."),
     ).toBeVisible();
-    socket.send(
-      frame({
-        type: "events",
-        seq: 6,
-        session: "s-web",
-        events: [[3_000, "o", "typed while paused\r\n"]],
-      }),
-    );
-    // Give the page every chance to draw it; it must not.
-    await page.waitForTimeout(300);
+    live.publish(shareEvents("s-web", [[3_000, "o", "typed while paused\r\n"]]));
+    // Give the page every poll it needs to see it; it must not draw it.
+    const polls = live.count("head.json");
+    await expect.poll(() => live.count("head.json")).toBeGreaterThan(polls + 1);
+    await expect.poll(() => live.count("g1/3.jsonl")).toBe(1);
     await expect(screen).not.toContainText("typed while paused");
 
     await page.getByRole("button", { name: "Resume" }).click();
     await expect(screen).toContainText("typed while paused");
     // Live again: the next line follows without another click.
-    socket.send(
-      frame({
-        type: "events",
-        seq: 7,
-        session: "s-web",
-        events: [[4_000, "o", "and after resuming\r\n"]],
-      }),
-    );
+    live.publish(shareEvents("s-web", [[4_000, "o", "and after resuming\r\n"]]));
     await expect(screen).toContainText("and after resuming");
     await expect(page.getByRole("button", { name: "Pause" })).toBeVisible();
   });
@@ -147,8 +239,7 @@ test.describe("shared run page", () => {
     page,
     ui,
   }) => {
-    const sockets = await openShare(page, ui);
-    (await sockets.nth(0)).send(frame(...history));
+    await openShare(page, ui, { history });
     await expect(tabs(page)).toHaveCount(2);
 
     // The ended SSH session has no live dot, and says it joined mid-session.
@@ -180,13 +271,61 @@ test.describe("shared run page", () => {
     await expect(slider).toBeVisible();
   });
 
+  test("plays a replay at the speed the learner typed, and shortens only a long pause", async ({
+    page,
+    ui,
+  }) => {
+    await openShare(page, ui, {
+      history: [
+        [
+          shareStart("s-fast", { mode: "native" }),
+          // Keys a second apart: below the idle limit, so as they were typed.
+          shareEvents("s-fast", [
+            [0, "o", "a"],
+            [1_000, "o", "b"],
+            [2_000, "o", "c"],
+            [3_000, "o", "d"],
+          ]),
+          shareEnd("s-fast"),
+          shareStart("s-pause", { mode: "native" }),
+          // Ten seconds of nothing: the player's idle limit (1.5 s) takes over.
+          shareEvents("s-pause", [
+            [0, "o", "a"],
+            [10_000, "o", "b"],
+          ]),
+          shareEnd("s-pause"),
+        ],
+      ],
+    });
+    await expect(tabs(page)).toHaveCount(2);
+
+    // An ended session opens as a replay, and at normal speed. (A tab that was
+    // left keeps its own clock in the page, hidden.)
+    const clock = page.locator(".replay-time:visible");
+    await expect(clock).toHaveText("0:00 / 0:01");
+    await expect(
+      page.getByRole("button", { name: "Playback speed: 1×" }),
+    ).toBeVisible();
+
+    await tabs(page).nth(0).click();
+    await expect(clock).toHaveText("0:00 / 0:03");
+    await expect(
+      page.getByRole("button", { name: "Playback speed: 1×" }),
+    ).toBeVisible();
+
+    // Played, it takes the time the typing took: half a second in, the clock
+    // has not moved a second, and it gets there on schedule.
+    await page.getByRole("button", { name: "Play replay" }).click();
+    await page.waitForTimeout(400);
+    await expect(clock).toHaveText("0:00 / 0:03");
+    await expect(clock).toHaveText("0:01 / 0:03");
+  });
+
   test("a running session opens live and replays from the start on request", async ({
     page,
     ui,
   }) => {
-    const sockets = await openShare(page, ui);
-    const socket = await sockets.nth(0);
-    socket.send(frame(...history));
+    const live = await openShare(page, ui, { history });
     await expect(page.locator(".xterm-rows")).toContainText("nginx.service");
 
     await page.getByRole("button", { name: "Replay from start" }).click();
@@ -195,14 +334,10 @@ test.describe("shared run page", () => {
     await expect(page.locator(".xterm-rows")).toHaveCount(0);
 
     // A replay is a recording up to now: the session goes on without it.
-    socket.send(
-      frame({
-        type: "events",
-        seq: 6,
-        session: "s-web",
-        events: [[2_000, "o", "after the replay opened\r\n"]],
-      }),
+    live.publish(
+      shareEvents("s-web", [[2_000, "o", "after the replay opened\r\n"]]),
     );
+    await expect.poll(() => live.count("g1/3.jsonl")).toBe(1);
     await page.getByRole("button", { name: "Back to live" }).click();
     await expect(page.locator(".xterm-rows")).toContainText(
       "after the replay opened",
@@ -214,20 +349,14 @@ test.describe("shared run page", () => {
     page,
     ui,
   }) => {
-    const sockets = await openShare(page, ui);
-    const socket = await sockets.nth(0);
-    socket.send(frame(...history));
+    const live = await openShare(page, ui, { history });
     await expect(tabs(page)).toHaveCount(2);
     await expect(tabs(page).nth(0)).toHaveAttribute("aria-selected", "true");
 
     // The viewer has not moved, so the new session takes the front.
-    socket.send(
-      frame(start("s-web-3", 6, { vm_id: "vm_db", mode: "native" }), {
-        type: "events",
-        seq: 7,
-        session: "s-web-3",
-        events: [[0, "o", "postgres@db:~$ "]],
-      }),
+    live.publish(
+      shareStart("s-web-3", { vm_id: "vm_db", mode: "native" }),
+      shareEvents("s-web-3", [[0, "o", "postgres@db:~$ "]]),
     );
     await expect(tabs(page)).toHaveCount(3);
     await expect(tabs(page).nth(2)).toContainText("db · 1");
@@ -237,13 +366,13 @@ test.describe("shared run page", () => {
     // Leaving for an older tab means the next session no longer takes over.
     await tabs(page).nth(0).click();
     await expect(screenOf(page)).toContainText("systemctl status");
-    socket.send(frame(start("s-web-4", 8)));
+    live.publish(shareStart("s-web-4"));
     await expect(tabs(page)).toHaveCount(4);
     await expect(tabs(page).nth(3)).toContainText("web · 3");
     await expect(tabs(page).nth(0)).toHaveAttribute("aria-selected", "true");
     // Going back to the newest tab follows again.
     await tabs(page).nth(3).click();
-    socket.send(frame(start("s-web-5", 9)));
+    live.publish(shareStart("s-web-5"));
     await expect(tabs(page)).toHaveCount(5);
     await expect(tabs(page).nth(4)).toHaveAttribute("aria-selected", "true");
   });
@@ -252,81 +381,68 @@ test.describe("shared run page", () => {
     page,
     ui,
   }) => {
-    const sockets = await openShare(page, ui);
-    (await sockets.nth(0)).send(
-      frame(
-        hello(true),
-        start("s-web", 1),
-        { type: "gap", seq: 2, session: "s-web", bytes: 65_536 },
-        { type: "detach", seq: 3, session: "s-web" },
-        { type: "synced", seq: 3 },
-      ),
-    );
+    const live = await openShare(page, ui, {
+      truncated: true,
+      history: [
+        [shareStart("s-web"), shareGap("s-web", 65_536), shareDetach("s-web")],
+      ],
+    });
 
     await expect(page.getByText("Replay truncated")).toBeVisible();
+    // Past the size limit nothing more is published, so this says so, and does
+    // not promise live output.
+    await expect(
+      page.getByText("This share reached its size limit, so later output isn't shown."),
+    ).toBeVisible();
+    await expect(page.getByText("Live output keeps arriving")).toHaveCount(0);
     await expect(page.getByText("Some output was dropped")).toBeVisible();
     await expect(
       page.getByText(/connection to this terminal dropped/),
     ).toBeVisible();
     // The writer came back: the same tab is live again, with no extra tab.
-    (await sockets.nth(0)).send(frame(start("s-web", 4, { resumed: true })));
-    await expect(tabs(page)).toHaveCount(1);
+    live.publish(shareStart("s-web", { resumed: true }));
     await expect(
       page.getByText(/connection to this terminal dropped/),
     ).toHaveCount(0);
+    await expect(tabs(page)).toHaveCount(1);
     await expect(page.locator("[data-share-dot='live']")).toHaveCount(1);
   });
 
-  test("reconnects asking only for what was missed, and keeps what it has", async ({
+  test("keeps what it has through failed reads, and reads only what is new once they stop", async ({
     page,
     ui,
   }) => {
-    const sockets = await openShare(page, ui);
-    const first = await sockets.nth(0);
-    first.send(frame(...history));
-    await expect(page.locator(".xterm-rows")).toContainText("nginx.service");
-    await expect(page.getByText("Live", { exact: true }).first()).toBeVisible();
+    const live = await openShare(page, ui, { history });
+    await expect(screenOf(page)).toContainText("nginx.service");
+    await expect(headerStatus(page, "Live")).toBeVisible();
 
-    // The connection drops; the page says so and tries again.
-    await first.close({ code: 1001, reason: "going away" });
-    await expect(page.getByText("Reconnecting…").first()).toBeVisible();
-    const second = await sockets.nth(1);
-    expect(sockets.urls[1]?.searchParams.get("after")).toBe("5");
-    expect(sockets.urls[1]?.searchParams.get("s")).toBe(SHARE_ID);
-
-    // Hello again, then only what came after; nothing replays, nothing resets.
-    second.send(
-      frame(
-        { ...hello(), mission: { ...mission, tagline: "Now with a new tagline." } },
-        {
-          type: "events",
-          seq: 6,
-          session: "s-web",
-          events: [[2_500, "o", "output from while away\r\n"]],
-        },
-        { type: "synced", seq: 6 },
-      ),
+    // Two reads of the head fail (a rate limit, a blip), while output goes on.
+    live.failHeads(2);
+    live.publish(
+      shareEvents("s-web", [[2_500, "o", "output from while away\r\n"]]),
     );
-    await expect(page.getByText("Now with a new tagline.")).toBeVisible();
-    await expect(tabs(page)).toHaveCount(2);
-    const screen = page.locator(".xterm-rows");
-    await expect(screen).toContainText("output from while away");
-    await expect(screen).toContainText("nginx.service: failed");
-    await expect(page.getByText("Live", { exact: true }).first()).toBeVisible();
+    await expect(headerStatus(page, "Reconnecting…")).toBeVisible();
+    // What was on the screen stays, and nothing is called live of the session.
+    await expect(screenOf(page)).toContainText("nginx.service: failed");
+    await expect(page.locator("[data-share-dot='live']")).toHaveCount(0);
 
-    // The next drop asks from the new place.
-    await second.close({ code: 1006 });
-    await sockets.nth(2);
-    expect(sockets.urls[2]?.searchParams.get("after")).toBe("6");
+    // The share comes back: it carries on from the segment it was at.
+    await expect(screenOf(page)).toContainText("output from while away", {
+      timeout: 12_000,
+    });
+    await expect(headerStatus(page, "Live")).toBeVisible();
+    await expect(tabs(page)).toHaveCount(2);
+    for (const file of ["mission.json", "g1/1.jsonl", "g1/2.jsonl", "g1/3.jsonl"]) {
+      expect(live.count(file), file).toBe(1);
+    }
   });
 
   test("ends for good when the share is stopped", async ({ page, ui }) => {
-    const sockets = await openShare(page, ui);
-    const socket = await sockets.nth(0);
-    socket.send(frame(...history));
+    const live = await openShare(page, ui, { history });
     await expect(tabs(page)).toHaveCount(2);
 
-    await socket.close({ code: 4001, reason: "sharing stopped" });
+    // The learner stops sharing: the head is gone on the next poll.
+    live.stop();
     await expect(page.getByText("This share has ended")).toBeVisible();
     await expect(page.getByText("Sharing stopped").first()).toBeVisible();
     // What was captured stays, and nothing live is claimed of it.
@@ -352,27 +468,25 @@ test.describe("shared run page", () => {
       page.getByRole("button", { name: "Replay from start" }),
     ).toBeVisible();
 
-    // A reconnect would have come within a second and a half.
-    await page.waitForTimeout(1_600);
-    expect(sockets.all).toHaveLength(1);
+    // It does not ask again: a stopped share does not come back.
+    const heads = live.count("head.json");
+    await page.waitForTimeout(2_500);
+    expect(live.count("head.json")).toBe(heads);
   });
 
   test("does not wait for a dropped writer once the share is stopped", async ({
     page,
     ui,
   }) => {
-    const sockets = await openShare(page, ui);
-    const socket = await sockets.nth(0);
-    socket.send(
-      frame(...history, { type: "detach", seq: 6, session: "s-web" }),
-    );
+    const live = await openShare(page, ui, { history });
+    live.publish(shareDetach("s-web"));
     // While the share is up, a dropped writer may resume.
     await expect(
       page.getByText(/connection to this terminal dropped/),
     ).toBeVisible();
     await expect(tabs(page).nth(0)).toContainText("Interrupted");
 
-    await socket.close({ code: 4001, reason: "sharing stopped" });
+    live.stop();
     await expect(page.getByText("This share has ended")).toBeVisible();
     await expect(tabs(page).nth(0)).toContainText("Stopped");
     await expect(
@@ -381,72 +495,64 @@ test.describe("shared run page", () => {
     await expect(page.getByText("Interrupted")).toHaveCount(0);
   });
 
-  test("keeps trying when the first connection is refused, and shows the share once one gets through", async ({
+  test("keeps trying when the first read fails, and shows the share once one gets through", async ({
     page,
     ui,
   }) => {
-    // A rate limit or a full house refuses the upgrade; a browser cannot tell
-    // that from a missing share, so it is not called one.
-    const sockets = await openShare(page, ui, { refuse: 1 });
-    await expect(page.getByText("Reconnecting…").first()).toBeVisible();
+    // A rate limit or an error from the CDN: not a missing share, so not called one.
+    const live = await openShare(page, ui, { history, failHeads: 1 });
+    await expect(headerStatus(page, "Reconnecting…")).toBeVisible();
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("Live run");
     await expect(page.getByText("This share isn't available")).toHaveCount(0);
     await expect(page.getByText("This link isn't shared")).toHaveCount(0);
 
     // The retry is about a second away.
-    (await sockets.nth(1)).send(frame(...history));
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(
       mission.title,
     );
     await expect(tabs(page)).toHaveCount(2);
     await expect(screenOf(page)).toContainText("nginx.service");
-    await expect(page.getByText("Live", { exact: true }).first()).toBeVisible();
-    expect(sockets.all).toHaveLength(2);
-    // Nothing had been received, so the second asks for the share from the start.
-    expect(sockets.urls[1]?.searchParams.has("after")).toBe(false);
-    expect(sockets.urls[1]?.searchParams.get("s")).toBe(SHARE_ID);
+    await expect(headerStatus(page, "Live")).toBeVisible();
+    expect(live.count("head.json")).toBe(2);
   });
 
-  test("says the share isn't available after a run of refusals, and tries again on request", async ({
+  test("says the share isn't available after a run of failures, and tries again on request", async ({
     page,
     ui,
   }, testInfo) => {
-    await fastReconnects(page);
-    const sockets = await openShare(page, ui, {
-      refuse: SHARE_HANDSHAKE_FAILURES,
-    });
+    await fastRetries(page);
+    const live = await openShare(page, ui, { history, failHeads: 6 });
 
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(
       "This share isn't available",
     );
     await expect(
-      page.getByText(/may have been stopped, or it's busy right now/),
+      page.getByText(/Check your connection and try again/),
     ).toBeVisible();
     await expect(page.getByText("This link isn't shared")).toHaveCount(0);
-    expect(sockets.all).toHaveLength(SHARE_HANDSHAKE_FAILURES);
+    expect(live.count("head.json")).toBe(6);
     await expect(page.locator("main")).toHaveCount(1);
     await expectNoAxeViolations(page, testInfo);
 
-    // It gave up: nothing more is asked of the server by itself.
-    await page.waitForTimeout(300);
-    expect(sockets.all).toHaveLength(SHARE_HANDSHAKE_FAILURES);
+    // It gave up: nothing more is asked of the CDN by itself.
+    await page.waitForTimeout(1_500);
+    expect(live.count("head.json")).toBe(6);
 
-    // Try again asks once more, and this time the share is there.
+    // Try again reads once more, and this time the share is there.
     await page.getByRole("button", { name: "Try again" }).click();
-    (await sockets.nth(SHARE_HANDSHAKE_FAILURES)).send(frame(...history));
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(
       mission.title,
     );
     await expect(tabs(page)).toHaveCount(2);
     await expect(screenOf(page)).toContainText("nginx.service");
-    expect(sockets.all).toHaveLength(SHARE_HANDSHAKE_FAILURES + 1);
+    expect(live.count("head.json")).toBe(7);
   });
 
-  test("says the link is not shared when it names nothing, without connecting", async ({
+  test("says the link is not shared when it names nothing, without asking for anything", async ({
     page,
     ui,
   }) => {
-    const sockets = await openShare(page, ui, { path: "/watch#not-a-share" });
+    const live = await openShare(page, ui, { path: "/watch#not-a-share" });
 
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(
       "This link isn't shared (anymore)",
@@ -455,12 +561,32 @@ test.describe("shared run page", () => {
       0,
     );
     await page.waitForTimeout(300);
-    expect(sockets.all).toHaveLength(0);
+    expect(live.requests).toEqual([]);
     await expect(page).toHaveTitle(/Live run/);
     await expect(page.locator('meta[name="robots"]')).toHaveAttribute(
       "content",
       "noindex, nofollow",
     );
+  });
+
+  test("says the link is not shared when the share was stopped before the viewer came", async ({
+    page,
+    ui,
+  }) => {
+    const live = await openShare(page, ui, { history, stopped: true });
+
+    // The files are gone (a 404): nothing to show, and nothing to wait for.
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText(
+      "This link isn't shared (anymore)",
+    );
+    await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(
+      0,
+    );
+    await expect(tabs(page)).toHaveCount(0);
+    expect(live.requests).not.toContain("g1/1.jsonl");
+    const asked = live.requests.length;
+    await page.waitForTimeout(2_500);
+    expect(live.requests).toHaveLength(asked);
   });
 
   test("never follows a link a program writes into the terminal", async ({
@@ -475,26 +601,20 @@ test.describe("shared run page", () => {
     const popups: string[] = [];
     page.context().on("page", (opened) => popups.push(opened.url()));
 
-    const sockets = await openShare(page, ui);
-    (await sockets.nth(0)).send(
-      frame(
-        hello(),
-        start("s-web", 1),
-        {
-          type: "events",
-          seq: 2,
-          session: "s-web",
-          events: [
+    await openShare(page, ui, {
+      history: [
+        [
+          shareStart("s-web"),
+          shareEvents("s-web", [
             [
               0,
               "o",
               "see \u001b]8;;https://evil.example.test/\u0007this link\u001b]8;;\u0007 now\r\n",
             ],
-          ],
-        },
-        { type: "synced", seq: 2 },
-      ),
-    );
+          ]),
+        ],
+      ],
+    });
     const screen = page.locator(".xterm-rows");
     await expect(screen).toContainText("see this link now");
 
@@ -518,14 +638,210 @@ test.describe("shared run page", () => {
   });
 });
 
+test.describe("a share rebuilt from the recordings", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  /** Generation 1: what the share captured live, with a line the recording will not have. */
+  const live = [
+    [
+      shareStart("s-web"),
+      shareEvents("s-web", [
+        [0, "o", "learner@web:~$ "],
+        [900, "o", "systemctl status nginx\r\n"],
+        [1_400, "o", "live only line\r\n"],
+      ]),
+    ],
+    [
+      shareStart("s-ssh", { mode: "native", cols: 100, rows: 20 }),
+      shareEvents("s-ssh", [
+        [0, "o", "root@web:~# "],
+        [600, "o", "uptime\r\n"],
+      ]),
+    ],
+  ];
+  /** Generation 2: the same sessions from the archive, every one ended. */
+  const recording = [
+    [
+      shareStart("s-web"),
+      shareEvents("s-web", [
+        [0, "o", "learner@web:~$ "],
+        [900, "o", "systemctl status nginx\r\n"],
+        [1_400, "o", "recorded tail\r\n"],
+      ]),
+      shareEnd("s-web"),
+    ],
+    [
+      shareStart("s-ssh", { mode: "native", cols: 100, rows: 20 }),
+      shareEvents("s-ssh", [
+        [0, "o", "root@web:~# "],
+        // Not what the live capture had at this point.
+        [600, "o", "uptime -p\r\n"],
+        [1_900, "o", "exit\r\n"],
+      ]),
+      shareEnd("s-ssh"),
+    ],
+  ];
+
+  test("rebuilds its tabs from the new generation, keeps the viewer's tab, and stops polling fast", async ({
+    page,
+    ui,
+  }) => {
+    const share = await openShare(page, ui, { history: live });
+    await expect(tabs(page)).toHaveCount(2);
+    await expect(headerStatus(page, "Live")).toBeVisible();
+    // The viewer chooses the second tab, and holds its screen still.
+    await tabs(page).nth(1).click();
+    await expect(tabs(page).nth(1)).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("button", { name: "Pause" }).click();
+    await expect(
+      page.getByText("New output is held until you resume."),
+    ).toBeVisible();
+
+    // The run ends and its archive is ready: the share is rebuilt from the
+    // recordings, as the next generation, and the live files are deleted.
+    share.record(...recording);
+    await expect(headerStatus(page, "Recorded")).toBeVisible();
+    await expect(page.getByText("Live", { exact: true })).toHaveCount(0);
+
+    // Every session is ended, in tabs rebuilt from the new generation.
+    await expect(tabs(page)).toHaveCount(2);
+    await expect(tabs(page).nth(0)).toContainText("Ended");
+    await expect(tabs(page).nth(1)).toContainText("Ended");
+    await expect(page.locator("[data-share-dot='live']")).toHaveCount(0);
+    // The viewer's own tab is still theirs, since the session id carried over,
+    // and still the screen they were reading. Where they had paused it means
+    // nothing in a log that was made again, so that is let go of.
+    await expect(tabs(page).nth(1)).toHaveAttribute("aria-selected", "true");
+    await expect(screenOf(page)).toContainText("root@web:~# uptime -p");
+    await expect(screenOf(page)).toContainText("exit");
+    await expect(
+      page.getByText("New output is held until you resume."),
+    ).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Pause" })).toHaveCount(0);
+
+    // The first tab is the recording's: what it holds is not what was live.
+    // The viewer had not looked at it, so it opens as an ended session does.
+    await tabs(page).nth(0).click();
+    await page.getByRole("button", { name: "Show final screen" }).click();
+    await expect(screenOf(page)).toContainText("recorded tail");
+    await expect(screenOf(page)).not.toContainText("live only line");
+
+    // Nothing changes in a recording, so the head is not read every second.
+    const heads = share.count("head.json");
+    await page.waitForTimeout(3_000);
+    expect(share.count("head.json")).toBe(heads);
+    // The old generation was read once, and not again; the new one once.
+    expect(share.count("g1/1.jsonl")).toBe(1);
+    expect(share.count("g1/2.jsonl")).toBe(1);
+    expect(share.count("g2/1.jsonl")).toBe(1);
+    expect(share.count("g2/2.jsonl")).toBe(1);
+    expect(share.count("mission.json")).toBe(1);
+  });
+
+  test("keeps a viewer who was in a replay in one when the share is rebuilt", async ({
+    page,
+    ui,
+  }) => {
+    const share = await openShare(page, ui, { history: live });
+    await expect(tabs(page)).toHaveCount(2);
+    // The newest running session is in front: the live capture's SSH session,
+    // which is a little over half a second long.
+    await page.getByRole("button", { name: "Replay from start" }).click();
+    const slider = page.getByRole("slider", { name: "Replay position" });
+    await expect(slider).toBeEnabled();
+    await expect(page.locator(".replay-time:visible")).toHaveText("0:00 / 0:00");
+
+    share.record(...recording);
+    await expect(headerStatus(page, "Recorded")).toBeVisible();
+
+    // Still a replay, and made from the recording: it is almost two seconds.
+    await expect(page.locator(".xterm-rows")).toHaveCount(0);
+    await expect(slider).toBeEnabled();
+    await expect(page.locator(".replay-time:visible")).toHaveText("0:00 / 0:01");
+  });
+
+  test("starts at the first tab when the viewer's session is not in the rebuilt share", async ({
+    page,
+    ui,
+  }) => {
+    const share = await openShare(page, ui, {
+      history: [
+        ...live,
+        [
+          shareStart("s-extra"),
+          shareEvents("s-extra", [[0, "o", "only in the live capture"]]),
+        ],
+      ],
+    });
+    await expect(tabs(page)).toHaveCount(3);
+    await tabs(page).nth(2).click();
+    await expect(tabs(page).nth(2)).toHaveAttribute("aria-selected", "true");
+
+    share.record(...recording);
+    await expect(headerStatus(page, "Recorded")).toBeVisible();
+
+    // The third session is not in the recording, so there is no third tab and
+    // the viewer is at the first.
+    await expect(tabs(page)).toHaveCount(2);
+    await expect(tabs(page).nth(0)).toHaveAttribute("aria-selected", "true");
+    await expect(tabs(page).nth(0)).toContainText("web · 1");
+  });
+
+  test("says a recording was cut at the size limit, which a rebuilt share has of its own", async ({
+    page,
+    ui,
+  }) => {
+    // A recording can carry the flag too: part of it kept its live capture.
+    await openShare(page, ui, { recorded: recording, truncated: true });
+
+    await expect(headerStatus(page, "Recorded")).toBeVisible();
+    await expect(page.getByText("Replay truncated")).toBeVisible();
+    await expect(
+      page.getByText("This share reached its size limit, so later output isn't shown."),
+    ).toBeVisible();
+  });
+
+  test("lets go of the size limit's notice when the rebuilt share was not cut", async ({
+    page,
+    ui,
+  }) => {
+    const share = await openShare(page, ui, { history: live, truncated: true });
+    await expect(page.getByText("Replay truncated")).toBeVisible();
+
+    // The recordings are whole, so the share rebuilt from them is not cut.
+    share.record(...recording);
+    await expect(headerStatus(page, "Recorded")).toBeVisible();
+    await expect(page.getByText("Replay truncated")).toHaveCount(0);
+  });
+
+  test("shows a share that was rebuilt before the viewer came as a recording", async ({
+    page,
+    ui,
+  }) => {
+    const share = await openShare(page, ui, { recorded: recording });
+
+    await expect(headerStatus(page, "Recorded")).toBeVisible();
+    await expect(tabs(page)).toHaveCount(2);
+    await expect(tabs(page).nth(0)).toContainText("Ended");
+    // Ended sessions open as replays.
+    await expect(
+      page.getByRole("slider", { name: "Replay position" }),
+    ).toBeEnabled();
+    expect(share.count("g1/1.jsonl")).toBe(0);
+    expect(share.count("g2/1.jsonl")).toBe(1);
+    const heads = share.count("head.json");
+    await page.waitForTimeout(2_500);
+    expect(share.count("head.json")).toBe(heads);
+  });
+});
+
 test.describe("shared run page layout", () => {
   test("sits the mission beside the terminals at 1920x1080 and keeps the terminal on screen", async ({
     page,
     ui,
   }) => {
     await page.setViewportSize({ width: 1920, height: 1080 });
-    const sockets = await openShare(page, ui, { theme: "dark" });
-    (await sockets.nth(0)).send(frame(...history));
+    await openShare(page, ui, { theme: "dark", history });
     await expect(page.locator(".xterm-rows")).toContainText("nginx.service");
 
     const terminals = await page
@@ -547,20 +863,14 @@ test.describe("shared run page layout", () => {
     ui,
   }) => {
     await page.setViewportSize({ width: 375, height: 812 });
-    const sockets = await openShare(page, ui);
-    (await sockets.nth(0)).send(
-      frame(
-        hello(),
-        start("s-wide", 1, { cols: 160, rows: 10 }),
-        {
-          type: "events",
-          seq: 2,
-          session: "s-wide",
-          events: [[0, "o", "wide terminal ".repeat(12)]],
-        },
-        { type: "synced", seq: 2 },
-      ),
-    );
+    await openShare(page, ui, {
+      history: [
+        [
+          shareStart("s-wide", { cols: 160, rows: 10 }),
+          shareEvents("s-wide", [[0, "o", "wide terminal ".repeat(12)]]),
+        ],
+      ],
+    });
     await expect(page.locator(".xterm-rows")).toContainText("wide terminal");
 
     const terminals = await page
@@ -594,7 +904,6 @@ test.describe("shared run page layout", () => {
     ui,
   }, testInfo) => {
     await page.setViewportSize({ width: 1440, height: 700 });
-    const sockets = await openShare(page, ui);
     const longMission = {
       ...mission,
       markdown: Array.from(
@@ -603,12 +912,7 @@ test.describe("shared run page layout", () => {
           `## Step ${index + 1}\n\nCheck the unit, read the journal, and compare the configuration with the last good one.`,
       ).join("\n\n"),
     };
-    (await sockets.nth(0)).send(
-      frame(
-        { ...hello(), mission: longMission },
-        ...history.slice(1),
-      ),
-    );
+    await openShare(page, ui, { history, mission: longMission });
     await expect(screenOf(page)).toContainText("nginx.service");
 
     const aside = page.getByRole("complementary", { name: "Mission" });
@@ -635,8 +939,7 @@ test.describe("shared run page layout", () => {
       ui,
     }, testInfo) => {
       await page.setViewportSize({ width: 1440, height: 900 });
-      const sockets = await openShare(page, ui, { theme });
-      (await sockets.nth(0)).send(frame(...history));
+      await openShare(page, ui, { theme, history });
       await expect(page.locator(".xterm-rows")).toContainText("nginx.service");
       await expect(page.locator("main")).toHaveCount(1);
       await expect(page.locator("h1")).toHaveCount(1);

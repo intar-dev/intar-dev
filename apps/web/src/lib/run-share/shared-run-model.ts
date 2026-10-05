@@ -7,9 +7,29 @@ import {
 import type { ShareViewerMessage, SharedRunMission } from "./protocol";
 
 /**
+ * One message of a share's stored log, as a segment file holds it: a session
+ * starting, output, dropped output, a session ending or its writer dropping,
+ * or the point where the stored replay stops.
+ */
+export type StoredShareMessage = ShareViewerMessage;
+
+/**
+ * What the model is told: the share's mission, the generation of the log that
+ * follows, and that log message by message.
+ *
+ * A generation is one complete version of the log. The live capture is the
+ * first; when the run's recordings are archived the share is rebuilt from them
+ * as the next, with the same session ids, and its sequence numbers start over.
+ */
+export type ShareUpdate =
+  | StoredShareMessage
+  | { type: "mission"; mission: SharedRunMission }
+  | { type: "generation"; generation: number };
+
+/**
  * The share id in a page address's fragment, or null when that is not one: 22
- * base64url characters. Checked before anything connects, so a mistyped link
- * never reaches the server.
+ * base64url characters. Checked before anything is requested, so a mistyped
+ * link never reaches the CDN.
  */
 export function parseShareId(fragment: string): string | null {
   const id = fragment.startsWith("#") ? fragment.slice(1) : fragment;
@@ -18,9 +38,8 @@ export function parseShareId(fragment: string): string | null {
 
 /**
  * The viewer's model of one public share: what the share's messages have said
- * so far. It is a plain reducer with no React and no socket, so the page can
- * feed it frames in any order a reconnect produces and a test can feed it by
- * hand.
+ * so far. It is a plain reducer with no React and no network, so the page can
+ * feed it a segment at a time and a test can feed it by hand.
  */
 
 /** xterm's own minimum grid. */
@@ -59,10 +78,15 @@ export function parseShareResize(data: unknown): ShareGrid | null {
 
 export type ShareSessionStatus = "live" | "detached" | "ended";
 
-/** How the viewer's link to the share is doing. */
+/**
+ * How the viewer's link to the share is doing: still reading what the share
+ * holds, keeping up with it, reading a finished recording of it, failing to
+ * reach it, told it is gone (a 404), or given up after a run of failures.
+ */
 export type ShareStatus =
   | "connecting"
   | "live"
+  | "recorded"
   | "reconnecting"
   | "stopped"
   | "unavailable";
@@ -70,6 +94,7 @@ export type ShareStatus =
 /** What one session is doing, as the viewer says it. */
 export type ShareSessionPhase =
   | "live"
+  | "loading"
   | "reconnecting"
   | "interrupted"
   | "stopped"
@@ -78,9 +103,9 @@ export type ShareSessionPhase =
 /**
  * A session's status says what the share last recorded, and the link says
  * whether anything more can arrive. A stopped share records no end or detach
- * for its sessions (the writers are cut off and the log is wiped), so once the
- * link is over every session that had not ended is stopped, not live and not
- * waiting for a connection that will not come.
+ * for its sessions (its files are deleted), so once the link is over every
+ * session that had not ended is stopped, not live and not waiting for a
+ * connection that will not come.
  */
 export function shareSessionPhase(
   session: Pick<ShareSession, "status">,
@@ -88,9 +113,13 @@ export function shareSessionPhase(
 ): ShareSessionPhase {
   // The PTY ending is a fact the share recorded, and it stays true.
   if (session.status === "ended") return "ended";
+  // A recording has no live end: whatever its log leaves open is over.
+  if (link === "recorded") return "ended";
   if (link === "stopped") return "stopped";
   if (session.status === "detached") return "interrupted";
-  return link === "live" ? "live" : "reconnecting";
+  if (link === "live") return "live";
+  // Part of the history is still arriving, or the share cannot be reached.
+  return link === "connecting" ? "loading" : "reconnecting";
 }
 
 /** One PTY at Stargate: every reconnect and every native SSH login is its own. */
@@ -116,16 +145,16 @@ export interface ShareSession {
 
 export interface SharedRunState {
   mission: SharedRunMission | null;
-  /** Tab order is arrival order, and a session is never removed. */
+  /** The generation of the log the sessions come from; null before the first. */
+  generation: number | null;
+  /** Tab order is arrival order, and within a generation a session is never removed. */
   sessions: ShareSession[];
-  /** The stored replay stops early; live output still arrives. */
+  /** The stored replay stops early; there is no output past that point. */
   truncated: boolean;
-  /** Everything the share had stored when this connection began is applied. */
-  synced: boolean;
   /**
-   * The highest log sequence number applied. A reconnect keeps the model and
-   * asks for `?after=<seq>`, so this is the cursor; null until a stored
-   * message arrives.
+   * The highest log sequence number of this generation applied; null until a
+   * stored message arrives. A message at or below it was applied already and is
+   * skipped, so a segment that is delivered twice cannot draw twice.
    */
   seq: number | null;
 }
@@ -133,15 +162,11 @@ export interface SharedRunState {
 export function createSharedRunState(): SharedRunState {
   return {
     mission: null,
+    generation: null,
     sessions: [],
     truncated: false,
-    synced: false,
     seq: null,
   };
-}
-
-function highest(left: number | null, right: number): number {
-  return left === null ? right : Math.max(left, right);
 }
 
 /**
@@ -153,7 +178,7 @@ function highest(left: number | null, right: number): number {
  */
 export function applyShareMessages(
   state: SharedRunState,
-  messages: readonly ShareViewerMessage[],
+  messages: readonly ShareUpdate[],
 ): SharedRunState {
   const copied = new Set<string>();
   let next = state;
@@ -169,44 +194,38 @@ export function applyShareMessages(
  */
 export function reduceShareMessage(
   state: SharedRunState,
-  message: ShareViewerMessage,
+  message: ShareUpdate,
   copied: Set<string> = new Set(),
 ): SharedRunState {
-  switch (message.type) {
-    case "hello":
-      // A resumed connection says hello again. The mission and the truncation
-      // flag are the share's current word; the sessions are what this viewer
-      // already holds, and what it missed follows.
-      return {
-        ...state,
-        mission: message.mission,
-        truncated: message.truncated,
-        synced: false,
-      };
-    case "synced":
-      return {
-        ...state,
-        synced: true,
-        seq:
-          typeof message.seq === "number"
-            ? highest(state.seq, message.seq)
-            : state.seq,
-      };
-    default:
-      break;
+  if (message.type === "mission") {
+    return state.mission === message.mission
+      ? state
+      : { ...state, mission: message.mission };
+  }
+  if (message.type === "generation") {
+    if (state.generation === message.generation) return state;
+    // The share was rebuilt: what the viewer holds is of the old log, and the
+    // new one numbers its messages from the start again. The mission stays.
+    copied.clear();
+    return {
+      ...state,
+      generation: message.generation,
+      sessions: [],
+      truncated: false,
+      seq: null,
+    };
   }
 
   const seq = typeof message.seq === "number" ? message.seq : undefined;
   // Stored messages arrive once, in order; one that does not is already here.
   if (seq !== undefined && state.seq !== null && seq <= state.seq) return state;
   const next = applyStored(state, message, copied);
-  // Live output past the storage cap carries no seq and moves nothing.
   return seq === undefined ? next : { ...next, seq };
 }
 
 function applyStored(
   state: SharedRunState,
-  message: Exclude<ShareViewerMessage, { type: "hello" | "synced" }>,
+  message: StoredShareMessage,
   copied: Set<string>,
 ): SharedRunState {
   switch (message.type) {
@@ -217,9 +236,9 @@ function applyStored(
         return state;
       }
       // ponytail: every event of every session stays in memory while the page
-      // is open. The share stores a capped log, but output past the cap keeps
-      // arriving live, so hours of heavy output grow without bound. Drop the
-      // oldest events and mark the replay truncated if that ever bites.
+      // is open. The share publishes a capped log (it stops publishing output
+      // past the cap), so this is bounded by that cap; a viewer that has to
+      // stay lighter would drop the oldest events and mark the replay truncated.
       return updateSession(state, message.session, (session) => {
         const events = ownedEvents(session, copied);
         // One at a time: spreading a long row into push() overflows the stack.
@@ -242,7 +261,7 @@ function applyStored(
         session.status === "ended" ? session : { ...session, status: "detached" },
       );
     case "truncated":
-      return { ...state, truncated: true };
+      return state.truncated ? state : { ...state, truncated: true };
     default:
       // A message type a newer share sends is not this viewer's to apply.
       return state;

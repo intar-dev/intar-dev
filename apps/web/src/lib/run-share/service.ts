@@ -12,6 +12,7 @@ import {
   putStargateRunMirror,
 } from "@/lib/stargate";
 import { runShareUrl } from "./links";
+import type { ShareRecordingInput } from "@/control-plane/run-share-do";
 import type { SharedRunMission } from "./protocol";
 
 export const RUN_SHARING_FLAG = "run-sharing";
@@ -123,6 +124,7 @@ async function initShare(
   const response = await runShareStub(shareId).fetch(`${SHARE_DO_ORIGIN}/init`, {
     method: "PUT",
     body: JSON.stringify({
+      share_id: shareId,
       mission,
       write_token_hash: await sha256Hex(writeToken),
     }),
@@ -271,8 +273,8 @@ export async function stopRunSharesForUser(userId: string): Promise<void> {
   for (const run of results) await stopRunShare(run.run_id, run.share_id);
 }
 
-/** A share is watchable while its run is visible and its owner's account is
- * active, so revoking an account closes its links at once. */
+/** A share is live while its run is visible and its owner's account is
+ * active; Stargate may only write to such a share. */
 export async function isShareWatchable(shareId: string): Promise<boolean> {
   const row = await env.DB.prepare(
     `SELECT 1 AS watchable
@@ -309,15 +311,46 @@ export async function handleShareIngest(request: Request): Promise<Response> {
   });
 }
 
-/** Opens a viewer socket after the share and its owner are checked.
- * `network` is the hashed caller network the share caps viewers by. */
-export async function openShareViewer(
-  shareId: string,
-  after: string | null,
-  network: string,
-): Promise<Response> {
-  const query = after && /^\d{1,15}$/.test(after) ? `?after=${after}` : "";
-  return runShareStub(shareId).fetch(`${SHARE_DO_ORIGIN}/watch${query}`, {
-    headers: { upgrade: "websocket", "x-share-viewer-network": network },
+/**
+ * Tells the run's share, if it has one, about one VM's archive: its
+ * recordings (from the timeline) or that the VM finished archiving. Once
+ * every VM with a shared session finished, the share rebuilds itself. Best
+ * effort: a share that never hears of its archive keeps its live capture.
+ */
+async function notifyShare(runId: string, path: string, body: unknown): Promise<void> {
+  try {
+    const run = await env.DB.prepare(
+      `SELECT share_id FROM scenario_runs WHERE run_id = ?1`,
+    )
+      .bind(runId)
+      .first<{ share_id: string | null }>();
+    if (!run?.share_id) return;
+    const response = await runShareStub(run.share_id).fetch(
+      `${SHARE_DO_ORIGIN}${path}`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+    if (response.status !== 204 && response.status !== 404) {
+      throw new Error(`share archive handoff failed (${response.status})`);
+    }
+  } catch (error) {
+    logShareCleanup("run_share_archive_handoff_failed", runId, error);
+  }
+}
+
+export async function notifyShareRecording(input: {
+  runId: string;
+  vmId: string;
+  sessions: ShareRecordingInput[];
+}): Promise<void> {
+  await notifyShare(input.runId, "/recording", {
+    vm_id: input.vmId,
+    sessions: input.sessions,
   });
+}
+
+export async function notifyShareVmArchived(input: {
+  runId: string;
+  vmId: string;
+}): Promise<void> {
+  await notifyShare(input.runId, "/vm-complete", { vm_id: input.vmId });
 }

@@ -1,5 +1,4 @@
 import { env } from "cloudflare:workers";
-import type { APIContext } from "astro";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -8,17 +7,16 @@ import {
   seedRun,
 } from "@/control-plane/host-runtime-do/test-fixtures";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
-import { parseShareViewerFrame } from "@/lib/run-share/protocol";
 import {
   disableRunShare,
   enableRunShare,
   handleShareIngest,
+  notifyShareRecording,
+  notifyShareVmArchived,
   isShareWatchable,
   RUN_SHARING_FLAG,
-  runShareStub,
   stopRunSharesForUser,
 } from "@/lib/run-share/service";
-import { GET as watchRoute } from "@/pages/api/shares/stream";
 import { revokeFixtureAccount } from "@/test/account-fixtures";
 
 const on = new StaticFeatureToggleService({ [RUN_SHARING_FLAG]: true });
@@ -33,27 +31,10 @@ async function shareIdOf(runId: string): Promise<string | null> {
   return row?.share_id ?? null;
 }
 
-async function watch(shareId: string) {
-  const response = await runShareStub(shareId).fetch(
-    "https://run-share.internal/watch",
-    { headers: { upgrade: "websocket", "x-share-viewer-network": "c".repeat(24) } },
-  );
-  const ws = response.webSocket;
-  if (!ws) return { status: response.status, frames: [] as string[] };
-  const frames: string[] = [];
-  ws.accept();
-  ws.addEventListener("message", (event) => {
-    frames.push(String(event.data));
-  });
-  return { status: response.status, frames };
-}
-
-function watchRequest(shareId: string, ip = "198.51.100.7") {
-  return watchRoute({
-    request: new Request(`http://localhost/api/shares/stream?s=${shareId}`, {
-      headers: { upgrade: "websocket", "cf-connecting-ip": ip },
-    }),
-  } as unknown as APIContext);
+/** What a viewer would read: the share's published head, or null. */
+async function published(shareId: string): Promise<unknown> {
+  const head = await env.SHARE_LIVE_BUCKET.get(`${shareId}/head.json`);
+  return head ? head.json() : null;
 }
 
 describe("run sharing", () => {
@@ -90,22 +71,23 @@ describe("run sharing", () => {
     expect(url).toBe(`http://localhost/watch#${shareId}`);
     expect(await enableRunShare(owner)).toBe(url);
 
-    const viewer = await watch(shareId!);
-    expect(viewer.status).toBe(101);
-    await vi.waitFor(() => expect(viewer.frames.length).toBe(1));
-    const [hello] = parseShareViewerFrame(viewer.frames[0]!);
-    expect(hello).toEqual({
-      type: "hello",
+    expect(await published(shareId!)).toEqual({
+      generation: 1,
+      segment: 0,
+      checkpoint: 0,
+      seq: 0,
       truncated: false,
-      mission: {
-        title: "Broken Nginx",
-        tagline: "",
-        scenario_name: "broken-nginx",
-        lecture_title: null,
-        markdown: "",
-        objectives: [],
-        vms: [{ id: "vm-1", name: "webserver" }],
-      },
+      recorded: false,
+    });
+    const mission = await env.SHARE_LIVE_BUCKET.get(`${shareId}/mission.json`);
+    expect(await mission?.json()).toEqual({
+      title: "Broken Nginx",
+      tagline: "",
+      scenario_name: "broken-nginx",
+      lecture_title: null,
+      markdown: "",
+      objectives: [],
+      vms: [{ id: "vm-1", name: "webserver" }],
     });
   });
 
@@ -113,11 +95,9 @@ describe("run sharing", () => {
     await enableRunShare(owner);
     const shareId = (await shareIdOf("run-1"))!;
     expect(await isShareWatchable(shareId)).toBe(true);
-    expect((await watchRequest(shareId)).status).toBe(101);
 
     await revokeFixtureAccount({ d1: env.DB, userId: "user-1" });
     expect(await isShareWatchable(shareId)).toBe(false);
-    expect((await watchRequest(shareId)).status).toBe(404);
   });
 
   it("lets Stargate write only to a share its run still points at", async () => {
@@ -141,17 +121,12 @@ describe("run sharing", () => {
     expect((await ingest(shareId)).status).toBe(404);
   });
 
-  it("answers 404 for an unknown or malformed share", async () => {
-    expect((await watchRequest("Zm9vYmFyYmF6cXV4cXV1eA")).status).toBe(404);
-    expect((await watchRequest("../../etc")).status).toBe(404);
-  });
-
   it("wipes the share before forgetting it", async () => {
     await enableRunShare(owner);
     const shareId = (await shareIdOf("run-1"))!;
     await disableRunShare(owner);
     expect(await shareIdOf("run-1")).toBeNull();
-    expect((await watch(shareId)).status).toBe(404);
+    expect(await published(shareId)).toBeNull();
     // Sharing again mints a new link; the old one stays dead.
     await enableRunShare(owner);
     expect(await shareIdOf("run-1")).not.toBe(shareId);
@@ -164,6 +139,21 @@ describe("run sharing", () => {
 
     await stopRunSharesForUser("user-1");
     expect(await shareIdOf("run-1")).toBeNull();
-    expect((await watch(shareId)).status).toBe(404);
+    expect(await published(shareId)).toBeNull();
+  });
+
+  it("hands the archived recordings to the run's share", async () => {
+    await enableRunShare(owner);
+    const shareId = (await shareIdOf("run-1"))!;
+    await notifyShareRecording({ runId: "run-1", vmId: "vm-1", sessions: [] });
+    await notifyShareVmArchived({ runId: "run-1", vmId: "vm-1" });
+    await vi.waitFor(async () =>
+      expect(await published(shareId)).toEqual(
+        expect.objectContaining({ generation: 2, recorded: true }),
+      ),
+    );
+    // A run without a share is left alone.
+    await notifyShareVmArchived({ runId: "run-without-share", vmId: "vm-1" });
   });
 });
+

@@ -1,10 +1,9 @@
 import { sessionFor } from "./fixtures/sessions";
 import {
   openShare,
-  shareFrame,
   shareHistory,
   shareMission,
-} from "./fixtures/share-socket";
+} from "./fixtures/share-live";
 import { expect, test } from "./fixtures/test";
 import { routeCase } from "./routes";
 
@@ -327,8 +326,7 @@ test("a shared run's public page mirrors the learner's terminals", async ({
   page,
   ui,
 }) => {
-  const sockets = await openShare(page, ui, { theme: "dark" });
-  (await sockets.nth(0)).send(shareFrame(...shareHistory));
+  await openShare(page, ui, { theme: "dark", history: shareHistory });
 
   await expect(
     page.getByRole("heading", { level: 1, name: shareMission.title }),

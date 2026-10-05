@@ -5,7 +5,10 @@ import { clampShareGrid, parseShareResize } from "./shared-run-model";
  * A session's log as an asciicast v3 recording, the shape the replay surface
  * plays: a header with the grid, then one `[seconds since the last event, code,
  * data]` line per event. The log's own times are milliseconds since the PTY
- * started, so each line carries the difference from the one before it.
+ * started, one per event, so each line carries the real difference from the
+ * event before it, however the events were batched on their way here: the
+ * replay plays at the speed the learner typed. A long pause stays long in the
+ * cast; the player shortens it (to its idle limit) as it plays.
  *
  * The web terminal draws with `convertEol`, so a line feed there returns the
  * carriage too. The player has no such option, so a browser session's output
@@ -21,8 +24,10 @@ export function buildShareCast(
   const lines = [JSON.stringify({ version: 3, term: { cols, rows } })];
   let previous = 0;
   for (const [ms, code, data] of session.events) {
-    // A clock that steps back is a stalled one, not a negative interval.
-    const at = Math.max(ms, previous);
+    // Whole milliseconds, so the intervals add up to the log's own times with
+    // no rounding that drifts. A clock that steps back is a stalled one, not a
+    // negative interval, and a time that is not a number takes no time.
+    const at = Number.isFinite(ms) ? Math.max(Math.round(ms), previous) : previous;
     const interval = Number(((at - previous) / 1000).toFixed(3));
     if (code === "o") {
       const text = session.mode === "browser" ? toCrlf(data) : data;

@@ -44,6 +44,13 @@
       "bucket_name": "intar-dev-local-vm-image-registry",
     },
     {
+      // Public run shares, served to viewers from the CDN by a custom domain
+      // (SHARE_LIVE_ORIGIN). Holds only what owners chose to share.
+      "binding": "SHARE_LIVE_BUCKET",
+      "bucket_name": "intar-dev-share-live-20261005",
+      "jurisdiction": "eu",
+    },
+    {
       "binding": "VM_RUN_ARTIFACTS_BUCKET",
       "bucket_name": "intar-dev-local-run-artifacts",
     },
@@ -68,16 +75,6 @@
       "namespace_id": "88427091",
       "simple": {
         "limit": 20,
-        "period": 60,
-      },
-    },
-    {
-      // Public share viewers, per address. A classroom behind one NAT shares
-      // an address, so this sits well above the sensitive-action limiter.
-      "name": "SHARE_WATCH_RATE_LIMITER",
-      "namespace_id": "88427092",
-      "simple": {
-        "limit": 120,
         "period": 60,
       },
     },
