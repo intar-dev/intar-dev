@@ -1,5 +1,11 @@
 # Changelog
 
+## kino/v0.5.0 (2026-10-05)
+
+### Features
+
+- **stargate:** Share runs live through a public link (#234) (02f12d72)
+
 ## kino/v0.4.0 (2026-10-01)
 
 ### Breaking changes
