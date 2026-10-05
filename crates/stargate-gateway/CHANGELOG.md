@@ -1,5 +1,11 @@
 # Changelog
 
+## stargate/v0.6.0 (2026-10-05)
+
+### Features
+
+- **stargate:** Share runs live through a public link (#234) (02f12d72)
+
 ## stargate/v0.5.0 (2026-10-01)
 
 ### Features
