@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { HttpResponseError } from "@/components/app/lib/http-response-error";
-import { catalogLoadFailed, filterCourses, filterLectures } from "./CourseCatalog";
+import {
+  catalogLoadFailed,
+  filterCourses,
+  filterLectures,
+  splitAssignments,
+} from "./CourseCatalog";
 import type { CourseCatalogCourse } from "./course-wire";
 
 const course: CourseCatalogCourse = {
@@ -128,5 +133,41 @@ describe("catalog load failure", () => {
         true,
       );
     }
+  });
+});
+
+describe("course index assignments", () => {
+  const assignment = (
+    assignmentId: string,
+    lecture: { courseId: string; scope: "organization-public" | "organization-private" } | null,
+  ) => ({
+    assignmentId,
+    organizationId: "org-a",
+    organizationName: "Org A",
+    scenarioTitle: null,
+    assignedAt: 0,
+    lecture: lecture && {
+      ...lecture,
+      lectureId: "01-nginx",
+      title: "Repair Nginx",
+      state: "available" as const,
+      blockedBy: null,
+    },
+  });
+  const privateCourse = { ...course, organizationId: "org-a", organizationName: "Org A" };
+
+  it("places each assignment on its catalog course and keeps the rest", () => {
+    const { byCourse, unmatched } = splitAssignments(
+      [
+        assignment("public", { courseId: "operations", scope: "organization-public" }),
+        assignment("private", { courseId: "operations", scope: "organization-private" }),
+        assignment("missing", { courseId: "gone", scope: "organization-public" }),
+        assignment("no-lecture", null),
+      ],
+      [course, privateCourse],
+    );
+    expect(byCourse.get("public:operations")?.map((entry) => entry.assignmentId)).toEqual(["public"]);
+    expect(byCourse.get("org-a:operations")?.map((entry) => entry.assignmentId)).toEqual(["private"]);
+    expect(unmatched.map((entry) => entry.assignmentId)).toEqual(["missing", "no-lecture"]);
   });
 });
