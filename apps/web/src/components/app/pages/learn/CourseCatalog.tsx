@@ -83,7 +83,10 @@ import {
 } from "./course-wire";
 
 interface MyAssignmentsResponse {
-  assignments: Array<{
+  assignments: Assignment[];
+}
+
+type Assignment = {
     assignmentId: string;
     organizationId: string;
     organizationName: string;
@@ -97,8 +100,7 @@ interface MyAssignmentsResponse {
       blockedBy: CourseLectureBlocker | null;
       scope: CourseRouteScope;
     } | null;
-  }>;
-}
+};
 
 export function PublicCourseCatalog() {
   return <CourseCatalogPage organizationId={null} courseId={null} />;
@@ -395,6 +397,7 @@ function CourseCatalogPage({
       capacityUpdateFailed={catalog.isError}
       animateArrival={catalog.isFetchedAfterMount}
       courses={visibleCourses}
+      allCourses={courses}
       organizationId={organizationId}
       filters={filters}
       filtersActive={filtersActive}
@@ -413,6 +416,7 @@ function CourseIndex({
   capacityUpdateFailed,
   animateArrival,
   courses,
+  allCourses,
   organizationId,
   filters,
   filtersActive,
@@ -424,13 +428,18 @@ function CourseIndex({
   capacityUpdateFailed: boolean;
   animateArrival: boolean;
   courses: readonly CourseCatalogCourse[];
+  allCourses: readonly CourseCatalogCourse[];
   organizationId: string | null;
   filters: ReactNode;
   filtersActive: boolean;
   onClearFilters: () => void;
-  assignments: MyAssignmentsResponse["assignments"];
+  assignments: readonly Assignment[];
   search: ReturnType<typeof compactCatalogSearch>;
 }) {
+  const { byCourse, unmatched } = splitAssignments(assignments, allCourses);
+  // An assignment outside the catalog has no difficulty, category or tags to
+  // filter by, so it steps aside while a filter is set.
+  const looseAssignments = filtersActive ? [] : unmatched;
   return (
     <PageShell>
       <ContentHeader
@@ -443,17 +452,32 @@ function CourseIndex({
         updateFailed={capacityUpdateFailed}
         animateArrival={animateArrival}
       />
-      {assignments.length ? <CourseAssignments assignments={assignments} /> : null}
       {filters}
-      {courses.length ? (
+      {courses.length || looseAssignments.length ? (
         <ul className="surface-raised divide-y overflow-hidden rounded-xl border bg-card">
+          {looseAssignments.map((assignment) => (
+            <li key={assignment.assignmentId}>
+              <AssignmentLink assignment={assignment} />
+            </li>
+          ))}
           {courses.map((course) => (
-            <li key={`${course.organizationId ?? "public"}:${course.courseId}`}>
+            <li key={catalogCourseKey(course)}>
               <CourseIndexItem
                 course={course}
                 organizationId={organizationId}
                 search={search}
               />
+              {byCourse.has(catalogCourseKey(course)) ? (
+                <div className="space-y-2 px-4 pb-4 sm:px-5">
+                  {byCourse.get(catalogCourseKey(course))?.map((assignment) => (
+                    <AssignmentLink
+                      key={assignment.assignmentId}
+                      assignment={assignment}
+                      attached
+                    />
+                  ))}
+                </div>
+              ) : null}
             </li>
           ))}
         </ul>
@@ -811,31 +835,51 @@ function courseMatchesScope(
   return course.organizationId === null;
 }
 
-function CourseAssignments({
-  assignments,
-}: {
-  assignments: MyAssignmentsResponse["assignments"];
-}) {
-  return (
-    <section aria-labelledby="course-assignments-heading" className="space-y-4">
-      <h2 id="course-assignments-heading" className="text-section-title">
-        Assignments
-      </h2>
-      <ul className="surface-raised divide-y overflow-hidden rounded-xl border bg-card">
-        {assignments.map((assignment) => (
-          <li key={assignment.assignmentId}>
-            <AssignmentLink assignment={assignment} />
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
+function catalogCourseKey(
+  course: Pick<CourseCatalogCourse, "courseId" | "organizationId">,
+): string {
+  return `${course.organizationId ?? "public"}:${course.courseId}`;
+}
+
+/**
+ * Places each assignment on the catalog course its lecture belongs to. An
+ * organization-private lecture lives in that organization's course; an
+ * organization-public one in the public course. The rest stay unmatched.
+ */
+export function splitAssignments(
+  assignments: readonly Assignment[],
+  courses: readonly CourseCatalogCourse[],
+): { byCourse: Map<string, Assignment[]>; unmatched: Assignment[] } {
+  const keys = new Set(courses.map(catalogCourseKey));
+  const byCourse = new Map<string, Assignment[]>();
+  const unmatched: Assignment[] = [];
+  for (const assignment of assignments) {
+    const lecture = assignment.lecture;
+    const key = lecture
+      ? catalogCourseKey({
+          courseId: lecture.courseId,
+          organizationId:
+            lecture.scope === "organization-private"
+              ? assignment.organizationId
+              : null,
+        })
+      : null;
+    if (key && keys.has(key)) {
+      byCourse.set(key, [...(byCourse.get(key) ?? []), assignment]);
+    } else {
+      unmatched.push(assignment);
+    }
+  }
+  return { byCourse, unmatched };
 }
 
 function AssignmentLink({
   assignment,
+  attached = false,
 }: {
-  assignment: MyAssignmentsResponse["assignments"][number];
+  assignment: Assignment;
+  /** Sits under its course row instead of standing as a row of its own. */
+  attached?: boolean;
 }) {
   const lecture = assignment.lecture;
   const target = lecture?.state === "locked" ? lecture.blockedBy : lecture;
@@ -850,11 +894,11 @@ function AssignmentLink({
   const locked = lecture?.state === "locked";
   const content = (
     <>
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-[0.625rem] bg-brand-subtle text-brand-text ring-1 ring-brand-border/60">
+      <span className={cn("flex shrink-0 items-center justify-center rounded-[0.625rem] bg-brand-subtle", attached ? "size-8" : "size-10", " text-brand-text ring-1 ring-brand-border/60")}>
         <Users className="size-4" aria-hidden />
       </span>
       <span className="min-w-0 flex-1 space-y-1">
-        <span className="block text-card-title [overflow-wrap:anywhere]">
+        <span className={cn("block [overflow-wrap:anywhere]", attached ? "text-support font-medium" : "text-card-title")}>
           {locked ? target?.title : lecture?.title ?? assignment.scenarioTitle ?? "Assigned lecture"}
         </span>
         <span className="block text-caption">
@@ -872,7 +916,12 @@ function AssignmentLink({
       </span>
     </>
   );
-  const className = "group grid min-h-16 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3 transition-colors duration-(--duration-fast) ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:px-5 dark:hover:bg-accent/60";
+  const className = cn(
+    "group grid grid-cols-[auto_minmax(0,1fr)] items-center gap-y-2 transition-colors duration-(--duration-fast) ease-standard hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:grid-cols-[auto_minmax(0,1fr)_auto] dark:hover:bg-accent/60",
+    attached
+      ? "min-h-12 gap-x-3 rounded-lg border border-brand-border/60 bg-brand-subtle/50 px-3 py-2"
+      : "min-h-16 gap-x-4 px-4 py-3 sm:px-5",
+  );
 
   return route && target ? (
     <LectureLink route={route} lectureId={target.lectureId} className={className}>
@@ -1085,24 +1134,7 @@ function CourseCatalogLoading({ showCapacity }: { showCapacity: boolean }) {
         <Skeleton className="h-8 w-72 max-w-full" />
         <Skeleton className="h-5 w-96 max-w-full" />
         {showCapacity ? (
-          <div className="space-y-3" aria-hidden="true">
-            <Skeleton className="h-[1.3125rem] w-48 max-w-full" />
-            <div className="grid gap-3 sm:grid-cols-2">
-              {[0, 1].map((index) => (
-                <div
-                  key={index}
-                  className="surface-raised space-y-3 rounded-xl border bg-card p-4"
-                >
-                  <div className="flex h-[1.35rem] items-center justify-between">
-                    <Skeleton className="h-3.5 w-14" />
-                    <Skeleton className="h-3.5 w-28" />
-                  </div>
-                  <Skeleton className="h-1.5 w-full rounded-full" />
-                  <Skeleton className="h-3 w-32" />
-                </div>
-              ))}
-            </div>
-          </div>
+          <Skeleton className="h-5 w-full max-w-xl" aria-hidden="true" />
         ) : null}
         <div className="surface-raised divide-y overflow-hidden rounded-xl border bg-card">
           <Skeleton className="h-28 w-full rounded-none" />

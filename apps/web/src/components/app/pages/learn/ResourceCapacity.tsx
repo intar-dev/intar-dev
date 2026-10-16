@@ -20,9 +20,10 @@ export function ResourceCapacity({
 }) {
   const titleId = useId();
   return (
-    <section aria-labelledby={titleId} className="space-y-3">
+    // One compact row, so the course list stays near the top of the page.
+    <section aria-labelledby={titleId} className="flex flex-wrap items-center gap-x-8 gap-y-2">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h2 id={titleId} className="text-card-title">Available for new runs</h2>
+        <h2 id={titleId} className="text-support font-medium">Available for new runs</h2>
         {/* Always mounted: only its text changes, so screen readers announce it. */}
         <p role="status" className="text-caption text-muted-foreground">
           <MetaLine
@@ -36,7 +37,7 @@ export function ResourceCapacity({
         </p>
       </div>
       {capacity ? (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="flex flex-wrap gap-x-8 gap-y-2">
           <CapacityMeter label="CPU" available={capacity.cpu.availableMillis} total={capacity.cpu.totalMillis} divisor={1000} unit="vCPUs" animateArrival={animateArrival} />
           <CapacityMeter label="Memory" available={capacity.memory.availableMib} total={capacity.memory.totalMib} divisor={1024} unit="GiB" animateArrival={animateArrival} />
         </div>
@@ -76,21 +77,8 @@ function CapacityMeter({ label, available, total, divisor, unit, animateArrival 
   }, [fraction]);
   const justLow = useJustReached([[label, low ? "low" : "ok"]], "low").has(label);
   return (
-    <div className="min-w-0 space-y-3 rounded-xl border bg-card p-4 shadow-[var(--highlight),var(--shadow-raised)]">
-      <div className="flex items-baseline justify-between gap-3 text-support">
-        <span id={labelId} className="font-medium">{label}</span>
-        <span
-          className={cn(
-            "font-medium tabular-nums transition-colors duration-(--duration-reveal) ease-standard",
-            low ? "text-warning" : "text-success",
-          )}
-        >
-          <RollingNumber value={pct} />% available
-          {low ? (
-            <span className={cn("inline-block whitespace-pre", justLow && "catalog-swap")}>{" · Low"}</span>
-          ) : null}
-        </span>
-      </div>
+    <div className="flex min-w-0 items-center gap-3 text-support">
+      <span id={labelId} className="w-14 font-medium">{label}</span>
       <div
         role="meter"
         aria-labelledby={labelId}
@@ -98,7 +86,7 @@ function CapacityMeter({ label, available, total, divisor, unit, animateArrival 
         aria-valuemax={100}
         aria-valuenow={pct}
         aria-valuetext={`${pct}% available${low ? ", low" : ""}, ${valueText}`}
-        className="h-1.5 overflow-hidden rounded-full bg-muted dark:bg-accent"
+        className="h-1.5 w-20 shrink-0 overflow-hidden rounded-full bg-muted sm:w-28 dark:bg-accent"
       >
         <span
           aria-hidden="true"
@@ -111,9 +99,20 @@ function CapacityMeter({ label, available, total, divisor, unit, animateArrival 
           style={{ transform: `scaleX(${Math.max(0, Math.min(1, fraction))})` }}
         />
       </div>
-      <p className="text-caption tabular-nums">
+      <span
+        className={cn(
+          "font-medium tabular-nums transition-colors duration-(--duration-reveal) ease-standard",
+          low ? "text-warning" : "text-success",
+        )}
+      >
+        <RollingNumber value={pct} />%
+        {low ? (
+          <span className={cn("inline-block whitespace-pre", justLow && "catalog-swap")}>{" · Low"}</span>
+        ) : null}
+      </span>
+      <span className="text-caption text-muted-foreground tabular-nums">
         <RollingNumber value={shown} /> / <RollingNumber value={shownTotal} /> {unit}
-      </p>
+      </span>
     </div>
   );
 }
