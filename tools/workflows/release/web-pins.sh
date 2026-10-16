@@ -58,6 +58,11 @@ if git diff --quiet -- apps/web/wrangler.jsonc; then
   echo "The website already pins intar-image-cli ${version}."
   exit 0
 fi
+# `wrangler types` types each var as its literal value and hashes the config
+# into the header, so the worker types follow the pins; CI's types:cf:check
+# fails otherwise.
+bun install --frozen-lockfile
+bun run --cwd apps/web types:cf
 
 branch="release/web-pins"
 title="chore(web): pin the scenario compiler to intar-image-cli ${version}"
@@ -67,7 +72,7 @@ git config user.name "${bot}"
 git config user.email "${bot_id}+${bot}@users.noreply.github.com"
 gh auth setup-git --hostname github.com
 git checkout -B "${branch}"
-git commit --quiet -m "${title}" -- apps/web/wrangler.jsonc
+git commit --quiet -m "${title}" -- apps/web/wrangler.jsonc apps/web/worker-configuration.d.ts
 tools/workflows/release/push-bot-branch.sh "${branch}"
 body="The website deploy picks up the ${tag} release: its version, the published archive digests, and the digest of its base-images.hcl."
 pr="$(gh pr list --head "${branch}" --base main --state open --json number --jq '.[0].number // empty')"
