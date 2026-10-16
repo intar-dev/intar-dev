@@ -220,6 +220,8 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
       - name: Set up cuenv
         uses: ./.github/actions/setup-cuenv
+      - name: Set up the CI runtime
+        uses: ./.github/actions/setup-runtime
       - name: Open the website pin pull request
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

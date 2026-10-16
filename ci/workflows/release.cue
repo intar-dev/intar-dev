@@ -179,6 +179,8 @@ let _gitCliff = {
 					token:         "${{ steps.app-token.outputs.token }}"
 				}},
 				gha.#SetupCuenv,
+				// web-pins.sh regenerates the worker types with wrangler.
+				gha.#SetupRuntime,
 				{
 					name: "Open the website pin pull request"
 					env:  _appEnv
