@@ -6,7 +6,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type MutableRefObject,
   type RefObject,
 } from "react";
 
@@ -196,7 +195,7 @@ export interface RunSheetController {
   section: RunSheetSection;
   detent: RunSheetDetent;
   /** The control that opened the sheet, so closing can return focus to it. */
-  openerRef: MutableRefObject<HTMLElement | null>;
+  openerRef: RefObject<HTMLElement | null>;
   openSheet: (
     section: RunSheetSection,
     options?: { detent?: RunSheetDetent; opener?: HTMLElement | null },
