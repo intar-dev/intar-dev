@@ -35,7 +35,7 @@ runs:
         cache: rust
 
     - name: Install cargo-nextest, cargo-zigbuild, and cargo-audit
-      uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+      uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2
       with:
         tool: cargo-nextest@0.9.143,cargo-zigbuild@0.23.0,cargo-audit@0.22.2
         fallback: none
