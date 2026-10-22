@@ -50,7 +50,7 @@ it("parses every workflow shell block", () => {
   }
 });
 
-it("deploys after CI passes on main's tip, or on a dispatch from main", () => {
+it("deploys when the merge queue moves main, after a CI run dispatched from main, or on a dispatch", () => {
   expect(Object.keys(workflow.jobs).sort()).toEqual(["deploy-docs", "deploy-web", "resolve"]);
   expect(workflow.on).toEqual({
     workflow_dispatch: {
@@ -62,22 +62,30 @@ it("deploys after CI passes on main's tip, or on a dispatch from main", () => {
         },
       },
     },
+    push: { branches: ["main"] },
     workflow_run: { workflows: ["CI"], types: ["completed"], branches: ["main"] },
   });
-  // release.yml tags and publishes after the same CI runs.
+  // CI runs on no push: the merge queue already checked main's tip.
+  expect(ci.on.push).toBeUndefined();
+  expect(Object.keys(ci.on).sort()).toEqual(["merge_group", "pull_request", "schedule", "workflow_dispatch"]);
+  // release.yml tags and publishes on the same events.
+  expect(release.on.push).toEqual(workflow.on.push);
   expect(release.on.workflow_run).toEqual(workflow.on.workflow_run);
   const gate = workflow.jobs.resolve!.if!;
   expect(release.jobs.plan!.if).toBe(gate);
   for (const condition of [
+    "((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main')",
     "github.event.workflow_run.conclusion == 'success'",
-    "(github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')",
+    "github.event.workflow_run.event == 'workflow_dispatch' &&",
     "github.event.workflow_run.head_branch == 'main'",
     "github.event.workflow_run.head_repository.full_name == github.repository",
     "github.event.workflow_run.head_sha == github.sha",
-    "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')",
   ]) {
     expect(gate).toContain(condition);
   }
+  // A merge group or a scheduled run completing on main triggers nothing.
+  expect(gate).not.toContain("workflow_run.event == 'merge_group'");
+  expect(gate).not.toContain("workflow_run.event == 'schedule'");
   expect(deploy.environment).toEqual({ name: "production", url: "https://intar.dev" });
   expect(docs.environment).toEqual({ name: "production", url: "https://docs.intar.dev" });
 });
@@ -88,7 +96,9 @@ it("deploys each build that its CI lane uploaded, by the identity resolve checke
     ["docs", docs, "docs/dist"],
   ] as const) {
     const upload = ci.jobs[lane]!.steps.at(-1)!;
-    expect(upload.if).toBe("github.ref == 'refs/heads/main'");
+    expect(upload.if).toBe("github.event_name == 'merge_group' || github.ref == 'refs/heads/main'");
+    // Every merge group builds it, whatever the group changed.
+    expect(ci.jobs.changes!.outputs![lane]).toContain("github.event_name == 'merge_group'");
     expect(upload.with).toMatchObject({ name: `${lane}-dist-\${{ github.sha }}`, path, overwrite: true });
     expect(job.needs).toBe("resolve");
     expect(job.if).toBe(`needs.resolve.outputs.${lane}_artifact != ''`);
@@ -223,6 +233,7 @@ jq -r "\${filter:-.}" <<<"$body"
         GITHUB_OUTPUT: join(root, "output"),
         GITHUB_STEP_SUMMARY: join(root, "summary"),
         RUNNER_TEMP: root,
+        GITHUB_EVENT_NAME: "workflow_dispatch",
         MAIN: sha,
         CI_RUN_ID: "77",
         RUNS: '{"workflow_runs":[]}',
@@ -267,21 +278,32 @@ it("refuses an expired build, and deploys nothing once main moved on", () => {
   expect(moved.output).toBe("");
 });
 
-it("deploys a dispatch from main's tip's latest successful CI run on main", () => {
-  const runs = (list: { id: number; event: string }[]) =>
-    JSON.stringify({ workflow_runs: list.map((run, index) => ({ ...run, run_number: index })) });
-  const found = findBuilds({
-    CI_RUN_ID: "",
-    RUNS: runs([
-      { id: 76, event: "push" },
-      { id: 78, event: "pull_request" },
-      { id: 77, event: "workflow_dispatch" },
-    ]),
-    ARTIFACTS: artifacts({ id: 2, name: `docs-dist-${sha}` }),
-  });
-  expect(found.status, found.stderr).toBe(0);
-  expect(found.output).toBe(`run_id=77\ndocs_artifact=2\ndocs_digest=${digest}\n`);
-  const none = findBuilds({ CI_RUN_ID: "", RUNS: runs([{ id: 78, event: "pull_request" }]) });
+const runs = (list: { id: number; event: string; head_branch: string }[]) =>
+  JSON.stringify({ workflow_runs: list.map((run, index) => ({ ...run, run_number: index })) });
+const queued = { event: "merge_group", head_branch: `gh-readonly-queue/main/pr-1-${"c".repeat(40)}` };
+
+it("deploys main's tip from its merge group or a CI run dispatched from main", () => {
+  const others = [
+    { id: 75, event: "push", head_branch: "main" },
+    { id: 76, event: "merge_group", head_branch: `gh-readonly-queue/other/pr-1-${"c".repeat(40)}` },
+    { id: 78, event: "pull_request", head_branch: "main" },
+    { id: 79, event: "workflow_dispatch", head_branch: "other" },
+  ];
+  for (const [event, run] of [
+    ["push", { id: 77, ...queued }],
+    ["workflow_dispatch", { id: 77, ...queued }],
+    ["workflow_dispatch", { id: 77, event: "workflow_dispatch", head_branch: "main" }],
+  ] as const) {
+    const found = findBuilds({
+      GITHUB_EVENT_NAME: event,
+      CI_RUN_ID: "",
+      RUNS: runs([...others.slice(0, 2), run, ...others.slice(2)]),
+      ARTIFACTS: artifacts({ id: 2, name: `docs-dist-${sha}` }),
+    });
+    expect(found.status, found.stderr).toBe(0);
+    expect(found.output).toBe(`run_id=77\ndocs_artifact=2\ndocs_digest=${digest}\n`);
+  }
+  const none = findBuilds({ CI_RUN_ID: "", RUNS: runs(others) });
   expect(none.status).not.toBe(0);
 });
 
@@ -300,7 +322,7 @@ it("breaks glass with the builds whose own lane jobs passed", () => {
   const env = {
     CI_RUN_ID: "",
     BREAK_GLASS: "true",
-    RUNS: JSON.stringify({ workflow_runs: [{ id: 77, event: "push", run_number: 1 }] }),
+    RUNS: runs([{ id: 77, ...queued }]),
     ARTIFACTS: artifacts({ id: 1, name: `web-dist-${sha}` }, { id: 2, name: `docs-dist-${sha}` }),
   };
   const web = findBuilds({ ...env, JOBS: jobs(["changes", "web", "Chromium smoke"]) });

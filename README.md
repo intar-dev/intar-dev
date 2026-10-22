@@ -60,23 +60,23 @@ other registry.
   patch, counts for every product. Such a commit bumps the product like any
   other and gets a line in its changelog. The pull request bumps each
   changed product's `Cargo.toml` version and `Cargo.lock` entry, and prepends
-  its `CHANGELOG.md`. A product whose manifest version is not tagged yet,
-  because CI has not passed on main's tip since it merged, is left out until
-  the first push after its tag, so no version is skipped. The app cannot move
-  the branch across a change to `.github/workflows`, so such a push to main
-  replaces the pull request with a new one.
-- **Dry run:** CI builds and smoke-tests every product whose version a pull
-  request changes, the release pull request included, with the release build's
-  own steps. A change to the release build dry-runs every product.
-- **Publishing:** once CI passes on main's tip after that pull request merges,
-  the Release workflow tags each new version on main and opens a draft
-  release with that version's changelog section as its notes. It builds and
-  smoke-tests each draft from its tag, attests the payload, and publishes it.
-  CI's rust lane already ran the workspace checks, so the build runs them again
-  only for a tag whose commit never passed CI on main. A failed build leaves
-  its draft, and the next run of the workflow
-  rebuilds and publishes it: after the next CI run that passes on main, a
-  re-run, or a dispatch from main.
+  its `CHANGELOG.md`. The workflow tags before it rebuilds the pull request;
+  should tagging fail, a product whose manifest version is not tagged yet is
+  left out until the first run after its tag, so no version is skipped. The
+  app cannot move the branch across a change to `.github/workflows`, so such
+  a push to main replaces the pull request with a new one.
+- **Dry run:** the merge queue builds and smoke-tests every product whose
+  version a pull request changes, the release pull request included, with the
+  release build's own steps. A change to the release build dry-runs every
+  product, on the pull request too.
+- **Publishing:** when the merge queue lands that pull request, the Release
+  workflow tags each new version on main and opens a draft release with that
+  version's changelog section as its notes. It builds and smoke-tests each
+  draft from its tag, attests the payload, and publishes it. CI's rust lane
+  already ran the workspace checks in the merge queue, so the build runs them
+  again only for a tag whose commit never passed CI there. A failed build
+  leaves its draft, and the next run of the workflow rebuilds and publishes
+  it: after the next merge, a re-run, or a dispatch from main.
 - **After an image CLI release,** the workflow opens a pull request that points
   the website at the new scenario compiler.
 

@@ -2,12 +2,13 @@ package workflows
 
 import "github.com/intar-dev/intar-dev/ci/gha"
 
-// Deploys the builds CI tested on main. Once a CI run on main passes for main's
-// tip (afterCI in ci.cue), `resolve` finds the build each lane uploaded in that
-// run, and the website and the docs deploy it. A lane that did not run uploaded
-// nothing, and its deploy skips. A dispatch from main deploys main's tip from
-// its latest successful CI run; with break_glass, from its latest finished one,
-// and only the builds whose own lane jobs passed there.
+// Deploys the builds CI tested for main's tip. When the merge queue moves main,
+// or a CI run dispatched from main passes for main's tip (afterCI in ci.cue),
+// `resolve` finds the build each lane uploaded in that commit's merge group or
+// dispatched run, and the website and the docs deploy it. A lane that did not
+// run uploaded nothing, and its deploy skips. A dispatch from main deploys
+// main's tip from its latest successful CI run; with break_glass, from its
+// latest finished one, and only the builds whose own lane jobs passed there.
 "workflows": deploy: {
 	name:       "Deploy"
 	"run-name": "Deploy main @ ${{ github.event.workflow_run.head_sha || github.sha }}"

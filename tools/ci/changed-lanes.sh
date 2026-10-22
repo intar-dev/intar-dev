@@ -8,10 +8,12 @@
 #                 the pull request. Should HEAD not be a merge commit, the base
 #                 falls back to the event's base sha: that diff also holds the
 #                 base branch's newer changes, which can add lanes, never drop
-#                 one.
-#   merge_group   The queue's commit against the event's base sha, the main
-#                 tip the group merges into.
-#   push, dispatch  Every lane.
+#                 one. The release pull request (release/next), rebuilt after
+#                 every merge, runs no lane: the merge queue checks it once.
+#   merge_group   The queue's commit against the event's base sha, the
+#                 commit the group merges onto.
+#   schedule      No lane: ci.yml picks the daily run's lanes itself.
+#   dispatch      Every lane.
 #   local         The merge base with origin/main against the working tree.
 #
 # Writes name=true|false per lane, and base=<sha> for a pull request or a
@@ -22,6 +24,7 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   exec >>"${GITHUB_OUTPUT}"
 fi
 all=false
+none=false
 target=(HEAD)
 case "${GITHUB_EVENT_NAME:-}" in
   pull_request)
@@ -34,6 +37,9 @@ case "${GITHUB_EVENT_NAME:-}" in
       fi
     fi
     echo "base=${base}"
+    if [[ "${GITHUB_HEAD_REF:-}" == release/next ]]; then
+      none=true
+    fi
     ;;
   merge_group)
     base="$(jq -er .merge_group.base_sha "${GITHUB_EVENT_PATH}")"
@@ -42,6 +48,7 @@ case "${GITHUB_EVENT_NAME:-}" in
     fi
     echo "base=${base}"
     ;;
+  schedule) none=true ;;
   "")
     base="$(git merge-base origin/main HEAD)"
     target=()
@@ -52,8 +59,8 @@ for lane in "$@"; do
   read -r name rest <<<"${lane}"
   read -r -a globs <<<"${rest}"
   changed=true
-  if [[ "${all}" == false ]] &&
-    git diff --quiet "${base}" "${target[@]}" -- "${globs[@]/#/:(glob)}"; then
+  if [[ "${none}" == true ]] || { [[ "${all}" == false ]] &&
+    git diff --quiet "${base}" "${target[@]}" -- "${globs[@]/#/:(glob)}"; }; then
     changed=false
   fi
   echo "${name}=${changed}"

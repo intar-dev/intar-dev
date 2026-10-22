@@ -26,41 +26,54 @@ tag, and its path is part of the OIDC allowlist in
 
 ## ci.yml
 
-One workflow checks pull requests and every push to main:
+One workflow checks pull requests and the merge queue. Main moves only
+through the merge queue, which fast-forwards it to the merge group's commit,
+so a push to main runs no CI: that exact commit already passed. Each check
+runs once per change it can see: on each push to a pull request, then once
+more in the merge group, which also holds what merged since.
 
 1. **`changes`** runs `cuenv task ci-changes` (`tools/ci/changed-lanes.sh`),
    which prints `<lane>=true|false` for each lane. A pull request runs a lane
    when a file matching the lane's `inputs` or the `sharedInputs` in
    `ci/workflows/lanes.cue` changed. It diffs against the first parent of
-   GitHub's merge commit, which is exactly the pull request. A push to main or
-   a dispatch runs every lane.
+   GitHub's merge commit, which is exactly the pull request. A merge group
+   diffs against its base sha, the commit it merges onto. The release pull
+   request (`release/next`), rebuilt after every merge, runs no lane: the
+   merge queue checks it once. A dispatch runs every lane.
 2. **One job per lane** (`rust`, `security`, `images`, `web`, `docs`), skipped
    when its output is false. `web-ui` runs the Chromium smoke in the Playwright
-   container when `web` runs. On main, a lane with a `dist` (`web`, `docs`)
-   uploads the build it checked as `<lane>-dist-<sha>`, which `deploy.yml`
-   deploys.
-3. **`release-plan`** lists the products the pull request would release: each
-   whose manifest version differs from the base, or all of them when the
-   release build itself changed (`tools/workflows/ci/release-plan.sh`).
-   **`release-dry-run`** builds and smoke-tests each with `release.yml`'s build
-   steps (`#ReleaseBuild` in `release.cue`), without the workspace gate the
-   `rust` lane runs and without keeping the payload. Nothing is published.
-4. **`pr-title`** fails unless the pull request title is a Conventional
+   container when `web` runs. Every merge group runs the lanes with a `dist`
+   (`web`, `docs`) and uploads the build each checked as `<lane>-dist-<sha>`,
+   which `deploy.yml` deploys: the queue merges up to five groups at once and
+   pushes only the last one's commit, whose diff need not hold an earlier
+   group's change. A dispatch from main uploads them too.
+3. **`release-plan`** lists the products a change would release: in the merge
+   queue, each whose manifest version differs from the base; in the merge queue
+   and on a pull request, all of them when the release build itself changed
+   (`tools/workflows/ci/release-plan.sh`). So the release pull request
+   dry-runs once, in the queue, not on each rebuild. **`release-dry-run`**
+   builds and smoke-tests each with `release.yml`'s build steps
+   (`#ReleaseBuild` in `release.cue`), without the workspace gate the `rust`
+   lane runs and without keeping the payload. Nothing is published.
+4. **`pr-title`** runs in the merge group and fails unless the squash commit's
+   subject, the pull request title that lands on main, is a Conventional
    Commit with one scope (`tools/ci/check-pr-title.sh`, `cuenv task
-   pr-title`): with the merge settings below, the title becomes the commit
-   that git-cliff versions the releases from. The title reaches the
-   script through the environment, never as script text. Editing the title or
-   description re-runs the whole workflow, not only this job: a skipped job
-   counts as passed, so a run that checked only the title would report a
-   `ci-ok` that never saw the lanes.
+   pr-title`): git-cliff versions the releases from those commits.
+   `pr-title.yml` runs the same check on the pull request title as it is
+   opened, pushed or edited. It is not required, and editing the title or
+   description runs nothing else, so no lane runs twice for one commit. The
+   title reaches the script through the environment, never as script text.
 5. **`ci-ok`** always runs. It fails when `changes` did not succeed or any job
    failed or was cancelled, and counts a skipped job as passed. It is the only
    check a ruleset needs to require.
 
-`ci.yml` runs pull request code, so the render fails if it grants a write
-permission or references a secret or the job token. Pull request runs are
-grouped by number and cancelled by a newer push; main runs are never
-cancelled.
+A daily scheduled run runs only the `security` lane, whose audits are the only
+check that sees a newly published advisory for code no pull request touched.
+
+`ci.yml` and `pr-title.yml` run pull request code, so the render fails if
+either grants a write permission or references a secret or the job token.
+Pull request runs are grouped by number and cancelled by a newer push; merge
+group, scheduled and dispatched runs are never cancelled.
 
 Run a lane locally with `cuenv task lanes.<name>`, every lane with
 `cuenv task ci`, and see which lanes your branch needs with
@@ -77,17 +90,20 @@ base of `origin/main`.
 
 ## Deployment workflows
 
-`deploy.yml` and `release.yml` run after `ci.yml` on main (`workflow_run`) and
-act only on a CI run that passed for a push or dispatch of the commit that is
-still main's tip (`afterCI` in `ci.cue`). A CI run for an older commit is left
-to the run for the newer one, and a failed CI run deploys and publishes
-nothing.
+`deploy.yml` and `release.yml` run on every push to main, which only the merge
+queue makes, once the merge group's CI run passed for that same commit. They
+take that run by the commit (`afterCI` in `ci.cue`), not on its `workflow_run`:
+the run completes before the queue moves main, so it would still see the old
+tip. After a CI run dispatched from main, they act only when it passed for the
+commit that is still main's tip. A run for an older commit is left to the run
+for the newer one, and a failed CI run deploys and publishes nothing.
 
 - **`deploy.yml`** deploys what CI built and tested. `resolve` finds each
-  lane's build in the CI run (`tools/workflows/deploy/find-builds.sh`), and
-  `deploy-web` and `deploy-docs` download it by that artifact id, which fails
-  on a digest mismatch, and deploy it. A lane that did not run uploaded no
-  build, so its deploy skips; a push to main runs every lane. A re-run deploys
+  lane's build in the tip's merge group or dispatched CI run
+  (`tools/workflows/deploy/find-builds.sh`), and `deploy-web` and
+  `deploy-docs` download it by that artifact id, which fails on a digest
+  mismatch, and deploy it. A lane that did not run uploaded no build, so its
+  deploy skips; every merge group and dispatch runs both. A re-run deploys
   only while its revision is main's tip.
   - `gh workflow run deploy.yml --ref main` deploys main's tip from its latest
     successful CI run, for example after a guest-tools promotion.
@@ -99,10 +115,11 @@ nothing.
     `gh workflow run deploy.yml --ref main -f break_glass=true` deploys each
     build whose own lane jobs passed in the tip's latest finished CI run
     (`web` with its Chromium smoke, `docs`).
-- **`release.yml`** rebuilds the release pull request on every push to main.
-  After CI, or on a dispatch from main, it tags and publishes merged releases;
-  see "Releasing" in the root README. A build reruns the workspace gate only
-  for a tag whose commit never passed CI on main.
+- **`release.yml`**, on every push to main, tags and publishes merged
+  releases, then rebuilds the release pull request; a dispatch from main
+  resumes the drafts. See "Releasing" in the root README. A build reruns the
+  workspace gate only for a tag whose commit never passed CI in the merge
+  queue or a dispatch from main.
 - **`image-ops.yml`** is dispatched by hand from main. No workflow rolls a
   tool out to a host; see "Rolling out" in the root README.
 
@@ -133,19 +150,15 @@ longer in a scanned file.
 
 ## Rulesets
 
-`.github/rulesets/` holds the ruleset bodies. They are not applied yet. Apply
-one with `gh api -X POST repos/intar-dev/intar-dev/rulesets --input <file>`, and
-replace an applied one with `gh api -X PUT
-repos/intar-dev/intar-dev/rulesets/<id> --input <file>`.
+`.github/rulesets/` holds the bodies of the applied rulesets. Change one in a
+pull request, then replace the applied one with `gh api -X PUT
+repos/intar-dev/intar-dev/rulesets/<id> --input <file>`; list the ids with
+`gh api repos/intar-dev/intar-dev/rulesets`.
 
-- **`main.json`, stage A:** main cannot be deleted or force-pushed.
-- **`main-stage-b.json`, stage B:** adds a pull request for every change
-  (no approval needed, squash merge only), linear history, and `ci-ok` from
-  the GitHub Actions app (integration 15368) on a branch that is up to date
-  with main. Admins can bypass only through a pull request. Apply it in place
-  of stage A once nothing pushes to main directly any more (the release
-  workflow now works through its pull request) and `ci-ok` has been green on
-  main for a while.
+- **`main.json`:** main cannot be deleted or force-pushed, requires `ci-ok`
+  from the GitHub Actions app (integration 15368), and merges through the
+  merge queue (squash, up to five entries). Nobody can bypass it: deploy.yml
+  and release.yml treat every push to main as a merge group whose CI passed.
 - **`release-tags.json`:** a `<prefix>/v*` release tag cannot be moved or
   deleted.
 
@@ -163,7 +176,7 @@ request can be set to squash-merge once `ci-ok` passes, and merged branches are
 deleted (`delete_branch_on_merge`). Check it with `gh api
 repos/intar-dev/intar-dev --jq '{allow_squash_merge, allow_merge_commit,
 allow_rebase_merge, squash_merge_commit_title, allow_auto_merge,
-delete_branch_on_merge}'`. Stage B also allows only squash merges.
+delete_branch_on_merge}'`. The merge queue squashes too.
 
 The `main` ruleset requires `ci-ok` and merges through a merge queue: each
 pull request is squashed onto main's tip and `ci.yml` checks that commit as a

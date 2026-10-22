@@ -9,6 +9,9 @@ run-name: Deploy main @ ${{ github.event.workflow_run.head_sha || github.sha }}
         description: Deploy each build whose own CI lane passed on main's tip, although another CI job failed
         default: false
         type: boolean
+  push:
+    branches:
+      - main
   workflow_run:
     workflows:
       - CI
@@ -21,10 +24,10 @@ jobs:
   resolve:
     name: Find the tested builds
     if: |-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
-      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_sha == github.sha)

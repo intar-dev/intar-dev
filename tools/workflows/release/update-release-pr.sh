@@ -36,10 +36,10 @@ for product in "${product_list[@]}"; do
   package="$(jq -r .package <<<"${product}")"
   manifest="$(jq -r .manifest <<<"${product}")"
   current="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "${manifest}" | head -n 1)"
-  # plan-release.sh tags only the manifest version on main's tip, once CI
-  # passes there, which can follow this push. A bump past a version it has not
-  # tagged yet would skip that version for good, so the product waits: the
-  # first push after the tag proposes its next release.
+  # plan-release.sh, which runs first, tags the manifest version on main's
+  # tip. Should it have failed, a bump past a version it has not tagged yet
+  # would skip that version for good, so the product waits: the first run
+  # after the tag proposes its next release.
   if ! git rev-parse --quiet --verify "refs/tags/${prefix}/v${current}" >/dev/null; then
     echo "${prefix}/v${current} is not tagged yet; ${prefix} waits for its release."
     continue

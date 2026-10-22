@@ -3,8 +3,7 @@ package workflows
 import "github.com/intar-dev/intar-dev/ci/gha"
 
 // The CI lanes. ci.yml runs each lane as one job when a file matching its
-// inputs or sharedInputs changed, and every lane on a push to main or a
-// dispatch. `cuenv task lanes.<name>` runs the same steps locally, and
+// inputs or sharedInputs changed, and every lane on a dispatch. `cuenv task lanes.<name>` runs the same steps locally, and
 // `cuenv task ci` runs every lane (see env.cue).
 lanes: [string]: close({
 	// Path globs, matched as git :(glob) pathspecs by tools/ci/changed-lanes.sh:
@@ -15,8 +14,9 @@ lanes: [string]: close({
 	// Root tasks, run in order.
 	steps: [...string]
 	timeout: int
-	// The build the lane checks, which deploy.yml deploys: on main, ci.yml
-	// uploads this directory as the artifact <lane>-dist-<sha>.
+	// The build the lane checks, which deploy.yml deploys: every merge group,
+	// and a dispatch from main, runs the lane and uploads this directory as the
+	// artifact <lane>-dist-<sha>.
 	dist?: {
 		path!: string
 		// Whether the upload keeps dotfiles.

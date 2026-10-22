@@ -131,12 +131,23 @@ test("**/ globs match at the root and below it", () => {
   }
 });
 
-test("a push or a dispatch runs every lane", () => {
+test("a dispatch runs every lane", () => {
   const { repo } = fixture({ "docs/src/index.md": "# Changed\n" });
-  for (const event of ["push", "workflow_dispatch"]) {
-    const selected = changedLanes(repo, { GITHUB_EVENT_NAME: event });
-    expect(selected.base).toBeUndefined();
-    expect(Object.values(selected)).toEqual(lanes.map(() => "true"));
+  const selected = changedLanes(repo, { GITHUB_EVENT_NAME: "workflow_dispatch" });
+  expect(selected.base).toBeUndefined();
+  expect(Object.values(selected)).toEqual(lanes.map(() => "true"));
+});
+
+test("the release pull request and the daily run select no lane", () => {
+  const { repo } = fixture({ "crates/kino/Cargo.toml": "[package]\nversion = \"1.0.0\"\n" });
+  mergeCheckout(repo);
+  for (const env of [
+    { GITHUB_EVENT_NAME: "pull_request", GITHUB_HEAD_REF: "release/next" },
+    { GITHUB_EVENT_NAME: "schedule" },
+  ]) {
+    const selected = changedLanes(repo, env);
+    delete selected.base;
+    expect(Object.values(selected)).toEqual(lanes.map(() => "false"));
   }
 });
 

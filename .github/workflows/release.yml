@@ -2,10 +2,10 @@
 # Regenerate with: cuenv sync codegen
 name: Release
 "on":
+  workflow_dispatch: {}
   push:
     branches:
       - main
-  workflow_dispatch: {}
   workflow_run:
     workflows:
       - CI
@@ -16,22 +16,22 @@ name: Release
 permissions: {}
 concurrency:
   group: |-
-    release-${{ github.event_name == 'push' && 'pr' || ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+    release-${{ (((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main') ||
     (github.event_name == 'workflow_run' &&
     github.event.workflow_run.conclusion == 'success' &&
-    (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+    github.event.workflow_run.event == 'workflow_dispatch' &&
     github.event.workflow_run.head_branch == 'main' &&
     github.event.workflow_run.head_repository.full_name == github.repository &&
-    github.event.workflow_run.head_sha == github.sha)) && 'publish' || github.run_id }}
+    github.event.workflow_run.head_sha == github.sha)) && 'main' || github.run_id }}
   cancel-in-progress: false
 jobs:
   plan:
     name: Plan releases
     if: |-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
-      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_sha == github.sha)
@@ -61,7 +61,8 @@ jobs:
         run: cuenv task -p ci --package ci release-plan
   release-pr:
     name: Update the release pull request
-    if: github.event_name == 'push'
+    needs: plan
+    if: ${{ !cancelled() && github.event_name == 'push' }}
     runs-on: ubuntu-24.04
     environment: release-pr
     steps:

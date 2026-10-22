@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # ci.yml, job release-plan, step "Plan the release dry run".
-# The products this pull request would release: each whose manifest version
-# differs from the base, or every product when the release build itself
-# changed. release-dry-run builds them with release.yml's build steps and
-# publishes nothing, so this needs no token and tags nothing.
+# The products this change would release: each whose manifest version differs
+# from the base, or every product when the release build itself changed.
+# release-dry-run builds them with release.yml's build steps and publishes
+# nothing, so this needs no token and tags nothing. A pull request dry-runs
+# only a change to the release build: the merge queue dry-runs a version
+# change, such as the release pull request that is rebuilt after every merge.
 # Outside GitHub Actions the base is the merge base with origin/main, and the
 # matrix goes to stdout.
 set -euo pipefail
@@ -21,14 +23,16 @@ tooling=(
   .github/actions/setup-rust/
   rust-toolchain.toml
 )
+mapfile -t product_list < <(jq -c '.[]' tools/workflows/release/products.json)
 all=false
 if ! git diff --quiet "${base}" HEAD -- "${tooling[@]}"; then
   all=true
+elif [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+  product_list=()
 fi
 manifest_version() {
   sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -n 1
 }
-mapfile -t product_list < <(jq -c '.[]' tools/workflows/release/products.json)
 matrix='[]'
 for product in "${product_list[@]}"; do
   manifest="$(jq -r .manifest <<<"${product}")"

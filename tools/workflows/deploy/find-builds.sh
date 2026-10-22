@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # deploy.yml, job resolve, step "Find the tested builds".
 # Names the CI run this deploy takes its builds from, and each lane's build in
-# it: after a CI run, that run; on a dispatch, the latest successful CI run for
-# main's tip. A lane that did not run uploaded no build, so its deploy skips.
+# it: after a CI run dispatched from main, that run; on a push or a dispatch,
+# the latest successful CI run for main's tip, which for a push is the merge
+# group the queue landed. A lane that did not run uploaded no build, so its
+# deploy skips.
 #
 # Break glass (BREAK_GLASS=true, a dispatch input) takes the latest finished CI
 # run for main's tip instead, and only the builds whose own lane jobs passed in
@@ -24,8 +26,17 @@ if [ -z "${run_id}" ]; then
   if [ "${BREAK_GLASS:-false}" = true ]; then
     status=completed
   fi
-  run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&head_sha=${GITHUB_SHA}&status=${status}" \
-    --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")] | max_by(.run_number) | .id // empty')"
+  # The merge queue's commit becomes main's tip, so its run is for the same sha.
+  # The queue merges once ci-ok passed, which can be moments before that run
+  # completes, so a push waits for it.
+  for _ in {1..10}; do
+    run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=${status}" \
+      --jq '[.workflow_runs[] | select((.event == "merge_group" and (.head_branch | startswith("gh-readonly-queue/main/"))) or (.event == "workflow_dispatch" and .head_branch == "main"))] | max_by(.run_number) | .id // empty')"
+    if [ -n "${run_id}" ] || [ "${GITHUB_EVENT_NAME:-}" != push ]; then
+      break
+    fi
+    sleep 30
+  done
   if [ -z "${run_id}" ]; then
     echo "No CI run ${status/success/passed} for main's tip ${GITHUB_SHA}. Dispatch CI from main; it deploys once it passes." >&2
     exit 1

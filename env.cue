@@ -285,8 +285,8 @@ schema.#Project & {
 			}]
 		}
 
-		// ci.yml's pr-title job: PR_TITLE must be a Conventional Commit with one
-		// scope.
+		// pr-title.yml and ci.yml's pr-title job: PR_TITLE, or else the subject of
+		// the commit checked out, must be a Conventional Commit with one scope.
 		"pr-title": #Host & {command: "tools/ci/check-pr-title.sh"}
 
 		// The web build deploy.yml deploys: the image registry cleanup worker it

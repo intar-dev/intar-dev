@@ -20,9 +20,10 @@ updates:
       - ".github/workflows/deploy.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/image-ops.yml"
+      - ".github/workflows/pr-title.yml"
     schedule:
       interval: weekly
-    # ci.yml's pr-title job requires a Conventional Commit title with one
+    # The pr-title check requires a Conventional Commit title with one
     # scope: "ci(deps): bump ...".
     commit-message:
       prefix: ci
