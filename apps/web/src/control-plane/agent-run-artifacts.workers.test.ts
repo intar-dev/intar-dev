@@ -20,8 +20,18 @@ import {
   type RunPhase,
   type VmPhase,
 } from "@/lib/run-state";
+import { upsertDesiredVm } from "@/lib/desired-state";
+import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
+import { expireOverdueRuntimeExecutions } from "@/lib/runtime-lease-expiry";
+import { expireOverdueRunLeases } from "@/lib/scenario-runs/lifecycle";
 import { seedArtifactRuntime } from "./agent-run-artifacts/test-fixtures";
+import { desiredRunningVm } from "./host-runtime-do/test-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
+
+vi.mock("@/lib/stargate", async (original) => ({
+  ...(await original<typeof import("@/lib/stargate")>()),
+  deleteStargateRoute: async () => {},
+}));
 
 describe("agent run artifact sealing", () => {
   beforeEach(async () => {
@@ -78,6 +88,80 @@ describe("agent run artifact sealing", () => {
     expect(run?.state).toBe("failed");
     expect(state.phase).toBe("failed");
     expect(state.vms[0]?.phase).toBe("completed");
+  });
+
+  it("archives a VM that the agent tears down after the lease expired", async () => {
+    const token = await seedRun("active_full", "ready");
+    const leaseExpiresAt = Date.now();
+    await env.DB.prepare(
+      "UPDATE runtime_executions SET state = 'ready', lease_expires_at = ?",
+    )
+      .bind(leaseExpiresAt)
+      .run();
+    await mutateStoredHostDesiredState(
+      drizzle(env.DB),
+      "host-1",
+      leaseExpiresAt,
+      (draft) =>
+        upsertDesiredVm(draft, {
+          ...desiredRunningVm("run-1", "vm-runtime", leaseExpiresAt),
+          lease_expires_at_unix_ms: leaseExpiresAt,
+        }),
+    );
+    // The host alarm expires the run and then its execution. The control
+    // plane's lease starts at run creation, so both happen before the agent,
+    // whose lease starts at boot, tears the VM down and uploads its archive.
+    const expiredAt = leaseExpiresAt + 1;
+    expect(
+      await expireOverdueRunLeases("host-1", expiredAt, {
+        wakeHostRuntime: false,
+      }),
+    ).toMatchObject({ expiredRunIds: ["run-1"] });
+    expect(
+      await expireOverdueRuntimeExecutions("host-1", expiredAt),
+    ).toMatchObject({ expiredExecutionIds: ["run-1"] });
+
+    await beginManifest(token, "ssh_recording_raw");
+    for (const [suffix, method, body] of [
+      ["artifacts/1/multipart-begin", "POST", undefined],
+      ["artifacts/1/parts/1", "PUT", "0123456789"],
+      ["artifacts/1/complete", "POST", undefined],
+      ["complete", "POST", undefined],
+    ] as const) {
+      const response = await handleAgentRunArtifactRequest(
+        new Request(
+          `http://localhost/agent/runs/run-1/vms/vm-runtime/${suffix}`,
+          {
+            method,
+            headers: { authorization: `Bearer ${token}` },
+            ...(body === undefined ? {} : { body }),
+          },
+        ),
+        env,
+      );
+      expect(response?.status, suffix).toBe(200);
+    }
+
+    expect(
+      await env.DB.prepare(
+        "SELECT upload_status FROM scenario_run_artifacts",
+      ).first(),
+    ).toEqual({ upload_status: "uploaded" });
+    expect(
+      await env.DB.prepare(
+        "SELECT execution.state, vm.artifact_writes_sealed FROM runtime_executions execution JOIN runtime_vms vm ON vm.execution_id = execution.id",
+      ).first(),
+    ).toEqual({ state: "archived", artifact_writes_sealed: 1 });
+    const [run] = await drizzle(env.DB).select().from(scenarioRuns);
+    const state = JSON.parse(run?.stateJson ?? "{}") as {
+      phase: string;
+      vms: Array<{ phase: string; hasRecording?: boolean }>;
+    };
+    expect(state.phase).toBe("failed");
+    expect(state.vms[0]).toMatchObject({
+      phase: "completed",
+      hasRecording: true,
+    });
   });
 
   it.each(["archive-stage", "timeline", "begin"])(
