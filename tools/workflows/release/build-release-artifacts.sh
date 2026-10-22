@@ -18,29 +18,13 @@ build_archive() {
   fi
   local binary="${target_dir}/${target}/${profile}/${BINARY}"
   local workdir
-  if [ "${PACKAGE}" = "intar-builder" ] || [ "${PACKAGE}" = "intar-image-cli" ]; then
-    CARGO_TARGET_DIR="${target_dir}" LIBNBD_BUILD_ROOT="${target_dir}/libnbd" \
-      tools/image-build/with-libnbd-env.sh --target "${target}" \
-        cargo zigbuild --locked --profile "${profile}" -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
-  else
-    # This package does not link libnbd, but Cargo still has to
-    # resolve the workspace path dependency, so prepare first.
-    CARGO_TARGET_DIR="${target_dir}" \
-      tools/image-build/with-libnbd-env.sh --rust-only \
-        cargo zigbuild --locked --profile "${profile}" -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
-  fi
+  CARGO_TARGET_DIR="${target_dir}" \
+    cargo zigbuild --locked --profile "${profile}" -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
   file "${binary}"
   workdir="$(mktemp -d)"
   cp "${binary}" "${workdir}/${BINARY}"
   chmod +x "${workdir}/${BINARY}"
   if [ "${PACKAGE}" = "intar-builder" ] || [ "${PACKAGE}" = "intar-image-cli" ]; then
-    tools/image-build/package-libnbd-static-artifacts.sh \
-      --prefix "${target_dir}/libnbd/${target}/prefix" \
-      --destination "${workdir}/third-party/libnbd"
-    (
-      cd "${workdir}/third-party/libnbd"
-      sha256sum --check --strict SHA256SUMS
-    )
     dynamic_section="$(readelf -d "${binary}" 2>/dev/null)"
     if grep -Fq '(NEEDED)' <<<"${dynamic_section}"; then
       echo "${binary} retained a dynamic shared-library dependency" >&2
@@ -56,11 +40,9 @@ build_archive() {
       exit 1
     fi
     CARGO_TARGET_DIR="${target_dir}" \
-      tools/image-build/with-libnbd-env.sh --rust-only \
-        cargo zigbuild --locked --release -p intar-jailer --bin intar-jailer --target "${target}"
+      cargo zigbuild --locked --release -p intar-jailer --bin intar-jailer --target "${target}"
     CARGO_TARGET_DIR="${target_dir}" \
-      tools/image-build/with-libnbd-env.sh --rust-only \
-        cargo zigbuild --locked --release -p intar-jailerd --bin intar-jailerd --target "${target}"
+      cargo zigbuild --locked --release -p intar-jailerd --bin intar-jailerd --target "${target}"
     cp "${target_dir}/${target}/release/intar-jailer" "${workdir}/intar-jailer"
     cp "${target_dir}/${target}/release/intar-jailerd" "${workdir}/intar-jailerd"
     chmod +x "${workdir}/intar-jailer" "${workdir}/intar-jailerd"
@@ -96,7 +78,7 @@ build_archive() {
     rm -rf "${license_extract}" "${ch_source}"
 
     metadata="$(mktemp)"
-    tools/image-build/with-libnbd-env.sh --rust-only -- cargo metadata --locked --format-version 1 > "${metadata}"
+    cargo metadata --locked --format-version 1 > "${metadata}"
     python3 crates/intar-jailerd/scripts/generate-dependency-inventory.py \
       "${metadata}" \
       "${workdir}/deploy/intar-rust-dependencies.json"

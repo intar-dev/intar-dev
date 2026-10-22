@@ -16,13 +16,12 @@ those two files counts for a product when, before or after the change, it:
 - changes anything else in the root Cargo.toml, such as a profile or a patch,
   which counts for every product.
 
-Both files are read as TOML, because Cargo cannot resolve the workspace without
-the prepared libnbd bindings.
+Both files are read as TOML at each revision, without running Cargo.
 
 ponytail: Cargo.lock also lists the workspace crates' dev-dependencies and
 every target's dependencies, so the closure can be wider than what ships and a
 dev-only bump can release a patch; `cargo tree -e normal,build` per release
-target is exact once the workspace resolves without the bindings.
+target would be exact.
 """
 
 import json

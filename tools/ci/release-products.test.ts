@@ -40,7 +40,6 @@ function crates(crate: string, seen: Set<string>): Set<string> {
     for (const dependency of Object.values(table ?? {})) {
       if (typeof dependency !== "object" || !dependency.path) continue;
       const path = relative(root, resolve(root, crate, dependency.path));
-      // The prepared libnbd bindings live in target/, outside the repository.
       if (path.startsWith("crates/")) crates(path, seen);
     }
   }

@@ -18,10 +18,6 @@ members = [
     "crates/stargate-core",
     "crates/stargate-gateway",
 ]
-# The pinned libnbd bindings are a path dependency that lives inside the
-# workspace directory, so Cargo would treat them as a member. Keep them out:
-# they declare their own workspace and they only build on Linux.
-exclude = ["target/libnbd-rust/1.24.4/rust"]
 resolver = "3"
 
 [workspace.package]
@@ -82,7 +78,7 @@ tempfile = "=3.27.0"
 tar = "=0.4.46"
 thiserror = "=2.0.21"
 time = { version = "=0.3.55", features = ["formatting", "macros", "parsing", "serde"] }
-tokio = { version = "=1.52.4", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "=1.54.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "=0.30.0", default-features = false }
 tokio-util = "=0.7.20"
 tokio-vsock = { version = "=0.7.2", features = ["axum08"] }

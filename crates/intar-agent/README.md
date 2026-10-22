@@ -8,9 +8,7 @@ host networking, namespaces, cgroups, or devices directly.
 ## Usage
 
 ```bash
-# The pinned libnbd bindings are not committed, so Cargo runs through the
-# preparation wrapper.
-tools/image-build/with-libnbd-env.sh --rust-only -- cargo run -p intar-agent -- --config path/to/config.toml
+cargo run -p intar-agent -- --config path/to/config.toml
 ```
 
 Before enabling a deployed scenario host, run the preflight checker:
