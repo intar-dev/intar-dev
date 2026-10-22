@@ -34,10 +34,6 @@ use russh::{
     server::{self, Auth, Msg, Server as _, Session},
 };
 use serde::Serialize;
-use sqlx::{
-    SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-};
 use stargate_core::{
     ActivateTerminalTargetRequest, AdminAuthSettings, IssueTerminalSessionRequest,
     IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
@@ -2061,21 +2057,13 @@ impl Harness {
     }
 
     async fn replace_authorized_client_keys_json(&self, value: &str) -> Result<()> {
-        let options = SqliteConnectOptions::new().filename(&self.database_path);
-        let pool: SqlitePool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
-        let updated = sqlx::query(
+        let connection = rusqlite::Connection::open(&self.database_path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        let updated = connection.execute(
             "UPDATE terminal_route_targets SET authorized_client_public_keys_json = ? \
              WHERE route_username = ?",
-        )
-        .bind(value)
-        .bind(&self.route_username)
-        .execute(&pool)
-        .await?
-        .rows_affected();
-        pool.close().await;
+            rusqlite::params![value, self.route_username],
+        )?;
         anyhow::ensure!(
             updated == 1,
             "failed to corrupt the native route for this test"
@@ -2500,6 +2488,7 @@ fn client_config(expected_server_key: &russh::keys::ssh_key::PublicKey) -> Arc<c
             key: Cow::Borrowed(&[SshAlgorithm::Ecdsa {
                 curve: EcdsaCurve::NistP384,
             }]),
+            host_key_certificates: Cow::Borrowed(&[]),
             cipher: Cow::Borrowed(&[cipher::AES_256_GCM]),
             mac: Cow::Borrowed(&[mac::HMAC_SHA512_ETM]),
             compression: Cow::Borrowed(&[compression::NONE]),
@@ -2737,8 +2726,12 @@ impl client::Handler for TestClient {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        Ok(server_public_key == &self.expected_server_key)
+        Ok(matches!(
+            server_public_key,
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. }
+                if key == &self.expected_server_key
+        ))
     }
 }

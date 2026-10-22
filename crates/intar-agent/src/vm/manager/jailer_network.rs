@@ -515,8 +515,17 @@ impl ssh_client::Handler for StrictGuestHostKeys {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        // Only a reported host key itself is trusted, never a certificate.
+        let russh::keys::PublicKeyOrCertificate::PublicKey {
+            key: server_public_key,
+            ..
+        } = server_public_key
+        else {
+            self.mismatch_observed.store(true, Ordering::Release);
+            return Ok(false);
+        };
         // OpenSSH comments are not part of the key sent over the wire. Kino
         // reports the contents of /etc/ssh/ssh_host_*.pub, so compare only
         // authenticated key material rather than full PublicKey equality.

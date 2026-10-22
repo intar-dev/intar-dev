@@ -595,6 +595,8 @@ fn server_config() -> russh::server::Config {
     config.preferred = Preferred {
         kex: Cow::Borrowed(&[kex::MLKEM768X25519_SHA256, kex::CURVE25519]),
         key: Cow::Borrowed(&[Algorithm::Ed25519]),
+        // Host certificates stay off: clients pin the plain host key.
+        host_key_certificates: Cow::Borrowed(&[]),
         cipher: Cow::Borrowed(&[cipher::CHACHA20_POLY1305, cipher::AES_256_GCM]),
         mac: Cow::Borrowed(&[mac::HMAC_SHA512_ETM, mac::HMAC_SHA256_ETM]),
         compression: Cow::Borrowed(&[compression::NONE]),

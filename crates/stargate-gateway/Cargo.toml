@@ -29,7 +29,7 @@ sd-notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlx.workspace = true
+rusqlite.workspace = true
 stargate-core = { path = "../stargate-core" }
 tempfile.workspace = true
 time.workspace = true
@@ -43,7 +43,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 tracing-subscriber.workspace = true
 # Paused time, so a test can wait out the writer's send timeout at once.
 tokio = { workspace = true, features = ["test-util"] }
