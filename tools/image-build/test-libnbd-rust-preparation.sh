@@ -85,11 +85,14 @@ pin_value() {
     grep -F "readonly $2=" "$1" | head -n 1 | cut -d= -f2- | tr -d "'\""
 }
 
+# Waits for a background caller started with its stderr in "$3", and shows
+# that stderr when the caller failed.
 wait_for() {
     if wait "$1"; then
         pass "$2"
     else
         fail "$2"
+        sed 's/^/    /' "$3" >&2
     fi
 }
 
@@ -155,24 +158,24 @@ check_equal "rerun keeps the installed directory" "$(dir_identity "$fixture_vers
 check_equal "rerun does not rewrite the tree" "$(tree_fingerprint "${fixture_version}/rust")" "$installed_fingerprint"
 
 # A ready cache must be adopted by every caller, never replaced.
-bash "$fixture_prepare" >/dev/null 2>&1 &
+bash "$fixture_prepare" >/dev/null 2>"${tmp_root}/ready-first.stderr" &
 ready_first=$!
-bash "$fixture_prepare" >/dev/null 2>&1 &
+bash "$fixture_prepare" >/dev/null 2>"${tmp_root}/ready-second.stderr" &
 ready_second=$!
-wait_for "$ready_first" "parallel caller over a ready cache: first"
-wait_for "$ready_second" "parallel caller over a ready cache: second"
+wait_for "$ready_first" "parallel caller over a ready cache: first" "${tmp_root}/ready-first.stderr"
+wait_for "$ready_second" "parallel caller over a ready cache: second" "${tmp_root}/ready-second.stderr"
 check_equal "ready cache keeps its identity under parallel callers" "$(dir_identity "$fixture_version")" "$installed_identity"
 check_equal "ready cache keeps its contents under parallel callers" "$(tree_fingerprint "${fixture_version}/rust")" "$installed_fingerprint"
 
 # An interrupted install must be repaired by concurrent callers without either
 # one deleting a cache the other completed.
 rm -f "${fixture_version}/PROVENANCE"
-bash "$fixture_prepare" >/dev/null 2>&1 &
+bash "$fixture_prepare" >/dev/null 2>"${tmp_root}/repair-first.stderr" &
 repair_first=$!
-bash "$fixture_prepare" >/dev/null 2>&1 &
+bash "$fixture_prepare" >/dev/null 2>"${tmp_root}/repair-second.stderr" &
 repair_second=$!
-wait_for "$repair_first" "repairing caller: first"
-wait_for "$repair_second" "repairing caller: second"
+wait_for "$repair_first" "repairing caller: first" "${tmp_root}/repair-first.stderr"
+wait_for "$repair_second" "repairing caller: second" "${tmp_root}/repair-second.stderr"
 check_equal "repair restores ${EXPECTED_FILES} files" "$(count_files "${fixture_version}/rust")" "$EXPECTED_FILES"
 check_true "repair restores the ready record" test -f "${fixture_version}/PROVENANCE"
 check_true "repair leaves no lock directory" test ! -e "$fixture_lock"
@@ -187,12 +190,12 @@ check_equal "missing version file is restored" "$(cat "${fixture_version}/rust/l
 # Two callers that both start from nothing must not corrupt each other.
 cold="$(new_fixture)"
 cold_cache="${cold}/target/libnbd-rust"
-bash "${cold}/tools/image-build/prepare-libnbd-rust.sh" >/dev/null 2>&1 &
+bash "${cold}/tools/image-build/prepare-libnbd-rust.sh" >/dev/null 2>"${tmp_root}/cold-first.stderr" &
 cold_first=$!
-bash "${cold}/tools/image-build/prepare-libnbd-rust.sh" >/dev/null 2>&1 &
+bash "${cold}/tools/image-build/prepare-libnbd-rust.sh" >/dev/null 2>"${tmp_root}/cold-second.stderr" &
 cold_second=$!
-wait_for "$cold_first" "cold preparer: first"
-wait_for "$cold_second" "cold preparer: second"
+wait_for "$cold_first" "cold preparer: first" "${tmp_root}/cold-first.stderr"
+wait_for "$cold_second" "cold preparer: second" "${tmp_root}/cold-second.stderr"
 check_equal "cold race prepares ${EXPECTED_FILES} files" "$(count_files "${cold_cache}/${EXPECTED_VERSION}/rust")" "$EXPECTED_FILES"
 check_equal "cold race keeps one ready record" "$(count_entries "${cold_cache}/${EXPECTED_VERSION}" 'PROVENANCE')" "1"
 check_equal "cold race leaves no lock" "$(count_entries "$cold_cache" '*.prepare.lock')" "0"
