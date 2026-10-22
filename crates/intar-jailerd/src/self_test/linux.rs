@@ -33,7 +33,7 @@ use rustix::fs::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
-use zbus::zvariant::{OwnedObjectPath, Value};
+use zbus::{OwnedObjectPath, Variant};
 
 use super::{
     ATTESTATION_FILE, ATTESTATION_VERSION, SELF_TEST_CPU_MILLIS, SELF_TEST_CPU_PERIOD_US,

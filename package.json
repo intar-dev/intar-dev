@@ -13,7 +13,7 @@
   ],
   "devDependencies": {
     "typescript": "^6.0.3",
-    "vitest": "^4.1.11",
+    "vitest": "^4.1.12",
     "wrangler": "^4.143.0"
   },
   "scripts": {
@@ -50,7 +50,7 @@
     "smol-toml": "1.9.0",
     "svgo": "4.1.0",
     "undici": "7.30.0",
-    "vitest": "4.1.11",
+    "vitest": "4.1.12",
     "yaml": "2.9.1"
   },
   "patchedDependencies": {

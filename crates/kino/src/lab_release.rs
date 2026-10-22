@@ -351,11 +351,22 @@ mod tests {
         assert_eq!(authorize_peer(this_process, Some(current_uid)), Ok(()));
 
         // A real second process runs a different executable, so the recorder
-        // boundary must refuse it even when the uid matches.
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
+        // boundary must refuse it even when the uid matches. spawn can return
+        // before the kernel switches a vforked child to its new executable,
+        // while /proc/<pid>/exe still names this test binary, so wait for the
+        // line the child prints only after its exec.
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "echo ready; exec sleep 30"])
+            .stdout(std::process::Stdio::piped())
             .spawn()
-            .expect("the sleep child must start");
+            .expect("the sh child must start");
+        let mut ready = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().expect("the child stdout is piped")),
+            &mut ready,
+        )
+        .expect("the child must report that it started");
+        assert_eq!(ready, "ready\n");
         let other_executable = PeerIdentity {
             uid: current_uid,
             pid: Some(child.id()),

@@ -151,6 +151,24 @@ test("without a merge checkout the base is the event's base sha", () => {
   expect(selected).toMatchObject({ base, docs: "true", web: "false" });
 });
 
+test("a merge group compares the queue's commit with its base sha", () => {
+  const { repo, base } = fixture({ "docs/src/index.md": "# Changed\n" });
+  const event = join(repo, ".git", "event.json");
+  writeFileSync(event, JSON.stringify({ merge_group: { base_sha: base } }));
+  const selected = changedLanes(repo, {
+    GITHUB_EVENT_NAME: "merge_group",
+    GITHUB_EVENT_PATH: event,
+  });
+  expect(selected).toEqual({
+    base,
+    rust: "false",
+    security: "false",
+    images: "false",
+    web: "false",
+    docs: "true",
+  });
+});
+
 test("a local run compares the working tree with the merge base of origin/main", () => {
   const { repo } = fixture({ "docs/src/index.md": "# Changed\n" });
   run("git", ["update-ref", "refs/remotes/origin/main", "main"], repo);

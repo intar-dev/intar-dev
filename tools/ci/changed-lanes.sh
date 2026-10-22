@@ -9,11 +9,13 @@
 #                 falls back to the event's base sha: that diff also holds the
 #                 base branch's newer changes, which can add lanes, never drop
 #                 one.
+#   merge_group   The queue's commit against the event's base sha, the main
+#                 tip the group merges into.
 #   push, dispatch  Every lane.
 #   local         The merge base with origin/main against the working tree.
 #
-# Writes name=true|false per lane, and base=<sha> for a pull request, to
-# $GITHUB_OUTPUT, or to stdout outside GitHub Actions.
+# Writes name=true|false per lane, and base=<sha> for a pull request or a
+# merge group, to $GITHUB_OUTPUT, or to stdout outside GitHub Actions.
 set -euo pipefail
 # Not >>/dev/stdout: on Linux that reopens fd 1, which fails for a socket.
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
@@ -30,6 +32,13 @@ case "${GITHUB_EVENT_NAME:-}" in
       if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
         git fetch --quiet --no-tags --depth=1 origin "${base}"
       fi
+    fi
+    echo "base=${base}"
+    ;;
+  merge_group)
+    base="$(jq -er .merge_group.base_sha "${GITHUB_EVENT_PATH}")"
+    if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+      git fetch --quiet --no-tags --depth=1 origin "${base}"
     fi
     echo "base=${base}"
     ;;

@@ -202,7 +202,7 @@ pub struct UnavailableHostBackend;
 #[derive(Clone)]
 pub struct SystemdHostBackend {
     network: Arc<Mutex<NetworkManager>>,
-    system_bus: zbus::blocking::Connection,
+    system_bus: zbus::Connection,
     cloud_hypervisor_sha256: Sha256Digest,
     landlock_attested: bool,
 }

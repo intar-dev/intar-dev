@@ -394,9 +394,9 @@ pub(super) fn read_trimmed(path: &str) -> Result<String> {
 
 #[cfg(target_os = "linux")]
 pub(super) fn systemd_version() -> Option<String> {
-    let connection = zbus::blocking::Connection::system().ok()?;
+    let connection = zbus::block_on(zbus::Connection::system()).ok()?;
     let manager = SystemdHostBackend::manager(&connection).ok()?;
-    manager.get_property("Version").ok()
+    zbus::block_on(manager.get_property("Version")).ok()
 }
 
 #[cfg(target_os = "linux")]

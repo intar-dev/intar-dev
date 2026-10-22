@@ -2,6 +2,9 @@
 # Regenerate with: cuenv sync codegen
 name: CI
 "on":
+  merge_group:
+    types:
+      - checks_requested
   pull_request:
     types:
       - opened
@@ -230,7 +233,7 @@ jobs:
   release-plan:
     name: release-plan
     needs: changes
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
