@@ -186,8 +186,13 @@ test("a merge group without its pull request head runs every lane the group chan
 // main at `base`; the pull request branched there and changed docs, as
 // `author`; main then moved on with each of `mainCommits`; the queue squashes
 // the pull request onto main's tip. GitHub's refs/pull/7/head is `head`, the
-// pull request's head unless given. Returns the lanes the merge group runs.
-function queued(mainCommits: Record<string, string | null>[], options: { author?: string; head?: string } = {}) {
+// pull request's head unless given. With `shallow`, the script runs in a clone
+// of only the group's commit and its base, as ci.yml checks it out. Returns
+// the lanes the merge group runs.
+function queued(
+  mainCommits: Record<string, string | null>[],
+  options: { author?: string; head?: string; shallow?: boolean } = {},
+) {
   const { repo } = fixture({ "docs/src/index.md": "# Changed\n" }, options.author);
   run("git", ["update-ref", "refs/pull/7/head", options.head ?? "pr"], repo);
   run("git", ["remote", "add", "origin", repo], repo);
@@ -203,12 +208,20 @@ function queued(mainCommits: Record<string, string | null>[], options: { author?
   const tip = run("git", ["rev-parse", "HEAD"], repo);
   run("git", ["merge", "-q", "--squash", "pr"], repo);
   run("git", ["commit", "-q", "-m", "fix(docs): change (#7)"], repo);
-  const event = join(repo, ".git", "event.json");
+  let checkout = repo;
+  if (options.shallow) {
+    checkout = mkdtempSync(join(tmpdir(), "intar-changed-lanes-shallow-"));
+    roots.push(checkout);
+    // file://, since a local clone ignores --depth.
+    run("git", ["clone", "-q", "--depth=2", "--no-tags", `file://${repo}`, checkout], tmpdir());
+    expect(run("git", ["rev-parse", "--is-shallow-repository"], checkout)).toBe("true");
+  }
+  const event = join(checkout, ".git", "event.json");
   writeFileSync(
     event,
     JSON.stringify({ merge_group: { base_sha: tip, head_ref: `refs/heads/gh-readonly-queue/main/pr-7-${tip}` } }),
   );
-  const selected = changedLanes(repo, { GITHUB_EVENT_NAME: "merge_group", GITHUB_EVENT_PATH: event });
+  const selected = changedLanes(checkout, { GITHUB_EVENT_NAME: "merge_group", GITHUB_EVENT_PATH: event });
   expect(selected.base).toBe(tip);
   expect(selected.docs_touched).toBe("true");
   return selected;
@@ -217,6 +230,14 @@ const webMoved = [{ "apps/web/src/index.ts": "export const later = true;\n" }];
 
 test("a merge group skips a lane its pull request's run checked against the same inputs", () => {
   expect(queued(webMoved)).toMatchObject({ docs: "false", web: "false", web_touched: "false" });
+});
+
+test("a merge group finds the pull request's merge base beyond a shallow checkout", () => {
+  expect(queued([...webMoved, { "Cargo.toml": "[workspace]\nmembers = []\n" }], { shallow: true })).toMatchObject({
+    docs: "false",
+    web: "false",
+    rust: "false",
+  });
 });
 
 test("a merge group reruns a lane whose inputs main changed since the pull request's merge base", () => {

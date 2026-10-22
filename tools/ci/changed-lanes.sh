@@ -68,15 +68,32 @@ case "${GITHUB_EVENT_NAME:-}" in
     # the public repository; a push to the pull request leaves the queue.
     number="$(jq -r '.merge_group.head_ref // ""' "${GITHUB_EVENT_PATH}" |
       sed -n 's|^refs/heads/gh-readonly-queue/[^/]*/pr-\([0-9][0-9]*\)-[0-9a-f]*$|\1|p')"
-    if [[ -n "${number}" ]] &&
-      git fetch --quiet --no-tags --filter=blob:none origin "+refs/pull/${number}/head:refs/intar/queued" 2>/dev/null; then
-      tested="$(git merge-base refs/intar/queued "${base}" 2>/dev/null || true)"
-      # That head is what the queue merged only when merging it again gives
-      # the group's tree.
-      if [[ -z "${tested}" ]] || from_release_app refs/intar/queued ||
-        [[ "$(git merge-tree --write-tree --merge-base "${tested}" "${base}" refs/intar/queued 2>/dev/null | head -n 1)" != "$(git rev-parse 'HEAD^{tree}')" ]]; then
-        tested=""
-      fi
+    # ci.yml checks out only the group's commit and its base. The pull
+    # request's merge base with main, and main's commits since, lie further
+    # back, so the fetch takes main's whole history, without file contents.
+    unshallow=()
+    if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
+      unshallow=(--unshallow)
+    fi
+    fallback=""
+    if [[ -z "${number}" ]]; then
+      fallback="no pull request number in the queue branch"
+    elif ! git fetch --quiet --no-tags --filter=blob:none "${unshallow[@]}" origin "+refs/pull/${number}/head:refs/intar/queued"; then
+      fallback="could not fetch refs/pull/${number}/head"
+    elif ! tested="$(git merge-base refs/intar/queued "${base}")"; then
+      fallback="no merge base between pull request #${number} and ${base}"
+    elif from_release_app refs/intar/queued; then
+      fallback="pull request #${number} comes from the release app"
+    # That head is what the queue merged only when merging it again gives the
+    # group's tree.
+    elif [[ "$(git merge-tree --write-tree --merge-base "${tested}" "${base}" refs/intar/queued | head -n 1)" != "$(git rev-parse 'HEAD^{tree}')" ]]; then
+      fallback="pull request #${number}'s head does not merge into the group's tree"
+    fi
+    if [[ -n "${fallback}" ]]; then
+      tested=""
+      echo "Merge queue: ${fallback}; checking every lane the group changed." >&2
+    else
+      echo "Merge queue: pull request #${number} branched from ${tested}; rerunning only the lanes main changed since." >&2
     fi
     ;;
   schedule) none=true ;;
