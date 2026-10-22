@@ -1,5 +1,11 @@
 # Changelog
 
+## stargate/v0.6.1 (2026-10-22)
+
+### Bug fixes
+
+- **deps:** Bump every dependency to its latest release (#248) (852817f2)
+
 ## stargate/v0.6.0 (2026-10-05)
 
 ### Features
