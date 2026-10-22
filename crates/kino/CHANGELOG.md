@@ -1,5 +1,12 @@
 # Changelog
 
+## kino/v0.5.1 (2026-10-22)
+
+### Bug fixes
+
+- **deps:** Patch the new audit advisories and check pull requests in a merge queue (#245) (3539442f)
+- **deps:** Bump every dependency to its latest release (#248) (852817f2)
+
 ## kino/v0.5.0 (2026-10-05)
 
 ### Features
