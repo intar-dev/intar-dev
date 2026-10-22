@@ -408,25 +408,24 @@ pub(super) fn infer_generation_identity_at(
 #[cfg(target_os = "linux")]
 pub(super) fn stop_orphan_generation(generation: &ValidatedId) -> Result<()> {
     let unit_name = format!("intar-vm-{generation}.service");
-    let connection = zbus::blocking::Connection::system()?;
+    let connection = zbus::block_on(zbus::Connection::system())?;
     let manager = SystemdHostBackend::manager(&connection)?;
-    let path: Result<zbus::zvariant::OwnedObjectPath> = manager
-        .call("GetUnit", &(unit_name.as_str(),))
-        .map_err(Into::into);
+    let path: Result<zbus::OwnedObjectPath> =
+        zbus::block_on(manager.call("GetUnit", &(unit_name.as_str(),))).map_err(Into::into);
     let Ok(path) = path else {
         return Ok(());
     };
-    let service = zbus::blocking::Proxy::new(
+    let service = zbus::block_on(zbus::Proxy::new(
         &connection,
         "org.freedesktop.systemd1",
         path,
         "org.freedesktop.systemd1.Service",
-    )?;
-    let control_group: String = service.get_property("ControlGroup")?;
-    let _: zbus::zvariant::OwnedObjectPath =
-        manager.call("StopUnit", &(unit_name.as_str(), "replace"))?;
+    ))?;
+    let control_group: String = zbus::block_on(service.get_property("ControlGroup"))?;
+    let _: zbus::OwnedObjectPath =
+        zbus::block_on(manager.call("StopUnit", &(unit_name.as_str(), "replace")))?;
     if !wait_cgroup_drained(&control_group, Duration::from_secs(5))? {
-        let _: () = manager.call("KillUnit", &(unit_name.as_str(), "all", 9_i32))?;
+        let _: () = zbus::block_on(manager.call("KillUnit", &(unit_name.as_str(), "all", 9_i32)))?;
         if !wait_cgroup_drained(&control_group, Duration::from_secs(10))? {
             bail!("orphan transient unit did not drain")
         }

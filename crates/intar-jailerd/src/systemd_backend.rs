@@ -95,7 +95,8 @@ impl SystemdHostBackend {
         landlock_attested: bool,
     ) -> Result<Self> {
         require_supervisor_process_inspection_capability()?;
-        let system_bus = zbus::blocking::Connection::system().context("connect to system D-Bus")?;
+        let system_bus =
+            zbus::block_on(zbus::Connection::system()).context("connect to system D-Bus")?;
         Ok(Self {
             network: Arc::new(Mutex::new(NetworkManager::new(config)?)),
             system_bus,
@@ -104,24 +105,22 @@ impl SystemdHostBackend {
         })
     }
 
-    pub(super) fn manager<'a>(
-        connection: &'a zbus::blocking::Connection,
-    ) -> Result<zbus::blocking::Proxy<'a>> {
-        zbus::blocking::Proxy::new(
+    pub(super) fn manager<'a>(connection: &'a zbus::Connection) -> Result<zbus::Proxy<'a>> {
+        zbus::block_on(zbus::Proxy::new(
             connection,
             "org.freedesktop.systemd1",
             "/org/freedesktop/systemd1",
             "org.freedesktop.systemd1.Manager",
-        )
+        ))
         .context("create systemd manager proxy")
     }
 
     pub(super) fn get_unit_path(
-        manager: &zbus::blocking::Proxy<'_>,
+        manager: &zbus::Proxy<'_>,
         unit_name: &str,
-    ) -> Result<Option<zbus::zvariant::OwnedObjectPath>> {
-        let result: zbus::Result<zbus::zvariant::OwnedObjectPath> =
-            manager.call("GetUnit", &(unit_name,));
+    ) -> Result<Option<zbus::OwnedObjectPath>> {
+        let result: zbus::Result<zbus::OwnedObjectPath> =
+            zbus::block_on(manager.call("GetUnit", &(unit_name,)));
         match result {
             Ok(path) => Ok(Some(path)),
             Err(zbus::Error::MethodError(name, _, _))
@@ -142,26 +141,26 @@ impl SystemdHostBackend {
         let manager = Self::manager(connection)?;
         let path = Self::get_unit_path(&manager, unit_name)?
             .with_context(|| format!("systemd unit {unit_name} no longer exists"))?;
-        let unit = zbus::blocking::Proxy::new(
+        let unit = zbus::block_on(zbus::Proxy::new(
             connection,
             "org.freedesktop.systemd1",
             path,
             "org.freedesktop.systemd1.Unit",
-        )?;
-        let active_state: String = unit.get_property("ActiveState")?;
+        ))?;
+        let active_state: String = zbus::block_on(unit.get_property("ActiveState"))?;
         let health = match active_state.as_str() {
             "active" | "activating" | "reloading" => SandboxHealth::Healthy,
             "deactivating" => SandboxHealth::Stopping,
             "failed" | "inactive" => SandboxHealth::Exited,
             _ => SandboxHealth::Quarantined,
         };
-        let service = zbus::blocking::Proxy::new(
+        let service = zbus::block_on(zbus::Proxy::new(
             connection,
             "org.freedesktop.systemd1",
             unit.path(),
             "org.freedesktop.systemd1.Service",
-        )?;
-        let control_group: String = service.get_property("ControlGroup")?;
+        ))?;
+        let control_group: String = zbus::block_on(service.get_property("ControlGroup"))?;
         let cpu_stat = read_cpu_stat(&control_group).ok();
         let vmm_pid = if matches!(health, SandboxHealth::Healthy | SandboxHealth::Stopping) {
             match launch_identity {
@@ -207,7 +206,7 @@ impl HostBackend for SystemdHostBackend {
     }
 
     fn start_unit(&mut self, spec: &UnitLaunchSpec) -> Result<StartedUnit> {
-        use zbus::zvariant::{OwnedObjectPath, Value};
+        use zbus::{OwnedObjectPath, Variant};
 
         ensure!(
             spec.unit_name == vm_unit_name(&spec.generation),
@@ -231,45 +230,44 @@ impl HostBackend for SystemdHostBackend {
             })
             .collect::<Vec<_>>();
         let properties = vec![
-            ("Description", Value::new(spec.description.clone())),
-            ("Slice", Value::new("intar-vms.slice")),
-            ("Type", Value::new("simple")),
-            ("ExecStart", Value::new(exec_start)),
-            ("CPUAccounting", Value::new(true)),
+            ("Description", Variant::new(spec.description.clone())),
+            ("Slice", Variant::new("intar-vms.slice")),
+            ("Type", Variant::new("simple")),
+            ("ExecStart", Variant::new(exec_start)),
+            ("CPUAccounting", Variant::new(true)),
             (
                 "CPUQuotaPerSecUSec",
-                Value::new(u64::from(spec.cpu_quota.cpu_millis) * 1_000),
+                Variant::new(u64::from(spec.cpu_quota.cpu_millis) * 1_000),
             ),
             (
                 "CPUQuotaPeriodUSec",
-                Value::new(spec.cpu_quota.period_micros),
+                Variant::new(spec.cpu_quota.period_micros),
             ),
-            ("KillMode", Value::new("control-group")),
-            ("Restart", Value::new("no")),
-            ("ExitType", Value::new("cgroup")),
-            ("RestrictRealtime", Value::new(true)),
-            ("LimitRTPRIO", Value::new(0_u64)),
-            ("DevicePolicy", Value::new("closed")),
-            ("DeviceAllow", Value::new(device_allow)),
-            ("NoNewPrivileges", Value::new(false)),
-            ("UMask", Value::new(0o077_u32)),
+            ("KillMode", Variant::new("control-group")),
+            ("Restart", Variant::new("no")),
+            ("ExitType", Variant::new("cgroup")),
+            ("RestrictRealtime", Variant::new(true)),
+            ("LimitRTPRIO", Variant::new(0_u64)),
+            ("DevicePolicy", Variant::new("closed")),
+            ("DeviceAllow", Variant::new(device_allow)),
+            ("NoNewPrivileges", Variant::new(false)),
+            ("UMask", Variant::new(0o077_u32)),
             (
                 "CapabilityBoundingSet",
-                Value::new(minimum_jailer_capability_mask()),
+                Variant::new(minimum_jailer_capability_mask()),
             ),
-            ("AmbientCapabilities", Value::new(0_u64)),
+            ("AmbientCapabilities", Variant::new(0_u64)),
         ];
-        let _: OwnedObjectPath = manager
-            .call(
-                "StartTransientUnit",
-                &(
-                    spec.unit_name.as_str(),
-                    "fail",
-                    properties,
-                    Vec::<(&str, Vec<(&str, Value)>)>::new(),
-                ),
-            )
-            .with_context(|| format!("start transient unit {}", spec.unit_name))?;
+        let _: OwnedObjectPath = zbus::block_on(manager.call(
+            "StartTransientUnit",
+            &(
+                spec.unit_name.as_str(),
+                "fail",
+                properties,
+                Vec::<(&str, Vec<(&str, Variant)>)>::new(),
+            ),
+        ))
+        .with_context(|| format!("start transient unit {}", spec.unit_name))?;
         drop(manager);
 
         let deadline = Instant::now() + VMM_START_TIMEOUT;
@@ -344,13 +342,14 @@ impl HostBackend for SystemdHostBackend {
         let Some(path) = Self::get_unit_path(&manager, unit_name)? else {
             return Ok(false);
         };
-        let service = zbus::blocking::Proxy::new(
+        let service = zbus::block_on(zbus::Proxy::new(
             connection,
             "org.freedesktop.systemd1",
             path,
             "org.freedesktop.systemd1.Service",
-        )?;
-        let control_group: zbus::Result<String> = service.get_property("ControlGroup");
+        ))?;
+        let control_group: zbus::Result<String> =
+            zbus::block_on(service.get_property("ControlGroup"));
         let Some(control_group) = settle_unit_operation(
             control_group,
             UnitCallSite::ObjectProperty,
@@ -360,8 +359,8 @@ impl HostBackend for SystemdHostBackend {
         else {
             return Ok(false);
         };
-        let stop: zbus::Result<zbus::zvariant::OwnedObjectPath> =
-            manager.call("StopUnit", &(unit_name, "replace"));
+        let stop: zbus::Result<zbus::OwnedObjectPath> =
+            zbus::block_on(manager.call("StopUnit", &(unit_name, "replace")));
         if settle_unit_operation(
             stop,
             UnitCallSite::Manager,
@@ -376,7 +375,8 @@ impl HostBackend for SystemdHostBackend {
             return Ok(false);
         }
         if !wait_cgroup_drained(&control_group, Duration::from_secs(5))? {
-            let kill: zbus::Result<()> = manager.call("KillUnit", &(unit_name, "all", 9_i32));
+            let kill: zbus::Result<()> =
+                zbus::block_on(manager.call("KillUnit", &(unit_name, "all", 9_i32)));
             let _ = settle_unit_operation(
                 kill,
                 UnitCallSite::Manager,
@@ -396,13 +396,13 @@ impl HostBackend for SystemdHostBackend {
         let Some(path) = Self::get_unit_path(&manager, unit_name)? else {
             return Ok(false);
         };
-        let unit = zbus::blocking::Proxy::new(
+        let unit = zbus::block_on(zbus::Proxy::new(
             connection,
             "org.freedesktop.systemd1",
             path,
             "org.freedesktop.systemd1.Unit",
-        )?;
-        let active_state: zbus::Result<String> = unit.get_property("ActiveState");
+        ))?;
+        let active_state: zbus::Result<String> = zbus::block_on(unit.get_property("ActiveState"));
         let Some(active_state) = settle_unit_operation(
             active_state,
             UnitCallSite::ObjectProperty,
@@ -416,7 +416,8 @@ impl HostBackend for SystemdHostBackend {
             bail!("refusing to destroy populated transient unit {unit_name}")
         }
         drop(unit);
-        let reset: zbus::Result<()> = manager.call("ResetFailedUnit", &(unit_name,));
+        let reset: zbus::Result<()> =
+            zbus::block_on(manager.call("ResetFailedUnit", &(unit_name,)));
         if settle_unit_operation(
             reset,
             UnitCallSite::Manager,

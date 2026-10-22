@@ -121,12 +121,7 @@ schema.#Project & {
 		security: {
 			type: "group"
 			js: #Host & {command: "bun", args: ["audit", "--audit-level=moderate"]}
-			// RUSTSEC-2026-0370/0371/0372: zvariant, zbus_names and
-			// zvariant_derive are unmaintained, not vulnerable, since zbus 6.0.0
-			// absorbed them. intar-jailerd uses them through zbus 5.17; drop the
-			// ignores when it moves to zbus 6.
-			rust: #Libnbd & {args: ["--rust-only", "--", "cargo", "audit", "--deny", "warnings",
-				"--ignore", "RUSTSEC-2026-0370", "--ignore", "RUSTSEC-2026-0371", "--ignore", "RUSTSEC-2026-0372"]}
+			rust: #Libnbd & {args: ["--rust-only", "--", "cargo", "audit", "--deny", "warnings"]}
 		}
 
 		"generate-contracts": #Libnbd & {args: ["--rust-only", "--", "cargo", "run", "-p", "intar-contracts-typegen"]}

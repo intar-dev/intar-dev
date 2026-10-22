@@ -752,7 +752,7 @@ pub(super) fn smoke_vm_config(
 /// Restrict only the disposable test units to the same logical CPU. The sets
 /// overlap; no exclusive partition or production affinity is installed.
 fn prove_shared_cpu_placement(launches: &[VmLaunchResult]) -> Result<()> {
-    use zbus::zvariant::Value;
+    use zbus::Variant;
 
     let status = std::fs::read_to_string("/proc/self/status")?;
     let allowed = status
@@ -767,11 +767,13 @@ fn prove_shared_cpu_placement(launches: &[VmLaunchResult]) -> Result<()> {
         .parse::<usize>()?;
     let mut mask = vec![0_u8; cpu / 8 + 1];
     mask[cpu / 8] = 1 << (cpu % 8);
-    let connection = zbus::blocking::Connection::system()?;
+    let connection = zbus::block_on(zbus::Connection::system())?;
     let manager = SystemdHostBackend::manager(&connection)?;
     for launch in launches {
-        let properties = vec![("AllowedCPUs", Value::new(mask.clone()))];
-        let _: () = manager.call("SetUnitProperties", &(&launch.unit_name, true, properties))?;
+        let properties = vec![("AllowedCPUs", Variant::new(mask.clone()))];
+        let _: () = zbus::block_on(
+            manager.call("SetUnitProperties", &(&launch.unit_name, true, properties)),
+        )?;
         let cgroup = cgroup_directory(
             launch
                 .cgroup_path

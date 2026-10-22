@@ -84,7 +84,7 @@ pub(super) fn start_worker_unit(
     netns_path: &Path,
     cpu_millis: u32,
 ) -> Result<()> {
-    let connection = zbus::blocking::Connection::system()?;
+    let connection = zbus::block_on(zbus::Connection::system())?;
     let manager = systemd_manager(&connection)?;
     let executable = executable.to_string_lossy().into_owned();
     let arguments = vec![
@@ -106,37 +106,37 @@ pub(super) fn start_worker_unit(
     let properties = vec![
         (
             "Description",
-            Value::new("Intar disposable jailer self-test"),
+            Variant::new("Intar disposable jailer self-test"),
         ),
-        ("Slice", Value::new("intar-vms.slice")),
-        ("Type", Value::new("simple")),
-        ("ExecStart", Value::new(exec_start)),
-        ("CPUAccounting", Value::new(true)),
+        ("Slice", Variant::new("intar-vms.slice")),
+        ("Type", Variant::new("simple")),
+        ("ExecStart", Variant::new(exec_start)),
+        ("CPUAccounting", Variant::new(true)),
         (
             "CPUQuotaPerSecUSec",
-            Value::new(u64::from(cpu_millis) * 1_000),
+            Variant::new(u64::from(cpu_millis) * 1_000),
         ),
-        ("CPUQuotaPeriodUSec", Value::new(SELF_TEST_CPU_PERIOD_US)),
-        ("KillMode", Value::new("control-group")),
-        ("Restart", Value::new("no")),
-        ("ExitType", Value::new("cgroup")),
-        ("RestrictRealtime", Value::new(true)),
-        ("LimitRTPRIO", Value::new(0_u64)),
-        ("DevicePolicy", Value::new("closed")),
-        ("DeviceAllow", Value::new(device_allow)),
-        ("CapabilityBoundingSet", Value::new(0_u64)),
-        ("AmbientCapabilities", Value::new(0_u64)),
-        ("NoNewPrivileges", Value::new(true)),
+        ("CPUQuotaPeriodUSec", Variant::new(SELF_TEST_CPU_PERIOD_US)),
+        ("KillMode", Variant::new("control-group")),
+        ("Restart", Variant::new("no")),
+        ("ExitType", Variant::new("cgroup")),
+        ("RestrictRealtime", Variant::new(true)),
+        ("LimitRTPRIO", Variant::new(0_u64)),
+        ("DevicePolicy", Variant::new("closed")),
+        ("DeviceAllow", Variant::new(device_allow)),
+        ("CapabilityBoundingSet", Variant::new(0_u64)),
+        ("AmbientCapabilities", Variant::new(0_u64)),
+        ("NoNewPrivileges", Variant::new(true)),
         (
             "NetworkNamespacePath",
-            Value::new(netns_path.to_string_lossy().into_owned()),
+            Variant::new(netns_path.to_string_lossy().into_owned()),
         ),
     ];
-    let auxiliary: Vec<(&str, Vec<(&str, Value<'_>)>)> = Vec::new();
-    let _: OwnedObjectPath = manager.call(
+    let auxiliary: Vec<(&str, Vec<(&str, Variant<'_>)>)> = Vec::new();
+    let _: OwnedObjectPath = zbus::block_on(manager.call(
         "StartTransientUnit",
         &(unit_name, "fail", properties, auxiliary),
-    )?;
+    ))?;
     Ok(())
 }
 
@@ -159,23 +159,23 @@ pub(super) fn wait_for_worker_report(
 }
 
 pub(super) fn inspect_unit(unit_name: &str) -> Result<UnitState> {
-    let connection = zbus::blocking::Connection::system()?;
+    let connection = zbus::block_on(zbus::Connection::system())?;
     let manager = systemd_manager(&connection)?;
-    let path: OwnedObjectPath = manager.call("GetUnit", &(unit_name,))?;
-    let unit = zbus::blocking::Proxy::new(
+    let path: OwnedObjectPath = zbus::block_on(manager.call("GetUnit", &(unit_name,)))?;
+    let unit = zbus::block_on(zbus::Proxy::new(
         &connection,
         "org.freedesktop.systemd1",
         path,
         "org.freedesktop.systemd1.Unit",
-    )?;
-    let service = zbus::blocking::Proxy::new(
+    ))?;
+    let service = zbus::block_on(zbus::Proxy::new(
         &connection,
         "org.freedesktop.systemd1",
         unit.path(),
         "org.freedesktop.systemd1.Service",
-    )?;
-    let control_group: String = service.get_property("ControlGroup")?;
-    let main_pid: u32 = service.get_property("MainPID")?;
+    ))?;
+    let control_group: String = zbus::block_on(service.get_property("ControlGroup"))?;
+    let main_pid: u32 = zbus::block_on(service.get_property("MainPID"))?;
     Ok(UnitState {
         main_pid,
         control_group,
@@ -183,25 +183,27 @@ pub(super) fn inspect_unit(unit_name: &str) -> Result<UnitState> {
 }
 
 pub(super) fn stop_and_reset_unit(unit_name: &str) -> Result<()> {
-    let connection = zbus::blocking::Connection::system()?;
+    let connection = zbus::block_on(zbus::Connection::system())?;
     let manager = systemd_manager(&connection)?;
-    let _: Result<OwnedObjectPath, _> = manager.call("StopUnit", &(unit_name, "replace"));
+    let _: Result<OwnedObjectPath, _> =
+        zbus::block_on(manager.call("StopUnit", &(unit_name, "replace")));
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut observed_stopped = false;
     loop {
-        let path: Result<OwnedObjectPath, _> = manager.call("GetUnit", &(unit_name,));
+        let path: Result<OwnedObjectPath, _> =
+            zbus::block_on(manager.call("GetUnit", &(unit_name,)));
         let Ok(path) = path else {
             return Ok(());
         };
-        let unit = zbus::blocking::Proxy::new(
+        let unit = zbus::block_on(zbus::Proxy::new(
             &connection,
             "org.freedesktop.systemd1",
             path,
             "org.freedesktop.systemd1.Unit",
-        )?;
-        let active: String = unit.get_property("ActiveState")?;
+        ))?;
+        let active: String = zbus::block_on(unit.get_property("ActiveState"))?;
         if matches!(active.as_str(), "inactive" | "failed") {
-            let _: Result<(), _> = manager.call("ResetFailedUnit", &(unit_name,));
+            let _: Result<(), _> = zbus::block_on(manager.call("ResetFailedUnit", &(unit_name,)));
             observed_stopped = true;
         }
         ensure!(
@@ -216,22 +218,19 @@ pub(super) fn stop_and_reset_unit(unit_name: &str) -> Result<()> {
     }
 }
 
-pub(super) fn systemd_manager<'a>(
-    connection: &'a zbus::blocking::Connection,
-) -> Result<zbus::blocking::Proxy<'a>> {
-    Ok(zbus::blocking::Proxy::new(
+pub(super) fn systemd_manager<'a>(connection: &'a zbus::Connection) -> Result<zbus::Proxy<'a>> {
+    Ok(zbus::block_on(zbus::Proxy::new(
         connection,
         "org.freedesktop.systemd1",
         "/org/freedesktop/systemd1",
         "org.freedesktop.systemd1.Manager",
-    )?)
+    ))?)
 }
 
 pub(super) fn read_systemd_version() -> Result<String> {
-    let connection = zbus::blocking::Connection::system()?;
-    systemd_manager(&connection)?
-        .get_property("Version")
-        .context("read systemd version")
+    let connection = zbus::block_on(zbus::Connection::system())?;
+    let manager = systemd_manager(&connection)?;
+    zbus::block_on(manager.get_property("Version")).context("read systemd version")
 }
 
 pub(super) fn cgroup_directory(control_group: &str) -> Result<PathBuf> {
