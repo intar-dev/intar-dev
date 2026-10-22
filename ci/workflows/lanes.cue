@@ -14,10 +14,6 @@ lanes: [string]: close({
 	// Root tasks, run in order.
 	steps: [...string]
 	timeout: int
-	// The lane's own Namespace cache volume. Parallel jobs that share one
-	// volume fork different generations and the last commit wins, so a Rust
-	// lane on the shared one rebuilt most crates on two runs in three.
-	cacheTag?: =~"^intar-[a-z0-9-]+$"
 	// The build the lane checks, which deploy.yml deploys: every merge group,
 	// and a dispatch from main, runs the lane and uploads this directory as the
 	// artifact <lane>-dist-<sha>.
@@ -43,8 +39,7 @@ lanes: {
 	rust: {
 		setup: [gha.#SetupRust]
 		steps: ["installer-tests", "verify", "check-generated-contracts"]
-		timeout:  45
-		cacheTag: "intar-rust"
+		timeout: 45
 		inputs: [
 			"Cargo.toml",
 			"Cargo.lock",
@@ -100,8 +95,7 @@ lanes: {
 	images: {
 		setup: [gha.#SetupRust]
 		steps: ["validate-images", "render-images"]
-		timeout:  30
-		cacheTag: "intar-images"
+		timeout: 30
 		inputs: [
 			"Cargo.toml",
 			"Cargo.lock",
@@ -135,8 +129,7 @@ lanes: {
 	web: {
 		setup: [gha.#SetupRuntime, gha.#BunCache]
 		steps: ["install-js", "test.js", "build.js", "check-web-artifact"]
-		timeout:  30
-		cacheTag: "intar-web"
+		timeout: 30
 		dist: {path: "apps/web/dist", hidden: true}
 		inputs: [
 			".github/workflows/deploy.yml",
@@ -167,8 +160,7 @@ lanes: {
 	kino: {
 		setup: [gha.#SetupRust]
 		steps: ["build-kino-guest"]
-		timeout:  20
-		cacheTag: "intar-kino"
+		timeout: 20
 		inputs: [
 			"Cargo.toml",
 			"Cargo.lock",

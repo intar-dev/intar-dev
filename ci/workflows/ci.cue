@@ -68,19 +68,16 @@ import (
 
 		for name, lane in lanes {
 			(name): {
-				"runs-on": [
-					if lane.cacheTag != _|_ {"\(gha.runner);overrides.cache-tag=\(lane.cacheTag)"},
-					gha.runner,
-				][0]
-				needs: "changes"
-				if:    "needs.changes.outputs.\(name) == 'true'"
+				"runs-on":         gha.runner
+				needs:             "changes"
+				if:                "needs.changes.outputs.\(name) == 'true'"
 				"timeout-minutes": lane.timeout
 				permissions: contents: "read"
 				let _artifact = "\(name)-dist-${{ github.sha }}"
 				steps: list.Concat([laneSteps[name], [if lane.dist != _|_ {
 					name: "Upload the tested build"
 					// The merge group's commit becomes main's tip.
-					if: "github.event_name == 'merge_group' || github.ref == 'refs/heads/main'"
+					if:   "github.event_name == 'merge_group' || github.ref == 'refs/heads/main'"
 					uses: gha.pin."upload-artifact".ref
 					with: {
 						name:                   _artifact

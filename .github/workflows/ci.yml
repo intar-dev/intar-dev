@@ -20,7 +20,7 @@ jobs:
   rust:
     if: needs.changes.outputs.rust == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev;overrides.cache-tag=intar-rust
+    runs-on: namespace-profile-intar-dev
     permissions:
       contents: read
     timeout-minutes: 45
@@ -74,7 +74,7 @@ jobs:
   images:
     if: needs.changes.outputs.images == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev;overrides.cache-tag=intar-images
+    runs-on: namespace-profile-intar-dev
     permissions:
       contents: read
     timeout-minutes: 30
@@ -94,7 +94,7 @@ jobs:
   web:
     if: needs.changes.outputs.web == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev;overrides.cache-tag=intar-web
+    runs-on: namespace-profile-intar-dev
     permissions:
       contents: read
     timeout-minutes: 30
@@ -133,7 +133,7 @@ jobs:
   kino:
     if: needs.changes.outputs.kino == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev;overrides.cache-tag=intar-kino
+    runs-on: namespace-profile-intar-dev
     permissions:
       contents: read
     timeout-minutes: 20
