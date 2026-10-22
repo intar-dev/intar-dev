@@ -240,7 +240,12 @@ function findBuilds(env: Record<string, string>, runs: Record<number, Run>, arti
     git(["commit", "-q", "-m", "web"]);
     const tip = git(["rev-parse", "HEAD"]);
     const hash = (lane: string, globs: string) =>
-      spawnSync("bash", [resolve("tools/ci/lane-inputs.sh"), `${lane} ${globs}`], { cwd: repo, encoding: "utf8" })
+      // Without GITHUB_OUTPUT, which a CI run sets, the hash goes to stdout.
+      spawnSync("bash", [resolve("tools/ci/lane-inputs.sh"), `${lane} ${globs}`], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, GITHUB_OUTPUT: "" },
+      })
         .stdout.trim()
         .split("=")[1];
     const names = { web: `web-dist-${hash("web", "web/**")}`, docs: `docs-dist-${hash("docs", "docs/**")}` };
