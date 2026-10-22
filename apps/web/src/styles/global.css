@@ -1934,14 +1934,6 @@ html {
   box-sizing: content-box;
 }
 
-/* Older lines fade out at the top instead of being cut mid-glyph. The fade
-   ends 2.25rem below the screen's edge; it sits on the player, not the
-   screen, so the scroller's focus ring stays whole. */
-.replay-custom {
-  -webkit-mask-image: linear-gradient(transparent, #000 1.375rem);
-  mask-image: linear-gradient(transparent, #000 1.375rem);
-}
-
 .replay-bar {
   display: flex;
   align-items: center;
