@@ -35,6 +35,7 @@ runner: "namespace-profile-intar-dev"
 		paths?: [...string]
 		types?: [...string]
 	}
+	merge_group?: types?: [...string]
 	schedule?: [...{cron!: string}]
 	workflow_run?: {
 		workflows!: [...string]

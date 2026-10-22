@@ -6,8 +6,8 @@ import (
 	"github.com/intar-dev/intar-dev/ci/gha"
 )
 
-// One CI workflow for pull requests and main. `changes` picks the lanes a
-// pull request needs (lanes.cue), every lane runs on a push to main or a
+// One CI workflow for pull requests, the merge queue and main. `changes` picks
+// the lanes a pull request or merge group needs (lanes.cue), every lane runs on a push to main or a
 // dispatch, and ci-ok is the one required check: it always runs, fails when
 // any job failed or was cancelled, and counts a skipped job as passed. On main,
 // a lane with a dist uploads the build it checked, and deploy.yml deploys it.
@@ -21,6 +21,9 @@ import (
 	on: {
 		pull_request: types: ["opened", "edited", "synchronize", "reopened"]
 		push: branches: ["main"]
+		// The merge queue checks each pull request merged onto main's tip
+		// before it lands (merge settings in ci/README.md).
+		merge_group: types: ["checks_requested"]
 		workflow_dispatch: {}
 	}
 	concurrency: gha.#PRConcurrency & {#name: "ci"}

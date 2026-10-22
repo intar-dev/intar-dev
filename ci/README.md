@@ -165,6 +165,12 @@ repos/intar-dev/intar-dev --jq '{allow_squash_merge, allow_merge_commit,
 allow_rebase_merge, squash_merge_commit_title, allow_auto_merge,
 delete_branch_on_merge}'`. Stage B also allows only squash merges.
 
+The `main` ruleset requires `ci-ok` and merges through a merge queue: each
+pull request is squashed onto main's tip and `ci.yml` checks that commit as a
+`merge_group` event, with `changes` diffing it against the group's base sha,
+before it lands. Check it with `gh api repos/intar-dev/intar-dev/rulesets
+--jq '.[] | select(.name == "main") | .id'` and that ruleset's `rules`.
+
 ## Returning to `cuenv sync ci`
 
 cuenv's own CI generator produced the lanes before `ci.yml`. It could not pin
