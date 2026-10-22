@@ -7,7 +7,7 @@ Monorepo for the intar platform:
 - `content/` contains authored Course and Scenario source locks.
 
 Tasks are defined in `env.cue` and run with [cuenv](https://github.com/cuenv/cuenv)
-0.56.7. `cuenv task` lists them. Common commands:
+0.57.3. `cuenv task` lists them. Common commands:
 
 ```sh
 cuenv task install-js

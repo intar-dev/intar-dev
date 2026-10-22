@@ -535,8 +535,16 @@ impl client::Handler for StrictHostKey {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        // Only the pinned key itself is trusted, never a certificate.
+        let russh::keys::PublicKeyOrCertificate::PublicKey {
+            key: server_public_key,
+            ..
+        } = server_public_key
+        else {
+            return Ok(false);
+        };
         // Compare only the key material. PublicKey equality also compares the
         // OpenSSH comment, and the expected key is derived from the guest's
         // `.pub` file (which carries a `root@host` comment) while the key the
@@ -949,6 +957,10 @@ mod tests {
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBklzf1Qy77LwsjmDlGvCAhBpCkhpti25927fAnOMEIR";
         let expected = PublicKey::from_openssh(&format!("{base} root@pair-ping-db-1"))
             .expect("expected host key parses");
+        let plain = |key| russh::keys::PublicKeyOrCertificate::PublicKey {
+            key,
+            hash_alg: None,
+        };
         let wire_key = PublicKey::from_openssh(base).expect("wire host key parses");
         let other = PublicKey::from_openssh(
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA8ax6Yk1ZMSRpAkk8cIriNXtVufy6mxst2stQk66n+d",
@@ -958,10 +970,20 @@ mod tests {
         let mut handler = StrictHostKey {
             expected: expected.clone(),
         };
-        assert!(handler.check_server_key(&wire_key).await.expect("check ok"));
+        assert!(
+            handler
+                .check_server_key(&plain(wire_key.clone()))
+                .await
+                .expect("check ok")
+        );
 
         let mut handler = StrictHostKey { expected };
-        assert!(!handler.check_server_key(&other).await.expect("check ok"));
+        assert!(
+            !handler
+                .check_server_key(&plain(other.clone()))
+                .await
+                .expect("check ok")
+        );
 
         let legacy = PublicKey::from_openssh(ECDSA_PUBLIC_KEY).expect("legacy host key parses");
         let mut handler = StrictHostKey {
@@ -969,7 +991,7 @@ mod tests {
         };
         assert!(
             !handler
-                .check_server_key(&legacy)
+                .check_server_key(&plain(legacy.clone()))
                 .await
                 .expect("legacy host key must be rejected")
         );

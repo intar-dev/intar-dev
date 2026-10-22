@@ -1,4 +1,4 @@
-/// <reference types="@cloudflare/vitest-pool-workers/types" />
+/// <reference types="@cloudflare/vitest-plugin/types" />
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { env, drizzle, seedHost, seedRun, seedEnabledScenario, desiredRunningVm, resetHostRuntimeTestDatabase } from "@/control-plane/host-runtime-do/test-fixtures";
 import { HOST_DESIRED_STATE_SCHEMA_VERSION } from "@/generated/constants";

@@ -20,7 +20,7 @@ for arch in amd64 arm64; do
   while IFS= read -r entry; do
     entry="${entry#./}"
     case "${entry}" in
-      ""|intar-image-cli|base-images.hcl|third-party/|third-party/libnbd/|third-party/libnbd/*) ;;
+      ""|intar-image-cli|base-images.hcl) ;;
       *)
         echo "unexpected path in ${archive}: ${entry}" >&2
         exit 1
@@ -31,14 +31,6 @@ for arch in amd64 arm64; do
   tar -xzf "${archive}" -C "${extract_dir}"
   test -x "${extract_dir}/intar-image-cli"
   cmp content/scenarios/base-images.hcl "${extract_dir}/base-images.hcl"
-  test -f "${extract_dir}/third-party/libnbd/source/PROVENANCE"
-  test -x "${extract_dir}/third-party/libnbd/source/build-libnbd-static.sh"
-  test -f "${extract_dir}/third-party/libnbd/rust-bindings/PROVENANCE.md"
-  test -f "${extract_dir}/third-party/libnbd/relink/libnbd.a"
-  (
-    cd "${extract_dir}/third-party/libnbd"
-    sha256sum --check --strict SHA256SUMS
-  )
   mapfile -t packaged_files < <(
     find "${extract_dir}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' \
       | LC_ALL=C sort

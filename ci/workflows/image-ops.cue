@@ -419,7 +419,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				// dependency tree; without the locked install `bunx` may fetch a latest.
 				if:   "needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'"
 				uses: gha.pin."setup-bun".ref
-				with: "bun-version": "1.3.14"
+				with: "bun-version": "1.4.4"
 			}, {
 				name: "Set up Node"
 				if:   "needs.request.outputs.action == 'plan' || needs.request.outputs.action == 'run'"

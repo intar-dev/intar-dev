@@ -21,8 +21,6 @@ use anyhow::{Context as _, Result, anyhow, bail};
 #[cfg(target_os = "linux")]
 use intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES;
 #[cfg(target_os = "linux")]
-use libnbd::{AsyncHandle, CONTEXT_BASE_ALLOCATION, CmdFlag, STATE_ZERO};
-#[cfg(target_os = "linux")]
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::process::{Pid, Signal, kill_process};
 #[cfg(target_os = "linux")]
@@ -37,11 +35,16 @@ use crate::chunked::{
 };
 use crate::config::QemuBuildConfig;
 
+#[cfg(any(target_os = "linux", test))]
+mod nbd;
+#[cfg(target_os = "linux")]
+use nbd::NbdClient;
+
 const RAW_VIEW_START_TIMEOUT: Duration = Duration::from_secs(30);
 const RAW_VIEW_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const RAW_VIEW_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(target_os = "linux")]
-const NBD_STATUS_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
+const NBD_STATUS_WINDOW_BYTES: u32 = 64 * 1024 * 1024;
 const NBD_SOCKET_DIRECTORY: &str = "raw-view-nbd";
 const NBD_SOCKET_FILENAME: &str = "raw-view.sock";
 const NBD_SOCKET_RELATIVE_PATH: &str = "raw-view-nbd/raw-view.sock";
@@ -49,8 +52,8 @@ const NBD_SOCKET_RELATIVE_PATH: &str = "raw-view-nbd/raw-view.sock";
 /// Keeps the final qcow2 source and its checkpoint backing alive while the
 /// scanner and encoder use one private readonly Unix NBD export.
 pub(super) struct RawViewGuard {
-    // The reader is dropped before state. It owns every libnbd request buffer
-    // and polling task, while state owns the source files and cache lease.
+    // The reader is dropped before state: it holds the NBD connection, while
+    // state owns the source files and cache lease.
     reader: Option<NbdChunkReader>,
     #[cfg(test)]
     test_reader: Option<TestChunkReader>,
@@ -370,8 +373,7 @@ impl RawViewGuard {
 
 impl Drop for RawViewGuard {
     fn drop(&mut self) {
-        // A destructor can run inside a Tokio task. Release the client before
-        // shared QSD cleanup, but do not nest its current-thread runtime.
+        // Release the client before shared QSD cleanup.
         self.reader = None;
         if let Err(error) = self.close() {
             eprintln!("[intar-nbd-view] cleanup_failed error={error:#}");
@@ -381,8 +383,7 @@ impl Drop for RawViewGuard {
 
 #[cfg(target_os = "linux")]
 struct NbdChunkReader {
-    runtime: Option<tokio::runtime::Runtime>,
-    handle: Option<Arc<AsyncHandle>>,
+    client: Option<NbdClient>,
     virtual_size_bytes: u64,
     zero_ranges: Vec<Range<u64>>,
     deadline: Instant,
@@ -397,11 +398,6 @@ impl NbdChunkReader {
         deadline: Instant,
         timed_out: Arc<AtomicBool>,
     ) -> Result<Self> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .context("failed to create NBD client runtime")?;
         let socket_directory = fs::File::open(socket_directory).with_context(|| {
             format!(
                 "failed to open private NBD socket directory '{}'",
@@ -409,52 +405,30 @@ impl NbdChunkReader {
             )
         })?;
         let socket = nbd_socket_client_path(&socket_directory);
-        let (handle, virtual_size_bytes, zero_ranges) = runtime.block_on(async move {
-            let handle = Arc::new(
-                AsyncHandle::new()
-                    .map_err(|error| anyhow!("failed to create NBD client: {error}"))?,
-            );
-            handle
-                .add_meta_context(CONTEXT_BASE_ALLOCATION)
-                .map_err(|error| anyhow!("failed to request NBD allocation metadata: {error}"))?;
-            let remaining = nbd_remaining(deadline, "NBD connect")?;
-            tokio::time::timeout(remaining, handle.connect_unix(socket))
-                .await
-                .context("NBD connect timed out")?
-                .map_err(|error| anyhow!("failed to connect to NBD export: {error}"))?;
-            ensure!(
-                handle
-                    .is_read_only()
-                    .map_err(|error| anyhow!("failed to inspect NBD readonly state: {error}"))?,
-                "NBD export is writable"
-            );
-            let virtual_size_bytes = handle
-                .get_size()
-                .map_err(|error| anyhow!("failed to read NBD export size: {error}"))?;
-            ensure!(virtual_size_bytes > 0, "NBD export has zero size");
-            let zero_ranges = match handle.can_meta_context(CONTEXT_BASE_ALLOCATION) {
-                Ok(true) => match query_zero_ranges(&handle, virtual_size_bytes, deadline).await {
-                    Ok(ranges) => ranges,
-                    Err(error) => {
-                        eprintln!(
-                            "[intar-nbd-view] allocation_metadata_unavailable error={error:#}; reading all chunks"
-                        );
-                        Vec::new()
-                    }
-                },
-                Ok(false) => Vec::new(),
+        nbd_remaining(deadline, "NBD connect")?;
+        let mut client = NbdClient::connect(&socket, deadline)?;
+        ensure!(client.is_read_only(), "NBD export is writable");
+        let virtual_size_bytes = client.size();
+        ensure!(virtual_size_bytes > 0, "NBD export has zero size");
+        let zero_ranges = if client.has_allocation_metadata() {
+            nbd_remaining(deadline, "NBD block-status")?;
+            match client.zero_ranges(NBD_STATUS_WINDOW_BYTES) {
+                Ok(ranges) => ranges,
                 Err(error) => {
                     eprintln!(
-                        "[intar-nbd-view] allocation_metadata_unavailable error={error}; reading all chunks"
+                        "[intar-nbd-view] allocation_metadata_unavailable error={error:#}; reading all chunks"
                     );
+                    // A failed query can leave replies unread on the socket,
+                    // so the reads use a fresh connection.
+                    client = NbdClient::connect(&socket, deadline)?;
                     Vec::new()
                 }
-            };
-            Ok::<_, anyhow::Error>((handle, virtual_size_bytes, zero_ranges))
-        })?;
+            }
+        } else {
+            Vec::new()
+        };
         Ok(Self {
-            runtime: Some(runtime),
-            handle: Some(handle),
+            client: Some(client),
             virtual_size_bytes,
             zero_ranges,
             deadline,
@@ -464,39 +438,11 @@ impl NbdChunkReader {
     }
 
     fn disconnect(&mut self) -> Result<()> {
-        let Some(handle) = self.handle.take() else {
-            if let Some(runtime) = self.runtime.take() {
-                runtime.shutdown_background();
-            }
-            return Ok(());
-        };
-        // Builder finalization runs in Tokio's blocking pool. That pool has a
-        // current handle but is not driving this private current-thread
-        // runtime, so it can wait for the NBD disconnect safely.
-        let result = self
-            .runtime
-            .as_ref()
-            .context("NBD client runtime was already closed")?
-            .block_on(async {
-                tokio::time::timeout(RAW_VIEW_CLEANUP_TIMEOUT, handle.disconnect(None))
-                    .await
-                    .context("NBD client disconnect timed out")?
-                    .map_err(|error| anyhow!("failed to disconnect NBD client: {error}"))
-            });
-        drop(handle);
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
-        }
-        result
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for NbdChunkReader {
-    fn drop(&mut self) {
-        drop(self.handle.take());
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
+        match self.client.take() {
+            Some(client) => client
+                .disconnect()
+                .context("failed to disconnect NBD client"),
+            None => Ok(()),
         }
     }
 }
@@ -528,139 +474,24 @@ impl ImageChunkReader for NbdChunkReader {
                 "invalid NBD image read"
             );
         }
-        let handle = Arc::clone(
-            self.handle
-                .as_ref()
-                .context("NBD client was closed before image reading")?,
+        let client = self
+            .client
+            .as_mut()
+            .context("NBD client was closed before image reading")?;
+        // The socket timeouts end the batch at the shared deadline, and the
+        // pidfd watchdog closes QSD then as well.
+        client.set_deadline(self.deadline)?;
+        let ranges = reads
+            .iter()
+            .map(|read| (read.offset, read.length))
+            .collect::<Vec<_>>();
+        let chunks = client.read_ranges(&ranges)?;
+        ensure!(
+            Instant::now() < self.deadline && !self.timed_out.load(Ordering::Acquire),
+            "raw view image-read deadline expired"
         );
-        let reads = reads.to_vec();
-        let timed_out = Arc::clone(&self.timed_out);
-        let deadline = self.deadline;
-        self.runtime
-            .as_ref()
-            .context("NBD client runtime was already closed")?
-            .block_on(async move {
-                let mut pending = tokio::task::JoinSet::new();
-                for (position, read) in reads.iter().enumerate() {
-                    let handle = Arc::clone(&handle);
-                    let offset = read.offset;
-                    let length = read.length;
-                    pending.spawn(async move {
-                        let mut bytes = vec![0_u8; length];
-                        handle
-                            .pread(&mut bytes, offset, Some(CmdFlag::empty()))
-                            .await
-                            .map_err(|error| {
-                                anyhow!("NBD read at byte {offset} failed: {error}")
-                            })?;
-                        Ok::<_, anyhow::Error>((position, bytes))
-                    });
-                }
-                // Do not apply `timeout` here. libnbd owns each Vec pointer until
-                // pread completes. The pidfd watchdog closes QSD at the shared
-                // deadline; then all tasks drain their buffers before returning.
-                let mut results = vec![None; reads.len()];
-                let mut first_error = None;
-                while let Some(result) = pending.join_next().await {
-                    match result {
-                        Ok(Ok((position, bytes))) if bytes.len() == reads[position].length => {
-                            results[position] = Some(bytes);
-                        }
-                        Ok(Ok((position, _))) => {
-                            first_error.get_or_insert_with(|| {
-                                anyhow!("NBD reader returned a partial chunk at index {position}")
-                            });
-                        }
-                        Ok(Err(error)) => {
-                            first_error.get_or_insert(error);
-                        }
-                        Err(error) => {
-                            first_error
-                                .get_or_insert_with(|| anyhow!("NBD reader task failed: {error}"));
-                        }
-                    }
-                }
-                if let Some(error) = first_error {
-                    return Err(error);
-                }
-                ensure!(
-                    Instant::now() < deadline && !timed_out.load(Ordering::Acquire),
-                    "raw view image-read deadline expired"
-                );
-                results
-                    .into_iter()
-                    .map(|bytes| bytes.context("NBD reader omitted a chunk result"))
-                    .collect()
-            })
+        Ok(chunks)
     }
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Default)]
-struct NbdZeroRanges {
-    ranges: Vec<Range<u64>>,
-    invalid: bool,
-}
-
-#[cfg(target_os = "linux")]
-async fn query_zero_ranges(
-    handle: &Arc<AsyncHandle>,
-    virtual_size_bytes: u64,
-    deadline: Instant,
-) -> Result<Vec<Range<u64>>> {
-    let ranges = Arc::new(Mutex::new(NbdZeroRanges::default()));
-    let mut offset = 0_u64;
-    while offset < virtual_size_bytes {
-        nbd_remaining(deadline, "NBD block-status")?;
-        let length = (virtual_size_bytes - offset).min(NBD_STATUS_WINDOW_BYTES);
-        let end = offset + length;
-        let callback_ranges = Arc::clone(&ranges);
-        handle
-            .block_status_64(
-                length,
-                offset,
-                move |metacontext, callback_offset, extents, callback_error| {
-                    if metacontext != CONTEXT_BASE_ALLOCATION {
-                        return 0;
-                    }
-                    let Ok(mut ranges) = callback_ranges.lock() else {
-                        *callback_error = 1;
-                        return -1;
-                    };
-                    let mut cursor = callback_offset;
-                    for extent in extents {
-                        let Some(extent_end) = cursor.checked_add(extent.length) else {
-                            ranges.invalid = true;
-                            *callback_error = 1;
-                            return -1;
-                        };
-                        if extent.length == 0 || cursor < offset || extent_end > end {
-                            ranges.invalid = true;
-                            *callback_error = 1;
-                            return -1;
-                        }
-                        if extent.flags & u64::from(STATE_ZERO) != 0 {
-                            ranges.ranges.push(cursor..extent_end);
-                        }
-                        cursor = extent_end;
-                    }
-                    0
-                },
-                Some(CmdFlag::empty()),
-            )
-            .await
-            .map_err(|error| anyhow!("NBD block-status at byte {offset} failed: {error}"))?;
-        offset = end;
-    }
-    let ranges = Arc::try_unwrap(ranges)
-        .map_err(|_| anyhow!("NBD block-status callback retained zero ranges"))?
-        .into_inner()
-        .map_err(|_| anyhow!("NBD block-status range lock is poisoned"))?;
-    ensure!(
-        !ranges.invalid,
-        "NBD block-status returned an invalid extent"
-    );
-    Ok(ranges.ranges)
 }
 
 #[cfg(target_os = "linux")]
@@ -1145,8 +976,6 @@ mod tests {
 
     use crate::config::QemuBuildConfig;
     #[cfg(target_os = "linux")]
-    use libnbd::AsyncHandle;
-    #[cfg(target_os = "linux")]
     use rustix::process::{Pid, PidfdFlags, pidfd_open};
 
     use super::{
@@ -1159,39 +988,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn disconnected_reader(socket_directory: std::fs::File) -> NbdChunkReader {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .unwrap();
         NbdChunkReader {
-            handle: Some(runtime.block_on(async { Arc::new(AsyncHandle::new().unwrap()) })),
-            runtime: Some(runtime),
+            client: None,
             virtual_size_bytes: 1,
             zero_ranges: Vec::new(),
             deadline: Instant::now() + Duration::from_secs(60),
             timed_out: Arc::new(AtomicBool::new(false)),
             _socket_directory: socket_directory,
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn nbd_disconnect_is_not_skipped_in_tokio_blocking_pool() {
-        let directory = tempdir().unwrap();
-        let mut reader = disconnected_reader(std::fs::File::open(directory.path()).unwrap());
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-
-        let result = runtime.block_on(async move {
-            tokio::task::spawn_blocking(move || {
-                assert!(tokio::runtime::Handle::try_current().is_ok());
-                reader.disconnect()
-            })
-            .await
-            .unwrap()
-        });
-
-        assert!(result.is_err());
     }
 
     #[cfg(target_os = "linux")]

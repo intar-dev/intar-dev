@@ -15,7 +15,7 @@ rustix.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-landlock = "=0.4.5"
+landlock = "=0.4.7"
 
 [dev-dependencies]
 tempfile.workspace = true

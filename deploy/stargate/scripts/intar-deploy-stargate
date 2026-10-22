@@ -112,13 +112,14 @@ wait_ready() {
   return 1
 }
 
+# The gateway records its schema version in PRAGMA user_version. Version 1 is
+# the baseline that holds every table, the workspace application ones included.
+# A database adopted from stargate 0.6 also keeps its SQLx migration table.
 verify_migrations() {
-  local successful
-  table_exists _sqlx_migrations || die "SQLx migration table is missing"
-  successful="$(database_scalar \
-    "SELECT count(*) FROM _sqlx_migrations WHERE version IN (2, 3, 4) AND success = 1")"
-  [ "$successful" -eq 3 ] || die "workspace application migrations 2, 3, and 4 are not successful"
-  log "workspace application migrations 2, 3, and 4 are successful"
+  local version
+  version="$(database_scalar "PRAGMA user_version")"
+  [ "$version" -ge 1 ] || die "the route database has no schema version"
+  log "route database is at schema version $version"
 }
 
 backup_database() {
@@ -327,8 +328,9 @@ plan() {
   if service_environment_has 'STARGATE_WORKSPACE_APP_SESSION_TTL_SECONDS=900'; then
     session_ttl="900"
   fi
-  if table_exists _sqlx_migrations && \
-    [ "$(database_scalar "SELECT count(*) FROM _sqlx_migrations WHERE version IN (2, 3, 4) AND success = 1")" -eq 3 ]; then
+  # A gateway before the baseline still keeps the SQLx migration table.
+  if [ "$(database_scalar "PRAGMA user_version")" -ge 1 ] || { table_exists _sqlx_migrations && \
+    [ "$(database_scalar "SELECT count(*) FROM _sqlx_migrations WHERE version IN (2, 3, 4) AND success = 1")" -eq 3 ]; }; then
     migrations="ready"
   fi
 

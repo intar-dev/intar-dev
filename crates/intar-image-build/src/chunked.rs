@@ -745,7 +745,7 @@ impl<W: std::io::Write> std::io::Write for HashingWriter<W> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::io::{Seek as _, SeekFrom, Write as _};
+    use std::io::SeekFrom;
 
     use super::*;
 

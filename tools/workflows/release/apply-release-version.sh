@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Called by update-release-pr.sh: set MANIFEST's package version to VERSION and
-# move PACKAGE's one Cargo.lock entry with it. A text edit, because Cargo cannot
-# resolve the workspace without the prepared libnbd bindings.
+# move PACKAGE's one Cargo.lock entry with it, as a text edit.
 set -euo pipefail
 python3 - <<'PY'
 import os

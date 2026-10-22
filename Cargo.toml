@@ -18,10 +18,6 @@ members = [
     "crates/stargate-core",
     "crates/stargate-gateway",
 ]
-# The pinned libnbd bindings are a path dependency that lives inside the
-# workspace directory, so Cargo would treat them as a member. Keep them out:
-# they declare their own workspace and they only build on Linux.
-exclude = ["target/libnbd-rust/1.22.2/rust"]
 resolver = "3"
 
 [workspace.package]
@@ -29,76 +25,75 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 publish = false
-rust-version = "1.97"
+rust-version = "1.99"
 
 [workspace.dependencies]
-anyhow = "=1.0.103"
+anyhow = "=1.0.104"
 avt = "=0.18.0"
 axum = { version = "=0.8.9", default-features = false }
 blake3 = "=1.8.7"
 base16ct = { version = "=1.0.0", features = ["alloc"] }
-base64 = "=0.22.1"
+base64 = "=0.23.1"
 bytes = "=1.12.1"
-clap = { version = "=4.6.1", features = ["derive"] }
+clap = { version = "=4.6.7", features = ["derive"] }
 crossterm = "=0.29.0"
 dashmap = "=6.2.1"
-dirs = "=6.0.0"
-ed25519-dalek = "=2.2.0"
+dirs = "=7.0.0"
+ed25519-dalek = "=3.0.0"
 fatfs = "=0.3.6"
-flate2 = "=1.1.9"
+flate2 = "=1.1.10"
 fs2 = "=0.4.3"
-futures-util = "=0.3.32"
+futures-util = "=0.3.34"
 getrandom = "=0.4.3"
-hcl-rs = "=0.19.7"
-http = "=1.4.2"
-hyper = { version = "=1.10.1", features = ["client", "http1"] }
-hyper-util = { version = "=0.1.20", features = ["tokio"] }
-jsonpath-rust = "=1.0.4"
-jsonwebtoken = { version = "=10.4.0", features = ["rust_crypto"] }
+hcl-rs = "=0.19.9"
+http = "=1.5.0"
+hyper = { version = "=1.12.0", features = ["client", "http1"] }
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
+jsonpath-rust = "=1.0.12"
+jsonwebtoken = { version = "=11.1.0", features = ["rust_crypto"] }
 k8s-openapi = { version = "=0.28.0", features = ["v1_35"] }
-kube = { version = "=4.0.0", default-features = false, features = ["client", "config", "rustls-tls"] }
-log = "=0.4.33"
+kube = { version = "=4.2.0", default-features = false, features = ["client", "config", "rustls-tls"] }
+log = "=0.4.34"
 nix = "=0.31.3"
 prost = "=0.14.4"
 prost-build = "=0.14.4"
-protoc-bin-vendored = "=3.2.0"
-pty-process = "=0.5.3"
-regex = "=1.13.0"
-reqwest = { version = "=0.13.4", default-features = false }
+protoc-bin-vendored = "=3.3.0"
+pty-process = "=0.5.4"
+regex = "=1.13.1"
+reqwest = { version = "=0.13.5", default-features = false }
 ring = "=0.17.14"
 rustix = { version = "=1.1.5", features = ["event", "fs", "mount", "net", "pipe", "process", "system", "thread"] }
 reflink-copy = "=0.1.30"
 rustls = { version = "=0.23.46", default-features = false }
-rusqlite = { version = "=0.39.0", features = ["bundled"] }
-russh = "=0.62.2"
-schemars = { version = "=1.2.1", features = ["derive"] }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+russh = "=0.64.1"
+schemars = { version = "=1.2.3", features = ["derive"] }
 sd-notify = "=0.5.0"
-serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = "=1.0.150"
-serde-saphyr = { version = "=1.2.0", default-features = false, features = ["deserialize"] }
-sha2 = "=0.11.0"
-signal-hook = "=0.4.4"
-sqlx = { version = "=0.9.0", default-features = false, features = ["macros", "migrate", "runtime-tokio", "sqlite", "time", "tls-rustls", "uuid"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
+sha2 = "=0.11.1"
+signal-hook = "=0.4.5"
 tempfile = "=3.27.0"
 tar = "=0.4.46"
-thiserror = "=2.0.18"
-time = { version = "=0.3.53", features = ["formatting", "macros", "parsing", "serde"] }
-tokio = { version = "=1.52.3", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = { version = "=0.29.0", default-features = false }
-tokio-util = "=0.7.18"
+thiserror = "=2.0.21"
+time = { version = "=0.3.55", features = ["formatting", "macros", "parsing", "serde"] }
+tokio = { version = "=1.54.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false }
+tokio-util = "=0.7.20"
 tokio-vsock = { version = "=0.7.2", features = ["axum08"] }
-toml = "=1.1.2"
+toml = "=1.1.8"
 tower = "=0.5.3"
 tracing = "=0.1.44"
-opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
-tracing-opentelemetry = { version = "=0.33.0", default-features = false }
+opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "=0.33.1", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = { version = "=0.34.0", default-features = false }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 url = { version = "=2.5.8", features = ["serde"] }
-uuid = { version = "=1.23.4", features = ["serde", "v4"] }
+uuid = { version = "=1.28.0", features = ["serde", "v4"] }
 xattr = "=1.6.1"
-zstd = "=0.13.3"
+zstd = "=0.14.3"
 zbus = { version = "=6.0.0", default-features = false, features = ["default-rt", "proxy"] }
 
 [workspace.lints.rust]

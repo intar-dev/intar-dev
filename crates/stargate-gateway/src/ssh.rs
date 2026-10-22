@@ -585,7 +585,10 @@ fn server_config() -> russh::server::Config {
         methods: MethodSet::from(&[MethodKind::PublicKey][..]),
         auth_rejection_time: Duration::from_millis(500),
         auth_rejection_time_initial: Some(Duration::from_millis(500)),
-        max_auth_attempts: 3,
+        // russh enforces this since 0.64 and counts the client's initial
+        // `none` probe and every key it offers, so a profile-key user whose
+        // agent holds other keys needs OpenSSH's own MaxAuthTries default.
+        max_auth_attempts: 6,
         inactivity_timeout: Some(Duration::from_secs(300)),
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 2,
@@ -595,6 +598,8 @@ fn server_config() -> russh::server::Config {
     config.preferred = Preferred {
         kex: Cow::Borrowed(&[kex::MLKEM768X25519_SHA256, kex::CURVE25519]),
         key: Cow::Borrowed(&[Algorithm::Ed25519]),
+        // Host certificates stay off: clients pin the plain host key.
+        host_key_certificates: Cow::Borrowed(&[]),
         cipher: Cow::Borrowed(&[cipher::CHACHA20_POLY1305, cipher::AES_256_GCM]),
         mac: Cow::Borrowed(&[mac::HMAC_SHA512_ETM, mac::HMAC_SHA256_ETM]),
         compression: Cow::Borrowed(&[compression::NONE]),

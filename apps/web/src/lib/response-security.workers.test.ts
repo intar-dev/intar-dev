@@ -1,4 +1,4 @@
-/// <reference types="@cloudflare/vitest-pool-workers/types" />
+/// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { describe, expect, it } from "vitest";
 import { hardenWorkerResponse, responseSecurity } from "./response-security";

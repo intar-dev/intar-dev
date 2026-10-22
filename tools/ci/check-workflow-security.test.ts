@@ -33,7 +33,7 @@ function check(
   writeFileSync(join(workflows, "security.yml"), source);
   const nodeVersion = join(root, "apps/web/.node-version");
   mkdirSync(join(nodeVersion, ".."), { recursive: true });
-  writeFileSync(nodeVersion, "24.17.0\n");
+  writeFileSync(nodeVersion, "24.22.1\n");
   for (const path of [
     "docs/wrangler.jsonc",
     "apps/web/wrangler.jsonc",
@@ -74,11 +74,9 @@ const pinnedNode =
   "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6";
 const pinnedBun =
   "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2";
-const pinnedGo =
-  "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6";
 
 describe("workflow security policy", () => {
-  it("accepts pinned actions, pinned tools, and Zig 0.16.0", () => {
+  it("accepts pinned actions, pinned tools, and Zig 0.17.0", () => {
     expect(
       check(`
 name: Security
@@ -92,22 +90,18 @@ jobs:
       - uses: ${pinnedCheckout}
       - uses: ${pinnedTaiki}
         with:
-          tool: just@1.58.0,cargo-nextest@0.9.143,cargo-zigbuild@0.23.0,cargo-audit@0.22.2
+          tool: just@1.58.0,cargo-nextest@0.9.149,cargo-zigbuild@0.24.0,cargo-audit@0.22.2
       - uses: ${pinnedZig}
         with:
-          version: 0.16.0
+          version: 0.17.0
       - uses: ${pinnedNode}
         with:
-          node-version: 24.17.0
+          node-version: 24.22.1
       - uses: ${pinnedBun}
         with:
-          bun-version: 1.3.14
-      - uses: ${pinnedGo}
-        with:
-          go-version: 1.27.0
-      - run: rustup toolchain install 1.97.0 --profile minimal
-      - run: rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl
-      - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.10
+          bun-version: 1.4.4
+      - run: rustup toolchain install 1.99.1 --profile minimal
+      - run: rustup target add --toolchain 1.99.1 x86_64-unknown-linux-musl
       - run: apt-get install --yes shellcheck=0.9.0-1
 `),
     ).toEqual([]);
@@ -151,12 +145,8 @@ jobs:
       - uses: ${pinnedBun}
         with:
           bun-version: latest
-      - uses: ${pinnedGo}
-        with:
-          go-version: stable
       - run: rustup toolchain install stable --profile minimal
       - run: rustup target add wasm32-unknown-unknown
-      - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
       - run: cargo install cargo-audit
       - run: |
           apt-get install --yes shellcheck=0.9.0-1 \\
@@ -168,16 +158,15 @@ jobs:
     const output = violations.join("\n");
     expect(output).toContain("pull_request_target is forbidden");
     expect(output).toContain("taiki tool just must use an exact version");
-    expect(output).toContain("taiki tool cargo-zigbuild must be 0.23.0");
+    expect(output).toContain("taiki tool cargo-zigbuild must be 0.24.0");
     expect(output).toContain(
       "taiki tool cargo-deny@stable must use an exact version",
     );
-    expect(output).toContain("Zig must be pinned to 0.16.0");
-    expect(output).toContain("Rust toolchain must be pinned to 1.97.0");
+    expect(output).toContain("Zig must be pinned to 0.17.0");
+    expect(output).toContain("Rust toolchain must be pinned to 1.99.1");
     expect(output).toContain(
-      "rustup target and component installs must use --toolchain 1.97.0",
+      "rustup target and component installs must use --toolchain 1.99.1",
     );
-    expect(output).toContain("go install must use a literal exact version");
     expect(output).toContain(
       "cargo install must use an exact --version and --locked",
     );
@@ -187,9 +176,8 @@ jobs:
     expect(output).toContain(
       "container images must use an exact sha256 digest",
     );
-    expect(output).toContain("Node must be pinned to 24.17.0");
-    expect(output).toContain("Bun must be pinned to 1.3.14");
-    expect(output).toContain("Go must be pinned to 1.27.0");
+    expect(output).toContain("Node must be pinned to 24.22.1");
+    expect(output).toContain("Bun must be pinned to 1.4.4");
   });
 
   it("checks install pins in workflow step scripts", () => {
@@ -197,7 +185,7 @@ jobs:
     const violations = check("jobs: {}\n", undefined, undefined, {
       [script]: `#!/usr/bin/env bash
 # rustup toolchain install stable
-rustup toolchain install 1.97.0 --profile minimal
+rustup toolchain install 1.99.1 --profile minimal
 rustup toolchain install stable --profile minimal
 rustup target add --toolchain stable x86_64-unknown-linux-musl
 cargo install cargo-foo
@@ -205,8 +193,8 @@ sudo apt-get install -y libfoo
 `,
     });
     expect(violations).toEqual([
-      `${script}:4: Rust toolchain must be pinned to 1.97.0`,
-      `${script}:5: rustup target and component installs must use --toolchain 1.97.0`,
+      `${script}:4: Rust toolchain must be pinned to 1.99.1`,
+      `${script}:5: rustup target and component installs must use --toolchain 1.99.1`,
       `${script}:6: cargo install must use an exact --version and --locked`,
       `${script}:7: apt installs must pin every package with package=version`,
     ]);

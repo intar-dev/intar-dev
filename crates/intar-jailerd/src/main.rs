@@ -330,7 +330,7 @@ struct ClientSlot(Arc<AtomicUsize>);
 impl ClientSlot {
     fn try_acquire(active: Arc<AtomicUsize>) -> Option<Self> {
         active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < MAX_CLIENT_CONNECTIONS).then_some(current + 1)
             })
             .ok()

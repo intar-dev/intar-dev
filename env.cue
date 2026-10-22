@@ -14,9 +14,7 @@ import (
 // checks read git state. cuenv's default hermetic sandbox has neither.
 #Host: schema.#Task & {hermetic: false}
 
-// Cargo resolves the workspace only after the pinned libnbd bindings exist.
-// Without --rust-only the wrapper also builds the static libnbd for Linux.
-#Libnbd: #Host & {command: "tools/image-build/with-libnbd-env.sh"}
+#Cargo: #Host & {command: "cargo"}
 
 // A bash body. Values reach it as positional arguments, never as source text.
 #Bash: #Host & {
@@ -78,32 +76,30 @@ schema.#Project & {
 			args: ["install", "--frozen-lockfile"]
 		}
 
-		fmt: #Libnbd & {args: ["--rust-only", "--", "cargo", "fmt"]}
-		"fmt-check": #Libnbd & {args: ["--rust-only", "--", "cargo", "fmt", "--", "--check"]}
-		clippy: #Libnbd & {args: ["--", "cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]}
-		"check-libnbd": #Host & {command: "tools/image-build/test-libnbd-rust-preparation.sh"}
+		fmt: #Cargo & {args: ["fmt"]}
+		"fmt-check": #Cargo & {args: ["fmt", "--", "--check"]}
+		clippy: #Cargo & {args: ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]}
 
 		check: {
 			type: "group"
-			rust: #Libnbd & {args: ["--", "cargo", "check", "--workspace"]}
+			rust: #Cargo & {args: ["check", "--workspace"]}
 			js: #Host & {command: "bun", args: ["run", "check"]}
 		}
 
 		test: {
 			type: "group"
-			rust: #Libnbd & {args: ["--", "cargo", "test", "--workspace"]}
+			rust: #Cargo & {args: ["test", "--workspace"]}
 			js: #Host & {command: "bun", args: ["run", "test"]}
 		}
 
 		build: {
 			type: "group"
-			rust: #Libnbd & {args: ["--", "cargo", "build", "--workspace"]}
+			rust: #Cargo & {args: ["build", "--workspace"]}
 			js: #Host & {command: "bun", args: ["run", "build"]}
 		}
 
 		// The workspace gate CI runs, in order and stopping at the first failure.
 		verify: [
-			_t."check-libnbd",
 			#Host & {
 				command: "sh"
 				args: ["crates/intar-jailerd/tests/install-process-audit.sh", "crates/intar-jailerd/deploy/install.sh"]
@@ -115,16 +111,16 @@ schema.#Project & {
 			},
 			_t."fmt-check",
 			_t.clippy,
-			#Libnbd & {args: ["--", "cargo", "nextest", "run", "--workspace"]},
+			#Cargo & {args: ["nextest", "run", "--workspace"]},
 		]
 
 		security: {
 			type: "group"
 			js: #Host & {command: "bun", args: ["audit", "--audit-level=moderate"]}
-			rust: #Libnbd & {args: ["--rust-only", "--", "cargo", "audit", "--deny", "warnings"]}
+			rust: #Cargo & {args: ["audit", "--deny", "warnings"]}
 		}
 
-		"generate-contracts": #Libnbd & {args: ["--rust-only", "--", "cargo", "run", "-p", "intar-contracts-typegen"]}
+		"generate-contracts": #Cargo & {args: ["run", "-p", "intar-contracts-typegen"]}
 		generate: [_t."generate-contracts"]
 		"check-generated-contracts": _checkGenerated
 		// cuenv 0.56.7 evaluates a sequence that references another sequence
@@ -132,9 +128,9 @@ schema.#Project & {
 		"check-generated": _checkGenerated
 		"clean-generated": #Host & {command: "bun", args: ["run", "clean:generated"]}
 
-		"build-kino-guest": #Libnbd & {args: ["--rust-only", "--", "cargo", "zigbuild", "--profile", "guest", "-p", "kino", "--target", "x86_64-unknown-linux-musl"]}
+		"build-kino-guest": #Cargo & {args: ["zigbuild", "--profile", "guest", "-p", "kino", "--target", "x86_64-unknown-linux-musl"]}
 
-		"validate-images": #Libnbd & {args: ["--", "cargo", "run", "-p", "intar-image-cli", "--", "validate"]}
+		"validate-images": #Cargo & {args: ["run", "-p", "intar-image-cli", "--", "validate"]}
 
 		"render-images": #Bash & {
 			params: _imageParams
@@ -146,7 +142,7 @@ schema.#Project & {
 				  args+=("${scenario}")
 				fi
 				args+=(--config "$(param "$2" '\(_builderConfig)')")
-				tools/image-build/with-libnbd-env.sh -- cargo run -p intar-image-cli -- "${args[@]}"
+				cargo run -p intar-image-cli -- "${args[@]}"
 				"""
 		}
 
@@ -166,7 +162,7 @@ schema.#Project & {
 				if [[ "$(param "$3" false)" == true ]]; then
 				  args+=(--no-upload)
 				fi
-				tools/image-build/with-libnbd-env.sh -- cargo run -p intar-image-cli -- "${args[@]}"
+				cargo run -p intar-image-cli -- "${args[@]}"
 				"""
 		}
 
@@ -195,7 +191,7 @@ schema.#Project & {
 				if [[ "$(param "$5" false)" == true ]]; then
 				  args+=(--no-upload)
 				fi
-				tools/image-build/with-libnbd-env.sh -- cargo run -p intar-image-cli -- "${args[@]}"
+				cargo run -p intar-image-cli -- "${args[@]}"
 				"""
 		}
 

@@ -43,7 +43,10 @@ async fn ssh_readiness_accepts_only_kino_reported_host_key_material() {
     };
     assert!(
         verifier
-            .check_server_key(&wire_key)
+            .check_server_key(&russh::keys::PublicKeyOrCertificate::PublicKey {
+                key: wire_key.clone(),
+                hash_alg: None,
+            })
             .await
             .expect("host-key check succeeds")
     );
@@ -56,7 +59,10 @@ async fn ssh_readiness_accepts_only_kino_reported_host_key_material() {
     };
     assert!(
         !verifier
-            .check_server_key(&other_key)
+            .check_server_key(&russh::keys::PublicKeyOrCertificate::PublicKey {
+                key: other_key.clone(),
+                hash_alg: None,
+            })
             .await
             .expect("host-key check succeeds")
     );

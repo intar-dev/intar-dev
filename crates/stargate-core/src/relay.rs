@@ -437,8 +437,16 @@ impl HostRelayClient {
 impl client::Handler for HostRelayClient {
     type Error = anyhow::Error;
 
-    async fn check_server_key(&mut self, key: &PublicKey) -> anyhow::Result<bool> {
-        Ok(key.key_data() == self.expected_gateway_key.key_data())
+    async fn check_server_key(
+        &mut self,
+        key: &russh::keys::PublicKeyOrCertificate,
+    ) -> anyhow::Result<bool> {
+        // Only the pinned key itself is trusted, never a certificate.
+        Ok(matches!(
+            key,
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. }
+                if key.key_data() == self.expected_gateway_key.key_data()
+        ))
     }
 
     async fn server_channel_open_direct_tcpip(

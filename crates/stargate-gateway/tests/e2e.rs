@@ -34,10 +34,6 @@ use russh::{
     server::{self, Auth, Msg, Server as _, Session},
 };
 use serde::Serialize;
-use sqlx::{
-    SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-};
 use stargate_core::{
     ActivateTerminalTargetRequest, AdminAuthSettings, IssueTerminalSessionRequest,
     IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
@@ -103,6 +99,14 @@ async fn public_ssh_profile_key_route_happy_path() -> Result<()> {
     let output = harness.public_exec_with_profile_key("hostname").await?;
     assert!(output.contains("exec:hostname"), "{output}");
     Ok(())
+}
+
+/// OpenSSH probes `none`, then offers each agent key in turn. Keys the route
+/// does not know must not lock out the one it does.
+#[tokio::test]
+async fn public_ssh_accepts_the_route_key_after_other_keys() -> Result<()> {
+    let harness = Harness::start().await?;
+    harness.assert_route_key_accepted_after_other_keys().await
 }
 
 #[tokio::test]
@@ -1761,6 +1765,55 @@ impl Harness {
         self.ssh_exec(command).await
     }
 
+    async fn assert_route_key_accepted_after_other_keys(&self) -> Result<()> {
+        let session = self.issue_native_terminal_session(true).await?;
+        session.native.context("missing native bundle")?;
+
+        let mut ssh_session = russh::client::connect(
+            client_config(&self.public_host_public),
+            self.public_ssh_addr,
+            TestClient {
+                expected_server_key: self.public_host_public.clone(),
+            },
+        )
+        .await?;
+        assert!(
+            !ssh_session
+                .authenticate_none(&self.route_username)
+                .await?
+                .success()
+        );
+        let mut rng = russh::keys::key::safe_rng();
+        for _ in 0..2 {
+            let other_key = russh::keys::PrivateKey::random(
+                &mut rng,
+                russh::keys::ssh_key::Algorithm::Ed25519,
+            )?;
+            let other = ssh_session
+                .authenticate_publickey(
+                    &self.route_username,
+                    PrivateKeyWithHashAlg::new(Arc::new(other_key), None),
+                )
+                .await?;
+            assert!(!other.success());
+        }
+        let route_key = Arc::new(russh::keys::decode_secret_key(
+            &self.profile_client_private_key_openssh,
+            None,
+        )?);
+        let accepted = ssh_session
+            .authenticate_publickey(
+                &self.route_username,
+                PrivateKeyWithHashAlg::new(route_key, None),
+            )
+            .await?;
+        assert!(
+            accepted.success(),
+            "the route key was refused after two other keys"
+        );
+        Ok(())
+    }
+
     async fn assert_delete_terminates_public_session(&self) -> Result<()> {
         let session = self.issue_native_terminal_session(true).await?;
         session.native.context("missing native bundle")?;
@@ -2061,21 +2114,13 @@ impl Harness {
     }
 
     async fn replace_authorized_client_keys_json(&self, value: &str) -> Result<()> {
-        let options = SqliteConnectOptions::new().filename(&self.database_path);
-        let pool: SqlitePool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
-        let updated = sqlx::query(
+        let connection = rusqlite::Connection::open(&self.database_path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        let updated = connection.execute(
             "UPDATE terminal_route_targets SET authorized_client_public_keys_json = ? \
              WHERE route_username = ?",
-        )
-        .bind(value)
-        .bind(&self.route_username)
-        .execute(&pool)
-        .await?
-        .rows_affected();
-        pool.close().await;
+            rusqlite::params![value, self.route_username],
+        )?;
         anyhow::ensure!(
             updated == 1,
             "failed to corrupt the native route for this test"
@@ -2500,6 +2545,7 @@ fn client_config(expected_server_key: &russh::keys::ssh_key::PublicKey) -> Arc<c
             key: Cow::Borrowed(&[SshAlgorithm::Ecdsa {
                 curve: EcdsaCurve::NistP384,
             }]),
+            host_key_certificates: Cow::Borrowed(&[]),
             cipher: Cow::Borrowed(&[cipher::AES_256_GCM]),
             mac: Cow::Borrowed(&[mac::HMAC_SHA512_ETM]),
             compression: Cow::Borrowed(&[compression::NONE]),
@@ -2737,8 +2783,12 @@ impl client::Handler for TestClient {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        Ok(server_public_key == &self.expected_server_key)
+        Ok(matches!(
+            server_public_key,
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. }
+                if key == &self.expected_server_key
+        ))
     }
 }

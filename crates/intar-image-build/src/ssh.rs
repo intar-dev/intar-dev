@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, bail};
 use russh::keys::{
     PrivateKey, PrivateKeyWithHashAlg,
-    ssh_key::{Algorithm, LineEnding, PublicKey},
+    ssh_key::{Algorithm, LineEnding},
 };
 use russh::{ChannelMsg, client};
 
@@ -327,7 +327,7 @@ impl client::Handler for AcceptUnknownHostKey {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &PublicKey,
+        _server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
         Ok(true)
     }

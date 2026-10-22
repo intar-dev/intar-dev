@@ -7,7 +7,7 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-hcl-edit = "=0.9.6"
+hcl-edit = "=0.9.8"
 hcl-rs.workspace = true
 jsonpath-rust.workspace = true
 regex.workspace = true

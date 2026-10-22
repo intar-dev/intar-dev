@@ -189,7 +189,7 @@ chromiumSmoke: {
 	name:      "Chromium smoke"
 	"runs-on": gha.runner
 	container: {
-		image:   "mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27"
+		image:   "mcr.microsoft.com/playwright:v1.64.1-noble@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf"
 		options: "--ipc=host"
 	}
 	steps: [{
@@ -207,7 +207,7 @@ chromiumSmoke: {
 	}, {
 		name: "Set up Bun"
 		uses: gha.pin."setup-bun".ref
-		with: "bun-version": "1.3.14"
+		with: "bun-version": "1.4.4"
 	}, {
 		name: "Install dependencies"
 		run:  "bun install --frozen-lockfile"

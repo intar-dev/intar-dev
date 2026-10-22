@@ -2,7 +2,7 @@
 
 ## Checks
 
-- Run unit and Worker tests with `bun run test`, and Playwright UI tests with `bun run test:ui`. `bun run build` includes the Cloudflare type checks and `astro check`.
+- Run unit and Worker tests with `bun run test`, and Playwright UI tests with `bun run test:ui`. `bun run build` includes the Cloudflare type checks and `tsc --noEmit` after `astro sync`.
 - From the repository root, `bun run check` covers import boundaries, deploy tooling, the Cloudflare Worker types, and database migration and schema checks. `cuenv task lanes.web` runs what CI runs for the website.
 
 ## Database migrations

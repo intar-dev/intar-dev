@@ -164,7 +164,7 @@ pub(crate) enum ProbeBuildError {
     #[error("probe '{probe_id}' kube client build failed: {source}")]
     BuildKubeClient {
         probe_id: String,
-        source: kube::Error,
+        source: Box<kube::Error>,
     },
 }
 
@@ -930,7 +930,7 @@ async fn kube_client(
 
     Client::try_from(client_config).map_err(|source| ProbeBuildError::BuildKubeClient {
         probe_id: probe_id.to_owned(),
-        source,
+        source: Box::new(source),
     })
 }
 

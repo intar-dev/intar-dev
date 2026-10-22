@@ -403,7 +403,10 @@ async fn cancelled_open_consumes_late_rejection_without_killing_host() -> anyhow
     }
     impl client::Handler for DelayedReject {
         type Error = anyhow::Error;
-        async fn check_server_key(&mut self, _: &PublicKey) -> anyhow::Result<bool> {
+        async fn check_server_key(
+            &mut self,
+            _: &russh::keys::PublicKeyOrCertificate,
+        ) -> anyhow::Result<bool> {
             Ok(true)
         }
         async fn server_channel_open_direct_tcpip(

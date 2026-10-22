@@ -1,4 +1,4 @@
-use std::io::{Cursor, Read as _, Write as _};
+use std::io::Cursor;
 use std::net::{SocketAddr, TcpListener};
 
 use super::*;

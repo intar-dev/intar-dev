@@ -34,8 +34,7 @@
       "crates/intar-image-scenario/**",
       "crates/intar-image-upload/**",
       "crates/intar-observability/**",
-      "content/scenarios/base-images.hcl",
-      "tools/image-build/*libnbd*"
+      "content/scenarios/base-images.hcl"
     ]
   },
   {
@@ -51,8 +50,7 @@
       "crates/intar-image-build/**",
       "crates/intar-image-scenario/**",
       "crates/intar-image-upload/**",
-      "content/scenarios/base-images.hcl",
-      "tools/image-build/*libnbd*"
+      "content/scenarios/base-images.hcl"
     ]
   },
   {

@@ -96,10 +96,10 @@ impl RunMirrors {
     pub(crate) async fn load(store: SqliteRouteStore, ingest_base_url: &url::Url) -> Result<Self> {
         let ingest_url = ingest_socket_url(ingest_base_url)?;
         if ingest_url.scheme() == "wss" {
-            // The gateway links two rustls providers (aws-lc-rs through
-            // reqwest, ring through sqlx), so rustls can not pick a process
-            // default and the socket's TLS setup would panic without one.
-            // reqwest already uses aws-lc-rs, so this changes nothing there.
+            // The gateway can link more than one rustls provider, and then
+            // rustls can not pick a process default and the socket's TLS setup
+            // would panic without one. reqwest already uses aws-lc-rs, so this
+            // changes nothing there.
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         }
         let targets = DashMap::new();
