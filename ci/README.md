@@ -161,10 +161,13 @@ pull request, then replace the applied one with `gh api -X PUT
 repos/intar-dev/intar-dev/rulesets/<id> --input <file>`; list the ids with
 `gh api repos/intar-dev/intar-dev/rulesets`.
 
-- **`main.json`:** main cannot be deleted or force-pushed, requires `ci-ok`
+- **`main.json`:** main cannot be deleted or force-pushed, takes every change
+  through a pull request (squash only, no approval needed), requires `ci-ok`
   from the GitHub Actions app (integration 15368), and merges through the
   merge queue (squash, up to five entries). Nobody can bypass it: deploy.yml
-  and release.yml treat every push to main as a merge group whose CI passed.
+  and release.yml treat every push to main as a merge group whose CI passed,
+  and the pull request rule keeps a commit whose `ci-ok` passed elsewhere, such
+  as a dispatched run, from being pushed straight to main.
 - **`release-tags.json`:** a `<prefix>/v*` release tag cannot be moved or
   deleted.
 
