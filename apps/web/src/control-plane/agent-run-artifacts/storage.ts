@@ -61,6 +61,8 @@ export interface ResolvedRunVm {
 
 /** The original JWT identity must survive every body/R2 await. Never refresh it. */
 function artifactWriteCondition(runVm: ResolvedRunVm, allowSealed = false) {
+  // Lease expiry archives the execution before its VMs upload, so the per-VM
+  // seal, not the execution state, closes artifact writes.
   return sql`${currentAgentHost(runVm.agent)}
     AND (${runVm.agent.scope} = 'organization' OR EXISTS (SELECT 1 FROM user host_owner WHERE host_owner.id = ${runVm.agent.userId}
       AND host_owner.deleted_at IS NULL AND coalesce(host_owner.banned, 0) = 0))
@@ -90,7 +92,6 @@ function artifactWriteCondition(runVm: ResolvedRunVm, allowSealed = false) {
           AND json_extract(scenario_vm.value, '$.runtimeVmName') = vm.runtime_vm_name
           AND (${allowSealed ? 1 : 0} = 1 OR json_extract(scenario_vm.value, '$.phase') <> 'completed'))
       AND (${allowSealed ? 1 : 0} = 1 OR vm.artifact_writes_sealed = 0)
-      AND (execution.state <> 'archived' OR (${allowSealed ? 1 : 0} = 1 AND vm.artifact_writes_sealed = 1))
   )`;
 }
 
