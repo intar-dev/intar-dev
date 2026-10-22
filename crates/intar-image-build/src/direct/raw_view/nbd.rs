@@ -265,7 +265,8 @@ impl NbdClient {
             )?;
         }
         let mut buffers: Vec<Vec<u8>> = ranges.iter().map(|(_, length)| vec![0; *length]).collect();
-        let mut filled = vec![0_usize; ranges.len()];
+        // The byte ranges each read's chunks covered, checked once it is done.
+        let mut covered: Vec<Vec<Range<usize>>> = vec![Vec::new(); ranges.len()];
         let mut done = vec![false; ranges.len()];
         let mut first_error = None;
         while done.iter().any(|done| !done) {
@@ -279,7 +280,7 @@ impl NbdClient {
                 Reply::Simple { error: 0 } => {
                     // Without structured replies the data follows the header.
                     self.stream.read_exact(&mut buffers[index])?;
-                    filled[index] = length;
+                    covered[index].push(0..length);
                     done[index] = true;
                 }
                 Reply::Simple { error } => {
@@ -325,7 +326,7 @@ impl NbdClient {
                             if let Some(data) = data {
                                 buffers[index][start..start + chunk_length].copy_from_slice(data);
                             }
-                            filled[index] += chunk_length;
+                            covered[index].push(start..start + chunk_length);
                         }
                         REPLY_TYPE_NONE => {}
                         kind if kind & REPLY_TYPE_ERROR_BIT != 0 => {
@@ -345,11 +346,19 @@ impl NbdClient {
         if let Some(error) = first_error {
             return Err(error);
         }
-        // The server must cover each read exactly once, so the chunks adding
-        // up to the length rules out both gaps and overlaps.
-        for (index, (offset, length)) in ranges.iter().enumerate() {
+        // The chunks must tile each read exactly: no gap, no overlap.
+        for ((offset, length), mut chunks) in ranges.iter().zip(covered) {
+            chunks.sort_unstable_by_key(|chunk| chunk.start);
+            let mut end = 0;
+            for chunk in chunks {
+                ensure!(
+                    chunk.start == end,
+                    "NBD reader returned a partial chunk at byte {offset}"
+                );
+                end = chunk.end;
+            }
             ensure!(
-                filled[index] == *length,
+                end == *length,
                 "NBD reader returned a partial chunk at byte {offset}"
             );
         }
@@ -720,6 +729,23 @@ mod tests {
             let (_, cookie, _, _) = read_request(stream);
             let mut data = 0_u64.to_be_bytes().to_vec();
             data.extend_from_slice(&[1; 8]);
+            chunk(stream, true, REPLY_TYPE_OFFSET_DATA, cookie, &data);
+        });
+        let mut client =
+            NbdClient::connect(&directory.path().join("nbd.sock"), deadline()).unwrap();
+        let error = client.read_ranges(&[(0, 16)]).unwrap_err();
+        assert!(format!("{error:#}").contains("partial chunk"), "{error:#}");
+        drop(client);
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn overlapping_chunks_that_add_up_to_the_length_are_partial() {
+        let (directory, join) = server(64, TRANSMISSION_FLAG_READ_ONLY, true, |stream| {
+            let (_, cookie, _, _) = read_request(stream);
+            let mut data = 0_u64.to_be_bytes().to_vec();
+            data.extend_from_slice(&[1; 8]);
+            chunk(stream, false, REPLY_TYPE_OFFSET_DATA, cookie, &data);
             chunk(stream, true, REPLY_TYPE_OFFSET_DATA, cookie, &data);
         });
         let mut client =

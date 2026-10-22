@@ -585,7 +585,10 @@ fn server_config() -> russh::server::Config {
         methods: MethodSet::from(&[MethodKind::PublicKey][..]),
         auth_rejection_time: Duration::from_millis(500),
         auth_rejection_time_initial: Some(Duration::from_millis(500)),
-        max_auth_attempts: 3,
+        // russh enforces this since 0.64 and counts the client's initial
+        // `none` probe and every key it offers, so a profile-key user whose
+        // agent holds other keys needs OpenSSH's own MaxAuthTries default.
+        max_auth_attempts: 6,
         inactivity_timeout: Some(Duration::from_secs(300)),
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 2,

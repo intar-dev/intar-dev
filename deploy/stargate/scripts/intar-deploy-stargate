@@ -113,8 +113,8 @@ wait_ready() {
 }
 
 # The gateway records its schema version in PRAGMA user_version. Version 1 is
-# the baseline that holds every table, the workspace application ones included;
-# it replaced the SQLx migration table, which the gateway drops on adoption.
+# the baseline that holds every table, the workspace application ones included.
+# A database adopted from stargate 0.6 also keeps its SQLx migration table.
 verify_migrations() {
   local version
   version="$(database_scalar "PRAGMA user_version")"

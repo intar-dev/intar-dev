@@ -927,8 +927,10 @@ fn migrate(connection: &mut Connection) -> Result<()> {
 }
 
 /// Returns true when the file holds stargate 0.6's sqlx-migrated schema, which
-/// is the baseline, after dropping its sqlx bookkeeping. Returns false for an
-/// empty file.
+/// is the baseline. Returns false for an empty file. The sqlx bookkeeping
+/// stays: a deploy script that still checks it, and a stargate 0.6 restored by
+/// a failed apply, both read it, and with all six rows present 0.6 migrates
+/// nothing.
 fn adopt_sqlx_database(transaction: &Transaction<'_>) -> Result<bool> {
     let objects: Vec<String> = {
         let mut statement = transaction
@@ -969,9 +971,6 @@ fn adopt_sqlx_database(transaction: &Transaction<'_>) -> Result<bool> {
                 .to_owned(),
         ));
     }
-    transaction
-        .execute_batch("DROP TABLE _sqlx_migrations")
-        .map_err(db)?;
     Ok(true)
 }
 
@@ -1304,17 +1303,25 @@ mod tests {
 
         let fresh = temp_dir.path().join("fresh.db");
         drop(SqliteRouteStore::connect(&fresh).await?);
-        assert_eq!(schema(&adopted)?, schema(&fresh)?);
+        let without_sqlx = |rows: Vec<String>| {
+            rows.into_iter()
+                .filter(|row| !row.contains("_sqlx_migrations"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(without_sqlx(schema(&adopted)?), schema(&fresh)?);
         assert_eq!(foreign_keys(&adopted)?, foreign_keys(&fresh)?);
         let version: i64 =
             Connection::open(&adopted)?
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
         assert_eq!(version, 1);
-        assert!(
-            !schema(&adopted)?
-                .iter()
-                .any(|row| row.contains("_sqlx_migrations"))
-        );
+        // The sqlx bookkeeping survives, so stargate 0.6 and older deploy
+        // scripts still find all six migrations applied.
+        let sqlx_rows: i64 = Connection::open(&adopted)?.query_row(
+            "SELECT count(*) FROM _sqlx_migrations WHERE success = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(sqlx_rows, 6);
 
         // A second start is a no-op.
         let store = SqliteRouteStore::connect(&adopted).await?;
