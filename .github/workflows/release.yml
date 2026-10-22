@@ -125,7 +125,7 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           targets: aarch64-unknown-linux-musl
-          namespace-cache: ${{ matrix.runner != 'ubuntu-24.04' }}
+          namespace-cache: "false"
       - name: Run checks
         if: matrix.ci_passed != true
         run: cuenv task verify

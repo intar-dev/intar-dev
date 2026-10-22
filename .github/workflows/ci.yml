@@ -20,7 +20,7 @@ jobs:
   rust:
     if: needs.changes.outputs.rust == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-intar-dev;overrides.cache-tag=intar-rust
     permissions:
       contents: read
     timeout-minutes: 45
@@ -39,8 +39,6 @@ jobs:
         run: cuenv task verify
       - name: check-generated-contracts
         run: cuenv task check-generated-contracts
-      - name: build-kino-guest
-        run: cuenv task build-kino-guest
   security:
     if: needs.changes.outputs.security == 'true'
     needs: changes
@@ -76,7 +74,7 @@ jobs:
   images:
     if: needs.changes.outputs.images == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-intar-dev;overrides.cache-tag=intar-images
     permissions:
       contents: read
     timeout-minutes: 30
@@ -96,7 +94,7 @@ jobs:
   web:
     if: needs.changes.outputs.web == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-intar-dev;overrides.cache-tag=intar-web
     permissions:
       contents: read
     timeout-minutes: 30
@@ -110,6 +108,7 @@ jobs:
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
       - name: Set up Bun cache
+        if: github.event_name != 'merge_group'
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           path: ~/.bun/install/cache
@@ -131,6 +130,24 @@ jobs:
           overwrite: true
           if-no-files-found: error
           retention-days: 14
+  kino:
+    if: needs.changes.outputs.kino == 'true'
+    needs: changes
+    runs-on: namespace-profile-intar-dev;overrides.cache-tag=intar-kino
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+      - name: build-kino-guest
+        run: cuenv task build-kino-guest
   docs:
     if: needs.changes.outputs.docs == 'true'
     needs: changes
@@ -167,6 +184,7 @@ jobs:
       security: ${{ steps.lanes.outputs.security == 'true' || github.event_name == 'schedule' }}
       images: ${{ steps.lanes.outputs.images == 'true' }}
       web: ${{ steps.lanes.outputs.web == 'true' || github.event_name == 'merge_group' }}
+      kino: ${{ steps.lanes.outputs.kino == 'true' }}
       docs: ${{ steps.lanes.outputs.docs == 'true' || github.event_name == 'merge_group' }}
       base: ${{ steps.lanes.outputs.base }}
     permissions:
@@ -332,6 +350,7 @@ jobs:
       - security
       - images
       - web
+      - kino
       - docs
     runs-on: ubuntu-24.04
     permissions: {}

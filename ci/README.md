@@ -40,8 +40,10 @@ more in the merge group, which also holds what merged since.
    diffs against its base sha, the commit it merges onto. The release pull
    request (`release/next`), rebuilt after every merge, runs no lane: the
    merge queue checks it once. A dispatch runs every lane.
-2. **One job per lane** (`rust`, `security`, `images`, `web`, `docs`), skipped
-   when its output is false. `web-ui` runs the Chromium smoke in the Playwright
+2. **One job per lane** (`rust`, `security`, `images`, `web`, `kino`,
+   `docs`), skipped when its output is false. `kino` builds the kino guest
+   with its size-optimised, fat-LTO profile, so only a change that reaches
+   kino pays that minute. `web-ui` runs the Chromium smoke in the Playwright
    container when `web` runs. Every merge group runs the lanes with a `dist`
    (`web`, `docs`) and uploads the build each checked as `<lane>-dist-<sha>`,
    which `deploy.yml` deploys: the queue merges up to five groups at once and
@@ -66,6 +68,16 @@ more in the merge group, which also holds what merged since.
 5. **`ci-ok`** always runs. It fails when `changes` did not succeed or any job
    failed or was cancelled, and counts a skipped job as passed. It is the only
    check a ruleset needs to require.
+
+Each lane that writes much to the Namespace cache has a volume of its own
+(`cacheTag` in `lanes.cue`, the runner label
+`namespace-profile-intar-dev;overrides.cache-tag=<tag>`, listed in
+`.github/actionlint.yaml`). Parallel jobs on one volume fork different
+generations and the last commit wins, so on the shared volume the `rust` lane
+rebuilt most crates on two runs in three. Pull request runs write these
+caches, so nothing that ships reads them: the merge group's web build installs
+without the Bun cache, and `release.yml` builds each product from its tag
+without the Rust cache and with a freshly downloaded, signature-checked Zig.
 
 A daily scheduled run runs only the `security` lane, whose audits are the only
 check that sees a newly published advisory for code no pull request touched.

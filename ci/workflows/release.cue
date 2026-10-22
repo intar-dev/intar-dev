@@ -232,9 +232,14 @@ let _gitCliff = {
 			if:   "matrix.project == 'intar-agent'"
 			#StepTask & {#task: "release-preflight-jailed-release-runner"}
 		},
+		// Pull request runs write the runner's caches, so the payload release.yml
+		// publishes is built from the tag without them.
 		gha.#SetupRust & {with: {
-			targets:           "aarch64-unknown-linux-musl"
-			"namespace-cache": "${{ matrix.runner != 'ubuntu-24.04' }}"
+			targets: "aarch64-unknown-linux-musl"
+			"namespace-cache": [
+				if #dryRun {"${{ matrix.runner != 'ubuntu-24.04' }}"},
+				"false",
+			][0]
 		}},
 		// CI's rust lane runs the workspace gate in the merge group that lands a
 		// version change. A tag whose commit CI never passed there, such as a

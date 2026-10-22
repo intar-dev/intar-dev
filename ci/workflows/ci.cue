@@ -68,9 +68,12 @@ import (
 
 		for name, lane in lanes {
 			(name): {
-				"runs-on":         gha.runner
-				needs:             "changes"
-				if:                "needs.changes.outputs.\(name) == 'true'"
+				"runs-on": [
+					if lane.cacheTag != _|_ {"\(gha.runner);overrides.cache-tag=\(lane.cacheTag)"},
+					gha.runner,
+				][0]
+				needs: "changes"
+				if:    "needs.changes.outputs.\(name) == 'true'"
 				"timeout-minutes": lane.timeout
 				permissions: contents: "read"
 				let _artifact = "\(name)-dist-${{ github.sha }}"

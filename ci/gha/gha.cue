@@ -170,9 +170,12 @@ runner: "namespace-profile-intar-dev"
 	uses: "./.github/actions/setup-runtime"
 }
 
+// Pull request runs write the cache, so the merge group, whose web build
+// deploy.yml deploys, installs without it.
 #BunCache: {
 	#Step
 	name: *"Set up Bun cache" | string
+	if:   "github.event_name != 'merge_group'"
 	uses: pin."nscloud-cache".ref
 	with: path: "~/.bun/install/cache"
 }

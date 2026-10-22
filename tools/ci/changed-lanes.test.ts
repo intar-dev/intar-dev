@@ -105,6 +105,7 @@ test("a docs-only pull request runs only the docs lane", () => {
     security: "false",
     images: "false",
     web: "false",
+    kino: "false",
     docs: "true",
   });
 });
@@ -176,6 +177,7 @@ test("a merge group compares the queue's commit with its base sha", () => {
     security: "false",
     images: "false",
     web: "false",
+    kino: "false",
     docs: "true",
   });
 });
@@ -190,6 +192,7 @@ test("a local run compares the working tree with the merge base of origin/main",
     "security=false",
     "images=false",
     "web=true",
+    "kino=false",
     "docs=true",
   ]);
 });
