@@ -25,7 +25,11 @@ tooling=(
 )
 mapfile -t product_list < <(jq -c '.[]' tools/workflows/release/products.json)
 all=false
-if ! git diff --quiet "${base}" HEAD -- "${tooling[@]}"; then
+# The merge queue reruns a tooling change's dry run only when it reruns the
+# rust lane (RECHECK), whose inputs hold the release build and every product:
+# otherwise the pull request's run dry-ran the same inputs.
+if ! git diff --quiet "${base}" HEAD -- "${tooling[@]}" &&
+  { [ "${GITHUB_EVENT_NAME:-}" != merge_group ] || [ "${RECHECK:-true}" = true ]; }; then
   all=true
 elif [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
   product_list=()

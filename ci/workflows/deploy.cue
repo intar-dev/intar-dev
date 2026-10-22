@@ -1,14 +1,19 @@
 package workflows
 
-import "github.com/intar-dev/intar-dev/ci/gha"
+import (
+	"list"
+	"strings"
+
+	"github.com/intar-dev/intar-dev/ci/gha"
+)
 
 // Deploys the builds CI tested for main's tip. When the merge queue moves main,
-// or a CI run dispatched from main passes for main's tip (afterCI in ci.cue),
-// `resolve` finds the build each lane uploaded in that commit's merge group or
-// dispatched run, and the website and the docs deploy it. A lane that did not
-// run uploaded nothing, and its deploy skips. A dispatch from main deploys
-// main's tip from its latest successful CI run; with break_glass, from its
-// latest finished one, and only the builds whose own lane jobs passed there.
+// after a CI run dispatched from main passes for main's tip, or on a dispatch
+// from main (afterCI in ci.cue), `resolve` finds each lane's newest build of
+// exactly main's inputs from a merge group that landed or a dispatch from main
+// (find-builds.sh), never from a pull request's run, and the website and the
+// docs deploy it. With break_glass, a build whose own lane jobs passed in a
+// run that failed elsewhere counts too.
 "workflows": deploy: {
 	name:       "Deploy"
 	"run-name": "Deploy main @ ${{ github.event.workflow_run.head_sha || github.sha }}"
@@ -28,20 +33,26 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				contents: "read"
 			}
 			outputs: {
-				for key in ["run_id", "web_artifact", "web_digest", "docs_artifact", "docs_digest"] {
-					(key): "${{ steps.builds.outputs.\(key) }}"
+				for lane in ["web", "docs"] for key in ["artifact", "digest", "run"] {
+					("\(lane)_\(key)"): "${{ steps.builds.outputs.\(lane)_\(key) }}"
 				}
 			}
 			steps: [
-				gha.#Checkout,
+				// The history says how long ago a lane's inputs last changed.
+				gha.#Checkout & {with: "fetch-depth": 0},
 				gha.#SetupCuenv,
 				{
 					name: "Find the tested builds"
 					id:   "builds"
 					env: {
 						GH_TOKEN:    "${{ github.token }}"
-						CI_RUN_ID:   "${{ github.event.workflow_run.id }}"
 						BREAK_GLASS: "${{ inputs.break_glass }}"
+						// main before the push: which lanes' inputs the push changed.
+						BEFORE: "${{ github.event.before }}"
+						// The globs that name each build, as ci.yml hashes them.
+						for lane in ["web", "docs"] {
+							"\(strings.ToUpper(lane))_INPUTS": strings.Join(list.Concat([lanes[lane].inputs, sharedInputs]), " ")
+						}
 					}
 					#StepTask & {#task: "deploy-find-builds"}
 				},
@@ -82,6 +93,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Download tested deployment artifact"
 				with: {
 					"artifact-ids": "${{ needs.resolve.outputs.web_artifact }}"
+					"run-id":       "${{ needs.resolve.outputs.web_run }}"
 					path:           "apps/web/dist"
 				}
 			}, {
@@ -251,6 +263,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					name: "Download tested docs"
 					with: {
 						"artifact-ids": "${{ needs.resolve.outputs.docs_artifact }}"
+						"run-id":       "${{ needs.resolve.outputs.docs_run }}"
 						path:           "docs/dist"
 					}
 				},
@@ -286,7 +299,6 @@ let _verifyRevision = {
 let _downloadBuild = {
 	uses: gha.pin."download-artifact".ref
 	with: {
-		"run-id":          "${{ needs.resolve.outputs.run_id }}"
 		"github-token":    "${{ github.token }}"
 		"digest-mismatch": "error"
 	}

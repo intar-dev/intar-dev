@@ -7,16 +7,18 @@ import (
 	"github.com/intar-dev/intar-dev/ci/gha"
 )
 
-// One CI workflow for pull requests and the merge queue. `changes` picks the
-// lanes a pull request or merge group needs (lanes.cue), every lane runs on a
-// dispatch, the security lane runs daily, and ci-ok is the one required check:
-// it always runs, fails when any job failed or was cancelled, and counts a
-// skipped job as passed.
+// One CI workflow for pull requests into main and the merge queue. `changes`
+// picks the lanes a pull request needs (lanes.cue), and of those the few a
+// merge group must rerun because main changed them under the pull request;
+// every lane runs on a dispatch, the security lane runs daily, and ci-ok is
+// the one required check: it always runs, fails when any job failed or was
+// cancelled, and counts a skipped job as passed.
 //
 // Main moves only through the merge queue, which fast-forwards it to the merge
 // group's commit, so a push to main runs no CI: that commit already passed. A
-// merge group, or a dispatch from main, uploads the build of each lane with a
-// dist, and deploy.yml deploys it.
+// merge group that changes a lane with a dist, or a dispatch from main,
+// uploads its build, named by the hash of its inputs, and deploy.yml deploys
+// the build of main's inputs.
 //
 // No paths filter, so every pull request reports ci-ok. Editing the title or
 // description runs nothing here: pr-title.yml checks the title on the pull
@@ -24,7 +26,13 @@ import (
 "workflows": ci: {
 	name: "CI"
 	on: {
-		pull_request: types: ["opened", "synchronize", "reopened"]
+		// Only into main: a pull request retargeted to main from another branch
+		// keeps no ci-ok from a run against that branch, which the merge queue
+		// would otherwise trust.
+		pull_request: {
+			branches: ["main"]
+			types: ["opened", "synchronize", "reopened"]
+		}
 		// The merge queue checks each pull request merged onto main's tip
 		// before it lands (merge settings in ci/README.md).
 		merge_group: types: ["checks_requested"]
@@ -43,25 +51,38 @@ import (
 				for name, lane in lanes {
 					(name): "${{ \(strings.Join([
 						"steps.lanes.outputs.\(name) == 'true'",
-						// Every merge group builds what deploy.yml deploys. The queue
-						// merges up to five groups at once and pushes only the last
-						// one's commit, whose diff need not hold an earlier group's
-						// change.
-						if lane.dist != _|_ {"github.event_name == 'merge_group'"},
+						// A lane that is its own build runs in every merge group that
+						// changes it: deploy.yml deploys only what the queue built.
+						if lane.dist != _|_ if lane.dist.build == _|_ {"steps.lanes.outputs.\(name)_touched == 'true'"},
 						// The daily run audits the dependencies, which no pull request
 						// may touch for days, against newly published advisories.
 						if name == "security" {"github.event_name == 'schedule'"},
 					], " || ")) }}"
 				}
+				for name, lane in lanes if lane.dist != _|_ {
+					"\(name)_inputs": "${{ steps.inputs.outputs.\(name) }}"
+					if lane.dist.build != _|_ {
+						"\(name)_touched": "${{ steps.lanes.outputs.\(name)_touched }}"
+					}
+				}
 				base: "${{ steps.lanes.outputs.base }}"
 			}
 			steps: [
-				gha.#Checkout & {with: "fetch-depth": 2},
+				// A merge group needs the history to its pull request's merge base.
+				gha.#Checkout & {with: {
+					"fetch-depth": "${{ github.event_name != 'merge_group' && 2 || 0 }}"
+					filter:        "${{ github.event_name == 'merge_group' && 'blob:none' || '' }}"
+				}},
 				gha.#SetupCuenv,
 				gha.#Run & {
 					name:  "Select the lanes"
 					id:    "lanes"
 					#task: "ci-changes"
+				},
+				gha.#Run & {
+					name:  "Hash the lane inputs"
+					id:    "inputs"
+					#task: "ci-lane-inputs"
 				},
 			]
 		}
@@ -73,23 +94,29 @@ import (
 				if:                "needs.changes.outputs.\(name) == 'true'"
 				"timeout-minutes": lane.timeout
 				permissions: contents: "read"
-				let _artifact = "\(name)-dist-${{ github.sha }}"
-				steps: list.Concat([laneSteps[name], [if lane.dist != _|_ {
-					name: "Upload the tested build"
-					// The merge group's commit becomes main's tip.
-					if:   "github.event_name == 'merge_group' || github.ref == 'refs/heads/main'"
-					uses: gha.pin."upload-artifact".ref
-					with: {
-						name:                   _artifact
-						path:                   lane.dist.path
-						"include-hidden-files": lane.dist.hidden
-						// A re-run of the job replaces it.
-						overwrite:           true
-						"if-no-files-found": "error"
-						// Long enough for a dispatch of deploy.yml to find it.
-						"retention-days": 14
-					}
-				}]])
+				steps: list.Concat([laneSteps[name], [if lane.dist != _|_ {_upload[name]}]])
+			}
+		}
+
+		// A merge group that changes a lane's build but needs none of its checks,
+		// because the pull request's run checked the same inputs, still builds it
+		// for deploy.yml: a pull request's run executes branch code, so production
+		// never takes its upload.
+		for id, lane in lanes if lane.dist != _|_ if lane.dist.build != _|_ {
+			"\(id)-build": {
+				name:              "\(id) build"
+				"runs-on":         gha.runner
+				needs:             "changes"
+				if:                "needs.changes.outputs.\(id)_touched == 'true' && needs.changes.outputs.\(id) != 'true'"
+				"timeout-minutes": lane.timeout
+				permissions: contents: "read"
+				steps: [
+					gha.#Checkout & {uses: gha.pin."nscloud-checkout".ref},
+					gha.#SetupCuenv,
+					for step in lane.setup {step},
+					for task in lane.dist.build {gha.#Run & {name: task, #task: task}},
+					_upload[id],
+				]
 			}
 		}
 
@@ -117,7 +144,12 @@ import (
 				{
 					name: "Plan the release dry run"
 					id:   "plan"
-					env: BASE_SHA: "${{ needs.changes.outputs.base }}"
+					env: {
+						BASE_SHA: "${{ needs.changes.outputs.base }}"
+						// Whether the merge queue reruns the rust lane, whose inputs hold
+						// the release build and every product.
+						RECHECK: "${{ needs.changes.outputs.rust }}"
+					}
 					#StepTask & {#task: "ci-release-plan"}
 				},
 			]
@@ -178,6 +210,29 @@ import (
 	jobs: [string]: permissions?: [string]: "read" | "none"
 }
 files: ".github/workflows/ci.yml": !~"secrets\\.|github\\.token"
+
+// The build a lane with a dist uploads in a merge group, which becomes main's
+// tip, or a dispatch from main, named by its inputs so deploy.yml finds the
+// build for main's tip in whichever run built those inputs.
+_upload: {
+	for id, lane in lanes if lane.dist != _|_ {
+		(id): {
+			name: "Upload the tested build"
+			if:   "github.event_name == 'merge_group' || github.ref == 'refs/heads/main'"
+			uses: gha.pin."upload-artifact".ref
+			with: {
+				name:                   "\(id)-dist-${{ needs.changes.outputs.\(id)_inputs }}"
+				path:                   lane.dist.path
+				"include-hidden-files": lane.dist.hidden
+				// A re-run of the job replaces it.
+				overwrite:           true
+				"if-no-files-found": "error"
+				// Long enough for a dispatch of deploy.yml to find it.
+				"retention-days": 14
+			}
+		}
+	}
+}
 
 tasks: {
 	"ci-release-plan": #Script & {_script: "tools/workflows/ci/release-plan.sh"}

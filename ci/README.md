@@ -26,38 +26,59 @@ tag, and its path is part of the OIDC allowlist in
 
 ## ci.yml
 
-One workflow checks pull requests and the merge queue. Main moves only
-through the merge queue, which fast-forwards it to the merge group's commit,
-so a push to main runs no CI: that exact commit already passed. Each check
-runs once per change it can see: on each push to a pull request, then once
-more in the merge group, which also holds what merged since.
+One workflow checks pull requests into main and the merge queue. A pull
+request runs every check its change needs, so it shows the full picture, and
+ci-ok must pass before it may queue. The merge queue then reruns only what
+main changed under it. Main moves only through the queue, which
+fast-forwards it to the merge group's commit, so a push to main runs no CI:
+that exact commit already passed.
 
 1. **`changes`** runs `cuenv task ci-changes` (`tools/ci/changed-lanes.sh`),
    which prints `<lane>=true|false` for each lane. A pull request runs a lane
    when a file matching the lane's `inputs` or the `sharedInputs` in
    `ci/workflows/lanes.cue` changed. It diffs against the first parent of
-   GitHub's merge commit, which is exactly the pull request. A merge group
-   diffs against its base sha, the commit it merges onto. The release pull
-   request (`release/next`), rebuilt after every merge, runs no lane: the
-   merge queue checks it once. A dispatch runs every lane.
+   GitHub's merge commit, which is exactly the pull request. The release pull
+   request (`release/next`, committed by the release app), rebuilt after
+   every merge, runs no lane: the merge queue checks it in full. A dispatch
+   runs every lane.
+
+   A merge group runs a lane only when it changed the lane's inputs against
+   its base sha **and** main changed them in a commit after the pull
+   request's merge base with main. The pull request's own run checked the
+   lane against a main at least that new, so otherwise the lane's inputs are
+   the ones it checked, and a lane's result depends only on its inputs (the
+   same assumption the diff selection makes). Usually a merge group runs only
+   `changes` and `ci-ok`. It finds the pull request's head from GitHub's queue
+   branch (`pr-<number>-…`) and the public `refs/pull/<number>/head`, and
+   uses it only when merging it onto the base gives the group's exact tree;
+   when it cannot, or the head comes from the release app, it runs every lane
+   the group changed.
 2. **One job per lane** (`rust`, `security`, `images`, `web`, `kino`,
    `docs`), skipped when its output is false. `kino` builds the kino guest
    with its size-optimised, fat-LTO profile, so only a change that reaches
    kino pays that minute. `web-ui` runs the Chromium smoke in the Playwright
-   container when `web` runs. Every merge group runs the lanes with a `dist`
-   (`web`, `docs`) and uploads the build each checked as `<lane>-dist-<sha>`,
-   which `deploy.yml` deploys: the queue merges up to five groups at once and
-   pushes only the last one's commit, whose diff need not hold an earlier
-   group's change. A dispatch from main uploads them too.
-3. **`release-plan`** lists the products a change would release: in the merge
-   queue, each whose manifest version differs from the base; in the merge queue
-   and on a pull request, all of them when the release build itself changed
-   (`tools/workflows/ci/release-plan.sh`). So the release pull request
-   dry-runs once, in the queue, not on each rebuild. **`release-dry-run`**
+   container when `web` runs.
+3. **Builds for `deploy.yml`.** A pull request's run executes branch code, so
+   production never takes its upload. A merge group that changes a lane with
+   a `dist` builds it: `docs` runs its lane, which is its build, and `web`
+   runs `web build` (`install-js`, `build.js`, `check-web-artifact`; the pull
+   request's run tested those inputs) unless the `web` lane reruns anyway.
+   A dispatch from main runs and uploads every lane. Each build is named
+   `<lane>-dist-<inputs hash>` (`cuenv task ci-lane-inputs`,
+   `tools/ci/lane-inputs.sh`: the mode, blob and path of every tracked file
+   the lane's globs match), so `deploy.yml` finds the build of main's exact
+   inputs in whichever run built them.
+4. **`release-plan`** lists the products a change would release
+   (`tools/workflows/ci/release-plan.sh`): in the merge queue, each whose
+   manifest version differs from the base, so the release pull request
+   dry-runs once, in the queue, not on each rebuild; on a pull request, all of
+   them when the release build itself changed. The queue dry-runs such a
+   change again only when it reruns the `rust` lane, whose inputs hold the
+   release build and every product. **`release-dry-run`**
    builds and smoke-tests each with `release.yml`'s build steps
    (`#ReleaseBuild` in `release.cue`), without the workspace gate the `rust`
    lane runs and without keeping the payload. Nothing is published.
-4. **`pr-title`** runs in the merge group and fails unless the squash commit's
+5. **`pr-title`** runs in the merge group and fails unless the squash commit's
    subject, the pull request title that lands on main, is a Conventional
    Commit with one scope (`tools/ci/check-pr-title.sh`, `cuenv task
    pr-title`): git-cliff versions the releases from those commits.
@@ -65,13 +86,14 @@ more in the merge group, which also holds what merged since.
    opened, pushed or edited. It is not required, and editing the title or
    description runs nothing else, so no lane runs twice for one commit. The
    title reaches the script through the environment, never as script text.
-5. **`ci-ok`** always runs. It fails when `changes` did not succeed or any job
+6. **`ci-ok`** always runs. It fails when `changes` did not succeed or any job
    failed or was cancelled, and counts a skipped job as passed. It is the only
    check a ruleset needs to require.
 
-Every Namespace job shares one cache volume. Pull request runs write it, so nothing that ships reads them: the merge group's web build installs
-without the Bun cache, and `release.yml` builds each product from its tag
-without the Rust cache and with a freshly downloaded, signature-checked Zig.
+Every Namespace job shares one cache volume. Pull request runs write it, so
+nothing that ships reads it: only pull request runs use the Bun cache, and
+`release.yml` builds each product from its tag without the Rust cache and
+with a freshly downloaded, signature-checked Zig.
 
 A daily scheduled run runs only the `security` lane, whose audits are the only
 check that sees a newly published advisory for code no pull request touched.
@@ -104,23 +126,26 @@ tip. After a CI run dispatched from main, they act only when it passed for the
 commit that is still main's tip. A run for an older commit is left to the run
 for the newer one, and a failed CI run deploys and publishes nothing.
 
-- **`deploy.yml`** deploys what CI built and tested. `resolve` finds each
-  lane's build in the tip's merge group or dispatched CI run
-  (`tools/workflows/deploy/find-builds.sh`), and `deploy-web` and
-  `deploy-docs` download it by that artifact id, which fails on a digest
-  mismatch, and deploy it. A lane that did not run uploaded no build, so its
-  deploy skips; every merge group and dispatch runs both. A re-run deploys
+- **`deploy.yml`** deploys what CI built and tested. `resolve`
+  (`tools/workflows/deploy/find-builds.sh`) hashes main's inputs for `web` and
+  `docs` and takes, for each, the newest unexpired `<lane>-dist-<hash>` from a
+  `ci.yml` run for a merge group into main or a dispatch from main whose
+  commit is on main and which passed; it waits for such a run still
+  completing. `deploy-web` and `deploy-docs` download that build by artifact
+  id, which fails on a digest mismatch, deploy it, and the summary names the
+  commit and run that built it. A push that did not change a lane's inputs,
+  with no build of them kept, leaves production on the build it serves; a push
+  that changed them, or a dispatch, without a build fails. A re-run deploys
   only while its revision is main's tip.
-  - `gh workflow run deploy.yml --ref main` deploys main's tip from its latest
-    successful CI run, for example after a guest-tools promotion.
-  - When that run's builds have expired (14 days), or no CI run passed for the
-    tip, `gh workflow run ci.yml --ref main` builds everything again and
-    deploys once it passes.
-  - Break glass: when CI on the tip keeps failing outside a deploy's own lane,
-    for example on a newly published advisory in `security`,
-    `gh workflow run deploy.yml --ref main -f break_glass=true` deploys each
-    build whose own lane jobs passed in the tip's latest finished CI run
-    (`web` with its Chromium smoke, `docs`).
+  - `gh workflow run deploy.yml --ref main` deploys main's tip again, for
+    example after a guest-tools promotion.
+  - When the build has expired (14 days), `gh workflow run ci.yml --ref main`
+    builds every lane again and deploys once it passes.
+  - Break glass: when CI keeps failing outside a deploy's own lane, for
+    example on a newly published advisory in `security`,
+    `gh workflow run deploy.yml --ref main -f break_glass=true` also takes a
+    build whose own lane jobs passed in a run that failed elsewhere (`web
+    build`, or `web` with its Chromium smoke; `docs`).
 - **`release.yml`**, on every push to main, tags and publishes merged
   releases, then rebuilds the release pull request; a dispatch from main
   resumes the drafts. See "Releasing" in the root README. A build reruns the

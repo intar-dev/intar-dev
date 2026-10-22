@@ -57,8 +57,9 @@ function write(repo: string, files: Record<string, string>) {
 }
 
 // A repository whose main holds a file for every lane, and a pull request
-// branch that changes `files`. Returns the base commit.
-function fixture(files: Record<string, string>) {
+// branch that changes `files`, committed by `author`. Returns the base commit.
+const releaseApp = "intar-release[bot] <336463729+intar-release[bot]@users.noreply.github.com>";
+function fixture(files: Record<string, string>, author = "test <test@example.invalid>") {
   const repo = mkdtempSync(join(tmpdir(), "intar-changed-lanes-"));
   roots.push(repo);
   run("git", ["init", "-q", "-b", "main"], repo);
@@ -74,7 +75,7 @@ function fixture(files: Record<string, string>) {
   run("git", ["checkout", "-q", "-b", "pr"], repo);
   write(repo, files);
   run("git", ["add", "-A"], repo);
-  run("git", ["commit", "-q", "-m", "change"], repo);
+  run("git", ["commit", "-q", "-m", "change", `--author=${author}`], repo);
   return { repo, base };
 }
 
@@ -139,8 +140,8 @@ test("a dispatch runs every lane", () => {
   expect(Object.values(selected)).toEqual(lanes.map(() => "true"));
 });
 
-test("the release pull request and the daily run select no lane", () => {
-  const { repo } = fixture({ "crates/kino/Cargo.toml": "[package]\nversion = \"1.0.0\"\n" });
+test("the release app's release pull request and the daily run select no lane", () => {
+  const { repo } = fixture({ "crates/kino/Cargo.toml": "[package]\nversion = \"1.0.0\"\n" }, releaseApp);
   mergeCheckout(repo);
   for (const env of [
     { GITHUB_EVENT_NAME: "pull_request", GITHUB_HEAD_REF: "release/next" },
@@ -150,6 +151,14 @@ test("the release pull request and the daily run select no lane", () => {
     delete selected.base;
     expect(Object.values(selected)).toEqual(lanes.map(() => "false"));
   }
+});
+
+test("a branch named release/next that the release app did not commit runs its lanes", () => {
+  const { repo } = fixture({ "docs/src/index.md": "# Changed\n" });
+  mergeCheckout(repo);
+  expect(changedLanes(repo, { GITHUB_EVENT_NAME: "pull_request", GITHUB_HEAD_REF: "release/next" })).toMatchObject({
+    docs: "true",
+  });
 });
 
 test("without a merge checkout the base is the event's base sha", () => {
@@ -163,7 +172,7 @@ test("without a merge checkout the base is the event's base sha", () => {
   expect(selected).toMatchObject({ base, docs: "true", web: "false" });
 });
 
-test("a merge group compares the queue's commit with its base sha", () => {
+test("a merge group without its pull request head runs every lane the group changed", () => {
   const { repo, base } = fixture({ "docs/src/index.md": "# Changed\n" });
   const event = join(repo, ".git", "event.json");
   writeFileSync(event, JSON.stringify({ merge_group: { base_sha: base } }));
@@ -171,15 +180,60 @@ test("a merge group compares the queue's commit with its base sha", () => {
     GITHUB_EVENT_NAME: "merge_group",
     GITHUB_EVENT_PATH: event,
   });
-  expect(selected).toEqual({
-    base,
-    rust: "false",
-    security: "false",
-    images: "false",
-    web: "false",
-    kino: "false",
-    docs: "true",
-  });
+  expect(selected).toMatchObject({ base, docs: "true", docs_touched: "true", web: "false", web_touched: "false" });
+});
+
+// main at `base`; the pull request branched there and changed docs, as
+// `author`; main then moved on with each of `mainCommits`; the queue squashes
+// the pull request onto main's tip. GitHub's refs/pull/7/head is `head`, the
+// pull request's head unless given. Returns the lanes the merge group runs.
+function queued(mainCommits: Record<string, string | null>[], options: { author?: string; head?: string } = {}) {
+  const { repo } = fixture({ "docs/src/index.md": "# Changed\n" }, options.author);
+  run("git", ["update-ref", "refs/pull/7/head", options.head ?? "pr"], repo);
+  run("git", ["remote", "add", "origin", repo], repo);
+  run("git", ["checkout", "-q", "main"], repo);
+  for (const files of mainCommits) {
+    for (const [path, contents] of Object.entries(files)) {
+      if (contents === null) rmSync(join(repo, path));
+      else write(repo, { [path]: contents });
+    }
+    run("git", ["add", "-A"], repo);
+    run("git", ["commit", "-q", "--allow-empty", "-m", "main moved on"], repo);
+  }
+  const tip = run("git", ["rev-parse", "HEAD"], repo);
+  run("git", ["merge", "-q", "--squash", "pr"], repo);
+  run("git", ["commit", "-q", "-m", "fix(docs): change (#7)"], repo);
+  const event = join(repo, ".git", "event.json");
+  writeFileSync(
+    event,
+    JSON.stringify({ merge_group: { base_sha: tip, head_ref: `refs/heads/gh-readonly-queue/main/pr-7-${tip}` } }),
+  );
+  const selected = changedLanes(repo, { GITHUB_EVENT_NAME: "merge_group", GITHUB_EVENT_PATH: event });
+  expect(selected.base).toBe(tip);
+  expect(selected.docs_touched).toBe("true");
+  return selected;
+}
+const webMoved = [{ "apps/web/src/index.ts": "export const later = true;\n" }];
+
+test("a merge group skips a lane its pull request's run checked against the same inputs", () => {
+  expect(queued(webMoved)).toMatchObject({ docs: "false", web: "false", web_touched: "false" });
+});
+
+test("a merge group reruns a lane whose inputs main changed since the pull request's merge base", () => {
+  expect(queued([{ "docs/src/other.md": "# Later\n" }])).toMatchObject({ docs: "true", web: "false" });
+});
+
+test("a merge group reruns a lane main changed and reverted since: the pull request's run may have seen it", () => {
+  const reverted = queued([{ "docs/src/other.md": "# Later\n" }, { "docs/src/other.md": null }]);
+  expect(reverted).toMatchObject({ docs: "true" });
+});
+
+test("a merge group runs every lane it changed when the pull request head does not give its tree", () => {
+  expect(queued(webMoved, { head: "main" })).toMatchObject({ docs: "true", web: "false" });
+});
+
+test("a merge group runs every lane the release app's pull request changed", () => {
+  expect(queued(webMoved, { author: releaseApp })).toMatchObject({ docs: "true", web: "false" });
 });
 
 test("a local run compares the working tree with the merge base of origin/main", () => {

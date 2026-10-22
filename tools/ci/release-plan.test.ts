@@ -42,7 +42,7 @@ function write(repo: string, files: Record<string, string>) {
 
 // Two products at 1.0.0 on the base, then `files` committed on top. Returns
 // the prefixes the dry run would build for each event.
-function plan(files: Record<string, string>) {
+function plan(files: Record<string, string>, queue: Record<string, string> = {}) {
   const repo = mkdtempSync(join(tmpdir(), "intar-release-plan-"));
   roots.push(repo);
   git(repo, "init", "-q", "-b", "main");
@@ -66,7 +66,7 @@ function plan(files: Record<string, string>) {
       writeFileSync(output, "");
       const result = spawnSync(script, {
         cwd: repo,
-        env: { ...baseEnv, BASE_SHA: base, GITHUB_EVENT_NAME: event, GITHUB_OUTPUT: output },
+        env: { ...baseEnv, BASE_SHA: base, GITHUB_EVENT_NAME: event, GITHUB_OUTPUT: output, ...queue },
         encoding: "utf8",
       });
       if (result.status !== 0) throw new Error(result.stderr);
@@ -88,5 +88,14 @@ test("a change to the release build dry-runs every product, on the pull request 
   expect(plan({ "tools/workflows/release/build-release-artifacts.sh": "#!/bin/sh\n" })).toEqual({
     pull_request: all,
     merge_group: all,
+  });
+});
+
+test("the merge queue reruns a tooling change's dry run only with the rust lane", () => {
+  const tooling = { "tools/workflows/release/build-release-artifacts.sh": "#!/bin/sh\n" };
+  expect(plan(tooling, { RECHECK: "false" }).merge_group).toEqual([]);
+  expect(plan({ ...tooling, "crates/a/Cargo.toml": '[package]\nversion = "1.1.0"\n' }, { RECHECK: "false" })).toEqual({
+    pull_request: ["a/v1.1.0", "b/v1.0.0"],
+    merge_group: ["a/v1.1.0"],
   });
 });

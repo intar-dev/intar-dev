@@ -6,6 +6,8 @@ name: CI
     types:
       - checks_requested
   pull_request:
+    branches:
+      - main
     types:
       - opened
       - synchronize
@@ -108,7 +110,7 @@ jobs:
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
       - name: Set up Bun cache
-        if: github.event_name != 'merge_group'
+        if: github.event_name == 'pull_request'
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           path: ~/.bun/install/cache
@@ -124,7 +126,7 @@ jobs:
         if: github.event_name == 'merge_group' || github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: web-dist-${{ github.sha }}
+          name: web-dist-${{ needs.changes.outputs.web_inputs }}
           path: apps/web/dist
           include-hidden-files: true
           overwrite: true
@@ -170,9 +172,47 @@ jobs:
         if: github.event_name == 'merge_group' || github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: docs-dist-${{ github.sha }}
+          name: docs-dist-${{ needs.changes.outputs.docs_inputs }}
           path: docs/dist
           include-hidden-files: false
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 14
+  web-build:
+    name: web build
+    if: needs.changes.outputs.web_touched == 'true' && needs.changes.outputs.web != 'true'
+    needs: changes
+    runs-on: namespace-profile-intar-dev
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up the CI runtime
+        uses: ./.github/actions/setup-runtime
+      - name: Set up Bun cache
+        if: github.event_name == 'pull_request'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
+        with:
+          path: ~/.bun/install/cache
+      - name: install-js
+        run: cuenv task install-js
+      - name: build.js
+        run: cuenv task build.js
+      - name: check-web-artifact
+        run: cuenv task check-web-artifact
+      - name: Upload the tested build
+        if: github.event_name == 'merge_group' || github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: web-dist-${{ needs.changes.outputs.web_inputs }}
+          path: apps/web/dist
+          include-hidden-files: true
           overwrite: true
           if-no-files-found: error
           retention-days: 14
@@ -183,9 +223,12 @@ jobs:
       rust: ${{ steps.lanes.outputs.rust == 'true' }}
       security: ${{ steps.lanes.outputs.security == 'true' || github.event_name == 'schedule' }}
       images: ${{ steps.lanes.outputs.images == 'true' }}
-      web: ${{ steps.lanes.outputs.web == 'true' || github.event_name == 'merge_group' }}
+      web: ${{ steps.lanes.outputs.web == 'true' }}
       kino: ${{ steps.lanes.outputs.kino == 'true' }}
-      docs: ${{ steps.lanes.outputs.docs == 'true' || github.event_name == 'merge_group' }}
+      docs: ${{ steps.lanes.outputs.docs == 'true' || steps.lanes.outputs.docs_touched == 'true' }}
+      web_inputs: ${{ steps.inputs.outputs.web }}
+      docs_inputs: ${{ steps.inputs.outputs.docs }}
+      web_touched: ${{ steps.lanes.outputs.web_touched }}
       base: ${{ steps.lanes.outputs.base }}
     permissions:
       contents: read
@@ -195,12 +238,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: ${{ github.event_name != 'merge_group' && 2 || 0 }}
+          filter: ${{ github.event_name == 'merge_group' && 'blob:none' || '' }}
       - name: Set up cuenv
         uses: ./.github/actions/setup-cuenv
       - name: Select the lanes
         id: lanes
         run: cuenv task ci-changes
+      - name: Hash the lane inputs
+        id: inputs
+        run: cuenv task ci-lane-inputs
   web-ui:
     name: Chromium smoke
     needs: changes
@@ -268,6 +315,7 @@ jobs:
         id: plan
         env:
           BASE_SHA: ${{ needs.changes.outputs.base }}
+          RECHECK: ${{ needs.changes.outputs.rust }}
         run: cuenv task -p ci --package ci ci-release-plan
   release-dry-run:
     name: Release dry run ${{ matrix.tag }}
@@ -352,6 +400,7 @@ jobs:
       - web
       - kino
       - docs
+      - web-build
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 5

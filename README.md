@@ -68,7 +68,8 @@ other registry.
 - **Dry run:** the merge queue builds and smoke-tests every product whose
   version a pull request changes, the release pull request included, with the
   release build's own steps. A change to the release build dry-runs every
-  product, on the pull request too.
+  product on the pull request, and again in the merge queue only when main
+  changed the Rust code under it.
 - **Publishing:** when the merge queue lands that pull request, the Release
   workflow tags each new version on main and opens a draft release with that
   version's changelog section as its notes. It builds and smoke-tests each
