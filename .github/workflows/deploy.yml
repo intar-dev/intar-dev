@@ -9,6 +9,9 @@ run-name: Deploy main @ ${{ github.event.workflow_run.head_sha || github.sha }}
         description: Deploy each build whose own CI lane passed on main's tip, although another CI job failed
         default: false
         type: boolean
+  push:
+    branches:
+      - main
   workflow_run:
     workflows:
       - CI
@@ -21,20 +24,21 @@ jobs:
   resolve:
     name: Find the tested builds
     if: |-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
-      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_sha == github.sha)
     runs-on: ubuntu-24.04
     outputs:
-      run_id: ${{ steps.builds.outputs.run_id }}
       web_artifact: ${{ steps.builds.outputs.web_artifact }}
       web_digest: ${{ steps.builds.outputs.web_digest }}
+      web_run: ${{ steps.builds.outputs.web_run }}
       docs_artifact: ${{ steps.builds.outputs.docs_artifact }}
       docs_digest: ${{ steps.builds.outputs.docs_digest }}
+      docs_run: ${{ steps.builds.outputs.docs_run }}
     permissions:
       actions: read
       contents: read
@@ -44,14 +48,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Set up cuenv
         uses: ./.github/actions/setup-cuenv
       - name: Find the tested builds
         id: builds
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ github.event.workflow_run.id }}
           BREAK_GLASS: ${{ inputs.break_glass }}
+          BEFORE: ${{ github.event.before }}
+          WEB_INPUTS: .github/workflows/deploy.yml .github/actions/setup-runtime/** tools/workflows/deploy/** tools/workflows/website/** package.json bun.lock patches/** tsconfig.base.json tools/check-import-boundaries.ts tools/database/** tools/deploy/** tools/vm-boot-benchmark/** tools/*.py tools/image-build/verify-published-image.py crates/intar-image-scenario/** apps/web/** env.cue cue.mod/** ci/** .github/workflows/ci.yml .github/actions/setup-cuenv/** tools/ci/changed-lanes.sh tools/ci/lane-inputs.sh
+          DOCS_INPUTS: .github/workflows/deploy.yml .github/actions/setup-runtime/** tools/workflows/deploy/** apps/web/.node-version docs/** env.cue cue.mod/** ci/** .github/workflows/ci.yml .github/actions/setup-cuenv/** tools/ci/changed-lanes.sh tools/ci/lane-inputs.sh
         run: cuenv task -p ci --package ci deploy-find-builds
   deploy-web:
     name: Deploy the website
@@ -86,10 +93,10 @@ jobs:
       - name: Download tested deployment artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          run-id: ${{ needs.resolve.outputs.run_id }}
           github-token: ${{ github.token }}
           digest-mismatch: error
           artifact-ids: ${{ needs.resolve.outputs.web_artifact }}
+          run-id: ${{ needs.resolve.outputs.web_run }}
           path: apps/web/dist
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
@@ -224,10 +231,10 @@ jobs:
       - name: Download tested docs
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          run-id: ${{ needs.resolve.outputs.run_id }}
           github-token: ${{ github.token }}
           digest-mismatch: error
           artifact-ids: ${{ needs.resolve.outputs.docs_artifact }}
+          run-id: ${{ needs.resolve.outputs.docs_run }}
           path: docs/dist
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime

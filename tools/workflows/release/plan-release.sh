@@ -58,8 +58,11 @@ for product in "${product_list[@]}"; do
     gh release create "${tag}" --draft --verify-tag \
       --title "${project} v${version}" --notes "${notes}"
   fi
-  ci_passed="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&head_sha=$(git rev-parse "${tag}^{commit}")&status=success" \
-    --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")] | length > 0')"
+  # The merge group that landed the version change, or a CI run dispatched
+  # from main. A version change touches the product's Cargo.toml, a rust lane
+  # input, so that run's rust lane checked exactly this commit.
+  ci_passed="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=$(git rev-parse "${tag}^{commit}")&status=success" \
+    --jq '[.workflow_runs[] | select((.event == "merge_group" and (.head_branch | startswith("gh-readonly-queue/main/"))) or (.event == "workflow_dispatch" and .head_branch == "main"))] | length > 0')"
   matrix="$(jq -c --argjson product "${product}" --arg tag "${tag}" --arg version "${version}" --argjson ci_passed "${ci_passed}" \
     '. + [$product + {tag: $tag, version: $version, ci_passed: $ci_passed} | del(.paths)]' <<<"${matrix}")"
 done

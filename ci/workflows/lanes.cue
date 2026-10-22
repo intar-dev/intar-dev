@@ -3,8 +3,7 @@ package workflows
 import "github.com/intar-dev/intar-dev/ci/gha"
 
 // The CI lanes. ci.yml runs each lane as one job when a file matching its
-// inputs or sharedInputs changed, and every lane on a push to main or a
-// dispatch. `cuenv task lanes.<name>` runs the same steps locally, and
+// inputs or sharedInputs changed, and every lane on a dispatch. `cuenv task lanes.<name>` runs the same steps locally, and
 // `cuenv task ci` runs every lane (see env.cue).
 lanes: [string]: close({
 	// Path globs, matched as git :(glob) pathspecs by tools/ci/changed-lanes.sh:
@@ -15,12 +14,18 @@ lanes: [string]: close({
 	// Root tasks, run in order.
 	steps: [...string]
 	timeout: int
-	// The build the lane checks, which deploy.yml deploys: on main, ci.yml
-	// uploads this directory as the artifact <lane>-dist-<sha>.
+	// The build the lane checks, which deploy.yml deploys. A merge group that
+	// changes the lane's inputs, and a dispatch from main, upload this directory
+	// as the artifact <lane>-dist-<hash of the lane's inputs>.
 	dist?: {
 		path!: string
 		// Whether the upload keeps dotfiles.
 		hidden!: bool
+		// The root tasks that build it, without the lane's tests, when the lane
+		// has tests besides: a merge group whose pull request's run checked the
+		// lane runs only these. Without them, the lane itself is the build, and
+		// a merge group that changes its inputs runs it.
+		build?: [...string]
 	}
 })
 
@@ -33,12 +38,13 @@ sharedInputs: [
 	".github/workflows/ci.yml",
 	".github/actions/setup-cuenv/**",
 	"tools/ci/changed-lanes.sh",
+	"tools/ci/lane-inputs.sh",
 ]
 
 lanes: {
 	rust: {
 		setup: [gha.#SetupRust]
-		steps: ["installer-tests", "verify", "check-generated-contracts", "build-kino-guest"]
+		steps: ["installer-tests", "verify", "check-generated-contracts"]
 		timeout: 45
 		inputs: [
 			"Cargo.toml",
@@ -48,9 +54,11 @@ lanes: {
 			"tools/image-build/**",
 			".github/actions/setup-rust/**",
 			// deploy/personal-metal/test_installer.py reads release.yml and the
-			// release artifact build step.
+			// release artifact build step. The rest of the release build is here
+			// too, so a merge group reruns a tooling change's release dry run
+			// exactly when it reruns this lane (release-plan in ci.cue).
 			".github/workflows/release.yml",
-			"tools/workflows/release/build-release-artifacts.sh",
+			"tools/workflows/release/**",
 			"package.json",
 			"bun.lock",
 			"content/scenarios/base-images.hcl",
@@ -130,15 +138,12 @@ lanes: {
 		setup: [gha.#SetupRuntime, gha.#BunCache]
 		steps: ["install-js", "test.js", "build.js", "check-web-artifact"]
 		timeout: 30
-		dist: {path: "apps/web/dist", hidden: true}
+		dist: {path: "apps/web/dist", hidden: true, build: ["install-js", "build.js", "check-web-artifact"]}
 		inputs: [
 			".github/workflows/deploy.yml",
 			".github/actions/setup-runtime/**",
 			"tools/workflows/deploy/**",
 			"tools/workflows/website/**",
-			"Cargo.toml",
-			"Cargo.lock",
-			"rust-toolchain.toml",
 			"package.json",
 			"bun.lock",
 			"patches/**",
@@ -152,6 +157,23 @@ lanes: {
 			"tools/image-build/verify-published-image.py",
 			"crates/intar-image-scenario/**",
 			"apps/web/**",
+		]
+	}
+
+	// The kino guest's size-optimised, fat-LTO musl build: about a minute even
+	// with a warm cache, so only a change that reaches kino pays it.
+	kino: {
+		setup: [gha.#SetupRust]
+		steps: ["build-kino-guest"]
+		timeout: 20
+		inputs: [
+			"Cargo.toml",
+			"Cargo.lock",
+			"rust-toolchain.toml",
+			".github/actions/setup-rust/**",
+			"crates/kino/**",
+			"crates/intar-contracts/**",
+			"crates/intar-kino-proto/**",
 		]
 	}
 

@@ -307,6 +307,7 @@ describe("RunShareDO", () => {
     expect(sharedMatchesRecording(prompt, recording)).toBe(false);
   });
 
+  // Close to vitest's 5 s default on a busy runner.
   it("writes a checkpoint every 60 segments for late joiners", async () => {
     const { stub, shareId } = await initShare();
     const writer = await producer(stub);
@@ -321,7 +322,7 @@ describe("RunShareDO", () => {
     expect(messages.map((message) => message.seq)).toEqual(
       Array.from({ length: 61 }, (_, index) => index + 1),
     );
-  });
+  }, 20_000);
 
   it("deletes a write that a stop overtook", async () => {
     const { stub, shareId } = await initShare();

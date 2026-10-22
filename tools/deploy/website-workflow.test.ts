@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
 
 // Bun is the CI runtime and supplies the YAML parser; no new dependency.
@@ -50,7 +50,7 @@ it("parses every workflow shell block", () => {
   }
 });
 
-it("deploys after CI passes on main's tip, or on a dispatch from main", () => {
+it("deploys when the merge queue moves main, after a CI run dispatched from main, or on a dispatch", () => {
   expect(Object.keys(workflow.jobs).sort()).toEqual(["deploy-docs", "deploy-web", "resolve"]);
   expect(workflow.on).toEqual({
     workflow_dispatch: {
@@ -62,22 +62,30 @@ it("deploys after CI passes on main's tip, or on a dispatch from main", () => {
         },
       },
     },
+    push: { branches: ["main"] },
     workflow_run: { workflows: ["CI"], types: ["completed"], branches: ["main"] },
   });
-  // release.yml tags and publishes after the same CI runs.
+  // CI runs on no push: the merge queue already checked main's tip.
+  expect(ci.on.push).toBeUndefined();
+  expect(Object.keys(ci.on).sort()).toEqual(["merge_group", "pull_request", "schedule", "workflow_dispatch"]);
+  // release.yml tags and publishes on the same events.
+  expect(release.on.push).toEqual(workflow.on.push);
   expect(release.on.workflow_run).toEqual(workflow.on.workflow_run);
   const gate = workflow.jobs.resolve!.if!;
   expect(release.jobs.plan!.if).toBe(gate);
   for (const condition of [
+    "((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main')",
     "github.event.workflow_run.conclusion == 'success'",
-    "(github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')",
+    "github.event.workflow_run.event == 'workflow_dispatch' &&",
     "github.event.workflow_run.head_branch == 'main'",
     "github.event.workflow_run.head_repository.full_name == github.repository",
     "github.event.workflow_run.head_sha == github.sha",
-    "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')",
   ]) {
     expect(gate).toContain(condition);
   }
+  // A merge group or a scheduled run completing on main triggers nothing.
+  expect(gate).not.toContain("workflow_run.event == 'merge_group'");
+  expect(gate).not.toContain("workflow_run.event == 'schedule'");
   expect(deploy.environment).toEqual({ name: "production", url: "https://intar.dev" });
   expect(docs.environment).toEqual({ name: "production", url: "https://docs.intar.dev" });
 });
@@ -88,15 +96,21 @@ it("deploys each build that its CI lane uploaded, by the identity resolve checke
     ["docs", docs, "docs/dist"],
   ] as const) {
     const upload = ci.jobs[lane]!.steps.at(-1)!;
-    expect(upload.if).toBe("github.ref == 'refs/heads/main'");
-    expect(upload.with).toMatchObject({ name: `${lane}-dist-\${{ github.sha }}`, path, overwrite: true });
+    expect(upload.if).toBe("github.event_name == 'merge_group' || github.ref == 'refs/heads/main'");
+    // Named by the hash of its inputs, which resolve computes the same way.
+    expect(ci.jobs.changes!.outputs![`${lane}_inputs`]).toBe(`\${{ steps.inputs.outputs.${lane} }}`);
+    expect(upload.with).toMatchObject({
+      name: `${lane}-dist-\${{ needs.changes.outputs.${lane}_inputs }}`,
+      path,
+      overwrite: true,
+    });
     expect(job.needs).toBe("resolve");
     expect(job.if).toBe(`needs.resolve.outputs.${lane}_artifact != ''`);
     expect(job.permissions).toEqual({ actions: "read", contents: "read" });
     const download = job.steps.find((step) => step.uses?.startsWith("actions/download-artifact@"))!;
     expect(download.with).toEqual({
       "artifact-ids": `\${{ needs.resolve.outputs.${lane}_artifact }}`,
-      "run-id": "${{ needs.resolve.outputs.run_id }}",
+      "run-id": `\${{ needs.resolve.outputs.${lane}_run }}`,
       "github-token": "${{ github.token }}",
       "digest-mismatch": "error",
       path,
@@ -189,11 +203,66 @@ it("recovers a maintenance version a failed deploy left serving without a step c
   );
 });
 
-// find-builds.sh against a stub gh: main's tip, the CI runs, and one CI run's
-// artifacts.
-function findBuilds(env: Record<string, string>) {
+// find-builds.sh in a repository whose main has a docs commit and then a web
+// commit, against a stub gh: main's tip, artifacts by name, runs by id, and a
+// run's jobs. A run's commit is main's tip unless it says otherwise.
+const digest = `sha256:${"b".repeat(64)}`;
+const queue = `gh-readonly-queue/main/pr-1-${"c".repeat(40)}`;
+type Run = { event: string; head_branch: string; conclusion: string; path?: string; jobs?: string[]; head_sha?: string };
+const passed = (event: string, head_branch: string): Run => ({ event, head_branch, conclusion: "success" });
+
+function findBuilds(env: Record<string, string>, runs: Record<number, Run>, artifacts: Record<string, number[][]>) {
   const root = mkdtempSync(join(tmpdir(), "intar-find-builds-"));
   try {
+    const repo = join(root, "repo");
+    const git = (args: string[]) =>
+      spawnSync("git", args, {
+        cwd: repo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.invalid",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.invalid",
+        },
+      }).stdout.trim();
+    mkdirSync(join(repo, "docs"), { recursive: true });
+    mkdirSync(join(repo, "web"), { recursive: true });
+    git(["init", "-q"]);
+    writeFileSync(join(repo, "docs", "index.md"), "# Docs\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "docs"]);
+    const docsCommit = git(["rev-parse", "HEAD"]);
+    writeFileSync(join(repo, "web", "index.ts"), "export {};\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "web"]);
+    const tip = git(["rev-parse", "HEAD"]);
+    const hash = (lane: string, globs: string) =>
+      // Without GITHUB_OUTPUT, which a CI run sets, the hash goes to stdout.
+      spawnSync("bash", [resolve("tools/ci/lane-inputs.sh"), `${lane} ${globs}`], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, GITHUB_OUTPUT: "" },
+      })
+        .stdout.trim()
+        .split("=")[1];
+    const names = { web: `web-dist-${hash("web", "web/**")}`, docs: `docs-dist-${hash("docs", "docs/**")}` };
+    const runMap = Object.fromEntries(
+      Object.entries(runs).map(([id, run]) => [
+        id,
+        { path: ".github/workflows/ci.yml", head_repository: { full_name: "intar-dev/intar-dev" }, head_sha: tip, status: "completed", ...run },
+      ]),
+    );
+    const byName = Object.fromEntries(
+      Object.entries(artifacts).map(([lane, list]) => [
+        names[lane as "web" | "docs"],
+        { artifacts: list.map(([id, run, expired = 0]) => ({ id, digest, expired: expired === 1, workflow_run: { id: run } })) },
+      ]),
+    );
+    writeFileSync(join(root, "runs.json"), JSON.stringify(runMap));
+    writeFileSync(join(root, "artifacts.json"), JSON.stringify(byName));
     writeFileSync(
       join(root, "gh"),
       `#!/usr/bin/env bash
@@ -204,112 +273,105 @@ while [ $# -gt 0 ]; do
 done
 case "$path" in
   */commits/main) body='{"sha":"'"$MAIN"'"}' ;;
-  */actions/workflows/ci.yml/runs*) body="$RUNS" ;;
-  */artifacts) body="$ARTIFACTS" ;;
-  */jobs*) body="$JOBS" ;;
+  */actions/artifacts\?name=*) body="$(jq -c --arg n "\${path##*name=}" '.[$n] // {"artifacts":[]}' "${root}/artifacts.json")" ;;
+  */jobs*) id="\${path%/jobs*}"; id="\${id##*/}"; body="$(jq -c --arg id "$id" '{jobs: ((.[$id].jobs // []) | map({name: ., conclusion: "success"}))}' "${root}/runs.json")" ;;
+  */actions/runs/*) body="$(jq -c --arg id "\${path##*/}" '.[$id]' "${root}/runs.json")" ;;
 esac
 jq -r "\${filter:-.}" <<<"$body"
 `,
     );
     chmodSync(join(root, "gh"), 0o755);
     for (const file of ["output", "summary"]) writeFileSync(join(root, file), "");
-    const result = spawnSync("bash", ["-e", "tools/workflows/deploy/find-builds.sh"], {
+    const result = spawnSync("bash", ["-e", resolve("tools/workflows/deploy/find-builds.sh")], {
+      cwd: repo,
       encoding: "utf8",
       env: {
         ...process.env,
         PATH: `${root}:${process.env.PATH}`,
         GITHUB_REPOSITORY: "intar-dev/intar-dev",
-        GITHUB_SHA: sha,
+        GITHUB_SHA: tip,
+        GITHUB_EVENT_NAME: "workflow_dispatch",
         GITHUB_OUTPUT: join(root, "output"),
         GITHUB_STEP_SUMMARY: join(root, "summary"),
-        RUNNER_TEMP: root,
-        MAIN: sha,
-        CI_RUN_ID: "77",
-        RUNS: '{"workflow_runs":[]}',
+        MAIN: tip,
+        WEB_INPUTS: "web/**",
+        DOCS_INPUTS: "docs/**",
+        // A push after the docs commit changed web, not docs.
+        BEFORE: env.GITHUB_EVENT_NAME === "push" ? docsCommit : "",
         ...env,
       },
     });
-    return { status: result.status, stderr: result.stderr, output: readFileSync(join(root, "output"), "utf8") };
+    return {
+      status: result.status,
+      stderr: result.stderr,
+      output: readFileSync(join(root, "output"), "utf8"),
+      summary: readFileSync(join(root, "summary"), "utf8"),
+    };
   } finally {
     rmSync(root, { force: true, recursive: true });
   }
 }
-const sha = "a".repeat(40);
-const digest = `sha256:${"b".repeat(64)}`;
-function artifacts(...list: { id: number; name: string; expired?: boolean }[]) {
-  return JSON.stringify({
-    artifacts: list.map(({ id, name, expired = false }) => ({
-      id,
-      name,
-      expired,
-      digest,
-      workflow_run: { id: 77, head_sha: sha },
-    })),
-  });
-}
+const web = (id: number, run: number) => `web_artifact=${id}\nweb_digest=${digest}\nweb_run=${run}\n`;
+const docsBuild = (id: number, run: number) => `docs_artifact=${id}\ndocs_digest=${digest}\ndocs_run=${run}\n`;
 
-it("finds the build of each lane that ran, and nothing for one that did not", () => {
-  const found = findBuilds({
-    ARTIFACTS: artifacts({ id: 1, name: `web-dist-${sha}` }, { id: 3, name: "website-smoke-1" }),
-  });
-  expect(found.status, found.stderr).toBe(0);
-  expect(found.output).toBe(`run_id=77\nweb_artifact=1\nweb_digest=${digest}\n`);
+it("deploys the newest passing build of main's inputs from a landed merge group or a dispatch from main", () => {
+  const runs = {
+    76: passed("workflow_dispatch", "main"),
+    77: passed("merge_group", queue),
+    78: passed("merge_group", `gh-readonly-queue/other/pr-1-${"c".repeat(40)}`),
+    79: { ...passed("merge_group", queue), conclusion: "failure" },
+    80: passed("pull_request", "main"),
+    81: passed("workflow_dispatch", "other"),
+    82: { ...passed("merge_group", queue), path: ".github/workflows/other.yml" },
+    // A group that never landed: its commit is not on main.
+    83: { ...passed("merge_group", queue), head_sha: "d".repeat(40) },
+  };
+  // [artifact id, run id, expired]
+  const list = [[10, 83], [9, 77, 1], [8, 82], [7, 81], [6, 80], [5, 79], [4, 78], [3, 77], [1, 76]];
+  for (const event of ["push", "workflow_dispatch", "workflow_run"]) {
+    const found = findBuilds({ GITHUB_EVENT_NAME: event }, runs, { web: list, docs: [[2, 76]] });
+    expect(found.status, found.stderr).toBe(0);
+    expect(found.output).toBe(web(3, 77) + docsBuild(2, 76));
+    expect(found.summary).toContain("- web: web-dist-");
+  }
 });
 
-it("refuses an expired build, and deploys nothing once main moved on", () => {
-  const expired = findBuilds({
-    ARTIFACTS: artifacts({ id: 1, name: `web-dist-${sha}` }, { id: 2, name: `docs-dist-${sha}`, expired: true }),
-  });
-  expect(expired.status).not.toBe(0);
-  expect(expired.output).toBe("");
-  const moved = findBuilds({ MAIN: "c".repeat(40), ARTIFACTS: artifacts({ id: 1, name: `web-dist-${sha}` }) });
+it("keeps production's build of inputs a push did not change, and fails a dispatch without one", () => {
+  const runs = { 77: passed("merge_group", queue) };
+  const push = findBuilds({ GITHUB_EVENT_NAME: "push" }, runs, { web: [[3, 77]] });
+  expect(push.status, push.stderr).toBe(0);
+  expect(push.output).toBe(web(3, 77));
+  expect(push.summary).toContain("docs: inputs unchanged");
+  const dispatch = findBuilds({}, runs, { web: [[3, 77]] });
+  expect(dispatch.status).not.toBe(0);
+  expect(dispatch.stderr).toContain("No passing build of docs-dist-");
+  expect(dispatch.output).toBe("");
+});
+
+it("deploys nothing once main moved on", () => {
+  const moved = findBuilds({ MAIN: "c".repeat(40) }, { 77: passed("merge_group", queue) }, { web: [[3, 77]] });
   expect(moved.status, moved.stderr).toBe(0);
   expect(moved.output).toBe("");
 });
 
-it("deploys a dispatch from main's tip's latest successful CI run on main", () => {
-  const runs = (list: { id: number; event: string }[]) =>
-    JSON.stringify({ workflow_runs: list.map((run, index) => ({ ...run, run_number: index })) });
-  const found = findBuilds({
-    CI_RUN_ID: "",
-    RUNS: runs([
-      { id: 76, event: "push" },
-      { id: 78, event: "pull_request" },
-      { id: 77, event: "workflow_dispatch" },
-    ]),
-    ARTIFACTS: artifacts({ id: 2, name: `docs-dist-${sha}` }),
-  });
-  expect(found.status, found.stderr).toBe(0);
-  expect(found.output).toBe(`run_id=77\ndocs_artifact=2\ndocs_digest=${digest}\n`);
-  const none = findBuilds({ CI_RUN_ID: "", RUNS: runs([{ id: 78, event: "pull_request" }]) });
-  expect(none.status).not.toBe(0);
-});
-
-it("breaks glass with the builds whose own lane jobs passed", () => {
+it("breaks glass with a build whose own lane jobs passed in a run that failed elsewhere", () => {
   // The job names find-builds.sh reads.
   expect(ci.jobs.web!.name).toBeUndefined();
   expect(ci.jobs.docs!.name).toBeUndefined();
   expect(ci.jobs["web-ui"]!.name).toBe("Chromium smoke");
-  const jobs = (passed: string[]) =>
-    JSON.stringify({
-      jobs: ["changes", "security", "web", "Chromium smoke", "docs"].map((name) => ({
-        name,
-        conclusion: passed.includes(name) ? "success" : "failure",
-      })),
-    });
-  const env = {
-    CI_RUN_ID: "",
-    BREAK_GLASS: "true",
-    RUNS: JSON.stringify({ workflow_runs: [{ id: 77, event: "push", run_number: 1 }] }),
-    ARTIFACTS: artifacts({ id: 1, name: `web-dist-${sha}` }, { id: 2, name: `docs-dist-${sha}` }),
+  expect(ci.jobs["web-build"]!.name).toBe("web build");
+  // The docs lane is its own build.
+  expect(ci.jobs["docs-build"]).toBeUndefined();
+  const failed = (jobs: string[]): Run => ({ ...passed("merge_group", queue), conclusion: "failure", jobs });
+  const runs = {
+    76: passed("merge_group", queue),
+    77: failed(["web build"]),
+    78: failed(["changes", "web"]),
+    79: failed(["web", "Chromium smoke"]),
   };
-  const web = findBuilds({ ...env, JOBS: jobs(["changes", "web", "Chromium smoke"]) });
-  expect(web.status, web.stderr).toBe(0);
-  expect(web.output).toBe(`run_id=77\nweb_artifact=1\nweb_digest=${digest}\n`);
-  const docs = findBuilds({ ...env, JOBS: jobs(["changes", "web", "docs"]) });
-  expect(docs.status, docs.stderr).toBe(0);
-  expect(docs.output).toBe(`run_id=77\ndocs_artifact=2\ndocs_digest=${digest}\n`);
-  const none = findBuilds({ ...env, JOBS: jobs(["changes", "security"]) });
-  expect(none.status).not.toBe(0);
-  expect(none.output).toBe("");
+  const list = { web: [[5, 79], [4, 78], [3, 77], [2, 76]], docs: [[1, 76]] };
+  expect(findBuilds({ BREAK_GLASS: "true" }, runs, list).output).toBe(web(5, 79) + docsBuild(1, 76));
+  const noSmoke = { ...runs, 79: failed(["web"]) };
+  expect(findBuilds({ BREAK_GLASS: "true" }, noSmoke, list).output).toBe(web(3, 77) + docsBuild(1, 76));
+  expect(findBuilds({}, runs, list).output).toBe(web(2, 76) + docsBuild(1, 76));
 });

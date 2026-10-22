@@ -52,6 +52,33 @@ test.each([
   expect(check(title)).toBe(1);
 });
 
+test("without PR_TITLE it checks the subject of the commit checked out", () => {
+  const repo = mkdtempSync(join(tmpdir(), "intar-pr-title-repo-"));
+  const git = (...args: string[]) =>
+    spawnSync("git", args, {
+      cwd: repo,
+      env: {
+        PATH: process.env.PATH ?? "",
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.com",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.com",
+      },
+    });
+  const subject = () =>
+    spawnSync(script, { cwd: repo, env: { PATH: process.env.PATH ?? "" } }).status;
+  try {
+    git("init", "-q");
+    // The merge queue's squash commit: the title, then the pull request number.
+    git("commit", "-q", "--allow-empty", "-m", "fix(ci): run once (#250)", "-m", "* body");
+    expect(subject()).toBe(0);
+    git("commit", "-q", "--allow-empty", "-m", "Run once (#250)");
+    expect(subject()).toBe(1);
+  } finally {
+    rmSync(repo, { force: true, recursive: true });
+  }
+});
+
 test("a title is data, never script text", () => {
   const marker = join(cwd, "pwned");
   for (const title of [

@@ -13,9 +13,10 @@ if [ "${GITHUB_RUN_ATTEMPT}" != 1 ]; then
     exit 1
   fi
 fi
-# Deployment follows a CI run on main, or a dispatch from main.
+# Deployment follows the merge queue's push to main, a CI run dispatched from
+# main, or a dispatch from main.
 case "${GITHUB_EVENT_NAME}" in
-  workflow_run|workflow_dispatch) ;;
+  push|workflow_run|workflow_dispatch) ;;
   *)
     echo "unsupported deploy event: ${GITHUB_EVENT_NAME}" >&2
     exit 1

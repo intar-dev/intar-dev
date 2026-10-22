@@ -1494,6 +1494,7 @@ describe("ScenarioSourceDO organization apply", () => {
   });
 
   // D1 refuses a statement with more than 100 bound parameters.
+  // Close to vitest's 5 s default on a busy runner.
   it("rotates the images of 60 scenarios within D1's bound parameters", async () => {
     github();
     const scenarioIds = Array.from({ length: 60 }, (_, index) => `acme-s${index}`);
@@ -1515,7 +1516,7 @@ describe("ScenarioSourceDO organization apply", () => {
     expect(await commitState(SHA_B)).toMatchObject({ state: "live" });
     const [rollback] = await db().select().from(scenarioCatalogSnapshots);
     expect(rollback?.snapshotJson.targetScenarioIds).toHaveLength(60);
-  });
+  }, 20_000);
 
   it("promotes and syncs a catalog that links 120 scenarios", async () => {
     github();

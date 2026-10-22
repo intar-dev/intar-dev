@@ -9,7 +9,9 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 // git-cliff finds since each product's latest tag
 // (tools/workflows/release/cliff.toml and products.json).
 //
-// Once CI passes on main's tip (afterCI in ci.cue), or on a dispatch from main:
+// On that push, which the merge queue makes only once CI passed for the
+// commit, after a CI run dispatched from main passes for main's tip, or on a
+// dispatch from main (afterCI in ci.cue):
 //
 //   - plan tags each product whose manifest version is new, opens its draft
 //     release, and lists every draft for the build;
@@ -56,16 +58,13 @@ let _gitCliff = {
 
 "workflows": release: {
 	name: "Release"
-	on: afterCI.on & {
-		push: branches: ["main"]
-		workflow_dispatch: {}
-	}
-	// A push only updates the release pull request, so it queues apart from the
-	// runs that tag and publish. A CI run this workflow ignores gets a group of
-	// its own: GitHub keeps one pending run per group, and the ignored run must
-	// not replace one that publishes.
+	on: afterCI.on & {workflow_dispatch: {}}
+	// Every run that acts queues in one group, and a newer pending run replaces
+	// an older one: it updates the pull request and resumes every draft too. A
+	// CI run this workflow ignores gets a group of its own, so it never
+	// replaces one that publishes.
 	concurrency: gha.#ProductionConcurrency & {
-		group: "release-${{ github.event_name == 'push' && 'pr' || (\(afterCI.if)) && 'publish' || github.run_id }}"
+		group: "release-${{ (\(afterCI.if)) && 'main' || github.run_id }}"
 	}
 	jobs: {
 		plan: {
@@ -91,9 +90,12 @@ let _gitCliff = {
 			]
 		}
 
+		// After plan, so a release that just merged is tagged and the pull
+		// request proposes the next one. A failed plan still updates it.
 		"release-pr": {
 			name:        "Update the release pull request"
-			if:          "github.event_name == 'push'"
+			needs:       "plan"
+			if:          "${{ !cancelled() && github.event_name == 'push' }}"
 			"runs-on":   "ubuntu-24.04"
 			environment: "release-pr"
 			steps: [
@@ -193,8 +195,9 @@ let _gitCliff = {
 
 // One product's build from a plan job's matrix. release.yml builds each draft
 // from its tag and keeps the payload for publish. ci.yml's release dry run
-// builds the pull request with the same steps, minus the workspace gate its
-// rust lane runs and the payload upload, since nothing publishes it.
+// builds the merge group or pull request with the same steps, minus the
+// workspace gate its rust lane runs and the payload upload, since nothing
+// publishes it.
 #ReleaseBuild: gha.#Job & {
 	#plan!:   string
 	#dryRun!: bool
@@ -229,14 +232,18 @@ let _gitCliff = {
 			if:   "matrix.project == 'intar-agent'"
 			#StepTask & {#task: "release-preflight-jailed-release-runner"}
 		},
+		// Pull request runs write the runner's caches, so the payload release.yml
+		// publishes is built from the tag without them.
 		gha.#SetupRust & {with: {
-			targets:           "aarch64-unknown-linux-musl"
-			"namespace-cache": "${{ matrix.runner != 'ubuntu-24.04' }}"
+			targets: "aarch64-unknown-linux-musl"
+			"namespace-cache": [
+				if #dryRun {"${{ matrix.runner != 'ubuntu-24.04' }}"},
+				"false",
+			][0]
 		}},
-		// CI's rust lane runs the workspace gate on every push to main. A tag
-		// whose commit CI never passed there, such as a release merge that a
-		// quicker push overtook, a dispatch, or a draft left from before, runs
-		// it here.
+		// CI's rust lane runs the workspace gate in the merge group that lands a
+		// version change. A tag whose commit CI never passed there, such as a
+		// draft left from before, runs it here.
 		if !#dryRun {
 			gha.#Run & {
 				name:  "Run checks"

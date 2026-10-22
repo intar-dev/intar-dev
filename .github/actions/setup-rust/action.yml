@@ -7,7 +7,10 @@ inputs:
     required: false
     default: ""
   namespace-cache:
-    description: Mount the Namespace Rust cache; 'false' on a GitHub-hosted runner.
+    description: >-
+      Use the runner's caches: the Namespace Rust cache, and Zig from the tool
+      cache with its global cache. 'false' on a GitHub-hosted runner and for a
+      release build, since pull request runs write them.
     required: false
     default: "true"
 
@@ -44,3 +47,7 @@ runs:
       uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
       with:
         version: 0.17.0
+        # Without the tool cache, setup-zig downloads Zig and checks its
+        # signature.
+        use-cache: ${{ inputs.namespace-cache }}
+        use-tool-cache: ${{ inputs.namespace-cache }}
