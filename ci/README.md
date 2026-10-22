@@ -52,7 +52,9 @@ that exact commit already passed.
    branch (`pr-<number>-…`) and the public `refs/pull/<number>/head`, and
    uses it only when merging it onto the base gives the group's exact tree;
    when it cannot, or the head comes from the release app, it runs every lane
-   the group changed.
+   the group changed. The checkout holds only the group's commit and its base,
+   so it first fetches main's history without file contents, where the merge
+   base lies. The `changes` log says which way it went, and why.
 2. **One job per lane** (`rust`, `security`, `images`, `web`, `kino`,
    `docs`), skipped when its output is false. `kino` builds the kino guest
    with its size-optimised, fat-LTO profile, so only a change that reaches
