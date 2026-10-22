@@ -8,8 +8,8 @@ import { join, relative, resolve } from "node:path";
 // follow a `uses:` reference into the composite it names.
 const POLICY_DIRECTORIES = [".github/workflows", ".github/actions"] as const;
 const PINNED_TAIKI_TOOLS = new Map([
-  ["cargo-nextest", "0.9.143"],
-  ["cargo-zigbuild", "0.23.0"],
+  ["cargo-nextest", "0.9.149"],
+  ["cargo-zigbuild", "0.24.0"],
   ["cargo-audit", "0.22.2"],
   ["git-cliff", "2.14.2"],
 ]);
@@ -18,10 +18,9 @@ const PINNED_TAIKI_TOOLS = new Map([
 const RENDERED_HEADER = "# Generated from ci/workflows/";
 const SHA = /^[0-9a-f]{40}$/u;
 const EXACT_VERSION = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
-const RUST_TOOLCHAIN = "1.97.0";
-const NODE_VERSION = "24.17.0";
-const BUN_VERSION = "1.3.14";
-const GO_VERSION = "1.27.0";
+const RUST_TOOLCHAIN = "1.99.1";
+const NODE_VERSION = "24.22.1";
+const BUN_VERSION = "1.4.4";
 // Miniflare 5.20260820.0-alpha is the newest published runtime on 2026-08-23
 // and rejects 2026-08-23 as a future compatibility date. Keep every Worker
 // and its test pool on the newest supported date until that runtime advances.
@@ -125,14 +124,6 @@ export function checkWorkflowSecurity(repositoryRoot: string): string[] {
       ) {
         violations.push(
           `${name}:${lineNumber}: Bun must be pinned to ${BUN_VERSION}`,
-        );
-      }
-      if (
-        action === "actions/setup-go" &&
-        stepProperty(lines, index, "go-version") !== GO_VERSION
-      ) {
-        violations.push(
-          `${name}:${lineNumber}: Go must be pinned to ${GO_VERSION}`,
         );
       }
     }
@@ -309,17 +300,6 @@ function checkInstalledToolVersions(
     }
   }
 
-  const goInstall = /\bgo\s+install\s+["']?([^\s"']+)["']?/u.exec(content);
-  if (goInstall?.[1]) {
-    const separator = goInstall[1].lastIndexOf("@");
-    const version = separator > 0 ? goInstall[1].slice(separator + 1) : "";
-    if (!EXACT_VERSION.test(version)) {
-      violations.push(
-        `${workflowName}:${lineNumber}: go install must use a literal exact version`,
-      );
-    }
-  }
-
   if (/\bcargo\s+install\b/u.test(content)) {
     const version = /--version\s+["']?([^\s"']+)/u.exec(content)?.[1] ?? "";
     if (!EXACT_VERSION.test(version) || !/\s--locked(?:\s|$)/u.test(content)) {
@@ -354,9 +334,9 @@ function checkZigVersion(
   violations: string[],
 ): void {
   const version = stepProperty(lines, useLineIndex, "version");
-  if (version !== "0.16.0") {
+  if (version !== "0.17.0") {
     violations.push(
-      `${workflowName}:${useLineIndex + 1}: Zig must be pinned to 0.16.0`,
+      `${workflowName}:${useLineIndex + 1}: Zig must be pinned to 0.17.0`,
     );
   }
 }

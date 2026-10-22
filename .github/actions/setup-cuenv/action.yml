@@ -8,12 +8,12 @@ runs:
     - name: Install cuenv
       shell: bash
       env:
-        CUENV_VERSION: 0.56.7
+        CUENV_VERSION: 0.57.3
         # GitHub's digest for the cuenv-linux-x64 asset of that release.
-        CUENV_SHA256: de1e5080fca8abcd06a723a66df8661e163dad7941a96537167e0e149d77a909
+        CUENV_SHA256: 70b2097cb21afde54cbba72756fc654910cee18dd5330e6ed79b0de0748d8843
         # The zip and module.cue layers that registry.cue.works serves for
         # github.com/cuenv/cuenv@v0.56.7, the dependency in cue.mod/module.cue.
-        SCHEMA_ZIP_SHA256: 079edc09c3ab17fad69f8a2b0c2f50e0d188c9f79525b153225c52b596d60dc8
+        SCHEMA_ZIP_SHA256: f83e92b64bbd087b6dc217165e70253adca6824111de4b83e90d46de7b8b7447
         SCHEMA_MOD_SHA256: 132f127337f3258d51664ff1a4cc3ce343a58d3ab0edabf1c006b42237c8eec2
       run: |
         set -euo pipefail

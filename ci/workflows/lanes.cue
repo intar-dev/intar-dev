@@ -207,7 +207,7 @@ chromiumSmoke: {
 	}, {
 		name: "Set up Bun"
 		uses: gha.pin."setup-bun".ref
-		with: "bun-version": "1.3.14"
+		with: "bun-version": "1.4.4"
 	}, {
 		name: "Install dependencies"
 		run:  "bun install --frozen-lockfile"
