@@ -85,10 +85,11 @@ import (
 
 		// The products this pull request would release: each whose version
 		// differs from the base, or all of them when the release build changed.
+		// The merge queue plans again against main's newer tip.
 		"release-plan": {
 			name:              "release-plan"
 			needs:             "changes"
-			if:                "github.event_name == 'pull_request'"
+			if:                "github.event_name == 'pull_request' || github.event_name == 'merge_group'"
 			"runs-on":         "ubuntu-24.04"
 			"timeout-minutes": 10
 			permissions: contents: "read"
