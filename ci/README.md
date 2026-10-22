@@ -158,10 +158,12 @@ git-cliff versions the releases from main's commits, so each must be a pull
 request title that `pr-title` checked. That takes squash merges named after the
 title. The repository is set that way: squash merges only, the squash commit
 titled after the pull request (`squash_merge_commit_title=PR_TITLE`), and no
-merge or rebase merges. Check it with `gh api repos/intar-dev/intar-dev --jq
-'{allow_squash_merge, allow_merge_commit, allow_rebase_merge,
-squash_merge_commit_title}'`. Stage B also allows only
-squash merges.
+merge or rebase merges. Auto-merge is allowed (`allow_auto_merge`), so a pull
+request can be set to squash-merge once `ci-ok` passes, and merged branches are
+deleted (`delete_branch_on_merge`). Check it with `gh api
+repos/intar-dev/intar-dev --jq '{allow_squash_merge, allow_merge_commit,
+allow_rebase_merge, squash_merge_commit_title, allow_auto_merge,
+delete_branch_on_merge}'`. Stage B also allows only squash merges.
 
 ## Returning to `cuenv sync ci`
 
