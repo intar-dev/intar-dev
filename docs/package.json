@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "astro dev",
-    "check": "astro check",
+    "check": "astro sync && tsc --noEmit",
     "build": "bun run check && astro build",
     "preview": "astro preview",
     "deploy": "wrangler deploy"
@@ -19,8 +19,7 @@
     "astro": "7.4.2"
   },
   "devDependencies": {
-    "@astrojs/check": "0.9.12",
-    "typescript": "6.0.3",
+    "typescript": "7.0.2",
     "wrangler": "4.151.3"
   }
 }
