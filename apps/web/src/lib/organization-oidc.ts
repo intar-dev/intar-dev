@@ -95,10 +95,18 @@ export async function registerOrganizationOidc(
       10_000,
       isSafePublicHttpsEndpoint,
     );
-    validateDiscoveryDocument(document, issuer);
+    // An admin may type the issuer without the trailing slash that
+    // Auth0-style providers advertise. The library compares issuers exactly,
+    // so a slash is the only difference accepted here, and the advertised
+    // value is what is checked and stored: ID tokens carry exactly that.
+    const advertised =
+      document.issuer?.replace(/\/$/, "") === issuer.replace(/\/$/, "")
+        ? document.issuer
+        : issuer;
+    validateDiscoveryDocument(document, advertised);
     discovered = normalizeDiscoveryUrls(
       document,
-      issuer,
+      advertised,
       isSafePublicHttpsEndpoint,
     );
   } catch {

@@ -1,8 +1,8 @@
 diff --git a/dist/context/transaction.mjs b/dist/context/transaction.mjs
-index 1ac1ae6c778046c3e8a626988043c54f478b5ca3..0b9819d17714baad82e32c1bcfdd0e982e933b28 100644
+index b2a9ff5a046b549a0e620cba29020431efc3092f..cf79e811670fd8e302f567d8e6b4639deab5afce 100644
 --- a/dist/context/transaction.mjs
 +++ b/dist/context/transaction.mjs
-@@ -74,6 +74,11 @@ const runWithTransaction = async (adapter, fn, options) => {
+@@ -86,6 +86,11 @@ const runWithTransaction = async (adapter, fn, options) => {
  			hasError = true;
  			error = e;
  		}
@@ -11,6 +11,6 @@ index 1ac1ae6c778046c3e8a626988043c54f478b5ca3..0b9819d17714baad82e32c1bcfdd0e98
 +			if (hasError) throw error;
 +			return result;
 +		}
- 		if (hasError) throw error;
- 		for (const hook of pendingHooks) try {
- 			await hook();
+ 		const runPendingHooks = async (unhandledErrors) => {
+ 			for (const hook of pendingHooks) try {
+ 				await hook();

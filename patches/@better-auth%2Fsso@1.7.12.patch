@@ -1,7 +1,7 @@
-diff --git a/dist/index-sM6JWXeV.d.mts b/dist/index-sM6JWXeV.d.mts
-index 2fe04042d5bf37bd1f8da2dda60190df6250ced6..2860db42d3e2f6fa9d35548d1fd5acbb92b924cf 100644
---- a/dist/index-sM6JWXeV.d.mts
-+++ b/dist/index-sM6JWXeV.d.mts
+diff --git a/dist/index-qb-OvHIE.d.mts b/dist/index-qb-OvHIE.d.mts
+index 0612dac63881c0dcb74c3643667d6ae932d083d9..e5ec1ae51e122e5cc10901cfcba7a84b6b0fcd2e 100644
+--- a/dist/index-qb-OvHIE.d.mts
++++ b/dist/index-qb-OvHIE.d.mts
 @@ -3,6 +3,7 @@ import * as z from "zod";
  import samlifyDefault from "samlify";
  import { DBFieldAttribute, FieldAttributeToObject, InferAdditionalFieldsFromPluginOptions, RemoveFieldsWithReturnedFalse } from "better-auth/db";
@@ -10,7 +10,7 @@ index 2fe04042d5bf37bd1f8da2dda60190df6250ced6..2860db42d3e2f6fa9d35548d1fd5acbb
  import * as _$better_call0 from "better-call";
  //#region src/saml/algorithms.d.ts
  declare const SignatureAlgorithm: {
-@@ -361,6 +362,26 @@ interface SSOOptions {
+@@ -364,6 +365,26 @@ interface SSOOptions {
       */
      provider: SSOProvider<SSOOptions>;
    }) => Awaitable<void>) | undefined;
@@ -38,10 +38,10 @@ index 2fe04042d5bf37bd1f8da2dda60190df6250ced6..2860db42d3e2f6fa9d35548d1fd5acbb
     * If true, the `provisionUser` callback will be called on every login,
     * not just when a new user is registered. This is useful when you need
 diff --git a/dist/index.mjs b/dist/index.mjs
-index b793a72226b6a185a8e3a9d87ae60af6689f005b..1ab4eb7d7191490b6d08c057e7bbcd903007ac6f 100644
+index ca304e9bbe1922d6de75af099a43f1c294dfbebd..3403183cf6c99c38659e31714f55cd7c53417ec5 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -3833,7 +3833,7 @@ async function handleOIDCCallback(ctx, options, providerId, stateData, parsedPro
+@@ -3855,7 +3855,7 @@ async function handleOIDCCallback(ctx, options, providerId, stateData, parsedPro
  	};
  	if (!config.tokenEndpoint) return redirectOIDCError("invalid_provider", "token_endpoint_not_found");
  	const tokenEndpoint = config.tokenEndpoint;
@@ -50,7 +50,7 @@ index b793a72226b6a185a8e3a9d87ae60af6689f005b..1ab4eb7d7191490b6d08c057e7bbcd90
  	if (config.tokenEndpointAuthentication === "private_key_jwt") {
  		let resolved;
  		const matchingDefault = options?.defaultSSO?.find((p) => p.providerId === provider.providerId && "privateKey" in p && p.privateKey);
-@@ -3950,6 +3950,19 @@ async function handleOIDCCallback(ctx, options, providerId, stateData, parsedPro
+@@ -3973,6 +3973,19 @@ async function handleOIDCCallback(ctx, options, providerId, stateData, parsedPro
  		accountId: userInfoId
  	};
  	const isTrustedProvider = "domainVerified" in provider && provider.domainVerified === true && validateEmailDomain(userInfoEmail, provider.domain);
