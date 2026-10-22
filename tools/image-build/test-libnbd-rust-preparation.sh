@@ -9,7 +9,7 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-readonly EXPECTED_VERSION='1.22.2'
+readonly EXPECTED_VERSION='1.24.4'
 # The prepared tree is the upstream rust/ subtree plus COPYING.LIB,
 # PROVENANCE.md, and the generated libnbd-sys/libnbd_version.
 readonly EXPECTED_FILES=64

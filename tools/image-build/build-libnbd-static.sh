@@ -2,21 +2,21 @@
 # Build the pinned static libnbd archive used by the image builder.
 set -euo pipefail
 
-readonly LIBNBD_VERSION='1.22.2'
-readonly LIBNBD_TAR='libnbd-1.22.2.tar.gz'
-readonly LIBNBD_URL="https://download.libguestfs.org/libnbd/1.22-stable/${LIBNBD_TAR}"
-readonly LIBNBD_TAR_SHA256='bdc403af00fd1c9b5ed20503765496a81c2d0197af550765af3dee196e8519ca'
-readonly LIBNBD_SIGNATURE_SHA256='0dd24ca3252c16365c52b1232946f078e5278698694133bc918c809cd69b4cc0'
+readonly LIBNBD_VERSION='1.24.4'
+readonly LIBNBD_TAR='libnbd-1.24.4.tar.gz'
+readonly LIBNBD_URL="https://download.libguestfs.org/libnbd/1.24-stable/${LIBNBD_TAR}"
+readonly LIBNBD_TAR_SHA256='19dc521f2b8142ecd45d3009e191b60b76105b1c522b03ce0582adf74864b83b'
+readonly LIBNBD_SIGNATURE_SHA256='384254b130928ea6159d4f1135b5113e966b18ad8d827037e7b7d08ad55a6edf'
 readonly LIBNBD_KEYRING_URL='https://download.libguestfs.org/libguestfs.keyring'
 readonly LIBNBD_KEYRING_SHA256='827d8fa129e8ae59d750001c3ebe551aea74343b3786147ae551032405e86ee3'
 readonly LIBNBD_SIGNING_FINGERPRINT='F7774FB1AD074A7E8C8767EA91738F73E1B768A0'
 # The pinned Rust bindings for this same release are prepared by
 # prepare-libnbd-rust.sh, which repeats the download pins below.
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly PKGCONFIG_PATCH="${SCRIPT_DIR}/libnbd-1.22.2-static-pkgconfig.patch"
+readonly PKGCONFIG_PATCH="${SCRIPT_DIR}/libnbd-1.24.4-static-pkgconfig.patch"
 
 if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
-    printf 'error: libnbd 1.22.2 requires Bash 4 or later\n' >&2
+    printf 'error: libnbd 1.24.4 requires Bash 4 or later\n' >&2
     exit 1
 fi
 

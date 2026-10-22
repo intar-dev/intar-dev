@@ -17,13 +17,13 @@
 # while it builds the static archive; see build-libnbd-static.sh.
 set -euo pipefail
 
-readonly LIBNBD_VERSION='1.22.2'
-readonly LIBNBD_TAR='libnbd-1.22.2.tar.gz'
-readonly LIBNBD_URL="https://download.libguestfs.org/libnbd/1.22-stable/${LIBNBD_TAR}"
+readonly LIBNBD_VERSION='1.24.4'
+readonly LIBNBD_TAR='libnbd-1.24.4.tar.gz'
+readonly LIBNBD_URL="https://download.libguestfs.org/libnbd/1.24-stable/${LIBNBD_TAR}"
 # Keep these download pins identical to build-libnbd-static.sh. That script
 # stays self-contained because release archives ship a copy of it.
-readonly LIBNBD_TAR_SHA256='bdc403af00fd1c9b5ed20503765496a81c2d0197af550765af3dee196e8519ca'
-readonly LIBNBD_SOURCE_COMMIT='5f55a26f3a776c11049a27154b1f2b59b8c335da'
+readonly LIBNBD_TAR_SHA256='19dc521f2b8142ecd45d3009e191b60b76105b1c522b03ce0582adf74864b83b'
+readonly LIBNBD_SOURCE_COMMIT='95ce522e7deb04174fde499770c8166dcf6eae08'
 readonly LOCK_WAIT_SECONDS=600
 # Age is only a fallback for a lock whose owner cannot be judged.
 readonly STALE_LOCK_MINUTES=10

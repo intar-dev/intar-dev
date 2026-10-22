@@ -5,7 +5,7 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Prepared cache written by prepare-libnbd-rust.sh. Keep the version in step
 # with the pin in that script and in crates/intar-image-build/Cargo.toml.
-readonly BINDINGS_DIR="${SCRIPT_DIR}/../../target/libnbd-rust/1.22.2/rust"
+readonly BINDINGS_DIR="${SCRIPT_DIR}/../../target/libnbd-rust/1.24.4/rust"
 readonly BUILD_SCRIPT="${SCRIPT_DIR}/build-libnbd-static.sh"
 
 usage() {
@@ -69,7 +69,7 @@ cp -R "$BINDINGS_DIR/." "$destination/rust-bindings/"
 cat <<'NOTICE' > "$destination/THIRD_PARTY_NOTICES.md"
 # libnbd static-link materials
 
-This release statically links libnbd 1.22.2 and its official Rust bindings.
+This release statically links libnbd 1.24.4 and its official Rust bindings.
 Both are LGPL-2.1-or-later. `source/` contains the verified source material,
 license, detached signature, key record, package patch, and build provenance.
 `relink/` contains the static C archive, public header, and pkg-config metadata

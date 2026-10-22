@@ -16,15 +16,8 @@ impl AsyncSeqpacketClient {
         #[cfg(not(target_os = "linux"))]
         rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
         rustix::fs::fcntl_setfl(&fd, rustix::fs::OFlags::NONBLOCK)?;
-        // tokio deprecates AsyncFd::new for inner types that can swap their
-        // descriptor; `register` is the replacement, but it is unsafe and the
-        // crate forbids unsafe code. An OwnedFd that the AsyncFd owns for its
-        // whole life cannot swap or close its descriptor, and tokio has no safe
-        // wrapper for a SOCK_SEQPACKET socket.
-        #[expect(deprecated)]
-        let io = AsyncFd::new(fd)?;
         Ok(Self {
-            io,
+            io: AsyncFd::new(fd)?,
             next_request_id: 1,
         })
     }

@@ -31,7 +31,7 @@ zstd.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 # Prepared by tools/image-build/prepare-libnbd-rust.sh into the ignored cache
 # that tools/image-build/with-libnbd-env.sh guarantees before Cargo resolves.
-libnbd = { path = "../../target/libnbd-rust/1.22.2/rust", default-features = false, features = ["tokio"] }
+libnbd = { path = "../../target/libnbd-rust/1.24.4/rust", default-features = false, features = ["tokio"] }
 
 [lints]
 workspace = true
