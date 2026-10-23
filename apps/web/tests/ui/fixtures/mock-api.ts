@@ -1514,12 +1514,6 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
 
-      if (pathname === "/api/agent/hosts" && method === "GET") {
-        await json(route, {
-          hosts: server.state.hosts.filter((host) => host.disabled !== true),
-        });
-        return;
-      }
       if (pathname === "/api/admin/runs" && method === "GET") {
         const cursor = url.searchParams.get("cursor");
         if (cursor === "invalid") {
@@ -1584,38 +1578,28 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         );
         return;
       }
-      if (pathname === "/api/agent/hosts" && method === "POST") {
+      if (pathname === "/api/servers/enrollments" && method === "POST") {
         await json(route, {
-          host: server.state.hosts[0] ?? null,
-          bootstrapToken: "test-only-bootstrap-token",
-        });
+          hostId: "host-enrolled",
+          enrollmentToken: "test-only-enrollment-token",
+          expiresAt: FIXED_NOW + 15 * 60_000,
+        }, 201);
         return;
       }
-      const hostId = segment(pathname, /^\/api\/agent\/hosts\/([^/]+)$/);
-      if (hostId && method === "GET") {
+      const revokeHostId = segment(
+        pathname,
+        /^\/api\/admin\/hosts\/([^/]+)\/revoke$/,
+      );
+      if (revokeHostId && method === "POST") {
         const host = server.state.hosts.find(
-          (candidate) => candidate.id === hostId,
-        );
-        await json(route, { host: host ?? null }, host ? 200 : 404);
-        return;
-      }
-      if (hostId && method === "DELETE") {
-        const host = server.state.hosts.find(
-          (candidate) => candidate.id === hostId,
+          (candidate) => candidate.id === revokeHostId,
         );
         if (!host) {
           await json(route, { error: "Host not found" }, 404);
           return;
         }
         host.disabled = true;
-        await json(route, { ok: true, hostId });
-        return;
-      }
-      if (
-        /^\/api\/agent\/hosts\/[^/]+\/runs$/.test(pathname) &&
-        method === "GET"
-      ) {
-        await json(route, server.state.hostRuns);
+        await json(route, { ok: true, hostId: revokeHostId, accessRevoked: true }, 202);
         return;
       }
 

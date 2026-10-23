@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { agentHosts, member, user } from "@/db/schema";
+import { member, user } from "@/db/schema";
 import type { AgentHostRole } from "@/db/schema";
 import {
   isImpersonatedSession,
@@ -187,44 +187,7 @@ export async function requireAdminUserContext(
   return authz;
 }
 
-export async function loadHostForUser(
-  hostId: string,
-  userId: string,
-): Promise<AgentHostRow | null> {
-  const db = drizzle(env.DB);
-  const rows = await db
-    .select({
-      id: agentHosts.id,
-      user_id: agentHosts.userId,
-      name: agentHosts.name,
-      role: agentHosts.role,
-      disabled: agentHosts.disabled,
-      scenario_enabled: agentHosts.scenarioEnabled,
-      connected: agentHosts.connected,
-      connected_at: agentHosts.connectedAt,
-      disconnected_at: agentHosts.disconnectedAt,
-      last_heartbeat_at: agentHosts.lastHeartbeatAt,
-      last_inventory_at: agentHosts.lastInventoryAt,
-      active_session_id: agentHosts.activeSessionId,
-      agent_version: agentHosts.agentVersion,
-      inventory_json: agentHosts.inventoryJson,
-      created_at: agentHosts.createdAt,
-      updated_at: agentHosts.updatedAt,
-    })
-    .from(agentHosts)
-    .where(
-      and(
-        eq(agentHosts.id, hostId),
-        eq(agentHosts.userId, userId),
-        eq(agentHosts.scope, "platform"),
-      ),
-    )
-    .limit(1);
-
-  return rows[0] ?? null;
-}
-
-export function parseInventory(
+function parseInventory(
   inventoryJson: string | null,
 ): AgentInventorySnapshot | null {
   return parseJsonObject(inventoryJson) as AgentInventorySnapshot | null;

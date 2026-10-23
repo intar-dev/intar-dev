@@ -2,8 +2,10 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Hammer, Server } from "lucide-react";
 import { apiErrorMessage } from "@/components/app/lib/api-errors";
+import { formatTimestamp } from "@/components/app/lib/format";
 import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import { AsyncLabel } from "@/components/app/patterns/AsyncLabel";
+import { CodeBlock } from "@/components/app/patterns/CodeBlock";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -11,59 +13,116 @@ import { Input } from "@/components/ui/input";
 
 export type HostRole = "agent" | "builder";
 
-export interface AgentOnboardingResponse {
-  host: {
-    id: string;
-    name: string;
-    role: HostRole;
-    disabled: boolean;
-    scenarioEnabled: boolean;
-    createdAt: number;
-  };
-  bootstrapTokenExpiresAt: string | null;
-  bridgeConfigToml: string;
+interface PlatformEnrollment {
+  hostId: string;
+  enrollmentToken: string;
+  expiresAt: number;
+  role: HostRole;
 }
 
 interface HostOnboardingPanelProps {
   eyebrow?: string;
   title?: string;
-  endpoint?: string;
-  allowedRoles?: readonly HostRole[];
-  defaultHostName?: string;
-  onGenerated?: (result: AgentOnboardingResponse) => void;
+}
+
+// The script asks for the token on the host's terminal, so neither the
+// command nor shell history holds a secret. Token and credential are staged
+// in a root-only file until the claim is saved: the server only lets the
+// same credential recover a claim whose response was lost, so a rerun after
+// any failure resumes instead of stranding the host.
+export function claimScript(origin: string, role: HostRole): string {
+  const finish =
+    role === "agent"
+      ? String.raw`write('/etc/intar-agent/credential.json',
+      json.dumps({**state['claim'], 'credential': state['credential']}) + '\n',
+      0o640, grp.getgrnam('intar-agent').gr_gid)
+set_bridge('/etc/intar-agent/config.toml', {'enabled': 'true'})
+service = 'intar-agent'`
+      : String.raw`set_bridge('/etc/intar-builder/config.toml', {
+    'enabled': 'true',
+    'host_id': json.dumps(state['claim']['hostId']),
+    'bootstrap_token': json.dumps(state['credential']),
+})
+service = 'intar-builder'`;
+  return String.raw`sudo python3 -I - <<'PY'
+import getpass, grp, json, os, re, secrets, tempfile, urllib.request
+STAGE = '/root/.intar-enrollment.json'
+
+def write(path, data, mode, gid):
+    fd, name = tempfile.mkstemp(prefix='.intar-', dir=os.path.dirname(path))
+    try:
+        os.fchmod(fd, mode)
+        os.fchown(fd, 0, gid)
+        with os.fdopen(fd, 'w') as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(name, path)
+    except BaseException:
+        os.unlink(name)
+        raise
+
+def set_bridge(path, values):
+    text = open(path).read()
+    start = text.index('[bridge]\n')
+    end = text.find('\n[', start)
+    end = len(text) if end < 0 else end + 1
+    section = text[start:end]
+    for key, value in values.items():
+        section, found = re.subn(r'(?m)^' + key + r'\s*=.*$', lambda _: key + ' = ' + value, section, count=1)
+        if not found:
+            section = section.replace('[bridge]\n', '[bridge]\n' + key + ' = ' + value + '\n', 1)
+    info = os.stat(path)
+    write(path, text[:start] + section + text[end:], info.st_mode & 0o777, info.st_gid)
+
+if os.path.exists(STAGE):
+    state = json.load(open(STAGE))
+else:
+    state = {'token': getpass.getpass('Enrollment token: ').strip(), 'credential': secrets.token_hex(32)}
+    write(STAGE, json.dumps(state), 0o600, 0)
+if 'claim' not in state:
+    request = urllib.request.Request('${origin}/agent/enroll', method='POST',
+        data=json.dumps({'enrollmentToken': state['token'], 'credential': state['credential']}).encode(),
+        headers={'Content-Type': 'application/json', 'User-Agent': 'intar-host'})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            claim = json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code != 401:
+            raise
+        raise SystemExit('Enrollment refused. If the token expired or was used, remove ' + STAGE + ' and create a new token.') from None
+    state['claim'] = {key: claim[key] for key in ('hostId', 'ownerUserId', 'scope', 'credentialGeneration')}
+    write(STAGE, json.dumps(state), 0o600, 0)
+${finish}
+os.unlink(STAGE)
+print('Enrolled ' + state['claim']['hostId'] + '. Restart ' + service + '.')
+PY`;
 }
 
 export function HostOnboardingPanel({
   eyebrow = "Host onboarding",
-  title = "Bridge config",
-  endpoint = "/api/agent/hosts",
-  allowedRoles = ["agent", "builder"],
-  defaultHostName = "dedicated-host",
-  onGenerated,
+  title = "Host enrollment",
 }: HostOnboardingPanelProps) {
-  const [hostName, setHostName] = useState(defaultHostName);
-  const [hostRole, setHostRole] = useState<HostRole>(
-    allowedRoles[0] ?? "agent",
-  );
-  const [generated, setGenerated] = useState<AgentOnboardingResponse | null>(
+  const [hostName, setHostName] = useState("");
+  const [hostRole, setHostRole] = useState<HostRole>("agent");
+  const [enrollment, setEnrollment] = useState<PlatformEnrollment | null>(
     null,
   );
+  const [revealed, setRevealed] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
 
   const onboard = useMutation({
     mutationFn: async () => {
-      const response = await fetch(endpoint, {
+      const response = await fetch("/api/servers/enrollments", {
         method: "POST",
         credentials: "include",
-        headers: {
-          "content-type": "application/json",
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          name: hostName.trim() || undefined,
+          name: hostName.trim(),
+          scope: "platform",
           role: hostRole,
         }),
       });
-
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
@@ -71,33 +130,38 @@ export function HostOnboardingPanel({
         throw HttpResponseError.fromBody(
           response.status,
           body,
-          "Onboarding failed. Try again.",
+          "Enrollment failed. Try again.",
         );
       }
-
-      return (await response.json()) as AgentOnboardingResponse;
+      const result = (await response.json()) as Omit<
+        PlatformEnrollment,
+        "role"
+      >;
+      return { ...result, role: hostRole };
     },
     onSuccess: (result) => {
-      setGenerated(result);
+      setEnrollment(result);
+      setRevealed(false);
       setCopyFeedback(null);
-      onGenerated?.(result);
     },
   });
 
-  const copyGeneratedConfig = async () => {
-    if (!generated?.bridgeConfigToml) return;
-    if (typeof navigator === "undefined" || !navigator.clipboard) {
-      setCopyFeedback("Clipboard unavailable");
+  const copyToken = async () => {
+    if (!enrollment) return;
+    if (enrollment.expiresAt <= Date.now()) {
+      setEnrollment(null);
+      setCopyFeedback("Token expired. Create a new token to continue.");
       return;
     }
-
     try {
-      await navigator.clipboard.writeText(generated.bridgeConfigToml);
-      setCopyFeedback("Configuration copied.");
+      await navigator.clipboard.writeText(enrollment.enrollmentToken);
+      setCopyFeedback("Token copied.");
     } catch {
-      setCopyFeedback("Configuration could not be copied.");
+      setCopyFeedback("Token could not be copied.");
     }
   };
+
+  const pending = onboard.isPending;
 
   return (
     <section className="grid gap-4 @min-[64rem]/panel:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
@@ -107,47 +171,41 @@ export function HostOnboardingPanel({
           <h2 className="text-section-title">{title}</h2>
         </div>
 
-        {allowedRoles.length > 1 ? (
-          <div
-            role="group"
-            aria-label="Host role"
-            className="grid gap-2 sm:grid-cols-2"
+        <div
+          role="group"
+          aria-label="Host role"
+          className="grid gap-2 sm:grid-cols-2"
+        >
+          <Button
+            type="button"
+            aria-pressed={hostRole === "agent"}
+            variant={hostRole === "agent" ? "default" : "outline"}
+            onClick={() => setHostRole("agent")}
+            disabled={pending}
+            className="justify-start"
           >
-            {allowedRoles.includes("agent") ? (
-              <Button
-                type="button"
-                aria-pressed={hostRole === "agent"}
-                variant={hostRole === "agent" ? "default" : "outline"}
-                onClick={() => setHostRole("agent")}
-                disabled={onboard.isPending}
-                className="justify-start"
-              >
-                <Server className="size-4" />
-                Agent
-              </Button>
-            ) : null}
-            {allowedRoles.includes("builder") ? (
-              <Button
-                type="button"
-                aria-pressed={hostRole === "builder"}
-                variant={hostRole === "builder" ? "default" : "outline"}
-                onClick={() => setHostRole("builder")}
-                disabled={onboard.isPending}
-                className="justify-start"
-              >
-                <Hammer className="size-4" />
-                Builder
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
+            <Server className="size-4" />
+            Agent
+          </Button>
+          <Button
+            type="button"
+            aria-pressed={hostRole === "builder"}
+            variant={hostRole === "builder" ? "default" : "outline"}
+            onClick={() => setHostRole("builder")}
+            disabled={pending}
+            className="justify-start"
+          >
+            <Hammer className="size-4" />
+            Builder
+          </Button>
+        </div>
 
         <form
           className="flex flex-col gap-2 sm:flex-row"
-          aria-busy={onboard.isPending || undefined}
+          aria-busy={pending || undefined}
           onSubmit={(event) => {
             event.preventDefault();
-            if (!onboard.isPending) onboard.mutate();
+            if (!pending && hostName.trim()) onboard.mutate();
           }}
         >
           <label htmlFor="host-onboarding-name" className="sr-only">
@@ -161,147 +219,110 @@ export function HostOnboardingPanel({
             name="hostName"
             placeholder="Host name"
             autoComplete="off"
+            required
+            maxLength={80}
             value={hostName}
             onChange={(event) => setHostName(event.currentTarget.value)}
-            readOnly={onboard.isPending}
+            readOnly={pending}
             className="flex-1 sm:max-w-field"
           />
           <Button
             type="submit"
-            aria-busy={onboard.isPending || undefined}
+            aria-busy={pending || undefined}
             focusableWhenDisabled
-            disabled={onboard.isPending}
+            disabled={pending || !hostName.trim()}
           >
             <AsyncLabel
-              state={onboard.isPending ? "pending" : "idle"}
-              idle="Generate"
-              pending="Generating…"
+              state={pending ? "pending" : "idle"}
+              idle="Create token"
+              pending="Creating token…"
             />
           </Button>
         </form>
 
         {onboard.error ? (
           <Alert variant="destructive" just>
-            <AlertTitle>Onboarding failed</AlertTitle>
+            <AlertTitle>Enrollment failed</AlertTitle>
             <AlertDescription>
-              {apiErrorMessage(onboard.error, "Onboarding failed. Try again.")}
+              {apiErrorMessage(onboard.error, "Enrollment failed. Try again.")}
             </AlertDescription>
           </Alert>
         ) : null}
-
-        <div className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-4">
-          <div className="rounded-xl bg-muted/40 px-4 py-3">
-            Host name
-            <div className="mt-1 font-medium text-foreground">
-              <code>{hostName.trim() || defaultHostName}</code>
-            </div>
-          </div>
-          <div className="rounded-xl bg-muted/40 px-4 py-3">
-            Role
-            <div className="mt-1 font-medium capitalize text-foreground">
-              {hostRole}
-            </div>
-          </div>
-          <div className="rounded-xl bg-muted/40 px-4 py-3">
-            Output
-            <div className="mt-1 font-medium text-foreground">
-              <code>config.toml</code>
-            </div>
-          </div>
-          <div className="rounded-xl bg-muted/40 px-4 py-3">
-            Install
-            <div className="mt-1 font-medium text-foreground">
-              <code>
-                {hostRole === "builder" ? "intar-builder" : "intar-agent"}
-              </code>
-            </div>
-          </div>
-        </div>
       </div>
 
       <div className="rounded-xl border bg-card p-4 shadow-[var(--highlight),var(--shadow-raised)]">
-        {generated ? (
+        {enrollment ? (
           <div className="space-y-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
-                <div>
-                  <dt className="text-label">Host ID</dt>
-                  <dd className="mt-1 font-mono text-xs break-all">
-                    {generated.host.id}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-label">Role</dt>
-                  <dd className="mt-1 font-medium capitalize">
-                    {generated.host.role}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-label">Bootstrap access</dt>
-                  <dd className="mt-1 font-medium">
-                    {generated.bootstrapTokenExpiresAt
-                      ? `Until ${new Date(generated.bootstrapTokenExpiresAt).toLocaleString()}`
-                      : "Until rotated or revoked"}
-                  </dd>
-                </div>
-              </dl>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={copyGeneratedConfig}
-              >
-                Copy config
-              </Button>
+            <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
+              <div>
+                <dt className="text-label">Host ID</dt>
+                <dd className="mt-1 font-mono text-xs break-all">
+                  {enrollment.hostId}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-label">Role</dt>
+                <dd className="mt-1 font-medium capitalize">
+                  {enrollment.role}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-label">Token expires</dt>
+                <dd className="mt-1 font-medium">
+                  {formatTimestamp(enrollment.expiresAt)}
+                </dd>
+              </div>
+            </dl>
+
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Run on the host as root</p>
+              <CodeBlock language="bash" copyName="Copy enrollment script">
+                <code>
+                  {claimScript(window.location.origin, enrollment.role)}
+                </code>
+              </CodeBlock>
             </div>
 
-            {copyFeedback ? (
-              <InlineFeedback
-                tone={
-                  copyFeedback === "Configuration copied." ? "success" : "error"
+            <div className="space-y-2" data-private>
+              <p className="text-sm font-medium">Enrollment token</p>
+              <p className="text-sm text-muted-foreground">
+                Single use. Paste it when the script asks. This page does not
+                save the token.
+              </p>
+              <p
+                className="rounded-lg bg-muted/50 p-3 font-mono text-xs break-all"
+                aria-label={
+                  revealed ? "Enrollment token" : "Enrollment token hidden"
                 }
               >
-                {copyFeedback}
-              </InlineFeedback>
-            ) : null}
-
-            <div
-              role="region"
-              tabIndex={0}
-              aria-label="Generated bridge configuration"
-              className="h-[24rem] overflow-auto rounded-lg border border-terminal-border bg-terminal-background text-terminal-foreground focus-visible:-outline-offset-2"
-            >
-              <pre className="px-4 py-3 text-code leading-6">
-                <code>{generated.bridgeConfigToml}</code>
-              </pre>
+                {revealed ? enrollment.enrollmentToken : "••••••••••••••••"}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  aria-pressed={revealed}
+                  onClick={() => setRevealed(!revealed)}
+                >
+                  {revealed ? "Hide token" : "Reveal token"}
+                </Button>
+                <Button variant="outline" onClick={() => void copyToken()}>
+                  Copy token
+                </Button>
+              </div>
             </div>
-
-            <ol className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-3">
-              <li className="rounded-xl bg-muted/40 px-4 py-3">
-                Replace <code>[bridge]</code> in{" "}
-                <code>
-                  {generated.host.role === "builder"
-                    ? "/etc/intar-builder/config.toml"
-                    : "/etc/intar-agent/config.toml"}
-                </code>
-              </li>
-              <li className="rounded-xl bg-muted/40 px-4 py-3">
-                Restart with{" "}
-                <code>
-                  {generated.host.role === "builder"
-                    ? "sudo systemctl restart intar-builder"
-                    : "sudo systemctl restart intar-agent"}
-                </code>
-              </li>
-              <li className="rounded-xl bg-muted/40 px-4 py-3">
-                Confirm the heartbeat in the runner list.
-              </li>
-            </ol>
           </div>
         ) : (
           <div className="flex min-h-48 items-center justify-center rounded-xl bg-muted/40 px-4 text-center text-sm text-muted-foreground">
-            Generate a host config to reveal the bridge block and install steps.
+            Create a token to reveal the enrollment script for the host.
           </div>
         )}
+        {copyFeedback ? (
+          <InlineFeedback
+            tone={copyFeedback === "Token copied." ? "success" : "error"}
+          >
+            {copyFeedback}
+          </InlineFeedback>
+        ) : null}
       </div>
     </section>
   );

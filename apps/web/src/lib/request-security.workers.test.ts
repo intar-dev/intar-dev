@@ -52,7 +52,7 @@ const BODYLESS_CUSTOM_MUTATIONS = [
   ["POST", "/api/admin/builds/build-1/retry"],
   ["POST", "/api/admin/scenarios/demo/enabled"],
   ["DELETE", "/api/admin/scenarios/demo/enabled"],
-  ["DELETE", "/api/agent/hosts/host-1"],
+  ["POST", "/api/admin/hosts/host-1/revoke"],
   ["DELETE", "/api/organizations/org/assignments/assignment-1"],
   ["DELETE", "/api/organizations/org"],
   ["POST", "/api/organizations/org/leave"],

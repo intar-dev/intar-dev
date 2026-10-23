@@ -819,18 +819,17 @@ mod tests {
             .unwrap();
         assert!(converted.success());
         let socket = directory.path().join("nbd.sock");
-        let arguments = super::super::qsd_arguments(
-            &qcow2,
-            socket.to_str().unwrap(),
-            &directory.path().join("qsd.pid"),
-        )
-        .unwrap();
+        let pidfile = directory.path().join("qsd.pid");
+        let arguments =
+            super::super::qsd_arguments(&qcow2, socket.to_str().unwrap(), &pidfile).unwrap();
         let mut daemon = std::process::Command::new(qsd)
             .args(arguments)
             .spawn()
             .unwrap();
         let started = Instant::now();
-        while !socket.exists() {
+        // The socket appears at bind, before QSD listens; like the raw view,
+        // wait for the pidfile it writes once the export is set up.
+        while !(socket.exists() && pidfile.is_file()) {
             assert!(
                 started.elapsed() < Duration::from_secs(10),
                 "QSD never listened"

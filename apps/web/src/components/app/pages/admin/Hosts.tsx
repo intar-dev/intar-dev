@@ -75,9 +75,9 @@ export function AdminHosts() {
   const removeHost = useMutation({
     mutationFn: async (hostId: string) => {
       const response = await fetch(
-        `/api/agent/hosts/${encodeURIComponent(hostId)}`,
+        `/api/admin/hosts/${encodeURIComponent(hostId)}/revoke`,
         {
-          method: "DELETE",
+          method: "POST",
           credentials: "include",
         },
       );
@@ -153,7 +153,7 @@ export function AdminHosts() {
 
       <Collapsible open={showOnboarding}>
         <CollapsibleContent id={panelId}>
-          <HostOnboardingPanel eyebrow="New host" title="Bridge config" />
+          <HostOnboardingPanel eyebrow="New host" />
         </CollapsibleContent>
       </Collapsible>
 

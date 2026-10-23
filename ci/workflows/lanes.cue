@@ -128,7 +128,6 @@ lanes: {
 			"apps/web/src/lib/host-runtime-wake.ts",
 			"apps/web/src/lib/scenario-hosts.ts",
 			"apps/web/src/db/schema.ts",
-			"apps/web/src/pages/api/agent/hosts.ts",
 		]
 	}
 
