@@ -26,38 +26,76 @@ interface HostOnboardingPanelProps {
 }
 
 // The script asks for the token on the host's terminal, so neither the
-// command nor shell history holds a secret. The credential file is created
-// before the claim so a failed write cannot strand a claimed host.
+// command nor shell history holds a secret. Token and credential are staged
+// in a root-only file until the claim is saved: the server only lets the
+// same credential recover a claim whose response was lost, so a rerun after
+// any failure resumes instead of stranding the host.
 export function claimScript(origin: string, role: HostRole): string {
-  const write =
+  const finish =
     role === "agent"
-      ? `path = '/etc/intar-agent/credential.json'
-fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
-os.fchown(fd, 0, grp.getgrnam('intar-agent').gr_gid)
-try:
-    claim = enroll()
-    with os.fdopen(fd, 'w') as file:
-        json.dump({**claim, 'credential': credential}, file)
-except BaseException:
-    os.unlink(path)
-    raise
-print('Wrote ' + path + '. Restart intar-agent.')`
-      : `claim = enroll()
-print('Add to [bridge] in /etc/intar-builder/config.toml, then restart intar-builder:')
-print('host_id = "' + claim['hostId'] + '"')
-print('bootstrap_token = "' + credential + '"')`;
-  return `sudo python3 -I - <<'PY'
-import getpass, grp, json, os, secrets, urllib.request
-token = getpass.getpass('Enrollment token: ').strip()
-credential = secrets.token_hex(32)
-def enroll():
+      ? String.raw`write('/etc/intar-agent/credential.json',
+      json.dumps({**state['claim'], 'credential': state['credential']}) + '\n',
+      0o640, grp.getgrnam('intar-agent').gr_gid)
+set_bridge('/etc/intar-agent/config.toml', {'enabled': 'true'})
+service = 'intar-agent'`
+      : String.raw`set_bridge('/etc/intar-builder/config.toml', {
+    'enabled': 'true',
+    'host_id': json.dumps(state['claim']['hostId']),
+    'bootstrap_token': json.dumps(state['credential']),
+})
+service = 'intar-builder'`;
+  return String.raw`sudo python3 -I - <<'PY'
+import getpass, grp, json, os, re, secrets, tempfile, urllib.request
+STAGE = '/root/.intar-enrollment.json'
+
+def write(path, data, mode, gid):
+    fd, name = tempfile.mkstemp(prefix='.intar-', dir=os.path.dirname(path))
+    try:
+        os.fchmod(fd, mode)
+        os.fchown(fd, 0, gid)
+        with os.fdopen(fd, 'w') as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(name, path)
+    except BaseException:
+        os.unlink(name)
+        raise
+
+def set_bridge(path, values):
+    text = open(path).read()
+    start = text.index('[bridge]\n')
+    end = text.find('\n[', start)
+    end = len(text) if end < 0 else end + 1
+    section = text[start:end]
+    for key, value in values.items():
+        section, found = re.subn(r'(?m)^' + key + r'\s*=.*$', lambda _: key + ' = ' + value, section, count=1)
+        if not found:
+            section = section.replace('[bridge]\n', '[bridge]\n' + key + ' = ' + value + '\n', 1)
+    info = os.stat(path)
+    write(path, text[:start] + section + text[end:], info.st_mode & 0o777, info.st_gid)
+
+if os.path.exists(STAGE):
+    state = json.load(open(STAGE))
+else:
+    state = {'token': getpass.getpass('Enrollment token: ').strip(), 'credential': secrets.token_hex(32)}
+    write(STAGE, json.dumps(state), 0o600, 0)
+if 'claim' not in state:
     request = urllib.request.Request('${origin}/agent/enroll', method='POST',
-        data=json.dumps({'enrollmentToken': token, 'credential': credential}).encode(),
+        data=json.dumps({'enrollmentToken': state['token'], 'credential': state['credential']}).encode(),
         headers={'Content-Type': 'application/json', 'User-Agent': 'intar-host'})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        claim = json.load(response)
-    return {key: claim[key] for key in ('hostId', 'ownerUserId', 'scope', 'credentialGeneration')}
-${write}
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            claim = json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code != 401:
+            raise
+        raise SystemExit('Enrollment refused. If the token expired or was used, remove ' + STAGE + ' and create a new token.') from None
+    state['claim'] = {key: claim[key] for key in ('hostId', 'ownerUserId', 'scope', 'credentialGeneration')}
+    write(STAGE, json.dumps(state), 0o600, 0)
+${finish}
+os.unlink(STAGE)
+print('Enrolled ' + state['claim']['hostId'] + '. Restart ' + service + '.')
 PY`;
 }
 
