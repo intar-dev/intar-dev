@@ -642,7 +642,7 @@ test.describe("focused state accessibility", () => {
     await page.getByRole("button", { name: "Add host" }).first().click();
 
     await expect(
-      page.getByRole("heading", { name: "Bridge config" }),
+      page.getByRole("heading", { name: "Host enrollment" }),
     ).toBeVisible();
     await expect(page.getByRole("group", { name: "Host role" })).toBeVisible();
     await expectNoAxeViolations(page, testInfo);
