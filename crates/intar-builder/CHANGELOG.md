@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.15.2 (2026-10-23)
+
+### Bug fixes
+
+- **deps:** Bump ctutils for RUSTSEC-2026-0385 and wire host admin to the current apis (#254) (68eaba88)
+
 ## builder/v0.15.1 (2026-10-22)
 
 ### Bug fixes
