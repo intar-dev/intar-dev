@@ -48,151 +48,165 @@ export function Landing() {
   return (
     // The safe-area insets keep the header, sections and footer clear of a
     // landscape notch and the home indicator; the page inset sits inside them.
-    <div className="relative isolate flex min-h-dvh flex-col overflow-hidden bg-canvas pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]">
-      <header className="mx-auto flex min-h-14 w-full max-w-7xl shrink-0 items-center justify-between gap-4 px-[var(--page-inset)] sm:min-h-[4.75rem]">
+    <div className="landing-pages relative isolate flex min-h-dvh flex-col overflow-clip bg-canvas pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]">
+      {/* The page scrolls as three snapped screens: the header and page one,
+          the workspace, then page three and the footer. */}
+      <header className="mx-auto flex min-h-14 w-full max-w-7xl shrink-0 snap-start items-center justify-between gap-4 px-[var(--page-inset)] sm:min-h-[4.75rem]">
         <BrandMark />
         <ThemeToggle />
       </header>
 
       <main className="flex flex-1 flex-col">
-        {errorMessage ? (
-          <div className="mx-auto w-full max-w-7xl px-[var(--page-inset)] pt-4">
-            <Alert variant="destructive">
-              <AlertTitle>Could not sign in</AlertTitle>
-              <AlertDescription>{errorMessage}</AlertDescription>
-            </Alert>
-          </div>
-        ) : null}
-
-        <section className="mx-auto flex w-full max-w-7xl flex-col items-center px-[var(--page-inset)] pt-10 text-center sm:pt-14 lg:pt-16">
-          <div className="flex flex-col items-center gap-6 sm:gap-8">
-            <p className="inline-flex items-center gap-2 text-label text-muted-foreground">
-              <span
-                aria-hidden="true"
-                className="size-1.5 rounded-full bg-primary"
-              />
-              Early access
-            </p>
-
-            <div className="space-y-5 sm:space-y-6">
-              <h1 className="text-display text-balance">
-                <span className="block">Repair real systems.</span>
-                <span className="block text-display-italic text-faint-foreground">
-                  Prove the fix.
-                  {/* The underscore cursor from the brand mark. */}
-                  <span
-                    aria-hidden="true"
-                    className="ml-[0.08em] inline-block h-[0.085em] w-[0.5em] bg-primary motion-safe:animate-caret"
-                  />
-                </span>
-              </h1>
-              <p className="mx-auto max-w-2xl text-[1.0625rem] leading-relaxed text-balance text-muted-foreground sm:text-lg lg:text-xl">
-                Diagnose a live sandbox, repair it in the shell, and watch
-                the checks turn green.
-              </p>
+        <div className="flex min-h-[calc(100dvh-3.5rem)] snap-end flex-col justify-center pb-10 sm:min-h-[calc(100dvh-4.75rem)]">
+          {errorMessage ? (
+            <div className="mx-auto w-full max-w-7xl px-[var(--page-inset)] pt-4">
+              <Alert variant="destructive">
+                <AlertTitle>Could not sign in</AlertTitle>
+                <AlertDescription>{errorMessage}</AlertDescription>
+              </Alert>
             </div>
+          ) : null}
 
-            {/* The spots line sits with the sign-in actions it describes. */}
-            <div className="flex w-full flex-col items-center gap-3 sm:w-auto">
-              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-center sm:gap-3">
-                {access === "stranded" ? (
-                  <Button
-                    size="lg"
-                    className="w-full sm:w-auto"
-                    onClick={() => signOut.mutate()}
-                    disabled={signOut.isPending}
-                  >
-                    {signOut.isPending ? "Signing out…" : "Sign out"}
-                  </Button>
-                ) : access === "active" ? (
-                  <Button
-                    size="lg"
-                    className="w-full sm:w-auto"
-                    disabled={runs.isLoading}
-                    render={
-                      runs.isLoading ? undefined : (
-                        <Link
-                          to={activeRunId ? "/runs/$runId" : "/courses"}
-                          params={activeRunId ? { runId: activeRunId } : {}}
-                        />
-                      )
-                    }
-                  >
-                    {runs.isLoading
-                      ? "Finding your work…"
-                      : activeRunId
-                        ? "Resume run"
-                        : "Browse courses"}
-                    {!runs.isLoading ? <ArrowRight className="size-4" /> : null}
-                  </Button>
-                ) : (
-                  <>
+          <section className="mx-auto flex w-full max-w-7xl flex-col items-center px-[var(--page-inset)] pt-10 text-center sm:pt-14 lg:pt-16">
+            <div className="flex flex-col items-center gap-6 sm:gap-8">
+              <p className="inline-flex items-center gap-2 text-label text-muted-foreground">
+                <span
+                  aria-hidden="true"
+                  className="size-1.5 rounded-full bg-primary"
+                />
+                Early access
+              </p>
+
+              <div className="space-y-5 sm:space-y-6">
+                <h1 className="text-display text-balance">
+                  <span className="block">Repair real systems.</span>
+                  <span className="block text-display-italic text-faint-foreground">
+                    Prove the fix.
+                    {/* The underscore cursor from the brand mark. */}
+                    <span
+                      aria-hidden="true"
+                      className="ml-[0.08em] inline-block h-[0.085em] w-[0.5em] bg-primary motion-safe:animate-caret"
+                    />
+                  </span>
+                </h1>
+                <p className="mx-auto max-w-2xl text-[1.0625rem] leading-relaxed text-balance text-muted-foreground sm:text-lg lg:text-xl">
+                  Diagnose a live sandbox, repair it in the shell, and watch the
+                  checks turn green.
+                </p>
+              </div>
+
+              {/* The spots line sits with the sign-in actions it describes. */}
+              <div className="flex w-full flex-col items-center gap-3 sm:w-auto">
+                <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-center sm:gap-3">
+                  {access === "stranded" ? (
                     <Button
                       size="lg"
                       className="w-full sm:w-auto"
-                      onClick={() => signIn.mutate()}
-                      disabled={signIn.isPending}
+                      onClick={() => signOut.mutate()}
+                      disabled={signOut.isPending}
                     >
-                      {signIn.isPending
-                        ? "Opening GitHub…"
-                        : "Sign in with GitHub"}
-                      {!signIn.isPending ? (
+                      {signOut.isPending ? "Signing out…" : "Sign out"}
+                    </Button>
+                  ) : access === "active" ? (
+                    <Button
+                      size="lg"
+                      className="w-full sm:w-auto"
+                      disabled={runs.isLoading}
+                      render={
+                        runs.isLoading ? undefined : (
+                          <Link
+                            to={activeRunId ? "/runs/$runId" : "/courses"}
+                            params={activeRunId ? { runId: activeRunId } : {}}
+                          />
+                        )
+                      }
+                    >
+                      {runs.isLoading
+                        ? "Finding your work…"
+                        : activeRunId
+                          ? "Resume run"
+                          : "Browse courses"}
+                      {!runs.isLoading ? (
                         <ArrowRight className="size-4" />
                       ) : null}
                     </Button>
-                    <Button
-                      size="lg"
-                      variant="outline"
-                      className="w-full sm:w-auto"
-                      render={<Link to="/organization-sign-in" />}
-                    >
-                      Organization sign-in
-                    </Button>
-                  </>
-                )}
+                  ) : (
+                    <>
+                      <Button
+                        size="lg"
+                        className="w-full sm:w-auto"
+                        onClick={() => signIn.mutate()}
+                        disabled={signIn.isPending}
+                      >
+                        {signIn.isPending
+                          ? "Opening GitHub…"
+                          : "Sign in with GitHub"}
+                        {!signIn.isPending ? (
+                          <ArrowRight className="size-4" />
+                        ) : null}
+                      </Button>
+                      <Button
+                        size="lg"
+                        variant="outline"
+                        className="w-full sm:w-auto"
+                        render={<Link to="/organization-sign-in" />}
+                      >
+                        Organization sign-in
+                      </Button>
+                    </>
+                  )}
+                </div>
+
+                {access === "stranded" ? (
+                  <p className="text-caption text-muted-foreground">
+                    This session can no longer be used. Sign out, then sign in
+                    again.
+                  </p>
+                ) : access === "signed-out" && signups.isSuccess ? (
+                  <MetaLine items={signupSpotsLine(signups.data)} />
+                ) : null}
               </div>
 
-              {access === "stranded" ? (
-                <p className="text-caption text-muted-foreground">
-                  This session can no longer be used. Sign out, then sign in
-                  again.
-                </p>
-              ) : access === "signed-out" && signups.isSuccess ? (
-                <MetaLine items={signupSpotsLine(signups.data)} />
+              {signIn.error ? (
+                <InlineFeedback tone="error">
+                  {signIn.error instanceof Error
+                    ? signIn.error.message
+                    : "GitHub sign-in could not be started."}
+                </InlineFeedback>
+              ) : signOut.error ? (
+                <InlineFeedback tone="error">
+                  {signOut.error.message}
+                </InlineFeedback>
               ) : null}
             </div>
+          </section>
 
-            {signIn.error ? (
-              <InlineFeedback tone="error">
-                {signIn.error instanceof Error
-                  ? signIn.error.message
-                  : "GitHub sign-in could not be started."}
-              </InlineFeedback>
-            ) : signOut.error ? (
-              <InlineFeedback tone="error">{signOut.error.message}</InlineFeedback>
-            ) : null}
-          </div>
-        </section>
-
-        {/* The workspace rises out of the hero on graph paper: page one shows
-            its top, the rest waits below the fold. */}
-        <div className="relative mx-auto w-full max-w-7xl px-[var(--page-inset)] pt-12 sm:pt-16">
-          <div
-            aria-hidden="true"
-            className="dot-grid pointer-events-none absolute -inset-x-20 -top-6 -bottom-20 -z-10 hidden [--dot-grid-mask:radial-gradient(ellipse_60%_56%_at_50%_46%,#000_32%,transparent_78%)] lg:block"
-          />
-          <RunPreview className="landing-settle h-[30rem] sm:h-[32rem] lg:h-[34rem]" />
+          <SponsorMarks />
         </div>
 
-        <RunLoop />
+        <div className="flex min-h-dvh snap-start items-center">
+          <div className="relative mx-auto w-full max-w-7xl px-[var(--page-inset)] py-10">
+            <div
+              aria-hidden="true"
+              className="dot-grid pointer-events-none absolute -inset-x-20 -top-6 -bottom-20 -z-10 hidden [--dot-grid-mask:radial-gradient(ellipse_60%_56%_at_50%_46%,#000_32%,transparent_78%)] lg:block"
+            />
+            <RunPreview className="landing-settle h-[30rem] sm:h-[32rem] lg:h-[34rem]" />
+          </div>
+        </div>
 
-        <SponsorMarks />
+        {/* ponytail: 5rem approximates the footer; measure it if page three must be exact. */}
+        <div className="flex min-h-[calc(100dvh-5rem)] snap-start flex-col justify-center pb-12">
+          <RunLoop />
+        </div>
       </main>
 
-      <footer className="mx-auto flex w-full max-w-7xl shrink-0 flex-col items-center gap-2 px-[var(--page-inset)] pb-[max(2rem,env(safe-area-inset-bottom))] text-[0.8125rem] text-faint-foreground sm:flex-row sm:justify-between">
+      <footer className="mx-auto flex w-full max-w-7xl shrink-0 snap-end flex-col items-center gap-2 px-[var(--page-inset)] pb-[max(2rem,env(safe-area-inset-bottom))] text-[0.8125rem] text-faint-foreground sm:flex-row sm:justify-between">
         <span>Built by Stefan Ruzitschka</span>
         <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
-          <a href="https://github.com/intar-dev" className={footerLinkClassName}>
+          <a
+            href="https://github.com/intar-dev"
+            className={footerLinkClassName}
+          >
             GitHub
           </a>
           <a href="https://docs.intar.dev" className={footerLinkClassName}>
@@ -211,7 +225,7 @@ function SponsorMarks() {
   return (
     <aside
       aria-labelledby="landing-sponsors-heading"
-      className="mx-auto flex w-full max-w-7xl flex-col items-center gap-5 px-[var(--page-inset)] py-12 sm:py-16"
+      className="mx-auto flex w-full max-w-7xl flex-col items-center gap-4 px-[var(--page-inset)] pt-10 sm:pt-12"
     >
       <p id="landing-sponsors-heading" className="text-label">
         Infrastructure by
@@ -276,4 +290,3 @@ const footerLinkClassName =
 
 const sponsorLinkClassName =
   "inline-flex min-h-11 min-w-11 items-center justify-center rounded-md px-1 opacity-80 transition-opacity duration-200 hover:opacity-100 focus-visible:opacity-100";
-
