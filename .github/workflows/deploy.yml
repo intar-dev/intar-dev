@@ -111,12 +111,6 @@ jobs:
         run: cuenv task -p ci --package ci website-pin-production-config
       - name: Resolve and inject the verified guest-tools pin
         run: cuenv task -p ci --package ci website-pin-guest-tools
-      - name: Prepare runtime secrets
-        id: runtime-secrets
-        env:
-          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
-          STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
-        run: cuenv task -p ci --package ci website-prepare-runtime-secrets
       - name: Plan production D1 migrations
         id: migrations
         run: cuenv task -p ci --package ci website-plan-d1-migrations
@@ -159,9 +153,6 @@ jobs:
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
         run: cuenv task -p ci --package ci website-release-registry-collector
-      - name: Remove runtime secret file
-        if: always() && steps.runtime-secrets.outcome != 'skipped'
-        run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
       - name: Summarize the deployment
         if: always()
         env:

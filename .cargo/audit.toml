@@ -2,4 +2,6 @@
 ignore = [
     # Owner: Stargate. Transitive through jsonwebtoken 11.1.0 and russh 0.64.1 (ssh-key); RustSec lists no fixed upgrade. Review by 2026-11-23.
     "RUSTSEC-2023-0071",
+    # Owner: Stargate. crypto-bigint 0.5.5, transitive through jsonwebtoken 11.1.0 (latest, stargate-gateway) via elliptic-curve 0.13; the fix is only in 0.7.6+. Review by 2026-11-23.
+    "RUSTSEC-2026-0387",
 ]

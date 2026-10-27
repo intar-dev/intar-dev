@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 4 ]; then
-  echo "usage: tools/deploy/deploy-web.sh <wrangler-config> <database-id> <secrets-file> <evidence.json>" >&2
+if [ "$#" -ne 3 ]; then
+  echo "usage: tools/deploy/deploy-web.sh <wrangler-config> <database-id> <evidence.json>" >&2
   exit 64
 fi
 
 readonly config="$1"
 readonly database_id="$2"
-readonly secrets_file="$3"
-readonly evidence="$4"
+readonly evidence="$3"
 readonly worker_name="intar-dev"
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly deploy_label="${WEB_DEPLOY_LABEL:-standard}"
@@ -25,7 +24,6 @@ readonly propagation_attempts="${runtime_root}/propagation-attempts.ndjson"
 
 mkdir -p "${runtime_root}"
 test -f "${config}"
-test -f "${secrets_file}"
 test ! -e "${evidence}"
 [[ "${database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
 [[ "${deploy_label}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
@@ -185,7 +183,6 @@ WRANGLER_OUTPUT_FILE_PATH="${deploy_output}" \
     --config "${config}" \
     --tag "web-${GITHUB_SHA:0:12}-${deploy_label}" \
     --message "Automatic web deployment for ${GITHUB_SHA}" \
-    --secrets-file "${secrets_file}" \
     --experimental-provision=false \
     --autoconfig=false
 bun "${repository_root}/tools/deploy/wrangler-output.ts" \
@@ -215,9 +212,6 @@ bun "${repository_root}/tools/deploy/worker-version.ts" \
   "${database_id}" "${deployed_version_id}" >/dev/null
 jq -e '
   ([.resources.bindings[] | select(.name == "SESSION")] | length) == 0 and
-  ([.resources.bindings[] | select(
-    .type == "secret_text" and .name == "STARGATE_EGRESS_IPV4_CIDRS"
-  )] | length) == 1 and
   ([.resources.bindings[] | select(
     .type == "secret_text" and .name == "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"
   )] | length) == 1 and

@@ -114,14 +114,6 @@ import (
 				name: "Resolve and inject the verified guest-tools pin"
 				#StepTask & {#task: "website-pin-guest-tools"}
 			}, {
-				name: "Prepare runtime secrets"
-				id:   "runtime-secrets"
-				env: {
-					CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
-					STARGATE_EGRESS_IPV4_CIDRS:              "${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}"
-				}
-				#StepTask & {#task: "website-prepare-runtime-secrets"}
-			}, {
 				name: "Plan production D1 migrations"
 				id:   "migrations"
 				#StepTask & {#task: "website-plan-d1-migrations"}
@@ -192,10 +184,6 @@ import (
 				if: "always() && steps.hold.outcome != 'skipped'"
 				env: CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
 				#StepTask & {#task: "website-release-registry-collector"}
-			}, {
-				name: "Remove runtime secret file"
-				if:   "always() && steps.runtime-secrets.outcome != 'skipped'"
-				run:  "rm -f \"${RUNNER_TEMP}/website-runtime-secrets.json\""
 			}, {
 				name: "Summarize the deployment"
 				if:   "always()"
@@ -313,7 +301,6 @@ tasks: {
 	"deploy-verify-revision": #Script & {_script: "tools/workflows/deploy/verify-revision.sh"}
 	"website-pin-production-config": #Script & {_script: "tools/workflows/website/pin-production-config.sh"}
 	"website-pin-guest-tools": #Script & {_script: "tools/workflows/website/pin-guest-tools.sh", _production: true}
-	"website-prepare-runtime-secrets": #Script & {_script: "tools/workflows/website/prepare-runtime-secrets.sh", _production: true}
 	"website-plan-d1-migrations": #Script & {_script: "tools/workflows/website/plan-d1-migrations.sh", _production: true}
 	"website-capture-pre-migration-d1-evidence": #Script & {_script: "tools/workflows/website/capture-pre-migration-d1-evidence.sh", _production: true}
 	"website-hold-registry-collector": #Script & {_script: "tools/workflows/website/hold-registry-collector.sh", _production: true}

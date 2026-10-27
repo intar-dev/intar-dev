@@ -32,7 +32,8 @@
     "@better-auth/core": "1.7.12",
     "esbuild": "0.28.2",
     "sharp": "0.35.5",
-    "undici": "7.30.1"
+    "undici": "7.30.1",
+    "zod": "4.6.7"
   },
   "patchedDependencies": {
     "@better-auth/sso@1.7.12": "patches/@better-auth%2Fsso@1.7.12.patch",

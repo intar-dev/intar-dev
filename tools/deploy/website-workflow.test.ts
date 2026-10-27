@@ -183,7 +183,6 @@ it("conditions only the migration steps on pending migrations", () => {
     "Drain and recheck maintenance": pending,
     "Apply pending D1 migrations": pending,
     "Release the image registry collector": "always() && steps.hold.outcome != 'skipped'",
-    "Remove runtime secret file": "always() && steps.runtime-secrets.outcome != 'skipped'",
     "Summarize the deployment": "always()",
     "Retain deployment evidence": "always()",
   });

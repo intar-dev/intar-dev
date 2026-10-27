@@ -15,5 +15,4 @@ jq -e '.vars.CONTROL_PLANE_MAINTENANCE == "on"' \
 WEB_DEPLOY_LABEL=maintenance tools/deploy/deploy-web.sh \
   "${maintenance_config}" \
   "${DATABASE_ID}" \
-  "${ACTIVATION_SECRETS_FILE}" \
   "${RUNNER_TEMP}/web-maintenance.json"
