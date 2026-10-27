@@ -31,7 +31,6 @@ export default defineConfig({
           STARGATE_ADMIN_AUTH_ISSUER: "intar.dev",
           STARGATE_ADMIN_AUTH_SECRET: "test-stargate-secret",
           STARGATE_ROUTE_TTL_SECONDS: "14400",
-          STARGATE_EGRESS_IPV4_CIDRS: "192.0.2.10/32",
         },
         serviceBindings: {
           STARGATE_ADMIN_SERVICE: async (request) => {

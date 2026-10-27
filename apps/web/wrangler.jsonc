@@ -7,7 +7,6 @@
   "secrets": {
     "required": [
       "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET",
-      "STARGATE_EGRESS_IPV4_CIDRS",
       "GITHUB_APP_PRIVATE_KEY",
       "GITHUB_APP_WEBHOOK_SECRET",
     ],

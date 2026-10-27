@@ -213,9 +213,6 @@ bun "${repository_root}/tools/deploy/worker-version.ts" \
 jq -e '
   ([.resources.bindings[] | select(.name == "SESSION")] | length) == 0 and
   ([.resources.bindings[] | select(
-    .type == "secret_text" and .name == "STARGATE_EGRESS_IPV4_CIDRS"
-  )] | length) == 1 and
-  ([.resources.bindings[] | select(
     .type == "secret_text" and .name == "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"
   )] | length) == 1 and
   ([.resources.bindings[] | select(.name == "BETTER_AUTH_TRUSTED_ORIGINS")]
