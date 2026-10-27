@@ -1217,6 +1217,13 @@ html {
   }
 }
 
+/* The landing page scrolls as three full-screen pages. It has no sticky app
+   bar, so pages snap flush to the top. */
+html:has(.landing-pages) {
+  scroll-snap-type: y mandatory;
+  scroll-padding-top: 0;
+}
+
 /* Modal content owns the focus order while open. The skip link is outside the
    portalled dialog, so remove it from sequential navigation until the dialog
    closes (Base UI restores the trigger afterwards). */
