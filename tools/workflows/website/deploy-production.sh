@@ -6,5 +6,4 @@ set -euo pipefail
 WEB_DEPLOY_LABEL=standard tools/deploy/deploy-web.sh \
   "${DEPLOYMENT_CONFIG}" \
   "${DATABASE_ID}" \
-  "${ACTIVATION_SECRETS_FILE}" \
   "${RUNNER_TEMP}/web-production.json"

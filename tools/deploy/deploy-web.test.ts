@@ -51,7 +51,6 @@ function runDeployment(options: RunOptions = {}) {
   const targetHealthCount = join(root, "target-health-count");
   const config = join(serverDir, "wrangler.json");
   const favicon = join(clientDir, "favicon.svg");
-  const secrets = join(root, "secrets.json");
   const evidence = join(root, "evidence.json");
   mkdirSync(bin, { recursive: true });
   mkdirSync(runnerTemp, { recursive: true });
@@ -60,10 +59,6 @@ function runDeployment(options: RunOptions = {}) {
   writeFileSync(state, beforeVersionId);
   writeFileSync(targetHealthCount, "0");
   writeFileSync(favicon, '<svg xmlns="http://www.w3.org/2000/svg"/>\n');
-  writeFileSync(
-    secrets,
-    '{"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET":"test-maintenance-secret-at-least-forty-three-characters","STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n',
-  );
   writeFileSync(
     config,
     JSON.stringify({
@@ -185,7 +180,7 @@ esac
 
   const result = spawnSync(
     "bash",
-    [deployScriptPath, config, databaseId, secrets, evidence],
+    [deployScriptPath, config, databaseId, evidence],
     {
       cwd: repositoryRoot,
       encoding: "utf8",
@@ -232,7 +227,7 @@ describe("automatic web deployment", () => {
     expect(script).toContain("bunx wrangler deploy");
     expect(script).toContain('--config "${config}"');
     expect(script).not.toContain("--strict");
-    expect(script).toContain("--secrets-file");
+    expect(script).not.toContain("--secrets-file");
     expect(script).toContain("--experimental-provision=false");
     expect(script).toContain("--autoconfig=false");
     expect(script).not.toContain("wrangler versions upload");
