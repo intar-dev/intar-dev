@@ -57,7 +57,7 @@ export function Landing() {
       </header>
 
       <main className="flex flex-1 flex-col">
-        <div className="flex min-h-[calc(100dvh-3.5rem)] flex-col justify-center pb-10 sm:min-h-[calc(100dvh-4.75rem)]">
+        <div className="flex min-h-[calc(100dvh-3.5rem)] snap-end flex-col justify-center pb-10 sm:min-h-[calc(100dvh-4.75rem)]">
           {errorMessage ? (
             <div className="mx-auto w-full max-w-7xl px-[var(--page-inset)] pt-4">
               <Alert variant="destructive">
