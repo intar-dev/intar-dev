@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "intar-agent"
-version = "0.19.1"
+version = "0.19.2"
 dependencies = [
  "anyhow",
  "avt",
@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "intar-builder"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "intar-image-cli"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2413,7 +2413,7 @@ dependencies = [
 
 [[package]]
 name = "kino"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -4747,7 +4747,7 @@ dependencies = [
 
 [[package]]
 name = "stargate-gateway"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "axum",

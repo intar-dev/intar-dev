@@ -1,5 +1,12 @@
 # Changelog
 
+## kino/v0.5.2 (2026-10-28)
+
+### Bug fixes
+
+- **deps:** Bump every dependency to its latest release (#261) (d29f1aae)
+- **deps:** Bump ctutils for RUSTSEC-2026-0385 and wire host admin to the current apis (#254) (68eaba88)
+
 ## kino/v0.5.1 (2026-10-22)
 
 ### Bug fixes
