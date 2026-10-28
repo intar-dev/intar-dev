@@ -4,8 +4,9 @@ PRODUCT is the product's products.json entry as JSON. Prints "<sha> <subject>"
 for each dependency fix between BASE and HEAD that changes a crate the product
 ships, for git-cliff's --with-commit. git-cliff maps a commit to a product by
 the paths it touches, and the root Cargo.toml and Cargo.lock belong to no
-product. A feat, fix, or build commit with the deps scope that touches only
-those two files counts for a product when, before or after the change, it:
+product. A feat, fix, or build commit with the deps scope that changes either
+file counts for a product whose paths it does not touch (git-cliff already
+takes those) when, before or after the change, it:
 
 - adds, removes, or edits a Cargo.lock package in the dependency closure of the
   product's workspace crates: its package and each crates/<name>/** in its
@@ -16,7 +17,9 @@ those two files counts for a product when, before or after the change, it:
 - changes anything else in the root Cargo.toml, such as a profile or a patch,
   which counts for every product.
 
-Both files are read as TOML at each revision, without running Cargo.
+The commit may change other files too, such as the code a breaking bump needs,
+so one pull request can carry the bump and its fixes. Both files are read as
+TOML at each revision, without running Cargo.
 
 ponytail: Cargo.lock also lists the workspace crates' dev-dependencies and
 every target's dependencies, so the closure can be wider than what ships and a
@@ -26,6 +29,7 @@ target would be exact.
 
 import json
 import re
+from fnmatch import fnmatchcase
 import subprocess
 import sys
 import tomllib
@@ -95,7 +99,9 @@ def main(base, product):
         if not DEPS_FIX.match(subject):
             continue
         files = set(git("diff-tree", "--no-commit-id", "--name-only", "-r", sha).splitlines())
-        if not files <= ROOT_FILES:
+        if not files & ROOT_FILES or any(
+            fnmatchcase(f, path) for f in files for path in product["paths"]
+        ):
             continue
         (rest, deps), (rest_after, deps_after) = manifest(f"{sha}^"), manifest(sha)
         if rest != rest_after:
