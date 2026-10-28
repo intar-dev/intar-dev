@@ -15,11 +15,11 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@astrojs/starlight": "0.42.6",
+    "@astrojs/starlight": "0.42.7",
     "astro": "7.4.2"
   },
   "devDependencies": {
     "typescript": "7.0.2",
-    "wrangler": "4.151.3"
+    "wrangler": "4.154.0"
   }
 }
