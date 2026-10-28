@@ -2,7 +2,7 @@
 
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agentHosts,
   courseCatalogs,
@@ -90,6 +90,10 @@ beforeEach(async () => {
   });
   await insertRun("org-run", SCENARIO, "completed");
   await insertRun("public-run", PUBLIC_SCENARIO, "completed");
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 async function insertRun(
@@ -192,6 +196,19 @@ describe("purging a disconnected scope", () => {
       }),
     ).rejects.toMatchObject({ status: 400 });
     expect(await count("course_catalogs")).toBe(1);
+  });
+
+  it("keeps the rows naming the objects until their R2 delete succeeds", async () => {
+    vi.spyOn(env.VM_IMAGE_REGISTRY_BUCKET, "delete").mockRejectedValueOnce(new Error("r2 down"));
+    await expect(purge()).rejects.toThrow("r2 down");
+    expect(await count("image_build_bundles")).toBe(1);
+    expect(await count("image_builds")).toBe(1);
+    expect(await count("scenario_sources", "disconnect_reason = 'purging'")).toBe(1);
+
+    await expect(purge()).resolves.toBeNull();
+    expect(await count("scenario_sources")).toBe(0);
+    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(`builds/bundles/${REV}.tar.gz`)).toBeNull();
+    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head("builds/logs/build.log")).toBeNull();
   });
 
   it("resumes a purge that was cut off", async () => {

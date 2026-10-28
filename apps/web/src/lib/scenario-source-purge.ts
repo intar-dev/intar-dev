@@ -109,17 +109,31 @@ export async function purgeScenarioSource(input: {
   ).all<{ scenario_id: string; arch: ImageArchitecture }>();
   // The family locks a live publish and a rollback take, over every family a
   // pointer or a rollback snapshot names, so neither can write the scope's
-  // pointers back between the read and the delete.
-  const objectKeys = await withImageBuildCoordinationLocks(
+  // pointers back between the read and the delete. The scope key, which no
+  // scenario id can be, serializes overlapping purges of the scope.
+  await withImageBuildCoordinationLocks(
     drizzle(d1),
-    families.map((family) => ({ scenarioId: family.scenario_id, arch: family.arch })),
+    [
+      { scenarioId: scopeKey, arch: "x86_64" },
+      ...families.map((family) => ({ scenarioId: family.scenario_id, arch: family.arch })),
+    ],
     async () => {
+      // The objects go before the rows that name them, so a purge cut off in
+      // between reads the same keys again. R2 deletes take at most 1000 keys.
+      // The marker is still set, so no reconnect writes under these keys.
       const { results: keys } = await bind(
         `SELECT r2_key AS key FROM image_build_bundles WHERE organization_id = ?2
           UNION SELECT log_r2_key FROM image_builds
             WHERE organization_id = ?2 AND log_r2_key IS NOT NULL`,
       ).all<{ key: string }>();
+      for (let offset = 0; offset < keys.length; offset += 1000) {
+        await env.VM_IMAGE_REGISTRY_BUCKET.delete(
+          keys.slice(offset, offset + 1000).map((row) => row.key),
+        );
+      }
       // The assignment delete reads the scenarios, so it runs before them.
+      // The commits cascade with the binding. The registry sweep reclaims the
+      // unreferenced images.
       await d1.batch([
         bind(`DELETE FROM course_unit_completions WHERE scope_key = ?1 AND ${PURGING}`),
         bind(`DELETE FROM scenario_assignments WHERE organization_id = ?2
@@ -129,18 +143,11 @@ export async function purgeScenarioSource(input: {
         bind(`DELETE FROM image_builds WHERE organization_id = ?2 AND ${PURGING}`),
         bind(`DELETE FROM image_build_bundles WHERE organization_id = ?2 AND ${PURGING}`),
         bind(`DELETE FROM vm_scenarios WHERE organization_id = ?2 AND ${PURGING}`),
+        bind(`DELETE FROM scenario_sources WHERE scope_key = ?1 AND ${PURGING}
+          AND NOT EXISTS (${ORG_SCENARIOS})`),
       ]);
-      return keys.map((row) => row.key);
     },
   );
-  // R2 deletes take at most 1000 keys. The marker is still set, so a reconnect
-  // cannot write a bundle under one of these deterministic keys meanwhile.
-  for (let offset = 0; offset < objectKeys.length; offset += 1000) {
-    await env.VM_IMAGE_REGISTRY_BUCKET.delete(objectKeys.slice(offset, offset + 1000));
-  }
-  // The commits cascade. The registry sweep reclaims the unreferenced images.
-  await bind(`DELETE FROM scenario_sources WHERE scope_key = ?1 AND ${PURGING}
-    AND NOT EXISTS (${ORG_SCENARIOS})`).run();
   return true;
 }
 
