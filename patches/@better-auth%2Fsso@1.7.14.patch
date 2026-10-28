@@ -1,16 +1,16 @@
-diff --git a/dist/index-qb-OvHIE.d.mts b/dist/index-qb-OvHIE.d.mts
-index 0612dac63881c0dcb74c3643667d6ae932d083d9..e5ec1ae51e122e5cc10901cfcba7a84b6b0fcd2e 100644
---- a/dist/index-qb-OvHIE.d.mts
-+++ b/dist/index-qb-OvHIE.d.mts
-@@ -3,6 +3,7 @@ import * as z from "zod";
+diff --git a/dist/index-BvKzNnKP.d.mts b/dist/index-BvKzNnKP.d.mts
+index 401c2cd5136d06281255e8c4242a87a7e350e68a..6ce7ee07647fcb8860da8bbe36a04050df26d6fd 100644
+--- a/dist/index-BvKzNnKP.d.mts
++++ b/dist/index-BvKzNnKP.d.mts
+@@ -4,6 +4,7 @@ import "@better-fetch/fetch";
  import samlifyDefault from "samlify";
  import { DBFieldAttribute, FieldAttributeToObject, InferAdditionalFieldsFromPluginOptions, RemoveFieldsWithReturnedFalse } from "better-auth/db";
  import { Awaitable, DBTransactionAdapter, OAuth2Tokens, User } from "better-auth";
 +import { GenericEndpointContext } from "@better-auth/core";
- import * as _$better_call0 from "better-call";
+ import "@better-auth/core/db/adapter";
+ import "@better-auth/core";
  //#region src/saml/algorithms.d.ts
- declare const SignatureAlgorithm: {
-@@ -364,6 +365,26 @@ interface SSOOptions {
+@@ -366,6 +367,26 @@ interface SSOOptions {
       */
      provider: SSOProvider<SSOOptions>;
    }) => Awaitable<void>) | undefined;
@@ -38,10 +38,10 @@ index 0612dac63881c0dcb74c3643667d6ae932d083d9..e5ec1ae51e122e5cc10901cfcba7a84b
     * If true, the `provisionUser` callback will be called on every login,
     * not just when a new user is registered. This is useful when you need
 diff --git a/dist/index.mjs b/dist/index.mjs
-index ca304e9bbe1922d6de75af099a43f1c294dfbebd..3403183cf6c99c38659e31714f55cd7c53417ec5 100644
+index 36dc6217df8018644e7bd5db8a5f1d6e6f29a564..bdd1363d5bad5fb15b792748699932912f0b8eea 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -3855,7 +3855,7 @@ async function handleOIDCCallback(ctx, options, providerId, stateData, parsedPro
+@@ -3857,7 +3857,7 @@ async function handleOIDCCallback(ctx, options, providerId, stateData, parsedPro
  	};
  	if (!config.tokenEndpoint) return redirectOIDCError("invalid_provider", "token_endpoint_not_found");
  	const tokenEndpoint = config.tokenEndpoint;
@@ -50,7 +50,7 @@ index ca304e9bbe1922d6de75af099a43f1c294dfbebd..3403183cf6c99c38659e31714f55cd7c
  	if (config.tokenEndpointAuthentication === "private_key_jwt") {
  		let resolved;
  		const matchingDefault = options?.defaultSSO?.find((p) => p.providerId === provider.providerId && "privateKey" in p && p.privateKey);
-@@ -3973,6 +3973,19 @@ async function handleOIDCCallback(ctx, options, providerId, stateData, parsedPro
+@@ -3975,6 +3975,19 @@ async function handleOIDCCallback(ctx, options, providerId, stateData, parsedPro
  		accountId: userInfoId
  	};
  	const isTrustedProvider = "domainVerified" in provider && provider.domainVerified === true && validateEmailDomain(userInfoEmail, provider.domain);

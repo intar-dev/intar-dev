@@ -103,8 +103,9 @@ impl server::Handler for SshConnection {
     async fn auth_publickey_offered(
         &mut self,
         user: &str,
-        public_key: &russh::keys::ssh_key::PublicKey,
+        offer: server::PublicKeyOffer<'_>,
     ) -> Result<Auth, Self::Error> {
+        let public_key = offer.public_key;
         self.clear_route_authorization();
         let Some((route, admission)) = self.load_route_with_admission(user).await? else {
             return Ok(self.reject_key(user, public_key, "route_unavailable"));
@@ -127,8 +128,9 @@ impl server::Handler for SshConnection {
     async fn auth_publickey(
         &mut self,
         user: &str,
-        public_key: &russh::keys::ssh_key::PublicKey,
+        key: server::VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
+        let public_key = key.public_key;
         let (route, admission) = match (self.route.clone(), self.route_admission.as_ref()) {
             (Some(route), Some(admission))
                 if route.route_username == user && !admission.token().is_cancelled() =>

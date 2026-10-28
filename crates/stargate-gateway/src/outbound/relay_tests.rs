@@ -650,9 +650,13 @@ async fn slow_client_does_not_block_another_channel_and_host_channels_are_limite
 }
 impl server::Handler for Guest {
     type Error = anyhow::Error;
-    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> anyhow::Result<Auth> {
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        key: server::VerifiedPublicKey<'_>,
+    ) -> anyhow::Result<Auth> {
         Ok(
-            if user == "learner" && key.key_data() == self.allowed.key_data() {
+            if user == "learner" && key.public_key.key_data() == self.allowed.key_data() {
                 Auth::Accept
             } else {
                 Auth::reject()

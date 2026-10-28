@@ -14,7 +14,7 @@
   "devDependencies": {
     "typescript": "^7.0.2",
     "vitest": "^5.0.5",
-    "wrangler": "^4.151.3"
+    "wrangler": "^4.154.0"
   },
   "scripts": {
     "check:imports": "bun tools/check-import-boundaries.ts",
@@ -29,14 +29,12 @@
     "build": "bun run build:web"
   },
   "overrides": {
-    "@better-auth/core": "1.7.12",
+    "@better-auth/core": "1.7.14",
     "esbuild": "0.28.2",
-    "sharp": "0.35.5",
-    "undici": "7.30.1",
-    "zod": "4.6.7"
+    "undici": "7.30.1"
   },
   "patchedDependencies": {
-    "@better-auth/sso@1.7.12": "patches/@better-auth%2Fsso@1.7.12.patch",
-    "@better-auth/core@1.7.12": "patches/@better-auth%2Fcore@1.7.12.patch"
+    "@better-auth/sso@1.7.14": "patches/@better-auth%2Fsso@1.7.14.patch",
+    "@better-auth/core@1.7.14": "patches/@better-auth%2Fcore@1.7.14.patch"
   }
 }

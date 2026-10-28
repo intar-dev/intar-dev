@@ -4,14 +4,15 @@
 //!
 //! The session's output plays through an `avt` virtual terminal at the
 //! recorded geometry, so carriage-return redraws, cursor addressing, and
-//! erases resolve exactly like they did on screen. `Vt::text()` then yields
+//! erases resolve exactly like they did on screen; a full-screen clear keeps
+//! what it cleared in scrollback. The primary screen's `text()` then yields
 //! the primary buffer including scrollback, with soft-wrapped rows joined
 //! back into logical lines and trailing whitespace trimmed. Alt-screen
 //! applications (vim, htop) draw on the alternate buffer, which keeps no
 //! scrollback — their frames never reach the transcript, only the
 //! primary-screen shell content around them.
 
-use avt::Vt;
+use avt::{Line, Observation, Observer, Terminal};
 
 use super::krec::{KrecEventData, ParsedKrec};
 
@@ -38,28 +39,30 @@ pub(crate) struct Transcript {
 }
 
 pub(crate) fn render_transcript(session: &ParsedKrec) -> Transcript {
-    let mut vt = Vt::builder()
-        .size(clamp_cols(session.width), clamp_rows(session.height))
-        .scrollback_limit(TRANSCRIPT_SCROLLBACK_LIMIT)
-        .build();
+    // The clamps keep both dimensions positive, so construction cannot fail.
+    let Ok(mut vt) = Terminal::with_scrollback(
+        clamp_cols(session.width),
+        clamp_rows(session.height),
+        Some(TRANSCRIPT_SCROLLBACK_LIMIT),
+    ) else {
+        return Transcript {
+            text: String::new(),
+            truncated: false,
+        };
+    };
 
-    let mut evicted = 0_usize;
+    let mut evicted = Evictions::default();
     for event in &session.events {
         match &event.data {
-            KrecEventData::Output(data) => {
-                evicted += vt.feed_str(data).scrollback.count();
-            }
+            KrecEventData::Output(data) => vt.feed_with(data.as_str(), &mut evicted),
             KrecEventData::Resize { cols, rows } => {
-                evicted += vt
-                    .resize(clamp_cols(*cols), clamp_rows(*rows))
-                    .scrollback
-                    .count();
+                vt.resize_with(clamp_cols(*cols), clamp_rows(*rows), &mut evicted);
             }
             KrecEventData::Input(_) => {}
         }
     }
 
-    let mut lines = vt.text();
+    let mut lines = vt.primary_screen().text();
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
     }
@@ -73,7 +76,7 @@ pub(crate) fn render_transcript(session: &ParsedKrec) -> Transcript {
         start += 1;
     }
 
-    let truncated = evicted > 0 || start > 0;
+    let truncated = evicted.0 > 0 || start > 0;
     let mut text = String::with_capacity(total_bytes + TRUNCATION_MARKER.len() + 1);
     if truncated {
         text.push_str(TRUNCATION_MARKER);
@@ -85,6 +88,20 @@ pub(crate) fn render_transcript(session: &ParsedKrec) -> Transcript {
     }
 
     Transcript { text, truncated }
+}
+
+/// Counts the primary lines the scrollback limit evicts.
+#[derive(Default)]
+struct Evictions(usize);
+
+impl Observer for Evictions {
+    type Output = ();
+
+    fn evicted(&mut self, _: &mut Observation<'_>, _: &Line) {
+        self.0 += 1;
+    }
+
+    fn end(&mut self, _: &mut Observation<'_>) {}
 }
 
 /// Shrinks a transcript to `max_bytes`, retaining its newest output. This is
@@ -196,6 +213,20 @@ mod tests {
             vec![output(0.0, "progress 10%"), output(0.5, "\rprogress 99%")],
         ));
         assert_eq!(transcript.text, "progress 99%\n");
+        assert!(!transcript.truncated);
+    }
+
+    #[test]
+    fn clearing_the_screen_keeps_the_output_it_cleared() {
+        let transcript = render_transcript(&session(
+            80,
+            24,
+            vec![
+                output(0.0, "$ ls\r\nnotes.txt\r\n$ "),
+                output(0.5, "\x1b[H\x1b[2J$ pwd"),
+            ],
+        ));
+        assert_eq!(transcript.text, "$ ls\nnotes.txt\n$\n$ pwd\n");
         assert!(!transcript.truncated);
     }
 
