@@ -22,6 +22,7 @@ function renderCard(source: Partial<ScenarioSourceView> | null): string {
       pausedAt: null,
       pauseReason: null,
       disconnectedAt: null,
+      disconnectReason: null,
       liveSha: null,
       liveAt: null,
       commit: null,
@@ -68,6 +69,16 @@ describe("scenario source card", () => {
   it("links to the builds page, connected or not", () => {
     expect(renderCard(null)).toContain('href="/admin/builds"');
     expect(renderCard({})).toContain('href="/admin/builds"');
+  });
+
+  it("offers to delete what a disconnected repository published", () => {
+    expect(renderCard({})).not.toContain("Delete courses and scenarios");
+    const disconnected = renderCard({ disconnectedAt: 1, disconnectReason: "admin" });
+    expect(disconnected).toContain("Delete courses and scenarios</button>");
+    expect(disconnected).toContain("Connect repository");
+    expect(
+      renderCard({ disconnectedAt: 1, disconnectReason: "purging" }),
+    ).toContain("Finish deleting</button>");
   });
 
   it("offers an admin pause over a suspension, but only resume otherwise", () => {

@@ -248,6 +248,15 @@ describe("binding a repository", () => {
     });
   });
 
+  it("waits for a purge of the last repository before re-binding", async () => {
+    github();
+    await insertBinding({ disconnectedAt: 3, disconnectReason: "purging" });
+    await expect(
+      change({ action: "connect", repository: "acme/labs" }),
+    ).rejects.toMatchObject({ status: 409, code: "scenario_source_purging" });
+    expect(await binding()).toMatchObject({ disconnectReason: "purging", githubRepositoryId: 9 });
+  });
+
   it("binds public only to the pinned repository, for an active platform admin", async () => {
     github({}, "1002");
     await createFixtureMember({ d1: env.DB, userId: "operator", role: "admin", githubAccountId: "1002" });
