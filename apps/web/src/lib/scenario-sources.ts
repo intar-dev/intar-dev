@@ -56,6 +56,7 @@ import { featureToggleService } from "@/lib/organization-access";
 import { administersOrganization } from "@/lib/organizations";
 import { activeAdministrator } from "@/lib/platform-admin-authority";
 import { currentScenarioRunContentAccessCondition } from "@/lib/scenario-runs/content-access";
+import { purgeScenarioSource } from "@/lib/scenario-source-purge";
 import {
   BodyLimitExceededError,
   enforceRateLimit,
@@ -89,6 +90,7 @@ export interface ScenarioSourceView {
   pausedAt: number | null;
   pauseReason: "admin" | "binder_lost_admin" | "suspended" | null;
   disconnectedAt: number | null;
+  disconnectReason: string | null;
   liveSha: string | null;
   liveAt: number | null;
   /** The organization's runs that hold the pending target: the unit guard's count. */
@@ -341,6 +343,7 @@ export async function loadScenarioSource(
     pausedAt: binding.pausedAt,
     pauseReason: binding.pauseReason,
     disconnectedAt: binding.disconnectedAt,
+    disconnectReason: binding.disconnectReason,
     liveSha: binding.liveSha,
     liveAt: binding.liveAt,
     activeRuns,
@@ -386,7 +389,7 @@ export function parseDiagnostics(
 
 type Change =
   | { action: "connect"; repository: string }
-  | { action: "resume" | "pause" | "disconnect" }
+  | { action: "resume" | "pause" | "disconnect" | "purge" }
   | { action: "mode"; mode: "push" | "pull" };
 
 function parseChange(body: unknown): Change {
@@ -411,6 +414,7 @@ function parseChange(body: unknown): Change {
     case "resume":
     case "pause":
     case "disconnect":
+    case "purge":
       return { action: input.action };
     case "mode":
       if (input.mode === "push" || input.mode === "pull") {
@@ -449,7 +453,7 @@ export async function refuseScenarioSourceWrite(
 /**
  * Applies one owner or admin change to the scope's binding and returns the
  * binding afterwards. Bind, resume and mode need the flag and answer 404
- * without it; pause and disconnect never do, so a scope can always stop.
+ * without it; pause, disconnect and purge never do, so a scope can always stop.
  */
 export async function changeScenarioSource(input: {
   scope: ScenarioSourceScope;
@@ -465,6 +469,7 @@ export async function changeScenarioSource(input: {
   if (
     change.action !== "pause" &&
     change.action !== "disconnect" &&
+    change.action !== "purge" &&
     !(await scenarioGitSourcesEnabled(scope, input.toggles))
   ) {
     throw appError(404, "not_found", "not found");
@@ -567,6 +572,16 @@ export async function changeScenarioSource(input: {
         })
         .where(connected);
       break;
+    case "purge":
+      if (scope.organizationId === null) {
+        throw appError(400, "scenario_source_change_invalid", "Unknown change.");
+      }
+      await purgeScenarioSource({
+        scopeKey: scope.key,
+        organizationId: scope.organizationId,
+        actorUserId,
+      });
+      break;
     case "mode": {
       const switching = and(connected, ne(scenarioSources.mode, change.mode));
       // A fetch or compile under the old mode is dropped; the new mode
@@ -643,7 +658,8 @@ async function connect(input: {
         disconnect_reason = NULL,
         poked_at = excluded.poked_at,
         updated_at = excluded.updated_at
-      WHERE scenario_sources.disconnected_at IS NOT NULL`);
+      WHERE scenario_sources.disconnected_at IS NOT NULL
+        AND scenario_sources.disconnect_reason IS NOT 'purging'`);
     changes = result.meta.changes ?? 0;
   } catch (error) {
     if (errorChainMatches(error, /scenario_sources\.github_repository_id/i)) {
@@ -657,10 +673,20 @@ async function connect(input: {
   }
   if (changes === 1) return;
   const [existing] = await db
-    .select({ disconnectedAt: scenarioSources.disconnectedAt })
+    .select({
+      disconnectedAt: scenarioSources.disconnectedAt,
+      disconnectReason: scenarioSources.disconnectReason,
+    })
     .from(scenarioSources)
     .where(eq(scenarioSources.scopeKey, scope.key))
     .limit(1);
+  if (existing?.disconnectReason === "purging") {
+    throw appError(
+      409,
+      "scenario_source_purging",
+      "The courses of the last repository are still being deleted. Finish that first.",
+    );
+  }
   if (existing && existing.disconnectedAt === null) {
     throw appError(
       409,

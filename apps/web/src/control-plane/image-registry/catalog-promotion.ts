@@ -670,6 +670,14 @@ export async function handleCatalogRollback(
         arch: family.arch,
       })),
       async () => {
+        // A purge of the scope deletes the snapshot under these locks; one it
+        // removed after the read above is not restored.
+        const current = await env.DB.prepare(
+          "SELECT 1 FROM scenario_catalog_snapshots WHERE revision = ?1",
+        )
+          .bind(revision)
+          .first();
+        if (!current) return null;
         const placeholders = snapshot.targetScenarioIds.map(() => "?").join(",");
         // The pointers the rollback replaces are the rollback image of the restored
         // state; read them before the restore rewrites the catalog.
@@ -729,6 +737,9 @@ export async function handleCatalogRollback(
         };
       },
     );
+    if (locked === null) {
+      return jsonResponse({ error: "exact rollback snapshot is unavailable or ambiguous" }, 409);
+    }
     restored = locked;
     await writer.release("ok");
   } finally {

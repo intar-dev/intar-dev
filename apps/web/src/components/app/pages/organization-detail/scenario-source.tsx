@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { GitBranch, Hammer, Pause, Play, Unplug } from "lucide-react";
+import { GitBranch, Hammer, Pause, Play, Trash2, Unplug } from "lucide-react";
 import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
 import { CodeBlock } from "../../patterns/CodeBlock";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
@@ -41,18 +41,28 @@ export function ScenarioSourceSection({
   const card = useQuery({ queryKey, queryFn: () => fetchJson<Card>(endpoint) });
   const [repository, setRepository] = useState("");
   const [disconnectOpen, setDisconnectOpen] = useState(false);
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [purgeConfirm, setPurgeConfirm] = useState("");
   const change = useMutation({
     mutationFn: async (body: Record<string, string>) => {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      await mutationResponse(response, "The scenario source could not be changed");
+      // A purge deletes a bounded share per request; it is done once the
+      // binding is gone. ponytail: 100 rounds, then the button resumes it.
+      for (let round = 0; round < 100; round += 1) {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        await mutationResponse(response, "The scenario source could not be changed");
+        if (body.action !== "purge") return;
+        const { source } = (await response.json()) as { source: ScenarioSourceView | null };
+        if (source?.disconnectReason !== "purging") return;
+      }
     },
     onSuccess: async () => {
       setDisconnectOpen(false);
+      setPurgeOpen(false);
       await queryClient.invalidateQueries({ queryKey });
     },
   });
@@ -63,6 +73,7 @@ export function ScenarioSourceSection({
   if (!card.data || !scenarioSourceCardVisible(card.data)) return null;
   const { enabled, appSlug } = card.data;
   const source = card.data.source?.disconnectedAt === null ? card.data.source : null;
+  const disconnected = card.data.source?.disconnectedAt != null ? card.data.source : null;
   const branch = source?.defaultBranch ?? "main";
   // Connecting a repository can refuse it; the field says why.
   const repositoryError =
@@ -154,6 +165,30 @@ export function ScenarioSourceSection({
             </form>
           </>
         )}
+        {disconnected ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+            <p className="text-muted-foreground">
+              {disconnected.disconnectReason === "purging"
+                ? `Deleting what ${disconnected.repository} published didn't finish.`
+                : `The courses and scenarios ${disconnected.repository} published stay live.`}
+            </p>
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={change.isPending}
+              onClick={() => {
+                change.reset();
+                setPurgeConfirm("");
+                setPurgeOpen(true);
+              }}
+            >
+              <Trash2 className="size-4" />
+              {disconnected.disconnectReason === "purging"
+                ? "Finish deleting"
+                : "Delete courses and scenarios"}
+            </Button>
+          </div>
+        ) : null}
         {failure && !repositoryError ? (
           <InlineFeedback tone="error">{failure.message}</InlineFeedback>
         ) : null}
@@ -198,6 +233,33 @@ export function ScenarioSourceSection({
         pendingLabel="Disconnecting…"
         onConfirm={() => change.mutate({ action: "disconnect" })}
       />
+      <ConfirmDialog
+        open={purgeOpen}
+        onClose={() => {
+          setPurgeOpen(false);
+          change.reset();
+        }}
+        title="Delete courses and scenarios?"
+        description={`This permanently deletes the courses, scenarios, images and builds ${disconnected?.repository ?? "the repository"} published, every run of those scenarios and the learners' progress. Type the repository name to confirm.`}
+        error={apiErrorMessage(
+          change.error,
+          "Couldn't delete the courses and scenarios. Try again.",
+        )}
+        pending={change.isPending}
+        confirmLabel="Delete everything"
+        pendingLabel="Deleting…"
+        confirmDisabled={purgeConfirm !== disconnected?.repository}
+        onConfirm={() => change.mutate({ action: "purge" })}
+      >
+        <Input
+          value={purgeConfirm}
+          onChange={(event) => setPurgeConfirm(event.target.value)}
+          aria-label="Repository name confirmation"
+          className="text-code"
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </ConfirmDialog>
     </Section>
   );
 }
