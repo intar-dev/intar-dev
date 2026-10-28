@@ -1,5 +1,11 @@
 # Changelog
 
+## image-cli/v0.10.3 (2026-10-28)
+
+### Bug fixes
+
+- **deps:** Bump every dependency to its latest release (#261) (d29f1aae)
+
 ## image-cli/v0.10.2 (2026-10-23)
 
 ### Bug fixes
