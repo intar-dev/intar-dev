@@ -42,14 +42,14 @@
     // The intar-image-cli release the compiler descriptor names, and its
     // release tarball sha256 per target as JSON, e.g. {"linux_amd64":"<hex>"}.
     // While either is empty the descriptor answers 503.
-    "SCENARIO_COMPILER_CLI_VERSION": "0.10.2",
+    "SCENARIO_COMPILER_CLI_VERSION": "0.10.3",
     // Public run shares keep their terminal logs next to the run recordings.
     // Local workerd has no jurisdictions, so local configs leave this unset.
     "RUN_SHARE_JURISDICTION": "eu",
     // The public origin of SHARE_LIVE_BUCKET, and its zone for cache purges
     // (with the optional SHARE_LIVE_PURGE_TOKEN secret).
     "SHARE_LIVE_ORIGIN": "https://live.intar.dev",
-    "SCENARIO_COMPILER_CLI_SHA256": "{\"linux_amd64\":\"6e1421afda89772f15c18ef2e0ee292aa456859c7d382c586c280b69291b87a3\",\"linux_arm64\":\"bc349d1f721fb7b6f3c3420a9ad2bad578f76380873347dcbe89a9321722bf02\"}",
+    "SCENARIO_COMPILER_CLI_SHA256": "{\"linux_amd64\":\"4a0287a6938ff053807f2c33720d1d8910594ef5443e5eca52c7ae034dc9307f\",\"linux_arm64\":\"712b7a6847b0244b7de60dd4e5ba18efaeeee835bc26830ab69b20081aecf165\"}",
   },
   "vpc_services": [
     {
