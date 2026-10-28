@@ -2590,9 +2590,9 @@ impl server::Handler for TestTargetServer {
     async fn auth_publickey(
         &mut self,
         user: &str,
-        public_key: &russh::keys::ssh_key::PublicKey,
+        key: server::VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
-        if user == self.allowed_username && public_key == &self.allowed_public_key {
+        if user == self.allowed_username && key.public_key == &self.allowed_public_key {
             Ok(Auth::Accept)
         } else {
             Ok(Auth::reject())

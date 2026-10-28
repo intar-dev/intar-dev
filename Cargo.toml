@@ -29,7 +29,7 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 anyhow = "=1.0.104"
-avt = "=0.18.0"
+avt = "=0.19.0"
 axum = { version = "=0.8.9", default-features = false }
 blake3 = "=1.8.7"
 base16ct = { version = "=1.0.0", features = ["alloc"] }
@@ -62,11 +62,11 @@ pty-process = "=0.5.4"
 regex = "=1.13.1"
 reqwest = { version = "=0.13.5", default-features = false }
 ring = "=0.17.14"
-rustix = { version = "=1.1.5", features = ["event", "fs", "mount", "net", "pipe", "process", "system", "thread"] }
+rustix = { version = "=1.1.6", features = ["event", "fs", "mount", "net", "pipe", "process", "system", "thread"] }
 reflink-copy = "=0.1.30"
 rustls = { version = "=0.23.46", default-features = false }
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
-russh = "=0.64.1"
+rusqlite = { version = "=0.41.0", features = ["bundled"] }
+russh = "=0.65.0"
 schemars = { version = "=1.2.3", features = ["derive"] }
 sd-notify = "=0.5.0"
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -91,10 +91,10 @@ opentelemetry-otlp = { version = "=0.33.1", default-features = false, features =
 tracing-opentelemetry = { version = "=0.34.0", default-features = false }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 url = { version = "=2.5.8", features = ["serde"] }
-uuid = { version = "=1.28.0", features = ["serde", "v4"] }
-xattr = "=1.6.1"
+uuid = { version = "=1.29.0", features = ["serde", "v4"] }
+xattr = "=1.7.0"
 zstd = "=0.14.3"
-zbus = { version = "=6.0.0", default-features = false, features = ["default-rt", "proxy"] }
+zbus = { version = "=6.1.0", default-features = false, features = ["default-rt", "proxy"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
