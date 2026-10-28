@@ -129,9 +129,9 @@ test("a commit that is not a dependency fix releases nothing", () => {
   expect(released(repo, "stargate-gateway")).toBe("");
 });
 
-test("only a dependency fix confined to the root Cargo files counts", () => {
+test("a dependency fix that changes other files counts too", () => {
   const repo = fixture();
-  commit(repo, "fix(deps): bump rustls 0.23 and devalue", {
+  const mixed = commit(repo, "fix(deps): bump rustls 0.23 and devalue", {
     "Cargo.lock": lock(packages({ rustls23: "0.23.2" })),
     "bun.lock": "{}\n",
   });
@@ -139,8 +139,24 @@ test("only a dependency fix confined to the root Cargo files counts", () => {
     "Cargo.toml": '[workspace]\ndependencies = { rustls = "0.23.3" }\n',
     "Cargo.lock": lock(packages({ rustls23: "0.23.3" })),
   });
-  expect(released(repo, "stargate-gateway")).toBe(breaking);
+  // Newest first, as git log lists them.
+  expect(released(repo, "stargate-gateway")).toBe(`${breaking}\n${mixed}`);
   expect(released(repo, "intar-agent")).toBe("");
+});
+
+// git-cliff takes a commit that touches the product's paths, and one that
+// changes no root Cargo file has no dependency for this script to weigh.
+test("a dependency fix that touches a product's paths leaves it to git-cliff", () => {
+  const repo = fixture();
+  run("mkdir", ["-p", "crates/intar-agent"], repo);
+  commit(repo, "fix(deps): bump rustls and adapt the agent", {
+    "Cargo.lock": lock(packages({ rustls21: "0.21.1", landlock: "0.4.6" })),
+    "crates/intar-agent/lib.rs": "\n",
+  });
+  run("mkdir", ["-p", "web"], repo);
+  commit(repo, "fix(deps): bump devalue", { "web/bun.lock": "{}\n" });
+  expect(released(repo, "intar-agent")).toBe("");
+  expect(released(repo, "stargate-gateway")).toBe("");
 });
 
 test("a crate only another shipped crate uses releases the product", () => {

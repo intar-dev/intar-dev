@@ -52,7 +52,8 @@ other registry.
   bumps the patch version. A breaking change bumps the minor version while a
   product is on 0.x. The root `Cargo.toml` and `Cargo.lock` belong to no
   product, so a `feat(deps)`, `fix(deps)`, or `build(deps)` commit that changes
-  only those two files counts for each product that ships what it changed
+  either of them, with or without other files, also counts for each product
+  that ships what it changed
   (`tools/workflows/release/deps-commits.py`): a `Cargo.lock` package in the
   dependency closure of the product's crates, including the jailer and jailerd
   in the agent's archive, or a `[workspace.dependencies]` entry those crates
@@ -86,10 +87,8 @@ product tag as part of other work, and never push a tag by hand. To release a
 version other than the one the release pull request proposes, change the
 version in a pull request of its own; the next run tags and publishes it. A
 Rust dependency update, such as a security fix in the root `Cargo.lock`, ships
-through the release pull request when it is a `fix(deps)` pull request that
-changes nothing but the root `Cargo.toml` and `Cargo.lock`, as described
-above; together with other files it releases only the products whose paths
-those files touch. The release pull request is rebuilt on every push to main,
+through the release pull request when it is a `fix(deps)` pull request, as
+described above, even when it also changes the code the update needs. The release pull request is rebuilt on every push to main,
 so edits made on it are lost.
 
 The workflow needs a GitHub App to push `release/next` and open pull requests,
