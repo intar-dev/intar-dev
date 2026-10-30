@@ -156,7 +156,10 @@ before the workflow attested them have no attestation. Then:
   `/usr/local/bin/intar-builder.pre-vX.Y.Z`, `install -m 0755` the new one,
   start the service, and check the journal for the handshake and the desired
   state with no warnings. The binary has no `--version`; tell releases apart by
-  their SHA-256.
+  their SHA-256. `swamp workflow run builder-rollout --input version=X.Y.Z`
+  runs these steps and stops for approval before the install and again before
+  a rollback; after each `swamp workflow approve builder-rollout <step>`,
+  `swamp workflow resume builder-rollout` continues the run.
 - **Stargate:** see "Rolling out" in `deploy/stargate/README.md`.
 - **Kino:** image-ops `tools-build` with the `kino_tag`, then the guest-tools
   steps in `apps/web/README.md`.

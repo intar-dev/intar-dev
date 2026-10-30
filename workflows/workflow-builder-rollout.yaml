@@ -1,0 +1,234 @@
+id: 7e7ee998-02ea-4fd0-882d-0c29852f711d
+name: builder-rollout
+description: >-
+  Roll a builder release out to the builder host, following "Builder" under
+  "Rolling out" in README.md. Run it from the repository root.
+tags: {}
+inputs:
+  properties:
+    version:
+      type: string
+      description: The release to roll out, X.Y.Z (tag builder/vX.Y.Z)
+  required: [version]
+jobs:
+  - name: prepare
+    description: Download and verify the release, stage it on the host and run its doctor
+    steps:
+      - name: version-format
+        task:
+          type: assert
+          expr: >-
+            inputs.version.matches('^[0-9]+[.][0-9]+[.][0-9]+$')
+          message: version must be X.Y.Z
+          severity: high
+      - name: fetch-release
+        description: >-
+          Download the linux_amd64 archive into .tmp/builder/vX.Y.Z, check it
+          against the release checksums and its attestation, and print the
+          binary's SHA-256
+        dependsOn:
+          - step: version-format
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: builder-release
+          methodName: execute
+          inputs:
+            timeout: 300000
+            run: |
+              set -eu
+              v='${{ inputs.version }}'
+              d=".tmp/builder/v$v"
+              a="intar-builder_${v}_linux_amd64.tar.gz"
+              rm -rf "$d"
+              mkdir -p "$d"
+              gh release download "builder/v$v" --repo intar-dev/intar-dev --dir "$d" --pattern "$a" --pattern "intar-builder_${v}_checksums.txt" >&2
+              (cd "$d" && shasum -a 256 -c --ignore-missing "intar-builder_${v}_checksums.txt") >&2
+              gh attestation verify "$d/$a" --repo intar-dev/intar-dev >&2
+              printf '%s' "$(tar -xzOf "$d/$a" ./intar-builder | shasum -a 256 | cut -d' ' -f1)"
+      - name: release-hash
+        dependsOn:
+          - step: fetch-release
+            condition:
+              type: succeeded
+        task:
+          type: assert
+          expr: >-
+            data.latest("builder-release", "result").attributes.stdout.matches('^[0-9a-f]{64}$')
+          message: >-
+            fetch-release did not print a SHA-256: ${{ data.latest("builder-release", "result").attributes.stdout }}
+          severity: high
+      - name: upload
+        dependsOn:
+          - step: release-hash
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: builder-host
+          methodName: copy
+          inputs:
+            hosts: all
+            direction: to
+            src: .tmp/builder/v${{ inputs.version }}/intar-builder_${{ inputs.version }}_linux_amd64.tar.gz
+            dst: /tmp/intar-builder_${{ inputs.version }}_linux_amd64.tar.gz
+            atomic: true
+            mode: "0600"
+      - name: stage
+        description: >-
+          Unpack the binary into /var/tmp/intar-builder-vX.Y.Z, check its
+          SHA-256, run its read-only doctor, and print the installed binary's
+          SHA-256
+        dependsOn:
+          - step: upload
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: builder-host
+          methodName: script
+          inputs:
+            hosts: all
+            sudo: true
+            timeoutSec: 300
+            script: |
+              set -eu
+              a='/tmp/intar-builder_${{ inputs.version }}_linux_amd64.tar.gz'
+              d='/var/tmp/intar-builder-v${{ inputs.version }}'
+              install -d -o root -g root -m 0700 "$d"
+              tar -xzf "$a" -C "$d" ./intar-builder
+              rm -f "$a"
+              echo '${{ data.latest("builder-release", "result").attributes.stdout }}  '"$d/intar-builder" | sha256sum --quiet --check --strict
+              "$d/intar-builder" doctor --config /etc/intar-builder/config.toml
+              echo "installed: $(sha256sum /usr/local/bin/intar-builder | cut -d' ' -f1)"
+    dependsOn: []
+  - name: deploy
+    description: Approve, wait for idle, install and verify
+    dependsOn:
+      - job: prepare
+        condition:
+          type: succeeded
+    steps:
+      - name: approve
+        task:
+          type: manual_approval
+          prompt: >-
+            Install builder/v${{ inputs.version }} on the builder host once it
+            is idle. Approve, then run: swamp workflow resume builder-rollout
+          timeout: 3600
+      - name: install
+        description: >-
+          Wait up to 30 minutes for no desired build and no qemu, keep the old
+          binary as intar-builder.pre-vX.Y.Z, install the new one, and check
+          its SHA-256, the bridge handshake and the desired state
+        dependsOn:
+          - step: approve
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: builder-host
+          methodName: script
+          inputs:
+            hosts: all
+            sudo: true
+            timeoutSec: 2400
+            script: |
+              set -eu
+              new='/var/tmp/intar-builder-v${{ inputs.version }}/intar-builder'
+              pre='/usr/local/bin/intar-builder.pre-v${{ inputs.version }}'
+              idle() {
+                line=$(journalctl -u intar-builder --no-pager -o cat -r | grep -m 1 'applied builder desired state' || true)
+                case "$line" in *'"desired_builds":0'*) ;; *) return 1 ;; esac
+                ! pgrep -f '^/usr/bin/qemu' >/dev/null
+              }
+              i=0
+              until idle; do
+                i=$((i + 1))
+                if [ "$i" -gt 180 ]; then
+                  echo 'the builder did not become idle within 30 minutes' >&2
+                  exit 1
+                fi
+                sleep 10
+              done
+              [ -e "$pre" ] || cp -p /usr/local/bin/intar-builder "$pre"
+              systemctl stop intar-builder
+              install -m 0755 "$new" /usr/local/bin/intar-builder
+              since="@$(date +%s)"
+              systemctl start intar-builder
+              echo '${{ data.latest("builder-release", "result").attributes.stdout }}  /usr/local/bin/intar-builder' | sha256sum --quiet --check --strict
+              i=0
+              until journalctl -u intar-builder --since "$since" --no-pager -o cat | grep -Eq 'builder bridge v[0-9]+ handshake complete' \
+                && journalctl -u intar-builder --since "$since" --no-pager -o cat | grep -q 'applied builder desired state'; do
+                i=$((i + 1))
+                if [ "$i" -gt 60 ]; then
+                  echo 'no bridge handshake and desired state within 120 s' >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              if journalctl -u intar-builder --since "$since" --no-pager -o cat | grep -E 'WARN|ERROR' >&2; then
+                echo 'the builder journal has warnings' >&2
+                exit 1
+              fi
+              journalctl -u intar-builder --since "$since" --no-pager -o cat | tail -n 20
+      - name: rollback-approve
+        dependsOn:
+          - step: install
+            condition:
+              type: failed
+        task:
+          type: manual_approval
+          prompt: >-
+            Installing builder/v${{ inputs.version }} failed. Approve to restore
+            /usr/local/bin/intar-builder.pre-v${{ inputs.version }}, then run:
+            swamp workflow resume builder-rollout
+          timeout: 3600
+      - name: rollback
+        dependsOn:
+          - step: rollback-approve
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: builder-host
+          methodName: script
+          inputs:
+            hosts: all
+            sudo: true
+            timeoutSec: 2400
+            script: |
+              set -eu
+              pre='/usr/local/bin/intar-builder.pre-v${{ inputs.version }}'
+              test -e "$pre"
+              idle() {
+                line=$(journalctl -u intar-builder --no-pager -o cat -r | grep -m 1 'applied builder desired state' || true)
+                case "$line" in *'"desired_builds":0'*) ;; *) return 1 ;; esac
+                ! pgrep -f '^/usr/bin/qemu' >/dev/null
+              }
+              i=0
+              until idle; do
+                i=$((i + 1))
+                if [ "$i" -gt 180 ]; then
+                  echo 'the builder did not become idle within 30 minutes' >&2
+                  exit 1
+                fi
+                sleep 10
+              done
+              systemctl stop intar-builder
+              install -m 0755 "$pre" /usr/local/bin/intar-builder
+              since="@$(date +%s)"
+              systemctl start intar-builder
+              i=0
+              until journalctl -u intar-builder --since "$since" --no-pager -o cat | grep -Eq 'builder bridge v[0-9]+ handshake complete'; do
+                i=$((i + 1))
+                if [ "$i" -gt 60 ]; then
+                  echo 'no bridge handshake within 120 s' >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              echo "restored: $(sha256sum /usr/local/bin/intar-builder | cut -d' ' -f1)"
+version: 1
