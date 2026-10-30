@@ -1,0 +1,178 @@
+id: 3c8f56d0-0bb7-44dc-b746-293acd66305e
+name: kino-rollout
+description: >-
+  Roll new guest tools out from a Kino release, following "To roll out new
+  guest tools" in apps/web/README.md. Run it from the repository root.
+tags: {}
+inputs:
+  properties:
+    version:
+      type: string
+      description: The Kino release, X.Y.Z (tag kino/vX.Y.Z)
+    revision:
+      type: string
+      description: The verified build revision tools-promote warms and checks against
+    break_glass:
+      type: boolean
+      default: false
+      description: Dispatch Deploy with break_glass, when a job outside the web lane failed on main's tip
+  required: [version, revision]
+jobs:
+  - name: prepare
+    steps:
+      - name: input-format
+        task:
+          type: assert
+          expr: >-
+            inputs.version.matches('^[0-9]+[.][0-9]+[.][0-9]+$')
+            && inputs.revision.matches('^[A-Za-z0-9._-]{1,128}$')
+          message: version must be X.Y.Z and revision 1-128 of A-Z a-z 0-9 . _ -
+          severity: high
+      - name: release-exists
+        dependsOn:
+          - step: input-format
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: kino-release
+          methodName: execute
+          inputs:
+            run: gh release view 'kino/v${{ inputs.version }}' --repo intar-dev/intar-dev --json tagName,publishedAt
+    dependsOn: []
+  - name: build
+    description: Approve, drain, and build the tools candidate
+    dependsOn:
+      - job: prepare
+        condition:
+          type: succeeded
+    steps:
+      - name: approve
+        task:
+          type: manual_approval
+          prompt: >-
+            Drain the run gate and build guest tools from kino/v${{ inputs.version }}.
+            Approve, then run: swamp workflow resume kino-rollout
+          timeout: 3600
+      - name: gate-drained
+        dependsOn:
+          - step: approve
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: image-gate-drained
+          methodName: execute
+          inputs:
+            timeout: 1800000
+            run: sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=gate-drained
+      - name: tools-build
+        dependsOn:
+          - step: gate-drained
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: image-tools-build
+          methodName: execute
+          inputs:
+            timeout: 3600000
+            run: sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=tools-build -f 'kino_tag=kino/v${{ inputs.version }}'
+      - name: candidate-hash
+        description: Download the build's guest-tools-deployment artifact and print the SHA-256 of its candidate.json
+        dependsOn:
+          - step: tools-build
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: tools-candidate
+          methodName: execute
+          inputs:
+            timeout: 300000
+            run: |
+              set -eu
+              id='${{ data.latest("image-tools-build", "result").attributes.stdout }}'
+              d=".tmp/kino/run-$id"
+              rm -rf "$d"
+              gh run download "$id" --repo intar-dev/intar-dev --name "guest-tools-deployment-$id" --dir "$d" >&2
+              jq . "$d/candidate.json" >&2
+              printf '%s' "$(shasum -a 256 "$d/candidate.json" | cut -d' ' -f1)"
+      - name: candidate-hash-format
+        dependsOn:
+          - step: candidate-hash
+            condition:
+              type: succeeded
+        task:
+          type: assert
+          expr: >-
+            data.latest("tools-candidate", "result").attributes.stdout.matches('^[0-9a-f]{64}$')
+          message: >-
+            candidate-hash did not print a SHA-256: ${{ data.latest("tools-candidate", "result").attributes.stdout }}
+          severity: high
+  - name: release
+    description: Approve the candidate, promote it, deploy, and open the gate
+    dependsOn:
+      - job: build
+        condition:
+          type: succeeded
+    steps:
+      - name: approve-promote
+        task:
+          type: manual_approval
+          prompt: >-
+            The run gate is drained. Check the candidate (swamp workflow history
+            get kino-rollout --json), approve to promote it against revision
+            ${{ inputs.revision }}, then run: swamp workflow resume kino-rollout
+          timeout: 3600
+      - name: tools-promote
+        dependsOn:
+          - step: approve-promote
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: image-tools-promote
+          methodName: execute
+          inputs:
+            timeout: 3600000
+            run: >-
+              sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=tools-promote
+              -f 'revision=${{ inputs.revision }}'
+              -f 'expected_candidate_sha256=${{ data.latest("tools-candidate", "result").attributes.stdout }}'
+      - name: deploy
+        description: >-
+          Dispatch Deploy from main, which pins the promoted tools. When main's
+          CI builds have expired, it fails: dispatch ci.yml from main, wait for
+          it to deploy, and resume with --from gate-open
+        dependsOn:
+          - step: tools-promote
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: web-deploy
+          methodName: execute
+          inputs:
+            timeout: 3600000
+            run: sh tools/swamp/dispatch-workflow.sh deploy.yml -f 'break_glass=${{ inputs.break_glass }}'
+      - name: gate-open
+        dependsOn:
+          - step: deploy
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: image-gate-open
+          methodName: execute
+          inputs:
+            timeout: 1800000
+            run: sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=gate-open
+version: 1
