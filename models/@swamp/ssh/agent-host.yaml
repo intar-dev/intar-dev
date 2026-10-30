@@ -1,0 +1,18 @@
+type: '@swamp/ssh'
+typeVersion: 2026.10.20.1
+id: c9ea22db-4eb4-4cae-958e-68ccb5265b5b
+name: agent-host
+version: 1
+tags: {}
+globalArguments:
+  name: agent
+  transport:
+    kind: ssh
+    user: root
+    hostKeys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIM46tf55KKCvoZHsY/GKVzMsorD4RekQafrNdezsZZw
+  hosts:
+    - name: agent
+      address: 95.217.114.144
+      tags: [agent, platform]
+methods: {}

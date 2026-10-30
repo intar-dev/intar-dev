@@ -1,0 +1,258 @@
+id: 7dc4ff32-e300-44c1-a337-78ee0c61cc41
+name: agent-rollout
+description: >-
+  Roll an agent release out to the platform host, following "Agent on a
+  platform host" under "Rolling out" in README.md. Run it from the repository
+  root.
+tags: {}
+inputs:
+  properties:
+    version:
+      type: string
+      description: The release to roll out, X.Y.Z (tag agent/vX.Y.Z)
+    rollback_version:
+      type: string
+      description: The release the host runs now, X.Y.Z; the rollback target
+  required: [version, rollback_version]
+jobs:
+  - name: prepare
+    description: Download, verify and unpack both releases on the host
+    steps:
+      - name: version-format
+        task:
+          type: assert
+          expr: >-
+            inputs.version.matches('^[0-9]+[.][0-9]+[.][0-9]+$')
+            && inputs.rollback_version.matches('^[0-9]+[.][0-9]+[.][0-9]+$')
+            && inputs.version != inputs.rollback_version
+          message: version and rollback_version must be different X.Y.Z values
+          severity: high
+      - name: fetch-releases
+        description: >-
+          Download both linux_amd64 archives into .tmp/agent/vX.Y.Z and check
+          them against the release checksums and their attestations
+        dependsOn:
+          - step: version-format
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: agent-release
+          methodName: execute
+          inputs:
+            timeout: 600000
+            run: |
+              set -eu
+              for v in '${{ inputs.version }}' '${{ inputs.rollback_version }}'; do
+                d=".tmp/agent/v$v"
+                a="intar-agent_${v}_linux_amd64.tar.gz"
+                rm -rf "$d"
+                mkdir -p "$d"
+                gh release download "agent/v$v" --repo intar-dev/intar-dev --dir "$d" --pattern "$a" --pattern "intar-agent_${v}_checksums.txt" >&2
+                (cd "$d" && shasum -a 256 -c --ignore-missing "intar-agent_${v}_checksums.txt") >&2
+                gh attestation verify "$d/$a" --repo intar-dev/intar-dev >&2
+              done
+      - name: upload-release
+        dependsOn:
+          - step: fetch-releases
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: agent-host
+          methodName: copy
+          inputs:
+            hosts: all
+            direction: to
+            src: .tmp/agent/v${{ inputs.version }}/intar-agent_${{ inputs.version }}_linux_amd64.tar.gz
+            dst: /root/intar-agent_${{ inputs.version }}_linux_amd64.tar.gz
+            atomic: true
+            mode: "0600"
+      - name: upload-rollback
+        dependsOn:
+          - step: upload-release
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: agent-host
+          methodName: copy
+          inputs:
+            hosts: all
+            direction: to
+            src: .tmp/agent/v${{ inputs.rollback_version }}/intar-agent_${{ inputs.rollback_version }}_linux_amd64.tar.gz
+            dst: /root/intar-agent_${{ inputs.rollback_version }}_linux_amd64.tar.gz
+            atomic: true
+            mode: "0600"
+      - name: unpack
+        description: >-
+          Unpack both releases into /var/lib/intar/releases (0700), check each
+          against deploy/SHA256SUMS, and check that the host runs the rollback
+          release
+        dependsOn:
+          - step: upload-rollback
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: agent-host
+          methodName: script
+          inputs:
+            hosts: all
+            timeoutSec: 300
+            script: |
+              set -eu
+              for v in '${{ inputs.version }}' '${{ inputs.rollback_version }}'; do
+                a="/root/intar-agent_${v}_linux_amd64.tar.gz"
+                d="/var/lib/intar/releases/agent-v$v"
+                install -d -o root -g root -m 0700 "$d"
+                tar -xzf "$a" -C "$d"
+                rm -f "$a"
+                (cd "$d" && sha256sum --quiet --check --strict deploy/SHA256SUMS)
+              done
+              if ! cmp -s /usr/local/bin/intar-agent '/var/lib/intar/releases/agent-v${{ inputs.rollback_version }}/intar-agent'; then
+                echo 'the host does not run agent/v${{ inputs.rollback_version }}' >&2
+                exit 1
+              fi
+              echo 'agent/v${{ inputs.rollback_version }} is installed; both releases are unpacked and checked'
+    dependsOn: []
+  - name: deploy
+    description: Approve, drain, install and verify, then open the gate
+    dependsOn:
+      - job: prepare
+        condition:
+          type: succeeded
+    steps:
+      - name: approve
+        task:
+          type: manual_approval
+          prompt: >-
+            Drain the run gate and install agent/v${{ inputs.version }} on the
+            platform host (rollback: agent/v${{ inputs.rollback_version }}).
+            Approve, then run: swamp workflow resume agent-rollout
+          timeout: 3600
+      - name: gate-drained
+        description: Dispatch image-ops gate-drained and wait until no desired VM is left
+        dependsOn:
+          - step: approve
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: image-gate-drained
+          methodName: execute
+          inputs:
+            timeout: 1800000
+            run: |
+              set -eu
+              url=$(gh workflow run image-ops.yml --repo intar-dev/intar-dev --ref main -f operation=gate-drained 2>&1 | grep -Eo 'https://github.com/[^ ]+/actions/runs/[0-9]+' | tail -n 1)
+              test -n "$url"
+              gh run watch "${url##*/}" --repo intar-dev/intar-dev --exit-status --interval 10 >&2
+              printf '%s' "$url"
+      - name: install
+        description: >-
+          Stop the agent, install the release, re-run the platform check, start
+          the agent, and check the installed binaries and the bridge handshake
+        dependsOn:
+          - step: gate-drained
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: agent-host
+          methodName: script
+          inputs:
+            hosts: all
+            timeoutSec: 900
+            script: |
+              set -eu
+              d='/var/lib/intar/releases/agent-v${{ inputs.version }}'
+              if systemctl list-units --all --type=service --no-legend --plain 'intar-vm-*.service' | grep -q .; then
+                echo 'intar-vm units are still present' >&2
+                exit 1
+              fi
+              systemctl stop intar-agent
+              (cd "$d" && sh deploy/install.sh) >&2
+              systemctl restart intar-platform-check
+              since="@$(date +%s)"
+              systemctl start intar-agent
+              for b in intar-agent:/usr/local/bin/intar-agent intar-jailer:/usr/lib/intar/intar-jailer intar-jailerd:/usr/lib/intar/intar-jailerd; do
+                cmp "$d/${b%%:*}" "${b#*:}"
+              done
+              i=0
+              until journalctl -u intar-agent --since "$since" --no-pager -o cat | grep -Eq 'bridge v[0-9]+ handshake complete'; do
+                i=$((i + 1))
+                if [ "$i" -gt 60 ]; then
+                  echo 'no bridge handshake within 120 s' >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              if journalctl -u intar-agent --since "$since" --no-pager -o cat | grep -E 'WARN|ERROR' >&2; then
+                echo 'the agent journal has warnings' >&2
+                exit 1
+              fi
+              journalctl -u intar-agent --since "$since" --no-pager -o cat | tail -n 20
+      - name: rollback-approve
+        dependsOn:
+          - step: install
+            condition:
+              type: failed
+        task:
+          type: manual_approval
+          prompt: >-
+            Installing agent/v${{ inputs.version }} failed; the gate stays
+            drained. Approve to reinstall agent/v${{ inputs.rollback_version }},
+            then run: swamp workflow resume agent-rollout
+          timeout: 3600
+      - name: rollback
+        dependsOn:
+          - step: rollback-approve
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: agent-host
+          methodName: script
+          inputs:
+            hosts: all
+            timeoutSec: 900
+            script: |
+              set -eu
+              d='/var/lib/intar/releases/agent-v${{ inputs.rollback_version }}'
+              systemctl stop intar-agent
+              (cd "$d" && sh deploy/install.sh) >&2
+              systemctl restart intar-platform-check
+              since="@$(date +%s)"
+              systemctl start intar-agent
+              i=0
+              until journalctl -u intar-agent --since "$since" --no-pager -o cat | grep -Eq 'bridge v[0-9]+ handshake complete'; do
+                i=$((i + 1))
+                if [ "$i" -gt 60 ]; then
+                  echo 'no bridge handshake within 120 s' >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              echo 'agent/v${{ inputs.rollback_version }} is back; open the gate with: gh workflow run image-ops.yml --ref main -f operation=gate-open'
+      - name: gate-open
+        dependsOn:
+          - step: install
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: image-gate-open
+          methodName: execute
+          inputs:
+            timeout: 1800000
+            run: |
+              set -eu
+              url=$(gh workflow run image-ops.yml --repo intar-dev/intar-dev --ref main -f operation=gate-open 2>&1 | grep -Eo 'https://github.com/[^ ]+/actions/runs/[0-9]+' | tail -n 1)
+              test -n "$url"
+              gh run watch "${url##*/}" --repo intar-dev/intar-dev --exit-status --interval 10 >&2
+              printf '%s' "$url"
+version: 1
