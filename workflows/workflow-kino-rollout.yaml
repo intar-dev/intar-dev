@@ -147,9 +147,12 @@ jobs:
               -f 'expected_candidate_sha256=${{ data.latest("tools-candidate", "result").attributes.stdout }}'
       - name: deploy
         description: >-
-          Dispatch Deploy from main, which pins the promoted tools. When main's
-          CI builds have expired, it fails: dispatch ci.yml from main, wait for
-          it to deploy, and resume with --from gate-open
+          Dispatch Deploy from main, which pins the promoted tools, and require
+          its "Deploy the website" job to have succeeded. It fails when main's
+          CI builds have expired (dispatch ci.yml from main) or when main moved
+          on and the run skipped the deploy (wait for the newer Deploy run);
+          once a Deploy run has deployed the website, resume with --from
+          gate-open
         dependsOn:
           - step: tools-promote
             condition:
@@ -161,7 +164,15 @@ jobs:
           methodName: execute
           inputs:
             timeout: 3600000
-            run: sh tools/swamp/dispatch-workflow.sh deploy.yml -f 'break_glass=${{ inputs.break_glass }}'
+            run: |
+              set -eu
+              id=$(sh tools/swamp/dispatch-workflow.sh deploy.yml -f 'break_glass=${{ inputs.break_glass }}')
+              c=$(gh run view "$id" --repo intar-dev/intar-dev --json jobs --jq '.jobs[] | select(.name == "Deploy the website") | .conclusion')
+              if [ "$c" != success ]; then
+                echo "Deploy run $id did not deploy the website (Deploy the website: ${c:-absent})" >&2
+                exit 1
+              fi
+              printf '%s' "$id"
       - name: gate-open
         dependsOn:
           - step: deploy
