@@ -198,11 +198,25 @@ jobs:
           inputs:
             hosts: all
             sudo: true
-            timeoutSec: 600
+            timeoutSec: 2400
             script: |
               set -eu
               pre='/usr/local/bin/intar-builder.pre-v${{ inputs.version }}'
               test -e "$pre"
+              idle() {
+                line=$(journalctl -u intar-builder --no-pager -o cat -r | grep -m 1 'applied builder desired state' || true)
+                case "$line" in *'"desired_builds":0'*) ;; *) return 1 ;; esac
+                ! pgrep -f '^/usr/bin/qemu' >/dev/null
+              }
+              i=0
+              until idle; do
+                i=$((i + 1))
+                if [ "$i" -gt 180 ]; then
+                  echo 'the builder did not become idle within 30 minutes' >&2
+                  exit 1
+                fi
+                sleep 10
+              done
               systemctl stop intar-builder
               install -m 0755 "$pre" /usr/local/bin/intar-builder
               since="@$(date +%s)"
