@@ -33,3 +33,7 @@ Roll a release out from the operator's machine. `intar-deploy-stargate`
    `https://wa-no-such-route.intar.app/` answers 401.
 5. If a check fails, `intar-deploy-stargate rollback BACKUP_ID` restores the
    backup.
+
+`swamp workflow run stargate-rollout --input version=X.Y.Z`, run from the
+repository root after `swamp extension install`, runs these steps as root and
+stops for `swamp workflow approve stargate-rollout approve` before `apply`.

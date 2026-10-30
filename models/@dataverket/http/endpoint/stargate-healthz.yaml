@@ -1,0 +1,16 @@
+type: '@dataverket/http/endpoint'
+typeVersion: 2026.10.29.1
+id: cf8e26b0-c643-4997-b087-62f4d9c82181
+name: stargate-healthz
+version: 1
+tags: {}
+globalArguments:
+  url: 'https://ws.intar.app/healthz'
+  expectStatus: 200
+  followRedirects: true
+  maxRedirects: 5
+  bodyContains: ''
+  timeoutMs: 10000
+  caFile: ''
+  userAgent: swamp @dataverket/http
+methods: {}
