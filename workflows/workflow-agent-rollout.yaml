@@ -145,12 +145,7 @@ jobs:
           methodName: execute
           inputs:
             timeout: 1800000
-            run: |
-              set -eu
-              url=$(gh workflow run image-ops.yml --repo intar-dev/intar-dev --ref main -f operation=gate-drained 2>&1 | grep -Eo 'https://github.com/[^ ]+/actions/runs/[0-9]+' | tail -n 1)
-              test -n "$url"
-              gh run watch "${url##*/}" --repo intar-dev/intar-dev --exit-status --interval 10 >&2
-              printf '%s' "$url"
+            run: sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=gate-drained
       - name: install
         description: >-
           Stop the agent, install the release, re-run the platform check, start
@@ -249,10 +244,5 @@ jobs:
           methodName: execute
           inputs:
             timeout: 1800000
-            run: |
-              set -eu
-              url=$(gh workflow run image-ops.yml --repo intar-dev/intar-dev --ref main -f operation=gate-open 2>&1 | grep -Eo 'https://github.com/[^ ]+/actions/runs/[0-9]+' | tail -n 1)
-              test -n "$url"
-              gh run watch "${url##*/}" --repo intar-dev/intar-dev --exit-status --interval 10 >&2
-              printf '%s' "$url"
+            run: sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=gate-open
 version: 1
