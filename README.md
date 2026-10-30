@@ -141,6 +141,13 @@ before the workflow attested them have no attestation. Then:
 
   If a check fails, stop the agent and run `install.sh` from the rollback
   release's directory instead.
+
+  `swamp workflow run agent-rollout --input version=X.Y.Z --input
+  rollback_version=<running X.Y.Z>`, run from the repository root after
+  `swamp extension install`, runs these steps. It stops for approval before
+  the drain and again before a rollback; after each
+  `swamp workflow approve agent-rollout <step>`,
+  `swamp workflow resume agent-rollout` continues the run.
 - **Builder:** on the builder host, run the new binary's
   `sudo ./intar-builder doctor --config /etc/intar-builder/config.toml`. Wait
   until the host is idle: the latest `applied builder desired state` journal line
