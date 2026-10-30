@@ -51,4 +51,6 @@ Behaviors (formerly models) are managed with `swamp behavior` — e.g.
 directly). Every `swamp model …` spelling remains supported.
 <!-- END swamp managed section -->
 
+In this repository "workflow" means a GitHub Actions workflow rendered from `ci/workflows/*.cue` (see AGENTS.md). Swamp rule 9 above applies only when the request names swamp.
+
 @AGENTS.md
