@@ -1,0 +1,7 @@
+swampVersion: 20261028.122335.0
+initializedAt: "2026-10-30T15:16:41.575Z"
+repoId: 2ac29a7b-a6c5-4941-ae4e-87a65e1466e3
+tools:
+  - claude
+defaultVault: default
+gitignoreManaged: true
