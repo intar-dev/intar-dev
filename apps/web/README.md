@@ -158,6 +158,13 @@ To roll out new guest tools, run these from `main` in order:
    `-f break_glass=true` to the Deploy dispatch.
 5. image-ops `gate-open`.
 
+`swamp workflow run kino-rollout --input version=X.Y.Z --input revision=<rev>`,
+run from the repository root, runs these steps. It takes the
+`candidate.json` SHA-256 from the build's artifact itself, and stops for
+approval before the drain and before the promotion; after each
+`swamp workflow approve kino-rollout <step>`,
+`swamp workflow resume kino-rollout` continues the run.
+
 ## Sign-ups
 
 Anyone can create an account with GitHub, or through an organization's
