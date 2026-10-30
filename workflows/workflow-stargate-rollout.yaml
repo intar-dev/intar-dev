@@ -1,0 +1,185 @@
+id: bac55f4e-a3e1-4ea2-be36-10ab5e6f9b28
+name: stargate-rollout
+description: >-
+  Roll a Stargate release out to intar.app, following "Rolling out" in
+  deploy/stargate/README.md. Run it from the repository root.
+tags: {}
+inputs:
+  properties:
+    version:
+      type: string
+      description: The release to roll out, X.Y.Z (tag stargate/vX.Y.Z)
+  required: [version]
+jobs:
+  - name: prepare
+    description: Download and verify the release, then check that Stargate is drained
+    steps:
+      - name: version-format
+        task:
+          type: assert
+          expr: >-
+            inputs.version.matches('^[0-9]+[.][0-9]+[.][0-9]+$')
+          message: version must be X.Y.Z
+          severity: high
+      - name: fetch-release
+        description: >-
+          Download the linux_amd64 archive into .tmp/stargate/vX.Y.Z, check it
+          against the release checksums and its attestation, and print the
+          archive and binary SHA-256
+        dependsOn:
+          - step: version-format
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: stargate-release
+          methodName: execute
+          inputs:
+            timeout: 300000
+            run: |
+              set -eu
+              v='${{ inputs.version }}'
+              d=".tmp/stargate/v$v"
+              a="stargate_${v}_linux_amd64.tar.gz"
+              rm -rf "$d"
+              mkdir -p "$d"
+              gh release download "stargate/v$v" --repo intar-dev/intar-dev --dir "$d" --pattern "$a" --pattern "stargate_${v}_checksums.txt" >&2
+              (cd "$d" && shasum -a 256 -c --ignore-missing "stargate_${v}_checksums.txt") >&2
+              gh attestation verify "$d/$a" --repo intar-dev/intar-dev >&2
+              printf '%s %s' "$(shasum -a 256 "$d/$a" | cut -d' ' -f1)" "$(tar -xzOf "$d/$a" ./stargate | shasum -a 256 | cut -d' ' -f1)"
+      - name: release-hashes
+        dependsOn:
+          - step: fetch-release
+            condition:
+              type: succeeded
+        task:
+          type: assert
+          expr: >-
+            data.latest("stargate-release", "result").attributes.stdout.matches('^[0-9a-f]{64} [0-9a-f]{64}$')
+          message: >-
+            fetch-release did not print two SHA-256 values: ${{ data.latest("stargate-release", "result").attributes.stdout }}
+          severity: high
+      - name: plan
+        dependsOn:
+          - step: release-hashes
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: stargate-host
+          methodName: exec
+          inputs:
+            hosts: all
+            command: /usr/local/sbin/intar-deploy-stargate plan
+      - name: drained
+        dependsOn:
+          - step: plan
+            condition:
+              type: succeeded
+        task:
+          type: assert
+          expr: >-
+            data.latest("stargate-host", "run-exec-stargate").attributes.stdout.contains("\nterminal_routes=0\n")
+            && data.latest("stargate-host", "run-exec-stargate").attributes.stdout.contains("\nworkspace_app_routes=0\n")
+            && data.latest("stargate-host", "run-exec-stargate").attributes.stdout.contains("\nbrowser_sessions=0\n")
+          message: >-
+            Stargate is not drained; apply would refuse. Plan: ${{ data.latest("stargate-host", "run-exec-stargate").attributes.stdout }}
+          severity: high
+    dependsOn: []
+  - name: deploy
+    description: Approve, upload the archive and apply the release
+    dependsOn:
+      - job: prepare
+        condition:
+          type: succeeded
+    steps:
+      - name: approve
+        task:
+          type: manual_approval
+          prompt: >-
+            Apply stargate/v${{ inputs.version }} to intar.app. Check the plan
+            (installed binary_sha256, counts) and the archive and binary
+            SHA-256 with: swamp workflow history get stargate-rollout --json
+          timeout: 3600
+      - name: upload
+        dependsOn:
+          - step: approve
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: stargate-host
+          methodName: copy
+          inputs:
+            hosts: all
+            direction: to
+            src: .tmp/stargate/v${{ inputs.version }}/stargate_${{ inputs.version }}_linux_amd64.tar.gz
+            dst: /root/stargate_${{ inputs.version }}_linux_amd64.tar.gz
+            atomic: true
+            mode: "0600"
+      - name: apply
+        description: >-
+          Back up the binary, configuration and database, install the release
+          and print backup_id; the deploy script restores on failure
+        dependsOn:
+          - step: upload
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behavior: stargate-host
+          methodName: exec
+          inputs:
+            hosts: all
+            timeoutSec: 900
+            command: >-
+              f=/root/stargate_${{ inputs.version }}_linux_amd64.tar.gz;
+              /usr/local/sbin/intar-deploy-stargate apply stargate/v${{ inputs.version }}
+              ${{ data.latest("stargate-release", "result").attributes.stdout }} < "$f";
+              s=$?; rm -f "$f"; exit $s
+  - name: verify
+    description: Check the public routing
+    dependsOn:
+      - job: deploy
+        condition:
+          type: succeeded
+    steps:
+      - name: healthz
+        task:
+          type: behavior
+          behavior: stargate-healthz
+          methodName: health
+      - name: unknown-host
+        task:
+          type: behavior
+          behavior: stargate-unknown-host
+          methodName: health
+      - name: unknown-route
+        task:
+          type: behavior
+          behavior: stargate-unknown-route
+          methodName: health
+      - name: routing
+        dependsOn:
+          - step: healthz
+            condition:
+              type: completed
+          - step: unknown-host
+            condition:
+              type: completed
+          - step: unknown-route
+            condition:
+              type: completed
+        task:
+          type: assert
+          expr: >-
+            data.latest("stargate-healthz", "health").attributes.ok
+            && data.latest("stargate-unknown-host", "health").attributes.ok
+            && data.latest("stargate-unknown-route", "health").attributes.ok
+          message: >-
+            Public routing check failed. Roll back with
+            swamp behavior run stargate-host exec --input hosts=all --input command='/usr/local/sbin/intar-deploy-stargate rollback BACKUP_ID'
+            using the backup_id apply printed: ${{ data.latest("stargate-host", "run-exec-stargate").attributes.stdout }}
+          severity: high
+version: 1

@@ -1,0 +1,42 @@
+{
+  "@swamp/ssh": {
+    "version": "2026.10.23.1",
+    "pulledAt": "2026-10-30T15:34:32.237Z",
+    "files": [
+      ".swamp/pulled-extensions/@swamp/ssh/files/LICENSE.txt",
+      ".swamp/pulled-extensions/@swamp/ssh/files/README.md",
+      ".swamp/pulled-extensions/@swamp/ssh/manifest.yaml",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/checks.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/cidr.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/control_master.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/forwarding.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/hex.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/host_keys.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/hosts.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/identities.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/operations.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/runner.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/schemas.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/_lib/selectors.ts",
+      ".swamp/pulled-extensions/@swamp/ssh/models/ssh.ts"
+    ],
+    "checksum": "80d000d7ff71ee7b14cfd91add03458f08caa1a2cb2cf07e8f38647ea4c33dd2",
+    "filesChecksum": "7787dc82d9c89d16c3dbd25667940dbf40f9a8b134d108415f83ce8c3481c569",
+    "serverUrl": "https://swamp-club.com",
+    "publishedChannel": "stable"
+  },
+  "@dataverket/http": {
+    "version": "2026.10.29.1",
+    "pulledAt": "2026-10-30T15:34:38.151Z",
+    "files": [
+      ".swamp/pulled-extensions/@dataverket/http/files/LICENSE.md",
+      ".swamp/pulled-extensions/@dataverket/http/files/README.md",
+      ".swamp/pulled-extensions/@dataverket/http/manifest.yaml",
+      ".swamp/pulled-extensions/@dataverket/http/models/endpoint.ts"
+    ],
+    "checksum": "2b7d605078b242dfc6eb8929fbe1dae7e75da15b88b163f0eed4337096d78e9a",
+    "filesChecksum": "01a96329dda982fca128d22b6a30081ea0ea8cbb4bc246844ab44b8c94e43cc3",
+    "serverUrl": "https://swamp-club.com",
+    "publishedChannel": "stable"
+  }
+}

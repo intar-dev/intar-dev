@@ -1,0 +1,19 @@
+type: '@swamp/ssh'
+typeVersion: 2026.10.20.1
+id: 1c756a1a-5401-44ee-8b42-7552fc44dc60
+name: stargate-host
+version: 1
+tags: {}
+globalArguments:
+  name: stargate
+  transport:
+    kind: ssh
+    user: root
+    port: 2222
+    hostKeys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH3yTmmoNWpwuus4PPNZbgiQkCDjh/wUjWEZ9qYKSPTd
+  hosts:
+    - name: stargate
+      address: intar.app
+      tags: [stargate]
+methods: {}
