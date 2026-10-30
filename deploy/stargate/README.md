@@ -36,4 +36,6 @@ Roll a release out from the operator's machine. `intar-deploy-stargate`
 
 `swamp workflow run stargate-rollout --input version=X.Y.Z`, run from the
 repository root after `swamp extension install`, runs these steps as root and
-stops for `swamp workflow approve stargate-rollout approve` before `apply`.
+stops before `apply`. `swamp workflow approve stargate-rollout approve` only
+records the approval; `swamp workflow resume stargate-rollout` then runs the
+upload, `apply` and the checks.
