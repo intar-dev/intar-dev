@@ -1,0 +1,18 @@
+type: '@swamp/ssh'
+typeVersion: 2026.10.20.1
+id: 4a60dc3c-179c-4f21-848a-68c0e8eefbe7
+name: builder-host
+version: 1
+tags: {}
+globalArguments:
+  name: builder
+  transport:
+    kind: ssh
+    user: debian
+    hostKeys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJlXTR8lHhiS/FnVsD/b3BrcInWGcxjOnvzfozazzTa
+  hosts:
+    - name: builder
+      address: ns3124720.ip-51-68-234.eu
+      tags: [builder]
+methods: {}
