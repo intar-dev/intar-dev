@@ -908,13 +908,13 @@ test("a replay carousel keeps learner-facing parts in order", async ({
   await expect(next).toBeEnabled();
   await expect(order.getByRole("button")).toHaveCount(3);
   await expect(order.getByRole("button").nth(0)).toHaveAccessibleName(
-    "Show part 1 of 3, web",
+    "Part 1 of 3 · web",
   );
   await expect(order.getByRole("button").nth(1)).toHaveAccessibleName(
-    "Show part 2 of 3, web",
+    "Part 2 of 3 · web",
   );
   await expect(order.getByRole("button").nth(2)).toHaveAccessibleName(
-    "Show part 3 of 3, worker",
+    "Part 3 of 3 · worker",
   );
   await expect
     .poll(() =>

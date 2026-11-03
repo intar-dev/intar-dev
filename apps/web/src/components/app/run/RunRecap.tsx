@@ -766,12 +766,12 @@ export function ReplayViewer({
               variant={selected.key === part.key ? "default" : "outline"}
               className="min-h-9"
               aria-current={selected.key === part.key ? "step" : undefined}
-              aria-label={`Show part ${index + 1} of ${parts.length}${
-                part.machineLabel ? `, ${part.machineLabel}` : ""
-              }`}
               onClick={() => selectPart(index)}
             >
+              {/* Named by its content, "Part 2 of 3 · web" like the position
+                  line: an aria-label would not contain the visible text. */}
               {part.partLabel}
+              <span className="sr-only">{` of ${parts.length}`}</span>
               {part.machineLabel ? (
                 // Full contrast on the selected chip; muted on the others.
                 <span
@@ -780,7 +780,7 @@ export function ReplayViewer({
                     selected.key !== part.key && "text-muted-foreground",
                   )}
                 >
-                  · {part.machineLabel}
+                  {` · ${part.machineLabel}`}
                 </span>
               ) : null}
             </Button>

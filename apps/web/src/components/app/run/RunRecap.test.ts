@@ -616,9 +616,13 @@ describe("RunRecap", () => {
     expect(multiPart).toContain("Part 1 of 2");
     expect(multiPart).toContain('aria-label="Previous replay part"');
     expect(multiPart).toContain('aria-label="Next replay part"');
-    expect(multiPart.indexOf("Show part 1 of 2")).toBeLessThan(
-      multiPart.indexOf("Show part 2 of 2"),
-    );
+    expect(
+      multiPart.indexOf('Part 1<span class="sr-only"> of 2</span>'),
+    ).toBeGreaterThan(-1);
+    expect(
+      multiPart.indexOf('Part 1<span class="sr-only"> of 2</span>'),
+    ).toBeLessThan(multiPart.indexOf('Part 2<span class="sr-only"> of 2</span>'));
+    expect(multiPart).not.toContain("Show part");
     expect(singlePart).not.toContain("data-run-replay-carousel");
     expect(singlePart).not.toContain("Previous replay part");
     expect(singlePart).not.toContain("Next replay part");
