@@ -1,14 +1,8 @@
 import { TriangleAlert } from "lucide-react";
 
-// The scenario data cutover (intar-dev/intar-dev#300). A slipped window moves
-// this date; the cutover PR removes the banner.
-export const CUTOVER_DATE = "2026-11-17";
-
-const cutoverDay = new Intl.DateTimeFormat("en-US", {
-  dateStyle: "long",
-  timeZone: "UTC",
-}).format(new Date(`${CUTOVER_DATE}T00:00:00Z`));
-
+// The scenario data cutover (intar-dev/intar-dev#300). The cutover PR removes
+// the banner.
+//
 // A labelled region, not a status: it is on the page from load, and pages keep
 // role="status" for their own feedback. snap-start keeps it reachable on the
 // landing page, whose html scroll snaps to its own screens.
@@ -21,10 +15,11 @@ export function CutoverBanner() {
       <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-warning" />
       <p>
         <strong className="font-semibold">
-          Scenario data cutover on <time dateTime={CUTOVER_DATE}>{cutoverDay}</time>.
+          A big cutover is coming in the next two weeks, and scenario data will
+          be lost.
         </strong>{" "}
-        All lab runs, recordings, shares, course progress and assignments will
-        be deleted that day. Your account, organizations and servers stay.
+        Lab runs, recordings, shares, course progress and assignments will be
+        deleted. Your account, organizations and servers stay.
       </p>
     </section>
   );
