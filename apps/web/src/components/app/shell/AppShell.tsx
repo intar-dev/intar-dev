@@ -3,6 +3,7 @@ import { Outlet, useRouterState } from "@tanstack/react-router";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "./AppSidebar";
 import { AppBar } from "./AppBar";
+import { CutoverBanner } from "./CutoverBanner";
 import { PageChromeProvider, usePageChromeValue } from "./page-chrome";
 
 // The authenticated app surface. Theme follows the user's choice (or system
@@ -57,7 +58,12 @@ function AppShellContent() {
                 : "@container/panel min-w-0"
             }
           >
-            {fullscreenWorkspace ? null : <AppBar />}
+            {fullscreenWorkspace ? null : (
+              <>
+                <CutoverBanner />
+                <AppBar />
+              </>
+            )}
             <main
               id="main-content"
               tabIndex={-1}
