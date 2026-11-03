@@ -12,6 +12,8 @@ const alertVariants = cva(
         default: "bg-card text-card-foreground shadow-(--shadow-raised) *:[svg]:text-current",
         destructive:
           "border-destructive-border bg-destructive-subtle text-foreground *:data-[slot=alert-description]:text-muted-foreground *:[svg]:text-destructive",
+        warning:
+          "border-warning-border bg-warning-subtle text-foreground *:data-[slot=alert-description]:text-muted-foreground *:[svg]:text-warning",
       },
     },
     defaultVariants: {
@@ -42,7 +44,7 @@ function Alert({
   }) {
   const lead =
     icon === undefined ? (
-      variant === "destructive" ? (
+      variant === "destructive" || variant === "warning" ? (
         <TriangleAlert data-slot="alert-icon" className="[&:has(~svg)]:hidden" />
       ) : (
         <Info data-slot="alert-icon" className="[&:has(~svg)]:hidden" />
