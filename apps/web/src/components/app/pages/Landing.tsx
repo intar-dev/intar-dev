@@ -39,7 +39,8 @@ export function Landing() {
   const signIn = useMutation({
     mutationFn: () =>
       startGithubSignIn({
-        callbackURL: `${window.location.origin}/courses`,
+        // `/?next=/play/...` returns to that page; anything else to /courses.
+        returnPath: new URLSearchParams(window.location.search).get("next"),
         errorCallbackURL: `${window.location.origin}/`,
       }),
     onMutate: clearErrorCode,

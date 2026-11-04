@@ -69,6 +69,8 @@ describe("cutover wipe", () => {
       userId: "user-1", scopeKey: "public", courseId: "linux-operations", lectureId: "01-broken-nginx",
       sourceRunId: "run-1", completedAt: Date.now(),
     });
+    await env.DB.prepare("INSERT INTO learner_run_starts (run_id, user_id, created_at) VALUES ('run-1', 'user-1', ?)")
+      .bind(Date.now()).run();
     await db.insert(hostCpuReservations).values({
       runId: "orphan-run", hostId: "host-1", cpuMillis: 1_000, state: "committed",
     });
@@ -99,7 +101,7 @@ describe("cutover wipe", () => {
     expect(report.uploadsAborted).toBe(1);
     expect(report.deleted).toMatchObject({
       scenario_runs: 1, runtime_executions: 1, host_cpu_reservations: 1,
-      course_unit_completions: 1, scenario_assignments: 1,
+      course_unit_completions: 1, scenario_assignments: 1, learner_run_starts: 1,
     });
     // The upload is aborted, never completed into an object.
     expect(await env.VM_RUN_ARTIFACTS_BUCKET.head("runs/run-1/session.cast")).toBeNull();

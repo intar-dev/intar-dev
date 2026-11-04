@@ -29,6 +29,7 @@ import {
   markPendingScenarioRunBootStage,
 } from "@/lib/scenario-run-performance";
 import { formatMinutes, sentenceCase } from "@/components/app/lib/format";
+import { confirmScenarioStart } from "@/components/app/lib/scenario-start";
 import { loadReplayTerminalFont } from "@/lib/replay/config";
 import { cn } from "@/lib/utils";
 import { CourseLink, LectureLink } from "./course-links";
@@ -666,6 +667,8 @@ function LinkedLectureAction({
 
 /** Starts timing and terminal asset work at the learner action. */
 function prepareScenarioRunStart(scenarioId: string) {
+  // This click is the learner's confirmation; the start page begins at once.
+  confirmScenarioStart(scenarioId);
   clearPendingScenarioRunBootEvidence(scenarioId);
   beginScenarioRunBootEvidence(scenarioId);
   void import("@/components/remote-access/WebSshTerminal")

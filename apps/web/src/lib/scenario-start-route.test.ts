@@ -60,6 +60,32 @@ describe("scenario start route", () => {
     });
   });
 
+  it("passes play attribution and drops anything it does not trust", async () => {
+    await startRequest({ launchSource: "play", ref: "rka" });
+    expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenLastCalledWith({
+      scenarioId: "pair-ping",
+      userId: "user-1",
+      idempotencyKey: "route-test-key-0001",
+      launchSource: "play",
+      ref: "rka",
+    });
+    for (const body of [
+      { launchSource: "play", ref: "x".repeat(33) },
+      { launchSource: "play", ref: "<script>" },
+    ]) {
+      await startRequest(body);
+      expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenLastCalledWith(
+        expect.not.objectContaining({ ref: expect.anything() }),
+      );
+    }
+    await startRequest({ launchSource: "admin", ref: "rka" });
+    expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenLastCalledWith({
+      scenarioId: "pair-ping",
+      userId: "user-1",
+      idempotencyKey: "route-test-key-0001",
+    });
+  });
+
   it("also accepts a valid bodyless scenario launch", async () => {
     const response = await bodylessStartRequest();
 

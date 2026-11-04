@@ -40,7 +40,14 @@ export function hardenWorkerResponse(
   const url = new URL(request.url);
   // A public run share is reachable by link only, never by search.
   if (url.pathname === "/watch") headers.set("x-robots-tag", "noindex, nofollow");
-  if (url.pathname.startsWith("/api/")) {
+  // The signed-out /play teaser is the one cacheable API response; its route
+  // varies it on Cookie and answers a session with private, no-store.
+  const publicPlay =
+    url.pathname.startsWith("/api/play/") &&
+    response.status === 200 &&
+    !headers.has("set-cookie") &&
+    headers.get("cache-control")?.startsWith("public,") === true;
+  if (url.pathname.startsWith("/api/") && !publicPlay) {
     headers.set("cache-control", API_CACHE_CONTROL);
     headers.set("pragma", "no-cache");
   }

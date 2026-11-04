@@ -38,6 +38,7 @@ export {
 } from "./schema/runtime";
 export {
   courseUnitCompletions,
+  learnerRunStarts,
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRunProbeSnapshots,

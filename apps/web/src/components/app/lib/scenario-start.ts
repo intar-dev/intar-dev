@@ -48,6 +48,26 @@ class ScenarioStartRequestError extends Error {
   }
 }
 
+/**
+ * The in-app Start click that navigated to /runs/start, held in memory only.
+ * A link, a reload or a new tab never carries it, so those visits show the
+ * Start lab confirmation instead of starting a run on page load.
+ */
+let confirmedStartScenarioId: string | null = null;
+
+export function confirmScenarioStart(scenarioId: string): void {
+  confirmedStartScenarioId = scenarioId;
+}
+
+/** Read without clearing, so a repeated render reads the same answer. */
+export function isScenarioStartConfirmed(scenarioId: string): boolean {
+  return confirmedStartScenarioId === scenarioId;
+}
+
+export function clearScenarioStartConfirmation(): void {
+  confirmedStartScenarioId = null;
+}
+
 export class ScenarioStartCancelledError extends Error {
   constructor() {
     super("Stopped waiting for the start to be admitted.");
@@ -71,6 +91,9 @@ export async function requestScenarioStartWithCapacityWait(
     organizationId?: string | null;
     candidateRevision?: string;
     candidateBuildId?: string;
+    /** Attribution for a /play start; the server never trusts it. */
+    launchSource?: "play";
+    ref?: string;
   },
 ): Promise<ScenarioStartAcceptedResponse> {
   const startedAt = Date.now();
@@ -99,6 +122,8 @@ export async function requestScenarioStartWithCapacityWait(
           ...(options.candidateBuildId
             ? { candidateBuildId: options.candidateBuildId }
             : {}),
+          ...(options.launchSource ? { launchSource: options.launchSource } : {}),
+          ...(options.ref ? { ref: options.ref } : {}),
         },
       );
     } catch (error) {
@@ -196,6 +221,8 @@ async function requestScenarioStart(
     organizationId: string | null;
     candidateRevision?: string;
     candidateBuildId?: string;
+    launchSource?: "play";
+    ref?: string;
   },
 ): Promise<ScenarioStartAcceptedResponse> {
   let response: Response;
@@ -221,6 +248,8 @@ async function requestScenarioStart(
           ...(options.candidateBuildId
             ? { candidateBuildId: options.candidateBuildId }
             : {}),
+          ...(options.launchSource ? { launchSource: options.launchSource } : {}),
+          ...(options.ref ? { ref: options.ref } : {}),
         }),
       },
     );

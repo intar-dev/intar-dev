@@ -470,6 +470,82 @@ describe("scenario admission batch", () => {
     expect(result.accepted).toBe(true);
   });
 
+  describe("learner start limit and attribution", () => {
+    const seedStarts = async (count: number, createdAt: number) => {
+      for (let index = 0; index < count; index += 1) {
+        await env.DB.prepare(
+          "INSERT INTO learner_run_starts (run_id, user_id, created_at) VALUES (?1, ?2, ?3)",
+        ).bind(`earlier-run-${index}`, RUNNER_USER_ID, createdAt).run();
+      }
+    };
+    const ledger = async () =>
+      (await env.DB.prepare(
+        "SELECT run_id AS runId FROM learner_run_starts ORDER BY run_id",
+      ).all<{ runId: string }>()).results.map((row) => row.runId);
+
+    it("records a play start's attribution and counts it", async () => {
+      const fixture = await seedAdmissionFixture();
+      const result = await beginScenarioRun(
+        fixture.input(RUNNER_USER_ID, { launchSource: "play", ref: "rka" }),
+      );
+      await result.deliveryHint;
+      expect(await loadRunRow(result.runId)).toMatchObject({
+        launchSource: "play",
+        ref: "rka",
+      });
+      await expect(ledger()).resolves.toEqual([result.runId]);
+    });
+
+    it("refuses the sixth learner start in 24 hours before any write", async () => {
+      const fixture = await seedAdmissionFixture();
+      await seedStarts(5, Date.now() - 60_000);
+      await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID))).rejects.toMatchObject({
+        status: 429,
+        code: "scenario_start_limit_reached",
+      });
+      expect(admissionHarness.state.admissionBatches).toBe(0);
+      await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
+    });
+
+    it("refuses inside the admission insert when a concurrent start takes the last slot", async () => {
+      const fixture = await seedAdmissionFixture();
+      await seedStarts(4, Date.now() - 60_000);
+      admissionHarness.armBeforeAdmissionBatch(() =>
+        env.DB.prepare(
+          "INSERT INTO learner_run_starts (run_id, user_id, created_at) VALUES ('concurrent-run', ?1, ?2)",
+        ).bind(RUNNER_USER_ID, Date.now()).run(),
+      );
+      await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID))).rejects.toMatchObject({
+        status: 429,
+        code: "scenario_start_limit_reached",
+      });
+      expect(admissionHarness.state.admissionBatches).toBe(1);
+      await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
+      expect((await desiredDocument()).vms).toEqual([]);
+    });
+
+    it("counts only the rolling window and prunes older starts", async () => {
+      const fixture = await seedAdmissionFixture();
+      await seedStarts(5, Date.now() - 24 * 60 * 60 * 1000 - 60_000);
+      const result = await beginScenarioRun(fixture.input(RUNNER_USER_ID));
+      await result.deliveryHint;
+      expect(await loadRunRow(result.runId)).toMatchObject({ launchSource: null, ref: null });
+      await expect(ledger()).resolves.toEqual([result.runId]);
+    });
+
+    it("exempts administrative proof starts and does not count them", async () => {
+      const fixture = await seedAdmissionFixture();
+      await seedStarts(5, Date.now() - 60_000);
+      await drizzle(env.DB).update(user).set({ role: "admin" }).where(eq(user.id, RUNNER_USER_ID));
+      const result = await beginScenarioRun(
+        fixture.input(RUNNER_USER_ID, { allowDrainedAdminProof: true }),
+      );
+      await result.deliveryHint;
+      expect(result.accepted).toBe(true);
+      await expect(ledger()).resolves.toHaveLength(5);
+    });
+  });
+
   it("admits current organization content through its private course", async () => {
     const fixture = await seedAdmissionFixture({ withSecondScenario: true });
     await env.DB.prepare("UPDATE vm_scenarios SET organization_id = ?1, enabled = 1, enabled_at = ?2 WHERE scenario_id = ?3")

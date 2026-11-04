@@ -62,6 +62,31 @@ describe("worker response security", () => {
     expect(response.headers.get("pragma")).toBe("no-cache");
   });
 
+  it("keeps only the signed-out /play teaser cacheable", () => {
+    const harden = (path: string, init: ResponseInit) =>
+      hardenWorkerResponse(
+        new Request("https://intar.dev" + path),
+        new Response("{}", init),
+        productionEnv,
+      ).headers.get("cache-control");
+    const publicPolicy = { "cache-control": "public, max-age=60" };
+
+    expect(harden("/api/play/intar/x", { headers: publicPolicy })).toBe(
+      "public, max-age=60",
+    );
+    for (const [path, init] of [
+      ["/api/play/intar/x", { status: 404, headers: publicPolicy }],
+      [
+        "/api/play/intar/x",
+        { headers: { ...publicPolicy, "set-cookie": "a=b" } },
+      ],
+      ["/api/playground", { headers: publicPolicy }],
+      ["/api/play/intar/x", { headers: { "cache-control": "private, no-store" } }],
+    ] as const) {
+      expect(harden(path, init)).toBe(responseSecurity.API_CACHE_CONTROL);
+    }
+  });
+
   it("retains route-specific stricter content and permissions policies", () => {
     const response = hardenWorkerResponse(
       new Request("https://intar.dev/api/runs/run-1/artifacts/vm-1:0/content"),

@@ -25,6 +25,7 @@ import {
   appQueryClient,
 } from "@/lib/app-bootstrap";
 import { isAdminUser } from "@/lib/authz";
+import { sanitizePlayRef } from "@/lib/play";
 import { supportPage, validateSupportSearch, type SupportSearch } from "@/lib/support-types";
 
 const rootRoute = createRootRoute({
@@ -112,6 +113,24 @@ const sharedRunRoute = createRoute({
     ),
   pendingComponent: FullPageRoutePending,
   component: lazyRouteComponent(() => import("./pages/SharedRun"), "SharedRun"),
+});
+
+/* -------------------------------------------------------------------------- */
+/* Run on intar entry (public). Signed-out visitors see the teaser and sign   */
+/* in here; the page itself starts a lab only from its Start lab button.      */
+/* -------------------------------------------------------------------------- */
+
+const playRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "play/$namespace/$slug",
+  validateSearch: (search: Record<string, unknown>): { ref?: string } => {
+    const ref = sanitizePlayRef(search.ref);
+    return ref ? { ref } : {};
+  },
+  head: () =>
+    routeHead("Run a lab", "Start a hands-on systems repair lab on intar."),
+  pendingComponent: FullPageRoutePending,
+  component: lazyRouteComponent(() => import("./pages/Play"), "Play"),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -480,6 +499,7 @@ const routeTree = rootRoute.addChildren([
     adminUserDetailsRoute,
   ]),
   sharedRunRoute,
+  playRoute,
 ]);
 
 export const router = createRouter({
