@@ -8,7 +8,6 @@ import namespaceLogo from "@/assets/namespace-logo.png";
 import { BrandMark } from "../patterns/BrandMark";
 import { InlineFeedback } from "../patterns/InlineFeedback";
 import { MetaLine } from "../patterns/MetaLine";
-import { CutoverNotice } from "../shell/CutoverNotice";
 import { useCallbackErrorCode } from "../hooks/useCallbackErrorCode";
 import { useMyRunsSummary } from "../hooks/useMyRuns";
 import { useSessionAccess } from "../hooks/useSession";
@@ -50,11 +49,6 @@ export function Landing() {
     // The safe-area insets keep the header, sections and footer clear of a
     // landscape notch and the home indicator; the page inset sits inside them.
     <div className="landing-pages relative isolate flex min-h-dvh flex-col overflow-clip bg-canvas pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]">
-      {/* snap-start keeps the cutover notice reachable: without it the first
-          snap lands on the header and scrolls past the notice. */}
-      <div className="mx-auto w-full max-w-7xl shrink-0 snap-start px-[var(--page-inset)] pt-3 sm:pt-4">
-        <CutoverNotice />
-      </div>
       {/* The page scrolls as three snapped screens: the header and page one,
           the workspace, then page three and the footer. */}
       <header className="mx-auto flex min-h-14 w-full max-w-7xl shrink-0 snap-start items-center justify-between gap-4 px-[var(--page-inset)] sm:min-h-[4.75rem]">
