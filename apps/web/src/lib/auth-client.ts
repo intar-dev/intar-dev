@@ -9,6 +9,7 @@ import {
   usernameClient,
 } from "better-auth/client/plugins";
 import { getClientAppBootstrap } from "./app-bootstrap";
+import { safeSignInReturnPath } from "./play";
 export { getClientAppBootstrap };
 export type { AppAccessState, AppBootstrapData } from "./app-bootstrap";
 
@@ -148,12 +149,15 @@ function requireHttpsSsoRedirect(value: string): string {
   return redirect.href;
 }
 
+/**
+ * `returnPath` is untrusted (it can come from a link), so only a same-origin
+ * /play/ path is kept; anything else returns to /courses.
+ */
 export async function startGithubSignIn(options?: {
-  callbackURL?: string;
+  returnPath?: string | null;
   errorCallbackURL?: string;
 }) {
-  const callbackURL =
-    options?.callbackURL ?? `${window.location.origin}/courses`;
+  const callbackURL = `${window.location.origin}${safeSignInReturnPath(options?.returnPath)}`;
   const errorCallbackURL =
     options?.errorCallbackURL ?? `${window.location.origin}/`;
   const result = await authClient.signIn.social({

@@ -12,6 +12,7 @@ import {
 } from "@/lib/scenario-runs";
 import { requireIdempotencyKey } from "@/lib/idempotency-key";
 import { resolveOrganizationId } from "@/lib/organizations";
+import { sanitizePlayRef } from "@/lib/play";
 
 export const prerender = false;
 
@@ -20,6 +21,8 @@ interface StartScenarioBody {
   organizationId?: unknown;
   candidateRevision?: unknown;
   candidateBuildId?: unknown;
+  launchSource?: unknown;
+  ref?: unknown;
 }
 
 export const POST: APIRoute = async ({ request, params, locals }) => {
@@ -65,6 +68,9 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
   let organizationId: string | null = null;
   let candidateRevision: string | undefined;
   let candidateBuildId: string | undefined;
+  // Attribution only: never trusted, so anything unexpected is dropped.
+  let launchSource: "play" | undefined;
+  let ref: string | undefined;
   if (request.headers.get("content-type")?.includes("application/json")) {
     let parsedBody: unknown;
     try {
@@ -117,6 +123,8 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
         { status: 400 },
       );
     }
+    launchSource = body.launchSource === "play" ? "play" : undefined;
+    ref = launchSource ? sanitizePlayRef(body.ref) : undefined;
     const organizationKey =
       typeof body.organizationId === "string"
         ? body.organizationId.trim() || null
@@ -182,6 +190,8 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
         : {}),
       ...(authz.context.isAdmin ? { allowDrainedAdminProof: true } : {}),
       ...(authz.context.isAdmin ? { allowSequenceBypass: true } : {}),
+      ...(launchSource ? { launchSource } : {}),
+      ...(ref ? { ref } : {}),
     });
     // The dispatch hint is background work, so it never enters the response
     // body and never delays it. The durable outbox sweep delivers the

@@ -20,6 +20,8 @@ import {
   SquareTerminal,
 } from "lucide-react";
 import {
+  clearScenarioStartConfirmation,
+  isScenarioStartConfirmed,
   requestScenarioStartWithCapacityWait,
   ScenarioStartCancelledError,
   type ScenarioStartContention,
@@ -102,6 +104,7 @@ import {
   planActiveRunStatus,
 } from "@/components/app/run/run-status-display";
 import { ScenarioVmSelector } from "@/components/app/run/ScenarioVmSelector";
+import { StartLabConfirm } from "@/components/app/run/StartLabConfirm";
 import {
   ScenarioShellStatusCard,
   ScenarioStepScreen,
@@ -182,9 +185,14 @@ export function ScenarioRunStart() {
   const search = useSearch({ from: "/app/runs/start/$scenarioId" });
   const organizationId = search.organizationId ?? null;
   const abortRef = useRef<AbortController | null>(null);
+  // Only the lecture's own Start click begins at once; a link, a reload or a
+  // new tab gets the explicit Start lab step first.
+  const [confirmedOnArrival] = useState(() =>
+    isScenarioStartConfirmed(scenarioId),
+  );
   const [startState, setStartState] = useState<
-    "requesting" | "waiting" | "failed"
-  >("requesting");
+    "confirm" | "requesting" | "waiting" | "failed"
+  >(confirmedOnArrival ? "requesting" : "confirm");
   const [startError, setStartError] = useState<string | null>(null);
   // Which refusal the wait is for, so the busy copy is accurate without
   // naming backend internals.
@@ -234,10 +242,11 @@ export function ScenarioRunStart() {
 
   const startScenario = useCallback(() => {
     abortRef.current?.abort();
+    clearScenarioStartConfirmation();
     const controller = new AbortController();
     abortRef.current = controller;
-    // Direct navigation has no learner click. The normal lecture action
-    // already recorded `start-click` before it navigated here.
+    // The lecture action already recorded `start-click` before it navigated
+    // here; a Start lab click on this page records the start route.
     beginScenarioRunBootEvidence(scenarioId, "start-route");
     markPendingScenarioRunBootStage(scenarioId, "start-request");
     setStartState("requesting");
@@ -295,9 +304,9 @@ export function ScenarioRunStart() {
   }, [navigate, organizationId, queryClient, scenarioId]);
 
   useEffect(() => {
-    startScenario();
+    if (confirmedOnArrival) startScenario();
     return () => abortRef.current?.abort();
-  }, [startScenario]);
+  }, [confirmedOnArrival, startScenario]);
 
   // Try again unmounts the button that holds focus; the sequence heading takes
   // it once the retry has rendered, so keyboard users keep their place.
@@ -312,6 +321,7 @@ export function ScenarioRunStart() {
 
   usePageChrome({ title, fullscreen: true });
 
+  const confirming = startState === "confirm";
   const waitingForCapacity = startState === "waiting";
   const waitingForRegistry =
     waitingForCapacity && startContention === "registry";
@@ -334,9 +344,11 @@ export function ScenarioRunStart() {
       title={title}
       status={
         <StatusToken
-          tone={failed ? "danger" : "pending"}
+          tone={failed ? "danger" : confirming ? "muted" : "pending"}
           word={
-            failed
+            confirming
+              ? "Ready to start"
+              : failed
               ? "Could not start"
               : waitingForRegistry
                 ? "Waiting to start"
@@ -345,9 +357,15 @@ export function ScenarioRunStart() {
                   : "Starting"
           }
           compactWord={
-            failed ? "Failed" : waitingForCapacity ? "Waiting" : "Starting"
+            confirming
+              ? "Ready"
+              : failed
+                ? "Failed"
+                : waitingForCapacity
+                  ? "Waiting"
+                  : "Starting"
           }
-          pulse={!failed}
+          pulse={!failed && !confirming}
         />
       }
       returnTarget={returnTarget}
@@ -363,6 +381,14 @@ export function ScenarioRunStart() {
         {/* The same insets as the run page's startup screen, so the card stays
             put when the run page takes the sequence over. */}
         <div className="m-auto w-full py-4 sm:px-1 sm:py-6" data-run-sequence-frame>
+          {confirming ? (
+            <StartLabConfirm
+              title={title}
+              pending={false}
+              error={null}
+              onStart={startScenario}
+            />
+          ) : (
           <ScenarioStepScreen
             title={failed ? "The run did not start" : "Preparing your workspace"}
             description={
@@ -406,6 +432,7 @@ export function ScenarioRunStart() {
               ) : undefined
             }
           />
+          )}
         </div>
       </div>
     </RunWorkspaceShell>

@@ -83,9 +83,10 @@ describe("rehearsal entrypoint", () => {
         "0036_slim_quicksilver",
         "0037_careful_carlie_cooper",
         "0038_skinny_annihilus",
+        "0039_dashing_vulture",
       ]);
-      expect(evidence.appliedMigrationCount).toBe(39);
-      expect(evidence.committedMigrationCount).toBe(39);
+      expect(evidence.appliedMigrationCount).toBe(40);
+      expect(evidence.committedMigrationCount).toBe(40);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(evidence.scenarioCounts).toEqual([1, 1, 1]);
 
@@ -98,7 +99,7 @@ describe("rehearsal entrypoint", () => {
       // The disposable database is deleted in the entrypoint's finally block,
       // so the run leaves nothing behind.
       expect(log.requests.some((entry) => entry.startsWith("DELETE"))).toBe(true);
-      expect(log.ledgerRows).toBe(39);
+      expect(log.ledgerRows).toBe(40);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

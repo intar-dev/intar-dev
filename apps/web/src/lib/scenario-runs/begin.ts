@@ -135,6 +135,43 @@ export interface BeginScenarioRunInput {
   candidateBuildId?: string;
   allowDrainedAdminProof?: boolean;
   allowSequenceBypass?: boolean;
+  /** Attribution only: 'play' for a /play start. Never an authorization input. */
+  launchSource?: "play";
+  /** Attribution only, already sanitized by the caller. */
+  ref?: string;
+}
+
+/**
+ * Learner starts per user in a rolling window. The count runs inside the run
+ * insert of the admission batch, so concurrent starts cannot exceed it.
+ * Administrative proof and verify starts are exempt and are not counted.
+ */
+export const LEARNER_START_LIMIT = 5;
+export const LEARNER_START_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function learnerStartLimitOpenSql(userParam: string, nowParam: string): string {
+  return `(SELECT count(*) FROM learner_run_starts recent
+    WHERE recent.user_id = ${userParam}
+      AND recent.created_at > ${nowParam} - ${LEARNER_START_WINDOW_MS}) < ${LEARNER_START_LIMIT}`;
+}
+
+async function assertLearnerStartLimit(
+  userId: string,
+  allowDrainedAdminProof: boolean | undefined,
+): Promise<void> {
+  if (allowDrainedAdminProof) return;
+  const row = await env.DB.prepare(
+    "SELECT " + learnerStartLimitOpenSql("?1", "?2") + " AS open",
+  )
+    .bind(userId, Date.now())
+    .first<{ open: number }>();
+  if (row?.open !== 1) {
+    throw appError(
+      429,
+      "scenario_start_limit_reached",
+      `You can start ${LEARNER_START_LIMIT} labs per 24 hours. Try again later.`,
+    );
+  }
 }
 
 export interface BeginScenarioRunResult {
@@ -356,6 +393,8 @@ async function admitScenarioStart(
     // stored run, which the idempotency lookup above already handled.
     throw activeRunConflictError(active.title);
   }
+  // A fast refusal before any preparation; the run insert rechecks it.
+  await assertLearnerStartLimit(input.userId, input.allowDrainedAdminProof);
 
   return admitNewRun({
     input,
@@ -952,6 +991,8 @@ async function admitNewRun(context: {
     completedAt: null,
     failedAt: null,
     hiddenAt: null,
+    launchSource: input.launchSource ?? null,
+    ref: input.ref ?? null,
     createdAt,
     updatedAt: createdAt,
   } satisfies typeof scenarioRuns.$inferInsert;
@@ -1105,6 +1146,8 @@ async function admitNewRun(context: {
       });
       if (refusal) throw refusal;
       await assertCurrentContentAccess(run, input.allowDrainedAdminProof);
+      // A concurrent start that took the last slot refuses the insert too.
+      await assertLearnerStartLimit(input.userId, input.allowDrainedAdminProof);
       if (attempt < ADMISSION_CAS_ATTEMPTS) {
         continue;
       }
@@ -1481,6 +1524,7 @@ async function admissionRefusal(input: AdmissionCommitInput) {
       : {}),
   });
   await assertCurrentContentAccess(input.run, input.allowDrainedAdminProof);
+  await assertLearnerStartLimit(input.run.userId, input.allowDrainedAdminProof);
   return scenarioStartAccessRevoked();
 }
 
@@ -1651,6 +1695,7 @@ export function admissionStatements(input: AdmissionCommitInput): AdmissionBatch
     ...runtimeVmStatements(run, input),
     resourceReservationStatement(run, input),
     activeSlotStatement(run),
+    ...(input.allowDrainedAdminProof ? [] : learnerStartStatements(run)),
   ];
   return { statements, runGateIndex: 1 };
 }
@@ -1697,9 +1742,27 @@ const RUN_INSERT_COLUMNS = [
   "completed_at",
   "failed_at",
   "hidden_at",
+  "launch_source",
+  "ref",
   "created_at",
   "updated_at",
 ];
+
+/** Records the learner start for the rolling limit and prunes expired rows. */
+function learnerStartStatements(
+  run: typeof scenarioRuns.$inferInsert & { hostId: string },
+): D1PreparedStatement[] {
+  return [
+    env.DB.prepare(
+      "INSERT INTO learner_run_starts (run_id, user_id, created_at)" +
+        " SELECT run.run_id, run.user_id, run.created_at FROM scenario_runs run" +
+        " WHERE run.run_id = ?1",
+    ).bind(run.runId),
+    env.DB.prepare(
+      "DELETE FROM learner_run_starts WHERE user_id = ?1 AND created_at <= ?2",
+    ).bind(run.userId, (run.createdAt as number) - LEARNER_START_WINDOW_MS),
+  ];
+}
 
 /**
  * The cut-over gates travel inside the insert so a drain that lands in the
@@ -1845,6 +1908,8 @@ function insertRunStatement(
     run.completedAt ?? null,
     run.failedAt ?? null,
     run.hiddenAt ?? null,
+    run.launchSource ?? null,
+    run.ref ?? null,
     run.createdAt as number,
     run.updatedAt as number,
   ];
@@ -1901,6 +1966,12 @@ function insertRunStatement(
     " AND " + admissionHostReadinessCondition(readinessParam) +
     " AND " + admissionContentAccessCondition(contentParam) +
     drainGateCondition(input.allowDrainedAdminProof) +
+    (input.allowDrainedAdminProof
+      ? ""
+      : " AND " + learnerStartLimitOpenSql(
+          "?" + String(userParam),
+          "?" + String(RUN_INSERT_COLUMNS.indexOf("created_at") + 1),
+        )) +
     (anchorCondition ? " AND " + anchorCondition : "") +
     " RETURNING run_id";
   return env.DB.prepare(sqlText).bind(

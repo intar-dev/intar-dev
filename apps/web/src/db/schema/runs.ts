@@ -94,6 +94,10 @@ export const scenarioRuns = sqliteTable(
     // The public share link's id while the owner shares the run, else null.
     // The share's terminal log lives in its RunShareDO, named by this id.
     shareId: text("share_id"),
+    // Attribution only, never trusted: 'play' for a /play start, else null,
+    // and the sanitized `?ref=` of that start.
+    launchSource: text("launch_source"),
+    ref: text("ref"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
@@ -132,6 +136,25 @@ export const scenarioRuns = sqliteTable(
     uniqueIndex("scenario_runs_runtime_execution_uidx").on(
       table.runtimeExecutionId,
     ),
+  ],
+);
+
+/**
+ * One row per admitted learner start. It outlives the run, so deleting runs
+ * cannot reset the rolling start limit; admission prunes a user's rows once
+ * they leave the window.
+ */
+export const learnerRunStarts = sqliteTable(
+  "learner_run_starts",
+  {
+    runId: text("run_id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [
+    index("learner_run_starts_user_idx").on(table.userId, table.createdAt),
   ],
 );
 
