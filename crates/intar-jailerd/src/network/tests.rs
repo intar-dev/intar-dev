@@ -524,6 +524,28 @@ fn nft_policy_blocks_host_cross_run_private_and_metadata_destinations() {
         !rules.contains("ip daddr 10.77.0.0/29 drop"),
         "same-run L2 range must not be blocked by the host policy"
     );
+
+    // The egress floor (T5 (a), #291) sits between the anti-spoofing guard
+    // and the established fast path, so it bounds tracked flows too.
+    let veth = &state.result.host_veth_name;
+    let floor = [
+        format!("iifname \"{veth}\" tcp dport {{ 25, 465, 587 }} drop"),
+        format!("iifname \"{veth}\" limit rate over 20000/second burst 5000 packets drop"),
+        format!("iifname \"{veth}\" limit rate over 12 mbytes/second burst 24 mbytes drop"),
+        format!("iifname \"{veth}\" ct state new limit rate over 30/second burst 120 packets drop"),
+    ];
+    let mut previous = rules.find(&source_guard).unwrap();
+    for rule in &floor {
+        let position = rules
+            .find(rule.as_str())
+            .unwrap_or_else(|| panic!("missing egress floor rule: {rule}"));
+        assert!(previous < position, "egress floor out of order at: {rule}");
+        previous = position;
+    }
+    assert!(
+        previous < rules.find(&established_accept).unwrap(),
+        "the egress floor must run before the established-flow fast path"
+    );
 }
 
 fn artifact(
