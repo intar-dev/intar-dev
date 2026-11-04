@@ -42,6 +42,9 @@ pub(crate) struct Boot {
     /// Absent in unit tests: then steps 1–6 are skipped.
     #[serde(default)]
     pub(crate) guest: Option<boot::Guest>,
+    /// Verify only: the other machines of the run, for the pre barrier.
+    #[serde(default)]
+    pub(crate) peers: Vec<String>,
     #[serde(default)]
     pub(crate) ready: Vec<ReadyScript>,
     #[serde(default)]
@@ -205,7 +208,9 @@ async fn connect() -> Option<Sink> {
     for _ in 0..50 {
         if let Ok(stream) = VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, REPORT_PORT)).await
         {
-            return Some(Box::new(stream));
+            let (read, write) = tokio::io::split(stream);
+            tokio::spawn(verify::read_host_frames(read));
+            return Some(Box::new(write));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

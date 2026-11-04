@@ -110,3 +110,43 @@ async fn verify_solves_in_order_treats_no_solve_as_implied_and_stops_at_a_peer()
     assert!(verify.done && !verify.passed, "{verify:?}");
     assert_eq!(verify.steps[2].waiting_for, ["worker/joined"]);
 }
+
+#[tokio::test]
+async fn verify_waits_for_the_peer_barrier_and_needs_then_stops_on_a_failed_peer() {
+    use super::verify::{PeerTasks, set_peers};
+    let temp = tempfile::tempdir().expect("tempdir");
+    let multi = boot(
+        r#"{"machine":"a","mode":"verify","peers":["b"],"tasks":[
+            {"id":"t","run":"true","needs":["b/x"]}]}"#,
+    );
+    let (report, changes) = watch::channel(Report::default());
+    let feeder = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let verify = changes.borrow().verify.clone();
+        assert!(verify.is_none_or(|verify| !verify.done), "waits on peers");
+        set_peers(PeerTasks {
+            pre_done: vec!["b".into()],
+            passed: [("b".to_owned(), vec!["x".to_owned()])].into(),
+            ..PeerTasks::default()
+        });
+    };
+    let dir = temp.path().join("s");
+    tokio::join!(run(&multi, &dir, &report), feeder);
+    let verify = changes.borrow().verify.clone().expect("verify");
+    assert!(verify.done && verify.passed, "{verify:?}");
+
+    let failing = boot(
+        r#"{"machine":"a","mode":"verify","peers":["b"],"tasks":[
+            {"id":"t","run":"true","needs":["b/never"]}]}"#,
+    );
+    set_peers(PeerTasks {
+        pre_done: vec!["b".into()],
+        failed: vec!["b".into()],
+        ..PeerTasks::default()
+    });
+    let (report, changes) = watch::channel(Report::default());
+    run(&failing, &temp.path().join("s"), &report).await;
+    let verify = changes.borrow().verify.clone().expect("verify");
+    assert!(verify.done && !verify.passed, "{verify:?}");
+    assert_eq!(changes.borrow().failure, "peer 'b' failed verify");
+}

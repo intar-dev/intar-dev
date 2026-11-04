@@ -1,18 +1,75 @@
 //! Verify mode, single machine (§5.3 in #309): every pre-check before any
 //! solve, then each task in dependency order: solve, then poll its check.
 //!
-//! Not here yet: `PeerTasks`. A task that needs a peer's task stops verify
-//! with `waiting_for` set.
+//! T13 spike: multi-machine verify with `PeerTasks` from the host (§5.3): a
+//! pre barrier over `boot.peers`, peer needs waited on with `waiting_for`
+//! set, and a peer in `failed` ends this machine's verify. Without `peers`, a
+//! task that needs a peer's task stops verify with `waiting_for` set.
 
 use super::{Boot, CHECK_TIMEOUT, Report, Status, exec};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 const SOLVE_TIMEOUT: Duration = Duration::from_secs(600);
 const POST_WINDOW: Duration = Duration::from_secs(120);
 const POST_INTERVAL: Duration = Duration::from_secs(2);
+const PEER_WAIT: Duration = Duration::from_secs(900);
+
+/// `kino.v2` `PeerTasks`, as a JSON host frame `{"peer_tasks": {...}}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub(crate) struct PeerTasks {
+    pub(crate) passed: BTreeMap<String, Vec<String>>,
+    pub(crate) pre_done: Vec<String>,
+    pub(crate) failed: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct HostFrame {
+    peer_tasks: PeerTasks,
+}
+
+/// ponytail: one process-wide channel; a test or a second run would share it.
+fn peers() -> &'static watch::Sender<PeerTasks> {
+    static PEERS: OnceLock<watch::Sender<PeerTasks>> = OnceLock::new();
+    PEERS.get_or_init(|| watch::channel(PeerTasks::default()).0)
+}
+
+pub(crate) fn set_peers(peer_tasks: PeerTasks) {
+    peers().send_replace(peer_tasks);
+}
+
+/// Read JSON host frames off the report connection.
+pub(crate) async fn read_host_frames(read: impl tokio::io::AsyncRead + Unpin) {
+    use tokio::io::AsyncBufReadExt as _;
+    let mut lines = tokio::io::BufReader::new(read).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Ok(frame) = serde_json::from_str::<HostFrame>(&line) {
+            set_peers(frame.peer_tasks);
+        }
+    }
+}
+
+fn need_passed(peers: &PeerTasks, need: &str) -> bool {
+    need.split_once('/').is_some_and(|(machine, task)| {
+        peers
+            .passed
+            .get(machine)
+            .is_some_and(|ids| ids.iter().any(|id| id == task))
+    })
+}
+
+async fn wait_peers(test: impl FnMut(&PeerTasks) -> bool) -> bool {
+    let mut rx = peers().subscribe();
+    matches!(
+        tokio::time::timeout(PEER_WAIT, rx.wait_for(test)).await,
+        Ok(Ok(_))
+    )
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct Verify {
@@ -41,6 +98,8 @@ pub(crate) struct Step {
     /// Admin-only.
     pub(crate) tail: String,
     pub(crate) waiting_for: Vec<String>,
+    /// When the solve (or, for an implied task, the check) began.
+    pub(crate) started_unix_ms: u64,
 }
 
 pub(crate) async fn run(boot: &Boot, dir: &Path, report: &watch::Sender<Report>) {
@@ -55,7 +114,27 @@ pub(crate) async fn run(boot: &Boot, dir: &Path, report: &watch::Sender<Report>)
             .collect(),
         ..Verify::default()
     };
-    let passed = steps(boot, dir, report, &mut verify).await;
+    let passed = if boot.peers.is_empty() {
+        steps(boot, dir, report, &mut verify).await
+    } else {
+        let mut failed_peer = None;
+        let passed = tokio::select! {
+            passed = steps(boot, dir, report, &mut verify) => passed,
+            _ = async {
+                let mut rx = peers().subscribe();
+                rx.wait_for(|peers| {
+                    failed_peer = peers.failed.first().cloned();
+                    failed_peer.is_some()
+                })
+                .await
+                .map(|_| ())
+            } => false,
+        };
+        if let Some(peer) = failed_peer {
+            report.send_modify(|report| report.failure = format!("peer '{peer}' failed verify"));
+        }
+        passed
+    };
     verify.done = true;
     verify.passed = passed;
     report.send_modify(|report| report.verify = Some(verify));
@@ -97,10 +176,16 @@ async fn steps(
     }
     verify.pre_done = true;
     publish(verify);
+    // The pre barrier: no machine solves before every machine's pre-checks ran.
+    if !boot.peers.is_empty()
+        && !wait_peers(|peers| boot.peers.iter().all(|peer| peers.pre_done.contains(peer))).await
+    {
+        report.send_modify(|report| report.failure = "peers did not finish pre-checks".into());
+        return false;
+    }
 
     for index in order {
         let task = &boot.tasks[index];
-        let started = Instant::now();
         let waiting_for: Vec<String> = task
             .needs
             .iter()
@@ -108,9 +193,19 @@ async fn steps(
             .cloned()
             .collect();
         if !waiting_for.is_empty() {
-            verify.steps[index].waiting_for = waiting_for;
-            return false;
+            verify.steps[index].waiting_for = waiting_for.clone();
+            if boot.peers.is_empty() {
+                return false;
+            }
+            publish(verify);
+            if !wait_peers(|peers| waiting_for.iter().all(|need| need_passed(peers, need))).await {
+                return false;
+            }
+            verify.steps[index].waiting_for.clear();
         }
+        let started = Instant::now();
+        verify.steps[index].started_unix_ms = super::unix_ms();
+        publish(verify);
         if let Some(solve) = &task.solve {
             let run = exec::run(dir, &format!("solve-{index}"), solve, SOLVE_TIMEOUT).await;
             let step = &mut verify.steps[index];
