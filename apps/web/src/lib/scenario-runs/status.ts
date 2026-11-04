@@ -11,7 +11,11 @@ import {
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
 import { runtimeVms, scenarioRuns } from "@/db/schema";
-import type { RunPhase, RunStateDocument } from "@/lib/run-state";
+import {
+  redactProbeResults,
+  type RunPhase,
+  type RunStateDocument,
+} from "@/lib/run-state";
 import {
   deriveScenarioRunActivity,
   deriveScenarioRunReplayState,
@@ -189,8 +193,8 @@ export async function getScenarioRunStatusForUser(input: {
       terminalPhase: vm.terminalPhase,
       canOpenTerminal: vm.canOpenTerminal,
       terminalTarget: vm.terminalTarget,
-      bootProbes: vm.bootProbes,
-      scenarioProbes: vm.scenarioProbes,
+      bootProbes: redactProbeResults(vm.bootProbes),
+      scenarioProbes: redactProbeResults(vm.scenarioProbes),
       sessionTimeline: vm.sessionTimeline,
       ...(vm.hasRecording === undefined
         ? {}

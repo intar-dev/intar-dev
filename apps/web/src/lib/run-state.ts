@@ -36,6 +36,17 @@ export interface ScenarioProbeStatus {
   value: unknown;
 }
 
+/**
+ * What a learner's browser may see of a probe: its status, never the raw
+ * value or error the guest reported. The keys stay so a client can still
+ * tell a reported result from a pending one.
+ */
+export function redactProbeResults(
+  probes: ScenarioProbeStatus[],
+): ScenarioProbeStatus[] {
+  return probes.map((probe) => ({ ...probe, error: null, value: null }));
+}
+
 export interface ScenarioReplayArtifact {
   id: string;
   hostId: string;

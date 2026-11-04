@@ -25,6 +25,7 @@ import {
   RUN_PHASE_ORDER,
   buildInitialRunState,
   recomputeRunState,
+  redactProbeResults,
   type RunPhase,
   type ScenarioReplayArtifact,
   type RunStateDocument,
@@ -400,6 +401,13 @@ export function toScenarioRunRecord(
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     ...row.state,
+    bootProbes: redactProbeResults(row.state.bootProbes),
+    scenarioProbes: redactProbeResults(row.state.scenarioProbes),
+    vms: row.state.vms.map((vm) => ({
+      ...vm,
+      bootProbes: redactProbeResults(vm.bootProbes),
+      scenarioProbes: redactProbeResults(vm.scenarioProbes),
+    })),
   };
 }
 

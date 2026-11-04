@@ -24,6 +24,7 @@ import {
   persistStoredRunLifecycle,
 } from "@/control-plane/agent-run-artifacts/storage";
 import { platformArtifactFixture } from "@/control-plane/agent-run-artifacts/test-fixtures";
+import { getScenarioRunStatusForUser } from "@/lib/scenario-runs/status";
 import { resetD1Database } from "@/test/d1-migrations";
 
 describe("scenario run artifact ledger", () => {
@@ -123,6 +124,37 @@ describe("scenario run artifact ledger", () => {
     expect(run.phase).toBe("provisioning");
     expect(run.replayArtifacts).toEqual([]);
     expect(run.vms[0]?.replayArtifacts).toEqual([]);
+  });
+
+  it("never sends a raw probe value or error to the learner", async () => {
+    await seedIdentity();
+    const probe = {
+      id: "nginx",
+      label: "nginx answers",
+      kind: "command",
+      status: "failed",
+      error: "raw probe error",
+      value: { stdout: "raw probe value" },
+    };
+    await insertActiveRun({
+      bootProbes: [{ ...probe, id: "boot", phase: "boot" as const }],
+      scenarioProbes: [{ ...probe, phase: "scenario" as const }],
+    });
+
+    const run = await getScenarioRunForUser({ runId: "run-1", userId: "user-1" });
+    const status = await getScenarioRunStatusForUser({
+      runId: "run-1",
+      userId: "user-1",
+    });
+
+    for (const vm of [...run.vms, ...status.vms]) {
+      for (const reported of [...vm.bootProbes, ...vm.scenarioProbes]) {
+        expect(reported).toMatchObject({ status: "failed", error: null, value: null });
+      }
+      expect(vm.bootProbes).toHaveLength(1);
+      expect(vm.scenarioProbes).toHaveLength(1);
+    }
+    expect(JSON.stringify([run, status])).not.toContain("raw probe");
   });
 
   it("does not let stale artifact completion bypass teardown acceptance", async () => {
@@ -384,7 +416,11 @@ async function insertCompletedRun({
   });
 }
 
-async function insertActiveRun(): Promise<void> {
+async function insertActiveRun(
+  probes: Partial<
+    Pick<ReturnType<typeof buildInitialRunState>["vms"][number], "bootProbes" | "scenarioProbes">
+  > = {},
+): Promise<void> {
   const db = drizzle(env.DB);
   const createdAt = Date.now();
   const initial = buildInitialRunState({
@@ -408,7 +444,7 @@ async function insertActiveRun(): Promise<void> {
   const active = recomputeRunState({
     ...initial,
     phase: "provisioning",
-    vms: initial.vms.map((vm) => ({ ...vm, phase: "booting" })),
+    vms: initial.vms.map((vm) => ({ ...vm, ...probes, phase: "booting" })),
   });
   await db.insert(scenarioRuns).values({
     runId: "run-1",
