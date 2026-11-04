@@ -3,6 +3,7 @@
 // about where a repository may publish.
 import { env } from "cloudflare:workers";
 import { and, asc, desc, eq, exists, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import { assertCutoverNotWiped, CUTOVER_WIPED_SQL } from "@/lib/run-admission-gate";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import {
@@ -1045,6 +1046,9 @@ export async function acceptScenarioSourceUpload(
     }
   }
 
+  // Before staging: nothing lands in the wiped tables or the bucket. The
+  // claim's own predicate covers a wipe that starts after this read.
+  await assertCutoverNotWiped(workerEnv.DB);
   const staged = stagedSourceObjectPrefix(scope.key, rev, purpose);
   await Promise.all([
     workerEnv.VM_IMAGE_REGISTRY_BUCKET.put(`${staged}bundle.tar.gz`, payload, {
@@ -1075,7 +1079,7 @@ export async function acceptScenarioSourceUpload(
               rev, via, state, created_at, updated_at)
             SELECT ${createAppId()}, ${scope.key}, ${purpose}, ${input.sha},
               ${rev}, 'push', 'ingesting', ${now}, ${now}
-            WHERE ${headIsRev}
+            WHERE ${headIsRev} AND NOT ${sql.raw(CUTOVER_WIPED_SQL)}
             ON CONFLICT (scope_key, rev, purpose) DO UPDATE SET
               state = 'ingesting', via = 'push', attempt = attempt + 1,
               detail = NULL, diagnostics_json = NULL,

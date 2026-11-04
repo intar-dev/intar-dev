@@ -13,6 +13,7 @@ import {
   hostDesiredState,
   imageBuildBundles,
   imageBuilds,
+  organization,
   runtimeOperationGates,
   scenarioSourceCommits,
   scenarioSources,
@@ -208,6 +209,47 @@ describe("image revision completion status", () => {
     });
   });
 
+  it("cutover gate reports a wipe as drained and keeps it through a repeated drain", async () => {
+    const gate = (body?: unknown) => handleImageRegistryRequest(new Request("https://intar.test/registry/v1/cutover/gate", {
+      method: body ? "POST" : "GET",
+      headers: { authorization: "Bearer test-publish-token", "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    }), env).then((response) => response!.json());
+    const stored = () => env.DB.prepare("SELECT state FROM runtime_operation_gates WHERE key = ?")
+      .bind(IMAGE_CUTOVER_GATE).first<{ state: string }>();
+    await drizzle(env.DB).insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "wiped" });
+
+    await expect(gate()).resolves.toMatchObject({ state: "drained", wiped: true });
+    await expect(gate({ state: "drained" })).resolves.toMatchObject({ state: "drained", wiped: true });
+    expect(await stored()).toEqual({ state: "wiped" });
+    await expect(gate({ state: "open" })).resolves.toMatchObject({ state: "open", wiped: false });
+    await expect(gate({ state: "drained" })).resolves.toMatchObject({ state: "drained", wiped: false });
+  });
+
+  it("cutover gate counts running VMs on every host scope", async () => {
+    const db = drizzle(env.DB);
+    await db.insert(organization).values({ id: "org-1", name: "Org", slug: "org", createdAt: new Date() });
+    const hosts = [
+      { id: "org", scope: "organization" as const, organizationId: "org-1" },
+      { id: "personal", scope: "personal" as const },
+      { id: "legacy", scope: null },
+    ];
+    await db.insert(agentHosts).values(hosts.map((host) => ({
+      userId: "owner", name: host.id, role: "agent" as const, credentialGeneration: 1, connected: true, ...host,
+    })));
+    for (const host of [...hosts, { id: "agent-1" }]) {
+      if (host.id !== "agent-1") {
+        await db.insert(hostDesiredState).values({ hostId: host.id, version: 7, docJson: { ...desiredState(), host_id: host.id } });
+      }
+      await env.DB.prepare("UPDATE host_desired_state SET doc_json = json_set(doc_json, '$.vms', json(?)) WHERE host_id = ?")
+        .bind(JSON.stringify([{ desired_phase: "running" }, { desired_phase: "absent" }]), host.id).run();
+    }
+    const response = await handleImageRegistryRequest(new Request("https://intar.test/registry/v1/cutover/gate", {
+      headers: { authorization: "Bearer test-publish-token" },
+    }), env);
+    expect(await response!.json()).toMatchObject({ active_desired_vms: 1, all_scopes_active_desired_vms: 4 });
+  });
+
   it.each([
     { action: "warm", platformRunning: false },
     { action: "promote", platformRunning: false },
@@ -253,7 +295,11 @@ describe("image revision completion status", () => {
       headers: { authorization: "Bearer test-publish-token" },
     }), env);
     expect(cutover?.status).toBe(200);
-    expect(await cutover!.json()).toMatchObject({ active_desired_vms: platformRunning ? 1 : 0 });
+    // The personal host's running VM counts toward the cutover, never image-ops.
+    expect(await cutover!.json()).toMatchObject({
+      active_desired_vms: platformRunning ? 1 : 0,
+      all_scopes_active_desired_vms: platformRunning ? 2 : 1,
+    });
     const woken: string[] = [];
     const response = await handleImageRegistryRequest(new Request(`https://intar.test/registry/v1/guest-tools/${action}`, {
       method: "POST", headers: {

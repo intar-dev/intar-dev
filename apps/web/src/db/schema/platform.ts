@@ -173,7 +173,7 @@ export const imageBuildCoordinationLocks = sqliteTable(
 
 export const runtimeOperationGates = sqliteTable("runtime_operation_gates", {
   key: text("key").primaryKey(),
-  state: text("state").$type<"open" | "drained">().notNull(),
+  state: text("state").$type<"open" | "drained" | "wiped">().notNull(),
   evidenceJson: text("evidence_json"),
   updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
 });

@@ -20,7 +20,11 @@ import {
   registryCleanupService,
   runRegistryCleanup,
 } from "@/lib/registry-cleanup-client";
-import { IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE } from "@/lib/run-admission-gate";
+import {
+  IMAGE_CUTOVER_GATE,
+  PROMOTION_HOLD_GATE,
+  cutoverDrainedSql,
+} from "@/lib/run-admission-gate";
 import { loadOutgoingReferenceBlockers } from "@/lib/scenario-catalog-rollback";
 import {
   publicSourceRevPromotable,
@@ -96,8 +100,8 @@ const FENCE_ABORT = /NOT NULL constraint failed: runtime_operation_gates\.state/
 const RUNNING_VMS = sql`(SELECT COUNT(*) FROM host_desired_state,
   json_each(host_desired_state.doc_json, '$.vms') AS vm
   WHERE json_extract(vm.value, '$.desired_phase') = 'running')`;
-const OPERATOR_DRAINED = sql`EXISTS (SELECT 1 FROM runtime_operation_gates
-  WHERE key = ${IMAGE_CUTOVER_GATE} AND state = 'drained')`;
+const OPERATOR_DRAINED = sql`EXISTS (SELECT 1 FROM runtime_operation_gates gate
+  WHERE gate.key = ${IMAGE_CUTOVER_GATE} AND ${sql.raw(cutoverDrainedSql("gate"))})`;
 
 async function readGate(db: DrizzleD1Database): Promise<PromotionGate> {
   const row = await db.get<{ evidence_json: string | null } | undefined>(

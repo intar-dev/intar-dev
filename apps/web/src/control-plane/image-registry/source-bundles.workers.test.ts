@@ -19,10 +19,12 @@ import {
   courseCatalogs,
   member,
   organization,
+  runtimeOperationGates,
   scenarioSourceCommits,
   scenarioSources,
   vmScenarios,
 } from "@/db/schema";
+import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import sourceRefusalSchema from "@/generated/schemas/source-refusal-v1.schema.json";
 import {
   SOURCE_BUNDLES_PATH,
@@ -289,6 +291,17 @@ describe("push uploads", () => {
     expect(await stagedKeys()).toEqual([`${staged}bundle.tar.gz`, `${staged}meta.json`]);
     const meta = await env.VM_IMAGE_REGISTRY_BUCKET.get(`${staged}meta.json`);
     expect(await meta?.text()).toBe(JSON.stringify(sourceMeta()));
+  });
+
+  it("refuses a push after the cutover wipe and stages nothing", async () => {
+    github();
+    await drizzle(env.DB).insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "wiped" });
+
+    const response = await push();
+
+    expect(response.status, await response.clone().text()).toBe(503);
+    expect(await commits()).toEqual([]);
+    expect(await stagedKeys()).toEqual([]);
   });
 
   it.each([
