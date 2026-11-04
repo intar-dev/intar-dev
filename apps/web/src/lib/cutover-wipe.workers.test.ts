@@ -17,7 +17,6 @@ import {
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
 } from "@/db/schema";
-import { completePureCourseLectureForUser } from "@/lib/course-catalogs";
 import { wipeScenarioData } from "@/lib/cutover-wipe";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
 import { assertAgentKvmRunsOpen, assertCutoverNotWiped, IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
@@ -108,10 +107,6 @@ describe("cutover wipe", () => {
 
     // Nothing refills the tables before the epoch migration.
     await expect(assertCutoverNotWiped(env.DB)).rejects.toMatchObject({ status: 503 });
-    await expect(completePureCourseLectureForUser({
-      db: drizzle(env.DB), userId: "user-1", organizationId: null,
-      courseId: "linux-operations", lectureId: "reading", nowUnixMs: Date.now(),
-    })).rejects.toMatchObject({ status: 503, code: "runtime_cutover_wiped" });
     await expect(assertAgentKvmRunsOpen(env.DB)).rejects.toMatchObject({ status: 503 });
     await expect(assertAgentKvmRunsOpen(env.DB, { allowDrainedAdminProof: true }))
       .rejects.toMatchObject({ status: 503 });
@@ -147,6 +142,22 @@ describe("cutover wipe", () => {
     expect(second.complete).toBe(true);
     expect(second.deleted).toMatchObject({ scenario_runs: 30, runtime_executions: 1, scenario_assignments: 1 });
     expect(second.runRoutesRevoked).toBe(1);
+  });
+
+  it("revokes the routes a terminal run still owes, and skips a settled one", async () => {
+    await setGate("drained");
+    await env.DB.prepare(
+      "UPDATE scenario_runs SET state = 'completed', active_key = NULL, route_cleanup_id = 'cleanup-1'",
+    ).run();
+
+    await expect(wipeScenarioData()).resolves.toMatchObject({ complete: true, runRoutesRevoked: 1 });
+    expect(effects.revokeRoute).toHaveBeenCalled();
+
+    effects.revokeRoute.mockClear();
+    await seedRun({ db: drizzle(env.DB), hostId: "host-1", runId: "run-2", now: Date.now() });
+    await env.DB.prepare("UPDATE scenario_runs SET state = 'completed', active_key = NULL").run();
+    await expect(wipeScenarioData()).resolves.toMatchObject({ complete: true, runRoutesRevoked: 0 });
+    expect(effects.revokeRoute).not.toHaveBeenCalled();
   });
 
   it("keeps a failed route revoke's run for the retry", async () => {

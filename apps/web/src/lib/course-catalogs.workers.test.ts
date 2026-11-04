@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   agentHosts,
   courseUnitCompletions,
+  runtimeOperationGates,
   imageBuilds,
   member,
   organization,
@@ -34,6 +35,7 @@ import {
   syncCourseCatalogSnapshot,
   validateCourseCatalogReferences,
 } from "@/lib/course-catalogs";
+import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
 
 const learnerId = "learner";
@@ -639,6 +641,20 @@ describe("V2 course catalogs", () => {
     await expect(db.select().from(courseUnitCompletions)).resolves.toHaveLength(
       1,
     );
+
+    // After the cutover wipe the insert itself refuses, not only a pre-check.
+    await db.delete(courseUnitCompletions);
+    await db.insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "wiped" });
+    await expect(completePureCourseLectureForUser({
+      db, userId: learnerId, organizationId: null,
+      courseId: "sequence", lectureId: "theory", nowUnixMs: 700,
+    })).rejects.toMatchObject({ status: 503, code: "runtime_cutover_wiped" });
+    await expect(db.select().from(courseUnitCompletions)).resolves.toEqual([]);
+    await db.delete(runtimeOperationGates);
+    await completePureCourseLectureForUser({
+      db, userId: learnerId, organizationId: null,
+      courseId: "sequence", lectureId: "theory", nowUnixMs: 800,
+    });
 
     await expect(
       assertCourseScenarioStartAllowed({

@@ -1,10 +1,10 @@
 import { env } from "cloudflare:workers";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { member, organization, scenarioAssignments } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
-import { assertCutoverNotWiped } from "@/lib/run-admission-gate";
+import { assertCutoverNotWiped, CUTOVER_WIPED_SQL } from "@/lib/run-admission-gate";
 import { listEnabledScenariosForUser } from "@/lib/scenario-runs";
 import type { CourseLocation } from "@/lib/scenario-runs";
 import {
@@ -79,8 +79,6 @@ export async function assignScenarioToOrganization(params: {
     admin: true,
   });
 
-  await assertCutoverNotWiped(env.DB);
-
   const titles = await scenarioTitleMap(params.organizationId);
   const scenarioTitle = titles.get(params.scenarioId);
   if (!scenarioTitle) {
@@ -106,19 +104,15 @@ export async function assignScenarioToOrganization(params: {
 
   const db = drizzle(env.DB);
   const id = createAppId();
-  const inserted = await db
-    .insert(scenarioAssignments)
-    .values({
-      id,
-      organizationId: params.organizationId,
-      scenarioId: params.scenarioId,
-      assignedBy: params.actorUserId,
-    })
-    .onConflictDoNothing()
-    .returning({
-      id: scenarioAssignments.id,
-      createdAt: scenarioAssignments.createdAt,
-    });
+  // The gate is checked inside the insert, so an assignment in flight when
+  // the cutover wipe starts cannot land behind it.
+  const inserted = await db.all<{ id: string; createdAt: number }>(sql`INSERT INTO
+      scenario_assignments (id, organization_id, scenario_id, assigned_by)
+    SELECT ${id}, ${params.organizationId}, ${params.scenarioId}, ${params.actorUserId}
+    WHERE NOT ${sql.raw(CUTOVER_WIPED_SQL)}
+    ON CONFLICT DO NOTHING
+    RETURNING id, created_at AS createdAt`);
+  if (!inserted[0]) await assertCutoverNotWiped(env.DB);
   const assignment =
     inserted[0] ??
     (

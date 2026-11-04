@@ -478,10 +478,6 @@ export async function completePureCourseLectureForUser(input: {
   courseScope?: CourseSourceScope;
   allowSequenceBypass?: boolean;
 }): Promise<CourseLectureDetailResponse> {
-  const gate = await input.db.get<{ wiped: number }>(
-    sql`SELECT ${sql.raw(CUTOVER_WIPED_SQL)} AS wiped`,
-  );
-  if (gate?.wiped) throw cutoverWipedError();
   const before = await loadCourseLectureDetailForUser(input);
   if (!before.ok) {
     throw appError(
@@ -501,17 +497,18 @@ export async function completePureCourseLectureForUser(input: {
   const scopeKey = courseCatalogScopeKey(
     before.detail.course.organizationId,
   );
-  await input.db
-    .insert(courseUnitCompletions)
-    .values({
-      userId: input.userId,
-      scopeKey,
-      courseId: before.detail.course.courseId,
-      lectureId: before.detail.lecture.lectureId,
-      sourceRunId: null,
-      completedAt: input.nowUnixMs,
-    })
-    .onConflictDoNothing();
+  // The gate is checked inside the insert, so a completion in flight when
+  // the cutover wipe starts cannot land behind it.
+  await input.db.run(sql`INSERT INTO course_unit_completions
+      (user_id, scope_key, course_id, lecture_id, source_run_id, completed_at)
+    SELECT ${input.userId}, ${scopeKey}, ${before.detail.course.courseId},
+      ${before.detail.lecture.lectureId}, NULL, ${input.nowUnixMs}
+    WHERE NOT ${sql.raw(CUTOVER_WIPED_SQL)}
+    ON CONFLICT DO NOTHING`);
+  const gate = await input.db.get<{ wiped: number }>(
+    sql`SELECT ${sql.raw(CUTOVER_WIPED_SQL)} AS wiped`,
+  );
+  if (gate?.wiped) throw cutoverWipedError();
 
   const after = await loadCourseLectureDetailForUser(input);
   if (!after.ok) {

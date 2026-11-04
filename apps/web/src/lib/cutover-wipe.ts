@@ -79,10 +79,17 @@ export async function wipeScenarioData(): Promise<CutoverWipeReport> {
   // route revoke throws with the run still there for the retry.
   while (budget > 0) {
     const { results: runs } = await env.DB.prepare(
-      `SELECT run_id, share_id, state, state_json FROM scenario_runs ORDER BY run_id LIMIT ?`,
+      `SELECT run_id, share_id, state, state_json, route_cleanup_id
+         FROM scenario_runs ORDER BY run_id LIMIT ?`,
     )
       .bind(Math.min(BATCH, budget))
-      .all<{ run_id: string; share_id: string | null; state: string; state_json: string }>();
+      .all<{
+        run_id: string;
+        share_id: string | null;
+        state: string;
+        state_json: string;
+        route_cleanup_id: string | null;
+      }>();
     if (!runs.length) break;
     budget -= runs.length;
     for (const run of runs) {
@@ -100,7 +107,9 @@ export async function wipeScenarioData(): Promise<CutoverWipeReport> {
       ids,
     );
     for (const run of runs) {
-      if (run.state === "completed" || run.state === "failed") continue;
+      // A terminal run keeps `route_cleanup_id` while its revocation is owed.
+      const terminal = run.state === "completed" || run.state === "failed";
+      if (terminal && run.route_cleanup_id === null) continue;
       await revokeScenarioRunRoutes({ runId: run.run_id, state: parseRunState(run.state_json) });
       report.runRoutesRevoked += 1;
     }
