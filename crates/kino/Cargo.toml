@@ -6,21 +6,27 @@ license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
+# Spike (T11): `--no-default-features` builds the `kino init` guest binary
+# without the probe service and its heavy dependencies.
+[features]
+default = ["legacy"]
+legacy = ["dep:axum", "dep:hcl-rs", "dep:jsonpath-rust", "dep:k8s-openapi", "dep:kube", "dep:rustls", "dep:regex", "dep:futures-util", "dep:prost", "dep:intar-kino-proto", "tokio-vsock/axum08"]
+
 [dependencies]
 anyhow.workspace = true
-axum = { workspace = true, features = ["http1", "tokio"] }
+axum = { workspace = true, features = ["http1", "tokio"], optional = true }
 base64.workspace = true
 clap.workspace = true
-futures-util.workspace = true
-hcl-rs.workspace = true
+futures-util = { workspace = true, optional = true }
+hcl-rs = { workspace = true, optional = true }
 intar-contracts = { path = "../intar-contracts" }
-intar-kino-proto = { path = "../intar-kino-proto" }
-jsonpath-rust.workspace = true
-k8s-openapi.workspace = true
-kube.workspace = true
-prost.workspace = true
-regex.workspace = true
-rustls = { workspace = true, features = ["ring"] }
+intar-kino-proto = { path = "../intar-kino-proto", optional = true }
+jsonpath-rust = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+kube = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+rustls = { workspace = true, features = ["ring"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -35,7 +41,7 @@ crossterm.workspace = true
 pty-process.workspace = true
 rustix = { workspace = true, features = ["time"] }
 signal-hook.workspace = true
-tokio-vsock.workspace = true
+tokio-vsock = { version = "=0.7.2", default-features = false }
 
 [lints]
 workspace = true

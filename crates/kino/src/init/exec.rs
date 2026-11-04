@@ -99,11 +99,26 @@ async fn run_bash(script: &Path) -> std::io::Result<std::process::Output> {
     command.process_group(0);
     let child = command.spawn()?;
     #[cfg(target_os = "linux")]
-    let mut group = crate::probe::ProcessGroupKillGuard::new(child.id());
+    let mut group = GroupGuard(child.id().and_then(|id| i32::try_from(id).ok()));
     let output = child.wait_with_output().await;
     #[cfg(target_os = "linux")]
-    group.disarm();
+    {
+        group.0 = None;
+    }
     output
+}
+
+/// Kills the script's process group when the deadline drops the future.
+#[cfg(target_os = "linux")]
+struct GroupGuard(Option<i32>);
+
+#[cfg(target_os = "linux")]
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.and_then(rustix::process::Pid::from_raw) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+    }
 }
 
 /// The first stdout line starting with `FAIL:`, else [`DEFAULT_MESSAGE`].

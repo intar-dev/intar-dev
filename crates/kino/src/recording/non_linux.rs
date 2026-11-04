@@ -1,4 +1,4 @@
-use crate::config::RecordingConfig;
+use crate::recording::RecordingConfig;
 use anyhow::{Result, bail};
 
 pub(crate) fn record_command(_config: &RecordingConfig, _command: &str) -> Result<i32> {

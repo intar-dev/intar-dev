@@ -29,11 +29,7 @@ pub(crate) enum ServerBind {
     Vsock { cid: u32, port: u32 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecordingConfig {
-    pub(crate) output_dir: PathBuf,
-    pub(crate) real_shell: PathBuf,
-}
+pub(crate) use crate::recording::RecordingConfig;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProbeConfig {

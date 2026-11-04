@@ -123,7 +123,7 @@ async fn steps(
         let post = poll_check(dir, index, &task.run).await;
         let step = &mut verify.steps[index];
         step.post = post.status;
-        step.duration_ms = crate::state::duration_millis_u64(started.elapsed());
+        step.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         if post.status != Status::Pass {
             step.tail = post.tail;
             return false;

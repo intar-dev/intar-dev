@@ -5,7 +5,13 @@
 //! runtime broker, renders only the broker's safe projection, and runs fresh
 //! selected checks through Kino's local control socket.
 
+#[cfg(feature = "legacy")]
 use crate::run_cli_control::configured_socket_path;
+
+#[cfg(not(feature = "legacy"))]
+fn configured_socket_path() -> PathBuf {
+    PathBuf::from("/run/intar/kino-control.sock")
+}
 use crate::run_cli_pending::{
     PendingHintReveal, clear_if_matches_at, configured_path as pending_hint_path, load_at,
     persist_at,
@@ -1409,7 +1415,7 @@ fn pad_chars(value: &str, width: usize) -> String {
     format!("{value}{}", " ".repeat(missing))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy"))]
 mod tests {
     use super::{
         BrokerEndpoint, CliResult, Command, TerminalAutoOptions, TerminalStyle, TransportError,

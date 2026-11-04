@@ -1,10 +1,11 @@
 //! `kino init`, first cut (#309, re-cut from the T4 spike in #290): run the
 //! lab's `ready` scripts, report `READY`, then run tasks (learn) or verify.
 //!
-//! Not here yet: the report channel and `kino.v2`, network, root resize, SSH,
-//! the recording disk and the lab release (steps 1–6 of `kino init`). Until
-//! the report channel exists, each report change is printed as one JSON line.
+//! The T11 spike adds steps 1–6 (`boot.rs`): a JSON-lines report channel on
+//! vsock (no `kino.v2` yet), network, SSH, the recording disk and the lab
+//! release on its fallback timer.
 
+mod boot;
 mod exec;
 mod verify;
 
@@ -12,6 +13,7 @@ mod verify;
 mod tests;
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::watch;
@@ -25,6 +27,9 @@ const READY_INTERVAL: Duration = Duration::from_secs(2);
 const READY_TOTAL: Duration = Duration::from_secs(300);
 const TASK_INTERVAL: Duration = Duration::from_secs(5);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// The contract's report port; the host listens on CID 2.
+const REPORT_PORT: u32 = 18081;
+const KEEPALIVE: Duration = Duration::from_secs(10);
 
 /// The part of `GuestBootV3` (#307) that `kino init` reads so far. The
 /// compiler has already lowered sugar (`http`, files, ...) into `run` scripts,
@@ -34,6 +39,9 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) struct Boot {
     pub(crate) machine: String,
     pub(crate) mode: Mode,
+    /// Absent in unit tests: then steps 1–6 are skipped.
+    #[serde(default)]
+    pub(crate) guest: Option<boot::Guest>,
     #[serde(default)]
     pub(crate) ready: Vec<ReadyScript>,
     #[serde(default)]
@@ -75,6 +83,8 @@ pub(crate) struct Task {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum Phase {
     #[default]
+    Booting,
+    SshReady,
     Preparing,
     Ready,
     Failed,
@@ -93,6 +103,10 @@ pub(crate) enum Status {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct Report {
     pub(crate) phase: Phase,
+    pub(crate) ssh_host_keys: Vec<String>,
+    /// Guest uptime in ms when each step finished.
+    pub(crate) timings_ms: BTreeMap<String, u64>,
+    pub(crate) rss_kib: u64,
     pub(crate) ready: Vec<ReadyState>,
     pub(crate) tasks: Vec<TaskState>,
     pub(crate) verify: Option<verify::Verify>,
@@ -117,22 +131,90 @@ pub(crate) struct TaskState {
 }
 
 pub(crate) async fn main() -> anyhow::Result<()> {
-    let bytes = std::fs::read(BOOT_PATH)
-        .map_err(|error| anyhow::anyhow!("failed to read {BOOT_PATH}: {error}"))?;
-    let boot: Boot = serde_json::from_slice(&bytes)
-        .map_err(|error| anyhow::anyhow!("{BOOT_PATH} is invalid: {error}"))?;
-    let (report, mut changes) = watch::channel(Report::default());
+    let (report, changes) = watch::channel(Report::default());
+    boot::mark(&report, Phase::Booting, "kino_started");
+    tokio::spawn(publish(changes));
+    let boot = match read_boot() {
+        Ok(boot) => boot,
+        Err(error) => return fail(&report, error).await,
+    };
+    if let Some(guest) = &boot.guest {
+        if let Err(error) = boot::bring_up(guest, &report).await {
+            return fail(&report, error).await;
+        }
+        boot::release_lab(guest, &report).await;
+    }
+    let keepalive = report.clone();
     tokio::spawn(async move {
-        while changes.changed().await.is_ok() {
-            if let Ok(line) = serde_json::to_string(&*changes.borrow_and_update()) {
-                println!("{line}");
-            }
+        loop {
+            keepalive.send_modify(|report| report.rss_kib = boot::rss_kib());
+            tokio::time::sleep(KEEPALIVE).await;
         }
     });
     run(&boot, Path::new(SCRIPT_DIR), &report).await;
     // `kino init` is the guest supervisor: it stays up after its work.
     std::future::pending::<()>().await;
     Ok(())
+}
+
+async fn fail(report: &watch::Sender<Report>, error: String) -> anyhow::Result<()> {
+    eprintln!("kino init: {error}");
+    report.send_modify(|report| {
+        report.phase = Phase::Failed;
+        report.failure = error;
+    });
+    std::future::pending::<()>().await;
+    Ok(())
+}
+
+fn read_boot() -> Result<Boot, String> {
+    let bytes =
+        std::fs::read(BOOT_PATH).map_err(|error| format!("failed to read {BOOT_PATH}: {error}"))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("{BOOT_PATH} is invalid: {error}"))
+}
+
+type Sink = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
+/// Write every report change as one JSON line to the host, or to stdout when
+/// the vsock channel cannot be opened.
+async fn publish(mut changes: watch::Receiver<Report>) {
+    use tokio::io::AsyncWriteExt as _;
+    let mut sink = connect().await;
+    loop {
+        let mut line = serde_json::to_string(&*changes.borrow_and_update()).unwrap_or_default();
+        line.push('\n');
+        let sent = match sink.as_mut() {
+            Some(stream) => {
+                stream.write_all(line.as_bytes()).await.is_ok() && stream.flush().await.is_ok()
+            }
+            None => false,
+        };
+        if !sent {
+            sink = None;
+            print!("{line}");
+        }
+        if changes.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn connect() -> Option<Sink> {
+    use tokio_vsock::{VMADDR_CID_HOST, VsockAddr, VsockStream};
+    for _ in 0..50 {
+        if let Ok(stream) = VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, REPORT_PORT)).await
+        {
+            return Some(Box::new(stream));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn connect() -> Option<Sink> {
+    None
 }
 
 pub(crate) async fn run(boot: &Boot, dir: &Path, report: &watch::Sender<Report>) {
@@ -164,7 +246,7 @@ pub(crate) async fn run(boot: &Boot, dir: &Path, report: &watch::Sender<Report>)
         return;
     }
     // Tasks start only after READY (T4 finding 5).
-    report.send_modify(|report| report.phase = Phase::Ready);
+    boot::mark(report, Phase::Ready, "ready");
     match boot.mode {
         Mode::Learn => run_tasks(&boot.tasks, dir, report).await,
         Mode::Verify => verify::run(boot, dir, report).await,
@@ -237,5 +319,9 @@ async fn run_tasks(tasks: &[Task], dir: &Path, report: &watch::Sender<Report>) {
 }
 
 fn unix_ms() -> u64 {
-    crate::state::unix_time_ms(SystemTime::now())
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }

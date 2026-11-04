@@ -1,26 +1,42 @@
+#[cfg(feature = "legacy")]
 mod config;
+#[cfg(feature = "legacy")]
 mod host_keys;
+#[cfg(feature = "legacy")]
 mod http;
 mod init;
+#[cfg(feature = "legacy")]
 mod lab_release;
+#[cfg(feature = "legacy")]
 mod probe;
+#[cfg(feature = "legacy")]
 mod proto;
+#[cfg(feature = "legacy")]
 mod ready_push;
 mod recording;
 mod run_cli;
+#[cfg(feature = "legacy")]
 mod run_cli_control;
 mod run_cli_pending;
 mod run_cli_wire;
+#[cfg(feature = "legacy")]
 mod scheduler;
+#[cfg(feature = "legacy")]
 mod startup;
+#[cfg(feature = "legacy")]
 mod state;
 
+#[cfg(feature = "legacy")]
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(feature = "legacy")]
 use std::future::IntoFuture;
+#[cfg(feature = "legacy")]
 use std::io::ErrorKind;
 use std::path::PathBuf;
+#[cfg(feature = "legacy")]
 use std::sync::Arc;
+#[cfg(feature = "legacy")]
 use std::time::Instant;
 
 #[derive(Debug, Parser)]
@@ -54,7 +70,9 @@ enum CliCommand {
     Init,
     RecordSsh {
         #[arg(long, value_name = "PATH")]
-        config: PathBuf,
+        config: Option<PathBuf>,
+        #[command(flatten)]
+        recording: RecordingArgs,
         #[arg(long, value_name = "COMMAND")]
         command: Option<String>,
         #[arg(long, value_enum, default_value_t = ShellStartupModeArg::Login)]
@@ -62,14 +80,47 @@ enum CliCommand {
     },
     RecordCommand {
         #[arg(long, value_name = "PATH")]
-        config: PathBuf,
+        config: Option<PathBuf>,
+        #[command(flatten)]
+        recording: RecordingArgs,
         #[arg(long, value_name = "COMMAND")]
         command: String,
     },
 }
 
+/// The recorder settings as flags (#309); `--config` still wins when given.
+#[derive(Debug, clap::Args)]
+struct RecordingArgs {
+    #[arg(long, default_value = "/var/lib/kino-recordings")]
+    output_dir: PathBuf,
+    #[arg(long, default_value = "/bin/bash")]
+    real_shell: PathBuf,
+}
+
+impl RecordingArgs {
+    #[cfg_attr(not(feature = "legacy"), allow(unused_variables))]
+    fn resolve(
+        self,
+        config: Option<&std::path::Path>,
+    ) -> anyhow::Result<recording::RecordingConfig> {
+        #[cfg(feature = "legacy")]
+        if let Some(path) = config {
+            let app_config = config::load_from_file(path)
+                .with_context(|| format!("failed to load config from {}", path.display()))?;
+            return app_config
+                .recording
+                .context("recording configuration is required for the recorders");
+        }
+        Ok(recording::RecordingConfig {
+            output_dir: self.output_dir,
+            real_shell: self.real_shell,
+        })
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(feature = "legacy")]
     let kino_started_at = Instant::now();
 
     if std::env::args_os()
@@ -84,33 +135,28 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(CliCommand::Init) => init::main().await,
         Some(CliCommand::RecordSsh {
-            config: config_path,
+            config,
+            recording,
             command,
             shell_startup,
         }) => {
-            let app_config = config::load_from_file(&config_path)
-                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let recording_config = app_config
-                .recording
-                .as_ref()
-                .context("recording configuration is required for 'record-ssh'")?;
+            let recording_config = recording.resolve(config.as_deref())?;
             let exit_code =
-                recording::record_ssh(recording_config, command.as_deref(), shell_startup.into())?;
+                recording::record_ssh(&recording_config, command.as_deref(), shell_startup.into())?;
             std::process::exit(exit_code);
         }
         Some(CliCommand::RecordCommand {
-            config: config_path,
+            config,
+            recording,
             command,
         }) => {
-            let app_config = config::load_from_file(&config_path)
-                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let recording_config = app_config
-                .recording
-                .as_ref()
-                .context("recording configuration is required for 'record-command'")?;
-            let exit_code = recording::record_command(recording_config, &command)?;
+            let recording_config = recording.resolve(config.as_deref())?;
+            let exit_code = recording::record_command(&recording_config, &command)?;
             std::process::exit(exit_code);
         }
+        #[cfg(not(feature = "legacy"))]
+        None => anyhow::bail!("this guest build only runs `kino init` and the recorders"),
+        #[cfg(feature = "legacy")]
         None => {
             let config_path = cli
                 .config
@@ -123,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+#[cfg(feature = "legacy")]
 async fn run_probe_service(
     app_config: config::AppConfig,
     kino_started_at: Instant,
@@ -252,6 +299,7 @@ async fn run_probe_service(
     Ok(())
 }
 
+#[cfg(feature = "legacy")]
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -277,7 +325,7 @@ async fn shutdown_signal() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy"))]
 mod tests {
     use super::run_probe_service;
     use crate::config::{AppConfig, ServerBind};

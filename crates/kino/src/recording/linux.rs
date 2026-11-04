@@ -1,4 +1,4 @@
-use crate::config::RecordingConfig;
+use crate::recording::RecordingConfig;
 use crate::recording::ShellStartupMode;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -303,6 +303,9 @@ fn record_ssh_linux(
     // supervisor uses the report only to release the lab earlier than its
     // fallback timer. A one-shot recorded command is not a terminal session
     // and does not release the lab.
+    // ponytail: the guest build has no control socket yet, so `kino init`
+    // releases the lab on its 5 s fallback only.
+    #[cfg(feature = "legacy")]
     crate::lab_release::notify_recording_started("recording-started");
     let loop_result = run_linux_interactive_loop(&mut session, &shared_writer, &recording_path);
     if loop_result.is_err() {
