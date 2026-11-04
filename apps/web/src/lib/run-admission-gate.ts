@@ -14,6 +14,11 @@ export const PROMOTION_HOLD_GATE = "image_promotion";
  */
 export const IMAGE_CUTOVER_WIPED = "wiped";
 
+/** SQL: the cutover wipe has run; nothing may add scenario data. */
+export const CUTOVER_WIPED_SQL =
+  "EXISTS (SELECT 1 FROM runtime_operation_gates" +
+  ` WHERE key = '${IMAGE_CUTOVER_GATE}' AND state = '${IMAGE_CUTOVER_WIPED}')`;
+
 /** SQL: the operators' gate state `alias.state` holds new runs. */
 export function cutoverDrainedSql(alias: string): string {
   return `${alias}.state IN ('drained', '${IMAGE_CUTOVER_WIPED}')`;
@@ -72,11 +77,13 @@ export async function assertCutoverNotWiped(database: D1Database): Promise<void>
     .prepare("SELECT state FROM runtime_operation_gates WHERE key = ?")
     .bind(IMAGE_CUTOVER_GATE)
     .first<{ state: string }>();
-  if (gate?.state === IMAGE_CUTOVER_WIPED) {
-    throw appError(
-      503,
-      "runtime_cutover_wiped",
-      "scenario changes are paused for the platform update",
-    );
-  }
+  if (gate?.state === IMAGE_CUTOVER_WIPED) throw cutoverWipedError();
+}
+
+export function cutoverWipedError() {
+  return appError(
+    503,
+    "runtime_cutover_wiped",
+    "scenario changes are paused for the platform update",
+  );
 }

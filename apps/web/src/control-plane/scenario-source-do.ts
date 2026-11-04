@@ -46,7 +46,7 @@ import {
   admitInternalRegistryOperation,
   createRegistryWriterGuard,
 } from "@/lib/image-registry-admission";
-import { runsHeldCondition } from "@/lib/run-admission-gate";
+import { CUTOVER_WIPED_SQL, runsHeldCondition } from "@/lib/run-admission-gate";
 import { promotionHolding } from "./image-promotion";
 import { isCandidateSourceLocked } from "@/lib/scenario-catalog-candidates";
 import {
@@ -479,6 +479,7 @@ async function claim(step: Step, head: HeadRow, now: number): Promise<CommitRow 
       ${now}, ${now}
     FROM scenario_sources WHERE scope_key = ${step.scopeKey} AND mode = 'pull'
       AND head_sha = ${head.sha} AND ${scenarioSourceBindingPredicate()}
+      AND NOT ${sql.raw(CUTOVER_WIPED_SQL)}
     ON CONFLICT (scope_key, rev, purpose) DO UPDATE SET state = 'fetching', via = 'pull',
       claimed_attempt = attempt, detail = NULL, diagnostics_json = NULL,
       updated_at = excluded.updated_at

@@ -17,6 +17,7 @@ import {
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
 } from "@/db/schema";
+import { completePureCourseLectureForUser } from "@/lib/course-catalogs";
 import { wipeScenarioData } from "@/lib/cutover-wipe";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
 import { assertAgentKvmRunsOpen, assertCutoverNotWiped, IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
@@ -107,6 +108,10 @@ describe("cutover wipe", () => {
 
     // Nothing refills the tables before the epoch migration.
     await expect(assertCutoverNotWiped(env.DB)).rejects.toMatchObject({ status: 503 });
+    await expect(completePureCourseLectureForUser({
+      db: drizzle(env.DB), userId: "user-1", organizationId: null,
+      courseId: "linux-operations", lectureId: "reading", nowUnixMs: Date.now(),
+    })).rejects.toMatchObject({ status: 503, code: "runtime_cutover_wiped" });
     await expect(assertAgentKvmRunsOpen(env.DB)).rejects.toMatchObject({ status: 503 });
     await expect(assertAgentKvmRunsOpen(env.DB, { allowDrainedAdminProof: true }))
       .rejects.toMatchObject({ status: 503 });
@@ -114,6 +119,34 @@ describe("cutover wipe", () => {
     // A retry finds nothing left and stays wiped.
     await expect(wipeScenarioData()).resolves.toMatchObject({ complete: true, sharesStopped: 0 });
     expect(await gateState()).toBe("wiped");
+  });
+
+  it("stops at its per-call budget and finishes on the next call", async () => {
+    await setGate("drained");
+    // 229 finished copies of run-1 beyond the 200-row budget of one call.
+    await env.DB.batch([
+      env.DB.prepare("CREATE TABLE run_copy AS SELECT * FROM scenario_runs"),
+      env.DB.prepare(`UPDATE run_copy SET active_key = NULL, share_id = NULL,
+        runtime_execution_id = NULL, state = 'completed'`),
+    ]);
+    for (let index = 0; index < 229; index += 1) {
+      await env.DB.batch([
+        env.DB.prepare("UPDATE run_copy SET run_id = ?").bind(`copy-${index}`),
+        env.DB.prepare("INSERT INTO scenario_runs SELECT * FROM run_copy"),
+      ]);
+    }
+    await env.DB.prepare("DROP TABLE run_copy").run();
+
+    const first = await wipeScenarioData();
+    expect(first.complete).toBe(false);
+    expect(first.deleted.scenario_runs).toBe(200);
+    expect(first.remaining.scenario_runs).toBe(30);
+    expect(first.remaining.scenario_assignments).toBe(1);
+
+    const second = await wipeScenarioData();
+    expect(second.complete).toBe(true);
+    expect(second.deleted).toMatchObject({ scenario_runs: 30, runtime_executions: 1, scenario_assignments: 1 });
+    expect(second.runRoutesRevoked).toBe(1);
   });
 
   it("keeps a failed route revoke's run for the retry", async () => {

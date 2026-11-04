@@ -209,6 +209,23 @@ describe("image revision completion status", () => {
     });
   });
 
+  it("cutover gate reports a wipe as drained and keeps it through a repeated drain", async () => {
+    const gate = (body?: unknown) => handleImageRegistryRequest(new Request("https://intar.test/registry/v1/cutover/gate", {
+      method: body ? "POST" : "GET",
+      headers: { authorization: "Bearer test-publish-token", "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    }), env).then((response) => response!.json());
+    const stored = () => env.DB.prepare("SELECT state FROM runtime_operation_gates WHERE key = ?")
+      .bind(IMAGE_CUTOVER_GATE).first<{ state: string }>();
+    await drizzle(env.DB).insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "wiped" });
+
+    await expect(gate()).resolves.toMatchObject({ state: "drained", wiped: true });
+    await expect(gate({ state: "drained" })).resolves.toMatchObject({ state: "drained", wiped: true });
+    expect(await stored()).toEqual({ state: "wiped" });
+    await expect(gate({ state: "open" })).resolves.toMatchObject({ state: "open", wiped: false });
+    await expect(gate({ state: "drained" })).resolves.toMatchObject({ state: "drained", wiped: false });
+  });
+
   it("cutover gate counts running VMs on every host scope", async () => {
     const db = drizzle(env.DB);
     await db.insert(organization).values({ id: "org-1", name: "Org", slug: "org", createdAt: new Date() });

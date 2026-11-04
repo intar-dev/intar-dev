@@ -23,6 +23,7 @@ import {
 } from "@/db/schema";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { appError } from "@/lib/app-error";
+import { CUTOVER_WIPED_SQL, cutoverWipedError } from "@/lib/run-admission-gate";
 import type { ScenarioBriefing } from "@/lib/scenario-model";
 import type { ResourceCapacity } from "@/lib/resource-capacity";
 
@@ -477,6 +478,10 @@ export async function completePureCourseLectureForUser(input: {
   courseScope?: CourseSourceScope;
   allowSequenceBypass?: boolean;
 }): Promise<CourseLectureDetailResponse> {
+  const gate = await input.db.get<{ wiped: number }>(
+    sql`SELECT ${sql.raw(CUTOVER_WIPED_SQL)} AS wiped`,
+  );
+  if (gate?.wiped) throw cutoverWipedError();
   const before = await loadCourseLectureDetailForUser(input);
   if (!before.ok) {
     throw appError(
