@@ -3,7 +3,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { agentHosts } from "@/db/schema";
 import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
-import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import { IMAGE_CUTOVER_GATE, isCutoverDrained } from "@/lib/run-admission-gate";
 import {
   desiredGuestTools,
   parseScenarioGuestToolsPin,
@@ -104,7 +104,7 @@ async function convergeScenarioGuestTools(
     )
       .bind(IMAGE_CUTOVER_GATE)
       .first<{ state: string | null; count: number }>();
-    if (drain?.state !== "drained" || drain.count !== 0) {
+    if (!isCutoverDrained(drain?.state) || drain?.count !== 0) {
       return jsonResponse(
         { error: "guest-tools promotion requires drained hosts with zero running desired VMs" },
         409,

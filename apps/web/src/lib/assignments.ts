@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { member, organization, scenarioAssignments } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
+import { assertCutoverNotWiped } from "@/lib/run-admission-gate";
 import { listEnabledScenariosForUser } from "@/lib/scenario-runs";
 import type { CourseLocation } from "@/lib/scenario-runs";
 import {
@@ -77,6 +78,8 @@ export async function assignScenarioToOrganization(params: {
     userId: params.actorUserId,
     admin: true,
   });
+
+  await assertCutoverNotWiped(env.DB);
 
   const titles = await scenarioTitleMap(params.organizationId);
   const scenarioTitle = titles.get(params.scenarioId);

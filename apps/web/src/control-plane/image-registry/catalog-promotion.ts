@@ -33,7 +33,7 @@ import {
   type RegistryWriterGuard,
 } from "@/lib/image-registry-admission";
 import { withImageBuildCoordinationLocks } from "@/lib/image-build-lock";
-import { IMAGE_CUTOVER_GATE, promotionHoldActive } from "@/lib/run-admission-gate";
+import { IMAGE_CUTOVER_GATE, isCutoverDrained, promotionHoldActive } from "@/lib/run-admission-gate";
 import {
   catalogRollbackRotates,
   catalogRollbackSnapshotStatement,
@@ -603,7 +603,7 @@ export async function handleCatalogRollback(
   )
     .bind(IMAGE_CUTOVER_GATE)
     .first<{ state: string }>();
-  if (gate?.state !== "drained") {
+  if (!isCutoverDrained(gate?.state)) {
     return jsonResponse({ error: "runtime cutover gate is not drained" }, 409);
   }
   if (await promotionHoldActive(env.DB)) {

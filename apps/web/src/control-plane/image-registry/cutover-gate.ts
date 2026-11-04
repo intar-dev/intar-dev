@@ -1,6 +1,12 @@
 import { drizzle } from "drizzle-orm/d1";
 import { runtimeOperationGates } from "@/db/schema";
-import { IMAGE_CUTOVER_GATE, promotionHoldActive } from "@/lib/run-admission-gate";
+import { sql } from "drizzle-orm";
+import {
+  IMAGE_CUTOVER_GATE,
+  IMAGE_CUTOVER_WIPED,
+  isCutoverDrained,
+  promotionHoldActive,
+} from "@/lib/run-admission-gate";
 import { hasRegistryPublishToken, isRecord, jsonResponse } from "./shared";
 
 export async function handleImageCutoverGate(
@@ -36,14 +42,18 @@ export async function handleImageCutoverGate(
       })
       .onConflictDoUpdate({
         target: runtimeOperationGates.key,
-        set: { state: value.state, updatedAt: Date.now() },
+        // A repeated drain keeps a wipe; only `open` ends it.
+        set: {
+          state: sql`CASE WHEN ${runtimeOperationGates.state} = ${IMAGE_CUTOVER_WIPED} AND excluded.state = 'drained' THEN ${IMAGE_CUTOVER_WIPED} ELSE excluded.state END`,
+          updatedAt: Date.now(),
+        },
       });
   }
   const gate = await env.DB.prepare(
     "SELECT state, updated_at FROM runtime_operation_gates WHERE key = ?",
   )
     .bind(IMAGE_CUTOVER_GATE)
-    .first<{ state: "open" | "drained"; updated_at: number }>();
+    .first<{ state: "open" | "drained" | "wiped"; updated_at: number }>();
   // `platform` is image-ops' contract: it promotes guest tools on platform
   // hosts only. The cutover unschedules every host, so its runbook waits on
   // `all_scopes`, which also counts organization, personal and unscoped hosts.
@@ -58,7 +68,9 @@ export async function handleImageCutoverGate(
   // so a runbook sees a promotion in progress before it acts.
   return jsonResponse({
     ok: true,
-    state: gate?.state ?? "open",
+    // `wiped` is drained to every reader of `state` (image-ops checks it).
+    state: isCutoverDrained(gate?.state) ? "drained" : "open",
+    wiped: gate?.state === IMAGE_CUTOVER_WIPED,
     active_desired_vms: active?.platform ?? 0,
     all_scopes_active_desired_vms: active?.all_scopes ?? 0,
     updated_at_unix_ms: gate?.updated_at ?? null,
