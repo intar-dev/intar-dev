@@ -17,6 +17,7 @@ const PLAIN_TABLES = [
   "scenario_assignments",
   "personal_image_preparations",
   "scenario_source_commits",
+  "learner_run_starts",
 ] as const;
 
 const WIPED_TABLES = ["scenario_runs", "runtime_executions", ...PLAIN_TABLES] as const;
