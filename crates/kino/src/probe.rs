@@ -651,20 +651,20 @@ impl CommandJsonPathProbe {
 /// probes may intentionally use a shell, so Linux additionally owns a fresh
 /// process group and kills the entire group on cancellation.
 #[cfg(target_os = "linux")]
-struct ProcessGroupKillGuard {
+pub(crate) struct ProcessGroupKillGuard {
     process_group: Option<Pid>,
 }
 
 #[cfg(target_os = "linux")]
 impl ProcessGroupKillGuard {
-    fn new(child_id: Option<u32>) -> Self {
+    pub(crate) fn new(child_id: Option<u32>) -> Self {
         let process_group = child_id
             .and_then(|id| i32::try_from(id).ok())
             .and_then(Pid::from_raw);
         Self { process_group }
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.process_group = None;
     }
 }

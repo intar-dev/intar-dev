@@ -1,6 +1,7 @@
 mod config;
 mod host_keys;
 mod http;
+mod init;
 mod lab_release;
 mod probe;
 mod proto;
@@ -27,7 +28,7 @@ use std::time::Instant;
 #[command(about = "Probe service and in-VM SSH recorder for ephemeral VM validation")]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Option<CliCommand>,
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 }
@@ -48,7 +49,9 @@ impl From<ShellStartupModeArg> for recording::ShellStartupMode {
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
+enum CliCommand {
+    /// The guest supervisor (first cut): ready scripts, then tasks or verify.
+    Init,
     RecordSsh {
         #[arg(long, value_name = "PATH")]
         config: PathBuf,
@@ -79,7 +82,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::RecordSsh {
+        Some(CliCommand::Init) => init::main().await,
+        Some(CliCommand::RecordSsh {
             config: config_path,
             command,
             shell_startup,
@@ -94,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
                 recording::record_ssh(recording_config, command.as_deref(), shell_startup.into())?;
             std::process::exit(exit_code);
         }
-        Some(Command::RecordCommand {
+        Some(CliCommand::RecordCommand {
             config: config_path,
             command,
         }) => {
