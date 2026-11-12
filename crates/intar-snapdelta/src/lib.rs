@@ -223,8 +223,9 @@ fn read_vec(file: &File, offset: usize, len: usize) -> Result<Vec<u8>, Error> {
 }
 
 /// Rebuilds the file `delta` was made from, from `base` and `delta`, as a
-/// sparse file at `out` (zero pages are not written). Returns the bytes
-/// written. The base's pages that the delta replaces are never read.
+/// new sparse file at `out` (zero pages are not written). Returns the bytes
+/// written. `out` must not exist, so it can never be one of the inputs; a
+/// failed apply leaves a partial `out` for the caller to remove. The base's pages that the delta replaces are never read.
 ///
 /// The caller checks the result against the digest it expects: a delta
 /// applied to another base of the same size gives a wrong file, not an
@@ -261,11 +262,20 @@ pub fn apply(base: &Path, delta: &Path, out: &Path, threads: usize) -> Result<u6
         .checked_add(map_len)
         .filter(|&end| end <= delta_len)
         .ok_or(Error::Invalid("delta shorter than its page map"))?;
+    // No frame is longer than zstd's bound for the data it decodes to, so a
+    // delta cannot make the host read more than the base's size allows.
+    let max_frame = zstd::zstd_safe::compress_bound(chunk_pages * PAGE);
+    if map_len > zstd::zstd_safe::compress_bound(pages) {
+        return Err(Error::Invalid("page map too long for the base's size"));
+    }
     let table = read_vec(&delta, HEADER, 4 * chunks)?;
     let mut frames = Vec::with_capacity(chunks);
     let mut offset = frames_start;
     for index in 0..chunks {
         let len = le32(&table, 4 * index);
+        if len > max_frame {
+            return Err(Error::Invalid("frame too long for its chunk"));
+        }
         frames.push((offset, len));
         offset = offset
             .checked_add(len)
@@ -282,7 +292,7 @@ pub fn apply(base: &Path, delta: &Path, out: &Path, threads: usize) -> Result<u6
         return Err(Error::Invalid("page map is not valid"));
     }
 
-    let out = File::create(out)?;
+    let out = File::options().write(true).create_new(true).open(out)?;
     out.set_len(size as u64)?;
     let chunk_bytes = chunk_pages * PAGE;
     let written = AtomicU64::new(0);
@@ -413,6 +423,7 @@ mod tests {
         for threads in [1, 8] {
             let written = apply(&path("base"), &path("delta"), &path("out"), threads)?;
             assert_eq!(fs::read(path("out"))?, fork);
+            fs::remove_file(path("out"))?;
             assert!(written < fork.len() as u64);
         }
 
@@ -420,6 +431,13 @@ mod tests {
         diff(&path("base"), &path("base"), &path("delta"), 3, 2)?;
         apply(&path("base"), &path("delta"), &path("out"), 2)?;
         assert_eq!(fs::read(path("out"))?, base);
+
+        // An existing output, an input among them, is never overwritten.
+        assert!(matches!(
+            apply(&path("base"), &path("delta"), &path("base"), 2),
+            Err(Error::Io(_))
+        ));
+        assert_eq!(fs::read(path("base"))?, base);
         Ok(())
     }
 
@@ -435,6 +453,7 @@ mod tests {
 
         let refused = |bytes: &[u8]| -> Result<bool, std::io::Error> {
             fs::write(path("bad"), bytes)?;
+            let _ = fs::remove_file(path("out"));
             Ok(matches!(
                 apply(&path("base"), &path("bad"), &path("out"), 2),
                 Err(Error::Invalid(_))
@@ -455,6 +474,11 @@ mod tests {
         assert!(refused(&with(28, &1_u32.to_le_bytes()))?, "chunk count");
         assert!(refused(&with(32, &u64::MAX.to_le_bytes()))?, "map length");
         assert!(refused(&with(HEADER, &u32::MAX.to_le_bytes()))?, "frame");
+        let long_map = (zstd::zstd_safe::compress_bound(150) as u64 + 1).to_le_bytes();
+        assert!(
+            refused(&[with(32, &long_map), vec![0; 4096]].concat())?,
+            "long map"
+        );
         assert!(refused(&with(delta.len() - 8, &[0xff; 8]))?, "frame data");
 
         fs::write(path("base"), &base[..PAGE])?;
