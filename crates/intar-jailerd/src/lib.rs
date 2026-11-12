@@ -16,11 +16,11 @@ use anyhow::{Context as _, Result, bail, ensure};
 #[cfg(target_os = "linux")]
 use intar_jailer_protocol::CpuStat;
 use intar_jailer_protocol::{
-    ArtifactAccess, ArtifactSource, CLOUD_HYPERVISOR_SHA256, CLOUD_HYPERVISOR_VERSION, CpuQuota,
-    CpuQuotaAttestation, DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest,
-    FinalizeVmBootResult, JailPathMap, JailSpecV1, JailerCapabilities, JailerdConfig,
-    LaunchVmV2Request, LaunchVmV3Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT,
-    PROTOCOL_VERSION, PrepareChunkedImageV3Request, PrepareImageV2Request, PreparedImageV2Result,
+    ArtifactAccess, ArtifactSource, CLOUD_HYPERVISOR_VERSION, CpuQuota, CpuQuotaAttestation,
+    DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest, FinalizeVmBootResult,
+    JailPathMap, JailSpecV1, JailerCapabilities, JailerdConfig, LaunchVmV2Request,
+    LaunchVmV3Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT, PROTOCOL_VERSION,
+    PrepareChunkedImageV3Request, PrepareImageV2Request, PreparedImageV2Result,
     PreparedImageV3Result, ProtocolError, Request, RequestClass, Response, RunNetworkResult,
     SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuRuntimeState,
     VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,

@@ -1,7 +1,7 @@
 [server]
 bind = "127.0.0.1:8080"
 
-# intar-agent is unprivileged. Cloud Hypervisor v53.0 and its checksum are
+# intar-agent is unprivileged. Cloud Hypervisor v55.0.0 and its checksum are
 # configured only in the root-owned /etc/intar-jailerd/config.toml.
 [jailer]
 socket = "/run/intar-jailerd/control.sock"

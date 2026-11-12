@@ -160,6 +160,8 @@ rm -f -- \
   /usr/lib/intar/intar-jailerd \
   /usr/lib/intar/intar-jailer \
   /usr/lib/intar/intar-jailerd-self-test \
+  /usr/lib/intar/cloud-hypervisor-v55.0.0 \
+  /usr/lib/intar/cloud-hypervisor-v55.0.0.sha256 \
   /usr/lib/intar/cloud-hypervisor-v53.0 \
   /usr/lib/intar/cloud-hypervisor-v53.0.sha256 \
   /usr/local/bin/intar-agent \
@@ -187,7 +189,7 @@ for path in \
   /usr/lib/intar/intar-jailerd \
   /usr/lib/intar/intar-jailer \
   /usr/lib/intar/intar-jailerd-self-test \
-  /usr/lib/intar/cloud-hypervisor-v53.0 \
+  /usr/lib/intar/cloud-hypervisor-v55.0.0 \
   /usr/local/bin/intar-agent; do
   if [ -e "${path}" ] || [ -L "${path}" ]; then
     die "installed path remains: ${path}"

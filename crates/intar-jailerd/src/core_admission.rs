@@ -443,7 +443,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         JailerCapabilities {
             protocol_version: PROTOCOL_VERSION,
             cloud_hypervisor_version: CLOUD_HYPERVISOR_VERSION.to_owned(),
-            cloud_hypervisor_sha256: CLOUD_HYPERVISOR_SHA256.to_owned(),
+            cloud_hypervisor_sha256: self.config.cloud_hypervisor_sha256.as_str().to_owned(),
             total_cpu_millis: self.total_cpu_millis,
             reserved_cpu_millis: self.config.cpu_reserved_millis,
             schedulable_cpu_millis,

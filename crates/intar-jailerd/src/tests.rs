@@ -2,6 +2,9 @@ use super::*;
 use intar_jailer_protocol::{ArtifactAccess, ArtifactSource, SourceArtifacts};
 use std::sync::Condvar;
 
+const TEST_RUNTIME_SHA256: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
 #[cfg(target_os = "linux")]
 mod staging;
 mod templates;
@@ -51,7 +54,7 @@ impl HostBackend for FakeBackend {
                 pid_start_time_ticks: Some(7),
                 netns_inode: Some(17),
                 jail_root_inode: None,
-                executable_sha256: Some(CLOUD_HYPERVISOR_SHA256.to_owned()),
+                executable_sha256: Some(TEST_RUNTIME_SHA256.to_owned()),
                 health: SandboxHealth::Healthy,
                 cpu_stat: None,
                 seccomp_enabled: true,
@@ -931,7 +934,7 @@ fn recovered_record(config: &JailerdConfig) -> VmRecord {
         host_boot_id: current_host_boot_id(),
         pid_start_time_ticks: None,
         jail_root_inode: None,
-        cloud_hypervisor_sha256: CLOUD_HYPERVISOR_SHA256.to_owned(),
+        cloud_hypervisor_sha256: TEST_RUNTIME_SHA256.to_owned(),
         request,
     }
 }
