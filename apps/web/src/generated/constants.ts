@@ -27,6 +27,10 @@ export const SHARE_INGEST_PONG = "pong";
 export const SHARE_INGEST_CLOSE_ENDED = 1000;
 export const SHARE_INGEST_CLOSE_LIMIT = 1009;
 export const SHARE_INGEST_CLOSE_STOPPED = 4001;
+export const WAKE_RAM_CHUNK_MEDIA_TYPE = "application/vnd.intar.wake.ram.chunk.v1+zstd";
+export const WAKE_DELTA_MEDIA_TYPE = "application/vnd.intar.wake.delta.v1";
+export const WAKE_STUB_MEDIA_TYPE = "application/vnd.intar.wake.stub.v1";
+export const WAKE_CPU_PROFILE_MEDIA_TYPE = "application/vnd.intar.wake.cpu-profile.v1+json";
 
 export const runtimeEnvKeys = {
   sshAuthorizedKeysB64: "INTAR_SSH_AUTHORIZED_KEYS_B64",
