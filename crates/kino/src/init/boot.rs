@@ -20,6 +20,8 @@ const RECORDING_DIR: &str = "/var/lib/kino-recordings";
 const RECORDING_USER: &str = "ubuntu";
 const RUN_CLI_BROKER: &str = "/run/intar/run-cli-broker";
 const RUN_CLI_PORT: u32 = 18082;
+/// T35: written by the old Kino right before it hands over after a wake.
+pub(crate) const WOKEN: &str = "/run/intar/woken";
 
 /// The run's network and access settings: the spike's stand-in for the
 /// `GuestBootV3` fields of §3 in #307.
@@ -134,7 +136,31 @@ async fn network(guest: &Guest) -> Result<(), String> {
             .await
         };
         match attempt.await {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                if Path::new(WOKEN).exists() {
+                    // T35: a woken guest still has the build's address; remove every other global one.
+                    let drop_others = format!(
+                        "for a in $(ip -4 -o addr show dev \"$1\" scope global | awk '{{print $4}}'); do [ \"$a\" = \"{}\" ] || ip addr del \"$a\" dev \"$1\"; done",
+                        guest.ip_cidr
+                    );
+                    let iface = interface().ok_or("no non-loopback interface")?;
+                    run("sh", &["-c", &drop_others, "sh", &iface]).await?;
+                    run(
+                        "ip",
+                        &[
+                            "route",
+                            "replace",
+                            "default",
+                            "via",
+                            &guest.gateway,
+                            "dev",
+                            &iface,
+                        ],
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
             Err(error) if tokio::time::Instant::now() >= deadline => {
                 return Err(format!("network: {error}"));
             }
@@ -143,12 +169,21 @@ async fn network(guest: &Guest) -> Result<(), String> {
     }
 }
 
-fn interface() -> Option<String> {
-    std::fs::read_dir("/sys/class/net")
+/// T20 (#331): the NIC is the entry with a `device` link and ARP type 1;
+/// `sit0` and `lo` have neither. Sorted, so the choice does not depend on
+/// kernfs hash order.
+pub(crate) fn interface() -> Option<String> {
+    let mut nics: Vec<String> = std::fs::read_dir("/sys/class/net")
         .ok()?
         .filter_map(Result::ok)
+        .filter(|entry| entry.path().join("device").exists())
+        .filter(|entry| {
+            std::fs::read_to_string(entry.path().join("type")).is_ok_and(|t| t.trim() == "1")
+        })
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .find(|name| name != "lo")
+        .collect();
+    nics.sort();
+    nics.into_iter().next()
 }
 
 async fn prepare_ssh(guest: &Guest) -> Result<(), String> {
@@ -178,6 +213,11 @@ async fn prepare_ssh(guest: &Guest) -> Result<(), String> {
     )
     .await?;
     run("chmod", &["0600", &keys_path]).await?;
+    if Path::new(WOKEN).exists() {
+        // T35: every run gets its own host key, also after a wake.
+        let _ = std::fs::remove_file("/etc/ssh/ssh_host_ed25519_key");
+        let _ = std::fs::remove_file("/etc/ssh/ssh_host_ed25519_key.pub");
+    }
     if !Path::new("/etc/ssh/ssh_host_ed25519_key").exists() {
         run(
             "ssh-keygen",
@@ -203,7 +243,17 @@ async fn start_sshd() -> Result<(), String> {
     write("/run/intar/ssh-ready", "")?;
     tokio::time::timeout(
         SSH_START_TIMEOUT,
-        run("systemctl", &["start", "ssh.service"]),
+        run(
+            "systemctl",
+            &[
+                if Path::new(WOKEN).exists() {
+                    "restart"
+                } else {
+                    "start"
+                },
+                "ssh.service",
+            ],
+        ),
     )
     .await
     .map_err(|_| "ssh.service did not start in time".to_owned())??;

@@ -30,7 +30,14 @@ pub(crate) struct PeerTasks {
 
 #[derive(Deserialize)]
 struct HostFrame {
-    peer_tasks: PeerTasks,
+    #[serde(default)]
+    peer_tasks: Option<PeerTasks>,
+    /// T19 spike: sent by the host right after a snapshot restore.
+    #[serde(default)]
+    resume: Option<super::Resume>,
+    /// T20 spike: hibernate to a swap device (image build stage).
+    #[serde(default)]
+    hibernate: Option<super::Hibernate>,
 }
 
 /// ponytail: one process-wide channel; a test or a second run would share it.
@@ -44,12 +51,23 @@ pub(crate) fn set_peers(peer_tasks: PeerTasks) {
 }
 
 /// Read JSON host frames off the report connection.
-pub(crate) async fn read_host_frames(read: impl tokio::io::AsyncRead + Unpin) {
+pub(crate) async fn read_host_frames(
+    read: impl tokio::io::AsyncRead + Unpin,
+    report: &watch::Sender<Report>,
+) {
     use tokio::io::AsyncBufReadExt as _;
     let mut lines = tokio::io::BufReader::new(read).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         if let Ok(frame) = serde_json::from_str::<HostFrame>(&line) {
-            set_peers(frame.peer_tasks);
+            if let Some(peer_tasks) = frame.peer_tasks {
+                set_peers(peer_tasks);
+            }
+            if let Some(resume) = frame.resume {
+                tokio::spawn(super::resume(resume, report.clone()));
+            }
+            if let Some(hibernate) = frame.hibernate {
+                tokio::spawn(super::hibernate(hibernate, report.clone()));
+            }
         }
     }
 }
