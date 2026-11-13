@@ -7,12 +7,14 @@ import { assertCutoverNotWiped, CUTOVER_WIPED_SQL } from "@/lib/run-admission-ga
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import {
+  normalizeCourseCatalogSnapshot,
   readBundleMeta,
   readGzipBundleArchive,
   readTarFile,
 } from "@/control-plane/image-registry/bundle";
 import {
   isRecord,
+  isSafeBundleRev,
   jsonResponse,
   sha256Hex,
 } from "@/control-plane/image-registry/shared";
@@ -29,10 +31,13 @@ import type { ScenarioSourceCommitState } from "@/db/schema/scenarios";
 import type { SourceCompileErrorV1 } from "@/generated/bridge";
 import type { SourceRefusalCode } from "@/generated/catalog";
 import {
+  MAX_SOURCE_BUNDLE_GZIP_BYTES,
   SOURCE_BUNDLE_FIELD,
   SOURCE_COMPILER_VERSION,
   SOURCE_META_FIELD,
 } from "@/generated/constants";
+import validateSourceBundleMeta from "@/generated/contracts/source-bundle-meta-v2.validate";
+import { readSourceBundle, sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { activeAccountExistsSql, activeAdminSql } from "@/lib/account-access";
 import type { UserContext } from "@/lib/agent-bridge";
 import { type AppError, appError, errorChainMatches } from "@/lib/app-error";
@@ -886,6 +891,7 @@ const SETTLED_STATES: readonly ScenarioSourceCommitState[] = [
   "promoting",
   "awaiting_promote",
   "live",
+  "validated",
 ];
 
 /**
@@ -956,51 +962,80 @@ export async function acceptScenarioSourceUpload(
   const metaField = form.get(SOURCE_META_FIELD);
   const rawMeta =
     typeof metaField === "string" ? metaField : await metaField?.text();
-  const digest = await platformCompileDigest(
-    workerEnv.PLATFORM_BASE_IMAGES_SHA256,
-  );
   const revPrefix = `git-${input.repositoryId}-${input.sha}-`;
-  const rev = digest === null ? null : `${revPrefix}${digest}`;
-  // An older CLI or builder is told to re-read the descriptor before any
-  // other meta check can call its output malformed.
   const lenient = parseRecord(rawMeta);
-  const compilerVersion = isRecord(lenient.source)
-    ? lenient.source.compiler_version
-    : undefined;
-  const formatVersion =
-    lenient.build_format_version ?? lenient.buildFormatVersion;
-  if (
-    (typeof lenient.rev === "string" &&
-      lenient.rev.startsWith(revPrefix) &&
-      lenient.rev !== rev) ||
-    (typeof compilerVersion === "string" &&
-      compilerVersion !== SOURCE_COMPILER_VERSION) ||
-    (typeof formatVersion === "string" &&
-      formatVersion !== IMAGE_BUILD_FORMAT_VERSION)
-  ) {
-    throw sourceRefusal(
-      409,
-      "compiler_outdated",
-      "Intar now compiles with another compiler. Re-read the compiler descriptor and publish again.",
-    );
-  }
-  const meta = await readBundleMeta(rawMeta ?? null);
-  if (!meta.ok) return meta.response;
-  if (rev === null || meta.value.rev !== rev) {
-    throw appError(400, "source_rev_invalid", "meta.rev does not name this commit");
-  }
-  const source = meta.value.bundleMeta.source;
-  if (
-    !isRecord(source) ||
-    typeof source.scope !== "string" ||
-    typeof source.courses_root !== "string" ||
-    typeof source.compiler_version !== "string"
-  ) {
-    throw appError(400, "source_meta_invalid", "meta.source is required");
-  }
+  // The v2 compiler's meta is `{rev}` alone; a v1 meta names its source.
+  const v2 = !Object.hasOwn(lenient, "source");
   const bundle = form.get(SOURCE_BUNDLE_FIELD);
-  if (!(bundle instanceof File) || bundle.size === 0) {
-    throw appError(400, "bundle_required", "bundle form field is required");
+  let digest: string;
+  let rev: string;
+  let meta: Awaited<ReturnType<typeof readBundleMeta>> | null = null;
+  if (v2) {
+    if (!validateSourceBundleMeta(lenient)) {
+      throw appError(400, "source_meta_invalid", "meta must be exactly {\"rev\": ...}");
+    }
+    if (!isSafeBundleRev(lenient.rev) || !lenient.rev.startsWith(revPrefix)) {
+      throw appError(400, "source_rev_invalid", "meta.rev does not name this commit");
+    }
+    digest = await sourceCompileDigest();
+    rev = `${revPrefix}${digest}`;
+    if (lenient.rev !== rev) {
+      throw sourceRefusal(
+        409,
+        "compiler_outdated",
+        "Intar now compiles with another compiler. Re-read the compiler descriptor and publish again.",
+      );
+    }
+    // A validate-only compile result carries no bundle.
+    if (purpose === "deploy" && !(bundle instanceof File)) {
+      throw appError(400, "bundle_required", "bundle form field is required");
+    }
+  } else {
+    const platformDigest = await platformCompileDigest(
+      workerEnv.PLATFORM_BASE_IMAGES_SHA256,
+    );
+    const v1Rev = platformDigest === null ? null : `${revPrefix}${platformDigest}`;
+    // An older CLI or builder is told to re-read the descriptor before any
+    // other meta check can call its output malformed.
+    const compilerVersion = isRecord(lenient.source)
+      ? lenient.source.compiler_version
+      : undefined;
+    const formatVersion =
+      lenient.build_format_version ?? lenient.buildFormatVersion;
+    if (
+      (typeof lenient.rev === "string" &&
+        lenient.rev.startsWith(revPrefix) &&
+        lenient.rev !== v1Rev) ||
+      (typeof compilerVersion === "string" &&
+        compilerVersion !== SOURCE_COMPILER_VERSION) ||
+      (typeof formatVersion === "string" &&
+        formatVersion !== IMAGE_BUILD_FORMAT_VERSION)
+    ) {
+      throw sourceRefusal(
+        409,
+        "compiler_outdated",
+        "Intar now compiles with another compiler. Re-read the compiler descriptor and publish again.",
+      );
+    }
+    meta = await readBundleMeta(rawMeta ?? null);
+    if (!meta.ok) return meta.response;
+    if (platformDigest === null || v1Rev === null || meta.value.rev !== v1Rev) {
+      throw appError(400, "source_rev_invalid", "meta.rev does not name this commit");
+    }
+    digest = platformDigest;
+    rev = v1Rev;
+    const source = meta.value.bundleMeta.source;
+    if (
+      !isRecord(source) ||
+      typeof source.scope !== "string" ||
+      typeof source.courses_root !== "string" ||
+      typeof source.compiler_version !== "string"
+    ) {
+      throw appError(400, "source_meta_invalid", "meta.source is required");
+    }
+    if (!(bundle instanceof File) || bundle.size === 0) {
+      throw appError(400, "bundle_required", "bundle form field is required");
+    }
   }
 
   const db = drizzle(workerEnv.DB);
@@ -1018,46 +1053,63 @@ export async function acceptScenarioSourceUpload(
     .limit(1);
   if (existing && SETTLED_STATES.includes(existing.state)) return receipt(rev);
 
-  const payload = await bundle.arrayBuffer();
-  // Empty and theory-only commits carry no base catalog.
-  if (meta.value.bundleMeta.scenarios.length) {
-    const archive = await readGzipBundleArchive(
-      payload,
-      MAX_SOURCE_BUNDLE_TAR_BYTES,
-    );
-    if (!archive.ok) return archive.response;
-    const baseImages = readTarFile(archive.bytes, "base-images.hcl");
-    if (!baseImages) {
-      throw appError(
-        400,
-        "bundle_invalid",
-        "bundle archive is missing base-images.hcl",
-      );
+  const files: Array<[name: string, body: ArrayBuffer | Uint8Array<ArrayBuffer> | string, type: string]> = [];
+  if (v2) {
+    if (bundle instanceof File) {
+      if (bundle.size > MAX_SOURCE_BUNDLE_GZIP_BYTES) {
+        throw appError(413, "payload_too_large", `The bundle is over ${MAX_SOURCE_BUNDLE_GZIP_BYTES} bytes gzipped.`);
+      }
+      const gzip = new Uint8Array(await bundle.arrayBuffer());
+      const read = await readSourceBundle(gzip);
+      if (!normalizeCourseCatalogSnapshot(read.course_catalog)) {
+        throw appError(400, "bundle_invalid", "The course catalog is invalid.");
+      }
+      if (purpose === "deploy") files.push(["bundle.json.gz", gzip, "application/gzip"]);
     }
-    if (
-      (await sha256Hex(baseImages.slice().buffer)) !==
-      workerEnv.PLATFORM_BASE_IMAGES_SHA256
-    ) {
-      throw sourceRefusal(
-        409,
-        "compiler_outdated",
-        "The bundle was compiled against another base-image catalog. Re-read the compiler descriptor and publish again.",
+  } else if (meta?.ok && bundle instanceof File) {
+    const payload = await bundle.arrayBuffer();
+    // Empty and theory-only commits carry no base catalog.
+    if (meta.value.bundleMeta.scenarios.length) {
+      const archive = await readGzipBundleArchive(
+        payload,
+        MAX_SOURCE_BUNDLE_TAR_BYTES,
       );
+      if (!archive.ok) return archive.response;
+      const baseImages = readTarFile(archive.bytes, "base-images.hcl");
+      if (!baseImages) {
+        throw appError(
+          400,
+          "bundle_invalid",
+          "bundle archive is missing base-images.hcl",
+        );
+      }
+      if (
+        (await sha256Hex(baseImages.slice().buffer)) !==
+        workerEnv.PLATFORM_BASE_IMAGES_SHA256
+      ) {
+        throw sourceRefusal(
+          409,
+          "compiler_outdated",
+          "The bundle was compiled against another base-image catalog. Re-read the compiler descriptor and publish again.",
+        );
+      }
     }
+    files.push(["bundle.tar.gz", payload, "application/gzip"], ["meta.json", rawMeta ?? "", "application/json"]);
   }
+  // A v2 validate-only result has nothing left to do once it is claimed.
+  const claimState = v2 && purpose === "validate" ? "validated" : "ingesting";
 
   // Before staging: nothing lands in the wiped tables or the bucket. The
   // claim's own predicate covers a wipe that starts after this read.
   await assertCutoverNotWiped(workerEnv.DB);
   const staged = stagedSourceObjectPrefix(scope.key, rev, purpose);
-  await Promise.all([
-    workerEnv.VM_IMAGE_REGISTRY_BUCKET.put(`${staged}bundle.tar.gz`, payload, {
-      httpMetadata: { contentType: "application/gzip" },
-    }),
-    workerEnv.VM_IMAGE_REGISTRY_BUCKET.put(`${staged}meta.json`, rawMeta ?? "", {
-      httpMetadata: { contentType: "application/json" },
-    }),
-  ]);
+  await Promise.all(
+    files.map(([name, body, contentType]) =>
+      workerEnv.VM_IMAGE_REGISTRY_BUCKET.put(`${staged}${name}`, body, {
+        httpMetadata: { contentType },
+      }),
+    ),
+  );
 
   const now = Date.now();
   const headIsRev = sql`EXISTS (SELECT 1 FROM scenario_sources
@@ -1078,10 +1130,10 @@ export async function acceptScenarioSourceUpload(
           sql`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha,
               rev, via, state, created_at, updated_at)
             SELECT ${createAppId()}, ${scope.key}, ${purpose}, ${input.sha},
-              ${rev}, 'push', 'ingesting', ${now}, ${now}
+              ${rev}, 'push', ${claimState}, ${now}, ${now}
             WHERE ${headIsRev} AND NOT ${sql.raw(CUTOVER_WIPED_SQL)}
             ON CONFLICT (scope_key, rev, purpose) DO UPDATE SET
-              state = 'ingesting', via = 'push', attempt = attempt + 1,
+              state = ${claimState}, via = 'push', attempt = attempt + 1,
               detail = NULL, diagnostics_json = NULL,
               updated_at = excluded.updated_at
             WHERE scenario_source_commits.state IN
@@ -1089,7 +1141,7 @@ export async function acceptScenarioSourceUpload(
         ]
       : [
           sql`UPDATE scenario_source_commits
-            SET state = 'ingesting', updated_at = ${now}
+            SET state = ${claimState}, updated_at = ${now}
             WHERE id = ${claim.commitId} AND attempt = ${claim.attempt}
               AND compile_host_id = ${claim.hostId} AND state = 'compiling'
               AND scope_key = ${scope.key} AND rev = ${rev}

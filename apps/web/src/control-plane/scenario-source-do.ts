@@ -7,6 +7,8 @@
 // to Intar's image promotion. The head commit's state shows as a GitHub check
 // run. Every head comparison runs in SQL against the stored head, so a push
 // claim that moves the head mid-alarm is never overwritten.
+// A head from the v2 compiler is ingested into scenario revisions and queued
+// machine builds; the alarm does not follow those builds.
 import { DurableObject } from "cloudflare:workers";
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, isNull, lt, not, sql } from "drizzle-orm";
@@ -42,6 +44,8 @@ import {
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { createAppId } from "@/lib/id";
 import { platformCompileDigest } from "@/lib/image-build-format";
+import { ingestSourceBundle, sourceBundleObjectKey } from "@/lib/scenario-bundles";
+import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
   admitInternalRegistryOperation,
   createRegistryWriterGuard,
@@ -98,7 +102,8 @@ const MAX_BUNDLE_BYTES = 2 * 1024 * 1024;
 const MAX_EXPANDED_BUNDLE_BYTES = 4 * 1024 * 1024;
 const MAX_SCENARIOS = 100;
 const MAX_DETAIL_CHARS = 4096;
-const STAGED_FILES = ["bundle.tar.gz", "meta.json", "source.tar.gz"];
+const SOURCE_BUNDLE_STAGED_FILE = "bundle.json.gz";
+const STAGED_FILES = ["bundle.tar.gz", "meta.json", "source.tar.gz", SOURCE_BUNDLE_STAGED_FILE];
 const REV_SCOPE_CONFLICT = "rev_scope_conflict: this commit is owned by another scope";
 /** A pull binding fetches or starts a compile at most once a minute. */
 const DELIVERY_FLOOR_MS = 60_000;
@@ -242,9 +247,19 @@ async function tickScenarioSource(
   // is unset or the fleet is drained, and it is the alarm's only promotion.
   const promoting = await finishPromotion(env, scopeKey, organizationId);
 
-  // Without a digest there is no head rev, so rows stay as they are rather
-  // than be compared against NULL.
-  const digest = await platformCompileDigest(env.PLATFORM_BASE_IMAGES_SHA256);
+  // A head uploaded by the v2 compiler is followed on its digest, any other
+  // on the platform digest of v1. Without a digest there is no head rev, so
+  // rows stay as they are rather than be compared against NULL.
+  const v2Digest = await sourceCompileDigest();
+  const headIsV2 = await env.DB.prepare(
+    `SELECT 1 FROM scenario_source_commits
+      WHERE scope_key = ?1 AND purpose = 'deploy' AND rev = ${headRev("?1", "?2")}`,
+  )
+    .bind(scopeKey, v2Digest)
+    .first();
+  const digest = headIsV2
+    ? v2Digest
+    : await platformCompileDigest(env.PLATFORM_BASE_IMAGES_SHA256);
   if (digest === null) return again || promoting === true;
   await supersede(env, scopeKey, digest);
 
@@ -627,6 +642,7 @@ async function ingest(step: Step): Promise<boolean> {
 }
 
 async function ingestRow(step: Step, rev: string): Promise<WriteOutcome> {
+  if (step.digest === (await sourceCompileDigest())) return ingestSourceBundleRow(step, rev);
   const [bundle] = await drizzle(step.env.DB)
     .select({
       organizationId: imageBuildBundles.organizationId,
@@ -773,6 +789,44 @@ async function writeBundle(
       outcome = "error";
     }
     throw error;
+  } finally {
+    await admitted.lease.complete(outcome);
+  }
+}
+
+// A v2 bundle: the staged gzip, or the stored one of a try that wrote the
+// object but did not finish. The writes run under an internal registry
+// writer, since spec blobs land in the registry's keyspace.
+async function ingestSourceBundleRow(step: Step, rev: string): Promise<WriteOutcome> {
+  const bucket = step.env.VM_IMAGE_REGISTRY_BUCKET;
+  const staged = await bucket.get(
+    `${stagedSourceObjectPrefix(step.scopeKey, rev, "deploy")}${SOURCE_BUNDLE_STAGED_FILE}`,
+  );
+  const owned = await step.env.DB.prepare("SELECT 1 FROM bundles WHERE rev = ?1 AND scope_key = ?2")
+    .bind(rev, step.scopeKey)
+    .first();
+  const object = staged ?? (owned ? await bucket.get(sourceBundleObjectKey(rev)) : null);
+  if (!object) return { state: "superseded", detail: "the staged bundle is gone" };
+  if (object.size > MAX_BUNDLE_BYTES) {
+    await object.body.cancel();
+    return invalid("the bundle is over 2 MiB compressed");
+  }
+  const gzip = new Uint8Array(await object.arrayBuffer());
+  const admitted = await admitInternalRegistryOperation(step.env, {
+    operation: "bundle_put",
+    owner: { kind: "system", id: `source:${step.scopeKey}` },
+  });
+  if (!admitted.ok) return "retry";
+  let outcome: "ok" | "error" | "unknown" = "unknown";
+  try {
+    const refused = await ingestSourceBundle(step.env, {
+      organizationId: step.organizationId,
+      rev,
+      gzip,
+      stored: staged === null,
+    });
+    outcome = refused === null ? "ok" : "error";
+    return refused === null ? "done" : invalid(refused);
   } finally {
     await admitted.lease.complete(outcome);
   }

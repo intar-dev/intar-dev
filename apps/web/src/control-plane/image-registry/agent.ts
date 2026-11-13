@@ -1,11 +1,13 @@
-import { and, eq, or, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import {
+  bundles,
   hostDesiredState,
   imageBuilds,
   imageBuildBundles,
+  machineBuilds,
   scenarioCatalogCandidates,
   scenarioSourceCommits,
   scenarioSources,
@@ -94,20 +96,7 @@ export async function handleAgentBundleDownload(
   }
 
   const db = drizzle(env.DB);
-  const activeAssignment = and(
-    currentAgentHost(verified.agent),
-    eq(imageBuilds.rev, rev),
-    eq(imageBuilds.hostId, verified.agent.hostId),
-    or(eq(imageBuilds.status, "assigned"), eq(imageBuilds.status, "building")),
-  );
-  const rows = await db
-    .select({ id: imageBuilds.id, r2Key: imageBuildBundles.r2Key })
-    .from(imageBuilds)
-    .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
-    .where(activeAssignment)
-    .limit(1);
-  const assignment = rows[0];
-  const objectKey = assignment?.r2Key;
+  const objectKey = await assignedBundleKey(db, verified.agent, rev);
   if (!objectKey) {
     return jsonResponse({ error: "bundle not found" }, 404);
   }
@@ -119,17 +108,7 @@ export async function handleAgentBundleDownload(
 
   // R2 can wait across a credential rotation or an assignment change. Check
   // the same assignment and object before exposing any source bytes.
-  const current = await db
-    .select({ id: imageBuilds.id })
-    .from(imageBuilds)
-    .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
-    .where(and(
-      activeAssignment,
-      eq(imageBuilds.id, assignment.id),
-      eq(imageBuildBundles.r2Key, objectKey),
-    ))
-    .limit(1);
-  if (!current.length) {
+  if ((await assignedBundleKey(db, verified.agent, rev)) !== objectKey) {
     await object.body.cancel();
     return jsonResponse({ error: "bundle not found" }, 404);
   }
@@ -144,6 +123,41 @@ export async function handleAgentBundleDownload(
       "x-build-bundle-rev": rev,
     },
   });
+}
+
+/**
+ * The object key of bundle `rev` while an image build or a machine build of
+ * it is assigned to or running on this builder, else null.
+ */
+async function assignedBundleKey(
+  db: DrizzleD1Database,
+  agent: VerifiedAgentHost,
+  rev: string,
+): Promise<string | null> {
+  const [v1] = await db
+    .select({ r2Key: imageBuildBundles.r2Key })
+    .from(imageBuilds)
+    .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
+    .where(and(
+      currentAgentHost(agent),
+      eq(imageBuilds.rev, rev),
+      eq(imageBuilds.hostId, agent.hostId),
+      or(eq(imageBuilds.status, "assigned"), eq(imageBuilds.status, "building")),
+    ))
+    .limit(1);
+  if (v1) return v1.r2Key;
+  const [v2] = await db
+    .select({ r2Key: bundles.r2Key })
+    .from(machineBuilds)
+    .innerJoin(bundles, eq(bundles.rev, machineBuilds.bundleRev))
+    .where(and(
+      currentAgentHost(agent),
+      eq(machineBuilds.bundleRev, rev),
+      eq(machineBuilds.hostId, agent.hostId),
+      inArray(machineBuilds.state, ["assigned", "building"]),
+    ))
+    .limit(1);
+  return v2?.r2Key ?? null;
 }
 
 const MAX_DIAGNOSTICS_CHARS = 64 * 1024;

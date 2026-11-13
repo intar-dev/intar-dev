@@ -41,6 +41,7 @@ import {
   MAX_SOURCE_UPLOAD_BYTES,
   scenarioSourceScope,
 } from "@/lib/scenario-sources";
+import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 
@@ -586,7 +587,7 @@ describe("compiler descriptor", () => {
     expect(response?.status).toBe(503);
   });
 
-  it("names the CLI release and the platform compile digest", async () => {
+  it("names the CLI release and the v2 source compile digest", async () => {
     const sha256 = { linux_amd64: "e".repeat(64) };
     const response = await handleImageRegistryRequest(request(), {
       ...testEnv,
@@ -597,7 +598,7 @@ describe("compiler descriptor", () => {
     await expect(response?.json()).resolves.toEqual({
       cli_version: "0.9.0",
       sha256,
-      digest: rev.split("-").at(-1),
+      digest: await sourceCompileDigest(),
     });
   });
 });

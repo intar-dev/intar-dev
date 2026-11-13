@@ -9,11 +9,9 @@ import {
   assignQueuedImageBuilds,
   queueImageBuildsFromBundle,
 } from "@/lib/build-scheduler";
-import {
-  IMAGE_BUILD_FORMAT_VERSION,
-  platformCompileDigest,
-} from "@/lib/image-build-format";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { AppError, appError, toErrorResponse } from "@/lib/app-error";
+import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { mintInstallationToken, readRepository } from "@/lib/github-app";
 import { verifyGithubActionsToken } from "@/lib/github-oidc";
 import { canonicalApplicationOrigin } from "@/lib/request-security";
@@ -237,8 +235,8 @@ export async function handleSourceBundleUpload(
 
 /**
  * The public compiler descriptor the reusable workflow reads: the CLI release,
- * its sha256 per target, and the platform compile digest. 503 until all three
- * are configured.
+ * its sha256 per target, and the v2 source compile digest. 503 until the
+ * release is configured.
  */
 export async function handleSourceCompilerDescriptor(
   request: Request,
@@ -247,7 +245,7 @@ export async function handleSourceCompilerDescriptor(
   if (request.method !== "GET") {
     return jsonResponse({ error: "method not allowed" }, 405);
   }
-  const digest = await platformCompileDigest(env.PLATFORM_BASE_IMAGES_SHA256);
+  const digest = await sourceCompileDigest();
   const version = env.SCENARIO_COMPILER_CLI_VERSION ?? "";
   let sha256: unknown = null;
   try {
