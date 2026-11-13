@@ -794,18 +794,20 @@ async function writeBundle(
   }
 }
 
-// A v2 bundle: the staged gzip, or the stored one of a try that wrote the
-// object but did not finish. The writes run under an internal registry
-// writer, since spec blobs land in the registry's keyspace.
+// A v2 bundle: the stored one once this scope owns the rev, so its rows keep
+// describing the first bytes and a staged re-upload is discarded; else the
+// staged gzip. The writes run under an internal registry writer, since spec
+// blobs land in the registry's keyspace.
 async function ingestSourceBundleRow(step: Step, rev: string): Promise<WriteOutcome> {
   const bucket = step.env.VM_IMAGE_REGISTRY_BUCKET;
-  const staged = await bucket.get(
-    `${stagedSourceObjectPrefix(step.scopeKey, rev, "deploy")}${SOURCE_BUNDLE_STAGED_FILE}`,
-  );
   const owned = await step.env.DB.prepare("SELECT 1 FROM bundles WHERE rev = ?1 AND scope_key = ?2")
     .bind(rev, step.scopeKey)
     .first();
-  const object = staged ?? (owned ? await bucket.get(sourceBundleObjectKey(rev)) : null);
+  const stored = owned ? await bucket.get(sourceBundleObjectKey(rev)) : null;
+  const staged = owned
+    ? null
+    : await bucket.get(`${stagedSourceObjectPrefix(step.scopeKey, rev, "deploy")}${SOURCE_BUNDLE_STAGED_FILE}`);
+  const object = stored ?? staged;
   if (!object) return { state: "superseded", detail: "the staged bundle is gone" };
   if (object.size > MAX_BUNDLE_BYTES) {
     await object.body.cancel();
@@ -823,7 +825,7 @@ async function ingestSourceBundleRow(step: Step, rev: string): Promise<WriteOutc
       organizationId: step.organizationId,
       rev,
       gzip,
-      stored: staged === null,
+      stored: stored !== null,
     });
     outcome = refused === null ? "ok" : "error";
     return refused === null ? "done" : invalid(refused);

@@ -261,10 +261,8 @@ describe("v2 bundle ingest", () => {
     });
     const revision = JSON.parse(STORED.revision.json) as { machines: { build_key: string }[] };
     expect(after.builds[0]!.build_key).toBe(revision.machines[0]!.build_key);
-    // Lecture links are namespaced from the binding.
-    const linked = JSON.stringify(after.catalogs);
-    expect(linked).toContain('\\"scenarioId\\":\\"intar/broken-nginx\\"');
-    expect(after.catalogs).toEqual([expect.objectContaining({ scope_key: "public", source_revision: rev() })]);
+    // Promotion applies the course catalog, not ingest.
+    expect(after.catalogs).toEqual([]);
 
     const specs = Object.values(STORED.specs).flatMap((modes) => Object.values(modes));
     expect(after.objects).toEqual(
@@ -287,6 +285,57 @@ describe("v2 bundle ingest", () => {
     await expect(again.json()).resolves.toEqual({ ok: true, rev: rev(), queued: 0, assigned: [] });
     await tick("public");
     expect(await written()).toEqual(before);
+  });
+
+  it("leaves the scope's course catalog as it was", async () => {
+    await env.DB.prepare(
+      `INSERT INTO course_catalogs (scope_key, organization_id, catalog_json, source_revision)
+        VALUES ('public', NULL, '{"version":2,"courses":[]}', 'earlier')`,
+    ).run();
+    const before = (await written()).catalogs;
+    expect((await push()).status).toBe(202);
+    await tick("public");
+    expect((await written()).catalogs).toEqual(before);
+  });
+
+  it("keeps the first bytes of a rev and the rows that describe them", async () => {
+    expect((await push()).status).toBe(202);
+    await tick("public");
+    const first = await written();
+    const other = JSON.parse(BUNDLE) as { scenarios: { title: string; tasks: { title: string }[] }[] };
+    other.scenarios[0]!.title = "Another title";
+    // A re-upload that staged other valid bytes for the same rev.
+    const staged = `${stagedSourceObjectPrefix("public", rev(), "deploy")}bundle.json.gz`;
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(staged, gz(other));
+    await env.DB.prepare("UPDATE scenario_source_commits SET state = 'ingesting'").run();
+    await tick("public");
+    // And a racing try that never saw the bundle row.
+    await expect(
+      ingestSourceBundle(env, { organizationId: null, rev: rev(), gzip: gz(other), stored: false }),
+    ).resolves.toBeNull();
+    const after = await written();
+    expect({ ...after, commits: [] }).toEqual({ ...first, commits: [] });
+    const stored = await env.VM_IMAGE_REGISTRY_BUCKET.get(sourceBundleObjectKey(rev()));
+    expect(new Uint8Array(await stored!.arrayBuffer())).toEqual(gz(BUNDLE));
+  });
+
+  it("writes revisions whose documents together exceed one D1 value", async () => {
+    const bundle = JSON.parse(BUNDLE) as { scenarios: Record<string, unknown>[] };
+    const [scenario] = bundle.scenarios;
+    for (let n = 0; n < 20; n += 1) {
+      bundle.scenarios.push({
+        ...scenario,
+        slug: `broken-nginx-${String(n).padStart(2, "0")}`,
+        briefing: `${String.fromCharCode(97 + n)}`.repeat(60_000),
+        solution: "s".repeat(60_000),
+      });
+    }
+    await expect(
+      ingestSourceBundle(env, { organizationId: null, rev: rev(), gzip: gz(bundle), stored: false }),
+    ).resolves.toBeNull();
+    const docs = await all("SELECT length(doc_json) AS size FROM scenario_revisions");
+    expect(docs).toHaveLength(21);
+    expect(docs.reduce((sum, row) => sum + Number(row.size), 0)).toBeGreaterThan(2_000_000);
   });
 
   it("completes a partial earlier attempt from the stored bundle", async () => {
@@ -364,10 +413,7 @@ describe("namespaces", () => {
     ]);
     // The public scope's rows are as they were.
     expect(after.scenarios.find((row) => row.id === "intar/broken-nginx")).toEqual(publicRows.scenarios[0]);
-    expect(after.catalogs.find((row) => row.scope_key === "public")).toEqual(publicRows.catalogs[0]);
-    expect(JSON.stringify(after.catalogs.find((row) => row.scope_key === REPOS[43].scope))).toContain(
-      "acme/broken-nginx",
-    );
+    expect(after.catalogs).toEqual(publicRows.catalogs);
   });
 
   it("never writes into a scenario or a rev of another scope", async () => {
