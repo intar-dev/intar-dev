@@ -42,6 +42,21 @@ pub(super) fn ready_gate(
     }
 }
 
+/// Keep a VM's failing lab, so an admin can read the guest's failure.
+async fn persist_failed_lab(inner: &Inner, vm_name: &str, update: &GuestUpdate) {
+    let states = inner.states.read().await;
+    let Some(vm) = states.get(vm_name) else {
+        return;
+    };
+    let persisted = match lab_row(update) {
+        Ok(lab) => inner.db.upsert_vm_and_lab(vm.to_db_row(), lab).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = persisted {
+        warn!(error = %error, vm = vm_name, "failed to persist a failed VM's lab");
+    }
+}
+
 #[tracing::instrument(name = "vm.wait_ready", skip_all, fields(vm = vm_name, run_id = ?details.run_id))]
 pub(super) async fn wait_for_scenario_runtime_ready(
     inner: &Arc<Inner>,
@@ -95,7 +110,10 @@ pub(super) async fn wait_for_scenario_runtime_ready(
                     match update {
                         Ok(update) => match ready_gate(&update, vm_name, &run_id, jail_generation) {
                             ReadyGate::OtherVm => {}
-                            ReadyGate::Failed(failed) => anyhow::bail!("{failed}"),
+                            ReadyGate::Failed(failed) => {
+                                persist_failed_lab(inner, vm_name, &update).await;
+                                anyhow::bail!("{failed}")
+                            }
                             ReadyGate::Ready => {
                                 ensure_scenario_runtime_process_live(vm_name, details).await?;
                                 return Ok(update);

@@ -41,6 +41,11 @@ pub(super) async fn run_probe_worker_task(inner: Arc<Inner>, target: ReportTarge
     }
 }
 
+/// The VM error of a guest that failed before SSH was up; the guest's own
+/// text is admin-only and stays in `lab.failure`.
+#[cfg(any(test, target_os = "linux"))]
+pub(super) const GUEST_FAILED_BEFORE_SSH: &str = "the guest failed before SSH was up";
+
 /// The identity a report listener is for.
 #[derive(Clone, Debug)]
 pub(super) struct ReportTarget {
@@ -83,9 +88,10 @@ pub(super) fn read_guest_frame(
             } else {
                 Vec::new()
             };
+            // The guest's failure text is admin-only: it stays in the lab.
             Ok(Some(update(
                 report.ssh_ready,
-                report.failed,
+                report.failed.map(|_| GUEST_FAILED_BEFORE_SSH.to_owned()),
                 keys,
                 report.lab,
             )))

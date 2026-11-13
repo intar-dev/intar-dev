@@ -59,7 +59,12 @@ pub fn boot_json(input: &BootJsonInput<'_>) -> Result<BootJson> {
         peers: input.peer_guest_ips.clone(),
         ssh: GuestSshV3 {
             enabled: input.ssh_enabled,
-            authorized_keys: validated_authorized_keys(input.ssh_authorized_keys_openssh)?,
+            // Without SSH there is nothing to authorize: keys sent anyway are dropped.
+            authorized_keys: if input.ssh_enabled {
+                validated_authorized_keys(input.ssh_authorized_keys_openssh)?
+            } else {
+                Vec::new()
+            },
         },
         root_resize: input.root_resize,
         mode: input.mode,
@@ -139,6 +144,27 @@ mod tests {
             "tasks": [],
         }))
         .unwrap_or_default()
+    }
+
+    #[test]
+    fn keys_are_required_only_with_ssh() -> Result<()> {
+        let (network, spec, peers) = (network(), spec(), BTreeMap::new());
+        let mut closed = input(&network, &peers, &[], &spec, false);
+        assert!(boot_json(&closed).is_err(), "a terminal VM needs a key");
+        let broken = ["not a key".to_owned()];
+        closed.ssh_authorized_keys_openssh = &broken;
+        assert!(
+            boot_json(&closed).is_err(),
+            "a terminal VM's keys are checked"
+        );
+
+        closed.ssh_enabled = false;
+        for keys in [&[][..], &broken[..]] {
+            closed.ssh_authorized_keys_openssh = keys;
+            let boot: GuestBootV3 = serde_json::from_slice(&boot_json(&closed)?.bytes)?;
+            assert!(!boot.ssh.enabled && boot.ssh.authorized_keys.is_empty());
+        }
+        Ok(())
     }
 
     fn input<'a>(

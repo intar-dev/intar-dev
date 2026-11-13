@@ -768,16 +768,7 @@ async fn reconcile_desired_vm(
         return Ok(());
     }
 
-    let authorized_keys = desired_vm
-        .ssh_authorized_keys
-        .iter()
-        .map(|key| key.trim())
-        .filter(|key| !key.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if authorized_keys.is_empty() {
-        anyhow::bail!("desired vm has no ssh_authorized_keys entry");
-    }
+    let authorized_keys = desired_authorized_keys(desired_vm)?;
     let lease_duration_seconds = desired_lease_duration_seconds(desired_vm, now)?;
     let peer_vm_aliases = desired_peer_vm_aliases(desired, desired_vm);
 
@@ -810,6 +801,26 @@ async fn reconcile_desired_vm(
     .await
     .map(|_| ())
     .map_err(|error| anyhow::anyhow!("{}", error.message))
+}
+
+/// The SSH keys of a desired VM: required with a terminal, dropped without
+/// one (such a VM has no SSH).
+fn desired_authorized_keys(desired_vm: &DesiredVmV3) -> Result<Vec<String>> {
+    if !desired_vm.terminal {
+        return Ok(Vec::new());
+    }
+    let keys = desired_vm
+        .ssh_authorized_keys
+        .iter()
+        .map(|key| key.trim())
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !keys.is_empty(),
+        "desired vm has no ssh_authorized_keys entry"
+    );
+    Ok(keys)
 }
 
 /// The peers a desired VM names, resolved to the running VMs of the same

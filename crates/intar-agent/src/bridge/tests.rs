@@ -713,6 +713,33 @@ fn a_failed_reconcile_reports_the_desired_digests() {
 }
 
 #[test]
+fn ssh_keys_are_required_only_for_a_terminal_vm() {
+    let mut vm = desired_vm();
+    assert_eq!(
+        desired_authorized_keys(&vm).expect("terminal with a key"),
+        vec!["ssh-ed25519 AAAATEST run".to_string()]
+    );
+    vm.ssh_authorized_keys = vec!["  ".to_string()];
+    assert!(
+        desired_authorized_keys(&vm).is_err(),
+        "terminal without a key"
+    );
+    vm.terminal = false;
+    assert!(
+        desired_authorized_keys(&vm)
+            .expect("no terminal")
+            .is_empty()
+    );
+    vm.ssh_authorized_keys = vec!["ssh-ed25519 AAAATEST run".to_string()];
+    assert!(
+        desired_authorized_keys(&vm)
+            .expect("keys ignored")
+            .is_empty(),
+        "keys of a VM without SSH are dropped"
+    );
+}
+
+#[test]
 fn expired_desired_lease_is_rejected() {
     let mut vm = desired_vm();
     vm.lease_expires_at_unix_ms = now_ms() - 1_000;

@@ -66,6 +66,27 @@ fn a_kino_of_another_contract_fails_the_vm() {
 }
 
 #[test]
+fn a_guest_failure_text_stays_out_of_the_vm_error() {
+    let hostile = "<script>steal()</script> /etc/shadow";
+    let mut body = GuestFrame::decode(frame(Phase::Failed, BOOT, GUEST_CONTRACT).as_slice())
+        .unwrap_or_else(|error| panic!("{error}"));
+    if let Some(guest_frame::Frame::Report(report)) = body.frame.as_mut() {
+        report.failure = hostile.to_owned();
+    }
+    let update = read(&body.encode_to_vec()).unwrap_or_else(|| panic!("current report"));
+    assert_eq!(update.failed.as_deref(), Some(GUEST_FAILED_BEFORE_SSH));
+    let ReadyGate::Failed(error) = ready_gate(&update, "web", "run-1", "generation-1") else {
+        panic!("a guest failure fails the VM");
+    };
+    assert!(!error.contains(hostile), "{error}");
+    assert_eq!(
+        update.lab.failure.as_deref(),
+        Some(hostile),
+        "admin-only copy"
+    );
+}
+
+#[test]
 fn a_malformed_frame_is_an_error() {
     assert!(read_guest_frame(&target(), b"\xff\xff not protobuf", None).is_err());
 }

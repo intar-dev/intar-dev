@@ -29,6 +29,10 @@ use super::registry::to_hex_lower;
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 /// Kino goes onto the 16 MiB run disk beside `boot.json`.
 const MAX_KINO_BYTES: u64 = 15 * 1024 * 1024;
+/// A kernel or an initrd larger than this is not a plausible machine layer.
+const MAX_BOOT_LAYER_BYTES: u64 = 256 * 1024 * 1024;
+/// Disk chunks are 4 MiB; one over this is not a chunk this agent reads.
+const MAX_DISK_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 /// A registry token lives 15 minutes; it is renewed this long before its end.
 const TOKEN_MARGIN: Duration = Duration::from_secs(60);
 /// Blobs of one image pulled at once; each still takes a global transfer slot.
@@ -211,8 +215,28 @@ impl OciRegistry {
         Ok(body)
     }
 
-    /// Verified bytes into the store under their digest.
-    async fn store_bytes(store: &BlobStore, digest: &OciDigest, bytes: &[u8]) -> Result<()> {
+    /// The one writer lock of a digest: the warmer and launches may want
+    /// the same blob or manifest at once.
+    async fn digest_lock(&self, digest: &OciDigest) -> Arc<Mutex<()>> {
+        Arc::clone(
+            self.blob_locks
+                .lock()
+                .await
+                .entry(digest.clone())
+                .or_default(),
+        )
+    }
+
+    /// Verified bytes into the store under their digest, unless they are
+    /// there already.
+    async fn store_bytes(&self, store: &BlobStore, digest: &OciDigest, bytes: &[u8]) -> Result<()> {
+        let lock = self.digest_lock(digest).await;
+        let _writer = lock.lock().await;
+        if let Some(path) = store.existing(digest, bytes.len() as u64).await
+            && super::registry::sha256_file(&path).await? == digest.hex()
+        {
+            return Ok(());
+        }
         tokio::fs::create_dir_all(store.directory())
             .await
             .context("create the blob store")?;
@@ -235,13 +259,7 @@ impl OciRegistry {
         store: &BlobStore,
     ) -> Result<PathBuf> {
         let (digest, size) = (&descriptor.digest, descriptor.size);
-        let lock = Arc::clone(
-            self.blob_locks
-                .lock()
-                .await
-                .entry(digest.clone())
-                .or_default(),
-        );
+        let lock = self.digest_lock(digest).await;
         let _writer = lock.lock().await;
         if let Some(path) = store.existing(digest, size).await {
             return Ok(path);
@@ -325,7 +343,7 @@ impl OciRegistry {
             image.as_str(),
             manifest.artifact_type
         );
-        Self::store_bytes(store, image, &bytes).await?;
+        self.store_bytes(store, image, &bytes).await?;
 
         ensure!(
             manifest.config.size <= MAX_MANIFEST_BYTES,
@@ -353,6 +371,22 @@ impl OciRegistry {
         ensure!(
             initrds.len() <= 1,
             "unsupported_artifact: a machine image has at most one initrd layer"
+        );
+
+        // Sizes are what the manifest declares: refuse implausible ones before
+        // a byte is fetched.
+        ensure!(
+            kernels
+                .iter()
+                .chain(&initrds)
+                .all(|layer| layer.size <= MAX_BOOT_LAYER_BYTES),
+            "unsupported_artifact: a kernel or initrd layer is over {MAX_BOOT_LAYER_BYTES} bytes"
+        );
+        ensure!(
+            of(DISK_CHUNK_MEDIA_TYPE)
+                .iter()
+                .all(|layer| layer.size <= MAX_DISK_CHUNK_BYTES),
+            "unsupported_artifact: a disk chunk layer is over {MAX_DISK_CHUNK_BYTES} bytes"
         );
 
         // Identical chunks share a layer, so each digest is pulled once.
@@ -389,8 +423,12 @@ impl OciRegistry {
             manifest.artifact_type == KINO_ARTIFACT_TYPE,
             "unsupported_artifact: not a Kino manifest"
         );
+        ensure!(
+            binary.size <= MAX_KINO_BYTES,
+            "the Kino binary is over the run disk's limit"
+        );
         // Kept so eviction and the scrub can tell which blob the pin names.
-        Self::store_bytes(store, kino, &bytes).await?;
+        self.store_bytes(store, kino, &bytes).await?;
         self.blob("kino", binary, store).await
     }
 

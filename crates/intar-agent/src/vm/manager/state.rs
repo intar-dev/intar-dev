@@ -333,6 +333,41 @@ pub(super) fn previous_schema_jail_selector(
     )))
 }
 
+/// The runs whose every old VM was torn down: their networks can go.
+pub(super) fn previous_schema_runs_to_release(
+    outcomes: &[(PendingTeardownRow, bool)],
+) -> Vec<String> {
+    let mut runs: BTreeMap<&str, bool> = BTreeMap::new();
+    for (row, torn_down) in outcomes {
+        if let Some(run_id) = row.run_id.as_deref() {
+            *runs.entry(run_id).or_insert(true) &= *torn_down;
+        }
+    }
+    runs.into_iter()
+        .filter(|(_, all_gone)| *all_gone)
+        .map(|(run_id, _)| run_id.to_owned())
+        .collect()
+}
+
+/// The queued rows that can be forgotten: torn down, and their run's
+/// network (if they had a run) destroyed.
+pub(super) fn previous_schema_teardowns_done(
+    outcomes: &[(PendingTeardownRow, bool)],
+    released_runs: &BTreeSet<String>,
+) -> Vec<String> {
+    outcomes
+        .iter()
+        .filter(|(row, torn_down)| {
+            *torn_down
+                && row
+                    .run_id
+                    .as_ref()
+                    .is_none_or(|run_id| released_runs.contains(run_id))
+        })
+        .map(|(row, _)| row.vm_name.clone())
+        .collect()
+}
+
 pub(super) fn matching_vm_names_for_run_id(
     states: &BTreeMap<String, VmStatusResponse>,
     run_id: &str,

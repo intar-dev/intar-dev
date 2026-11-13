@@ -463,3 +463,32 @@ fn an_old_vm_is_found_by_its_generation_else_by_run_and_name() {
             .is_none()
     );
 }
+
+#[test]
+fn an_old_run_stays_queued_until_its_network_is_gone() {
+    let row = |vm: &str, run_id: Option<&str>| crate::db::PendingTeardownRow {
+        vm_name: vm.to_string(),
+        run_id: run_id.map(str::to_string),
+        jail_generation: None,
+    };
+    let outcomes = vec![
+        (row("a1", Some("run-a")), true),
+        (row("a2", Some("run-a")), true),
+        (row("b1", Some("run-b")), true),
+        (row("b2", Some("run-b")), false),
+        (row("loose", None), true),
+    ];
+    assert_eq!(
+        previous_schema_runs_to_release(&outcomes),
+        vec!["run-a".to_string()]
+    );
+    // run-a's network destroy failed: its rows stay queued for the next start.
+    assert_eq!(
+        previous_schema_teardowns_done(&outcomes, &BTreeSet::new()),
+        vec!["loose".to_string()]
+    );
+    assert_eq!(
+        previous_schema_teardowns_done(&outcomes, &BTreeSet::from(["run-a".to_string()])),
+        vec!["a1".to_string(), "a2".to_string(), "loose".to_string()]
+    );
+}

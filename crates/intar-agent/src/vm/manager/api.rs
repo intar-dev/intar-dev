@@ -262,8 +262,7 @@ impl VmManager {
                 return;
             }
         };
-        // A run's network goes only once every VM of that run is gone.
-        let mut run_networks: BTreeMap<String, bool> = BTreeMap::new();
+        let mut outcomes = Vec::with_capacity(rows.len());
         for row in rows {
             let destroyed = match previous_schema_jail_selector(&row) {
                 Ok(Some(selector)) => cleanup_jailed_vm_by_selector(&self.inner, selector).await,
@@ -277,41 +276,39 @@ impl VmManager {
                 }
                 Err(error) => Err(error),
             };
-            let torn_down = destroyed.is_ok();
-            if let Some(run_id) = row.run_id.clone() {
-                *run_networks.entry(run_id).or_insert(true) &= torn_down;
-            }
-            if let Err(error) = destroyed {
+            if let Err(error) = &destroyed {
                 warn!(error = %error, vm = row.vm_name, "failed to destroy a VM of an older state schema");
-                continue;
-            }
-            let mut removed = Vec::new();
-            for path in previous_schema_vm_dirs(&work_dir, &row) {
-                match tokio::fs::remove_dir_all(&path).await {
-                    Ok(()) => removed.push(path.display().to_string()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        warn!(error = %error, path = %path.display(), "failed to remove a VM directory")
+            } else {
+                let mut removed = Vec::new();
+                for path in previous_schema_vm_dirs(&work_dir, &row) {
+                    match tokio::fs::remove_dir_all(&path).await {
+                        Ok(()) => removed.push(path.display().to_string()),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            warn!(error = %error, path = %path.display(), "failed to remove a VM directory")
+                        }
                     }
                 }
+                info!(vm = row.vm_name, run_id = ?row.run_id, ?removed, "tore down a VM of an older state schema");
             }
-            if let Err(error) = self
-                .inner
-                .db
-                .delete_pending_teardown(row.vm_name.clone())
-                .await
-            {
-                warn!(error = %error, vm = row.vm_name, "failed to forget a torn-down VM");
-                continue;
-            }
-            info!(vm = row.vm_name, run_id = ?row.run_id, ?removed, "tore down a VM of an older state schema");
+            outcomes.push((row, destroyed.is_ok()));
         }
-        for run_id in run_networks
-            .into_iter()
-            .filter_map(|(run_id, all_gone)| all_gone.then_some(run_id))
-        {
-            if let Err(error) = destroy_previous_schema_run_network(&self.inner, &run_id).await {
-                warn!(error = %error, run_id, "failed to destroy the run network of an older state schema");
+        let mut released = BTreeSet::new();
+        for run_id in previous_schema_runs_to_release(&outcomes) {
+            match destroy_previous_schema_run_network(&self.inner, &run_id).await {
+                Ok(()) => {
+                    released.insert(run_id);
+                }
+                Err(error) => {
+                    warn!(error = %error, run_id, "failed to destroy the run network of an older state schema")
+                }
+            }
+        }
+        // A run's rows stay queued until its network is gone too, so a
+        // failed network destroy is retried on the next start.
+        for vm_name in previous_schema_teardowns_done(&outcomes, &released) {
+            if let Err(error) = self.inner.db.delete_pending_teardown(vm_name.clone()).await {
+                warn!(error = %error, vm = vm_name, "failed to forget a torn-down VM");
             }
         }
     }
@@ -374,14 +371,16 @@ impl VmManager {
         req: CreateScenarioVmRequest,
     ) -> Result<CreateVmResponse, ApiError> {
         let api_started_at = Instant::now();
+        // A VM without a terminal has no SSH: its keys are dropped.
         let ssh_authorized_keys_openssh = req
             .runtime
             .ssh_authorized_keys_openssh
             .into_iter()
+            .filter(|_| req.terminal)
             .map(|key| key.trim().to_string())
             .filter(|key| !key.is_empty())
             .collect::<Vec<_>>();
-        if ssh_authorized_keys_openssh.is_empty() {
+        if req.terminal && ssh_authorized_keys_openssh.is_empty() {
             return Err(ApiError::bad_request(
                 "runtime.ssh_authorized_keys_openssh must not be empty",
             ));

@@ -316,3 +316,63 @@ async fn other_artifacts_are_named_not_dropped() -> Result<()> {
     assert_eq!(client.spec(&spec).await?, b"{\"spec\":true}");
     Ok(())
 }
+
+fn kino_manifest(registry: &Registry, binary: OciDescriptorV1) -> OciDigest {
+    let kino = OciManifestV1 {
+        schema_version: 2,
+        media_type: OCI_MANIFEST_MEDIA_TYPE.to_owned(),
+        artifact_type: KINO_ARTIFACT_TYPE.to_owned(),
+        config: registry.descriptor("application/vnd.intar.kino.config.v1+json", b"{}"),
+        layers: vec![binary],
+    };
+    registry.put(&serde_json::to_vec(&kino).expect("manifest"))
+}
+
+#[tokio::test]
+async fn concurrent_kino_pulls_of_one_digest_all_succeed() -> Result<()> {
+    let (registry, client, _temp, store) = serve().await;
+    let binary = registry.descriptor("application/octet-stream", &vec![9; 200_000]);
+    let kino = kino_manifest(&registry, binary.clone());
+
+    let paths =
+        futures_util::future::try_join_all((0..8).map(|_| client.pull_kino(&kino, &store))).await?;
+
+    for path in paths {
+        assert_eq!(
+            sha256_hex(&tokio::fs::read(path).await?),
+            binary.digest.hex()
+        );
+    }
+    assert_eq!(
+        sha256_hex(&tokio::fs::read(store.path(&kino)).await?),
+        kino.hex()
+    );
+    assert_eq!(
+        registry.requests_for(&binary.digest).len(),
+        1,
+        "fetched once"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_oversized_kino_is_refused_before_its_download() -> Result<()> {
+    let (registry, client, _temp, store) = serve().await;
+    let mut binary = registry.descriptor("application/octet-stream", b"small");
+    binary.size = MAX_KINO_BYTES + 1;
+    let kino = kino_manifest(&registry, binary.clone());
+
+    let error = client
+        .pull_kino(&kino, &store)
+        .await
+        .expect_err("over the cap");
+    assert!(
+        error.to_string().contains("over the run disk's limit"),
+        "{error}"
+    );
+    assert!(
+        registry.requests_for(&binary.digest).is_empty(),
+        "never fetched"
+    );
+    Ok(())
+}
