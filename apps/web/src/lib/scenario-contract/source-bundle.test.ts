@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import compileDigest from "@/generated/fixtures/source/compile-digest-v2.json";
-import { readSourceBundle, sourceCompileDigest } from "./source-bundle";
+import { MAX_SOURCE_BUNDLE_JSON_BYTES, readSourceBundle, sourceCompileDigest } from "./source-bundle";
 
 const fixture = (name: string) =>
   readFileSync(new URL(`../../generated/fixtures/scenario/${name}`, import.meta.url), "utf8");
@@ -36,6 +36,32 @@ describe("readSourceBundle", () => {
     const bomb = gz(`${" ".repeat(33 * 1024 * 1024)}{}`);
     expect(bomb.byteLength).toBeLessThan(2 * 1024 * 1024);
     await expect(readSourceBundle(bomb)).rejects.toMatchObject({ status: 413 });
+  });
+
+  it("caps the inflated size at 16 MiB", async () => {
+    expect(MAX_SOURCE_BUNDLE_JSON_BYTES).toBe(16 * 1024 * 1024);
+    const padded = (spaces: number) => gz(`${" ".repeat(spaces)}${fixture("broken-nginx-bundle.json")}`);
+    const size = new TextEncoder().encode(fixture("broken-nginx-bundle.json")).byteLength;
+    await expect(readSourceBundle(padded(MAX_SOURCE_BUNDLE_JSON_BYTES - size))).resolves.toBeTruthy();
+    await expect(readSourceBundle(padded(MAX_SOURCE_BUNDLE_JSON_BYTES - size + 1))).rejects.toMatchObject({
+      status: 413,
+    });
+  });
+
+  it("refuses a scenario whose stored document would be over D1's value limit", async () => {
+    const value = bundle() as { scenarios: { slug: string; tasks: Record<string, unknown>[] }[] };
+    const [task] = value.scenarios[0]!.tasks;
+    value.scenarios[0]!.tasks = Array.from({ length: 32 }, (_, n) => ({
+      ...task,
+      id: `task-${String(n).padStart(2, "0")}`,
+      needs: [],
+      body: "x".repeat(63_000),
+    }));
+    await expect(readSourceBundle(gz(value))).rejects.toMatchObject({
+      status: 400,
+      code: "bundle_invalid",
+      message: "scenario `broken-nginx`: its stored document is over 2000000 bytes",
+    });
   });
 
   it.each([

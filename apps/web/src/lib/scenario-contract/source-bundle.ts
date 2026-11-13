@@ -10,13 +10,17 @@ import {
 import type { SourceBundleV2 } from "@/generated/contracts/source-bundle-v2";
 import validateSourceBundle from "@/generated/contracts/source-bundle-v2.validate";
 import { appError } from "@/lib/app-error";
+import { canonicalJson, utf8Length } from "./canonical-json";
+import { scenarioRevision } from "./machine-spec";
 import { validateBundle } from "./validate";
 
 /**
  * The most a bundle may inflate to. Below the builder's 64 MiB: the Worker
  * holds the text and its parse in memory at once.
  */
-export const MAX_SOURCE_BUNDLE_JSON_BYTES = 32 * 1024 * 1024;
+export const MAX_SOURCE_BUNDLE_JSON_BYTES = 16 * 1024 * 1024;
+/** D1's limit on one bound value; a revision document is bound whole. */
+export const MAX_REVISION_DOC_BYTES = 2_000_000;
 /** Each scenario costs one revision, its spec blobs and its builds. */
 export const MAX_SOURCE_BUNDLE_SCENARIOS = 100;
 
@@ -34,9 +38,12 @@ export async function sourceCompileDigest(): Promise<string> {
 
 const invalid = (message: string) => appError(400, "bundle_invalid", message);
 
-async function gunzip(gzip: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+// Inflates and decodes chunk by chunk, so only the text is kept, and stops
+// at the cap rather than inflate a bomb.
+async function inflateText(gzip: Uint8Array<ArrayBuffer>): Promise<string> {
   const reader = new Blob([gzip]).stream().pipeThrough(new DecompressionStream("gzip")).getReader();
-  const chunks: Uint8Array[] = [];
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let text = "";
   let length = 0;
   try {
     for (;;) {
@@ -47,19 +54,13 @@ async function gunzip(gzip: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBu
         await reader.cancel();
         throw appError(413, "payload_too_large", `The bundle inflates beyond ${MAX_SOURCE_BUNDLE_JSON_BYTES} bytes.`);
       }
-      chunks.push(value);
+      text += decoder.decode(value, { stream: true });
     }
+    return text + decoder.decode();
   } catch (error) {
     if (error instanceof Error && error.name === "AppError") throw error;
-    throw invalid("The bundle is not gzip.");
+    throw invalid("The bundle is not gzipped UTF-8.");
   }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
 }
 
 /**
@@ -70,11 +71,11 @@ export async function readSourceBundle(gzip: Uint8Array<ArrayBuffer>): Promise<S
   if (gzip.byteLength > MAX_SOURCE_BUNDLE_GZIP_BYTES) {
     throw appError(413, "payload_too_large", `The bundle is over ${MAX_SOURCE_BUNDLE_GZIP_BYTES} bytes gzipped.`);
   }
+  const text = await inflateText(gzip);
   let value: unknown;
   try {
-    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await gunzip(gzip)));
-  } catch (error) {
-    if (error instanceof Error && error.name === "AppError") throw error;
+    value = JSON.parse(text);
+  } catch {
     throw invalid("The bundle is not JSON.");
   }
   // Before the schema: a newer compiler's bundle may have another shape.
@@ -95,5 +96,14 @@ export async function readSourceBundle(gzip: Uint8Array<ArrayBuffer>): Promise<S
   }
   const problems = validateBundle(value);
   if (problems.length) throw invalid(problems.join("\n"));
+  // The stored document's size does not depend on the build keys' values.
+  const placeholder = `sha256:${"0".repeat(64)}`;
+  for (const scenario of value.scenarios) {
+    const keys = { images: {}, machines: Object.fromEntries(scenario.machines.map((machine) => [machine.name, placeholder])) };
+    const doc = canonicalJson(await scenarioRevision(scenario, `${scenario.slug}/${scenario.slug}`, keys));
+    if (utf8Length(doc) > MAX_REVISION_DOC_BYTES) {
+      throw invalid(`scenario \`${scenario.slug}\`: its stored document is over ${MAX_REVISION_DOC_BYTES} bytes`);
+    }
+  }
   return value;
 }
