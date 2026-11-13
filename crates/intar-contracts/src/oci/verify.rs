@@ -15,6 +15,9 @@ const GIB: u64 = 1024 * 1024 * 1024;
 /// Bounds on a suspended guest, far above any lab VM.
 const MAX_WAKE_MEMORY_BYTES: u64 = 64 * GIB;
 const MAX_WAKE_VCPUS: u32 = 64;
+/// x86-64 guest physical address widths cloud-hypervisor accepts.
+const MIN_WAKE_PHYS_BITS: u8 = 32;
+const MAX_WAKE_PHYS_BITS: u8 = 52;
 const MAX_WAKE_DELTA_BYTES: u64 = 4 * GIB;
 const MAX_WAKE_STUB_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_WAKE_CPU_PROFILE_BYTES: u64 = 1024 * 1024;
@@ -226,6 +229,10 @@ pub fn verified_wake(manifest: &OciManifestV1, wake: &WakeV1) -> Result<Verified
             && shape.max_vcpus <= MAX_WAKE_VCPUS,
         "wake vCPU shape is not sound",
     )?;
+    ensure(
+        (MIN_WAKE_PHYS_BITS..=MAX_WAKE_PHYS_BITS).contains(&shape.max_phys_bits),
+        "wake physical address width is not sound",
+    )?;
     let ram_chunks = verified_chunks(
         manifest,
         &ram.chunks,
@@ -421,7 +428,7 @@ mod tests {
         machine["wake"] = serde_json::json!({
             "ram": {"size_bytes": 9 * MIB, "chunk_size": 4 * MIB,
                     "chunks": [[0, 3, hex("d")], [2, 3, hex("e")]], "sha256": hex("f")},
-            "shape": {"memory_bytes": 9 * MIB, "boot_vcpus": 1, "max_vcpus": 2, "balloon": true},
+            "shape": {"memory_bytes": 9 * MIB, "boot_vcpus": 1, "max_vcpus": 2, "balloon": true, "max_phys_bits": 36},
             "cpu_profile": format!("sha256:{}", hex("6")),
             "vmm": {"min_version": "v50.0", "built_with": "v50.0"},
             "booted_at_unix_ms": 1,
@@ -498,7 +505,7 @@ mod tests {
     #[test]
     fn every_break_in_a_wake_is_refused() {
         type Break = fn(&mut serde_json::Value, &mut serde_json::Value);
-        let broken: [(bool, &str, Break); 18] = [
+        let broken: [(bool, &str, Break); 20] = [
             (false, "exactly one stub", |m, _| {
                 m["layers"][4]["mediaType"] = "application/vnd.intar.kernel.v2".into()
             }),
@@ -532,6 +539,12 @@ mod tests {
             }),
             (false, "vCPU shape", |_, c| {
                 c["wake"]["shape"]["max_vcpus"] = 65.into()
+            }),
+            (false, "physical address width", |_, c| {
+                c["wake"]["shape"]["max_phys_bits"] = 31.into()
+            }),
+            (false, "physical address width", |_, c| {
+                c["wake"]["shape"]["max_phys_bits"] = 53.into()
             }),
             (false, "wake RAM chunk 0 is out of order", |_, c| {
                 c["wake"]["ram"]["chunks"][1][0] = 0.into()

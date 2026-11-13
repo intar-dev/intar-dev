@@ -234,6 +234,8 @@ pub struct WakeShapeV1 {
     pub boot_vcpus: u32,
     pub max_vcpus: u32,
     pub balloon: bool,
+    /// The guest's physical address width, the same at build and wake.
+    pub max_phys_bits: u8,
 }
 
 /// cloud-hypervisor versions as the VMM reports them (`v55.0.0`), compared
@@ -258,7 +260,7 @@ mod tests {
         serde_json::json!({
             "ram": {"size_bytes": 4_294_967_296_u64, "chunk_size": 4_194_304, "chunks": [[0, 7, hex("b")]], "sha256": hex("c")},
             "pack": {"base": format!("sha256:{}", hex("a")), "ram_sha256": hex("e")},
-            "shape": {"memory_bytes": 4_294_967_296_u64, "boot_vcpus": 2, "max_vcpus": 4, "balloon": true},
+            "shape": {"memory_bytes": 4_294_967_296_u64, "boot_vcpus": 2, "max_vcpus": 4, "balloon": true, "max_phys_bits": 36},
             "cpu_profile": format!("sha256:{}", hex("d")),
             "vmm": {"min_version": "v55.0.0", "built_with": "v55.0.0"},
             "booted_at_unix_ms": 1,

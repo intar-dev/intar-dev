@@ -681,7 +681,7 @@ mod tests {
                     "ram": {"size_bytes": base.len(), "chunk_size": 4 << 20,
                             "chunks": [[0, 1, sha(&base)]], "sha256": sha(&base)},
                     "pack": {"base": format!("sha256:{}", "9".repeat(64)), "ram_sha256": sha(&fork)},
-                    "shape": {"memory_bytes": base.len(), "boot_vcpus": 1, "max_vcpus": 2, "balloon": true},
+                    "shape": {"memory_bytes": base.len(), "boot_vcpus": 1, "max_vcpus": 2, "balloon": true, "max_phys_bits": 36},
                     "cpu_profile": format!("sha256:{}", sha(profile)),
                     "vmm": {"min_version": "v50.0", "built_with": "v50.0"},
                     "booted_at_unix_ms": 1,

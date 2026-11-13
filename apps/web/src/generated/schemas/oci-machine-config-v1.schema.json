@@ -189,6 +189,13 @@
           "format": "uint32",
           "minimum": 0
         },
+        "max_phys_bits": {
+          "description": "The guest's physical address width, the same at build and wake.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
         "max_vcpus": {
           "type": "integer",
           "format": "uint32",
@@ -205,7 +212,8 @@
         "memory_bytes",
         "boot_vcpus",
         "max_vcpus",
-        "balloon"
+        "balloon",
+        "max_phys_bits"
       ]
     },
     "WakeV1": {

@@ -534,6 +534,107 @@
           "node-deferred": "sha256:5065cfd9002c17b00c813ed3e850869e2acf5e0901018727243391c3ec5a5c27"
         }
       }
+    },
+    {
+      "name": "wake-image",
+      "scenario": "klustered-01",
+      "images": [
+        {
+          "name": "k3s",
+          "from": "trixie",
+          "disk_mib": 8192,
+          "defer": [
+            "k3s.service"
+          ],
+          "setup": [
+            {
+              "name": "install-k3s",
+              "script": "curl -sfL https://get.k3s.io | sh -\n"
+            }
+          ],
+          "wake": true
+        }
+      ],
+      "machines": [
+        {
+          "name": "control-plane",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 8192,
+          "from": "k3s",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "KUBECONFIG": "/etc/rancher/k3s/k3s.yaml"
+          },
+          "setup": [
+            {
+              "name": "seed-v1",
+              "script": "printf '%s' 'kind: List' | kubectl apply -f -\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {
+          "k3s": "sha256:9f4fa8ec11d62516831fe78d16dce1c882a32391d7f865b1b79eb3f38a377e29"
+        },
+        "machines": {
+          "control-plane": "sha256:f70f7f41f4931419c0438bb4a106b620ef703fca33ddad003f5fb6547a7f3b9c"
+        }
+      }
+    },
+    {
+      "name": "wake-image-off",
+      "scenario": "klustered-01",
+      "images": [
+        {
+          "name": "k3s",
+          "from": "trixie",
+          "disk_mib": 8192,
+          "defer": [
+            "k3s.service"
+          ],
+          "setup": [
+            {
+              "name": "install-k3s",
+              "script": "curl -sfL https://get.k3s.io | sh -\n"
+            }
+          ]
+        }
+      ],
+      "machines": [
+        {
+          "name": "control-plane",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 8192,
+          "from": "k3s",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "KUBECONFIG": "/etc/rancher/k3s/k3s.yaml"
+          },
+          "setup": [
+            {
+              "name": "seed-v1",
+              "script": "printf '%s' 'kind: List' | kubectl apply -f -\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {
+          "k3s": "sha256:03000b88abfe4a9a9025da57f66bebcb3eea0e177e570828352fd5c76886e3a5"
+        },
+        "machines": {
+          "control-plane": "sha256:e1093fbbcba14a42962578908ec113874c58630cbaa4cf8baf62ebdaa2387e13"
+        }
+      }
     }
   ],
   "equal": [
@@ -578,6 +679,10 @@
     [
       "image-chain/control-plane",
       "zero-setup-on-image/node"
+    ],
+    [
+      "wake-image/control-plane",
+      "wake-image-off/control-plane"
     ]
   ]
 }

@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! record = str(IMAGE_FORMAT) str(kind) str(parent)
-//!          list(defer) list(env) list(stages) str(disk)
+//!          list(defer) list(env) list(stages) str(disk) [str("wake")]
 //! str(s)   = u32be(byte length of s as UTF-8) ‖ the UTF-8 bytes of s
 //! list(xs) = u32be(number of items) ‖ each item
 //! defer item = str(unit)                  units sorted by byte order, duplicates dropped
@@ -23,6 +23,8 @@
 //! - `parent` is the parent's key as text (`sha256:…`); the base, which has
 //!   no parent, puts its name `trixie` there.
 //! - `disk` is the geometry in MiB as decimal ASCII, or empty.
+//! - `str("wake")` ends the record of an image with `wake = true` only, so
+//!   every other key is the same as before wake images existed.
 //!
 //! Which inputs a record holds:
 //!
@@ -60,6 +62,7 @@ struct Record<'a> {
     env: Option<&'a BTreeMap<String, String>>,
     stages: &'a [ScriptV1],
     disk: Option<u32>,
+    wake: bool,
 }
 
 fn put(bytes: &mut Vec<u8>, text: &str) {
@@ -98,6 +101,9 @@ fn key(record: &Record) -> OciDigest {
         &mut bytes,
         &record.disk.map(|mib| mib.to_string()).unwrap_or_default(),
     );
+    if record.wake {
+        put(&mut bytes, "wake");
+    }
     OciDigest::from_sha256(&Sha256::digest(&bytes).into())
 }
 
@@ -110,6 +116,7 @@ pub fn base_key() -> OciDigest {
         env: None,
         stages: &[],
         disk: None,
+        wake: false,
     })
 }
 
@@ -159,6 +166,7 @@ fn image_key(
         } else {
             None
         },
+        wake: image.wake,
     });
     keys.insert(name.to_owned(), found.clone());
     Ok(found)
@@ -191,6 +199,7 @@ fn machine_key(
         env: builds.then_some(&machine.env),
         stages: &machine.setup,
         disk: (on_base && builds).then_some(machine.disk_mib),
+        wake: false,
     }))
 }
 
@@ -297,6 +306,7 @@ mod tests {
             disk_mib: None,
             defer: Vec::new(),
             setup: Vec::new(),
+            wake: false,
         };
         let looped = [image("a-img", "b-img"), image("b-img", "a-img")];
         assert!(image_keys(&looped).is_err_and(|problem| problem.contains("cycle")));

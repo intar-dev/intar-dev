@@ -260,6 +260,7 @@ fn image(source: &Source, block: &Block, file_name: &str) -> Loaded<ImageV1> {
         disk_mib: mib(&fields, "disk", disk)?,
         defer: fields.strings("defer")?,
         setup: stages(source, &mut fields)?,
+        wake: fields.flag("wake", false)?,
     };
     fields.done()?;
     Ok(image)

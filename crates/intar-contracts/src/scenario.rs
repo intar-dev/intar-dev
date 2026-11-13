@@ -121,6 +121,9 @@ pub struct ImageV1 {
     pub disk_mib: Option<u32>,
     pub defer: Vec<String>,
     pub setup: Vec<ScriptV1>,
+    /// Published with a suspended guest; a machine `from` it is a pack.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wake: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -262,6 +265,20 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
             )),
             Some(_) => {}
         }
+        let from_wake = images
+            .iter()
+            .any(|image| image.wake && image.name == machine.from);
+        if from_wake
+            && machine
+                .setup
+                .first()
+                .is_some_and(|stage| stage.name == "packages")
+        {
+            problem(format!(
+                "machine `{name}`: a machine from the wake image `{}` installs no packages; move them into the image",
+                machine.from
+            ));
+        }
         if machine.disk_mib > MAX_DISK_MIB {
             problem(format!(
                 "machine `{name}`: disk is over the {MAX_DISK_MIB} MiB limit"
@@ -401,6 +418,15 @@ fn image_geometry<'a>(
             ));
         }
         check_scripts(&format!("image `{name}` setup"), &image.setup, problem);
+        if images
+            .iter()
+            .any(|parent| parent.wake && parent.name == image.from)
+        {
+            problem(format!(
+                "image `{name}`: from the wake image `{}`; only a machine can start from a wake image",
+                image.from
+            ));
+        }
     }
     let edges = by_name
         .iter()
@@ -553,6 +579,7 @@ mod tests {
             disk_mib: Some(8192),
             defer: Vec::new(),
             setup: vec![script("install")],
+            wake: false,
         }]
     }
 
@@ -592,7 +619,7 @@ mod tests {
     #[test]
     fn each_rule_is_enforced() {
         type Break = fn(&mut ScenarioV1, &mut Vec<ImageV1>);
-        let broken: [(&str, Break); 16] = [
+        let broken: [(&str, Break); 18] = [
             ("not a valid ID", |s, _| s.slug = "Ab".to_owned()),
             ("1 to 8 machines", |s, _| s.machines.clear()),
             ("declared twice", |s, _| {
@@ -633,6 +660,18 @@ mod tests {
             ("disk is over the 65536 MiB limit", |_, i| {
                 i[0].disk_mib = Some(MAX_DISK_MIB + 1)
             }),
+            ("installs no packages; move them into the image", |s, i| {
+                i[0].wake = true;
+                s.machines[0].setup = vec![script("packages")];
+            }),
+            ("only a machine can start from a wake image", |_, i| {
+                i[0].wake = true;
+                let mut child = i[0].clone();
+                child.name = "k3s-child".to_owned();
+                child.from = "k3s".to_owned();
+                child.disk_mib = None;
+                i.push(child);
+            }),
         ];
         for (expected, mutate) in broken {
             let (mut scenario, mut images) = (scenario(), images());
@@ -654,6 +693,7 @@ mod tests {
             disk_mib: None,
             defer: Vec::new(),
             setup: Vec::new(),
+            wake: false,
         });
         let mut scenario = scenario();
         scenario.machines[0].from = "klustered".to_owned();

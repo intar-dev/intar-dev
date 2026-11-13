@@ -337,6 +337,7 @@ mod tests {
                 name: "install".to_owned(),
                 script: "apt-get install -y nginx\n".to_owned(),
             }],
+            wake: false,
         });
         let machine = machine_mut(&mut bundle, "webserver");
         machine.from = "web".to_owned();

@@ -395,7 +395,7 @@ fn wake_machine(registry: &Registry, grow: u64) -> (OciDigest, Vec<OciDescriptor
         "wake": {
             "ram": {"size_bytes": 4 << 20, "chunk_size": 4 << 20, "chunks": [[0, 2, hex]], "sha256": hex},
             "pack": {"base": format!("sha256:{hex}"), "ram_sha256": hex},
-            "shape": {"memory_bytes": 4 << 20, "boot_vcpus": 1, "max_vcpus": 2, "balloon": true},
+            "shape": {"memory_bytes": 4 << 20, "boot_vcpus": 1, "max_vcpus": 2, "balloon": true, "max_phys_bits": 36},
             "cpu_profile": profile.digest.as_str(),
             "vmm": {"min_version": "v55.0.0", "built_with": "v55.0.0"},
             "booted_at_unix_ms": 1,

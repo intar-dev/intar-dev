@@ -17,7 +17,7 @@ fn guest() -> WakeV1 {
     let hex = "a".repeat(64);
     serde_json::from_value(json!({
         "ram": {"size_bytes": 2_u64 << 30, "chunk_size": 4 << 20, "chunks": [], "sha256": hex},
-        "shape": {"memory_bytes": 2_u64 << 30, "boot_vcpus": 1, "max_vcpus": 4, "balloon": true},
+        "shape": {"memory_bytes": 2_u64 << 30, "boot_vcpus": 1, "max_vcpus": 4, "balloon": true, "max_phys_bits": 36},
         "cpu_profile": profile().as_str(),
         "vmm": {"min_version": "v55.0", "built_with": "v55.0.0"},
         "booted_at_unix_ms": NOW_MS - DAY_MS,
