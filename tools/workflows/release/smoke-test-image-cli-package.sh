@@ -28,10 +28,9 @@ done
 cli="${smoke_root}/amd64/intar-image-cli"
 test "$("${cli}" --version)" = "intar-image-cli ${VERSION}"
 
-# The frozen scenario-publish argv: `validate` and `bundle` from the root.
-repo="${smoke_root}/repo"
-bash tools/image-build/stage-example.sh "${repo}"
-cd "${repo}"
+# The frozen scenario-publish argv: `validate` and `bundle` from the root,
+# here the repository's own content.
+cd content
 digest="$("${cli}" validate | sed -n 's/^compile digest: //p')"
 if ! [[ "${digest}" =~ ^p[0-9a-f]{8}$ ]]; then
   echo "validate printed no compile digest" >&2

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # release.yml, job web-pins, step "Open the website pin pull request".
 # Points the website's scenario compiler at the published intar-image-cli
-# release that main's manifest names: its version, the published archive
-# digests, and the digest of the base-images.hcl it ships.
+# release that main's manifest names: its version and the published archive
+# digests.
 set -euo pipefail
 # A re-run keeps its run's commit. Only the run for main's tip may rewrite the
 # pull request; a push that moved main has a run of its own that follows.
@@ -20,8 +20,7 @@ if [ "${draft}" != false ]; then
 fi
 sums="$(mktemp -d)/checksums.txt"
 gh release download "${tag}" --pattern "intar-image-cli_${version}_checksums.txt" --output "${sums}"
-base_images_sha256="$(git show "${tag}^{commit}:content/scenarios/base-images.hcl" | sha256sum | cut -d ' ' -f 1)"
-VERSION="${version}" SUMS="${sums}" BASE_IMAGES_SHA256="${base_images_sha256}" python3 - <<'PY'
+VERSION="${version}" SUMS="${sums}" python3 - <<'PY'
 import json
 import os
 import pathlib
@@ -37,7 +36,6 @@ for line in pathlib.Path(os.environ["SUMS"]).read_text().splitlines():
 if sorted(digests) != ["linux_amd64", "linux_arm64"]:
     raise SystemExit(f"published checksums lack an archive digest: {digests}")
 pins = {
-    "PLATFORM_BASE_IMAGES_SHA256": os.environ["BASE_IMAGES_SHA256"],
     "SCENARIO_COMPILER_CLI_VERSION": version,
     "SCENARIO_COMPILER_CLI_SHA256": json.dumps(digests, separators=(",", ":"), sort_keys=True),
 }
@@ -74,7 +72,7 @@ gh auth setup-git --hostname github.com
 git checkout -B "${branch}"
 git commit --quiet -m "${title}" -- apps/web/wrangler.jsonc apps/web/worker-configuration.d.ts
 tools/workflows/release/push-bot-branch.sh "${branch}"
-body="The website deploy picks up the ${tag} release: its version, the published archive digests, and the digest of its base-images.hcl."
+body="The website deploy picks up the ${tag} release: its version, and the published archive digests."
 pr="$(gh pr list --head "${branch}" --base main --state open --json number --jq '.[0].number // empty')"
 if [ -n "${pr}" ]; then
   gh pr edit "${pr}" --title "${title}" --body "${body}"

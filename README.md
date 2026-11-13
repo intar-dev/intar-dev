@@ -31,10 +31,9 @@ Never hand-edit migration SQL or metadata, create custom migrations, or add SQL
 triggers. Run `bun run --cwd apps/web db:generate` after a typed schema change
 and `bun run check:database-migrations` before committing it.
 
-`content/courses/` contains Markdown-first Course source. Each Course contains
-`course.md` and ordered Lecture directories. Each Lecture contains `lecture.md`
-and can contain a technical `scenario.hcl`. The base image catalog remains at
-`content/scenarios/base-images.hcl`.
+`content/` is a scenario repository: `intar.hcl`, `scenarios/<slug>/scenario.hcl`
+and Markdown-first Course source under `courses/`. Each Course contains
+`course.md` and ordered Lecture directories, each with a `lecture.md`.
 
 ## Releasing
 
@@ -167,4 +166,4 @@ before the workflow attested them have no attestation. Then:
 - **Kino:** image-ops `tools-build` with the `kino_tag`, then the guest-tools
   steps in `apps/web/README.md`.
 - **Image CLI:** merge the website pin pull request that the release opens. The
-  next website deploy uses it, and `tools-build` builds tools disks with it.
+  next website deploy uses it.

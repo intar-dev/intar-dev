@@ -255,12 +255,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				name: "Verify runner disk tools"
 				#StepTask & {#task: "image-ops-verify-runner-disk-tools"}
 			}, {
-				// Kino's published release is its guest build, and the image CLI
-				// release the website pins builds the disk, so nothing compiles here.
-				name: "Build the tools disk from the releases"
-				env: GH_TOKEN: "${{ github.token }}"
-				#StepTask & {#task: "image-ops-build-guest-tools"}
-			}, {
 				name: "Set up the CI runtime"
 				uses: "./.github/actions/setup-runtime"
 			}, {
@@ -502,7 +496,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 // _production; the authority check and the evidence scrub touch only the runner.
 tasks: {
 	"image-ops-verify-runner-disk-tools": #Script & {_script: "tools/workflows/image-ops/verify-runner-disk-tools.sh"}
-	"image-ops-build-guest-tools": #Script & {_script: "tools/workflows/image-ops/build-guest-tools.sh"}
 	"image-ops-upload-tools-candidate": #Script & {_script: "tools/workflows/image-ops/upload-tools-candidate.sh", _production: true}
 	"image-ops-verify-tools-upload": #Script & {_script: "tools/workflows/image-ops/verify-tools-upload.sh", _production: true}
 	"image-ops-read-tools-candidate": #Script & {_script: "tools/workflows/image-ops/read-tools-candidate.sh", _production: true}

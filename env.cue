@@ -114,15 +114,11 @@ schema.#Project & {
 
 		"build-kino-guest": #Cargo & {args: ["zigbuild", "--profile", "guest", "-p", "kino", "--target", "x86_64-unknown-linux-musl"]}
 
-		// The in-repository example, staged as a repository of the new format
-		// (tools/image-build/stage-example.sh says why).
+		// The in-repository content, as a repository of the scenario format.
 		"validate-images": #Bash & {_script: """
-			repo="$(mktemp -d)"
-			trap 'rm -rf "${repo}"' EXIT
-			bash tools/image-build/stage-example.sh "${repo}"
-			cargo run -q -p intar-image-cli -- validate --root "${repo}"
-			cargo run -q -p intar-image-cli -- fmt --check --root "${repo}"
-			cargo run -q -p intar-image-cli -- spec broken-nginx --verify --root "${repo}" >/dev/null
+			cargo run -q -p intar-image-cli -- validate --root content
+			cargo run -q -p intar-image-cli -- fmt --check --root content
+			cargo run -q -p intar-image-cli -- spec broken-nginx --verify --root content >/dev/null
 			"""}
 
 		// Checks that used to exist only inline in CI.
