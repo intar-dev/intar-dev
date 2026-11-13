@@ -769,8 +769,7 @@ pub(super) fn smoke_vm_config(
         net: Some(vec![NetConfig {
             tap: request.tap_name.clone(),
             mac: Some(request.mac_address.clone()),
-            ip: None,
-            mask: None,
+            ..NetConfig::default()
         }]),
         serial: Some(SerialConfig {
             file: Some(path_utf8(&launch.paths.jailed_serial_log)?),

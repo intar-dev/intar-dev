@@ -214,7 +214,11 @@ fn a_wake_config_is_the_cold_config_with_only_the_listed_differences() {
     expected["cpus"] = json!({
         "boot_vcpus": 1, "max_vcpus": 4,
         "profile": {"File": "/boot/cpu-profile.json"},
+        "max_phys_bits": 36,
     });
+    expected["net"][0]["offload_tso"] = json!(true);
+    expected["net"][0]["offload_ufo"] = json!(true);
+    expected["net"][0]["offload_csum"] = json!(true);
     expected["memory"] = json!({
         "size": 0,
         "zones": [{"id": "mem0", "size": 2_i64 << 30, "file": "/disks/wake.ram", "shared": false}],

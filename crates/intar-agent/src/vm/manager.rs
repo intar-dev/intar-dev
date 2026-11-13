@@ -11,10 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use axum::http::StatusCode;
-use cloud_hypervisor_client::{
-    Client as ChClient, ConsoleConfig, CpusConfig, DiskConfig, DiskImageType, MemoryConfig,
-    NetConfig, PayloadConfig, SerialConfig, VmConfig, VsockConfig,
-};
+use cloud_hypervisor_client::{Client as ChClient, VmConfig};
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use getrandom::fill as getrandom_fill;
 use intar_contracts::bridge::VmRuntimeConstraintsV2;
@@ -558,7 +555,6 @@ const SCENARIO_READY_API_POLL_INTERVAL_SECONDS: u64 = 3;
 const SCENARIO_READY_API_PROBE_TIMEOUT_SECONDS: u64 = 2;
 const CLOUD_HYPERVISOR_STDERR_LOG_NAME: &str = "cloud-hypervisor.stderr.log";
 const RUNTIME_DISK_FILENAME: &str = "runtime.img";
-const RUNTIME_DISK_ID_SUFFIX: &str = "runtime";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LeaseExpiryErrorLogState {

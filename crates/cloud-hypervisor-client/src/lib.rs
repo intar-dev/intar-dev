@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod machine;
+
 use std::fmt;
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -264,6 +266,9 @@ pub struct CpusConfig {
     /// `vm.info` reports other shapes here (`"Host"`), which nothing reads.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub profile: Option<CpuProfile>,
+    /// The guest's physical address width; the VMM's default when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_phys_bits: Option<u8>,
 }
 
 /// A CPU profile; cloud-hypervisor takes it as `{"File": "<path>"}`.
@@ -329,7 +334,7 @@ pub enum DiskImageType {
     Unknown,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct NetConfig {
     pub tap: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -338,6 +343,14 @@ pub struct NetConfig {
     pub ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<String>,
+    /// Offloads the guest negotiated at a wake image's build; its wake
+    /// must offer the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload_tso: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload_ufo: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload_csum: Option<bool>,
 }
 
 /// Cloud Hypervisor serial output config.
@@ -717,6 +730,7 @@ mod tests {
                 boot_vcpus: 2,
                 max_vcpus: 4,
                 profile: Some(CpuProfile::File("/profile.json".to_string())),
+                max_phys_bits: None,
             }),
             memory: Some(MemoryConfig {
                 size: 0,
@@ -748,6 +762,7 @@ mod tests {
                 boot_vcpus: 2,
                 max_vcpus: 2,
                 profile: None,
+                max_phys_bits: None,
             }),
             memory: Some(MemoryConfig {
                 size: 1,

@@ -40,75 +40,41 @@ pub(super) struct CloudHypervisorVmConfigInput<'a> {
 pub(super) fn build_cloud_hypervisor_vm_config(
     input: CloudHypervisorVmConfigInput<'_>,
 ) -> Result<VmConfig> {
-    let disks = vec![
-        DiskConfig {
-            path: input.paths.jailed_root_disk.display().to_string(),
-            readonly: false,
-            id: Some(format!("{}-root", input.name)),
-            image_type: Some(DiskImageType::Raw),
+    let paths = input.paths;
+    let text = |path: &Path| path.display().to_string();
+    let (kernel, initramfs) = (
+        text(&paths.jailed_kernel),
+        paths.jailed_initrd.as_deref().map(text),
+    );
+    let (root, runtime, recording) = (
+        text(&paths.jailed_root_disk),
+        text(&paths.jailed_runtime_disk),
+        text(&paths.jailed_recording_disk),
+    );
+    let (serial, console, vsock) = (
+        text(&paths.jailed_serial_log),
+        text(&paths.jailed_console_log),
+        text(&paths.jailed_vsock_socket),
+    );
+    Ok(cloud_hypervisor_client::machine::machine_vm_config(
+        &cloud_hypervisor_client::machine::MachineVmInput {
+            name: input.name,
+            cpu_millis: input.cpu_millis,
+            memory_mib: input.memory_mib,
+            kernel: &kernel,
+            initramfs: initramfs.as_deref(),
+            cmdline: input.cmdline,
+            root_disk: &root,
+            runtime_disk: &runtime,
+            recording_disk: &recording,
+            serial_log: &serial,
+            console_log: &console,
+            tap: input.tap,
+            mac: input.mac,
+            vsock_socket: &vsock,
+            vsock_cid: input.kino_vsock_cid,
         },
-        DiskConfig {
-            path: input.paths.jailed_runtime_disk.display().to_string(),
-            readonly: true,
-            id: Some(format!("{}-{RUNTIME_DISK_ID_SUFFIX}", input.name)),
-            image_type: Some(DiskImageType::Raw),
-        },
-        DiskConfig {
-            path: input.paths.jailed_recording_disk.display().to_string(),
-            readonly: false,
-            id: Some(format!("{}-recordings", input.name)),
-            image_type: Some(DiskImageType::Raw),
-        },
-    ];
-    Ok(VmConfig {
-        cpus: (input.cpu_millis > 1_000).then(|| CpusConfig {
-            boot_vcpus: input.cpu_millis.div_ceil(1_000),
-            max_vcpus: input.cpu_millis.div_ceil(1_000),
-            profile: None,
-        }),
-        memory: Some(MemoryConfig {
-            size: (input.memory_mib as i64) * 1024 * 1024,
-            zones: None,
-        }),
-        payload: PayloadConfig {
-            kernel: Some(input.paths.jailed_kernel.display().to_string()),
-            initramfs: input
-                .paths
-                .jailed_initrd
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            cmdline: Some(input.cmdline.to_string()),
-            ..PayloadConfig::default()
-        },
-        serial: Some(SerialConfig {
-            file: Some(input.paths.jailed_serial_log.display().to_string()),
-            mode: "File".to_string(),
-            iommu: false,
-            socket: None,
-        }),
-        console: Some(ConsoleConfig {
-            file: Some(input.paths.jailed_console_log.display().to_string()),
-            mode: "File".to_string(),
-            iommu: false,
-            socket: None,
-        }),
-        disks: Some(disks),
-        net: Some(vec![NetConfig {
-            tap: input.tap.to_string(),
-            mac: Some(input.mac.to_string()),
-            ip: None,
-            mask: None,
-        }]),
-        vsock: Some(VsockConfig {
-            cid: u64::from(input.kino_vsock_cid),
-            socket: input.paths.jailed_vsock_socket.display().to_string(),
-            iommu: false,
-            pci_segment: None,
-            id: Some(format!("{}-kino-vsock", input.name)),
-        }),
-        balloon: None,
-        landlock_enable: Some(true),
-    })
+    ))
 }
 
 pub(super) async fn cached_jailer_launch_capabilities(

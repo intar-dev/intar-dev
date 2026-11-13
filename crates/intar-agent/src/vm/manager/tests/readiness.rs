@@ -338,21 +338,21 @@ fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
     assert_eq!(disks[0].id.as_deref(), Some("vm-demo-root"));
     assert!(matches!(
         disks[0].image_type.as_ref(),
-        Some(DiskImageType::Raw)
+        Some(cloud_hypervisor_client::DiskImageType::Raw)
     ));
     assert_eq!(disks[1].path, "/disks/runtime.vfat");
     assert!(disks[1].readonly);
     assert_eq!(disks[1].id.as_deref(), Some("vm-demo-runtime"));
     assert!(matches!(
         disks[1].image_type.as_ref(),
-        Some(DiskImageType::Raw)
+        Some(cloud_hypervisor_client::DiskImageType::Raw)
     ));
     assert_eq!(disks[2].path, "/disks/recordings.vfat");
     assert!(!disks[2].readonly);
     assert_eq!(disks[2].id.as_deref(), Some("vm-demo-recordings"));
     assert!(matches!(
         disks[2].image_type.as_ref(),
-        Some(DiskImageType::Raw)
+        Some(cloud_hypervisor_client::DiskImageType::Raw)
     ));
 
     let net = cfg.net.as_ref().expect("net");

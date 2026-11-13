@@ -1,7 +1,6 @@
 //! Waking a VM from its image's suspended guest: whether to, the VM config
 //! of a wake, and the one fallback to a cold boot.
 
-use cloud_hypervisor_client::{BalloonConfig, CpuProfile, MemoryZoneConfig};
 use intar_contracts::oci::WakeV1;
 use intar_jailer_protocol::JailWakePaths;
 
@@ -105,36 +104,29 @@ fn version_at_least(actual: &str, minimum: &str) -> bool {
 /// the one private memory zone and, on a balloon shape, the balloon taking
 /// what the VM was not given.
 pub(super) fn wake_vm_config(
-    mut cold: VmConfig,
+    cold: VmConfig,
     wake: &WakeV1,
     paths: &JailWakePaths,
     memory_mib: u32,
 ) -> Result<VmConfig> {
     let shape = &wake.shape;
-    let memory_bytes = i64::try_from(shape.memory_bytes).context("wake memory is too large")?;
-    cold.payload.kernel = Some(paths.jailed_stub.display().to_string());
-    cold.cpus = Some(CpusConfig {
-        boot_vcpus: shape.boot_vcpus,
-        max_vcpus: shape.max_vcpus,
-        profile: Some(CpuProfile::File(
-            paths.jailed_cpu_profile.display().to_string(),
-        )),
-    });
-    cold.memory = Some(MemoryConfig {
-        size: 0,
-        zones: Some(vec![MemoryZoneConfig {
-            id: "mem0".to_owned(),
-            size: memory_bytes,
-            file: Some(paths.jailed_ram.display().to_string()),
-            shared: false,
-        }]),
-    });
-    if shape.balloon {
-        cold.balloon = Some(BalloonConfig {
-            size: memory_bytes - i64::from(memory_mib) * 1024 * 1024,
-        });
-    }
-    Ok(cold)
+    let mut config = cloud_hypervisor_client::machine::wake_vm_config(
+        cold,
+        &cloud_hypervisor_client::machine::WakeShape {
+            memory_bytes: shape.memory_bytes,
+            boot_vcpus: shape.boot_vcpus,
+            max_vcpus: shape.max_vcpus,
+            balloon: shape.balloon,
+            max_phys_bits: shape.max_phys_bits,
+        },
+        &paths.jailed_cpu_profile.display().to_string(),
+        &paths.jailed_ram.display().to_string(),
+        false,
+        memory_mib,
+    )
+    .context("wake memory is too large")?;
+    config.payload.kernel = Some(paths.jailed_stub.display().to_string());
+    Ok(config)
 }
 
 /// Whether an image fell back on this host within the last hour.
