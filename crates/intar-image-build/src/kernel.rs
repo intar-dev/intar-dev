@@ -39,8 +39,11 @@ pub const KERNEL_UPSTREAM_VERSION: &str = "6.12.96";
 /// so the release string stays inside the shape guests expect from uname -r.
 pub const KERNEL_LOCALVERSION: &str = "-intar-cutover";
 
-/// Upstream directory that holds the source files.
-pub const KERNEL_SOURCE_BASE_URL: &str = "https://deb.debian.org/debian/pool/main/l/linux";
+/// Directory that holds the source files: the pool of the same dated
+/// snapshot as [`KERNEL_APT_SNAPSHOT`]. Debian's moving pool drops a version
+/// once a newer one lands, which broke every cold base build (#288).
+pub const KERNEL_SOURCE_BASE_URL: &str =
+    "https://snapshot.debian.org/archive/debian/20260912T000000Z/pool/main/l/linux";
 
 /// Dated Debian snapshot that the kernel stage installs its toolchain from.
 /// A floating compiler would break the reproducibility claim, so the stage
