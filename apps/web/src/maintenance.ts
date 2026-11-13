@@ -31,7 +31,12 @@ export async function handleMaintenanceMode(
     return maintenanceStatus(request.method === "HEAD");
   }
 
-  if (pathname.startsWith("/api/") || pathname.startsWith("/agent/")) {
+  if (
+    pathname.startsWith("/api/") ||
+    pathname.startsWith("/agent/") ||
+    pathname === "/v2" ||
+    pathname.startsWith("/v2/")
+  ) {
     return maintenanceJsonResponse();
   }
   return maintenancePage();

@@ -78,6 +78,15 @@
         "period": 60,
       },
     },
+    {
+      // Registry token exchanges per client IP; content reads are not limited.
+      "name": "REGISTRY_TOKEN_RATE_LIMITER",
+      "namespace_id": "88427092",
+      "simple": {
+        "limit": 30,
+        "period": 60,
+      },
+    },
   ],
   "durable_objects": {
     "bindings": [

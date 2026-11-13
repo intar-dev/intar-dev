@@ -14,6 +14,7 @@ import {
   sweepScenarioSources,
 } from "@/control-plane/scenario-source-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
+import { handleOciRequest } from "@/control-plane/image-registry/oci";
 import { advanceImagePromotion } from "@/control-plane/image-promotion";
 import {
   GITHUB_WEBHOOK_PATH,
@@ -72,6 +73,9 @@ export default {
     ) {
       return respond(await traceOperation("agent.connect", () => handleAgentConnect(request, env)));
     }
+
+    const ociResponse = await traceOperation("registry.oci", () => handleOciRequest(request, env));
+    if (ociResponse) return respond(ociResponse);
 
     const registryResponse = await traceOperation("image.registry", () => handleImageRegistryRequest(request, env));
     if (registryResponse) {
