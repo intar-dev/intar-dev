@@ -47,6 +47,7 @@ pub(crate) struct VmNetworkAttachment {
     pub ssh_public_port: Option<u16>,
     pub ssh_forward_active: bool,
     pub vsock_cid: u32,
+    pub egress: bool,
     pub uid: u32,
     pub gid: u32,
 }
@@ -274,6 +275,7 @@ impl NetworkManager {
             ssh_public_port: request.ssh_public_port,
             ssh_forward_active: false,
             vsock_cid: request.vsock_cid,
+            egress: request.egress,
             uid,
             gid,
         };
@@ -338,6 +340,7 @@ impl NetworkManager {
             ssh_public_port: request.ssh_public_port,
             ssh_forward_active: false,
             vsock_cid: request.vsock_cid,
+            egress: request.egress,
             uid,
             gid,
         };

@@ -21,7 +21,7 @@ use thiserror::Error;
 use tokio::io::unix::AsyncFd;
 
 /// Current on-wire protocol version.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 /// Maximum request or response packet, including its JSON envelope.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Reserved source-root selector for artifacts in jailerd's root-owned image
@@ -443,6 +443,9 @@ pub struct VmLaunchRequest {
     pub guest_ip_cidr: String,
     pub ssh_public_port: Option<u16>,
     pub vsock_cid: u32,
+    /// Whether the VM may open connections out of its run's network, behind
+    /// the egress floor. Without it the VM reaches only its run.
+    pub egress: bool,
     pub artifacts: SourceArtifacts,
 }
 

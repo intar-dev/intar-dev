@@ -821,6 +821,7 @@ fn launch(index: u32, cpu_millis: u32) -> VmLaunchRequest {
         guest_ip_cidr: format!("10.77.0.{}/28", index + 2),
         ssh_public_port: Some(22_000_u16 + u16::try_from(index).expect("small fixture")),
         vsock_cid: 3 + index,
+        egress: false,
         artifacts: SourceArtifacts {
             kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
             initrd: None,

@@ -548,6 +548,7 @@ pub(super) fn smoke_launch_request(
             guest_ip_cidr: format!("10.77.255.{}/28", index.saturating_add(242)),
             ssh_public_port: None,
             vsock_cid: 4_294_000_001_u32.saturating_add(u32::from(index)),
+            egress: false,
             artifacts: protocol_artifacts(config, artifacts, prepared_image)?,
         },
     })

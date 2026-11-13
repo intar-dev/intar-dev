@@ -202,9 +202,18 @@ pub(super) fn render_nft_rules(state: &RunState) -> Result<String> {
         "    iifname \"{}\" ip daddr {host_transit} drop\n",
         state.result.host_veth_name
     ));
+    // Only a VM launched with egress may open a connection out of its run;
+    // everything else from the run ends here, also an address no VM holds.
+    // Replies to connections from outside (SSH) took the established path
+    // above, and VMs of one run reach each other inside the run's namespace.
+    for attachment in state.attachments.values() {
+        if attachment.egress {
+            let guest = cidr_address(&attachment.guest_ip_cidr)?;
+            rules.push_str(&format!("    iifname \"{veth}\" ip saddr {guest} accept\n"));
+        }
+    }
     rules.push_str(&format!(
-        "    iifname \"{}\" accept\n  }}\n  chain prerouting {{\n    type nat hook prerouting priority dstnat; policy accept;\n",
-        state.result.host_veth_name
+        "    iifname \"{veth}\" counter drop\n  }}\n  chain prerouting {{\n    type nat hook prerouting priority dstnat; policy accept;\n",
     ));
     for attachment in state.attachments.values() {
         if attachment.ssh_forward_active

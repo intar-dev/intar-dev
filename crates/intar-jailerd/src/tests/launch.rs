@@ -42,7 +42,7 @@ fn capabilities_and_prepare_image_v2_require_fast_template_store() {
     )
     .expect("core");
     let capabilities = available.capabilities();
-    assert_eq!(capabilities.protocol_version, 4);
+    assert_eq!(capabilities.protocol_version, 5);
     assert!(capabilities.supports_jailer_v3);
     assert!(capabilities.supports_jailer_v2);
     assert!(capabilities.supports_template_backed_launch);

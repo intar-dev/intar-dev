@@ -315,7 +315,7 @@ fn rejects_legacy_jailerd_protocol_v1() {
     assert!(report.checks.iter().any(|check| {
         check.name == "jailerd protocol"
             && check.status == PreflightStatus::Fail
-            && check.detail.contains("required version 4")
+            && check.detail.contains("required version 5")
     }));
 }
 

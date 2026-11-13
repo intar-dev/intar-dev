@@ -260,8 +260,9 @@ pub struct PayloadConfig {
 pub struct CpusConfig {
     pub boot_vcpus: u32,
     pub max_vcpus: u32,
-    /// The CPU the guest is shown instead of the host's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The CPU the guest is shown instead of the host's. Write-only:
+    /// `vm.info` reports other shapes here (`"Host"`), which nothing reads.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub profile: Option<CpuProfile>,
 }
 
@@ -761,6 +762,12 @@ mod tests {
         );
         assert_eq!(cold["memory"], serde_json::json!({"size": 1}));
         assert!(cold.get("balloon").is_none());
+        // What the VMM reports for a cold boot must still parse.
+        let info: CpusConfig = serde_json::from_value(
+            serde_json::json!({"boot_vcpus": 1, "max_vcpus": 1, "profile": "Host"}),
+        )
+        .expect("vm.info cpus");
+        assert_eq!(info.profile, None);
         let resize = VmResize {
             desired_vcpus: Some(4),
             desired_balloon: Some(0),

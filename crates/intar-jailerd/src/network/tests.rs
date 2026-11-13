@@ -239,6 +239,7 @@ fn attachment_collision_checks_cover_guest_tap_cross_class_and_bridge_domains() 
         ssh_public_port: None,
         ssh_forward_active: false,
         vsock_cid: 3,
+        egress: true,
         uid: 200_000,
         gid: 200_000,
     };
@@ -285,6 +286,7 @@ fn create_and_recovery_tap_commands_use_only_the_derived_host_mac() {
         ssh_public_port: None,
         ssh_forward_active: false,
         vsock_cid: 3,
+        egress: true,
         uid: 200_000,
         gid: 200_000,
     };
@@ -374,6 +376,7 @@ fn guest_address_rejects_gateway_network_broadcast_and_prefix_drift() {
         guest_ip_cidr: address.to_owned(),
         ssh_public_port: None,
         vsock_cid: 3,
+        egress: true,
         artifacts: intar_jailer_protocol::SourceArtifacts {
             kernel: artifact("kernel", intar_jailer_protocol::ArtifactAccess::ReadOnly),
             initrd: None,
@@ -416,6 +419,7 @@ fn nft_policy_blocks_host_cross_run_private_and_metadata_destinations() {
             ssh_public_port: Some(22_001),
             ssh_forward_active: true,
             vsock_cid: 3,
+            egress: true,
             uid: 200_000,
             gid: 200_000,
         },
@@ -490,7 +494,10 @@ fn nft_policy_blocks_host_cross_run_private_and_metadata_destinations() {
         rules.find(&source_guard).unwrap() < rules.find(&established_accept).unwrap(),
         "source anti-spoofing must run before the established-flow fast path"
     );
-    let forward_accept = format!("iifname \"{}\" accept", state.result.host_veth_name);
+    let forward_accept = format!(
+        "iifname \"{}\" ip saddr 10.77.0.2 accept",
+        state.result.host_veth_name
+    );
     let ssh_dnat = format!(
         "iifname != \"{}\" fib daddr type local tcp dport 22001 dnat ip to 10.77.0.2:22",
         state.result.host_veth_name
@@ -545,6 +552,37 @@ fn nft_policy_blocks_host_cross_run_private_and_metadata_destinations() {
     assert!(
         previous < rules.find(&established_accept).unwrap(),
         "the egress floor must run before the established-flow fast path"
+    );
+
+    // Egress is per VM and closed by default: the VM launched with it is
+    // accepted by address after every guard, and the run's last rule drops
+    // the rest, also an address no VM holds.
+    let last_drop = format!("iifname \"{veth}\" counter drop\n  }}\n  chain prerouting");
+    assert!(
+        rules.find("ip daddr 224.0.0.0/4 drop").unwrap() < rules.find(&forward_accept).unwrap()
+            && rules.find(&forward_accept).unwrap() < rules.find(&last_drop).unwrap(),
+        "the per-VM accept sits between the destination guards and the final drop"
+    );
+    let mut closed = state.clone();
+    closed
+        .attachments
+        .values_mut()
+        .next()
+        .expect("attachment")
+        .egress = false;
+    let closed_rules = render_nft_rules(&closed).unwrap();
+    assert!(
+        !closed_rules.contains("ip saddr 10.77.0.2 accept") && closed_rules.contains(&last_drop),
+        "a VM without egress gets no accept rule"
+    );
+    assert!(
+        closed_rules.contains("dnat ip to 10.77.0.2:22")
+            && closed_rules.contains(&established_accept),
+        "SSH to a VM without egress still works: DNAT in, established replies out"
+    );
+    assert!(
+        !rules.contains(&format!("iifname \"{veth}\" accept\n")),
+        "no blanket accept for the run"
     );
 }
 

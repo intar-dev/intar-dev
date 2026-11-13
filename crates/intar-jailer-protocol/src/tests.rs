@@ -173,6 +173,7 @@ fn launch_vm_v2_is_template_bound_and_v1_rejects_prepared_sources() {
         guest_ip_cidr: "10.77.0.2/28".to_string(),
         ssh_public_port: Some(22_000),
         vsock_cid: 3,
+        egress: false,
         artifacts: SourceArtifacts {
             kernel: prepared("kernel", ArtifactAccess::ReadOnly),
             initrd: Some(prepared("initrd", ArtifactAccess::ReadOnly)),
@@ -287,6 +288,7 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         guest_ip_cidr: "10.77.0.2/28".to_string(),
         ssh_public_port: Some(22_000),
         vsock_cid: 3,
+        egress: false,
         artifacts: SourceArtifacts {
             kernel: prepared("kernel", ArtifactAccess::ReadOnly),
             initrd: Some(prepared("initrd", ArtifactAccess::ReadOnly)),
@@ -355,8 +357,8 @@ fn unknown_envelope_fields_are_rejected() {
 }
 
 #[test]
-fn protocol_v4_rejects_legacy_handshake_authority() {
-    assert_eq!(PROTOCOL_VERSION, 4);
+fn protocol_v5_rejects_legacy_handshake_authority() {
+    assert_eq!(PROTOCOL_VERSION, 5);
     let legacy = RequestEnvelope::decode(
         br#"{"version":1,"request_id":1,"request":{"operation":"capabilities"}}"#,
     )
@@ -465,6 +467,7 @@ fn guest_cpu_count_cannot_be_added_to_launch_request() {
         guest_ip_cidr: "10.77.0.2/28".to_owned(),
         ssh_public_port: Some(22000),
         vsock_cid: 3,
+        egress: false,
         artifacts: SourceArtifacts {
             kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
             initrd: None,

@@ -352,6 +352,7 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
         guest_ip_cidr: req.network.guest_ip_cidr.clone(),
         ssh_public_port: req.ssh_public_port,
         vsock_cid: req.kino_vsock_cid,
+        egress: false,
         artifacts,
     };
     let launch_operation = build_jailer_launch_operation(request, prepared)?;
