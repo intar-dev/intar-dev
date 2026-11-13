@@ -354,10 +354,10 @@ pub fn clone_or_sparse_copy(source: &Path, target: &Path) -> Result<()> {
     let mut buffer = vec![0_u8; 4 * MIB];
     let mut at = 0_u64;
     while at < size {
-        let Ok(data) = seek(&input, RawSeek::Data(i64::try_from(at)?)) else {
+        let Ok(data) = seek(&input, RawSeek::Data(at)) else {
             break;
         };
-        let hole = seek(&input, RawSeek::Hole(i64::try_from(data)?))?;
+        let hole = seek(&input, RawSeek::Hole(data))?;
         let mut offset = data;
         input.seek(SeekFrom::Start(offset))?;
         output.seek(SeekFrom::Start(offset))?;
@@ -388,10 +388,10 @@ pub fn punch_zero_pages(path: &Path) -> Result<()> {
     let flags = FallocateFlags::PUNCH_HOLE | FallocateFlags::KEEP_SIZE;
     let mut at = 0_u64;
     while at < size {
-        let Ok(data) = seek(&file, RawSeek::Data(i64::try_from(at)?)) else {
+        let Ok(data) = seek(&file, RawSeek::Data(at)) else {
             break;
         };
-        let hole = seek(&file, RawSeek::Hole(i64::try_from(data)?))?;
+        let hole = seek(&file, RawSeek::Hole(data))?;
         let mut offset = data;
         while offset < hole {
             let take = usize::try_from((hole - offset).min(buffer.len() as u64))?;
