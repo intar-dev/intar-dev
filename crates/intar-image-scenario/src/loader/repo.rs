@@ -17,6 +17,16 @@ const RETIRED: &str = "retired scenario format; see docs/scenarios";
 pub struct Repository {
     pub images: Vec<ImageV1>,
     pub scenarios: Vec<ScenarioV1>,
+    /// Every author script as lowered, where the lints report it.
+    pub scripts: Vec<LoweredScript>,
+}
+
+/// One lowered script and the block it came from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoweredScript {
+    /// The block's place; the message names the block.
+    pub at: Diagnostic,
+    pub script: String,
 }
 
 /// Load the repository at `root`, or every problem found.
@@ -54,7 +64,10 @@ pub fn load_repository(root: &Path) -> Result<Repository, Vec<Diagnostic>> {
                 match load(root, &path, files, |source, block| {
                     image(source, block, name)
                 }) {
-                    Ok(image) => repository.images.push(image),
+                    Ok((image, scripts)) => {
+                        repository.images.push(image);
+                        repository.scripts.extend(scripts);
+                    }
                     Err(problem) => problems.push(problem),
                 }
             }
@@ -63,7 +76,10 @@ pub fn load_repository(root: &Path) -> Result<Repository, Vec<Diagnostic>> {
                 match load(root, &path, files, |source, block| {
                     scenario(source, block, slug)
                 }) {
-                    Ok(scenario) => repository.scenarios.push(scenario),
+                    Ok((scenario, scripts)) => {
+                        repository.scenarios.push(scenario);
+                        repository.scripts.extend(scripts);
+                    }
                     Err(problem) => problems.push(problem),
                 }
             }
@@ -93,6 +109,7 @@ fn source<'a>(root: &'a Path, path: &'a Path, text: &'a str, files: PathBuf) -> 
         text,
         files,
         referenced: std::cell::RefCell::default(),
+        scripts: std::cell::RefCell::default(),
     }
 }
 
@@ -127,12 +144,13 @@ fn files(root: &Path, directory: &Path, problems: &mut Vec<Diagnostic>) -> Vec<P
 
 /// Parse one file that holds exactly one block, build its value, and
 /// require every file beside it to be read by a `file()` or `markdown()`.
+/// The file's lowered scripts come back with the value.
 fn load<T>(
     root: &Path,
     path: &Path,
     files_directory: PathBuf,
     build: impl FnOnce(&Source, &Block) -> Loaded<T>,
-) -> Loaded<T> {
+) -> Loaded<(T, Vec<LoweredScript>)> {
     let whole = |message: String| Diagnostic {
         path: path.to_owned(),
         line: 0,
@@ -165,7 +183,7 @@ fn load<T>(
             });
         }
     }
-    Ok(built)
+    Ok((built, source.scripts.take()))
 }
 
 /// `intar.hcl`: one empty `repository {}` block. The namespace comes from

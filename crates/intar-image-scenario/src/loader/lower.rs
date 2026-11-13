@@ -25,6 +25,11 @@ pub(super) fn checks(source: &super::Source, blocks: &[&Block]) -> Loaded<String
         let author = fields.text("fail")?;
         let (body, sugar) = check_body(&mut fields)?;
         fields.done()?;
+        source.record(
+            block.span(),
+            format!("`{}`", block.ident.as_str()),
+            &format!("{PRELUDE}{body}"),
+        );
         // The first `FAIL:` line is the learner's message. A `run` script's
         // own line and a sugar's specific default come first and win; an
         // author's `fail` on a sugar replaces them, so they are silenced.
@@ -159,7 +164,9 @@ pub(super) fn solve(source: &super::Source, block: &Block) -> Loaded<String> {
     let run = fields.script("run")?;
     let run = fields.need("run", run)?;
     fields.done()?;
-    Ok(format!("{PRELUDE}{run}"))
+    let script = format!("{PRELUDE}{run}");
+    source.record(block.span(), "`solve`".to_owned(), &script);
+    Ok(script)
 }
 
 /// The `packages` attribute as the first setup stage's script.
@@ -239,7 +246,10 @@ pub(super) fn setup(source: &super::Source, block: &Block) -> Loaded<String> {
     fields.done()?;
     let mut found = found.into_iter();
     match (found.next(), found.next()) {
-        (Some(script), None) => Ok(script),
+        (Some(script), None) => {
+            source.record(span, "`setup`".to_owned(), &script);
+            Ok(script)
+        }
         _ => Err(source.at(
             span,
             "`setup` takes exactly one of `run`, a `file` block and `k8s_apply`",

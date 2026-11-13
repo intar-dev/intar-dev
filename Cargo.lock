@@ -2104,6 +2104,7 @@ dependencies = [
 name = "intar-image-scenario"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "hcl-edit",
  "hcl-rs",
  "intar-contracts",
@@ -2111,6 +2112,7 @@ dependencies = [
  "pulldown-cmark",
  "regex",
  "serde",
+ "serde-saphyr 2.0.0",
  "serde_json",
  "sha2 0.11.1",
  "tempfile",

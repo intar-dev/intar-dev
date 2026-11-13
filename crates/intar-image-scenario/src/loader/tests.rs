@@ -191,6 +191,7 @@ fn lowered_checks_behave_in_bash() {
             text: &text,
             files: PathBuf::new(),
             referenced: std::cell::RefCell::default(),
+            scripts: std::cell::RefCell::default(),
         };
         let body = source.parse().expect("parses");
         let block = body.blocks().next().expect("a block");
@@ -450,5 +451,189 @@ fn retired_layouts_are_refused() {
     assert!(
         named.contains("image `other` must be in images/other.hcl"),
         "{named}"
+    );
+}
+
+#[test]
+fn tab_indented_heredocs_are_refused() {
+    let found = edit_scenario(
+        "    Start it: `systemctl start nginx`.\n",
+        "\tStart it: `systemctl start nginx`.\n",
+    );
+    assert!(
+        found.contains("scenario.hcl:9:1: a `<<-` heredoc is indented with tabs"),
+        "{found}"
+    );
+}
+
+/// The repository of [`repository`] with a course whose second lecture
+/// links `link`.
+fn with_course(root: &Path, link: &str) {
+    let write = |path: &str, text: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, text).expect("write");
+    };
+    write(
+        "courses/linux/course.md",
+        "---\ntitle: Linux\nsummary: Repair things.\nsequential: true\n---\n\nBody.\n",
+    );
+    write(
+        "courses/linux/00-theory/lecture.md",
+        "---\ntitle: Theory\nsummary: Read first.\ncategory: linux\ntags: [linux]\nestimated_minutes: 5\n---\n\nRead.\n",
+    );
+    write(
+        "courses/linux/01-repair/lecture.md",
+        &format!(
+            "---\ntitle: Repair\nsummary: Fix it.\ncategory: linux\ntags: [nginx]\ndifficulty: easy\nestimated_minutes: 15\nscenario: {link}\n---\n\nFix.\n"
+        ),
+    );
+}
+
+fn compiled(change: impl FnOnce(&Path)) -> Result<intar_contracts::source::SourceBundleV2, String> {
+    let (temp, _) = repository(|_| {});
+    change(temp.path());
+    compile(temp.path())
+        .map(|(bundle, _)| bundle)
+        .map_err(|problems| {
+            problems
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+}
+
+#[test]
+fn lectures_link_scenarios_of_their_repository() {
+    let bundle = compiled(|root| with_course(root, "repair-nginx")).expect("compiles");
+    let lectures = &bundle.course_catalog.courses[0].lectures;
+    assert_eq!(lectures.len(), 2);
+    assert_eq!(lectures[0].scenario_id, None);
+    assert_eq!(lectures[1].scenario_id.as_deref(), Some("repair-nginx"));
+    assert_eq!(lectures[1].body_markdown, "\nFix.\n");
+
+    for link in ["nope-nope", "rawkode-academy/systemd-timers"] {
+        let found = compiled(|root| with_course(root, link))
+            .err()
+            .unwrap_or_default();
+        assert!(
+            found.contains(&format!(
+                "courses/linux/01-repair/lecture.md:8:1: scenario `{link}` is not in this repository"
+            )),
+            "{found}"
+        );
+    }
+
+    let stray = compiled(|root| {
+        with_course(root, "repair-nginx");
+        std::fs::write(root.join("courses/linux/01-repair/notes.txt"), "x").expect("write");
+    })
+    .err()
+    .unwrap_or_default();
+    assert!(
+        stray.contains("courses/linux/01-repair/notes.txt: a lecture holds lecture.md"),
+        "{stray}"
+    );
+
+    let unknown = compiled(|root| {
+        with_course(root, "repair-nginx");
+        edit(root, "courses/linux/course.md", "sequential", "ordered");
+    })
+    .err()
+    .unwrap_or_default();
+    assert!(
+        unknown.contains("courses/linux/course.md:2:1: frontmatter:"),
+        "{unknown}"
+    );
+}
+
+fn gunzip(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Read as _;
+    let mut json = Vec::new();
+    flate2::read::GzDecoder::new(bytes)
+        .read_to_end(&mut json)
+        .expect("gunzip");
+    json
+}
+
+#[test]
+fn bundles_round_trip_and_are_capped() {
+    let bundle = compiled(|root| with_course(root, "repair-nginx")).expect("compiles");
+    let encoded = encode_bundle(&bundle).expect("encodes");
+    assert_eq!(
+        encode_bundle(&bundle).as_ref(),
+        Ok(&encoded),
+        "deterministic"
+    );
+    let decoded: intar_contracts::source::SourceBundleV2 =
+        serde_json::from_slice(&gunzip(&encoded)).expect("decodes");
+    assert_eq!(decoded, bundle);
+    assert_eq!(intar_contracts::source::validate_bundle(&decoded), Ok(()));
+
+    // Incompressible text over the cap.
+    let mut state = 1_u64;
+    let noise: String = (0..3 * 1024 * 1024)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            char::from(b'!' + u8::try_from(state >> 58).unwrap_or(0))
+        })
+        .collect();
+    let mut huge = bundle;
+    huge.scenarios[0].briefing = noise;
+    let refused = encode_bundle(&huge).err().unwrap_or_default();
+    assert!(refused.starts_with("bundle_too_large"), "{refused}");
+}
+
+/// `content/` holds the builder's old files too, so the example is copied
+/// out with what a new-format repository holds.
+fn example() -> tempfile::TempDir {
+    let content = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let scenario = temp.path().join("scenarios/broken-nginx");
+    std::fs::create_dir_all(&scenario).expect("mkdir");
+    std::fs::copy(content.join("intar.hcl"), temp.path().join("intar.hcl")).expect("copy");
+    std::fs::copy(
+        content.join("scenarios/broken-nginx/scenario.hcl"),
+        scenario.join("scenario.hcl"),
+    )
+    .expect("copy");
+    temp
+}
+
+#[test]
+fn the_example_content_validates_and_bundles() {
+    let temp = example();
+    let (bundle, scripts) = compile(temp.path()).unwrap_or_else(|problems| panic!("{problems:?}"));
+    assert_eq!(bundle.scenarios[0].slug, "broken-nginx");
+    assert_eq!(bundle.scenarios[0].tasks.len(), 3);
+    assert!(encode_bundle(&bundle).is_ok());
+    // No lint fires on it, shellcheck included when it is installed.
+    assert_eq!(warnings(&scripts), Vec::new());
+    assert_eq!(format_repository(temp.path(), false), Ok(Vec::new()));
+}
+
+#[test]
+fn quiet_greps_are_warned_at_their_block() {
+    let (_temp, loaded) = repository(|root| {
+        edit(
+            root,
+            "scenarios/repair-nginx/scenario.hcl",
+            "check { port = 80 }",
+            "check { run = \"ss -ltn | grep -q :80\" }",
+        );
+    });
+    let repository = loaded.unwrap_or_else(|problems| panic!("{problems:?}"));
+    let found: Vec<String> = warnings(&repository.scripts)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(
+        found.iter().any(|warning| warning.starts_with(
+            "scenarios/repair-nginx/scenario.hcl:58:5: warning: `check` lowered line 2: `| grep -q`"
+        )),
+        "{found:?}"
     );
 }

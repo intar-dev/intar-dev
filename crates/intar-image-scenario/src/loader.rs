@@ -3,6 +3,10 @@
 //! evaluation: literals, heredocs, `file()` and `markdown()`. What it
 //! produces are the lowered contract types of `intar_contracts::scenario`.
 
+mod bundle;
+mod courses;
+mod fmt;
+mod lint;
 mod lower;
 mod markdown;
 mod repo;
@@ -10,14 +14,17 @@ mod repo;
 #[cfg(test)]
 mod tests;
 
-pub use repo::{Repository, load_repository};
+pub use bundle::{compile, encode_bundle};
+pub use fmt::{format_hcl, format_repository};
+pub use lint::warnings;
+pub use repo::{LoweredScript, Repository, load_repository};
 
 use hcl::edit::Span as _;
 use hcl::edit::expr::{Expression, ObjectKey};
 use hcl::edit::structure::{Block, BlockLabel, Body, Structure};
 use hcl::edit::template::{Element, Template};
 use std::collections::BTreeMap;
-use std::fmt;
+use std::fmt as text;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -32,8 +39,8 @@ pub struct Diagnostic {
     pub message: String,
 }
 
-impl fmt::Display for Diagnostic {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl text::Display for Diagnostic {
+    fn fmt(&self, out: &mut text::Formatter<'_>) -> text::Result {
         let path = self.path.display();
         match self.line {
             0 => write!(out, "{path}: {}", self.message),
@@ -58,9 +65,20 @@ struct Source<'a> {
     files: PathBuf,
     /// Repository-relative paths the file's calls have read.
     referenced: std::cell::RefCell<Vec<PathBuf>>,
+    /// Every script lowered from the file, with the block it came from, for
+    /// the lints.
+    scripts: std::cell::RefCell<Vec<LoweredScript>>,
 }
 
 impl Source<'_> {
+    /// Keeps a lowered script for the lints, at `span`.
+    fn record(&self, span: Option<Range<usize>>, what: String, script: &str) {
+        self.scripts.borrow_mut().push(LoweredScript {
+            at: self.at(span, what),
+            script: script.to_owned(),
+        });
+    }
+
     fn at(&self, span: Option<Range<usize>>, message: impl Into<String>) -> Diagnostic {
         let (line, column) = span.map_or((0, 0), |span| line_column(self.text, span.start));
         Diagnostic {
@@ -192,7 +210,12 @@ fn value(source: &Source, expression: &Expression) -> Loaded<Value> {
     match expression {
         Expression::String(text) => Ok(Value::Text(text.value().clone())),
         Expression::StringTemplate(text) => template(literal(text)),
-        Expression::HeredocTemplate(heredoc) => template(literal(&heredoc.template)),
+        Expression::HeredocTemplate(heredoc) => {
+            if heredoc.indent().is_some() {
+                tab_indented(source, span.clone())?;
+            }
+            template(literal(&heredoc.template))
+        }
         Expression::Bool(flag) => Ok(Value::Bool(*flag.value())),
         Expression::Number(number) => match number.value().as_i64() {
             Some(number) => Ok(Value::Number(number)),
@@ -241,6 +264,30 @@ fn value(source: &Source, expression: &Expression) -> Loaded<Value> {
         | Expression::BinaryOp(_)
         | Expression::ForExpr(_) => refuse("an expression"),
     }
+}
+
+/// `<<-` strips the smallest indentation and counts a tab as one column, so
+/// tabs in the indentation strip the wrong amount without an error.
+fn tab_indented(source: &Source, span: Option<Range<usize>>) -> Loaded<()> {
+    let Some(span) = span else {
+        return Ok(());
+    };
+    let raw = source.text.get(span.clone()).unwrap_or_default();
+    let mut offset = span.start;
+    // The opener's line and the closing delimiter's line are not content.
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    for (index, line) in lines.iter().enumerate() {
+        let content = index > 0 && index + 1 < lines.len();
+        let indentation = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+        if content && indentation.contains('\t') {
+            return Err(source.at(
+                Some(offset..offset),
+                "a `<<-` heredoc is indented with tabs; indent it with spaces",
+            ));
+        }
+        offset += line.len();
+    }
+    Ok(())
 }
 
 /// One block: its attributes, taken one by one, and its child blocks in file
@@ -300,7 +347,7 @@ impl<'a> Fields<'a> {
         )
     }
 
-    fn error(&self, span: Option<Range<usize>>, message: impl fmt::Display) -> Diagnostic {
+    fn error(&self, span: Option<Range<usize>>, message: impl text::Display) -> Diagnostic {
         self.source.at(
             span.or_else(|| self.span.clone()),
             format!("{}: {message}", self.what),
