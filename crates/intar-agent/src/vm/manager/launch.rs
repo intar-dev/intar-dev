@@ -157,6 +157,14 @@ pub(super) async fn ensure_jailer_image_template(
         image_id: Sha256Digest::parse(image.image_id.clone())?,
         chunk_manifest_sha256: Sha256Digest::parse(image.chunk_manifest_sha256.clone())?,
         virtual_size_bytes: image.virtual_size_bytes,
+        // The image cache does not hold OCI manifests until it pulls through
+        // /v2; until then jailerd refuses this request at the hash check.
+        image_manifest: artifact_source(
+            &image.chunk_manifest_path,
+            &capabilities.allowed_source_roots,
+            Some(&image.image_id),
+            ArtifactAccess::ReadOnly,
+        )?,
         manifest: artifact_source(
             &image.chunk_manifest_path,
             &capabilities.allowed_source_roots,

@@ -316,10 +316,19 @@ pub struct PreparedImageV2Result {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareChunkedImageV3Request {
+    /// The digest of the machine image's OCI manifest: the image's identity
+    /// and the template's name.
     pub image_id: Sha256Digest,
+    /// The digest of the machine config, the blob that maps chunks to
+    /// layers.
     pub chunk_manifest_sha256: Sha256Digest,
     pub virtual_size_bytes: u64,
+    /// The OCI manifest; its SHA-256 is `image_id`.
+    pub image_manifest: ArtifactSource,
+    /// The machine config; its SHA-256 is `chunk_manifest_sha256`.
     pub manifest: ArtifactSource,
+    /// The blob cache: every chunk layer is a file named by its digest's
+    /// hex.
     pub chunk_cache_root: TrustedDirectorySource,
     pub kernel: ArtifactSource,
     pub initrd: Option<ArtifactSource>,
@@ -350,6 +359,7 @@ impl PrepareChunkedImageV3Request {
         }
         self.chunk_cache_root.validate()?;
         for source in [
+            Some(&self.image_manifest),
             Some(&self.manifest),
             Some(&self.kernel),
             self.initrd.as_ref(),
@@ -368,7 +378,9 @@ impl PrepareChunkedImageV3Request {
                 return Err(ValidationError::MissingTemplateArtifactHash);
             }
         }
-        if self.manifest.sha256.as_ref() != Some(&self.chunk_manifest_sha256) {
+        if self.manifest.sha256.as_ref() != Some(&self.chunk_manifest_sha256)
+            || self.image_manifest.sha256.as_ref() != Some(&self.image_id)
+        {
             return Err(ValidationError::InvalidChunkManifestSource);
         }
         Ok(())

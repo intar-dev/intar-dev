@@ -4,11 +4,33 @@ use std::num::NonZeroU64;
 use std::os::unix::fs::MetadataExt as _;
 
 use crate::store_gc::touch_chunked_template;
-use intar_contracts::catalog::{IMAGE_CHUNK_SIZE_BYTES, ImageChunkManifestV1, ImageChunkV1};
+use intar_contracts::catalog::{IMAGE_CHUNK_SIZE_BYTES, MAX_CHUNKED_IMAGE_BYTES};
+use intar_contracts::oci::{
+    DISK_CHUNK_MEDIA_TYPE, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE, MACHINE_ARTIFACT_TYPE,
+    MACHINE_CONFIG_MEDIA_TYPE, MachineConfigV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1,
+    OciManifestV1,
+};
 use intar_jailer_protocol::TrustedDirectorySource;
 use reflink_copy::ReflinkBlockBuilder;
 
 const MAX_CHUNK_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+
+/// One non-zero chunk of the root disk, with everything needed to verify it.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct ImageChunk {
+    pub(super) index: u32,
+    pub(super) raw_size_bytes: u32,
+    pub(super) raw_sha256: String,
+    pub(super) encoded_size_bytes: u64,
+    pub(super) encoded_sha256: String,
+}
+
+/// The chunks of a verified machine image.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct VerifiedImage {
+    pub(super) virtual_size_bytes: u64,
+    pub(super) chunks: Vec<ImageChunk>,
+}
 
 pub(super) fn prepare_chunked_image_template(
     config: &JailerdConfig,
@@ -208,36 +230,149 @@ pub(super) fn validate_prepared_chunked_launch(
     Ok(())
 }
 
-fn read_verified_chunk_manifest(
+/// A source file of at most 4 MiB whose SHA-256 the request names.
+fn read_verified_source(
     config: &JailerdConfig,
-    request: &PrepareChunkedImageV3Request,
-) -> Result<ImageChunkManifestV1> {
-    let mut file = open_trusted_source(
-        config,
-        request.manifest.source_root,
-        &request.manifest.relative_path,
-    )?;
+    source: &ArtifactSource,
+    expected: &Sha256Digest,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let mut file = open_trusted_source(config, source.source_root, &source.relative_path)?;
     let mut bytes = Vec::new();
     std::io::Read::by_ref(&mut file)
         .take(MAX_CHUNK_MANIFEST_BYTES + 1)
         .read_to_end(&mut bytes)?;
     ensure!(
         bytes.len() as u64 <= MAX_CHUNK_MANIFEST_BYTES,
-        "chunk manifest exceeds the bounded size"
+        "{label} exceeds the bounded size"
     );
     ensure!(
-        sha256_digest(&bytes) == request.chunk_manifest_sha256,
-        "chunk manifest SHA-256 mismatch"
+        sha256_digest(&bytes) == *expected,
+        "{label} SHA-256 mismatch"
     );
-    let manifest: ImageChunkManifestV1 =
-        serde_json::from_slice(&bytes).context("decode chunk manifest")?;
-    manifest.validate().context("validate chunk manifest")?;
+    Ok(bytes)
+}
+
+/// Follow the chain the image's identity commits to: the OCI manifest (its
+/// digest is the image id) names the machine config and every layer by
+/// digest and size; the config maps each non-zero chunk of the disk to a
+/// layer and to the SHA-256 of its raw content. Nothing outside that chain
+/// is believed: the kernel and initrd the request offers must be the
+/// manifest's.
+fn read_verified_chunk_manifest(
+    config: &JailerdConfig,
+    request: &PrepareChunkedImageV3Request,
+) -> Result<VerifiedImage> {
+    let bytes = read_verified_source(
+        config,
+        &request.image_manifest,
+        &request.image_id,
+        "image manifest",
+    )?;
+    let manifest: OciManifestV1 =
+        serde_json::from_slice(&bytes).context("decode image manifest")?;
+    let bytes = read_verified_source(
+        config,
+        &request.manifest,
+        &request.chunk_manifest_sha256,
+        "machine config",
+    )?;
+    let machine: MachineConfigV1 =
+        serde_json::from_slice(&bytes).context("decode machine config")?;
+    verified_image(
+        &manifest,
+        &machine,
+        bytes.len() as u64,
+        request.chunk_manifest_sha256.as_str(),
+        request.virtual_size_bytes,
+        request.kernel.sha256.as_ref().map(Sha256Digest::as_str),
+        request
+            .initrd
+            .as_ref()
+            .and_then(|source| source.sha256.as_ref())
+            .map(Sha256Digest::as_str),
+    )
+}
+
+/// The checks of [`read_verified_chunk_manifest`] on already-verified bytes.
+pub(super) fn verified_image(
+    manifest: &OciManifestV1,
+    machine: &MachineConfigV1,
+    config_bytes: u64,
+    config_sha256: &str,
+    virtual_size_bytes: u64,
+    kernel_sha256: Option<&str>,
+    initrd_sha256: Option<&str>,
+) -> Result<VerifiedImage> {
     ensure!(
-        manifest.image_id == request.image_id.as_str()
-            && manifest.virtual_size_bytes == request.virtual_size_bytes,
-        "chunk manifest identity does not match prepare request"
+        manifest.schema_version == 2
+            && manifest.media_type == OCI_MANIFEST_MEDIA_TYPE
+            && manifest.artifact_type == MACHINE_ARTIFACT_TYPE
+            && manifest.config.media_type == MACHINE_CONFIG_MEDIA_TYPE,
+        "image manifest is not a machine image"
     );
-    Ok(manifest)
+    ensure!(
+        manifest.config.digest.hex() == config_sha256 && manifest.config.size == config_bytes,
+        "machine config is not the one the image manifest names"
+    );
+    let layers_of = |media_type: &str| -> Vec<&OciDescriptorV1> {
+        manifest
+            .layers
+            .iter()
+            .filter(|layer| layer.media_type == media_type)
+            .collect()
+    };
+    let kernels = layers_of(KERNEL_MEDIA_TYPE);
+    let initrds = layers_of(INITRD_MEDIA_TYPE);
+    ensure!(
+        kernels.len() == 1 && kernels.first().map(|layer| layer.digest.hex()) == kernel_sha256,
+        "kernel is not the one the image manifest names"
+    );
+    ensure!(
+        initrds.len() <= 1 && initrds.first().map(|layer| layer.digest.hex()) == initrd_sha256,
+        "initrd is not the one the image manifest names"
+    );
+
+    let chunk_size = u64::from(IMAGE_CHUNK_SIZE_BYTES);
+    let disk = &machine.disk;
+    ensure!(
+        disk.chunk_size == chunk_size
+            && disk.size_bytes == virtual_size_bytes
+            && disk.size_bytes > 0
+            && disk.size_bytes <= MAX_CHUNKED_IMAGE_BYTES,
+        "machine config disk geometry does not match the prepare request"
+    );
+    let mut chunks = Vec::with_capacity(disk.chunks.len());
+    let mut next_index = 0_u64;
+    for (index, layer_index, raw_sha256) in &disk.chunks {
+        let offset = index
+            .checked_mul(chunk_size)
+            .filter(|offset| *offset < disk.size_bytes && *index >= next_index)
+            .with_context(|| format!("image chunk {index} is out of order or outside the disk"))?;
+        next_index = index + 1;
+        let layer = manifest
+            .layers
+            .get(*layer_index as usize)
+            .filter(|layer| layer.media_type == DISK_CHUNK_MEDIA_TYPE)
+            .with_context(|| format!("image chunk {index} names no chunk layer"))?;
+        // A zstd frame of a 4 MiB chunk is never twice its size.
+        ensure!(
+            layer.size > 0 && layer.size <= 2 * chunk_size,
+            "image chunk {index} has an implausible encoded size"
+        );
+        chunks.push(ImageChunk {
+            index: u32::try_from(*index).context("image chunk index")?,
+            raw_size_bytes: u32::try_from(chunk_size.min(disk.size_bytes - offset))
+                .context("image chunk size")?,
+            raw_sha256: raw_sha256.as_str().to_owned(),
+            encoded_size_bytes: layer.size,
+            encoded_sha256: layer.digest.hex().to_owned(),
+        });
+    }
+    Ok(VerifiedImage {
+        virtual_size_bytes: disk.size_bytes,
+        chunks,
+    })
 }
 
 fn open_trusted_chunk_cache(
@@ -268,7 +403,7 @@ fn open_trusted_chunk_cache(
 
 fn assemble_chunked_root(
     config: &JailerdConfig,
-    manifest: &ImageChunkManifestV1,
+    manifest: &VerifiedImage,
     image_id: &Sha256Digest,
     chunk_cache: &OwnedFd,
     chunk_store: &OwnedFd,
@@ -319,7 +454,7 @@ fn ensure_raw_chunk(
     config: &JailerdConfig,
     chunk_cache: &OwnedFd,
     chunk_store: &OwnedFd,
-    chunk: &ImageChunkV1,
+    chunk: &ImageChunk,
 ) -> Result<File> {
     let raw_name = format!("{}.raw", chunk.raw_sha256);
     let lock_name = format!(".lock-{}", chunk.raw_sha256);
@@ -334,7 +469,8 @@ fn ensure_raw_chunk(
         return Ok(existing);
     }
 
-    let encoded_name = format!("{}.raw.zst", chunk.raw_sha256);
+    // The blob cache names every blob by its digest.
+    let encoded_name = chunk.encoded_sha256.clone();
     let encoded_fd = open_source_beneath(chunk_cache, Path::new(&encoded_name))?;
     let mut encoded = File::from(encoded_fd);
     let before = encoded.metadata()?;
@@ -403,7 +539,7 @@ fn ensure_raw_chunk(
 fn open_verified_raw_chunk(
     chunk_store: &OwnedFd,
     raw_name: &str,
-    chunk: &ImageChunkV1,
+    chunk: &ImageChunk,
 ) -> Result<File> {
     let fd = rustix::fs::openat(
         chunk_store,

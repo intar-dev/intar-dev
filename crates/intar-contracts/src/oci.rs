@@ -111,6 +111,30 @@ impl OciDigest {
     }
 }
 
+/// `mediaType` of every manifest stored here.
+pub const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+
+/// A stored OCI image manifest, exactly as the builder writes it: no
+/// annotations, no subject. Its digest is the artifact's identity.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OciManifestV1 {
+    #[schemars(range(min = 2, max = 2))]
+    pub schema_version: u32,
+    pub media_type: String,
+    pub artifact_type: String,
+    pub config: OciDescriptorV1,
+    pub layers: Vec<OciDescriptorV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OciDescriptorV1 {
+    pub media_type: String,
+    pub digest: OciDigest,
+    pub size: u64,
+}
+
 /// The config blob of a machine image. The image's identity is its
 /// manifest's digest.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -263,6 +287,27 @@ mod tests {
                 .wake
                 .is_some()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn the_machine_manifest_of_the_design_parses_and_is_strict() -> Result<(), serde_json::Error> {
+        let digest = |digit: &str| format!("sha256:{}", digit.repeat(64));
+        let json = serde_json::json!({
+            "schemaVersion": 2, "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "artifactType": MACHINE_ARTIFACT_TYPE,
+            "config": {"mediaType": MACHINE_CONFIG_MEDIA_TYPE, "digest": digest("c"), "size": 61234},
+            "layers": [
+                {"mediaType": KERNEL_MEDIA_TYPE, "digest": digest("1"), "size": 11_534_336},
+                {"mediaType": INITRD_MEDIA_TYPE, "digest": digest("2"), "size": 3_145_728},
+                {"mediaType": DISK_CHUNK_MEDIA_TYPE, "digest": digest("3"), "size": 1_137_000},
+            ],
+        });
+        let manifest: OciManifestV1 = serde_json::from_value(json.clone())?;
+        assert_eq!(serde_json::to_value(&manifest)?, json);
+        let mut annotated = json;
+        annotated["annotations"] = serde_json::json!({});
+        assert!(serde_json::from_value::<OciManifestV1>(annotated).is_err());
         Ok(())
     }
 

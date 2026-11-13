@@ -234,3 +234,132 @@ fn chunked_template_metadata_is_bounded_separately_from_protocol_frames() {
             .contains("exceeds bounded size")
     );
 }
+
+mod machine_image {
+    use crate::chunked_templates::verified_image;
+    use intar_contracts::oci::{MachineConfigV1, OciManifestV1};
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn hex(digit: &str) -> String {
+        digit.repeat(64)
+    }
+
+    /// A 10 MiB disk: chunk 0 full, chunk 1 a zero hole, chunk 2 the 2 MiB
+    /// tail; both chunks in one layer (identical content is stored once).
+    fn image() -> (serde_json::Value, serde_json::Value) {
+        let layer = |media: &str, digit: &str, size: u64| serde_json::json!({"mediaType": media, "digest": format!("sha256:{}", hex(digit)), "size": size});
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "artifactType": "application/vnd.intar.machine.v1",
+            "config": layer("application/vnd.intar.machine.config.v1+json", "c", 300),
+            "layers": [
+                layer("application/vnd.intar.kernel.v1", "1", 11 * MIB),
+                layer("application/vnd.intar.initrd.v1", "2", 3 * MIB),
+                layer("application/vnd.intar.disk.chunk.v1+zstd", "3", 1000),
+            ],
+        });
+        let machine = serde_json::json!({
+            "guest_contract": 3, "image_format": "intar-image-3",
+            "build_key": format!("sha256:{}", hex("b")),
+            "boot": {"cmdline": "root=LABEL=INTARROOT"},
+            "disk": {"size_bytes": 10 * MIB, "chunk_size": 4 * MIB,
+                     "chunks": [[0, 2, hex("d")], [2, 2, hex("e")]]},
+        });
+        (manifest, machine)
+    }
+
+    fn verify(
+        manifest: &serde_json::Value,
+        machine: &serde_json::Value,
+    ) -> Result<Vec<(u32, u32)>, String> {
+        let manifest: OciManifestV1 =
+            serde_json::from_value(manifest.clone()).map_err(|error| error.to_string())?;
+        let machine: MachineConfigV1 =
+            serde_json::from_value(machine.clone()).map_err(|error| error.to_string())?;
+        verified_image(
+            &manifest,
+            &machine,
+            300,
+            &hex("c"),
+            10 * MIB,
+            Some(&hex("1")),
+            Some(&hex("2")),
+        )
+        .map(|image| {
+            assert_eq!(image.virtual_size_bytes, 10 * MIB);
+            image
+                .chunks
+                .iter()
+                .map(|chunk| (chunk.index, chunk.raw_size_bytes))
+                .collect()
+        })
+        .map_err(|error| format!("{error:#}"))
+    }
+
+    #[test]
+    fn a_sound_image_yields_its_chunks_with_a_short_tail() {
+        let (manifest, machine) = image();
+        assert_eq!(
+            verify(&manifest, &machine),
+            Ok(vec![(0, 4 << 20), (2, 2 << 20)])
+        );
+    }
+
+    #[test]
+    fn every_break_in_the_chain_is_refused() {
+        type Break = fn(&mut serde_json::Value, &mut serde_json::Value);
+        let broken: [(&str, Break); 12] = [
+            ("not a machine image", |m, _| {
+                m["artifactType"] = "application/vnd.intar.kino.v1".into()
+            }),
+            ("not the one the image manifest names", |m, _| {
+                m["config"]["size"] = 301.into()
+            }),
+            ("not the one the image manifest names", |m, _| {
+                m["config"]["digest"] = format!("sha256:{}", "f".repeat(64)).into();
+            }),
+            ("kernel is not the one", |m, _| {
+                m["layers"][0]["digest"] = format!("sha256:{}", "f".repeat(64)).into();
+            }),
+            ("initrd is not the one", |m, _| {
+                m["layers"][1]["digest"] = format!("sha256:{}", "f".repeat(64)).into();
+            }),
+            ("kernel is not the one", |m, _| {
+                m["layers"][1]["mediaType"] = "application/vnd.intar.kernel.v1".into()
+            }),
+            ("disk geometry", |_, c| {
+                c["disk"]["chunk_size"] = 4096.into()
+            }),
+            ("disk geometry", |_, c| {
+                c["disk"]["size_bytes"] = (11 * MIB).into()
+            }),
+            ("out of order or outside the disk", |_, c| {
+                c["disk"]["chunks"][1][0] = 0.into()
+            }),
+            ("out of order or outside the disk", |_, c| {
+                c["disk"]["chunks"][1][0] = 3.into()
+            }),
+            ("names no chunk layer", |_, c| {
+                c["disk"]["chunks"][0][1] = 0.into()
+            }),
+            ("implausible encoded size", |m, _| {
+                m["layers"][2]["size"] = (9 * MIB).into()
+            }),
+        ];
+        for (expected, change) in broken {
+            let (mut manifest, mut machine) = image();
+            change(&mut manifest, &mut machine);
+            let error = verify(&manifest, &machine).expect_err(expected);
+            assert!(
+                error.contains(expected),
+                "expected `{expected}` in `{error}`"
+            );
+        }
+        // A raw digest that is not hex never reaches a file name.
+        let (manifest, mut machine) = image();
+        machine["disk"]["chunks"][0][2] = "../../etc/shadow".into();
+        assert!(verify(&manifest, &machine).is_err());
+    }
+}

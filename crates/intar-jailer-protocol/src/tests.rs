@@ -230,6 +230,7 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         image_id: image_id.clone(),
         chunk_manifest_sha256: manifest_sha256.clone(),
         virtual_size_bytes: 8 * 1024 * 1024,
+        image_manifest: readonly("blobs/manifest", image_id.clone()),
         manifest: readonly("manifests/image.json", manifest_sha256.clone()),
         chunk_cache_root: TrustedDirectorySource {
             source_root: 0,
@@ -240,6 +241,12 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         request_class: RequestClass::Foreground,
     };
     prepare.validate().expect("valid chunked prepare");
+    let mut other_manifest = prepare.clone();
+    other_manifest.image_manifest.sha256 = Some(manifest_sha256.clone());
+    assert!(
+        other_manifest.validate().is_err(),
+        "the image manifest's hash must be the image id"
+    );
     let envelope = RequestEnvelope::new(
         11,
         Request::PrepareChunkedImageV3(Box::new(prepare.clone())),
