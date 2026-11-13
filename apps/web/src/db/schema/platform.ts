@@ -3,6 +3,7 @@ import {
   check,
   index,
   integer,
+  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
@@ -63,6 +64,10 @@ export const agentHosts = sqliteTable(
     lastClientHelloAt: integer("last_client_hello_at"),
     lastServerHelloAt: integer("last_server_hello_at"),
     agentVersion: text("agent_version"),
+    // The last time the Worker refused this host's agent as too old.
+    lastRefusalCode: text("last_refusal_code"),
+    lastRefusalAt: integer("last_refusal_at"),
+    lastRefusedAgentVersion: text("last_refused_agent_version"),
     inventoryJson: text("inventory_json"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
@@ -411,5 +416,66 @@ export const imageRegistryGcRuns = sqliteTable(
   (table) => [
     uniqueIndex("image_registry_gc_runs_sweep_uidx").on(table.sweepToken),
     index("image_registry_gc_runs_state_idx").on(table.state, table.startedAt),
+  ],
+);
+
+export type MachineBuildState =
+  | "queued"
+  | "assigned"
+  | "building"
+  | "succeeded"
+  | "failed";
+
+/**
+ * One machine image per build key. Images are platform content shared by
+ * every scope, so a build has no organization. `image_digest` is written
+ * once, by the build's result.
+ */
+export const machineBuilds = sqliteTable(
+  "machine_builds",
+  {
+    buildKey: text("build_key").primaryKey(),
+    imageFormat: text("image_format").notNull(),
+    bundleRev: text("bundle_rev").notNull(),
+    state: text("state").$type<MachineBuildState>().default("queued").notNull(),
+    imageDigest: text("image_digest"),
+    attempt: integer("attempt").default(0).notNull(),
+    hostId: text("host_id").references(() => agentHosts.id, {
+      onDelete: "set null",
+    }),
+    logKey: text("log_key"),
+    error: text("error"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    index("machine_builds_state_idx").on(table.state, table.updatedAt),
+    check(
+      "machine_builds_state_check",
+      sql`${table.state} IN ('queued', 'assigned', 'building', 'succeeded', 'failed')`,
+    ),
+  ],
+);
+
+/** Every manifest stored under `oci/sha256/<hex>`, written once at its PUT. */
+export const registryManifests = sqliteTable("registry_manifests", {
+  digest: text("digest").primaryKey(),
+  mediaType: text("media_type").notNull(),
+  artifactType: text("artifact_type").notNull(),
+  size: integer("size").notNull(),
+  createdAt: integer("created_at").default(nowMsDefault).notNull(),
+});
+
+/** The blobs a manifest references: its config and its layers. */
+export const registryManifestBlobs = sqliteTable(
+  "registry_manifest_blobs",
+  {
+    manifestDigest: text("manifest_digest")
+      .notNull()
+      .references(() => registryManifests.digest, { onDelete: "cascade" }),
+    blobDigest: text("blob_digest").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.manifestDigest, table.blobDigest] }),
   ],
 );

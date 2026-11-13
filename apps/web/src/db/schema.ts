@@ -23,6 +23,9 @@ export {
   imageRegistryGcRuns,
   imageRegistryOperationWriters,
   imageRegistryUploadSessions,
+  machineBuilds,
+  registryManifestBlobs,
+  registryManifests,
   runtimeOperationGates,
 } from "./schema/platform";
 export {
@@ -46,6 +49,10 @@ export {
   scenarioRunSshKeys,
 } from "./schema/runs";
 export {
+  bundles,
+  organizationEntitlements,
+  scenarioRevisions,
+  scenarios,
   scenarioCatalogCandidates,
   scenarioCatalogSnapshots,
   courseCatalogs,
@@ -89,6 +96,8 @@ export type {
   CourseCatalogSnapshotV2,
   ScenarioRunHintSnapshot,
 } from "./schema/shared";
+export type { MachineBuildState } from "./schema/platform";
+export type { ScenarioRevisionState } from "./schema/scenarios";
 export type {
   HostResourceReservationState,
   RuntimeDomainKind,

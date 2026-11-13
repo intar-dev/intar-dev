@@ -2,6 +2,7 @@ import {
   check,
   index,
   integer,
+  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
@@ -12,6 +13,7 @@ import type {
   ScenarioHintManifestV3,
   ScenarioManifestV5,
 } from "@/generated/catalog";
+import type { ScenarioRevisionV1 } from "@/generated/contracts/scenario-revision-v1";
 import { organization, user } from "./core";
 import { agentHosts } from "./platform";
 import {
@@ -295,4 +297,96 @@ export const vmScenarioProbes = sqliteTable(
       table.ordinal,
     ),
   ],
+);
+
+export type ScenarioRevisionState = "building" | "ready" | "verified" | "failed";
+
+/**
+ * One row per published scenario, keyed by its global ID
+ * `<namespace>/<slug>`. The namespace comes from the source binding: `intar`
+ * for the public scope, else the organization's slug. Rows are never deleted,
+ * so an ID is never reused.
+ */
+export const scenarios = sqliteTable(
+  "scenarios",
+  {
+    id: text("id").primaryKey(),
+    namespace: text("namespace").notNull(),
+    slug: text("slug").notNull(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "restrict",
+    }),
+    scopeKey: text("scope_key").notNull(),
+    enabled: integer("enabled", { mode: "boolean" }).notNull(),
+    play: integer("play", { mode: "boolean" }).notNull(),
+    liveRev: text("live_rev"),
+    candidateRev: text("candidate_rev"),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("scenarios_namespace_slug_uidx").on(table.namespace, table.slug),
+    index("scenarios_organization_idx").on(table.organizationId),
+    check(
+      "scenarios_id_check",
+      sql`${table.id} = ${table.namespace} || '/' || ${table.slug}`,
+    ),
+  ],
+);
+
+/** A scenario as one bundle revision compiled it; immutable once ready. */
+export const scenarioRevisions = sqliteTable(
+  "scenario_revisions",
+  {
+    scenarioId: text("scenario_id")
+      .notNull()
+      .references(() => scenarios.id, { onDelete: "cascade" }),
+    rev: text("rev").notNull(),
+    guestContract: integer("guest_contract").notNull(),
+    docJson: jsonText<ScenarioRevisionV1>("doc_json").notNull(),
+    // sha256 of the canonical `doc_json`, set when the revision is ready.
+    contentDigest: text("content_digest"),
+    state: text("state").$type<ScenarioRevisionState>().notNull(),
+    verifyRunId: text("verify_run_id"),
+    verifyReportJson: text("verify_report_json"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.scenarioId, table.rev] }),
+    check(
+      "scenario_revisions_state_check",
+      sql`${table.state} IN ('building', 'ready', 'verified', 'failed')`,
+    ),
+    check(
+      "scenario_revisions_doc_json_check",
+      sql`json_valid(${table.docJson})`,
+    ),
+  ],
+);
+
+/** One uploaded source bundle, stored at `r2_key`. */
+export const bundles = sqliteTable(
+  "bundles",
+  {
+    rev: text("rev").primaryKey(),
+    scopeKey: text("scope_key").notNull(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "restrict",
+    }),
+    compilerVersion: text("compiler_version").notNull(),
+    r2Key: text("r2_key").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [index("bundles_organization_idx").on(table.organizationId)],
+);
+
+/** What a platform admin has granted an organization. */
+export const organizationEntitlements = sqliteTable(
+  "organization_entitlements",
+  {
+    organizationId: text("organization_id")
+      .primaryKey()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    publicPlayGrantedAt: integer("public_play_granted_at"),
+    grantedBy: text("granted_by"),
+  },
 );

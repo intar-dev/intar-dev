@@ -6,6 +6,7 @@ import {
   text,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
+import type { RevisionTaskV1 } from "@/generated/contracts/scenario-revision-v1";
 import { organization, user } from "./core";
 import { agentHosts } from "./platform";
 import { runtimeExecutions } from "./runtime";
@@ -46,6 +47,14 @@ export const scenarioRuns = sqliteTable(
       .references(() => agentHosts.id, { onDelete: "restrict" }),
     scenarioId: text("scenario_id").notNull(),
     scenarioName: text("scenario_name").notNull(),
+    // The scenario revision the run started from, and its tasks.
+    scenarioRev: text("scenario_rev"),
+    tasksJson: jsonText<RevisionTaskV1[]>("tasks_json"),
+    launchSource: text("launch_source").$type<
+      "course" | "play" | "assignment" | "verify"
+    >(),
+    ref: text("ref"),
+    endReason: text("end_reason").$type<"lab_failed">(),
     // Immutable course/lecture context. Old runs remain readable with nulls.
     courseScopeKey: text("course_scope_key"),
     courseId: text("course_id"),

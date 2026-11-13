@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "12a3fb28-782d-4dff-a707-0bac26453c1f",
-  "prevId": "0d9331f0-b993-4f3a-a619-5843e6b48a39",
+  "id": "122ac0a9-4679-46ff-a8fb-bf45e2bf0400",
+  "prevId": "12a3fb28-782d-4dff-a707-0bac26453c1f",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -680,6 +680,27 @@
           "notNull": false,
           "autoincrement": false
         },
+        "last_refusal_code": {
+          "name": "last_refusal_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_refusal_at": {
+          "name": "last_refusal_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_refused_agent_version": {
+          "name": "last_refused_agent_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "inventory_json": {
           "name": "inventory_json",
           "type": "text",
@@ -780,6 +801,81 @@
           "value": "(\"scope\" is 'organization' AND \"organization_id\" is not null) OR (\"scope\" is not 'organization' AND \"organization_id\" is null)"
         }
       }
+    },
+    "bundles": {
+      "name": "bundles",
+      "columns": {
+        "rev": {
+          "name": "rev",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "scope_key": {
+          "name": "scope_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "compiler_version": {
+          "name": "compiler_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "r2_key": {
+          "name": "r2_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        }
+      },
+      "indexes": {
+        "bundles_organization_idx": {
+          "name": "bundles_organization_idx",
+          "columns": [
+            "organization_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "bundles_organization_id_organization_id_fk": {
+          "name": "bundles_organization_id_organization_id_fk",
+          "tableFrom": "bundles",
+          "tableTo": "organization",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
     },
     "course_catalogs": {
       "name": "course_catalogs",
@@ -2499,6 +2595,125 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "machine_builds": {
+      "name": "machine_builds",
+      "columns": {
+        "build_key": {
+          "name": "build_key",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "image_format": {
+          "name": "image_format",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "bundle_rev": {
+          "name": "bundle_rev",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'queued'"
+        },
+        "image_digest": {
+          "name": "image_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "attempt": {
+          "name": "attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "host_id": {
+          "name": "host_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "log_key": {
+          "name": "log_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        }
+      },
+      "indexes": {
+        "machine_builds_state_idx": {
+          "name": "machine_builds_state_idx",
+          "columns": [
+            "state",
+            "updated_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "machine_builds_host_id_agent_hosts_id_fk": {
+          "name": "machine_builds_host_id_agent_hosts_id_fk",
+          "tableFrom": "machine_builds",
+          "tableTo": "agent_hosts",
+          "columnsFrom": [
+            "host_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "machine_builds_state_check": {
+          "name": "machine_builds_state_check",
+          "value": "\"machine_builds\".\"state\" IN ('queued', 'assigned', 'building', 'succeeded', 'failed')"
+        }
+      }
+    },
     "member": {
       "name": "member",
       "columns": {
@@ -3814,6 +4029,51 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "organization_entitlements": {
+      "name": "organization_entitlements",
+      "columns": {
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "public_play_granted_at": {
+          "name": "public_play_granted_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "granted_by": {
+          "name": "granted_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "organization_entitlements_organization_id_organization_id_fk": {
+          "name": "organization_entitlements_organization_id_organization_id_fk",
+          "tableFrom": "organization_entitlements",
+          "tableTo": "organization",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "organization_member_removals": {
       "name": "organization_member_removals",
       "columns": {
@@ -4054,6 +4314,98 @@
           "onUpdate": "no action"
         }
       },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "registry_manifest_blobs": {
+      "name": "registry_manifest_blobs",
+      "columns": {
+        "manifest_digest": {
+          "name": "manifest_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "blob_digest": {
+          "name": "blob_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "registry_manifest_blobs_manifest_digest_registry_manifests_digest_fk": {
+          "name": "registry_manifest_blobs_manifest_digest_registry_manifests_digest_fk",
+          "tableFrom": "registry_manifest_blobs",
+          "tableTo": "registry_manifests",
+          "columnsFrom": [
+            "manifest_digest"
+          ],
+          "columnsTo": [
+            "digest"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "registry_manifest_blobs_manifest_digest_blob_digest_pk": {
+          "columns": [
+            "manifest_digest",
+            "blob_digest"
+          ],
+          "name": "registry_manifest_blobs_manifest_digest_blob_digest_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "registry_manifests": {
+      "name": "registry_manifests",
+      "columns": {
+        "digest": {
+          "name": "digest",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "media_type": {
+          "name": "media_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "artifact_type": {
+          "name": "artifact_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "size": {
+          "name": "size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -5456,6 +5808,111 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "scenario_revisions": {
+      "name": "scenario_revisions",
+      "columns": {
+        "scenario_id": {
+          "name": "scenario_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "rev": {
+          "name": "rev",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "guest_contract": {
+          "name": "guest_contract",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "doc_json": {
+          "name": "doc_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "content_digest": {
+          "name": "content_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "verify_run_id": {
+          "name": "verify_run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "verify_report_json": {
+          "name": "verify_report_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "scenario_revisions_scenario_id_scenarios_id_fk": {
+          "name": "scenario_revisions_scenario_id_scenarios_id_fk",
+          "tableFrom": "scenario_revisions",
+          "tableTo": "scenarios",
+          "columnsFrom": [
+            "scenario_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "scenario_revisions_scenario_id_rev_pk": {
+          "columns": [
+            "scenario_id",
+            "rev"
+          ],
+          "name": "scenario_revisions_scenario_id_rev_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "scenario_revisions_state_check": {
+          "name": "scenario_revisions_state_check",
+          "value": "\"scenario_revisions\".\"state\" IN ('building', 'ready', 'verified', 'failed')"
+        },
+        "scenario_revisions_doc_json_check": {
+          "name": "scenario_revisions_doc_json_check",
+          "value": "json_valid(\"scenario_revisions\".\"doc_json\")"
+        }
+      }
+    },
     "scenario_run_artifact_uploads": {
       "name": "scenario_run_artifact_uploads",
       "columns": {
@@ -6010,6 +6467,41 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "scenario_rev": {
+          "name": "scenario_rev",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "tasks_json": {
+          "name": "tasks_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "launch_source": {
+          "name": "launch_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "ref": {
+          "name": "ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "end_reason": {
+          "name": "end_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "course_scope_key": {
@@ -6821,6 +7313,122 @@
         "scenario_sources_pause_reason_check": {
           "name": "scenario_sources_pause_reason_check",
           "value": "\"scenario_sources\".\"pause_reason\" IN ('admin', 'binder_lost_admin', 'suspended')"
+        }
+      }
+    },
+    "scenarios": {
+      "name": "scenarios",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "namespace": {
+          "name": "namespace",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "scope_key": {
+          "name": "scope_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "enabled": {
+          "name": "enabled",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "play": {
+          "name": "play",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "live_rev": {
+          "name": "live_rev",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "candidate_rev": {
+          "name": "candidate_rev",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        }
+      },
+      "indexes": {
+        "scenarios_namespace_slug_uidx": {
+          "name": "scenarios_namespace_slug_uidx",
+          "columns": [
+            "namespace",
+            "slug"
+          ],
+          "isUnique": true
+        },
+        "scenarios_organization_idx": {
+          "name": "scenarios_organization_idx",
+          "columns": [
+            "organization_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "scenarios_organization_id_organization_id_fk": {
+          "name": "scenarios_organization_id_organization_id_fk",
+          "tableFrom": "scenarios",
+          "tableTo": "organization",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "scenarios_id_check": {
+          "name": "scenarios_id_check",
+          "value": "\"scenarios\".\"id\" = \"scenarios\".\"namespace\" || '/' || \"scenarios\".\"slug\""
         }
       }
     },
