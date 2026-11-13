@@ -1,5 +1,6 @@
 import { strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
 import type { HostStateReportV2 } from "@/generated/bridge";
+import type { HostStateReportV3 } from "@/generated/contracts/bridge-message-v9";
 import { hostSupportsRunCliV1, hostSupportsSpeedRedesign } from "@/lib/scenario-hosts";
 
 export function personalHostReportReady(report: HostStateReportV2 | null, requireRunCli: boolean): boolean {
@@ -11,12 +12,19 @@ export function personalHostReportReady(report: HostStateReportV2 | null, requir
     hostSupportsSpeedRedesign(report) && (!requireRunCli || hostSupportsRunCliV1(report));
 }
 
-/** Persist readiness and placement together. Admission cannot see Ready with cloud placement. */
+/**
+ * Persist readiness and placement together. Admission cannot see Ready with cloud placement.
+ * A bridge 9 report (V3) names a VM by its machine name and is never ready
+ * for placement yet.
+ */
 export async function persistHostReport(input: {
   d1: D1Database; hostId: string; sessionId: string; credentialGeneration: number;
-  report: HostStateReportV2; now: number; requireRunCli: boolean;
+  report: HostStateReportV2 | HostStateReportV3; now: number; requireRunCli: boolean;
 }): Promise<boolean> {
   const { d1, hostId, sessionId, credentialGeneration, report, now } = input;
+  const v2 = "capabilities" in report;
+  const vmName = v2 ? "$.vm_name" : "$.name";
+  const ready = v2 && personalHostReportReady(report, input.requireRunCli) ? 1 : 0;
   if (report.host_id !== hostId) return false;
   const currentHost = `id = ?1 AND active_session_id = ?2 AND credential_generation = ?3 AND disabled = 0`;
   // Reports include stopping VMs after access is revoked. Check their identity
@@ -36,7 +44,7 @@ export async function persistHostReport(input: {
               AND execution.user_id = json_extract(reported.value, '$.owner_user_id')
               AND execution.domain_id = json_extract(reported.value, '$.run_id')
               AND execution.host_id = ?1 AND execution.state <> 'archived'
-              AND vm.runtime_vm_name = json_extract(reported.value, '$.vm_name')
+              AND vm.runtime_vm_name = json_extract(reported.value, '${vmName}')
               AND (host.scope = 'platform' OR (host.scope = 'personal' AND host.user_id = execution.user_id)
                 OR (host.scope = 'organization' AND host.organization_id = run.organization_id))
               AND NOT EXISTS (SELECT 1 FROM runtime_executions newer WHERE newer.domain_kind = execution.domain_kind
@@ -55,7 +63,7 @@ export async function persistHostReport(input: {
         AND EXISTS (SELECT 1 FROM agent_hosts host WHERE host.${currentHost}
           AND host.scope = 'personal' AND host.role = 'agent' AND host.scenario_enabled = 1 AND host.user_id = user.id)
         AND EXISTS (SELECT 1 FROM host_actual_state WHERE host_id = ?1 AND report_json = ?5 AND updated_at = ?6)`)
-      .bind(hostId, sessionId, credentialGeneration, personalHostReportReady(report, input.requireRunCli) ? 1 : 0, JSON.stringify(report), now),
+      .bind(hostId, sessionId, credentialGeneration, ready, JSON.stringify(report), now),
     d1.prepare(`UPDATE organization SET metal_placement = 'organization'
       WHERE metal_placement = 'platform' AND ?4 = 1
         AND EXISTS (SELECT 1 FROM agent_hosts host
@@ -63,7 +71,7 @@ export async function persistHostReport(input: {
             AND host.scope = 'organization' AND host.role = 'agent' AND host.scenario_enabled = 1
             AND host.organization_id = organization.id)
         AND EXISTS (SELECT 1 FROM host_actual_state WHERE host_id = ?1 AND report_json = ?5 AND updated_at = ?6)`)
-      .bind(hostId, sessionId, credentialGeneration, personalHostReportReady(report, input.requireRunCli) ? 1 : 0, JSON.stringify(report), now),
+      .bind(hostId, sessionId, credentialGeneration, ready, JSON.stringify(report), now),
   ]);
   return accepted?.results.length === 1;
 }

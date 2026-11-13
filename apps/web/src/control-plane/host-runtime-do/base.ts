@@ -20,8 +20,9 @@ import {
 } from "@/lib/runtime-executions";
 import { recordLinkedCourseUnitCompletionForRun } from "@/lib/course-catalogs";
 import {
-  loadOrCreateHostDesiredState,
+  loadStoredHostDesiredState,
   mutateStoredHostDesiredState,
+  type StoredHostDesiredState,
 } from "@/lib/desired-state-store";
 import { removeDesiredBuild } from "@/lib/desired-state";
 import type { HostDesiredStateV2 } from "@/generated/bridge";
@@ -46,7 +47,10 @@ export interface SocketAttachment {
   sessionId: string | null;
   connectedAt: number;
   helloReceived: boolean;
-  bridgeProtocol: "v6" | null;
+  /** "v6" speaks bridge 8, "v9" bridge 9. */
+  bridgeProtocol: "v6" | "v9" | null;
+  /** The guest contract a bridge 9 hello stated. */
+  guestContract?: number | null;
   lastDesiredVersionSent: number | null;
   lastDesiredDispatchAtMs: number | null;
 }
@@ -423,7 +427,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   protected async computeNextAlarm(hostId: string): Promise<number | null> {
     const now = Date.now();
     const activeSocket = await this.findActiveSocket(hostId);
-    const desiredState = await loadOrCreateHostDesiredState(
+    const desiredState = await loadStoredHostDesiredState(
       drizzle(this.env.DB),
       hostId,
       now,
@@ -432,7 +436,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
     const undeliveredDesired = activeSocket
       ? activeSocket.attachment.lastDesiredVersionSent !== desiredState.version
       : false;
-    const nextLeaseExpiry = desiredState.vms
+    const nextLeaseExpiry = (desiredState.vms as Array<{ desired_phase: string; lease_expires_at_unix_ms: number }>)
       .filter((vm) => vm.desired_phase === "running")
       .map((vm) => vm.lease_expires_at_unix_ms)
       .sort((left, right) => left - right)[0];
@@ -649,7 +653,8 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
             ? Math.floor(parsed.connectedAt)
             : 0,
         helloReceived: Boolean(parsed.helloReceived),
-        bridgeProtocol: parsed.bridgeProtocol === "v6" ? "v6" : null,
+        bridgeProtocol: parsed.bridgeProtocol === "v6" || parsed.bridgeProtocol === "v9" ? parsed.bridgeProtocol : null,
+        guestContract: typeof parsed.guestContract === "number" && Number.isSafeInteger(parsed.guestContract) ? parsed.guestContract : null,
         lastDesiredVersionSent:
           typeof parsed.lastDesiredVersionSent === "number" &&
           Number.isFinite(parsed.lastDesiredVersionSent) &&
@@ -703,7 +708,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   protected async loadDesiredVersionLag(
     hostId: string,
     nowUnixMs: number,
-    desiredState?: HostDesiredStateV2,
+    desiredState?: StoredHostDesiredState,
   ): Promise<{
     lagging: boolean;
     desiredVersion: number;
@@ -712,7 +717,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
     const db = drizzle(this.env.DB);
     const desired =
       desiredState ??
-      (await loadOrCreateHostDesiredState(db, hostId, nowUnixMs));
+      (await loadStoredHostDesiredState(db, hostId, nowUnixMs));
     const rows = await db
       .select({
         appliedDesiredVersion: hostActualState.appliedDesiredVersion,

@@ -278,7 +278,7 @@ function hostCacheReport(
   requiredImages: RequiredImage[],
   guestTools: DesiredGuestToolsV1,
 ) {
-  const arch = actual?.capabilities.arch ?? null;
+  const arch = actual?.capabilities?.arch ?? null;
   const hostImages = arch
     ? requiredImages.filter((image) => image.image_key.arch === arch)
     : requiredImages;
