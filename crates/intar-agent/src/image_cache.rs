@@ -273,7 +273,7 @@ mod budget;
 mod hashing;
 mod oci;
 use hashing::hash_file_bounded;
-pub(crate) use oci::{AgentJwt, BlobStore, OciRegistry, PulledMachine};
+pub(crate) use oci::{AgentJwt, BlobStore, MAX_WAKE_DELTA_BYTES, OciRegistry, PulledMachine};
 mod pins;
 pub(crate) use pins::RequiredPins;
 mod refresh;

@@ -15,7 +15,8 @@ use intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES;
 use intar_jailer_protocol::{WAKE_CPU_PROFILE_FILE, WAKE_RAM_FILE, WAKE_STUB_FILE, WakeArtifacts};
 
 /// A pack's apply rewrites at most 64 GiB of mostly sparse RAM.
-const WAKE_APPLY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const WAKE_APPLY_TIMEOUT: Duration =
+    Duration::from_secs(intar_jailer_protocol::WAKE_APPLY_TIMEOUT_SECONDS);
 /// The helper's buffers (two threads, two at most 256 MiB each) and zstd.
 const WAKE_APPLY_MEMORY_MAX_BYTES: u64 = 1536 * 1024 * 1024;
 
@@ -132,7 +133,7 @@ fn ensure_ram_store(
         Mode::RUSR | Mode::WUSR,
     )?;
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
-    if let Ok(existing) = open_ram_store(&store, &name, wake.ram_size_bytes) {
+    if let Ok(existing) = reuse_ram_store(&store, &name, wake.ram_size_bytes) {
         return Ok(existing);
     }
     let temporary = format!(".ram-{}", Uuid::new_v4());
@@ -159,6 +160,26 @@ fn ensure_ram_store(
     }
     operation?;
     open_ram_store(&store, &name, wake.ram_size_bytes)
+}
+
+/// An existing store file, its mtime refreshed under the store's lock: a
+/// pack's apply opens it again by path after the lock is gone, and the
+/// store GC's grace period, counted from the mtime, must cover that.
+fn reuse_ram_store(store: &OwnedFd, name: &str, size_bytes: u64) -> Result<File> {
+    let file = open_ram_store(store, name, size_bytes)?;
+    let time = |nanoseconds| rustix::fs::Timespec {
+        tv_sec: 0,
+        tv_nsec: nanoseconds,
+    };
+    rustix::fs::futimens(
+        &file,
+        &rustix::fs::Timestamps {
+            last_access: time(rustix::fs::UTIME_OMIT),
+            last_modification: time(rustix::fs::UTIME_NOW),
+        },
+    )
+    .context("refresh the reused wake RAM store's mtime")?;
+    Ok(file)
 }
 
 /// A store file is trusted by its root-owned identity; its content was
@@ -382,6 +403,31 @@ mod tests {
     use super::*;
 
     const CHUNK: usize = IMAGE_CHUNK_SIZE_BYTES as usize;
+
+    #[test]
+    #[ignore = "needs root: a store file is root-owned"]
+    fn a_reused_ram_store_has_its_mtime_refreshed() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("store.ram");
+        std::fs::write(&path, b"ram")?;
+        std::fs::set_permissions(
+            &path,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o400),
+        )?;
+        let old = std::time::SystemTime::now() - Duration::from_secs(7_200);
+        File::open(&path)?.set_modified(old)?;
+        let store = rustix::fs::open(
+            directory.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+
+        reuse_ram_store(&store, "store.ram", 3)?;
+
+        let age = std::fs::metadata(&path)?.modified()?.elapsed()?;
+        assert!(age < Duration::from_secs(60), "mtime is fresh: {age:?}");
+        Ok(())
+    }
 
     fn sha(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();

@@ -174,6 +174,8 @@ pub(super) trait StartBackend {
     ) -> Option<&'static str>;
     /// Stop and destroy the generation completely.
     async fn destroy(&mut self, launched: Self::Launched) -> Result<()>;
+    /// Fails once the VM was deleted, its lease ended included.
+    async fn ensure_wanted(&mut self) -> Result<()>;
     fn record_fallback(&mut self);
 }
 
@@ -222,6 +224,9 @@ pub(super) async fn start_vm<B: StartBackend>(
             },
         },
     };
+    // A VM deleted during its wake is gone: no fallback to keep, no
+    // cold launch.
+    backend.ensure_wanted().await?;
     backend.record_fallback();
     let launched = backend.launch(false).await?;
     backend.boot(&launched, false).await?;

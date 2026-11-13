@@ -31,7 +31,8 @@ store_gc_grace_seconds = 3600
 # default; lower this only as an explicit operator capacity decision.
 cpu_reserved_millis = 1000
 # Optional RLIMIT_FSIZE for the VMM process tree. Omit for no byte limit; when
-# set it must exceed zero and should cover the host's largest VM disk policy.
+# set it must exceed zero and should cover the host's largest VM disk policy
+# and the largest suspended guest's RAM file (up to 64 GiB) a wake maps.
 # vmm_file_size_limit_bytes = 68719476736
 # Audit this entire range for local and directory identity collisions before
 # enabling the host. Failed cleanup quarantines identities instead of reusing.

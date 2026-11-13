@@ -179,7 +179,11 @@ pub(super) async fn ensure_jailer_image_template(
         // A background import is rate limited on purpose, so its budget must
         // cover the physical minimum for this image size. The foreground
         // class keeps the fixed budget and is never parked.
-        jailer_prepare_timeout(request_class, request.virtual_size_bytes),
+        jailer_prepare_timeout(
+            request_class,
+            request.virtual_size_bytes,
+            wake_prepare_bytes(image, prepare_wake),
+        ),
     )
     .await?
     {
@@ -203,6 +207,22 @@ pub(super) async fn ensure_jailer_image_template(
     validate_prepared_image_v3_result(&request, &result)?;
     image_cache::mark_template_ready(&cache_root, image, &result).await?;
     Ok(result)
+}
+
+/// The suspended guest's RAM size plus a pack's delta bytes, when asked.
+pub(super) fn wake_prepare_bytes(
+    image: &image_cache::PulledMachine,
+    prepare_wake: bool,
+) -> Option<u64> {
+    let ram = image.config.wake.as_ref()?.ram.size_bytes;
+    prepare_wake.then(|| {
+        image
+            .manifest
+            .layers
+            .iter()
+            .filter(|layer| layer.media_type == intar_contracts::oci::WAKE_DELTA_MEDIA_TYPE)
+            .fold(ram, |total, layer| total.saturating_add(layer.size))
+    })
 }
 
 fn validate_prepared_image_v3_result(
@@ -1348,6 +1368,10 @@ impl StartBackend for LiveStart<'_> {
         cleanup_jailed_vm_by_selector(inner, VmIdentityRequest::by_generation(launch.generation))
             .await
             .context("destroy the woken jail generation")
+    }
+
+    async fn ensure_wanted(&mut self) -> Result<()> {
+        ensure_create_not_deleted(self.inner, self.req.name).await
     }
 
     fn record_fallback(&mut self) {

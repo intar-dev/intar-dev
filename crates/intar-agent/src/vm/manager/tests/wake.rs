@@ -279,6 +279,7 @@ struct FakeStart {
     /// The first-report outcome of a woken generation.
     report: Option<&'static str>,
     fallbacks: u32,
+    deleted: bool,
 }
 
 impl StartBackend for FakeStart {
@@ -310,6 +311,13 @@ impl StartBackend for FakeStart {
 
     async fn destroy(&mut self, generation: u32) -> Result<()> {
         self.log.push(format!("destroy {generation}"));
+        Ok(())
+    }
+
+    async fn ensure_wanted(&mut self) -> Result<()> {
+        if self.deleted {
+            anyhow::bail!("vm create cancelled by delete request");
+        }
         Ok(())
     }
 
@@ -392,4 +400,24 @@ async fn a_refused_or_failed_wake_falls_back_and_a_failed_cold_launch_fails() ->
     assert_eq!(cold.log, ["launch 1 wake=false", "boot 1 wake=false"]);
     assert_eq!(cold.fallbacks, 0);
     Ok(())
+}
+
+#[tokio::test]
+async fn a_vm_deleted_during_its_wake_neither_falls_back_nor_boots_cold() {
+    let mut fake = FakeStart {
+        report: Some("no report within 10 s"),
+        deleted: true,
+        ..FakeStart::default()
+    };
+    assert!(start_vm(&mut fake, StartDecision::Wake).await.is_err());
+    assert_eq!(fake.fallbacks, 0, "no false fallback is kept");
+    assert_eq!(
+        fake.log,
+        [
+            "launch 1 wake=true",
+            "boot 1 wake=true",
+            "wait 1",
+            "destroy 1"
+        ]
+    );
 }

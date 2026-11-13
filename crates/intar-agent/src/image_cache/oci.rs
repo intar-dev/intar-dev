@@ -37,7 +37,7 @@ const MAX_DISK_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 /// A CPU profile is a small JSON document.
 const MAX_WAKE_CPU_PROFILE_BYTES: u64 = 1024 * 1024;
 /// A pack's delta, all parts together; jailerd refuses more.
-const MAX_WAKE_DELTA_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub(crate) const MAX_WAKE_DELTA_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// A registry token lives 15 minutes; it is renewed this long before its end.
 const TOKEN_MARGIN: Duration = Duration::from_secs(60);
 /// Blobs of one image pulled at once; each still takes a global transfer slot.

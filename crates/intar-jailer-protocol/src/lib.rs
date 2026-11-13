@@ -48,6 +48,8 @@ pub const MAX_SSH_PUBLIC_PORT: u16 = 32_767;
 /// `MAX_CHUNKED_IMAGE_BYTES / BACKGROUND_PREPARE_BYTES_PER_SECOND` abandons
 /// an import that jailerd is still running.
 pub const BACKGROUND_PREPARE_BYTES_PER_SECOND: u64 = 16 * 1024 * 1024;
+/// How long jailerd lets a pack's sandboxed delta apply run.
+pub const WAKE_APPLY_TIMEOUT_SECONDS: u64 = 15 * 60;
 
 /// Pinned Cloud Hypervisor release.
 /// The release builds this version from a pinned commit of upstream's main
