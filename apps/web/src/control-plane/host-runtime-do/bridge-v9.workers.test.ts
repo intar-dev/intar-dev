@@ -200,8 +200,9 @@ describe("machine builds over bridge 9", () => {
     })).toBeNull();
   }
 
-  const build = () => env.DB.prepare("SELECT build_key, state, attempt, host_id, image_digest, error FROM machine_builds").first<{
+  const build = () => env.DB.prepare("SELECT build_key, state, attempt, host_id, image_digest, error, updated_at FROM machine_builds").first<{
     build_key: string; state: string; attempt: number; host_id: string | null; image_digest: string | null; error: string | null;
+    updated_at: number;
   }>();
   const revision = (n: number) => env.DB.prepare(
     "SELECT state, content_digest, doc_json, failure_reason FROM scenario_revisions WHERE rev = ?1",
@@ -292,7 +293,7 @@ describe("machine builds over bridge 9", () => {
     ws.close();
   });
 
-  it("assigns an expired build again with the next attempt, and fails a revision on a failed build", async () => {
+  it("assigns an expired build again, retries a reported failure, and fails the revision after the last", async () => {
     await ingest(1);
     const { ws } = await connectBuilder();
     await until(build, (row) => row?.state === "assigned");
@@ -302,10 +303,63 @@ describe("machine builds over bridge 9", () => {
     await maintainMachineBuilds(env, null, Date.now());
     expect(await build()).toMatchObject({ state: "assigned", attempt: 2, host_id: "builder-1" });
 
-    ws.send(report(key, 2, "failed", { error: "qemu exited: /var/lib/builder/x" }));
+    ws.send(report(key, 2, "failed", { error: "qemu exited" }));
+    await until(build, (row) => row?.attempt === 3);
+    expect(await build()).toMatchObject({ state: "assigned", attempt: 3, host_id: "builder-1" });
+    expect(await revision(1)).toMatchObject({ state: "building" });
+    // The superseded attempt can no longer record an image.
+    expect((await postResult(key, 2, await pushImage(key))).status).toBe(409);
+
+    ws.send(report(key, 3, "failed", { error: "qemu exited: /var/lib/builder/x" }));
     const failed = await until(() => revision(1), (row) => row?.state === "failed");
     expect(failed).toMatchObject({ state: "failed", failure_reason: REVISION_BUILD_FAILURE });
     expect(await build()).toMatchObject({ state: "failed", error: "qemu exited: /var/lib/builder/x" });
+
+    // Ingest queues the failed key again from its first attempt.
+    await ingest(2);
+    expect(await build()).toMatchObject({ state: "assigned", attempt: 1, image_digest: null, error: null });
+    ws.close();
+  });
+
+  it("settles a failure reported after the result POST as succeeded", async () => {
+    await ingest(1);
+    const { ws } = await connectBuilder();
+    await until(build, (row) => row?.state === "assigned");
+    const key = (await build())!.build_key;
+    const image = await pushImage(key);
+    expect((await postResult(key, 1, image)).status).toBe(201);
+    // The builder restarted after the push and lost its outcome.
+    ws.send(report(key, 1, "failed", { error: "interrupted" }));
+    const ready = await until(() => revision(1), (row) => row?.state === "ready");
+    expect(ready!.content_digest).toMatch(/^sha256:/);
+    expect(await build()).toMatchObject({ state: "succeeded", attempt: 1, image_digest: image });
+    ws.close();
+  });
+
+  it("keeps a build that reports every heartbeat past the silence window, until the attempt ceiling", async () => {
+    await ingest(1);
+    const { ws } = await connectBuilder();
+    await until(build, (row) => row?.state === "assigned");
+    const key = (await build())!.build_key;
+    ws.send(report(key, 1, "building"));
+    await until(build, (row) => row?.state === "building");
+
+    const now = Date.now();
+    await env.DB.prepare("UPDATE machine_builds SET assigned_at = ?1, updated_at = 0").bind(now - 45 * 60_000).run();
+    ws.send(report(key, 1, "building"));
+    await until(build, (row) => row?.updated_at !== 0);
+    await maintainMachineBuilds(env, null, Date.now());
+    expect(await build()).toMatchObject({ state: "building", attempt: 1 });
+
+    // Silent for the window: taken back.
+    await env.DB.prepare("UPDATE machine_builds SET updated_at = 0").run();
+    await maintainMachineBuilds(env, null, Date.now());
+    expect(await build()).toMatchObject({ state: "assigned", attempt: 2 });
+
+    // Reporting, but past the ceiling for one attempt: taken back too.
+    await env.DB.prepare("UPDATE machine_builds SET assigned_at = ?1").bind(Date.now() - 3 * 60 * 60_000 - 1).run();
+    await maintainMachineBuilds(env, null, Date.now());
+    expect(await build()).toMatchObject({ state: "assigned", attempt: 3 });
     ws.close();
   });
 
@@ -317,7 +371,7 @@ describe("machine builds over bridge 9", () => {
     expect(await revision(1)).toMatchObject({ state: "failed" });
   });
 
-  it("verifies an equal revision by carry-forward once the first is verified", async () => {
+  it("verifies an equal revision by carry-forward only from a verified twin of the same guest contract", async () => {
     await ingest(1);
     const { ws } = await connectBuilder();
     await until(build, (row) => row?.state === "assigned");
@@ -326,10 +380,14 @@ describe("machine builds over bridge 9", () => {
     expect((await postResult(key, 1, image)).status).toBe(201);
     ws.send(report(key, 1, "succeeded", { image_digest: image }));
     await until(() => revision(1), (row) => row?.state === "ready");
-    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev(1)).run();
 
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified', guest_contract = 2 WHERE rev = ?1").bind(rev(1)).run();
     await ingest(2);
-    expect(await revision(2)).toMatchObject({ state: "verified", content_digest: (await revision(1))!.content_digest });
+    expect(await revision(2)).toMatchObject({ state: "ready", content_digest: (await revision(1))!.content_digest });
+
+    await env.DB.prepare("UPDATE scenario_revisions SET guest_contract = 3 WHERE rev = ?1").bind(rev(1)).run();
+    await ingest(3);
+    expect(await revision(3)).toMatchObject({ state: "verified", content_digest: (await revision(1))!.content_digest });
     ws.close();
   });
 });

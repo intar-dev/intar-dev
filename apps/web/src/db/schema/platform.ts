@@ -453,6 +453,9 @@ export const machineBuilds = sqliteTable(
     }),
     logKey: text("log_key"),
     error: text("error"),
+    // When the current attempt was assigned; `updated_at` is the builder's
+    // last report on it.
+    assignedAt: integer("assigned_at"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },

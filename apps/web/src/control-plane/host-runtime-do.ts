@@ -758,12 +758,13 @@ export class HostRuntimeDO extends HostRuntimeBase {
       await this.reconcileHost(hostId);
     } else if (message.type === "build_report") {
       // recordMachineBuildReport takes reports only from the build's own
-      // builder on its current session, so an agent's report is dropped.
-      await recordMachineBuildReport(this.env, hostId, message.report, {
+      // builder on its current session, so an agent's report is dropped. A
+      // replay that moved nothing needs no reconcile.
+      const moved = await recordMachineBuildReport(this.env, hostId, message.report, {
         sessionId: attachment.sessionId,
         credentialGeneration: attachment.credentialGeneration,
       });
-      await this.reconcileHost(hostId);
+      if (moved) await this.reconcileHost(hostId);
     } else if (message.type === "vm_report") {
       // ponytail: no bridge 9 VM is placed yet, so no report can be this
       // host's; the runs slice matches it on (run, name, execution,

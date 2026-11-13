@@ -57,6 +57,7 @@ describe("generated migration apply", () => {
         "0039_dark_medusa",
         "0040_sparkling_madame_hydra",
         "0041_plain_polaris",
+        "0042_hot_jimmy_woo",
       ]);
     } finally {
       fixture.database.close(false);
@@ -122,6 +123,7 @@ describe("generated migration apply", () => {
         "0039_dark_medusa",
         "0040_sparkling_madame_hydra",
         "0041_plain_polaris",
+        "0042_hot_jimmy_woo",
       ]);
 
       const evidence = await applyGeneratedMigrations(client);

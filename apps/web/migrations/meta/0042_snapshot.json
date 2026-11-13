@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "6a50f60a-ce76-4af6-94bb-31ec196963f1",
-  "prevId": "b6240cd6-5b4a-4e13-9add-6aafb747d29e",
+  "id": "8d3d0d33-d6b9-4efb-9e6f-895c16d72a7a",
+  "prevId": "6a50f60a-ce76-4af6-94bb-31ec196963f1",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -2680,6 +2680,13 @@
         "error": {
           "name": "error",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "assigned_at": {
+          "name": "assigned_at",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

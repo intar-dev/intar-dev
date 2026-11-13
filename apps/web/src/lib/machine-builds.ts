@@ -5,8 +5,10 @@
 //
 // A row moves queued → assigned → building → succeeded or failed. Only the
 // result POST writes `image_digest`; a succeeded report must name that
-// digest. A build whose builder went silent or away is assigned again with
-// the next attempt, up to MAX_MACHINE_BUILD_ATTEMPTS.
+// digest. The Worker owns retries: a build whose builder reported a failure,
+// went silent or went away is assigned again with the next attempt, up to
+// MAX_MACHINE_BUILD_ATTEMPTS. One whose image is already recorded succeeded,
+// whatever the builder says afterwards.
 
 import { drizzle } from "drizzle-orm/d1";
 import { IMAGE_FORMAT } from "@/generated/constants";
@@ -31,6 +33,13 @@ export const MAX_MACHINE_BUILD_ATTEMPTS = 3;
 /** What a learner or tenant reads about a revision whose image failed. */
 export const REVISION_BUILD_FAILURE = "An image of this scenario failed to build.";
 const MAX_BUILD_ERROR_CHARS = 4096;
+// The builder replays its reports on every heartbeat, so a build without a
+// report for BUILD_REPORT_STALE_AFTER_MS lost its builder. One attempt may
+// still not run forever: the builder's worst case is a fetch, the provision
+// boot (provision_timeout_seconds, 40 min by default), for a wake image a
+// second boot under the same timeout, a QEMU exit wait (5 min) after each,
+// and the push with 5 min per request. Three hours is above that sum.
+const MACHINE_BUILD_ATTEMPT_CEILING_MS = 3 * 60 * 60 * 1000;
 const ASSIGN_BATCH = 100;
 
 type Env = Pick<Cloudflare.Env, "DB">;
@@ -126,7 +135,7 @@ export async function assignQueuedMachineBuilds(env: Env, now: number): Promise<
     if (!builder) break;
     const claimed = await env.DB.prepare(
       `UPDATE machine_builds SET state = 'assigned', host_id = ?2, attempt = attempt + 1, phase = NULL,
-          error = NULL, updated_at = ?3
+          error = NULL, assigned_at = ?3, updated_at = ?3
         WHERE build_key = ?1 AND state = 'queued'
           AND (SELECT count(*) FROM machine_builds slot
             WHERE slot.host_id = ?2 AND slot.state IN ('assigned', 'building')) < ?4
@@ -144,17 +153,18 @@ export async function assignQueuedMachineBuilds(env: Env, now: number): Promise<
 /**
  * Takes back the builds whose builder went silent for
  * BUILD_REPORT_STALE_AFTER_MS, stayed away for BUILDER_REASSIGN_AFTER_MS,
- * was disabled or removed. One whose image is already recorded succeeded;
+ * was disabled or removed, and attempts older than
+ * MACHINE_BUILD_ATTEMPT_CEILING_MS. One whose image is already recorded succeeded;
  * one out of attempts failed; any other is queued again. Returns the
  * builders that lost a build.
  */
 export async function expireMachineBuildLeases(env: Env, now: number): Promise<string[]> {
   const { results } = await env.DB.prepare(
     `SELECT build_key, host_id, attempt, image_digest FROM machine_builds build
-      WHERE state IN ('assigned', 'building') AND (host_id IS NULL OR updated_at <= ?1
+      WHERE state IN ('assigned', 'building') AND (host_id IS NULL OR updated_at <= ?1 OR assigned_at <= ?3
         OR EXISTS (SELECT 1 FROM agent_hosts host WHERE host.id = build.host_id
           AND (host.disabled = 1 OR (host.connected = 0 AND host.disconnected_at <= ?2))))`,
-  ).bind(now - BUILD_REPORT_STALE_AFTER_MS, now - BUILDER_REASSIGN_AFTER_MS)
+  ).bind(now - BUILD_REPORT_STALE_AFTER_MS, now - BUILDER_REASSIGN_AFTER_MS, now - MACHINE_BUILD_ATTEMPT_CEILING_MS)
     .all<{ build_key: string; host_id: string | null; attempt: number; image_digest: string | null }>();
   const released = new Set<string>();
   for (const build of results) {
@@ -177,7 +187,9 @@ export async function expireMachineBuildLeases(env: Env, now: number): Promise<s
  * Applies one build report of `hostId`. Only the build's assigned builder,
  * on its current session and for the current attempt, moves it; anything
  * else is ignored. A succeeded report must name the digest the result POST
- * recorded. True when the build moved.
+ * recorded. A replayed phase only marks the build alive. A failure succeeds
+ * when the attempt's image is recorded, queues the next attempt while one
+ * is left, and fails the build after the last. True when the build moved.
  */
 export async function recordMachineBuildReport(
   env: Env,
@@ -200,22 +212,31 @@ export async function recordMachineBuildReport(
       reason: row.image_digest === null ? "no result recorded" : "digest differs from the recorded result" }));
     return false;
   }
-  if (row.phase === report.phase) return false;
+  const now = Date.now();
+  const current = `build_key = ?1 AND host_id = ?2 AND attempt = ?3 AND state IN ('assigned', 'building')`;
+  if (row.phase === report.phase) {
+    await env.DB.prepare(`UPDATE machine_builds SET updated_at = ?4 WHERE ${current}`)
+      .bind(report.build_key, hostId, report.attempt, now).run();
+    return false;
+  }
   const state = report.phase === "queued" ? "assigned"
     : report.phase === "succeeded" || report.phase === "failed" ? report.phase : "building";
   const error = report.phase === "failed" ? (report.error || "the builder reported no error").slice(0, MAX_BUILD_ERROR_CHARS) : null;
+  // The failure outcome is decided on the row as written, so a result POST
+  // racing this report is never lost.
+  const failure = `CASE WHEN image_digest IS NOT NULL THEN 'succeeded' WHEN attempt < ${MAX_MACHINE_BUILD_ATTEMPTS}
+    THEN 'queued' ELSE 'failed' END`;
   const moved = await env.DB.prepare(
-    `UPDATE machine_builds SET state = ?4, phase = ?5, error = ?6, updated_at = ?7
-      WHERE build_key = ?1 AND host_id = ?2 AND attempt = ?3 AND state IN ('assigned', 'building')
-        AND phase IS NOT ?5 AND (?5 <> 'succeeded' OR image_digest = ?8)
-      RETURNING build_key`,
-  ).bind(report.build_key, hostId, report.attempt, state, report.phase, error, Date.now(),
-    report.image_digest ?? null).first();
+    `UPDATE machine_builds SET state = CASE WHEN ?4 = 'failed' THEN ${failure} ELSE ?4 END,
+        host_id = CASE WHEN ?4 = 'failed' AND ${failure} = 'queued' THEN NULL ELSE host_id END,
+        phase = ?5, error = ?6, updated_at = ?7
+      WHERE ${current} AND phase IS NOT ?5 AND (?5 <> 'succeeded' OR image_digest = ?8)
+      RETURNING state`,
+  ).bind(report.build_key, hostId, report.attempt, state, report.phase, error, now,
+    report.image_digest ?? null).first<{ state: string }>();
   if (!moved) return false;
-  if (state === "succeeded" || state === "failed") {
-    await settleScenarioRevisions(env, { buildKey: report.build_key });
-    await syncBuilderDesiredState(env, hostId, Date.now());
-  }
+  if (moved.state === "succeeded" || moved.state === "failed") await settleScenarioRevisions(env, { buildKey: report.build_key });
+  if (moved.state !== "assigned" && moved.state !== "building") await syncBuilderDesiredState(env, hostId, now);
   return true;
 }
 
@@ -223,7 +244,8 @@ export async function recordMachineBuildReport(
  * Settles the building revisions of a rev, or those that need a build key.
  * One with a failed build fails. One whose every machine has its image gets
  * the digests in its document and the document's digest, and is ready, or
- * verified when a verified revision of its scenario has the same digest.
+ * verified when a verified revision of its scenario has the same digest and
+ * guest contract.
  */
 export async function settleScenarioRevisions(env: Env, by: { rev: string } | { buildKey: string }): Promise<void> {
   const { results } = await ("rev" in by
@@ -258,7 +280,8 @@ export async function settleScenarioRevisions(env: Env, by: { rev: string } | { 
     await env.DB.prepare(
       `UPDATE scenario_revisions SET doc_json = ?3, content_digest = ?4,
           state = CASE WHEN EXISTS (SELECT 1 FROM scenario_revisions twin WHERE twin.scenario_id = ?1
-            AND twin.content_digest = ?4 AND twin.state = 'verified') THEN 'verified' ELSE 'ready' END
+            AND twin.content_digest = ?4 AND twin.guest_contract = scenario_revisions.guest_contract
+            AND twin.state = 'verified') THEN 'verified' ELSE 'ready' END
         WHERE scenario_id = ?1 AND rev = ?2 AND state = 'building'`,
     ).bind(revision.scenario_id, revision.rev, ready, await sha256Digest(ready)).run();
   }

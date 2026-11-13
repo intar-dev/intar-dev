@@ -1,0 +1,1 @@
+ALTER TABLE `machine_builds` ADD `assigned_at` integer;
