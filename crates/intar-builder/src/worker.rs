@@ -30,7 +30,9 @@ use crate::db::{self, BuilderDb};
 const MAX_BUNDLE_JSON_BYTES: u64 = 64 * 1024 * 1024;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 /// The most of each log a build uploads: its end, where a failure shows.
+// Two log tails plus the error stay under the Worker's 9 MiB log cap.
 const LOG_UPLOAD_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+const LOG_UPLOAD_ERROR_BYTES: usize = 64 * 1024;
 
 /// Runs queued builds once the bridge applied a live desired state.
 pub async fn worker_loop(
@@ -326,6 +328,7 @@ async fn upload_log(
     let serial_path = log_path.with_extension("serial.log");
     let mut log = String::new();
     if let Some(error) = error {
+        let error = str_tail(error, LOG_UPLOAD_ERROR_BYTES);
         log.push_str(&format!("== error ==\n{error}\n\n"));
     }
     for (title, path) in [("build log", &log_path), ("serial log", &serial_path)] {
@@ -368,17 +371,33 @@ async fn append_log(log: &mut String, title: &str, path: &Path) {
     }
 }
 
-/// The last `limit` bytes of `path` as text, any invalid UTF-8 replaced.
+/// The end of `path` as text, any invalid UTF-8 replaced, at most `limit`
+/// bytes after the replacement (each replaced byte grows to three) plus a
+/// one-line marker when anything was cut.
 pub(crate) async fn read_log_tail(path: &Path, limit: u64) -> std::io::Result<String> {
     let mut file = tokio::fs::File::open(path).await?;
     let size = file.metadata().await?.len();
     let mut tail = Vec::new();
     if size > limit {
         file.seek(std::io::SeekFrom::Start(size - limit)).await?;
-        tail.extend_from_slice(format!("[{} earlier bytes cut]\n", size - limit).as_bytes());
     }
     file.take(limit).read_to_end(&mut tail).await?;
-    Ok(String::from_utf8_lossy(&tail).into_owned())
+    let text = String::from_utf8_lossy(&tail);
+    let kept = str_tail(&text, usize::try_from(limit).unwrap_or(usize::MAX));
+    if size > limit || kept.len() < text.len() {
+        Ok(format!("[earlier output cut]\n{kept}"))
+    } else {
+        Ok(kept.to_owned())
+    }
+}
+
+/// The last `limit` bytes of `text`, starting at a character boundary.
+fn str_tail(text: &str, limit: usize) -> &str {
+    let mut start = text.len().saturating_sub(limit);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
 }
 
 #[cfg(test)]

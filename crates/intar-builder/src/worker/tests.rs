@@ -141,16 +141,22 @@ async fn a_log_uploads_only_its_end_and_survives_invalid_utf8() {
     bytes.extend_from_slice(b"tail \xff end");
     std::fs::write(&path, &bytes).unwrap();
 
-    let tail = read_log_tail(&path, 10).await.unwrap();
-    assert_eq!(
-        tail,
-        format!(
-            "[{} earlier bytes cut]\ntail \u{fffd} end",
-            bytes.len() - 10
-        )
-    );
+    let tail = read_log_tail(&path, 12).await.unwrap();
+    assert_eq!(tail, "[earlier output cut]\ntail \u{fffd} end");
     let whole = read_log_tail(&path, 1 << 20).await.unwrap();
     assert!(whole.starts_with("head head") && whole.ends_with("\u{fffd} end"));
+}
+
+#[tokio::test]
+async fn a_log_tail_of_invalid_utf8_stays_within_its_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("build.log");
+    std::fs::write(&path, vec![0xff_u8; 4096]).unwrap();
+
+    let tail = read_log_tail(&path, 1000).await.unwrap();
+    let body = tail.strip_prefix("[earlier output cut]\n").unwrap();
+    assert!(body.len() <= 1000 && body.len() > 990);
+    assert!(body.chars().all(|c| c == '\u{fffd}'));
 }
 
 #[tokio::test]
