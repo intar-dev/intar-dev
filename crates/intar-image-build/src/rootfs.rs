@@ -22,7 +22,7 @@ pub(crate) const INTAR_ACPI_EVENT_RULE: &str =
     "event=button[ /]power\naction=/usr/local/sbin/intar-acpi-poweroff\n";
 pub(crate) const INTAR_ACPI_POWEROFF_SCRIPT: &str = "#!/bin/bash\nset -eu\nkill -s RTMIN+4 1\n";
 
-const MASKED_UNITS: &[&str] = &[
+pub(crate) const MASKED_UNITS: &[&str] = &[
     "apt-daily.service",
     "apt-daily.timer",
     "apt-daily-upgrade.service",
@@ -255,7 +255,7 @@ fn run_command(binary: &Path, args: &[String], current_dir: Option<&Path>) -> Re
     bail!("command '{}' failed with status {status}", binary.display())
 }
 
-fn rootfs_build_paths(
+pub(crate) fn rootfs_build_paths(
     base: &BaseImageSpec,
     config: &QemuBuildConfig,
     definition_hash: &str,
@@ -274,7 +274,7 @@ fn rootfs_build_paths(
     }
 }
 
-fn render_essential_hook() -> String {
+pub(crate) fn render_essential_hook() -> String {
     r#"#!/bin/sh
 set -eu
 root="$1"
@@ -410,7 +410,7 @@ ln -sf /etc/systemd/system/intar-build.path "$root/etc/systemd/system/multi-user
     )
 }
 
-fn render_intar_build_service() -> String {
+pub(crate) fn render_intar_build_service() -> String {
     r#"[Unit]
 Description=Intar image build bootstrap
 After=local-fs.target
@@ -433,6 +433,14 @@ WantedBy=multi-user.target
 }
 
 fn render_intar_build_start_script() -> String {
+    render_build_start_script("ubuntu", "")
+}
+
+/// The build bootstrap: mounts the INTARBUILD seed, installs its key for
+/// `username`, configures the network and runs the build-only sshd with
+/// `extra_sshd_args` (lines of shell words, each ending in ` \`) before its
+/// fixed options.
+pub(crate) fn render_build_start_script(username: &str, extra_sshd_args: &str) -> String {
     r#"#!/bin/sh
 set -eu
 
@@ -506,14 +514,14 @@ for dns_server in ${INTAR_BUILD_DNS:-10.0.2.3}; do
 done
 chmod 0644 /etc/resolv.conf
 
-install -d -m 0700 -o ubuntu -g ubuntu /home/ubuntu/.ssh
-install -m 0600 -o ubuntu -g ubuntu /run/intar-build/authorized_keys /home/ubuntu/.ssh/authorized_keys
+install -d -m 0700 -o @USER@ -g @USER@ /home/@USER@/.ssh
+install -m 0600 -o @USER@ -g @USER@ /run/intar-build/authorized_keys /home/@USER@/.ssh/authorized_keys
 if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
   ssh-keygen -q -N '' -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
 fi
 install -d -o root -g root -m 0755 /run/sshd
 set -- \
-  -o UsePAM=yes \
+@SSHD_ARGS@  -o UsePAM=yes \
   -o PAMServiceName=intar-build \
   -o AuthenticationMethods=publickey \
   -o PerSourcePenalties=no \
@@ -529,7 +537,8 @@ configure_network
 # boot/session gates. The same fixed options are validated above.
 exec /usr/sbin/sshd -D -e "$@"
 "#
-    .to_string()
+    .replace("@USER@", username)
+    .replace("@SSHD_ARGS@", extra_sshd_args)
 }
 
 #[cfg(test)]

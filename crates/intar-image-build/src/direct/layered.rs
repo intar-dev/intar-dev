@@ -16,7 +16,7 @@ use crate::provision::{ProvisionStage, ProvisionStageKind, render_scenario_build
 use crate::qemu::{DirectBootQemuInput, render_direct_boot_qemu_command};
 use crate::ssh::{BuildSshKey, private_key_to_openssh};
 
-mod qmp;
+pub(crate) mod qmp;
 use super::raw_view::RawViewGuard;
 use qmp::Qmp;
 
@@ -24,7 +24,7 @@ const PROVISIONING_ABI: &str = "intar-qemu-stages-v1";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
 const ROOT_BLOCK_DEVICE: &str = "intar-root";
 const VIRTIO_BALLOON_DEVICE: &str = "virtio-balloon-pci,id=intar-balloon,free-page-reporting=on";
-const VIRTIO_BALLOON_VERIFY_COMMAND: &str = r#"set -eu
+pub(crate) const VIRTIO_BALLOON_VERIFY_COMMAND: &str = r#"set -eu
 modprobe virtio_balloon
 driver=/sys/bus/virtio/drivers/virtio_balloon
 test -d "$driver"
@@ -40,7 +40,7 @@ for device in /sys/bus/virtio/devices/virtio*; do
 done
 exit 1
 "#;
-const CHECKPOINT_MEMORY_RELEASE_COMMAND: &str = r#"set -eu
+pub(crate) const CHECKPOINT_MEMORY_RELEASE_COMMAND: &str = r#"set -eu
 sync
 fstrim / || true
 page_reporting_order=/sys/module/page_reporting/parameters/page_reporting_order
@@ -65,9 +65,9 @@ sync
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ResumeMetadata {
-    bootstrap_private_key: String,
-    memory_encoding: String,
+pub(crate) struct ResumeMetadata {
+    pub(crate) bootstrap_private_key: String,
+    pub(crate) memory_encoding: String,
 }
 
 pub(super) fn build(rendered: RenderedDirectBuild) -> Result<RawDirectBuild> {
@@ -979,7 +979,7 @@ fn capture(
     })
 }
 
-fn migration_writer_command(
+pub(crate) fn migration_writer_command(
     zstd: &Path,
     partial: &Path,
     output: &Path,
@@ -995,7 +995,7 @@ fn migration_writer_command(
     ))
 }
 
-fn link_frozen_checkpoint_scratch(source: &Path, scratch: &Path) -> Result<()> {
+pub(crate) fn link_frozen_checkpoint_scratch(source: &Path, scratch: &Path) -> Result<()> {
     ensure!(
         source != scratch,
         "checkpoint scratch must differ from source"
@@ -1009,7 +1009,11 @@ fn link_frozen_checkpoint_scratch(source: &Path, scratch: &Path) -> Result<()> {
     })
 }
 
-fn wait_for_checkpoint_output(output: &Path, complete: &Path, deadline: Instant) -> Result<()> {
+pub(crate) fn wait_for_checkpoint_output(
+    output: &Path,
+    complete: &Path,
+    deadline: Instant,
+) -> Result<()> {
     loop {
         if output.is_file() && complete.is_file() {
             return Ok(());
@@ -1022,7 +1026,7 @@ fn wait_for_checkpoint_output(output: &Path, complete: &Path, deadline: Instant)
     }
 }
 
-fn snapshot_sync_arguments(continuation_disk: &Path) -> Result<serde_json::Value> {
+pub(crate) fn snapshot_sync_arguments(continuation_disk: &Path) -> Result<serde_json::Value> {
     let snapshot_file = continuation_disk
         .to_str()
         .context("checkpoint continuation path is not UTF-8")?;
@@ -1108,7 +1112,7 @@ fn layered_args(rendered: &RenderedDirectBuild, disk: &Path, ssh_port: u16) -> V
     args
 }
 
-fn append_layered_devices(args: &mut Vec<String>) {
+pub(crate) fn append_layered_devices(args: &mut Vec<String>) {
     args.extend([
         "-device".to_string(),
         "vmgenid,guid=auto".to_string(),
@@ -1117,7 +1121,7 @@ fn append_layered_devices(args: &mut Vec<String>) {
     ]);
 }
 
-fn replace_serial_log_with_append(args: &mut Vec<String>, serial_log_path: &Path) {
+pub(crate) fn replace_serial_log_with_append(args: &mut Vec<String>, serial_log_path: &Path) {
     let Some(index) = args.iter().position(|argument| argument == "-serial") else {
         return;
     };
@@ -1142,38 +1146,11 @@ fn identities(
     rendered: &RenderedDirectBuild,
     stages: &[ProvisionStage],
 ) -> Result<Vec<CheckpointIdentity>> {
-    let executable = resolve_binary(&rendered.config.qemu_binary)?;
-    let mut version_command = Command::new(&executable);
-    version_command.arg("--version");
-    let version = run_command_output_until(
-        version_command,
+    let (qemu_version, cpu) = qemu_host_identity(
+        &rendered.config.qemu_binary,
         &rendered.paths.work_root,
-        deadline_after(rendered.config.qemu_exit_timeout_seconds),
-        "QEMU version query",
+        rendered.config.qemu_exit_timeout_seconds,
     )?;
-    ensure!(version.status.success(), "failed to read QEMU version");
-    let qemu_version = format!(
-        "{}\nsha256={}",
-        String::from_utf8(version.stdout)?,
-        sha256_file_hex(&executable)?
-    );
-    let cpu = fs::read_to_string("/proc/cpuinfo")?
-        .lines()
-        .filter(|line| {
-            [
-                "vendor_id",
-                "cpu family",
-                "model\t",
-                "model name",
-                "stepping",
-                "flags",
-            ]
-            .iter()
-            .any(|key| line.starts_with(key))
-        })
-        .take(6)
-        .collect::<Vec<_>>()
-        .join("\n");
     let mut canonical = rendered.clone();
     canonical.paths.seed_disk_path = "/intar/seed.img".into();
     canonical.paths.serial_log_path = "/intar/serial.log".into();
@@ -1203,7 +1180,49 @@ fn identities(
     Ok(result)
 }
 
-fn resolve_binary(binary: &Path) -> Result<PathBuf> {
+/// The QEMU version and binary hash, and the host CPU lines a checkpoint
+/// depends on.
+pub(crate) fn qemu_host_identity(
+    qemu_binary: &Path,
+    work_root: &Path,
+    timeout_seconds: u64,
+) -> Result<(String, String)> {
+    let executable = resolve_binary(qemu_binary)?;
+    let mut version_command = Command::new(&executable);
+    version_command.arg("--version");
+    let version = run_command_output_until(
+        version_command,
+        work_root,
+        deadline_after(timeout_seconds),
+        "QEMU version query",
+    )?;
+    ensure!(version.status.success(), "failed to read QEMU version");
+    let qemu_version = format!(
+        "{}\nsha256={}",
+        String::from_utf8(version.stdout)?,
+        sha256_file_hex(&executable)?
+    );
+    let cpu = fs::read_to_string("/proc/cpuinfo")?
+        .lines()
+        .filter(|line| {
+            [
+                "vendor_id",
+                "cpu family",
+                "model\t",
+                "model name",
+                "stepping",
+                "flags",
+            ]
+            .iter()
+            .any(|key| line.starts_with(key))
+        })
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((qemu_version, cpu))
+}
+
+pub(crate) fn resolve_binary(binary: &Path) -> Result<PathBuf> {
     if binary.is_absolute() || binary.components().count() > 1 {
         return fs::canonicalize(binary).context("build executable is unavailable");
     }
@@ -1246,7 +1265,7 @@ fn run_img_output_until(
     )
 }
 
-fn run_command_output_until(
+pub(crate) fn run_command_output_until(
     mut command: Command,
     work_root: &Path,
     deadline: Instant,
@@ -1341,11 +1360,11 @@ fn terminate_command(child: &mut Child, label: &str) -> Result<ExitStatus> {
         .with_context(|| format!("failed to reap {label} pid {pid} after killing it"))
 }
 
-fn deadline_after(timeout_seconds: u64) -> Instant {
+pub(crate) fn deadline_after(timeout_seconds: u64) -> Instant {
     Instant::now() + Duration::from_secs(timeout_seconds.max(1))
 }
 
-fn timeout_in_runtime<T>(
+pub(crate) fn timeout_in_runtime<T>(
     runtime: &tokio::runtime::Runtime,
     timeout: Duration,
     phase: &str,
@@ -1358,14 +1377,14 @@ fn timeout_in_runtime<T>(
     })
 }
 
-fn remaining_until(deadline: Instant, phase: &str) -> Result<Duration> {
+pub(crate) fn remaining_until(deadline: Instant, phase: &str) -> Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
         .filter(|remaining| !remaining.is_zero())
         .with_context(|| format!("{phase} deadline expired"))
 }
 
-fn truncate_serial_log(path: &Path) -> Result<()> {
+pub(crate) fn truncate_serial_log(path: &Path) -> Result<()> {
     fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -1375,7 +1394,7 @@ fn truncate_serial_log(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_work_file(path: &Path) -> Result<()> {
+pub(crate) fn remove_work_file(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1396,11 +1415,11 @@ fn log(rendered: &RenderedDirectBuild, message: &str) -> Result<()> {
     Ok(())
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn render_clock_set_command(unix_seconds: u64) -> String {
+pub(crate) fn render_clock_set_command(unix_seconds: u64) -> String {
     format!("sudo date -u -s @{unix_seconds}")
 }
 

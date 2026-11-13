@@ -8,8 +8,11 @@ mod direct;
 mod disk;
 mod guest_tools;
 mod kernel;
+#[cfg(unix)]
+mod machine;
 mod manifest;
 mod oci;
+mod platform;
 mod provision;
 mod qemu;
 mod rootfs;
@@ -51,7 +54,16 @@ pub use kernel::{
     KernelSourceFile, kernel_build_script_tokens, kernel_image_file_name, kernel_initrd_file_name,
     kernel_profile_digest, kernel_release, missing_required_builtins, render_kernel_build_script,
 };
+#[cfg(unix)]
+pub use machine::{
+    BuildPlan, BuildTarget, MachineBuildOutput, MachineBuildRequest, MachineImage, PlannedNode,
+    PlannedStage, VerifiedMachineImage, build_machine_image, plan_build, reconstruct_machine_disk,
+    verify_machine_image, write_machine_image,
+};
 pub use manifest::{build_direct_manifest_json, combine_scenario_manifests};
+pub use platform::{
+    PLATFORM_BASE_DISK_BYTES, ensure_platform_base, platform_base_spec, render_platform_rootfs_plan,
+};
 pub use qemu::{
     BUILD_BOOT_CMDLINE, DirectBootQemuCommand, DirectBootQemuInput, PUBLISHED_BOOT_CMDLINE,
     render_direct_boot_qemu_command,

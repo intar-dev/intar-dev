@@ -8,14 +8,14 @@ use serde_json::{Value, json};
 
 use super::super::{connect_qmp_socket, read_qmp_message};
 
-pub(super) struct Qmp {
+pub(crate) struct Qmp {
     stream: UnixStream,
     reader: BufReader<UnixStream>,
     sequence: u64,
 }
 
 impl Qmp {
-    pub(super) fn connect(path: &Path, deadline: Instant) -> Result<Self> {
+    pub(crate) fn connect(path: &Path, deadline: Instant) -> Result<Self> {
         let stream = loop {
             match connect_qmp_socket(path) {
                 Ok(stream) => break stream,
@@ -40,7 +40,7 @@ impl Qmp {
         Ok(qmp)
     }
 
-    pub(super) fn execute(
+    pub(crate) fn execute(
         &mut self,
         command: &str,
         arguments: Value,
@@ -89,7 +89,7 @@ impl Qmp {
         }
     }
 
-    pub(super) fn wait_migration(&mut self, deadline: Instant) -> Result<()> {
+    pub(crate) fn wait_migration(&mut self, deadline: Instant) -> Result<()> {
         loop {
             ensure!(
                 Instant::now() < deadline,

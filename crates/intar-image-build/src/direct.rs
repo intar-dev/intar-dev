@@ -31,7 +31,7 @@ use crate::seed::{BuildSeedInput, write_build_seed};
 use crate::ssh::{BuildSshSession, generate_build_ssh_key};
 
 #[cfg(unix)]
-mod layered;
+pub(crate) mod layered;
 #[cfg(unix)]
 mod raw_view;
 #[cfg(not(unix))]
@@ -47,12 +47,12 @@ mod raw_view {
 }
 
 const SSH_USERNAME: &str = "ubuntu";
-const SSH_HOST: &str = "127.0.0.1";
+pub(crate) const SSH_HOST: &str = "127.0.0.1";
 const QMP_SOCKET_FILE_NAME: &str = "qmp.sock";
 // A build guest can briefly expose port 22 before its ephemeral key and
 // network setup have settled. Avoid hammering OpenSSH's unauthenticated
 // connection limits while retaining responsive readiness detection.
-const SSH_POLL_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const SSH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const QEMU_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(unix)]
 const QMP_IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -497,7 +497,7 @@ fn lock_direct_build_path(lock: &fs::File, path: &Path, resource: &str) -> Resul
     }
 }
 
-fn allocate_ssh_host_port() -> Result<u16> {
+pub(crate) fn allocate_ssh_host_port() -> Result<u16> {
     let listener = TcpListener::bind((SSH_HOST, 0))
         .with_context(|| format!("failed to allocate build SSH host port on {SSH_HOST}"))?;
     let port = listener
@@ -927,7 +927,7 @@ fn qemu_failure_after_cleanup(qemu: &mut Child, failure: Error) -> Error {
     }
 }
 
-fn terminate_qemu(qemu: &mut Child) -> Result<ExitStatus> {
+pub(crate) fn terminate_qemu(qemu: &mut Child) -> Result<ExitStatus> {
     let pid = qemu.id();
     if let Err(kill_error) = qemu.kill() {
         return match qemu.try_wait() {
