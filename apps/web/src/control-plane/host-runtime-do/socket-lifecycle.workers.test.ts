@@ -303,8 +303,11 @@ describe("HostRuntimeDO socket lifecycle", () => {
     await runInDurableObject(stub, async (_instance, state) => {
       const attachment = state.getWebSockets("run-status")[0]!.deserializeAttachment() as RunStatusSocketAttachment;
       // Seed other users' accepted sockets to exercise the host-wide limit without 511 D1 fixtures.
+      // The client ends are kept: a collected one closes its accepted socket and lowers the count.
+      const clients: WebSocket[] = [];
       for (let i = 1; i < MAX_STATUS_SOCKETS; i++) {
         const pair = new WebSocketPair();
+        clients.push(pair[0]);
         state.acceptWebSocket(pair[1], ["run-status"]);
         pair[1].serializeAttachment({ ...attachment, userId: `other-${i}` });
       }
@@ -314,6 +317,7 @@ describe("HostRuntimeDO socket lifecycle", () => {
       const host = accept(await (await pendingHostRequest("full"))());
       host.close();
       for (const ws of state.getWebSockets("run-status")) ws.close();
+      expect(clients).toHaveLength(MAX_STATUS_SOCKETS - 1);
     });
     first.close();
   });
