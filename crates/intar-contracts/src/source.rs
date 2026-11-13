@@ -90,6 +90,24 @@ pub struct SourceBundleMetaV2 {
     pub rev: String,
 }
 
+/// Content type of the `bundle` part.
+pub const SOURCE_BUNDLE_MIME: &str = "application/gzip";
+
+impl SourceBundleMetaV2 {
+    /// The `meta` field's text: the CLI and the builder send the same.
+    #[must_use]
+    pub fn field(&self) -> String {
+        // A struct of one string always serializes.
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// The `bundle` part's file name.
+    #[must_use]
+    pub fn bundle_file_name(&self) -> String {
+        format!("{}.json.gz", self.rev)
+    }
+}
+
 /// Every rule a bundle must keep, for the compiler, the Worker's ingest and
 /// the builder alike; the result lists every problem found.
 pub fn validate_bundle(bundle: &SourceBundleV2) -> Result<(), Vec<String>> {

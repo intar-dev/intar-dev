@@ -1,10 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::{
-    env, fs,
-    process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
-};
+use std::{env, fs, process::Command};
 
 use crate::config::BuilderConfig;
 use intar_contracts::catalog::ImageArchitecture;
@@ -15,9 +10,6 @@ pub enum PreflightStatus {
     Warn,
     Fail,
 }
-
-const QSD_HELP_TIMEOUT: Duration = Duration::from_secs(5);
-const QSD_HELP_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreflightCheck {
@@ -51,7 +43,6 @@ pub struct PreflightEnvironment {
     pub host_arch: ImageArchitecture,
     pub path_entries: Vec<PathBuf>,
     pub kvm_path: PathBuf,
-    pub vhost_vsock_path: PathBuf,
 }
 
 impl PreflightEnvironment {
@@ -63,7 +54,6 @@ impl PreflightEnvironment {
                 .map(|path| env::split_paths(&path).collect())
                 .unwrap_or_default(),
             kvm_path: PathBuf::from("/dev/kvm"),
-            vhost_vsock_path: PathBuf::from("/dev/vhost-vsock"),
         }
     }
 }
@@ -82,7 +72,6 @@ pub fn collect_preflight_with_environment(
     push_arch_check(&mut checks, env.host_arch.clone());
     push_accelerator_check(&mut checks, &cfg.qemu.accelerator);
     push_char_device_check(&mut checks, "kvm device", &env.kvm_path);
-    push_optional_char_device_check(&mut checks, "vhost-vsock device", &env.vhost_vsock_path);
     push_command_check(
         &mut checks,
         "qemu binary",
@@ -90,23 +79,6 @@ pub fn collect_preflight_with_environment(
         &env.path_entries,
     );
     push_qemu_version_check(&mut checks, &cfg.qemu.qemu_binary, &env.path_entries);
-    push_command_check(
-        &mut checks,
-        "qemu-storage-daemon binary",
-        cfg.qemu.qemu_storage_daemon_binary.as_str(),
-        &env.path_entries,
-    );
-    push_qsd_nbd_export_check(
-        &mut checks,
-        cfg.qemu.qemu_storage_daemon_binary.as_str(),
-        &env.path_entries,
-    );
-    push_command_check(
-        &mut checks,
-        "qemu-img binary",
-        cfg.qemu.layered.qemu_img_binary.to_string_lossy().as_ref(),
-        &env.path_entries,
-    );
     push_command_check(
         &mut checks,
         "buildctl binary",
@@ -154,20 +126,6 @@ pub fn collect_preflight_with_environment(
         )),
     }
     push_job_check(&mut checks, cfg);
-    if cfg.qemu.raw_view_read_timeout_seconds == 0 {
-        checks.push(fail(
-            "raw view read timeout",
-            "qemu.raw_view_read_timeout_seconds must be greater than zero",
-        ));
-    } else {
-        checks.push(pass(
-            "raw view read timeout",
-            format!(
-                "qemu.raw_view_read_timeout_seconds = {}",
-                cfg.qemu.raw_view_read_timeout_seconds
-            ),
-        ));
-    }
     push_bridge_check(&mut checks, cfg);
 
     PreflightReport { checks }
@@ -212,114 +170,6 @@ fn push_command_check(
             name,
             format!("'{}' was not found or is not executable", command),
         )),
-    }
-}
-
-fn push_qsd_nbd_export_check(
-    checks: &mut Vec<PreflightCheck>,
-    command: &str,
-    path_entries: &[PathBuf],
-) {
-    let Some(path) = resolve_command(command, path_entries) else {
-        checks.push(fail(
-            "qemu-storage-daemon NBD export",
-            "cannot read QEMU storage daemon help because the configured binary is unavailable",
-        ));
-        return;
-    };
-    let mut child = match Command::new(&path)
-        .arg("--help")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            checks.push(fail(
-                "qemu-storage-daemon NBD export",
-                format!("failed to run '{} --help': {error}", path.display()),
-            ));
-            return;
-        }
-    };
-    let deadline = Instant::now() + QSD_HELP_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                checks.push(fail(
-                    "qemu-storage-daemon NBD export",
-                    format!(
-                        "'{} --help' did not finish within five seconds",
-                        path.display()
-                    ),
-                ));
-                return;
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                checks.push(fail(
-                    "qemu-storage-daemon NBD export",
-                    format!(
-                        "failed while waiting for '{} --help': {error}",
-                        path.display()
-                    ),
-                ));
-                return;
-            }
-        }
-    }
-    let output = match child.wait_with_output() {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            checks.push(fail(
-                "qemu-storage-daemon NBD export",
-                format!("'{} --help' exited with {}", path.display(), output.status),
-            ));
-            return;
-        }
-        Err(error) => {
-            checks.push(fail(
-                "qemu-storage-daemon NBD export",
-                format!("failed to collect '{} --help': {error}", path.display()),
-            ));
-            return;
-        }
-    };
-    let output_len = output.stdout.len().saturating_add(output.stderr.len());
-    if output_len > QSD_HELP_MAX_BYTES {
-        checks.push(fail(
-            "qemu-storage-daemon NBD export",
-            "QEMU storage daemon help exceeds the 64 KiB preflight limit",
-        ));
-        return;
-    }
-    let mut bytes = output.stdout;
-    bytes.extend(output.stderr);
-    let output = match String::from_utf8(bytes) {
-        Ok(output) => output,
-        Err(_) => {
-            checks.push(fail(
-                "qemu-storage-daemon NBD export",
-                "QEMU storage daemon help is not UTF-8",
-            ));
-            return;
-        }
-    };
-    if output.contains("--nbd-server") && output.contains("--export [type=]nbd") {
-        checks.push(pass(
-            "qemu-storage-daemon NBD export",
-            "configured daemon supports Unix-socket NBD export",
-        ));
-    } else {
-        checks.push(fail(
-            "qemu-storage-daemon NBD export",
-            "configured daemon does not advertise --nbd-server and --export [type=]nbd",
-        ));
     }
 }
 
@@ -416,32 +266,6 @@ fn push_char_device_check(checks: &mut Vec<PreflightCheck>, name: &str, path: &P
     }
 }
 
-fn push_optional_char_device_check(checks: &mut Vec<PreflightCheck>, name: &str, path: &Path) {
-    match path.metadata() {
-        Ok(metadata) if is_char_device(&metadata) => {
-            checks.push(pass(name, format!("found {}", path.display())));
-        }
-        Ok(_) => {
-            checks.push(warn(
-                name,
-                format!(
-                    "'{}' exists but is not a character device; builder will report vsock unsupported",
-                    path.display()
-                ),
-            ));
-        }
-        Err(_) => {
-            checks.push(warn(
-                name,
-                format!(
-                    "'{}' is missing; builder will report vsock unsupported",
-                    path.display()
-                ),
-            ));
-        }
-    }
-}
-
 fn push_dir_check(checks: &mut Vec<PreflightCheck>, name: &str, path: &Path) {
     match path.metadata() {
         Ok(metadata) if metadata.is_dir() => {
@@ -518,18 +342,6 @@ fn is_pinned_oci_image(image: &str) -> bool {
 }
 
 fn push_job_check(checks: &mut Vec<PreflightCheck>, cfg: &BuilderConfig) {
-    if cfg.jobs.max_attempts == 0 {
-        checks.push(fail(
-            "job attempts",
-            "jobs.max_attempts must be greater than zero",
-        ));
-    } else {
-        checks.push(pass(
-            "job attempts",
-            format!("max_attempts = {}", cfg.jobs.max_attempts),
-        ));
-    }
-
     if (1..=2).contains(&cfg.jobs.max_concurrent_builds) {
         checks.push(pass(
             "job concurrency",
@@ -553,7 +365,7 @@ fn push_bridge_check(checks: &mut Vec<PreflightCheck>, cfg: &BuilderConfig) {
     if !cfg.bridge.enabled {
         checks.push(warn(
             "bridge configuration",
-            "bridge.enabled = false; run-once can build locally but daemon mode will not converge jobs",
+            "bridge.enabled = false; the daemon will not converge builds",
         ));
         return;
     }
@@ -711,17 +523,6 @@ mod tests {
         make_executable(&path);
     }
 
-    #[cfg(unix)]
-    fn fake_qemu_storage_daemon(dir: &std::path::Path, help_output: &str) {
-        let path = dir.join("qemu-storage-daemon");
-        fs::write(
-            &path,
-            format!("#!/bin/sh\nprintf '%s\\n' '{help_output}'\n"),
-        )
-        .unwrap();
-        make_executable(&path);
-    }
-
     #[test]
     fn parses_qemu_major_version() {
         assert_eq!(
@@ -768,19 +569,7 @@ mod tests {
         fs::create_dir_all(&oci_cache).unwrap();
         let _buildkit_socket = UnixListener::bind(oci_cache.join("buildkitd.sock")).unwrap();
         fake_qemu(&bin, "QEMU emulator version 10.0.11");
-        fake_qemu_storage_daemon(
-            &bin,
-            "--nbd-server addr.type=unix,addr.path=raw-view.sock --export [type=]nbd,id=raw,node-name=root",
-        );
-        for tool in [
-            "qemu-img",
-            "buildctl",
-            "umoci",
-            "zstd",
-            "mke2fs",
-            "e2fsck",
-            "resize2fs",
-        ] {
+        for tool in ["buildctl", "umoci", "zstd", "mke2fs", "e2fsck", "resize2fs"] {
             fake_tool(&bin, tool);
         }
         let mut cfg = BuilderConfig::default();
@@ -794,7 +583,6 @@ mod tests {
             host_arch: intar_contracts::catalog::ImageArchitecture::X86_64,
             path_entries: vec![bin.clone()],
             kvm_path: PathBuf::from("/dev/null"),
-            vhost_vsock_path: PathBuf::from("/dev/null"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -822,7 +610,6 @@ mod tests {
             host_arch: intar_contracts::catalog::ImageArchitecture::X86_64,
             path_entries: Vec::new(),
             kvm_path: fake_kvm,
-            vhost_vsock_path: temp.path().join("missing-vsock"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -840,7 +627,6 @@ mod tests {
         let mut cfg = BuilderConfig::default();
         cfg.bridge.enabled = false;
         cfg.jobs.max_concurrent_builds = 3;
-        cfg.qemu.raw_view_read_timeout_seconds = 0;
         cfg.qemu.accelerator = "tcg".to_string();
         cfg.builder.work_root = temp.path().join("missing-work");
         cfg.builder.cache_root = temp.path().join("missing-cache");
@@ -849,7 +635,6 @@ mod tests {
             host_arch: intar_contracts::catalog::ImageArchitecture::Aarch64,
             path_entries: Vec::new(),
             kvm_path: temp.path().join("missing-kvm"),
-            vhost_vsock_path: temp.path().join("missing-vsock"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -863,9 +648,6 @@ mod tests {
         }));
         assert!(report.checks.iter().any(|check| {
             check.name == "job concurrency" && check.status == PreflightStatus::Fail
-        }));
-        assert!(report.checks.iter().any(|check| {
-            check.name == "raw view read timeout" && check.status == PreflightStatus::Fail
         }));
         assert!(report.checks.iter().any(|check| {
             check.name == "bridge configuration" && check.status == PreflightStatus::Warn
@@ -888,19 +670,7 @@ mod tests {
         fs::create_dir_all(&oci_cache).unwrap();
         let buildkit_socket = UnixListener::bind(oci_cache.join("buildkitd.sock")).unwrap();
         fake_qemu(&bin, "QEMU emulator version 10.0.11");
-        fake_qemu_storage_daemon(
-            &bin,
-            "--nbd-server addr.type=unix,addr.path=raw-view.sock --export [type=]nbd,id=raw,node-name=root",
-        );
-        for tool in [
-            "qemu-img",
-            "buildctl",
-            "umoci",
-            "zstd",
-            "mke2fs",
-            "e2fsck",
-            "resize2fs",
-        ] {
+        for tool in ["buildctl", "umoci", "zstd", "mke2fs", "e2fsck", "resize2fs"] {
             fake_tool(&bin, tool);
         }
         let mut cfg = BuilderConfig::default();
@@ -912,7 +682,6 @@ mod tests {
             host_arch: intar_contracts::catalog::ImageArchitecture::X86_64,
             path_entries: vec![bin.clone()],
             kvm_path: PathBuf::from("/dev/null"),
-            vhost_vsock_path: PathBuf::from("/dev/null"),
         };
 
         let report = collect_preflight_with_environment(&cfg, &env);
@@ -927,27 +696,11 @@ mod tests {
         assert!(report.checks.iter().any(|check| {
             check.name == "qemu version" && check.status == PreflightStatus::Pass
         }));
-        assert!(report.checks.iter().any(|check| {
-            check.name == "qemu-storage-daemon binary" && check.status == PreflightStatus::Pass
-        }));
-        assert!(report.checks.iter().any(|check| {
-            check.name == "qemu-storage-daemon NBD export" && check.status == PreflightStatus::Pass
-        }));
-
-        fake_qemu_storage_daemon(&bin, "--export [type=]vhost-user-blk,id=raw,node-name=root");
-        let report = collect_preflight_with_environment(&cfg, &env);
-        assert!(report.checks.iter().any(|check| {
-            check.name == "qemu-storage-daemon NBD export" && check.status == PreflightStatus::Fail
-        }));
-
-        fs::remove_file(bin.join("qemu-storage-daemon")).unwrap();
-        let report = collect_preflight_with_environment(&cfg, &env);
-        assert!(report.checks.iter().any(|check| {
-            check.name == "qemu-storage-daemon binary" && check.status == PreflightStatus::Fail
-        }));
-        fake_qemu_storage_daemon(
-            &bin,
-            "--nbd-server addr.type=unix,addr.path=raw-view.sock --export [type=]nbd,id=raw,node-name=root",
+        assert!(
+            !report
+                .checks
+                .iter()
+                .any(|check| check.name.contains("qemu-storage-daemon"))
         );
 
         drop(buildkit_socket);

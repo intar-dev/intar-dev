@@ -1,15 +1,8 @@
-mod config;
+//! The builder's push of a built machine image to `/registry/v1`.
+
 mod error;
+mod push;
 mod session;
-mod uploader;
 
-#[cfg(test)]
-mod tests;
-
-pub use config::ImageUploadConfig;
 pub use error::{Error, Result};
-pub use uploader::{
-    ExistingImageChunk, ImageChunkLookup, ImageUploader, PublishArtifactFile, PublishBuildIdentity,
-    PublishChunkedImage, PublishImageChunkFile, PublishReceipt, PublishedArtifact, PublishedImage,
-    REGISTRY_SESSION_HEADER, RegistryUploadSession, UploadOutcome,
-};
+pub use push::{BLOB_CONCURRENCY, REGISTRY_SESSION_HEADER, RegistryPusher};

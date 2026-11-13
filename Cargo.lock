@@ -2028,6 +2028,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "toml",
@@ -2070,12 +2071,10 @@ dependencies = [
  "russh",
  "rustix",
  "serde",
- "serde-saphyr 2.0.0",
  "serde_json",
  "sha2 0.11.1",
  "tar",
  "tempfile",
- "thiserror",
  "tokio",
  "zstd",
 ]
@@ -2088,7 +2087,6 @@ dependencies = [
  "clap",
  "flate2",
  "intar-contracts",
- "intar-image-build",
  "intar-image-scenario",
  "reqwest",
  "serde_json",
@@ -2100,18 +2098,13 @@ name = "intar-image-scenario"
 version = "0.1.0"
 dependencies = [
  "flate2",
- "hcl-edit",
  "hcl-rs",
  "intar-contracts",
- "jsonpath-rust",
  "pulldown-cmark",
- "regex",
  "serde",
  "serde-saphyr 2.0.0",
  "serde_json",
- "sha2 0.11.1",
  "tempfile",
- "thiserror",
 ]
 
 [[package]]

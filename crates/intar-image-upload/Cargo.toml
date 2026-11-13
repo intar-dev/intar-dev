@@ -8,13 +8,13 @@ rust-version.workspace = true
 
 [dependencies]
 intar-contracts = { path = "../intar-contracts" }
-reqwest = { workspace = true, features = ["blocking", "json", "multipart", "rustls"] }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 tempfile.workspace = true
 
 [lints]

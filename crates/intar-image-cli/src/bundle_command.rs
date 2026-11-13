@@ -3,7 +3,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use intar_contracts::source::{
-    SOURCE_BUNDLE_FIELD, SOURCE_META_FIELD, SourceBundleMetaV2, SourceRefusalCode, SourceRefusalV1,
+    SOURCE_BUNDLE_FIELD, SOURCE_BUNDLE_MIME, SOURCE_META_FIELD, SourceBundleMetaV2,
+    SourceRefusalCode, SourceRefusalV1,
 };
 use std::env;
 use std::fmt;
@@ -136,11 +137,11 @@ pub(super) fn upload_bundle(
     };
     let part = reqwest::blocking::multipart::Part::file(bundle_path)
         .with_context(|| format!("failed to read bundle {}", bundle_path.display()))?
-        .file_name(format!("{rev}.json.gz"))
-        .mime_str("application/gzip")?;
+        .file_name(meta.bundle_file_name())
+        .mime_str(SOURCE_BUNDLE_MIME)?;
     // Part::file has a known length, so reqwest sends a Content-Length.
     let form = reqwest::blocking::multipart::Form::new()
-        .text(SOURCE_META_FIELD, serde_json::to_string(&meta)?)
+        .text(SOURCE_META_FIELD, meta.field())
         .part(SOURCE_BUNDLE_FIELD, part);
 
     let response = reqwest::blocking::Client::builder()
