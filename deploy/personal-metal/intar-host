@@ -676,7 +676,7 @@ def doctor():
         'intar-agent': '/usr/local/bin/intar-agent',
         'intar-jailerd': '/usr/lib/intar/intar-jailerd',
         'intar-jailer': '/usr/lib/intar/intar-jailer',
-        'cloud-hypervisor-v53.0': '/usr/lib/intar/cloud-hypervisor-v53.0',
+        'cloud-hypervisor-v55.0.0': '/usr/lib/intar/cloud-hypervisor-v55.0.0',
     }.items():
         secure_path(target)
         require(digest(package / source) == digest(target), f'Installed binary differs from release: {target}')
@@ -859,7 +859,7 @@ def remove_runtime():
              Path('/usr/local/bin/intar-agent'),
              *(Path('/usr/lib/intar') / name for name in (
                  'intar-jailerd', 'intar-jailer', 'intar-jailerd-self-test',
-                 'cloud-hypervisor-v53.0', 'cloud-hypervisor-v53.0.sha256'))]
+                 'cloud-hypervisor-v55.0.0', 'cloud-hypervisor-v55.0.0.sha256'))]
     for path in paths:
         if path.exists() or path.is_symlink():
             secure_path(path)
