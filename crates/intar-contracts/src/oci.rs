@@ -5,6 +5,8 @@
 //! jumps to the guest's wake vector, and the CPU profile the base was built
 //! under. A puller that cannot wake skips these layers and cold-boots.
 
+pub mod verify;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

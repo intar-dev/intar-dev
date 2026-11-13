@@ -267,7 +267,8 @@ mod tests {
             disk.len() as u64,
             Some(&image.kernel_sha256),
             image.initrd_sha256.as_deref(),
-        )?;
+        )
+        .map_err(anyhow::Error::msg)?;
         assert_eq!(
             verified
                 .chunks

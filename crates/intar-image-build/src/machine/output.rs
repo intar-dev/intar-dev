@@ -8,8 +8,9 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
-use intar_contracts::catalog::{IMAGE_CHUNK_SIZE_BYTES, MAX_CHUNKED_IMAGE_BYTES};
+use intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES;
 use intar_contracts::guest::GUEST_CONTRACT;
+use intar_contracts::oci::verify::{layers_of, verified_image};
 use intar_contracts::oci::{
     DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE,
     MACHINE_ARTIFACT_TYPE, MACHINE_CONFIG_MEDIA_TYPE, MachineBootV1, MachineConfigV1,
@@ -162,9 +163,9 @@ pub struct VerifiedMachineImage {
     pub initrd: Option<PathBuf>,
 }
 
-/// Check the image `digest` in `dir` as jailerd does before it boots one
-/// (`verified_image` in `intar-jailerd`), plus what jailerd checks while it
-/// fetches: every blob's size and SHA-256, and each chunk's decoded SHA-256.
+/// Check the image `digest` in `dir` with the checks jailerd runs before it
+/// boots one ([`verified_image`]), plus what jailerd checks while it fetches:
+/// every blob's size and SHA-256, and each chunk's decoded SHA-256.
 ///
 /// # Errors
 /// Returns the first rule the image breaks.
@@ -173,13 +174,6 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
     let manifest_bytes = read_blob(&blobs, digest, None)?;
     let manifest: OciManifestV1 =
         serde_json::from_slice(&manifest_bytes).context("the manifest is no machine manifest")?;
-    ensure!(
-        manifest.schema_version == 2
-            && manifest.media_type == OCI_MANIFEST_MEDIA_TYPE
-            && manifest.artifact_type == MACHINE_ARTIFACT_TYPE
-            && manifest.config.media_type == MACHINE_CONFIG_MEDIA_TYPE,
-        "image manifest is not a machine image"
-    );
     let config_bytes = read_blob(&blobs, &manifest.config.digest, Some(manifest.config.size))?;
     let config: MachineConfigV1 =
         serde_json::from_slice(&config_bytes).context("the config is no machine config")?;
@@ -190,17 +184,23 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
         config.image_format
     );
     ensure!(config.wake.is_none(), "a built image carries no wake");
-
-    let of = |media_type: &str| -> Vec<&OciDescriptorV1> {
-        manifest
-            .layers
-            .iter()
-            .filter(|layer| layer.media_type == media_type)
-            .collect()
+    let first = |media_type: &str| {
+        layers_of(&manifest, media_type)
+            .first()
+            .map(|layer| layer.digest.hex().to_owned())
     };
-    let (kernels, initrds) = (of(KERNEL_MEDIA_TYPE), of(INITRD_MEDIA_TYPE));
-    ensure!(kernels.len() == 1, "the image has no single kernel");
-    ensure!(initrds.len() <= 1, "the image has more than one initrd");
+    let (kernel, initrd) = (first(KERNEL_MEDIA_TYPE), first(INITRD_MEDIA_TYPE));
+    let verified = verified_image(
+        &manifest,
+        &config,
+        config_bytes.len() as u64,
+        manifest.config.digest.hex(),
+        config.disk.size_bytes,
+        kernel.as_deref(),
+        initrd.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+
     for layer in &manifest.layers {
         ensure!(
             [KERNEL_MEDIA_TYPE, INITRD_MEDIA_TYPE, DISK_CHUNK_MEDIA_TYPE]
@@ -209,67 +209,45 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
             layer.digest.as_str(),
             layer.media_type
         );
+        let used = layer.media_type != DISK_CHUNK_MEDIA_TYPE
+            || verified
+                .chunks
+                .iter()
+                .any(|chunk| chunk.encoded_sha256 == layer.digest.hex());
+        ensure!(
+            used,
+            "chunk layer {} is named by no chunk",
+            layer.digest.as_str()
+        );
         if layer.media_type != DISK_CHUNK_MEDIA_TYPE {
             read_blob(&blobs, &layer.digest, Some(layer.size))?;
         }
     }
-
-    let chunk_size = u64::from(IMAGE_CHUNK_SIZE_BYTES);
-    let disk = &config.disk;
-    ensure!(
-        disk.chunk_size == chunk_size
-            && disk.size_bytes > 0
-            && disk.size_bytes <= MAX_CHUNKED_IMAGE_BYTES,
-        "machine config disk geometry is invalid"
-    );
-    let mut next_index = 0_u64;
-    let mut used = vec![false; manifest.layers.len()];
-    for (index, layer_index, raw_sha256) in &disk.chunks {
-        let offset = index
-            .checked_mul(chunk_size)
-            .filter(|offset| *offset < disk.size_bytes && *index >= next_index)
-            .with_context(|| format!("image chunk {index} is out of order or out of range"))?;
-        next_index = index + 1;
-        let layer = manifest
-            .layers
-            .get(*layer_index as usize)
-            .filter(|layer| layer.media_type == DISK_CHUNK_MEDIA_TYPE)
-            .with_context(|| format!("image chunk {index} names no chunk layer"))?;
-        ensure!(
-            layer.size > 0 && layer.size <= 2 * chunk_size,
-            "image chunk {index} has an implausible encoded size"
-        );
-        let encoded = read_blob(&blobs, &layer.digest, Some(layer.size))?;
+    for chunk in &verified.chunks {
+        let index = chunk.index;
+        let encoded = read_blob(
+            &blobs,
+            &digest_of_hex(&chunk.encoded_sha256)?,
+            Some(chunk.encoded_size_bytes),
+        )?;
         let raw = zstd::stream::decode_all(encoded.as_slice())
             .with_context(|| format!("image chunk {index} does not decode"))?;
         ensure!(
-            raw.len() as u64 == chunk_size.min(disk.size_bytes - offset),
+            raw.len() as u64 == u64::from(chunk.raw_size_bytes),
             "image chunk {index} decodes to {} bytes",
             raw.len()
         );
         ensure!(
-            hex(&Sha256::digest(&raw)) == raw_sha256.as_str(),
+            hex(&Sha256::digest(&raw)) == chunk.raw_sha256,
             "image chunk {index} is not its raw SHA-256"
         );
-        if let Some(used) = used.get_mut(*layer_index as usize) {
-            *used = true;
-        }
     }
-    for (layer, used) in manifest.layers.iter().zip(&used) {
-        ensure!(
-            *used || layer.media_type != DISK_CHUNK_MEDIA_TYPE,
-            "chunk layer {} is named by no chunk",
-            layer.digest.as_str()
-        );
-    }
-    let path = |layer: &OciDescriptorV1| blobs.join(layer.digest.hex());
-    let kernel = kernels.first().map(|layer| path(layer)).context("kernel")?;
-    let initrd = initrds.first().map(|layer| path(layer));
+    let path = |hex: String| blobs.join(hex);
     Ok(VerifiedMachineImage {
+        kernel: kernel.map(path).context("kernel")?,
+        initrd: initrd.map(path),
         manifest,
         config,
-        kernel,
-        initrd,
     })
 }
 

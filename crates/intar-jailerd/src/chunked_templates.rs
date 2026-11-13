@@ -4,63 +4,15 @@ use std::num::NonZeroU64;
 use std::os::unix::fs::MetadataExt as _;
 
 use crate::store_gc::touch_chunked_template;
-use intar_contracts::catalog::{IMAGE_CHUNK_SIZE_BYTES, MAX_CHUNKED_IMAGE_BYTES};
-use intar_contracts::oci::{
-    DISK_CHUNK_MEDIA_TYPE, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE, MACHINE_ARTIFACT_TYPE,
-    MACHINE_CONFIG_MEDIA_TYPE, MachineConfigV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1,
-    OciManifestV1, Sha256Hex, WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_DELTA_MEDIA_TYPE,
-    WAKE_RAM_CHUNK_MEDIA_TYPE, WAKE_STUB_MEDIA_TYPE, WakeV1,
-};
+use intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES;
+use intar_contracts::oci::{MachineConfigV1, OciManifestV1};
 use intar_jailer_protocol::TrustedDirectorySource;
 use reflink_copy::ReflinkBlockBuilder;
 
 const MAX_CHUNK_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
-const GIB: u64 = 1024 * 1024 * 1024;
-/// Bounds on a suspended guest, far above any lab VM.
-const MAX_WAKE_MEMORY_BYTES: u64 = 64 * GIB;
-const MAX_WAKE_VCPUS: u32 = 64;
-const MAX_WAKE_DELTA_BYTES: u64 = 4 * GIB;
-const MAX_WAKE_STUB_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_WAKE_CPU_PROFILE_BYTES: u64 = 1024 * 1024;
-
-/// One non-zero chunk of the root disk, with everything needed to verify it.
-#[derive(Debug, Eq, PartialEq)]
-pub(super) struct ImageChunk {
-    pub(super) index: u32,
-    pub(super) raw_size_bytes: u32,
-    pub(super) raw_sha256: String,
-    pub(super) encoded_size_bytes: u64,
-    pub(super) encoded_sha256: String,
-}
-
-/// The chunks of a verified machine image.
-#[derive(Debug, Eq, PartialEq)]
-pub(super) struct VerifiedImage {
-    pub(super) virtual_size_bytes: u64,
-    pub(super) chunks: Vec<ImageChunk>,
-    pub(super) wake: Option<VerifiedWake>,
-}
-
-/// A layer the template takes whole, by its digest and size.
-#[derive(Debug, Eq, PartialEq)]
-pub(super) struct WakeLayer {
-    pub(super) sha256: String,
-    pub(super) size_bytes: u64,
-}
-
-/// The suspended guest of a verified machine image.
-#[derive(Debug, Eq, PartialEq)]
-pub(super) struct VerifiedWake {
-    /// The base's RAM file, as its chunks and its whole-file SHA-256.
-    pub(super) ram_size_bytes: u64,
-    pub(super) ram_sha256: String,
-    pub(super) ram_chunks: Vec<ImageChunk>,
-    pub(super) stub: WakeLayer,
-    pub(super) cpu_profile: WakeLayer,
-    /// A pack's delta parts in layer order, and the SHA-256 of the RAM file
-    /// they rebuild from the base's.
-    pub(super) pack: Option<(Vec<WakeLayer>, String)>,
-}
+pub(super) use intar_contracts::oci::verify::{
+    ImageChunk, VerifiedImage, VerifiedWake, WakeLayer, verified_image,
+};
 
 pub(super) fn prepare_chunked_image_template(
     config: &JailerdConfig,
@@ -413,201 +365,13 @@ fn read_verified_chunk_manifest(
             .as_ref()
             .and_then(|source| source.sha256.as_ref())
             .map(Sha256Digest::as_str),
-    )?;
+    )
+    .map_err(anyhow::Error::msg)?;
     ensure!(
         !request.prepare_wake || image.wake.is_some(),
         "machine image carries no suspended guest"
     );
     Ok(image)
-}
-
-/// The checks of [`read_verified_chunk_manifest`] on already-verified bytes.
-pub(super) fn verified_image(
-    manifest: &OciManifestV1,
-    machine: &MachineConfigV1,
-    config_bytes: u64,
-    config_sha256: &str,
-    virtual_size_bytes: u64,
-    kernel_sha256: Option<&str>,
-    initrd_sha256: Option<&str>,
-) -> Result<VerifiedImage> {
-    ensure!(
-        manifest.schema_version == 2
-            && manifest.media_type == OCI_MANIFEST_MEDIA_TYPE
-            && manifest.artifact_type == MACHINE_ARTIFACT_TYPE
-            && manifest.config.media_type == MACHINE_CONFIG_MEDIA_TYPE,
-        "image manifest is not a machine image"
-    );
-    ensure!(
-        manifest.config.digest.hex() == config_sha256 && manifest.config.size == config_bytes,
-        "machine config is not the one the image manifest names"
-    );
-    let kernels = layers_of(manifest, KERNEL_MEDIA_TYPE);
-    let initrds = layers_of(manifest, INITRD_MEDIA_TYPE);
-    ensure!(
-        kernels.len() == 1 && kernels.first().map(|layer| layer.digest.hex()) == kernel_sha256,
-        "kernel is not the one the image manifest names"
-    );
-    ensure!(
-        initrds.len() <= 1 && initrds.first().map(|layer| layer.digest.hex()) == initrd_sha256,
-        "initrd is not the one the image manifest names"
-    );
-
-    let chunk_size = u64::from(IMAGE_CHUNK_SIZE_BYTES);
-    let disk = &machine.disk;
-    ensure!(
-        disk.chunk_size == chunk_size
-            && disk.size_bytes == virtual_size_bytes
-            && disk.size_bytes > 0
-            && disk.size_bytes <= MAX_CHUNKED_IMAGE_BYTES,
-        "machine config disk geometry does not match the prepare request"
-    );
-    let chunks = verified_chunks(
-        manifest,
-        &disk.chunks,
-        disk.size_bytes,
-        DISK_CHUNK_MEDIA_TYPE,
-        "image chunk",
-    )?;
-    // A config without `wake` is a plain machine image, whatever else its
-    // manifest lists.
-    let wake = machine
-        .wake
-        .as_ref()
-        .map(|wake| verified_wake(manifest, wake))
-        .transpose()?;
-    Ok(VerifiedImage {
-        virtual_size_bytes: disk.size_bytes,
-        chunks,
-        wake,
-    })
-}
-
-fn layers_of<'a>(manifest: &'a OciManifestV1, media_type: &str) -> Vec<&'a OciDescriptorV1> {
-    manifest
-        .layers
-        .iter()
-        .filter(|layer| layer.media_type == media_type)
-        .collect()
-}
-
-/// `[chunk_index, layer_index, raw_sha256]` of a file of `size_bytes` in
-/// 4 MiB chunks: indexes rising and inside the file, each naming a layer of
-/// `media_type` whose size a zstd frame of the chunk can have.
-fn verified_chunks(
-    manifest: &OciManifestV1,
-    entries: &[(u64, u32, Sha256Hex)],
-    size_bytes: u64,
-    media_type: &str,
-    label: &str,
-) -> Result<Vec<ImageChunk>> {
-    let chunk_size = u64::from(IMAGE_CHUNK_SIZE_BYTES);
-    let mut chunks = Vec::with_capacity(entries.len());
-    let mut next_index = 0_u64;
-    for (index, layer_index, raw_sha256) in entries {
-        let offset = index
-            .checked_mul(chunk_size)
-            .filter(|offset| *offset < size_bytes && *index >= next_index)
-            .with_context(|| format!("{label} {index} is out of order or out of range"))?;
-        next_index = index + 1;
-        let layer = manifest
-            .layers
-            .get(*layer_index as usize)
-            .filter(|layer| layer.media_type == media_type)
-            .with_context(|| format!("{label} {index} names no chunk layer"))?;
-        // A zstd frame of a 4 MiB chunk is never twice its size.
-        ensure!(
-            layer.size > 0 && layer.size <= 2 * chunk_size,
-            "{label} {index} has an implausible encoded size"
-        );
-        chunks.push(ImageChunk {
-            index: u32::try_from(*index).context("chunk index")?,
-            raw_size_bytes: u32::try_from(chunk_size.min(size_bytes - offset))
-                .context("chunk size")?,
-            raw_sha256: raw_sha256.as_str().to_owned(),
-            encoded_size_bytes: layer.size,
-            encoded_sha256: layer.digest.hex().to_owned(),
-        });
-    }
-    Ok(chunks)
-}
-
-/// Check `wake` against the manifest the image id commits to: one stub, one
-/// CPU profile (the one `wake` names), a RAM file in rising chunks of the
-/// disk's size that the shape's memory equals, a bounded shape, and delta
-/// parts on a pack only.
-pub(super) fn verified_wake(manifest: &OciManifestV1, wake: &WakeV1) -> Result<VerifiedWake> {
-    let layer = |descriptor: &&OciDescriptorV1| WakeLayer {
-        sha256: descriptor.digest.hex().to_owned(),
-        size_bytes: descriptor.size,
-    };
-    let stubs = layers_of(manifest, WAKE_STUB_MEDIA_TYPE);
-    let profiles = layers_of(manifest, WAKE_CPU_PROFILE_MEDIA_TYPE);
-    let ([stub], [profile]) = (stubs.as_slice(), profiles.as_slice()) else {
-        bail!("wake needs exactly one stub and one CPU profile layer")
-    };
-    ensure!(
-        profile.digest == wake.cpu_profile,
-        "wake CPU profile is not the one the image manifest names"
-    );
-    ensure!(
-        stub.size > 0
-            && stub.size <= MAX_WAKE_STUB_BYTES
-            && profile.size > 0
-            && profile.size <= MAX_WAKE_CPU_PROFILE_BYTES,
-        "wake stub or CPU profile has an implausible size"
-    );
-    let (ram, shape) = (&wake.ram, &wake.shape);
-    ensure!(
-        ram.chunk_size == u64::from(IMAGE_CHUNK_SIZE_BYTES)
-            && ram.size_bytes > 0
-            && ram.size_bytes <= MAX_WAKE_MEMORY_BYTES
-            && shape.memory_bytes == ram.size_bytes,
-        "wake RAM geometry is not sound"
-    );
-    ensure!(
-        shape.boot_vcpus > 0
-            && shape.boot_vcpus <= shape.max_vcpus
-            && shape.max_vcpus <= MAX_WAKE_VCPUS,
-        "wake vCPU shape is not sound"
-    );
-    let ram_chunks = verified_chunks(
-        manifest,
-        &ram.chunks,
-        ram.size_bytes,
-        WAKE_RAM_CHUNK_MEDIA_TYPE,
-        "wake RAM chunk",
-    )?;
-    let deltas = layers_of(manifest, WAKE_DELTA_MEDIA_TYPE);
-    let pack = match &wake.pack {
-        None => {
-            ensure!(deltas.is_empty(), "a wake base carries no delta");
-            None
-        }
-        Some(pack) => {
-            let total = deltas.iter().try_fold(0_u64, |total, delta| {
-                (delta.size > 0)
-                    .then(|| total.checked_add(delta.size))
-                    .flatten()
-            });
-            ensure!(
-                !deltas.is_empty() && total.is_some_and(|total| total <= MAX_WAKE_DELTA_BYTES),
-                "wake pack delta is missing or too large"
-            );
-            Some((
-                deltas.iter().map(layer).collect(),
-                pack.ram_sha256.as_str().to_owned(),
-            ))
-        }
-    };
-    Ok(VerifiedWake {
-        ram_size_bytes: ram.size_bytes,
-        ram_sha256: ram.sha256.as_str().to_owned(),
-        ram_chunks,
-        stub: layer(stub),
-        cpu_profile: layer(profile),
-        pack,
-    })
 }
 
 fn open_trusted_chunk_cache(
