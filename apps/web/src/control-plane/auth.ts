@@ -74,7 +74,66 @@ export async function handleAgentBootstrap(
     );
   }
 
-  const tokenHash = await sha256Hex(bootstrapToken);
+  const credential = await verifyHostCredential(env, hostId, bootstrapToken);
+  if (!credential.ok) return credential.response;
+  const host = credential.host;
+  const nowMs = Date.now();
+
+  const issuer = env.AGENT_JWT_ISSUER ?? "intar-agent-bridge";
+  const audience = env.AGENT_JWT_AUDIENCE ?? "agent-connect";
+  const nowSeconds = Math.floor(nowMs / 1000);
+
+  const payload: JwtPayload = {
+    credential_generation: host.credentialGeneration,
+    organization_id: host.scope === "organization" ? host.organizationId ?? null : null,
+    iss: issuer,
+    aud: audience,
+    sub: hostId,
+    iat: nowSeconds,
+    nbf: nowSeconds,
+    exp: nowSeconds + JWT_TTL_SECONDS,
+    jti: createAppId(),
+  };
+
+  const accessToken = await signJwt(payload, jwtSecret);
+  const wsUrl = new URL(request.url);
+  wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
+  wsUrl.pathname = "/agent/connect";
+  wsUrl.search = `hostId=${encodeURIComponent(hostId)}`;
+
+  return jsonResponse(
+    {
+      hostId,
+      ownerUserId: host.userId,
+      ...(host.scope === "organization" ? { organizationId: host.organizationId } : {}),
+      scope: host.scope,
+      credentialGeneration: host.credentialGeneration,
+      accessToken,
+      expiresAt: new Date(payload.exp * 1000).toISOString(),
+      wsUrl: wsUrl.toString(),
+    },
+    200,
+  );
+}
+
+type HostCredentialResult =
+  | { ok: true; host: VerifiedAgentHost }
+  | { ok: false; response: Response };
+
+/**
+ * Checks a host's enrollment credential (C2) as the bootstrap exchange does,
+ * with the same statuses and messages.
+ */
+export async function verifyHostCredential(
+  env: Cloudflare.Env,
+  hostId: string,
+  credential: string,
+): Promise<HostCredentialResult> {
+  const refuse = (body: unknown, status: number): HostCredentialResult => ({
+    ok: false,
+    response: jsonResponse(body, status),
+  });
+  const tokenHash = await sha256Hex(credential);
   const db = drizzle(env.DB);
 
   const matches = await db
@@ -104,20 +163,20 @@ export async function handleAgentBootstrap(
 
   const match = matches[0];
   if (!match) {
-    return jsonResponse({ error: "invalid bootstrap credentials" }, 401);
+    return refuse({ error: "invalid bootstrap credentials" }, 401);
   }
   if (!match.scope || match.credentialGeneration < 1 ||
       match.tokenCredentialGeneration !== match.credentialGeneration) {
-    return jsonResponse({ error: "Install and register this server again" }, 401);
+    return refuse({ error: "Install and register this server again" }, 401);
   }
   if (match.scope === "organization" && (!match.organizationAdmitted || match.role !== "agent")) {
-    return jsonResponse({ error: "invalid organization host" }, 403);
+    return refuse({ error: "invalid organization host" }, 403);
   }
   if (match.hostDisabled) {
-    return jsonResponse({ error: "host is disabled" }, 403);
+    return refuse({ error: "host is disabled" }, 403);
   }
   if (match.scope === "personal" && !match.ownerActive) {
-    return jsonResponse({ error: "account access is revoked" }, 403);
+    return refuse({ error: "account access is revoked" }, 403);
   }
 
   const nowMs = Date.now();
@@ -125,47 +184,23 @@ export async function handleAgentBootstrap(
     match.revokedAt !== null ||
     (match.expiresAt !== null && match.expiresAt <= nowMs)
   ) {
-    return jsonResponse(
+    return refuse(
       { error: "bootstrap token is expired or revoked" },
       401,
     );
   }
 
-  const issuer = env.AGENT_JWT_ISSUER ?? "intar-agent-bridge";
-  const audience = env.AGENT_JWT_AUDIENCE ?? "agent-connect";
-  const nowSeconds = Math.floor(nowMs / 1000);
-
-  const payload: JwtPayload = {
-    credential_generation: match.credentialGeneration,
-    organization_id: match.scope === "organization" ? match.organizationId : null,
-    iss: issuer,
-    aud: audience,
-    sub: hostId,
-    iat: nowSeconds,
-    nbf: nowSeconds,
-    exp: nowSeconds + JWT_TTL_SECONDS,
-    jti: createAppId(),
-  };
-
-  const accessToken = await signJwt(payload, jwtSecret);
-  const wsUrl = new URL(request.url);
-  wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-  wsUrl.pathname = "/agent/connect";
-  wsUrl.search = `hostId=${encodeURIComponent(hostId)}`;
-
-  return jsonResponse(
-    {
-      hostId,
-      ownerUserId: match.hostUserId,
-      ...(match.scope === "organization" ? { organizationId: match.organizationId } : {}),
+  return {
+    ok: true,
+    host: {
       scope: match.scope,
+      organizationId: match.organizationId,
       credentialGeneration: match.credentialGeneration,
-      accessToken,
-      expiresAt: new Date(payload.exp * 1000).toISOString(),
-      wsUrl: wsUrl.toString(),
+      hostId,
+      userId: match.hostUserId,
+      role: match.role,
     },
-    200,
-  );
+  };
 }
 
 export async function handleAgentConnect(
@@ -210,6 +245,10 @@ export async function handleAgentConnect(
   return stub.fetch(proxiedRequest);
 }
 
+export type VerifiedAgentToken =
+  | { ok: true; agent: VerifiedAgentHost; expiresAt: number }
+  | { ok: false; response: Response };
+
 export async function requireVerifiedAgentRequest(
   request: Request,
   env: Cloudflare.Env,
@@ -217,6 +256,31 @@ export async function requireVerifiedAgentRequest(
 ): Promise<
   { ok: true; agent: VerifiedAgentHost } | { ok: false; response: Response }
 > {
+  const authHeader = request.headers.get("authorization") ?? "";
+  const bearer = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7).trim()
+    : "";
+  if (!bearer && validAgentJwtSecret(env.AGENT_JWT_SECRET)) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "missing bearer token" }, 401),
+    };
+  }
+  return verifyAgentToken(env, bearer, {
+    audience: env.AGENT_JWT_AUDIENCE ?? "agent-connect",
+    expectedHostId,
+  });
+}
+
+/**
+ * Verifies an agent JWT for one audience and re-reads its host, so a
+ * credential rotation, a disabled host or a revoked owner fails at once.
+ */
+export async function verifyAgentToken(
+  env: Cloudflare.Env,
+  token: string,
+  options: { audience: string; expectedHostId?: string | undefined },
+): Promise<VerifiedAgentToken> {
   const jwtSecret = validAgentJwtSecret(env.AGENT_JWT_SECRET);
   if (!jwtSecret) {
     return {
@@ -224,23 +288,13 @@ export async function requireVerifiedAgentRequest(
       response: agentAuthenticationUnavailable(),
     };
   }
-
-  const authHeader = request.headers.get("authorization") ?? "";
-  const bearer = authHeader.startsWith("Bearer ")
-    ? authHeader.slice(7).trim()
-    : "";
-  if (!bearer) {
-    return {
-      ok: false,
-      response: jsonResponse({ error: "missing bearer token" }, 401),
-    };
-  }
+  const expectedHostId = options.expectedHostId;
 
   const payload = await verifyJwt(
-    bearer,
+    token,
     jwtSecret,
     env.AGENT_JWT_ISSUER ?? "intar-agent-bridge",
-    env.AGENT_JWT_AUDIENCE ?? "agent-connect",
+    options.audience,
   );
   if (!payload) {
     return {
@@ -313,7 +367,41 @@ export async function requireVerifiedAgentRequest(
       userId: host.userId,
       role: host.role,
     },
+    expiresAt: payload.exp,
   };
+}
+
+/** Audience of the tokens `/v2` accepts; no other surface accepts it. */
+export const REGISTRY_TOKEN_AUDIENCE = "intar-registry";
+
+/**
+ * Mints a registry token for a verified agent host. It never outlives
+ * `notAfter`, so exchanging a JWT never extends its lifetime. Null when the
+ * secret is unusable or the bridge audience is the registry's.
+ */
+export async function mintRegistryToken(
+  env: Cloudflare.Env,
+  agent: VerifiedAgentHost,
+  notAfter?: number,
+): Promise<{ token: string; issuedAt: number; expiresAt: number } | null> {
+  const jwtSecret = validAgentJwtSecret(env.AGENT_JWT_SECRET);
+  if (!jwtSecret || String(env.AGENT_JWT_AUDIENCE ?? "agent-connect") === REGISTRY_TOKEN_AUDIENCE) {
+    return null;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const exp = Math.min(now + JWT_TTL_SECONDS, notAfter ?? Number.MAX_SAFE_INTEGER);
+  const token = await signJwt({
+    credential_generation: agent.credentialGeneration,
+    organization_id: agent.scope === "organization" ? agent.organizationId ?? null : null,
+    iss: env.AGENT_JWT_ISSUER ?? "intar-agent-bridge",
+    aud: REGISTRY_TOKEN_AUDIENCE,
+    sub: agent.hostId,
+    iat: now,
+    nbf: now,
+    exp,
+    jti: createAppId(),
+  }, jwtSecret);
+  return { token, issuedAt: now, expiresAt: exp };
 }
 
 export async function sha256Hex(value: string): Promise<string> {
