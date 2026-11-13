@@ -425,6 +425,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             supports_jailer_v3: ready && fast_template_store,
             supports_template_backed_launch: ready && fast_template_store,
             fast_template_store,
+            supports_wake: ready
+                && fast_template_store
+                && crate::wake_apply::snapdelta_sandbox_available(&self.config.jailer_binary),
             supports_hard_cpu_quota: ready,
             supports_landlock: ready,
             supports_cgroup_v2: self.readiness.supports_cgroup_v2,

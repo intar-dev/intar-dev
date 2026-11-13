@@ -81,7 +81,22 @@ each named by its SHA-256) into a blob cache inside its disposable jail
 directory, then sends `PrepareChunkedImageV3` and `LaunchVmV3`. The production
 `allowed_source_roots` remains agent-cache-only: the binary adds the fixture
 root and that blob cache's root solely to its isolated in-memory self-test
-configuration.
+configuration. Its image carries no suspended guest, so the self-test does not
+cover a wake: neither the RAM store, the sandboxed delta apply, nor the staging
+of `ram`, `stub` and `cpu-profile.json`.
+
+When an image's machine config has `wake`, `PrepareChunkedImageV3` also checks
+it against the manifest and prepares `ram`, `stub` and `cpu-profile.json` into
+the template, reading every wake layer from the same blob cache. A base's RAM
+file is assembled once per host into the root-owned store `ram/<sha256>.ram`
+and cloned; a pack's is the base's with the pack's delta applied by
+`intar-jailer apply-snapdelta` in a transient, unprivileged systemd unit
+(dynamic user, no network or capabilities, syscall filter, Landlock, bounded
+memory and time) that gets only the three files as open descriptors. Its
+output counts only once its SHA-256 is the pack's. The store GC keeps a RAM
+store file while any template names it. `supports_wake` is advertised when the
+host is ready for template launches, systemd is at least 253 (`OpenFile=`) and
+the jailer binary is present.
 Fast-host readiness creates root-owned anonymous probes in the template store
 and every configured source filesystem, then exact-reflinks each probe into the
 root-owned generation store. One failed route withdraws v3 and fast-template

@@ -270,6 +270,7 @@ fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
         host_stderr_log: PathBuf::from("/work/jails/vm-demo/root/logs/cloud-hypervisor.stderr.log"),
         jailed_serial_log: PathBuf::from("/logs/serial.log"),
         jailed_console_log: PathBuf::from("/logs/console.log"),
+        wake: None,
     };
 
     let cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {

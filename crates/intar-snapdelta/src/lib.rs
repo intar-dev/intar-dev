@@ -11,7 +11,8 @@
 //!   (kinds 2 and 3) in address order. A chunk without data pages has frame
 //!   length 0.
 //!
-//! [`diff`] runs where the delta is built. [`apply`] runs on a host and
+//! [`diff`] runs where the delta is built. [`apply`] (or [`apply_files`])
+//! runs on a host and
 //! treats the delta as untrusted: every header field, table entry and page
 //! kind is checked before it is used, and nothing is allocated beyond what
 //! the base's size allows.
@@ -225,7 +226,8 @@ fn read_vec(file: &File, offset: usize, len: usize) -> Result<Vec<u8>, Error> {
 /// Rebuilds the file `delta` was made from, from `base` and `delta`, as a
 /// new sparse file at `out` (zero pages are not written). Returns the bytes
 /// written. `out` must not exist, so it can never be one of the inputs; a
-/// failed apply leaves a partial `out` for the caller to remove. The base's pages that the delta replaces are never read.
+/// failed apply leaves a partial `out` for the caller to remove. The base's
+/// pages that the delta replaces are never read.
 ///
 /// The caller checks the result against the digest it expects: a delta
 /// applied to another base of the same size gives a wrong file, not an
@@ -237,11 +239,28 @@ fn read_vec(file: &File, offset: usize, len: usize) -> Result<Vec<u8>, Error> {
 /// for a base of this size.
 pub fn apply(base: &Path, delta: &Path, out: &Path, threads: usize) -> Result<u64, Error> {
     let (base, delta) = (File::open(base)?, File::open(delta)?);
-    let (size, delta_len) = (len_of(&base)?, len_of(&delta)?);
+    let out = File::options().write(true).create_new(true).open(out)?;
+    apply_files(&base, &delta, &out, threads)
+}
+
+/// [`apply`] on files that are already open: `base` and `delta` readable,
+/// `out` a writable, empty regular file, which is grown to the base's size
+/// and written sparsely. A non-empty `out` is refused, so an input passed
+/// as the output is never overwritten.
+///
+/// # Errors
+///
+/// As [`apply`], and when `out` is not an empty regular file.
+pub fn apply_files(base: &File, delta: &File, out: &File, threads: usize) -> Result<u64, Error> {
+    let out_meta = out.metadata()?;
+    if !out_meta.is_file() || out_meta.len() != 0 {
+        return Err(Error::Invalid("output is not an empty regular file"));
+    }
+    let (size, delta_len) = (len_of(base)?, len_of(delta)?);
     if delta_len < HEADER {
         return Err(Error::Invalid("delta shorter than its header"));
     }
-    let header = read_vec(&delta, 0, HEADER)?;
+    let header = read_vec(delta, 0, HEADER)?;
     if &header[..8] != MAGIC || le32(&header, 8) != PAGE {
         return Err(Error::Invalid("not a snapdelta file"));
     }
@@ -268,7 +287,7 @@ pub fn apply(base: &Path, delta: &Path, out: &Path, threads: usize) -> Result<u6
     if map_len > zstd::zstd_safe::compress_bound(pages) {
         return Err(Error::Invalid("page map too long for the base's size"));
     }
-    let table = read_vec(&delta, HEADER, 4 * chunks)?;
+    let table = read_vec(delta, HEADER, 4 * chunks)?;
     let mut frames = Vec::with_capacity(chunks);
     let mut offset = frames_start;
     for index in 0..chunks {
@@ -286,13 +305,12 @@ pub fn apply(base: &Path, delta: &Path, out: &Path, threads: usize) -> Result<u6
             "delta length does not match its frame table",
         ));
     }
-    let map = zstd::bulk::decompress(&read_vec(&delta, table_end, map_len)?, pages)
+    let map = zstd::bulk::decompress(&read_vec(delta, table_end, map_len)?, pages)
         .map_err(|_| Error::Invalid("page map does not decode"))?;
     if map.len() != pages || map.iter().any(|&kind| kind > XOR) {
         return Err(Error::Invalid("page map is not valid"));
     }
 
-    let out = File::options().write(true).create_new(true).open(out)?;
     out.set_len(size as u64)?;
     let chunk_bytes = chunk_pages * PAGE;
     let written = AtomicU64::new(0);
@@ -328,7 +346,7 @@ pub fn apply(base: &Path, delta: &Path, out: &Path, threads: usize) -> Result<u6
             }
             Vec::new()
         } else {
-            let frame = read_vec(&delta, frame_at, frame_len)?;
+            let frame = read_vec(delta, frame_at, frame_len)?;
             zstd::bulk::decompress(&frame, data_pages * PAGE)
                 .ok()
                 .filter(|data| data.len() == data_pages * PAGE)
@@ -438,6 +456,45 @@ mod tests {
             Err(Error::Io(_))
         ));
         assert_eq!(fs::read(path("base"))?, base);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_files_rebuilds_the_fork_into_an_empty_file() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = |name: &str| dir.path().join(name);
+        let (base, fork) = files();
+        fs::write(path("base"), &base)?;
+        fs::write(path("fork"), &fork)?;
+        diff_chunked(&path("base"), &path("fork"), &path("delta"), 3, 2, 16)?;
+        let (base_file, delta_file) = (File::open(path("base"))?, File::open(path("delta"))?);
+        let open_out = || {
+            File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path("out"))
+        };
+
+        apply_files(&base_file, &delta_file, &open_out()?, 2)?;
+        assert_eq!(fs::read(path("out"))?, fork);
+
+        // A non-empty output is refused and left as it was.
+        assert!(matches!(
+            apply_files(&base_file, &delta_file, &open_out()?, 2),
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(fs::read(path("out"))?, fork);
+
+        // A bad delta is refused before the output is touched.
+        fs::write(path("bad"), b"not a delta at all, not even close to it")?;
+        fs::remove_file(path("out"))?;
+        assert!(matches!(
+            apply_files(&base_file, &File::open(path("bad"))?, &open_out()?, 2),
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(fs::metadata(path("out"))?.len(), 0);
         Ok(())
     }
 

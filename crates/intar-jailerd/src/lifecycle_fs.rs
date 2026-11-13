@@ -145,7 +145,7 @@ pub(super) fn create_exclusive_file(path: &Path, mode: u32) -> Result<()> {
     set_mode(path, mode)
 }
 
-pub(super) fn jail_paths(root: &Path, has_initrd: bool) -> JailPathMap {
+pub(super) fn jail_paths(root: &Path, has_initrd: bool, has_wake: bool) -> JailPathMap {
     JailPathMap {
         host_jail_root: root.to_path_buf(),
         host_api_socket: root.join("run/cloud-hypervisor.sock"),
@@ -167,6 +167,14 @@ pub(super) fn jail_paths(root: &Path, has_initrd: bool) -> JailPathMap {
         host_stderr_log: root.join("logs/cloud-hypervisor.stderr.log"),
         jailed_serial_log: PathBuf::from("/logs/serial.log"),
         jailed_console_log: PathBuf::from("/logs/console.log"),
+        wake: has_wake.then(|| JailWakePaths {
+            host_ram: root.join("disks/wake.ram"),
+            host_stub: root.join("boot/wake-stub"),
+            host_cpu_profile: root.join("boot/cpu-profile.json"),
+            jailed_ram: PathBuf::from("/disks/wake.ram"),
+            jailed_stub: PathBuf::from("/boot/wake-stub"),
+            jailed_cpu_profile: PathBuf::from("/boot/cpu-profile.json"),
+        }),
     }
 }
 

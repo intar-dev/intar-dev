@@ -497,6 +497,7 @@ fn saturation_smoke_requests_have_unique_typed_topology() {
         ),
         initrd: None,
         fast_template_store: true,
+        wake: None,
     };
     let requests = (0..=SELF_TEST_SATURATION_VM_COUNT)
         .map(|index| {

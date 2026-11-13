@@ -139,7 +139,11 @@ pub(super) fn prepare_jail_files(
             spec_path,
             jail_root_inode: Some(root_stat.st_ino),
             vmm_executable_identity,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            paths: jail_paths(
+                &root,
+                request.artifacts.initrd.is_some(),
+                request.artifacts.wake.is_some(),
+            ),
         })
     })();
     match operation {
@@ -194,6 +198,20 @@ pub(super) fn stage_artifacts_v2(
             .set_len(root_disk_size_bytes)
             .context("expand cloned generation root disk")?;
     }
+    // The suspended guest: the generation's own clone of the RAM file, which
+    // the VM writes as its root disk is written, and the stub and CPU
+    // profile read-only, as the kernel is.
+    if let Some(wake) = &artifacts.wake {
+        stage_source(config, &wake.ram, &root.join("disks/wake.ram"), 0o600)?;
+        stage_source(config, &wake.stub, &root.join("boot/wake-stub"), 0o444)?;
+        stage_source(
+            config,
+            &wake.cpu_profile,
+            &root.join("boot/cpu-profile.json"),
+            0o444,
+        )?;
+        set_owner(&root.join("disks/wake.ram"), uid, gid)?;
+    }
     // Runtime state remains per-VM and read-only, but the recording disk is a
     // preformatted root-owned blank. Its agent descriptor is retained solely
     // as the trusted export destination after the cgroup drains.
@@ -240,6 +258,10 @@ pub(super) fn stage_artifacts(
     gid: u32,
 ) -> Result<()> {
     validate_template_launch_sources(artifacts)?;
+    ensure!(
+        artifacts.wake.is_none(),
+        "a suspended guest launches only from a prepared template"
+    );
     stage_source(config, &artifacts.kernel, &root.join("boot/kernel"), 0o444)?;
     if let Some(initrd) = &artifacts.initrd {
         stage_source(config, initrd, &root.join("boot/initrd"), 0o444)?;
@@ -500,9 +522,16 @@ pub(super) fn validate_template_launch_sources(artifacts: &SourceArtifacts) -> R
     let root_template = template_source_image(&artifacts.root_disk);
     let kernel_template = template_source_image(&artifacts.kernel);
     let initrd_template = artifacts.initrd.as_ref().and_then(template_source_image);
+    let wake_templates = artifacts
+        .wake
+        .iter()
+        .flat_map(|wake| [&wake.ram, &wake.stub, &wake.cpu_profile])
+        .map(template_source_image)
+        .collect::<Vec<_>>();
     let has_any_template = root_template.is_some()
         || kernel_template.is_some()
         || initrd_template.is_some()
+        || wake_templates.iter().any(Option::is_some)
         || artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
         || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT;
     if !has_any_template {
@@ -514,6 +543,7 @@ pub(super) fn validate_template_launch_sources(artifacts: &SourceArtifacts) -> R
             .initrd
             .as_ref()
             .is_some_and(|_| initrd_template != Some(image))
+        || wake_templates.iter().any(|wake| *wake != Some(image))
         || artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
         || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
     {
@@ -576,6 +606,17 @@ pub(super) fn open_prepared_template_source(
                 .context("prepared image does not contain an initrd")?,
             ArtifactAccess::ReadOnly,
         ),
+        "ram" | "stub" | "cpu-profile.json" => {
+            let wake = metadata
+                .wake
+                .as_ref()
+                .context("prepared image does not carry a suspended guest")?;
+            match file_name {
+                "ram" => (&wake.ram, ArtifactAccess::ReadWrite),
+                "stub" => (&wake.stub, ArtifactAccess::ReadOnly),
+                _ => (&wake.cpu_profile, ArtifactAccess::ReadOnly),
+            }
+        }
         _ => bail!("prepared template artifact name is not allowed"),
     };
     if source.access != expected_access || source.sha256.as_ref() != Some(&expected.sha256) {

@@ -2137,6 +2137,7 @@ dependencies = [
  "anyhow",
  "clap",
  "intar-jailer-protocol",
+ "intar-snapdelta",
  "landlock",
  "nix",
  "rustix",

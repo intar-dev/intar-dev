@@ -44,6 +44,7 @@ fn ready_capabilities(source_root: PathBuf) -> JailerCapabilities {
         supports_jailer_v3: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
+        supports_wake: false,
         supports_hard_cpu_quota: true,
         supports_landlock: true,
         supports_cgroup_v2: true,

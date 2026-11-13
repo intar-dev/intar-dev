@@ -18,8 +18,8 @@ use intar_jailer_protocol::CpuStat;
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, CLOUD_HYPERVISOR_VERSION, CpuQuota, CpuQuotaAttestation,
     DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest, FinalizeVmBootResult,
-    JailPathMap, JailSpecV1, JailerCapabilities, JailerdConfig, LaunchVmV3Request, OperationResult,
-    PREPARED_IMAGE_SOURCE_ROOT, PROTOCOL_VERSION, PrepareChunkedImageV3Request,
+    JailPathMap, JailSpecV1, JailWakePaths, JailerCapabilities, JailerdConfig, LaunchVmV3Request,
+    OperationResult, PREPARED_IMAGE_SOURCE_ROOT, PROTOCOL_VERSION, PrepareChunkedImageV3Request,
     PreparedImageV3Result, ProtocolError, Request, RequestClass, Response, RunNetworkResult,
     SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuRuntimeState,
     VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
@@ -772,6 +772,9 @@ mod prepare_lane;
 use prepare_lane::*;
 mod store_gc;
 pub use store_gc::{StoreGcReport, gc_root_stores};
+mod wake_apply;
+mod wake_templates;
+use wake_templates::*;
 const IMAGE_TEMPLATE_METADATA_V3: u16 = 3;
 const HOST_TEMPLATE_METADATA_VERSION: u16 = 2;
 const HOST_TEMPLATE_POINTER: &str = "host-v2-current.json";
@@ -803,6 +806,20 @@ struct ImageTemplateMetadataV2 {
     root_disk: ImageTemplateArtifactV2,
     kernel: ImageTemplateArtifactV2,
     initrd: Option<ImageTemplateArtifactV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wake: Option<ImageTemplateWakeV1>,
+}
+
+/// The template files of an image's suspended guest.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ImageTemplateWakeV1 {
+    /// The host's RAM store file (`ram/<sha256>.ram`) the template's `ram`
+    /// comes from: its clone on a base, the base a pack's delta applied to.
+    ram_store_sha256: Sha256Digest,
+    ram: ImageTemplateArtifactV2,
+    stub: ImageTemplateArtifactV2,
+    cpu_profile: ImageTemplateArtifactV2,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

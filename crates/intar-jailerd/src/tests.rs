@@ -410,7 +410,7 @@ impl JailPreparer for FakePreparer {
             spec_path: root.join("../jail-spec-v1.json"),
             jail_root_inode: None,
             vmm_executable_identity: None,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
         })
     }
     fn destroy(&mut self, _config: &JailerdConfig, _generation: &ValidatedId) -> Result<bool> {
@@ -506,7 +506,7 @@ impl JailPreparer for FakeTemplatePreparer {
             spec_path: root.join("../jail-spec-v1.json"),
             jail_root_inode: None,
             vmm_executable_identity: None,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
         })
     }
 
@@ -569,7 +569,7 @@ impl JailPreparer for TrackingPreparer {
             spec_path: root.join("../jail-spec-v1.json"),
             jail_root_inode: None,
             vmm_executable_identity: None,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
         })
     }
 
@@ -784,6 +784,7 @@ fn launch(index: u32, cpu_millis: u32) -> VmLaunchRequest {
             root_disk: source("/trusted/root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: source("/trusted/runtime.raw", ArtifactAccess::ReadOnly),
             recording_disk: source("/trusted/recordings.vfat", ArtifactAccess::ReadWrite),
+            wake: None,
         },
     }
 }
@@ -852,7 +853,7 @@ fn recovered_record(config: &JailerdConfig) -> VmRecord {
         quota,
         quota_attestation: None,
         ssh_forward_active: true,
-        paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+        paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
         cgroup_path: Some(
             format!("/intar.slice/intar-vms.slice/intar-vm-{generation}.service").into(),
         ),

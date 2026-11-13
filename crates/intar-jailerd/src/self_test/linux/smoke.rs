@@ -678,6 +678,8 @@ pub(super) fn protocol_artifacts(
             &artifacts.recording_disk,
             ArtifactAccess::ReadWrite,
         )?,
+        // The self-test does not cover a wake.
+        wake: None,
     })
 }
 

@@ -318,6 +318,7 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
             None,
             ArtifactAccess::ReadWrite,
         )?,
+        wake: None,
     };
 
     let request = VmLaunchRequest {

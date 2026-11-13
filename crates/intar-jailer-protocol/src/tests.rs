@@ -195,10 +195,11 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_prepared_boot_artifacts() {
             root_disk: prepared("root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: agent("runtime.raw", ArtifactAccess::ReadOnly, None),
             recording_disk: agent("recordings.vfat", ArtifactAccess::ReadWrite, None),
+            wake: None,
         },
     };
     let request = LaunchVmV3Request {
-        image_id,
+        image_id: image_id.clone(),
         chunk_manifest_sha256: manifest_sha256,
         virtual_size_bytes: 8 * 1024 * 1024,
         launch,
@@ -213,12 +214,54 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_prepared_boot_artifacts() {
         Err(ValidationError::TemplateLaunchRequiresV2),
         "a raw launch must not reference prepared boot artifacts"
     );
-    let mut writable_runtime = request;
+    let mut writable_runtime = request.clone();
     writable_runtime.launch.artifacts.runtime_disk.access = ArtifactAccess::ReadWrite;
     assert_eq!(
         writable_runtime.validate(),
         Err(ValidationError::InvalidArtifactAccess)
     );
+
+    // A suspended guest: the launch's own template files, RAM writable.
+    let wake = WakeArtifacts {
+        ram: prepared("ram", ArtifactAccess::ReadWrite),
+        stub: prepared("stub", ArtifactAccess::ReadOnly),
+        cpu_profile: prepared("cpu-profile.json", ArtifactAccess::ReadOnly),
+    };
+    let mut waking = request;
+    waking.launch.artifacts.wake = Some(wake.clone());
+    waking.validate().expect("valid wake launch");
+    assert_eq!(
+        waking.launch.validate(),
+        Err(ValidationError::TemplateLaunchRequiresV2),
+        "a raw launch carries no suspended guest"
+    );
+    let broken: [fn(&mut WakeArtifacts); 5] = [
+        |wake| wake.ram.access = ArtifactAccess::ReadOnly,
+        |wake| wake.stub.access = ArtifactAccess::ReadWrite,
+        |wake| {
+            wake.cpu_profile.relative_path = PathBuf::from("b".repeat(64)).join("cpu-profile.json")
+        },
+        |wake| wake.stub.source_root = 0,
+        |wake| wake.ram.sha256 = None,
+    ];
+    for change in broken {
+        let mut broken = waking.clone();
+        if let Some(wake) = broken.launch.artifacts.wake.as_mut() {
+            change(wake);
+        }
+        assert_eq!(
+            broken.validate(),
+            Err(ValidationError::InvalidPreparedLaunchArtifact)
+        );
+    }
+    // An older peer's launch, without the field, still decodes.
+    let mut value = serde_json::to_value(&waking).expect("encode");
+    value["launch"]["artifacts"]
+        .as_object_mut()
+        .expect("artifacts")
+        .remove("wake");
+    let decoded: LaunchVmV3Request = serde_json::from_value(value).expect("decode");
+    assert!(decoded.launch.artifacts.wake.is_none());
 }
 
 #[test]
@@ -262,6 +305,7 @@ fn capabilities_require_every_fast_launch_attestation() {
         supports_jailer_v3: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
+        supports_wake: false,
         supports_hard_cpu_quota: true,
         supports_landlock: true,
         supports_cgroup_v2: true,
@@ -287,7 +331,19 @@ fn capabilities_require_every_fast_launch_attestation() {
         ssh_public_port_start: DEFAULT_SSH_PUBLIC_PORT_START,
         ssh_public_port_end: DEFAULT_SSH_PUBLIC_PORT_END,
     };
-    let encoded = serde_json::to_value(capabilities).expect("serialize capabilities");
+    let encoded = serde_json::to_value(&capabilities).expect("serialize capabilities");
+    // A host without wake support says nothing of it, as an older one did.
+    assert!(encoded.get("supports_wake").is_none());
+    let waking = JailerCapabilities {
+        supports_wake: true,
+        ..capabilities
+    };
+    let waking_encoded = serde_json::to_value(&waking).expect("serialize capabilities");
+    assert_eq!(waking_encoded["supports_wake"], serde_json::json!(true));
+    assert_eq!(
+        serde_json::from_value::<JailerCapabilities>(waking_encoded).expect("decode"),
+        waking
+    );
     for required in [
         "supports_jailer_v3",
         "supports_template_backed_launch",
@@ -356,6 +412,7 @@ fn guest_cpu_count_cannot_be_added_to_launch_request() {
             root_disk: source("/trusted/root", ArtifactAccess::ReadWrite),
             runtime_disk: source("/trusted/runtime", ArtifactAccess::ReadOnly),
             recording_disk: source("/trusted/recording", ArtifactAccess::ReadWrite),
+            wake: None,
         },
     };
     assert_eq!(

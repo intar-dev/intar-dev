@@ -28,10 +28,16 @@ const CLOUD_HYPERVISOR_ARGS: [&str; 4] = [
     "true",
 ];
 
+#[cfg(target_os = "linux")]
+mod snapdelta;
+
 #[derive(Debug, Parser)]
 #[command(name = "intar-jailer")]
 #[command(about = "Single-use Cloud Hypervisor isolation boundary")]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
     #[arg(long, value_name = "PATH", required_unless_present = "stage2")]
     spec: Option<std::path::PathBuf>,
     #[arg(long, hide = true)]
@@ -42,10 +48,21 @@ struct Cli {
     gid: Option<u32>,
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Rebuild a VM memory file from a base and an untrusted snapdelta, from
+    /// the descriptors `base`, `delta` and `out` that systemd passes in
+    /// (`OpenFile=`). Run only by jailerd, inside its sandboxed unit.
+    ApplySnapdelta,
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     #[cfg(target_os = "linux")]
     {
+        if let Some(Command::ApplySnapdelta) = cli.command {
+            return snapdelta::run();
+        }
         if cli.stage2 {
             return linux::run_stage2(
                 cli.uid.context("stage2 requires --uid")?,
