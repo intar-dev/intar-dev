@@ -141,19 +141,25 @@ export function applyVmStateV3ToRunState(input: {
         error: null,
         updated_at_unix_ms: reported.updated_at_unix_ms,
       },
-      readyGate: (lab?.state ?? vm.lab?.state) === "ready",
+      // Without a lab in this report, the last one counts only within the
+      // same runtime generation: a new generation starts a new guest.
+      readyGate: lab
+        ? lab.state === "ready"
+        : vm.lab?.state === "ready" &&
+          (reported.runtime_constraints?.generation ?? null) === (vm.runtimeConstraints?.generation ?? null),
     });
     if (applied === vm) return vm;
     if (lab && tasks) {
       tasks = mergeReportedTasks(tasks, vm.scenarioVmName, lab.tasks, reported.updated_at_unix_ms);
     }
+    // `applied.lab` is cleared when the report starts a new generation.
     const labState = lab
       ? {
-          state: vm.lab?.state === "failed" ? "failed" as const : lab.state,
+          state: applied.lab?.state === "failed" ? "failed" as const : lab.state,
           ready: lab.ready.slice(0, 64).map(({ name, status }) => ({ name, status })),
-          failure: lab.failure?.slice(0, 4096) ?? vm.lab?.failure ?? null,
+          failure: lab.failure?.slice(0, 4096) ?? applied.lab?.failure ?? null,
         }
-      : (vm.lab ?? null);
+      : (applied.lab ?? null);
     if (labState?.state !== "failed") return { ...applied, lab: labState };
     return decorateVmState({
       ...applied,
@@ -458,6 +464,7 @@ function resetVmForRuntimeGeneration(
     },
     runtimeConstraints: null,
     resourceState: null,
+    lab: null,
     bootProbes: resetProbes(current.bootProbes),
     scenarioProbes: resetProbes(current.scenarioProbes),
   };

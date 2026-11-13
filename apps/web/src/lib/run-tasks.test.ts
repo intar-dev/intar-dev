@@ -139,6 +139,18 @@ describe("bridge 9 VM state on a task run", () => {
     expect(state.vms[0]?.lab).toEqual({ state: "failed", ready: [{ name: "svc", status: "pass" }], failure: "setup.sh: exit 3" });
   });
 
+  it("forgets the lab of a VM that restarts into a new runtime generation", () => {
+    const at = (generation: string, time: number, report: VmLabV1 | null): VmStateV3 => ({
+      ...vm("web", time, lab("ready")), lab: report,
+      runtime_constraints: { generation, cpu_millis: 1000, quota_verified_at_unix_ms: time },
+    });
+    let state = applyVmStateV3ToRunState({ runId, current: run(), vm: at("jail-1", 1, lab("ready")) });
+    expect(state.vms[0]?.phase).toBe("ready");
+    state = applyVmStateV3ToRunState({ runId, current: state, vm: at("jail-2", 2, null) });
+    expect(state.vms[0]?.lab).toBeNull();
+    expect(state.vms[0]?.phase).toBe("booting");
+  });
+
   it("ignores another run's VM and a stale report", () => {
     const current = run();
     expect(applyVmStateV3ToRunState({ runId, current, vm: { ...vm("web", 1, lab("ready")), run_id: "other" } })).toBe(current);
