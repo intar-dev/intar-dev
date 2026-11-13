@@ -605,6 +605,11 @@ pub(super) async fn release_jailed_runtime(inner: &Inner, vm: &VmStatusResponse)
         return Ok(());
     }
 
+    destroy_previous_schema_run_network(inner, run_id).await
+}
+
+/// Ask jailerd to destroy a run's network; one it does not know is gone.
+pub(super) async fn destroy_previous_schema_run_network(inner: &Inner, run_id: &str) -> Result<()> {
     let run_id = ValidatedId::parse(run_id.to_string()).context("validate persisted run ID")?;
     match request_jailerd(
         inner,

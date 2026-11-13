@@ -156,6 +156,9 @@ pub struct VmDetails {
     /// SHA-256 (hex) of the exact `boot.json` bytes on the run disk.
     #[serde(skip_serializing)]
     pub boot_sha256: Option<String>,
+    /// The machine's name in its scenario: the guest's hostname and the
+    /// name reported to the control plane. The VM's key is its `vm_id`.
+    pub machine_name: Option<String>,
     pub run_id: Option<String>,
     pub root_disk_path: String,
     pub seed_disk_path: String,
@@ -267,6 +270,7 @@ impl VmStatusResponse {
                 image: None,
                 kino: None,
                 boot_sha256: None,
+                machine_name: None,
                 run_id: run_id.map(str::to_string),
                 root_disk_path: format!("/tmp/{name}/root.raw"),
                 seed_disk_path: format!("/tmp/{name}/runtime.img"),
@@ -337,6 +341,7 @@ impl VmStatusResponse {
                 .as_ref()
                 .and_then(|d| d.kino.as_ref().map(|digest| digest.as_str().to_owned())),
             boot_sha256: self.details.as_ref().and_then(|d| d.boot_sha256.clone()),
+            machine_name: self.details.as_ref().and_then(|d| d.machine_name.clone()),
             created_at_s: self.created_at_s,
             updated_at_s: self.updated_at_s,
             running_at_s: self.running_at_s,
@@ -844,6 +849,7 @@ use jailer_network::*;
 mod network_allocation;
 use network_allocation::*;
 mod state;
+pub(crate) use state::is_safe_key;
 use state::*;
 #[cfg(test)]
 mod tests;

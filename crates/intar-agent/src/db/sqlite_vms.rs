@@ -162,8 +162,8 @@ pub(super) fn ensure_schema(conn: &mut Connection) -> Result<()> {
     for vm in &legacy {
         transaction
             .execute(
-                "INSERT OR REPLACE INTO pending_teardown (vm_name, run_id) VALUES (?1, ?2);",
-                params![vm.vm_name, vm.run_id],
+                "INSERT OR REPLACE INTO pending_teardown (vm_name, run_id, jail_generation) VALUES (?1, ?2, ?3);",
+                params![vm.vm_name, vm.run_id, vm.jail_generation],
             )
             .context("queue legacy VM teardown")?;
     }
@@ -193,18 +193,25 @@ fn legacy_vms(conn: &Connection) -> Result<Vec<PendingTeardownRow>> {
     if !table_has_column(conn, "vms", "name")? {
         return Ok(rows);
     }
-    let run_id = if table_has_column(conn, "vms", "run_id")? {
-        "run_id"
-    } else {
-        "NULL"
+    let column = |name: &'static str| -> Result<&'static str> {
+        Ok(if table_has_column(conn, "vms", name)? {
+            name
+        } else {
+            "NULL"
+        })
     };
-    let query = format!("SELECT name, {run_id} FROM vms;");
+    let query = format!(
+        "SELECT name, {}, {} FROM vms;",
+        column("run_id")?,
+        column("jail_generation")?
+    );
     let mut stmt = conn.prepare(&query).context("prepare legacy VM query")?;
     let legacy = stmt
         .query_map([], |row| {
             Ok(PendingTeardownRow {
                 vm_name: row.get(0)?,
                 run_id: row.get(1)?,
+                jail_generation: row.get(2)?,
             })
         })
         .context("query legacy VMs")?
@@ -276,7 +283,8 @@ SELECT
   ch_executable_sha256,
   owner_user_id,
   runtime_execution_id,
-  generation
+  generation,
+  machine_name
 FROM vms
 ORDER BY created_at_s ASC;
 "#,
@@ -328,6 +336,7 @@ ORDER BY created_at_s ASC;
                 owner_user_id: row.get(39)?,
                 runtime_execution_id: row.get(40)?,
                 generation: row.get(41)?,
+                machine_name: row.get(42)?,
             })
         })
         .context("query load_all_vms")?;
@@ -381,9 +390,10 @@ INSERT INTO vms (
   ch_executable_sha256,
   owner_user_id,
   runtime_execution_id,
-  generation
+  generation,
+  machine_name
 ) VALUES (
-  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43
 )
 ON CONFLICT(name) DO UPDATE SET
   state = excluded.state,
@@ -426,7 +436,8 @@ ON CONFLICT(name) DO UPDATE SET
   ch_executable_sha256 = excluded.ch_executable_sha256,
   owner_user_id = excluded.owner_user_id,
   runtime_execution_id = excluded.runtime_execution_id,
-  generation = excluded.generation;
+  generation = excluded.generation,
+  machine_name = excluded.machine_name;
 "#,
         params![
             row.name,
@@ -471,6 +482,7 @@ ON CONFLICT(name) DO UPDATE SET
             row.owner_user_id,
             row.runtime_execution_id,
             row.generation,
+            row.machine_name,
         ],
     )
     .context("upsert vms row")?;

@@ -681,13 +681,13 @@ async fn apply_desired_state(
     let desired_identities = desired
         .vms
         .iter()
-        .map(|vm| (vm.run_id.as_str(), vm.name.as_str()))
+        .map(|vm| (vm.run_id.as_str(), vm.vm_id.as_str()))
         .collect::<BTreeSet<_>>();
     let desired_absent = desired
         .vms
         .iter()
         .filter(|vm| vm.desired_phase == DesiredVmPhase::Absent)
-        .map(|vm| (vm.run_id.as_str(), vm.name.as_str()))
+        .map(|vm| (vm.run_id.as_str(), vm.vm_id.as_str()))
         .collect::<BTreeSet<_>>();
 
     for local in vm.list_vms().await {
@@ -718,6 +718,7 @@ async fn apply_desired_state(
                 warn!(
                     error = %error,
                     run_id = %desired_vm.run_id,
+                    vm_id = %desired_vm.vm_id,
                     vm = %desired_vm.name,
                     "failed to reconcile desired vm"
                 );
@@ -743,10 +744,10 @@ async fn reconcile_desired_vm(
     now: i64,
 ) -> Result<()> {
     if desired_vm.lease_expires_at_unix_ms <= now {
-        delete_vm_if_present(vm, &desired_vm.name).await;
+        delete_vm_if_present(vm, &desired_vm.vm_id).await;
         anyhow::bail!("desired VM lease expired");
     }
-    if let Some(existing) = vm.get_vm(&desired_vm.name).await {
+    if let Some(existing) = vm.get_vm(&desired_vm.vm_id).await {
         let existing_run_id = local_run_id(&existing);
         if existing_run_id.as_deref() == Some(desired_vm.run_id.as_str())
             && existing.details.as_ref().is_some_and(|d| {
@@ -758,12 +759,12 @@ async fn reconcile_desired_vm(
             return Ok(());
         }
         warn!(
-            vm = %desired_vm.name,
+            vm_id = %desired_vm.vm_id,
             desired_run_id = %desired_vm.run_id,
             existing_run_id = ?existing_run_id,
-            "desired vm name is occupied by another run; deleting existing vm first"
+            "desired vm_id is occupied by another execution; deleting existing vm first"
         );
-        delete_vm_if_present(vm, &desired_vm.name).await;
+        delete_vm_if_present(vm, &desired_vm.vm_id).await;
         return Ok(());
     }
 
@@ -778,13 +779,14 @@ async fn reconcile_desired_vm(
         anyhow::bail!("desired vm has no ssh_authorized_keys entry");
     }
     let lease_duration_seconds = desired_lease_duration_seconds(desired_vm, now)?;
-    let peer_vm_names = desired_peer_vm_names(desired, desired_vm);
+    let peer_vm_aliases = desired_peer_vm_aliases(desired, desired_vm);
 
     vm.create_scenario_vm(CreateScenarioVmRequest {
         owner_user_id: desired_vm.owner_user_id.clone(),
         runtime_execution_id: desired_vm.runtime_execution_id.clone(),
         generation: desired_vm.generation,
-        name: desired_vm.name.clone(),
+        // The host key is `vm_id`; `name` is what the guest sees.
+        name: desired_vm.vm_id.clone(),
         run_id: desired_vm.run_id.clone(),
         image: desired_vm.image.clone(),
         kino: desired_vm.kino.clone(),
@@ -801,8 +803,8 @@ async fn reconcile_desired_vm(
             kino: Some(CreateScenarioVmRuntimeKino {
                 vsock_cid: kino_vsock_cid(desired.version, desired_vm),
             }),
-            peer_vm_names,
-            peer_vm_aliases: BTreeMap::new(),
+            peer_vm_names: peer_vm_aliases.keys().cloned().collect(),
+            peer_vm_aliases,
         },
     })
     .await
@@ -810,20 +812,23 @@ async fn reconcile_desired_vm(
     .map_err(|error| anyhow::anyhow!("{}", error.message))
 }
 
-/// The peers a desired VM names that run beside it in the same run.
-fn desired_peer_vm_names(desired: &HostDesiredStateV3, desired_vm: &DesiredVmV3) -> Vec<String> {
-    desired_vm
-        .peers
+/// The peers a desired VM names, resolved to the running VMs of the same
+/// run with that name: their `vm_id` (the host key) to their `name` (what
+/// the guest's `/etc/hosts` says).
+fn desired_peer_vm_aliases(
+    desired: &HostDesiredStateV3,
+    desired_vm: &DesiredVmV3,
+) -> BTreeMap<String, String> {
+    desired
+        .vms
         .iter()
-        .filter(|peer| {
-            **peer != desired_vm.name
-                && desired.vms.iter().any(|vm| {
-                    vm.desired_phase == DesiredVmPhase::Running
-                        && vm.run_id == desired_vm.run_id
-                        && vm.name == **peer
-                })
+        .filter(|vm| {
+            vm.desired_phase == DesiredVmPhase::Running
+                && vm.run_id == desired_vm.run_id
+                && vm.vm_id != desired_vm.vm_id
+                && desired_vm.peers.contains(&vm.name)
         })
-        .cloned()
+        .map(|vm| (vm.vm_id.clone(), vm.name.clone()))
         .collect()
 }
 
@@ -863,7 +868,7 @@ pub(crate) async fn validate_restart(
             u64::try_from(row.generation).context("invalid persisted generation")?,
         )?;
         anyhow::ensure!(
-            desired.vms.iter().any(|vm| vm.name == row.name
+            desired.vms.iter().any(|vm| vm.vm_id == row.name
                 && Some(vm.run_id.as_str()) == row.run_id.as_deref()
                 && vm.owner_user_id == row.owner_user_id
                 && vm.runtime_execution_id == row.runtime_execution_id
@@ -912,7 +917,7 @@ async fn update_relay(
                 {
                     continue;
                 }
-                let Some(local) = vm.get_vm(&target.name).await else {
+                let Some(local) = vm.get_vm(&target.vm_id).await else {
                     continue;
                 };
                 let Some(details) = local.details.as_ref() else {
@@ -925,7 +930,7 @@ async fn update_relay(
                 {
                     continue;
                 }
-                let Some(terminal) = vm.committed_terminal_state(&target.name).await else {
+                let Some(terminal) = vm.committed_terminal_state(&target.vm_id).await else {
                     continue;
                 };
                 if terminal.state != VmTerminalStateKind::Ready {

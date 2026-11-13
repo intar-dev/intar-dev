@@ -133,17 +133,24 @@ pub(super) fn validate_desired_state(
             && !desired.owner_user_id.trim().is_empty(),
         "desired host ownership mismatch"
     );
+    let mut vm_ids = BTreeSet::new();
     let mut names = BTreeSet::new();
     let mut runs = BTreeMap::new();
     for vm in &desired.vms {
         cfg.validate_owner(&vm.owner_user_id, &vm.runtime_execution_id, vm.generation)?;
+        // `vm_id` keys the VM on this host (its state row, work directory and
+        // jail); `name` is the machine's name inside its run.
         anyhow::ensure!(
-            !vm.run_id.trim().is_empty()
-                && !vm.name.trim().is_empty()
-                && !vm.vm_id.trim().is_empty(),
-            "VM identity is empty"
+            crate::vm::is_safe_key(&vm.run_id)
+                && crate::vm::is_safe_key(&vm.name)
+                && crate::vm::is_safe_key(&vm.vm_id),
+            "VM identity must match [A-Za-z0-9_-]+"
         );
-        anyhow::ensure!(names.insert(&vm.name), "duplicate VM name in desired state");
+        anyhow::ensure!(vm_ids.insert(&vm.vm_id), "duplicate vm_id in desired state");
+        anyhow::ensure!(
+            names.insert((&vm.run_id, &vm.name)),
+            "duplicate VM name within a run in desired state"
+        );
         let identity = (&vm.owner_user_id, &vm.runtime_execution_id, vm.generation);
         if let Some(previous) = runs.insert(&vm.run_id, identity) {
             anyhow::ensure!(
@@ -264,7 +271,7 @@ pub(super) fn desired_lease_duration_seconds(vm: &DesiredVmV3, now_ms: i64) -> R
 
 pub(super) fn kino_vsock_cid(desired_version: u64, vm: &DesiredVmV3) -> u32 {
     let mut hash = desired_version;
-    for byte in vm.run_id.bytes().chain(vm.name.bytes()) {
+    for byte in vm.run_id.bytes().chain(vm.vm_id.bytes()) {
         hash = hash.wrapping_mul(16_777_619) ^ u64::from(byte);
     }
     10_000 + u32::try_from(hash % 50_000).unwrap_or(0)

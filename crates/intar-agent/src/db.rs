@@ -22,6 +22,9 @@ pub struct VmRow {
     /// SHA-256 (hex) of the exact `boot.json` bytes on the run disk; a
     /// guest report for any other digest is stale.
     pub boot_sha256: Option<String>,
+    /// The machine's name in its scenario (`DesiredVmV3.name`): the guest's
+    /// hostname. The row's `name` is the agent's key, `DesiredVmV3.vm_id`.
+    pub machine_name: Option<String>,
     pub created_at_s: i64,
     pub updated_at_s: i64,
     pub running_at_s: Option<i64>,
@@ -75,6 +78,8 @@ pub struct VmLabRow {
 pub struct PendingTeardownRow {
     pub vm_name: String,
     pub run_id: Option<String>,
+    /// The jail generation, when the old row recorded one.
+    pub jail_generation: Option<String>,
 }
 
 /// The `PRAGMA user_version` of the agent's state. Any other value resets

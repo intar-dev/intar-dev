@@ -16,4 +16,4 @@ pub use manager::{
     CreateScenarioVmRuntimeNetwork, CreateVmResources, VmLifecycleState, VmManager,
     VmStatusResponse, VmTerminalState, VmTerminalStateKind,
 };
-pub(crate) use manager::{GuestUpdate, ImagePrepareRequeued};
+pub(crate) use manager::{GuestUpdate, ImagePrepareRequeued, is_safe_key};

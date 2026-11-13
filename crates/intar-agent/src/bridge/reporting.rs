@@ -445,7 +445,7 @@ pub(super) fn vm_state_from_status(
     let desired_vm = desired.and_then(|state| {
         state.vms.iter().find(|vm| {
             vm.run_id == run_id
-                && vm.name == status.name
+                && vm.vm_id == status.name
                 && status.details.as_ref().is_some_and(|d| {
                     d.owner_user_id == vm.owner_user_id
                         && d.runtime_execution_id == vm.runtime_execution_id
@@ -478,7 +478,11 @@ pub(super) fn vm_state_from_status(
         generation: details.map(|d| d.generation).unwrap_or_default(),
         phase: vm_phase_from_status(&status),
         run_id,
-        name: status.name.clone(),
+        // The local key is `vm_id`; the report names the machine.
+        name: details
+            .and_then(|d| d.machine_name.clone())
+            .or_else(|| desired_vm.map(|vm| vm.name.clone()))
+            .unwrap_or_else(|| status.name.clone()),
         desired_version: desired_vm.and_then(|_| desired.map(|state| state.version)),
         image: details
             .and_then(|d| d.image.clone())

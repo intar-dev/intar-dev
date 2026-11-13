@@ -208,13 +208,16 @@ SELECT kino FROM vms WHERE kino IS NOT NULL;
 
 pub(super) fn load_pending_teardowns(conn: &Connection) -> Result<Vec<PendingTeardownRow>> {
     let mut stmt = conn
-        .prepare("SELECT vm_name, run_id FROM pending_teardown ORDER BY vm_name ASC;")
+        .prepare(
+            "SELECT vm_name, run_id, jail_generation FROM pending_teardown ORDER BY vm_name ASC;",
+        )
         .context("prepare load_pending_teardowns")?;
     let rows = stmt
         .query_map([], |row| {
             Ok(PendingTeardownRow {
                 vm_name: row.get(0)?,
                 run_id: row.get(1)?,
+                jail_generation: row.get(2)?,
             })
         })
         .context("query pending_teardown")?;
@@ -336,7 +339,8 @@ CREATE TABLE IF NOT EXISTS vms (
   recording_disk_path TEXT,
   spool_dir TEXT,
   cpu_millis INTEGER,
-  ch_executable_sha256 TEXT
+  ch_executable_sha256 TEXT,
+  machine_name TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_vms_lease
@@ -386,7 +390,8 @@ CREATE TABLE IF NOT EXISTS desired_state (
 -- leaves only once jailerd confirmed and the spool is gone.
 CREATE TABLE IF NOT EXISTS pending_teardown (
   vm_name TEXT PRIMARY KEY,
-  run_id TEXT
+  run_id TEXT,
+  jail_generation TEXT
 );
 
 "#;

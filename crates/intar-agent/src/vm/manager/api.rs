@@ -262,11 +262,26 @@ impl VmManager {
                 return;
             }
         };
+        // A run's network goes only once every VM of that run is gone.
+        let mut run_networks: BTreeMap<String, bool> = BTreeMap::new();
         for row in rows {
-            if let Some(run_id) = row.run_id.as_deref()
-                && let Err(error) =
-                    cleanup_jailed_vm_by_logical_id(&self.inner, run_id, &row.vm_name).await
-            {
+            let destroyed = match previous_schema_jail_selector(&row) {
+                Ok(Some(selector)) => cleanup_jailed_vm_by_selector(&self.inner, selector).await,
+                Ok(None) => {
+                    warn!(
+                        vm = row.vm_name,
+                        "a VM of an older state schema has neither a jail generation nor a run; \
+                         jailerd cannot be asked to destroy it, check the host by hand"
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+            let torn_down = destroyed.is_ok();
+            if let Some(run_id) = row.run_id.clone() {
+                *run_networks.entry(run_id).or_insert(true) &= torn_down;
+            }
+            if let Err(error) = destroyed {
                 warn!(error = %error, vm = row.vm_name, "failed to destroy a VM of an older state schema");
                 continue;
             }
@@ -290,6 +305,14 @@ impl VmManager {
                 continue;
             }
             info!(vm = row.vm_name, run_id = ?row.run_id, ?removed, "tore down a VM of an older state schema");
+        }
+        for run_id in run_networks
+            .into_iter()
+            .filter_map(|(run_id, all_gone)| all_gone.then_some(run_id))
+        {
+            if let Err(error) = destroy_previous_schema_run_network(&self.inner, &run_id).await {
+                warn!(error = %error, run_id, "failed to destroy the run network of an older state schema");
+            }
         }
     }
 
@@ -609,6 +632,7 @@ impl VmManager {
             image: Some(image.clone()),
             kino: Some(kino.clone()),
             boot_sha256: None,
+            machine_name: Some(hostname.clone()),
             run_id: Some(run_id.clone()),
             root_disk_path: root_disk_path.display().to_string(),
             seed_disk_path: config_disk_path.display().to_string(),

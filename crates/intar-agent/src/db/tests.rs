@@ -18,6 +18,7 @@ fn test_vm_row() -> VmRow {
         image: Some(format!("sha256:{}", "1".repeat(64))),
         kino: Some(format!("sha256:{}", "2".repeat(64))),
         boot_sha256: Some("3".repeat(64)),
+        machine_name: Some("web".to_string()),
         created_at_s: 100,
         updated_at_s: 200,
         running_at_s: Some(150),
@@ -143,8 +144,8 @@ fn an_older_schema_queues_its_vms_for_teardown_and_starts_empty() {
     // table this schema no longer has.
     conn.execute_batch(
         r#"
-CREATE TABLE vms (name TEXT PRIMARY KEY, run_id TEXT, image_key TEXT, guest_tools_json TEXT);
-INSERT INTO vms (name, run_id, image_key) VALUES ('web', 'run-1', 'ubuntu');
+CREATE TABLE vms (name TEXT PRIMARY KEY, run_id TEXT, jail_generation TEXT, image_key TEXT, guest_tools_json TEXT);
+INSERT INTO vms (name, run_id, jail_generation, image_key) VALUES ('web', 'run-1', 'gen-1', 'ubuntu');
 INSERT INTO vms (name, run_id) VALUES ('db', NULL);
 CREATE TABLE image_cache_access (image_key TEXT PRIMARY KEY);
 PRAGMA user_version = 8;
@@ -167,10 +168,12 @@ PRAGMA user_version = 8;
             PendingTeardownRow {
                 vm_name: "db".to_string(),
                 run_id: None,
+                jail_generation: None,
             },
             PendingTeardownRow {
                 vm_name: "web".to_string(),
                 run_id: Some("run-1".to_string()),
+                jail_generation: Some("gen-1".to_string()),
             },
         ]
     );
@@ -190,7 +193,7 @@ fn an_interrupted_reset_keeps_the_queued_teardowns() {
     let conn = Connection::open(&path).expect("open old db");
     conn.execute_batch(
         r#"
-CREATE TABLE pending_teardown (vm_name TEXT PRIMARY KEY, run_id TEXT);
+CREATE TABLE pending_teardown (vm_name TEXT PRIMARY KEY, run_id TEXT, jail_generation TEXT);
 INSERT INTO pending_teardown (vm_name, run_id) VALUES ('old', 'run-0');
 CREATE TABLE vms (name TEXT PRIMARY KEY);
 INSERT INTO vms (name) VALUES ('web');
@@ -621,8 +624,8 @@ async fn restart_requires_durable_execution_and_host_identity() {
         cached_images: Vec::new(),
         kino_pin: None,
         vms: vec![DesiredVmV3 {
-            vm_id: "vm-id-1".to_string(),
-            name: row.name.clone(),
+            vm_id: row.name.clone(),
+            name: "web".to_string(),
             run_id: row.run_id.clone().expect("fixture identity"),
             runtime_execution_id: row.runtime_execution_id.clone(),
             owner_user_id: row.owner_user_id.clone(),

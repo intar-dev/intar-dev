@@ -131,6 +131,7 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
             image,
             kino,
             boot_sha256: row.boot_sha256.clone(),
+            machine_name: row.machine_name.clone(),
             run_id: row.run_id.clone(),
             root_disk_path: root_disk_path.clone(),
             seed_disk_path: seed_disk_path.clone(),
@@ -276,7 +277,7 @@ pub(super) fn compute_lease_expires_at(
     Some(format_rfc3339_s(lease_expires_at_s))
 }
 
-pub(super) fn is_safe_key(s: &str) -> bool {
+pub(crate) fn is_safe_key(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -310,6 +311,26 @@ pub(super) fn previous_schema_vm_dirs(work_dir: &Path, row: &PendingTeardownRow)
         dirs.push(vm_spool_dir(work_dir, run_id, &row.vm_name));
     }
     dirs
+}
+
+/// How jailerd finds a VM an older schema launched: by its jail generation
+/// when the row has one, else by (run_id, the row's name), the logical id
+/// the agent launched it under. `None`: jailerd cannot be asked at all.
+pub(super) fn previous_schema_jail_selector(
+    row: &PendingTeardownRow,
+) -> Result<Option<VmIdentityRequest>> {
+    if let Some(generation) = row.jail_generation.as_deref().filter(|g| !g.is_empty()) {
+        return Ok(Some(VmIdentityRequest::by_generation(
+            ValidatedId::parse(generation.to_owned()).context("validate an old jail generation")?,
+        )));
+    }
+    let Some(run_id) = row.run_id.as_deref().filter(|run_id| !run_id.is_empty()) else {
+        return Ok(None);
+    };
+    Ok(Some(VmIdentityRequest::by_logical_id(
+        ValidatedId::parse(run_id.to_owned()).context("validate an old run ID")?,
+        ValidatedId::parse(row.vm_name.clone()).context("validate an old VM ID")?,
+    )))
 }
 
 pub(super) fn matching_vm_names_for_run_id(

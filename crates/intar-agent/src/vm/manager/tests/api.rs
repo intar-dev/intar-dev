@@ -431,3 +431,35 @@ fn the_background_budget_is_bounded_by_the_contract_maximum() {
     );
     assert_eq!(over, derived.max(JAILER_PREPARE_IMAGE_TIMEOUT));
 }
+
+#[test]
+fn an_old_vm_is_found_by_its_generation_else_by_run_and_name() {
+    let row = |run_id: Option<&str>, generation: Option<&str>| crate::db::PendingTeardownRow {
+        vm_name: "web".to_string(),
+        run_id: run_id.map(str::to_string),
+        jail_generation: generation.map(str::to_string),
+    };
+    let by_generation = previous_schema_jail_selector(&row(Some("run-1"), Some("gen-1")))
+        .expect("valid ids")
+        .expect("a selector");
+    assert_eq!(
+        by_generation.generation.map(|g| g.to_string()),
+        Some("gen-1".to_string())
+    );
+    let by_name = previous_schema_jail_selector(&row(Some("run-1"), None))
+        .expect("valid ids")
+        .expect("a selector");
+    assert_eq!(
+        by_name.run_id.map(|id| id.to_string()),
+        Some("run-1".to_string())
+    );
+    assert_eq!(
+        by_name.vm_id.map(|id| id.to_string()),
+        Some("web".to_string())
+    );
+    assert!(
+        previous_schema_jail_selector(&row(None, None))
+            .expect("no ids")
+            .is_none()
+    );
+}

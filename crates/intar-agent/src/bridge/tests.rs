@@ -540,21 +540,72 @@ fn desired_peers_are_the_named_running_vms_of_the_same_run() {
     ];
 
     let mut db = web.clone();
+    db.vm_id = "vm-db".to_string();
     db.name = "db".to_string();
     let mut absent = web.clone();
+    absent.vm_id = "vm-cache".to_string();
     absent.name = "cache".to_string();
     absent.desired_phase = DesiredVmPhase::Absent;
     let mut other_run = web.clone();
+    other_run.vm_id = "vm-other".to_string();
     other_run.run_id = "other-run".to_string();
     other_run.name = "other".to_string();
+    // A VM named like a peer, but in another run, is not that peer.
+    let mut foreign_db = db.clone();
+    foreign_db.vm_id = "vm-foreign-db".to_string();
+    foreign_db.run_id = "other-run".to_string();
 
     let mut desired = empty_desired_state(1);
-    desired.vms = vec![web.clone(), db, absent, other_run];
+    desired.vms = vec![web.clone(), db, absent, other_run, foreign_db];
 
     assert_eq!(
-        desired_peer_vm_names(&desired, &web),
-        vec!["db".to_string()]
+        desired_peer_vm_aliases(&desired, &web),
+        BTreeMap::from([("vm-db".to_string(), "db".to_string())])
     );
+}
+
+#[test]
+fn vms_are_keyed_by_vm_id_and_names_are_unique_only_within_a_run() {
+    let cfg = test_bridge_config();
+    let first = desired_vm();
+    let mut second = desired_vm();
+    second.vm_id = "vm-2".to_string();
+    second.run_id = "run-2".to_string();
+    let mut desired = empty_desired_state(1);
+    desired.vms = vec![first.clone(), second.clone()];
+    validate_desired_state(&cfg, &desired).expect("one name in two runs");
+
+    let mut same_id = desired.clone();
+    same_id.vms[1].vm_id = first.vm_id.clone();
+    assert!(
+        validate_desired_state(&cfg, &same_id).is_err(),
+        "duplicate vm_id"
+    );
+    let mut same_run = desired.clone();
+    same_run.vms[1].run_id = first.run_id.clone();
+    assert!(
+        validate_desired_state(&cfg, &same_run).is_err(),
+        "duplicate name within a run"
+    );
+    let mut unsafe_id = desired.clone();
+    unsafe_id.vms[1].vm_id = "../vm".to_string();
+    assert!(
+        validate_desired_state(&cfg, &unsafe_id).is_err(),
+        "unsafe vm_id"
+    );
+
+    // Each local VM is keyed by its vm_id and reports its own run under the
+    // shared machine name.
+    for vm in [&first, &second] {
+        let mut status = VmStatusResponse::test_status(&vm.vm_id, Some(&vm.run_id));
+        if let Some(details) = status.details.as_mut() {
+            details.machine_name = Some(vm.name.clone());
+        }
+        let state = vm_state_from_status(None, Some(&desired), status, None, None, None);
+        assert_eq!(state.name, "web");
+        assert_eq!(state.run_id, vm.run_id);
+        assert_eq!(state.desired_version, Some(1), "matched its desired VM");
+    }
 }
 
 fn lab_with_task_passed(passed_at_unix_ms: u64) -> VmLabV1 {
@@ -719,7 +770,7 @@ fn desired_identity_is_mandatory_and_personal_owner_is_bound() {
     wrong.vms.push(desired_vm());
     assert!(
         validate_desired_state(&cfg, &wrong).is_err(),
-        "a VM name appears twice"
+        "a vm_id appears twice"
     );
     wrong = desired.clone();
     wrong.schema_version = 6;
