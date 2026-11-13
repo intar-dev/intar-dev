@@ -6,6 +6,8 @@ import type {
   VmRuntimeConstraintsV2,
   VmTerminalStateV1,
 } from "@/generated/bridge";
+import type { VmStateV3 } from "@/generated/contracts/bridge-message-v9";
+import { LAB_FAILED_TEXT, mergeReportedTasks } from "@/lib/run-tasks";
 import {
   applyProbeSnapshotToVm,
   canAdvanceVmPhase,
@@ -22,21 +24,28 @@ export function deriveVmPhase(input: {
   vm: RunVmStateDocument;
   reportPhase?: BridgeVmPhase | null | undefined;
   collectionError?: string | null | undefined;
+  /** False holds the VM below ready, whatever the host reports. */
+  readyGate?: boolean;
 }): {
   phase: VmPhase;
   phaseDetail: string;
 } {
   const vm = input.vm;
-  const bootGateSatisfied = bootProbesPassing(vm);
+  const gated = input.readyGate === false;
+  const bootGateSatisfied = bootProbesPassing(vm) && !gated;
   const scenarioPassing = vm.scenarioProbes.length
     ? vm.scenarioProbes.every((probe) => isVerificationPassed(probe.status))
     : false;
 
   let phase = vm.phase;
   let detail = vm.phaseDetail;
-  const reportPhase = input.reportPhase
+  const mappedPhase = input.reportPhase
     ? bridgeVmPhaseToRunVmPhase(input.reportPhase)
     : null;
+  const reportPhase =
+    gated && (mappedPhase === "ready" || mappedPhase === "solved")
+      ? "booting"
+      : mappedPhase;
 
   if (reportPhase && canAdvanceVmPhase(phase, reportPhase)) {
     phase = reportPhase;
@@ -91,6 +100,71 @@ export function applyVmReportToRunState(input: {
     ),
   };
   return recomputeRunState(next);
+}
+
+/** The host-local VM id of a machine in a revision-model run. */
+export function revisionVmId(machine: string, runId: string): string {
+  return `${machine}-${runId}`;
+}
+
+/**
+ * Applies one bridge 9 VM state to a run on the revision model. The VM is
+ * ready only once its guest's lab is ready; a failed lab fails the VM with
+ * a fixed text, and the guest's own failure text stays admin-only.
+ */
+export function applyVmStateV3ToRunState(input: {
+  runId: string;
+  current: RunStateDocument;
+  vm: VmStateV3;
+}): RunStateDocument {
+  const reported = input.vm;
+  if (reported.run_id !== input.runId) return input.current;
+  const runtimeVmName = revisionVmId(reported.name, reported.run_id);
+  const lab = reported.lab ?? null;
+  let tasks = input.current.tasks;
+  const vms = input.current.vms.map((vm) => {
+    if (vm.runtimeVmName !== runtimeVmName) return vm;
+    const applied = applyReportedVmState({
+      runId: input.runId,
+      vm,
+      report: {
+        run_id: reported.run_id,
+        vm_name: runtimeVmName,
+        phase: reported.phase,
+        network: reported.network ?? null,
+        terminal: reported.terminal,
+        runtime_constraints: reported.runtime_constraints ?? null,
+        resource_state: reported.resource_state ?? null,
+        ssh_host_keys_openssh: reported.ssh_host_keys_openssh,
+        probes: [],
+        // Host error text is for operators.
+        error: null,
+        updated_at_unix_ms: reported.updated_at_unix_ms,
+      },
+      readyGate: (lab?.state ?? vm.lab?.state) === "ready",
+    });
+    if (applied === vm) return vm;
+    if (lab && tasks) {
+      tasks = mergeReportedTasks(tasks, vm.scenarioVmName, lab.tasks, reported.updated_at_unix_ms);
+    }
+    const labState = lab
+      ? {
+          state: vm.lab?.state === "failed" ? "failed" as const : lab.state,
+          ready: lab.ready.slice(0, 64).map(({ name, status }) => ({ name, status })),
+          failure: lab.failure?.slice(0, 4096) ?? vm.lab?.failure ?? null,
+        }
+      : (vm.lab ?? null);
+    if (labState?.state !== "failed") return { ...applied, lab: labState };
+    return decorateVmState({
+      ...applied,
+      lab: labState,
+      phase: "failed",
+      phaseDetail: LAB_FAILED_TEXT,
+      terminalPhase: "failed",
+      terminalReason: LAB_FAILED_TEXT,
+    });
+  });
+  return recomputeRunState({ ...input.current, vms, ...(tasks ? { tasks } : {}) });
 }
 
 export function applyHostReportToRunState(input: {
@@ -162,6 +236,7 @@ function applyReportedVmState(input: {
     | "error"
     | "updated_at_unix_ms"
   >;
+  readyGate?: boolean;
 }): RunVmStateDocument {
   if (
     !matchesVmReportIdentity({
@@ -239,6 +314,7 @@ function applyReportedVmState(input: {
     vm: withRuntimeEvidence,
     reportPhase: input.report.phase,
     collectionError: input.report.error ?? null,
+    ...(input.readyGate === undefined ? {} : { readyGate: input.readyGate }),
   });
 
   return decorateVmState({

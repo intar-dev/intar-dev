@@ -4,6 +4,7 @@ import {
   type ScenarioObjective,
 } from "@/lib/scenario-model";
 import { type RunPhase, type RunStateDocument } from "@/lib/run-state";
+import type { RunTaskView } from "@/lib/run-tasks";
 import {
   type ScenarioRunHintView,
   type ScenarioRunSolutionView,
@@ -88,7 +89,9 @@ export interface ScenarioDetail {
   }>;
 }
 
-export interface ScenarioRunRecord extends RunStateDocument {
+export interface ScenarioRunRecord extends Omit<RunStateDocument, "tasks"> {
+  /** A revision-model run's tasks, as the learner may see them. */
+  tasks?: RunTaskView[];
   id: string;
   scenarioId: string;
   organizationId: string | null;

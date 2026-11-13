@@ -266,7 +266,7 @@ const CURRENT_HOST_SQL = `host AS (
  * (`image` or `spec`). This is the one place host assignments grant reads;
  * a new kind of assignment is added here.
  *
- * - Every host: a desired VM naming it. A platform host's desired state is
+ * - Every host: a running desired VM naming it. A platform host's desired state is
  *   the grant; on a personal or organization host the VM must be backed by
  *   the run it names: active, current execution and lease, the owner still
  *   allowed, and the run's content access.
@@ -278,7 +278,7 @@ const CURRENT_HOST_SQL = `host AS (
  */
 function assignedImageSql(field: "image" | "spec"): string {
   const desiredVm = `SELECT 1 FROM host, desired, json_each(desired.doc_json, '$.vms') vm
-    WHERE json_extract(vm.value, '$.${field}') = ?2
+    WHERE json_extract(vm.value, '$.${field}') = ?2 AND json_extract(vm.value, '$.desired_phase') = 'running'
       AND (host.scope = 'platform' OR EXISTS (${RUN_BACKS_VM_SQL}))`;
   if (field === "spec") return desiredVm;
   return `${desiredVm}

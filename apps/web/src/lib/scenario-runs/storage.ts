@@ -48,6 +48,7 @@ import {
 } from "@/lib/scenarios";
 import { recordLinkedCourseUnitCompletionForRun } from "@/lib/course-catalogs";
 import { type ScenarioRunRecord } from "./types";
+import { learnerLab, taskViews } from "@/lib/run-tasks";
 import { runShareUrl } from "@/lib/run-share/links";
 import {
   deriveScenarioRunActivity,
@@ -357,6 +358,7 @@ export function toScenarioRunRecord(
     phase: row.state.phase,
   });
   const replayState = deriveScenarioRunReplayState(row.state);
+  const { tasks, ...stateWithoutTasks } = row.state;
   return {
     id: row.runId,
     scenarioId: row.scenarioId,
@@ -400,13 +402,15 @@ export function toScenarioRunRecord(
     share: row.shareId ? { url: runShareUrl(row.shareId) } : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    ...row.state,
+    ...stateWithoutTasks,
+    ...(tasks ? { tasks: taskViews(tasks) } : {}),
     bootProbes: redactProbeResults(row.state.bootProbes),
     scenarioProbes: redactProbeResults(row.state.scenarioProbes),
     vms: row.state.vms.map((vm) => ({
       ...vm,
       bootProbes: redactProbeResults(vm.bootProbes),
       scenarioProbes: redactProbeResults(vm.scenarioProbes),
+      ...(vm.lab === undefined ? {} : { lab: learnerLab(vm.lab) }),
     })),
   };
 }

@@ -16,6 +16,7 @@ import {
   organization,
   courseCatalogs,
   scenarioRuns,
+  scenarios,
   vmScenarios,
   type CourseCatalogCourseV2,
   type CourseCatalogLectureV2,
@@ -885,6 +886,21 @@ async function loadCourseViews(input: {
           .where(inJson(vmScenarios.scenarioId, scenarioIds))
       : Promise.resolve([]),
   ]);
+  const readyRows: Array<{ scenarioId: string; organizationId: string | null; enabled: boolean; enabledAt: number | null }> = [...scenarioRows];
+  // A scenario of the revision model is ready while it is enabled with a
+  // live revision, as content access requires.
+  if (scenarioIds.length) {
+    const revised = await input.db
+      .select({
+        scenarioId: scenarios.id,
+        organizationId: scenarios.organizationId,
+        enabled: scenarios.enabled,
+        enabledAt: sql<number | null>`CASE WHEN ${scenarios.liveRev} IS NULL THEN NULL ELSE 0 END`,
+      })
+      .from(scenarios)
+      .where(inJson(scenarios.id, scenarioIds));
+    readyRows.push(...revised);
+  }
   const completedUnitKeys = new Set(
     completionRows.map((row) =>
       courseUnitKey(row.scopeKey, row.courseId, row.lectureId),
@@ -899,7 +915,7 @@ async function loadCourseViews(input: {
     );
   }
   const scenarioById = new Map(
-    scenarioRows.map((scenario) => [scenario.scenarioId, scenario]),
+    readyRows.map((scenario) => [scenario.scenarioId, scenario]),
   );
 
   return sources.map((source) => {

@@ -32,6 +32,8 @@ import {
   type ScenarioRunSavingStage,
 } from "./saving-stage";
 import { parseRunState } from "./storage";
+import type { LabState } from "@/generated/contracts/bridge-message-v9";
+import { taskViews, type RunTaskView } from "@/lib/run-tasks";
 
 /**
  * The small, mutable portion of a scenario run. The full run view is loaded
@@ -58,6 +60,8 @@ export interface ScenarioRunStatus {
   savingStage: ScenarioRunSavingStage | null;
   replayState: ScenarioRunReplayState;
   hasReplay: boolean;
+  /** A revision-model run's tasks; absent on probe runs. */
+  tasks?: RunTaskView[];
   vms: Array<{
     id: string;
     phase: RunStateDocument["vms"][number]["phase"];
@@ -71,6 +75,7 @@ export interface ScenarioRunStatus {
     scenarioProbes: RunStateDocument["vms"][number]["scenarioProbes"];
     sessionTimeline: RunStateDocument["vms"][number]["sessionTimeline"];
     hasRecording?: boolean;
+    lab?: { state: LabState } | null;
   }>;
 }
 
@@ -184,6 +189,7 @@ export async function getScenarioRunStatusForUser(input: {
     }),
     replayState,
     hasReplay: replayState === "ready",
+    ...(state.tasks ? { tasks: taskViews(state.tasks) } : {}),
     vms: state.vms.map((vm) => ({
       id: vm.id,
       phase: vm.phase,
@@ -199,6 +205,7 @@ export async function getScenarioRunStatusForUser(input: {
       ...(vm.hasRecording === undefined
         ? {}
         : { hasRecording: vm.hasRecording }),
+      ...(vm.lab === undefined ? {} : { lab: vm.lab ? { state: vm.lab.state } : null }),
     })),
   };
 }

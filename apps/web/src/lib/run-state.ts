@@ -1,6 +1,9 @@
 import type { ScenarioLaunchSummary } from "@/lib/scenario-model";
 import type { ImageKey } from "@/generated/catalog";
 import type { VmResourceStateV3 } from "@/generated/bridge";
+import type { CheckStatus, LabState } from "@/generated/contracts/bridge-message-v9";
+import { GUEST_USERNAME } from "@/generated/constants";
+import { tasksSolved, type RunTaskState } from "@/lib/run-tasks";
 import { isVerificationPassed } from "@/lib/verification-copy";
 
 export type RunPhase =
@@ -147,6 +150,15 @@ export interface RunVmStateDocument {
   runtimeObservedAt: number | null;
   vmCreatedAt: number | null;
   provisioning: RunVmProvisioningSpec;
+  /// The guest's lab on the revision model; absent on older runs and until
+  /// the guest's first report. `failure` is admin-only.
+  lab?: RunVmLabState | null;
+}
+
+export interface RunVmLabState {
+  state: LabState;
+  ready: Array<{ name: string; status: CheckStatus }>;
+  failure: string | null;
 }
 
 /** Immutable origin for an administrator-started staged-image proof run. */
@@ -169,6 +181,8 @@ export interface RunStateDocument {
   terminalTarget: TerminalTarget;
   vms: RunVmStateDocument[];
   candidateSource?: CandidateRunSourceIdentityV1;
+  /// The run's tasks on the revision model; absent on probe runs.
+  tasks?: RunTaskState[];
 }
 
 export const RUN_PHASE_ORDER: Record<RunPhase, number> = {
@@ -293,13 +307,14 @@ export function recomputeRunState(current: RunStateDocument): RunStateDocument {
     vms[0] ??
     null;
   const terminalTarget = terminalVm?.terminalTarget ?? defaultTerminalTarget();
-  const phase = deriveRunPhase(vms, current.phase);
-  const descriptor = describeRunPhase(phase, vms, current.phaseDetail);
+  const phase = deriveRunPhase(vms, current.phase, current.tasks);
+  const descriptor = describeRunPhase(phase, vms, current.phaseDetail, current.tasks);
 
   return {
     ...(current.candidateSource
       ? { candidateSource: current.candidateSource }
       : {}),
+    ...(current.tasks ? { tasks: current.tasks } : {}),
     phase,
     phaseTitle: descriptor.title,
     phaseDetail: descriptor.detail,
@@ -482,6 +497,7 @@ export function applyProbeSnapshotToVm(
 function deriveRunPhase(
   vms: RunVmStateDocument[],
   current: RunPhase,
+  tasks: RunTaskState[] | undefined,
 ): RunPhase {
   if (!vms.length) {
     return current;
@@ -504,7 +520,13 @@ function deriveRunPhase(
     }
     return "teardown_requested";
   }
-  if (vms.every((vm) => vm.phase === "solved")) {
+  // A task run is solved by its tasks, once every VM is usable; a probe run
+  // when every VM is solved.
+  if (
+    tasks
+      ? tasksSolved(tasks) && vms.every((vm) => vm.phase === "ready" || vm.phase === "solved")
+      : vms.every((vm) => vm.phase === "solved")
+  ) {
     return "solved";
   }
   if (vms.every((vm) => vm.phase === "ready" || vm.phase === "solved")) {
@@ -613,6 +635,7 @@ function describeRunPhase(
   phase: RunPhase,
   vms: RunVmStateDocument[],
   currentDetail: string,
+  tasks?: RunTaskState[],
 ): {
   title: string;
   detail: string;
@@ -647,7 +670,9 @@ function describeRunPhase(
     case "solved":
       return {
         title: "Solved",
-        detail: "All required VMs are passing their scenario probes.",
+        detail: tasks
+          ? "Every required task is complete."
+          : "All required VMs are passing their scenario probes.",
         progressPercent: 85,
       };
     case "teardown_requested":
@@ -694,7 +719,7 @@ function defaultTerminalTarget(): TerminalTarget {
   return {
     host: null,
     port: 22,
-    username: "ubuntu",
+    username: GUEST_USERNAME,
     hostKeyOpenssh: null,
     checkedAt: null,
   };

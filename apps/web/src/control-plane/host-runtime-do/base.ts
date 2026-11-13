@@ -219,6 +219,10 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
           solvedAt,
           completedAt,
           failedAt,
+          // A run ends `lab_failed` when it fails because a guest's lab did.
+          ...(merged.phase === "failed" && merged.vms.some((vm) => vm.lab?.state === "failed")
+            ? { endReason: sql<"lab_failed">`coalesce(${scenarioRuns.endReason}, 'lab_failed')` }
+            : {}),
           archiveEnteredAt: ["archiving", "completed", "failed"].includes(
             merged.phase,
           )

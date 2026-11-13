@@ -7,6 +7,14 @@ import type {
   DesiredVmV2,
   HostDesiredStateV2,
 } from "@/generated/bridge";
+import type { DesiredVmV3 } from "@/generated/contracts/bridge-message-v9";
+import { isRevisionScenarioId } from "@/lib/scenario-id";
+import {
+  admitRevisionRun,
+  liveRevisionAnchorCondition,
+  liveRevisionHolds,
+  liveScenarioRevision,
+} from "./revision-begin";
 import {
   admissionCpuQuotaStatement,
   admissionResourceReservationStatement,
@@ -41,7 +49,7 @@ import {
   upsertDesiredGuestTools,
   upsertDesiredVm,
 } from "@/lib/desired-state";
-import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
+import { desiredVmName, loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { createAppId } from "@/lib/id";
 import { requireIdempotencyKey } from "@/lib/idempotency-key";
@@ -302,29 +310,36 @@ async function admitScenarioStart(
   const { idempotencyKey, organizationId, candidateRequest } = prelude;
   const scope = scenarioStartRequestScope(input, input.scenarioId);
   const db = drizzle(env.DB);
-  const [source, active] = await Promise.all([
-    loadScenarioForStart({
-      db,
-      scenarioId: input.scenarioId,
-      organizationId,
-      candidateRequest,
-    }),
+  // A namespaced id starts a scenario of the revision model, from its live
+  // revision; candidate proofs exist only on the catalog model.
+  const revisionStart = isRevisionScenarioId(input.scenarioId);
+  if (revisionStart && candidateRequest) throw scenarioCandidateNotReady();
+  const [source, revision, active] = await Promise.all([
+    revisionStart
+      ? null
+      : loadScenarioForStart({
+          db,
+          scenarioId: input.scenarioId,
+          organizationId,
+          candidateRequest,
+        }),
+    revisionStart ? liveScenarioRevision(env.DB, input.scenarioId, organizationId) : null,
     loadActiveRunRow(input.userId),
   ]);
-  if (!source) {
+  if (!source && !revision) {
     if (candidateRequest) {
       throw scenarioCandidateNotReady();
     }
     throw appError(404, "scenario_not_found", "scenario not found");
   }
-  const scenario = source.scenario;
+  const scenarioId = source?.scenario.scenarioId ?? input.scenarioId;
   // Resolve the V2 unit before any reuse can return, so an old direct
   // request cannot revive an unlinked scenario around the course gate.
   const courseLecture = await assertCourseScenarioStartAllowed({
     db,
     userId: input.userId,
     organizationId,
-    scenarioId: scenario.scenarioId,
+    scenarioId,
     ...(input.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
   });
   await assertAccountActive(input.userId);
@@ -357,9 +372,20 @@ async function admitScenarioStart(
     throw activeRunConflictError(active.title);
   }
 
+  if (revision) {
+    return admitRevisionRun({
+      input,
+      revision,
+      organizationId,
+      courseLecture,
+      idempotencyKey,
+      scope,
+    });
+  }
+  if (!source) throw appError(404, "scenario_not_found", "scenario not found");
   return admitNewRun({
     input,
-    scenario,
+    scenario: source.scenario,
     organizationId,
     courseLecture,
     idempotencyKey,
@@ -383,7 +409,7 @@ function scenarioCandidateNotReady() {
  * would launch an image the catalog no longer describes. It is a decision on
  * this request only: a start against fresh reads is a new admission.
  */
-function scenarioSourceChanged() {
+export function scenarioSourceChanged() {
   return appError(
     409,
     "scenario_source_changed",
@@ -457,7 +483,7 @@ interface StoredIdempotentRun {
   acceptedAt: number;
 }
 
-async function loadRunByIdempotencyKey(
+export async function loadRunByIdempotencyKey(
   db: DrizzleD1Database,
   userId: string,
   idempotencyKey: string,
@@ -492,7 +518,7 @@ async function loadRunByIdempotencyKey(
   };
 }
 
-function assertReplayMatchesScope(
+export function assertReplayMatchesScope(
   stored: ScenarioStartRequestScope | null,
   expected: ScenarioStartRequestScope,
 ): void {
@@ -547,11 +573,11 @@ interface ScenarioStartSource {
   candidateProof: CandidateProof | null;
 }
 
-async function assertAccountActive(userId: string): Promise<void> {
+export async function assertAccountActive(userId: string): Promise<void> {
   if (!(await isActiveAccount(userId))) throw scenarioStartAccessRevoked();
 }
 
-async function assertAccountStillActive(input: {
+export async function assertAccountStillActive(input: {
   userId: string;
   runId: string;
   hostId: string;
@@ -588,7 +614,7 @@ function scenarioStartAccessRevoked() {
  * or the error text: a wake failure can echo a request body, and the address
  * space of a scenario host is not a log field.
  */
-async function deliveryHint(hostId: string): Promise<void> {
+export async function deliveryHint(hostId: string): Promise<void> {
   try {
     await tryWakeHostRuntime(hostId);
   } catch {
@@ -664,7 +690,7 @@ export async function cancelAdmittedRun(input: {
   );
 }
 
-function cancelRunStatement(
+export function cancelRunStatement(
   input: { runId: string; userId: string; hostId: string },
   now: number,
 ): D1PreparedStatement {
@@ -1377,7 +1403,7 @@ export interface AdmissionCommitInput {
   sshKeyRows: Array<typeof scenarioRunSshKeys.$inferInsert>;
   runtimeVms: Array<RuntimeVmSpec & { runtimeVmId: string }>;
   accessKeys: Array<{ ciphertextB64: string; ivB64: string }>;
-  desiredVms: DesiredVmV2[];
+  desiredVms: Array<DesiredVmV2 | DesiredVmV3>;
   desired: AdmissionHostAllocation;
   cpuMillis: number;
   reservationResources: RuntimeResourceDemand;
@@ -1388,16 +1414,18 @@ export interface AdmissionCommitInput {
   candidateProof?: CandidateProof | null;
   /** The live-catalog image identity the source read returned, if any. */
   sourceAnchor?: LiveSourceFingerprint | null;
+  /** The live revision a revision-model start read, if any. */
+  revisionAnchor?: string | null;
   now: number;
 }
 
-type AdmissionCommitOutcome =
+export type AdmissionCommitOutcome =
   | { ok: true }
   | { ok: false; reason: "cas_lost" }
   | { ok: false; reason: "duplicate_key" }
   | { ok: false; reason: "error"; error: unknown };
 
-async function commitAdmissionBatch(
+export async function commitAdmissionBatch(
   input: AdmissionCommitInput,
 ): Promise<AdmissionCommitOutcome> {
   let results: D1Result<unknown>[];
@@ -1474,6 +1502,9 @@ async function admissionRefusal(input: AdmissionCommitInput) {
     scenarioId: input.run.scenarioId,
   });
   if (refusal) throw refusal;
+  if (input.revisionAnchor && !(await liveRevisionHolds(env.DB, input.run.scenarioId, input.revisionAnchor))) {
+    throw scenarioSourceChanged();
+  }
   await assertAdmissionRefusalPriority({
     userId: input.run.userId,
     ...(input.allowDrainedAdminProof
@@ -1502,7 +1533,7 @@ function admissionContentAccess(
   };
 }
 
-async function assertCurrentContentAccess(run: AdmissionCommitInput["run"], allowDrainedAdminProof = false) {
+export async function assertCurrentContentAccess(run: AdmissionCommitInput["run"], allowDrainedAdminProof = false) {
   const row = await env.DB.prepare(
     "SELECT " + admissionContentAccessCondition(1) + " AS allowed",
   )
@@ -1699,6 +1730,9 @@ const RUN_INSERT_COLUMNS = [
   "hidden_at",
   "created_at",
   "updated_at",
+  "scenario_rev",
+  "tasks_json",
+  "launch_source",
 ];
 
 /**
@@ -1847,14 +1881,20 @@ function insertRunStatement(
     run.hiddenAt ?? null,
     run.createdAt as number,
     run.updatedAt as number,
+    run.scenarioRev ?? null,
+    run.tasksJson ? JSON.stringify(run.tasksJson) : null,
+    run.launchSource ?? null,
   ];
   const hostParam = values.length + 1;
   const userParam = values.length + 2;
   const candidateParam = values.length + 3;
   const candidateProof = input.candidateProof;
   const sourceAnchor = input.sourceAnchor ?? null;
+  const revisionAnchor = input.revisionAnchor ?? null;
   const anchorCondition = candidateProof
     ? candidateAnchorCondition(candidateParam)
+    : revisionAnchor
+      ? liveRevisionAnchorCondition(RUN_INSERT_COLUMNS.indexOf("scenario_id") + 1, candidateParam)
     : sourceAnchor
       ? liveSourceAnchorCondition({
           // The scenario id is already bound for the insert's own columns, so
@@ -1875,6 +1915,8 @@ function insertRunStatement(
         candidateProof.buildId,
         candidateProof.manifestText,
       ]
+    : revisionAnchor
+      ? [revisionAnchor]
     : sourceAnchor
       ? [sourceAnchor.json, sourceAnchor.vmCount]
       : [];
@@ -2105,9 +2147,11 @@ function runtimeVmStatements(
       ),
     );
     const accessKey = input.accessKeys[index];
-    const publicKey =
-      input.desiredVms.find((desired) => desired.vm_name === vm.runtimeVmName)
-        ?.ssh_authorized_keys_openssh[0] ?? "";
+    const desired = input.desiredVms.find((candidate) => desiredVmName(candidate) === vm.runtimeVmName);
+    const keys = !desired ? [] : "ssh_authorized_keys" in desired
+      ? (desired as DesiredVmV3).ssh_authorized_keys
+      : (desired as DesiredVmV2).ssh_authorized_keys_openssh;
+    const publicKey = keys[0] ?? "";
     if (!accessKey || !publicKey) {
       throw new Error("runtime VM access key material is incomplete");
     }

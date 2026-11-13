@@ -220,7 +220,7 @@ export async function mutateHostDesiredStateV3(
   );
 }
 
-function checkedHostDesiredStateV3(document: unknown, hostId: string, rowVersion: number): HostDesiredStateV3 {
+export function checkedHostDesiredStateV3(document: unknown, hostId: string, rowVersion: number): HostDesiredStateV3 {
   const message = {
     type: "desired_state", protocol_version: BRIDGE_PROTOCOL_VERSION_9, host_id: hostId, desired_state: document,
   };
@@ -233,4 +233,33 @@ function checkedHostDesiredStateV3(document: unknown, hostId: string, rowVersion
     throw new Error(`desired state identity is invalid for host ${hostId}`);
   }
   return state;
+}
+
+/** A desired VM's host-local name: `vm_id` under bridge 9, `vm_name` before. */
+export function desiredVmName(vm: HostDesiredStateV2["vms"][number] | HostDesiredStateV3["vms"][number]): string {
+  return "vm_name" in vm ? vm.vm_name : vm.vm_id;
+}
+
+/**
+ * Marks the running VMs `select` picks absent in the stored desired state of
+ * either schema, keeping their leases, and returns the stored result.
+ * `initialState` saves the first read when the caller already holds it.
+ */
+export async function markStoredDesiredVmsAbsent(
+  db: DrizzleD1Database,
+  hostId: string,
+  nowUnixMs: number,
+  select: (vm: { run_id: string; name: string; runtime_execution_id: string; generation: number }) => boolean,
+  initialState?: StoredHostDesiredState,
+): Promise<StoredHostDesiredState> {
+  const mark = <T extends HostDesiredStateV2["vms"][number] | HostDesiredStateV3["vms"][number]>(vms: T[]) => {
+    for (const vm of vms) {
+      if (vm.desired_phase === "running" && select({ ...vm, name: desiredVmName(vm) })) vm.desired_phase = "absent";
+    }
+  };
+  const current = initialState ?? await loadStoredHostDesiredState(db, hostId, nowUnixMs);
+  if (isHostDesiredStateV3(current)) {
+    return (await mutateHostDesiredStateV3(db, hostId, nowUnixMs, (draft) => mark(draft.vms))).state;
+  }
+  return mutateStoredHostDesiredState(db, hostId, nowUnixMs, (draft) => mark(draft.vms), current);
 }

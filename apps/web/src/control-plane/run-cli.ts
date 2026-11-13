@@ -252,6 +252,10 @@ async function dispatchScenarioRunCliAction(input: {
     );
   }
   const vm = requireScenarioVm(run, input.subject.runtimeVmName);
+  // A task run's guest reports its checks itself; there is nothing to sync.
+  if (input.action.kind === "check_sync" && run.tasks) {
+    throw runCliFailure("unavailable", "Checks are not supported for this run.", false);
+  }
 
   if (input.action.kind === "completion") {
     return {
@@ -318,13 +322,7 @@ function scenarioCompletionAliases(
       true,
     );
   }
-  if (vm.scenarioProbes.length > RUN_CLI_MAX_PROBE_IDS) {
-    throw runCliFailure(
-      "unavailable",
-      "Checks are unavailable for this run.",
-      true,
-    );
-  }
+  const vmChecks = scenarioVmChecks(run, vm);
 
   const aliases: string[] = [];
   if (
@@ -334,18 +332,8 @@ function scenarioCompletionAliases(
   ) {
     aliases.push("general");
   }
-  const prefix = `probe:${vm.scenarioVmName}:`;
-  for (const [ordinal, probe] of vm.scenarioProbes.entries()) {
-    if (
-      run.hints.some(
-        (hint) =>
-          hint.scope === "probe" &&
-          hint.key.startsWith(prefix) &&
-          hint.probeName === probe.id &&
-          hint.unlocked &&
-          !hint.revealed,
-      )
-    ) {
+  for (const [ordinal, check] of vmChecks.entries()) {
+    if (check.hints.some((hint) => hint.unlocked && !hint.revealed)) {
       aliases.push(`check-${ordinal + 1}`);
     }
   }
@@ -380,17 +368,11 @@ function scenarioRunCliView(
       true,
     );
   }
-  if (vm.scenarioProbes.length > RUN_CLI_MAX_PROBE_IDS) {
-    throw runCliFailure(
-      "unavailable",
-      "Checks are unavailable for this run.",
-      true,
-    );
-  }
+  const vmChecks = scenarioVmChecks(run, vm);
   assertViewTextBudget([
     run.title,
     vm.scenarioVmName,
-    ...vm.scenarioProbes.map((probe) => probe.label),
+    ...vmChecks.map((check) => check.label),
     ...run.hints.flatMap((hint) =>
       hint.revealed
         ? [hint.title ?? "", hint.bodyMarkdown ?? ""]
@@ -400,13 +382,13 @@ function scenarioRunCliView(
       ? [run.solution.bodyMarkdown]
       : []),
   ]);
-  const checks = boundedChecks(vm.scenarioProbes.map((probe, ordinal) => ({
-    probe_id: probe.id,
+  const checks = boundedChecks(vmChecks.map((check, ordinal) => ({
+    probe_id: check.id,
     alias: `check-${ordinal + 1}`,
-    label: safeSingleLine(probe.label, `Check ${ordinal + 1}`),
-    status: scenarioCheckStatus(probe.status),
+    label: safeSingleLine(check.label, `Check ${ordinal + 1}`),
+    status: scenarioCheckStatus(check.status),
   })) satisfies RunCliCheckV1[]);
-  const hintGroups = scenarioHintGroups(run, vm, checks);
+  const hintGroups = scenarioHintGroups(run, vmChecks, checks);
   return boundedView({
     retry_scope: retryScope,
     run: {
@@ -430,7 +412,7 @@ function scenarioRunCliView(
 
 function scenarioHintGroups(
   run: ScenarioRunRecord,
-  vm: ScenarioRunRecord["vms"][number],
+  vmChecks: readonly ScenarioVmCheck[],
   checks: readonly RunCliCheckV1[],
 ): RunCliHintGroupV1[] {
   const groups: RunCliHintGroupV1[] = [];
@@ -440,14 +422,8 @@ function scenarioHintGroups(
       projectScenarioHintGroup("general", "General guidance", scenarioHints),
     );
   }
-  const prefix = `probe:${vm.scenarioVmName}:`;
   for (const [ordinal, check] of checks.entries()) {
-    const hints = run.hints.filter(
-      (hint) =>
-        hint.scope === "probe" &&
-        hint.key.startsWith(prefix) &&
-        hint.probeName === check.probe_id,
-    );
+    const hints = vmChecks[ordinal]?.hints ?? [];
     if (!hints.length) continue;
     // The full objective label already appears in `checks`; keeping this
     // repeated group label fixed prevents one hostile label multiplying by
@@ -505,18 +481,51 @@ function scenarioHintForAliasOrdinal(
   const ordinal = checkOrdinal(alias);
   if (ordinal === null) return null;
   const vm = requireScenarioVm(run, runtimeVmName);
-  const probe = vm.scenarioProbes[ordinal];
-  if (!probe) return null;
-  const prefix = `probe:${vm.scenarioVmName}:`;
-  return (
-    run.hints
-      .filter(
-      (hint) =>
-        hint.scope === "probe" &&
-        hint.key.startsWith(prefix) &&
-        hint.probeName === probe.id,
-      )[expectedOrdinal - 1] ?? null
-  );
+  return scenarioVmChecks(run, vm)[ordinal]?.hints[expectedOrdinal - 1] ?? null;
+}
+
+interface ScenarioVmCheck {
+  id: string;
+  label: string;
+  status: string;
+  hints: ScenarioRunRecord["hints"];
+}
+
+/**
+ * The checks of one VM, in order, with their hint ladders: a task run's
+ * tasks on this machine, keyed by task id; otherwise the VM's scenario
+ * probes.
+ */
+function scenarioVmChecks(
+  run: ScenarioRunRecord,
+  vm: ScenarioRunRecord["vms"][number],
+): ScenarioVmCheck[] {
+  const checks = run.tasks
+    ? run.tasks
+        .filter((task) => task.machine === vm.scenarioVmName)
+        .map((task) => ({
+          id: task.id,
+          label: task.title,
+          status: task.status,
+          hints: run.hints.filter((hint) =>
+            hint.scope === "probe" && hint.key.startsWith("task:") && hint.probeName === task.id),
+        }))
+    : vm.scenarioProbes.map((probe) => ({
+        id: probe.id,
+        label: probe.label,
+        status: probe.status,
+        hints: run.hints.filter((hint) =>
+          hint.scope === "probe" && hint.key.startsWith(`probe:${vm.scenarioVmName}:`) &&
+          hint.probeName === probe.id),
+      }));
+  if (checks.length > RUN_CLI_MAX_PROBE_IDS) {
+    throw runCliFailure(
+      "unavailable",
+      "Checks are unavailable for this run.",
+      true,
+    );
+  }
+  return checks;
 }
 
 function scenarioCheckStatus(status: string): RunCliCheckStatusV1 {

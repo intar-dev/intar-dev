@@ -414,7 +414,7 @@ async function markRunActive(): Promise<void> {
     terminalTarget: {
       host: "10.0.0.10",
       port: 22,
-      username: "ubuntu",
+      username: "user",
       hostKeyOpenssh: "ssh-ed25519 HOST host@example.test",
       checkedAt: NOW,
     },

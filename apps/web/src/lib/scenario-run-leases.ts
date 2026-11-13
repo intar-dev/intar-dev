@@ -1,4 +1,4 @@
-import type { HostDesiredStateV2 } from "@/generated/bridge";
+import { desiredVmName, type StoredHostDesiredState } from "@/lib/desired-state-store";
 
 export interface OverdueRunLease {
   runId: string;
@@ -6,7 +6,7 @@ export interface OverdueRunLease {
 }
 
 export function selectOverdueRunLeases(
-  desiredState: HostDesiredStateV2,
+  desiredState: StoredHostDesiredState,
   nowUnixMs: number,
 ): OverdueRunLease[] {
   const byRunId = new Map<string, Set<string>>();
@@ -18,7 +18,7 @@ export function selectOverdueRunLeases(
       continue;
     }
     const names = byRunId.get(vm.run_id) ?? new Set<string>();
-    names.add(vm.vm_name);
+    names.add(desiredVmName(vm));
     byRunId.set(vm.run_id, names);
   }
 

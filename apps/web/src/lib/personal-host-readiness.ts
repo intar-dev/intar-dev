@@ -12,10 +12,18 @@ export function personalHostReportReady(report: HostStateReportV2 | null, requir
     hostSupportsSpeedRedesign(report) && (!requireRunCli || hostSupportsRunCliV1(report));
 }
 
+/** A bridge 9 report is Ready on the same capacity floor, from its hardware facts. */
+export function hostReportV3Ready(report: HostStateReportV3 | null): boolean {
+  const cpu = strictCpuCapacity(report);
+  return !!report && report.relay_connected === true && !!cpu && cpu.schedulableCpuMillis > 0 &&
+    report.capacity.total_cpu_millis >= 2000 &&
+    report.capacity.memory_total_mib >= 4096;
+}
+
 /**
  * Persist readiness and placement together. Admission cannot see Ready with cloud placement.
- * A bridge 9 report (V3) names a VM by its machine name and is never ready
- * for placement yet.
+ * A bridge 9 report (V3) names a VM by its machine name; its host-local id is
+ * the name and the run id.
  */
 export async function persistHostReport(input: {
   d1: D1Database; hostId: string; sessionId: string; credentialGeneration: number;
@@ -23,8 +31,9 @@ export async function persistHostReport(input: {
 }): Promise<boolean> {
   const { d1, hostId, sessionId, credentialGeneration, report, now } = input;
   const v2 = "capabilities" in report;
-  const vmName = v2 ? "$.vm_name" : "$.name";
-  const ready = v2 && personalHostReportReady(report, input.requireRunCli) ? 1 : 0;
+  const vmName = v2 ? "json_extract(reported.value, '$.vm_name')"
+    : "json_extract(reported.value, '$.name') || '-' || json_extract(reported.value, '$.run_id')";
+  const ready = (v2 ? personalHostReportReady(report, input.requireRunCli) : hostReportV3Ready(report)) ? 1 : 0;
   if (report.host_id !== hostId) return false;
   const currentHost = `id = ?1 AND active_session_id = ?2 AND credential_generation = ?3 AND disabled = 0`;
   // Reports include stopping VMs after access is revoked. Check their identity
@@ -44,7 +53,7 @@ export async function persistHostReport(input: {
               AND execution.user_id = json_extract(reported.value, '$.owner_user_id')
               AND execution.domain_id = json_extract(reported.value, '$.run_id')
               AND execution.host_id = ?1 AND execution.state <> 'archived'
-              AND vm.runtime_vm_name = json_extract(reported.value, '${vmName}')
+              AND vm.runtime_vm_name = ${vmName}
               AND (host.scope = 'platform' OR (host.scope = 'personal' AND host.user_id = execution.user_id)
                 OR (host.scope = 'organization' AND host.organization_id = run.organization_id))
               AND NOT EXISTS (SELECT 1 FROM runtime_executions newer WHERE newer.domain_kind = execution.domain_kind

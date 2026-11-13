@@ -97,7 +97,7 @@ function vm(
     terminalTarget: {
       host: null,
       port: 22,
-      username: "ubuntu",
+      username: "user",
       hostKeyOpenssh: null,
       checkedAt: null,
     },

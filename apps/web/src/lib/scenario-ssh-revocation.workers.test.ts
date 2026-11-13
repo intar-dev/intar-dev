@@ -50,7 +50,7 @@ beforeEach(async () => {
       phase: "active_full",
       vms: current.vms.map((vm) => ({
         ...vm, phase: "ready", terminalPhase: "ready",
-        terminalTarget: { host: "10.0.0.10", port: 22, username: "ubuntu", hostKeyOpenssh: "ssh-ed25519 HOST", checkedAt: now },
+        terminalTarget: { host: "10.0.0.10", port: 22, username: "user", hostKeyOpenssh: "ssh-ed25519 HOST", checkedAt: now },
       })),
     }),
   });

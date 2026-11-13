@@ -9,8 +9,7 @@ import {
   strictCpuCapacity,
 } from "@/control-plane/host-cpu-reservations";
 import { agentHosts, hostActualState, scenarioRuns } from "@/db/schema";
-import { markDesiredVmAbsent } from "@/lib/desired-state";
-import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
+import { markStoredDesiredVmsAbsent } from "@/lib/desired-state-store";
 import { hostHealth } from "@/lib/host-health";
 import {
   availableRuntimeHostResources,
@@ -209,18 +208,12 @@ export async function markRunVmsAbsentInDesiredState(input: {
     return;
   }
 
-  await mutateStoredHostDesiredState(
+  const names = new Set(input.vms.map((vm) => vm.runtimeVmName));
+  await markStoredDesiredVmsAbsent(
     input.db ?? drizzle(env.DB),
     input.hostId,
     input.nowUnixMs,
-    (draft) => {
-      for (const vm of input.vms) {
-        markDesiredVmAbsent(draft, {
-          runId: input.runId,
-          vmName: vm.runtimeVmName,
-        });
-      }
-    },
+    (vm) => vm.run_id === input.runId && names.has(vm.name),
   );
 }
 

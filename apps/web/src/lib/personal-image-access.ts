@@ -14,7 +14,10 @@ export function preparationAuthoritySql(): string {
   // depth limit when image, manifest, and artifact routes add their own fences.
   return `EXISTS (SELECT 1 FROM agent_hosts host
     JOIN user owner ON owner.id = prep.user_id
-    JOIN vm_scenarios scenario ON scenario.scenario_id = ${field("scenarioId")}
+    JOIN (SELECT scenario_id, organization_id FROM vm_scenarios
+        WHERE enabled = 1 AND enabled_at IS NOT NULL
+      UNION ALL SELECT id, organization_id FROM scenarios
+        WHERE enabled = 1 AND live_rev IS NOT NULL) scenario ON scenario.scenario_id = ${field("scenarioId")}
     JOIN course_catalogs catalog ON catalog.scope_key = ${field("courseScopeKey")}
     JOIN json_each(catalog.catalog_json, '$.courses') course
     JOIN json_each(course.value, '$.lectures') lecture
@@ -32,8 +35,7 @@ export function preparationAuthoritySql(): string {
         instr(',' || replace(lower(coalesce(owner.role, '')), ' ', '') || ',', ',admin,') > 0)
       AND (${field("organizationId")} IS NULL OR EXISTS (SELECT 1 FROM member membership
         WHERE membership.user_id = prep.user_id AND membership.organization_id = ${field("organizationId")}))
-      AND (scenario.enabled = 1 AND scenario.enabled_at IS NOT NULL
-        AND (scenario.organization_id IS NULL OR scenario.organization_id = ${field("organizationId")}))
+      AND (scenario.organization_id IS NULL OR scenario.organization_id = ${field("organizationId")})
       AND (catalog.organization_id IS NULL OR catalog.organization_id = ${field("organizationId")})
       AND (json_extract(catalog.catalog_json, '$.version'), json_extract(course.value, '$.courseId'),
         json_extract(lecture.value, '$.lectureId'), json_extract(lecture.value, '$.scenarioId')) =

@@ -5,7 +5,7 @@ import {
   isSafeBuildId,
   isSafeBundleRev,
 } from "@/control-plane/image-registry/shared";
-import { isSafeScenarioId } from "@/lib/scenario-id";
+import { isRevisionScenarioId, isSafeScenarioId } from "@/lib/scenario-id";
 import {
   courseLocationFromRunSnapshot,
   startScenarioRunForUser,
@@ -38,11 +38,12 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     return jsonResponse(body, { status });
   }
 
-  const scenarioId = params.scenarioId?.trim() ?? "";
+  // A revision-model id carries one encoded slash.
+  const scenarioId = (params.scenarioId?.trim() ?? "").replace(/%2F/giu, "/");
   if (!scenarioId) {
     return jsonResponse({ error: "scenarioId is required" }, { status: 400 });
   }
-  if (!isSafeScenarioId(scenarioId)) {
+  if (!isSafeScenarioId(scenarioId) && !isRevisionScenarioId(scenarioId)) {
     return jsonResponse({ error: "invalid scenarioId" }, { status: 400 });
   }
 

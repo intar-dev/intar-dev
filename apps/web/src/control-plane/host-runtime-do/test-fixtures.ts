@@ -651,7 +651,7 @@ export function vmReport(
               target: {
                 host: "203.0.113.9",
                 port: sshHostPort,
-                username: "ubuntu",
+                username: "user",
                 checked_at_unix_ms: observedAt,
               },
             }

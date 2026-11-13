@@ -43,7 +43,11 @@ import { createAppId } from "@/lib/id";
 import {
   applyHostReportToRunState,
   applyVmReportToRunState,
+  applyVmStateV3ToRunState,
+  revisionVmId,
 } from "@/lib/run-lifecycle";
+import type { RunStateDocument } from "@/lib/run-state";
+import { liveRevisionImages } from "@/lib/scenario-runs/revision-begin";
 import {
   HOST_DESIRED_STATE_SCHEMA_VERSION_V3,
   loadOrCreateHostDesiredState,
@@ -57,6 +61,7 @@ import type {
   BridgeMessageV9,
   HostDesiredStateV3,
   HostStateReportV3,
+  VmReportV3,
 } from "@/generated/contracts/bridge-message-v9";
 import validateBridgeMessageV9 from "@/generated/contracts/bridge-message-v9.validate";
 import { readKinoPin } from "@/control-plane/image-registry/push";
@@ -766,10 +771,16 @@ export class HostRuntimeDO extends HostRuntimeBase {
       });
       if (moved) await this.reconcileHost(hostId);
     } else if (message.type === "vm_report") {
-      // ponytail: no bridge 9 VM is placed yet, so no report can be this
-      // host's; the runs slice matches it on (run, name, execution,
-      // generation) and projects it.
-      return;
+      if (message.report.host_id !== hostId) return;
+      const vm = message.report.vm;
+      await this.applyBridgeVmReport(
+        hostId,
+        vmReportV2FromV3(message.report),
+        attachment.sessionId,
+        attachment.credentialGeneration,
+        (latest) => applyVmStateV3ToRunState({ runId: vm.run_id, current: latest, vm }),
+      );
+      await this.scheduleAlarmNoLaterThan(Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
     } else if (message.type === "sync_request") {
       await this.dispatchBridgeDesiredStateIfNeeded(hostId, ws, { force: true });
       await this.reconcileHost(hostId);
@@ -792,6 +803,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     guestContract: number | null | undefined,
   ): Promise<HostDesiredStateV3> {
     const pin = typeof guestContract === "number" ? await readKinoPin(this.env, guestContract) : null;
+    const liveImages = typeof guestContract === "number" ? await liveRevisionImages(this.env.DB, guestContract) : [];
     const { state } = await mutateHostDesiredStateV3(drizzle(this.env.DB), hostId, Date.now(), (draft, host) => {
       if (host.role === "builder") {
         draft.vms = [];
@@ -805,6 +817,15 @@ export class HostRuntimeDO extends HostRuntimeBase {
       } else {
         delete draft.kino_pin;
         draft.vms = [];
+      }
+      // A platform host holds every live image of its guest contract and the
+      // images its running VMs use. ponytail: no eviction; add an LRU when
+      // the live set outgrows the host cache.
+      if (draft.scope === "platform") {
+        draft.cached_images = [...new Set([
+          ...liveImages,
+          ...draft.vms.filter((vm) => vm.desired_phase === "running").map((vm) => vm.image),
+        ])].sort();
       }
     });
     return state;
@@ -820,12 +841,37 @@ export class HostRuntimeDO extends HostRuntimeBase {
     expectedSessionId: string,
     expectedCredentialGeneration: number,
   ): Promise<void> {
-    await persistHostReport({
+    const accepted = await persistHostReport({
       d1: this.env.DB, hostId, report, now: Date.now(),
       sessionId: expectedSessionId,
       credentialGeneration: expectedCredentialGeneration,
       requireRunCli: learnerRunCliV1EnforcementEnabled(this.env),
     });
+    if (!accepted) return;
+    for (const run of await this.listOpenRunsForHost(hostId)) {
+      const vms = report.vms.filter((vm) => vm.run_id === run.runId);
+      if (!vms.length || vms.some((vm) => vm.runtime_execution_id !== run.executionId ||
+        vm.generation !== run.executionGeneration || vm.owner_user_id !== run.userId)) continue;
+      const outcome = await this.withRunProjectionLock(run.runId, async () => {
+        const current = await this.loadRun(run.runId);
+        if (!current || current.hostId !== hostId || !current.state.tasks) {
+          return { kind: "unchanged" } satisfies RunProjectionOutcome;
+        }
+        return this.persistRunState(
+          run.runId,
+          (latest) => vms.reduce((state, vm) => applyVmStateV3ToRunState({ runId: run.runId, current: state, vm }), latest),
+          {
+            keepDeleteRequestedAt: true,
+            initialRow: current,
+            expectedExecution: { id: run.executionId, ownerUserId: run.userId, generation: run.executionGeneration },
+            expectedHostSession: { hostId, activeSessionId: expectedSessionId, credentialGeneration: expectedCredentialGeneration },
+          },
+        );
+      });
+      if (outcome.kind === "updated") {
+        this.scheduleRunStatusInvalidation({ runId: run.runId, hostId, revision: outcome.revision });
+      }
+    }
   }
 
   private async handleBridgeClientHello(
@@ -1203,6 +1249,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
     report: Extract<BridgeMessageV8, { type: "vm_report" }>["report"],
     expectedSessionId: string,
     expectedCredentialGeneration: number,
+    project: (latest: RunStateDocument) => RunStateDocument = (latest) =>
+      applyVmReportToRunState({ runId: report.run_id, current: latest, report }),
   ): Promise<void> {
     const execution = await this.loadRuntimeVmReportContext(hostId, report.runtime_execution_id, report.vm_name);
     if (!execution || execution.domainId !== report.run_id || execution.userId !== report.owner_user_id ||
@@ -1215,12 +1263,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
           run?.hostId === hostId
             ? await this.persistRunState(
                 report.run_id,
-                (latest) =>
-                  applyVmReportToRunState({
-                    runId: report.run_id,
-                    current: latest,
-                    report,
-                  }),
+                project,
                 {
                   keepDeleteRequestedAt: true,
                   initialRow: run,
@@ -1500,13 +1543,11 @@ export class HostRuntimeDO extends HostRuntimeBase {
   ): Promise<void> {
     const now = Date.now();
     const db = drizzle(this.env.DB);
-    // A bridge 9 document holds no old builds or run leases.
+    // A bridge 9 document holds no old builds.
     const v9 = isHostDesiredStateV3(await loadStoredHostDesiredState(db, hostId, now));
     if (!v9) await maintainHostBuildAssignments(db, hostId, now);
     await maintainMachineBuilds(this.env, hostId, now);
-    const expiredLeases = v9
-      ? { updatedRunRevisions: [] }
-      : await expireOverdueRunLeases(hostId, now, { db, wakeHostRuntime: false });
+    const expiredLeases = await expireOverdueRunLeases(hostId, now, { db, wakeHostRuntime: false });
     for (const expired of expiredLeases.updatedRunRevisions) {
       this.scheduleRunStatusInvalidation({
         runId: expired.runId,
@@ -1578,18 +1619,12 @@ export class HostRuntimeDO extends HostRuntimeBase {
         return;
       }
 
-      // ponytail: bridge 9 documents skip the workload access filter until
-      // they carry VMs; the runs slice applies it to DesiredVmV3.
-      const desiredState = attachment.bridgeProtocol === "v9"
-        ? await this.prepareDesiredStateV3(hostId, attachment.guestContract)
-        : await enforceHostWorkloadAccess(
-            await loadOrCreateHostDesiredState(
-              drizzle(this.env.DB),
-              hostId,
-              Date.now(),
-            ),
-            (runId) => this.scheduleRunStatusRefresh(hostId, [runId]),
-          );
+      const desiredState = await enforceHostWorkloadAccess<HostDesiredStateV2 | HostDesiredStateV3>(
+        attachment.bridgeProtocol === "v9"
+          ? await this.prepareDesiredStateV3(hostId, attachment.guestContract)
+          : await loadOrCreateHostDesiredState(drizzle(this.env.DB), hostId, Date.now()),
+        (runId) => this.scheduleRunStatusRefresh(hostId, [runId]),
+      );
       const lastSent = attachment.lastDesiredVersionSent;
       if (lastSent !== null && desiredState.version < lastSent) return;
       const relayRefreshDue = desiredState.scope !== "platform" &&
@@ -1995,6 +2030,35 @@ function requiredRunStatusHeader(
     value === value.trim()
     ? value
     : null;
+}
+
+/**
+ * A bridge 9 VM report in the shape the runtime mirror and the run CLI fence
+ * read: the VM is named by its host-local id and carries no probes.
+ */
+function vmReportV2FromV3(report: VmReportV3): VmReportV2 {
+  const vm = report.vm;
+  return {
+    owner_user_id: vm.owner_user_id,
+    runtime_execution_id: vm.runtime_execution_id,
+    generation: vm.generation,
+    schema_version: report.schema_version,
+    host_id: report.host_id,
+    run_id: vm.run_id,
+    vm_name: revisionVmId(vm.name, vm.run_id),
+    desired_version: vm.desired_version ?? null,
+    observed_at_unix_ms: report.observed_at_unix_ms,
+    phase: vm.phase,
+    network: vm.network ?? null,
+    terminal: vm.terminal,
+    runtime_constraints: vm.runtime_constraints ?? null,
+    resource_state: vm.resource_state ?? null,
+    sandbox: vm.sandbox ?? null,
+    ssh_host_keys_openssh: vm.ssh_host_keys_openssh,
+    probes: [],
+    archive: vm.archive ?? null,
+    error: vm.error ?? null,
+  };
 }
 
 function runtimeActualStateFromReport(report: VmReportV2): VmActualStateV2 {

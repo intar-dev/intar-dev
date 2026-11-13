@@ -135,8 +135,8 @@ it("saves retry intent before absence so an interrupted dispatch cannot lose ter
     ...current, phase: "failed", vms: current.vms.map(vm => ({ ...vm, phase: "failed" })),
   }) });
   const state = await loadOrCreateHostDesiredState(drizzle(env.DB), "host-1", Date.now());
-  const mutate = desiredStateStore.mutateStoredHostDesiredState;
-  const interrupted = vi.spyOn(desiredStateStore, "mutateStoredHostDesiredState").mockImplementationOnce(async (...args) => {
+  const mutate = desiredStateStore.markStoredDesiredVmsAbsent;
+  const interrupted = vi.spyOn(desiredStateStore, "markStoredDesiredVmsAbsent").mockImplementationOnce(async (...args) => {
     expect((await runRow()).routeCleanupId).not.toBeNull();
     await mutate(...args);
     throw new Error("dispatch interrupted after absence was saved");
