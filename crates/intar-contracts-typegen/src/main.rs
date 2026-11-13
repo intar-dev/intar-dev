@@ -157,6 +157,10 @@ fn main() -> Result<()> {
         &schema_for!(BridgeMessageV8),
     )?;
     write_schema(
+        &schema_dir.join("bridge-message-v9.schema.json"),
+        &schema_for!(intar_contracts::bridge_v9::BridgeMessageV9),
+    )?;
+    write_schema(
         &schema_dir.join("guest-boot-v3.schema.json"),
         &schema_for!(intar_contracts::guest::GuestBootV3),
     )?;
@@ -368,6 +372,7 @@ export const SHARE_INGEST_PONG = "{}";
 export const SHARE_INGEST_CLOSE_ENDED = {};
 export const SHARE_INGEST_CLOSE_LIMIT = {};
 export const SHARE_INGEST_CLOSE_STOPPED = {};
+export const BRIDGE_PROTOCOL_VERSION_9 = {};
 export const GUEST_CONTRACT = {};
 export const GUEST_REPORT_PORT = {};
 export const GUEST_RUN_CLI_PORT = {};
@@ -421,6 +426,7 @@ export const runtimeEnvKeys = {{
         SHARE_INGEST_CLOSE_ENDED,
         SHARE_INGEST_CLOSE_LIMIT,
         SHARE_INGEST_CLOSE_STOPPED,
+        intar_contracts::bridge_v9::BRIDGE_PROTOCOL_VERSION_9,
         intar_contracts::guest::GUEST_CONTRACT,
         intar_contracts::guest::REPORT_PORT,
         intar_contracts::guest::RUN_CLI_PORT,

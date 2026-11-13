@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bridge;
+pub mod bridge_v9;
 pub mod catalog;
 pub mod guest;
 pub mod oci;

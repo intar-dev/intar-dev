@@ -27,6 +27,7 @@ export const SHARE_INGEST_PONG = "pong";
 export const SHARE_INGEST_CLOSE_ENDED = 1000;
 export const SHARE_INGEST_CLOSE_LIMIT = 1009;
 export const SHARE_INGEST_CLOSE_STOPPED = 4001;
+export const BRIDGE_PROTOCOL_VERSION_9 = 9;
 export const GUEST_CONTRACT = 3;
 export const GUEST_REPORT_PORT = 18081;
 export const GUEST_RUN_CLI_PORT = 18082;

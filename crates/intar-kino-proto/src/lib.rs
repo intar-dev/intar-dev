@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod host;
+
 pub mod kino_v1 {
     #![allow(clippy::all, clippy::pedantic, clippy::restriction, clippy::nursery)]
 

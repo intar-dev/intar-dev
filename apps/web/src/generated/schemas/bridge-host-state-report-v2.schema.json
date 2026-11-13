@@ -421,6 +421,7 @@
           "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
         "total_cpu_millis",
         "reserved_cpu_millis",
@@ -652,6 +653,7 @@
           "$ref": "#/$defs/VmArchivePhase"
         }
       },
+      "additionalProperties": false,
       "required": [
         "phase",
         "artifact_count"
@@ -716,6 +718,7 @@
           "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
         "bridge_name",
         "guest_ip",
@@ -827,6 +830,7 @@
           "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
         "cpu_millis",
         "cpu_quota_us",
@@ -860,6 +864,7 @@
           "format": "int64"
         }
       },
+      "additionalProperties": false,
       "required": [
         "generation",
         "cpu_millis"
@@ -890,6 +895,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "healthy",
         "generation",
@@ -936,6 +942,7 @@
           ]
         }
       },
+      "additionalProperties": false,
       "required": [
         "state",
         "observed_at_unix_ms"
@@ -961,6 +968,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "host",
         "port",

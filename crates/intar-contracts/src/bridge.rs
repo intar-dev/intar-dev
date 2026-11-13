@@ -245,7 +245,7 @@ pub struct HostStateReportV2 {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct HostCapacityV2 {
     pub total_cpu_millis: u32,
     pub reserved_cpu_millis: u32,
@@ -308,7 +308,7 @@ pub struct HostCapabilitiesV2 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct VmResourceStateV3 {
     #[schemars(range(min = 1))]
     pub cpu_millis: u32,
@@ -325,7 +325,7 @@ pub struct VmResourceStateV3 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct VmSandboxStateV1 {
     pub healthy: bool,
     pub generation: String,
@@ -438,7 +438,7 @@ pub enum VmPhase {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct VmNetworkStateV1 {
     pub bridge_name: String,
     pub guest_ip: String,
@@ -462,7 +462,7 @@ pub enum VmTerminalStateKindV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct VmTerminalTargetV1 {
     pub host: String,
     pub port: u16,
@@ -471,7 +471,7 @@ pub struct VmTerminalTargetV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct VmTerminalStateV1 {
     pub state: VmTerminalStateKindV1,
     /// Present only when `state` is `ready`.
@@ -483,7 +483,7 @@ pub struct VmTerminalStateV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct VmRuntimeConstraintsV2 {
     /// Jailer-owned generation to which every quota and ingress attestation
     /// in this object applies. The breaking v2 contract never accepts
@@ -519,7 +519,7 @@ pub enum VmProbeStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct VmArchiveStateV1 {
     pub phase: VmArchivePhase,
     pub artifact_count: u32,

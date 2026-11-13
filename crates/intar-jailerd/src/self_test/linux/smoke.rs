@@ -683,6 +683,7 @@ pub(super) fn smoke_vm_config(
         cpus: None,
         memory: Some(MemoryConfig {
             size: i64::from(SELF_TEST_VM_MEMORY_MIB) * 1024 * 1024,
+            zones: None,
         }),
         payload: PayloadConfig {
             kernel: Some(path_utf8(&launch.paths.jailed_kernel)?),
@@ -745,6 +746,7 @@ pub(super) fn smoke_vm_config(
             pci_segment: None,
             id: Some("selftest-kino-vsock".to_owned()),
         }),
+        balloon: None,
         landlock_enable: Some(true),
     })
 }

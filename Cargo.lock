@@ -2192,9 +2192,11 @@ dependencies = [
 name = "intar-kino-proto"
 version = "0.1.0"
 dependencies = [
+ "intar-contracts",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "thiserror",
 ]
 
 [[package]]

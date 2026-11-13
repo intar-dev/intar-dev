@@ -74,9 +74,11 @@ pub(super) fn build_cloud_hypervisor_vm_config(
         cpus: (input.cpu_millis > 1_000).then(|| CpusConfig {
             boot_vcpus: input.cpu_millis.div_ceil(1_000),
             max_vcpus: input.cpu_millis.div_ceil(1_000),
+            profile: None,
         }),
         memory: Some(MemoryConfig {
             size: (input.memory_mib as i64) * 1024 * 1024,
+            zones: None,
         }),
         payload: PayloadConfig {
             kernel: Some(input.paths.jailed_kernel.display().to_string()),
@@ -114,6 +116,7 @@ pub(super) fn build_cloud_hypervisor_vm_config(
             pci_segment: None,
             id: Some(format!("{}-kino-vsock", input.name)),
         }),
+        balloon: None,
         landlock_enable: Some(true),
     })
 }
