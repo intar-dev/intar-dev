@@ -2088,16 +2088,13 @@ version = "0.10.3"
 dependencies = [
  "anyhow",
  "clap",
- "hcl-rs",
+ "flate2",
  "intar-contracts",
  "intar-image-build",
  "intar-image-scenario",
- "intar-image-upload",
  "reqwest",
- "serde",
  "serde_json",
  "tempfile",
- "tokio",
 ]
 
 [[package]]

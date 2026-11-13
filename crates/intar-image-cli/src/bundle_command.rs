@@ -1,12 +1,17 @@
-use super::*;
+//! The bundle upload: a `multipart/form-data` POST of the `meta` and
+//! `bundle` fields with a bearer token, as `scenario-publish.yml` drives it.
+
+use anyhow::{Context, Result, anyhow, bail};
 use intar_contracts::source::{
-    SOURCE_BUNDLE_FIELD, SOURCE_META_FIELD, SourceRefusalCode, SourceRefusalV1,
+    SOURCE_BUNDLE_FIELD, SOURCE_META_FIELD, SourceBundleMetaV2, SourceRefusalCode, SourceRefusalV1,
 };
-use intar_image_build::source_bundle::validate_safe_cli_slug;
-use intar_image_upload::{REGISTRY_SESSION_HEADER, RegistryUploadSession, UploadOutcome};
+use std::env;
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
+const DEFAULT_BUNDLE_OUTPUT_ROOT: &str = "dist/bundles";
 /// The whole bundle request, the body upload included.
 const BUNDLE_UPLOAD_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 120 });
 /// Exit codes of a failed upload that the scenario-publish workflow acts on.
@@ -15,6 +20,36 @@ const EXIT_SUPERSEDED: u8 = 3;
 const EXIT_COMPILER_OUTDATED: u8 = 4;
 /// `EX_TEMPFAIL`: a transport error, a client timeout, a 429 or a 5xx.
 const EXIT_TRANSIENT: u8 = 75;
+
+/// Where an upload goes and the token it carries.
+#[derive(Debug)]
+pub(super) struct BundleUploadTarget {
+    pub(super) url: String,
+    token: String,
+}
+
+impl BundleUploadTarget {
+    pub(super) fn new(url: &str, token: Option<&str>) -> Result<Self> {
+        let url = url.trim();
+        if url.is_empty() {
+            bail!("bundle upload URL is empty");
+        }
+        let token = token.map(str::trim).unwrap_or_default();
+        if token.is_empty() {
+            bail!("a bundle upload needs --token");
+        }
+        Ok(Self {
+            url: url.to_owned(),
+            token: token.to_owned(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BundleUploadReceipt {
+    pub(super) queued: u64,
+    pub(super) assigned: usize,
+}
 
 /// A failed bundle upload and the exit code it ends the process with.
 #[derive(Debug)]
@@ -43,14 +78,6 @@ fn transient(message: String) -> UploadFailed {
     }
 }
 
-pub(super) fn load_build_config(path: Option<&Path>) -> Result<BuildConfig> {
-    match path {
-        Some(path) => BuildConfig::from_file(path)
-            .with_context(|| format!("failed to load build config from {}", path.display())),
-        None => Ok(BuildConfig::default()),
-    }
-}
-
 pub(super) fn default_bundle_rev() -> Result<String> {
     if let Ok(github_sha) = env::var("GITHUB_SHA") {
         let trimmed = github_sha.trim();
@@ -74,103 +101,28 @@ pub(super) fn default_bundle_rev() -> Result<String> {
     bail!("failed to determine bundle revision; pass --rev explicitly");
 }
 
+/// 1 to 128 of `[A-Za-z0-9._-]`, and not `.` or `..`: the rev names a file.
 pub(super) fn validate_bundle_rev(rev: &str) -> Result<()> {
-    validate_safe_cli_slug("bundle rev", rev)
+    let safe = (1..=128).contains(&rev.len())
+        && rev != "."
+        && rev != ".."
+        && rev
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte));
+    if !safe {
+        bail!("invalid bundle rev '{rev}' (expected 1-128 safe slug characters)");
+    }
+    Ok(())
 }
 
 pub(super) fn default_bundle_output_path(rev: &str) -> PathBuf {
-    Path::new(DEFAULT_BUNDLE_OUTPUT_ROOT).join(format!("{rev}.tar.gz"))
-}
-
-pub(super) fn bundle_upload_target(
-    config: Option<&RawUploadConfig>,
-    url_override: Option<&str>,
-    token_override: Option<&str>,
-    no_upload: bool,
-) -> Result<Option<BundleUploadTarget>> {
-    if no_upload {
-        return Ok(None);
-    }
-
-    let url = if let Some(url) = url_override {
-        url.trim().to_owned()
-    } else {
-        let Some(config) = config else {
-            return Ok(None);
-        };
-        if !config.enabled {
-            return Ok(None);
-        }
-        bundle_url_from_publish_url(&config.url)
-    };
-
-    if url.is_empty() {
-        bail!("bundle upload URL is empty");
-    }
-
-    let token = token_override
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            config
-                .map(|config| config.token.trim())
-                .filter(|token| !token.is_empty())
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| env::var(IMAGE_PUBLISH_TOKEN_ENV).unwrap_or_default());
-
-    if token.trim().is_empty() {
-        bail!("bundle upload requires upload.token, --token, or {IMAGE_PUBLISH_TOKEN_ENV}");
-    }
-
-    Ok(Some(BundleUploadTarget { url, token }))
-}
-
-pub(super) fn bundle_url_from_publish_url(value: &str) -> String {
-    let trimmed = value.trim().trim_end_matches('/');
-    if let Some(base) = trimmed.strip_suffix("/registry/v1/publish") {
-        format!("{base}/registry/v1/bundles")
-    } else {
-        trimmed.to_owned()
-    }
+    Path::new(DEFAULT_BUNDLE_OUTPUT_ROOT).join(format!("{rev}.json.gz"))
 }
 
 pub(super) fn upload_bundle(
-    uploader: Option<&ImageUploader>,
     target: &BundleUploadTarget,
-    archive_path: &Path,
+    bundle_path: &Path,
     rev: &str,
-    meta: &serde_json::Value,
-) -> Result<BundleUploadReceipt> {
-    // The registry admits one writer per bundle upload, so the session opens
-    // before the request and closes with its outcome. A target that is not the
-    // registry bundles route has no admission to hold and uploads as before.
-    let Some(uploader) = uploader else {
-        return post_bundle(target, None, archive_path, rev, meta);
-    };
-    let session = uploader.start_session("image_bundle")?;
-    let receipt = post_bundle(target, Some(&session), archive_path, rev, meta);
-    let closed = session.complete(if receipt.is_ok() {
-        UploadOutcome::Published
-    } else {
-        UploadOutcome::Abandoned
-    });
-    match (receipt, closed) {
-        (Ok(receipt), Ok(())) => Ok(receipt),
-        (Ok(_), Err(close)) => {
-            Err(close).context("bundle uploaded but the registry upload session was not completed")
-        }
-        (Err(primary), _) => Err(primary),
-    }
-}
-
-fn post_bundle(
-    target: &BundleUploadTarget,
-    session: Option<&RegistryUploadSession>,
-    archive_path: &Path,
-    rev: &str,
-    meta: &serde_json::Value,
 ) -> Result<BundleUploadReceipt> {
     // reqwest rejects a non-HTTP scheme only while it streams the body, where
     // it can surface as a transport error, so a bad target fails here with 1.
@@ -179,48 +131,39 @@ fn post_bundle(
     if !matches!(url.scheme(), "http" | "https") {
         bail!("bundle upload URL {} must use http or https", target.url);
     }
-    let part = reqwest::blocking::multipart::Part::file(archive_path)
-        .with_context(|| format!("failed to read bundle {}", archive_path.display()))?
-        .file_name(format!("{rev}.tar.gz"))
+    let meta = SourceBundleMetaV2 {
+        rev: rev.to_owned(),
+    };
+    let part = reqwest::blocking::multipart::Part::file(bundle_path)
+        .with_context(|| format!("failed to read bundle {}", bundle_path.display()))?
+        .file_name(format!("{rev}.json.gz"))
         .mime_str("application/gzip")?;
     // Part::file has a known length, so reqwest sends a Content-Length.
     let form = reqwest::blocking::multipart::Form::new()
-        .text(SOURCE_META_FIELD, serde_json::to_string(meta)?)
+        .text(SOURCE_META_FIELD, serde_json::to_string(&meta)?)
         .part(SOURCE_BUNDLE_FIELD, part);
 
-    let mut request = reqwest::blocking::Client::builder()
+    let response = reqwest::blocking::Client::builder()
         .timeout(BUNDLE_UPLOAD_TIMEOUT)
         .build()?
         .post(url)
-        .bearer_auth(target.token.trim());
-    if let Some(session) = session {
-        request = request.header(REGISTRY_SESSION_HEADER, session.id());
-    }
-    let response = request.multipart(form).send().map_err(|error| {
-        let message = format!("failed to upload bundle to {}", target.url);
-        // A builder error, such as a bad token header, fails the same on a retry.
-        if error.is_builder() {
-            anyhow::Error::new(error).context(message)
-        } else {
-            anyhow::Error::new(error).context(transient(message))
-        }
-    })?;
+        .bearer_auth(&target.token)
+        .multipart(form)
+        .send()
+        .map_err(|error| {
+            let message = format!("failed to upload bundle to {}", target.url);
+            // A builder error, such as a bad token header, fails the same on a retry.
+            if error.is_builder() {
+                anyhow::Error::new(error).context(message)
+            } else {
+                anyhow::Error::new(error).context(transient(message))
+            }
+        })?;
     let status = response.status();
     let body = response
         .text()
         .with_context(|| transient("failed to read bundle response".to_owned()))?;
     parse_bundle_upload_response(status, &body, rev)
-}
-
-/// The admission client is built from the publish route, while the bundle POST
-/// goes to the sibling bundles route: the reverse of the publish to bundles
-/// derivation in this module. A target outside the registry has no admission to
-/// hold.
-pub(super) fn publish_url_from_bundle_url(value: &str) -> Option<String> {
-    let trimmed = value.trim().trim_end_matches('/');
-    trimmed
-        .strip_suffix("/registry/v1/bundles")
-        .map(|base| format!("{base}/registry/v1/publish"))
 }
 
 pub(super) fn parse_bundle_upload_response(

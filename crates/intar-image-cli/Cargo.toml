@@ -9,16 +9,15 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-hcl-rs.workspace = true
 intar-contracts = { path = "../intar-contracts" }
 intar-image-build = { path = "../intar-image-build" }
 intar-image-scenario = { path = "../intar-image-scenario" }
-intar-image-upload = { path = "../intar-image-upload" }
 reqwest = { workspace = true, features = ["blocking", "multipart", "rustls"] }
-serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true
