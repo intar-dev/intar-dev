@@ -484,6 +484,7 @@ pub(crate) use priority::{
 };
 mod budget;
 mod hashing;
+mod oci;
 use hashing::hash_file_bounded;
 mod pins;
 use pins::RequiredPins;
