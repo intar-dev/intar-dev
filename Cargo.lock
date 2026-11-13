@@ -2052,8 +2052,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "intar-contracts",
+ "intar-image-scenario",
  "schemars",
+ "serde",
  "serde_json",
+ "sha2 0.11.1",
 ]
 
 [[package]]

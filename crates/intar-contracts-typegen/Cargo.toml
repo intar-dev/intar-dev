@@ -9,8 +9,11 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 intar-contracts = { path = "../intar-contracts" }
+intar-image-scenario = { path = "../intar-image-scenario" }
 schemars.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

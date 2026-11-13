@@ -2,7 +2,7 @@
 
 use std::{fs, path::Path};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use intar_contracts::{
     bridge::{
         BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV8, BuildReportV1,
@@ -40,7 +40,17 @@ use intar_contracts::{
         ShareIngestMessage, StageTerminalTargetRequest, StageTerminalTargetResponse,
     },
 };
+use intar_contracts::{
+    oci::OciDigest,
+    scenario::{
+        HintV1, ImageV1, MAX_DISK_MIB, MAX_READY_PER_MACHINE, MAX_SCRIPT_BYTES,
+        MAX_TASKS_PER_MACHINE, ScenarioRevisionV1, ScriptV1, SpecMode, build_keys, canonical_json,
+    },
+    source::validate_bundle,
+};
+use intar_image_scenario::loader::compile;
 use schemars::schema_for;
+use sha2::{Digest as _, Sha256};
 
 fn main() -> Result<()> {
     let out_dir = Path::new("apps/web/src/generated");
@@ -53,6 +63,8 @@ fn main() -> Result<()> {
     fs::create_dir_all(fixture_dir.join("bridge")).context("create bridge fixture directory")?;
     fs::create_dir_all(fixture_dir.join("run-cli")).context("create run CLI fixture directory")?;
     fs::create_dir_all(fixture_dir.join("source")).context("create source fixture directory")?;
+    fs::create_dir_all(fixture_dir.join("scenario"))
+        .context("create scenario fixture directory")?;
 
     for obsolete in [
         "schemas/catalog-scenario-manifest-v4.schema.json",
@@ -197,6 +209,14 @@ fn main() -> Result<()> {
         &schema_for!(intar_contracts::oci::KinoConfigV1),
     )?;
     write_schema(
+        &schema_dir.join("oci-manifest-v1.schema.json"),
+        &schema_for!(intar_contracts::oci::OciManifestV1),
+    )?;
+    write_schema(
+        &schema_dir.join("scenario-revision-v1.schema.json"),
+        &schema_for!(ScenarioRevisionV1),
+    )?;
+    write_schema(
         &schema_dir.join("run-cli-request-v1.schema.json"),
         &schema_for!(RunCliRequestV1),
     )?;
@@ -315,8 +335,232 @@ fn main() -> Result<()> {
     )?;
     write_compile_digest_fixture(&fixture_dir.join("source/compile-digest.json"))?;
     write_compile_digest_v2_fixture(&fixture_dir.join("source/compile-digest-v2.json"))?;
+    copy_fixture(
+        "crates/intar-contracts/fixtures/scenario/build-keys.json",
+        &fixture_dir.join("scenario/build-keys.json"),
+    )?;
+    write_scenario_fixtures(&fixture_dir.join("scenario"))?;
 
     Ok(())
+}
+
+/// The in-repository content compiled as the Worker receives it, what the
+/// Worker stores from it, and broken variants of it with the problems
+/// `validate_bundle` lists for each, so the Worker's port can be held to
+/// the same bytes and the same refusals.
+fn write_scenario_fixtures(dir: &Path) -> Result<()> {
+    let (bundle, _) = compile(Path::new("content")).map_err(|problems| {
+        let problems: Vec<String> = problems.iter().map(ToString::to_string).collect();
+        anyhow!("compile content: {}", problems.join("; "))
+    })?;
+    write_json(&dir.join("broken-nginx-bundle.json"), &bundle)?;
+
+    let id = "intar/broken-nginx";
+    let scenario = bundle
+        .scenarios
+        .iter()
+        .find(|scenario| scenario.slug == "broken-nginx")
+        .context("content has no broken-nginx")?;
+    let keys = build_keys(scenario, &bundle.images).map_err(|problem| anyhow!(problem))?;
+    let revision =
+        ScenarioRevisionV1::new(scenario, id, &keys).map_err(|problem| anyhow!(problem))?;
+    let mut specs = serde_json::Map::new();
+    for machine in &scenario.machines {
+        let mut modes = serde_json::Map::new();
+        for (label, mode) in [("learn", SpecMode::Learn), ("verify", SpecMode::Verify)] {
+            let spec = scenario
+                .machine_spec(id, &machine.name, mode)
+                .context("spec of a declared machine")?;
+            let (bytes, digest) = spec.blob();
+            modes.insert(label.to_owned(), blob_json(bytes, &digest)?);
+        }
+        specs.insert(machine.name.clone(), modes.into());
+    }
+    let revision_json = canonical_json(&revision).context("serialize revision")?;
+    let content_digest = OciDigest::from_sha256(&Sha256::digest(&revision_json).into());
+    write_json(
+        &dir.join("broken-nginx-revision.json"),
+        &serde_json::json!({
+            "scenario_id": id,
+            "revision": blob_json(revision_json, &content_digest)?,
+            "specs": specs,
+        }),
+    )?;
+
+    let refusals = refusal_cases()
+        .into_iter()
+        .map(|(name, mutate)| {
+            let mut broken = bundle.clone();
+            mutate(&mut broken);
+            let problems = validate_bundle(&broken).err().unwrap_or_default();
+            anyhow::ensure!(!problems.is_empty(), "refusal `{name}` is not refused");
+            let case = serde_json::json!({"name": name, "bundle": broken, "problems": problems});
+            serde_json::to_string(&case).context("serialize refusal")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // One case per line: the bundles are large and alike.
+    let path = dir.join("bundle-refusals.json");
+    fs::write(&path, format!("[\n{}\n]\n", refusals.join(",\n")))
+        .with_context(|| format!("write {}", path.display()))
+}
+
+fn blob_json(bytes: Vec<u8>, digest: &OciDigest) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "json": String::from_utf8(bytes).context("canonical JSON is UTF-8")?,
+        "digest": digest,
+    }))
+}
+
+type Mutation = fn(&mut SourceBundleV2);
+
+/// One broken bundle per rule of `validate_bundle`, from the compiled
+/// content. Each stays within the bundle schema, so only the rules refuse it.
+fn refusal_cases() -> Vec<(&'static str, Mutation)> {
+    fn image(name: &str, from: &str, disk_mib: Option<u32>) -> ImageV1 {
+        ImageV1 {
+            name: name.to_owned(),
+            from: from.to_owned(),
+            disk_mib,
+            defer: Vec::new(),
+            setup: Vec::new(),
+            wake: false,
+        }
+    }
+    fn script(name: &str, script: String) -> ScriptV1 {
+        ScriptV1 {
+            name: name.to_owned(),
+            script,
+        }
+    }
+    vec![
+        ("compiler", |b| {
+            b.compiler = "intar-source-compiler-v1".to_owned()
+        }),
+        ("image-format", |b| {
+            b.image_format = "intar-image-2".to_owned()
+        }),
+        ("scenario-twice", |b| {
+            b.scenarios.push(b.scenarios[0].clone())
+        }),
+        ("slug", |b| b.scenarios[0].slug = "Broken".to_owned()),
+        ("hint-twice", |b| {
+            let hints = &mut b.scenarios[0].tasks[0].hints;
+            hints.push(hints[0].clone());
+        }),
+        ("hint-id", |b| {
+            b.scenarios[0].hints.push(HintV1 {
+                id: "-x".to_owned(),
+                title: None,
+                body: String::new(),
+            })
+        }),
+        ("no-machines", |b| b.scenarios[0].machines.clear()),
+        ("machine-twice", |b| {
+            let machines = &mut b.scenarios[0].machines;
+            machines.push(machines[0].clone());
+        }),
+        ("unknown-from", |b| {
+            b.scenarios[0].machines[0].from = "nope".to_owned()
+        }),
+        ("disk-below-image", |b| {
+            b.images.push(image("web-base", "trixie", Some(8192)));
+            b.scenarios[0].machines[0].from = "web-base".to_owned();
+        }),
+        ("machine-disk-over-limit", |b| {
+            b.scenarios[0].machines[0].disk_mib = MAX_DISK_MIB + 1;
+        }),
+        ("ready-blocks", |b| {
+            b.scenarios[0].machines[0].ready = (0..=MAX_READY_PER_MACHINE)
+                .map(|n| script(&format!("ready-{n:02}"), "true".to_owned()))
+                .collect();
+        }),
+        ("setup-name", |b| {
+            b.scenarios[0].machines[0].setup[1].name = "Break".to_owned();
+        }),
+        ("setup-twice", |b| {
+            let setup = &mut b.scenarios[0].machines[0].setup;
+            setup.push(setup[1].clone());
+        }),
+        ("too-many-tasks", |b| {
+            let task = b.scenarios[0].tasks[0].clone();
+            b.scenarios[0].tasks = (0..=MAX_TASKS_PER_MACHINE)
+                .map(|n| {
+                    let mut task = task.clone();
+                    task.id = format!("task-{n:02}");
+                    task
+                })
+                .collect();
+        }),
+        ("task-twice", |b| {
+            let tasks = &mut b.scenarios[0].tasks;
+            tasks.push(tasks[0].clone());
+        }),
+        ("task-machine", |b| {
+            b.scenarios[0].tasks[0].machine = "nope".to_owned()
+        }),
+        ("empty-check", |b| {
+            b.scenarios[0].tasks[0].check = " ".to_owned()
+        }),
+        ("unverifiable", |b| b.scenarios[0].tasks[0].solve = None),
+        ("unknown-need", |b| {
+            b.scenarios[0].tasks[2].needs = vec!["nope".to_owned()]
+        }),
+        ("need-cycle", |b| {
+            b.scenarios[0].tasks[0].needs = vec!["site-reachable".to_owned()];
+        }),
+        // Over the limit in UTF-8 bytes, under it in UTF-16 code units.
+        ("check-over-limit", |b| {
+            b.scenarios[0].tasks[0].check = "\u{e9}".repeat(MAX_SCRIPT_BYTES / 2 + 1);
+        }),
+        ("image-name", |b| {
+            b.images.push(image("trixie", "trixie", Some(4096)))
+        }),
+        ("image-twice", |b| {
+            b.images = vec![image("base", "trixie", Some(4096)); 2];
+        }),
+        ("image-disk-rule", |b| {
+            b.images.push(image("base", "trixie", None))
+        }),
+        ("image-disk-over-limit", |b| {
+            b.images
+                .push(image("base", "trixie", Some(MAX_DISK_MIB + 1)));
+        }),
+        ("image-unknown-from", |b| {
+            b.images.push(image("base", "nope", None))
+        }),
+        ("image-cycle", |b| {
+            b.images = vec![image("one", "two", None), image("two", "one", None)];
+        }),
+        ("wake-packages", |b| {
+            let mut base = image("web-base", "trixie", Some(4096));
+            base.wake = true;
+            b.images.push(base);
+            b.scenarios[0].machines[0].from = "web-base".to_owned();
+        }),
+        ("wake-chain", |b| {
+            let mut base = image("web-base", "trixie", Some(4096));
+            base.wake = true;
+            b.images = vec![base, image("child", "web-base", None)];
+        }),
+        ("course-twice", |b| {
+            let courses = &mut b.course_catalog.courses;
+            courses.push(courses[0].clone());
+        }),
+        ("lecture-twice", |b| {
+            let lectures = &mut b.course_catalog.courses[0].lectures;
+            lectures.push(lectures[0].clone());
+        }),
+        ("lecture-scenario", |b| {
+            for lecture in &mut b.course_catalog.courses[0].lectures {
+                lecture.scenario_id = Some("elsewhere".to_owned());
+            }
+        }),
+    ]
+}
+
+fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    let body = serde_json::to_string_pretty(value).context("serialize fixture")?;
+    fs::write(path, format!("{body}\n")).with_context(|| format!("write {}", path.display()))
 }
 
 /// A fixed vector for the platform compile digest formula, so the Worker and
