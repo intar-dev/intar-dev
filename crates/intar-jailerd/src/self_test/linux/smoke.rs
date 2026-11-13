@@ -648,6 +648,7 @@ pub(super) fn prepare_smoke_image(
         // the same lane a learner launch uses, so the smoke covers the
         // foreground admission path.
         request_class: RequestClass::Foreground,
+        prepare_wake: false,
     };
     match core.handle(Request::PrepareChunkedImageV3(Box::new(request))) {
         Response::PrepareChunkedImageV3(prepared) if prepared.fast_template_store => Ok(prepared),

@@ -135,6 +135,7 @@ pub(super) async fn ensure_jailer_image_template(
     inner: &Inner,
     image: &image_cache::PulledMachine,
     request_class: RequestClass,
+    prepare_wake: bool,
 ) -> Result<PreparedImageV3Result> {
     let capabilities = cached_jailer_launch_capabilities(inner).await?;
     if !(capabilities.supports_jailer_v3
@@ -169,6 +170,7 @@ pub(super) async fn ensure_jailer_image_template(
         // `Foreground` and is never parked. The background cache warmer passes
         // `Background`, which keeps it inside jailerd's background lane.
         request_class,
+        prepare_wake,
     };
     request.validate()?;
     let result = match request_jailerd_with_timeout(
@@ -246,6 +248,13 @@ fn validate_prepared_image_v3_result(
         (None, None) => {}
         _ => anyhow::bail!("jailerd prepared v3 initrd shape mismatch"),
     }
+    anyhow::ensure!(
+        !request.prepare_wake || result.wake.is_some(),
+        "jailerd prepared no wake files although asked to"
+    );
+    if let Some(wake) = &result.wake {
+        image_cache::check_prepared_wake(request.image_id.as_str(), wake)?;
+    }
     Ok(())
 }
 
@@ -291,6 +300,7 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
     inner: &Inner,
     req: &RunCreateInput<'_>,
     ready: &image_cache::ReadyImage,
+    wake: bool,
 ) -> Result<VmLaunchResult> {
     let prepared = &ready.prepared_image;
     let run_id = ValidatedId::parse(req.run_id.to_string()).context("validate jailer run ID")?;
@@ -318,7 +328,16 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
             None,
             ArtifactAccess::ReadWrite,
         )?,
-        wake: None,
+        wake: if wake {
+            Some(
+                prepared
+                    .wake
+                    .clone()
+                    .context("the image's suspended guest is not prepared")?,
+            )
+        } else {
+            None
+        },
     };
 
     let request = VmLaunchRequest {
@@ -915,93 +934,59 @@ pub(super) async fn run_create(
 
     set_state(inner, req.name, VmLifecycleState::CreatingVm).await;
 
-    let launch_deadline = Instant::now() + Duration::from_secs(SCENARIO_READY_MAX_TIMEOUT_SECONDS);
-    let mut capacity_attempt = 0_u32;
-    let launch = loop {
-        match launch_jailed_cloud_hypervisor(inner, &req, &ready_image).await {
-            Ok(result) => break result,
-            Err(error) if error.downcast_ref::<CpuCapacityPending>().is_some() => {
-                ensure_create_not_deleted(inner, req.name).await?;
-                if Instant::now() >= launch_deadline {
-                    return Err(error).context("timed out waiting for jailerd CPU capacity");
-                }
-                let delay = boot_capacity_retry_delay(capacity_attempt);
-                capacity_attempt = capacity_attempt.saturating_add(1);
-                debug!(
-                    vm = req.name,
-                    attempt = capacity_attempt,
-                    delay_ms = delay.as_millis(),
-                    "waiting for capacity-accounted VM boot CPU"
-                );
-                tokio::time::sleep(delay).await;
-            }
-            Err(error) => return Err(error),
-        }
+    let decision = start_decision(inner, &req, &ready_image).await?;
+    match &decision {
+        StartDecision::Wake => info!(
+            vm = req.name,
+            image = req.image.as_str(),
+            "waking the VM from its image's suspended guest"
+        ),
+        StartDecision::Cold(reason) => info!(
+            vm = req.name,
+            image = req.image.as_str(),
+            reason = reason.as_str(),
+            "booting the VM cold"
+        ),
+    }
+    let mut backend = LiveStart {
+        inner,
+        req: &req,
+        ready: &ready_image,
+        run_network: &run_network,
+        run_guard: Some(run_launch_guard),
+        launch_deadline: Instant::now() + Duration::from_secs(SCENARIO_READY_MAX_TIMEOUT_SECONDS),
+        attempt: None,
     };
-    persist_jail_launch(inner, req.name, &launch, &run_network).await?;
-    drop(run_launch_guard);
-
-    remove_agent_launch_sources(&req)
-        .await
-        .context("remove unprivileged launch staging files")?;
-    ensure_create_not_deleted(inner, req.name).await?;
-    let jail_ready_at = Instant::now();
-
-    let vm_cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
-        cpu_millis: req.cpu_millis,
-        name: req.name,
-        cmdline: &ready_image.cmdline,
-        paths: &launch.paths,
-        memory_mib: req.memory_mib,
-        tap: req.tap,
-        mac: req.mac,
-        kino_vsock_cid: req.kino_vsock_cid,
-    })?;
-
-    // LaunchVmV3 returns only after jailerd has pinned and pinged the API socket.
-    // Repeating the readiness loop here adds another VMM API request and up to
-    // one polling interval to every boot. Recovery still uses the bounded
-    // readiness helper because it does not inherit that launch attestation.
-    let ch = ChClient::new(launch.paths.host_api_socket.display().to_string())
-        .context("open jailerd-attested cloud-hypervisor API socket")?;
-    let vmm_ready_at = Instant::now();
-
-    debug!("calling cloud-hypervisor vm.create");
-    ch.vm_create(&vm_cfg)
-        .await
-        .context("cloud-hypervisor vm.create failed")?;
-
-    set_state(inner, req.name, VmLifecycleState::BootingVm).await;
-
-    let mut details = {
-        let states = inner.states.read().await;
-        states
-            .get(req.name)
-            .and_then(|vm| vm.details.clone())
-            .ok_or_else(|| anyhow::anyhow!("VM state disappeared after jailed launch"))?
-    };
-    details.ssh_host_keys_openssh = current_ssh_host_keys(inner, req.name).await;
-    let readiness_updates = inner.guest_reports_tx.subscribe();
-    // Bind and activate the guest-initiated report socket before boot. A
-    // fast guest's first Kino report must not race listener startup and fall
-    // through to Kino's reconnect interval.
-    start_probe_worker(inner, req.name, &details)
-        .await
-        .context("failed to start vm probe worker")?;
-    // Bind the private guest-to-host command broker before boot, alongside
-    // Kino's readiness listener. The broker refuses requests until this VM is
-    // durably Running, but a fast SSH guest can never race listener setup.
-    start_run_cli_broker(inner, req.name, &details)
-        .await
-        .context("failed to start vm run CLI broker")?;
-
-    debug!("calling cloud-hypervisor vm.boot");
-    mark_vmm_started(inner, req.name);
-    ch.vm_boot()
-        .await
-        .context("cloud-hypervisor vm.boot failed")?;
-    ensure_create_not_deleted(inner, req.name).await?;
-    let boot_accepted_at = Instant::now();
+    let (launch, start) = start_vm(&mut backend, decision).await?;
+    let attempt = backend
+        .attempt
+        .take()
+        .context("the VM start left no booted attempt")?;
+    if start.path == VmStartPath::Wake {
+        // The woken jail no longer needs the agent's sources.
+        remove_agent_launch_sources(&req)
+            .await
+            .context("remove unprivileged launch staging files")?;
+        ensure_create_not_deleted(inner, req.name).await?;
+    }
+    if start.path == VmStartPath::WakeFallback {
+        info!(
+            vm = req.name,
+            image = req.image.as_str(),
+            reason = start.reason.as_deref().unwrap_or_default(),
+            "the wake fell back to a cold boot"
+        );
+    }
+    persist_vm_start(inner, req.name, start).await?;
+    let StartAttempt {
+        ch,
+        details,
+        readiness_updates,
+        jail_ready_at,
+        vmm_ready_at,
+        boot_accepted_at,
+        ..
+    } = attempt;
 
     let ready = wait_for_scenario_runtime_ready(inner, req.name, &ch, &details, readiness_updates)
         .await
@@ -1090,4 +1075,284 @@ pub(super) async fn run_create(
     );
 
     Ok(())
+}
+
+/// Whether this VM wakes, from the host's settings, the prepared image,
+/// jailerd and the VM's size.
+async fn start_decision(
+    inner: &Inner,
+    req: &RunCreateInput<'_>,
+    ready: &image_cache::ReadyImage,
+) -> Result<StartDecision> {
+    let capabilities = cached_jailer_launch_capabilities(inner).await?;
+    let fell_back_recently = inner
+        .wake_fallbacks
+        .lock()
+        .is_ok_and(|fallbacks| fell_back_recently(&fallbacks, req.image, Instant::now()));
+    let now_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        });
+    Ok(decide_start(&StartFacts {
+        config: &inner.wake,
+        wake: ready.wake.as_ref(),
+        prepared: ready.prepared_image.wake.is_some(),
+        jailer_supports_wake: capabilities.supports_wake,
+        vmm_version: CLOUD_HYPERVISOR_VERSION,
+        now_unix_ms,
+        memory_mib: req.memory_mib,
+        cpu_millis: req.cpu_millis,
+        fell_back_recently,
+    }))
+}
+
+/// Keep how the VM started, for its `VmStartV1` reports.
+async fn persist_vm_start(inner: &Inner, name: &str, start: VmStartV1) -> Result<()> {
+    let persisted = {
+        let mut states = inner.states.write().await;
+        let vm = states
+            .get_mut(name)
+            .context("VM state disappeared during its start")?;
+        vm.details
+            .as_mut()
+            .context("VM details disappeared during its start")?
+            .start = Some(start);
+        vm.clone()
+    };
+    inner
+        .db
+        .upsert_vm(persisted.to_db_row())
+        .await
+        .context("persist how the VM started")
+}
+
+/// The booted generation's handles.
+struct StartAttempt {
+    ch: ChClient,
+    details: VmDetails,
+    readiness_updates: broadcast::Receiver<GuestUpdate>,
+    first_reports: broadcast::Receiver<GuestUpdate>,
+    booted_at: Instant,
+    jail_ready_at: Instant,
+    vmm_ready_at: Instant,
+    boot_accepted_at: Instant,
+}
+
+/// A VM start against jailerd and cloud-hypervisor.
+struct LiveStart<'a> {
+    inner: &'a Arc<Inner>,
+    req: &'a RunCreateInput<'a>,
+    ready: &'a image_cache::ReadyImage,
+    run_network: &'a RunNetworkResult,
+    /// The run fence the first launch inherits; a second launch takes it
+    /// again.
+    run_guard: Option<OwnedMutexGuard<()>>,
+    launch_deadline: Instant,
+    attempt: Option<StartAttempt>,
+}
+
+impl StartBackend for LiveStart<'_> {
+    type Launched = VmLaunchResult;
+
+    async fn launch(&mut self, wake: bool) -> Result<VmLaunchResult> {
+        let (inner, req) = (self.inner, self.req);
+        let run_guard = match self.run_guard.take() {
+            Some(guard) => guard,
+            None => acquire_run_cleanup_lock(&inner.run_cleanup_locks, req.run_id).await,
+        };
+        ensure_create_not_deleted(inner, req.name).await?;
+        let mut capacity_attempt = 0_u32;
+        let launch = loop {
+            match launch_jailed_cloud_hypervisor(inner, req, self.ready, wake).await {
+                Ok(result) => break result,
+                Err(error) if error.downcast_ref::<CpuCapacityPending>().is_some() => {
+                    ensure_create_not_deleted(inner, req.name).await?;
+                    if Instant::now() >= self.launch_deadline {
+                        return Err(error).context("timed out waiting for jailerd CPU capacity");
+                    }
+                    let delay = boot_capacity_retry_delay(capacity_attempt);
+                    capacity_attempt = capacity_attempt.saturating_add(1);
+                    debug!(
+                        vm = req.name,
+                        attempt = capacity_attempt,
+                        delay_ms = delay.as_millis(),
+                        "waiting for capacity-accounted VM boot CPU"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        persist_jail_launch(inner, req.name, &launch, self.run_network).await?;
+        drop(run_guard);
+
+        // A wake keeps the agent's sources until it reported, so a fallback
+        // can launch again.
+        if !wake {
+            remove_agent_launch_sources(req)
+                .await
+                .context("remove unprivileged launch staging files")?;
+        }
+        ensure_create_not_deleted(inner, req.name).await?;
+        Ok(launch)
+    }
+
+    async fn boot(&mut self, launch: &VmLaunchResult, wake: bool) -> Result<()> {
+        let (inner, req) = (self.inner, self.req);
+        let jail_ready_at = Instant::now();
+        let cold = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
+            cpu_millis: req.cpu_millis,
+            name: req.name,
+            cmdline: &self.ready.cmdline,
+            paths: &launch.paths,
+            memory_mib: req.memory_mib,
+            tap: req.tap,
+            mac: req.mac,
+            kino_vsock_cid: req.kino_vsock_cid,
+        })?;
+        let guest = match (wake, self.ready.wake.as_ref(), launch.paths.wake.as_ref()) {
+            (false, _, _) => None,
+            (true, Some(guest), Some(paths)) => Some((guest, paths)),
+            (true, _, _) => anyhow::bail!("the wake launch has no suspended guest"),
+        };
+        let vm_cfg = match guest {
+            Some((guest, paths)) => wake_vm_config(cold, guest, paths, req.memory_mib)?,
+            None => cold,
+        };
+
+        // LaunchVmV3 returns only after jailerd has pinned and pinged the API socket.
+        // Repeating the readiness loop here adds another VMM API request and up to
+        // one polling interval to every boot. Recovery still uses the bounded
+        // readiness helper because it does not inherit that launch attestation.
+        let ch = ChClient::new(launch.paths.host_api_socket.display().to_string())
+            .context("open jailerd-attested cloud-hypervisor API socket")?;
+        let vmm_ready_at = Instant::now();
+
+        debug!("calling cloud-hypervisor vm.create");
+        ch.vm_create(&vm_cfg)
+            .await
+            .context("cloud-hypervisor vm.create failed")?;
+
+        set_state(inner, req.name, VmLifecycleState::BootingVm).await;
+
+        let mut details = {
+            let states = inner.states.read().await;
+            states
+                .get(req.name)
+                .and_then(|vm| vm.details.clone())
+                .ok_or_else(|| anyhow::anyhow!("VM state disappeared after jailed launch"))?
+        };
+        details.ssh_host_keys_openssh = current_ssh_host_keys(inner, req.name).await;
+        let readiness_updates = inner.guest_reports_tx.subscribe();
+        let first_reports = inner.guest_reports_tx.subscribe();
+        // Bind and activate the guest-initiated report socket before boot. A
+        // fast guest's first Kino report must not race listener startup and fall
+        // through to Kino's reconnect interval.
+        start_probe_worker(inner, req.name, &details)
+            .await
+            .context("failed to start vm probe worker")?;
+        // Bind the private guest-to-host command broker before boot, alongside
+        // Kino's readiness listener. The broker refuses requests until this VM is
+        // durably Running, but a fast SSH guest can never race listener setup.
+        start_run_cli_broker(inner, req.name, &details)
+            .await
+            .context("failed to start vm run CLI broker")?;
+
+        debug!("calling cloud-hypervisor vm.boot");
+        mark_vmm_started(inner, req.name);
+        let booted_at = Instant::now();
+        ch.vm_boot()
+            .await
+            .context("cloud-hypervisor vm.boot failed")?;
+        if let Some((guest, _)) = guest {
+            let vcpus = vcpu_count(req.cpu_millis);
+            if vcpus > guest.shape.boot_vcpus {
+                ch.vm_resize(&cloud_hypervisor_client::VmResize {
+                    desired_vcpus: Some(vcpus),
+                    ..Default::default()
+                })
+                .await
+                .context("cloud-hypervisor vm.resize failed")?;
+            }
+        }
+        ensure_create_not_deleted(inner, req.name).await?;
+        self.attempt = Some(StartAttempt {
+            ch,
+            details,
+            readiness_updates,
+            first_reports,
+            booted_at,
+            jail_ready_at,
+            vmm_ready_at,
+            boot_accepted_at: Instant::now(),
+        });
+        Ok(())
+    }
+
+    async fn first_report(
+        &mut self,
+        launch: &VmLaunchResult,
+        limit: Duration,
+    ) -> Option<&'static str> {
+        let (name, run_id) = (self.req.name, self.req.run_id);
+        let Some(attempt) = self.attempt.as_mut() else {
+            return Some("the wake left no booted VM");
+        };
+        let deadline = tokio::time::Instant::from_std(attempt.booted_at + limit);
+        let mut poll = tokio::time::interval(Duration::from_millis(
+            SCENARIO_READY_PROCESS_POLL_INTERVAL_MILLIS,
+        ));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep_until(deadline) => return Some("no report within 10 s"),
+                update = attempt.first_reports.recv() => match update {
+                    Ok(update) => {
+                        if ready_gate(&update, name, run_id, launch.generation.as_str())
+                            != ReadyGate::OtherVm
+                        {
+                            return None;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Some("the report channel closed");
+                    }
+                },
+                _ = poll.tick() => {
+                    if ensure_scenario_runtime_process_live(name, &attempt.details).await.is_err() {
+                        return Some("the VMM exited before the first report");
+                    }
+                    match timeout(Duration::from_secs(1), attempt.ch.vm_info()).await {
+                        Ok(Ok(info))
+                            if matches!(info.state, cloud_hypervisor_client::VmState::Shutdown) =>
+                        {
+                            return Some("the guest shut down before the first report");
+                        }
+                        Ok(Err(cloud_hypervisor_client::Error::HttpStatus { status: 404, .. })) => {
+                            return Some("the VM disappeared before the first report");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn destroy(&mut self, launch: VmLaunchResult) -> Result<()> {
+        let (inner, name) = (self.inner, self.req.name);
+        self.attempt = None;
+        stop_probe_worker(inner, name).await;
+        stop_run_cli_broker(inner, name).await;
+        cleanup_jailed_vm_by_selector(inner, VmIdentityRequest::by_generation(launch.generation))
+            .await
+            .context("destroy the woken jail generation")
+    }
+
+    fn record_fallback(&mut self) {
+        if let Ok(mut fallbacks) = self.inner.wake_fallbacks.lock() {
+            remember_fallback(&mut fallbacks, self.req.image, Instant::now());
+        }
+    }
 }

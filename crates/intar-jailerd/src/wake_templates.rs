@@ -596,6 +596,156 @@ mod tests {
         Ok(())
     }
 
+    /// A published template gains its wake files on a `prepare_wake`
+    /// request, keeping its root disk and kernel; a cold prepare needs no
+    /// wake layer; an image without `wake` cannot be prepared with it. The
+    /// disk has no chunks, so no reflink is needed. Needs what
+    /// [`a_pack_is_prepared_through_the_sandbox`] needs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs root, systemd and a reachable intar-jailer"]
+    fn a_template_gains_its_wake_files_under_its_lock() -> Result<()> {
+        use intar_jailer_protocol::TrustedDirectorySource;
+
+        let page = |byte: u8| vec![byte; 4096];
+        let base = [page(1), page(2), page(3), page(4)].concat();
+        let fork = [page(1), page(0), page(7), page(8)].concat();
+        let delta = crate::wake_apply::tests::delta_for(&base, &fork)?;
+        let (first, second) = delta.split_at(delta.len() / 2);
+        let ram_chunk = zstd::encode_all(&base[..], 3)?;
+        let (kernel, stub, profile) = (b"kernel".as_slice(), b"stub".as_slice(), b"{}".as_slice());
+
+        let sources = tempfile::tempdir()?;
+        std::fs::create_dir(sources.path().join("blobs"))?;
+        let put =
+            |bytes: &[u8]| std::fs::write(sources.path().join("blobs").join(sha(bytes)), bytes);
+        put(kernel)?;
+        let descriptor = |media: &str, bytes: &[u8]| serde_json::json!({"mediaType": media, "digest": format!("sha256:{}", sha(bytes)), "size": bytes.len()});
+        // Writes the config and manifest; returns the request for them.
+        let image = |wake: bool| -> Result<PrepareChunkedImageV3Request> {
+            let mut machine = serde_json::json!({
+                "guest_contract": 3, "image_format": "intar-image-3",
+                "build_key": format!("sha256:{}", "b".repeat(64)),
+                "boot": {"cmdline": "console=ttyS0"},
+                "disk": {"size_bytes": 4 << 20, "chunk_size": 4 << 20, "chunks": []},
+            });
+            let mut layers = vec![descriptor("application/vnd.intar.kernel.v1", kernel)];
+            if wake {
+                machine["wake"] = serde_json::json!({
+                    "ram": {"size_bytes": base.len(), "chunk_size": 4 << 20,
+                            "chunks": [[0, 1, sha(&base)]], "sha256": sha(&base)},
+                    "pack": {"base": format!("sha256:{}", "9".repeat(64)), "ram_sha256": sha(&fork)},
+                    "shape": {"memory_bytes": base.len(), "boot_vcpus": 1, "max_vcpus": 2, "balloon": true},
+                    "cpu_profile": format!("sha256:{}", sha(profile)),
+                    "vmm": {"min_version": "v50.0", "built_with": "v50.0"},
+                    "booted_at_unix_ms": 1,
+                });
+                layers.extend([
+                    descriptor("application/vnd.intar.wake.ram.chunk.v1+zstd", &ram_chunk),
+                    descriptor("application/vnd.intar.wake.stub.v1", stub),
+                    descriptor("application/vnd.intar.wake.cpu-profile.v1+json", profile),
+                    descriptor("application/vnd.intar.wake.delta.v1", first),
+                    descriptor("application/vnd.intar.wake.delta.v1", second),
+                ]);
+            }
+            let config = serde_json::to_vec(&machine)?;
+            let manifest = serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "artifactType": "application/vnd.intar.machine.v1",
+                "config": descriptor("application/vnd.intar.machine.config.v1+json", &config),
+                "layers": layers,
+            }))?;
+            let source = |name: &str, bytes: &[u8]| -> Result<ArtifactSource> {
+                std::fs::write(sources.path().join(name), bytes)?;
+                Ok(ArtifactSource {
+                    source_root: 0,
+                    relative_path: PathBuf::from(name),
+                    sha256: Some(Sha256Digest::parse(sha(bytes))?),
+                    access: ArtifactAccess::ReadOnly,
+                })
+            };
+            let tag = if wake { "wake" } else { "cold" };
+            Ok(PrepareChunkedImageV3Request {
+                image_id: Sha256Digest::parse(sha(&manifest))?,
+                chunk_manifest_sha256: Sha256Digest::parse(sha(&config))?,
+                virtual_size_bytes: 4 << 20,
+                image_manifest: source(&format!("{tag}-manifest.json"), &manifest)?,
+                manifest: source(&format!("{tag}-config.json"), &config)?,
+                chunk_cache_root: TrustedDirectorySource {
+                    source_root: 0,
+                    relative_path: PathBuf::from("blobs"),
+                },
+                kernel: ArtifactSource {
+                    source_root: 0,
+                    relative_path: PathBuf::from("blobs").join(sha(kernel)),
+                    sha256: Some(Sha256Digest::parse(sha(kernel))?),
+                    access: ArtifactAccess::ReadOnly,
+                },
+                initrd: None,
+                request_class: RequestClass::Foreground,
+                prepare_wake: false,
+            })
+        };
+        let jail_root = tempfile::tempdir()?;
+        let config = JailerdConfig {
+            jail_root: jail_root.path().to_owned(),
+            jailer_binary: PathBuf::from(std::env::var("INTAR_SNAPDELTA_TEST_JAILER")?),
+            allowed_source_roots: vec![sources.path().to_owned()],
+            ..JailerdConfig::default()
+        };
+        let lane = PrepareLane::claim(RequestClass::Foreground)?;
+        let template = |request: &PrepareChunkedImageV3Request| {
+            jail_root
+                .path()
+                .join("templates")
+                .join(request.image_id.as_str())
+        };
+        let identity = |path: PathBuf| std::fs::metadata(path).map(|m| (m.dev(), m.ino()));
+
+        // Cold: no wake layer is in the cache yet.
+        let mut request = image(true)?;
+        let cold = crate::prepare_chunked_image_template(&config, &request, &lane)?;
+        assert!(cold.wake.is_none());
+        let before = (
+            identity(template(&request).join("root.raw"))?,
+            identity(template(&request).join("kernel"))?,
+        );
+
+        for blob in [&ram_chunk[..], stub, profile, first, second] {
+            put(blob)?;
+        }
+        request.prepare_wake = true;
+        let warm = crate::prepare_chunked_image_template(&config, &request, &lane)?;
+        assert!(warm.wake.is_some());
+        assert_eq!(
+            (warm.root_disk.clone(), warm.kernel.clone()),
+            (cold.root_disk, cold.kernel)
+        );
+        assert_eq!(std::fs::read(template(&request).join("ram"))?, fork);
+        assert_eq!(
+            before,
+            (
+                identity(template(&request).join("root.raw"))?,
+                identity(template(&request).join("kernel"))?,
+            )
+        );
+        // A template with its wake files satisfies a cold request too.
+        request.prepare_wake = false;
+        assert_eq!(
+            crate::prepare_chunked_image_template(&config, &request, &lane)?,
+            warm
+        );
+
+        let mut plain = image(false)?;
+        plain.prepare_wake = true;
+        let error = crate::prepare_chunked_image_template(&config, &plain, &lane)
+            .expect_err("no wake to prepare");
+        assert!(format!("{error:#}").contains("carries no suspended guest"));
+        assert!(!template(&plain).exists());
+        Ok(())
+    }
+
     #[test]
     fn layers_are_copied_only_with_their_size_and_digest() -> Result<()> {
         let blob = b"stub bytes".as_slice();

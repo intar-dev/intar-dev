@@ -55,3 +55,11 @@ refresh_interval_minutes = 15
 # artifacts. The default is 53687091200 (50 GiB). The agent does not keep a
 # full unprivileged raw image. Pinned entries are never deleted to reach it.
 # max_bytes = 53687091200
+
+[wake]
+# Start VMs from an image's suspended guest instead of booting it. Off by
+# default. A VM is woken only under a CPU profile pinned here for this host
+# (the digest of the image's `wake.cpu_profile` layer); anything else boots
+# cold, and a wake that does not report within 10 s falls back to a cold boot.
+enabled = false
+profiles = []

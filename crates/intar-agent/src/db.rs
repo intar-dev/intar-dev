@@ -59,6 +59,8 @@ pub struct VmRow {
     pub spool_dir: Option<String>,
     pub cpu_millis: Option<i64>,
     pub ch_executable_sha256: Option<String>,
+    /// How the VM was started (`VmStartV1` without its timing), as JSON.
+    pub start_json: Option<String>,
 }
 
 /// The latest lab a VM's Kino reported, as strict `VmLabV1` JSON.

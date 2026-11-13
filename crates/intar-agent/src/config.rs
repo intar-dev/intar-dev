@@ -21,6 +21,17 @@ pub struct AgentConfig {
     pub vm_defaults: VmDefaultsConfig,
     pub image_registry: ImageRegistryConfig,
     pub image_cache: ImageCacheConfig,
+    pub wake: WakeConfig,
+}
+
+/// Starting VMs from an image's suspended guest. Off unless the operator
+/// turns it on for this host.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct WakeConfig {
+    pub enabled: bool,
+    /// The CPU profile digests this host may wake an image under.
+    pub profiles: Vec<intar_contracts::oci::OciDigest>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

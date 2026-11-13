@@ -294,6 +294,11 @@ pub struct PrepareChunkedImageV3Request {
     /// learner-visible launch path and the default for older callers.
     #[serde(default)]
     pub request_class: RequestClass,
+    /// Also prepare the image's suspended guest; its layers must then be in
+    /// the blob cache. Without it the image's `wake` is ignored. An image
+    /// without `wake` cannot be prepared with it.
+    #[serde(default)]
+    pub prepare_wake: bool,
 }
 
 /// Work class of a preparation request. This is a scheduling hint from the

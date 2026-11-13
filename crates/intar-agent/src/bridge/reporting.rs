@@ -424,12 +424,16 @@ pub(super) fn build_vm_report_from_status(
     }
 }
 
-/// Every VM starts cold until the wake path lands.
-pub(super) fn cold_start(first_report_ms: Option<u64>) -> VmStartV1 {
+/// How the VM was started, with the lab's first-report time. A VM without a
+/// recorded start (one started before the record existed) started cold.
+pub(super) fn vm_start(recorded: Option<&VmStartV1>, first_report_ms: Option<u64>) -> VmStartV1 {
     VmStartV1 {
-        path: VmStartPath::Cold,
-        reason: None,
         first_report_ms,
+        ..recorded.cloned().unwrap_or(VmStartV1 {
+            path: VmStartPath::Cold,
+            reason: None,
+            first_report_ms: None,
+        })
     }
 }
 
@@ -490,7 +494,10 @@ pub(super) fn vm_state_from_status(
         kino: details
             .and_then(|d| d.kino.clone())
             .or_else(|| desired_vm.map(|vm| vm.kino.clone())),
-        start: Some(cold_start(first_report_ms)),
+        start: Some(vm_start(
+            details.and_then(|d| d.start.as_ref()),
+            first_report_ms,
+        )),
         network: network_state_from_status(&status, ssh_host),
         terminal: terminal_state,
         runtime_constraints,
@@ -527,7 +534,7 @@ pub(super) fn failed_vm_report(
             phase: VmPhaseV2::Failed,
             image: Some(vm.image.clone()),
             kino: Some(vm.kino.clone()),
-            start: Some(cold_start(None)),
+            start: Some(vm_start(None, None)),
             network: None,
             terminal: VmTerminalStateV1 {
                 state: VmTerminalStateKindV1::Failed,

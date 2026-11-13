@@ -168,6 +168,11 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
                 row.ssh_host_keys_openssh_json.as_deref(),
             ),
             cpu_runtime: None,
+            // Only a report reads it; an unreadable one is left out.
+            start: row
+                .start_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str(json).ok()),
         }),
         _ => None,
     };

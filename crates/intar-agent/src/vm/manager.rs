@@ -18,17 +18,18 @@ use cloud_hypervisor_client::{
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use getrandom::fill as getrandom_fill;
 use intar_contracts::bridge::VmRuntimeConstraintsV2;
-use intar_contracts::bridge_v9::VmLabV1;
+use intar_contracts::bridge_v9::{VmLabV1, VmStartPath, VmStartV1};
 use intar_contracts::oci::OciDigest;
 use intar_contracts::scenario::SpecMode;
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, AsyncSeqpacketClient, BACKGROUND_PREPARE_BYTES_PER_SECOND,
-    DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest, FinalizeVmBootResult,
-    JailPathMap, JailerCapabilities, LaunchVmV3Request, PREPARED_IMAGE_SOURCE_ROOT,
-    PrepareChunkedImageV3Request, PreparedImageV3Result, Request as JailerRequest, RequestClass,
-    Response as JailerResponse, RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts,
-    TrustedDirectorySource, ValidatedId, VmCpuRuntimeState, VmIdentityRequest, VmInspection,
-    VmLaunchRequest, VmLaunchResult,
+    CLOUD_HYPERVISOR_VERSION, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
+    FinalizeVmBootRequest, FinalizeVmBootResult, JailPathMap, JailerCapabilities,
+    LaunchVmV3Request, PREPARED_IMAGE_SOURCE_ROOT, PrepareChunkedImageV3Request,
+    PreparedImageV3Result, Request as JailerRequest, RequestClass, Response as JailerResponse,
+    RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts, TrustedDirectorySource,
+    ValidatedId, VmCpuRuntimeState, VmIdentityRequest, VmInspection, VmLaunchRequest,
+    VmLaunchResult,
 };
 use reqwest::Client as HttpClient;
 use russh::{
@@ -190,6 +191,9 @@ pub struct VmDetails {
     pub ssh_host_keys_openssh: Vec<String>,
     #[serde(skip_serializing)]
     pub cpu_runtime: Option<VmCpuRuntimeState>,
+    /// How the VM was started; `first_report_ms` is the lab's.
+    #[serde(skip_serializing)]
+    pub start: Option<intar_contracts::bridge_v9::VmStartV1>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -301,6 +305,7 @@ impl VmStatusResponse {
                 kino_vsock_path: None,
                 ssh_host_keys_openssh: Vec::new(),
                 cpu_runtime: None,
+                start: None,
             }),
             error: None,
             lease_duration_seconds: None,
@@ -428,6 +433,11 @@ impl VmStatusResponse {
                 .as_ref()
                 .and_then(|d| d.recording_disk_path.clone()),
             spool_dir: self.details.as_ref().and_then(|d| d.spool_dir.clone()),
+            start_json: self
+                .details
+                .as_ref()
+                .and_then(|d| d.start.as_ref())
+                .and_then(|start| serde_json::to_string(start).ok()),
         }
     }
 
@@ -775,6 +785,11 @@ struct Inner {
     /// A permit is retained when the archive worker is between waits, so a
     /// durable queue insertion never has to wait for the ten-second sweep.
     archive_jobs_notify: Notify,
+    /// The host's `[wake]` settings.
+    wake: crate::config::WakeConfig,
+    /// When an image last fell back from a wake to a cold boot on this host,
+    /// keyed by image digest. A fresh entry keeps its VMs cold for an hour.
+    wake_fallbacks: std::sync::Mutex<BTreeMap<String, Instant>>,
 }
 
 const RUN_CLI_ACCESS_TOKEN_CACHE_TTL: Duration = Duration::from_secs(90);
@@ -849,7 +864,9 @@ use jailer_network::*;
 mod network_allocation;
 use network_allocation::*;
 mod state;
+mod wake;
 pub(crate) use state::is_safe_key;
 use state::*;
+use wake::*;
 #[cfg(test)]
 mod tests;

@@ -107,6 +107,8 @@ impl VmManager {
             archive_transfer_sem: Semaphore::new(ARCHIVE_HOST_TRANSFER_CONCURRENCY),
             archive_jobs_lock: Mutex::new(()),
             archive_jobs_notify: Notify::new(),
+            wake: cfg.wake.clone(),
+            wake_fallbacks: std::sync::Mutex::new(BTreeMap::new()),
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -236,8 +238,15 @@ impl VmManager {
     pub(crate) async fn ensure_cached_image_template_background(
         &self,
         image: &image_cache::PulledMachine,
+        prepare_wake: bool,
     ) -> Result<PreparedImageV3Result> {
-        ensure_jailer_image_template(&self.inner, image, RequestClass::Background).await
+        ensure_jailer_image_template(&self.inner, image, RequestClass::Background, prepare_wake)
+            .await
+    }
+
+    /// The host's `[wake]` settings.
+    pub(crate) fn wake_config(&self) -> &crate::config::WakeConfig {
+        &self.inner.wake
     }
 
     pub async fn inspect_jailed_vm(&self, generation: &str) -> Result<Option<VmInspection>> {
@@ -662,6 +671,7 @@ impl VmManager {
             kino_vsock_path: Some(kino_vsock_path.display().to_string()),
             ssh_host_keys_openssh: Vec::new(),
             cpu_runtime: None,
+            start: None,
         };
 
         let status = VmStatusResponse {

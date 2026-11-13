@@ -105,7 +105,9 @@ async fn prepare_missing_pinned_entries(pins: &RequiredPins, context: CacheRefre
         let missing = pins
             .images
             .iter()
-            .filter(|image| !ready::is_image_ready(context.cache_root, image))
+            .filter(|image| {
+                ready::needs_prepare(context.cache_root, image, context.vm.wake_config())
+            })
             .collect::<Vec<_>>();
         if missing.is_empty() {
             return;
@@ -153,19 +155,56 @@ fn is_requeued(error: &anyhow::Error) -> bool {
 /// Pull one pinned image into the blob store, refuse a config this agent's
 /// Kino contract cannot boot, and have jailerd build its template in the
 /// background lane.
+///
+/// When this host wants the image's suspended guest, its layers are pulled
+/// too and jailerd prepares it. If that fails the image is prepared without
+/// it, so cold boots still work, and why is kept.
 async fn prepare_one_image(image: &OciDigest, context: CacheRefreshContext<'_>) -> Result<()> {
-    let pulled = context
-        .vm
-        .oci_registry()
-        .pull_machine(image, &context.store())
-        .await?;
+    let store = context.store();
+    let registry = context.vm.oci_registry();
+    let pulled = registry.pull_machine(image, &store).await?;
     check_machine_config(&pulled.config)?;
-    context
-        .vm
-        .ensure_cached_image_template_background(&pulled)
-        .await
-        .map(drop)
-        .context("failed to prepare the root-owned jail image template")
+    let warm = ready::wants_wake(context.vm.wake_config(), &pulled.config).then_some(async {
+        registry.pull_wake_layers(&pulled, &store).await?;
+        context
+            .vm
+            .ensure_cached_image_template_background(&pulled, true)
+            .await
+            .map(drop)
+    });
+    let cold = async {
+        context
+            .vm
+            .ensure_cached_image_template_background(&pulled, false)
+            .await
+            .map(drop)
+            .context("failed to prepare the root-owned jail image template")
+    };
+    prepare_warm_or_cold(image, warm, cold).await
+}
+
+/// Prepare an image with its suspended guest when `warm` is given. Any
+/// failure of that but a requeue is kept and the image is prepared cold.
+pub(super) async fn prepare_warm_or_cold(
+    image: &OciDigest,
+    warm: Option<impl Future<Output = Result<()>>>,
+    cold: impl Future<Output = Result<()>>,
+) -> Result<()> {
+    if let Some(warm) = warm {
+        match warm.await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_requeued(&error) => return Err(error),
+            Err(error) => {
+                warn!(
+                    error = %format!("{error:#}"),
+                    image = image.as_str(),
+                    "the image's suspended guest could not be prepared; preparing it for cold boots"
+                );
+                ready::record_wake_prepare_failure(image, &error);
+            }
+        }
+    }
+    cold.await
 }
 
 /// Verify retained cache content with the bounded background hash reader.

@@ -132,6 +132,7 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_prepared_boot_artifacts() {
         kernel: readonly("artifacts/kernel", artifact_sha256.clone()),
         initrd: Some(readonly("artifacts/initrd", artifact_sha256.clone())),
         request_class: RequestClass::Foreground,
+        prepare_wake: false,
     };
     prepare.validate().expect("valid chunked prepare");
     let mut other_manifest = prepare.clone();

@@ -19,6 +19,7 @@ fn test_vm_row() -> VmRow {
         kino: Some(format!("sha256:{}", "2".repeat(64))),
         boot_sha256: Some("3".repeat(64)),
         machine_name: Some("web".to_string()),
+        start_json: None,
         created_at_s: 100,
         updated_at_s: 200,
         running_at_s: Some(150),

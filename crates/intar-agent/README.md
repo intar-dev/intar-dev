@@ -131,6 +131,10 @@ refresh_interval_minutes = 15
 # Not used by the /v2 client, which authenticates with the bridge's agent JWT.
 # username = ""
 # password = ""
+
+[wake]
+enabled = false
+profiles = []
 ```
 
 The agent pulls images from the OCI `/v2` API at the origin of `url` (its path
@@ -142,6 +146,29 @@ template. Desired-state changes wake the cache immediately; the 15-minute poll
 is only a repair scan. It does not keep a full unprivileged raw-image cache. The pinned
 Cloud Hypervisor v55.0.0 path and SHA-256 belong only in the root-owned
 `/etc/intar-jailerd/config.toml`.
+
+## Waking a suspended guest
+
+An image may carry a suspended guest (`wake` in its machine config). With
+`[wake] enabled = true`, an image whose `wake.cpu_profile` is listed in
+`profiles` (`sha256:<hex>`, pinned per host by the operator) also has its RAM
+chunks, wake stub, CPU profile and pack delta pulled, and jailerd prepares them
+with `prepare_wake`. If that prepare fails, the image is prepared without them
+and stays usable for cold boots.
+
+Each VM is then woken only when all of these hold, otherwise it boots cold and
+its report says why: wake is enabled, the prepared image has wake artifacts,
+its profile is pinned here, jailerd reports `supports_wake`, the pinned
+cloud-hypervisor is at least `wake.vmm.min_version`, the guest was booted less
+than 330 days ago, the VM asks for at most the guest's memory (exactly it
+unless the guest has a balloon), its vCPU count is at most `max_vcpus`, and the
+image did not fall back on this host within the last hour.
+
+A woken VM must send Kino's first report within 10 s of `vm.boot`. If it does
+not, or its VMM exits first, the agent destroys that jail generation (root
+disk, RAM and recording clones included) and boots the VM cold once. Reports
+carry `start.path`: `wake`, `wake_fallback` with a reason, or `cold` with the
+reason a wake was not tried.
 
 ## Scenario CPU resources
 

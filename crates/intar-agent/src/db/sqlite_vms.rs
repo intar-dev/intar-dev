@@ -137,9 +137,15 @@ pub(super) fn ensure_schema(conn: &mut Connection) -> Result<()> {
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .context("read sqlite schema marker")?;
     if version == STATE_SCHEMA_VERSION {
-        return conn
-            .execute_batch(&format!("{BASELINE_SCHEMA_SQL}{CACHE_STATE_SCHEMA_SQL}"))
-            .context("apply sqlite schema");
+        conn.execute_batch(&format!("{BASELINE_SCHEMA_SQL}{CACHE_STATE_SCHEMA_SQL}"))
+            .context("apply sqlite schema")?;
+        // Added within this version: a nullable column an older agent of
+        // the same version neither reads nor writes.
+        if !table_has_column(conn, "vms", "start_json")? {
+            conn.execute_batch("ALTER TABLE vms ADD COLUMN start_json TEXT;")
+                .context("add vms.start_json")?;
+        }
+        return Ok(());
     }
     let transaction = conn.transaction().context("begin sqlite schema reset")?;
     let legacy = legacy_vms(&transaction)?;
@@ -284,7 +290,8 @@ SELECT
   owner_user_id,
   runtime_execution_id,
   generation,
-  machine_name
+  machine_name,
+  start_json
 FROM vms
 ORDER BY created_at_s ASC;
 "#,
@@ -337,6 +344,7 @@ ORDER BY created_at_s ASC;
                 runtime_execution_id: row.get(40)?,
                 generation: row.get(41)?,
                 machine_name: row.get(42)?,
+                start_json: row.get(43)?,
             })
         })
         .context("query load_all_vms")?;
@@ -391,9 +399,10 @@ INSERT INTO vms (
   owner_user_id,
   runtime_execution_id,
   generation,
-  machine_name
+  machine_name,
+  start_json
 ) VALUES (
-  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44
 )
 ON CONFLICT(name) DO UPDATE SET
   state = excluded.state,
@@ -437,7 +446,8 @@ ON CONFLICT(name) DO UPDATE SET
   owner_user_id = excluded.owner_user_id,
   runtime_execution_id = excluded.runtime_execution_id,
   generation = excluded.generation,
-  machine_name = excluded.machine_name;
+  machine_name = excluded.machine_name,
+  start_json = excluded.start_json;
 "#,
         params![
             row.name,
@@ -483,6 +493,7 @@ ON CONFLICT(name) DO UPDATE SET
             row.runtime_execution_id,
             row.generation,
             row.machine_name,
+            row.start_json,
         ],
     )
     .context("upsert vms row")?;

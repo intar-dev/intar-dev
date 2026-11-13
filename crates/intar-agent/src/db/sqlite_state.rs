@@ -340,7 +340,8 @@ CREATE TABLE IF NOT EXISTS vms (
   spool_dir TEXT,
   cpu_millis INTEGER,
   ch_executable_sha256 TEXT,
-  machine_name TEXT
+  machine_name TEXT,
+  start_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_vms_lease
