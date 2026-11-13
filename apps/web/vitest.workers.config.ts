@@ -19,6 +19,10 @@ export default defineConfig({
           BETTER_AUTH_URL: "http://localhost",
           GITHUB_CLIENT_ID: "test-client-id",
           GITHUB_CLIENT_SECRET: "test-client-secret",
+          // The Kino artifact revision-runs.workers.test.ts stores; without
+          // it in the registry the pin reads as unset.
+          KINO_PINS_JSON:
+            '{"3":{"current":"sha256:ba84da6c273cceb718a63a6374ceeebc4ad862fd4098e570ed71937fe01b4639","previous":null}}',
           PLATFORM_BASE_IMAGES_SHA256:
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           GITHUB_APP_WEBHOOK_SECRET: "test-github-webhook-secret",
