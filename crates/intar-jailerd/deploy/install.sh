@@ -315,12 +315,22 @@ if [ ! -e /etc/intar-jailerd/config.toml ]; then
   mv -f -- "${config_tmp}" /etc/intar-jailerd/config.toml
 else
   # An existing config keeps every setting except the runtime this release
-  # ships: its path and the hash of this build.
+  # ships: its path and the hash of this build. Both lines are dropped
+  # wherever they are and written first, so a config without the hash line or
+  # with other spacing ends up right too; the result is read back.
   config_tmp=$(mktemp /etc/intar-jailerd/.config.toml.XXXXXX)
-  sed \
-    -e 's|^cloud_hypervisor_binary = .*|cloud_hypervisor_binary = "/usr/lib/intar/cloud-hypervisor-v55.0.0"|' \
-    -e "s/^cloud_hypervisor_sha256 = .*/cloud_hypervisor_sha256 = \"${expected}\"/" \
-    /etc/intar-jailerd/config.toml > "${config_tmp}"
+  {
+    printf 'cloud_hypervisor_binary = "/usr/lib/intar/cloud-hypervisor-v55.0.0"\n'
+    printf 'cloud_hypervisor_sha256 = "%s"\n' "${expected}"
+    sed -E '/^[[:space:]]*cloud_hypervisor_(binary|sha256)[[:space:]]*=/d' /etc/intar-jailerd/config.toml
+  } > "${config_tmp}"
+  python3 - "${config_tmp}" "${expected}" <<'PY' || { rm -f -- "${config_tmp}"; die "could not update /etc/intar-jailerd/config.toml"; }
+import sys, tomllib
+with open(sys.argv[1], "rb") as handle:
+    config = tomllib.load(handle)
+assert config["cloud_hypervisor_binary"] == "/usr/lib/intar/cloud-hypervisor-v55.0.0"
+assert config["cloud_hypervisor_sha256"] == sys.argv[2]
+PY
   chown root:root "${config_tmp}"
   chmod --reference=/etc/intar-jailerd/config.toml "${config_tmp}"
   mv -f -- "${config_tmp}" /etc/intar-jailerd/config.toml

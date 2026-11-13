@@ -19,18 +19,96 @@ pub const WAKE_STUB_MEDIA_TYPE: &str = "application/vnd.intar.wake.stub.v1";
 /// The cloud-hypervisor CPU profile a base was built under.
 pub const WAKE_CPU_PROFILE_MEDIA_TYPE: &str = "application/vnd.intar.wake.cpu-profile.v1+json";
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so
+/// nothing else parses.
+#[derive(
+    Clone, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(try_from = "String", into = "String")]
+#[schemars(extend("pattern" = "^[0-9a-f]{64}$"))]
+pub struct Sha256Hex(String);
+
+/// An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex
+/// digits.
+#[derive(
+    Clone, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(try_from = "String", into = "String")]
+#[schemars(extend("pattern" = "^sha256:[0-9a-f]{64}$"))]
+pub struct OciDigest(String);
+
+impl TryFrom<String> for Sha256Hex {
+    type Error = &'static str;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if is_sha256_hex(&value) {
+            Ok(Self(value))
+        } else {
+            Err("expected 64 lowercase hex digits")
+        }
+    }
+}
+
+impl TryFrom<String> for OciDigest {
+    type Error = &'static str;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.strip_prefix("sha256:").is_some_and(is_sha256_hex) {
+            Ok(Self(value))
+        } else {
+            Err("expected sha256: and 64 lowercase hex digits")
+        }
+    }
+}
+
+impl From<Sha256Hex> for String {
+    fn from(value: Sha256Hex) -> Self {
+        value.0
+    }
+}
+
+impl From<OciDigest> for String {
+    fn from(value: OciDigest) -> Self {
+        value.0
+    }
+}
+
+impl Sha256Hex {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl OciDigest {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The hex digits after `sha256:`.
+    pub fn hex(&self) -> &str {
+        &self.0["sha256:".len()..]
+    }
+}
+
 /// The `wake` object of a machine config.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WakeV1 {
-    /// Manifest digest (`sha256:<hex>`) of the base this pack's delta
-    /// applies to; absent on a base. A delta is never applied to another
-    /// base.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<String>,
+    /// The base's RAM file. A pack repeats its base's value, so a host needs
+    /// no other manifest to assemble it.
     pub ram: WakeRamV1,
+    /// Set on a pack, absent on a base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<WakePackV1>,
     pub shape: WakeShapeV1,
-    pub cpu: WakeCpuV1,
+    /// The CPU profile layer. A host wakes the image only when it knows a
+    /// profile with this digest and its KVM offers what that profile needs.
+    pub cpu_profile: OciDigest,
     pub vmm: WakeVmmV1,
     /// When the base was cold-booted, carried unchanged into every pack.
     /// The guest's certificates date from that boot.
@@ -42,12 +120,22 @@ pub struct WakeV1 {
 pub struct WakeRamV1 {
     pub size_bytes: u64,
     pub chunk_size: u64,
-    /// The base's RAM file as `[chunk_index, layer_index, raw_sha256]`;
-    /// absent indexes are zero holes.
-    pub chunks: Vec<(u64, u32, String)>,
-    /// SHA-256 (hex) of the RAM file the VMM is given: the base's on a
-    /// base, the one rebuilt from base and delta on a pack.
-    pub sha256: String,
+    /// `[chunk_index, layer_index, raw_sha256]`; absent indexes are zero
+    /// holes.
+    pub chunks: Vec<(u64, u32, Sha256Hex)>,
+    /// SHA-256 of the assembled file, checked once per host.
+    pub sha256: Sha256Hex,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WakePackV1 {
+    /// Manifest digest of the base the delta applies to. It is a check, not
+    /// a reference to fetch: the pack's manifest lists the base's layers.
+    pub base: OciDigest,
+    /// SHA-256 of the RAM file rebuilt from the base's and the delta. The
+    /// build checks it; a start does not hash the file.
+    pub ram_sha256: Sha256Hex,
 }
 
 /// What the guest was suspended with. A VM's size is chosen at the wake,
@@ -61,42 +149,16 @@ pub struct WakeShapeV1 {
     pub balloon: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WakeCpuV1 {
-    /// Blob digest (`sha256:<hex>`) of the CPU profile layer.
-    pub profile: String,
-    /// What a host's KVM must offer a guest to wake this image, so a host
-    /// can decide before it pulls.
-    pub requires: Vec<CpuidBitsV1>,
-}
-
-/// Bits of one CPUID register that must all be set.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CpuidBitsV1 {
-    pub leaf: u32,
-    pub sub_leaf: u32,
-    pub register: CpuidRegister,
-    pub mask: u32,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CpuidRegister {
-    Eax,
-    Ebx,
-    Ecx,
-    Edx,
-}
-
-/// cloud-hypervisor versions, as the VMM reports them.
+/// cloud-hypervisor versions as the VMM reports them (`v55.0.0`), compared
+/// number by number.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WakeVmmV1 {
     /// The lowest version that can wake the image.
+    #[schemars(regex(pattern = r"^v[0-9]+(\.[0-9]+){1,2}$"))]
     pub min_version: String,
     /// The version that suspended it.
+    #[schemars(regex(pattern = r"^v[0-9]+(\.[0-9]+){1,2}$"))]
     pub built_with: String,
 }
 
@@ -104,16 +166,21 @@ pub struct WakeVmmV1 {
 mod tests {
     use super::*;
 
+    fn wake_json() -> serde_json::Value {
+        let hex = |digit: &str| digit.repeat(64);
+        serde_json::json!({
+            "ram": {"size_bytes": 4_294_967_296_u64, "chunk_size": 4_194_304, "chunks": [[0, 7, hex("b")]], "sha256": hex("c")},
+            "pack": {"base": format!("sha256:{}", hex("a")), "ram_sha256": hex("e")},
+            "shape": {"memory_bytes": 4_294_967_296_u64, "boot_vcpus": 2, "max_vcpus": 4, "balloon": true},
+            "cpu_profile": format!("sha256:{}", hex("d")),
+            "vmm": {"min_version": "v55.0.0", "built_with": "v55.0.0"},
+            "booted_at_unix_ms": 1,
+        })
+    }
+
     #[test]
     fn wake_round_trips_and_refuses_unknown_fields() -> Result<(), serde_json::Error> {
-        let json = serde_json::json!({
-            "base": "sha256:aa",
-            "ram": {"size_bytes": 4_294_967_296_u64, "chunk_size": 4_194_304, "chunks": [[0, 7, "bb"]], "sha256": "cc"},
-            "shape": {"memory_bytes": 4_294_967_296_u64, "boot_vcpus": 2, "max_vcpus": 4, "balloon": true},
-            "cpu": {"profile": "sha256:dd", "requires": [{"leaf": 1, "sub_leaf": 0, "register": "ecx", "mask": 1}]},
-            "vmm": {"min_version": "v55.0", "built_with": "v55.0"},
-            "booted_at_unix_ms": 1,
-        });
+        let json = wake_json();
         let wake: WakeV1 = serde_json::from_value(json.clone())?;
         assert_eq!(serde_json::to_value(&wake)?, json);
 
@@ -121,5 +188,23 @@ mod tests {
         unknown["later"] = true.into();
         assert!(serde_json::from_value::<WakeV1>(unknown).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn digests_refuse_anything_but_lowercase_hex() {
+        for bad in ["../x", "sha256:../x", &"A".repeat(64), &"a".repeat(63)] {
+            let mut json = wake_json();
+            json["ram"]["sha256"] = bad.into();
+            assert!(serde_json::from_value::<WakeV1>(json).is_err(), "{bad}");
+            let mut json = wake_json();
+            json["cpu_profile"] = bad.into();
+            assert!(serde_json::from_value::<WakeV1>(json).is_err(), "{bad}");
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(WakeV1)).unwrap_or_default();
+        assert_eq!(schema["$defs"]["Sha256Hex"]["pattern"], "^[0-9a-f]{64}$");
+        assert_eq!(
+            schema["$defs"]["OciDigest"]["pattern"],
+            "^sha256:[0-9a-f]{64}$"
+        );
     }
 }
