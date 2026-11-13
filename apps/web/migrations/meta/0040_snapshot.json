@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "122ac0a9-4679-46ff-a8fb-bf45e2bf0400",
-  "prevId": "12a3fb28-782d-4dff-a707-0bac26453c1f",
+  "id": "b6240cd6-5b4a-4e13-9add-6aafb747d29e",
+  "prevId": "122ac0a9-4679-46ff-a8fb-bf45e2bf0400",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -2617,6 +2617,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "target_json": {
+          "name": "target_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "state": {

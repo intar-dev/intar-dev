@@ -17,6 +17,7 @@ import type {
   ImageArchitecture,
   ScenarioManifestV5,
 } from "@/generated/catalog";
+import type { BuildTargetV1 } from "@/generated/contracts/bridge-message-v9";
 import { organization, user } from "./core";
 import {
   type AgentHostRole,
@@ -437,6 +438,8 @@ export const machineBuilds = sqliteTable(
     buildKey: text("build_key").primaryKey(),
     imageFormat: text("image_format").notNull(),
     bundleRev: text("bundle_rev").notNull(),
+    // What the builder builds from `bundle_rev` to get `build_key`.
+    targetJson: jsonText<BuildTargetV1>("target_json"),
     state: text("state").$type<MachineBuildState>().default("queued").notNull(),
     imageDigest: text("image_digest"),
     attempt: integer("attempt").default(0).notNull(),

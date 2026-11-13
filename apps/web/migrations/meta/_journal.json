@@ -281,6 +281,13 @@
       "when": 1794595445853,
       "tag": "0039_dark_medusa",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1794606985208,
+      "tag": "0040_sparkling_madame_hydra",
+      "breakpoints": true
     }
   ]
 }
