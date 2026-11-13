@@ -288,6 +288,13 @@
       "when": 1794606985208,
       "tag": "0040_sparkling_madame_hydra",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "6",
+      "when": 1794609007852,
+      "tag": "0041_plain_polaris",
+      "breakpoints": true
     }
   ]
 }

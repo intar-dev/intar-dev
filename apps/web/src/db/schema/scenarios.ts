@@ -346,6 +346,8 @@ export const scenarioRevisions = sqliteTable(
     // sha256 of the canonical `doc_json`, set when the revision is ready.
     contentDigest: text("content_digest"),
     state: text("state").$type<ScenarioRevisionState>().notNull(),
+    // Why a failed revision failed, in words a learner may read.
+    failureReason: text("failure_reason"),
     verifyRunId: text("verify_run_id"),
     verifyReportJson: text("verify_report_json"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),

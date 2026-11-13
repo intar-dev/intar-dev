@@ -17,7 +17,7 @@ import type {
   ImageArchitecture,
   ScenarioManifestV5,
 } from "@/generated/catalog";
-import type { BuildTargetV1 } from "@/generated/contracts/bridge-message-v9";
+import type { BuildPhaseV2, BuildTargetV1 } from "@/generated/contracts/bridge-message-v9";
 import { organization, user } from "./core";
 import {
   type AgentHostRole,
@@ -69,6 +69,9 @@ export const agentHosts = sqliteTable(
     lastRefusalCode: text("last_refusal_code"),
     lastRefusalAt: integer("last_refusal_at"),
     lastRefusedAgentVersion: text("last_refused_agent_version"),
+    // The validated bridge 9 client hello of the current connection; null
+    // for an older protocol.
+    helloJson: text("hello_json"),
     inventoryJson: text("inventory_json"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
@@ -441,6 +444,8 @@ export const machineBuilds = sqliteTable(
     // What the builder builds from `bundle_rev` to get `build_key`.
     targetJson: jsonText<BuildTargetV1>("target_json"),
     state: text("state").$type<MachineBuildState>().default("queued").notNull(),
+    // The last phase the builder reported for the current attempt.
+    phase: text("phase").$type<BuildPhaseV2>(),
     imageDigest: text("image_digest"),
     attempt: integer("attempt").default(0).notNull(),
     hostId: text("host_id").references(() => agentHosts.id, {

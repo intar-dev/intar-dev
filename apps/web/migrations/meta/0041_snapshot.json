@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b6240cd6-5b4a-4e13-9add-6aafb747d29e",
-  "prevId": "122ac0a9-4679-46ff-a8fb-bf45e2bf0400",
+  "id": "6a50f60a-ce76-4af6-94bb-31ec196963f1",
+  "prevId": "b6240cd6-5b4a-4e13-9add-6aafb747d29e",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -696,6 +696,13 @@
         },
         "last_refused_agent_version": {
           "name": "last_refused_agent_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "hello_json": {
+          "name": "hello_json",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -2633,6 +2640,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'queued'"
+        },
+        "phase": {
+          "name": "phase",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "image_digest": {
           "name": "image_digest",
@@ -5858,6 +5872,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "failure_reason": {
+          "name": "failure_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "verify_run_id": {
