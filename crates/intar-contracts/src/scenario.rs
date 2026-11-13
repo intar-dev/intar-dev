@@ -10,6 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+
+use crate::oci::OciDigest;
 
 pub use build_key::{BuildKeys, base_key, build_keys, image_keys};
 
@@ -156,6 +159,149 @@ pub struct SpecTaskV1 {
     pub needs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solve: Option<String>,
+}
+
+/// What the Worker stores for one revision of a scenario: what learners see,
+/// the tasks, and per machine its resources, build key and spec digests. No
+/// script text: setup stays in the bundle, and scripts reach the guest
+/// through the spec blobs.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioRevisionV1 {
+    pub title: String,
+    pub summary: String,
+    pub difficulty: Difficulty,
+    pub minutes: u32,
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit: Option<String>,
+    pub play: bool,
+    pub briefing: String,
+    pub solution: String,
+    pub hints: Vec<HintV1>,
+    /// In the scenario's order, which is the order learners see.
+    pub tasks: Vec<RevisionTaskV1>,
+    /// In the scenario's order, which is the terminal tab order.
+    pub machines: Vec<RevisionMachineV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionTaskV1 {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub machine: String,
+    /// Bare task IDs, on any machine.
+    pub needs: Vec<String>,
+    pub optional: bool,
+    /// The task's 0-based position in the scenario.
+    pub ordinal: u32,
+    pub hints: Vec<HintV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionMachineV1 {
+    pub name: String,
+    #[schemars(range(min = 1))]
+    pub cpu_millis: u32,
+    pub memory_mib: u32,
+    pub disk_mib: u32,
+    pub terminal: bool,
+    pub egress: bool,
+    pub build_key: OciDigest,
+    /// The built image, set once its build has succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_digest: Option<OciDigest>,
+    /// Digest of the learn spec blob.
+    pub spec: OciDigest,
+    /// Digest of the verify spec blob.
+    pub verify_spec: OciDigest,
+}
+
+/// `value` as JSON with object keys sorted by byte order and no whitespace:
+/// the bytes stored documents and spec blobs are hashed over.
+pub fn canonical_json<T: Serialize>(value: &T) -> serde_json::Result<Vec<u8>> {
+    // `serde_json::Map` is a `BTreeMap` (no `preserve_order`), so a `Value`
+    // writes its keys sorted.
+    serde_json::to_vec(&serde_json::to_value(value)?)
+}
+
+impl MachineSpecV1 {
+    /// The spec blob, canonical JSON, and its digest.
+    pub fn blob(&self) -> (Vec<u8>, OciDigest) {
+        // A struct of strings, lists and string-keyed maps always serializes.
+        let bytes = canonical_json(self).unwrap_or_default();
+        let digest = OciDigest::from_sha256(&Sha256::digest(&bytes).into());
+        (bytes, digest)
+    }
+}
+
+impl ScenarioRevisionV1 {
+    /// The revision of a valid scenario, stored under `scenario_id`, with
+    /// the machine keys of [`build_keys`] and no image digests yet.
+    pub fn new(scenario: &ScenarioV1, scenario_id: &str, keys: &BuildKeys) -> Result<Self, String> {
+        let machines = scenario
+            .machines
+            .iter()
+            .map(|machine| {
+                let name = &machine.name;
+                let spec = |mode| {
+                    scenario
+                        .machine_spec(scenario_id, name, mode)
+                        .map(|spec| spec.blob().1)
+                        .ok_or_else(|| format!("machine `{name}`: no spec"))
+                };
+                Ok(RevisionMachineV1 {
+                    name: name.clone(),
+                    cpu_millis: machine.cpu_millis,
+                    memory_mib: machine.memory_mib,
+                    disk_mib: machine.disk_mib,
+                    terminal: machine.terminal,
+                    egress: machine.egress,
+                    build_key: keys
+                        .machines
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| format!("machine `{name}`: no build key"))?,
+                    image_digest: None,
+                    spec: spec(SpecMode::Learn)?,
+                    verify_spec: spec(SpecMode::Verify)?,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        let tasks = scenario
+            .tasks
+            .iter()
+            .zip(0..)
+            .map(|(task, ordinal)| RevisionTaskV1 {
+                id: task.id.clone(),
+                title: task.title.clone(),
+                body: task.body.clone(),
+                machine: task.machine.clone(),
+                needs: task.needs.clone(),
+                optional: task.optional,
+                ordinal,
+                hints: task.hints.clone(),
+            })
+            .collect();
+        Ok(Self {
+            title: scenario.title.clone(),
+            summary: scenario.summary.clone(),
+            difficulty: scenario.difficulty,
+            minutes: scenario.minutes,
+            tags: scenario.tags.clone(),
+            credit: scenario.credit.clone(),
+            play: scenario.play,
+            briefing: scenario.briefing.clone(),
+            solution: scenario.solution.clone(),
+            hints: scenario.hints.clone(),
+            tasks,
+            machines,
+        })
+    }
 }
 
 impl ScenarioV1 {
@@ -703,6 +849,34 @@ mod tests {
         images[0].from = "klustered".to_owned();
         images[0].disk_mib = None;
         assert!(problems(&scenario, &images).contains("from chain forms a cycle"));
+    }
+
+    #[test]
+    fn a_revision_holds_no_scripts_and_hashes_canonical_specs() {
+        let scenario = scenario();
+        let keys = build_keys(&scenario, &images()).unwrap_or_default();
+        let revision = ScenarioRevisionV1::new(&scenario, "intar/two-routers", &keys);
+        let revision = revision.unwrap_or_else(|problem| panic!("{problem}"));
+        assert_eq!(revision.tasks[2].ordinal, 2);
+        assert_eq!(revision.machines[0].build_key, keys.machines["router-a"]);
+        let json = String::from_utf8(canonical_json(&revision).unwrap_or_default());
+        let json = json.unwrap_or_default();
+        assert!(
+            !json.contains("\"fix\"") && !json.contains("check"),
+            "{json}"
+        );
+        assert!(json.starts_with("{\"briefing\":\"b\",\"difficulty\":\"easy\","));
+
+        let spec = scenario.machine_spec("intar/two-routers", "router-a", SpecMode::Learn);
+        let (bytes, digest) = spec.unwrap_or_default().blob();
+        assert!(bytes.starts_with(b"{\"defer\":[\"k3s.service\"],\"env\":"));
+        assert_eq!(revision.machines[0].spec, digest);
+        assert_ne!(revision.machines[0].spec, revision.machines[0].verify_spec);
+
+        let mut unknown = serde_json::to_value(&revision).unwrap_or_default();
+        unknown["machines"][0]["setup"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<ScenarioRevisionV1>(unknown).is_err());
+        assert!(ScenarioRevisionV1::new(&scenario, "x", &BuildKeys::default()).is_err());
     }
 
     #[test]
