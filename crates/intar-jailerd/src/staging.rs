@@ -483,21 +483,22 @@ fn reflink_route_is_unavailable(error: rustix::io::Errno) -> bool {
 /// kernel holds that inode. The stub is the generation's own clone, root
 /// owned and read-only to the VM, as the kernel is; both keep their mode.
 pub(super) fn replace_wake_stub(record: &VmRecord) -> Result<bool> {
+    let wake = record.paths.wake.as_ref().context("the VM was not woken")?;
+    replace_stub_with_kernel(&record.paths.host_kernel, &wake.host_stub)
+}
+
+/// [`replace_wake_stub`] on paths; `false` when the stub already is the
+/// kernel.
+pub(super) fn replace_stub_with_kernel(host_kernel: &Path, stub: &Path) -> Result<bool> {
     use std::io::{Read as _, Seek as _, Write as _};
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
-    let stub = &record
-        .paths
-        .wake
-        .as_ref()
-        .context("the VM was not woken")?
-        .host_stub;
     let no_follow = rustix::fs::OFlags::NOFOLLOW.bits() as i32;
     let mut kernel = Vec::new();
     OpenOptions::new()
         .read(true)
         .custom_flags(no_follow)
-        .open(&record.paths.host_kernel)
+        .open(host_kernel)
         .context("open the staged kernel")?
         .read_to_end(&mut kernel)?;
     let mut target = OpenOptions::new()

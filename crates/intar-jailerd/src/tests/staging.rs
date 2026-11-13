@@ -148,3 +148,26 @@ fn drained_recording_export_does_not_fallback_after_an_unexpected_clone_error() 
             .contains("exact-reflink drained recording export")
     );
 }
+
+#[test]
+fn the_wake_stub_is_rewritten_in_place_with_the_kernel() {
+    let dir = tempfile::tempdir().expect("dir");
+    let (kernel, stub) = (dir.path().join("kernel"), dir.path().join("stub"));
+    std::fs::write(&kernel, b"the kernel").expect("kernel");
+    std::fs::write(&stub, b"a longer wake stub").expect("stub");
+    let inode = std::fs::metadata(&stub).expect("stub").ino();
+
+    assert!(replace_stub_with_kernel(&kernel, &stub).expect("replace"));
+    assert_eq!(std::fs::read(&stub).expect("read"), b"the kernel");
+    assert_eq!(std::fs::metadata(&stub).expect("stub").ino(), inode);
+    assert!(!replace_stub_with_kernel(&kernel, &stub).expect("again"));
+
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&stub, &link).expect("symlink");
+    assert!(replace_stub_with_kernel(&kernel, &link).is_err());
+    let shared = dir.path().join("shared");
+    std::fs::write(&shared, b"stub").expect("shared");
+    std::fs::hard_link(&shared, dir.path().join("second")).expect("hard link");
+    assert!(replace_stub_with_kernel(&kernel, &shared).is_err());
+    assert_eq!(std::fs::read(&shared).expect("read"), b"stub");
+}
