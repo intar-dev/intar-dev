@@ -6,6 +6,7 @@
 import {
   IMAGE_FORMAT,
   MAX_DISK_MIB,
+  MAX_MACHINE_NAME_LEN,
   MAX_MACHINES,
   MAX_MACHINE_SPEC_BYTES,
   MAX_MARKDOWN_BYTES,
@@ -160,6 +161,9 @@ export function validate(scenario: ScenarioV1, images: ImageV1[]): string[] {
   for (const machine of scenario.machines) {
     const { name } = machine;
     if (!isId(name)) problem(`machine \`${name}\`: not a valid ID`);
+    else if (name.length > MAX_MACHINE_NAME_LEN) {
+      problem(`machine \`${name}\`: a name is at most ${MAX_MACHINE_NAME_LEN} characters`);
+    }
     if (machineNames.has(name)) problem(`machine \`${name}\`: declared twice`);
     machineNames.add(name);
     if (machine.cpu_millis === 0 || machine.memory_mib === 0) {

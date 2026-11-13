@@ -19,6 +19,10 @@ pub use build_key::{BuildKeys, base_key, build_keys, image_keys};
 /// The platform base image every chain starts from.
 pub const PLATFORM_BASE_IMAGE: &str = "trixie";
 pub const MAX_MACHINES: usize = 8;
+/// The longest machine name. A run's VM id is `<machine>-<run id>` with a
+/// 24-character run id, and the jailer takes ids of at most 64 characters:
+/// this leaves room for the run id in a VM id.
+pub const MAX_MACHINE_NAME_LEN: usize = 39;
 pub const MAX_TASKS_PER_MACHINE: usize = 32;
 pub const MAX_READY_PER_MACHINE: usize = 16;
 pub const MAX_SCRIPT_BYTES: usize = 64 * 1024;
@@ -392,6 +396,10 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
         let name = &machine.name;
         if !is_id(name) {
             problem(format!("machine `{name}`: not a valid ID"));
+        } else if name.len() > MAX_MACHINE_NAME_LEN {
+            problem(format!(
+                "machine `{name}`: a name is at most {MAX_MACHINE_NAME_LEN} characters"
+            ));
         }
         if !machine_names.insert(name.as_str()) {
             problem(format!("machine `{name}`: declared twice"));

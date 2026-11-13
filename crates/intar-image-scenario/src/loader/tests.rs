@@ -365,6 +365,13 @@ fn problems_carry_their_place() {
             "See [this](notes.md).",
             "a relative link or image target".to_owned(),
         ),
+        (
+            "machine \"web\" {",
+            "machine \"web-server-with-a-name-far-too-long-for-ids\" {",
+            format!(
+                "{at}: machine `web-server-with-a-name-far-too-long-for-ids`: a name is at most 39 characters"
+            ),
+        ),
     ] {
         let found = edit_scenario(from, to);
         assert!(

@@ -47,6 +47,7 @@ export const WAKE_STUB_MEDIA_TYPE = "application/vnd.intar.wake.stub.v1";
 export const WAKE_CPU_PROFILE_MEDIA_TYPE = "application/vnd.intar.wake.cpu-profile.v1+json";
 export const PLATFORM_BASE_IMAGE = "trixie";
 export const MAX_MACHINES = 8;
+export const MAX_MACHINE_NAME_LEN = 39;
 export const MAX_TASKS_PER_MACHINE = 32;
 export const MAX_READY_PER_MACHINE = 16;
 export const MAX_SCRIPT_BYTES = 65536;

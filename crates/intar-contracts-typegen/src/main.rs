@@ -459,6 +459,15 @@ fn refusal_cases() -> Vec<(&'static str, Mutation)> {
             let machines = &mut b.scenarios[0].machines;
             machines.push(machines[0].clone());
         }),
+        ("machine-name-over-limit", |b| {
+            let name = "w".repeat(intar_contracts::scenario::MAX_MACHINE_NAME_LEN + 1);
+            let old = std::mem::replace(&mut b.scenarios[0].machines[0].name, name.clone());
+            for task in &mut b.scenarios[0].tasks {
+                if task.machine == old {
+                    task.machine.clone_from(&name);
+                }
+            }
+        }),
         ("unknown-from", |b| {
             b.scenarios[0].machines[0].from = "nope".to_owned()
         }),
@@ -661,6 +670,7 @@ export const WAKE_STUB_MEDIA_TYPE = "{}";
 export const WAKE_CPU_PROFILE_MEDIA_TYPE = "{}";
 export const PLATFORM_BASE_IMAGE = "{}";
 export const MAX_MACHINES = {};
+export const MAX_MACHINE_NAME_LEN = {};
 export const MAX_TASKS_PER_MACHINE = {};
 export const MAX_READY_PER_MACHINE = {};
 export const MAX_SCRIPT_BYTES = {};
@@ -725,6 +735,7 @@ export const runtimeEnvKeys = {{
         intar_contracts::oci::WAKE_CPU_PROFILE_MEDIA_TYPE,
         intar_contracts::scenario::PLATFORM_BASE_IMAGE,
         intar_contracts::scenario::MAX_MACHINES,
+        intar_contracts::scenario::MAX_MACHINE_NAME_LEN,
         MAX_TASKS_PER_MACHINE,
         MAX_READY_PER_MACHINE,
         MAX_SCRIPT_BYTES,

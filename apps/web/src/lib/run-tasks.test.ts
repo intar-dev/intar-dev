@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { MAX_MACHINE_NAME_LEN } from "@/generated/constants";
 import type { VmLabV1, VmStateV3, VmTaskV1 } from "@/generated/contracts/bridge-message-v9";
 import type { RevisionTaskV1 } from "@/generated/contracts/scenario-revision-v1";
+import { createAppId } from "@/lib/id";
 import { applyVmStateV3ToRunState, revisionVmId } from "@/lib/run-lifecycle";
 import { buildInitialRunState, buildInitialVmState, recomputeRunState, type RunStateDocument } from "@/lib/run-state";
 import {
@@ -144,4 +146,10 @@ describe("bridge 9 VM state on a task run", () => {
     const stale = applyVmStateV3ToRunState({ runId, current: later, vm: vm("web", 4, lab("failed")) });
     expect(stale.phase).not.toBe("failed");
   });
+});
+
+it("fits the longest machine name and a run id in a jailer id", () => {
+  const id = revisionVmId("a".repeat(MAX_MACHINE_NAME_LEN), createAppId());
+  expect(id.length).toBeLessThanOrEqual(64);
+  expect(id).toMatch(/^[A-Za-z0-9_-]+$/);
 });
