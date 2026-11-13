@@ -8,6 +8,22 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Bumped with every change to the platform base or to how images are built.
+pub const IMAGE_FORMAT: &str = "intar-image-3";
+/// `artifactType` of a machine image's manifest.
+pub const MACHINE_ARTIFACT_TYPE: &str = "application/vnd.intar.machine.v1";
+/// A machine image's config blob, a [`MachineConfigV1`].
+pub const MACHINE_CONFIG_MEDIA_TYPE: &str = "application/vnd.intar.machine.config.v1+json";
+pub const KERNEL_MEDIA_TYPE: &str = "application/vnd.intar.kernel.v1";
+pub const INITRD_MEDIA_TYPE: &str = "application/vnd.intar.initrd.v1";
+/// One zstd-compressed chunk of the root disk.
+pub const DISK_CHUNK_MEDIA_TYPE: &str = "application/vnd.intar.disk.chunk.v1+zstd";
+/// `artifactType` of a Kino manifest; its one layer is the static binary and
+/// its config a [`KinoConfigV1`].
+pub const KINO_ARTIFACT_TYPE: &str = "application/vnd.intar.kino.v1";
+/// A machine spec, stored as a plain blob.
+pub const MACHINE_SPEC_MEDIA_TYPE: &str = "application/vnd.intar.machine.spec.v1+json";
+
 /// One zstd-compressed chunk of a base's RAM file.
 pub const WAKE_RAM_CHUNK_MEDIA_TYPE: &str = "application/vnd.intar.wake.ram.chunk.v1+zstd";
 /// A pack's RAM file as an `intar-snapdelta` delta against its base's, or
@@ -93,6 +109,45 @@ impl OciDigest {
     pub fn hex(&self) -> &str {
         &self.0["sha256:".len()..]
     }
+}
+
+/// The config blob of a machine image. The image's identity is its
+/// manifest's digest.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineConfigV1 {
+    pub guest_contract: u32,
+    pub image_format: String,
+    pub build_key: OciDigest,
+    pub boot: MachineBootV1,
+    pub disk: MachineDiskV1,
+    /// Set when the manifest also carries a suspended guest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake: Option<WakeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineBootV1 {
+    pub cmdline: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineDiskV1 {
+    pub size_bytes: u64,
+    pub chunk_size: u64,
+    /// `[chunk_index, layer_index, raw_sha256]`; absent indexes are zero
+    /// holes.
+    pub chunks: Vec<(u64, u32, Sha256Hex)>,
+}
+
+/// The config blob of a Kino manifest.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KinoConfigV1 {
+    pub guest_contract: u32,
+    pub version: String,
 }
 
 /// The `wake` object of a machine config.
@@ -187,6 +242,27 @@ mod tests {
         let mut unknown = json;
         unknown["later"] = true.into();
         assert!(serde_json::from_value::<WakeV1>(unknown).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn machine_config_of_the_design_parses() -> Result<(), serde_json::Error> {
+        let hex = "a".repeat(64);
+        let json = serde_json::json!({
+            "guest_contract": 3, "image_format": IMAGE_FORMAT, "build_key": format!("sha256:{hex}"),
+            "boot": {"cmdline": "console=hvc0 root=LABEL=INTARROOT"},
+            "disk": {"size_bytes": 8_589_934_592_u64, "chunk_size": 4_194_304,
+                     "chunks": [[0, 2, hex], [1, 3, hex], [5, 2, hex]]},
+        });
+        let config: MachineConfigV1 = serde_json::from_value(json.clone())?;
+        assert_eq!(serde_json::to_value(&config)?, json);
+        let mut with_wake = json;
+        with_wake["wake"] = wake_json();
+        assert!(
+            serde_json::from_value::<MachineConfigV1>(with_wake)?
+                .wake
+                .is_some()
+        );
         Ok(())
     }
 

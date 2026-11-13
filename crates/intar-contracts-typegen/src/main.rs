@@ -157,6 +157,30 @@ fn main() -> Result<()> {
         &schema_for!(BridgeMessageV8),
     )?;
     write_schema(
+        &schema_dir.join("guest-boot-v3.schema.json"),
+        &schema_for!(intar_contracts::guest::GuestBootV3),
+    )?;
+    write_schema(
+        &schema_dir.join("scenario-v1.schema.json"),
+        &schema_for!(intar_contracts::scenario::ScenarioV1),
+    )?;
+    write_schema(
+        &schema_dir.join("scenario-image-v1.schema.json"),
+        &schema_for!(intar_contracts::scenario::ImageV1),
+    )?;
+    write_schema(
+        &schema_dir.join("machine-spec-v1.schema.json"),
+        &schema_for!(intar_contracts::scenario::MachineSpecV1),
+    )?;
+    write_schema(
+        &schema_dir.join("oci-machine-config-v1.schema.json"),
+        &schema_for!(intar_contracts::oci::MachineConfigV1),
+    )?;
+    write_schema(
+        &schema_dir.join("oci-kino-config-v1.schema.json"),
+        &schema_for!(intar_contracts::oci::KinoConfigV1),
+    )?;
+    write_schema(
         &schema_dir.join("run-cli-request-v1.schema.json"),
         &schema_for!(RunCliRequestV1),
     )?;
@@ -344,6 +368,17 @@ export const SHARE_INGEST_PONG = "{}";
 export const SHARE_INGEST_CLOSE_ENDED = {};
 export const SHARE_INGEST_CLOSE_LIMIT = {};
 export const SHARE_INGEST_CLOSE_STOPPED = {};
+export const GUEST_CONTRACT = {};
+export const GUEST_REPORT_PORT = {};
+export const GUEST_RUN_CLI_PORT = {};
+export const IMAGE_FORMAT = "{}";
+export const MACHINE_ARTIFACT_TYPE = "{}";
+export const MACHINE_CONFIG_MEDIA_TYPE = "{}";
+export const KERNEL_MEDIA_TYPE = "{}";
+export const INITRD_MEDIA_TYPE = "{}";
+export const DISK_CHUNK_MEDIA_TYPE = "{}";
+export const KINO_ARTIFACT_TYPE = "{}";
+export const MACHINE_SPEC_MEDIA_TYPE = "{}";
 export const WAKE_RAM_CHUNK_MEDIA_TYPE = "{}";
 export const WAKE_DELTA_MEDIA_TYPE = "{}";
 export const WAKE_STUB_MEDIA_TYPE = "{}";
@@ -386,6 +421,17 @@ export const runtimeEnvKeys = {{
         SHARE_INGEST_CLOSE_ENDED,
         SHARE_INGEST_CLOSE_LIMIT,
         SHARE_INGEST_CLOSE_STOPPED,
+        intar_contracts::guest::GUEST_CONTRACT,
+        intar_contracts::guest::REPORT_PORT,
+        intar_contracts::guest::RUN_CLI_PORT,
+        intar_contracts::oci::IMAGE_FORMAT,
+        intar_contracts::oci::MACHINE_ARTIFACT_TYPE,
+        intar_contracts::oci::MACHINE_CONFIG_MEDIA_TYPE,
+        intar_contracts::oci::KERNEL_MEDIA_TYPE,
+        intar_contracts::oci::INITRD_MEDIA_TYPE,
+        intar_contracts::oci::DISK_CHUNK_MEDIA_TYPE,
+        intar_contracts::oci::KINO_ARTIFACT_TYPE,
+        intar_contracts::oci::MACHINE_SPEC_MEDIA_TYPE,
         intar_contracts::oci::WAKE_RAM_CHUNK_MEDIA_TYPE,
         intar_contracts::oci::WAKE_DELTA_MEDIA_TYPE,
         intar_contracts::oci::WAKE_STUB_MEDIA_TYPE,

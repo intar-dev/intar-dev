@@ -26,6 +26,58 @@ pub const ENV_PEER_PREFIX: &str = "INTAR_PEER_";
 pub const ENV_PEER_SUFFIX: &str = "_IP";
 pub const ENV_PEER_HOSTS_B64: &str = "INTAR_PEER_HOSTS_B64";
 
+/// Guest contract 3: the image's one unit runs [`GUEST_LOADER_PATH`], which
+/// mounts the run disk at [`RUN_DISK_MOUNT`] and executes [`KINO_FILENAME`]
+/// from it with `init`; [`BOOT_JSON_FILENAME`] on that disk is a
+/// [`GuestBootV3`]; Kino reports on [`REPORT_PORT`] and the run CLI's broker
+/// listens on [`RUN_CLI_PORT`], both on the host's vsock CID.
+///
+/// A guest woken from a suspended image runs the Kino and holds the run disk
+/// of the build. That Kino unmounts the run disk and executes the loader
+/// again when the `boot.json` on the attached disk is not the one it applied,
+/// and at no other time. Images hold a Kino in memory, so this hand-over is
+/// part of the contract: a Kino release must keep it or bump the contract.
+pub const GUEST_CONTRACT: u32 = 3;
+pub const REPORT_PORT: u32 = 18081;
+pub const RUN_CLI_PORT: u32 = 18082;
+pub const GUEST_LOADER_PATH: &str = "/usr/lib/intar/guest-loader";
+pub const RUN_DISK_MOUNT: &str = "/run/intar/run";
+pub const BOOT_JSON_FILENAME: &str = "boot.json";
+pub const KINO_FILENAME: &str = "kino";
+
+/// `boot.json`: everything one VM's Kino is told. The host writes it onto
+/// the read-only run disk.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestBootV3 {
+    #[schemars(range(min = 3, max = 3))]
+    pub contract: u32,
+    pub hostname: String,
+    pub network: GuestNetworkV3,
+    /// Machine name to address, for `/etc/hosts`.
+    pub peers: BTreeMap<String, String>,
+    pub ssh: GuestSshV3,
+    pub root_resize: bool,
+    pub mode: crate::scenario::SpecMode,
+    pub spec: crate::scenario::MachineSpecV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestNetworkV3 {
+    pub ip_cidr: String,
+    pub gateway: String,
+    /// Empty unless the machine has egress; peers resolve from `/etc/hosts`.
+    pub dns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestSshV3 {
+    pub enabled: bool,
+    pub authorized_keys: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RuntimeEnv {
@@ -132,6 +184,48 @@ fn shell_single_quoted(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boot_json_of_the_design_parses_and_unknown_fields_are_refused()
+    -> Result<(), serde_json::Error> {
+        let json = serde_json::json!({
+            "contract": 3,
+            "hostname": "control-plane",
+            "network": {"ip_cidr": "10.42.0.2/24", "gateway": "10.42.0.1", "dns": []},
+            "peers": {"web": "10.42.0.3"},
+            "ssh": {"enabled": true, "authorized_keys": ["ssh-ed25519 AAAA run-key"]},
+            "root_resize": true,
+            "mode": "learn",
+            "spec": {
+                "scenario_id": "intar/klustered-01-repair-cluster-plumbing",
+                "machine": "control-plane",
+                "env": {"KUBECONFIG": "/etc/rancher/k3s/k3s.yaml"},
+                "defer": ["k3s.service"],
+                "ready": [{"name": "node", "script": "true"}],
+                "tasks": [
+                    {"id": "database-scheduled", "check": "true", "needs": []},
+                    {"id": "dns-and-v2", "check": "true", "needs": ["database-scheduled"], "solve": "fix"},
+                ],
+            },
+        });
+        let boot: GuestBootV3 = serde_json::from_value(json.clone())?;
+        assert_eq!(boot.contract, GUEST_CONTRACT);
+        assert_eq!(serde_json::to_value(&boot)?, json);
+        for pointer in ["", "/network", "/ssh", "/spec", "/spec/tasks/0"] {
+            let mut unknown = json.clone();
+            if let Some(object) = unknown
+                .pointer_mut(pointer)
+                .and_then(|value| value.as_object_mut())
+            {
+                object.insert("later".to_owned(), true.into());
+            }
+            assert!(
+                serde_json::from_value::<GuestBootV3>(unknown).is_err(),
+                "{pointer}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn authorized_keys_are_newline_terminated() {
