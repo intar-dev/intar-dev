@@ -1,6 +1,6 @@
-//! Bridge protocol 9 (#307 §5.4), the agent's side: the hello, the desired
-//! VMs and what a host reports about them. Every type refuses unknown
-//! fields. The builder's messages join with the builder's own change.
+//! Bridge protocol 9 (#307 §5.4): the hello, the desired VMs, builds and
+//! source compiles, and what a host reports about them. Every type refuses
+//! unknown fields.
 //!
 //! It lives beside `bridge` (protocol 8) until the agent and the Worker
 //! have both moved.
@@ -35,6 +35,7 @@ pub enum BridgeMessageV9 {
     DesiredState(DesiredStateV9),
     StateReport(StateReportV9),
     VmReport(VmReportV9),
+    BuildReport(BuildReportV9),
     SyncRequest(SyncRequestV9),
 }
 
@@ -51,6 +52,19 @@ pub struct ClientHelloV9 {
     /// Picks the host's Kino and gates placement.
     pub guest_contract: u32,
     pub hardware: HostHardwareV1,
+    /// What a builder builds and compiles for; absent on an agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder: Option<BuilderHelloV1>,
+}
+
+/// A builder is assigned only builds of its `image_format` and compiles of
+/// its `source_compile_digest`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuilderHelloV1 {
+    pub image_format: String,
+    /// `source_compile_digest(image_format, compiler version)`.
+    pub source_compile_digest: String,
 }
 
 /// What the host can do. Facts only: no rollout switches.
@@ -111,6 +125,15 @@ pub struct VmReportV9 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct BuildReportV9 {
+    #[schemars(range(min = 9, max = 9))]
+    pub protocol_version: u16,
+    pub host_id: String,
+    pub report: BuildReportV2,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SyncRequestV9 {
     #[schemars(range(min = 9, max = 9))]
     pub protocol_version: u16,
@@ -135,6 +158,148 @@ pub struct HostDesiredStateV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kino_pin: Option<OciDigest>,
     pub vms: Vec<DesiredVmV3>,
+    /// Empty for an agent.
+    pub builds: Vec<DesiredBuildV2>,
+    /// Empty for an agent.
+    pub source_compiles: Vec<DesiredSourceCompileV2>,
+}
+
+/// One image to build out of a stored bundle, and push.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesiredBuildV2 {
+    pub build_id: String,
+    /// The key the builder recomputes from the bundle; a mismatch refuses
+    /// the build.
+    pub build_key: OciDigest,
+    pub bundle_rev: String,
+    pub target: BuildTargetV1,
+    #[schemars(range(min = 1))]
+    pub attempt: u32,
+}
+
+/// What a build builds: a repository image (`trixie` is the platform base)
+/// or a scenario's machine.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BuildTargetV1 {
+    Image { name: String },
+    Machine { scenario: String, machine: String },
+}
+
+/// One repository snapshot to compile into a bundle, or only validate.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesiredSourceCompileV2 {
+    pub compile_id: String,
+    #[schemars(range(min = 1))]
+    pub attempt: u32,
+    pub rev: String,
+    pub validate_only: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildPhaseV2 {
+    Queued,
+    FetchingSources,
+    Building,
+    Pushing,
+    Succeeded,
+    Failed,
+}
+
+/// One build's state, sent as soon as it changes. `image_digest` is the
+/// pushed manifest, present exactly when the build succeeded.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildReportV2 {
+    pub build_id: String,
+    pub build_key: OciDigest,
+    pub attempt: u32,
+    pub phase: BuildPhaseV2,
+    pub observed_at_unix_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_digest: Option<OciDigest>,
+}
+
+/// 1 to 128 of `[A-Za-z0-9._-]`, not `.` or `..`: ids and revs name files
+/// and request paths.
+#[must_use]
+pub fn is_safe_name(value: &str) -> bool {
+    (1..=128).contains(&value.len())
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+impl DesiredBuildV2 {
+    /// Every name the builder puts in a path, a URL or a log.
+    ///
+    /// # Errors
+    /// Returns the first unsafe name.
+    pub fn validate(&self) -> Result<(), String> {
+        let names: &[(&str, &str)] = match &self.target {
+            BuildTargetV1::Image { name } => &[("image", name)],
+            BuildTargetV1::Machine { scenario, machine } => {
+                &[("scenario", scenario), ("machine", machine)]
+            }
+        };
+        for (label, value) in [
+            ("build id", self.build_id.as_str()),
+            ("bundle rev", &self.bundle_rev),
+        ]
+        .into_iter()
+        .chain(names.iter().copied())
+        {
+            if !is_safe_name(value) {
+                return Err(format!("invalid {label} '{value}'"));
+            }
+        }
+        if self.attempt == 0 {
+            return Err("a build attempt starts at 1".to_owned());
+        }
+        Ok(())
+    }
+}
+
+impl DesiredSourceCompileV2 {
+    /// The compile id and rev go into a request path and a child's argv.
+    ///
+    /// # Errors
+    /// Returns the first unsafe name.
+    pub fn validate(&self) -> Result<(), String> {
+        for (label, value) in [("compile id", &self.compile_id), ("bundle rev", &self.rev)] {
+            if !is_safe_name(value) {
+                return Err(format!("invalid {label} '{value}'"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BuildReportV2 {
+    /// A succeeded build names its image and nothing else does.
+    ///
+    /// # Errors
+    /// Returns what is inconsistent.
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.phase, &self.image_digest) {
+            (BuildPhaseV2::Succeeded, None) => {
+                Err("a succeeded build names its image digest".to_owned())
+            }
+            (BuildPhaseV2::Succeeded, Some(_)) | (_, None) => Ok(()),
+            (_, Some(_)) => Err("only a succeeded build names an image digest".to_owned()),
+        }
+    }
 }
 
 /// One VM to run. It carries no address: the host allocates the run's
@@ -414,6 +579,141 @@ mod tests {
         let mut old = hello;
         old["hardware"]["supports_run_cli_v1"] = true.into();
         assert!(serde_json::from_value::<BridgeMessageV9>(old).is_err());
+        Ok(())
+    }
+
+    fn desired_build() -> serde_json::Value {
+        serde_json::json!({
+            "build_id": "build-1", "build_key": digest("a"), "bundle_rev": "git-1-abc-p0011",
+            "target": {"kind": "machine", "scenario": "broken-nginx", "machine": "web"},
+            "attempt": 1,
+        })
+    }
+
+    #[test]
+    fn a_desired_build_round_trips_strictly_and_validates_its_names()
+    -> Result<(), serde_json::Error> {
+        let json = desired_build();
+        let build: DesiredBuildV2 = serde_json::from_value(json.clone())?;
+        assert_eq!(serde_json::to_value(&build)?, json);
+        assert_eq!(build.validate(), Ok(()));
+        let image: DesiredBuildV2 = serde_json::from_value(serde_json::json!({
+            "build_id": "build-2", "build_key": digest("b"), "bundle_rev": "rev",
+            "target": {"kind": "image", "name": "nginx"}, "attempt": 2,
+        }))?;
+        assert_eq!(image.validate(), Ok(()));
+        // The v1 build's fields, and unknown target fields, are refused.
+        for (field, value) in [
+            ("content_hash", serde_json::json!("a")),
+            ("bundle_ref", serde_json::json!("builds/x")),
+            ("arch", serde_json::json!("x86_64")),
+        ] {
+            let mut unknown = json.clone();
+            unknown[field] = value;
+            assert!(
+                serde_json::from_value::<DesiredBuildV2>(unknown).is_err(),
+                "{field}"
+            );
+        }
+        let mut target = json.clone();
+        target["target"]["name"] = "web".into();
+        assert!(serde_json::from_value::<DesiredBuildV2>(target).is_err());
+        let mut key = json.clone();
+        key["build_key"] = "f".repeat(64).into();
+        assert!(serde_json::from_value::<DesiredBuildV2>(key).is_err());
+
+        for (change, expected) in [
+            (("build_id", "../x"), "invalid build id"),
+            (("bundle_rev", "a b"), "invalid bundle rev"),
+        ] {
+            let mut broken = build.clone();
+            match change.0 {
+                "build_id" => broken.build_id = change.1.to_owned(),
+                _ => broken.bundle_rev = change.1.to_owned(),
+            }
+            assert!(
+                broken
+                    .validate()
+                    .is_err_and(|error| error.contains(expected))
+            );
+        }
+        let mut machine = build.clone();
+        machine.target = BuildTargetV1::Machine {
+            scenario: "..".to_owned(),
+            machine: "web".to_owned(),
+        };
+        assert!(
+            machine
+                .validate()
+                .is_err_and(|error| error.contains("invalid scenario"))
+        );
+        let mut attempt = build;
+        attempt.attempt = 0;
+        assert!(attempt.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_build_report_names_its_image_only_on_success() -> Result<(), serde_json::Error> {
+        let json = serde_json::json!({
+            "type": "build_report", "protocol_version": 9, "host_id": "builder-1",
+            "report": {"build_id": "build-1", "build_key": digest("a"), "attempt": 1,
+                "phase": "succeeded", "observed_at_unix_ms": 3, "started_at_unix_ms": 1,
+                "finished_at_unix_ms": 3, "image_digest": digest("c")},
+        });
+        let message: BridgeMessageV9 = serde_json::from_value(json.clone())?;
+        assert_eq!(serde_json::to_value(&message)?, json);
+        let BridgeMessageV9::BuildReport(message) = message else {
+            panic!("a build report");
+        };
+        let mut report = message.report;
+        assert_eq!(report.validate(), Ok(()));
+        report.image_digest = None;
+        assert!(report.validate().is_err());
+        report.phase = BuildPhaseV2::Failed;
+        report.error = Some("boom".to_owned());
+        assert_eq!(report.validate(), Ok(()));
+        report.image_digest = Some(serde_json::from_value(digest("c").into())?);
+        assert!(report.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_builder_hello_states_its_image_format_and_compile_digest() -> Result<(), serde_json::Error>
+    {
+        let hello = serde_json::json!({
+            "type": "client_hello", "protocol_version": 9, "host_id": "builder-1",
+            "agent_version": "1.0.0", "role": "builder", "guest_contract": 3,
+            "hardware": {"cloud_hypervisor_sha256": null, "kvm": true, "vsock": false,
+                "reflink": false, "landlock": false, "cgroup_v2": false, "hard_cpu_quota": false},
+            "builder": {"image_format": "intar-image-3", "source_compile_digest": "p0011aabb"},
+        });
+        let message: BridgeMessageV9 = serde_json::from_value(hello.clone())?;
+        assert_eq!(serde_json::to_value(&message)?, hello);
+        let mut unknown = hello;
+        unknown["builder"]["arch"] = "x86_64".into();
+        assert!(serde_json::from_value::<BridgeMessageV9>(unknown).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_desired_state_carries_builds_and_compiles() -> Result<(), serde_json::Error> {
+        let json = serde_json::json!({
+            "scope": "platform", "owner_user_id": "owner", "schema_version": 7,
+            "host_id": "builder-1", "version": 1, "generated_at_unix_ms": 1,
+            "cached_images": [], "vms": [], "builds": [desired_build()],
+            "source_compiles": [{"compile_id": "compile-1", "attempt": 1, "rev": "git-1",
+                "validate_only": false}],
+        });
+        let state: HostDesiredStateV3 = serde_json::from_value(json.clone())?;
+        assert_eq!(serde_json::to_value(&state)?, json);
+        assert_eq!(state.source_compiles[0].validate(), Ok(()));
+        // Both lists are required, even when empty.
+        let mut missing = json;
+        missing
+            .as_object_mut()
+            .map(|object| object.remove("builds"));
+        assert!(serde_json::from_value::<HostDesiredStateV3>(missing).is_err());
         Ok(())
     }
 }

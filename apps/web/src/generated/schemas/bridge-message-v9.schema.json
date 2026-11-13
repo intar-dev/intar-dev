@@ -8,6 +8,17 @@
         "agent_version": {
           "type": "string"
         },
+        "builder": {
+          "description": "What a builder builds and compiles for; absent on an agent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuilderHelloV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "guest_contract": {
           "description": "Picks the host's Kino and gates placement.",
           "type": "integer",
@@ -203,6 +214,34 @@
           "maximum": 9,
           "minimum": 9
         },
+        "report": {
+          "$ref": "#/$defs/BuildReportV2"
+        },
+        "type": {
+          "type": "string",
+          "const": "build_report"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "protocol_version",
+        "host_id",
+        "report"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 9,
+          "minimum": 9
+        },
         "reason": {
           "$ref": "#/$defs/SyncRequestReason"
         },
@@ -221,6 +260,140 @@
     }
   ],
   "$defs": {
+    "BuildPhaseV2": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "fetching_sources",
+        "building",
+        "pushing",
+        "succeeded",
+        "failed"
+      ]
+    },
+    "BuildReportV2": {
+      "description": "One build's state, sent as soon as it changes. `image_digest` is the\npushed manifest, present exactly when the build succeeded.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "build_id": {
+          "type": "string"
+        },
+        "build_key": {
+          "$ref": "#/$defs/OciDigest"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finished_at_unix_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "image_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OciDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "phase": {
+          "$ref": "#/$defs/BuildPhaseV2"
+        },
+        "started_at_unix_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "build_id",
+        "build_key",
+        "attempt",
+        "phase",
+        "observed_at_unix_ms"
+      ]
+    },
+    "BuildTargetV1": {
+      "description": "What a build builds: a repository image (`trixie` is the platform base)\nor a scenario's machine.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "image"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "machine"
+            },
+            "machine": {
+              "type": "string"
+            },
+            "scenario": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "scenario",
+            "machine"
+          ]
+        }
+      ]
+    },
+    "BuilderHelloV1": {
+      "description": "A builder is assigned only builds of its `image_format` and compiles of\nits `source_compile_digest`.",
+      "type": "object",
+      "properties": {
+        "image_format": {
+          "type": "string"
+        },
+        "source_compile_digest": {
+          "description": "`source_compile_digest(image_format, compiler version)`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "image_format",
+        "source_compile_digest"
+      ]
+    },
     "CachedImageStateV2": {
       "type": "object",
       "properties": {
@@ -263,6 +436,65 @@
         "pass",
         "fail",
         "error"
+      ]
+    },
+    "DesiredBuildV2": {
+      "description": "One image to build out of a stored bundle, and push.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "build_id": {
+          "type": "string"
+        },
+        "build_key": {
+          "description": "The key the builder recomputes from the bundle; a mismatch refuses\nthe build.",
+          "$ref": "#/$defs/OciDigest"
+        },
+        "bundle_rev": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/BuildTargetV1"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "build_id",
+        "build_key",
+        "bundle_rev",
+        "target",
+        "attempt"
+      ]
+    },
+    "DesiredSourceCompileV2": {
+      "description": "One repository snapshot to compile into a bundle, or only validate.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "compile_id": {
+          "type": "string"
+        },
+        "rev": {
+          "type": "string"
+        },
+        "validate_only": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "compile_id",
+        "attempt",
+        "rev",
+        "validate_only"
       ]
     },
     "DesiredVmPhase": {
@@ -476,6 +708,13 @@
     "HostDesiredStateV3": {
       "type": "object",
       "properties": {
+        "builds": {
+          "description": "Empty for an agent.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DesiredBuildV2"
+          }
+        },
         "cached_images": {
           "description": "Machine images to hold, by manifest digest.",
           "type": "array",
@@ -513,6 +752,13 @@
         "scope": {
           "$ref": "#/$defs/HostScope"
         },
+        "source_compiles": {
+          "description": "Empty for an agent.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DesiredSourceCompileV2"
+          }
+        },
         "version": {
           "type": "integer",
           "format": "uint64",
@@ -534,7 +780,9 @@
         "version",
         "generated_at_unix_ms",
         "cached_images",
-        "vms"
+        "vms",
+        "builds",
+        "source_compiles"
       ]
     },
     "HostHardwareV1": {

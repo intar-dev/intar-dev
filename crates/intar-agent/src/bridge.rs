@@ -273,6 +273,7 @@ async fn connect_once(
             last_applied_desired_version: current_desired_state.as_ref().map(|state| state.version),
             guest_contract: GUEST_CONTRACT,
             hardware: hello_hardware.clone(),
+            builder: None,
         }),
     )
     .await?;
@@ -587,7 +588,8 @@ async fn handle_server_message(
         }
         BridgeMessageV9::ClientHello(_)
         | BridgeMessageV9::StateReport(_)
-        | BridgeMessageV9::VmReport(_) => {
+        | BridgeMessageV9::VmReport(_)
+        | BridgeMessageV9::BuildReport(_) => {
             anyhow::bail!("server sent agent-originated bridge message");
         }
     }

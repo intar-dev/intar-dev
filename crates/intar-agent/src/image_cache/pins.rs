@@ -89,6 +89,8 @@ pub(crate) mod tests {
             cached_images: cached.iter().copied().map(digest).collect(),
             kino_pin: kino_pin.map(digest),
             vms,
+            builds: Vec::new(),
+            source_compiles: Vec::new(),
         }
     }
 

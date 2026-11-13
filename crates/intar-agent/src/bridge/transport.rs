@@ -133,6 +133,10 @@ pub(super) fn validate_desired_state(
             && !desired.owner_user_id.trim().is_empty(),
         "desired host ownership mismatch"
     );
+    anyhow::ensure!(
+        desired.builds.is_empty() && desired.source_compiles.is_empty(),
+        "an agent host builds and compiles nothing"
+    );
     let mut vm_ids = BTreeSet::new();
     let mut names = BTreeSet::new();
     let mut runs = BTreeMap::new();
@@ -169,6 +173,7 @@ pub(super) fn message_has_current_protocol(message: &BridgeMessageV9) -> bool {
         BridgeMessageV9::DesiredState(message) => message.protocol_version,
         BridgeMessageV9::StateReport(message) => message.protocol_version,
         BridgeMessageV9::VmReport(message) => message.protocol_version,
+        BridgeMessageV9::BuildReport(message) => message.protocol_version,
         BridgeMessageV9::SyncRequest(message) => message.protocol_version,
     };
     version == BRIDGE_PROTOCOL_VERSION
@@ -181,6 +186,7 @@ pub(super) fn bridge_message_host_id(message: &BridgeMessageV9) -> &str {
         BridgeMessageV9::DesiredState(message) => &message.host_id,
         BridgeMessageV9::StateReport(message) => &message.host_id,
         BridgeMessageV9::VmReport(message) => &message.host_id,
+        BridgeMessageV9::BuildReport(message) => &message.host_id,
         BridgeMessageV9::SyncRequest(message) => &message.host_id,
     }
 }
@@ -192,6 +198,7 @@ pub(super) fn bridge_message_type(message: &BridgeMessageV9) -> &'static str {
         BridgeMessageV9::DesiredState(_) => "desired_state",
         BridgeMessageV9::StateReport(_) => "state_report",
         BridgeMessageV9::VmReport(_) => "vm_report",
+        BridgeMessageV9::BuildReport(_) => "build_report",
         BridgeMessageV9::SyncRequest(_) => "sync_request",
     }
 }

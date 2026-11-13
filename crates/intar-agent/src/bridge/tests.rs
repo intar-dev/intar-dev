@@ -52,6 +52,7 @@ fn the_hello_carries_the_guest_contract_and_the_hardware() {
         last_applied_desired_version: None,
         guest_contract: GUEST_CONTRACT,
         hardware: collect_host_hardware(None),
+        builder: None,
     });
     let value = serde_json::to_value(&hello).expect("serialize");
     assert_eq!(value["type"], "client_hello");
@@ -73,6 +74,8 @@ fn empty_desired_state(version: u64) -> HostDesiredStateV3 {
         cached_images: Vec::new(),
         kino_pin: None,
         vms: Vec::new(),
+        builds: Vec::new(),
+        source_compiles: Vec::new(),
     }
 }
 
@@ -805,9 +808,38 @@ fn desired_identity_is_mandatory_and_personal_owner_is_bound() {
     wrong = desired.clone();
     wrong.scope = intar_contracts::bridge::HostScope::Platform;
     assert!(validate_desired_state(&cfg, &wrong).is_err());
-    wrong = desired;
+    wrong = desired.clone();
     wrong.owner_user_id = "another-owner".into();
     assert!(validate_desired_state(&cfg, &wrong).is_err());
+    wrong = desired.clone();
+    wrong
+        .source_compiles
+        .push(intar_contracts::bridge_v9::DesiredSourceCompileV2 {
+            compile_id: "compile-1".into(),
+            attempt: 1,
+            rev: "rev".into(),
+            validate_only: true,
+        });
+    assert!(
+        validate_desired_state(&cfg, &wrong).is_err(),
+        "an agent compiles nothing"
+    );
+    wrong = desired;
+    wrong
+        .builds
+        .push(intar_contracts::bridge_v9::DesiredBuildV2 {
+            build_id: "build-1".into(),
+            build_key: intar_contracts::scenario::base_key(),
+            bundle_rev: "rev".into(),
+            target: intar_contracts::bridge_v9::BuildTargetV1::Image {
+                name: "trixie".into(),
+            },
+            attempt: 1,
+        });
+    assert!(
+        validate_desired_state(&cfg, &wrong).is_err(),
+        "an agent builds nothing"
+    );
 }
 
 #[test]

@@ -645,6 +645,8 @@ async fn restart_requires_durable_execution_and_host_identity() {
             terminal: true,
             egress: false,
         }],
+        builds: Vec::new(),
+        source_compiles: Vec::new(),
     };
     assert!(
         crate::bridge::validate_restart(&cfg, &db, std::slice::from_ref(&row))
