@@ -180,7 +180,6 @@ fn launch_vm_v2_is_template_bound_and_v1_rejects_prepared_sources() {
             root_disk: prepared("root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: agent_owned("runtime.raw", ArtifactAccess::ReadOnly),
             recording_disk: agent_owned("recordings.vfat", ArtifactAccess::ReadWrite),
-            tools_disk: None,
         },
     };
     assert_eq!(
@@ -216,7 +215,7 @@ fn launch_vm_v2_is_template_bound_and_v1_rejects_prepared_sources() {
 }
 
 #[test]
-fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
+fn chunked_v3_uses_a_bounded_manifest_root_and_prepared_boot_artifacts() {
     let image_id = Sha256Digest::parse("a".repeat(64)).expect("image digest");
     let manifest_sha256 = Sha256Digest::parse("b".repeat(64)).expect("manifest digest");
     let artifact_sha256 = Sha256Digest::parse("c".repeat(64)).expect("artifact digest");
@@ -302,11 +301,6 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
             root_disk: prepared("root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: agent("runtime.raw", ArtifactAccess::ReadOnly, None),
             recording_disk: agent("recordings.vfat", ArtifactAccess::ReadWrite, None),
-            tools_disk: Some(agent(
-                "tools/tools.ext4",
-                ArtifactAccess::ReadOnly,
-                Some(Sha256Digest::parse("d".repeat(64)).expect("tools digest")),
-            )),
         },
     };
     let request = LaunchVmV3Request {
@@ -320,29 +314,17 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         .launch
         .validate_persisted()
         .expect("persisted v3 launch");
-    assert!(
-        request.launch.validate().is_err(),
-        "raw launch must still reject tools"
+    assert_eq!(
+        request.launch.validate(),
+        Err(ValidationError::TemplateLaunchRequiresV2),
+        "a raw launch must not reference prepared boot artifacts"
     );
-    let mut unhashed_tools = request.clone();
-    unhashed_tools
-        .launch
-        .artifacts
-        .tools_disk
-        .as_mut()
-        .expect("tools disk")
-        .sha256 = None;
-    assert!(unhashed_tools.launch.validate_persisted().is_err());
-    let mut writable_tools = request;
-    writable_tools
-        .launch
-        .artifacts
-        .tools_disk
-        .as_mut()
-        .expect("tools disk")
-        .access = ArtifactAccess::ReadWrite;
-    assert!(writable_tools.validate().is_err());
-    assert!(writable_tools.launch.validate_persisted().is_err());
+    let mut writable_runtime = request;
+    writable_runtime.launch.artifacts.runtime_disk.access = ArtifactAccess::ReadWrite;
+    assert_eq!(
+        writable_runtime.validate(),
+        Err(ValidationError::InvalidArtifactAccess)
+    );
 }
 
 #[test]
@@ -481,7 +463,6 @@ fn guest_cpu_count_cannot_be_added_to_launch_request() {
             root_disk: source("/trusted/root", ArtifactAccess::ReadWrite),
             runtime_disk: source("/trusted/runtime", ArtifactAccess::ReadOnly),
             recording_disk: source("/trusted/recording", ArtifactAccess::ReadWrite),
-            tools_disk: None,
         },
     };
     assert_eq!(

@@ -249,8 +249,6 @@ pub struct SourceArtifacts {
     pub root_disk: ArtifactSource,
     pub runtime_disk: ArtifactSource,
     pub recording_disk: ArtifactSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools_disk: Option<ArtifactSource>,
 }
 
 /// Import a verified agent-cache boot bundle into jailerd's root-owned,
@@ -490,19 +488,6 @@ impl LaunchVmV3Request {
         if self.launch.root_disk_size_bytes < self.virtual_size_bytes {
             return Err(ValidationError::RootDiskSmallerThanTemplate);
         }
-        let tools_disk = self
-            .launch
-            .artifacts
-            .tools_disk
-            .as_ref()
-            .ok_or(ValidationError::InvalidToolsDisk)?;
-        tools_disk.validate()?;
-        if tools_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-            || tools_disk.access != ArtifactAccess::ReadOnly
-            || tools_disk.sha256.is_none()
-        {
-            return Err(ValidationError::InvalidToolsDisk);
-        }
         let quota = self.launch.validate_inner(true)?;
         for (source, file_name, expected_access) in [
             (
@@ -537,9 +522,6 @@ impl LaunchVmV2Request {
         }
         if self.launch.root_disk_size_bytes < self.virtual_size_bytes {
             return Err(ValidationError::RootDiskSmallerThanTemplate);
-        }
-        if self.launch.artifacts.tools_disk.is_some() {
-            return Err(ValidationError::InvalidToolsDisk);
         }
         let quota = self.launch.validate_inner(true)?;
         for (source, file_name, expected_access) in [
@@ -757,8 +739,6 @@ pub struct JailPathMap {
     pub host_root_disk: PathBuf,
     pub host_runtime_disk: PathBuf,
     pub host_recording_disk: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_tools_disk: Option<PathBuf>,
     pub jailed_api_socket: PathBuf,
     pub jailed_vsock_socket: PathBuf,
     pub jailed_kernel: PathBuf,
@@ -766,8 +746,6 @@ pub struct JailPathMap {
     pub jailed_root_disk: PathBuf,
     pub jailed_runtime_disk: PathBuf,
     pub jailed_recording_disk: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jailed_tools_disk: Option<PathBuf>,
     pub host_serial_log: PathBuf,
     pub host_console_log: PathBuf,
     pub host_stderr_log: PathBuf,
@@ -1110,8 +1088,6 @@ pub enum ValidationError {
     InvalidChunkCacheRoot,
     #[error("chunk manifest source must match the requested manifest digest")]
     InvalidChunkManifestSource,
-    #[error("launch_vm_v3 requires one verified read-only tools disk")]
-    InvalidToolsDisk,
     #[error("VM selector must contain either a generation or a run/VM logical ID")]
     InvalidVmSelector,
     #[error("path must be absolute: {0}")]

@@ -1,5 +1,4 @@
 use super::*;
-use std::os::unix::fs::MetadataExt as _;
 
 pub(super) fn prepare_jail_files(
     config: &JailerdConfig,
@@ -216,10 +215,6 @@ pub(super) fn stage_artifacts_v2(
     // Clone its extents exactly instead of copying and syncing 16 MiB on every
     // launch; a cross-filesystem host is not fast-launch eligible and fails.
     stage_prepared_template_source_file(runtime_source, &root.join("disks/runtime.raw"), 0o444)?;
-    if let Some(tools_disk) = &artifacts.tools_disk {
-        let tools_source = open_or_import_tools_disk(config, tools_disk)?;
-        stage_prepared_template_source_file(tools_source, &root.join("disks/tools.ext4"), 0o444)?;
-    }
     stage_prepared_template_source_file(
         open_host_template_artifact(config, host_template, c"recordings.vfat")?,
         &root.join("disks/recordings.vfat"),
@@ -234,55 +229,7 @@ pub(super) fn stage_artifacts_v2(
     }
     set_mode(&root.join("disks/runtime.raw"), 0o444)?;
     set_owner(&root.join("disks/runtime.raw"), 0, 0)?;
-    if artifacts.tools_disk.is_some() {
-        set_mode(&root.join("disks/tools.ext4"), 0o444)?;
-        set_owner(&root.join("disks/tools.ext4"), 0, 0)?;
-    }
     Ok(())
-}
-
-fn open_or_import_tools_disk(config: &JailerdConfig, source: &ArtifactSource) -> Result<File> {
-    let sha256 = source
-        .sha256
-        .as_ref()
-        .context("tools disk source is missing SHA-256")?;
-    let jail_root = trusted_jail_root_fd(config)?;
-    let store = ensure_root_directory_at(&jail_root, c"tools")?;
-    let name = format!("{}.ext4", sha256.as_str());
-    let lock_name = format!(".lock-{}", sha256.as_str());
-    let lock = rustix::fs::openat(
-        &store,
-        &lock_name,
-        OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::RUSR | Mode::WUSR,
-    )?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
-    let open_existing = || -> Result<File> {
-        let fd = rustix::fs::openat(
-            &store,
-            &name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )?;
-        let file = File::from(fd);
-        let metadata = file.metadata()?;
-        ensure!(
-            metadata.is_file()
-                && metadata.len() == 64 * 1024 * 1024
-                && metadata.nlink() == 1
-                && metadata.uid() == 0
-                && metadata.gid() == 0
-                && metadata.mode() & 0o777 == 0o400,
-            "root-owned tools disk metadata is invalid"
-        );
-        Ok(file)
-    };
-    if let Ok(file) = open_existing() {
-        return Ok(file);
-    }
-    let destination = config.jail_root.join("tools").join(&name);
-    copy_template_source(config, source, &destination, Some(64 * 1024 * 1024), None)?;
-    open_existing()
 }
 
 pub(super) fn stage_artifacts(
@@ -315,9 +262,6 @@ pub(super) fn stage_artifacts(
         &root.join("disks/recordings.vfat"),
         0o600,
     )?;
-    if let Some(tools_disk) = &artifacts.tools_disk {
-        stage_source(config, tools_disk, &root.join("disks/tools.ext4"), 0o444)?;
-    }
     for path in [
         root.join("disks/root.raw"),
         root.join("disks/recordings.vfat"),
@@ -327,10 +271,6 @@ pub(super) fn stage_artifacts(
     }
     set_mode(&root.join("disks/runtime.raw"), 0o444)?;
     set_owner(&root.join("disks/runtime.raw"), 0, 0)?;
-    if artifacts.tools_disk.is_some() {
-        set_mode(&root.join("disks/tools.ext4"), 0o444)?;
-        set_owner(&root.join("disks/tools.ext4"), 0, 0)?;
-    }
     Ok(())
 }
 
@@ -564,11 +504,7 @@ pub(super) fn validate_template_launch_sources(artifacts: &SourceArtifacts) -> R
         || kernel_template.is_some()
         || initrd_template.is_some()
         || artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-        || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-        || artifacts
-            .tools_disk
-            .as_ref()
-            .is_some_and(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT);
+        || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT;
     if !has_any_template {
         return Ok(());
     }
@@ -580,10 +516,6 @@ pub(super) fn validate_template_launch_sources(artifacts: &SourceArtifacts) -> R
             .is_some_and(|_| initrd_template != Some(image))
         || artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
         || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-        || artifacts
-            .tools_disk
-            .as_ref()
-            .is_some_and(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT)
     {
         bail!(
             "template-backed launch must use one prepared boot bundle and agent-owned runtime disks"

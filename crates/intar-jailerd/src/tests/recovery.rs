@@ -619,7 +619,7 @@ fn recovery_reattaches_a_matching_drained_generation() {
 
 #[test]
 fn recovery_accepts_persisted_v2_and_v3_template_launches() {
-    for with_tools in [false, true] {
+    {
         let directory = tempfile::tempdir().expect("recovery directory");
         let mut config = test_config();
         config.jail_root = directory.path().to_path_buf();
@@ -630,14 +630,6 @@ fn recovery_accepts_persisted_v2_and_v3_template_launches() {
             template_artifact_source(&image, "root.raw", &image, ArtifactAccess::ReadWrite);
         record.request.artifacts.kernel =
             template_artifact_source(&image, "kernel", &image, ArtifactAccess::ReadOnly);
-        if with_tools {
-            let root = generation_directory(&config, &record.generation).join("root");
-            std::fs::create_dir_all(root.join("disks")).expect("tools directory");
-            std::fs::write(root.join("disks/tools.ext4"), b"tools").expect("tools fixture");
-            record.request.artifacts.tools_disk =
-                Some(source("tools.ext4", ArtifactAccess::ReadOnly));
-            record.paths = jail_paths(&root, record.request.artifacts.initrd.is_some());
-        }
         record.request_fingerprint = request_fingerprint(&record.request).expect("fingerprint");
         let record = decode_vm_record_v2(&serde_json::to_vec(&record).expect("persist record"))
             .expect("decode persisted template launch");

@@ -828,7 +828,6 @@ fn launch(index: u32, cpu_millis: u32) -> VmLaunchRequest {
             root_disk: source("/trusted/root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: source("/trusted/runtime.raw", ArtifactAccess::ReadOnly),
             recording_disk: source("/trusted/recordings.vfat", ArtifactAccess::ReadWrite),
-            tools_disk: None,
         },
     }
 }
