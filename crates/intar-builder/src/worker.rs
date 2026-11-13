@@ -148,6 +148,7 @@ async fn build_and_push(
         output_dir,
         &digest,
         &build.build_id,
+        build.attempt,
     )
     .await?;
     Ok(digest)
@@ -161,6 +162,7 @@ pub(crate) async fn push_verified(
     dir: &Path,
     digest: &OciDigest,
     build_id: &str,
+    attempt: u32,
 ) -> Result<()> {
     let (base_url, token, dir, digest, build_id) = (
         base_url.to_owned(),
@@ -172,7 +174,7 @@ pub(crate) async fn push_verified(
     tokio::task::spawn_blocking(move || {
         verify_machine_image(&dir, &digest).context("the built image fails verification")?;
         RegistryPusher::new(&base_url, &token)?
-            .push_build(&dir, &digest, &build_id)
+            .push_build(&dir, &digest, &build_id, attempt)
             .context("failed to push the image")
     })
     .await

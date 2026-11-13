@@ -182,7 +182,7 @@ fn a_blob_the_registry_has_is_not_put() {
     let (manifest, blobs) = image(dir.path());
     registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-1")
+        .push_build(dir.path(), &manifest, "build-1", 1)
         .unwrap();
 
     let calls = registry.calls();
@@ -207,7 +207,7 @@ fn a_missing_blob_is_put_with_its_bytes_under_its_digest() {
     let (manifest, blobs) = image(dir.path());
     registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-1")
+        .push_build(dir.path(), &manifest, "build-1", 1)
         .unwrap();
 
     let calls = registry.calls();
@@ -232,7 +232,7 @@ fn the_manifest_follows_every_blob_and_the_result_names_it() {
     let (manifest, _) = image(dir.path());
     registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-7")
+        .push_build(dir.path(), &manifest, "build-7", 3)
         .unwrap();
 
     let calls = registry.calls();
@@ -259,7 +259,7 @@ fn the_manifest_follows_every_blob_and_the_result_names_it() {
 
     let result = calls.last().unwrap();
     assert_eq!(result.method, "POST");
-    assert_eq!(result.path, "/registry/v1/builds/build-7/result");
+    assert_eq!(result.path, "/registry/v1/builds/build-7/result?attempt=3");
     let body: serde_json::Value = serde_json::from_slice(&result.body).unwrap();
     assert_eq!(
         body,
@@ -278,7 +278,7 @@ fn a_conflict_fails_the_push_before_the_manifest() {
     let (manifest, _) = image(dir.path());
     let error = registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-1")
+        .push_build(dir.path(), &manifest, "build-1", 1)
         .unwrap_err();
 
     assert!(
@@ -306,7 +306,7 @@ fn a_transient_failure_is_retried() {
     let (manifest, blobs) = image(dir.path());
     registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-1")
+        .push_build(dir.path(), &manifest, "build-1", 1)
         .unwrap();
 
     let calls = registry.calls();
@@ -331,7 +331,7 @@ fn a_refused_token_is_not_retried() {
     let (manifest, _) = image(dir.path());
     registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-1")
+        .push_build(dir.path(), &manifest, "build-1", 1)
         .unwrap_err();
     // Each blob's HEAD may have left before the first refusal; none again.
     let calls = registry.calls();

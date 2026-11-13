@@ -5,7 +5,8 @@
 //!    `PUT` the same URL with the blob's bytes when the HEAD answers 404;
 //!    at most [`BLOB_CONCURRENCY`] blobs at a time.
 //! 2. `PUT /registry/v1/manifests/<digest>` once every blob is stored.
-//! 3. `POST /registry/v1/builds/<build_id>/result` with `{"image_digest"}`.
+//! 3. `POST /registry/v1/builds/<build_id>/result?attempt=<n>` with
+//!    `{"image_digest"}`; the attempt fences out a superseded one.
 //!
 //! Every call carries the bearer token and the session header. A transport
 //! error, a 429 or a 5xx is retried; a 409 and every other refusal fail the
@@ -86,11 +87,17 @@ impl RegistryPusher {
     }
 
     /// Push the image `manifest` from `dir` (`sha256/<hex>` blobs) and record
-    /// it as the result of `build_id`.
+    /// it as the result of `attempt` of `build_id`.
     ///
     /// # Errors
     /// Returns the first call that failed for good.
-    pub fn push_build(&self, dir: &Path, manifest: &OciDigest, build_id: &str) -> Result<()> {
+    pub fn push_build(
+        &self,
+        dir: &Path,
+        manifest: &OciDigest,
+        build_id: &str,
+        attempt: u32,
+    ) -> Result<()> {
         let blobs = dir.join("sha256");
         let manifest_bytes = std::fs::read(blobs.join(manifest.hex()))?;
         let parsed: OciManifestV1 = serde_json::from_slice(&manifest_bytes)?;
@@ -100,6 +107,9 @@ impl RegistryPusher {
                 digests.push(layer.digest);
             }
         }
+        let result_url = self
+            .root
+            .join(&format!("builds/{build_id}/result?attempt={attempt}"))?;
         let mut restarts = 0;
         loop {
             let session = self.open_session()?;
@@ -109,7 +119,7 @@ impl RegistryPusher {
                 &digests,
                 manifest,
                 &manifest_bytes,
-                build_id,
+                &result_url,
             );
             let beat = session.heartbeat.stop();
             let lost = matches!(beat, Some(BeatFailure::Superseded))
@@ -134,7 +144,7 @@ impl RegistryPusher {
         digests: &[OciDigest],
         manifest: &OciDigest,
         manifest_bytes: &[u8],
-        build_id: &str,
+        result_url: &url::Url,
     ) -> Result<()> {
         self.push_blobs(session, blobs, digests)?;
         let url = self
@@ -147,9 +157,10 @@ impl RegistryPusher {
                 .header(reqwest::header::CONTENT_TYPE, OCI_MANIFEST_MEDIA_TYPE)
                 .body(manifest_bytes.to_vec()))
         })?;
-        let url = self.root.join(&format!("builds/{build_id}/result"))?;
         let body = serde_json::json!({ "image_digest": manifest.as_str() });
-        self.call(session, || Ok(self.client.post(url.clone()).json(&body)))?;
+        self.call(session, || {
+            Ok(self.client.post(result_url.clone()).json(&body))
+        })?;
         Ok(())
     }
 

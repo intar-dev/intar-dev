@@ -179,7 +179,7 @@ async fn an_image_that_fails_verification_is_not_pushed() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let error = push_verified(&url, "token", &out, &image.manifest_digest, "build-1")
+    let error = push_verified(&url, "token", &out, &image.manifest_digest, "build-1", 1)
         .await
         .unwrap_err();
     assert!(
