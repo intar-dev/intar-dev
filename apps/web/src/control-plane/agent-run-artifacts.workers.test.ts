@@ -642,7 +642,7 @@ async function seedRun(runPhase: RunPhase, vmPhase: VmPhase): Promise<string> {
   const response = await handleAgentBootstrap(
     new Request("http://localhost/agent/bootstrap", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "intar-bridge-protocol": "9" },
       body: JSON.stringify({ hostId: "host-1", bootstrapToken }),
     }),
     env,

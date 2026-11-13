@@ -65,11 +65,19 @@ export function serializeManagedServer(
       : "Ready for your runs. Only your workloads can use this server.";
   return {
     id: host.id, name: host.name, status, message,
-    repairAction: status === "offline" || status === "needs_attention" || status === "setting_up" ? "Run sudo intar-host doctor on this server." : null,
+    repairAction: status === "offline" || status === "needs_attention" || status === "setting_up"
+      ? refusedSinceLastHello(host) ? "Agent too old: run sudo intar-host update." : "Run sudo intar-host doctor on this server."
+      : null,
     connected, createdAt: host.createdAt, lastSeenAt: host.lastHeartbeatAt,
     capacity: ready && report && resources ? { total: report.capacity.schedulable_cpu_millis / 1000, available: resources.cpuMillis / 1000 } : null,
     activeRuns,
   };
+}
+
+/** The Worker refused this host's agent as too old, and it has not connected since. */
+function refusedSinceLastHello(host: typeof agentHosts.$inferSelect): boolean {
+  return host.lastRefusalCode === "upgrade_required" && host.lastRefusalAt !== null &&
+    host.lastRefusalAt > (host.lastClientHelloAt ?? 0);
 }
 
 export async function updatePersonalServer(d1: D1Database, context: UserContext, hostId: string, input: Record<string, unknown>) {

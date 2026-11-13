@@ -58,7 +58,7 @@ describe("builder credentials at registry reads and commits", () => {
       credentialGeneration: 1, expiresAt: Date.now() + 60_000,
     });
     const bootstrap = await handleAgentBootstrap(new Request("https://intar.test/agent/bootstrap", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST", headers: { "content-type": "application/json", "intar-bridge-protocol": "9" },
       body: JSON.stringify({ hostId: HOST, bootstrapToken: "bootstrap-token" }),
     }), env);
     expect(bootstrap.status).toBe(200);

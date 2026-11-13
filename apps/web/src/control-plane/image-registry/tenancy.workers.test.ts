@@ -456,7 +456,7 @@ async function seedAgentAndBootstrap(input: {
   const response = await handleAgentBootstrap(
     new Request("https://intar.test/agent/bootstrap", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "intar-bridge-protocol": "9" },
       body: JSON.stringify({
         hostId: input.hostId,
         bootstrapToken: input.bootstrapToken,

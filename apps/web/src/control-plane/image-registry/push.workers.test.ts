@@ -28,7 +28,7 @@ async function seedBuilder(id: string): Promise<string> {
     id: `${id}-c2`, hostId: id, tokenHash: await sha256Hex(`${id}-secret`), credentialGeneration: 1, expiresAt: null,
   });
   const response = await handleAgentBootstrap(new Request("https://intar.test/agent/bootstrap", {
-    method: "POST", headers: { "content-type": "application/json" },
+    method: "POST", headers: { "content-type": "application/json", "intar-bridge-protocol": "9" },
     body: JSON.stringify({ hostId: id, bootstrapToken: `${id}-secret` }),
   }), env);
   return ((await response.json()) as { accessToken: string }).accessToken;

@@ -61,7 +61,7 @@ async function seedHost(id: string, scope: "personal" | "platform" | "organizati
     id: `${id}-c2`, hostId: id, tokenHash: await sha256Hex(c2(id)), credentialGeneration: 1, expiresAt: null,
   });
   const response = await handleAgentBootstrap(new Request(`${ORIGIN}/agent/bootstrap`, {
-    method: "POST", headers: { "content-type": "application/json" },
+    method: "POST", headers: { "content-type": "application/json", "intar-bridge-protocol": "9" },
     body: JSON.stringify({ hostId: id, bootstrapToken: c2(id) }),
   }), env);
   expect(response.status).toBe(200);

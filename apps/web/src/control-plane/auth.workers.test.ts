@@ -5,6 +5,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   handleAgentBootstrap,
+  handleAgentConnect,
   requireVerifiedAgentRequest,
   sha256Hex,
 } from "./auth";
@@ -125,6 +126,34 @@ describe("agent JWT secret validation", () => {
     expect((await verify()).ok).toBe(false);
   });
 
+  it("answers 426 to a client that does not state bridge protocol 9 and records it", async () => {
+    const hostId = "host-old-agent";
+    await seedBootstrapToken(hostId, "old-agent-secret");
+    const runtimeEnv = agentEnv(STRONG_SECRET);
+    const old = bootstrapRequest(hostId, "old-agent-secret");
+    old.headers.delete("intar-bridge-protocol");
+    const refused = await handleAgentBootstrap(old, runtimeEnv);
+    expect(refused.status).toBe(426);
+    expect(await refused.json()).toMatchObject({ code: "upgrade_required", protocol_version: 9 });
+    const row = await env.DB.prepare(
+      "SELECT last_refusal_code, last_refusal_at FROM agent_hosts WHERE id = ?1",
+    ).bind(hostId).first<{ last_refusal_code: string; last_refusal_at: number }>();
+    expect(row?.last_refusal_code).toBe("upgrade_required");
+    expect(row?.last_refusal_at).toBeGreaterThan(0);
+
+    // A wrong credential is still a 401, and writes nothing.
+    const stranger = bootstrapRequest(hostId, "wrong");
+    stranger.headers.set("intar-bridge-protocol", "8");
+    expect((await handleAgentBootstrap(stranger, runtimeEnv)).status).toBe(401);
+
+    const bootstrap = await handleAgentBootstrap(bootstrapRequest(hostId, "old-agent-secret"), runtimeEnv);
+    const { accessToken } = await bootstrap.json() as { accessToken: string };
+    const upgrade = await handleAgentConnect(new Request(`http://localhost/agent/connect?hostId=${hostId}`, {
+      headers: { upgrade: "websocket", authorization: `Bearer ${accessToken}`, "intar-bridge-protocol": "8" },
+    }), runtimeEnv);
+    expect(upgrade.status).toBe(426);
+  });
+
   it("rejects both an issued JWT and the old durable secret after generation changes", async () => {
     const hostId = "host-credential-generation";
     await seedBootstrapToken(hostId, "old-secret");
@@ -191,7 +220,7 @@ function agentEnv(secret: string | undefined): Cloudflare.Env {
 function bootstrapRequest(hostId: string, bootstrapToken: string): Request {
   return new Request("http://localhost/agent/bootstrap", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "intar-bridge-protocol": "9" },
     body: JSON.stringify({ hostId, bootstrapToken }),
   });
 }

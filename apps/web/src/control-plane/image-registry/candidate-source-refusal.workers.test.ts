@@ -372,7 +372,7 @@ async function bootstrapBuilderToken(): Promise<string> {
   const response = await handleAgentBootstrap(
     new Request("https://intar.test/agent/bootstrap", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "intar-bridge-protocol": "9" },
       body: JSON.stringify({
         hostId: BUILDER_HOST_ID,
         bootstrapToken: BOOTSTRAP_TOKEN,

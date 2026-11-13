@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { agentBootstrapTokens, agentHosts, user } from "@/db/schema";
+import { BRIDGE_PROTOCOL_VERSION_9 } from "@/generated/constants";
 import { createAppId } from "@/lib/id";
 
 /** Organization credentials belong to the organization, not the enrollment creator. */
@@ -77,6 +78,7 @@ export async function handleAgentBootstrap(
   const credential = await verifyHostCredential(env, hostId, bootstrapToken);
   if (!credential.ok) return credential.response;
   const host = credential.host;
+  if (!statesBridgeProtocol9(request)) return refuseOldBridgeProtocol(env, hostId, null);
   const nowMs = Date.now();
 
   const issuer = env.AGENT_JWT_ISSUER ?? "intar-agent-bridge";
@@ -224,6 +226,7 @@ export async function handleAgentConnect(
   if (!verified.ok) {
     return verified.response;
   }
+  if (!statesBridgeProtocol9(request)) return refuseOldBridgeProtocol(env, hostId, null);
 
   const id = env.HOST_RUNTIME.idFromName(hostId);
   const stub = env.HOST_RUNTIME.get(id);
@@ -243,6 +246,45 @@ export async function handleAgentConnect(
   });
 
   return stub.fetch(proxiedRequest);
+}
+
+/** The header a bridge client states its protocol in. */
+export const BRIDGE_PROTOCOL_HEADER = "intar-bridge-protocol";
+/** Close code of a bridge socket whose hello states another protocol. */
+export const CLOSE_UPGRADE_REQUIRED = 4426;
+const MAX_REFUSED_AGENT_VERSION_LENGTH = 64;
+
+function statesBridgeProtocol9(request: Request): boolean {
+  return request.headers.get(BRIDGE_PROTOCOL_HEADER)?.trim() === String(BRIDGE_PROTOCOL_VERSION_9);
+}
+
+/**
+ * Records on the host that its agent was refused as too old, so My servers
+ * can say so. Only an authenticated host's own row is written.
+ */
+export async function recordBridgeProtocolRefusal(
+  env: Cloudflare.Env,
+  hostId: string,
+  agentVersion: string | null,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE agent_hosts SET last_refusal_code = 'upgrade_required', last_refusal_at = ?2,
+       last_refused_agent_version = ?3 WHERE id = ?1`,
+  ).bind(hostId, Date.now(), agentVersion?.slice(0, MAX_REFUSED_AGENT_VERSION_LENGTH) ?? null).run();
+}
+
+/** 426: the clients wait for an upgrade on this status alone. */
+async function refuseOldBridgeProtocol(
+  env: Cloudflare.Env,
+  hostId: string,
+  agentVersion: string | null,
+): Promise<Response> {
+  await recordBridgeProtocolRefusal(env, hostId, agentVersion);
+  return jsonResponse({
+    error: `bridge protocol ${BRIDGE_PROTOCOL_VERSION_9} is required; update the agent`,
+    code: "upgrade_required",
+    protocol_version: BRIDGE_PROTOCOL_VERSION_9,
+  }, 426);
 }
 
 export type VerifiedAgentToken =

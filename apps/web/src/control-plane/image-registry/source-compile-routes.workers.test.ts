@@ -96,7 +96,7 @@ beforeEach(async () => {
     });
     const bootstrap = await handleAgentBootstrap(new Request("https://intar.test/agent/bootstrap", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "intar-bridge-protocol": "9" },
       body: JSON.stringify({ hostId, bootstrapToken: `${hostId}-token` }),
     }), env);
     tokens[hostId] = ((await bootstrap.json()) as { accessToken: string }).accessToken;

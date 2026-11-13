@@ -27,7 +27,7 @@ vi.mock("@/lib/stargate", async (importOriginal) => ({
 
 const runtimeEnv = () => ({ ...env, AGENT_JWT_SECRET: "test-agent-jwt-secret-0123456789abcdef" });
 const bootstrap = () => handleAgentBootstrap(new Request("https://intar.test/agent/bootstrap", {
-  method: "POST", headers: { "content-type": "application/json" },
+  method: "POST", headers: { "content-type": "application/json", "intar-bridge-protocol": "9" },
   body: JSON.stringify({ hostId: "platform", bootstrapToken: "durable-secret" }),
 }), runtimeEnv());
 const revoke = (hostId = "platform") => POST({
