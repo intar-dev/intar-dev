@@ -344,6 +344,10 @@ export const SHARE_INGEST_PONG = "{}";
 export const SHARE_INGEST_CLOSE_ENDED = {};
 export const SHARE_INGEST_CLOSE_LIMIT = {};
 export const SHARE_INGEST_CLOSE_STOPPED = {};
+export const WAKE_RAM_CHUNK_MEDIA_TYPE = "{}";
+export const WAKE_DELTA_MEDIA_TYPE = "{}";
+export const WAKE_STUB_MEDIA_TYPE = "{}";
+export const WAKE_CPU_PROFILE_MEDIA_TYPE = "{}";
 
 export const runtimeEnvKeys = {{
   sshAuthorizedKeysB64: "{}",
@@ -382,6 +386,10 @@ export const runtimeEnvKeys = {{
         SHARE_INGEST_CLOSE_ENDED,
         SHARE_INGEST_CLOSE_LIMIT,
         SHARE_INGEST_CLOSE_STOPPED,
+        intar_contracts::oci::WAKE_RAM_CHUNK_MEDIA_TYPE,
+        intar_contracts::oci::WAKE_DELTA_MEDIA_TYPE,
+        intar_contracts::oci::WAKE_STUB_MEDIA_TYPE,
+        intar_contracts::oci::WAKE_CPU_PROFILE_MEDIA_TYPE,
         ENV_SSH_AUTHORIZED_KEYS_B64,
         ENV_KINO_VSOCK_CID,
         ENV_KINO_VSOCK_PORT,

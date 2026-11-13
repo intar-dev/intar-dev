@@ -3,6 +3,7 @@
 pub mod bridge;
 pub mod catalog;
 pub mod guest;
+pub mod oci;
 pub mod run_cli;
 pub mod source;
 pub mod stargate;

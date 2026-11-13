@@ -2209,6 +2209,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "intar-snapdelta"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror",
+ "zstd",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
