@@ -163,7 +163,7 @@ before the workflow attested them have no attestation. Then:
   a rollback; after each `swamp workflow approve builder-rollout <step>`,
   `swamp workflow resume builder-rollout` continues the run.
 - **Stargate:** see "Rolling out" in `deploy/stargate/README.md`.
-- **Kino:** image-ops `tools-build` with the `kino_tag`, then the guest-tools
-  steps in `apps/web/README.md`.
+- **Kino:** no rollout path for now. The guest tools disk is gone, and machine
+  images do not carry Kino yet.
 - **Image CLI:** merge the website pin pull request that the release opens. The
   next website deploy uses it.

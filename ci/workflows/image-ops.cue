@@ -7,7 +7,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 	"run-name": "Image ops ${{ inputs.operation }} @ ${{ github.sha }}"
 
 	// One operator lane for the image flywheel work that stays manual: the run
-	// gate, the guest-tools build and promotion, and the registry cleanup. Intar
+	// gate and the registry cleanup. Intar
 	// promotes image catalogs itself (Admin, Scenarios, Image promotion), also
 	// inside a drain this lane holds. Each operation keeps its own inputs and its
 	// own job, so the plane fence and the deliberate-release property stay
@@ -24,31 +24,11 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				options: [
 					"gate-open",
 					"gate-drained",
-					"tools-build",
-					"tools-promote",
 					"cleanup-status",
 					"cleanup-plan",
 					"cleanup-run",
 					"cleanup-resolve",
 				]
-			}
-			revision: {
-				description: "verified candidate bundle revision, for a tools promotion"
-				required:    false
-				default:     ""
-				type:        "string"
-			}
-			kino_tag: {
-				description: "published Kino release tag, for a tools build"
-				required:    false
-				default:     ""
-				type:        "string"
-			}
-			expected_candidate_sha256: {
-				description: "SHA-256 of the candidate the release pinned, for a tools promotion"
-				required:    false
-				default:     ""
-				type:        "string"
 			}
 			expected_gc_run_id: {
 				description: "the stalled sweep to abort, for a cleanup resolve"
@@ -76,12 +56,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			steps: [{
 				name: "Validate the operation"
 				id:   "validate"
-				env: {
-					OPERATION:                 "${{ inputs.operation }}"
-					REVISION:                  "${{ inputs.revision }}"
-					KINO_TAG:                  "${{ inputs.kino_tag }}"
-					EXPECTED_CANDIDATE_SHA256: "${{ inputs.expected_candidate_sha256 }}"
-				}
+				env: OPERATION: "${{ inputs.operation }}"
 				run: """
 					set -euo pipefail
 					test "${GITHUB_REF}" = refs/heads/main
@@ -96,15 +71,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					  gate-drained)
 					    job=gate
 					    state=drained
-					    ;;
-					  tools-build)
-					    job=tools-build
-					    [[ "${KINO_TAG}" =~ ^kino/v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]
-					    ;;
-					  tools-promote)
-					    job=tools-promote
-					    [[ "${REVISION}" =~ ^[A-Za-z0-9._-]+$ ]]
-					    [[ "${EXPECTED_CANDIDATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
 					    ;;
 					  cleanup-status)
 					    job=cleanup
@@ -124,7 +90,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					    ;;
 					  *)
 					    echo "unsupported operation: ${OPERATION}" >&2
-					    echo 'Use gate-open, gate-drained, tools-build, tools-promote, cleanup-status, cleanup-plan, cleanup-run, or cleanup-resolve.' >&2
+					    echo 'Use gate-open, gate-drained, cleanup-status, cleanup-plan, cleanup-run, or cleanup-resolve.' >&2
 					    exit 1
 					    ;;
 					esac
@@ -213,165 +179,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					  | jq -e '.state == "open"' >/dev/null
 
 					"""
-			}]
-		}
-		"tools-build": {
-			name:      "Build and verify tools"
-			"runs-on": "namespace-profile-intar-dev"
-			needs: ["request"]
-			if: "needs.request.outputs.job == 'tools-build'"
-			concurrency: {
-				group:                "intar-image-catalog-promotion"
-				"cancel-in-progress": false
-			}
-			"timeout-minutes": 30
-			environment:       "production"
-			env: {
-				KINO_TAG: "${{ inputs.kino_tag }}"
-				BUCKET:   "intar-dev-vm-image-registry-20260709"
-			}
-			steps: [{
-				name: "Validate deployment inputs"
-				run: """
-					set -euo pipefail
-					test "${GITHUB_REF}" = refs/heads/main
-					[[ "${KINO_TAG}" =~ ^kino/v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]
-					mkdir -p "${RUNNER_TEMP}/guest-tools"
-					printf 'TOOLS_DIR=%s/guest-tools\\n' "${RUNNER_TEMP}" >> "${GITHUB_ENV}"
-
-					"""
-			}, {
-				name: "Checkout deployment revision"
-				uses: gha.pin.checkout.ref
-				with: {
-					ref:                   "${{ github.sha }}"
-					"fetch-depth":         0
-					"persist-credentials": false
-				}
-			}, {
-				name: "Set up cuenv"
-				uses: "./.github/actions/setup-cuenv"
-			}, {
-				name: "Verify runner disk tools"
-				#StepTask & {#task: "image-ops-verify-runner-disk-tools"}
-			}, {
-				name: "Set up the CI runtime"
-				uses: "./.github/actions/setup-runtime"
-			}, {
-				name: "Install pinned Wrangler"
-				run:  "bun install --frozen-lockfile"
-			}, {
-				name:                "Upload candidate objects"
-				"working-directory": "."
-				env: {
-					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
-					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
-				}
-				#StepTask & {#task: "image-ops-upload-tools-candidate"}
-			}, {
-				name:                "Verify uploaded objects by re-download"
-				"working-directory": "."
-				env: {
-					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
-					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
-				}
-				#StepTask & {#task: "image-ops-verify-tools-upload"}
-			}, {
-				name: "Retain build and deployment evidence"
-				if:   "always()"
-				uses: gha.pin."upload-artifact".ref
-				with: {
-					name:                "guest-tools-deployment-${{ github.run_id }}"
-					path:                "${{ runner.temp }}/guest-tools/"
-					"if-no-files-found": "error"
-				}
-			}]
-		}
-		"tools-promote": {
-			name:      "Promote and verify the tools channel"
-			"runs-on": "namespace-profile-intar-dev"
-			needs: ["request"]
-			if: "needs.request.outputs.job == 'tools-promote'"
-			concurrency: {
-				group:                "intar-image-catalog-promotion"
-				"cancel-in-progress": false
-			}
-			"timeout-minutes": 30
-			environment:       "production"
-			env: {
-				REVISION:                  "${{ inputs.revision }}"
-				EXPECTED_CANDIDATE_SHA256: "${{ inputs.expected_candidate_sha256 }}"
-				BUCKET:                    "intar-dev-vm-image-registry-20260709"
-			}
-			steps: [{
-				name: "Validate promotion inputs"
-				run: """
-					set -euo pipefail
-					test "${GITHUB_REF}" = refs/heads/main
-					[[ "${REVISION}" =~ ^[A-Za-z0-9._-]{1,128}$ ]]
-					[[ "${EXPECTED_CANDIDATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-					mkdir -p "${RUNNER_TEMP}/guest-tools"
-					printf 'TOOLS_DIR=%s/guest-tools\\n' "${RUNNER_TEMP}" >> "${GITHUB_ENV}"
-
-					"""
-			}, {
-				name: "Checkout promotion revision"
-				uses: gha.pin.checkout.ref
-				with: {
-					ref:                   "${{ github.sha }}"
-					"persist-credentials": false
-				}
-			}, {
-				name: "Set up cuenv"
-				uses: "./.github/actions/setup-cuenv"
-			}, {
-				name: "Set up the CI runtime"
-				uses: "./.github/actions/setup-runtime"
-			}, {
-				name: "Install pinned Wrangler"
-				run:  "bun install --frozen-lockfile"
-			}, {
-				name:                "Read the candidate pin from the registry bucket"
-				"working-directory": "."
-				env: {
-					CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
-					CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
-				}
-				#StepTask & {#task: "image-ops-read-tools-candidate"}
-			}, {
-				name:                "Require drained host and retain previous stable pin"
-				"working-directory": "."
-				env: {
-					CLOUDFLARE_ACCOUNT_ID:     "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
-					CLOUDFLARE_API_TOKEN:      "${{ secrets.CLOUDFLARE_API_TOKEN }}"
-					INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				}
-				#StepTask & {#task: "image-ops-require-drain-retain-stable"}
-			}, {
-				name: "Retain rollback pin before promotion"
-				uses: gha.pin."upload-artifact".ref
-				with: {
-					name:                "guest-tools-rollback-${{ github.run_id }}"
-					path:                "${{ runner.temp }}/guest-tools/previous-stable.json"
-					"if-no-files-found": "error"
-				}
-			}, {
-				name: "Warm every host and wait for the candidate cache"
-				env: INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				#StepTask & {#task: "image-ops-warm-tools-candidate"}
-			}, {
-				name: "Promote the exact candidate while drained"
-				env: INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
-				#StepTask & {#task: "image-ops-promote-tools-candidate"}
-			}, {
-				name: "Retain promotion evidence"
-				if:   "always()"
-				uses: gha.pin."upload-artifact".ref
-				with: {
-					name:                "guest-tools-promotion-${{ github.run_id }}"
-					path:                "${{ runner.temp }}/guest-tools/"
-					"if-no-files-found": "error"
-				}
 			}]
 		}
 		cleanup: {
@@ -495,13 +302,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 // that authenticates to production or changes anything outside the runner is
 // _production; the authority check and the evidence scrub touch only the runner.
 tasks: {
-	"image-ops-verify-runner-disk-tools": #Script & {_script: "tools/workflows/image-ops/verify-runner-disk-tools.sh"}
-	"image-ops-upload-tools-candidate": #Script & {_script: "tools/workflows/image-ops/upload-tools-candidate.sh", _production: true}
-	"image-ops-verify-tools-upload": #Script & {_script: "tools/workflows/image-ops/verify-tools-upload.sh", _production: true}
-	"image-ops-read-tools-candidate": #Script & {_script: "tools/workflows/image-ops/read-tools-candidate.sh", _production: true}
-	"image-ops-require-drain-retain-stable": #Script & {_script: "tools/workflows/image-ops/require-drain-retain-stable.sh", _production: true}
-	"image-ops-warm-tools-candidate": #Script & {_script: "tools/workflows/image-ops/warm-tools-candidate.sh", _production: true}
-	"image-ops-promote-tools-candidate": #Script & {_script: "tools/workflows/image-ops/promote-tools-candidate.sh", _production: true}
 	"image-ops-validate-cleanup-authority": #Script & {_script: "tools/workflows/image-ops/validate-cleanup-authority.sh"}
 	"image-ops-read-cleanup-state": #Script & {_script: "tools/workflows/image-ops/read-cleanup-state.sh", _production: true}
 	"image-ops-plan-cleanup": #Script & {_script: "tools/workflows/image-ops/plan-cleanup.sh", _production: true}

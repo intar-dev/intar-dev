@@ -3,10 +3,8 @@
 set -euo pipefail
 release_dir="${RUNNER_TEMP}/guest-tools-release"
 mkdir -p "${release_dir}"
-# A release keeps the promoted stable pin. A tools rollout promotes the
-# new pin first (image-ops tools-build, then tools-promote), so this
-# release reads it here. The published objects are verified against
-# the pin below.
+# A release keeps the last promoted stable pin; nothing promotes a new
+# one any more. The published objects are verified against the pin below.
 bunx wrangler r2 object get \
   "${BUCKET}/guest-tools/scenario/stable.json" \
   --remote --jurisdiction eu --file "${release_dir}/manifest.json"
