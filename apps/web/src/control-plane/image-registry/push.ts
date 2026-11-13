@@ -374,7 +374,11 @@ function declaredLength(request: Request, limit: number): number | Response {
 }
 
 function parseJson(bytes: ArrayBuffer): unknown {
-  return parseJsonText(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    return null;
+  }
 }
 
 function parseJsonText(text: string): unknown {

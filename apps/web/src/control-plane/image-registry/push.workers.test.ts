@@ -151,6 +151,11 @@ describe("registry push routes", () => {
     const image = await machineImage();
     await pushBlobs(image.blobs);
     expect((await putManifest({ ...image.manifest, annotations: {} })).response.status).toBe(400);
+    const notText = await blob(new Uint8Array([0xff]));
+    const notJson = await call("PUT", `/manifests/${notText.digest}`, {
+      body: notText.bytes, headers: { "content-type": OCI_MANIFEST_MEDIA_TYPE },
+    });
+    expect(notJson.status).toBe(400);
     const layer = structuredClone(image.manifest);
     layer.layers[0]!.mediaType = "application/vnd.oci.image.layer.v1.tar";
     expect((await putManifest(layer)).response.status).toBe(400);

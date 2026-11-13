@@ -64,7 +64,8 @@ export async function handleOciRequest(
     event: "registry.pull",
     host_id: host.hostId,
     repository: route.repository.kind,
-    digest: route.digest,
+    // A tag is logged as the digest it resolved to whenever something was served.
+    digest: response.headers.get("docker-content-digest") ?? route.digest,
     status: response.status,
     bytes: Number(response.headers.get("content-length") ?? 0),
   });
