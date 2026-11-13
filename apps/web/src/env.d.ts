@@ -34,6 +34,12 @@ declare global {
       SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON: string;
       SCENARIO_RUN_KEY_ENCRYPTION_SECRET: string;
       REGISTRY_PUBLISH_TOKEN: string;
+      /**
+       * The Kino pins per guest contract, as
+       * `{"<contract>":{"current":"sha256:<hex>","previous":"sha256:<hex>"|null}}`.
+       * The deploy injects it; without it no host has a Kino pin.
+       */
+      KINO_PINS_JSON?: string;
     }
   }
 }

@@ -36,6 +36,12 @@ import {
 } from "./catalog-promotion";
 import { handleImageCutoverGate } from "./cutover-gate";
 import {
+  handleBlobHead,
+  handleBlobPut,
+  handleBuildResult,
+  handleManifestPut,
+} from "./push";
+import {
   handleRegistryAdmissionEnforcement,
   handleRegistryAdmissionPause,
   handleRegistryAdmissionReap,
@@ -49,6 +55,7 @@ import {
   type RegistryOperationLease,
 } from "@/lib/image-registry-admission";
 import type { ImageRegistryOperationKind } from "@/db/schema";
+import { jsonResponse } from "./shared";
 import {
   AGENT_SOURCES_PATH,
   SOURCE_BUNDLES_PATH,
@@ -182,6 +189,35 @@ export async function handleImageRegistryRequest(
         env,
         imageManifestUploadMatch[1] ?? "",
       ),
+    );
+  }
+
+  const ociMatch = url.pathname.match(
+    /^\/registry\/v1\/(blobs|manifests)\/([^/]+)$/,
+  );
+  if (ociMatch) {
+    const hex = ociMatch[2]?.match(/^sha256:([a-f0-9]{64})$/)?.[1];
+    if (!hex) return jsonResponse({ error: "invalid digest" }, 400);
+    if (ociMatch[1] === "manifests") {
+      return admitted(request, env, "PUT", "manifest_put", () =>
+        handleManifestPut(request, env, hex),
+      );
+    }
+    return request.method === "HEAD"
+      ? admitted(request, env, "HEAD", "blob_exists", () =>
+          handleBlobHead(request, env, hex),
+        )
+      : admitted(request, env, "PUT", "blob_put", () =>
+          handleBlobPut(request, env, hex),
+        );
+  }
+
+  const buildResultMatch = url.pathname.match(
+    /^\/registry\/v1\/builds\/([^/]+)\/result$/,
+  );
+  if (buildResultMatch) {
+    return admitted(request, env, "POST", "build_result", () =>
+      handleBuildResult(request, env, buildResultMatch[1] ?? ""),
     );
   }
 

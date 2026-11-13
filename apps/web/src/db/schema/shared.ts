@@ -37,7 +37,10 @@ export type ImageRegistryGcRunState =
 export type ImageRegistryOperationKind =
   | "chunk_exists"
   | "chunk_put"
+  | "blob_exists"
+  | "blob_put"
   | "manifest_put"
+  | "build_result"
   | "multipart_create"
   | "multipart_part"
   | "multipart_complete"
