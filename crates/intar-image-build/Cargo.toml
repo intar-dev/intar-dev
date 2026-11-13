@@ -12,9 +12,7 @@ blake3.workspace = true
 fatfs.workspace = true
 flate2.workspace = true
 fs2.workspace = true
-hcl-rs.workspace = true
 intar-contracts = { path = "../intar-contracts" }
-intar-image-scenario = { path = "../intar-image-scenario" }
 russh.workspace = true
 rustix.workspace = true
 ring.workspace = true

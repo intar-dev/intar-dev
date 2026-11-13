@@ -344,7 +344,7 @@ pub fn kernel_profile_digest() -> String {
     identity.push_str(KERNEL_CONFIG_FRAGMENT);
     identity.push_str("--init-script--\n");
     identity.push_str(KERNEL_INITRAMFS_INIT_SCRIPT);
-    crate::content_hash::sha256_bytes_hex(identity.as_bytes())
+    crate::sha256::sha256_bytes_hex(identity.as_bytes())
 }
 
 /// Return required symbols that are not built in (value y) in a kernel .config.

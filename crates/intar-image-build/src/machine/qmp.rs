@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::{Value, json};
 
-use super::super::{connect_qmp_socket, read_qmp_message};
+use super::shutdown::{connect_qmp_socket, read_qmp_message};
 
 pub(crate) struct Qmp {
     stream: UnixStream,

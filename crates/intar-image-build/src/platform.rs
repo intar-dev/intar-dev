@@ -4,21 +4,20 @@
 //! masks. No supervisor, runtime asset, Kino or tools-disk mount is baked:
 //! everything of a run comes from the run disk.
 //!
-//! It is a variant beside the old base: its definition hash also holds
-//! [`IMAGE_FORMAT`] and `build_key("trixie")`, so both build and cache side
-//! by side.
+//! Its definition hash also holds [`IMAGE_FORMAT`] and `build_key("trixie")`,
+//! so a format bump rebuilds it.
 
 use anyhow::Result;
 use intar_contracts::guest::{GUEST_LOADER_PATH, GUEST_USERNAME, KINO_FILENAME, RUN_DISK_MOUNT};
 use intar_contracts::oci::IMAGE_FORMAT;
 use intar_contracts::scenario::{PLATFORM_BASE_IMAGE, base_key};
-use intar_image_scenario::BaseImageSpec;
 
 use crate::config::QemuBuildConfig;
 use crate::rootfs::{
-    BaseRootfsArtifact, INTAR_ACPI_EVENT_PATH, INTAR_ACPI_EVENT_RULE, INTAR_ACPI_POWEROFF_PATH,
-    INTAR_ACPI_POWEROFF_SCRIPT, MASKED_UNITS, RootfsBuildPlan, render_build_start_script,
-    render_essential_hook, render_intar_build_service, rootfs_build_paths,
+    BaseImageSpec, BaseRootfsArtifact, INTAR_ACPI_EVENT_PATH, INTAR_ACPI_EVENT_RULE,
+    INTAR_ACPI_POWEROFF_PATH, INTAR_ACPI_POWEROFF_SCRIPT, MASKED_UNITS, RootfsBuildPlan,
+    render_build_start_script, render_essential_hook, render_intar_build_service,
+    rootfs_build_paths,
 };
 use crate::sha256::sha256_bytes_hex;
 
@@ -413,9 +412,6 @@ mod tests {
         );
         let config = QemuBuildConfig::default();
         let plan = render_platform_rootfs_plan(&config);
-        let old = crate::rootfs::render_rootfs_build_plan(&platform_base_spec(), &config);
-        assert_ne!(plan.definition_hash, old.definition_hash);
-        assert_ne!(plan.paths.base_ext4_path, old.paths.base_ext4_path);
         assert_eq!(
             plan.definition_hash,
             render_platform_rootfs_plan(&config).definition_hash

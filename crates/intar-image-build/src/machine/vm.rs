@@ -14,33 +14,33 @@ use intar_contracts::guest::GUEST_USERNAME;
 use russh::keys::PrivateKey;
 use serde_json::json;
 
-use super::plan::{BuildPlan, CheckpointHost, checkpoint_identities};
-use super::script::{
-    REPACK_DEVICE, UPLOAD_PATH, as_root, finalize_script, record_boot_files, repack_script,
-    stage_command, stage_file,
-};
-use crate::artifact::sha256_file_hex;
-use crate::checkpoint::{
-    CheckpointCache, CheckpointCacheConfig, CheckpointIdentity, CheckpointLease, CheckpointPublish,
-    CheckpointSlot,
-};
-use crate::config::QemuBuildConfig;
-use crate::direct::layered::qmp::Qmp;
-use crate::direct::layered::{
+use super::host::{
     CHECKPOINT_MEMORY_RELEASE_COMMAND, ResumeMetadata, VIRTIO_BALLOON_VERIFY_COMMAND,
     append_layered_devices, link_frozen_checkpoint_scratch, migration_writer_command,
     qemu_host_identity, remaining_until, remove_work_file, render_clock_set_command,
     replace_serial_log_with_append, resolve_binary, run_command_output_until, shell_quote,
     snapshot_sync_arguments, timeout_in_runtime, wait_for_checkpoint_output,
 };
-use crate::direct::{
+use super::plan::{BuildPlan, CheckpointHost, checkpoint_identities};
+use super::qmp::Qmp;
+use super::script::{
+    REPACK_DEVICE, UPLOAD_PATH, as_root, finalize_script, record_boot_files, repack_script,
+    stage_command, stage_file,
+};
+use super::shutdown::{
     DirectQemuShutdownInput, SSH_HOST, SSH_POLL_INTERVAL, acknowledged_qmp_shutdown,
     allocate_ssh_host_port, terminate_qemu,
 };
-use crate::disk::{ScenarioDiskCommand, ScenarioDiskPlan, prepare_scenario_disk};
+use crate::checkpoint::{
+    CheckpointCache, CheckpointCacheConfig, CheckpointIdentity, CheckpointLease, CheckpointPublish,
+    CheckpointSlot,
+};
+use crate::config::QemuBuildConfig;
+use crate::disk::{prepare_scenario_disk, render_scenario_disk_plan};
 use crate::qemu::{BUILD_BOOT_CMDLINE, DirectBootQemuInput, render_direct_boot_qemu_command};
 use crate::rootfs::BaseRootfsArtifact;
 use crate::seed::{BuildSeedInput, write_build_seed};
+use crate::sha256::sha256_file_hex;
 use crate::ssh::{BuildSshKey, BuildSshSession, generate_build_ssh_key, private_key_to_openssh};
 
 /// The files a spawn names; [`Files::canonical`] for checkpoint identities.
@@ -289,21 +289,12 @@ impl Vm<'_> {
     fn cold(&self, base: &BaseRootfsArtifact) -> Result<Guest> {
         let started = Instant::now();
         let raw = self.work.join("root.raw");
-        prepare_scenario_disk(&ScenarioDiskPlan {
-            base_ext4_path: base.base_ext4_path.clone(),
-            root_disk_path: raw.clone(),
-            virtual_size_bytes: self.plan.disk_bytes,
-            commands: vec![
-                ScenarioDiskCommand {
-                    program: self.config.e2fsck_binary.clone(),
-                    args: vec!["-fy".to_owned(), raw.display().to_string()],
-                },
-                ScenarioDiskCommand {
-                    program: self.config.resize2fs_binary.clone(),
-                    args: vec![raw.display().to_string()],
-                },
-            ],
-        })?;
+        prepare_scenario_disk(&render_scenario_disk_plan(
+            &base.base_ext4_path,
+            &raw,
+            self.plan.disk_bytes,
+            self.config,
+        ))?;
         let key = generate_build_ssh_key()?;
         write_build_seed(&BuildSeedInput {
             path: &self.files.seed,
@@ -601,8 +592,7 @@ rm -f {UPLOAD_PATH}
         let outcome =
             match writer.publish_moving(&snapshot, &memory, &self.files.seed, index, metadata) {
                 Ok(CheckpointPublish::Stored(lease)) => {
-                    drop(lease);
-                    "stored".to_owned()
+                    format!("stored bytes={}", lease.entry.stored_bytes)
                 }
                 Ok(CheckpointPublish::Skipped) => "skipped".to_owned(),
                 Ok(CheckpointPublish::RetentionUncertain) => "retention_uncertain".to_owned(),

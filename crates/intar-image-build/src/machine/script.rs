@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use intar_contracts::guest::GUEST_USERNAME;
 
-use crate::direct::layered::shell_quote;
+use super::host::shell_quote;
 use crate::platform::BUILD_BOOTSTRAP_FILES;
 
 /// tmpfs: scripts never reach the image's disk.

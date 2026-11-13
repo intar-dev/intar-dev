@@ -1,12 +1,12 @@
 //! Developer tool for the image format 3 build (Linux/KVM):
 //!
 //! ```text
-//! build_machine build <repo dir | bundle.json.gz> <base | image:NAME | SCENARIO/MACHINE> <out dir> [config.hcl] [sha256:KEY]
+//! build_machine build <bundle.json.gz> <base | image:NAME | SCENARIO/MACHINE> <out dir> [qemu.json] [sha256:KEY]
 //! build_machine verify <out dir> <sha256:MANIFEST>
 //! build_machine reconstruct <out dir> <sha256:MANIFEST> <disk.raw>
 //! ```
 //!
-//! `config.hcl` is the builder's `BuildConfig` (a `qemu { … }` block).
+//! `qemu.json` is a `QemuBuildConfig`; make the bundle with `intar-image-cli bundle`.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -15,8 +15,8 @@ use anyhow::{Context as _, Result, bail};
 use intar_contracts::oci::OciDigest;
 use intar_contracts::source::SourceBundleV2;
 use intar_image_build::{
-    BuildConfig, BuildTarget, MachineBuildRequest, build_machine_image, reconstruct_machine_disk,
-    verify_machine_image,
+    BuildTarget, MachineBuildRequest, QemuBuildConfig, build_machine_image,
+    reconstruct_machine_disk, verify_machine_image,
 };
 
 fn main() -> Result<()> {
@@ -25,8 +25,8 @@ fn main() -> Result<()> {
     match args.as_slice() {
         ["build", source, target, out, rest @ ..] => {
             let config = match rest.first() {
-                Some(path) => BuildConfig::from_file(Path::new(path))?.qemu,
-                None => BuildConfig::default().qemu,
+                Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
+                None => QemuBuildConfig::default(),
             };
             let expected_key = rest.get(1).map(|key| digest(key)).transpose()?;
             let output = build_machine_image(&MachineBuildRequest {
@@ -95,13 +95,8 @@ fn target_of(text: &str) -> Result<BuildTarget> {
     })
 }
 
-/// A repository is compiled; a file is a gzipped bundle.
+/// A gzipped bundle, as `intar-image-cli bundle` writes it.
 fn bundle(source: &Path) -> Result<SourceBundleV2> {
-    if source.is_dir() {
-        return intar_image_scenario::loader::compile(source)
-            .map(|(bundle, _)| bundle)
-            .map_err(|problems| anyhow::anyhow!("{problems:?}"));
-    }
     let mut json = Vec::new();
     flate2::read::GzDecoder::new(std::fs::File::open(source)?).read_to_end(&mut json)?;
     serde_json::from_slice(&json).context("not a v2 bundle")

@@ -1,6 +1,212 @@
-use super::*;
+#![allow(clippy::unwrap_used)]
 
-#[cfg(unix)]
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use tempfile::{TempDir, tempdir};
+
+use super::{
+    DirectQemuShutdownInput, QEMU_EXIT_POLL_INTERVAL, QMP_IO_TIMEOUT, QMP_READ_POLL_INTERVAL,
+    SSH_POLL_INTERVAL, acknowledged_qmp_shutdown, acknowledged_qmp_shutdown_with_cancel,
+    connect_qmp_socket,
+};
+use crate::config::QemuBuildConfig;
+
+/// The paths and timeout of a build VM's powerdown.
+struct Rendered {
+    paths: Paths,
+    config: QemuBuildConfig,
+}
+
+struct Paths {
+    work_root: PathBuf,
+    qmp_socket_path: PathBuf,
+    serial_log_path: PathBuf,
+    build_log_path: PathBuf,
+}
+
+fn render_test_direct_build(directory: &TempDir, config: QemuBuildConfig) -> Rendered {
+    render_test_direct_build_in_work_root(directory, config, directory.path().join(".work"))
+}
+
+fn render_test_direct_build_in_work_root(
+    _directory: &TempDir,
+    config: QemuBuildConfig,
+    work_root: PathBuf,
+) -> Rendered {
+    std::fs::create_dir_all(&work_root).unwrap();
+    Rendered {
+        paths: Paths {
+            qmp_socket_path: work_root.join("qmp.sock"),
+            serial_log_path: work_root.join("serial.log"),
+            build_log_path: work_root.join("build.log"),
+            work_root,
+        },
+        config,
+    }
+}
+
+fn wait_for_qemu_shutdown(qemu: &mut Child, rendered: &Rendered) -> Result<()> {
+    acknowledged_qmp_shutdown(
+        qemu,
+        &DirectQemuShutdownInput {
+            qmp_socket_path: &rendered.paths.qmp_socket_path,
+            serial_log_path: &rendered.paths.serial_log_path,
+            build_log_path: &rendered.paths.build_log_path,
+            timeout_seconds: rendered.config.qemu_exit_timeout_seconds,
+        },
+    )
+}
+
+#[test]
+fn ssh_readiness_poll_does_not_hammer_guest_limits() {
+    assert_eq!(SSH_POLL_INTERVAL, std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn qemu_exit_poll_is_independent_from_ssh_readiness_backoff() {
+    assert_eq!(QEMU_EXIT_POLL_INTERVAL, Duration::from_millis(100));
+    assert!(QEMU_EXIT_POLL_INTERVAL < SSH_POLL_INTERVAL);
+}
+
+#[test]
+fn cancellation_kills_and_reaps_qemu_before_returning() {
+    let directory = tempdir().unwrap();
+    let mut qemu = Command::new("sh")
+        .args(["-c", "sleep 60"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let error = acknowledged_qmp_shutdown_with_cancel(
+        &mut qemu,
+        &DirectQemuShutdownInput {
+            qmp_socket_path: &directory.path().join("missing-qmp.sock"),
+            serial_log_path: &directory.path().join("serial.log"),
+            build_log_path: &directory.path().join("build.log"),
+            timeout_seconds: 300,
+        },
+        || true,
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("shutdown cancelled"));
+    assert!(qemu.try_wait().unwrap().is_some());
+}
+
+fn write_qmp_message(stream: &mut UnixStream, message: &serde_json::Value) {
+    serde_json::to_writer(&mut *stream, message).unwrap();
+    stream.write_all(b"\n").unwrap();
+    stream.flush().unwrap();
+}
+
+fn read_qmp_command(reader: &mut BufReader<UnixStream>, expected: &str) -> String {
+    let mut command = String::new();
+    reader.read_line(&mut command).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&command).unwrap(),
+        serde_json::json!({ "execute": expected, "id": expected })
+    );
+    command
+}
+
+fn write_qmp_success(stream: &mut UnixStream, command: &str) {
+    write_qmp_message(stream, &serde_json::json!({ "return": {}, "id": command }));
+}
+
+fn write_guest_shutdown_event(stream: &mut UnixStream) {
+    write_qmp_message(
+        stream,
+        &serde_json::json!({
+            "event": "SHUTDOWN",
+            "data": { "guest": true, "reason": "guest-shutdown" }
+        }),
+    );
+}
+
+fn write_qmp_greeting(stream: &mut UnixStream) {
+    write_qmp_message(
+        stream,
+        &serde_json::json!({
+            "QMP": {
+                "version": {
+                    "qemu": { "major": 9, "minor": 0, "micro": 0 },
+                    "package": ""
+                },
+                "capabilities": []
+            }
+        }),
+    );
+}
+
+fn serve_acknowledged_powerdown(
+    listener: UnixListener,
+    exit_marker: Option<PathBuf>,
+) -> Vec<String> {
+    let (mut stream, _) = listener.accept().unwrap();
+    let reader_stream = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(reader_stream);
+    write_qmp_greeting(&mut stream);
+
+    let commands = vec![read_qmp_command(&mut reader, "qmp_capabilities"), {
+        write_qmp_success(&mut stream, "qmp_capabilities");
+        read_qmp_command(&mut reader, "system_powerdown")
+    }];
+    write_qmp_success(&mut stream, "system_powerdown");
+    write_guest_shutdown_event(&mut stream);
+    if let Some(exit_marker) = exit_marker {
+        std::fs::write(exit_marker, "powerdown").unwrap();
+    }
+    commands
+}
+
+fn run_qmp_flood_case(payload: &'static [u8]) -> (String, Duration, usize) {
+    let directory = tempdir().unwrap();
+    let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+    let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+    let qmp_server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let reader_stream = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(reader_stream);
+        write_qmp_greeting(&mut stream);
+        read_qmp_command(&mut reader, "qmp_capabilities");
+        let mut writes = 0;
+        loop {
+            if stream
+                .write_all(payload)
+                .and_then(|()| stream.flush())
+                .is_err()
+            {
+                break;
+            }
+            writes += 1;
+            thread::sleep(Duration::from_millis(10));
+        }
+        writes
+    });
+    let mut qemu = Command::new("sh")
+        .args(["-c", "sleep 60"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started_at = Instant::now();
+
+    let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+    let elapsed = started_at.elapsed();
+    let writes = qmp_server.join().unwrap();
+    assert!(qemu.try_wait().unwrap().is_some());
+    (format!("{error:#}"), elapsed, writes)
+}
+
 #[test]
 fn host_qmp_powerdown_accepts_a_clean_bounded_qemu_exit() {
     let directory = tempdir().unwrap();
@@ -41,7 +247,6 @@ fn host_qmp_powerdown_accepts_a_clean_bounded_qemu_exit() {
     assert!(qemu.try_wait().unwrap().unwrap().success());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_qmp_powerdown_connects_beneath_an_overlong_work_path() {
     let directory = tempdir().unwrap();
@@ -101,7 +306,6 @@ fn host_qmp_powerdown_connects_beneath_an_overlong_work_path() {
     assert!(qemu.try_wait().unwrap().unwrap().success());
 }
 
-#[cfg(unix)]
 #[test]
 fn qmp_client_resolves_a_relative_socket_before_creating_its_alias() {
     let relative_directory = tempfile::Builder::new()
@@ -120,7 +324,6 @@ fn qmp_client_resolves_a_relative_socket_before_creating_its_alias() {
     drop(server);
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_fails_closed_when_qmp_is_unavailable() {
     let directory = tempdir().unwrap();
@@ -144,7 +347,6 @@ fn host_poweroff_fails_closed_when_qmp_is_unavailable() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_rejects_clean_qemu_exit_before_acknowledgement() {
     let directory = tempdir().unwrap();
@@ -166,7 +368,6 @@ fn host_poweroff_rejects_clean_qemu_exit_before_acknowledgement() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_fails_closed_when_qmp_returns_an_error() {
     let directory = tempdir().unwrap();
@@ -208,7 +409,6 @@ fn host_poweroff_fails_closed_when_qmp_returns_an_error() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_requires_a_system_powerdown_acknowledgement() {
     let directory = tempdir().unwrap();
@@ -249,7 +449,6 @@ fn host_poweroff_requires_a_system_powerdown_acknowledgement() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_requires_a_guest_shutdown_event_after_acknowledgement() {
     let directory = tempdir().unwrap();
@@ -292,7 +491,6 @@ fn host_poweroff_requires_a_guest_shutdown_event_after_acknowledgement() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_rejects_a_non_guest_shutdown_event() {
     let directory = tempdir().unwrap();
@@ -336,7 +534,6 @@ fn host_poweroff_rejects_a_non_guest_shutdown_event() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_rejects_shutdown_buffered_before_system_powerdown_ack() {
     let directory = tempdir().unwrap();
@@ -375,7 +572,6 @@ fn host_poweroff_rejects_shutdown_buffered_before_system_powerdown_ack() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_ignores_unrelated_events_after_acknowledgement() {
     let directory = tempdir().unwrap();
@@ -424,7 +620,6 @@ fn host_poweroff_ignores_unrelated_events_after_acknowledgement() {
     assert!(qemu.try_wait().unwrap().unwrap().success());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_preserves_qmp_lines_fragmented_across_read_polls() {
     let directory = tempdir().unwrap();
@@ -475,7 +670,6 @@ fn host_poweroff_preserves_qmp_lines_fragmented_across_read_polls() {
     assert!(qemu.try_wait().unwrap().unwrap().success());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_fails_when_qmp_closes_after_powerdown_ack() {
     let directory = tempdir().unwrap();
@@ -511,7 +705,6 @@ fn host_poweroff_fails_when_qmp_closes_after_powerdown_ack() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_rejects_a_mismatched_qmp_response_id() {
     let directory = tempdir().unwrap();
@@ -546,7 +739,6 @@ fn host_poweroff_rejects_a_mismatched_qmp_response_id() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_fails_closed_when_qmp_closes_without_acknowledging() {
     let directory = tempdir().unwrap();
@@ -579,7 +771,6 @@ fn host_poweroff_fails_closed_when_qmp_closes_without_acknowledging() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_fails_closed_when_qmp_reply_is_malformed() {
     let directory = tempdir().unwrap();
@@ -615,7 +806,6 @@ fn host_poweroff_fails_closed_when_qmp_reply_is_malformed() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_fails_closed_when_qmp_never_acknowledges() {
     let directory = tempdir().unwrap();
@@ -664,7 +854,6 @@ fn host_poweroff_fails_closed_when_qmp_never_acknowledges() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_has_an_absolute_deadline_during_qmp_floods() {
     for payload in [
@@ -681,7 +870,6 @@ fn host_poweroff_has_an_absolute_deadline_during_qmp_floods() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_fails_closed_when_acknowledged_qemu_stays_alive() {
     let directory = tempdir().unwrap();
@@ -716,7 +904,6 @@ fn host_poweroff_fails_closed_when_acknowledged_qemu_stays_alive() {
     assert!(qemu.try_wait().unwrap().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn host_poweroff_rejects_nonzero_qemu_exit_after_acknowledgement() {
     let directory = tempdir().unwrap();

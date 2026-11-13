@@ -26,10 +26,9 @@ pub struct ScenarioDiskPlan {
 pub fn render_scenario_disk_plan(
     base_ext4_path: &Path,
     root_disk_path: &Path,
-    disk_gib: u32,
+    virtual_size_bytes: u64,
     config: &QemuBuildConfig,
 ) -> ScenarioDiskPlan {
-    let virtual_size_bytes = u64::from(disk_gib) * 1024 * 1024 * 1024;
     ScenarioDiskPlan {
         base_ext4_path: base_ext4_path.to_path_buf(),
         root_disk_path: root_disk_path.to_path_buf(),
@@ -143,7 +142,7 @@ mod tests {
         let plan = render_scenario_disk_plan(
             Path::new("/cache/base.ext4"),
             Path::new("/work/root.raw"),
-            6,
+            6 * 1024 * 1024 * 1024,
             &config,
         );
 

@@ -1,14 +1,16 @@
 //! Machine and repository-image builds of image format 3 from a
-//! `SourceBundleV2` (#311 §6): plan, build VM, OCI output. Beside the old
-//! `direct` path, which the builder still uses.
+//! `SourceBundleV2` (#311 §6): plan, build VM, OCI output.
 
+mod host;
 mod output;
-mod plan;
+pub(crate) mod plan;
+mod qmp;
 mod script;
+mod shutdown;
 mod vm;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Result, ensure};
@@ -48,6 +50,13 @@ pub struct MachineBuildOutput {
     pub output_seconds: f64,
 }
 
+/// The build log of `build_key` under `work_root`; the serial console goes
+/// beside it as `<log>.serial.log`.
+#[must_use]
+pub fn machine_build_log_path(work_root: &Path, build_key: &OciDigest) -> PathBuf {
+    work_root.join(format!("machine-{}.build.log", build_key.hex()))
+}
+
 /// Plan, build and write one image.
 ///
 /// # Errors
@@ -67,7 +76,7 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
     let base_seconds = started.elapsed().as_secs_f64();
     let work_root = &request.config.work_root;
     fs::create_dir_all(work_root)?;
-    let log_path = work_root.join(format!("machine-{}.build.log", plan.build_key.hex()));
+    let log_path = machine_build_log_path(work_root, &plan.build_key);
     let work = tempfile::Builder::new()
         .prefix("machine-")
         .tempdir_in(work_root)?;

@@ -4,7 +4,6 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 
 pub const INTAR_BUILD_SEED_LABEL: [u8; 11] = *b"INTARBUILD ";
-pub const INTAR_BUILD_SEED_LABEL_TEXT: &str = "INTARBUILD";
 pub const BUILD_ENV_FILENAME: &str = "build.env";
 pub const AUTHORIZED_KEYS_FILENAME: &str = "authorized_keys";
 
@@ -109,7 +108,7 @@ mod tests {
             .open(&seed_path)
             .unwrap();
         let fs = fatfs::FileSystem::new(image, fatfs::FsOptions::new()).unwrap();
-        assert_eq!(fs.volume_label(), INTAR_BUILD_SEED_LABEL_TEXT);
+        assert_eq!(fs.volume_label(), "INTARBUILD");
 
         let root = fs.root_dir();
         let mut build_env = String::new();

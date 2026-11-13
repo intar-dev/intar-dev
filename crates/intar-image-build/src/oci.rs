@@ -9,17 +9,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use fs2::FileExt as _;
-use intar_image_scenario::BaseImageSpec;
 use serde::{Deserialize, Serialize};
 use tar::Archive;
 
-use crate::artifact::sha256_file_hex;
 use crate::config::QemuBuildConfig;
-use crate::content_hash::sha256_bytes_hex;
 use crate::rootfs::{
-    BASE_EXT4_LABEL, BaseRootfsArtifact, BaseRootfsLease, RootfsBuildPlan,
+    BASE_EXT4_LABEL, BaseImageSpec, BaseRootfsArtifact, BaseRootfsLease, RootfsBuildPlan,
     base_rootfs_artifact_from_plan, create_base_ext4, install_kernel_boot_artifacts,
 };
+use crate::sha256::sha256_bytes_hex;
+use crate::sha256::sha256_file_hex;
 
 const OCI_BASE_CACHE_ABI: &str = "intar-oci-base-v3";
 const OCI_IMAGE_NAME: &str = "intar-base:latest";
@@ -1016,7 +1015,7 @@ fn cached_base_rootfs_artifact(
         kernel_path: directory.join(KERNEL_FILE),
         initrd_path: directory.join(INITRD_FILE),
         definition_hash: plan.definition_hash.clone(),
-        lease: Arc::new(BaseRootfsLease::Cache { _lock: lease }),
+        _lease: Arc::new(BaseRootfsLease::Cache { _lock: lease }),
     })
 }
 
@@ -1385,7 +1384,6 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
-    use intar_image_scenario::BaseImageCatalog;
     use tar::{Archive, Builder, EntryType, Header};
 
     use super::{
@@ -1399,23 +1397,8 @@ mod tests {
         write_artifact_record, write_oci_build_context, write_oci_neutral_host_files,
     };
     use crate::config::QemuBuildConfig;
-    use crate::content_hash::sha256_bytes_hex;
-    use crate::rootfs::render_rootfs_build_plan;
-
-    fn base_image() -> intar_image_scenario::BaseImageSpec {
-        let catalog = BaseImageCatalog::parse(
-            r#"
-base_image "trixie" {
-  suite          = "trixie"
-  mirror         = "https://deb.debian.org/debian"
-  arch           = "amd64"
-  packages       = ["acpid", "openssh-server", "ca-certificates", "curl", "iproute2", "e2fsprogs", "kmod", "systemd-sysv", "udev", "sudo"]
-}
-"#,
-        )
-        .unwrap();
-        catalog.base_image_by_name("trixie").unwrap().clone()
-    }
+    use crate::platform::{platform_base_spec, render_platform_rootfs_plan};
+    use crate::sha256::sha256_bytes_hex;
 
     fn layered_config(root: &std::path::Path) -> QemuBuildConfig {
         let mut config = QemuBuildConfig {
@@ -1432,7 +1415,7 @@ base_image "trixie" {
     #[test]
     fn dockerfile_uses_a_pinned_debian_base_and_current_bootstrap_contract() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
+        let base = platform_base_spec();
         let dockerfile = render_oci_dockerfile(&base, &layered_config(root.path())).unwrap();
 
         assert!(!dockerfile.starts_with("# syntax="));
@@ -1536,9 +1519,9 @@ base_image "trixie" {
         let root = tempfile::tempdir().unwrap();
         let context = root.path().join("context");
         fs::create_dir_all(&context).unwrap();
-        let base = base_image();
+        let base = platform_base_spec();
         let config = layered_config(root.path());
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let bytes =
             b"-----BEGIN CERTIFICATE-----\npublic test certificate\n-----END CERTIFICATE-----\n"
                 .to_vec();
@@ -1570,7 +1553,7 @@ base_image "trixie" {
     #[test]
     fn layered_definition_hash_covers_the_pinned_base_and_generated_hooks() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
+        let base = platform_base_spec();
         let config = layered_config(root.path());
         let original = layered_definition_hash(&base, "essential", "customize", &config);
 
@@ -1600,9 +1583,9 @@ base_image "trixie" {
     #[test]
     fn buildctl_plan_exports_an_oci_archive_through_the_isolated_builder_socket() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
+        let base = platform_base_spec();
         let config = layered_config(root.path());
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let artifact_parent = plan.paths.base_ext4_path.parent().unwrap();
         let staging = staged_paths(&plan, artifact_parent, "base").unwrap();
 
@@ -1777,9 +1760,8 @@ base_image "trixie" {
     #[test]
     fn converted_artifact_is_verified_before_reuse() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
         let config = layered_config(root.path());
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let source = root.path().join("converted");
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join(ROOTFS_FILE), b"rootfs").unwrap();
@@ -1845,9 +1827,8 @@ base_image "trixie" {
     #[test]
     fn active_base_lease_prevents_converted_cache_eviction() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
         let config = layered_config(root.path());
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let cache_root = config.layered.oci_cache_root.clone().unwrap();
         let manifest = format!("sha256:{}", "a".repeat(64));
         let root_hash = sha256_bytes_hex(b"rootfs");
@@ -1886,9 +1867,8 @@ base_image "trixie" {
     #[test]
     fn private_base_artifact_stays_alive_until_its_lease_is_dropped() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
         let config = layered_config(root.path());
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let private_dir = private_artifact_directory(&config).unwrap();
         let staging = staged_paths(&plan, private_dir.path(), "base").unwrap();
         fs::create_dir_all(&staging.artifact_dir).unwrap();
@@ -1920,7 +1900,7 @@ base_image "trixie" {
 
         let artifact = finalize_private_staging(&staging, &record, private_dir).unwrap();
         let artifact_path = artifact.base_ext4_path.clone();
-        let lease = artifact.lease.clone();
+        let lease = artifact._lease.clone();
         assert_ne!(artifact_path, plan.paths.base_ext4_path);
         drop(artifact);
         assert!(artifact_path.is_file());
@@ -1938,10 +1918,10 @@ base_image "trixie" {
     #[test]
     fn the_dockerfile_writes_the_artifacts_where_the_installer_reads_them() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
+        let base = platform_base_spec();
         let config = layered_config(root.path());
         let dockerfile = render_oci_dockerfile(&base, &config).unwrap();
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let artifact_parent = plan.paths.base_ext4_path.parent().unwrap();
         let staging = staged_paths(&plan, artifact_parent, "base").unwrap();
         let rootfs = &staging.rootfs_plan.paths.rootfs_dir;
