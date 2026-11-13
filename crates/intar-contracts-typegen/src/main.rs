@@ -28,6 +28,10 @@ use intar_contracts::{
         AGENT_SOURCES_PATH, SOURCE_BUNDLE_FIELD, SOURCE_BUNDLES_PATH, SOURCE_COMPILER_PATH,
         SOURCE_COMPILER_VERSION, SOURCE_META_FIELD, SourceRefusalV1, platform_compile_digest,
     },
+    source::{
+        MAX_SOURCE_BUNDLE_GZIP_BYTES, SOURCE_COMPILER_VERSION_V2, SourceBundleMetaV2,
+        SourceBundleV2, source_compile_digest,
+    },
     stargate::{
         ActivateTerminalTargetRequest, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
         IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse, RunMirrorRequest,
@@ -147,6 +151,14 @@ fn main() -> Result<()> {
     write_schema(
         &schema_dir.join("source-refusal-v1.schema.json"),
         &schema_for!(SourceRefusalV1),
+    )?;
+    write_schema(
+        &schema_dir.join("source-bundle-v2.schema.json"),
+        &schema_for!(SourceBundleV2),
+    )?;
+    write_schema(
+        &schema_dir.join("source-bundle-meta-v2.schema.json"),
+        &schema_for!(SourceBundleMetaV2),
     )?;
     write_schema(
         &schema_dir.join("bridge-build-report-v1.schema.json"),
@@ -302,6 +314,7 @@ fn main() -> Result<()> {
         &fixture_dir.join("run-cli/probe-check-complete-v1.json"),
     )?;
     write_compile_digest_fixture(&fixture_dir.join("source/compile-digest.json"))?;
+    write_compile_digest_v2_fixture(&fixture_dir.join("source/compile-digest-v2.json"))?;
 
     Ok(())
 }
@@ -317,6 +330,18 @@ fn write_compile_digest_fixture(path: &Path) -> Result<()> {
         "compiler_version": compiler_version,
         "base_images_sha256": base_images_sha256,
         "digest": platform_compile_digest(format_version, compiler_version, base_images_sha256),
+    });
+    let body = serde_json::to_string_pretty(&fixture).context("serialize compile digest")?;
+    fs::write(path, format!("{body}\n")).with_context(|| format!("write {}", path.display()))
+}
+
+/// The same for the v2 compiler, whose digest has no base-images input.
+fn write_compile_digest_v2_fixture(path: &Path) -> Result<()> {
+    let image_format = intar_contracts::oci::IMAGE_FORMAT;
+    let fixture = serde_json::json!({
+        "image_format": image_format,
+        "compiler_version": SOURCE_COMPILER_VERSION_V2,
+        "digest": source_compile_digest(image_format, SOURCE_COMPILER_VERSION_V2),
     });
     let body = serde_json::to_string_pretty(&fixture).context("serialize compile digest")?;
     fs::write(path, format!("{body}\n")).with_context(|| format!("write {}", path.display()))
@@ -355,6 +380,8 @@ export const HOST_STATE_REPORT_SCHEMA_VERSION = {};
 export const BUILD_REPORT_SCHEMA_VERSION = {};
 export const VM_REPORT_SCHEMA_VERSION = {};
 export const SOURCE_COMPILER_VERSION = "{}";
+export const SOURCE_COMPILER_VERSION_V2 = "{}";
+export const MAX_SOURCE_BUNDLE_GZIP_BYTES = {};
 export const SOURCE_BUNDLES_PATH = "{}";
 export const SOURCE_COMPILER_PATH = "{}";
 /**
@@ -414,6 +441,8 @@ export const runtimeEnvKeys = {{
         BUILD_REPORT_SCHEMA_VERSION,
         VM_REPORT_SCHEMA_VERSION,
         SOURCE_COMPILER_VERSION,
+        SOURCE_COMPILER_VERSION_V2,
+        MAX_SOURCE_BUNDLE_GZIP_BYTES,
         SOURCE_BUNDLES_PATH,
         SOURCE_COMPILER_PATH,
         AGENT_SOURCES_PATH,

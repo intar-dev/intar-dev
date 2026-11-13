@@ -4,10 +4,14 @@
 //! Nothing here knows HCL. Every script is lowered bash, every markdown
 //! field is inlined text.
 
+mod build_key;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+pub use build_key::{BuildKeys, base_key, build_keys, image_keys};
 
 /// The platform base image every chain starts from.
 pub const PLATFORM_BASE_IMAGE: &str = "trixie";
@@ -344,6 +348,17 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
         problem(format!("task `{id}`: its needs form a cycle"));
     }
 
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+/// The image rules alone, for a repository that may have no scenario.
+pub fn validate_images(images: &[ImageV1]) -> Result<(), Vec<String>> {
+    let mut problems = Vec::new();
+    image_geometry(images, &mut |text| problems.push(text));
     if problems.is_empty() {
         Ok(())
     } else {

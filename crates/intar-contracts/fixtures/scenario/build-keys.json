@@ -1,0 +1,583 @@
+{
+  "image_format": "intar-image-3",
+  "base_key": "sha256:f1319f7978890f9abb1cb2724a789509f747d06e12d47c4fec99a1d275b29a45",
+  "cases": [
+    {
+      "name": "setup-on-trixie",
+      "scenario": "broken-nginx",
+      "images": [],
+      "machines": [
+        {
+          "name": "web",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "MODE": "lab"
+          },
+          "setup": [
+            {
+              "name": "packages",
+              "script": "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends 'nginx'\n"
+            },
+            {
+              "name": "break-nginx",
+              "script": "systemctl disable nginx\nrm /etc/nginx/sites-enabled/default\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "web": "sha256:349a64f9fbfec841b21cd0593c018b055e3a325431a95a1688734ec8cbc82535"
+        }
+      }
+    },
+    {
+      "name": "same-machine-other-scenario",
+      "scenario": "other-scenario",
+      "images": [],
+      "machines": [
+        {
+          "name": "web",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "MODE": "lab"
+          },
+          "setup": [
+            {
+              "name": "packages",
+              "script": "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends 'nginx'\n"
+            },
+            {
+              "name": "break-nginx",
+              "script": "systemctl disable nginx\nrm /etc/nginx/sites-enabled/default\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "web": "sha256:349a64f9fbfec841b21cd0593c018b055e3a325431a95a1688734ec8cbc82535"
+        }
+      }
+    },
+    {
+      "name": "egress-flipped",
+      "scenario": "broken-nginx",
+      "images": [],
+      "machines": [
+        {
+          "name": "web",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": true,
+          "env": {
+            "MODE": "lab"
+          },
+          "setup": [
+            {
+              "name": "packages",
+              "script": "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends 'nginx'\n"
+            },
+            {
+              "name": "break-nginx",
+              "script": "systemctl disable nginx\nrm /etc/nginx/sites-enabled/default\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "web": "sha256:349a64f9fbfec841b21cd0593c018b055e3a325431a95a1688734ec8cbc82535"
+        }
+      }
+    },
+    {
+      "name": "env-changed",
+      "scenario": "broken-nginx",
+      "images": [],
+      "machines": [
+        {
+          "name": "web",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "MODE": "exam"
+          },
+          "setup": [
+            {
+              "name": "packages",
+              "script": "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends 'nginx'\n"
+            },
+            {
+              "name": "break-nginx",
+              "script": "systemctl disable nginx\nrm /etc/nginx/sites-enabled/default\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "web": "sha256:347f442db0ed595b3d72b9ba6cd4604d1755adabf3592de0bf1064e8dc307b57"
+        }
+      }
+    },
+    {
+      "name": "defer-changed",
+      "scenario": "broken-nginx",
+      "images": [],
+      "machines": [
+        {
+          "name": "web",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [
+            "nginx.service"
+          ],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "MODE": "lab"
+          },
+          "setup": [
+            {
+              "name": "packages",
+              "script": "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends 'nginx'\n"
+            },
+            {
+              "name": "break-nginx",
+              "script": "systemctl disable nginx\nrm /etc/nginx/sites-enabled/default\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "web": "sha256:180054fbc38563f617d207c9399c17e4f10eced8c8232c33b1e7852ccddc8586"
+        }
+      }
+    },
+    {
+      "name": "defer-reordered",
+      "scenario": "broken-nginx",
+      "images": [],
+      "machines": [
+        {
+          "name": "web",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [
+            "b.service",
+            "a.service",
+            "a.service"
+          ],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "MODE": "lab"
+          },
+          "setup": [
+            {
+              "name": "packages",
+              "script": "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends 'nginx'\n"
+            },
+            {
+              "name": "break-nginx",
+              "script": "systemctl disable nginx\nrm /etc/nginx/sites-enabled/default\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "web": "sha256:6ad5b571554cde29512ea95b853ee8298ba9aa89a31a0bb58b00ebfdbeb8a888"
+        }
+      }
+    },
+    {
+      "name": "defer-sorted",
+      "scenario": "broken-nginx",
+      "images": [],
+      "machines": [
+        {
+          "name": "web",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [
+            "a.service",
+            "b.service"
+          ],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "MODE": "lab"
+          },
+          "setup": [
+            {
+              "name": "packages",
+              "script": "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends 'nginx'\n"
+            },
+            {
+              "name": "break-nginx",
+              "script": "systemctl disable nginx\nrm /etc/nginx/sites-enabled/default\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "web": "sha256:6ad5b571554cde29512ea95b853ee8298ba9aa89a31a0bb58b00ebfdbeb8a888"
+        }
+      }
+    },
+    {
+      "name": "split-a",
+      "scenario": "broken-nginx",
+      "images": [],
+      "machines": [
+        {
+          "name": "web",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {},
+          "setup": [
+            {
+              "name": "one",
+              "script": "echo 1\n"
+            },
+            {
+              "name": "two",
+              "script": "echo 2\necho 3\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "web": "sha256:0c0194413650e70bb5f095b8cc4966a144b8b4cb4420dea6e53a88adbe29a4b9"
+        }
+      }
+    },
+    {
+      "name": "split-b",
+      "scenario": "broken-nginx",
+      "images": [],
+      "machines": [
+        {
+          "name": "web",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {},
+          "setup": [
+            {
+              "name": "one",
+              "script": "echo 1\necho 2\n"
+            },
+            {
+              "name": "two",
+              "script": "echo 3\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "web": "sha256:a669ab3c4abf6856c75791124c2d38d6af96f90c078ba4a203f8be9a0eb95481"
+        }
+      }
+    },
+    {
+      "name": "zero-setup-on-trixie",
+      "scenario": "plain-box",
+      "images": [],
+      "machines": [
+        {
+          "name": "box",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "A": "1"
+          },
+          "setup": [],
+          "ready": []
+        },
+        {
+          "name": "held",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [
+            "x.service"
+          ],
+          "terminal": true,
+          "egress": false,
+          "env": {},
+          "setup": [],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "box": "sha256:f1319f7978890f9abb1cb2724a789509f747d06e12d47c4fec99a1d275b29a45",
+          "held": "sha256:60d470f402c20b6527043783b34909f3574e8f4c51cfe75cc010d18f6e4485a7"
+        }
+      }
+    },
+    {
+      "name": "image-chain",
+      "scenario": "klustered-01",
+      "images": [
+        {
+          "name": "k3s",
+          "from": "trixie",
+          "disk_mib": 8192,
+          "defer": [
+            "k3s.service"
+          ],
+          "setup": [
+            {
+              "name": "install-k3s",
+              "script": "curl -sfL https://get.k3s.io | sh -\n"
+            }
+          ]
+        },
+        {
+          "name": "klustered",
+          "from": "k3s",
+          "defer": [],
+          "setup": [
+            {
+              "name": "preload",
+              "script": "k3s ctr images import /tmp/app.tar\n"
+            }
+          ]
+        }
+      ],
+      "machines": [
+        {
+          "name": "control-plane",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 8192,
+          "from": "klustered",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "KUBECONFIG": "/etc/rancher/k3s/k3s.yaml"
+          },
+          "setup": [
+            {
+              "name": "seed-v1",
+              "script": "printf '%s' 'kind: List' | kubectl apply -f -\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {
+          "k3s": "sha256:03000b88abfe4a9a9025da57f66bebcb3eea0e177e570828352fd5c76886e3a5",
+          "klustered": "sha256:8047318e29ab867ed16e084942db23ed312cc3508588f55ed5c34628e26b0d14"
+        },
+        "machines": {
+          "control-plane": "sha256:fbc0e7c92930b48efb48b31e5a9578131f46fa4cc06806440ba131b430d8a326"
+        }
+      }
+    },
+    {
+      "name": "zero-setup-on-image",
+      "scenario": "klustered-02",
+      "images": [
+        {
+          "name": "k3s",
+          "from": "trixie",
+          "disk_mib": 8192,
+          "defer": [
+            "k3s.service"
+          ],
+          "setup": [
+            {
+              "name": "install-k3s",
+              "script": "curl -sfL https://get.k3s.io | sh -\n"
+            }
+          ]
+        },
+        {
+          "name": "klustered",
+          "from": "k3s",
+          "defer": [],
+          "setup": [
+            {
+              "name": "preload",
+              "script": "k3s ctr images import /tmp/app.tar\n"
+            }
+          ]
+        }
+      ],
+      "machines": [
+        {
+          "name": "node",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 8192,
+          "from": "klustered",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "KUBECONFIG": "/etc/rancher/k3s/k3s.yaml"
+          },
+          "setup": [],
+          "ready": []
+        },
+        {
+          "name": "node-other-env",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 8192,
+          "from": "klustered",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {
+            "KUBECONFIG": "/root/k"
+          },
+          "setup": [],
+          "ready": []
+        },
+        {
+          "name": "node-deferred",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 8192,
+          "from": "klustered",
+          "defer": [
+            "k3s.service"
+          ],
+          "terminal": true,
+          "egress": false,
+          "env": {},
+          "setup": [],
+          "ready": []
+        }
+      ],
+      "keys": {
+        "images": {
+          "k3s": "sha256:03000b88abfe4a9a9025da57f66bebcb3eea0e177e570828352fd5c76886e3a5",
+          "klustered": "sha256:8047318e29ab867ed16e084942db23ed312cc3508588f55ed5c34628e26b0d14"
+        },
+        "machines": {
+          "node": "sha256:42c988ebdefcdb7a5b56457f3319a55c463d2f37d06d5d510733b66390379da3",
+          "node-other-env": "sha256:42c988ebdefcdb7a5b56457f3319a55c463d2f37d06d5d510733b66390379da3",
+          "node-deferred": "sha256:5065cfd9002c17b00c813ed3e850869e2acf5e0901018727243391c3ec5a5c27"
+        }
+      }
+    }
+  ],
+  "equal": [
+    [
+      "setup-on-trixie/web",
+      "same-machine-other-scenario/web"
+    ],
+    [
+      "setup-on-trixie/web",
+      "egress-flipped/web"
+    ],
+    [
+      "defer-reordered/web",
+      "defer-sorted/web"
+    ],
+    [
+      "zero-setup-on-image/node",
+      "zero-setup-on-image/node-other-env"
+    ]
+  ],
+  "differ": [
+    [
+      "split-a/web",
+      "split-b/web"
+    ],
+    [
+      "setup-on-trixie/web",
+      "env-changed/web"
+    ],
+    [
+      "setup-on-trixie/web",
+      "defer-changed/web"
+    ],
+    [
+      "zero-setup-on-image/node",
+      "zero-setup-on-image/node-deferred"
+    ],
+    [
+      "zero-setup-on-trixie/box",
+      "zero-setup-on-trixie/held"
+    ],
+    [
+      "image-chain/control-plane",
+      "zero-setup-on-image/node"
+    ]
+  ]
+}

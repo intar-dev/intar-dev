@@ -101,6 +101,12 @@ impl Sha256Hex {
 }
 
 impl OciDigest {
+    /// The digest whose hash is `sha256`.
+    pub fn from_sha256(sha256: &[u8; 32]) -> Self {
+        let hex: String = sha256.iter().map(|byte| format!("{byte:02x}")).collect();
+        Self(format!("sha256:{hex}"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
