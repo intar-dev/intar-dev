@@ -31,9 +31,6 @@ build_archive() {
       exit 1
     fi
   fi
-  if [ "${PACKAGE}" = "intar-image-cli" ]; then
-    cp content/scenarios/base-images.hcl "${workdir}/"
-  fi
   if [ "${PACKAGE}" = "intar-agent" ]; then
     if [ "${arch}" != "amd64" ]; then
       echo "Jailed scenario hosts currently support x86_64 only." >&2

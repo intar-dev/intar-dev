@@ -50,8 +50,9 @@
       "crates/intar-contracts/**",
       "crates/intar-image-build/**",
       "crates/intar-image-scenario/**",
-      "crates/intar-image-upload/**",
-      "content/scenarios/base-images.hcl"
+      "content/scenarios/base-images.hcl",
+      "content/intar.hcl",
+      "content/scenarios/broken-nginx/**"
     ]
   },
   {

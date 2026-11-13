@@ -24,22 +24,6 @@ import (
 	args: list.Concat([["-euo", "pipefail", "-c", _script, "cuenv-task"], _argv])
 }
 
-// ponytail: cuenv 0.56.7 substitutes {{param}} only when the task gets
-// arguments, so a bare `cuenv task render-images` passes the placeholder
-// through. The image tasks treat an unsubstituted value as unset. Drop this
-// when cuenv applies parameter defaults without arguments.
-let _param = """
-	param() { case "$1" in "{{"*) printf '%s' "$2" ;; *) printf '%s' "$1" ;; esac; }
-
-	"""
-
-let _builderConfig = "builder.sample.amd64.hcl"
-
-let _imageParams = {
-	scenario: {description: "One scenario instead of every scenario", default: ""}
-	config: {description: "Builder configuration", default: _builderConfig}
-}
-
 // Runs tasks in order through `cuenv task`, stopping at the first failure.
 // cuenv 0.56.7 evaluates a sequence that references another sequence, such as
 // verify, to null.
@@ -130,70 +114,16 @@ schema.#Project & {
 
 		"build-kino-guest": #Cargo & {args: ["zigbuild", "--profile", "guest", "-p", "kino", "--target", "x86_64-unknown-linux-musl"]}
 
-		"validate-images": #Cargo & {args: ["run", "-p", "intar-image-cli", "--", "validate"]}
-
-		"render-images": #Bash & {
-			params: _imageParams
-			_argv: ["{{scenario}}", "{{config}}"]
-			_script: _param + """
-				scenario="$(param "$1" '')"
-				args=(render)
-				if [[ -n "${scenario}" ]]; then
-				  args+=("${scenario}")
-				fi
-				args+=(--config "$(param "$2" '\(_builderConfig)')")
-				cargo run -p intar-image-cli -- "${args[@]}"
-				"""
-		}
-
-		"build-images": #Bash & {
-			params: _imageParams & {
-				"no-upload": {description: "Build without uploading", default: "false"}
-			}
-			_argv: ["{{scenario}}", "{{config}}", "{{no-upload}}"]
-			_script: _param + """
-				scenario="$(param "$1" '')"
-				if [[ -n "${scenario}" ]]; then
-				  args=(build "${scenario}")
-				else
-				  args=(build-all)
-				fi
-				args+=(--config "$(param "$2" '\(_builderConfig)')")
-				if [[ "$(param "$3" false)" == true ]]; then
-				  args+=(--no-upload)
-				fi
-				cargo run -p intar-image-cli -- "${args[@]}"
-				"""
-		}
-
-		"bundle-images": #Bash & {
-			params: _imageParams & {
-				rev: {description: "Source revision recorded in the bundle", default: ""}
-				url: {description: "Source URL recorded in the bundle", default: ""}
-				"no-upload": {description: "Bundle without uploading", default: "false"}
-			}
-			_argv: ["{{scenario}}", "{{config}}", "{{rev}}", "{{url}}", "{{no-upload}}"]
-			_script: _param + """
-				scenario="$(param "$1" '')"
-				rev="$(param "$3" '')"
-				url="$(param "$4" '')"
-				args=(bundle)
-				if [[ -n "${scenario}" ]]; then
-				  args+=("${scenario}")
-				fi
-				args+=(--config "$(param "$2" '\(_builderConfig)')")
-				if [[ -n "${rev}" ]]; then
-				  args+=(--rev "${rev}")
-				fi
-				if [[ -n "${url}" ]]; then
-				  args+=(--url "${url}")
-				fi
-				if [[ "$(param "$5" false)" == true ]]; then
-				  args+=(--no-upload)
-				fi
-				cargo run -p intar-image-cli -- "${args[@]}"
-				"""
-		}
+		// The in-repository example, staged as a repository of the new format
+		// (tools/image-build/stage-example.sh says why).
+		"validate-images": #Bash & {_script: """
+			repo="$(mktemp -d)"
+			trap 'rm -rf "${repo}"' EXIT
+			bash tools/image-build/stage-example.sh "${repo}"
+			cargo run -q -p intar-image-cli -- validate --root "${repo}"
+			cargo run -q -p intar-image-cli -- fmt --check --root "${repo}"
+			cargo run -q -p intar-image-cli -- spec broken-nginx --verify --root "${repo}" >/dev/null
+			"""}
 
 		// Checks that used to exist only inline in CI.
 		"installer-tests": #Bash & {_script: """

@@ -91,8 +91,6 @@ jobs:
         uses: ./.github/actions/setup-rust
       - name: validate-images
         run: cuenv task validate-images
-      - name: render-images
-        run: cuenv task render-images
   web:
     if: needs.changes.outputs.web == 'true'
     needs: changes

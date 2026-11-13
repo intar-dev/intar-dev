@@ -61,7 +61,8 @@ lanes: {
 			"tools/workflows/release/**",
 			"package.json",
 			"bun.lock",
-			"content/scenarios/base-images.hcl",
+			// The loader and CLI tests and the release smoke read the example.
+			"content/**",
 			"crates/**",
 			"deploy/personal-metal/**",
 			"apps/web/public/install.sh",
@@ -102,7 +103,7 @@ lanes: {
 
 	images: {
 		setup: [gha.#SetupRust]
-		steps: ["validate-images", "render-images"]
+		steps: ["validate-images"]
 		timeout: 30
 		inputs: [
 			"Cargo.toml",
@@ -114,9 +115,7 @@ lanes: {
 			"crates/intar-contracts/**",
 			"crates/intar-contracts-typegen/**",
 			"crates/intar-image-*/**",
-			"content/scenarios/base-images.hcl",
-			"builder.*.hcl",
-			"content/courses/**",
+			"content/**",
 			"apps/web/migrations/**",
 			"apps/web/src/control-plane/auth.ts",
 			"apps/web/src/control-plane/bridge-v8.ts",
