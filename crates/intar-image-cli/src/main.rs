@@ -2,7 +2,6 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use intar_contracts::oci::IMAGE_FORMAT;
 use intar_contracts::source::{SOURCE_COMPILER_VERSION_V2, source_compile_digest};
-use intar_image_build::write_guest_tools_disk;
 use intar_image_scenario::loader::{
     Diagnostic, compile, encode_bundle, format_repository, warnings,
 };
@@ -37,8 +36,6 @@ enum Command {
     Spec(spec_command::SpecCommand),
     /// Compile the repository into a bundle, and upload it with `--url`.
     Bundle(BundleCommand),
-    /// Build the guest tools disk around a Kino binary.
-    BuildGuestTools(BuildGuestToolsCommand),
 }
 
 #[derive(Debug, Args)]
@@ -80,16 +77,6 @@ struct BundleCommand {
     root: PathBuf,
 }
 
-#[derive(Debug, Args)]
-struct BuildGuestToolsCommand {
-    #[arg(long)]
-    kino_binary: PathBuf,
-    #[arg(long, default_value = "dist/guest-tools")]
-    output_root: PathBuf,
-    #[arg(long, default_value = "mke2fs")]
-    mke2fs_binary: PathBuf,
-}
-
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -97,7 +84,6 @@ fn main() -> ExitCode {
         Command::Fmt(args) => fmt_command(&args),
         Command::Spec(args) => spec_command::spec_command(&args),
         Command::Bundle(args) => bundle_command(&args),
-        Command::BuildGuestTools(args) => build_guest_tools_command(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -191,26 +177,6 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
             target.url, receipt.queued, receipt.assigned
         );
     }
-    Ok(())
-}
-
-fn build_guest_tools_command(args: &BuildGuestToolsCommand) -> Result<()> {
-    let artifact =
-        write_guest_tools_disk(&args.kino_binary, &args.output_root, &args.mke2fs_binary)?;
-    println!(
-        "{}",
-        serde_json::to_string(&serde_json::json!({
-            "schema_version": 1,
-            "bootstrap_abi": artifact.manifest.bootstrap_abi,
-            "tools_disk_sha256": artifact.disk_sha256,
-            "tools_disk_size_bytes": artifact.disk_size_bytes,
-            "compressed_disk_sha256": artifact.compressed_disk_sha256,
-            "compressed_disk_size_bytes": artifact.compressed_disk_size_bytes,
-            "compressed_disk_path": artifact.compressed_disk_path,
-            "kino_sha256": artifact.kino_sha256,
-            "kino_size_bytes": artifact.kino_size_bytes,
-        }))?
-    );
     Ok(())
 }
 
