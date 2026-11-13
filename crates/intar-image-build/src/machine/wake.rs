@@ -89,13 +89,17 @@ done
 "#;
 
 /// The suspend, as a transient unit so no SSH session holds it: drop the
-/// page cache, take the random device off the bus, suspend to RAM (the
-/// `\_S3_` table makes that the VMM's exit), and after a wake rescan.
+/// page cache, take the random device and the NIC off the bus, suspend to
+/// RAM (the `\_S3_` table makes that the VMM's exit), and after a wake
+/// rescan. The rescan probes the NIC again, so a woken guest takes its VM's
+/// MAC, not the build's: two woken VMs on one bridge never share one.
 const SUSPEND_SCRIPT: &str = r"echo deep >/sys/power/mem_sleep
 sync
 echo 3 >/proc/sys/vm/drop_caches
 for d in /sys/bus/pci/devices/*; do
-  [ $(cat $d/vendor):$(cat $d/device) = 0x1af4:0x1044 ] && echo 1 >$d/remove
+  case $(cat $d/vendor):$(cat $d/device) in
+  0x1af4:0x1041|0x1af4:0x1044) echo 1 >$d/remove ;;
+  esac
 done
 echo mem >/sys/power/state
 echo 1 >/sys/bus/pci/rescan
