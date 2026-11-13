@@ -415,7 +415,7 @@ pub(super) fn terminal_state_from_vm(
             endpoint.map(|(host, port)| VmTerminalTarget {
                 host,
                 port,
-                username: "ubuntu".to_string(),
+                username: intar_contracts::guest::GUEST_USERNAME.to_owned(),
                 checked_at: observed_at,
             })
         } else {
