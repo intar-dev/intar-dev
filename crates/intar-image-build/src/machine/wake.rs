@@ -24,6 +24,7 @@ use intar_contracts::guest::{
     BOOT_JSON_FILENAME, GUEST_CONTRACT, GUEST_USERNAME, GuestBootV3, GuestNetworkV3, GuestSshV3,
     KINO_FILENAME, RECORDING_DISK_LABEL, REPORT_PORT, RUNTIME_DISK_LABEL,
 };
+use intar_contracts::oci::verify::MAX_WAKE_DELTA_BYTES;
 use intar_contracts::oci::{
     DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE, MachineBootV1,
     MachineConfigV1, OciDigest, Sha256Hex, WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_DELTA_MEDIA_TYPE,
@@ -42,7 +43,9 @@ use super::{MachineBuildRequest, vm};
 use crate::config::{QemuBuildConfig, WakeBuildConfig};
 use crate::rootfs::BaseRootfsArtifact;
 use crate::sha256::sha256_file_hex;
-use crate::ssh::{BuildSshSession, generate_build_ssh_key, private_key_to_openssh};
+use crate::ssh::{
+    BUILD_LOG_LIMIT_BYTES, BuildSshSession, generate_build_ssh_key, private_key_to_openssh,
+};
 use crate::wake::{
     WAKE_BALLOON, WAKE_BOOT_VCPUS, WAKE_MAX_PHYS_BITS, WAKE_MAX_VCPUS, WAKE_MEMORY_BYTES,
     find_wake_vector, parse_bar_table, patch_stub, save_acpi_tables, stub_template, wake_cmdline,
@@ -574,6 +577,11 @@ impl Steps<'_> {
         let stats =
             intar_snapdelta::diff(&base_dir.join("ram"), &ram, &delta, DELTA_LEVEL, threads)
                 .context("diff the pack's RAM")?;
+        ensure!(
+            stats.delta_bytes <= MAX_WAKE_DELTA_BYTES,
+            "the pack's RAM delta is {} bytes, over the {MAX_WAKE_DELTA_BYTES} byte limit",
+            stats.delta_bytes
+        );
         let diffed = started.elapsed();
         let check = dir.join("check");
         intar_snapdelta::apply(&base_dir.join("ram"), &delta, &check, threads)
@@ -616,10 +624,7 @@ impl Steps<'_> {
             profile.digest == base_wake.cpu_profile,
             "the CPU profile is not the base's"
         );
-        let delta_bytes = fs::read(&delta)?;
-        for part in delta_bytes.chunks(DELTA_PART_BYTES) {
-            writer.bytes(part, WAKE_DELTA_MEDIA_TYPE)?;
-        }
+        let parts = write_delta_parts(&mut writer, &delta, MAX_WAKE_DELTA_BYTES)?;
         let config = MachineConfigV1 {
             guest_contract: GUEST_CONTRACT,
             image_format: IMAGE_FORMAT.to_owned(),
@@ -647,7 +652,7 @@ impl Steps<'_> {
             &format!(
                 "pack image manifest={} delta_parts={} quiet={} quiet_ms={} elapsed_ms={}",
                 image.manifest_digest.as_str(),
-                delta_bytes.len().div_ceil(DELTA_PART_BYTES),
+                parts,
                 result.quiet,
                 result.quiet_ms,
                 started.elapsed().as_millis()
@@ -798,6 +803,34 @@ impl Steps<'_> {
     }
 }
 
+/// The delta as [`DELTA_PART_BYTES`] layers, read a part at a time; a delta
+/// over `limit` (what a run host accepts) fails the build.
+fn write_delta_parts(writer: &mut ImageWriter, delta: &Path, limit: u64) -> Result<usize> {
+    let mut file = fs::File::open(delta)?;
+    let size = file.metadata()?.len();
+    ensure!(
+        size <= limit,
+        "the pack's RAM delta is {size} bytes, over the {limit} byte limit"
+    );
+    let mut part = vec![0_u8; DELTA_PART_BYTES];
+    let mut parts = 0;
+    loop {
+        let mut filled = 0;
+        while filled < part.len() {
+            let read = file.read(&mut part[filled..])?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        if filled == 0 {
+            return Ok(parts);
+        }
+        writer.bytes(&part[..filled], WAKE_DELTA_MEDIA_TYPE)?;
+        parts += 1;
+    }
+}
+
 fn write_fat(
     path: &Path,
     bytes: u64,
@@ -871,12 +904,46 @@ pub fn run_wake_child(job: &Path) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(child(&job));
+    let result = runtime.block_on(async {
+        tokio::select! {
+            result = child(&job) => result,
+            error = logs_over_limit(&job) => Err(error),
+        }
+    });
     if let Err(error) = &result {
         let _ = log_line(&job.log, &format!("error: {error:#}"));
     }
     fs::write(&job.result, serde_json::to_vec(&result?)?)?;
     Ok(())
+}
+
+/// The VM's serial, console and VMM logs are capped as the QEMU build's
+/// serial log is: past the limit the run fails, and the VMM goes with it.
+async fn logs_over_limit(job: &ChildJob) -> anyhow::Error {
+    let logs = [
+        PathBuf::from(&job.serial),
+        PathBuf::from(&job.console),
+        Path::new(&job.serial).with_file_name("vmm.log"),
+    ];
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if let Some(error) = logs
+            .iter()
+            .find_map(|log| log_over_limit(log, BUILD_LOG_LIMIT_BYTES))
+        {
+            return error;
+        }
+    }
+}
+
+fn log_over_limit(log: &Path, limit: u64) -> Option<anyhow::Error> {
+    let size = fs::metadata(log).map_or(0, |metadata| metadata.len());
+    (size > limit).then(|| {
+        anyhow::anyhow!(
+            "the wake VM wrote {size} bytes to {}, over the {limit} byte limit",
+            log.display()
+        )
+    })
 }
 
 fn ip(args: &[&str]) -> Result<()> {
@@ -1143,6 +1210,30 @@ async fn quiet(pid: u32) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_delta_is_written_in_parts_and_capped() {
+        let dir = tempfile::tempdir().expect("dir");
+        let delta = dir.path().join("delta");
+        fs::write(&delta, vec![7_u8; DELTA_PART_BYTES + 5]).expect("delta");
+        let mut writer = ImageWriter::new(&dir.path().join("out")).expect("writer");
+        assert_eq!(
+            write_delta_parts(&mut writer, &delta, u64::MAX).expect("parts"),
+            2
+        );
+        let limit = u64::try_from(DELTA_PART_BYTES).expect("size");
+        assert!(write_delta_parts(&mut writer, &delta, limit).is_err());
+    }
+
+    #[test]
+    fn a_log_over_the_limit_fails_the_run() {
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join("serial.log");
+        assert!(log_over_limit(&log, 4).is_none());
+        fs::write(&log, b"12345").expect("log");
+        assert!(log_over_limit(&log, 5).is_none());
+        assert!(log_over_limit(&log, 4).is_some());
+    }
+
     use super::*;
 
     #[test]

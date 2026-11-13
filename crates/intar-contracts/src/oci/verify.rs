@@ -18,7 +18,8 @@ const MAX_WAKE_VCPUS: u32 = 64;
 /// x86-64 guest physical address widths cloud-hypervisor accepts.
 const MIN_WAKE_PHYS_BITS: u8 = 32;
 const MAX_WAKE_PHYS_BITS: u8 = 52;
-const MAX_WAKE_DELTA_BYTES: u64 = 4 * GIB;
+/// The most a pack's delta layers may hold together.
+pub const MAX_WAKE_DELTA_BYTES: u64 = 4 * GIB;
 const MAX_WAKE_STUB_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_WAKE_CPU_PROFILE_BYTES: u64 = 1024 * 1024;
 
