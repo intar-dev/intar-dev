@@ -43,8 +43,9 @@ sharedInputs: [
 
 lanes: {
 	rust: {
-		setup: [gha.#SetupRust]
-		steps: ["installer-tests", "verify", "check-generated-contracts"]
+		// The generated contracts include validators a Bun script emits.
+		setup: [gha.#SetupRust, gha.#SetupRuntime]
+		steps: ["installer-tests", "verify", "install-js", "check-generated-contracts"]
 		timeout: 45
 		inputs: [
 			"Cargo.toml",
@@ -67,6 +68,8 @@ lanes: {
 			"deploy/personal-metal/**",
 			"apps/web/public/install.sh",
 			"apps/web/src/generated/**",
+			"apps/web/scripts/generate-contract-validators.ts",
+			".github/actions/setup-runtime/**",
 		]
 	}
 

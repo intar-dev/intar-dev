@@ -35,10 +35,14 @@ jobs:
         uses: ./.github/actions/setup-cuenv
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
+      - name: Set up the CI runtime
+        uses: ./.github/actions/setup-runtime
       - name: installer-tests
         run: cuenv task installer-tests
       - name: verify
         run: cuenv task verify
+      - name: install-js
+        run: cuenv task install-js
       - name: check-generated-contracts
         run: cuenv task check-generated-contracts
   security:

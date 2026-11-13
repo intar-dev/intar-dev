@@ -104,7 +104,12 @@ schema.#Project & {
 			rust: #Cargo & {args: ["audit", "--deny", "warnings"]}
 		}
 
-		"generate-contracts": #Cargo & {args: ["run", "-p", "intar-contracts-typegen"]}
+		// The Rust contracts' schemas and fixtures, then the Worker's types and
+		// validators generated from those schemas.
+		"generate-contracts": #Bash & {_script: """
+			cargo run -p intar-contracts-typegen
+			bun apps/web/scripts/generate-contract-validators.ts
+			"""}
 		generate: [_t."generate-contracts"]
 		"check-generated-contracts": _checkGenerated
 		// cuenv 0.56.7 evaluates a sequence that references another sequence
