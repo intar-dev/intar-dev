@@ -2443,6 +2443,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "signal-hook 0.4.5",
  "tempfile",
  "thiserror",

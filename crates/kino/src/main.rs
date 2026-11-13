@@ -1,6 +1,7 @@
 mod config;
 mod host_keys;
 mod http;
+mod init;
 mod lab_release;
 mod probe;
 mod proto;
@@ -27,7 +28,7 @@ use std::time::Instant;
 #[command(about = "Probe service and in-VM SSH recorder for ephemeral VM validation")]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Option<CliCommand>,
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 }
@@ -48,10 +49,14 @@ impl From<ShellStartupModeArg> for recording::ShellStartupMode {
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
+enum CliCommand {
+    /// The guest supervisor of guest contract 3.
+    Init,
     RecordSsh {
         #[arg(long, value_name = "PATH")]
-        config: PathBuf,
+        config: Option<PathBuf>,
+        #[command(flatten)]
+        recording: RecordingArgs,
         #[arg(long, value_name = "COMMAND")]
         command: Option<String>,
         #[arg(long, value_enum, default_value_t = ShellStartupModeArg::Login)]
@@ -59,10 +64,37 @@ enum Command {
     },
     RecordCommand {
         #[arg(long, value_name = "PATH")]
-        config: PathBuf,
+        config: Option<PathBuf>,
+        #[command(flatten)]
+        recording: RecordingArgs,
         #[arg(long, value_name = "COMMAND")]
         command: String,
     },
+}
+
+/// The recorder's settings. Guest contract 3 passes none and takes the
+/// defaults; `--config` is the baked HCL file of the old guest.
+#[derive(Debug, clap::Args)]
+struct RecordingArgs {
+    #[arg(long, default_value = "/var/lib/kino-recordings")]
+    output_dir: PathBuf,
+    #[arg(long, default_value = "/bin/bash")]
+    real_shell: PathBuf,
+}
+
+impl RecordingArgs {
+    fn resolve(self, config: Option<&std::path::Path>) -> anyhow::Result<config::RecordingConfig> {
+        let Some(path) = config else {
+            return Ok(config::RecordingConfig {
+                output_dir: self.output_dir,
+                real_shell: self.real_shell,
+            });
+        };
+        config::load_from_file(path)
+            .with_context(|| format!("failed to load config from {}", path.display()))?
+            .recording
+            .context("recording configuration is required for the recorders")
+    }
 }
 
 #[tokio::main]
@@ -79,32 +111,25 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::RecordSsh {
-            config: config_path,
+        Some(CliCommand::Init) => init::main().await,
+        Some(CliCommand::RecordSsh {
+            config,
+            recording,
             command,
             shell_startup,
         }) => {
-            let app_config = config::load_from_file(&config_path)
-                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let recording_config = app_config
-                .recording
-                .as_ref()
-                .context("recording configuration is required for 'record-ssh'")?;
+            let recording_config = recording.resolve(config.as_deref())?;
             let exit_code =
-                recording::record_ssh(recording_config, command.as_deref(), shell_startup.into())?;
+                recording::record_ssh(&recording_config, command.as_deref(), shell_startup.into())?;
             std::process::exit(exit_code);
         }
-        Some(Command::RecordCommand {
-            config: config_path,
+        Some(CliCommand::RecordCommand {
+            config,
+            recording,
             command,
         }) => {
-            let app_config = config::load_from_file(&config_path)
-                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let recording_config = app_config
-                .recording
-                .as_ref()
-                .context("recording configuration is required for 'record-command'")?;
-            let exit_code = recording::record_command(recording_config, &command)?;
+            let recording_config = recording.resolve(config.as_deref())?;
+            let exit_code = recording::record_command(&recording_config, &command)?;
             std::process::exit(exit_code);
         }
         None => {

@@ -33,16 +33,21 @@ pub const ENV_PEER_HOSTS_B64: &str = "INTAR_PEER_HOSTS_B64";
 /// listens on [`RUN_CLI_PORT`], both on the host's vsock CID.
 ///
 /// A guest woken from a suspended image runs the Kino and holds the run disk
-/// of the build. That Kino unmounts the run disk and executes the loader
-/// again when the `boot.json` on the attached disk is not the one it applied,
-/// and at no other time. Images hold a Kino in memory, so this hand-over is
-/// part of the contract: a Kino release must keep it or bump the contract.
+/// of the build. On a resume from suspend that Kino replaces itself with a
+/// process that unmounts the run disk and the recording disk, drops their
+/// cached blocks and executes the loader again. The Kino started then finds
+/// in [`APPLIED_BOOT_PATH`] the SHA-256 (hex) of the `boot.json` its
+/// predecessor applied, and replaces the guest's per-run identity (address,
+/// SSH host key) only when its own `boot.json` differs. Images hold a Kino in
+/// memory, so this hand-over is part of the contract: a Kino release must
+/// keep it or bump the contract.
 pub const GUEST_CONTRACT: u32 = 3;
 pub const REPORT_PORT: u32 = 18081;
 pub const RUN_CLI_PORT: u32 = 18082;
 pub const GUEST_LOADER_PATH: &str = "/usr/lib/intar/guest-loader";
 pub const RUN_DISK_MOUNT: &str = "/run/intar/run";
 pub const BOOT_JSON_FILENAME: &str = "boot.json";
+pub const APPLIED_BOOT_PATH: &str = "/run/intar/boot.sha256";
 pub const KINO_FILENAME: &str = "kino";
 
 /// `boot.json`: everything one VM's Kino is told. The host writes it onto
