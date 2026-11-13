@@ -115,6 +115,7 @@ import {
 } from "@/components/app/run/run-support";
 import {
   mergeScenarioRunStatus,
+  runTaskChecks,
   scenarioRunStatusRefetchInterval,
   type ScenarioRunStatus,
   type ScenarioRunResponse,
@@ -1136,7 +1137,10 @@ export function ScenarioRun() {
           attemptData.vms.map((vm) => vm.provisioning?.leaseDurationSeconds),
         )
       : null;
-  const selectedProbes = selectedVm?.scenarioProbes ?? [];
+  const taskChecks = attemptData
+    ? runTaskChecks(attemptData, selectedVm?.scenarioVmName ?? null)
+    : null;
+  const selectedProbes = taskChecks?.probes ?? selectedVm?.scenarioProbes ?? [];
   // Sharing is offered to a run that is active, and a shared run can always be
   // stopped, even after it has finished. Only the run view answers whether it
   // may be offered; a record from a hint or the start does not. The last
@@ -1692,7 +1696,7 @@ export function ScenarioRun() {
     runSolved: attemptData.phase === "solved" || attemptData.solvedAt !== null,
     probes: selectedProbes,
     vmName: selectedVm?.scenarioVmName ?? null,
-    objectives: attemptData.objectives,
+    objectives: taskChecks?.objectives ?? attemptData.objectives,
     hints: attemptData.hints,
     solution: attemptData.solution,
     onRevealHint: (hintKey: string) => revealHint.mutate(hintKey),

@@ -12,6 +12,7 @@ import type {
   ScenarioRunSavingStage,
 } from "@/lib/scenario-runs";
 import type { ScenarioRunStatus as ScenarioRunWireStatus } from "@/lib/scenario-runs/status";
+import type { RunTaskView } from "@/lib/run-tasks";
 
 export interface ScenarioProbeStatus {
   id: string;
@@ -151,6 +152,32 @@ export interface ScenarioRunRecord {
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
   vms: ScenarioRunVmRecord[];
+  /** A revision-model run's tasks; such a run has no probes. */
+  tasks?: RunTaskView[];
+}
+
+/**
+ * A task run's tasks in the shape the learning panel shows checks: one
+ * check per task on `vmName`, and one objective per task.
+ */
+export function runTaskChecks(run: ScenarioRunRecord, vmName: string | null): {
+  probes: ScenarioProbeStatus[];
+  objectives: ScenarioObjective[];
+} | null {
+  if (!run.tasks) return null;
+  return {
+    probes: run.tasks
+      .filter((task) => task.machine === vmName)
+      .map((task) => ({
+        id: task.id, label: task.title, kind: "task", phase: "scenario",
+        status: task.status, error: null, value: null,
+      })),
+    objectives: run.tasks.map((task) => ({
+      probeName: task.id, vmName: task.machine, label: task.title, title: task.title,
+      bodyMarkdown: null,
+      hintCount: run.hints.filter((hint) => hint.probeName === task.id).length,
+    })),
+  };
 }
 
 export interface ScenarioObjective {
@@ -226,6 +253,7 @@ export function mergeScenarioRunStatus(
     replayState: status.replayState,
     hasReplay: status.hasReplay,
     updatedAt: status.updatedAt,
+    ...(status.tasks ? { tasks: status.tasks } : {}),
     bootProbes: status.vms.flatMap((vm) => vm.bootProbes),
     scenarioProbes: status.vms.flatMap((vm) => vm.scenarioProbes),
     vms: current.vms.map((vm) => {
