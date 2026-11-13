@@ -4,9 +4,8 @@ use std::time::Duration;
 use std::{env, fs};
 
 use intar_jailer_protocol::{
-    AsyncSeqpacketClient, CLOUD_HYPERVISOR_SHA256, CLOUD_HYPERVISOR_VERSION, JailerCapabilities,
-    PROTOCOL_VERSION, RUN_GUEST_NETWORK_PREFIX, Request as JailerRequest,
-    Response as JailerResponse,
+    AsyncSeqpacketClient, CLOUD_HYPERVISOR_VERSION, JailerCapabilities, PROTOCOL_VERSION,
+    RUN_GUEST_NETWORK_PREFIX, Request as JailerRequest, Response as JailerResponse,
 };
 
 use crate::config::AgentConfig;
@@ -366,18 +365,14 @@ fn push_jailerd_capabilities_check(
     push_bool_check(
         checks,
         "Cloud Hypervisor release",
-        capabilities.cloud_hypervisor_version == CLOUD_HYPERVISOR_VERSION
-            && capabilities.cloud_hypervisor_sha256 == CLOUD_HYPERVISOR_SHA256,
+        capabilities.cloud_hypervisor_version == CLOUD_HYPERVISOR_VERSION,
         format!(
-            "{} has pinned SHA-256 {}",
+            "{} with installed SHA-256 {}",
             capabilities.cloud_hypervisor_version, capabilities.cloud_hypervisor_sha256
         ),
         format!(
-            "jailerd reports {} / {}; expected {} / {}",
-            capabilities.cloud_hypervisor_version,
-            capabilities.cloud_hypervisor_sha256,
-            CLOUD_HYPERVISOR_VERSION,
-            CLOUD_HYPERVISOR_SHA256
+            "jailerd reports {}; expected {CLOUD_HYPERVISOR_VERSION}",
+            capabilities.cloud_hypervisor_version
         ),
     );
     push_bool_check(

@@ -140,7 +140,10 @@ before the workflow attested them have no attestation. Then:
      image-ops `gate-open`, after any Kino rollout that shares the drain.
 
   If a check fails, stop the agent and run `install.sh` from the rollback
-  release's directory instead.
+  release's directory instead. `install.sh` sets the Cloud Hypervisor path and
+  hash in `/etc/intar-jailerd/config.toml` to its own release's; a rollback to
+  a release that still pinned v53.0, whose installer leaves the config alone, also needs both
+  lines set back by hand to that release's `deploy/config.example.toml`.
 
   `swamp workflow run agent-rollout --input version=X.Y.Z --input
   rollback_version=<running X.Y.Z>`, run from the repository root after

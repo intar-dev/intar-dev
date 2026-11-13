@@ -7,8 +7,10 @@ allow_uid_gid_collisions = false
 
 jail_root = "/var/lib/intar/jails"
 # Pinned static runtime. intar-agent has neither this path nor spawn authority.
-cloud_hypervisor_binary = "/usr/lib/intar/cloud-hypervisor-v53.0"
-cloud_hypervisor_sha256 = "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+# install.sh writes the hash of the runtime it installs; by hand, take it from
+# deploy/cloud-hypervisor-v55.0.0.sha256.
+cloud_hypervisor_binary = "/usr/lib/intar/cloud-hypervisor-v55.0.0"
+cloud_hypervisor_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 jailer_binary = "/usr/lib/intar/intar-jailer"
 # Root-owned systemd SOCK_SEQPACKET endpoint used by the configured agent UID.
 socket_path = "/run/intar-jailerd/control.sock"

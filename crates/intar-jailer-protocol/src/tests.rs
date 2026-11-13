@@ -369,7 +369,7 @@ fn protocol_v2_capabilities_require_every_fast_launch_attestation() {
     let capabilities = JailerCapabilities {
         protocol_version: PROTOCOL_VERSION,
         cloud_hypervisor_version: CLOUD_HYPERVISOR_VERSION.to_owned(),
-        cloud_hypervisor_sha256: CLOUD_HYPERVISOR_SHA256.to_owned(),
+        cloud_hypervisor_sha256: "a".repeat(64),
         total_cpu_millis: 8_000,
         reserved_cpu_millis: 1_000,
         schedulable_cpu_millis: 7_000,
@@ -534,12 +534,11 @@ fn vm_selectors_are_exactly_generation_or_logical_identity() {
 }
 
 #[test]
-fn jailerd_config_rejects_runtime_hash_overrides() {
+fn jailerd_config_rejects_another_runtime_binary() {
     let config = JailerdConfig {
         agent_uid: 991,
         agent_gid: 991,
-        cloud_hypervisor_sha256: Sha256Digest::parse("a".repeat(64))
-            .expect("syntactically valid digest"),
+        cloud_hypervisor_binary: PathBuf::from("/usr/lib/intar/cloud-hypervisor-v53.0"),
         ..JailerdConfig::default()
     };
     assert_eq!(config.validate(), Err(ValidationError::UnpinnedRuntime));
