@@ -45,6 +45,14 @@ export const WAKE_RAM_CHUNK_MEDIA_TYPE = "application/vnd.intar.wake.ram.chunk.v
 export const WAKE_DELTA_MEDIA_TYPE = "application/vnd.intar.wake.delta.v1";
 export const WAKE_STUB_MEDIA_TYPE = "application/vnd.intar.wake.stub.v1";
 export const WAKE_CPU_PROFILE_MEDIA_TYPE = "application/vnd.intar.wake.cpu-profile.v1+json";
+export const PLATFORM_BASE_IMAGE = "trixie";
+export const MAX_MACHINES = 8;
+export const MAX_TASKS_PER_MACHINE = 32;
+export const MAX_READY_PER_MACHINE = 16;
+export const MAX_SCRIPT_BYTES = 65536;
+export const MAX_MARKDOWN_BYTES = 65536;
+export const MAX_MACHINE_SPEC_BYTES = 262144;
+export const MAX_DISK_MIB = 65536;
 
 export const runtimeEnvKeys = {
   sshAuthorizedKeysB64: "INTAR_SSH_AUTHORIZED_KEYS_B64",

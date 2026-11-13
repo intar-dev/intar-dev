@@ -659,6 +659,14 @@ export const WAKE_RAM_CHUNK_MEDIA_TYPE = "{}";
 export const WAKE_DELTA_MEDIA_TYPE = "{}";
 export const WAKE_STUB_MEDIA_TYPE = "{}";
 export const WAKE_CPU_PROFILE_MEDIA_TYPE = "{}";
+export const PLATFORM_BASE_IMAGE = "{}";
+export const MAX_MACHINES = {};
+export const MAX_TASKS_PER_MACHINE = {};
+export const MAX_READY_PER_MACHINE = {};
+export const MAX_SCRIPT_BYTES = {};
+export const MAX_MARKDOWN_BYTES = {};
+export const MAX_MACHINE_SPEC_BYTES = {};
+export const MAX_DISK_MIB = {};
 
 export const runtimeEnvKeys = {{
   sshAuthorizedKeysB64: "{}",
@@ -715,6 +723,14 @@ export const runtimeEnvKeys = {{
         intar_contracts::oci::WAKE_DELTA_MEDIA_TYPE,
         intar_contracts::oci::WAKE_STUB_MEDIA_TYPE,
         intar_contracts::oci::WAKE_CPU_PROFILE_MEDIA_TYPE,
+        intar_contracts::scenario::PLATFORM_BASE_IMAGE,
+        intar_contracts::scenario::MAX_MACHINES,
+        MAX_TASKS_PER_MACHINE,
+        MAX_READY_PER_MACHINE,
+        MAX_SCRIPT_BYTES,
+        intar_contracts::scenario::MAX_MARKDOWN_BYTES,
+        intar_contracts::scenario::MAX_MACHINE_SPEC_BYTES,
+        MAX_DISK_MIB,
         ENV_SSH_AUTHORIZED_KEYS_B64,
         ENV_KINO_VSOCK_CID,
         ENV_KINO_VSOCK_PORT,
