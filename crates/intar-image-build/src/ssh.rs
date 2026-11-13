@@ -88,6 +88,7 @@ impl BuildSshSession {
         let command = format!("cat > {remote} && chmod {mode:o} {remote}");
         self.exec_with_optional_input(&command, Some(file), None)
             .await
+            .map(drop)
             .with_context(|| {
                 format!(
                     "failed to upload '{}' to build guest at {remote_path}",
@@ -96,6 +97,13 @@ impl BuildSshSession {
             })
     }
     pub async fn run(&mut self, command: &str) -> Result<()> {
+        self.exec_with_optional_input(command, None, None)
+            .await
+            .map(drop)
+    }
+
+    /// Run `command` and return the last 64 KiB of its output.
+    pub async fn run_output(&mut self, command: &str) -> Result<Vec<u8>> {
         self.exec_with_optional_input(command, None, None).await
     }
 
@@ -104,6 +112,7 @@ impl BuildSshSession {
     pub async fn run_logged(&mut self, command: &str, log_path: &Path) -> Result<()> {
         self.exec_with_optional_input(command, None, Some(log_path))
             .await
+            .map(drop)
     }
 
     async fn exec_with_optional_input(
@@ -111,7 +120,7 @@ impl BuildSshSession {
         command: &str,
         input: Option<tokio::fs::File>,
         log_path: Option<&Path>,
-    ) -> Result<()> {
+    ) -> Result<Vec<u8>> {
         let mut channel = self
             .session
             .channel_open_session()
@@ -158,7 +167,7 @@ impl BuildSshSession {
         }
 
         match exit_status {
-            Some(0) => Ok(()),
+            Some(0) => Ok(output_tail),
             Some(code) => {
                 let output = String::from_utf8_lossy(&output_tail);
                 bail!("build SSH command '{command}' failed with status {code}: {output}");

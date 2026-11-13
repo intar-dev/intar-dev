@@ -8,6 +8,7 @@ mod qmp;
 mod script;
 mod shutdown;
 mod vm;
+mod wake;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,7 +25,8 @@ pub use output::{
     MachineImage, VerifiedMachineImage, reconstruct_machine_disk, verify_machine_image,
     write_machine_image,
 };
-pub use plan::{BuildPlan, BuildTarget, PlannedNode, PlannedStage, plan_build};
+pub use plan::{BuildPlan, BuildTarget, PlannedNode, PlannedStage, WakeRole, plan_build};
+pub use wake::{WAKE_CHILD_ARG, run_wake_child, wake_unavailable};
 
 /// One build: a target of a bundle, the key the caller expects, and where
 /// the image goes.
@@ -81,10 +83,26 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
         .prefix("machine-")
         .tempdir_in(work_root)?;
     let started = Instant::now();
+    fs::create_dir_all(&request.output_dir)?;
+    if plan.wake.is_some() {
+        match wake::wake_unavailable(&request.config) {
+            None => {
+                let image = wake::build_wake_target(request, &plan, &base, work.path(), &log_path)?;
+                return Ok(MachineBuildOutput {
+                    plan,
+                    image,
+                    log_path,
+                    base_seconds,
+                    build_seconds: started.elapsed().as_secs_f64(),
+                    output_seconds: 0.0,
+                });
+            }
+            Some(reason) => fallback_note(&log_path, &reason)?,
+        }
+    }
     let raw = vm::build_disk(&plan, &request.config, &base, work.path(), &log_path)?;
     let build_seconds = started.elapsed().as_secs_f64();
     let started = Instant::now();
-    fs::create_dir_all(&request.output_dir)?;
     let image = write_machine_image(
         &raw,
         &base.kernel_path,
@@ -100,4 +118,15 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
         build_seconds,
         output_seconds: started.elapsed().as_secs_f64(),
     })
+}
+
+/// A wake image or pack built as a plain image says so in its log.
+fn fallback_note(log: &Path, reason: &str) -> Result<()> {
+    use std::io::Write as _;
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(log)?;
+    writeln!(
+        file,
+        "[wake] unavailable ({reason}); building this wake target as a plain image"
+    )?;
+    Ok(())
 }

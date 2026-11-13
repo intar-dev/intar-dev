@@ -60,6 +60,18 @@ pub struct BuildPlan {
     /// The union of the chain's and the target's `defer`.
     pub defer: BTreeSet<String>,
     pub disk_bytes: u64,
+    /// Set when the target is a wake image or a machine from one.
+    pub wake: Option<WakeRole>,
+}
+
+/// What a target is to the wake steps (#348 §3).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WakeRole {
+    /// A wake image: built as usual, then booted and suspended.
+    Base,
+    /// A machine from the wake image `base`: its own stages run in the
+    /// woken base, and its suspended guest is published as a delta.
+    Pack { base: String },
 }
 
 /// Validate `bundle` strictly, recompute the target's key and its chain's
@@ -159,6 +171,23 @@ pub fn plan_build(
             });
         }
     }
+    let wake = match (target, own) {
+        (BuildTarget::Image(name), _)
+            if images.get(name.as_str()).is_some_and(|image| image.wake) =>
+        {
+            Some(WakeRole::Base)
+        }
+        (_, Some(machine))
+            if images
+                .get(machine.from.as_str())
+                .is_some_and(|image| image.wake) =>
+        {
+            Some(WakeRole::Pack {
+                base: machine.from.clone(),
+            })
+        }
+        _ => None,
+    };
     let disk_bytes = disk_mib.map_or(PLATFORM_BASE_DISK_BYTES, |mib| u64::from(mib) * MIB);
     ensure!(
         disk_bytes >= PLATFORM_BASE_DISK_BYTES,
@@ -171,6 +200,7 @@ pub fn plan_build(
         stages,
         defer,
         disk_bytes,
+        wake,
     })
 }
 

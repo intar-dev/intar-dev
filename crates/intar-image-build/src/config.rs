@@ -30,6 +30,26 @@ pub struct QemuBuildConfig {
     pub work_root: PathBuf,
     #[serde(default)]
     pub layered: LayeredBuildConfig,
+    /// Builds wake images through cloud-hypervisor when set; without it a
+    /// wake image builds as a plain one.
+    #[serde(default)]
+    pub wake: Option<WakeBuildConfig>,
+}
+
+/// What the wake steps run with (#348 §3).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WakeBuildConfig {
+    /// The pinned static cloud-hypervisor binary and its SHA-256 (hex).
+    pub vmm_binary: PathBuf,
+    pub vmm_sha256: String,
+    /// Its version as it reports itself (`v55.0.0`): what the image says it
+    /// was built with and needs.
+    pub vmm_version: String,
+    /// The CPU profile every wake image is suspended under.
+    pub cpu_profile: PathBuf,
+    /// The Kino binary the build guest runs.
+    pub kino: PathBuf,
 }
 
 impl Default for QemuBuildConfig {
@@ -48,6 +68,7 @@ impl Default for QemuBuildConfig {
             output_root: default_output_root(),
             work_root: default_work_root(),
             layered: LayeredBuildConfig::default(),
+            wake: None,
         }
     }
 }

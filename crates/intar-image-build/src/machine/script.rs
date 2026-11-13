@@ -47,12 +47,14 @@ pub(crate) fn stage_command(file: &str, env: &BTreeMap<String, String>) -> Strin
 
 /// Make the image a run image: `defer` units wait for `intar-lab.target`,
 /// and nothing of the build, no host key, no machine id and no cache stays.
-pub(crate) fn finalize_script(defer: &BTreeSet<String>) -> String {
+/// A guest that is suspended next (`stop`) also stops its `defer` units.
+pub(crate) fn finalize_script(defer: &BTreeSet<String>, stop: bool) -> String {
     let mut script = String::from("set -eu\n");
+    let now = if stop { " --now" } else { "" };
     for unit in defer {
         let unit = shell_quote(unit);
         script.push_str(&format!(
-            "systemctl disable {unit}\nsystemctl add-wants intar-lab.target {unit}\n"
+            "systemctl disable{now} {unit}\nsystemctl add-wants intar-lab.target {unit}\n"
         ));
     }
     script.push_str(&format!(
@@ -123,10 +125,13 @@ mod tests {
     #[test]
     fn finalize_defers_units_and_removes_the_build() {
         let defer = BTreeSet::from(["nginx.service".to_owned(), "b.timer".to_owned()]);
-        let script = finalize_script(&defer);
+        let script = finalize_script(&defer, false);
         let nginx = "systemctl disable 'nginx.service'\nsystemctl add-wants intar-lab.target 'nginx.service'\n";
         assert!(script.contains(nginx));
         assert!(script.find("'b.timer'") < script.find("'nginx.service'"));
+        assert!(
+            finalize_script(&defer, true).contains("systemctl disable --now 'nginx.service'\n")
+        );
         for removed in [
             "/etc/systemd/system/intar-build.service",
             "/etc/systemd/system/intar-build.path",
@@ -148,7 +153,7 @@ mod tests {
         // The /boot check runs before the trim, which comes last.
         assert!(script.find("/boot") < script.find("fstrim"));
         assert!(script.ends_with("fstrim -v /\n"));
-        assert!(!finalize_script(&BTreeSet::new()).contains("add-wants"));
+        assert!(!finalize_script(&BTreeSet::new(), false).contains("add-wants"));
     }
 
     #[test]
@@ -164,7 +169,7 @@ mod tests {
     #[test]
     fn the_scripts_are_valid_bash() {
         let defer = BTreeSet::from(["a.service".to_owned()]);
-        for script in [finalize_script(&defer), repack_script()] {
+        for script in [finalize_script(&defer, false), repack_script()] {
             let output = std::process::Command::new("bash")
                 .args(["-n", "-c", &script])
                 .output()

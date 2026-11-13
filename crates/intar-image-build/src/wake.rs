@@ -373,6 +373,25 @@ pub fn clone_or_sparse_copy(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Without Linux: a plain copy.
+///
+/// # Errors
+/// Returns an error when the file cannot be copied.
+#[cfg(not(target_os = "linux"))]
+pub fn clone_or_sparse_copy(source: &Path, target: &Path) -> Result<()> {
+    fs::copy(source, target)?;
+    Ok(())
+}
+
+/// Without Linux there are no holes to punch.
+///
+/// # Errors
+/// Always.
+#[cfg(not(target_os = "linux"))]
+pub fn punch_zero_pages(_path: &Path) -> Result<()> {
+    bail!("punching holes needs Linux")
+}
+
 /// Punch holes over every zero 4 KiB page of `path`, as `fallocate
 /// --dig-holes` does; the guest's freed pages are zero (`init_on_free`).
 ///

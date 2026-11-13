@@ -9,10 +9,13 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
+cloud-hypervisor-client = { path = "../cloud-hypervisor-client" }
 fatfs.workspace = true
 flate2.workspace = true
 fs2.workspace = true
 intar-contracts = { path = "../intar-contracts" }
+intar-kino-proto = { path = "../intar-kino-proto" }
+intar-snapdelta = { path = "../intar-snapdelta" }
 russh.workspace = true
 rustix.workspace = true
 ring.workspace = true

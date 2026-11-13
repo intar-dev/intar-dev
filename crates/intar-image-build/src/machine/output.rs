@@ -7,7 +7,7 @@ use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES;
 use intar_contracts::guest::GUEST_CONTRACT;
 use intar_contracts::oci::verify::{layers_of, verified_image};
@@ -15,6 +15,8 @@ use intar_contracts::oci::{
     DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE,
     MACHINE_ARTIFACT_TYPE, MACHINE_CONFIG_MEDIA_TYPE, MachineBootV1, MachineConfigV1,
     MachineDiskV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1, Sha256Hex,
+    WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_DELTA_MEDIA_TYPE, WAKE_RAM_CHUNK_MEDIA_TYPE,
+    WAKE_STUB_MEDIA_TYPE,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -46,88 +48,151 @@ pub fn write_machine_image(
     build_key: &OciDigest,
     output: &Path,
 ) -> Result<MachineImage> {
-    let blobs = output.join("sha256");
-    fs::create_dir_all(&blobs).with_context(|| format!("create {}", blobs.display()))?;
-    let scratch = tempfile::Builder::new()
-        .prefix(".chunks-")
-        .tempdir_in(output)?;
-    let scan = scan_raw_image_chunks(raw)?;
-    let chunked = write_scanned_chunked_image_artifact(
-        &scan,
-        &scratch.path().join("chunks"),
-        &scratch.path().join("chunks.json"),
-        &BTreeMap::new(),
-    )?;
-
-    let mut layers = vec![
-        blob_file(kernel, &blobs, KERNEL_MEDIA_TYPE)?,
-        blob_file(initrd, &blobs, INITRD_MEDIA_TYPE)?,
-    ];
-    let mut layer_of = BTreeMap::<String, u32>::new();
-    let mut chunks = Vec::with_capacity(chunked.chunks.len());
-    for chunk in &chunked.chunks {
-        let descriptor = &chunk.descriptor;
-        let layer = match layer_of.get(&descriptor.encoded_sha256) {
-            Some(layer) => *layer,
-            None => {
-                let path = chunk
-                    .path
-                    .as_ref()
-                    .context("an encoded chunk has no file")?;
-                let target = blobs.join(&descriptor.encoded_sha256);
-                if target.exists() {
-                    fs::remove_file(path)?;
-                } else {
-                    fs::rename(path, &target)?;
-                }
-                let layer = u32::try_from(layers.len()).context("layer count")?;
-                layers.push(OciDescriptorV1 {
-                    media_type: DISK_CHUNK_MEDIA_TYPE.to_owned(),
-                    digest: digest_of_hex(&descriptor.encoded_sha256)?,
-                    size: descriptor.encoded_size_bytes,
-                });
-                layer_of.insert(descriptor.encoded_sha256.clone(), layer);
-                layer
-            }
-        };
-        chunks.push((
-            u64::from(descriptor.index),
-            layer,
-            Sha256Hex::try_from(descriptor.raw_sha256.clone()).map_err(anyhow::Error::msg)?,
-        ));
-    }
-    let config = MachineConfigV1 {
+    let mut writer = ImageWriter::new(output)?;
+    writer.file(kernel, KERNEL_MEDIA_TYPE)?;
+    writer.file(initrd, INITRD_MEDIA_TYPE)?;
+    let disk = writer.chunks(raw, DISK_CHUNK_MEDIA_TYPE)?;
+    writer.finish(MachineConfigV1 {
         guest_contract: GUEST_CONTRACT,
         image_format: IMAGE_FORMAT.to_owned(),
         build_key: build_key.clone(),
         boot: MachineBootV1 {
             cmdline: PUBLISHED_BOOT_CMDLINE.to_owned(),
         },
-        disk: MachineDiskV1 {
-            size_bytes: scan.virtual_size_bytes,
-            chunk_size: u64::from(IMAGE_CHUNK_SIZE_BYTES),
-            chunks,
-        },
+        disk: disk.disk,
         wake: None,
-    };
-    let config_bytes = serde_json::to_vec(&config)?;
-    let manifest = OciManifestV1 {
-        schema_version: 2,
-        media_type: OCI_MANIFEST_MEDIA_TYPE.to_owned(),
-        artifact_type: MACHINE_ARTIFACT_TYPE.to_owned(),
-        config: blob_bytes(&config_bytes, &blobs, MACHINE_CONFIG_MEDIA_TYPE)?,
-        layers,
-    };
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
-    let manifest_digest = blob_bytes(&manifest_bytes, &blobs, OCI_MANIFEST_MEDIA_TYPE)?.digest;
-    Ok(MachineImage {
-        manifest_digest,
-        manifest_bytes: manifest_bytes.len() as u64,
-        config_bytes: config_bytes.len() as u64,
-        chunk_count: chunked.chunks.len(),
-        chunk_layers: layer_of.len(),
-        disk_bytes: scan.virtual_size_bytes,
     })
+}
+
+/// A file's chunks as a config names them.
+pub(crate) struct WrittenChunks {
+    pub disk: MachineDiskV1,
+    pub count: usize,
+}
+
+/// The layers of one image as they are written to `output/sha256`.
+pub(crate) struct ImageWriter {
+    blobs: PathBuf,
+    scratch: tempfile::TempDir,
+    layers: Vec<OciDescriptorV1>,
+    layer_of: BTreeMap<String, u32>,
+    chunk_count: usize,
+    disk_bytes: u64,
+}
+
+impl ImageWriter {
+    pub(crate) fn new(output: &Path) -> Result<Self> {
+        let blobs = output.join("sha256");
+        fs::create_dir_all(&blobs).with_context(|| format!("create {}", blobs.display()))?;
+        let scratch = tempfile::Builder::new()
+            .prefix(".chunks-")
+            .tempdir_in(output)?;
+        Ok(Self {
+            blobs,
+            scratch,
+            layers: Vec::new(),
+            layer_of: BTreeMap::new(),
+            chunk_count: 0,
+            disk_bytes: 0,
+        })
+    }
+
+    pub(crate) fn file(&mut self, path: &Path, media_type: &str) -> Result<OciDescriptorV1> {
+        let descriptor = blob_file(path, &self.blobs, media_type)?;
+        self.layers.push(descriptor.clone());
+        Ok(descriptor)
+    }
+
+    pub(crate) fn bytes(&mut self, bytes: &[u8], media_type: &str) -> Result<OciDescriptorV1> {
+        let descriptor = blob_bytes(bytes, &self.blobs, media_type)?;
+        self.layers.push(descriptor.clone());
+        Ok(descriptor)
+    }
+
+    /// 4 MiB chunks of `raw`, zero chunks left out, each distinct encoded
+    /// chunk one layer of `media_type`.
+    pub(crate) fn chunks(&mut self, raw: &Path, media_type: &str) -> Result<WrittenChunks> {
+        let scan = scan_raw_image_chunks(raw)?;
+        let dir = self.scratch.path().join(format!("{}", self.layers.len()));
+        let chunked = write_scanned_chunked_image_artifact(
+            &scan,
+            &dir.join("chunks"),
+            &dir.join("chunks.json"),
+            &BTreeMap::new(),
+        )?;
+        let mut chunks = Vec::with_capacity(chunked.chunks.len());
+        for chunk in &chunked.chunks {
+            let descriptor = &chunk.descriptor;
+            let key = format!("{media_type} {}", descriptor.encoded_sha256);
+            let layer = match self.layer_of.get(&key) {
+                Some(layer) => *layer,
+                None => {
+                    let path = chunk
+                        .path
+                        .as_ref()
+                        .context("an encoded chunk has no file")?;
+                    let target = self.blobs.join(&descriptor.encoded_sha256);
+                    if target.exists() {
+                        fs::remove_file(path)?;
+                    } else {
+                        fs::rename(path, &target)?;
+                    }
+                    let layer = u32::try_from(self.layers.len()).context("layer count")?;
+                    self.layers.push(OciDescriptorV1 {
+                        media_type: media_type.to_owned(),
+                        digest: digest_of_hex(&descriptor.encoded_sha256)?,
+                        size: descriptor.encoded_size_bytes,
+                    });
+                    self.layer_of.insert(key, layer);
+                    layer
+                }
+            };
+            chunks.push((
+                u64::from(descriptor.index),
+                layer,
+                Sha256Hex::try_from(descriptor.raw_sha256.clone()).map_err(anyhow::Error::msg)?,
+            ));
+        }
+        if media_type == DISK_CHUNK_MEDIA_TYPE {
+            self.chunk_count = chunks.len();
+            self.disk_bytes = scan.virtual_size_bytes;
+        }
+        Ok(WrittenChunks {
+            count: chunks.len(),
+            disk: MachineDiskV1 {
+                size_bytes: scan.virtual_size_bytes,
+                chunk_size: u64::from(IMAGE_CHUNK_SIZE_BYTES),
+                chunks,
+            },
+        })
+    }
+
+    pub(crate) fn finish(self, config: MachineConfigV1) -> Result<MachineImage> {
+        let config_bytes = serde_json::to_vec(&config)?;
+        let chunk_layers = self
+            .layers
+            .iter()
+            .filter(|layer| layer.media_type == DISK_CHUNK_MEDIA_TYPE)
+            .count();
+        let manifest = OciManifestV1 {
+            schema_version: 2,
+            media_type: OCI_MANIFEST_MEDIA_TYPE.to_owned(),
+            artifact_type: MACHINE_ARTIFACT_TYPE.to_owned(),
+            config: blob_bytes(&config_bytes, &self.blobs, MACHINE_CONFIG_MEDIA_TYPE)?,
+            layers: self.layers,
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest)?;
+        let manifest_digest =
+            blob_bytes(&manifest_bytes, &self.blobs, OCI_MANIFEST_MEDIA_TYPE)?.digest;
+        Ok(MachineImage {
+            manifest_digest,
+            manifest_bytes: manifest_bytes.len() as u64,
+            config_bytes: config_bytes.len() as u64,
+            chunk_count: self.chunk_count,
+            chunk_layers,
+            disk_bytes: self.disk_bytes,
+        })
+    }
 }
 
 fn digest_of_hex(hex: &str) -> Result<OciDigest> {
@@ -183,7 +248,6 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
         config.guest_contract,
         config.image_format
     );
-    ensure!(config.wake.is_none(), "a built image carries no wake");
     let first = |media_type: &str| {
         layers_of(&manifest, media_type)
             .first()
@@ -201,29 +265,35 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
     )
     .map_err(anyhow::Error::msg)?;
 
+    let ram_chunks = verified
+        .wake
+        .as_ref()
+        .map_or(&[][..], |wake| wake.ram_chunks.as_slice());
     for layer in &manifest.layers {
+        let chunks = match layer.media_type.as_str() {
+            DISK_CHUNK_MEDIA_TYPE => &verified.chunks[..],
+            WAKE_RAM_CHUNK_MEDIA_TYPE => ram_chunks,
+            KERNEL_MEDIA_TYPE | INITRD_MEDIA_TYPE => {
+                read_blob(&blobs, &layer.digest, Some(layer.size))?;
+                continue;
+            }
+            WAKE_STUB_MEDIA_TYPE | WAKE_CPU_PROFILE_MEDIA_TYPE | WAKE_DELTA_MEDIA_TYPE
+                if config.wake.is_some() =>
+            {
+                read_blob(&blobs, &layer.digest, Some(layer.size))?;
+                continue;
+            }
+            other => bail!("layer {} is of unknown type {other}", layer.digest.as_str()),
+        };
         ensure!(
-            [KERNEL_MEDIA_TYPE, INITRD_MEDIA_TYPE, DISK_CHUNK_MEDIA_TYPE]
-                .contains(&layer.media_type.as_str()),
-            "layer {} is of unknown type {}",
-            layer.digest.as_str(),
-            layer.media_type
-        );
-        let used = layer.media_type != DISK_CHUNK_MEDIA_TYPE
-            || verified
-                .chunks
+            chunks
                 .iter()
-                .any(|chunk| chunk.encoded_sha256 == layer.digest.hex());
-        ensure!(
-            used,
+                .any(|chunk| chunk.encoded_sha256 == layer.digest.hex()),
             "chunk layer {} is named by no chunk",
             layer.digest.as_str()
         );
-        if layer.media_type != DISK_CHUNK_MEDIA_TYPE {
-            read_blob(&blobs, &layer.digest, Some(layer.size))?;
-        }
     }
-    for chunk in &verified.chunks {
+    for chunk in verified.chunks.iter().chain(ram_chunks) {
         let index = chunk.index;
         let encoded = read_blob(
             &blobs,
@@ -242,6 +312,12 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
             "image chunk {index} is not its raw SHA-256"
         );
     }
+    if let Some(wake) = &verified.wake {
+        ensure!(
+            ram_sha256(&blobs, wake)? == wake.ram_sha256,
+            "the wake RAM is not its SHA-256"
+        );
+    }
     let path = |hex: String| blobs.join(hex);
     Ok(VerifiedMachineImage {
         kernel: kernel.map(path).context("kernel")?,
@@ -249,6 +325,32 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
         manifest,
         config,
     })
+}
+
+/// SHA-256 of the RAM file a verified wake's chunks assemble: zero holes
+/// between them.
+fn ram_sha256(blobs: &Path, wake: &intar_contracts::oci::verify::VerifiedWake) -> Result<String> {
+    let chunk_size = u64::from(IMAGE_CHUNK_SIZE_BYTES);
+    let zeros = vec![0_u8; IMAGE_CHUNK_SIZE_BYTES as usize];
+    let mut hasher = Sha256::new();
+    let mut at = 0_u64;
+    for chunk in &wake.ram_chunks {
+        let start = u64::from(chunk.index) * chunk_size;
+        while at < start {
+            hasher.update(&zeros);
+            at += chunk_size;
+        }
+        let encoded = fs::read(blobs.join(&chunk.encoded_sha256))?;
+        let raw = zstd::stream::decode_all(encoded.as_slice())?;
+        hasher.update(&raw);
+        at += raw.len() as u64;
+    }
+    while at < wake.ram_size_bytes {
+        let take = (wake.ram_size_bytes - at).min(chunk_size);
+        hasher.update(&zeros[..usize::try_from(take)?]);
+        at += take;
+    }
+    Ok(hex(&hasher.finalize()))
 }
 
 /// Write the raw disk of a verified image to `target`, sparse where the image

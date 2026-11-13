@@ -207,7 +207,7 @@ pub(crate) fn build_disk(
     }
 
     let started = Instant::now();
-    let finalize = finalize_script(&plan.defer);
+    let finalize = finalize_script(&plan.defer, false);
     vm.guest_run(&mut guest, &as_root(&finalize), "finalize")?;
     vm.log(&format!(
         "finalize elapsed_ms={}",

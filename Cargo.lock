@@ -2062,10 +2062,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "cloud-hypervisor-client",
  "fatfs",
  "flate2",
  "fs2",
  "intar-contracts",
+ "intar-kino-proto",
+ "intar-snapdelta",
  "reflink-copy",
  "ring",
  "russh",
