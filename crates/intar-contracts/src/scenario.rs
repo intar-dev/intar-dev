@@ -21,6 +21,10 @@ pub const MAX_READY_PER_MACHINE: usize = 16;
 pub const MAX_SCRIPT_BYTES: usize = 64 * 1024;
 pub const MAX_MARKDOWN_BYTES: usize = 64 * 1024;
 pub const MAX_MACHINE_SPEC_BYTES: usize = 256 * 1024;
+/// The largest disk a machine or image may declare: the most a run host
+/// accepts ([`crate::catalog::MAX_CHUNKED_IMAGE_BYTES`]).
+pub const MAX_DISK_MIB: u32 = 64 * 1024;
+const _: () = assert!(MAX_DISK_MIB as u64 * 1024 * 1024 == crate::catalog::MAX_CHUNKED_IMAGE_BYTES);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -258,6 +262,11 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
             )),
             Some(_) => {}
         }
+        if machine.disk_mib > MAX_DISK_MIB {
+            problem(format!(
+                "machine `{name}`: disk is over the {MAX_DISK_MIB} MiB limit"
+            ));
+        }
         if machine.ready.len() > MAX_READY_PER_MACHINE {
             problem(format!(
                 "machine `{name}`: more than {MAX_READY_PER_MACHINE} ready blocks"
@@ -384,6 +393,11 @@ fn image_geometry<'a>(
         if (image.from == PLATFORM_BASE_IMAGE) != image.disk_mib.is_some() {
             problem(format!(
                 "image `{name}`: disk is set exactly when from is `{PLATFORM_BASE_IMAGE}`"
+            ));
+        }
+        if image.disk_mib.is_some_and(|disk| disk > MAX_DISK_MIB) {
+            problem(format!(
+                "image `{name}`: disk is over the {MAX_DISK_MIB} MiB limit"
             ));
         }
         check_scripts(&format!("image `{name}` setup"), &image.setup, problem);
@@ -578,7 +592,7 @@ mod tests {
     #[test]
     fn each_rule_is_enforced() {
         type Break = fn(&mut ScenarioV1, &mut Vec<ImageV1>);
-        let broken: [(&str, Break); 14] = [
+        let broken: [(&str, Break); 16] = [
             ("not a valid ID", |s, _| s.slug = "Ab".to_owned()),
             ("1 to 8 machines", |s, _| s.machines.clear()),
             ("declared twice", |s, _| {
@@ -613,6 +627,12 @@ mod tests {
                 s.tasks[0].check = "x".repeat(MAX_SCRIPT_BYTES + 1)
             }),
             ("disk is set exactly", |_, i| i[0].disk_mib = None),
+            ("`router-a`: disk is over the 65536 MiB limit", |s, _| {
+                s.machines[0].disk_mib = MAX_DISK_MIB + 1
+            }),
+            ("disk is over the 65536 MiB limit", |_, i| {
+                i[0].disk_mib = Some(MAX_DISK_MIB + 1)
+            }),
         ];
         for (expected, mutate) in broken {
             let (mut scenario, mut images) = (scenario(), images());
