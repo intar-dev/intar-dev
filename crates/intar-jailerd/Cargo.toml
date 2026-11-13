@@ -19,7 +19,6 @@ reflink-copy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
@@ -38,3 +37,8 @@ tokio.workspace = true
 
 # `main.rs` denies unsafe code globally and contains one narrowly allowed,
 # documented conversion for the socket-activation FD handed over by systemd.
+# So it does not inherit the workspace lints, which forbid unsafe code.
+[lints]
+
+[dev-dependencies]
+tempfile.workspace = true

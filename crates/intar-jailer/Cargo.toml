@@ -9,12 +9,12 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-intar-jailer-protocol = { path = "../intar-jailer-protocol" }
-nix.workspace = true
 rustix.workspace = true
-serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+intar-jailer-protocol = { path = "../intar-jailer-protocol" }
+nix.workspace = true
+serde_json.workspace = true
 intar-snapdelta = { path = "../intar-snapdelta" }
 landlock = "=0.4.7"
 
