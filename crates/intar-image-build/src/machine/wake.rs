@@ -203,15 +203,14 @@ pub(crate) fn build_wake_target(
             let BuildTarget::Image(name) = &request.target else {
                 bail!("a wake base is an image");
             };
-            let (_, _, image) =
-                steps.cached_base(request, name, work, Some(&request.output_dir))?;
-            image.context("the base was not published")
+            let cached = steps.cached_base(request, name, Some(&request.output_dir))?;
+            cached.image.context("the base was not published")
         }
         Some(WakeRole::Pack { base: name }) => {
-            let (dir, record, _) = steps.cached_base(request, name, work, None)?;
+            let cached = steps.cached_base(request, name, None)?;
             steps.pack(
                 plan,
-                &(dir, record),
+                &(cached.dir.clone(), cached.record.clone()),
                 &work.join("pack"),
                 &request.output_dir,
             )
@@ -240,13 +239,66 @@ struct BaseRecord {
     initrd_sha256: String,
 }
 
+/// A base of the cache, held against eviction while this lives.
+struct CachedBase {
+    dir: PathBuf,
+    record: BaseRecord,
+    image: Option<MachineImage>,
+    _in_use: fs::File,
+}
+
+/// A base in the cache is rebuilt after this many days: packs carry the
+/// base's `booted_at`, and run hosts stop waking a guest booted 330 days
+/// ago, so an old base would publish packs that soon cold-boot only.
+const MAX_CACHED_BASE_AGE_DAYS: u64 = 30;
+const BUILDING_PREFIX: &str = ".building-";
+
+fn expired(booted_at_unix_ms: u64, now_unix_ms: u64) -> bool {
+    now_unix_ms.saturating_sub(booted_at_unix_ms) > MAX_CACHED_BASE_AGE_DAYS * 24 * 3_600_000
+}
+
+/// Remove the least recently used bases past `max`, counting `keep`; never
+/// `keep`, nor one a build holds.
+fn evict_bases(cache: &Path, keep: &Path, max: usize) -> Result<Vec<PathBuf>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(cache)? {
+        let path = entry?.path();
+        let hidden = path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with('.'));
+        if hidden || path == keep || !path.is_dir() {
+            continue;
+        }
+        let used = fs::metadata(path.join("base.json"))
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH);
+        entries.push((used, path));
+    }
+    entries.sort();
+    let excess = (entries.len() + 1).saturating_sub(max.max(1));
+    let mut removed = Vec::new();
+    for (_, path) in entries {
+        if removed.len() == excess {
+            break;
+        }
+        let held = fs::File::open(path.join(".lock"))
+            .is_ok_and(|lock| fs2::FileExt::try_lock_exclusive(&lock).is_err());
+        if held {
+            continue;
+        }
+        fs::remove_dir_all(&path)?;
+        removed.push(path);
+    }
+    Ok(removed)
+}
+
 struct BuiltBase {
     image: MachineImage,
     record: BaseRecord,
 }
 
 /// What the namespace child runs.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct ChildJob {
     vmm: PathBuf,
     kernel: String,
@@ -424,32 +476,27 @@ impl Steps<'_> {
     }
 
     /// The suspended base `name` of the cache, verified, or built into it;
-    /// with `publish`, also its image there.
+    /// with `publish`, also its image there. The returned lock keeps the
+    /// entry from eviction while the caller reads it.
     ///
-    /// ponytail: one directory per base and recipe, never evicted; add an
-    /// LRU bound when bases pile up on a builder.
+    /// ponytail: one lock for the whole cache, so base builds wait for each
+    /// other; lock per entry if bases are built often.
     fn cached_base(
         &self,
         request: &MachineBuildRequest,
         name: &str,
-        work: &Path,
         publish: Option<&Path>,
-    ) -> Result<(PathBuf, BaseRecord, Option<MachineImage>)> {
+    ) -> Result<CachedBase> {
         let plan = plan_build(&request.bundle, &BuildTarget::Image(name.to_owned()), None)?;
-        // A base is reused only by the same image, profile, VMM and suspend.
-        let recipe = crate::sha256::sha256_bytes_hex(
-            format!(
-                "{}\n{}\n{}\n{SUSPEND_SCRIPT}",
-                plan.build_key.as_str(),
-                sha256_file_hex(&self.wake.cpu_profile)?,
-                self.wake.vmm_sha256
-            )
-            .as_bytes(),
-        );
-        let dir = self.wake.base_cache.join(recipe);
+        let recipe = self.recipe(&plan)?;
+        let cache = &self.wake.base_cache;
+        fs::create_dir_all(cache)?;
+        let cache_lock = fs::File::create(cache.join(".lock"))?;
+        fs2::FileExt::lock_exclusive(&cache_lock)?;
+        let dir = cache.join(recipe);
         fs::create_dir_all(&dir)?;
-        let lock = fs::File::create(dir.join(".lock"))?;
-        fs2::FileExt::lock_exclusive(&lock)?;
+        let in_use = fs::File::create(dir.join(".lock"))?;
+        fs2::FileExt::lock_shared(&in_use)?;
         let record_path = dir.join("base.json");
         let reused = fs::read(&record_path)
             .ok()
@@ -458,10 +505,19 @@ impl Steps<'_> {
         match reused {
             Some(Ok(record)) => {
                 log_line(self.log, &format!("base {name} reused from the cache"))?;
+                fs::File::options()
+                    .write(true)
+                    .open(&record_path)?
+                    .set_modified(SystemTime::now())?;
                 let image = publish
                     .map(|output| self.publish_base(&dir, &record, output))
                     .transpose()?;
-                return Ok((dir, record, image));
+                return Ok(CachedBase {
+                    dir,
+                    record,
+                    image,
+                    _in_use: in_use,
+                });
             }
             Some(Err(error)) => {
                 log_line(self.log, &format!("base {name} cache refused: {error:#}"))?;
@@ -469,16 +525,58 @@ impl Steps<'_> {
             None => log_line(self.log, &format!("base {name} not cached; building it"))?,
         }
         let _ = fs::remove_file(&record_path);
-        let build = work.join("base");
-        fs::create_dir_all(&build)?;
-        let oci = build.join("oci");
-        let built = self.base(&plan, &build, publish.unwrap_or(&oci))?;
+        // Built beside the cache, so the files move in by rename; what a
+        // crashed build left is removed first.
+        for entry in fs::read_dir(cache)? {
+            let path = entry?.path();
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(BUILDING_PREFIX))
+            {
+                fs::remove_dir_all(&path)?;
+            }
+        }
+        let build = tempfile::Builder::new()
+            .prefix(BUILDING_PREFIX)
+            .tempdir_in(cache)?;
+        let oci = build.path().join("oci");
+        let built = self.base(&plan, build.path(), publish.unwrap_or(&oci))?;
         for file in ["disk.raw", "ram", "stub"] {
-            fs::rename(build.join(file), dir.join(file))?;
+            fs::rename(build.path().join(file), dir.join(file))?;
         }
         fs::write(&record_path, serde_json::to_vec(&built.record)?)?;
-        fs::remove_dir_all(&build)?;
-        Ok((dir, built.record, publish.map(|_| built.image)))
+        for removed in evict_bases(cache, &dir, self.wake.max_cached_bases)? {
+            log_line(
+                self.log,
+                &format!("base cache evicted {}", removed.display()),
+            )?;
+        }
+        Ok(CachedBase {
+            dir,
+            record: built.record,
+            image: publish.map(|_| built.image),
+            _in_use: in_use,
+        })
+    }
+
+    /// What a base is reused for: the same image, CPU profile, VMM, VM
+    /// config (paths aside), command line and guest scripts.
+    fn recipe(&self, plan: &BuildPlan) -> Result<String> {
+        let cmdline = wake_cmdline(fs::metadata(&self.base.initrd_path)?.len());
+        let vm = build_vm_config(&ChildJob {
+            cmdline,
+            ..ChildJob::default()
+        })?;
+        Ok(crate::sha256::sha256_bytes_hex(
+            format!(
+                "{}\n{}\n{}\n{}\n{BARS_SCRIPT}\n{SUSPEND_SCRIPT}",
+                plan.build_key.as_str(),
+                sha256_file_hex(&self.wake.cpu_profile)?,
+                self.wake.vmm_sha256,
+                serde_json::to_string(&vm)?,
+            )
+            .as_bytes(),
+        ))
     }
 
     /// The image of the cached base: the same bytes, so the same manifest.
@@ -502,6 +600,11 @@ impl Steps<'_> {
 
     fn verify_cached(&self, dir: &Path, record: &BaseRecord) -> Result<()> {
         let ram = record.config.wake.as_ref().context("no wake")?;
+        ensure!(
+            !expired(ram.booted_at_unix_ms, unix_ms()),
+            "the base was booted over {} days ago",
+            MAX_CACHED_BASE_AGE_DAYS
+        );
         for (file, expected) in [
             (dir.join("disk.raw"), record.disk_sha256.as_str()),
             (dir.join("ram"), ram.ram.sha256.as_str()),
@@ -952,6 +1055,42 @@ fn ip(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// The VM the base and pack steps boot: the agent's cold config in the wake
+/// shape, the RAM shared so the file is the guest's memory.
+fn build_vm_config(job: &ChildJob) -> Result<cloud_hypervisor_client::VmConfig> {
+    let cold = machine_vm_config(&MachineVmInput {
+        name: "intar-build",
+        cpu_millis: WAKE_BOOT_VCPUS * 1000,
+        memory_mib: u32::try_from(WAKE_MEMORY_BYTES >> 20)?,
+        kernel: &job.kernel,
+        initramfs: Some(&job.initramfs),
+        cmdline: &job.cmdline,
+        root_disk: &job.disk,
+        runtime_disk: &job.run_disk,
+        recording_disk: &job.recording_disk,
+        serial_log: &job.serial,
+        console_log: &job.console,
+        tap: TAP,
+        mac: WAKE_BUILD_MAC,
+        vsock_socket: &job.vsock,
+        vsock_cid: WAKE_BUILD_VSOCK_CID,
+    });
+    Ok(wake_vm_config(
+        cold,
+        &WakeShape {
+            memory_bytes: WAKE_MEMORY_BYTES,
+            boot_vcpus: WAKE_BOOT_VCPUS,
+            max_vcpus: WAKE_MAX_VCPUS,
+            balloon: WAKE_BALLOON,
+            max_phys_bits: WAKE_MAX_PHYS_BITS,
+        },
+        &job.cpu_profile,
+        &job.ram,
+        true,
+        u32::try_from(WAKE_MEMORY_BYTES >> 20)?,
+    )?)
+}
+
 async fn child(job: &ChildJob) -> Result<ChildResult> {
     use tokio::time::timeout;
     let log = &job.log;
@@ -983,37 +1122,7 @@ async fn child(job: &ChildJob) -> Result<ChildResult> {
     }
     let ch = cloud_hypervisor_client::Client::new(job.api.clone())?;
     ch.ping().await.context("the VMM does not answer")?;
-    let cold = machine_vm_config(&MachineVmInput {
-        name: "intar-build",
-        cpu_millis: WAKE_BOOT_VCPUS * 1000,
-        memory_mib: u32::try_from(WAKE_MEMORY_BYTES >> 20)?,
-        kernel: &job.kernel,
-        initramfs: Some(&job.initramfs),
-        cmdline: &job.cmdline,
-        root_disk: &job.disk,
-        runtime_disk: &job.run_disk,
-        recording_disk: &job.recording_disk,
-        serial_log: &job.serial,
-        console_log: &job.console,
-        tap: TAP,
-        mac: WAKE_BUILD_MAC,
-        vsock_socket: &job.vsock,
-        vsock_cid: WAKE_BUILD_VSOCK_CID,
-    });
-    let config = wake_vm_config(
-        cold,
-        &WakeShape {
-            memory_bytes: WAKE_MEMORY_BYTES,
-            boot_vcpus: WAKE_BOOT_VCPUS,
-            max_vcpus: WAKE_MAX_VCPUS,
-            balloon: WAKE_BALLOON,
-            max_phys_bits: WAKE_MAX_PHYS_BITS,
-        },
-        &job.cpu_profile,
-        &job.ram,
-        true,
-        u32::try_from(WAKE_MEMORY_BYTES >> 20)?,
-    )?;
+    let config = build_vm_config(job)?;
     ch.vm_create(&config).await.context("vm.create")?;
     let booted_at_unix_ms = unix_ms();
     let booted = Instant::now();
@@ -1222,6 +1331,46 @@ mod tests {
         );
         let limit = u64::try_from(DELTA_PART_BYTES).expect("size");
         assert!(write_delta_parts(&mut writer, &delta, limit).is_err());
+    }
+
+    #[test]
+    fn old_bases_expire() {
+        let day = 24 * 3_600_000;
+        assert!(!expired(0, 30 * day));
+        assert!(expired(0, 30 * day + 1));
+    }
+
+    #[test]
+    fn the_cache_evicts_the_least_recently_used_bases_not_held_ones() {
+        let cache = tempfile::tempdir().expect("cache");
+        let entry = |name: &str, age_s: u64| {
+            let dir = cache.path().join(name);
+            fs::create_dir_all(&dir).expect("entry");
+            let record = fs::File::create(dir.join("base.json")).expect("record");
+            record
+                .set_modified(SystemTime::now() - Duration::from_secs(age_s))
+                .expect("mtime");
+            fs::File::create(dir.join(".lock")).expect("lock");
+            dir
+        };
+        let (old, held, recent, keep) = (
+            entry("old", 400),
+            entry("held", 300),
+            entry("recent", 100),
+            entry("keep", 1_000),
+        );
+        fs::create_dir_all(cache.path().join(".building-x")).expect("leftover");
+        let lock = fs::File::open(held.join(".lock")).expect("lock");
+        fs2::FileExt::lock_shared(&lock).expect("hold");
+        assert_eq!(
+            evict_bases(cache.path(), &keep, 3).expect("evict"),
+            vec![old.clone()]
+        );
+        assert_eq!(
+            evict_bases(cache.path(), &keep, 2).expect("evict"),
+            vec![recent.clone()]
+        );
+        assert!(held.exists() && keep.exists() && !old.exists() && !recent.exists());
     }
 
     #[test]

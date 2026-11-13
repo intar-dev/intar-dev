@@ -158,6 +158,7 @@ mod tests {
             cpu_profile: dir.path().join("profile.json"),
             kino: dir.path().join("kino"),
             base_cache: dir.path().join("bases"),
+            max_cached_bases: 4,
         });
         let error = builds_wake(&config, &log).expect_err("broken wake");
         assert!(

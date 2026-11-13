@@ -42,8 +42,11 @@ fails with the reason until it is fixed; plain targets still build. With
 `enabled = false`, wake targets build as plain images and their logs say so.
 
 A wake base is cached under `cache_root/wake-bases`, keyed by the image's build
-key, the profile, the VMM and the suspend steps, so an image and its packs
-share one base. Nothing evicts it; remove old entries by hand.
+key, the profile, the VMM, the VM config, the command line and the guest
+steps, so an image and its packs share one base. The cache keeps
+`max_cached_bases` (default 4) and evicts the least recently used; a base
+booted over 30 days ago is rebuilt, since packs inherit its boot time and run
+hosts stop waking guests booted 330 days ago.
 
 A guest that must keep its address across wakes cannot use the run's address:
 every run gets a new one. k3s, for example, should be pinned to a fixed node

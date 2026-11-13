@@ -53,6 +53,13 @@ pub struct WakeBuildConfig {
     /// Where suspended bases outlive a build, so an image and its packs
     /// share one.
     pub base_cache: PathBuf,
+    /// The most bases the cache keeps; the least recently used go first.
+    #[serde(default = "default_max_cached_bases")]
+    pub max_cached_bases: usize,
+}
+
+fn default_max_cached_bases() -> usize {
+    4
 }
 
 impl Default for QemuBuildConfig {
