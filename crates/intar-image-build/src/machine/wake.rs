@@ -195,15 +195,23 @@ pub(crate) fn build_wake_target(
         log,
     };
     match &plan.wake {
+        // The image and its packs share one base: the cache's.
         Some(WakeRole::Base) => {
-            let dir = work.join("base");
-            fs::create_dir_all(&dir)?;
-            let built = steps.base(plan, &dir, &request.output_dir)?;
-            Ok(built.image)
+            let BuildTarget::Image(name) = &request.target else {
+                bail!("a wake base is an image");
+            };
+            let (_, _, image) =
+                steps.cached_base(request, name, work, Some(&request.output_dir))?;
+            image.context("the base was not published")
         }
         Some(WakeRole::Pack { base: name }) => {
-            let cached = steps.cached_base(request, name, work)?;
-            steps.pack(plan, &cached, &work.join("pack"), &request.output_dir)
+            let (dir, record, _) = steps.cached_base(request, name, work, None)?;
+            steps.pack(
+                plan,
+                &(dir, record),
+                &work.join("pack"),
+                &request.output_dir,
+            )
         }
         None => bail!("not a wake target"),
     }
@@ -412,20 +420,30 @@ impl Steps<'_> {
         }
     }
 
-    /// The suspended base `name` of the cache, verified, or built into it.
+    /// The suspended base `name` of the cache, verified, or built into it;
+    /// with `publish`, also its image there.
+    ///
+    /// ponytail: one directory per base and recipe, never evicted; add an
+    /// LRU bound when bases pile up on a builder.
     fn cached_base(
         &self,
         request: &MachineBuildRequest,
         name: &str,
         work: &Path,
-    ) -> Result<(PathBuf, BaseRecord)> {
+        publish: Option<&Path>,
+    ) -> Result<(PathBuf, BaseRecord, Option<MachineImage>)> {
         let plan = plan_build(&request.bundle, &BuildTarget::Image(name.to_owned()), None)?;
-        let profile = sha256_file_hex(&self.wake.cpu_profile)?;
-        let dir = self
-            .config
-            .work_root
-            .join("wake-bases")
-            .join(format!("{}-{profile}", plan.build_key.hex()));
+        // A base is reused only by the same image, profile, VMM and suspend.
+        let recipe = crate::sha256::sha256_bytes_hex(
+            format!(
+                "{}\n{}\n{}\n{SUSPEND_SCRIPT}",
+                plan.build_key.as_str(),
+                sha256_file_hex(&self.wake.cpu_profile)?,
+                self.wake.vmm_sha256
+            )
+            .as_bytes(),
+        );
+        let dir = self.wake.base_cache.join(recipe);
         fs::create_dir_all(&dir)?;
         let lock = fs::File::create(dir.join(".lock"))?;
         fs2::FileExt::lock_exclusive(&lock)?;
@@ -437,7 +455,10 @@ impl Steps<'_> {
         match reused {
             Some(Ok(record)) => {
                 log_line(self.log, &format!("base {name} reused from the cache"))?;
-                return Ok((dir, record));
+                let image = publish
+                    .map(|output| self.publish_base(&dir, &record, output))
+                    .transpose()?;
+                return Ok((dir, record, image));
             }
             Some(Err(error)) => {
                 log_line(self.log, &format!("base {name} cache refused: {error:#}"))?;
@@ -447,13 +468,33 @@ impl Steps<'_> {
         let _ = fs::remove_file(&record_path);
         let build = work.join("base");
         fs::create_dir_all(&build)?;
-        let built = self.base(&plan, &build, &build.join("oci"))?;
+        let oci = build.join("oci");
+        let built = self.base(&plan, &build, publish.unwrap_or(&oci))?;
         for file in ["disk.raw", "ram", "stub"] {
             fs::rename(build.join(file), dir.join(file))?;
         }
         fs::write(&record_path, serde_json::to_vec(&built.record)?)?;
         fs::remove_dir_all(&build)?;
-        Ok((dir, built.record))
+        Ok((dir, built.record, publish.map(|_| built.image)))
+    }
+
+    /// The image of the cached base: the same bytes, so the same manifest.
+    fn publish_base(&self, dir: &Path, record: &BaseRecord, output: &Path) -> Result<MachineImage> {
+        let mut writer = ImageWriter::new(output)?;
+        writer.file(&self.base.kernel_path, KERNEL_MEDIA_TYPE)?;
+        writer.file(&self.base.initrd_path, INITRD_MEDIA_TYPE)?;
+        writer.chunks(&dir.join("disk.raw"), DISK_CHUNK_MEDIA_TYPE)?;
+        writer.chunks(&dir.join("ram"), WAKE_RAM_CHUNK_MEDIA_TYPE)?;
+        writer.file(&dir.join("stub"), WAKE_STUB_MEDIA_TYPE)?;
+        writer.file(&self.wake.cpu_profile, WAKE_CPU_PROFILE_MEDIA_TYPE)?;
+        let image = writer.finish(record.config.clone())?;
+        ensure!(
+            image.manifest_digest == record.manifest,
+            "the cached base publishes as {}, not {}",
+            image.manifest_digest.as_str(),
+            record.manifest.as_str()
+        );
+        Ok(image)
     }
 
     fn verify_cached(&self, dir: &Path, record: &BaseRecord) -> Result<()> {

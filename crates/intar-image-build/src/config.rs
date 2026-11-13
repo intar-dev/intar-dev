@@ -50,6 +50,9 @@ pub struct WakeBuildConfig {
     pub cpu_profile: PathBuf,
     /// The Kino binary the build guest runs.
     pub kino: PathBuf,
+    /// Where suspended bases outlive a build, so an image and its packs
+    /// share one.
+    pub base_cache: PathBuf,
 }
 
 impl Default for QemuBuildConfig {

@@ -39,8 +39,9 @@ and unprivileged user namespaces (on Ubuntu,
 builder). When any of these is missing, `doctor` warns and wake targets build
 as plain images; each such build log says why.
 
-A wake base is cached under `work_root/wake-bases`, keyed by the image's build
-key and the profile's digest, so the packs of one image share one base.
+A wake base is cached under `cache_root/wake-bases`, keyed by the image's build
+key, the profile, the VMM and the suspend steps, so an image and its packs
+share one base. Nothing evicts it; remove old entries by hand.
 
 A guest that must keep its address across wakes cannot use the run's address:
 every run gets a new one. k3s, for example, should be pinned to a fixed node

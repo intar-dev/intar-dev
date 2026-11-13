@@ -48,6 +48,7 @@ impl BuilderConfig {
                 vmm_version: self.wake.vmm_version.clone(),
                 cpu_profile: self.wake.cpu_profile.clone(),
                 kino: self.wake.kino.clone(),
+                base_cache: self.builder.cache_root.join("wake-bases"),
             }),
         }
     }
