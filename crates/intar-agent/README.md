@@ -169,6 +169,8 @@ not, or its VMM exits first, the agent destroys that jail generation (root
 disk, RAM and recording clones included) and boots the VM cold once. Reports
 carry `start.path`: `wake`, `wake_fallback` with a reason, or `cold` with the
 reason a wake was not tried.
+After a woken VM's first report, jailerd writes the kernel over its staged wake
+stub, so a guest reboot boots cold; if that fails the agent logs a warning.
 
 ## Scenario CPU resources
 

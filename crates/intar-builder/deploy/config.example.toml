@@ -35,3 +35,7 @@ minimum_free_bytes = 21474836480
 
 [jobs]
 max_concurrent_builds = 2
+
+# Wake images (see README.md); off, they build as plain images.
+[wake]
+enabled = false
