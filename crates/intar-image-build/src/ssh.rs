@@ -86,7 +86,7 @@ impl BuildSshSession {
             .with_context(|| format!("failed to open upload source '{}'", local_path.display()))?;
         let remote = shell_quote(remote_path);
         let command = format!("cat > {remote} && chmod {mode:o} {remote}");
-        self.exec_with_optional_input(&command, Some(file), false, None)
+        self.exec_with_optional_input(&command, Some(file), None)
             .await
             .with_context(|| {
                 format!(
@@ -95,18 +95,14 @@ impl BuildSshSession {
                 )
             })
     }
-    pub async fn run(&mut self, command: &str, inherit_output: bool) -> Result<()> {
-        self.exec_with_optional_input(command, None, inherit_output, None)
-            .await
+    pub async fn run(&mut self, command: &str) -> Result<()> {
+        self.exec_with_optional_input(command, None, None).await
     }
 
-    pub async fn run_logged(
-        &mut self,
-        command: &str,
-        inherit_output: bool,
-        log_path: &Path,
-    ) -> Result<()> {
-        self.exec_with_optional_input(command, None, inherit_output, Some(log_path))
+    /// Run `command` with its output appended to `log_path`, never to this
+    /// process's own output.
+    pub async fn run_logged(&mut self, command: &str, log_path: &Path) -> Result<()> {
+        self.exec_with_optional_input(command, None, Some(log_path))
             .await
     }
 
@@ -114,7 +110,6 @@ impl BuildSshSession {
         &mut self,
         command: &str,
         input: Option<tokio::fs::File>,
-        inherit_output: bool,
         log_path: Option<&Path>,
     ) -> Result<()> {
         let mut channel = self
@@ -137,27 +132,13 @@ impl BuildSshSession {
             .await
             .context("failed to close build SSH command stdin")?;
 
-        let mut log_file = open_log_file(log_path)?;
+        let mut log = CappedLog::open(log_path, BUILD_LOG_LIMIT_BYTES)?;
         let mut exit_status = None;
         let mut output_tail = Vec::new();
         while let Some(message) = channel.wait().await {
             match message {
-                ChannelMsg::Data { data } => {
-                    if inherit_output {
-                        std::io::stdout()
-                            .write_all(&data)
-                            .context("failed to write build SSH stdout")?;
-                    }
-                    write_log_chunk(log_file.as_mut(), &data)?;
-                    append_limited(&mut output_tail, &data);
-                }
-                ChannelMsg::ExtendedData { data, .. } => {
-                    if inherit_output {
-                        std::io::stderr()
-                            .write_all(&data)
-                            .context("failed to write build SSH stderr")?;
-                    }
-                    write_log_chunk(log_file.as_mut(), &data)?;
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                    log.write(&data)?;
                     append_limited(&mut output_tail, &data);
                 }
                 ChannelMsg::ExitStatus { exit_status: code } => {
@@ -187,30 +168,63 @@ impl BuildSshSession {
     }
 }
 
-fn open_log_file(log_path: Option<&Path>) -> Result<Option<std::fs::File>> {
-    let Some(log_path) = log_path else {
-        return Ok(None);
-    };
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create '{}'", parent.display()))?;
-    }
-    Ok(Some(
-        std::fs::OpenOptions::new()
+/// The most a build log may hold; a command that writes past it fails.
+pub const BUILD_LOG_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A log file that refuses to grow past `limit` bytes.
+struct CappedLog {
+    file: Option<std::fs::File>,
+    size: u64,
+    limit: u64,
+}
+
+impl CappedLog {
+    fn open(log_path: Option<&Path>, limit: u64) -> Result<Self> {
+        let Some(log_path) = log_path else {
+            return Ok(Self {
+                file: None,
+                size: 0,
+                limit,
+            });
+        };
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create '{}'", parent.display()))?;
+        }
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(log_path)
-            .with_context(|| format!("failed to open build log '{}'", log_path.display()))?,
-    ))
-}
-
-fn write_log_chunk(log_file: Option<&mut std::fs::File>, data: &[u8]) -> Result<()> {
-    if let Some(log_file) = log_file {
-        log_file
-            .write_all(data)
-            .context("failed to append build SSH output to build log")?;
+            .with_context(|| format!("failed to open build log '{}'", log_path.display()))?;
+        let size = file.metadata()?.len();
+        Ok(Self {
+            file: Some(file),
+            size,
+            limit,
+        })
     }
-    Ok(())
+
+    /// Append `data`, or note the cut and fail when it would pass the limit.
+    fn write(&mut self, data: &[u8]) -> Result<()> {
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        let room = self.limit.saturating_sub(self.size);
+        if data.len() as u64 > room {
+            let fits = usize::try_from(room).unwrap_or(data.len()).min(data.len());
+            file.write_all(&data[..fits])?;
+            file.write_all(b"\n[intar-machine] build log limit reached; output cut\n")?;
+            self.file = None;
+            bail!(
+                "the build wrote more than {} bytes of output; the build log keeps at most that",
+                self.limit
+            );
+        }
+        file.write_all(data)
+            .context("failed to append build SSH output to build log")?;
+        self.size += data.len() as u64;
+        Ok(())
+    }
 }
 
 struct AcceptUnknownHostKey;
@@ -248,7 +262,21 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{generate_build_ssh_key, private_key_to_openssh, shell_quote};
+    use super::{CappedLog, generate_build_ssh_key, private_key_to_openssh, shell_quote};
+
+    #[test]
+    fn the_build_log_stops_at_its_limit_and_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build.log");
+        std::fs::write(&path, "head\n").unwrap();
+        let mut log = CappedLog::open(Some(&path), 20).unwrap();
+        log.write(b"0123456789").unwrap();
+        let error = log.write(b"abcdefghij").unwrap_err();
+        assert!(error.to_string().contains("more than 20 bytes"), "{error}");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("head\n0123456789abcde\n"), "{content}");
+        assert!(content.ends_with("output cut\n"), "{content}");
+    }
 
     #[test]
     fn generates_ed25519_build_key_without_ssh_keygen() {

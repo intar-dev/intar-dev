@@ -41,7 +41,22 @@ use crate::qemu::{BUILD_BOOT_CMDLINE, DirectBootQemuInput, render_direct_boot_qe
 use crate::rootfs::BaseRootfsArtifact;
 use crate::seed::{BuildSeedInput, write_build_seed};
 use crate::sha256::sha256_file_hex;
-use crate::ssh::{BuildSshKey, BuildSshSession, generate_build_ssh_key, private_key_to_openssh};
+use crate::ssh::{
+    BUILD_LOG_LIMIT_BYTES, BuildSshKey, BuildSshSession, generate_build_ssh_key,
+    private_key_to_openssh,
+};
+
+const SERIAL_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Fails when the serial console log at `path` is over `limit` bytes.
+fn check_serial_log(path: &Path, limit: u64) -> Result<()> {
+    let size = fs::metadata(path).map_or(0, |metadata| metadata.len());
+    ensure!(
+        size <= limit,
+        "the build VM wrote {size} bytes to its serial console, over the {limit} byte limit"
+    );
+    Ok(())
+}
 
 /// The files a spawn names; [`Files::canonical`] for checkpoint identities.
 struct Files {
@@ -426,13 +441,12 @@ rm -f {UPLOAD_PATH}
         fs::set_permissions(&local, fs::Permissions::from_mode(0o600))?;
         let command = stage_command(&stage_file(index, &stage.name), &stage.env);
         let ssh = guest.ssh.as_mut().context("the build VM has no session")?;
-        timeout_in_runtime(
-            &self.runtime,
+        self.watched(
             remaining_until(self.deadline, "provision")?,
             "stage",
             async {
                 ssh.upload_file(&local, UPLOAD_PATH, 0o600).await?;
-                ssh.run_logged(&command, true, &self.log).await
+                ssh.run_logged(&command, &self.log).await
             },
         )
         .with_context(|| format!("stage {index} `{}` failed", stage.name))
@@ -440,13 +454,39 @@ rm -f {UPLOAD_PATH}
 
     fn guest_run(&self, guest: &mut Guest, command: &str, phase: &str) -> Result<()> {
         let ssh = guest.ssh.as_mut().context("the build VM has no session")?;
-        timeout_in_runtime(
-            &self.runtime,
+        self.watched(
             remaining_until(self.deadline, phase)?,
             phase,
-            ssh.run_logged(command, true, &self.log),
+            ssh.run_logged(command, &self.log),
         )
         .with_context(|| format!("{phase} failed"))
+    }
+
+    /// `future` within `timeout`, failed early when the serial log passes
+    /// its limit: the guest writes the console, so it is bounded like the
+    /// build log.
+    // ponytail: polled, so a guest overshoots by what it writes in one
+    // interval; and the console is only watched while a command runs.
+    fn watched<T>(
+        &self,
+        timeout: Duration,
+        phase: &str,
+        future: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let serial = &self.files.serial;
+        timeout_in_runtime(&self.runtime, timeout, phase, async {
+            tokio::select! {
+                result = future => result,
+                error = async {
+                    loop {
+                        tokio::time::sleep(SERIAL_POLL_INTERVAL).await;
+                        if let Err(error) = check_serial_log(serial, BUILD_LOG_LIMIT_BYTES) {
+                            return error;
+                        }
+                    }
+                } => Err(error),
+            }
+        })
     }
 
     fn connect(&self, guest: &mut Guest) -> Result<()> {
@@ -469,7 +509,7 @@ rm -f {UPLOAD_PATH}
                     &guest.key.private_key,
                 )
                 .await?;
-                ssh.run("true", false).await?;
+                ssh.run("true").await?;
                 Ok(ssh)
             });
             match attempt {
@@ -625,5 +665,27 @@ rm -f {UPLOAD_PATH}
         writeln!(file, "[intar-machine] {message}")?;
         eprintln!("[intar-machine] {message}");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::check_serial_log;
+
+    #[test]
+    fn a_serial_log_over_its_limit_fails_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build.serial.log");
+        check_serial_log(&path, 4).unwrap();
+        std::fs::write(&path, "1234").unwrap();
+        check_serial_log(&path, 4).unwrap();
+        std::fs::write(&path, "12345").unwrap();
+        let error = check_serial_log(&path, 4).unwrap_err();
+        assert!(
+            error.to_string().contains("over the 4 byte limit"),
+            "{error}"
+        );
     }
 }
