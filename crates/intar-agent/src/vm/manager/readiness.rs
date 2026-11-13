@@ -9,14 +9,47 @@ pub(super) fn boot_capacity_retry_delay(attempt: u32) -> Duration {
     Duration::from_millis(base_ms.saturating_add(jitter_ms).min(1_000))
 }
 
+/// What one guest report means for a VM waiting to become Ready.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ReadyGate {
+    /// For another VM, run or generation.
+    OtherVm,
+    /// A guest failure or a contract mismatch: the VM never becomes Ready.
+    Failed(String),
+    /// SSH is up.
+    Ready,
+    /// The lab is progressing; SSH is not up yet.
+    Waiting,
+}
+
+pub(super) fn ready_gate(
+    update: &GuestUpdate,
+    vm_name: &str,
+    run_id: &str,
+    jail_generation: &str,
+) -> ReadyGate {
+    if update.vm_name != vm_name
+        || update.run_id != run_id
+        || update.jail_generation != jail_generation
+    {
+        ReadyGate::OtherVm
+    } else if let Some(failed) = &update.failed {
+        ReadyGate::Failed(failed.clone())
+    } else if update.ssh_ready {
+        ReadyGate::Ready
+    } else {
+        ReadyGate::Waiting
+    }
+}
+
 #[tracing::instrument(name = "vm.wait_ready", skip_all, fields(vm = vm_name, run_id = ?details.run_id))]
 pub(super) async fn wait_for_scenario_runtime_ready(
     inner: &Arc<Inner>,
     vm_name: &str,
     ch: &ChClient,
     details: &VmDetails,
-    mut updates: broadcast::Receiver<ProbeUpdateEnvelope>,
-) -> Result<ProbeUpdateEnvelope> {
+    mut updates: broadcast::Receiver<GuestUpdate>,
+) -> Result<GuestUpdate> {
     let run_id = details
         .run_id
         .as_ref()
@@ -60,19 +93,20 @@ pub(super) async fn wait_for_scenario_runtime_ready(
             tokio::select! {
                 update = updates.recv() => {
                     match update {
-                        Ok(update)
-                            if update.vm_name == vm_name
-                                && update.run_id == run_id
-                                && update.jail_generation == jail_generation => {
-                            if update.collection_state == ProbeCollectionState::Ok {
+                        Ok(update) => match ready_gate(&update, vm_name, &run_id, jail_generation) {
+                            ReadyGate::OtherVm => {}
+                            ReadyGate::Failed(failed) => anyhow::bail!("{failed}"),
+                            ReadyGate::Ready => {
                                 ensure_scenario_runtime_process_live(vm_name, details).await?;
                                 return Ok(update);
                             }
-                            last_error = Some(anyhow::anyhow!(
-                                update.collection_error.unwrap_or_else(|| "Kino readiness push reported an error".to_string())
-                            ));
-                        }
-                        Ok(_) => {}
+                            ReadyGate::Waiting => {
+                                last_error = Some(anyhow::anyhow!(
+                                    "Kino reported {:?} but SSH is not up yet",
+                                    update.lab.state
+                                ));
+                            }
+                        },
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             debug!(vm = vm_name, skipped, "lagged while waiting for Kino readiness push");
                         }
@@ -790,7 +824,7 @@ pub(super) async fn resume_tracked_vm_on_startup(
                 )
             })?;
 
-            let readiness_updates = inner_for_task.kino_readiness_tx.subscribe();
+            let readiness_updates = inner_for_task.guest_reports_tx.subscribe();
             start_probe_worker(&inner_for_task, &vm_name, &details)
                 .await
                 .context("failed to restart vm probe worker after startup resume")?;
@@ -828,7 +862,7 @@ pub(super) async fn resume_tracked_vm_on_startup(
                 wait_for_guest_ssh_before_running(&inner_for_task, &vm_name, &generation).await?;
             }
             ensure_create_not_deleted(&inner_for_task, &vm_name).await?;
-            commit_ready_vm_and_probe(&inner_for_task, &vm_name, &generation, &ready)
+            commit_ready_vm(&inner_for_task, &vm_name, &generation, &ready)
                 .await
                 .context("durably commit recovered VM readiness")?;
             let terminal =

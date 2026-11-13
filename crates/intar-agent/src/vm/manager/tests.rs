@@ -1,6 +1,4 @@
 use super::*;
-#[cfg(target_os = "linux")]
-use crate::kino_probe::{GuestPhaseTimings, ProbeSummary, ProbeView};
 use cloud_hypervisor_client::Error as ChError;
 use intar_jailer_protocol::{CpuQuota, CpuQuotaAttestation};
 use russh::client::Handler as _;
@@ -29,57 +27,7 @@ fn ch_delete_confirms_absence_status(status: u16) -> bool {
 }
 
 fn test_vm_status(name: &str, run_id: Option<&str>) -> VmStatusResponse {
-    VmStatusResponse {
-        name: name.to_string(),
-        state: VmLifecycleState::Queued,
-        created_at: "1970-01-01T00:00:00Z".to_string(),
-        updated_at: "1970-01-01T00:00:00Z".to_string(),
-        details: Some(VmDetails {
-            owner_user_id: "user-1".to_string(),
-            runtime_execution_id: "execution-1".to_string(),
-            generation: 1,
-            image_key: None,
-            image_sha256: None,
-            guest_tools: None,
-            run_id: run_id.map(str::to_string),
-            root_disk_path: format!("/tmp/{name}/root.raw"),
-            seed_disk_path: format!("/tmp/{name}/runtime.img"),
-            recording_disk_path: None,
-            spool_dir: None,
-            mac: "02:00:00:00:00:01".to_string(),
-            cpu_millis: Some(125),
-            guest_ip: None,
-            guest_ip_cidr: None,
-            gateway: None,
-            bridge_name: None,
-            ssh_public_port: None,
-            tap_name: None,
-            ch_socket_path: None,
-            ch_pid: None,
-            ch_start_time_ticks: None,
-            host_boot_id: None,
-            ch_executable_sha256: None,
-            jail_generation: None,
-            jail_unit_name: None,
-            jail_cgroup_path: None,
-            jail_root_path: None,
-            jail_root_inode: None,
-            jail_uid: None,
-            jail_gid: None,
-            jail_netns_name: None,
-            kino_vsock_cid: None,
-            kino_vsock_port: None,
-            kino_vsock_path: None,
-            ssh_host_keys_openssh: Vec::new(),
-            cpu_runtime: None,
-        }),
-        error: None,
-        lease_duration_seconds: None,
-        lease_expires_at: None,
-        created_at_s: 0,
-        updated_at_s: 0,
-        running_at_s: None,
-    }
+    VmStatusResponse::test_status(name, run_id)
 }
 
 mod archive;
@@ -97,3 +45,4 @@ mod api;
 mod lifecycle;
 mod network;
 mod readiness;
+mod reports;

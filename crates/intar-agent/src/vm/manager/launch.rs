@@ -4,18 +4,16 @@ pub(super) struct RunCreateInput<'a> {
     pub(super) api_started_at: Instant,
     pub(super) name: &'a str,
     pub(super) run_id: &'a str,
-    pub(super) image_key: &'a str,
-    pub(super) expected_image_sha256: &'a str,
-    pub(super) tools_disk_sha256: &'a str,
-    pub(super) tools_disk_size_bytes: u64,
-    pub(super) kino_sha256: &'a str,
-    pub(super) guest_bootstrap_abi: u16,
+    pub(super) image: &'a OciDigest,
+    pub(super) kino: &'a OciDigest,
+    pub(super) spec: &'a OciDigest,
+    pub(super) mode: SpecMode,
+    pub(super) egress: bool,
+    pub(super) terminal: bool,
     pub(super) runtime: &'a CreateScenarioVmRuntime,
     pub(super) tap: &'a str,
     pub(super) ssh_public_port: Option<u16>,
     pub(super) kino_vsock_cid: u32,
-    pub(super) kino_vsock_port: u32,
-    pub(super) kino_host_ready_port: u32,
     pub(super) cpu_millis: u32,
     pub(super) memory_mib: u32,
     pub(super) disk_mib: Option<u32>,
@@ -42,7 +40,7 @@ pub(super) struct CloudHypervisorVmConfigInput<'a> {
 pub(super) fn build_cloud_hypervisor_vm_config(
     input: CloudHypervisorVmConfigInput<'_>,
 ) -> Result<VmConfig> {
-    let mut disks = vec![
+    let disks = vec![
         DiskConfig {
             path: input.paths.jailed_root_disk.display().to_string(),
             readonly: false,
@@ -62,14 +60,6 @@ pub(super) fn build_cloud_hypervisor_vm_config(
             image_type: Some(DiskImageType::Raw),
         },
     ];
-    if let Some(tools) = &input.paths.jailed_tools_disk {
-        disks.push(DiskConfig {
-            path: tools.display().to_string(),
-            readonly: true,
-            id: Some(format!("{}-tools", input.name)),
-            image_type: Some(DiskImageType::Raw),
-        });
-    }
     Ok(VmConfig {
         cpus: (input.cpu_millis > 1_000).then(|| CpusConfig {
             boot_vcpus: input.cpu_millis.div_ceil(1_000),
@@ -140,10 +130,10 @@ pub(super) async fn cached_jailer_launch_capabilities(
         .await
 }
 
-#[tracing::instrument(name = "vm.prepare_image", skip_all)]
+#[tracing::instrument(name = "vm.prepare_image", skip_all, fields(image = image.image.as_str()))]
 pub(super) async fn ensure_jailer_image_template(
     inner: &Inner,
-    image: &image_cache::CachedChunkedImage,
+    image: &image_cache::PulledMachine,
     request_class: RequestClass,
 ) -> Result<PreparedImageV3Result> {
     let capabilities = cached_jailer_launch_capabilities(inner).await?;
@@ -153,40 +143,28 @@ pub(super) async fn ensure_jailer_image_template(
     {
         anyhow::bail!("jailerd does not attest the mandatory v3 chunked launch contract");
     }
+    let cache_root =
+        image_cache::default_cache_root().context("failed to determine image cache root")?;
+    let store = image_cache::BlobStore::new(&cache_root);
+    let roots = &capabilities.allowed_source_roots;
+    let blob = |digest: &OciDigest| {
+        artifact_source(
+            &store.path(digest),
+            roots,
+            Some(digest.hex()),
+            ArtifactAccess::ReadOnly,
+        )
+    };
+    let config = &image.manifest.config.digest;
     let request = PrepareChunkedImageV3Request {
-        image_id: Sha256Digest::parse(image.image_id.clone())?,
-        chunk_manifest_sha256: Sha256Digest::parse(image.chunk_manifest_sha256.clone())?,
-        virtual_size_bytes: image.virtual_size_bytes,
-        // The image cache does not hold OCI manifests until it pulls through
-        // /v2; until then jailerd refuses this request at the hash check.
-        image_manifest: artifact_source(
-            &image.chunk_manifest_path,
-            &capabilities.allowed_source_roots,
-            Some(&image.image_id),
-            ArtifactAccess::ReadOnly,
-        )?,
-        manifest: artifact_source(
-            &image.chunk_manifest_path,
-            &capabilities.allowed_source_roots,
-            Some(&image.chunk_manifest_sha256),
-            ArtifactAccess::ReadOnly,
-        )?,
-        chunk_cache_root: trusted_directory_source(
-            &image.chunk_cache_root,
-            &capabilities.allowed_source_roots,
-        )?,
-        kernel: artifact_source(
-            &image.kernel_path,
-            &capabilities.allowed_source_roots,
-            Some(&image.kernel_sha256),
-            ArtifactAccess::ReadOnly,
-        )?,
-        initrd: Some(artifact_source(
-            &image.initrd_path,
-            &capabilities.allowed_source_roots,
-            Some(&image.initrd_sha256),
-            ArtifactAccess::ReadOnly,
-        )?),
+        image_id: Sha256Digest::parse(image.image.hex().to_owned())?,
+        chunk_manifest_sha256: Sha256Digest::parse(config.hex().to_owned())?,
+        virtual_size_bytes: image.config.disk.size_bytes,
+        image_manifest: blob(&image.image)?,
+        manifest: blob(config)?,
+        chunk_cache_root: trusted_directory_source(store.directory(), roots)?,
+        kernel: blob(&image.kernel)?,
+        initrd: image.initrd.as_ref().map(blob).transpose()?,
         // A learner launch waits for this template, so the launch path passes
         // `Foreground` and is never parked. The background cache warmer passes
         // `Background`, which keeps it inside jailerd's background lane.
@@ -199,7 +177,7 @@ pub(super) async fn ensure_jailer_image_template(
         // A background import is rate limited on purpose, so its budget must
         // cover the physical minimum for this image size. The foreground
         // class keeps the fixed budget and is never parked.
-        jailer_prepare_timeout(request_class, image.virtual_size_bytes),
+        jailer_prepare_timeout(request_class, request.virtual_size_bytes),
     )
     .await?
     {
@@ -221,7 +199,7 @@ pub(super) async fn ensure_jailer_image_template(
         ),
     };
     validate_prepared_image_v3_result(&request, &result)?;
-    image_cache::mark_template_ready(image, &result).await?;
+    image_cache::mark_template_ready(&cache_root, image, &result).await?;
     Ok(result)
 }
 
@@ -312,10 +290,9 @@ where
 pub(super) async fn launch_jailed_cloud_hypervisor(
     inner: &Inner,
     req: &RunCreateInput<'_>,
-    cached_image: &image_cache::CachedChunkedImage,
-    prepared: &PreparedImageV3Result,
-    tools_disk_path: &Path,
+    ready: &image_cache::ReadyImage,
 ) -> Result<VmLaunchResult> {
+    let prepared = &ready.prepared_image;
     let run_id = ValidatedId::parse(req.run_id.to_string()).context("validate jailer run ID")?;
     let vm_id = ValidatedId::parse(req.name.to_string()).context("validate jailer VM ID")?;
 
@@ -324,7 +301,7 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
     let root_disk_size_bytes = req
         .disk_mib
         .map(|target_disk_mib| u64::from(target_disk_mib) * 1024 * 1024)
-        .unwrap_or(cached_image.virtual_size_bytes);
+        .unwrap_or(ready.disk_size_bytes);
     let artifacts = SourceArtifacts {
         kernel: prepared.kernel.clone(),
         initrd: prepared.initrd.clone(),
@@ -341,12 +318,6 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
             None,
             ArtifactAccess::ReadWrite,
         )?,
-        tools_disk: Some(artifact_source(
-            tools_disk_path,
-            &capabilities.allowed_source_roots,
-            Some(req.tools_disk_sha256),
-            ArtifactAccess::ReadOnly,
-        )?),
     };
 
     let request = VmLaunchRequest {
@@ -360,7 +331,7 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
         guest_ip_cidr: req.network.guest_ip_cidr.clone(),
         ssh_public_port: req.ssh_public_port,
         vsock_cid: req.kino_vsock_cid,
-        egress: false,
+        egress: req.egress,
         artifacts,
     };
     let launch_operation = build_jailer_launch_operation(request, prepared)?;
@@ -465,25 +436,25 @@ pub(super) async fn finalize_jailed_vm_boot(
     Ok(result)
 }
 
-pub(super) async fn commit_ready_vm_and_probe(
+pub(super) async fn commit_ready_vm(
     inner: &Inner,
     name: &str,
     generation: &ValidatedId,
-    ready: &ProbeUpdateEnvelope,
+    ready: &GuestUpdate,
 ) -> Result<()> {
     anyhow::ensure!(
         ready.vm_name == name,
-        "Kino ready snapshot identifies a different VM"
+        "guest report identifies a different VM"
     );
     anyhow::ensure!(
         ready.jail_generation == generation.as_str(),
-        "Kino ready snapshot generation does not match the live generation"
+        "guest report generation does not match the live generation"
     );
     anyhow::ensure!(
-        ready.collection_state == ProbeCollectionState::Ok,
-        "Kino ready snapshot is not successful"
+        ready.ssh_ready && ready.failed.is_none(),
+        "guest report is not a ready one"
     );
-    let probe_row = probe_state_row(ready)?;
+    let lab_row = lab_row(ready)?;
     let now_s = now_unix_s();
     let observed_at = now_unix_ms();
 
@@ -501,7 +472,7 @@ pub(super) async fn commit_ready_vm_and_probe(
         .context("VM details disappeared during ready commit")?;
     anyhow::ensure!(
         details.run_id.as_deref() == Some(ready.run_id.as_str()),
-        "Kino ready snapshot run does not match the live VM"
+        "guest report run does not match the live VM"
     );
     anyhow::ensure!(
         details.jail_generation.as_deref() == Some(generation.as_str()),
@@ -547,9 +518,9 @@ pub(super) async fn commit_ready_vm_and_probe(
 
     inner
         .db
-        .upsert_ready_vm_and_probe_state(committed.to_db_row(), probe_row)
+        .upsert_vm_and_lab(committed.to_db_row(), lab_row)
         .await
-        .context("atomically persist running VM and Kino snapshot")?;
+        .context("atomically persist running VM and its lab")?;
     *current = committed;
     drop(states);
     // Running remains internal until the generation-fenced terminal state is
@@ -832,13 +803,7 @@ pub(super) async fn run_create(
     let image_prepare_deadline = Instant::now() + Duration::from_secs(60);
     let mut descriptor_refresh_requested = false;
     let ready_image = loop {
-        match image_cache::require_ready_image_launch(
-            &cache_root,
-            req.image_key,
-            Some(req.expected_image_sha256),
-        )
-        .await
-        {
+        match image_cache::require_ready_image(&cache_root, req.image).await {
             Ok(ready) => break ready,
             Err(error) if Instant::now() < image_prepare_deadline => {
                 if !std::mem::replace(&mut descriptor_refresh_requested, true) {
@@ -852,59 +817,38 @@ pub(super) async fn run_create(
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Err(error) => {
-                return Err(error).context(
-                    "image was not prepared within 60 seconds; foreground registry fallback is disabled",
-                );
+                return Err(match image_cache::image_failure(req.image) {
+                    Some(failure) => error.context(failure),
+                    None => error,
+                })
+                .context("image was not prepared within 60 seconds");
             }
         }
     };
     let image_ready_at = Instant::now();
-    let cached_image = ready_image.image;
-    let prepared_image = ready_image.prepared_image;
-    let tools_disk_path = image_cache::ensure_cached_tools_disk(
-        req.tools_disk_sha256,
-        req.tools_disk_size_bytes,
-        &inner.image_registry,
-        Some(&inner.bridge),
-        &cache_root,
-        &inner.http,
-        image_cache::ToolsDiskVerification::ReuseVerified,
-    )
-    .await
-    .context("pinned guest tools disk is unavailable")?;
-    if let Err(error) = image_cache::touch_cached_image(&inner.db, &cached_image).await {
-        warn!(
-            error = %error,
-            vm = req.name,
-            image = %cached_image.image_key,
-            "failed to update image cache access metadata"
-        );
-    }
-    {
-        let persisted = {
-            let mut states = inner.states.write().await;
-            let Some(vm) = states.get_mut(req.name) else {
-                return Ok(());
-            };
-            if let Some(details) = vm.details.as_mut() {
-                details.image_key = Some(cached_image.image_key.clone());
-                details.image_sha256 = Some(cached_image.image_id.clone());
-            }
-            vm.clone()
-        };
-        if let Err(error) = inner.db.upsert_vm(persisted.to_db_row()).await {
-            warn!(
-                error = %error,
-                vm = req.name,
-                "failed to persist vm cached image identity"
-            );
-        }
-        publish_inventory_update(inner);
-    }
+    // Kino and the spec come by digest and are checked against it before
+    // anything reaches the run disk.
+    let store = image_cache::BlobStore::new(&cache_root);
+    let (kino_binary, spec) = tokio::try_join!(
+        async {
+            inner
+                .oci
+                .kino_binary(req.kino, &store)
+                .await
+                .context("the VM's Kino is unavailable")
+        },
+        async {
+            inner
+                .oci
+                .spec(req.spec)
+                .await
+                .context("the VM's machine spec is unavailable")
+        },
+    )?;
     ensure_create_not_deleted(inner, req.name).await?;
     set_state(inner, req.name, VmLifecycleState::PreparingDisks).await;
 
-    let base_virtual_size_bytes = cached_image.virtual_size_bytes;
+    let base_virtual_size_bytes = ready_image.disk_size_bytes;
     if let Some(target_disk_mib) = req.disk_mib {
         let target_bytes = u64::from(target_disk_mib) * 1024 * 1024;
         if target_bytes < base_virtual_size_bytes {
@@ -915,47 +859,56 @@ pub(super) async fn run_create(
             );
         }
     }
-    let root_resize_required = req.disk_mib.is_some_and(|target_disk_mib| {
+    let root_resize = req.disk_mib.is_some_and(|target_disk_mib| {
         u64::from(target_disk_mib) * 1024 * 1024 > base_virtual_size_bytes
     });
 
+    let boot = runtime_disk::boot_json(&runtime_disk::BootJsonInput {
+        hostname: req.hostname,
+        network: req.network,
+        egress: req.egress,
+        peer_guest_ips: req.peer_guest_ips,
+        ssh_enabled: req.terminal,
+        ssh_authorized_keys_openssh: &req.runtime.ssh_authorized_keys_openssh,
+        root_resize,
+        mode: req.mode,
+        spec: &spec,
+    })
+    .context("failed to build boot.json")?;
+    // The report filter needs this digest after a restart too, so it is
+    // durable before the guest can send a report.
+    {
+        let persisted = {
+            let mut states = inner.states.write().await;
+            let vm = states
+                .get_mut(req.name)
+                .context("VM state disappeared before its run disk was written")?;
+            let details = vm
+                .details
+                .as_mut()
+                .context("VM details disappeared before its run disk was written")?;
+            details.boot_sha256 = Some(boot.sha256.clone());
+            vm.clone()
+        };
+        inner
+            .db
+            .upsert_vm(persisted.to_db_row())
+            .await
+            .context("persist the VM's boot.json digest")?;
+        publish_inventory_update(inner);
+    }
     ensure_create_not_deleted(inner, req.name).await?;
 
-    let runtime = req.runtime;
-    info!(
-        path = %req.config_disk_path.display(),
-        "writing scenario runtime disk"
-    );
+    info!(path = %req.config_disk_path.display(), "writing run disk");
     let config_disk_path = req.config_disk_path.to_path_buf();
-    let ssh_authorized_keys_openssh = runtime.ssh_authorized_keys_openssh.clone();
-    let kino_vsock_cid = req.kino_vsock_cid;
-    let kino_vsock_port = req.kino_vsock_port;
-    let kino_host_ready_port = req.kino_host_ready_port;
-    let kino_sha256 = req.kino_sha256.to_string();
-    let guest_bootstrap_abi = req.guest_bootstrap_abi;
-    let network = req.network.clone();
-    let peer_guest_ips = req.peer_guest_ips.clone();
-    let hostname = req.hostname.to_string();
     let runtime_disk_task = tokio::task::spawn_blocking(move || {
-        runtime_disk::write_runtime_disk(&runtime_disk::RuntimeDiskInput {
-            path: &config_disk_path,
-            ssh_authorized_keys_openssh: &ssh_authorized_keys_openssh,
-            kino_vsock_cid,
-            kino_vsock_port,
-            kino_host_ready_port,
-            kino_sha256: &kino_sha256,
-            guest_bootstrap_abi,
-            hostname: &hostname,
-            network: &network,
-            root_resize_required,
-            peer_guest_ips: &peer_guest_ips,
-        })
+        runtime_disk::write_runtime_disk(&config_disk_path, &boot.bytes, &kino_binary)
     });
     let (runtime_disk_result, network_result) = tokio::join!(runtime_disk_task, network_task);
-    let runtime_disk_result = runtime_disk_result.context("scenario runtime disk task panicked")?;
+    let runtime_disk_result = runtime_disk_result.context("run disk task panicked")?;
     let run_network = network_result.context("run network task panicked")?;
     let run_network = run_network.context("failed to ensure jailed run network")?;
-    runtime_disk_result.context("failed to write scenario runtime disk")?;
+    runtime_disk_result.context("failed to write the run disk")?;
     ensure_create_not_deleted(inner, req.name).await?;
     let disks_ready_at = Instant::now();
 
@@ -964,15 +917,7 @@ pub(super) async fn run_create(
     let launch_deadline = Instant::now() + Duration::from_secs(SCENARIO_READY_MAX_TIMEOUT_SECONDS);
     let mut capacity_attempt = 0_u32;
     let launch = loop {
-        match launch_jailed_cloud_hypervisor(
-            inner,
-            &req,
-            &cached_image,
-            &prepared_image,
-            &tools_disk_path,
-        )
-        .await
-        {
+        match launch_jailed_cloud_hypervisor(inner, &req, &ready_image).await {
             Ok(result) => break result,
             Err(error) if error.downcast_ref::<CpuCapacityPending>().is_some() => {
                 ensure_create_not_deleted(inner, req.name).await?;
@@ -1004,7 +949,7 @@ pub(super) async fn run_create(
     let vm_cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
         cpu_millis: req.cpu_millis,
         name: req.name,
-        cmdline: &cached_image.cmdline,
+        cmdline: &ready_image.cmdline,
         paths: &launch.paths,
         memory_mib: req.memory_mib,
         tap: req.tap,
@@ -1035,9 +980,9 @@ pub(super) async fn run_create(
             .ok_or_else(|| anyhow::anyhow!("VM state disappeared after jailed launch"))?
     };
     details.ssh_host_keys_openssh = current_ssh_host_keys(inner, req.name).await;
-    let readiness_updates = inner.kino_readiness_tx.subscribe();
-    // Bind and activate the guest-initiated readiness socket before boot. A
-    // fast guest's first Kino push must not race listener startup and fall
+    let readiness_updates = inner.guest_reports_tx.subscribe();
+    // Bind and activate the guest-initiated report socket before boot. A
+    // fast guest's first Kino report must not race listener startup and fall
     // through to Kino's reconnect interval.
     start_probe_worker(inner, req.name, &details)
         .await
@@ -1050,6 +995,7 @@ pub(super) async fn run_create(
         .context("failed to start vm run CLI broker")?;
 
     debug!("calling cloud-hypervisor vm.boot");
+    mark_vmm_started(inner, req.name);
     ch.vm_boot()
         .await
         .context("cloud-hypervisor vm.boot failed")?;
@@ -1059,7 +1005,6 @@ pub(super) async fn run_create(
     let ready = wait_for_scenario_runtime_ready(inner, req.name, &ch, &details, readiness_updates)
         .await
         .context("scenario runtime did not become ready")?;
-    validate_guest_tools_readiness(&ready, req.kino_sha256, req.guest_bootstrap_abi)?;
     ensure_create_not_deleted(inner, req.name).await?;
     let guest_ready_at = Instant::now();
     seal_ready_vm_cpu(
@@ -1080,7 +1025,7 @@ pub(super) async fn run_create(
     // steady cgroup quota, activated DNAT, and the agent has authenticated the
     // guest host key. Atomically commit Running + Kino state, then emit exactly
     // one composite ready event.
-    commit_ready_vm_and_probe(inner, req.name, &launch.generation, &ready)
+    commit_ready_vm(inner, req.name, &launch.generation, &ready)
         .await
         .context("durably commit sealed VM readiness")?;
     let terminal = terminal_state_for_attested_ready(inner, req.name, &launch.generation)
@@ -1132,13 +1077,8 @@ pub(super) async fn run_create(
         vmm_start_ms,
         vm_api_ms,
         guest_ready_ms,
-        guest_runtime_disk_ms = ready.guest_phase_timings.runtime_disk_ms,
-        guest_tools_disk_ms = ready.guest_phase_timings.tools_disk_ms,
-        guest_network_ms = ready.guest_phase_timings.network_ms,
-        guest_ssh_keys_ms = ready.guest_phase_timings.ssh_keys_ms,
-        guest_ssh_service_ms = ready.guest_phase_timings.ssh_service_ms,
-        guest_kino_ms = ready.guest_phase_timings.kino_ms,
-        guest_ready_uptime_ms = ready.guest_phase_timings.ready_uptime_ms,
+        first_report_ms = ready.first_report_ms,
+        guest_timings_ms = ?ready.lab.timings_ms,
         quota_seal_ms,
         ssh_verify_ms,
         terminal_publish_ms,
@@ -1148,25 +1088,5 @@ pub(super) async fn run_create(
         "vm booted"
     );
 
-    Ok(())
-}
-
-pub(super) fn validate_guest_tools_readiness(
-    ready: &ProbeUpdateEnvelope,
-    kino_sha256: &str,
-    guest_bootstrap_abi: u16,
-) -> Result<()> {
-    anyhow::ensure!(
-        ready.kino_sha256 == kino_sha256,
-        "Kino readiness SHA-256 differs from desired guest tools"
-    );
-    anyhow::ensure!(
-        ready.guest_bootstrap_abi == guest_bootstrap_abi,
-        "Kino readiness bootstrap ABI differs from desired guest tools"
-    );
-    anyhow::ensure!(
-        ready.guest_phase_timings.ready_uptime_ms > 0,
-        "Kino readiness omitted guest phase timings"
-    );
     Ok(())
 }

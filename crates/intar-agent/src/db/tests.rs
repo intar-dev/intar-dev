@@ -15,14 +15,9 @@ fn test_vm_row() -> VmRow {
         generation: 1,
         name: "vm-1".to_string(),
         state: "running".to_string(),
-        image_key: Some("ubuntu".to_string()),
-        image_sha256: Some("1".repeat(64)),
-        guest_tools_json: Some(format!(
-            "{{\"tools_disk_sha256\":\"{}\",\"tools_disk_size_bytes\":67108864,\"kino_sha256\":\"{}\",\"bootstrap_abi\":{}}}",
-            "2".repeat(64),
-            "3".repeat(64),
-            intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2
-        )),
+        image: Some(format!("sha256:{}", "1".repeat(64))),
+        kino: Some(format!("sha256:{}", "2".repeat(64))),
+        boot_sha256: Some("3".repeat(64)),
         created_at_s: 100,
         updated_at_s: 200,
         running_at_s: Some(150),
@@ -52,7 +47,6 @@ fn test_vm_row() -> VmRow {
         jail_gid: Some(200_000),
         jail_netns_name: Some("intar-run-1".to_string()),
         kino_vsock_cid: Some(42),
-        kino_vsock_port: Some(12345),
         kino_vsock_path: Some("/tmp/kino.vsock".to_string()),
         ssh_host_keys_openssh_json: Some(r#"["ssh-ed25519 AAAAHOST host"]"#.to_string()),
         run_id: Some("run-1".to_string()),
@@ -63,16 +57,13 @@ fn test_vm_row() -> VmRow {
     }
 }
 
-fn test_probe_row() -> VmProbeStateRow {
-    VmProbeStateRow {
+fn test_lab_row() -> VmLabRow {
+    VmLabRow {
         vm_name: "vm-1".to_string(),
         run_id: "run-1".to_string(),
-        fingerprint: "ready-fingerprint".to_string(),
-        collection_state: "ok".to_string(),
-        collection_error: None,
-        summary_json: r#"{"total":1,"pass":1,"fail":0,"unknown":0}"#.to_string(),
-        snapshot_json: r#"{"generation":"generation-1"}"#.to_string(),
-        generated_at_ms: 200_000,
+        jail_generation: "generation-1".to_string(),
+        lab_json: r#"{"state":"ready"}"#.to_string(),
+        first_report_ms: Some(1_500),
         updated_at_ms: 200_001,
     }
 }
@@ -113,7 +104,6 @@ async fn open_test_db_thread(path: PathBuf) -> Db {
 fn upsert_vm_persists_row_with_ssh_public_port() {
     let path = test_db_path();
     let conn = open_prepared_connection(&path).expect("open db");
-    let image_sha = "1".repeat(64);
     let row = test_vm_row();
 
     upsert_vm(&conn, &row).expect("upsert vm");
@@ -121,9 +111,9 @@ fn upsert_vm_persists_row_with_ssh_public_port() {
     let rows = load_all_vms(&conn).expect("load vms");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "vm-1");
-    assert_eq!(rows[0].image_key.as_deref(), Some("ubuntu"));
-    assert_eq!(rows[0].image_sha256.as_deref(), Some(image_sha.as_str()));
-    assert_eq!(rows[0].guest_tools_json, row.guest_tools_json);
+    assert_eq!(rows[0].image, row.image);
+    assert_eq!(rows[0].kino, row.kino);
+    assert_eq!(rows[0].boot_sha256, row.boot_sha256);
     assert_eq!(rows[0].ssh_public_port, Some(22001));
     assert_eq!(rows[0].guest_ip_cidr.as_deref(), Some("10.200.0.2/28"));
     assert_eq!(rows[0].gateway.as_deref(), Some("10.200.0.1"));
@@ -134,72 +124,146 @@ fn upsert_vm_persists_row_with_ssh_public_port() {
     );
     assert_eq!(rows[0].spool_dir.as_deref(), Some("/tmp/spool"));
     assert_eq!(rows[0].ch_executable_sha256, Some("b".repeat(64)));
+    let mut digests = load_local_vm_digests(&conn).expect("load vm digests");
+    digests.sort();
     assert_eq!(
-        load_local_vm_image_shas(&conn).expect("load vm image shas"),
-        vec![image_sha]
-    );
-    assert_eq!(
-        load_local_vm_guest_tools_jsons(&conn).expect("load vm guest-tools"),
-        row.guest_tools_json.into_iter().collect::<Vec<_>>()
+        digests,
+        [row.image, row.kino]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
     );
 }
 
 #[test]
-fn existing_vm_database_adds_guest_tools_pin_column_in_place() {
+fn an_older_schema_queues_its_vms_for_teardown_and_starts_empty() {
     let path = test_db_path();
     let conn = Connection::open(&path).expect("open old db");
-    conn.execute_batch(BASELINE_SCHEMA_SQL)
-        .expect("create baseline schema");
-    conn.execute("ALTER TABLE vms DROP COLUMN guest_tools_json", [])
-        .expect("model pre-pin schema");
+    // A schema-8 file: a VM table with columns this schema dropped, and a
+    // table this schema no longer has.
+    conn.execute_batch(
+        r#"
+CREATE TABLE vms (name TEXT PRIMARY KEY, run_id TEXT, image_key TEXT, guest_tools_json TEXT);
+INSERT INTO vms (name, run_id, image_key) VALUES ('web', 'run-1', 'ubuntu');
+INSERT INTO vms (name, run_id) VALUES ('db', NULL);
+CREATE TABLE image_cache_access (image_key TEXT PRIMARY KEY);
+PRAGMA user_version = 8;
+"#,
+    )
+    .expect("model an old schema");
     drop(conn);
 
-    let migrated = open_prepared_connection(&path).expect("migrate old db");
-    assert!(
-        table_has_column(&migrated, "vms", "guest_tools_json").expect("inspect migrated schema")
+    let conn = open_prepared_connection(&path).expect("reset old db");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .expect("schema marker");
+    assert_eq!(version, STATE_SCHEMA_VERSION);
+    assert!(load_all_vms(&conn).expect("load vms").is_empty());
+    assert!(!table_has_column(&conn, "image_cache_access", "image_key").expect("inspect"));
+    assert!(table_has_column(&conn, "vms", "boot_sha256").expect("inspect"));
+    assert_eq!(
+        load_pending_teardowns(&conn).expect("queued teardowns"),
+        vec![
+            PendingTeardownRow {
+                vm_name: "db".to_string(),
+                run_id: None,
+            },
+            PendingTeardownRow {
+                vm_name: "web".to_string(),
+                run_id: Some("run-1".to_string()),
+            },
+        ]
     );
+    drop(conn);
+
+    // Reopening at the current version keeps the queue, and a torn-down VM
+    // leaves it for good.
+    let conn = open_prepared_connection(&path).expect("reopen current db");
+    assert_eq!(load_pending_teardowns(&conn).expect("queue kept").len(), 2);
+    delete_pending_teardown(&conn, "web").expect("forget web");
+    assert_eq!(load_pending_teardowns(&conn).expect("queue").len(), 1);
 }
 
 #[test]
-fn ready_vm_and_probe_commit_is_atomic() {
+fn an_interrupted_reset_keeps_the_queued_teardowns() {
+    let path = test_db_path();
+    let conn = Connection::open(&path).expect("open old db");
+    conn.execute_batch(
+        r#"
+CREATE TABLE pending_teardown (vm_name TEXT PRIMARY KEY, run_id TEXT);
+INSERT INTO pending_teardown (vm_name, run_id) VALUES ('old', 'run-0');
+CREATE TABLE vms (name TEXT PRIMARY KEY);
+INSERT INTO vms (name) VALUES ('web');
+PRAGMA user_version = 3;
+"#,
+    )
+    .expect("model a half-reset db");
+    drop(conn);
+
+    let conn = open_prepared_connection(&path).expect("reset db");
+    let names = load_pending_teardowns(&conn)
+        .expect("queue")
+        .into_iter()
+        .map(|row| row.vm_name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["old", "web"]);
+}
+
+#[test]
+fn a_fresh_file_starts_at_the_current_schema_with_nothing_queued() {
+    let conn = open_prepared_connection(&test_db_path()).expect("fresh db");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .expect("schema marker");
+    assert_eq!(version, STATE_SCHEMA_VERSION);
+    assert!(load_pending_teardowns(&conn).expect("queue").is_empty());
+}
+
+#[test]
+fn ready_vm_and_lab_commit_is_atomic() {
     let path = test_db_path();
     let mut conn = open_prepared_connection(&path).expect("open db");
     conn.execute_batch(
         r#"
-CREATE TRIGGER fail_ready_probe
-BEFORE INSERT ON vm_probe_state
+CREATE TRIGGER fail_ready_lab
+BEFORE INSERT ON vm_lab
 BEGIN
-  SELECT RAISE(ABORT, 'injected ready probe failure');
+  SELECT RAISE(ABORT, 'injected ready lab failure');
 END;
 "#,
     )
     .expect("install failure trigger");
 
-    let error = upsert_ready_vm_and_probe_state(&mut conn, &test_vm_row(), &test_probe_row())
-        .expect_err("probe failure must abort ready transaction");
-    assert!(error.to_string().contains("persist ready probe row"));
+    let error = upsert_vm_and_lab(&mut conn, &test_vm_row(), &test_lab_row())
+        .expect_err("lab failure must abort ready transaction");
+    assert!(format!("{error:#}").contains("persist lab row"));
     assert!(
         load_all_vms(&conn)
             .expect("load rolled back VMs")
             .is_empty()
     );
     assert!(
-        load_all_vm_probe_states(&conn)
-            .expect("load rolled back probes")
+        load_all_vm_labs(&conn)
+            .expect("load rolled back labs")
             .is_empty()
     );
 
-    conn.execute_batch("DROP TRIGGER fail_ready_probe;")
+    conn.execute_batch("DROP TRIGGER fail_ready_lab;")
         .expect("remove failure trigger");
-    upsert_ready_vm_and_probe_state(&mut conn, &test_vm_row(), &test_probe_row())
+    upsert_vm_and_lab(&mut conn, &test_vm_row(), &test_lab_row())
         .expect("commit ready transaction");
     assert_eq!(load_all_vms(&conn).expect("load ready VM").len(), 1);
     assert_eq!(
-        load_all_vm_probe_states(&conn)
-            .expect("load ready probe")
-            .len(),
-        1
+        load_vm_lab(&conn, "vm-1").expect("load ready lab"),
+        Some(test_lab_row())
     );
+
+    let mut other_run = test_lab_row();
+    other_run.run_id = "run-2".to_string();
+    assert!(upsert_vm_and_lab(&mut conn, &test_vm_row(), &other_run).is_err());
+
+    delete_vm(&conn, "vm-1").expect("delete vm");
+    assert!(load_vm_lab(&conn, "vm-1").expect("lab gone").is_none());
 }
 
 #[tokio::test]
@@ -264,49 +328,6 @@ END;
             .to_string()
             .contains("delete vms row")
     );
-}
-
-#[test]
-fn image_cache_access_round_trips_and_orders_by_lru() {
-    let path = test_db_path();
-    let conn = open_prepared_connection(&path).expect("open db");
-    touch_image_cache_entry(
-        &conn,
-        &ImageCacheAccessRow {
-            image_key: "ubuntu".to_string(),
-            image_sha256: "b".repeat(64),
-            kernel_sha256: "c".repeat(64),
-            initrd_sha256: "d".repeat(64),
-            raw_bytes: 2048,
-            last_accessed_at_ms: 20,
-        },
-    )
-    .expect("touch newer");
-    touch_image_cache_entry(
-        &conn,
-        &ImageCacheAccessRow {
-            image_key: "debian".to_string(),
-            image_sha256: "a".repeat(64),
-            kernel_sha256: "e".repeat(64),
-            initrd_sha256: "f".repeat(64),
-            raw_bytes: 1024,
-            last_accessed_at_ms: 10,
-        },
-    )
-    .expect("touch older");
-
-    let rows = load_image_cache_access(&conn).expect("load cache access");
-    assert_eq!(
-        rows.iter()
-            .map(|row| row.image_key.as_str())
-            .collect::<Vec<_>>(),
-        vec!["debian", "ubuntu"]
-    );
-
-    delete_image_cache_access(&conn, &"a".repeat(64)).expect("delete access");
-    let rows = load_image_cache_access(&conn).expect("reload cache access");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].image_key, "ubuntu");
 }
 
 #[test]
@@ -571,12 +592,14 @@ async fn verified_content_upsert_inserts_then_updates_the_same_row() {
 #[tokio::test]
 async fn restart_requires_durable_execution_and_host_identity() {
     use crate::config::BridgeConfig;
-    use intar_contracts::bridge::{HostDesiredStateV2, HostScope};
+    use intar_contracts::bridge::{DesiredVmPhase, HostScope};
+    use intar_contracts::bridge_v9::{
+        DesiredVmV3, HOST_DESIRED_STATE_SCHEMA_VERSION_7, HostDesiredStateV3,
+    };
+    use intar_contracts::oci::OciDigest;
+    use intar_contracts::scenario::SpecMode;
+
     let db = open_test_db_thread(test_db_path()).await;
-    let mut desired: HostDesiredStateV2 = serde_json::from_str(include_str!(
-        "../../../intar-contracts/fixtures/bridge/host-desired-state-v2.json"
-    ))
-    .expect("valid fixture");
     let cfg = BridgeConfig {
         host_id: "host-1".into(),
         owner_user_id: "user-1".into(),
@@ -584,16 +607,41 @@ async fn restart_requires_durable_execution_and_host_identity() {
         ..BridgeConfig::default()
     };
     let row = test_vm_row();
-    desired.host_id = cfg.host_id.clone();
-    desired.owner_user_id = cfg.owner_user_id.clone();
-    desired.scope = cfg.scope;
-    desired.builds.clear();
-    desired.vms.truncate(1);
-    desired.vms[0].vm_name = row.name.clone();
-    desired.vms[0].run_id = row.run_id.clone().expect("fixture identity");
-    desired.vms[0].owner_user_id = row.owner_user_id.clone();
-    desired.vms[0].runtime_execution_id = row.runtime_execution_id.clone();
-    desired.vms[0].generation = row.generation as u64;
+    let digest = |digit: char| {
+        OciDigest::try_from(format!("sha256:{}", digit.to_string().repeat(64)))
+            .expect("test digest")
+    };
+    let desired = HostDesiredStateV3 {
+        scope: cfg.scope,
+        owner_user_id: cfg.owner_user_id.clone(),
+        schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION_7,
+        host_id: cfg.host_id.clone(),
+        version: 3,
+        generated_at_unix_ms: 1,
+        cached_images: Vec::new(),
+        kino_pin: None,
+        vms: vec![DesiredVmV3 {
+            vm_id: "vm-id-1".to_string(),
+            name: row.name.clone(),
+            run_id: row.run_id.clone().expect("fixture identity"),
+            runtime_execution_id: row.runtime_execution_id.clone(),
+            owner_user_id: row.owner_user_id.clone(),
+            generation: row.generation as u64,
+            desired_phase: DesiredVmPhase::Running,
+            lease_expires_at_unix_ms: 4_102_444_800_000,
+            image: digest('1'),
+            kino: digest('2'),
+            spec: digest('3'),
+            mode: SpecMode::Learn,
+            cpu_millis: 125,
+            memory_mib: 512,
+            disk_mib: 0,
+            peers: Vec::new(),
+            ssh_authorized_keys: vec!["ssh-ed25519 AAAATEST run".to_string()],
+            terminal: true,
+            egress: false,
+        }],
+    };
     assert!(
         crate::bridge::validate_restart(&cfg, &db, std::slice::from_ref(&row))
             .await

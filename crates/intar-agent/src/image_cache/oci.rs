@@ -5,10 +5,9 @@
 //! `<cache>/oci/sha256/<hex>`. A file in the store is therefore what its name
 //! says; jailerd checks again before it uses one.
 
-// Not called yet: the image cache and the bridge switch to it together.
-#![allow(dead_code, reason = "wired in with the agent's move to bridge v9")]
-
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -28,6 +27,8 @@ use super::registry::to_hex_lower;
 
 /// Manifests and configs are small; the registry's own limit is 4 MiB.
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+/// Kino goes onto the 16 MiB run disk beside `boot.json`.
+const MAX_KINO_BYTES: u64 = 15 * 1024 * 1024;
 /// A registry token lives 15 minutes; it is renewed this long before its end.
 const TOKEN_MARGIN: Duration = Duration::from_secs(60);
 /// Blobs of one image pulled at once; each still takes a global transfer slot.
@@ -70,12 +71,23 @@ impl BlobStore {
     }
 }
 
+impl std::fmt::Debug for OciRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OciRegistry")
+            .field("origin", &self.origin.as_str())
+            .finish_non_exhaustive()
+    }
+}
+
 pub(crate) struct OciRegistry {
     /// Scheme, host and port only.
     origin: reqwest::Url,
     client: reqwest::Client,
     agent_jwt: AgentJwt,
     token: Mutex<Option<(String, Instant)>>,
+    /// One writer per blob: the warmer and a launch may want the same one.
+    blob_locks: Mutex<HashMap<OciDigest, Arc<Mutex<()>>>>,
 }
 
 /// A machine image in the blob store, ready to hand to jailerd.
@@ -86,7 +98,6 @@ pub(crate) struct PulledMachine {
     pub(crate) config: MachineConfigV1,
     pub(crate) kernel: OciDigest,
     pub(crate) initrd: Option<OciDigest>,
-    pub(crate) bytes: u64,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -100,6 +111,7 @@ impl OciRegistry {
             client,
             agent_jwt,
             token: Mutex::new(None),
+            blob_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -223,6 +235,14 @@ impl OciRegistry {
         store: &BlobStore,
     ) -> Result<PathBuf> {
         let (digest, size) = (&descriptor.digest, descriptor.size);
+        let lock = Arc::clone(
+            self.blob_locks
+                .lock()
+                .await
+                .entry(digest.clone())
+                .or_default(),
+        );
+        let _writer = lock.lock().await;
         if let Some(path) = store.existing(digest, size).await {
             return Ok(path);
         }
@@ -231,10 +251,10 @@ impl OciRegistry {
             .await
             .context("create the blob store")?;
         let part = store.directory().join(format!(".{}.part", digest.hex()));
-        let mut have = match tokio::fs::symlink_metadata(&part).await {
+        let mut have = match tokio::fs::symlink_metadata(part.clone()).await {
             Ok(metadata) if metadata.is_file() && metadata.len() < size => metadata.len(),
             Ok(_) => {
-                tokio::fs::remove_file(&part)
+                tokio::fs::remove_file(part.clone())
                     .await
                     .context("drop an unusable partial blob")?;
                 0
@@ -252,7 +272,7 @@ impl OciRegistry {
             .write(true)
             .append(have > 0)
             .truncate(have == 0)
-            .open(&part)
+            .open(part.clone())
             .await
             .with_context(|| format!("open {}", part.display()))?;
         let mut stream = response.bytes_stream();
@@ -264,7 +284,7 @@ impl OciRegistry {
             have += chunk.len() as u64;
             if have > size {
                 drop(file);
-                let _ = tokio::fs::remove_file(&part).await;
+                let _ = tokio::fs::remove_file(part.clone()).await;
                 bail!("{path} is longer than its descriptor's {size} bytes");
             }
             file.write_all(&chunk).await.context("write a blob")?;
@@ -275,11 +295,11 @@ impl OciRegistry {
         ensure!(have == size, "{path} ended after {have} of {size} bytes");
         let actual = super::registry::sha256_file(&part).await?;
         if actual != digest.hex() {
-            let _ = tokio::fs::remove_file(&part).await;
+            let _ = tokio::fs::remove_file(part.clone()).await;
             bail!("{path} does not hash to its digest");
         }
         let published = store.path(digest);
-        tokio::fs::rename(&part, &published)
+        tokio::fs::rename(part.clone(), published.clone())
             .await
             .context("publish a blob")?;
         Ok(published)
@@ -341,9 +361,10 @@ impl OciRegistry {
         wanted.extend(of(DISK_CHUNK_MEDIA_TYPE));
         wanted.sort_by(|left, right| left.digest.cmp(&right.digest));
         wanted.dedup_by(|left, right| left.digest == right.digest);
-        let total = wanted.iter().map(|layer| layer.size).sum::<u64>() + manifest.config.size;
+        let repository = repository.as_str();
+        let wanted = wanted.into_iter().cloned().collect::<Vec<_>>();
         futures_util::stream::iter(wanted)
-            .map(|layer| self.blob(&repository, layer, store))
+            .map(|layer| async move { self.blob(repository, &layer, store).await })
             .buffer_unordered(BLOB_FANOUT)
             .try_collect::<Vec<_>>()
             .await?;
@@ -351,7 +372,6 @@ impl OciRegistry {
             image: image.clone(),
             kernel: kernel.digest.clone(),
             initrd: initrds.first().map(|layer| layer.digest.clone()),
-            bytes: total,
             manifest,
             config,
         })
@@ -369,7 +389,40 @@ impl OciRegistry {
             manifest.artifact_type == KINO_ARTIFACT_TYPE,
             "unsupported_artifact: not a Kino manifest"
         );
+        // Kept so eviction and the scrub can tell which blob the pin names.
+        Self::store_bytes(store, kino, &bytes).await?;
         self.blob("kino", binary, store).await
+    }
+
+    /// The bytes of a pinned Kino binary, pulled if needed and hashed again
+    /// here, manifest and binary both, so what goes onto a run disk is what
+    /// the digest names.
+    pub(crate) async fn kino_binary(&self, kino: &OciDigest, store: &BlobStore) -> Result<Vec<u8>> {
+        let path = self.pull_kino(kino, store).await?;
+        let manifest = tokio::fs::read(store.path(kino))
+            .await
+            .context("read the stored Kino manifest")?;
+        ensure!(
+            sha256_hex(&manifest) == kino.hex(),
+            "the stored Kino manifest does not hash to its digest"
+        );
+        let manifest: OciManifestV1 = serde_json::from_slice(&manifest)
+            .context("unsupported_artifact: not a Kino manifest")?;
+        let [binary] = manifest.layers.as_slice() else {
+            bail!("unsupported_artifact: a Kino manifest has exactly one layer");
+        };
+        ensure!(
+            binary.size <= MAX_KINO_BYTES,
+            "the Kino binary is over the run disk's limit"
+        );
+        let bytes = tokio::fs::read(&path)
+            .await
+            .context("read the Kino binary")?;
+        ensure!(
+            sha256_hex(&bytes) == binary.digest.hex(),
+            "the stored Kino binary does not hash to its digest"
+        );
+        Ok(bytes)
     }
 
     /// A machine spec blob: its bytes, verified.

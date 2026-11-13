@@ -48,14 +48,12 @@ fn create_scenario_vm_request_accepts_runtime() {
         "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
-        "image": "broken-nginx-webserver-amd64",
-        "image_sha256": "a".repeat(64),
-        "guest_tools": {
-            "tools_disk_sha256": "b".repeat(64),
-            "tools_disk_size_bytes": 67108864,
-            "kino_sha256": "c".repeat(64),
-            "bootstrap_abi": GUEST_BOOTSTRAP_ABI_V2
-        },
+        "image": format!("sha256:{}", "a".repeat(64)),
+        "kino": format!("sha256:{}", "b".repeat(64)),
+        "spec": format!("sha256:{}", "c".repeat(64)),
+        "mode": "learn",
+        "egress": false,
+        "terminal": true,
         "runtime": {
             "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"],
             "network": {
@@ -64,8 +62,7 @@ fn create_scenario_vm_request_accepts_runtime() {
                 "dns": ["1.1.1.1", "8.8.8.8"]
             },
             "kino": {
-                "vsock_cid": 10044,
-                "vsock_port": 19090
+                "vsock_cid": 10044
             }
         },
         "lease_duration_seconds": 300
@@ -73,7 +70,9 @@ fn create_scenario_vm_request_accepts_runtime() {
     .expect("request should parse");
 
     assert_eq!(req.lease_duration_seconds, Some(300));
-    assert_eq!(req.image_sha256, "a".repeat(64));
+    assert_eq!(req.image.hex(), "a".repeat(64));
+    assert_eq!(req.mode, SpecMode::Learn);
+    assert!(req.terminal && !req.egress);
     assert!(req.runtime.peer_vm_names.is_empty());
     assert!(req.runtime.peer_vm_aliases.is_empty());
     assert_eq!(
@@ -93,8 +92,8 @@ fn create_scenario_vm_request_accepts_runtime() {
             .kino
             .as_ref()
             .expect("kino override should parse")
-            .vsock_port,
-        Some(19090)
+            .vsock_cid,
+        10044
     );
 }
 
@@ -106,14 +105,12 @@ fn create_scenario_vm_request_rejects_missing_runtime() {
         "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
-        "image": "broken-nginx-webserver-amd64",
-        "image_sha256": "a".repeat(64),
-        "guest_tools": {
-            "tools_disk_sha256": "b".repeat(64),
-            "tools_disk_size_bytes": 67108864,
-            "kino_sha256": "c".repeat(64),
-            "bootstrap_abi": 1
-        }
+        "image": format!("sha256:{}", "a".repeat(64)),
+        "kino": format!("sha256:{}", "b".repeat(64)),
+        "spec": format!("sha256:{}", "c".repeat(64)),
+        "mode": "learn",
+        "egress": false,
+        "terminal": true
     }))
     .expect_err("missing runtime field should be rejected");
 
@@ -133,12 +130,17 @@ fn create_scenario_vm_request_rejects_missing_image_digest() {
         "name": "demo",
         "run_id": "abc123demo",
         "image": "broken-nginx-webserver-amd64",
+        "kino": format!("sha256:{}", "b".repeat(64)),
+        "spec": format!("sha256:{}", "c".repeat(64)),
+        "mode": "learn",
+        "egress": false,
+        "terminal": true,
         "runtime": {
             "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"]
         }
     }))
-    .expect_err("the v2 launch descriptor digest must be explicit");
-    assert!(error.to_string().contains("image_sha256"));
+    .expect_err("an image is named by its manifest digest");
+    assert!(error.to_string().contains("sha256"), "{error}");
 }
 
 #[test]
@@ -149,8 +151,12 @@ fn create_scenario_vm_request_rejects_unknown_field() {
         "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
-        "image": "broken-nginx-webserver-amd64",
-        "image_sha256": "a".repeat(64),
+        "image": format!("sha256:{}", "a".repeat(64)),
+        "kino": format!("sha256:{}", "b".repeat(64)),
+        "spec": format!("sha256:{}", "c".repeat(64)),
+        "mode": "learn",
+        "egress": false,
+        "terminal": true,
         "runtime": {
             "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"]
         },
@@ -173,8 +179,12 @@ fn create_scenario_vm_request_rejects_legacy_network_field() {
         "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
-        "image": "broken-nginx-webserver-amd64",
-        "image_sha256": "a".repeat(64),
+        "image": format!("sha256:{}", "a".repeat(64)),
+        "kino": format!("sha256:{}", "b".repeat(64)),
+        "spec": format!("sha256:{}", "c".repeat(64)),
+        "mode": "learn",
+        "egress": false,
+        "terminal": true,
         "runtime": {
             "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"]
         },

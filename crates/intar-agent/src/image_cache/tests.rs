@@ -1,15 +1,10 @@
+use std::io::Write as _;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::tls_provider::ensure_ring_provider;
 
 use super::*;
-
-fn sha256_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    to_hex_lower(&hasher.finalize())
-}
 
 #[test]
 fn registry_access_token_cache_expires_and_redacts_its_value() {
@@ -24,15 +19,6 @@ fn registry_access_token_cache_expires_and_redacts_its_value() {
     assert!(cache.get(now).is_none());
 }
 
-fn registry_config(addr: std::net::SocketAddr) -> ImageRegistryConfig {
-    ImageRegistryConfig {
-        url: format!("http://{addr}/images"),
-        username: None,
-        password: None,
-        refresh_interval_minutes: 15,
-    }
-}
-
 fn registry_config_for_url(url: &str) -> ImageRegistryConfig {
     ImageRegistryConfig {
         url: url.to_string(),
@@ -42,5 +28,5 @@ fn registry_config_for_url(url: &str) -> ImageRegistryConfig {
     }
 }
 
+mod layout;
 mod registry;
-mod tools;

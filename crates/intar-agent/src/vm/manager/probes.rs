@@ -1,18 +1,21 @@
 use super::*;
 
+#[cfg(any(test, target_os = "linux"))]
+use intar_kino_proto::host::{DecodeError, Decoded, decode};
+#[cfg(target_os = "linux")]
+use intar_kino_proto::kino_v2::MAX_FRAME_BYTES;
+
 #[cfg(not(target_os = "linux"))]
-pub(super) async fn run_probe_worker_task(
-    inner: Arc<Inner>,
-    vm_name: String,
-    run_id: String,
-    jail_generation: String,
-    _kino_vsock_path: PathBuf,
-    _kino_vsock_port: u32,
-    _jail_uid: u32,
-) {
+pub(super) async fn run_probe_worker_task(inner: Arc<Inner>, target: ReportTarget) {
+    let ReportTarget {
+        vm_name,
+        run_id,
+        jail_generation,
+        ..
+    } = target;
     warn!(
         vm = vm_name,
-        "Kino readiness push listener is only available on Linux"
+        "the guest report listener is only available on Linux"
     );
     let mut interval = tokio::time::interval(Duration::from_secs(PROBE_POLL_INTERVAL_SECONDS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -38,12 +41,83 @@ pub(super) async fn run_probe_worker_task(
     }
 }
 
+/// The identity a report listener is for.
+#[derive(Clone, Debug)]
+pub(super) struct ReportTarget {
+    pub(super) vm_name: String,
+    pub(super) run_id: String,
+    pub(super) jail_generation: String,
+    /// SHA-256 (hex) of this run's `boot.json`.
+    #[cfg(any(test, target_os = "linux"))]
+    pub(super) boot_sha256: String,
+}
+
+/// One kino.v2 frame body, read for `target`. `None` is a stale report (a
+/// woken guest's build-time Kino), which is dropped. A Kino of another
+/// guest contract is a failure the VM never recovers from.
+#[cfg(any(test, target_os = "linux"))]
+pub(super) fn read_guest_frame(
+    target: &ReportTarget,
+    body: &[u8],
+    first_report_ms: Option<u64>,
+) -> Result<Option<GuestUpdate>> {
+    let received_at_ms = now_unix_ms();
+    let update = |ssh_ready, failed, ssh_host_keys_openssh, lab| GuestUpdate {
+        vm_name: target.vm_name.clone(),
+        run_id: target.run_id.clone(),
+        jail_generation: target.jail_generation.clone(),
+        ssh_ready,
+        failed,
+        ssh_host_keys_openssh,
+        lab,
+        first_report_ms,
+        received_at_ms,
+    };
+    match decode(body, &target.boot_sha256) {
+        Ok(Decoded::Stale) => Ok(None),
+        Ok(Decoded::Report(report)) => {
+            let report = *report;
+            // Host keys count only once SSH is up.
+            let keys = if report.ssh_ready {
+                report.ssh_host_keys_openssh
+            } else {
+                Vec::new()
+            };
+            Ok(Some(update(
+                report.ssh_ready,
+                report.failed,
+                keys,
+                report.lab,
+            )))
+        }
+        Err(error @ DecodeError::ContractMismatch(_)) => Ok(Some(update(
+            false,
+            Some(error.to_string()),
+            Vec::new(),
+            contract_mismatch_lab(&error),
+        ))),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn contract_mismatch_lab(error: &DecodeError) -> VmLabV1 {
+    VmLabV1 {
+        state: intar_contracts::bridge_v9::LabState::Failed,
+        kino_version: String::new(),
+        ready: Vec::new(),
+        tasks: Vec::new(),
+        verify: None,
+        timings_ms: BTreeMap::new(),
+        failure: Some(error.to_string()),
+    }
+}
+
 #[cfg(target_os = "linux")]
-pub(super) async fn handle_kino_ready_stream(
+pub(super) async fn handle_guest_report_stream(
     inner: Arc<Inner>,
-    vm_name: &str,
-    run_id: &str,
-    jail_generation: &str,
+    target: &ReportTarget,
+    first_report_ms: &std::sync::Mutex<Option<u64>>,
     mut stream: tokio::net::UnixStream,
 ) -> Result<()> {
     use std::io::ErrorKind;
@@ -54,116 +128,123 @@ pub(super) async fn handle_kino_ready_stream(
         match stream.read_exact(&mut len_buf).await {
             Ok(_) => {}
             Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(()),
-            Err(error) => return Err(error).context("failed to read Kino readiness frame length"),
+            Err(error) => return Err(error).context("failed to read a guest report length"),
         }
         let len = u32::from_be_bytes(len_buf) as usize;
-        anyhow::ensure!(len > 0, "Kino readiness frame was empty");
+        anyhow::ensure!(len > 0, "guest report frame was empty");
         anyhow::ensure!(
-            len <= MAX_KINO_READY_FRAME_BYTES,
-            "Kino readiness frame too large: {len} bytes"
+            len <= MAX_FRAME_BYTES,
+            "guest report frame too large: {len} bytes"
         );
-
         let mut frame = vec![0_u8; len];
         stream
             .read_exact(&mut frame)
             .await
-            .context("failed to read Kino readiness frame body")?;
+            .context("failed to read a guest report frame")?;
+        let first = first_report_ms.lock().map(|value| *value).unwrap_or(None);
+        let Some(mut update) = read_guest_frame(target, &frame, first)? else {
+            debug!(vm = target.vm_name, "dropped a stale guest report");
+            continue;
+        };
+        if update.first_report_ms.is_none() {
+            update.first_report_ms = ms_since_vmm_start(&inner, &target.vm_name);
+            if let Ok(mut value) = first_report_ms.lock() {
+                *value = update.first_report_ms;
+            }
+        }
+        apply_guest_update(&inner, update).await?;
+    }
+}
 
-        let result = decode_probe_snapshot(&frame)?;
-        apply_kino_ready_snapshot(&inner, vm_name, run_id, jail_generation, result).await?;
+/// Record when the VMM was asked to boot, for `first_report_ms`.
+pub(super) fn mark_vmm_started(inner: &Inner, vm_name: &str) {
+    if let Ok(mut started) = inner.vmm_started_at.lock() {
+        started.insert(vm_name.to_owned(), Instant::now());
     }
 }
 
 #[cfg(target_os = "linux")]
-pub(super) async fn apply_kino_ready_snapshot(
-    inner: &Arc<Inner>,
-    vm_name: &str,
-    run_id: &str,
-    jail_generation: &str,
-    result: ProbePollResult,
-) -> Result<()> {
-    let current_run_matches = {
-        let states = inner.states.read().await;
-        states.get(vm_name).is_some_and(|vm| {
-            vm.details.as_ref().is_some_and(|details| {
-                details.run_id.as_deref() == Some(run_id)
-                    && details.jail_generation.as_deref() == Some(jail_generation)
-            })
-        })
-    };
-    anyhow::ensure!(
-        current_run_matches,
-        "dropping Kino readiness snapshot for stale run/generation {run_id}/{jail_generation} of vm {vm_name}"
-    );
+fn ms_since_vmm_start(inner: &Inner, vm_name: &str) -> Option<u64> {
+    let started = inner.vmm_started_at.lock().ok()?.get(vm_name).copied()?;
+    u64::try_from(started.elapsed().as_millis()).ok()
+}
 
-    stage_vm_ssh_host_keys(
-        inner,
-        vm_name,
-        jail_generation,
-        result.ssh_host_keys_openssh.clone(),
-    )
-    .await;
-    let still_current = {
-        let states = inner.states.read().await;
+/// Hand one report to the boot waiter, keep its lab, and project it once the
+/// VM is past its ready boundary.
+#[cfg(target_os = "linux")]
+pub(super) async fn apply_guest_update(inner: &Arc<Inner>, update: GuestUpdate) -> Result<()> {
+    let vm_name = update.vm_name.as_str();
+    let is_current = |states: &BTreeMap<String, VmStatusResponse>| {
         states.get(vm_name).is_some_and(|vm| {
             vm.details.as_ref().is_some_and(|details| {
-                details.run_id.as_deref() == Some(run_id)
-                    && details.jail_generation.as_deref() == Some(jail_generation)
+                details.run_id.as_deref() == Some(update.run_id.as_str())
+                    && details.jail_generation.as_deref() == Some(update.jail_generation.as_str())
             })
         })
     };
     anyhow::ensure!(
-        still_current,
-        "dropping Kino readiness snapshot after generation changed"
+        is_current(&*inner.states.read().await),
+        "dropping a guest report for stale run/generation {}/{} of vm {vm_name}",
+        update.run_id,
+        update.jail_generation
     );
-    let update = ProbeUpdateEnvelope::from_poll_result(vm_name, run_id, jail_generation, result);
+    if update.ssh_ready {
+        stage_vm_ssh_host_keys(
+            inner,
+            vm_name,
+            &update.jail_generation,
+            update.ssh_host_keys_openssh.clone(),
+        )
+        .await;
+    }
     // Always wake the generation-fenced launch waiter internally. Projection
     // is permitted only for an already committed steady VM; the first ready
-    // snapshot is published through the atomic ready transaction instead.
-    let _ = inner.kino_readiness_tx.send(update.clone());
-    let may_project = {
+    // report is published through the atomic ready transaction instead.
+    let _ = inner.guest_reports_tx.send(update.clone());
+    let committed = {
         let states = inner.states.read().await;
+        anyhow::ensure!(
+            is_current(&states),
+            "dropping a guest report after the generation changed"
+        );
         let Some(vm) = states.get(vm_name) else {
             return Ok(());
         };
         let committed = vm.state == VmLifecycleState::Running
             && vm.details.as_ref().is_some_and(|details| {
-                details.run_id.as_deref() == Some(run_id)
-                    && details.jail_generation.as_deref() == Some(jail_generation)
-                    && details.cpu_runtime.as_ref().is_some_and(|runtime| {
-                        Some(runtime.quota.cpu_millis) == details.cpu_millis
-                            && runtime.attestation.as_ref().is_some_and(|proof| {
-                                proof.quota == runtime.quota
-                                    && proof.cpu_max == runtime.quota.cpu_max()
-                                    && proof.cpu_max_burst == 0
-                                    && proof.verified_at_unix_ms > 0
-                            })
-                    })
+                details.cpu_runtime.as_ref().is_some_and(|runtime| {
+                    Some(runtime.quota.cpu_millis) == details.cpu_millis
+                        && runtime.attestation.as_ref().is_some_and(|proof| {
+                            proof.quota == runtime.quota
+                                && proof.cpu_max == runtime.quota.cpu_max()
+                                && proof.cpu_max_burst == 0
+                                && proof.verified_at_unix_ms > 0
+                        })
+                })
             });
+        // Hold the read fence while persisting, so a concurrent generation
+        // replacement cannot be overwritten by this lab. A pre-ready lab is
+        // persisted by the ready transaction itself.
         if committed {
-            // Persist host-key changes and their Kino snapshot in the same
-            // transaction used by the initial ready boundary. Holding the
-            // read fence prevents a concurrent generation replacement.
             inner
                 .db
-                .upsert_ready_vm_and_probe_state(vm.to_db_row(), probe_state_row(&update)?)
+                .upsert_vm_and_lab(vm.to_db_row(), lab_row(&update)?)
                 .await
-                .context("atomically persist post-ready Kino snapshot")?;
+                .context("atomically persist a post-ready lab")?;
         }
         committed
     };
     record_vm_check_passes(inner, vm_name, &update).await;
-    if may_project {
-        let _ = inner.probe_updates_tx.send(update);
+    if committed {
+        let _ = inner.lab_updates_tx.send(update);
     }
     Ok(())
 }
 
-/// Keeps each check's first pass beside the VM's artifacts, where the replay
-/// renderer turns it into a marker. Legacy rows without a per-VM spool get
-/// no markers. A failure costs only the markers, never the snapshot.
+/// Keeps each task's first pass beside the VM's artifacts, where the replay
+/// renderer turns it into a marker. A failure costs only the markers.
 #[cfg(target_os = "linux")]
-async fn record_vm_check_passes(inner: &Inner, vm_name: &str, update: &ProbeUpdateEnvelope) {
+async fn record_vm_check_passes(inner: &Inner, vm_name: &str, update: &GuestUpdate) {
     let artifacts_dir = {
         let states = inner.states.read().await;
         states
@@ -175,12 +256,8 @@ async fn record_vm_check_passes(inner: &Inner, vm_name: &str, update: &ProbeUpda
     let Some(artifacts_dir) = artifacts_dir else {
         return;
     };
-    if let Err(error) = crate::vm::check_passes::record_check_passes(
-        &artifacts_dir,
-        &update.probes,
-        update.generated_at_ms,
-    )
-    .await
+    if let Err(error) =
+        crate::vm::check_passes::record_check_passes(&artifacts_dir, &update.lab.tasks).await
     {
         warn!(error = %error, vm = vm_name, "failed to record check passes");
     }
@@ -243,8 +320,18 @@ pub(super) async fn start_probe_worker(
         .as_ref()
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("vm details missing kino_vsock_path"))?;
-    #[cfg(not(target_os = "linux"))]
-    let kino_vsock_port = details.kino_vsock_port.unwrap_or(KINO_VSOCK_PORT);
+    let target = ReportTarget {
+        vm_name: vm_name.to_owned(),
+        run_id,
+        jail_generation,
+        #[cfg(any(test, target_os = "linux"))]
+        boot_sha256: details
+            .boot_sha256
+            .clone()
+            .context("vm details missing the boot.json digest")?,
+    };
+    #[cfg(target_os = "linux")]
+    let replay = details.ssh_host_keys_openssh.clone();
     let jail_uid = details
         .jail_uid
         .ok_or_else(|| anyhow::anyhow!("vm details missing jail_uid"))?;
@@ -255,15 +342,13 @@ pub(super) async fn start_probe_worker(
     let (ready_listener, ready_socket_path) =
         prepare_kino_ready_listener(&kino_vsock_path, jail_uid).await?;
 
-    let vm_name_owned = vm_name.to_string();
     let inner_for_task = Arc::clone(inner);
     #[cfg(target_os = "linux")]
     let join = tokio::spawn(async move {
         run_probe_worker_task(
             inner_for_task,
-            vm_name_owned,
-            run_id,
-            jail_generation,
+            target,
+            replay,
             jail_uid,
             ready_listener,
             ready_socket_path,
@@ -272,16 +357,8 @@ pub(super) async fn start_probe_worker(
     });
     #[cfg(not(target_os = "linux"))]
     let join = tokio::spawn(async move {
-        run_probe_worker_task(
-            inner_for_task,
-            vm_name_owned,
-            run_id,
-            jail_generation,
-            kino_vsock_path,
-            kino_vsock_port,
-            jail_uid,
-        )
-        .await;
+        let _ = (kino_vsock_path, jail_uid);
+        run_probe_worker_task(inner_for_task, target).await;
     });
 
     let mut tasks = inner.probe_tasks.lock().await;
@@ -426,13 +503,13 @@ pub(super) async fn emit_terminal_state_update_to_channels(
 }
 
 /// Filesystem path where cloud-hypervisor surfaces guest-initiated vsock
-/// connections to `KINO_HOST_READY_PORT`. Cloud Hypervisor implements the
+/// connections to the guest contract's `REPORT_PORT`. Cloud Hypervisor implements the
 /// Firecracker-style hybrid vsock scheme: a guest connect to host CID 2 port
 /// P is forwarded to the unix socket `<vsock-socket>_P` on the host, so the
 /// agent must listen there — a host AF_VSOCK listener never sees it.
 pub(super) fn kino_ready_socket_path(kino_vsock_path: &Path) -> PathBuf {
     let mut os = kino_vsock_path.as_os_str().to_owned();
-    os.push(format!("_{KINO_HOST_READY_PORT}"));
+    os.push(format!("_{}", intar_contracts::guest::REPORT_PORT));
     PathBuf::from(os)
 }
 
@@ -459,35 +536,53 @@ pub(super) async fn prepare_kino_ready_listener(
 #[cfg(target_os = "linux")]
 pub(super) async fn run_probe_worker_task(
     inner: Arc<Inner>,
-    vm_name: String,
-    run_id: String,
-    jail_generation: String,
+    target: ReportTarget,
+    replay_host_keys: Vec<String>,
     jail_uid: u32,
     listener: tokio::net::UnixListener,
     ready_socket_path: PathBuf,
 ) {
-    match inner.db.load_vm_probe_state(vm_name.clone()).await {
-        Ok(Some(row)) if row.run_id == run_id => {
-            if let Some(update) = probe_update_from_state_row(&row)
-                && update.jail_generation == jail_generation
+    let first_report_ms = Arc::new(std::sync::Mutex::new(None));
+    match inner.db.load_vm_lab(target.vm_name.clone()).await {
+        Ok(Some(row))
+            if row.run_id == target.run_id && row.jail_generation == target.jail_generation =>
+        {
+            let first = row
+                .first_report_ms
+                .and_then(|value| u64::try_from(value).ok());
+            if let Ok(mut value) = first_report_ms.lock() {
+                *value = first;
+            }
+            // A VM whose host keys were staged had SSH up before the restart.
+            // The persisted lab is only an internal readiness input: recovery
+            // reseals and re-authenticates SSH before anything is projected.
+            if !replay_host_keys.is_empty()
+                && let Ok(lab) = serde_json::from_str::<VmLabV1>(&row.lab_json)
             {
-                // A recovered durable snapshot is an internal readiness input.
-                // Recovery must reseal and re-attest SSH before any external
-                // projection is emitted.
-                let _ = inner.kino_readiness_tx.send(update);
+                let _ = inner.guest_reports_tx.send(GuestUpdate {
+                    vm_name: target.vm_name.clone(),
+                    run_id: target.run_id.clone(),
+                    jail_generation: target.jail_generation.clone(),
+                    ssh_ready: true,
+                    failed: None,
+                    ssh_host_keys_openssh: replay_host_keys,
+                    lab,
+                    first_report_ms: first,
+                    received_at_ms: now_unix_ms(),
+                });
             }
         }
         Ok(_) => {}
         Err(error) => {
-            warn!(error = %error, vm = vm_name, "failed to load persisted probe state");
+            warn!(error = %error, vm = target.vm_name, "failed to load the persisted lab");
         }
     }
 
     info!(
-        vm = vm_name,
+        vm = target.vm_name,
         vm_uid = jail_uid,
         path = %ready_socket_path.display(),
-        "listening for guest-initiated Kino readiness pushes"
+        "listening for guest-initiated Kino reports"
     );
 
     let mut interval = tokio::time::interval(Duration::from_secs(PROBE_POLL_INTERVAL_SECONDS));
@@ -499,29 +594,27 @@ pub(super) async fn run_probe_worker_task(
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _)) => {
-                        // Kino keeps a single persistent push connection; a
+                        // Kino keeps a single persistent report connection; a
                         // new connection supersedes the previous one.
                         if let Some(task) = connection_task.take() {
                             task.abort();
                         }
                         let inner_for_task = Arc::clone(&inner);
-                        let vm_name_for_task = vm_name.clone();
-                        let run_id_for_task = run_id.clone();
-                        let generation_for_task = jail_generation.clone();
+                        let target_for_task = target.clone();
+                        let first_for_task = Arc::clone(&first_report_ms);
                         connection_task = Some(tokio::spawn(async move {
-                            if let Err(error) = handle_kino_ready_stream(
+                            if let Err(error) = handle_guest_report_stream(
                                 inner_for_task,
-                                &vm_name_for_task,
-                                &run_id_for_task,
-                                &generation_for_task,
+                                &target_for_task,
+                                &first_for_task,
                                 stream,
                             )
                             .await
                             {
                                 warn!(
                                     error = %error,
-                                    vm = vm_name_for_task,
-                                    "Kino readiness push connection failed"
+                                    vm = target_for_task.vm_name,
+                                    "guest report connection failed"
                                 );
                             }
                         }));
@@ -529,8 +622,8 @@ pub(super) async fn run_probe_worker_task(
                     Err(error) => {
                         warn!(
                             error = %error,
-                            vm = vm_name,
-                            "failed to accept Kino readiness push connection"
+                            vm = target.vm_name,
+                            "failed to accept a guest report connection"
                         );
                     }
                 }
@@ -538,7 +631,7 @@ pub(super) async fn run_probe_worker_task(
             _ = interval.tick() => {
                 let should_continue = {
                     let states = inner.states.read().await;
-                    match states.get(&vm_name) {
+                    match states.get(&target.vm_name) {
                         Some(vm) => {
                             matches!(
                                 vm.state,
@@ -546,9 +639,9 @@ pub(super) async fn run_probe_worker_task(
                                     | VmLifecycleState::BootingVm
                                     | VmLifecycleState::Running
                             ) && vm.details.as_ref().is_some_and(|details| {
-                                details.run_id.as_deref() == Some(run_id.as_str())
+                                details.run_id.as_deref() == Some(target.run_id.as_str())
                                     && details.jail_generation.as_deref()
-                                        == Some(jail_generation.as_str())
+                                        == Some(target.jail_generation.as_str())
                             })
                         }
                         None => false,
@@ -656,29 +749,17 @@ pub(super) async fn activate_kino_ready_socket(path: &Path, jail_uid: u32) -> Re
     Ok(())
 }
 
-pub(super) fn probe_state_row(update: &ProbeUpdateEnvelope) -> Result<VmProbeStateRow> {
-    let summary_json = serde_json::to_string(&update.summary).context("serialize probe summary")?;
-    let snapshot_json =
-        serde_json::to_string(update).context("serialize current probe snapshot")?;
-    Ok(VmProbeStateRow {
+pub(super) fn lab_row(update: &GuestUpdate) -> Result<VmLabRow> {
+    Ok(VmLabRow {
         vm_name: update.vm_name.clone(),
         run_id: update.run_id.clone(),
-        fingerprint: update.fingerprint.clone(),
-        collection_state: match &update.collection_state {
-            ProbeCollectionState::Ok => "ok".to_string(),
-            ProbeCollectionState::Error => "error".to_string(),
-        },
-        collection_error: update.collection_error.clone(),
-        summary_json,
-        snapshot_json,
-        generated_at_ms: update.generated_at_ms,
+        jail_generation: update.jail_generation.clone(),
+        lab_json: serde_json::to_string(&update.lab).context("serialize the VM's lab")?,
+        first_report_ms: update
+            .first_report_ms
+            .and_then(|value| i64::try_from(value).ok()),
         updated_at_ms: now_unix_ms(),
     })
-}
-
-#[cfg(target_os = "linux")]
-pub(super) fn probe_update_from_state_row(row: &VmProbeStateRow) -> Option<ProbeUpdateEnvelope> {
-    serde_json::from_str::<ProbeUpdateEnvelope>(&row.snapshot_json).ok()
 }
 
 pub(super) async fn request_jailerd(

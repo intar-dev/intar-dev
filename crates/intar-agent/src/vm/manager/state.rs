@@ -106,20 +106,19 @@ pub(super) async fn mark_vm_delete_failed(inner: &Inner, name: &str, message: St
 pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
     let state = VmLifecycleState::parse(&row.state)
         .ok_or_else(|| anyhow::anyhow!("unknown vm state \"{}\"", row.state))?;
-    let guest_tools = row
-        .guest_tools_json
-        .as_deref()
-        .map(serde_json::from_str::<DesiredGuestToolsV1>)
-        .transpose()
-        .context("decode persisted VM guest-tools pin")?;
-    if let Some(pin) = &guest_tools {
+    let digest = |value: &Option<String>, what: &str| {
+        value
+            .clone()
+            .map(OciDigest::try_from)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("persisted VM {what} digest is invalid: {error}"))
+    };
+    let image = digest(&row.image, "image")?;
+    let kino = digest(&row.kino, "kino")?;
+    if let Some(sha) = &row.boot_sha256 {
         anyhow::ensure!(
-            normalize_sha256(&pin.tools_disk_sha256).as_deref()
-                == Some(pin.tools_disk_sha256.as_str())
-                && pin.tools_disk_size_bytes == 64 * 1024 * 1024
-                && normalize_sha256(&pin.kino_sha256).as_deref() == Some(pin.kino_sha256.as_str())
-                && pin.bootstrap_abi == GUEST_BOOTSTRAP_ABI_V2,
-            "persisted VM guest-tools pin is invalid"
+            intar_contracts::oci::Sha256Hex::try_from(sha.clone()).is_ok(),
+            "persisted VM boot.json digest is invalid"
         );
     }
 
@@ -129,9 +128,9 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
             runtime_execution_id: row.runtime_execution_id.clone(),
             generation: u64::try_from(row.generation)
                 .context("invalid persisted execution generation")?,
-            image_key: row.image_key.clone(),
-            image_sha256: row.image_sha256.clone(),
-            guest_tools,
+            image,
+            kino,
+            boot_sha256: row.boot_sha256.clone(),
             run_id: row.run_id.clone(),
             root_disk_path: root_disk_path.clone(),
             seed_disk_path: seed_disk_path.clone(),
@@ -163,10 +162,6 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
             jail_gid: row.jail_gid.and_then(|value| u32::try_from(value).ok()),
             jail_netns_name: row.jail_netns_name.clone(),
             kino_vsock_cid: row.kino_vsock_cid.and_then(|v| u32::try_from(v).ok()),
-            kino_vsock_port: row
-                .kino_vsock_port
-                .and_then(|v| u32::try_from(v).ok())
-                .or_else(|| row.kino_vsock_cid.map(|_| KINO_VSOCK_PORT)),
             kino_vsock_path: row.kino_vsock_path.clone(),
             ssh_host_keys_openssh: parse_ssh_host_keys_json(
                 row.ssh_host_keys_openssh_json.as_deref(),
@@ -293,6 +288,28 @@ pub(super) fn run_spool_dir(work_dir: &Path, run_id: &str) -> PathBuf {
 
 pub(super) fn vm_spool_dir(work_dir: &Path, run_id: &str, vm_name: &str) -> PathBuf {
     run_spool_dir(work_dir, run_id).join(vm_name)
+}
+
+/// The agent-owned directories of a VM an older schema tracked, derived
+/// from the work dir rather than trusted from the old row: the VM dir and,
+/// when its run is known, its spool.
+pub(super) fn previous_schema_vm_dirs(work_dir: &Path, row: &PendingTeardownRow) -> Vec<PathBuf> {
+    let safe = |part: &str| {
+        !part.is_empty()
+            && Path::new(part).components().count() == 1
+            && matches!(
+                Path::new(part).components().next(),
+                Some(std::path::Component::Normal(_))
+            )
+    };
+    if !safe(&row.vm_name) {
+        return Vec::new();
+    }
+    let mut dirs = vec![work_dir.join("vms").join(&row.vm_name)];
+    if let Some(run_id) = row.run_id.as_deref().filter(|run_id| safe(run_id)) {
+        dirs.push(vm_spool_dir(work_dir, run_id, &row.vm_name));
+    }
+    dirs
 }
 
 pub(super) fn matching_vm_names_for_run_id(

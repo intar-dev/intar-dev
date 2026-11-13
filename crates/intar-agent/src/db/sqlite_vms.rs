@@ -5,7 +5,7 @@ pub(super) fn db_thread_main(
     mut rx: mpsc::Receiver<Op>,
     init_tx: oneshot::Sender<Result<Vec<VmRow>>>,
 ) {
-    let mut conn = match open_or_reset_database(&db_path) {
+    let mut conn = match open_prepared_connection(&db_path) {
         Ok(conn) => conn,
         Err(error) => {
             let _ = init_tx.send(Err(error));
@@ -38,20 +38,16 @@ pub(super) fn db_thread_main(
                 }
                 let _ = resp.send(result);
             }
-            Op::LoadVmProbeState { vm_name, resp } => {
-                let _ = resp.send(load_vm_probe_state(&conn, &vm_name));
+            Op::LoadVmLab { vm_name, resp } => {
+                let _ = resp.send(load_vm_lab(&conn, &vm_name));
             }
-            Op::LoadAllVmProbeStates { resp } => {
-                let _ = resp.send(load_all_vm_probe_states(&conn));
+            Op::LoadAllVmLabs { resp } => {
+                let _ = resp.send(load_all_vm_labs(&conn));
             }
-            Op::UpsertReadyVmAndProbeState { vm, probe, resp } => {
-                let result = upsert_ready_vm_and_probe_state(&mut conn, &vm, &probe);
+            Op::UpsertVmAndLab { vm, lab, resp } => {
+                let result = upsert_vm_and_lab(&mut conn, &vm, &lab);
                 if let Err(error) = &result {
-                    error!(
-                        error = %error,
-                        vm = vm.name,
-                        "sqlite ready VM transaction failed"
-                    );
+                    error!(error = %error, vm = vm.name, "sqlite VM and lab transaction failed");
                 }
                 let _ = resp.send(result);
             }
@@ -97,47 +93,30 @@ pub(super) fn db_thread_main(
             Op::UpsertDesiredState { row, resp } => {
                 let _ = resp.send(upsert_desired_state(&conn, &row));
             }
-            Op::TouchImageCacheEntry { row, resp } => {
-                let _ = resp.send(touch_image_cache_entry(&conn, &row));
-            }
             Op::LoadVerifiedContent { resp } => {
                 let _ = resp.send(load_verified_content(&conn));
             }
             Op::UpsertVerifiedContent { row, resp } => {
                 let _ = resp.send(upsert_verified_content(&conn, &row));
             }
-            #[cfg(test)]
-            Op::LoadImageCacheAccess { resp } => {
-                let _ = resp.send(load_image_cache_access(&conn));
+            Op::LoadLocalVmDigests { resp } => {
+                let _ = resp.send(load_local_vm_digests(&conn));
             }
-            Op::LoadLocalVmImageShas { resp } => {
-                let _ = resp.send(load_local_vm_image_shas(&conn));
+            Op::LoadPendingTeardowns { resp } => {
+                let _ = resp.send(load_pending_teardowns(&conn));
             }
-            Op::LoadLocalVmGuestToolsJsons { resp } => {
-                let _ = resp.send(load_local_vm_guest_tools_jsons(&conn));
-            }
-            #[cfg(test)]
-            Op::DeleteImageCacheAccess { image_sha256, resp } => {
-                let _ = resp.send(delete_image_cache_access(&conn, &image_sha256));
+            Op::DeletePendingTeardown { vm_name, resp } => {
+                let _ = resp.send(delete_pending_teardown(&conn, &vm_name));
             }
         }
     }
 }
 
-pub(super) fn open_or_reset_database(db_path: &Path) -> Result<Connection> {
-    open_prepared_connection(db_path).map_err(|error| {
-        anyhow::anyhow!(
-            "sqlite db at {} is incompatible with the baseline schema; purge the file and restart: {error}",
-            db_path.display()
-        )
-    })
-}
-
 pub(super) fn open_prepared_connection(db_path: &Path) -> Result<Connection> {
-    let conn = Connection::open(db_path)
+    let mut conn = Connection::open(db_path)
         .with_context(|| format!("failed to open sqlite db at {}", db_path.display()))?;
     prepare_connection(&conn)?;
-    ensure_baseline_schema(&conn)?;
+    ensure_schema(&mut conn)?;
     Ok(conn)
 }
 
@@ -149,80 +128,90 @@ pub(super) fn prepare_connection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn ensure_baseline_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(BASELINE_SCHEMA_SQL)
-        .context("failed to apply baseline sqlite schema")?;
-    conn.execute_batch(CACHE_STATE_SCHEMA_SQL)
-        .context("failed to apply image cache state schema")?;
-
-    if !table_has_column(conn, "vms", "guest_tools_json")? {
-        conn.execute("ALTER TABLE vms ADD COLUMN guest_tools_json TEXT;", [])
-            .context("migrate persisted VM guest-tools pins")?;
+/// Brings the file to [`STATE_SCHEMA_VERSION`]. A file of any other
+/// version is not migrated: its VMs are queued in `pending_teardown` for
+/// jailerd to destroy, and every other table is dropped, in one
+/// transaction. The caller works the queue off; nothing here can loop.
+pub(super) fn ensure_schema(conn: &mut Connection) -> Result<()> {
+    let version: i64 = conn
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .context("read sqlite schema marker")?;
+    if version == STATE_SCHEMA_VERSION {
+        return conn
+            .execute_batch(&format!("{BASELINE_SCHEMA_SQL}{CACHE_STATE_SCHEMA_SQL}"))
+            .context("apply sqlite schema");
     }
-
-    if table_has_column(conn, "vms", "vcpu_count")? {
-        let vm_count: i64 = conn.query_row("SELECT count(*) FROM vms", [], |row| row.get(0))?;
-        anyhow::ensure!(
-            vm_count == 0,
-            "drain all VMs before upgrading the CPU contract"
+    let transaction = conn.transaction().context("begin sqlite schema reset")?;
+    let legacy = legacy_vms(&transaction)?;
+    let tables = {
+        let mut stmt = transaction.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%';",
+        )?;
+        stmt.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("list sqlite tables")?
+    };
+    for table in &tables {
+        transaction
+            .execute_batch(&format!("DROP TABLE \"{}\";", table.replace('"', "\"\"")))
+            .with_context(|| format!("drop sqlite table {table}"))?;
+    }
+    transaction
+        .execute_batch(&format!("{BASELINE_SCHEMA_SQL}{CACHE_STATE_SCHEMA_SQL}"))
+        .context("apply sqlite schema")?;
+    for vm in &legacy {
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO pending_teardown (vm_name, run_id) VALUES (?1, ?2);",
+                params![vm.vm_name, vm.run_id],
+            )
+            .context("queue legacy VM teardown")?;
+    }
+    transaction
+        .execute_batch(&format!("PRAGMA user_version = {STATE_SCHEMA_VERSION};"))
+        .context("write sqlite schema marker")?;
+    transaction.commit().context("commit sqlite schema reset")?;
+    if !tables.is_empty() {
+        info!(
+            from = version,
+            to = STATE_SCHEMA_VERSION,
+            dropped_tables = tables.len(),
+            queued_vms = legacy.len(),
+            "agent state schema changed; reset the state and queued its VMs for teardown"
         );
-        conn.execute("ALTER TABLE vms DROP COLUMN vcpu_count", [])
-            .context("remove obsolete guest CPU configuration")?;
-    }
-
-    let has_any_tables: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%');",
-            [],
-            |row| row.get(0),
-        )
-        .context("failed to check existing sqlite tables")?;
-
-    if has_any_tables && !schema_is_compatible(conn)? {
-        anyhow::bail!("sqlite schema is incompatible with the baseline schema");
     }
     Ok(())
 }
 
-pub(super) fn schema_is_compatible(conn: &Connection) -> Result<bool> {
-    let requirements = [
-        ("vms", "owner_user_id"),
-        ("vms", "runtime_execution_id"),
-        ("vms", "generation"),
-        ("vms", "name"),
-        ("vms", "image_key"),
-        ("vms", "image_sha256"),
-        ("vms", "guest_tools_json"),
-        ("vms", "spool_dir"),
-        ("vms", "ssh_public_port"),
-        ("vms", "ssh_host_keys_openssh_json"),
-        ("vms", "guest_ip_cidr"),
-        ("vms", "gateway"),
-        ("vms", "bridge_name"),
-        ("vms", "ch_start_time_ticks"),
-        ("vms", "host_boot_id"),
-        ("vms", "jail_generation"),
-        ("vms", "jail_unit_name"),
-        ("vms", "jail_cgroup_path"),
-        ("vms", "jail_root_path"),
-        ("vms", "jail_root_inode"),
-        ("vms", "jail_uid"),
-        ("vms", "jail_gid"),
-        ("vms", "jail_netns_name"),
-        ("vms", "cpu_millis"),
-        ("vms", "ch_executable_sha256"),
-        ("desired_state", "doc_json"),
-        ("vm_probe_state", "snapshot_json"),
-        ("archive_jobs", "run_id"),
-    ];
-
-    for (table, column) in requirements {
-        if !table_has_column(conn, table, column)? {
-            return Ok(false);
-        }
+/// The VMs of an older schema, read with only the columns every schema
+/// had. A `pending_teardown` left by an interrupted earlier reset is kept.
+fn legacy_vms(conn: &Connection) -> Result<Vec<PendingTeardownRow>> {
+    let mut rows = Vec::new();
+    if table_has_column(conn, "pending_teardown", "vm_name")? {
+        rows.extend(load_pending_teardowns(conn)?);
     }
-
-    Ok(true)
+    if !table_has_column(conn, "vms", "name")? {
+        return Ok(rows);
+    }
+    let run_id = if table_has_column(conn, "vms", "run_id")? {
+        "run_id"
+    } else {
+        "NULL"
+    };
+    let query = format!("SELECT name, {run_id} FROM vms;");
+    let mut stmt = conn.prepare(&query).context("prepare legacy VM query")?;
+    let legacy = stmt
+        .query_map([], |row| {
+            Ok(PendingTeardownRow {
+                vm_name: row.get(0)?,
+                run_id: row.get(1)?,
+            })
+        })
+        .context("query legacy VMs")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect legacy VMs")?;
+    rows.extend(legacy);
+    Ok(rows)
 }
 
 pub(super) fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -248,9 +237,9 @@ pub(super) fn load_all_vms(conn: &Connection) -> Result<Vec<VmRow>> {
 SELECT
   name,
   state,
-  image_key,
-  image_sha256,
-  guest_tools_json,
+  image,
+  kino,
+  boot_sha256,
   created_at_s,
   updated_at_s,
   running_at_s,
@@ -278,7 +267,6 @@ SELECT
   jail_gid,
   jail_netns_name,
   kino_vsock_cid,
-  kino_vsock_port,
   kino_vsock_path,
   ssh_host_keys_openssh_json,
   run_id,
@@ -300,9 +288,9 @@ ORDER BY created_at_s ASC;
             Ok(VmRow {
                 name: row.get(0)?,
                 state: row.get(1)?,
-                image_key: row.get(2)?,
-                image_sha256: row.get(3)?,
-                guest_tools_json: row.get(4)?,
+                image: row.get(2)?,
+                kino: row.get(3)?,
+                boot_sha256: row.get(4)?,
                 created_at_s: row.get(5)?,
                 updated_at_s: row.get(6)?,
                 running_at_s: row.get(7)?,
@@ -330,17 +318,16 @@ ORDER BY created_at_s ASC;
                 jail_gid: row.get(29)?,
                 jail_netns_name: row.get(30)?,
                 kino_vsock_cid: row.get(31)?,
-                kino_vsock_port: row.get(32)?,
-                kino_vsock_path: row.get(33)?,
-                ssh_host_keys_openssh_json: row.get(34)?,
-                run_id: row.get(35)?,
-                recording_disk_path: row.get(36)?,
-                spool_dir: row.get(37)?,
-                cpu_millis: row.get(38)?,
-                ch_executable_sha256: row.get(39)?,
-                owner_user_id: row.get(40)?,
-                runtime_execution_id: row.get(41)?,
-                generation: row.get(42)?,
+                kino_vsock_path: row.get(32)?,
+                ssh_host_keys_openssh_json: row.get(33)?,
+                run_id: row.get(34)?,
+                recording_disk_path: row.get(35)?,
+                spool_dir: row.get(36)?,
+                cpu_millis: row.get(37)?,
+                ch_executable_sha256: row.get(38)?,
+                owner_user_id: row.get(39)?,
+                runtime_execution_id: row.get(40)?,
+                generation: row.get(41)?,
             })
         })
         .context("query load_all_vms")?;
@@ -355,9 +342,9 @@ pub(super) fn upsert_vm(conn: &Connection, row: &VmRow) -> Result<()> {
 INSERT INTO vms (
   name,
   state,
-  image_key,
-  image_sha256,
-  guest_tools_json,
+  image,
+  kino,
+  boot_sha256,
   created_at_s,
   updated_at_s,
   running_at_s,
@@ -385,7 +372,6 @@ INSERT INTO vms (
   jail_gid,
   jail_netns_name,
   kino_vsock_cid,
-  kino_vsock_port,
   kino_vsock_path,
   ssh_host_keys_openssh_json,
   run_id,
@@ -397,13 +383,13 @@ INSERT INTO vms (
   runtime_execution_id,
   generation
 ) VALUES (
-  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42
 )
 ON CONFLICT(name) DO UPDATE SET
   state = excluded.state,
-  image_key = excluded.image_key,
-  image_sha256 = excluded.image_sha256,
-  guest_tools_json = excluded.guest_tools_json,
+  image = excluded.image,
+  kino = excluded.kino,
+  boot_sha256 = excluded.boot_sha256,
   created_at_s = excluded.created_at_s,
   updated_at_s = excluded.updated_at_s,
   running_at_s = excluded.running_at_s,
@@ -431,7 +417,6 @@ ON CONFLICT(name) DO UPDATE SET
   jail_gid = excluded.jail_gid,
   jail_netns_name = excluded.jail_netns_name,
   kino_vsock_cid = excluded.kino_vsock_cid,
-  kino_vsock_port = excluded.kino_vsock_port,
   kino_vsock_path = excluded.kino_vsock_path,
   ssh_host_keys_openssh_json = excluded.ssh_host_keys_openssh_json,
   run_id = excluded.run_id,
@@ -446,9 +431,9 @@ ON CONFLICT(name) DO UPDATE SET
         params![
             row.name,
             row.state,
-            row.image_key,
-            row.image_sha256,
-            row.guest_tools_json,
+            row.image,
+            row.kino,
+            row.boot_sha256,
             row.created_at_s,
             row.updated_at_s,
             row.running_at_s,
@@ -476,7 +461,6 @@ ON CONFLICT(name) DO UPDATE SET
             row.jail_gid,
             row.jail_netns_name,
             row.kino_vsock_cid,
-            row.kino_vsock_port,
             row.kino_vsock_path,
             row.ssh_host_keys_openssh_json,
             row.run_id,
@@ -497,158 +481,89 @@ ON CONFLICT(name) DO UPDATE SET
 pub(super) fn delete_vm(conn: &Connection, name: &str) -> Result<()> {
     conn.execute("DELETE FROM vms WHERE name = ?1;", params![name])
         .context("delete vms row")?;
-    conn.execute(
-        "DELETE FROM vm_probe_state WHERE vm_name = ?1;",
-        params![name],
-    )
-    .context("delete vm_probe_state row")?;
+    conn.execute("DELETE FROM vm_lab WHERE vm_name = ?1;", params![name])
+        .context("delete vm_lab row")?;
     Ok(())
 }
 
-pub(super) fn load_vm_probe_state(
-    conn: &Connection,
-    vm_name: &str,
-) -> Result<Option<VmProbeStateRow>> {
+const VM_LAB_COLUMNS: &str =
+    "vm_name, run_id, jail_generation, lab_json, first_report_ms, updated_at_ms";
+
+fn vm_lab_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VmLabRow> {
+    Ok(VmLabRow {
+        vm_name: row.get(0)?,
+        run_id: row.get(1)?,
+        jail_generation: row.get(2)?,
+        lab_json: row.get(3)?,
+        first_report_ms: row.get(4)?,
+        updated_at_ms: row.get(5)?,
+    })
+}
+
+pub(super) fn load_vm_lab(conn: &Connection, vm_name: &str) -> Result<Option<VmLabRow>> {
     conn.query_row(
-        r#"
-SELECT
-  vm_name,
-  run_id,
-  fingerprint,
-  collection_state,
-  collection_error,
-  summary_json,
-  snapshot_json,
-  generated_at_ms,
-  updated_at_ms
-FROM vm_probe_state
-WHERE vm_name = ?1
-LIMIT 1;
-"#,
+        &format!("SELECT {VM_LAB_COLUMNS} FROM vm_lab WHERE vm_name = ?1;"),
         params![vm_name],
-        |row| {
-            Ok(VmProbeStateRow {
-                vm_name: row.get(0)?,
-                run_id: row.get(1)?,
-                fingerprint: row.get(2)?,
-                collection_state: row.get(3)?,
-                collection_error: row.get(4)?,
-                summary_json: row.get(5)?,
-                snapshot_json: row.get(6)?,
-                generated_at_ms: row.get(7)?,
-                updated_at_ms: row.get(8)?,
-            })
-        },
+        vm_lab_row,
     )
     .optional()
-    .context("load vm_probe_state row")
+    .context("load vm_lab row")
 }
 
-pub(super) fn load_all_vm_probe_states(conn: &Connection) -> Result<Vec<VmProbeStateRow>> {
+pub(super) fn load_all_vm_labs(conn: &Connection) -> Result<Vec<VmLabRow>> {
     let mut stmt = conn
-        .prepare(
-            r#"
-SELECT
-  vm_name,
-  run_id,
-  fingerprint,
-  collection_state,
-  collection_error,
-  summary_json,
-  snapshot_json,
-  generated_at_ms,
-  updated_at_ms
-FROM vm_probe_state
-ORDER BY updated_at_ms ASC, vm_name ASC;
-"#,
-        )
-        .context("prepare load_all_vm_probe_states query")?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(VmProbeStateRow {
-                vm_name: row.get(0)?,
-                run_id: row.get(1)?,
-                fingerprint: row.get(2)?,
-                collection_state: row.get(3)?,
-                collection_error: row.get(4)?,
-                summary_json: row.get(5)?,
-                snapshot_json: row.get(6)?,
-                generated_at_ms: row.get(7)?,
-                updated_at_ms: row.get(8)?,
-            })
-        })
-        .context("query load_all_vm_probe_states")?;
-
-    rows.collect::<rusqlite::Result<Vec<VmProbeStateRow>>>()
-        .context("collect load_all_vm_probe_states rows")
+        .prepare(&format!(
+            "SELECT {VM_LAB_COLUMNS} FROM vm_lab ORDER BY updated_at_ms ASC, vm_name ASC;"
+        ))
+        .context("prepare load_all_vm_labs")?;
+    stmt.query_map([], vm_lab_row)
+        .context("query load_all_vm_labs")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect load_all_vm_labs")
 }
 
-pub(super) fn upsert_vm_probe_state(conn: &Connection, row: &VmProbeStateRow) -> Result<()> {
+pub(super) fn upsert_vm_lab(conn: &Connection, row: &VmLabRow) -> Result<()> {
     conn.execute(
         r#"
-INSERT INTO vm_probe_state (
-  vm_name,
-  run_id,
-  fingerprint,
-  collection_state,
-  collection_error,
-  summary_json,
-  snapshot_json,
-  generated_at_ms,
-  updated_at_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+INSERT INTO vm_lab (vm_name, run_id, jail_generation, lab_json, first_report_ms, updated_at_ms)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
 ON CONFLICT(vm_name) DO UPDATE SET
   run_id = excluded.run_id,
-  fingerprint = excluded.fingerprint,
-  collection_state = excluded.collection_state,
-  collection_error = excluded.collection_error,
-  summary_json = excluded.summary_json,
-  snapshot_json = excluded.snapshot_json,
-  generated_at_ms = excluded.generated_at_ms,
+  jail_generation = excluded.jail_generation,
+  lab_json = excluded.lab_json,
+  first_report_ms = excluded.first_report_ms,
   updated_at_ms = excluded.updated_at_ms;
 "#,
         params![
             row.vm_name,
             row.run_id,
-            row.fingerprint,
-            row.collection_state,
-            row.collection_error,
-            row.summary_json,
-            row.snapshot_json,
-            row.generated_at_ms,
+            row.jail_generation,
+            row.lab_json,
+            row.first_report_ms,
             row.updated_at_ms,
         ],
     )
-    .context("upsert vm_probe_state row")?;
-
+    .context("upsert vm_lab row")?;
     Ok(())
 }
 
-pub(super) fn upsert_ready_vm_and_probe_state(
-    conn: &mut Connection,
-    vm: &VmRow,
-    probe: &VmProbeStateRow,
-) -> Result<()> {
+/// The VM row and its latest lab in one transaction: a Ready VM is never
+/// persisted without the report that made it Ready.
+pub(super) fn upsert_vm_and_lab(conn: &mut Connection, vm: &VmRow, lab: &VmLabRow) -> Result<()> {
     anyhow::ensure!(
-        vm.name == probe.vm_name,
-        "ready VM and probe rows identify different VMs"
+        vm.name == lab.vm_name,
+        "VM and lab rows identify different VMs"
     );
     anyhow::ensure!(
-        vm.run_id.as_deref() == Some(probe.run_id.as_str()),
-        "ready VM and probe rows identify different runs"
+        vm.run_id.as_deref() == Some(lab.run_id.as_str()),
+        "VM and lab rows identify different runs"
     );
-    anyhow::ensure!(
-        vm.state == "running",
-        "ready VM transaction requires the running lifecycle state"
-    );
-
     let transaction = conn
         .transaction()
-        .context("begin ready VM SQLite transaction")?;
-    upsert_vm(&transaction, vm).context("persist ready VM row")?;
-    upsert_vm_probe_state(&transaction, probe).context("persist ready probe row")?;
+        .context("begin VM and lab SQLite transaction")?;
+    upsert_vm(&transaction, vm).context("persist VM row")?;
+    upsert_vm_lab(&transaction, lab).context("persist lab row")?;
     transaction
         .commit()
-        .context("commit ready VM SQLite transaction")
+        .context("commit VM and lab SQLite transaction")
 }

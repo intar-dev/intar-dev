@@ -1,51 +1,69 @@
-use intar_contracts::bridge::DesiredCachedImageV1;
-use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2;
-use sha2::Digest as _;
+use intar_contracts::bridge_v9::{CheckStatus, LabState, VmTaskV1};
+use intar_contracts::oci::OciDigest;
+use intar_contracts::scenario::SpecMode;
 
 use crate::vm::VmTerminalTarget;
 
 use super::*;
 
-fn desired_vm() -> DesiredVmV2 {
-    DesiredVmV2 {
+fn digest(digit: char) -> OciDigest {
+    OciDigest::try_from(format!("sha256:{}", digit.to_string().repeat(64)))
+        .unwrap_or_else(|error| panic!("test digest: {error}"))
+}
+
+fn desired_vm() -> DesiredVmV3 {
+    DesiredVmV3 {
         vm_id: "vm-1".to_string(),
-        owner_user_id: "user-1".to_string(),
-        runtime_execution_id: "execution-1".to_string(),
-        generation: 1,
+        name: "web".to_string(),
         run_id: "run-1".to_string(),
-        vm_name: "web".to_string(),
+        runtime_execution_id: "execution-1".to_string(),
+        owner_user_id: "user-1".to_string(),
+        generation: 1,
         desired_phase: DesiredVmPhase::Running,
-        image_key: ImageKey {
-            scenario: "broken-nginx".to_string(),
-            vm: "web".to_string(),
-            arch: ImageArchitecture::X86_64,
-        },
-        image_id: "a".repeat(64),
-        guest_tools: intar_contracts::bridge::DesiredGuestToolsV1 {
-            tools_disk_sha256: "1".repeat(64),
-            tools_disk_size_bytes: 64 * 1024 * 1024,
-            kino_sha256: "2".repeat(64),
-            bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
-        },
-        resources: VmResourcesV3 {
-            cpu_millis: 125,
-            memory_mib: Mib(512),
-            disk_mib: Mib(4096),
-        },
-        ssh_authorized_keys_openssh: vec!["ssh-ed25519 AAAATEST run".to_string()],
         lease_expires_at_unix_ms: now_ms() + 60_000,
+        image: digest('a'),
+        kino: digest('b'),
+        spec: digest('c'),
+        mode: SpecMode::Learn,
+        cpu_millis: 125,
+        memory_mib: 512,
+        disk_mib: 4096,
+        peers: Vec::new(),
+        ssh_authorized_keys: vec!["ssh-ed25519 AAAATEST run".to_string()],
+        terminal: true,
+        egress: false,
     }
 }
 
 #[test]
-fn host_capabilities_require_an_attested_run_cli_runtime() {
-    let capabilities = collect_host_capabilities(None);
-    assert!(!capabilities.supports_run_cli_v1);
-    assert!(!capabilities.supports_run_cli_completion_v1);
+fn host_hardware_fails_closed_without_a_jailerd_attestation() {
+    let hardware = collect_host_hardware(None);
+    assert_eq!(hardware.cloud_hypervisor_sha256, None);
+    assert!(!hardware.kvm && !hardware.landlock && !hardware.hard_cpu_quota);
 }
 
-fn empty_desired_state(version: u64) -> HostDesiredStateV2 {
-    HostDesiredStateV2 {
+#[test]
+fn the_hello_carries_the_guest_contract_and_the_hardware() {
+    let hello = BridgeMessageV9::ClientHello(ClientHelloV9 {
+        protocol_version: BRIDGE_PROTOCOL_VERSION,
+        host_id: "host-1".to_string(),
+        agent_version: "0.0.0".to_string(),
+        role: HostRoleV1::Agent,
+        last_applied_desired_version: None,
+        guest_contract: GUEST_CONTRACT,
+        hardware: collect_host_hardware(None),
+    });
+    let value = serde_json::to_value(&hello).expect("serialize");
+    assert_eq!(value["type"], "client_hello");
+    assert_eq!(value["protocol_version"], 9);
+    assert_eq!(value["guest_contract"], GUEST_CONTRACT);
+    assert_eq!(value["hardware"]["vsock"], true);
+    let raw = serde_json::to_string(&hello).expect("serialize");
+    assert_eq!(parse_bridge_json(&raw).expect("v9 hello"), hello);
+}
+
+fn empty_desired_state(version: u64) -> HostDesiredStateV3 {
+    HostDesiredStateV3 {
         scope: intar_contracts::bridge::HostScope::Personal,
         owner_user_id: "user-1".to_string(),
         schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
@@ -53,10 +71,8 @@ fn empty_desired_state(version: u64) -> HostDesiredStateV2 {
         version,
         generated_at_unix_ms: 123,
         cached_images: Vec::new(),
-        cached_guest_tools: Vec::new(),
+        kino_pin: None,
         vms: Vec::new(),
-        builds: Vec::new(),
-        source_compiles: Vec::new(),
     }
 }
 
@@ -77,8 +93,8 @@ fn char_device_probe_accepts_openable_char_devices() {
 }
 
 #[test]
-fn parses_only_v8_bridge_messages() {
-    let message = BridgeMessageV8::SyncRequest(SyncRequestV8 {
+fn parses_only_v9_bridge_messages() {
+    let message = BridgeMessageV9::SyncRequest(SyncRequestV9 {
         protocol_version: BRIDGE_PROTOCOL_VERSION,
         host_id: "host-1".to_string(),
         reason: SyncRequestReason::Connect,
@@ -87,9 +103,89 @@ fn parses_only_v8_bridge_messages() {
 
     assert!(parse_bridge_json(&raw).is_ok());
 
-    let raw_v6 = raw.replace("\"protocol_version\":8", "\"protocol_version\":6");
-    let error = parse_bridge_json(&raw_v6).expect_err("v6 should fail");
-    assert!(error.to_string().contains("expected v8"));
+    let raw_v8 = raw.replace("\"protocol_version\":9", "\"protocol_version\":8");
+    let error = parse_bridge_json(&raw_v8).expect_err("v8 should fail");
+    assert!(error.to_string().contains("expected v9"));
+
+    // A v8 message the v9 schema does not know is refused outright.
+    let build_report = r#"{"type":"build_report","protocol_version":9,"host_id":"host-1"}"#;
+    assert!(parse_bridge_json(build_report).is_err());
+    let unknown_field = raw.replace("\"reason\"", "\"later\":1,\"reason\"");
+    assert!(parse_bridge_json(&unknown_field).is_err());
+}
+
+#[test]
+fn a_refused_protocol_backs_off_long_without_resetting_the_backoff() {
+    assert_eq!(
+        retry_after_failure(RETRY_MIN_MS, false),
+        (RETRY_MIN_MS, 2 * RETRY_MIN_MS)
+    );
+    assert_eq!(
+        retry_after_failure(RETRY_MAX_MS, false),
+        (RETRY_MAX_MS, RETRY_MAX_MS)
+    );
+    let (wait, next) = retry_after_failure(RETRY_MIN_MS, true);
+    assert_eq!(wait, UPGRADE_RETRY_MS);
+    assert!(
+        wait >= 10 * RETRY_MAX_MS,
+        "an upgrade refusal must not hot-loop"
+    );
+    assert_eq!(next, RETRY_MAX_MS);
+}
+
+#[test]
+fn close_4426_is_upgrade_required() {
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    let close = |code: u16| {
+        Message::Close(Some(CloseFrame {
+            code: CloseCode::from(code),
+            reason: "".into(),
+        }))
+    };
+    let error = parse_bridge_message(close(4426)).expect_err("4426 closes");
+    assert!(error.downcast_ref::<UpgradeRequired>().is_some());
+    let error = parse_bridge_message(close(1000)).expect_err("1000 closes");
+    assert!(error.downcast_ref::<UpgradeRequired>().is_none());
+}
+
+#[tokio::test]
+async fn bootstrap_426_is_upgrade_required_and_sends_the_protocol_header() {
+    crate::tls_provider::ensure_ring_provider().expect("rustls provider");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route(
+                "/api/agent/bootstrap",
+                axum::routing::post(|headers: axum::http::HeaderMap| async move {
+                    if headers
+                        .get(BRIDGE_PROTOCOL_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        == Some("9")
+                    {
+                        axum::http::StatusCode::UPGRADE_REQUIRED
+                    } else {
+                        axum::http::StatusCode::BAD_REQUEST
+                    }
+                }),
+            ),
+        )
+        .await
+        .expect("serve");
+    });
+    let mut cfg = test_bridge_config();
+    cfg.base_url = format!("http://{address}");
+    let result = bootstrap_agent_access(&cfg, &HttpClient::new()).await;
+    server.abort();
+    let error = result.err().expect("426 fails the bootstrap");
+    assert!(
+        error.downcast_ref::<UpgradeRequired>().is_some(),
+        "{error:#}"
+    );
 }
 
 #[tokio::test]
@@ -167,7 +263,7 @@ async fn outbound_writer_prioritizes_urgent_terminal_reports() {
     let (inventory_tx, mut inventory_rx) = mpsc::channel(1);
     let (normal_tx, mut normal_rx) = mpsc::channel(1);
     normal_tx
-        .send(BridgeMessageV8::SyncRequest(SyncRequestV8 {
+        .send(BridgeMessageV9::SyncRequest(SyncRequestV9 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "normal".to_string(),
             reason: SyncRequestReason::Connect,
@@ -175,7 +271,7 @@ async fn outbound_writer_prioritizes_urgent_terminal_reports() {
         .await
         .expect("queue normal message");
     inventory_tx
-        .send(BridgeMessageV8::SyncRequest(SyncRequestV8 {
+        .send(BridgeMessageV9::SyncRequest(SyncRequestV9 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "inventory".to_string(),
             reason: SyncRequestReason::Reconnect,
@@ -183,7 +279,7 @@ async fn outbound_writer_prioritizes_urgent_terminal_reports() {
         .await
         .expect("queue inventory message");
     urgent_tx
-        .send(BridgeMessageV8::SyncRequest(SyncRequestV8 {
+        .send(BridgeMessageV9::SyncRequest(SyncRequestV9 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "terminal".to_string(),
             reason: SyncRequestReason::Reconnect,
@@ -208,7 +304,7 @@ async fn outbound_writer_prioritizes_inventory_reports() {
     let (inventory_tx, mut inventory_rx) = mpsc::channel(1);
     let (normal_tx, mut normal_rx) = mpsc::channel(1);
     normal_tx
-        .send(BridgeMessageV8::SyncRequest(SyncRequestV8 {
+        .send(BridgeMessageV9::SyncRequest(SyncRequestV9 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "normal".to_string(),
             reason: SyncRequestReason::Connect,
@@ -216,7 +312,7 @@ async fn outbound_writer_prioritizes_inventory_reports() {
         .await
         .expect("queue normal message");
     inventory_tx
-        .send(BridgeMessageV8::SyncRequest(SyncRequestV8 {
+        .send(BridgeMessageV9::SyncRequest(SyncRequestV9 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "inventory".to_string(),
             reason: SyncRequestReason::Reconnect,
@@ -343,26 +439,6 @@ fn explicit_terminal_contract_exposes_targets_only_when_ready() {
 }
 
 #[test]
-fn agent_desired_state_rejects_build_assignments() {
-    let mut desired = empty_desired_state(1);
-    validate_desired_state(&test_bridge_config(), &desired).expect("empty builds should be valid");
-
-    desired
-        .builds
-        .push(intar_contracts::bridge::DesiredBuildV1 {
-            build_id: "build-1".to_string(),
-            scenario_id: "broken-nginx".to_string(),
-            arch: ImageArchitecture::X86_64,
-            rev: "abc123".to_string(),
-            content_hash: "f".repeat(64),
-            bundle_ref: "builds/bundles/abc123.tar.gz".to_string(),
-        });
-    let error = validate_desired_state(&test_bridge_config(), &desired)
-        .expect_err("agents must reject builder assignments");
-    assert!(format!("{error:#}").contains("must not contain build assignments"));
-}
-
-#[test]
 fn desired_state_versions_never_regress() {
     let current = empty_desired_state(7);
 
@@ -388,66 +464,34 @@ fn cache_refresh_wakes_for_initial_state_and_new_pins() {
 
     let mut incoming = current.clone();
     incoming.version = 2;
-    incoming.cached_images.push(DesiredCachedImageV1 {
-        image_key: desired_vm().image_key,
-        image_id: "a".repeat(64),
-    });
-
+    incoming.cached_images.push(digest('a'));
     assert!(required_cache_pins_changed(Some(&current), &incoming));
+
+    let mut kino = current.clone();
+    kino.version = 2;
+    kino.kino_pin = Some(digest('b'));
+    assert!(required_cache_pins_changed(Some(&current), &kino));
 }
 
 #[test]
 fn cache_refresh_ignores_revision_pin_order_and_duplicates() {
     let first = desired_vm();
     let mut second = desired_vm();
-    second.vm_name = "worker".to_string();
-    second.image_key.vm = "worker".to_string();
-    second.image_id = "b".repeat(64);
-    second.guest_tools.tools_disk_sha256 = "3".repeat(64);
-    second.guest_tools.kino_sha256 = "4".repeat(64);
+    second.name = "worker".to_string();
+    second.image = digest('d');
+    second.kino = digest('e');
 
     let mut current = empty_desired_state(1);
-    current.cached_images = vec![
-        DesiredCachedImageV1 {
-            image_key: first.image_key.clone(),
-            image_id: first.image_id.clone(),
-        },
-        DesiredCachedImageV1 {
-            image_key: second.image_key.clone(),
-            image_id: second.image_id.clone(),
-        },
-    ];
-    current.cached_guest_tools = vec![first.guest_tools.clone(), second.guest_tools.clone()];
+    current.cached_images = vec![first.image.clone(), second.image.clone()];
     current.vms = vec![first.clone(), second.clone()];
 
     let mut incoming = current.clone();
     incoming.version = 2;
     incoming.cached_images.reverse();
-    incoming.cached_guest_tools.reverse();
     incoming.vms.reverse();
-    incoming.cached_images.push(DesiredCachedImageV1 {
-        image_key: first.image_key,
-        image_id: first.image_id.to_ascii_uppercase(),
-    });
-    incoming.cached_guest_tools.push(second.guest_tools);
+    incoming.cached_images.push(first.image);
 
     assert!(!required_cache_pins_changed(Some(&current), &incoming));
-}
-
-#[test]
-fn cache_refresh_keeps_hyphenated_image_key_components_distinct() {
-    let mut left = desired_vm();
-    left.image_key.scenario = "a-b".to_string();
-    left.image_key.vm = "c".to_string();
-
-    let mut right = desired_vm();
-    right.image_key.scenario = "a".to_string();
-    right.image_key.vm = "b-c".to_string();
-
-    assert_ne!(
-        image_cache_pin(&left.image_key, &left.image_id),
-        image_cache_pin(&right.image_key, &right.image_id)
-    );
 }
 
 #[test]
@@ -459,8 +503,8 @@ fn cache_refresh_tracks_running_pins_and_ignores_stopped_ones() {
 
     let mut changed_stopped_pin = current.clone();
     changed_stopped_pin.version = 2;
-    changed_stopped_pin.vms[0].image_id = "b".repeat(64);
-    changed_stopped_pin.vms[0].guest_tools.tools_disk_sha256 = "3".repeat(64);
+    changed_stopped_pin.vms[0].image = digest('d');
+    changed_stopped_pin.vms[0].kino = digest('e');
     assert!(!required_cache_pins_changed(
         Some(&current),
         &changed_stopped_pin
@@ -478,267 +522,143 @@ fn cache_refresh_tracks_running_pins_and_ignores_stopped_ones() {
 }
 
 #[test]
-fn image_cache_key_matches_committed_catalog_format() {
-    assert_eq!(
-        image_cache_key(&desired_vm().image_key),
-        "broken-nginx-web-x86_64"
-    );
-}
-
-#[test]
 fn creating_vm_is_booting_only_after_runtime_constraints_exist() {
-    assert_eq!(creating_vm_report_phase(false), VmPhase::CreatingDisks);
-    assert_eq!(creating_vm_report_phase(true), VmPhase::Booting);
+    assert_eq!(creating_vm_report_phase(false), VmPhaseV2::CreatingDisks);
+    assert_eq!(creating_vm_report_phase(true), VmPhaseV2::Booting);
 }
 
 #[test]
-fn desired_peer_aliases_map_runtime_names_to_manifest_vm_names() {
+fn desired_peers_are_the_named_running_vms_of_the_same_run() {
     let mut web = desired_vm();
     web.run_id = "run-pair".to_string();
-    web.vm_name = "pair-ping-web-bv1xgh-1".to_string();
-    web.image_key.scenario = "pair-ping".to_string();
-    web.image_key.vm = "web".to_string();
+    web.peers = vec![
+        "db".to_string(),
+        "cache".to_string(),
+        "other".to_string(),
+        "web".to_string(),
+        "ghost".to_string(),
+    ];
 
     let mut db = web.clone();
-    db.vm_name = "pair-ping-db-bv1xgh-2".to_string();
-    db.image_key.vm = "db".to_string();
-
+    db.name = "db".to_string();
     let mut absent = web.clone();
-    absent.vm_name = "pair-ping-cache-bv1xgh-3".to_string();
-    absent.image_key.vm = "cache".to_string();
+    absent.name = "cache".to_string();
     absent.desired_phase = DesiredVmPhase::Absent;
-
     let mut other_run = web.clone();
     other_run.run_id = "other-run".to_string();
-    other_run.vm_name = "pair-ping-other-abcdef-1".to_string();
-    other_run.image_key.vm = "other".to_string();
+    other_run.name = "other".to_string();
 
-    let desired = HostDesiredStateV2 {
-        scope: intar_contracts::bridge::HostScope::Personal,
-        owner_user_id: "user-1".to_string(),
-        schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
-        host_id: "host-1".to_string(),
-        version: 1,
-        generated_at_unix_ms: 123,
-        cached_images: Vec::new(),
-        cached_guest_tools: Vec::new(),
-        vms: vec![web.clone(), db.clone(), absent, other_run],
-        builds: Vec::new(),
-        source_compiles: Vec::new(),
-    };
-
-    assert_eq!(
-        desired_peer_vm_aliases(&desired, &web),
-        BTreeMap::from([(db.vm_name, "db".to_string())])
-    );
-}
-
-#[tokio::test]
-async fn cached_image_state_requires_verified_launch_descriptor() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let mut vm = desired_vm();
-    let mut manifest = intar_contracts::catalog::ImageChunkManifestV1 {
-        schema_version: 1,
-        image_id: "0".repeat(64),
-        virtual_size_bytes: 1,
-        chunk_size_bytes: intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES,
-        encoding: intar_contracts::catalog::IMAGE_CHUNK_ENCODING.to_string(),
-        chunks: Vec::new(),
-    };
-    manifest.image_id = manifest.compute_image_id().expect("image id");
-    vm.image_id.clone_from(&manifest.image_id);
-    let cache_key = image_cache_key(&vm.image_key);
-    let image_dir = temp.path().join(&cache_key);
-    std::fs::create_dir_all(&image_dir).expect("image cache dir");
-    let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest JSON");
-    let manifest_sha256 = sha2::Sha256::digest(&manifest_bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let manifest_dir = temp.path().join("manifests");
-    let chunk_dir = temp.path().join("chunks");
-    std::fs::create_dir_all(&manifest_dir).expect("manifest cache");
-    std::fs::create_dir_all(&chunk_dir).expect("chunk cache");
-    let manifest_path = manifest_dir.join(format!("{manifest_sha256}.json"));
-    std::fs::write(&manifest_path, &manifest_bytes).expect("cached manifest");
-    let desired = HostDesiredStateV2 {
-        scope: intar_contracts::bridge::HostScope::Personal,
-        owner_user_id: "user-1".to_string(),
-        schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
-        host_id: "host-1".to_string(),
-        version: 1,
-        generated_at_unix_ms: 123,
-        cached_images: vec![DesiredCachedImageV1 {
-            image_key: vm.image_key.clone(),
-            image_id: manifest.image_id.clone(),
-        }],
-        cached_guest_tools: Vec::new(),
-        vms: Vec::new(),
-        builds: Vec::new(),
-        source_compiles: Vec::new(),
-    };
-
-    let unverified = cached_image_states_with_cache_root(&desired, 456, Some(temp.path()), false);
-    assert_eq!(unverified[0].phase, ImageCachePhase::Missing);
-    assert_eq!(unverified[0].bytes_on_disk, None);
-
-    let artifacts = temp.path().join("artifacts");
-    std::fs::create_dir_all(&artifacts).expect("boot artifact cache");
-    let kernel_sha256 = "b".repeat(64);
-    let initrd_sha256 = "c".repeat(64);
-    let kernel_path = artifacts.join(&kernel_sha256);
-    let initrd_path = artifacts.join(&initrd_sha256);
-    std::fs::write(&kernel_path, b"kernel").expect("cached kernel artifact");
-    std::fs::write(&initrd_path, b"initrd").expect("cached initrd artifact");
-    let prepared_source =
-        |name: &str, sha256: &str, access: intar_jailer_protocol::ArtifactAccess| {
-            intar_jailer_protocol::ArtifactSource {
-                source_root: intar_jailer_protocol::PREPARED_IMAGE_SOURCE_ROOT,
-                relative_path: PathBuf::from(&manifest.image_id).join(name),
-                sha256: Some(
-                    intar_jailer_protocol::Sha256Digest::parse(sha256.to_string())
-                        .expect("prepared digest"),
-                ),
-                access,
-            }
-        };
-    let cached = crate::image_cache::CachedChunkedImage {
-        image_key: cache_key,
-        image_id: manifest.image_id.clone(),
-        chunk_manifest_path: manifest_path,
-        chunk_manifest_sha256: manifest_sha256.clone(),
-        chunk_cache_root: chunk_dir,
-        kernel_path,
-        initrd_path,
-        kernel_sha256: kernel_sha256.clone(),
-        initrd_sha256: initrd_sha256.clone(),
-        cmdline: "root=/dev/vda rw".to_string(),
-        virtual_size_bytes: 1,
-        guest_bootstrap_abi: GUEST_BOOTSTRAP_ABI_V2,
-    };
-    let prepared = intar_jailer_protocol::PreparedImageV3Result {
-        image_id: intar_jailer_protocol::Sha256Digest::parse(manifest.image_id.clone())
-            .expect("image digest"),
-        chunk_manifest_sha256: intar_jailer_protocol::Sha256Digest::parse(manifest_sha256)
-            .expect("manifest digest"),
-        virtual_size_bytes: 1,
-        root_disk: prepared_source(
-            "root.raw",
-            &manifest.image_id,
-            intar_jailer_protocol::ArtifactAccess::ReadWrite,
-        ),
-        kernel: prepared_source(
-            "kernel",
-            &kernel_sha256,
-            intar_jailer_protocol::ArtifactAccess::ReadOnly,
-        ),
-        initrd: Some(prepared_source(
-            "initrd",
-            &initrd_sha256,
-            intar_jailer_protocol::ArtifactAccess::ReadOnly,
-        )),
-        fast_template_store: true,
-    };
-    crate::image_cache::mark_template_ready(&cached, &prepared)
-        .await
-        .expect("publish launch descriptor");
-    let template_ready =
-        cached_image_states_with_cache_root(&desired, 791, Some(temp.path()), true);
-    assert_eq!(template_ready[0].phase, ImageCachePhase::Ready);
-    assert_eq!(
-        template_ready[0].bytes_on_disk,
-        Some(manifest_bytes.len() as u64)
-    );
-}
-
-#[tokio::test]
-async fn cached_guest_tools_reports_verified_readiness() {
-    const DISK_BYTES: u64 = 64 * 1024 * 1024;
-    let zero_disk_sha256 = {
-        let mut hasher = sha2::Sha256::new();
-        let zeros = [0u8; 64 * 1024];
-        for _ in 0..(DISK_BYTES / zeros.len() as u64) {
-            hasher.update(zeros);
-        }
-        hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    };
-    let temp = tempfile::tempdir().expect("tempdir");
-    let cache_root = temp.path().join("cache");
-    let mut valid = desired_vm().guest_tools;
-    valid.tools_disk_sha256 = zero_disk_sha256.to_ascii_uppercase();
-    let mut absent = valid.clone();
-    absent.tools_disk_sha256 = "3".repeat(64);
-    absent.kino_sha256 = "4".repeat(64);
     let mut desired = empty_desired_state(1);
-    desired.cached_guest_tools = vec![valid.clone(), absent.clone()];
+    desired.vms = vec![web.clone(), db, absent, other_run];
 
-    // A missing cache root reports every pin Missing and creates nothing.
-    let states = cached_guest_tools_states_with_cache_root(&desired, 111, Some(&cache_root)).await;
-    assert_eq!(states.len(), 2);
-    assert!(
-        states
-            .iter()
-            .all(|state| state.phase == ImageCachePhase::Missing)
+    assert_eq!(
+        desired_peer_vm_names(&desired, &web),
+        vec!["db".to_string()]
     );
-    assert!(states.iter().all(|state| state.bytes_on_disk.is_none()));
-    assert!(states.iter().all(|state| state.error.is_none()));
-    assert!(states.iter().all(|state| state.updated_at_unix_ms == 111));
-    assert!(
-        !cache_root.exists(),
-        "reporting must not create cache state"
+}
+
+fn lab_with_task_passed(passed_at_unix_ms: u64) -> VmLabV1 {
+    VmLabV1 {
+        state: LabState::Ready,
+        kino_version: "kino 2".to_string(),
+        ready: Vec::new(),
+        tasks: vec![VmTaskV1 {
+            id: "nginx".to_string(),
+            status: CheckStatus::Pass,
+            message: String::new(),
+            passed_at_unix_ms: Some(passed_at_unix_ms),
+        }],
+        verify: None,
+        timings_ms: BTreeMap::new(),
+        failure: None,
+    }
+}
+
+#[test]
+fn a_vm_report_is_ready_only_with_its_forward_and_starts_cold() {
+    let mut status = VmStatusResponse::test_status("web", Some("run-1"));
+    status.state = VmLifecycleState::Running;
+    if let Some(details) = status.details.as_mut() {
+        details.image = Some(digest('a'));
+        details.kino = Some(digest('b'));
+    }
+    let lab = ReportedLab {
+        lab: lab_with_task_passed(7),
+        first_report_ms: Some(1_234),
+    };
+    let report = build_vm_report_from_status(
+        "host-1",
+        None,
+        None,
+        status.clone(),
+        Some(lab.clone()),
+        None,
+        None,
     );
-
-    let without_root = cached_guest_tools_states_with_cache_root(&desired, 111, None).await;
-    assert_eq!(without_root, states);
-
-    let tools_dir = cache_root.join("tools");
-    std::fs::create_dir_all(&tools_dir).expect("tools cache dir");
-    let disk_path = tools_dir.join(format!("{zero_disk_sha256}.ext4"));
-    std::fs::File::create(&disk_path)
-        .expect("sparse tools disk")
-        .set_len(DISK_BYTES)
-        .expect("sparse length");
-
-    let states = cached_guest_tools_states_with_cache_root(&desired, 222, Some(&cache_root)).await;
-    assert_eq!(states[0].guest_tools, valid);
-    assert_eq!(states[0].phase, ImageCachePhase::Ready);
-    assert_eq!(states[0].bytes_on_disk, Some(DISK_BYTES));
-    assert_eq!(states[0].updated_at_unix_ms, 222);
-    assert_eq!(states[1].guest_tools, absent);
-    assert_eq!(states[1].phase, ImageCachePhase::Missing);
-    assert_eq!(states[1].bytes_on_disk, None);
-    assert_eq!(states[1].updated_at_unix_ms, 222);
-
-    // A later report keeps the readiness and advances the timestamp.
-    let states = cached_guest_tools_states_with_cache_root(&desired, 333, Some(&cache_root)).await;
-    assert_eq!(states[0].phase, ImageCachePhase::Ready);
-    assert_eq!(states[0].bytes_on_disk, Some(DISK_BYTES));
-    assert_eq!(states[0].updated_at_unix_ms, 333);
-    assert_eq!(states[1].updated_at_unix_ms, 333);
-
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&disk_path)
-        .expect("open tools disk")
-        .set_len(0)
-        .expect("truncated length");
-    let states = cached_guest_tools_states_with_cache_root(&desired, 444, Some(&cache_root)).await;
-    assert_eq!(states[0].phase, ImageCachePhase::Missing);
-    assert_eq!(states[0].bytes_on_disk, None);
-    // Reporting observes but never repairs or removes the cache entry.
-    assert_eq!(std::fs::metadata(&disk_path).expect("metadata").len(), 0);
-
-    let mut unpinned = empty_desired_state(1);
-    unpinned.cached_guest_tools = Vec::new();
-    assert!(
-        cached_guest_tools_states_with_cache_root(&unpinned, 555, Some(&cache_root))
-            .await
-            .is_empty()
+    assert_eq!(report.schema_version, VM_REPORT_SCHEMA_VERSION);
+    assert_eq!(report.vm.phase, VmPhaseV2::Running, "no forward, not ready");
+    assert_eq!(
+        report.vm.start,
+        Some(VmStartV1 {
+            path: VmStartPath::Cold,
+            reason: None,
+            first_report_ms: Some(1_234),
+        })
     );
+    assert_eq!(report.vm.lab, Some(lab.lab));
+    assert_eq!(report.vm.image, Some(digest('a')));
+    assert_eq!(report.vm.kino, Some(digest('b')));
+
+    if let Some(details) = status.details.as_mut() {
+        details.ssh_public_port = Some(22_001);
+    }
+    let ready = vm_state_from_status(None, None, status, None, None, None);
+    assert_eq!(ready.phase, VmPhaseV2::Ready);
+    assert_eq!(ready.lab, None);
+    assert_eq!(ready.start.and_then(|start| start.first_report_ms), None);
+    // The v9 schema itself refuses the v8 Solved phase.
+    assert!(serde_json::from_str::<VmPhaseV2>("\"solved\"").is_err());
+}
+
+#[test]
+fn a_persisted_lab_is_reported_only_when_it_parses() {
+    let row = VmLabRow {
+        vm_name: "web".to_string(),
+        run_id: "run-1".to_string(),
+        jail_generation: "generation-1".to_string(),
+        lab_json: serde_json::to_string(&lab_with_task_passed(9)).expect("lab"),
+        first_report_ms: Some(42),
+        updated_at_ms: 1,
+    };
+    assert_eq!(
+        ReportedLab::from_row(&row),
+        Some(ReportedLab {
+            lab: lab_with_task_passed(9),
+            first_report_ms: Some(42),
+        })
+    );
+    let broken = VmLabRow {
+        lab_json: "{\"state\":\"ready\"}".to_string(),
+        ..row
+    };
+    assert_eq!(ReportedLab::from_row(&broken), None);
+}
+
+#[test]
+fn a_failed_reconcile_reports_the_desired_digests() {
+    let desired = empty_desired_state(3);
+    let report = failed_vm_report("host-1", &desired, &desired_vm(), 5, "boom".to_string());
+    assert_eq!(report.vm.phase, VmPhaseV2::Failed);
+    assert_eq!(report.vm.image, Some(digest('a')));
+    assert_eq!(report.vm.desired_version, Some(3));
+    assert_eq!(report.vm.terminal.state, VmTerminalStateKindV1::Failed);
+    let raw = serde_json::to_string(&BridgeMessageV9::VmReport(VmReportV9 {
+        protocol_version: BRIDGE_PROTOCOL_VERSION,
+        host_id: "host-1".to_string(),
+        report,
+    }))
+    .expect("serialize");
+    assert!(parse_bridge_json(&raw).is_ok());
 }
 
 #[test]
@@ -774,7 +694,7 @@ fn desired_identity_is_mandatory_and_personal_owner_is_bound() {
             .expect("fixture object")
             .remove(field);
         assert!(
-            serde_json::from_value::<HostDesiredStateV2>(value).is_err(),
+            serde_json::from_value::<HostDesiredStateV3>(value).is_err(),
             "{field}"
         );
     }
@@ -782,7 +702,7 @@ fn desired_identity_is_mandatory_and_personal_owner_is_bound() {
         let mut value = serde_json::to_value(&desired).expect("valid fixture");
         value.as_object_mut().expect("fixture object").remove(field);
         assert!(
-            serde_json::from_value::<HostDesiredStateV2>(value).is_err(),
+            serde_json::from_value::<HostDesiredStateV3>(value).is_err(),
             "{field}"
         );
     }
@@ -794,6 +714,15 @@ fn desired_identity_is_mandatory_and_personal_owner_is_bound() {
     assert!(validate_desired_state(&cfg, &wrong).is_err());
     wrong = desired.clone();
     wrong.vms[0].generation = 0;
+    assert!(validate_desired_state(&cfg, &wrong).is_err());
+    wrong = desired.clone();
+    wrong.vms.push(desired_vm());
+    assert!(
+        validate_desired_state(&cfg, &wrong).is_err(),
+        "a VM name appears twice"
+    );
+    wrong = desired.clone();
+    wrong.schema_version = 6;
     assert!(validate_desired_state(&cfg, &wrong).is_err());
     wrong = desired.clone();
     wrong.scope = intar_contracts::bridge::HostScope::Platform;
@@ -827,7 +756,7 @@ fn organization_host_accepts_members_without_rebinding_host_identity() {
     validate_desired_state(&cfg, &desired).expect("valid fixture");
     let value = serde_json::to_value(&desired).expect("serialize organization state");
     assert_eq!(value["scope"], "organization");
-    let decoded: HostDesiredStateV2 = serde_json::from_value(value).expect("organization scope");
+    let decoded: HostDesiredStateV3 = serde_json::from_value(value).expect("organization scope");
     validate_desired_state(&cfg, &decoded).expect("organization round trip");
     desired.scope = intar_contracts::bridge::HostScope::Platform;
     assert!(validate_desired_state(&cfg, &desired).is_err());

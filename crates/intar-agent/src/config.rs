@@ -512,17 +512,6 @@ fn is_safe_image_key(s: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-pub(crate) fn normalize_sha256(s: &str) -> Option<String> {
-    let s = s.trim();
-    if s.len() != 64 {
-        return None;
-    }
-    if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(s.to_ascii_lowercase())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
