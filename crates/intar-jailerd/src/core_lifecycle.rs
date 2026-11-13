@@ -498,6 +498,19 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         Ok(changed)
     }
 
+    pub(super) fn replace_wake_stub(&mut self, request: VmIdentityRequest) -> Result<bool> {
+        let generation = self.resolve_generation(&request)?;
+        let record = self
+            .records
+            .get(&generation)
+            .context("unknown jail generation")?;
+        ensure!(
+            record.request.artifacts.wake.is_some(),
+            "the VM was not woken"
+        );
+        self.preparer.replace_wake_stub(&self.config, record)
+    }
+
     pub(super) fn destroy_vm(&mut self, request: VmIdentityRequest) -> Result<bool> {
         let generation = self.resolve_generation(&request)?;
         // A destroy is terminal: no boot window for this generation survives it.

@@ -284,6 +284,10 @@ pub trait JailPreparer: Send {
     fn export_recording(&mut self, _config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
         Ok(())
     }
+    /// Write the VM's kernel over its staged wake stub.
+    fn replace_wake_stub(&mut self, _config: &JailerdConfig, _record: &VmRecord) -> Result<bool> {
+        Ok(false)
+    }
     fn reserve_identity(
         &mut self,
         _config: &JailerdConfig,
@@ -724,9 +728,10 @@ fn validate_protocol_request(request: &Request) -> Result<()> {
         }
         Request::LaunchVmV3(request) => request.validate().map(|_| ()).map_err(Into::into),
         Request::FinalizeVmBoot(_) => Ok(()),
-        Request::InspectVm(request) | Request::StopVm(request) | Request::DestroyVm(request) => {
-            request.validate().map_err(Into::into)
-        }
+        Request::InspectVm(request)
+        | Request::StopVm(request)
+        | Request::DestroyVm(request)
+        | Request::ReplaceWakeStub(request) => request.validate().map_err(Into::into),
         Request::Capabilities | Request::DestroyRunNetwork(_) => Ok(()),
     }
 }

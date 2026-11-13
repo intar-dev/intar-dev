@@ -477,6 +477,52 @@ fn reflink_route_is_unavailable(error: rustix::io::Errno) -> bool {
     )
 }
 
+/// Write the generation's kernel into its staged wake stub, so the VMM's
+/// next boot of the same path (a guest reboot) is a cold boot. The stub's
+/// own inode is rewritten, not replaced: the VMM's Landlock rule for its
+/// kernel holds that inode. The stub is the generation's own clone, root
+/// owned and read-only to the VM, as the kernel is; both keep their mode.
+pub(super) fn replace_wake_stub(record: &VmRecord) -> Result<bool> {
+    use std::io::{Read as _, Seek as _, Write as _};
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let stub = &record
+        .paths
+        .wake
+        .as_ref()
+        .context("the VM was not woken")?
+        .host_stub;
+    let no_follow = rustix::fs::OFlags::NOFOLLOW.bits() as i32;
+    let mut kernel = Vec::new();
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(no_follow)
+        .open(&record.paths.host_kernel)
+        .context("open the staged kernel")?
+        .read_to_end(&mut kernel)?;
+    let mut target = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(no_follow)
+        .open(stub)
+        .context("open the staged wake stub")?;
+    let metadata = target.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.nlink() == 1,
+        "the staged wake stub is not a private regular file"
+    );
+    let mut current = Vec::new();
+    target.read_to_end(&mut current)?;
+    if current == kernel {
+        return Ok(false);
+    }
+    target.rewind()?;
+    target.write_all(&kernel)?;
+    target.set_len(kernel.len() as u64)?;
+    target.sync_all()?;
+    Ok(true)
+}
+
 #[cfg(not(target_os = "linux"))]
 pub(super) fn export_recording_disk(_config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
     bail!("recording export is supported only on Linux")

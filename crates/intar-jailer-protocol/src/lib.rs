@@ -575,6 +575,9 @@ pub enum Request {
     StopVm(VmIdentityRequest),
     DestroyVm(VmIdentityRequest),
     DestroyRunNetwork(DestroyRunNetworkRequest),
+    /// After a woken VM's first report: its kernel takes the stub's place,
+    /// so a guest reboot cold-boots.
+    ReplaceWakeStub(VmIdentityRequest),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -816,6 +819,7 @@ pub enum Response {
     StopVm(OperationResult),
     DestroyVm(OperationResult),
     DestroyRunNetwork(OperationResult),
+    ReplaceWakeStub(OperationResult),
     Error(ProtocolError),
 }
 

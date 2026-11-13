@@ -377,6 +377,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             Request::DestroyVm(request) => Ok(Response::DestroyVm(OperationResult {
                 changed: self.destroy_vm(request)?,
             })),
+            Request::ReplaceWakeStub(request) => Ok(Response::ReplaceWakeStub(OperationResult {
+                changed: self.replace_wake_stub(request)?,
+            })),
             Request::DestroyRunNetwork(request) => {
                 if self
                     .records

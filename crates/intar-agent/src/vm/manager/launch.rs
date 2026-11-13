@@ -77,6 +77,30 @@ pub(super) fn build_cloud_hypervisor_vm_config(
     ))
 }
 
+/// Ask jailerd to put the kernel in the woken VM's stub. A failure leaves
+/// the VM running: only a guest reboot would wake it again, not boot it.
+async fn replace_wake_stub(inner: &Inner, name: &str, generation: &ValidatedId) {
+    let request =
+        JailerRequest::ReplaceWakeStub(VmIdentityRequest::by_generation(generation.clone()));
+    match request_jailerd(inner, request).await {
+        Ok(JailerResponse::ReplaceWakeStub(_)) => {}
+        Ok(JailerResponse::Error(error)) => warn!(
+            vm = name,
+            code = error.code.as_str(),
+            message = error.message.as_str(),
+            "jailerd did not replace the wake stub"
+        ),
+        Ok(response) => warn!(
+            vm = name,
+            ?response,
+            "jailerd answered the wake stub replacement with another response"
+        ),
+        Err(error) => {
+            warn!(vm = name, error = %format!("{error:#}"), "the wake stub replacement failed")
+        }
+    }
+}
+
 pub(super) async fn cached_jailer_launch_capabilities(
     inner: &Inner,
 ) -> Result<&JailerCapabilities> {
@@ -949,6 +973,8 @@ pub(super) async fn run_create(
         .take()
         .context("the VM start left no booted attempt")?;
     if start.path == VmStartPath::Wake {
+        // The guest reported: a reboot from here on must boot the kernel.
+        replace_wake_stub(inner, req.name, &launch.generation).await;
         // The woken jail no longer needs the agent's sources.
         remove_agent_launch_sources(&req)
             .await

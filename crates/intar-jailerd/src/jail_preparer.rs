@@ -249,6 +249,10 @@ impl JailPreparer for FileSystemJailPreparer {
         export_recording_disk(config, record)
     }
 
+    fn replace_wake_stub(&mut self, _config: &JailerdConfig, record: &VmRecord) -> Result<bool> {
+        replace_wake_stub(record)
+    }
+
     fn reserve_identity(
         &mut self,
         config: &JailerdConfig,

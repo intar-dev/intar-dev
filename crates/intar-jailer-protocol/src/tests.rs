@@ -650,3 +650,23 @@ fn source(path: &str, access: ArtifactAccess) -> ArtifactSource {
         access,
     }
 }
+
+#[test]
+fn the_wake_stub_replacement_names_one_generation() {
+    let generation = ValidatedId::parse("generation-1").expect("generation");
+    let envelope = RequestEnvelope::new(
+        8,
+        Request::ReplaceWakeStub(VmIdentityRequest::by_generation(generation)),
+    );
+    let encoded = envelope.encode().expect("encode");
+    assert!(String::from_utf8_lossy(&encoded).contains(r#""operation":"replace_wake_stub""#));
+    assert_eq!(RequestEnvelope::decode(&encoded).expect("decode"), envelope);
+    let response = ResponseEnvelope::new(
+        8,
+        Response::ReplaceWakeStub(OperationResult { changed: true }),
+    );
+    assert_eq!(
+        ResponseEnvelope::decode(&response.encode().expect("encode")).expect("decode"),
+        response
+    );
+}
