@@ -12,8 +12,11 @@ use intar_contracts::bridge_v9::{BuildPhaseV2, BuildReportV2, BuildTargetV1, Des
 use intar_contracts::oci::{IMAGE_FORMAT, OciDigest};
 use intar_contracts::scenario::PLATFORM_BASE_IMAGE;
 use intar_contracts::source::{MAX_SOURCE_BUNDLE_GZIP_BYTES, SourceBundleV2};
-use intar_image_build::{BuildTarget, MachineBuildRequest, build_machine_image, plan_build};
+use intar_image_build::{
+    BuildTarget, MachineBuildRequest, build_machine_image, plan_build, verify_machine_image,
+};
 use intar_image_upload::RegistryPusher;
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
@@ -26,6 +29,8 @@ use crate::db::{self, BuilderDb};
 /// contract.
 const MAX_BUNDLE_JSON_BYTES: u64 = 64 * 1024 * 1024;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(300);
+/// The most of each log a build uploads: its end, where a failure shows.
+const LOG_UPLOAD_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Runs queued builds once the bridge applied a live desired state.
 pub async fn worker_loop(
@@ -68,8 +73,7 @@ async fn run_build(
 ) {
     let started = now_ms();
     info!(build_id = %build.build_id, attempt = build.attempt, key = %build.build_key.as_str(), "build starting");
-    let work_root = cfg.builder.work_root.join("builds").join(&build.build_id);
-    let output_dir = cfg.builder.cache_root.join("outputs").join(&build.build_id);
+    let (work_root, output_dir) = attempt_dirs(cfg, build);
     let result = build_and_push(cfg, reports, build, started, &work_root, &output_dir).await;
     let mut report = db::report(
         build,
@@ -95,8 +99,11 @@ async fn run_build(
             Some(message)
         }
     };
-    upload_log(cfg, build, &work_root, error.as_deref()).await;
-    publish(cfg, reports, report).await;
+    // A superseded attempt leaves the log and the report to the current one.
+    if is_current(&cfg.builder.state_db, build) {
+        upload_log(cfg, build, &work_root, error.as_deref()).await;
+        publish(&cfg.builder.state_db, reports, report).await;
+    }
     for path in [&work_root, &output_dir] {
         if let Err(error) = tokio::fs::remove_dir_all(path).await
             && error.kind() != std::io::ErrorKind::NotFound
@@ -133,22 +140,53 @@ async fn build_and_push(
         .context("the build task panicked")??;
     let digest = output.image.manifest_digest;
     phase(cfg, reports, build, BuildPhaseV2::Pushing, started).await?;
-
     // A long build outlives its first token.
     let token = bootstrap_builder_access_token(&cfg.bridge).await?;
-    let (base_url, dir, build_id, pushed) = (
-        cfg.bridge.base_url.clone(),
-        output_dir.to_owned(),
-        build.build_id.clone(),
+    push_verified(
+        &cfg.bridge.base_url,
+        &token,
+        output_dir,
+        &digest,
+        &build.build_id,
+    )
+    .await?;
+    Ok(digest)
+}
+
+/// Push the image in `dir` once it passes the checks a run host makes
+/// before it boots one; an image that fails them is not pushed at all.
+pub(crate) async fn push_verified(
+    base_url: &str,
+    token: &str,
+    dir: &Path,
+    digest: &OciDigest,
+    build_id: &str,
+) -> Result<()> {
+    let (base_url, token, dir, digest, build_id) = (
+        base_url.to_owned(),
+        token.to_owned(),
+        dir.to_owned(),
         digest.clone(),
+        build_id.to_owned(),
     );
     tokio::task::spawn_blocking(move || {
-        RegistryPusher::new(&base_url, &token)?.push_build(&dir, &pushed, &build_id)
+        verify_machine_image(&dir, &digest).context("the built image fails verification")?;
+        RegistryPusher::new(&base_url, &token)?
+            .push_build(&dir, &digest, &build_id)
+            .context("failed to push the image")
     })
     .await
     .context("the push task panicked")?
-    .context("failed to push the image")?;
-    Ok(digest)
+}
+
+/// The work and output directories of this attempt of `build`: a new
+/// attempt may start while an old one still runs.
+pub(crate) fn attempt_dirs(cfg: &BuilderConfig, build: &DesiredBuildV2) -> (PathBuf, PathBuf) {
+    let name = format!("{}.{}", build.build_id, build.attempt);
+    (
+        cfg.builder.work_root.join("builds").join(&name),
+        cfg.builder.cache_root.join("outputs").join(name),
+    )
 }
 
 /// Refuse a bundle of another image format, and a build whose key is not
@@ -239,7 +277,7 @@ async fn phase(
 ) -> Result<()> {
     let mut report = db::report(build, phase, now_ms());
     report.started_at_unix_ms = Some(started);
-    if !publish(cfg, reports, report).await {
+    if !publish(&cfg.builder.state_db, reports, report).await {
         bail!("build '{}' left the desired state", build.build_id);
     }
     Ok(())
@@ -247,12 +285,12 @@ async fn phase(
 
 /// Record `report` and hand it to the bridge; false when the build or this
 /// attempt is no longer desired.
-async fn publish(
-    cfg: &BuilderConfig,
+pub(crate) async fn publish(
+    state_db: &Path,
     reports: &mpsc::Sender<BuildReportV2>,
     report: BuildReportV2,
 ) -> bool {
-    match BuilderDb::open(&cfg.builder.state_db).and_then(|db| db.record(&report)) {
+    match BuilderDb::open(state_db).and_then(|db| db.record(&report)) {
         Ok(true) => {
             // A closed channel only delays it: the bridge replays every report.
             let _ = reports.send(report).await;
@@ -266,7 +304,16 @@ async fn publish(
     }
 }
 
-/// PUT the build and serial logs, best effort.
+pub(crate) fn is_current(state_db: &Path, build: &DesiredBuildV2) -> bool {
+    BuilderDb::open(state_db)
+        .and_then(|db| db.is_current(build))
+        .unwrap_or_else(|error| {
+            warn!(build_id = %build.build_id, error = %format!("{error:#}"), "failed to read the desired build");
+            false
+        })
+}
+
+/// PUT the end of the build and serial logs, best effort.
 async fn upload_log(
     cfg: &BuilderConfig,
     build: &DesiredBuildV2,
@@ -311,14 +358,25 @@ async fn upload_log(
     }
 }
 
-async fn append_log(log: &mut String, title: &str, path: &PathBuf) {
-    match tokio::fs::read_to_string(path).await {
-        Ok(content) => {
-            log.push_str(&format!("== {title} ==\n{content}\n"));
-        }
+async fn append_log(log: &mut String, title: &str, path: &Path) {
+    match read_log_tail(path, LOG_UPLOAD_TAIL_BYTES).await {
+        Ok(content) => log.push_str(&format!("== {title} ==\n{content}\n")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => log.push_str(&format!("== {title} ==\nunreadable: {error}\n")),
     }
+}
+
+/// The last `limit` bytes of `path` as text, any invalid UTF-8 replaced.
+pub(crate) async fn read_log_tail(path: &Path, limit: u64) -> std::io::Result<String> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let size = file.metadata().await?.len();
+    let mut tail = Vec::new();
+    if size > limit {
+        file.seek(std::io::SeekFrom::Start(size - limit)).await?;
+        tail.extend_from_slice(format!("[{} earlier bytes cut]\n", size - limit).as_bytes());
+    }
+    file.take(limit).read_to_end(&mut tail).await?;
+    Ok(String::from_utf8_lossy(&tail).into_owned())
 }
 
 #[cfg(test)]

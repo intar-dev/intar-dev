@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use intar_contracts::bridge_v9::{BuildPhaseV2, BuildReportV2, DesiredBuildV2};
+use intar_contracts::oci::OciDigest;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tracing::info;
 
@@ -151,6 +152,12 @@ impl BuilderDb {
         write_report(&self.conn, report)
     }
 
+    /// Whether `build` is still the desired attempt of its build.
+    pub fn is_current(&self, build: &DesiredBuildV2) -> Result<bool> {
+        Ok(desired(&self.conn, &build.build_id)?
+            .is_some_and(|desired| same_attempt(&desired, build.attempt, &build.build_key)))
+    }
+
     #[cfg(test)]
     pub fn report(&self, build_id: &str) -> Result<Option<BuildReportV2>> {
         let json: Option<String> = self
@@ -219,19 +226,28 @@ pub fn report(build: &DesiredBuildV2, phase: BuildPhaseV2, now_ms: i64) -> Build
     }
 }
 
-fn write_report(conn: &Connection, report: &BuildReportV2) -> Result<bool> {
+fn desired(conn: &Connection, build_id: &str) -> Result<Option<DesiredBuildV2>> {
     let desired_json: Option<String> = conn
         .query_row(
             "SELECT desired_json FROM builds WHERE build_id = ?1",
-            [&report.build_id],
+            [build_id],
             |row| row.get(0),
         )
         .optional()?;
-    let Some(desired_json) = desired_json else {
+    desired_json
+        .map(|json| serde_json::from_str(&json).context("invalid cached desired build"))
+        .transpose()
+}
+
+fn same_attempt(desired: &DesiredBuildV2, attempt: u32, key: &OciDigest) -> bool {
+    desired.attempt == attempt && &desired.build_key == key
+}
+
+fn write_report(conn: &Connection, report: &BuildReportV2) -> Result<bool> {
+    let Some(desired) = desired(conn, &report.build_id)? else {
         return Ok(false);
     };
-    let desired: DesiredBuildV2 = serde_json::from_str(&desired_json)?;
-    if desired.attempt != report.attempt || desired.build_key != report.build_key {
+    if !same_attempt(&desired, report.attempt, &report.build_key) {
         return Ok(false);
     }
     conn.execute(
