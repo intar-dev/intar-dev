@@ -27,6 +27,9 @@ build_user='@BUILD_USER@'
 build_host='@BUILD_HOST@'
 config_fragment="${INTAR_KERNEL_CONFIG:?INTAR_KERNEL_CONFIG is required}"
 init_script="${INTAR_KERNEL_INIT_SOURCE:?INTAR_KERNEL_INIT_SOURCE is required}"
+kernel_patch="${INTAR_KERNEL_PATCH:?INTAR_KERNEL_PATCH is required}"
+stub_source="${INTAR_WAKE_STUB_SOURCE:?INTAR_WAKE_STUB_SOURCE is required}"
+stub_linker="${INTAR_WAKE_STUB_LINKER:?INTAR_WAKE_STUB_LINKER is required}"
 apt_ca="${INTAR_APT_CA_INFO:?INTAR_APT_CA_INFO is required}"
 work=/build
 
@@ -67,6 +70,9 @@ if grep -q '@[A-Z_]*@' "$0" 2>/dev/null; then
 fi
 test -r "$config_fragment" || fail "missing $config_fragment"
 test -r "$init_script" || fail "missing $init_script"
+test -r "$kernel_patch" || fail "missing $kernel_patch"
+test -r "$stub_source" || fail "missing $stub_source"
+test -r "$stub_linker" || fail "missing $stub_linker"
 
 mkdir -p "$out" "$work"
 
@@ -99,6 +105,8 @@ apt-get -o "$apt_ca" install -y --no-install-recommends \
   libelf-dev \
   libssl-dev \
   make \
+  patch \
+  tar \
   xz-utils >/dev/null
 test -x /bin/busybox || fail 'busybox-static did not install /bin/busybox'
 test -x /sbin/e2fsck.static || fail 'e2fsck-static did not install /sbin/e2fsck.static'
@@ -137,6 +145,12 @@ require_makefile_version VERSION "$upstream_major"
 require_makefile_version PATCHLEVEL "$upstream_minor"
 require_makefile_version SUBLEVEL "$upstream_patch"
 cd "$src"
+
+# A guest woken from a suspended image starts on a new VM's kvmclock: the
+# patch re-bases sched_clock() on resume (wake images, #348).
+log "applying the kvmclock resume patch"
+patch -p1 --forward --fuzz=0 --no-backup-if-mismatch < "$kernel_patch" >/dev/null ||
+  fail "the kvmclock resume patch does not apply"
 
 log "merging the Intar kernel profile over x86_64_defconfig"
 make x86_64_defconfig >/dev/null
@@ -204,6 +218,32 @@ test -f "$modules_dir/modules.builtin" ||
 depmod -b "$out/modules" -w "$release" >/dev/null
 test -f "$modules_dir/modules.dep" || fail 'depmod did not write modules.dep'
 test -d "$modules_dir"
+
+# The wake stub templates, one per number of BAR writes: placeholder BAR
+# addresses (never zero, the table ends at a zero address) and values, a
+# placeholder wake vector and ACPI length. The image builder writes a base's
+# values into a copy of the template with its count.
+log "assembling the wake stub templates"
+stubs="$work/wake-stubs"
+rm -rf "$stubs"
+mkdir -p "$stubs/out"
+count=1
+while [ "$count" -le 24 ]; do
+  i=0
+  : > "$stubs/bars.inc"
+  while [ "$i" -lt "$count" ]; do
+    printf '\t.long\t0x%08x, 0x00000000\n' $(( 0x80000010 + i * 0x100 )) >> "$stubs/bars.inc"
+    i=$((i + 1))
+  done
+  gcc -c -m64 -DBARS=1 -DWAKE_SEG=0x9a00 -DWAKE_OFF=0 -DACPI_SRC=0x101000 -DACPI_LEN=1 \
+    -DBASE=0x100000 -I"$stubs" -o "$stubs/stub.o" -x assembler-with-cpp "$stub_source"
+  ld -m elf_x86_64 -n -T "$stub_linker" -e 0x100000 -o "$stubs/out/$count.elf" "$stubs/stub.o"
+  count=$((count + 1))
+done
+find "$stubs/out" -exec touch -h -d "@$source_date_epoch" {} +
+tar --sort=name --mtime="@$source_date_epoch" --owner=0 --group=0 --numeric-owner \
+  -C "$stubs/out" -cf "$out/wake-stubs.tar" .
+touch -h -d "@$source_date_epoch" "$out/wake-stubs.tar"
 
 log "building the minimal initramfs"
 initramfs="$work/initramfs"

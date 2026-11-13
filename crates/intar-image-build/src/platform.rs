@@ -175,7 +175,29 @@ pub fn ensure_platform_base(config: &QemuBuildConfig) -> Result<BaseRootfsArtifa
     crate::oci::ensure_oci_base_rootfs(&platform_base_spec(), config, &plan)
 }
 
+/// Hot-added vCPUs of a woken guest come online by themselves.
+const WAKE_CPU_ONLINE_RULE: &str = "SUBSYSTEM==\"cpu\", ACTION==\"add\", TEST==\"online\", ATTR{online}==\"0\", ATTR{online}=\"1\"\n";
+
+/// Takes every PCI device with a 64-bit BAR 0 off the bus and rescans it,
+/// so Linux places those BARs itself; a wake image's stub puts them back.
+const WAKE_RESCAN_SCRIPT: &str = r#"#!/bin/sh
+for d in /sys/bus/pci/devices/*; do
+  set -- $(od -An -tx4 -j16 -N4 "$d/config")
+  [ $(( 0x$1 & 7 )) -eq 4 ] || continue
+  echo 1 >"$d/remove"
+done
+echo 1 >/sys/bus/pci/rescan
+"#;
+
+fn render_wake_rescan_unit() -> String {
+    format!(
+        "[Unit]\nDescription=Place the 64-bit PCI BARs of a wake image\nDefaultDependencies=no\nConditionKernelCommandLine={}\nBefore=sysinit.target systemd-udev-trigger.service systemd-networkd.service network-pre.target networking.service intar.service\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/local/sbin/intar-pci-rescan\n[Install]\nWantedBy=sysinit.target\n",
+        crate::wake::WAKE_RESCAN_FLAG
+    )
+}
+
 fn render_platform_customize_hook() -> String {
+    let wake_rescan_unit = render_wake_rescan_unit();
     let masks = MASKED_UNITS
         .iter()
         .chain(T2_MASKED_UNITS)
@@ -208,6 +230,15 @@ cat > "$root/etc/systemd/journald.conf.d/90-intar-volatile.conf" <<'EOF'
 [Journal]
 Storage=volatile
 EOF
+mkdir -p "$root/etc/udev/rules.d"
+cat > "$root/etc/udev/rules.d/90-intar-cpu-online.rules" <<'EOF'
+{WAKE_CPU_ONLINE_RULE}EOF
+cat > "$root/usr/local/sbin/intar-pci-rescan" <<'EOF'
+{WAKE_RESCAN_SCRIPT}EOF
+chmod 0755 "$root/usr/local/sbin/intar-pci-rescan"
+cat > "$root/etc/systemd/system/intar-pci-rescan.service" <<'EOF'
+{wake_rescan_unit}EOF
+systemctl --root="$root" enable intar-pci-rescan.service >/dev/null
 cat > "$root/etc/ssh/sshd_config.d/90-intar.conf" <<'EOF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no

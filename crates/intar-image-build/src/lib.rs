@@ -17,6 +17,7 @@ mod rootfs;
 mod seed;
 mod sha256;
 mod ssh;
+pub mod wake;
 
 pub use chunked::{
     ChunkedImageArtifact, EncodedImageChunkArtifact, ReusedEncodedImageChunk, ScannedChunkedImage,

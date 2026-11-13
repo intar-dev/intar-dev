@@ -43,10 +43,16 @@ const KERNEL_STAGE_NAME: &str = "intar-kernel";
 const KERNEL_BUILD_SCRIPT_FILE: &str = "intar-kernel-build.sh";
 const KERNEL_CONFIG_FILE: &str = "intar-kernel.config";
 const KERNEL_INIT_SCRIPT_FILE: &str = "intar-initramfs-init.sh";
+const KERNEL_PATCH_FILE: &str = "kvmclock-resume.patch";
+const WAKE_STUB_SOURCE_FILE: &str = "wake-stub.S";
+const WAKE_STUB_LINKER_FILE: &str = "wake-stub.ld";
 /// In-container paths for the kernel stage.
 const KERNEL_BUILD_SCRIPT_PATH: &str = "/usr/local/libexec/intar/intar-kernel-build.sh";
 const KERNEL_STAGE_CONFIG_PATH: &str = "/build/intar-kernel.config";
 const KERNEL_STAGE_INIT_PATH: &str = "/build/intar-initramfs-init.sh";
+const KERNEL_STAGE_PATCH_PATH: &str = "/build/kvmclock-resume.patch";
+const WAKE_STUB_STAGE_SOURCE_PATH: &str = "/build/wake-stub.S";
+const WAKE_STUB_STAGE_LINKER_PATH: &str = "/build/wake-stub.ld";
 const KERNEL_STAGE_OUTPUT_DIR: &str = "/kernel";
 
 static OCI_BUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -102,12 +108,13 @@ pub(crate) fn layered_definition_hash(
     config: &QemuBuildConfig,
 ) -> String {
     let identity = format!(
-        "{}\n--hooks--\n{essential_hook}\n--\n{customize_hook}\n--layered-oci--\nabi={OCI_BASE_CACHE_ABI}\nimage={}\nplatform=linux/{}\nfilesystem=ext4\nlabel={BASE_EXT4_LABEL}\nmke2fs={}\nkernel={}",
+        "{}\n--hooks--\n{essential_hook}\n--\n{customize_hook}\n--layered-oci--\nabi={OCI_BASE_CACHE_ABI}\nimage={}\nplatform=linux/{}\nfilesystem=ext4\nlabel={BASE_EXT4_LABEL}\nmke2fs={}\nkernel={}\ns3_ssdt={}",
         base.content_identity(),
         config.layered.debian_image,
         base.arch,
         config.mke2fs_binary.display(),
         crate::kernel::kernel_profile_digest(),
+        sha256_bytes_hex(&crate::wake::ssdt_initrd_prefix()),
     );
     sha256_bytes_hex(identity.as_bytes())
 }
@@ -576,6 +583,17 @@ fn write_oci_build_context(
             context_dir.display()
         )
     })?;
+    for (file, content) in [
+        (KERNEL_PATCH_FILE, crate::kernel::KERNEL_PATCH),
+        (WAKE_STUB_SOURCE_FILE, crate::kernel::WAKE_STUB_SOURCE),
+        (
+            WAKE_STUB_LINKER_FILE,
+            crate::kernel::WAKE_STUB_LINKER_SCRIPT,
+        ),
+    ] {
+        fs::write(context_dir.join(file), content)
+            .with_context(|| format!("failed to write {file} in '{}'", context_dir.display()))?;
+    }
     fs::write(
         context_dir.join(KERNEL_INIT_SCRIPT_FILE),
         crate::kernel::KERNEL_INITRAMFS_INIT_SCRIPT,
@@ -641,6 +659,25 @@ fn render_oci_dockerfile(base: &BaseImageSpec, config: &QemuBuildConfig) -> Resu
     dockerfile.push_str(&format!(
         "COPY {KERNEL_INIT_SCRIPT_FILE} {KERNEL_STAGE_INIT_PATH}\n"
     ));
+    for (file, path, variable) in [
+        (
+            KERNEL_PATCH_FILE,
+            KERNEL_STAGE_PATCH_PATH,
+            "INTAR_KERNEL_PATCH",
+        ),
+        (
+            WAKE_STUB_SOURCE_FILE,
+            WAKE_STUB_STAGE_SOURCE_PATH,
+            "INTAR_WAKE_STUB_SOURCE",
+        ),
+        (
+            WAKE_STUB_LINKER_FILE,
+            WAKE_STUB_STAGE_LINKER_PATH,
+            "INTAR_WAKE_STUB_LINKER",
+        ),
+    ] {
+        dockerfile.push_str(&format!("COPY {file} {path}\nENV {variable}={path}\n"));
+    }
     dockerfile.push_str(&docker_run([
         "rm",
         "-f",
@@ -712,6 +749,10 @@ fn render_oci_dockerfile(base: &BaseImageSpec, config: &QemuBuildConfig) -> Resu
     dockerfile.push_str(&format!(
         "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/kernel-build.json {}\n",
         crate::kernel::KERNEL_PROVENANCE_PATH
+    ));
+    dockerfile.push_str(&format!(
+        "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/wake-stubs.tar {}\n",
+        crate::kernel::WAKE_STUB_TEMPLATES_PATH
     ));
     dockerfile.push_str(&docker_run(["update-ca-certificates", "--fresh"])?);
     dockerfile.push_str(&docker_run([
@@ -1941,8 +1982,8 @@ mod tests {
         }
         assert_eq!(
             copies.len(),
-            4,
-            "the kernel stage copies the kernel, the initramfs, the module tree, and the record: {copies:?}"
+            5,
+            "the kernel stage copies the kernel, the initramfs, the module tree, the record, and the wake stubs: {copies:?}"
         );
 
         // Write one distinguishable payload at every file destination the
@@ -1957,7 +1998,7 @@ mod tests {
             fs::write(&path, format!("image bytes from {source}\n")).unwrap();
             file_copies.push((source.clone(), destination.clone()));
         }
-        assert_eq!(file_copies.len(), 3, "{file_copies:?}");
+        assert_eq!(file_copies.len(), 4, "{file_copies:?}");
 
         install_kernel_boot_artifacts(&staging.rootfs_plan).unwrap();
 
@@ -1969,9 +2010,11 @@ mod tests {
             fs::read_to_string(&staging.rootfs_plan.paths.kernel_path).unwrap(),
             expected_kernel
         );
+        let mut initrd = crate::wake::ssdt_initrd_prefix();
+        initrd.extend_from_slice(expected_initrd.as_bytes());
         assert_eq!(
-            fs::read_to_string(&staging.rootfs_plan.paths.initrd_path).unwrap(),
-            expected_initrd
+            fs::read(&staging.rootfs_plan.paths.initrd_path).unwrap(),
+            initrd
         );
         // The image keeps its own copies at the destinations the writer chose.
         for (_, destination) in &file_copies {

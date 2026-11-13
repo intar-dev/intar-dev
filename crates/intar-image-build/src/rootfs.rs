@@ -148,7 +148,15 @@ pub(crate) fn install_kernel_boot_artifacts(plan: &RootfsBuildPlan) -> Result<()
         } else {
             &plan.paths.initrd_path
         };
-        fs::copy(source, destination).with_context(|| {
+        let mut bytes = fs::read(source)
+            .with_context(|| format!("failed to read image artifact '{}'", source.display()))?;
+        if destination == &plan.paths.initrd_path {
+            // Every published initrd carries the `\_S3_` table first.
+            let mut initrd = crate::wake::ssdt_initrd_prefix();
+            initrd.append(&mut bytes);
+            bytes = initrd;
+        }
+        fs::write(destination, &bytes).with_context(|| {
             format!(
                 "failed to copy image artifact '{}' to '{}'",
                 source.display(),
@@ -467,10 +475,9 @@ mod tests {
             std::fs::read_to_string(&plan.paths.kernel_path).unwrap(),
             "kernel"
         );
-        assert_eq!(
-            std::fs::read_to_string(&plan.paths.initrd_path).unwrap(),
-            "initrd"
-        );
+        let mut initrd = crate::wake::ssdt_initrd_prefix();
+        initrd.extend_from_slice(b"initrd");
+        assert_eq!(std::fs::read(&plan.paths.initrd_path).unwrap(), initrd);
         // The base image keeps its own copies, and every other byte is untouched.
         assert_eq!(
             std::fs::read_to_string(in_image_path(&plan, "/boot/vmlinuz-6.12.96-intar-cutover"))
