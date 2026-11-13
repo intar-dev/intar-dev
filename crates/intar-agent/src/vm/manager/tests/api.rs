@@ -255,7 +255,7 @@ fn terminal_state_reports_ready_when_running_and_ssh_is_ready() {
         Some(VmTerminalTarget {
             host: Some("bridge.example.test".to_string()),
             port: 2222,
-            username: "ubuntu".to_string(),
+            username: "user".to_string(),
             checked_at: 1234,
         })
     );

@@ -202,7 +202,7 @@ async fn terminal_subscription_retains_transition_during_initial_snapshot() {
         terminal_target: Some(VmTerminalTarget {
             host: Some("203.0.113.7".to_string()),
             port: 22_001,
-            username: "ubuntu".to_string(),
+            username: "user".to_string(),
             checked_at: 2_000,
         }),
         reason: None,
@@ -407,7 +407,7 @@ fn explicit_terminal_contract_exposes_targets_only_when_ready() {
         terminal_target: Some(VmTerminalTarget {
             host: Some("203.0.113.7".to_string()),
             port: 22_001,
-            username: "ubuntu".to_string(),
+            username: "user".to_string(),
             checked_at: 2_000,
         }),
         reason: None,
@@ -427,7 +427,7 @@ fn explicit_terminal_contract_exposes_targets_only_when_ready() {
         terminal_target: Some(VmTerminalTarget {
             host: Some("203.0.113.7".to_string()),
             port: 22_001,
-            username: "ubuntu".to_string(),
+            username: "user".to_string(),
             checked_at: 2_000,
         }),
         reason: Some("sealing CPU quota".to_string()),

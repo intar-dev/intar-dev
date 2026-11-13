@@ -33,7 +33,7 @@ async fn terminal_ready_cache_precedes_targeted_publication() {
         terminal_target: Some(VmTerminalTarget {
             host: Some("bridge.example.test".to_string()),
             port: 2_200,
-            username: "ubuntu".to_string(),
+            username: "user".to_string(),
             checked_at: 2_000,
         }),
         reason: None,
