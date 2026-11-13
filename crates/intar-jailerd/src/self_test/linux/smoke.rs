@@ -1,5 +1,10 @@
 use super::*;
 
+/// What the smoke VMs boot with; also the machine image's `boot.cmdline`.
+const SMOKE_CMDLINE: &str = "console=hvc0 root=/dev/vda rw reboot=k panic=1 init=/sbin/init";
+/// The image's blob cache, beneath the smoke's own source root.
+const MACHINE_BLOBS: &str = "blobs";
+
 pub(super) fn config_runtime_fingerprint(
     config: &JailerdConfig,
     runtime_sha256: &str,
@@ -103,6 +108,33 @@ pub(super) fn run_cloud_hypervisor_smoke(
             .push(artifact_root.to_path_buf());
     }
     ensure_saturation_resources(&smoke_config, artifacts)?;
+    // The machine image goes through the only image path there is: a chunked
+    // OCI image in a blob cache beneath an allowed source root, on the jail
+    // filesystem so it reflinks like the agent's cache.
+    let image_root = directory.join("machine-image");
+    create_root_directory(&image_root)?;
+    create_root_directory(&image_root.join(MACHINE_BLOBS))?;
+    let image = crate::self_test::machine_image::build_machine_image(
+        &artifacts.root_disk.path,
+        &artifacts.kernel.path,
+        artifacts
+            .initrd
+            .as_ref()
+            .map(|initrd| initrd.path.as_path()),
+        SMOKE_CMDLINE,
+        &image_root.join(MACHINE_BLOBS),
+    )
+    .context("build the package-smoke machine image")?;
+    ensure!(
+        image.kernel_sha256 == artifacts.kernel.sha256
+            && image.initrd_sha256.as_deref()
+                == artifacts
+                    .initrd
+                    .as_ref()
+                    .map(|initrd| initrd.sha256.as_str()),
+        "the package-smoke machine image does not carry the verified boot artifacts"
+    );
+    smoke_config.allowed_source_roots.push(image_root);
 
     // The ordinary constructor accepts only a durable verified
     // attestation.  This narrowly scoped constructor is available only to
@@ -146,14 +178,14 @@ pub(super) fn run_cloud_hypervisor_smoke(
         guest_cidr: "10.77.255.240/28".to_owned(),
         gateway: "10.77.255.241".to_owned(),
     };
-    let prepared_image = prepare_smoke_image(&mut core, &smoke_config, artifacts)
-        .context("prepare the package-smoke image in the root-owned v2 template store")?;
+    let prepared_image = prepare_smoke_image(&mut core, &smoke_config, &image)
+        .context("prepare the package-smoke image in the root-owned template store")?;
     // Fast-template readiness is a host-level prerequisite. Prove it
     // before creating a run namespace so a fail-closed readiness error
     // cannot leave network authority behind.
     expect_run_network(core.handle(Request::EnsureRunNetwork(network_request.clone())))?;
 
-    // Boot two independent v2 template-backed VMMs in the same run
+    // Boot two independent template-backed VMMs in the same run
     // network. Their 500m
     // reservations fill exactly one advertised schedulable core while
     // retaining separate generations, identities, TAPs, units and leaf
@@ -456,7 +488,7 @@ pub(super) fn prove_saturation_admission(
     core: &mut JailerdCore<SystemdHostBackend, FileSystemJailPreparer>,
     config: &JailerdConfig,
     artifacts: &SelfTestArtifacts,
-    prepared_image: &PreparedImageV2Result,
+    prepared_image: &PreparedImageV3Result,
     run_id: &ValidatedId,
     suffix: &str,
     selectors: &mut Vec<VmIdentityRequest>,
@@ -474,11 +506,11 @@ pub(super) fn prove_saturation_admission(
         "two 500m VM reservations did not fill exactly one schedulable core"
     );
     ensure!(
-        before.supports_jailer_v2
+        before.supports_jailer_v3
             && before.supports_template_backed_launch
             && before.fast_template_store
             && before.supports_hard_cpu_quota,
-        "saturation authority stopped advertising hard v2 template-backed CPU quotas"
+        "saturation authority stopped advertising hard template-backed CPU quotas"
     );
 
     let rejected_index =
@@ -491,14 +523,14 @@ pub(super) fn prove_saturation_admission(
         suffix,
         rejected_index,
     )?;
-    match core.handle(Request::LaunchVmV2(Box::new(third))) {
+    match core.handle(Request::LaunchVmV3(Box::new(third))) {
         Response::Error(error) => ensure!(
             error.code == "cpu_capacity_exhausted",
             "third 500m launch failed with unexpected error {}: {}",
             error.code,
             error.message
         ),
-        Response::LaunchVmV2(launch) => {
+        Response::LaunchVmV3(launch) => {
             // Retain the selector so the caller's fail-closed cleanup also
             // drains an erroneously admitted third unit and jail.
             selectors.push(VmIdentityRequest::by_generation(launch.generation));
@@ -518,17 +550,18 @@ pub(super) fn prove_saturation_admission(
 pub(super) fn smoke_launch_request(
     config: &JailerdConfig,
     artifacts: &SelfTestArtifacts,
-    prepared_image: &PreparedImageV2Result,
+    prepared_image: &PreparedImageV3Result,
     run_id: &ValidatedId,
     suffix: &str,
     index: u8,
-) -> Result<LaunchVmV2Request> {
+) -> Result<LaunchVmV3Request> {
     ensure!(
         usize::from(index) <= SELF_TEST_SATURATION_VM_COUNT,
         "package smoke supports two VMs plus one rejected admission probe"
     );
-    Ok(LaunchVmV2Request {
-        image_sha256: prepared_image.image_sha256.clone(),
+    Ok(LaunchVmV3Request {
+        image_id: prepared_image.image_id.clone(),
+        chunk_manifest_sha256: prepared_image.chunk_manifest_sha256.clone(),
         virtual_size_bytes: prepared_image.virtual_size_bytes,
         launch: VmLaunchRequest {
             run_id: run_id.clone(),
@@ -556,10 +589,10 @@ pub(super) fn smoke_launch_request(
 
 pub(super) fn launch_smoke_vm(
     core: &mut JailerdCore<SystemdHostBackend, FileSystemJailPreparer>,
-    request: &LaunchVmV2Request,
+    request: &LaunchVmV3Request,
 ) -> Result<VmLaunchResult> {
-    match core.handle(Request::LaunchVmV2(Box::new(request.clone()))) {
-        Response::LaunchVmV2(launch) => Ok(launch),
+    match core.handle(Request::LaunchVmV3(Box::new(request.clone()))) {
+        Response::LaunchVmV3(launch) => Ok(launch),
         Response::Error(error) => bail!(
             "jailerd package-smoke launch failed for {}: {}: {}",
             request.launch.vm_id,
@@ -576,35 +609,49 @@ pub(super) fn launch_smoke_vm(
 pub(super) fn prepare_smoke_image(
     core: &mut JailerdCore<SystemdHostBackend, FileSystemJailPreparer>,
     config: &JailerdConfig,
-    artifacts: &SelfTestArtifacts,
-) -> Result<PreparedImageV2Result> {
+    image: &crate::self_test::machine_image::MachineImage,
+) -> Result<PreparedImageV3Result> {
     let capabilities = core.capabilities();
     ensure!(
-        capabilities.supports_jailer_v2,
-        "package-smoke image preparation requires jailer v2 readiness: {capabilities:?}"
+        capabilities.supports_jailer_v3,
+        "package-smoke image preparation requires jailer v3 readiness: {capabilities:?}"
     );
-    let request = PrepareImageV2Request {
-        // The package self-test has no registry descriptor, so the verified
-        // raw-root digest is its stable content-addressed image identity.
-        image_sha256: Sha256Digest::parse(artifacts.root_disk.sha256.clone())?,
-        virtual_size_bytes: std::fs::metadata(&artifacts.root_disk.path)
-            .context("stat package-smoke root image")?
-            .len(),
-        root_disk: protocol_artifact(config, &artifacts.root_disk, ArtifactAccess::ReadOnly)?,
-        kernel: protocol_artifact(config, &artifacts.kernel, ArtifactAccess::ReadOnly)?,
-        initrd: artifacts
-            .initrd
-            .as_ref()
-            .map(|artifact| protocol_artifact(config, artifact, ArtifactAccess::ReadOnly))
-            .transpose()?,
+    let source_root = u16::try_from(
+        config
+            .allowed_source_roots
+            .len()
+            .checked_sub(1)
+            .context("the machine image has no source root")?,
+    )
+    .context("too many allowed source roots")?;
+    let blob = |sha256: &str| -> Result<ArtifactSource> {
+        Ok(ArtifactSource {
+            source_root,
+            relative_path: Path::new(MACHINE_BLOBS).join(sha256),
+            sha256: Some(Sha256Digest::parse(sha256.to_owned())?),
+            access: ArtifactAccess::ReadOnly,
+        })
+    };
+    let request = PrepareChunkedImageV3Request {
+        image_id: Sha256Digest::parse(image.manifest_sha256.clone())?,
+        chunk_manifest_sha256: Sha256Digest::parse(image.config_sha256.clone())?,
+        virtual_size_bytes: image.config.disk.size_bytes,
+        image_manifest: blob(&image.manifest_sha256)?,
+        manifest: blob(&image.config_sha256)?,
+        chunk_cache_root: TrustedDirectorySource {
+            source_root,
+            relative_path: PathBuf::from(MACHINE_BLOBS),
+        },
+        kernel: blob(&image.kernel_sha256)?,
+        initrd: image.initrd_sha256.as_deref().map(blob).transpose()?,
         // The package self-test prepares the image in the foreground lane,
         // the same lane a learner launch uses, so the smoke covers the
         // foreground admission path.
         request_class: RequestClass::Foreground,
     };
-    match core.handle(Request::PrepareImageV2(Box::new(request))) {
-        Response::PrepareImageV2(prepared) if prepared.fast_template_store => Ok(prepared),
-        Response::PrepareImageV2(_) => {
+    match core.handle(Request::PrepareChunkedImageV3(Box::new(request))) {
+        Response::PrepareChunkedImageV3(prepared) if prepared.fast_template_store => Ok(prepared),
+        Response::PrepareChunkedImageV3(_) => {
             bail!("package-smoke image preparation did not attest the fast template store")
         }
         Response::Error(error) => bail!(
@@ -619,7 +666,7 @@ pub(super) fn prepare_smoke_image(
 pub(super) fn protocol_artifacts(
     config: &JailerdConfig,
     artifacts: &SelfTestArtifacts,
-    prepared_image: &PreparedImageV2Result,
+    prepared_image: &PreparedImageV3Result,
 ) -> Result<SourceArtifacts> {
     Ok(SourceArtifacts {
         kernel: prepared_image.kernel.clone(),
@@ -693,9 +740,7 @@ pub(super) fn smoke_vm_config(
                 .as_ref()
                 .map(|path| path_utf8(path))
                 .transpose()?,
-            cmdline: Some(
-                "console=hvc0 root=/dev/vda rw reboot=k panic=1 init=/sbin/init".to_owned(),
-            ),
+            cmdline: Some(SMOKE_CMDLINE.to_owned()),
             ..PayloadConfig::default()
         },
         disks: Some(vec![

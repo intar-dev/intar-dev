@@ -526,10 +526,10 @@ fn push_jailerd_capabilities_check(
     });
     push_bool_check(
         checks,
-        "jailer v2 isolation capability",
-        capabilities.supports_jailer_v2,
-        "jailerd advertises the required template-backed jailer-v2 contract",
-        "jailerd does not advertise the required jailer-v2 contract",
+        "jailer v3 isolation capability",
+        capabilities.supports_jailer_v3,
+        "jailerd advertises the required chunked-template jailer-v3 contract",
+        "jailerd does not advertise the required jailer-v3 contract",
     );
     push_bool_check(
         checks,
@@ -540,7 +540,7 @@ fn push_jailerd_capabilities_check(
     );
 
     checks.push(
-        if capabilities.supports_jailer_v2
+        if capabilities.supports_jailer_v3
             && capabilities.supports_template_backed_launch
             && capabilities.fast_template_store
         {

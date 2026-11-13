@@ -109,112 +109,6 @@ fn finalize_boot_is_generation_fenced_and_rejects_extra_authority() {
 }
 
 #[test]
-fn prepare_image_v2_is_hash_bound_and_cannot_reimport_templates() {
-    let digest = Sha256Digest::parse("a".repeat(64)).expect("digest");
-    let source = |path: &str| ArtifactSource {
-        source_root: 0,
-        relative_path: PathBuf::from(path),
-        sha256: Some(digest.clone()),
-        access: ArtifactAccess::ReadOnly,
-    };
-    let request = PrepareImageV2Request {
-        image_sha256: digest.clone(),
-        virtual_size_bytes: 4 * 1024 * 1024 * 1024,
-        root_disk: source("images/root.raw"),
-        kernel: source("artifacts/kernel"),
-        initrd: Some(source("artifacts/initrd")),
-        request_class: RequestClass::Foreground,
-    };
-    request.validate().expect("valid prepared image request");
-    let envelope = RequestEnvelope::new(9, Request::PrepareImageV2(Box::new(request.clone())));
-    assert_eq!(
-        RequestEnvelope::decode(&envelope.encode().expect("encode")).expect("decode"),
-        envelope
-    );
-
-    let mut invalid = request;
-    invalid.root_disk.source_root = PREPARED_IMAGE_SOURCE_ROOT;
-    assert_eq!(
-        invalid.validate(),
-        Err(ValidationError::InvalidTemplateSource)
-    );
-    invalid.root_disk.source_root = 0;
-    invalid.root_disk.sha256 = None;
-    assert_eq!(
-        invalid.validate(),
-        Err(ValidationError::MissingTemplateArtifactHash)
-    );
-}
-
-#[test]
-fn launch_vm_v2_is_template_bound_and_v1_rejects_prepared_sources() {
-    let image_sha256 = Sha256Digest::parse("b".repeat(64)).expect("image digest");
-    let artifact_sha256 = Sha256Digest::parse("c".repeat(64)).expect("artifact digest");
-    let prepared = |name: &str, access| ArtifactSource {
-        source_root: PREPARED_IMAGE_SOURCE_ROOT,
-        relative_path: PathBuf::from(image_sha256.as_str()).join(name),
-        sha256: Some(artifact_sha256.clone()),
-        access,
-    };
-    let agent_owned = |name: &str, access| ArtifactSource {
-        source_root: 0,
-        relative_path: PathBuf::from(name),
-        sha256: Some(Sha256Digest::for_bytes(b"fixture")),
-        access,
-    };
-    let launch = VmLaunchRequest {
-        run_id: ValidatedId::parse("run-1").expect("run ID"),
-        vm_id: ValidatedId::parse("vm-1").expect("VM ID"),
-        cpu_millis: 1_000,
-        memory_mib: 512,
-        root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
-        tap_name: "tap-test".to_string(),
-        mac_address: "02:00:00:00:00:01".to_string(),
-        guest_ip_cidr: "10.77.0.2/28".to_string(),
-        ssh_public_port: Some(22_000),
-        vsock_cid: 3,
-        egress: false,
-        artifacts: SourceArtifacts {
-            kernel: prepared("kernel", ArtifactAccess::ReadOnly),
-            initrd: Some(prepared("initrd", ArtifactAccess::ReadOnly)),
-            root_disk: prepared("root.raw", ArtifactAccess::ReadWrite),
-            runtime_disk: agent_owned("runtime.raw", ArtifactAccess::ReadOnly),
-            recording_disk: agent_owned("recordings.vfat", ArtifactAccess::ReadWrite),
-        },
-    };
-    assert_eq!(
-        launch.validate(),
-        Err(ValidationError::TemplateLaunchRequiresV2)
-    );
-
-    let request = LaunchVmV2Request {
-        image_sha256,
-        virtual_size_bytes: 4 * 1024 * 1024 * 1024,
-        launch,
-    };
-    request.validate().expect("valid v2 launch");
-    let mut undersized = request.clone();
-    undersized.launch.root_disk_size_bytes = undersized.virtual_size_bytes - 1;
-    assert_eq!(
-        undersized.validate(),
-        Err(ValidationError::RootDiskSmallerThanTemplate)
-    );
-    let envelope = RequestEnvelope::new(10, Request::LaunchVmV2(Box::new(request.clone())));
-    assert_eq!(
-        RequestEnvelope::decode(&envelope.encode().expect("encode")).expect("decode"),
-        envelope
-    );
-
-    let mut wrong_bundle = request;
-    wrong_bundle.launch.artifacts.kernel.relative_path =
-        PathBuf::from(wrong_bundle.image_sha256.as_str()).join("other-kernel");
-    assert_eq!(
-        wrong_bundle.validate(),
-        Err(ValidationError::InvalidPreparedLaunchArtifact)
-    );
-}
-
-#[test]
 fn chunked_v3_uses_a_bounded_manifest_root_and_prepared_boot_artifacts() {
     let image_id = Sha256Digest::parse("a".repeat(64)).expect("image digest");
     let manifest_sha256 = Sha256Digest::parse("b".repeat(64)).expect("manifest digest");
@@ -356,7 +250,7 @@ fn protocol_v5_rejects_legacy_handshake_authority() {
 }
 
 #[test]
-fn protocol_v2_capabilities_require_every_fast_launch_attestation() {
+fn capabilities_require_every_fast_launch_attestation() {
     let capabilities = JailerCapabilities {
         protocol_version: PROTOCOL_VERSION,
         cloud_hypervisor_version: CLOUD_HYPERVISOR_VERSION.to_owned(),
@@ -365,7 +259,6 @@ fn protocol_v2_capabilities_require_every_fast_launch_attestation() {
         reserved_cpu_millis: 1_000,
         schedulable_cpu_millis: 7_000,
         committed_cpu_millis: 2_000,
-        supports_jailer_v2: true,
         supports_jailer_v3: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
@@ -396,7 +289,7 @@ fn protocol_v2_capabilities_require_every_fast_launch_attestation() {
     };
     let encoded = serde_json::to_value(capabilities).expect("serialize capabilities");
     for required in [
-        "supports_jailer_v2",
+        "supports_jailer_v3",
         "supports_template_backed_launch",
         "fast_template_store",
     ] {

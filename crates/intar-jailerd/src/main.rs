@@ -33,8 +33,7 @@ use intar_jailer_protocol::{
 #[cfg(target_os = "linux")]
 use intar_jailerd::{
     FileSystemJailPreparer, HostReadiness, JailerdCore, SystemdHostBackend,
-    host_cpu_capacity_millis, launch_vm_v2_response, launch_vm_v3_response,
-    prepare_chunked_image_v3_response, prepare_image_v2_response, self_test,
+    host_cpu_capacity_millis, launch_vm_v3_response, prepare_chunked_image_v3_response, self_test,
 };
 #[cfg(target_os = "linux")]
 use rustix::net::{
@@ -369,25 +368,6 @@ fn serve_connection(
             match RequestEnvelope::decode(&buffer[..length]) {
                 Ok(envelope) if envelope.version == PROTOCOL_VERSION => {
                     let response = match envelope.request {
-                        Request::PrepareImageV2(request) => {
-                            // Importing and hashing a raw image can take many
-                            // seconds. Snapshot the root-owned policy under the
-                            // lifecycle lock, then release it so the boot-lease
-                            // watchdog and VM finalization remain responsive.
-                            let config = core
-                                .lock()
-                                .map_err(|_| anyhow::anyhow!("jailerd state lock poisoned"))?
-                                .template_prepare_config();
-                            config.map_or_else(
-                                || {
-                                    Response::Error(ProtocolError::new(
-                                        "host_not_ready",
-                                        "host readiness attestation does not permit template-backed image preparation",
-                                    ))
-                                },
-                                |config| prepare_image_v2_response(&config, *request),
-                            )
-                        }
                         Request::PrepareChunkedImageV3(request) => {
                             let config = core
                                 .lock()
@@ -403,7 +383,6 @@ fn serve_connection(
                                 |config| prepare_chunked_image_v3_response(&config, *request),
                             )
                         }
-                        Request::LaunchVmV2(request) => launch_vm_v2_response(core, *request),
                         Request::LaunchVmV3(request) => launch_vm_v3_response(core, *request),
                         request => core
                             .lock()

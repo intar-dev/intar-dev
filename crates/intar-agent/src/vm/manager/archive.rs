@@ -583,7 +583,7 @@ pub(super) async fn release_jailed_runtime(inner: &Inner, vm: &VmStatusResponse)
             .with_context(|| format!("destroy jail generation {generation}"))?;
     } else if let Some(selector) = generationless_v6_launch_cleanup_selector(vm)? {
         // A process crash can leave SQLite in any prelaunch state after
-        // jailerd has committed LaunchVmV2 but before persist_jail_launch records
+        // jailerd has committed LaunchVmV3 but before persist_jail_launch records
         // the fresh generation (an earlier state transition may itself have
         // failed to persist). Resolve only that narrow V6 window by the
         // protocol's typed logical identity and drain it before considering

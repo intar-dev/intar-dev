@@ -957,7 +957,7 @@ pub(super) async fn run_create(
         kino_vsock_cid: req.kino_vsock_cid,
     })?;
 
-    // LaunchVmV2 returns only after jailerd has pinned and pinged the API socket.
+    // LaunchVmV3 returns only after jailerd has pinned and pinged the API socket.
     // Repeating the readiness loop here adds another VMM API request and up to
     // one polling interval to every boot. Recovery still uses the bounded
     // readiness helper because it does not inherit that launch attestation.

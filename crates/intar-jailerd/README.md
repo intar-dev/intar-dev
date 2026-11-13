@@ -74,12 +74,23 @@ Doctor must run as the configured agent identity so its cache paths and
 
 For an offline host, pre-seed the two files listed in the wrapper/notices under
 `/var/lib/intar/self-test-assets/downloads/`, then pass `--offline`. The
-production `allowed_source_roots` remains agent-cache-only: the binary adds the
-fresh fixture root solely to its isolated in-memory self-test configuration.
+self-test boots through the same image path as the agent: it splits the fresh
+root disk into 4 MiB chunks, skips the all-zero ones, zstd-encodes the rest and
+writes a machine image (OCI manifest, machine config, kernel and chunk blobs,
+each named by its SHA-256) into a blob cache inside its disposable jail
+directory, then sends `PrepareChunkedImageV3` and `LaunchVmV3`. The production
+`allowed_source_roots` remains agent-cache-only: the binary adds the fixture
+root and that blob cache's root solely to its isolated in-memory self-test
+configuration.
 Fast-host readiness creates root-owned anonymous probes in the template store
 and every configured source filesystem, then exact-reflinks each probe into the
-root-owned generation store. One failed route withdraws v2 and fast-template
+root-owned generation store. One failed route withdraws v3 and fast-template
 capability for the host; launch never degrades to copying.
+
+The store GC removes every template directory that is not of the current
+schema, unless a live VM was booted from it. The retired
+`legacy_template_retention_seconds` key is still accepted in
+`/etc/intar-jailerd/config.toml` and ignored.
 
 Agent doctor is read-only. The root-only self-test runs under the same
 private-mount/filesystem sandbox as the installed service and uses an isolated

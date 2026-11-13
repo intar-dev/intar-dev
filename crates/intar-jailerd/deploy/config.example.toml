@@ -26,7 +26,6 @@ ssh_public_port_end = 22999
 template_budget_bytes = 103079215104
 minimum_free_space_bytes = 137438953472
 store_gc_grace_seconds = 3600
-legacy_template_retention_seconds = 604800
 
 # Unschedulable host allowance. A one-CPU host therefore advertises zero by
 # default; lower this only as an explicit operator capacity decision.
@@ -40,6 +39,6 @@ uid_gid_start = 200000
 uid_gid_end = 265535
 # Jailerd accepts typed artifact descriptors only below trusted source roots.
 # Every configured root must support an exact reflink into the jail generation
-# filesystem; startup withdraws all v2/fast-template capability if any route
+# filesystem; startup withdraws all fast-template capability if any route
 # fails. There is no copy fallback.
 allowed_source_roots = ["/var/cache/intar-agent"]

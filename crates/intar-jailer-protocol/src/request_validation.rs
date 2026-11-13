@@ -5,7 +5,7 @@ impl VmLaunchRequest {
         self.validate_inner(false)
     }
 
-    /// Recheck a persisted launch after its V2/V3 wrapper was validated.
+    /// Recheck a persisted launch after its V3 wrapper was validated.
     /// Prepared boot sources remain valid during recovery; incoming requests
     /// must still use their complete launch wrapper.
     pub fn validate_persisted(&self) -> Result<CpuQuota, ValidationError> {

@@ -1,40 +1,20 @@
 use super::*;
 
 #[test]
-fn capabilities_and_prepare_image_v2_require_fast_template_store() {
-    let config = test_config();
-    let digest = Sha256Digest::parse("a".repeat(64)).expect("digest");
-    let cached_source = |path: &str| ArtifactSource {
-        source_root: 0,
-        relative_path: PathBuf::from(path),
-        sha256: Some(digest.clone()),
-        access: ArtifactAccess::ReadOnly,
-    };
-    let request = PrepareImageV2Request {
-        image_sha256: digest.clone(),
-        virtual_size_bytes: 4 * 1024 * 1024 * 1024,
-        root_disk: cached_source("images/root.raw"),
-        kernel: cached_source("artifacts/kernel"),
-        initrd: Some(cached_source("artifacts/initrd")),
-        request_class: RequestClass::Foreground,
-    };
-
-    let mut unavailable = JailerdCore::new_with_readiness(
-        config.clone(),
+fn template_capabilities_require_fast_template_store() {
+    let unavailable = JailerdCore::new_with_readiness(
+        test_config(),
         FakeBackend::default(),
         FakePreparer,
         4_000,
         ready_readiness(),
     )
     .expect("core");
-    assert!(!unavailable.capabilities().supports_jailer_v2);
-    assert!(matches!(
-        unavailable.handle(Request::PrepareImageV2(Box::new(request.clone()))),
-        Response::Error(ProtocolError { ref code, .. }) if code == "host_not_ready"
-    ));
+    assert!(!unavailable.capabilities().supports_jailer_v3);
+    assert!(unavailable.template_prepare_config().is_none());
 
-    let mut available = JailerdCore::new_with_readiness(
-        config,
+    let available = JailerdCore::new_with_readiness(
+        test_config(),
         FakeBackend::default(),
         FakeTemplatePreparer,
         4_000,
@@ -44,16 +24,9 @@ fn capabilities_and_prepare_image_v2_require_fast_template_store() {
     let capabilities = available.capabilities();
     assert_eq!(capabilities.protocol_version, 5);
     assert!(capabilities.supports_jailer_v3);
-    assert!(capabilities.supports_jailer_v2);
     assert!(capabilities.supports_template_backed_launch);
     assert!(capabilities.fast_template_store);
-    let prepared = match available.handle(Request::PrepareImageV2(Box::new(request))) {
-        Response::PrepareImageV2(prepared) => prepared,
-        other => panic!("unexpected prepare response: {other:?}"),
-    };
-    assert_eq!(prepared.root_disk.source_root, PREPARED_IMAGE_SOURCE_ROOT);
-    assert_eq!(prepared.root_disk.access, ArtifactAccess::ReadWrite);
-    assert!(prepared.fast_template_store);
+    assert!(available.template_prepare_config().is_some());
 }
 
 #[test]
@@ -68,30 +41,14 @@ fn live_template_validation_withdraws_fast_host_capabilities() {
     .expect("core");
     let capabilities = core.capabilities();
     assert!(!capabilities.fast_template_store);
-    assert!(!capabilities.supports_jailer_v2);
+    assert!(!capabilities.supports_jailer_v3);
     assert!(!capabilities.supports_template_backed_launch);
 }
 
 #[test]
-fn launch_vm_v2_requires_and_uses_one_prepared_template_bundle() {
-    let config = test_config();
-    let digest = Sha256Digest::parse("d".repeat(64)).expect("digest");
-    let cached_source = |path: &str| ArtifactSource {
-        source_root: 0,
-        relative_path: PathBuf::from(path),
-        sha256: Some(digest.clone()),
-        access: ArtifactAccess::ReadOnly,
-    };
-    let prepare = PrepareImageV2Request {
-        image_sha256: digest.clone(),
-        virtual_size_bytes: 4 * 1024 * 1024 * 1024,
-        root_disk: cached_source("images/root.raw"),
-        kernel: cached_source("artifacts/kernel"),
-        initrd: Some(cached_source("artifacts/initrd")),
-        request_class: RequestClass::Foreground,
-    };
+fn launch_vm_v3_requires_a_fast_template_store() {
     let mut core = JailerdCore::new_with_readiness(
-        config,
+        test_config(),
         FakeBackend::default(),
         FakeTemplatePreparer,
         4_000,
@@ -99,20 +56,6 @@ fn launch_vm_v2_requires_and_uses_one_prepared_template_bundle() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let prepared = match core.handle(Request::PrepareImageV2(Box::new(prepare))) {
-        Response::PrepareImageV2(prepared) => prepared,
-        other => panic!("unexpected prepare response: {other:?}"),
-    };
-    let mut prepared_launch = launch(0, 125);
-    prepared_launch.artifacts.root_disk = prepared.root_disk.clone();
-    prepared_launch.artifacts.kernel = prepared.kernel.clone();
-    prepared_launch.artifacts.initrd = prepared.initrd.clone();
-
-    let v2 = LaunchVmV2Request {
-        image_sha256: prepared.image_sha256,
-        virtual_size_bytes: prepared.virtual_size_bytes,
-        launch: prepared_launch,
-    };
     let mut unavailable = JailerdCore::new_with_readiness(
         test_config(),
         FakeBackend::default(),
@@ -122,12 +65,12 @@ fn launch_vm_v2_requires_and_uses_one_prepared_template_bundle() {
     )
     .expect("core without fast template store");
     assert!(matches!(
-        unavailable.handle(Request::LaunchVmV2(Box::new(v2.clone()))),
+        unavailable.handle(Request::LaunchVmV3(Box::new(launch_v3(0, 125)))),
         Response::Error(ProtocolError { ref code, .. }) if code == "host_not_ready"
     ));
     assert!(matches!(
-        core.handle(Request::LaunchVmV2(Box::new(v2))),
-        Response::LaunchVmV2(_)
+        core.handle(Request::LaunchVmV3(Box::new(launch_v3(0, 125)))),
+        Response::LaunchVmV3(_)
     ));
 }
 
@@ -156,8 +99,8 @@ fn detached_v2_launch_releases_core_lock_and_reserves_capacity() {
         assert!(matches!(response, Response::EnsureRunNetwork(_)));
     }
 
-    let first = match launch_vm_v2_response(&core, launch_v2(0, 1_000)) {
-        Response::LaunchVmV2(result) => result,
+    let first = match launch_vm_v3_response(&core, launch_v3(0, 1_000)) {
+        Response::LaunchVmV3(result) => result,
         other => panic!("unexpected first launch response: {other:?}"),
     };
     assert!(matches!(
@@ -172,7 +115,7 @@ fn detached_v2_launch_releases_core_lock_and_reserves_capacity() {
     backend.block_next_launch();
     let launch_core = Arc::clone(&core);
     let launch_thread =
-        std::thread::spawn(move || launch_vm_v2_response(&launch_core, launch_v2(1, 1_000)));
+        std::thread::spawn(move || launch_vm_v3_response(&launch_core, launch_v3(1, 1_000)));
     backend.wait_until_launch_enters();
 
     {
@@ -190,7 +133,7 @@ fn detached_v2_launch_releases_core_lock_and_reserves_capacity() {
         ));
     }
 
-    let duplicate = launch_vm_v2_response(&core, launch_v2(1, 1_000));
+    let duplicate = launch_vm_v3_response(&core, launch_v3(1, 1_000));
     assert!(matches!(
         duplicate,
         Response::Error(ProtocolError { ref code, .. }) if code == "cpu_capacity_exhausted"
@@ -201,7 +144,7 @@ fn detached_v2_launch_releases_core_lock_and_reserves_capacity() {
         "an idempotent retry must not reserve a second generation"
     );
 
-    let rejected = launch_vm_v2_response(&core, launch_v2(2, 1_000));
+    let rejected = launch_vm_v3_response(&core, launch_v3(2, 1_000));
     assert!(matches!(
         rejected,
         Response::Error(ProtocolError { ref code, .. }) if code == "cpu_capacity_exhausted"
@@ -210,7 +153,7 @@ fn detached_v2_launch_releases_core_lock_and_reserves_capacity() {
     backend.release_launch();
     assert!(matches!(
         launch_thread.join().expect("launch thread"),
-        Response::LaunchVmV2(_)
+        Response::LaunchVmV3(_)
     ));
     let live = core.lock().expect("core lock");
     assert!(live.inflight_launches.is_empty());
@@ -248,7 +191,7 @@ fn detached_v2_launch_failure_releases_proven_capacity() {
     }
 
     assert!(matches!(
-        launch_vm_v2_response(&core, launch_v2(0, 1_000)),
+        launch_vm_v3_response(&core, launch_v3(0, 1_000)),
         Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
     ));
     let live = core.lock().expect("core lock");
@@ -292,7 +235,7 @@ fn detached_v2_launch_retains_capacity_until_failed_unit_is_contained() {
     }
 
     assert!(matches!(
-        launch_vm_v2_response(&core, launch_v2(0, 1_000)),
+        launch_vm_v3_response(&core, launch_v3(0, 1_000)),
         Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
     ));
     let live = core.lock().expect("core lock");
@@ -300,7 +243,7 @@ fn detached_v2_launch_retains_capacity_until_failed_unit_is_contained() {
     assert_eq!(live.pending_cpu_reservations.len(), 1);
     assert_eq!(live.unresolved_recoveries.len(), 1);
     assert_eq!(live.capabilities().committed_cpu_millis, 1_000);
-    assert!(!live.capabilities().supports_jailer_v2);
+    assert!(!live.capabilities().supports_jailer_v3);
 }
 
 #[test]
@@ -330,9 +273,9 @@ fn detached_existing_identity_mismatch_releases_only_proven_capacity() {
         ));
     }
 
-    let request = launch_v2(0, 1_000);
-    let launched = match launch_vm_v2_response(&core, request.clone()) {
-        Response::LaunchVmV2(result) => result,
+    let request = launch_v3(0, 1_000);
+    let launched = match launch_vm_v3_response(&core, request.clone()) {
+        Response::LaunchVmV3(result) => result,
         other => panic!("unexpected launch response: {other:?}"),
     };
     {
@@ -345,7 +288,7 @@ fn detached_existing_identity_mismatch_releases_only_proven_capacity() {
     }
 
     assert!(matches!(
-        launch_vm_v2_response(&core, request),
+        launch_vm_v3_response(&core, request),
         Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
     ));
     let live = core.lock().expect("core lock");
@@ -353,7 +296,7 @@ fn detached_existing_identity_mismatch_releases_only_proven_capacity() {
     assert!(live.pending_cpu_reservations.is_empty());
     assert!(live.unresolved_recoveries.is_empty());
     assert_eq!(live.capabilities().committed_cpu_millis, 0);
-    assert!(!live.capabilities().supports_jailer_v2);
+    assert!(!live.capabilities().supports_jailer_v3);
     drop(live);
 
     let state = backend.state.lock().expect("backend state");
@@ -388,9 +331,9 @@ fn detached_existing_identity_mismatch_retains_boot_capacity_until_drain() {
         ));
     }
 
-    let request = launch_v2(0, 1_000);
-    let launched = match launch_vm_v2_response(&core, request.clone()) {
-        Response::LaunchVmV2(result) => result,
+    let request = launch_v3(0, 1_000);
+    let launched = match launch_vm_v3_response(&core, request.clone()) {
+        Response::LaunchVmV3(result) => result,
         other => panic!("unexpected launch response: {other:?}"),
     };
     {
@@ -409,7 +352,7 @@ fn detached_existing_identity_mismatch_retains_boot_capacity_until_drain() {
     }
 
     assert!(matches!(
-        launch_vm_v2_response(&core, request),
+        launch_vm_v3_response(&core, request),
         Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
     ));
     let live = core.lock().expect("core lock");
@@ -418,7 +361,7 @@ fn detached_existing_identity_mismatch_retains_boot_capacity_until_drain() {
     assert_eq!(live.pending_cpu_reservations.len(), 1);
     assert_eq!(live.unresolved_recoveries.len(), 1);
     assert_eq!(live.capabilities().committed_cpu_millis, 1_000);
-    assert!(!live.capabilities().supports_jailer_v2);
+    assert!(!live.capabilities().supports_jailer_v3);
     drop(live);
 
     let state = backend.state.lock().expect("backend state");
@@ -441,10 +384,10 @@ fn eight_eighth_cpu_vms_fill_exactly_one_schedulable_core() {
     .expect("core");
     ensure_test_network(&mut core);
     for index in 0..8 {
-        let response = launch_prepared_v2(&mut core, index, 125);
-        assert!(matches!(response, Response::LaunchVmV2(_)), "{response:?}");
+        let response = launch_prepared_v3(&mut core, index, 125);
+        assert!(matches!(response, Response::LaunchVmV3(_)), "{response:?}");
     }
-    let response = launch_prepared_v2(&mut core, 8, 125);
+    let response = launch_prepared_v3(&mut core, 8, 125);
     assert!(matches!(
         response,
         Response::Error(ProtocolError { ref code, .. }) if code == "cpu_capacity_exhausted"
@@ -466,8 +409,8 @@ fn half_cpu_launches_share_capacity_and_keep_ssh_closed() {
     .expect("valid CPU test fixture");
     ensure_test_network(&mut core);
     for index in 0..2 {
-        let launched = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(index, 500)))) {
-            Response::LaunchVmV2(result) => result,
+        let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(index, 500)))) {
+            Response::LaunchVmV3(result) => result,
             response => panic!("{response:?}"),
         };
         assert_eq!(launched.cpu_runtime.quota.cpu_millis, 500);
@@ -488,7 +431,7 @@ fn half_cpu_launches_share_capacity_and_keep_ssh_closed() {
     assert_eq!(core.capabilities().committed_cpu_millis, 1000);
     let before = core.allocated_identities.len();
     assert!(
-        matches!(core.handle(Request::LaunchVmV2(Box::new(launch_v2(2, 500)))), Response::Error(ref error) if error.code == "cpu_capacity_exhausted")
+        matches!(core.handle(Request::LaunchVmV3(Box::new(launch_v3(2, 500)))), Response::Error(ref error) if error.code == "cpu_capacity_exhausted")
     );
     assert_eq!(core.backend.started_specs.len(), 2);
     assert_eq!(core.allocated_identities.len(), before);
@@ -507,8 +450,8 @@ fn finalize_seals_quota_before_ingress_and_is_idempotent() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(0, 1_000)))) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(0, 1_000)))) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected launch response {other:?}"),
     };
     let request = FinalizeVmBootRequest {
@@ -554,8 +497,8 @@ fn finalize_persistence_and_ingress_rollback_failure_contains_vm() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(0, 1_000)))) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(0, 1_000)))) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected launch response {other:?}"),
     };
     core.backend.fail_ssh_forward_disable = true;
@@ -571,7 +514,7 @@ fn finalize_persistence_and_ingress_rollback_failure_contains_vm() {
     assert!(core.preparer.quarantined.contains(&launched.generation));
     assert!(!core.records.contains_key(&launched.generation));
     assert_eq!(core.capabilities().committed_cpu_millis, 0);
-    assert!(!core.capabilities().supports_jailer_v2);
+    assert!(!core.capabilities().supports_jailer_v3);
 }
 
 #[test]
@@ -588,11 +531,11 @@ fn quota_exhaustion_is_rejected_before_launch() {
     .expect("core");
     ensure_test_network(&mut core);
     assert!(matches!(
-        core.handle(Request::LaunchVmV2(Box::new(launch_v2(0, 1_000)))),
-        Response::LaunchVmV2(_)
+        core.handle(Request::LaunchVmV3(Box::new(launch_v3(0, 1_000)))),
+        Response::LaunchVmV3(_)
     ));
     assert!(matches!(
-        core.handle(Request::LaunchVmV2(Box::new(launch_v2(1, 1_000)))),
+        core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 1_000)))),
         Response::Error(ProtocolError { ref code, .. }) if code == "cpu_capacity_exhausted"
     ));
     assert_eq!(core.capabilities().committed_cpu_millis, 1_000);
@@ -611,8 +554,8 @@ fn failed_quota_readback_contains_vm_without_exposing_ssh() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(0, 1_000)))) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(0, 1_000)))) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected launch response {other:?}"),
     };
     core.backend.fail_quota_verification = true;

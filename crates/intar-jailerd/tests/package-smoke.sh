@@ -282,7 +282,7 @@ cleanup() {
 trap cleanup 0
 trap 'exit 130' HUP INT TERM
 
-# The v2 package deliberately has no copy fallback: the root-owned template
+# The package deliberately has no copy fallback: the root-owned template
 # store and jail-generation store must share a filesystem that accepts an
 # exact FICLONE. Docker's overlay filesystem does not provide that invariant,
 # so the disposable privileged smoke provisions the same XFS reflink topology

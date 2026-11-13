@@ -743,7 +743,7 @@ pub(super) fn collect_host_hardware(jailer: Option<&JailerCapabilities>) -> Host
         // The service deliberately runs with PrivateDevices=true. A successful
         // jailerd readiness attestation, not agent-visible device access, is
         // the authority for KVM availability and complete helper accounting.
-        kvm: jailer.is_some_and(|capabilities| capabilities.supports_jailer_v2),
+        kvm: jailer.is_some_and(|capabilities| capabilities.supports_jailer_v3),
         vsock: true,
         reflink: supports_reflink_for_image_cache(),
         landlock: jailer.is_some_and(|capabilities| capabilities.supports_landlock),

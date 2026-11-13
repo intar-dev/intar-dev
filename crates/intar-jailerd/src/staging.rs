@@ -561,10 +561,8 @@ pub(super) fn open_prepared_template_source(
             .context("open root-owned image template")?;
     validate_root_directory(&image_directory, "root-owned image template")?;
     let metadata = open_template_metadata(&image_directory)?;
-    if !matches!(
-        metadata.schema_version,
-        IMAGE_TEMPLATE_METADATA_V2 | IMAGE_TEMPLATE_METADATA_V3
-    ) || metadata.image_sha256 != image_sha256
+    if metadata.schema_version != IMAGE_TEMPLATE_METADATA_V3
+        || metadata.image_sha256 != image_sha256
     {
         bail!("prepared image template metadata identity mismatch")
     }

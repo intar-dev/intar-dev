@@ -35,23 +35,6 @@ impl JailPreparer for FileSystemJailPreparer {
         })
     }
 
-    fn prepare_image_v2(
-        &mut self,
-        config: &JailerdConfig,
-        request: &PrepareImageV2Request,
-    ) -> Result<PreparedImageV2Result> {
-        let lane = PrepareLane::claim(request.request_class)?;
-        prepare_image_template(config, request, &lane)
-    }
-
-    fn validate_prepared_launch(
-        &mut self,
-        config: &JailerdConfig,
-        request: &LaunchVmV2Request,
-    ) -> Result<()> {
-        validate_prepared_launch_template(config, request)
-    }
-
     fn prepare_image_v3(
         &mut self,
         config: &JailerdConfig,
@@ -81,7 +64,7 @@ impl JailPreparer for FileSystemJailPreparer {
         prepare_jail_files(config, request, run_network, generation, uid, gid, None)
     }
 
-    fn prepare_v2(
+    fn prepare_v3(
         &mut self,
         config: &JailerdConfig,
         request: &VmLaunchRequest,
@@ -95,7 +78,7 @@ impl JailPreparer for FileSystemJailPreparer {
             .as_ref()
             .context("root-owned host runtime template is unavailable")?;
         validate_host_template(config, metadata)
-            .context("validate pinned host runtime template before V2 launch")?;
+            .context("validate pinned host runtime template before launch")?;
         prepare_jail_files(
             config,
             request,
@@ -105,18 +88,6 @@ impl JailPreparer for FileSystemJailPreparer {
             gid,
             Some(metadata),
         )
-    }
-
-    fn prepare_v3(
-        &mut self,
-        config: &JailerdConfig,
-        request: &VmLaunchRequest,
-        run_network: &RunNetworkResult,
-        generation: &ValidatedId,
-        uid: u32,
-        gid: u32,
-    ) -> Result<PreparedJail> {
-        self.prepare_v2(config, request, run_network, generation, uid, gid)
     }
 
     fn destroy(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<bool> {

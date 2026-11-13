@@ -251,66 +251,6 @@ pub struct SourceArtifacts {
     pub recording_disk: ArtifactSource,
 }
 
-/// Import a verified agent-cache boot bundle into jailerd's root-owned,
-/// content-addressed template store.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PrepareImageV2Request {
-    /// Registry image identity. The raw disk has its own digest because the
-    /// registry identity covers the compressed image payload.
-    pub image_sha256: Sha256Digest,
-    pub virtual_size_bytes: u64,
-    pub root_disk: ArtifactSource,
-    pub kernel: ArtifactSource,
-    pub initrd: Option<ArtifactSource>,
-    /// Coordinator hint that classifies the request. Foreground is the
-    /// learner-visible launch path and the default for older callers.
-    #[serde(default)]
-    pub request_class: RequestClass,
-}
-
-impl PrepareImageV2Request {
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.virtual_size_bytes == 0 {
-            return Err(ValidationError::ZeroImageSize);
-        }
-        for source in [
-            Some(&self.root_disk),
-            Some(&self.kernel),
-            self.initrd.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            source.validate()?;
-            if source.source_root == PREPARED_IMAGE_SOURCE_ROOT {
-                return Err(ValidationError::InvalidTemplateSource);
-            }
-            if source.access != ArtifactAccess::ReadOnly {
-                return Err(ValidationError::InvalidTemplateArtifactAccess);
-            }
-            if source.sha256.is_none() {
-                return Err(ValidationError::MissingTemplateArtifactHash);
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Root-owned sources returned by `PrepareImageV2`. These descriptors are
-/// accepted only through `LaunchVmV2Request`; jailerd resolves the reserved
-/// source root without exposing its filesystem path to the agent.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreparedImageV2Result {
-    pub image_sha256: Sha256Digest,
-    pub virtual_size_bytes: u64,
-    pub root_disk: ArtifactSource,
-    pub kernel: ArtifactSource,
-    pub initrd: Option<ArtifactSource>,
-    pub fast_template_store: bool,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareChunkedImageV3Request {
@@ -444,8 +384,8 @@ pub struct VmLaunchRequest {
     pub vm_id: ValidatedId,
     pub cpu_millis: u32,
     pub memory_mib: u32,
-    /// Exact size of the mutable generation root disk. For V2 launches this
-    /// may exceed the immutable prepared image size, but it may never shrink
+    /// Exact size of the mutable generation root disk. For template launches
+    /// this may exceed the immutable prepared image size, but it may never shrink
     /// the prepared filesystem image.
     pub root_disk_size_bytes: u64,
     pub tap_name: String,
@@ -460,17 +400,6 @@ pub struct VmLaunchRequest {
 }
 
 mod request_validation;
-/// Capability-gated template-backed launch. The image identity and size bind
-/// the prepared boot descriptors to one root-owned template generation; the
-/// mutable/runtime artifacts remain in the regular launch request.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LaunchVmV2Request {
-    pub image_sha256: Sha256Digest,
-    pub virtual_size_bytes: u64,
-    pub launch: VmLaunchRequest,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchVmV3Request {
@@ -507,46 +436,6 @@ impl LaunchVmV3Request {
             validate_prepared_launch_artifact(
                 initrd,
                 &self.image_id,
-                "initrd",
-                ArtifactAccess::ReadOnly,
-            )?;
-        }
-        Ok(quota)
-    }
-}
-
-impl LaunchVmV2Request {
-    pub fn validate(&self) -> Result<CpuQuota, ValidationError> {
-        if self.virtual_size_bytes == 0 {
-            return Err(ValidationError::ZeroImageSize);
-        }
-        if self.launch.root_disk_size_bytes < self.virtual_size_bytes {
-            return Err(ValidationError::RootDiskSmallerThanTemplate);
-        }
-        let quota = self.launch.validate_inner(true)?;
-        for (source, file_name, expected_access) in [
-            (
-                &self.launch.artifacts.root_disk,
-                "root.raw",
-                ArtifactAccess::ReadWrite,
-            ),
-            (
-                &self.launch.artifacts.kernel,
-                "kernel",
-                ArtifactAccess::ReadOnly,
-            ),
-        ] {
-            validate_prepared_launch_artifact(
-                source,
-                &self.image_sha256,
-                file_name,
-                expected_access,
-            )?;
-        }
-        if let Some(initrd) = &self.launch.artifacts.initrd {
-            validate_prepared_launch_artifact(
-                initrd,
-                &self.image_sha256,
                 "initrd",
                 ArtifactAccess::ReadOnly,
             )?;
@@ -629,11 +518,9 @@ pub struct DestroyRunNetworkRequest {
 )]
 pub enum Request {
     Capabilities,
-    PrepareImageV2(Box<PrepareImageV2Request>),
     PrepareChunkedImageV3(Box<PrepareChunkedImageV3Request>),
     EnsureRunNetwork(EnsureRunNetworkRequest),
     RepairRunNetwork(EnsureRunNetworkRequest),
-    LaunchVmV2(Box<LaunchVmV2Request>),
     LaunchVmV3(Box<LaunchVmV3Request>),
     FinalizeVmBoot(FinalizeVmBootRequest),
     InspectVm(VmIdentityRequest),
@@ -678,10 +565,6 @@ pub struct JailerCapabilities {
     pub reserved_cpu_millis: u64,
     pub schedulable_cpu_millis: u64,
     pub committed_cpu_millis: u64,
-    /// Breaking v2 launch and readiness contract. These attestations are
-    /// required on the v2 wire; an old daemon cannot decode as performance
-    /// ready by omission.
-    pub supports_jailer_v2: bool,
     pub supports_jailer_v3: bool,
     pub supports_template_backed_launch: bool,
     pub fast_template_store: bool,
@@ -857,11 +740,9 @@ pub struct OperationResult {
 )]
 pub enum Response {
     Capabilities(JailerCapabilities),
-    PrepareImageV2(PreparedImageV2Result),
     PrepareChunkedImageV3(PreparedImageV3Result),
     EnsureRunNetwork(RunNetworkResult),
     RepairRunNetwork(RunNetworkResult),
-    LaunchVmV2(VmLaunchResult),
     LaunchVmV3(VmLaunchResult),
     FinalizeVmBoot(FinalizeVmBootResult),
     InspectVm(VmInspection),
@@ -939,7 +820,11 @@ pub struct JailerdConfig {
     pub template_budget_bytes: u64,
     pub minimum_free_space_bytes: u64,
     pub store_gc_grace_seconds: u64,
-    pub legacy_template_retention_seconds: u64,
+    /// Deprecated and ignored: templates of an older schema are collected
+    /// like any other unreferenced entry. Still accepted so a host's existing
+    /// config loads; the installer drops the key in stage 7.
+    #[serde(skip_serializing)]
+    pub legacy_template_retention_seconds: Option<u64>,
 }
 
 impl Default for JailerdConfig {
@@ -966,7 +851,7 @@ impl Default for JailerdConfig {
             template_budget_bytes: 96 * 1024 * 1024 * 1024,
             minimum_free_space_bytes: 128 * 1024 * 1024 * 1024,
             store_gc_grace_seconds: 60 * 60,
-            legacy_template_retention_seconds: 7 * 24 * 60 * 60,
+            legacy_template_retention_seconds: None,
         }
     }
 }
@@ -1078,11 +963,11 @@ pub enum ValidationError {
     InvalidTemplateArtifactAccess,
     #[error("image preparation artifacts require SHA-256 digests")]
     MissingTemplateArtifactHash,
-    #[error("root-owned prepared boot artifacts require launch_vm_v2")]
+    #[error("root-owned prepared boot artifacts require launch_vm_v3")]
     TemplateLaunchRequiresV2,
     #[error("runtime and recording artifacts cannot reference the root-owned template store")]
     InvalidTemplateRuntimeSource,
-    #[error("launch_vm_v2 boot descriptors must exactly reference one prepared image template")]
+    #[error("launch_vm_v3 boot descriptors must exactly reference one prepared image template")]
     InvalidPreparedLaunchArtifact,
     #[error("chunk-cache root must be a trusted non-template relative directory")]
     InvalidChunkCacheRoot,

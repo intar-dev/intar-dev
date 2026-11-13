@@ -99,52 +99,6 @@ pub(super) fn template_artifact_source(
     }
 }
 
-pub(super) fn prepared_image_result(metadata: &ImageTemplateMetadataV2) -> PreparedImageV2Result {
-    PreparedImageV2Result {
-        image_sha256: metadata.image_sha256.clone(),
-        virtual_size_bytes: metadata.virtual_size_bytes,
-        root_disk: template_artifact_source(
-            &metadata.image_sha256,
-            "root.raw",
-            &metadata.root_disk.sha256,
-            ArtifactAccess::ReadWrite,
-        ),
-        kernel: template_artifact_source(
-            &metadata.image_sha256,
-            "kernel",
-            &metadata.kernel.sha256,
-            ArtifactAccess::ReadOnly,
-        ),
-        initrd: metadata.initrd.as_ref().map(|artifact| {
-            template_artifact_source(
-                &metadata.image_sha256,
-                "initrd",
-                &artifact.sha256,
-                ArtifactAccess::ReadOnly,
-            )
-        }),
-        fast_template_store: true,
-    }
-}
-
-pub(super) fn request_template_identity_matches(
-    request: &PrepareImageV2Request,
-    metadata: &ImageTemplateMetadataV2,
-) -> bool {
-    metadata.schema_version == IMAGE_TEMPLATE_METADATA_V2
-        && metadata.image_sha256 == request.image_sha256
-        && metadata.chunk_manifest_sha256.is_none()
-        && metadata.chunk_raw_sha256s.is_empty()
-        && metadata.virtual_size_bytes == request.virtual_size_bytes
-        && request.root_disk.sha256.as_ref() == Some(&metadata.root_disk.sha256)
-        && request.kernel.sha256.as_ref() == Some(&metadata.kernel.sha256)
-        && request
-            .initrd
-            .as_ref()
-            .and_then(|source| source.sha256.as_ref())
-            == metadata.initrd.as_ref().map(|artifact| &artifact.sha256)
-}
-
 pub(super) fn validate_template_artifact_stat(
     stat: &rustix::fs::Stat,
     expected: &ImageTemplateArtifactV2,

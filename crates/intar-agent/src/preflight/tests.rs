@@ -41,7 +41,6 @@ fn ready_capabilities(source_root: PathBuf) -> JailerCapabilities {
         reserved_cpu_millis: 1_000,
         schedulable_cpu_millis: 7_000,
         committed_cpu_millis: 125,
-        supports_jailer_v2: true,
         supports_jailer_v3: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
@@ -254,7 +253,7 @@ fn rejects_unattested_jailerd_security_and_identity_state() {
     capabilities.runtime_statically_linked = false;
     capabilities.landlock_abi = Some(2);
     capabilities.kvm_accounting_proven = false;
-    capabilities.supports_jailer_v2 = false;
+    capabilities.supports_jailer_v3 = false;
     capabilities.supports_template_backed_launch = false;
     capabilities.fast_template_store = false;
     capabilities.supports_hard_cpu_quota = false;
@@ -288,7 +287,7 @@ fn rejects_unattested_jailerd_security_and_identity_state() {
         "Cloud Hypervisor static linkage",
         "Landlock ABI",
         "KVM helper accounting",
-        "jailer v2 isolation capability",
+        "jailer v3 isolation capability",
         "fast jail template store",
         "hard CPU quota capability",
     ] {
