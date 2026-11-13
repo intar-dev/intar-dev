@@ -21,8 +21,9 @@ cpu_profile = "/etc/intar-builder/cpu-profile.json"
 kino = "/usr/local/lib/intar-builder/kino"
 ```
 
-- `vmm_binary` is the static cloud-hypervisor the builder's release ships in
-  `deploy/`; the build refuses a binary of another hash. `vmm_version` is what
+- `vmm_binary` is the static cloud-hypervisor the builder's release ships at
+  its archive root (`cloud-hypervisor-v55.0.0`, its SHA-256 in `deploy/`), as
+  the agent's does; the build refuses a binary of another hash. `vmm_version` is what
   the image records as built with.
 - `cpu_profile` is the CPU profile every wake image is suspended under. Its
   digest is the image's `wake.cpu_profile`, which a run host must pin to wake
@@ -36,8 +37,9 @@ uplink) in that namespace and talks to the guest over SSH and vsock. The host
 needs `/dev/kvm` and `/dev/net/tun` usable by the builder's user, `unshare`,
 and unprivileged user namespaces (on Ubuntu,
 `kernel.apparmor_restrict_unprivileged_userns=0` or an AppArmor profile for the
-builder). When any of these is missing, `doctor` warns and wake targets build
-as plain images; each such build log says why.
+builder). When any of these is missing, `doctor` warns and every wake target
+fails with the reason until it is fixed; plain targets still build. With
+`enabled = false`, wake targets build as plain images and their logs say so.
 
 A wake base is cached under `cache_root/wake-bases`, keyed by the image's build
 key, the profile, the VMM and the suspend steps, so an image and its packs

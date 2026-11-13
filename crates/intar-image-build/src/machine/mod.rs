@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use intar_contracts::oci::OciDigest;
 use intar_contracts::source::SourceBundleV2;
 
@@ -84,21 +84,16 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
         .tempdir_in(work_root)?;
     let started = Instant::now();
     fs::create_dir_all(&request.output_dir)?;
-    if plan.wake.is_some() {
-        match wake::wake_unavailable(&request.config) {
-            None => {
-                let image = wake::build_wake_target(request, &plan, &base, work.path(), &log_path)?;
-                return Ok(MachineBuildOutput {
-                    plan,
-                    image,
-                    log_path,
-                    base_seconds,
-                    build_seconds: started.elapsed().as_secs_f64(),
-                    output_seconds: 0.0,
-                });
-            }
-            Some(reason) => fallback_note(&log_path, &reason)?,
-        }
+    if plan.wake.is_some() && builds_wake(&request.config, &log_path)? {
+        let image = wake::build_wake_target(request, &plan, &base, work.path(), &log_path)?;
+        return Ok(MachineBuildOutput {
+            plan,
+            image,
+            log_path,
+            base_seconds,
+            build_seconds: started.elapsed().as_secs_f64(),
+            output_seconds: 0.0,
+        });
     }
     let raw = vm::build_disk(&plan, &request.config, &base, work.path(), &log_path)?;
     let build_seconds = started.elapsed().as_secs_f64();
@@ -120,13 +115,54 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
     })
 }
 
-/// A wake image or pack built as a plain image says so in its log.
-fn fallback_note(log: &Path, reason: &str) -> Result<()> {
+/// Whether a wake target builds as one. Wake off is the operator's choice:
+/// a plain image, and its log says so. Wake on but unusable fails the build
+/// rather than publish a plain image under the wake key.
+fn builds_wake(config: &QemuBuildConfig, log: &Path) -> Result<bool> {
     use std::io::Write as _;
-    let mut file = fs::OpenOptions::new().create(true).append(true).open(log)?;
-    writeln!(
-        file,
-        "[wake] unavailable ({reason}); building this wake target as a plain image"
-    )?;
-    Ok(())
+    if config.wake.is_none() {
+        let mut file = fs::OpenOptions::new().create(true).append(true).open(log)?;
+        writeln!(
+            file,
+            "[wake] off on this builder; building this wake target as a plain image"
+        )?;
+        return Ok(false);
+    }
+    if let Some(reason) = wake::wake_unavailable(config) {
+        bail!("this builder cannot build wake images: {reason}");
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WakeBuildConfig;
+
+    #[test]
+    fn wake_off_builds_plain_and_broken_wake_fails() {
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join("build.log");
+        let mut config = QemuBuildConfig::default();
+        assert!(!builds_wake(&config, &log).expect("off"));
+        assert!(
+            fs::read_to_string(&log)
+                .expect("log")
+                .contains("plain image")
+        );
+
+        config.wake = Some(WakeBuildConfig {
+            vmm_binary: dir.path().join("missing-vmm"),
+            vmm_sha256: "00".to_owned(),
+            vmm_version: "v55.0.0".to_owned(),
+            cpu_profile: dir.path().join("profile.json"),
+            kino: dir.path().join("kino"),
+            base_cache: dir.path().join("bases"),
+        });
+        let error = builds_wake(&config, &log).expect_err("broken wake");
+        assert!(
+            error.to_string().contains("cannot build wake images"),
+            "{error}"
+        );
+    }
 }
