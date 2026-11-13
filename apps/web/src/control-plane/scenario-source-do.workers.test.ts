@@ -1,18 +1,18 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
+import { gzipSync } from "node:zlib";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { exportPKCS8, generateKeyPair } from "jose";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleAgentBootstrap, sha256Hex as sha256Text } from "@/control-plane/auth";
 import { GITHUB_WEBHOOK_PATH, handleGitHubWebhook } from "@/control-plane/github-webhook";
 import type { ScenarioSourceDO } from "@/control-plane/scenario-source-do";
 import { sweepScenarioSources } from "@/control-plane/scenario-source-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import { normalizeCourseCatalogSnapshot } from "@/control-plane/image-registry/bundle";
-import { sha256Hex } from "@/control-plane/image-registry/shared";
 import {
   agentBootstrapTokens,
   agentHosts,
@@ -46,6 +46,8 @@ import hostReportFixture from "@/generated/fixtures/bridge/host-state-report-v2.
 import { maintainHostBuildAssignments, queueImageBuildsFromBundle } from "@/lib/build-scheduler";
 import { BUILDER_REASSIGN_AFTER_MS } from "@/lib/build-scheduler-core";
 import { IMAGE_BUILD_FORMAT_VERSION, platformCompileDigest } from "@/lib/image-build-format";
+import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
+import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
 import { setRegistryPause } from "@/lib/image-registry-admission";
 import { IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE } from "@/lib/run-admission-gate";
 import {
@@ -2260,6 +2262,15 @@ describe("ScenarioSourceDO public apply", () => {
 });
 
 describe("ScenarioSourceDO pull delivery", () => {
+  // A pull binding compiles on the v2 compiler.
+  let v1Digest: string;
+  beforeAll(async () => {
+    v1Digest = digest;
+    digest = await sourceCompileDigest();
+  });
+  afterAll(() => {
+    digest = v1Digest;
+  });
   const SCOPE_B = "organization:org-b";
   const SNAPSHOT = new Uint8Array([31, 139, 8, 0, 1, 2, 3]);
   const codeload = (repository: string, sha: string) =>
@@ -2636,18 +2647,14 @@ describe("ScenarioSourceDO pull delivery", () => {
     expect((await rows())[0]).toMatchObject({ state: "failed", detail: "compiler did not finish" });
   });
 
-  it("takes an organization pull commit from its compile result to live", async () => {
-    // A digest whose base catalog is the staged base-images.hcl.
-    const baseImages = new TextEncoder().encode("base_image {}\n");
-    const overrides = { PLATFORM_BASE_IMAGES_SHA256: await sha256Hex(baseImages.buffer) };
-    const at = await platformCompileDigest(overrides.PLATFORM_BASE_IMAGES_SHA256);
-    if (!at) throw new Error("the base catalog digest is unset");
-    await seedBuilder("builder-2", at);
+  it("takes an organization pull commit from its v2 compile result to building revisions", async () => {
+    await seedBuilder("builder-2");
+    await db().update(agentHosts).set({ connected: false }).where(eq(agentHosts.id, "builder-1"));
     github(tarball(SHA_A));
 
-    await pullTick(overrides);
+    await pullTick();
     const [row] = await rows();
-    expect(row).toMatchObject({ rev: rev(SHA_A, at), state: "compiling", compileHostId: "builder-2" });
+    expect(row).toMatchObject({ rev: rev(SHA_A), state: "compiling", compileHostId: "builder-2" });
 
     await db().insert(agentBootstrapTokens).values({
       id: "builder-2-bootstrap",
@@ -2659,16 +2666,15 @@ describe("ScenarioSourceDO pull delivery", () => {
     const bootstrap = await handleAgentBootstrap(
       new Request("https://intar.test/agent/bootstrap", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "intar-bridge-protocol": "9" },
         body: JSON.stringify({ hostId: "builder-2", bootstrapToken: "builder-2-token" }),
       }),
       env,
     );
     const { accessToken } = (await bootstrap.json()) as { accessToken: string };
-    const { meta, bundle } = await compiled({ sha: SHA_A, digest: at });
     const form = new FormData();
-    form.set(SOURCE_META_FIELD, JSON.stringify(meta));
-    form.set(SOURCE_BUNDLE_FIELD, new Blob([new Uint8Array(bundle)]), `${rev(SHA_A, at)}.tar.gz`);
+    form.set(SOURCE_META_FIELD, JSON.stringify({ rev: rev(SHA_A) }));
+    form.set(SOURCE_BUNDLE_FIELD, new Blob([new Uint8Array(gzipSync(JSON.stringify(bundleFixture)))]), `${rev(SHA_A)}.json.gz`);
     const multipart = new Response(form);
     const body = await multipart.arrayBuffer();
     const result = await handleImageRegistryRequest(
@@ -2681,39 +2687,27 @@ describe("ScenarioSourceDO pull delivery", () => {
         },
         body,
       }),
-      { ...env, HOST_RUNTIME: hostRuntime, ...overrides } as unknown as Cloudflare.Env,
+      { ...env, HOST_RUNTIME: hostRuntime } as unknown as Cloudflare.Env,
     );
     expect(result?.status, await result?.clone().text()).toBe(202);
-    expect(await commitState(SHA_A, at)).toMatchObject({ state: "ingesting" });
+    expect(await commitState(SHA_A)).toMatchObject({ state: "ingesting" });
 
-    await pullTick(overrides);
-    expect(await commitState(SHA_A, at)).toMatchObject({ state: "building" });
-    await publish(SHA_A, { at });
-    await pullTick(overrides);
-    expect(await commitState(SHA_A, at)).toMatchObject({ state: "live" });
-    expect(await binding()).toMatchObject({ liveRev: rev(SHA_A, at), liveSha: SHA_A });
-    expect(
-      await db()
-        .select({ organizationId: vmScenarios.organizationId, sourceRevision: vmScenarios.sourceRevision })
-        .from(vmScenarios),
-    ).toEqual([{ organizationId: ORG, sourceRevision: rev(SHA_A, at) }]);
+    await pullTick();
+    expect(await commitState(SHA_A)).toMatchObject({ state: "building" });
+    expect(await env.DB.prepare("SELECT scenario_id, state FROM scenario_revisions WHERE rev = ?1")
+      .bind(rev(SHA_A)).all().then((all) => all.results)).toEqual([{ scenario_id: "acme/broken-nginx", state: "building" }]);
   });
 
-  it("supersedes a compile on a digest bump and removes its entry", async () => {
+  it("keeps a pull compile on the v2 digest when the platform digest moves", async () => {
     github(tarball(SHA_A));
     await pullTick();
     expect(await desired("builder-1")).toMatchObject({ version: 1 });
-    woken = [];
 
     await clearFloor();
     await pullTick({ PLATFORM_BASE_IMAGES_SHA256: "f".repeat(64) });
 
-    expect((await rows())[0]).toMatchObject({ state: "superseded" });
-    expect(await desired("builder-1")).toEqual({ version: 2, compiles: undefined });
-    expect(woken).toEqual(["builder-1"]);
-    expect(await stagedKeys(SHA_A)).toEqual([]);
-    // The builder is on the old digest, so the new head waits for a compiler.
-    expect(await rows()).toHaveLength(1);
+    expect((await rows())[0]).toMatchObject({ state: "compiling", rev: rev(SHA_A) });
+    expect(await desired("builder-1")).toMatchObject({ version: 1 });
   });
 
   it.each(["invalid", "failed"] as const)("does not deliver a %s head again until a check_suite re-run, which restarts its compile tries", async (state) => {

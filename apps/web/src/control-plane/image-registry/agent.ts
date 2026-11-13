@@ -438,6 +438,9 @@ export async function handleAgentBuildLogUpload(
     .where(eq(imageBuilds.id, buildId))
     .limit(1);
   const build = rows[0];
+  if (!build && /^[0-9a-f]{64}$/.test(buildId)) {
+    return putMachineBuildLog(request, env, buildId, verified.agent.hostId);
+  }
   if (!build) {
     return jsonResponse({ error: "build not found" }, 404);
   }
@@ -480,6 +483,38 @@ export async function handleAgentBuildLogUpload(
   }
 
   return jsonResponse({ ok: true, build_id: buildId, log_key: objectKey });
+}
+
+/** The builder logs two 4 MiB tails and an error line. */
+const MAX_MACHINE_BUILD_LOG_BYTES = 9 * 1024 * 1024;
+
+/** Stores the log of a machine build, keyed by its build key hex, for its assigned builder. */
+async function putMachineBuildLog(
+  request: Request,
+  env: Cloudflare.Env,
+  hex: string,
+  hostId: string,
+): Promise<Response> {
+  const buildKey = `sha256:${hex}`;
+  const assigned = await env.DB.prepare(
+    "SELECT 1 FROM machine_builds WHERE build_key = ?1 AND host_id = ?2",
+  ).bind(buildKey, hostId).first();
+  if (!assigned) return jsonResponse({ error: "build is not assigned to this builder" }, 409);
+  const length = Number(request.headers.get("content-length") ?? "NaN");
+  if (!Number.isSafeInteger(length) || length > MAX_MACHINE_BUILD_LOG_BYTES) {
+    return jsonResponse({ error: "a log of at most 9 MiB with a Content-Length is required" }, 413);
+  }
+  const payload = await request.arrayBuffer();
+  if (payload.byteLength > MAX_MACHINE_BUILD_LOG_BYTES) return jsonResponse({ error: "the log is too large" }, 413);
+  const objectKey = `builds/logs/${hex}.log`;
+  await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
+    httpMetadata: { contentType: "text/plain; charset=utf-8" },
+    customMetadata: { build_id: hex, host_id: hostId },
+  });
+  await env.DB.prepare(
+    "UPDATE machine_builds SET log_key = ?3 WHERE build_key = ?1 AND host_id = ?2",
+  ).bind(buildKey, hostId, objectKey).run();
+  return jsonResponse({ ok: true, build_id: hex, log_key: objectKey });
 }
 
 export async function handleAgentImageIndex(

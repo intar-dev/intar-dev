@@ -31,10 +31,12 @@ import {
 } from "@/lib/build-scheduler-core";
 import { removeDesiredBuild, upsertDesiredBuild } from "@/lib/desired-state";
 import {
+  HOST_DESIRED_STATE_SCHEMA_VERSION_V3,
   loadOrCreateHostDesiredState,
   mutateStoredHostDesiredState,
 } from "@/lib/desired-state-store";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { syncBuilderDesiredState } from "@/lib/machine-builds";
 import { hostHealth } from "@/lib/host-health";
 import { createAppId } from "@/lib/id";
 import {
@@ -637,6 +639,8 @@ export async function reconcileHostSourceCompiles(
   hostId: string,
   nowUnixMs: number,
 ): Promise<boolean> {
+  // A bridge 9 builder's document mirrors its rows in its own schema.
+  if (await syncBuilderDesiredState(env, hostId, nowUnixMs)) return true;
   const [rows, [desired]] = await Promise.all([
     db
       .select({
@@ -657,10 +661,12 @@ export async function reconcileHostSourceCompiles(
     db
       .select({
         compiles: sql<string | null>`json_extract(${hostDesiredState.docJson}, '$.source_compiles')`,
+        schema: sql<number | null>`json_extract(${hostDesiredState.docJson}, '$.schema_version')`,
       })
       .from(hostDesiredState)
       .where(eq(hostDesiredState.hostId, hostId)),
   ]);
+  if (desired?.schema === HOST_DESIRED_STATE_SCHEMA_VERSION_V3) return false;
   const wanted: DesiredSourceCompileV1[] = rows
     .map((row) => ({
       compile_id: row.id,
@@ -1069,6 +1075,7 @@ async function loadBuilderCandidates(
       .select({
         hostId: agentHosts.id,
         role: agentHosts.role,
+        helloCompileDigest: sql<string | null>`json_extract(${agentHosts.helloJson}, '$.builder.source_compile_digest')`,
         connected: agentHosts.connected,
         activeSessionId: agentHosts.activeSessionId,
         lastClientHelloAt: agentHosts.lastClientHelloAt,
@@ -1110,7 +1117,8 @@ async function loadBuilderCandidates(
   return hosts.map((host) => ({
     hostId: host.hostId,
     role: host.role,
-    arch: host.reportJson?.capabilities.arch ?? null,
+    // A bridge 9 report has no capabilities, so it never takes a build here.
+    arch: host.reportJson?.capabilities?.arch ?? null,
     connected: Boolean(
       host.connected &&
       host.activeSessionId &&
@@ -1124,7 +1132,7 @@ async function loadBuilderCandidates(
     activeBuildCount: activeBuildCount.get(host.hostId) ?? 0,
     prePublicationBuildCount: prePublicationBuildCount.get(host.hostId) ?? 0,
     sourceCompilePlatform:
-      host.reportJson?.capabilities.source_compile_platform ?? null,
+      host.reportJson?.capabilities?.source_compile_platform ?? host.helloCompileDigest ?? null,
     capacity: host.reportJson?.capacity ?? null,
   }));
 }

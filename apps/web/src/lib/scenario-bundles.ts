@@ -1,6 +1,6 @@
 // Ingest of a `SourceBundleV2` into one scope: the bundle object, its row,
 // a building revision per scenario with its spec blobs, the scenarios and a
-// queued build per unseen build key. Every ID is `<namespace>/<slug>`, and
+// queued build per unseen or failed build key. Every ID is `<namespace>/<slug>`, and
 // the namespace comes from the binding, never from the bundle. The first
 // stored bytes of a rev are the only ones its rows describe, and every write
 // is idempotent, so a repeat completes a partial earlier attempt and
@@ -15,6 +15,7 @@ import { baseKey, buildKeys } from "@/lib/scenario-contract/build-key";
 import { canonicalJson } from "@/lib/scenario-contract/canonical-json";
 import { machineSpec, scenarioRevision, specBlob } from "@/lib/scenario-contract/machine-spec";
 import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
+import { maintainMachineBuilds, settleScenarioRevisions } from "@/lib/machine-builds";
 
 /** The namespace of the public scope. */
 export const PUBLIC_NAMESPACE = "intar";
@@ -179,7 +180,10 @@ export async function ingestSourceBundle(
       `INSERT INTO machine_builds (build_key, image_format, bundle_rev, target_json, state, attempt,
           created_at, updated_at)
         SELECT key, ?2, ?3, value, 'queued', 0, ?4, ?4 FROM json_each(?1)
-        WHERE true ON CONFLICT (build_key) DO NOTHING`,
+        WHERE true ON CONFLICT (build_key) DO UPDATE SET state = 'queued', host_id = NULL, phase = NULL,
+          error = NULL, bundle_rev = excluded.bundle_rev, target_json = excluded.target_json,
+          updated_at = excluded.updated_at
+        WHERE machine_builds.state = 'failed'`,
     ).bind(
       JSON.stringify(Object.fromEntries([...builds].map(([key, target]) => [key, JSON.stringify(target)]))),
       IMAGE_FORMAT,
@@ -187,5 +191,9 @@ export async function ingestSourceBundle(
       now,
     ),
   ]);
+  // A revision whose images all exist is ready now; the rest wait for the
+  // builds just queued.
+  await settleScenarioRevisions(env, { rev });
+  await maintainMachineBuilds(env, null, now);
   return null;
 }

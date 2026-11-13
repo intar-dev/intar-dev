@@ -247,12 +247,14 @@ async function tickScenarioSource(
   // is unset or the fleet is drained, and it is the alarm's only promotion.
   const promoting = await finishPromotion(env, scopeKey, organizationId);
 
-  // A head uploaded by the v2 compiler is followed on its digest, any other
-  // on the platform digest of v1. Without a digest there is no head rev, so
-  // rows stay as they are rather than be compared against NULL.
+  // A pull binding compiles on the v2 compiler, and a head uploaded by it is
+  // followed on its digest; any other on the platform digest of v1. Without
+  // a digest there is no head rev, so rows stay as they are rather than be
+  // compared against NULL.
   const v2Digest = await sourceCompileDigest();
   const headIsV2 = await env.DB.prepare(
-    `SELECT 1 FROM scenario_source_commits
+    `SELECT 1 FROM scenario_sources WHERE scope_key = ?1 AND mode = 'pull'
+      UNION ALL SELECT 1 FROM scenario_source_commits
       WHERE scope_key = ?1 AND purpose = 'deploy' AND rev = ${headRev("?1", "?2")}`,
   )
     .bind(scopeKey, v2Digest)
@@ -1292,6 +1294,21 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
         )
     : [];
   let built = 0;
+  let total = scenarios.length;
+  // A v2 rev has one revision per scenario; its state, and a failure's
+  // learner-safe reason, is the progress.
+  const revisions = bundle
+    ? []
+    : (await step.env.DB.prepare(
+        `SELECT revision.scenario_id, revision.state, revision.failure_reason FROM scenario_revisions revision
+          JOIN bundles bundle ON bundle.rev = revision.rev AND bundle.scope_key = ?2
+          WHERE revision.rev = ?1 ORDER BY revision.scenario_id`,
+      ).bind(row.rev, step.scopeKey).all<{ scenario_id: string; state: string; failure_reason: string | null }>()).results;
+  total += revisions.length;
+  const revisionLines = revisions.map(({ scenario_id: scenarioId, state, failure_reason: reason }) => {
+    if (state === "ready" || state === "verified") built += 1;
+    return `- ${scenarioId}: ${state}${reason ? `: ${reason}` : ""}`;
+  });
   const lines = scenarios.map(({ scenarioId, arch, contentHash }) => {
     const build = builds.find(
       (candidate) =>
@@ -1317,7 +1334,7 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
     row.is_live_rev && check.status !== "completed"
       ? "Restoring"
       : state === "building"
-        ? `Building ${built}/${scenarios.length}`
+        ? `Building ${built}/${total}`
         : state === "awaiting_promote" && (await promotionHolding(drizzle(step.env.DB), row.rev))
           ? "Promoting images"
           : check.title;
@@ -1326,6 +1343,7 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
     ...(row.detail === null ? [] : [redactHostPaths(row.detail)]),
     ...diagnostics,
     ...lines,
+    ...revisionLines,
   ]
     .join("\n")
     .replaceAll("&", "&amp;")
