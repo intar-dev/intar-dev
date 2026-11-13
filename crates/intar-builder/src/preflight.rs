@@ -127,6 +127,7 @@ pub fn collect_preflight_with_environment(
     }
     push_job_check(&mut checks, cfg);
     push_bridge_check(&mut checks, cfg);
+    push_wake_check(&mut checks, cfg);
 
     PreflightReport { checks }
 }
@@ -339,6 +340,28 @@ fn is_pinned_oci_image(image: &str) -> bool {
         && digest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// Wake is optional: without it a wake target builds as a plain image, so a
+/// host that cannot build one only warns.
+fn push_wake_check(checks: &mut Vec<PreflightCheck>, cfg: &BuilderConfig) {
+    if !cfg.wake.enabled {
+        checks.push(pass(
+            "wake images",
+            "off; wake targets build as plain images",
+        ));
+        return;
+    }
+    match intar_image_build::wake_unavailable(&cfg.qemu_build_config()) {
+        None => checks.push(pass(
+            "wake images",
+            "the pinned VMM and the namespaces work",
+        )),
+        Some(reason) => checks.push(warn(
+            "wake images",
+            format!("unavailable ({reason}); wake targets build as plain images"),
+        )),
+    }
 }
 
 fn push_job_check(checks: &mut Vec<PreflightCheck>, cfg: &BuilderConfig) {

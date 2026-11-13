@@ -37,8 +37,22 @@ struct ConfigArgs {
     config: PathBuf,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // A wake build re-runs this binary in fresh namespaces; that child owns
+    // its own runtime, so it starts before ours.
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if let [child, job] = args.as_slice()
+        && child == intar_image_build::WAKE_CHILD_ARG
+    {
+        return intar_image_build::run_wake_child(Path::new(job));
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(daemon())
+}
+
+async fn daemon() -> Result<()> {
     let _telemetry = intar_observability::init(
         "intar-builder",
         env!("CARGO_PKG_VERSION"),

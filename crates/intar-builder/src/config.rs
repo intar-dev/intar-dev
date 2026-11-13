@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use intar_contracts::catalog::ImageArchitecture;
-use intar_image_build::{LayeredBuildConfig, QemuBuildConfig};
+use intar_image_build::{LayeredBuildConfig, QemuBuildConfig, WakeBuildConfig};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -14,6 +14,7 @@ pub struct BuilderConfig {
     pub builder: BuilderRuntimeConfig,
     pub qemu: QemuConfig,
     pub jobs: JobConfig,
+    pub wake: WakeConfig,
 }
 
 impl BuilderConfig {
@@ -41,6 +42,13 @@ impl BuilderConfig {
             work_root: self.builder.work_root.clone(),
             output_root: self.builder.cache_root.join("outputs"),
             layered,
+            wake: self.wake.enabled.then(|| WakeBuildConfig {
+                vmm_binary: self.wake.vmm_binary.clone(),
+                vmm_sha256: self.wake.vmm_sha256.clone(),
+                vmm_version: self.wake.vmm_version.clone(),
+                cpu_profile: self.wake.cpu_profile.clone(),
+                kino: self.wake.kino.clone(),
+            }),
         }
     }
 }
@@ -136,6 +144,19 @@ impl Default for JobConfig {
             max_concurrent_builds: 2,
         }
     }
+}
+
+/// `[wake]`: what wake images are built with. Off, a wake target builds as
+/// a plain image.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WakeConfig {
+    pub enabled: bool,
+    pub vmm_binary: PathBuf,
+    pub vmm_sha256: String,
+    pub vmm_version: String,
+    pub cpu_profile: PathBuf,
+    pub kino: PathBuf,
 }
 
 pub fn load(path: &Path) -> Result<BuilderConfig> {
@@ -288,5 +309,25 @@ unknown = true
             Some(PathBuf::from("/var/cache/intar-builder/checkpoints"))
         );
         assert_eq!(config.jobs.max_concurrent_builds, 2);
+        assert!(build_config.wake.is_none());
+    }
+
+    #[test]
+    fn parses_the_wake_section() {
+        let config = parse(
+            r#"
+[wake]
+enabled = true
+vmm_binary = "/usr/lib/intar-builder/cloud-hypervisor"
+vmm_sha256 = "00"
+vmm_version = "v55.0.0"
+cpu_profile = "/etc/intar-builder/cpu-profile.json"
+kino = "/usr/lib/intar-builder/kino"
+"#,
+        )
+        .unwrap();
+        let wake = config.qemu_build_config().wake.unwrap();
+        assert_eq!(wake.vmm_version, "v55.0.0");
+        assert_eq!(wake.kino, PathBuf::from("/usr/lib/intar-builder/kino"));
     }
 }
