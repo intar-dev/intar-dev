@@ -88,7 +88,8 @@ pub(crate) async fn release_lab(spec: &MachineSpecV1, report: &watch::Sender<Rep
     if !spec.defer.is_empty() {
         tokio::time::sleep(LAB_RELEASE_FALLBACK).await;
     }
-    if let Err(error) = run("systemctl", &["start", "intar-lab.target"]).await {
+    // Not waiting for the units: the ready scripts say when the lab is up.
+    if let Err(error) = run("systemctl", &["start", "--no-block", "intar-lab.target"]).await {
         eprintln!("kino init: lab release: {error}");
     }
     mark(report, Phase::Preparing, "lab_released");

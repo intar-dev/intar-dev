@@ -24,10 +24,15 @@ message Report {
   // disk it wrote.
   string boot_sha256 = 11;
 }
+// A report shows the latest phase, and phases only advance, so a host may
+// never see SSH_READY itself: PREPARING and READY imply it. FAILED is a lab
+// failure, with SSH still up, when timings_ms holds "ssh_ready".
 enum Phase  { PHASE_UNSPECIFIED = 0; BOOTING = 1; SSH_READY = 2; PREPARING = 3; READY = 4; FAILED = 5; }
 enum Status { STATUS_UNSPECIFIED = 0; PENDING = 1; PASS = 2; FAIL = 3; ERROR = 4; }
 message Ready { string name = 1; Status status = 2; string tail = 3; }   // tail at most 2 KiB, admin-only
 message Task  { string id = 1; Status status = 2; string message = 3; uint64 passed_at_unix_ms = 4; } // message at most 512 B, learner-safe
+// In verify mode `tasks` stay unevaluated; the steps are the result. A step's
+// solve_exit of 0 means success only once its post status is set.
 message Verify { repeated Step steps = 1; bool done = 2; bool passed = 3; bool pre_done = 4; }
 message Step {
   string task_id = 1; Status pre = 2; int32 solve_exit = 3; Status post = 4;

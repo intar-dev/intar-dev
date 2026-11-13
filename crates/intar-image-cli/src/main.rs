@@ -24,6 +24,7 @@ use std::{fs, process::Command as ProcessCommand};
 
 mod clean_base_command;
 mod reconstruct_command;
+mod spec_command;
 
 const BASE_IMAGES_PATH: &str = "content/scenarios/base-images.hcl";
 const IMAGE_PUBLISH_TOKEN_ENV: &str = "INTAR_IMAGE_PUBLISH_TOKEN";
@@ -68,6 +69,8 @@ enum Command {
     Reconstruct(reconstruct_command::ReconstructCommand),
     Hash(HashCommand),
     Bundle(BundleCommand),
+    /// Print a scenario of the new format as its machines will run it.
+    Spec(spec_command::SpecCommand),
 }
 
 #[derive(Debug, Args)]
@@ -178,6 +181,7 @@ fn main() -> ExitCode {
         Command::Reconstruct(args) => reconstruct_command::reconstruct(&args),
         Command::Hash(args) => hash_command(&args),
         Command::Bundle(args) => bundle_command(&args, working_dir),
+        Command::Spec(args) => spec_command::spec_command(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -2,6 +2,7 @@ mod base_image;
 mod content_hash;
 mod error;
 mod kino;
+pub mod loader;
 mod probe;
 mod scenario;
 

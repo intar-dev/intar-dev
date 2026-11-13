@@ -9,12 +9,17 @@ rust-version.workspace = true
 [dependencies]
 hcl-edit = "=0.9.8"
 hcl-rs.workspace = true
+intar-contracts = { path = "../intar-contracts" }
 jsonpath-rust.workspace = true
+pulldown-cmark.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

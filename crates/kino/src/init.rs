@@ -59,10 +59,11 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     // A guest woken from an image holds the marker of the boot.json the
     // build's Kino applied; a cold boot has none.
     let woken = std::fs::read_to_string(APPLIED_BOOT_PATH).is_ok_and(|applied| applied != digest);
+    // The digest first: the host drops every report without it.
+    report.send_modify(|report| report.boot_sha256.clone_from(&digest));
     if woken {
         boot::mark(&report, Phase::Booting, "woken");
     }
-    report.send_modify(|report| report.boot_sha256.clone_from(&digest));
     if let Err(error) = boot::bring_up(&boot, woken, &report).await {
         return fail(&report, error).await;
     }
