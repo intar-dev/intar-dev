@@ -5,6 +5,8 @@ export type MaintenanceFlag = "on" | "off";
 
 export interface MaintenanceStateSnapshot {
   maintenance: MaintenanceFlag;
+  /** `KINO_PINS_JSON` as served, "" when unset: the registry collector roots these pins. */
+  kinoPinsJson: string;
   observedAtMs: number;
 }
 
@@ -16,11 +18,12 @@ export interface MaintenanceStateSnapshot {
  * would drift during a maintenance deployment.
  */
 export function readMaintenanceStateSnapshot(
-  env: Pick<Cloudflare.Env, "CONTROL_PLANE_MAINTENANCE">,
+  env: Pick<Cloudflare.Env, "CONTROL_PLANE_MAINTENANCE" | "KINO_PINS_JSON">,
   nowMs: number,
 ): MaintenanceStateSnapshot {
   return {
     maintenance: controlPlaneMaintenanceEnabled(env) ? "on" : "off",
+    kinoPinsJson: env.KINO_PINS_JSON ?? "",
     observedAtMs: nowMs,
   };
 }

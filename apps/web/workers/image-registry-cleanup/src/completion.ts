@@ -1,4 +1,5 @@
 import type { ImageRegistryCleanupRunResult } from "@/lib/image-registry-cleanup";
+import type { OciSweepReport } from "@/lib/oci-registry-sweep";
 import type { CleanupStatus } from "./types";
 
 /**
@@ -49,8 +50,12 @@ export function completionStatus(
   // `completed` is the core's verdict, and the only signal that means a
   // finished sweep. Nothing else in the result may promote it to success.
   if (result.completed === true) return "ok";
+  return incompleteStatus(result.error);
+}
 
-  const reason = typeof result.error === "string" ? result.error.trim() : "";
+/** Classifies why a pass did not complete. */
+function incompleteStatus(error: string | null): CleanupStatus {
+  const reason = typeof error === "string" ? error.trim() : "";
   if (!reason) return "pending";
   if (CLEANUP_CONTENTION_REASONS.includes(reason)) return "busy";
   if (CLEANUP_WITHHOLD_REASONS.includes(reason)) return "paused";
@@ -61,4 +66,12 @@ export function completionStatus(
 /** True only for a pass the core proved complete. */
 export function isAppliedCompletion(status: CleanupStatus): boolean {
   return status === "ok";
+}
+
+/** The same mapping for the OCI pass. A fault fails it in either mode; report-only never completes. */
+export function ociCompletionStatus(report: OciSweepReport): CleanupStatus {
+  if (report.faults.length) return "core-failed";
+  if (report.mode !== "delete") return "report-only";
+  if (report.completed) return "ok";
+  return incompleteStatus(report.error);
 }

@@ -8,13 +8,14 @@ import {
   createImageRegistryCleanupCore,
   type ImageRegistryCleanupEnv,
 } from "@/lib/image-registry-cleanup";
+import { runOciSweep, type OciSweepReport } from "@/lib/oci-registry-sweep";
 import type { CleanupLastRun } from "./types";
 import type {
   CleanupEnvelope,
   CleanupMode,
   CleanupStatus,
 } from "./types";
-import { completionStatus } from "./completion";
+import { completionStatus, ociCompletionStatus } from "./completion";
 
 export const CLEANUP_SCHEMA_VERSION = 1;
 export const DEFAULT_CLEANUP_MODE: CleanupMode = "report-only";
@@ -30,12 +31,14 @@ export interface CleanupEnv extends ImageRegistryCleanupEnv {
 
 /** The parent `MaintenanceState` entrypoint, bound as CONTROL_PLANE. */
 interface MaintenanceStateBinding {
-  state(): Promise<{ maintenance?: unknown }>;
+  state(): Promise<{ maintenance?: unknown; kinoPinsJson?: unknown }>;
 }
 
 export interface MaintenanceRead {
   maintenance: "on" | "off";
   source: "control-plane" | "unavailable";
+  /** The parent's Kino pins; null when they could not be read. */
+  kinoPinsJson: string | null;
 }
 
 export interface ModeRead {
@@ -71,19 +74,20 @@ export async function readMaintenance(
   const binding = env.CONTROL_PLANE as MaintenanceStateBinding | undefined;
   if (!binding || typeof binding.state !== "function") {
     log("registry_cleanup_maintenance_probe_missing");
-    return { maintenance: "on", source: "unavailable" };
+    return { maintenance: "on", source: "unavailable", kinoPinsJson: null };
   }
   try {
     const state = await binding.state();
     return {
       maintenance: state?.maintenance === "off" ? "off" : "on",
       source: "control-plane",
+      kinoPinsJson: typeof state?.kinoPinsJson === "string" ? state.kinoPinsJson : null,
     };
   } catch (error) {
     log("registry_cleanup_maintenance_probe_failed", {
       error: describeError(error),
     });
-    return { maintenance: "on", source: "unavailable" };
+    return { maintenance: "on", source: "unavailable", kinoPinsJson: null };
   }
 }
 
@@ -218,6 +222,51 @@ export async function awaitRegistryIdle(
  * the core recorded while it ran.
  */
 export async function runCleanup(
+  env: CleanupEnv,
+  request: { source: "scheduled" | "rpc"; planOnly?: boolean },
+): Promise<CleanupEnvelope> {
+  const legacy = await runLegacyCleanup(env, request);
+  // The OCI store's sweep runs after the old registry's, behind the same fence
+  // and gate. Each pass takes its own sweep lease. The envelope's own status
+  // stays the old collector's; the OCI pass reports beside it.
+  if (legacy.status === "fenced" || legacy.status === "paused" || legacy.status === "busy") {
+    return { ...legacy, oci: null };
+  }
+  const mode = readMode(env.REGISTRY_CLEANUP_MODE);
+  const maintenance = await readMaintenance(env);
+  if (maintenance.maintenance === "on") return { ...legacy, oci: null };
+  let report: OciSweepReport;
+  try {
+    report = await runOciSweep(env, {
+      mode: request.planOnly === true || mode.mode !== "delete" ? "report-only" : "delete",
+      nowMs: Date.now(),
+      kinoPinsJson: maintenance.kinoPinsJson,
+    });
+  } catch (error) {
+    // The sweep reports its own failures; a throw here deleted nothing.
+    log("registry_cleanup_oci_failed", { source: request.source, error: describeError(error) });
+    return { ...legacy, oci: null };
+  }
+  const status = ociCompletionStatus(report);
+  log("registry_cleanup_oci_finished", {
+    source: request.source,
+    status,
+    mode: report.mode,
+    listedObjects: report.listedObjects,
+    candidateObjects: report.candidateObjects,
+    candidateBytes: report.candidateBytes,
+    deletedObjects: report.deletedObjects,
+    deletedBytes: report.deletedBytes,
+    deletedRevisions: report.deletedRevisions,
+    faults: report.faults.length,
+    nextStartAfter: report.nextStartAfter,
+    error: report.error,
+  });
+  return { ...legacy, oci: { status, report } };
+}
+
+/** The old registry's collector, unchanged. */
+async function runLegacyCleanup(
   env: CleanupEnv,
   request: { source: "scheduled" | "rpc"; planOnly?: boolean },
 ): Promise<CleanupEnvelope> {

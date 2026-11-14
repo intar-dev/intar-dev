@@ -121,9 +121,10 @@ function fencedParent(): MaintenanceState {
  * around it instead of assuming the table is empty.
  */
 async function gcRunIds(): Promise<Set<string>> {
-  const rows = await env.DB.prepare("SELECT id FROM image_registry_gc_runs").all<{
-    id: string;
-  }>();
+  // The OCI store's pass records its own rows under another owner.
+  const rows = await env.DB.prepare("SELECT id FROM image_registry_gc_runs WHERE owner = ?1")
+    .bind(CLEANUP_OWNER)
+    .all<{ id: string }>();
   return new Set((rows.results ?? []).map((row) => row.id));
 }
 

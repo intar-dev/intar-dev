@@ -3,6 +3,7 @@ import type {
   ImageRegistryCleanupRunResult,
 } from "@/lib/image-registry-cleanup";
 import type { ImageRegistryEnforcementMode } from "@/db/schema";
+import type { OciSweepReport } from "@/lib/oci-registry-sweep";
 
 /**
  * Request and response contract of the image registry cleanup worker.
@@ -41,6 +42,11 @@ export interface CleanupEnvelope {
   plan: CleanupPlan | null;
   result: CleanupResult | null;
   error: string | null;
+  /**
+   * The OCI store's pass, after the old registry's. Null when the fence, the
+   * hold or another sweep stopped the invocation before it.
+   */
+  oci?: { status: CleanupStatus; report: OciSweepReport } | null;
 }
 
 export interface CleanupRunRequest {
