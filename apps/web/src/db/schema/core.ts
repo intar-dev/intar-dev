@@ -171,9 +171,15 @@ export const organization = sqliteTable(
       .notNull(),
     // When the organization used its one slug rename, or null.
     slugRenamedAt: integer("slug_renamed_at"),
+    // The slug given up by that rename. It stays reserved, so links that carry
+    // it never reach another organization.
+    previousSlug: text("previous_slug"),
   },
   (table) => [
     uniqueIndex("organization_slug_uidx").on(table.slug),
+    uniqueIndex("organization_previous_slug_uidx")
+      .on(table.previousSlug)
+      .where(sql`${table.previousSlug} IS NOT NULL`),
   ],
 );
 

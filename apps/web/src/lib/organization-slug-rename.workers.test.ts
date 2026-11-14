@@ -5,7 +5,8 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { bundles, member, organization, scenarios, user } from "@/db/schema";
-import { getOrganizationDetail, renameOrganizationSlug } from "@/lib/organizations";
+import { StaticFeatureToggleService } from "@/lib/feature-toggles";
+import { createOrganization, getOrganizationDetail, renameOrganizationSlug } from "@/lib/organizations";
 import { resetD1Database } from "@/test/d1-migrations";
 
 describe("organization slug rename", () => {
@@ -67,6 +68,33 @@ describe("organization slug rename", () => {
     await expect(renameOrganizationSlug({ organizationId: "org-a", actorUserId: "owner", slug: "org-b" }))
       .rejects.toMatchObject({ status: 409, code: "organization_slug_taken" });
     expect(await slugOf("org-a")).toBe("Org-A-x1Y2z3");
+  });
+
+  it("keeps a slug given up by a rename from every other organization", async () => {
+    await drizzle(env.DB).update(organization).set({ slug: "acme" }).where(eq(organization.id, "org-a"));
+    await renameOrganizationSlug({ organizationId: "org-a", actorUserId: "owner", slug: "acme2" });
+    expect((await drizzle(env.DB).select({ previous: organization.previousSlug }).from(organization)
+      .where(eq(organization.id, "org-a")))[0]?.previous).toBe("acme");
+
+    await expect(renameOrganizationSlug({ organizationId: "org-b", actorUserId: "operator", slug: "acme" }))
+      .rejects.toMatchObject({ status: 409, code: "organization_slug_taken" });
+    expect(await slugOf("org-b")).toBe("org-b");
+    await expect(createOrganization({
+      name: "Copycat", slug: "acme", ownerUserId: "plain",
+      featureToggleService: new StaticFeatureToggleService({ "organization-creation": true }),
+    })).rejects.toMatchObject({ status: 409, code: "organization_slug_taken" });
+    expect((await env.DB.prepare("SELECT count(*) AS n FROM organization").first<{ n: number }>())?.n).toBe(2);
+    expect(await env.DB.prepare("SELECT 1 FROM member WHERE user_id = 'plain' AND role = 'owner'").first()).toBeNull();
+    // The organization itself cannot go back: the rename happens once.
+    await expect(renameOrganizationSlug({ organizationId: "org-a", actorUserId: "owner", slug: "acme" }))
+      .rejects.toMatchObject({ status: 409, code: "organization_slug_rename_used" });
+    // Another organization that renames later still cannot take it.
+    await expect(renameOrganizationSlug({ organizationId: "org-b", actorUserId: "operator", slug: "beta" }))
+      .resolves.toEqual({ id: "org-b", slug: "beta" });
+    await expect(createOrganization({
+      name: "Fresh", slug: "fresh", ownerUserId: "plain",
+      featureToggleService: new StaticFeatureToggleService({ "organization-creation": true }),
+    })).resolves.toMatchObject({ slug: "fresh", role: "owner" });
   });
 
   it("lets a platform admin rename an organization they are not in", async () => {

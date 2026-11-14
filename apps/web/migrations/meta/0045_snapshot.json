@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "6c2718e3-7651-4ba2-9a52-26931bcb8a27",
-  "prevId": "50a21c91-9af3-4bda-8623-e6f4d10b8c32",
+  "id": "fa88c152-95a1-4ae9-9362-8861f1bbf4f8",
+  "prevId": "6c2718e3-7651-4ba2-9a52-26931bcb8a27",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -4041,6 +4041,13 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "previous_slug": {
+          "name": "previous_slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {
@@ -4057,6 +4064,14 @@
             "slug"
           ],
           "isUnique": true
+        },
+        "organization_previous_slug_uidx": {
+          "name": "organization_previous_slug_uidx",
+          "columns": [
+            "previous_slug"
+          ],
+          "isUnique": true,
+          "where": "\"organization\".\"previous_slug\" IS NOT NULL"
         }
       },
       "foreignKeys": {},

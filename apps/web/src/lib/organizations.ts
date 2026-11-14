@@ -160,24 +160,22 @@ export async function createOrganization(params: {
   const slug = await validateChosenSlug(params.slug);
   const id = createAppId();
   const now = Date.now();
-  const db = drizzle(env.DB);
-
   try {
-    await db.batch([
-      db.insert(organization).values({
-        id,
-        name,
-        slug,
-        createdAt: new Date(now),
-      }),
-      db.insert(member).values({
-        id: createAppId(),
-        organizationId: id,
-        userId: params.ownerUserId,
-        role: "owner",
-        createdAt: new Date(now),
-      }),
+    // A slug another organization gave up stays reserved; the owner joins
+    // only the organization this batch inserted.
+    const [inserted] = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO organization (id, name, slug, created_at)
+         SELECT ?1, ?2, ?3, ?4
+          WHERE NOT EXISTS (SELECT 1 FROM organization WHERE previous_slug = ?3)`,
+      ).bind(id, name, slug, now),
+      env.DB.prepare(
+        `INSERT INTO member (id, organization_id, user_id, role, created_at)
+         SELECT ?1, ?2, ?3, 'owner', ?4
+          WHERE EXISTS (SELECT 1 FROM organization WHERE id = ?2)`,
+      ).bind(createAppId(), id, params.ownerUserId, now),
     ]);
+    if (inserted?.meta.changes !== 1) throw slugTakenError();
   } catch (error) {
     if (
       errorChainMatches(
@@ -385,11 +383,12 @@ export async function renameOrganizationSlug(params: {
   try {
     renamed = await db
       .update(organization)
-      .set({ slug, slugRenamedAt: Date.now() })
+      .set({ slug, slugRenamedAt: Date.now(), previousSlug: sql`${organization.slug}` })
       .where(and(
         eq(organization.id, params.organizationId),
         isNull(organization.slugRenamedAt),
         ne(organization.slug, slug),
+        sql`NOT ${slugGivenUp(slug)}`,
         sql`NOT ${organizationSlugInUse(params.organizationId)}`,
         or(
           administersOrganization(params.organizationId, params.actorUserId),
@@ -417,6 +416,9 @@ export async function renameOrganizationSlug(params: {
   }
   if (current.slug === slug) {
     throw appError(400, "organization_slug_unchanged", "the organization already has this slug");
+  }
+  if (await env.DB.prepare("SELECT 1 FROM organization WHERE previous_slug = ?1").bind(slug).first()) {
+    throw slugTakenError();
   }
   if ((await loadOrganizationSlugState(params.organizationId))?.inUse) {
     throw appError(
@@ -1058,6 +1060,11 @@ async function validateChosenSlug(raw: string): Promise<string> {
     .limit(1);
   if (taken) throw slugTakenError();
   return slug;
+}
+
+/** Holds while an organization gave up `slug` in its rename. */
+function slugGivenUp(slug: string): SQL {
+  return sql`EXISTS (SELECT 1 FROM organization given_up WHERE given_up.previous_slug = ${slug})`;
 }
 
 function slugTakenError() {
