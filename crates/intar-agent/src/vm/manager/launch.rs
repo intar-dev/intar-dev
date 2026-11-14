@@ -808,13 +808,14 @@ pub(super) fn boot_phase_millis(start: Instant, ends: [Instant; 10]) -> [u128; 1
     })
 }
 
-/// Wake the cache pass and wait until it has prepared the launch's image,
-/// for at most [`image_prepare_wait`] or until the VM is deleted.
+/// Wake the cache pass, which puts this image first, and wait until it has
+/// prepared it, for at most [`image_prepare_wait`] or until the VM is deleted.
 async fn wait_for_prepared_image(
     inner: &Arc<Inner>,
     cache_root: &Path,
     req: &RunCreateInput<'_>,
 ) -> Result<image_cache::ReadyImage> {
+    let _awaited = image_cache::AwaitedImage::new(req.image);
     image_cache::wake_cache_refresh();
     debug!(
         vm = req.name,
@@ -822,8 +823,17 @@ async fn wait_for_prepared_image(
     );
     let budget = image_prepare_wait();
     let deadline = Instant::now() + budget;
+    // A pass that ended on a transient failure is not run again until the
+    // scrub timer, so the wait wakes it again with a backoff.
+    let mut rewake = image_cache::RewakeBackoff::new(Instant::now());
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
+        if rewake.due(Instant::now(), image_cache::pass_running())
+            && !image_cache::is_image_ready(cache_root, req.image)
+        {
+            debug!(vm = req.name, "waking the image cache pass again");
+            image_cache::wake_cache_refresh();
+        }
         let ready = image_cache::require_ready_image(cache_root, req.image).await;
         if let Err(error) = &ready {
             debug!(vm = req.name, error = %error, "waiting for event-driven image preparation");

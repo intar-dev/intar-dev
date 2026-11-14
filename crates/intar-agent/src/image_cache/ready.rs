@@ -143,7 +143,7 @@ pub(crate) async fn require_ready_image(
     validate_descriptor(image, serde_json::from_slice(&bytes)?)
 }
 
-pub(super) fn is_image_ready(cache_root: &Path, image: &OciDigest) -> bool {
+pub(crate) fn is_image_ready(cache_root: &Path, image: &OciDigest) -> bool {
     std::fs::read(descriptor_path(cache_root, image))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())

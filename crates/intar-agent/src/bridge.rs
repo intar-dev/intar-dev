@@ -330,6 +330,9 @@ async fn connect_once(
     let mut relay_status = relay.subscribe();
     vm.set_relay_status(relay_status.clone());
     vm.set_control_connected(true);
+    if reconnect {
+        crate::image_cache::wake_cache_refresh_if_unready(current_desired_state.as_ref());
+    }
     let mut relay_credentials = server_hello.relay;
     // Wait for a current desired state on this authenticated connection before
     // granting relay access to any records recovered from disk.

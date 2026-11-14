@@ -37,6 +37,7 @@ pub(super) async fn run_cache_refresh_cycle(
         info!("image cache has no desired state; waiting for one");
         return;
     };
+    let _running = wait::PassRunning::start();
     let pins = RequiredPins::from_desired_state(&desired);
     if pins.is_empty() {
         info!("image cache has no required pins; waiting for a desired-state intent");
@@ -81,7 +82,8 @@ const REQUEUE_RETRY_DELAY: Duration = Duration::from_secs(5);
 /// lost, and the bound keeps one pass from running forever behind boots.
 const REQUEUE_ROUNDS_PER_PASS: usize = 12;
 
-/// Prepare the pinned images that are not ready, one image at a time.
+/// Prepare the pinned images that are not ready, one image at a time, the
+/// ones a launch waits on first.
 ///
 /// The pass holds the single image prepare job for the whole process, parks
 /// between two images while a boot is live, and sends each import to jailerd's
@@ -103,7 +105,7 @@ async fn prepare_missing_pinned_entries(pins: &RequiredPins, context: CacheRefre
     let mut rounds = 0usize;
     loop {
         rounds = rounds.saturating_add(1);
-        let missing = pins
+        let mut missing = pins
             .images
             .iter()
             .filter(|image| {
@@ -114,7 +116,10 @@ async fn prepare_missing_pinned_entries(pins: &RequiredPins, context: CacheRefre
             return;
         }
         let mut requeued = Vec::new();
-        for image in missing {
+        // An image a launch waits on goes next, even when the launch began
+        // after this round did; a transfer under way is never cut short.
+        while !missing.is_empty() {
+            let image = missing.remove(wait::next_pending(&missing, wait::is_awaited));
             wait_for_vm_boot_idle().await;
             let span = tracing::info_span!("image_cache_prepare", image = image.as_str());
             match prepare_one_image(image, context).instrument(span).await {

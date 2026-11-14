@@ -147,6 +147,25 @@ pub(crate) fn wake_cache_refresh() {
     CACHE_REFRESH_WAKE.get_or_init(Notify::new).notify_one();
 }
 
+/// Wake the cache pass when a pinned image of `desired` is not ready, as
+/// after the bridge reconnects: a pass that failed while the network was
+/// down would otherwise wait for the scrub timer.
+pub(crate) fn wake_cache_refresh_if_unready(
+    desired: Option<&intar_contracts::bridge_v9::HostDesiredStateV3>,
+) {
+    let Some(desired) = desired else { return };
+    let Ok(cache_root) = default_cache_root() else {
+        return;
+    };
+    if RequiredPins::from_desired_state(desired)
+        .images
+        .iter()
+        .any(|image| !ready::is_image_ready(&cache_root, image))
+    {
+        wake_cache_refresh();
+    }
+}
+
 pub(crate) fn registry_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -263,7 +282,8 @@ fn validate_prepared_source(
 mod ready;
 pub(crate) use ready::{
     ReadyImage, check_machine_config, check_prepared_wake, image_failure, image_failure_state,
-    mark_template_ready, record_image_failure, require_ready_image, sweep_cache_layout,
+    is_image_ready, mark_template_ready, record_image_failure, require_ready_image,
+    sweep_cache_layout,
 };
 mod priority;
 pub(crate) use priority::{
@@ -282,6 +302,8 @@ use refresh::*;
 
 mod storage;
 use storage::*;
+mod wait;
+pub(crate) use wait::{AwaitedImage, RewakeBackoff, pass_running};
 mod registry;
 use registry::*;
 #[cfg(test)]
