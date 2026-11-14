@@ -7,7 +7,6 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { handleAgentBootstrap, sha256Hex as sha256Text } from "@/control-plane/auth";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
-import { sha256Hex } from "@/control-plane/image-registry/shared";
 import {
   agentBootstrapTokens,
   agentHosts,
@@ -20,12 +19,13 @@ import {
 import {
   AGENT_SOURCES_PATH,
   SOURCE_BUNDLE_FIELD,
-  SOURCE_COMPILER_VERSION,
   SOURCE_META_FIELD,
 } from "@/generated/constants";
+import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
 import sourceRefusalSchema from "@/generated/schemas/source-refusal-v1.schema.json";
-import { reconcileHostSourceCompiles } from "@/lib/build-scheduler";
-import { IMAGE_BUILD_FORMAT_VERSION, platformCompileDigest } from "@/lib/image-build-format";
+import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
+import { syncBuilderDesiredState } from "@/lib/machine-builds";
+import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { stagedSourceObjectPrefix } from "@/lib/scenario-sources";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -34,8 +34,6 @@ const ORG = "org-a";
 const SCOPE = `organization:${ORG}`;
 const OWNER = "owner";
 const SHA = "a".repeat(40);
-const BASE_IMAGES = 'base "debian" {}\n';
-const SCENARIO = "acme-web";
 const COMPILE = "compile-1";
 const SNAPSHOT = "repository snapshot";
 
@@ -58,9 +56,8 @@ beforeAll(async () => {
   testEnv = {
     ...env,
     HOST_RUNTIME: hostRuntime,
-    PLATFORM_BASE_IMAGES_SHA256: await sha256Hex(new TextEncoder().encode(BASE_IMAGES).buffer),
   } as unknown as Cloudflare.Env;
-  rev = `git-42-${SHA}-${await platformCompileDigest(testEnv.PLATFORM_BASE_IMAGES_SHA256)}`;
+  rev = `git-42-${SHA}-${await sourceCompileDigest()}`;
   staged = stagedSourceObjectPrefix(SCOPE, rev, "deploy");
 });
 
@@ -105,7 +102,8 @@ beforeEach(async () => {
     id: COMPILE, scopeKey: SCOPE, purpose: "deploy", sha: SHA, rev, via: "pull", attempt: 2,
     state: "compiling", compileHostId: "builder-1", compileAssignedAt: Date.now(),
   });
-  await reconcileHostSourceCompiles(db, "builder-1", Date.now());
+  for (const hostId of ["builder-1", "builder-2"]) await mutateHostDesiredStateV3(db, hostId, Date.now(), () => {});
+  await syncBuilderDesiredState(env, "builder-1", Date.now());
   const listed = await env.VM_IMAGE_REGISTRY_BUCKET.list({ prefix: "builds/" });
   if (listed.objects.length) {
     await env.VM_IMAGE_REGISTRY_BUCKET.delete(listed.objects.map((object) => object.key));
@@ -113,55 +111,9 @@ beforeEach(async () => {
   await env.VM_IMAGE_REGISTRY_BUCKET.put(`${staged}source.tar.gz`, SNAPSHOT);
 });
 
-function sourceMeta() {
-  return {
-    rev,
-    build_format_version: IMAGE_BUILD_FORMAT_VERSION,
-    catalog_channel: "candidate",
-    scenarios: [{ scenario_id: SCENARIO, arch: "x86_64", content_hash: "b".repeat(64) }],
-    course_catalog: {
-      version: 2,
-      courses: [{
-        course_id: "linux",
-        title: "Linux",
-        summary: "Linux basics",
-        body_markdown: "# Linux",
-        sequential: false,
-        lectures: [{
-          lecture_id: "01-web",
-          title: "Web",
-          summary: "A lecture",
-          body_markdown: "# Lecture",
-          category: "web",
-          tags: ["web"],
-          estimated_minutes: 10,
-          difficulty: "easy",
-          scenario_id: SCENARIO,
-        }],
-      }],
-    },
-    source: { scope: "acme", courses_root: "courses", compiler_version: SOURCE_COMPILER_VERSION },
-  };
-}
-
-/** A gzipped tar of the named files. */
-function archive(files: Record<string, string>): Uint8Array {
-  const parts: Uint8Array[] = [];
-  for (const [path, content] of Object.entries(files)) {
-    const data = new TextEncoder().encode(content);
-    const header = new Uint8Array(512);
-    const write = (offset: number, text: string) => header.set(new TextEncoder().encode(text), offset);
-    write(0, path);
-    write(100, "0000644\0");
-    write(124, `${data.byteLength.toString(8).padStart(11, "0")}\0`);
-    header.fill(0x20, 148, 156);
-    header[156] = "0".charCodeAt(0);
-    write(257, "ustar\u000000");
-    write(148, `${header.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, "0")}\0 `);
-    parts.push(header, data, new Uint8Array((512 - (data.byteLength % 512)) % 512));
-  }
-  parts.push(new Uint8Array(1024));
-  return new Uint8Array(gzipSync(Buffer.concat(parts)));
+/** A gzipped compiled bundle. */
+function compiledBundle(bundle: unknown = bundleFixture): Uint8Array {
+  return new Uint8Array(gzipSync(JSON.stringify(bundle)));
 }
 
 /**
@@ -170,21 +122,17 @@ function archive(files: Record<string, string>): Uint8Array {
  * a Content-Length, posted to the S01 path with the attempt in the query.
  */
 function builderResult(
-  input: { host?: string; attempt?: number; id?: string; meta?: Record<string, unknown> } = {},
+  input: { host?: string; attempt?: number; id?: string; rev?: string; bundle?: unknown } = {},
 ): Request {
   const boundary = "8f2c1a9e4b7d3c60-1e5a7c9b2d4f6a80-3b5d7f9a1c2e4b60-7d9f1b3a5c7e9d20";
   const text = new TextEncoder();
   const head = text.encode(
     `--${boundary}\r\nContent-Disposition: form-data; name="${SOURCE_META_FIELD}"\r\n\r\n` +
-      `${JSON.stringify({ ...sourceMeta(), ...input.meta })}\r\n` +
+      `${JSON.stringify({ rev: input.rev ?? rev })}\r\n` +
       `--${boundary}\r\nContent-Disposition: form-data; name="${SOURCE_BUNDLE_FIELD}"; filename="${rev}.tar.gz"\r\n` +
       "Content-Type: application/gzip\r\n\r\n",
   );
-  const bundle = archive({
-    "base-images.hcl": BASE_IMAGES,
-    "curriculum/catalog.json": "{}",
-    [`scenarios/${SCENARIO}/scenario.hcl`]: "scenario {}",
-  });
+  const bundle = compiledBundle(input.bundle);
   const tail = text.encode(`\r\n--${boundary}--\r\n`);
   const body = new Uint8Array(head.byteLength + bundle.byteLength + tail.byteLength);
   body.set(head);
@@ -262,7 +210,7 @@ describe("pull compile routes", () => {
       mode: "pull", boundByUserId: "owner-b", headSha: "b".repeat(40), headObservedAt: 1,
     });
     expect(await desiredCompiles("builder-1")).toEqual([
-      { compile_id: COMPILE, attempt: 2, rev, validate_only: false, arch: "x86_64" },
+      { compile_id: COMPILE, attempt: 2, rev, validate_only: false },
     ]);
 
     const response = await send(builderResult());
@@ -270,8 +218,8 @@ describe("pull compile routes", () => {
     expect(response.status, await response.clone().text()).toBe(202);
     await expect(response.json()).resolves.toEqual({ ok: true, rev, queued: 0, assigned: [] });
     expect(await row()).toMatchObject({ state: "ingesting", attempt: 2 });
-    expect(await stagedKeys()).toEqual([`${staged}bundle.tar.gz`, `${staged}meta.json`]);
-    expect(await desiredCompiles("builder-1")).toBeUndefined();
+    expect(await stagedKeys()).toEqual([`${staged}bundle.json.gz`]);
+    expect(await desiredCompiles("builder-1")).toEqual([]);
     expect(woken).toEqual(["builder-1"]);
     const poked = await db
       .select({ scopeKey: scenarioSources.scopeKey, pokedAt: scenarioSources.pokedAt })
@@ -297,40 +245,40 @@ describe("pull compile routes", () => {
   });
 
   it("settles a refused result now and frees its builder instead of waiting for the lease", async () => {
-    const response = await send(builderResult({ meta: { catalog_channel: "live" } }));
+    const response = await send(builderResult({ bundle: { ...bundleFixture, course_catalog: { version: 3, courses: [] } } }));
 
     expect(response.status).toBe(400);
-    expect(await row()).toMatchObject({ state: "invalid", detail: "invalid catalog_channel", attempt: 2 });
+    expect(await row()).toMatchObject({ state: "invalid", detail: expect.stringContaining("/course_catalog/version"), attempt: 2 });
     expect(await stagedKeys()).toEqual([]);
-    expect(await desiredCompiles("builder-1")).toBeUndefined();
+    expect(await desiredCompiles("builder-1")).toEqual([]);
     expect(woken).toEqual(["builder-1"]);
   });
 
   it("returns an outdated result to its archive like an expiry, and fails it at the attempt cap", async () => {
-    const outdated = { build_format_version: "0" };
-    await expectRefusal(await send(builderResult({ meta: outdated })), "compiler_outdated");
+    const outdated = `git-42-${SHA}-p00000000`;
+    await expectRefusal(await send(builderResult({ rev: outdated })), "compiler_outdated");
     expect(await row()).toMatchObject({ state: "fetching", attempt: 2 });
     expect(await stagedKeys()).toEqual([`${staged}source.tar.gz`]);
-    expect(await desiredCompiles("builder-1")).toBeUndefined();
+    expect(await desiredCompiles("builder-1")).toEqual([]);
 
     await drizzle(env.DB)
       .update(scenarioSourceCommits)
       .set({ state: "compiling", attempt: 3 });
-    await expectRefusal(await send(builderResult({ attempt: 3, meta: outdated })), "compiler_outdated");
+    await expectRefusal(await send(builderResult({ attempt: 3, rev: outdated })), "compiler_outdated");
     expect(await row()).toMatchObject({ state: "failed", detail: expect.stringContaining("another compiler") });
     expect(await stagedKeys()).toEqual([]);
   });
 
   it("counts outdated results from the row's last claim", async () => {
-    const outdated = { build_format_version: "0" };
+    const outdated = `git-42-${SHA}-p00000000`;
     await drizzle(env.DB).update(scenarioSourceCommits).set({ attempt: 3, claimedAttempt: 1 });
-    await expectRefusal(await send(builderResult({ attempt: 3, meta: outdated })), "compiler_outdated");
+    await expectRefusal(await send(builderResult({ attempt: 3, rev: outdated })), "compiler_outdated");
     expect(await row()).toMatchObject({ state: "fetching", attempt: 3 });
 
     await drizzle(env.DB)
       .update(scenarioSourceCommits)
       .set({ state: "compiling", attempt: 4 });
-    await expectRefusal(await send(builderResult({ attempt: 4, meta: outdated })), "compiler_outdated");
+    await expectRefusal(await send(builderResult({ attempt: 4, rev: outdated })), "compiler_outdated");
     expect(await row()).toMatchObject({ state: "failed", detail: expect.stringContaining("another compiler") });
   });
 
@@ -347,7 +295,7 @@ describe("pull compile routes", () => {
     expect(commit).toMatchObject({ state: "invalid", detail: "The repository did not compile." });
     expect(JSON.parse(commit?.diagnosticsJson ?? "null")).toEqual([first, filler]);
     expect(await stagedKeys()).toEqual([]);
-    expect(await desiredCompiles("builder-1")).toBeUndefined();
+    expect(await desiredCompiles("builder-1")).toEqual([]);
     expect(woken).toEqual(["builder-1"]);
     await expectRefusal(await send(builderFailure([first])), "fenced");
   });

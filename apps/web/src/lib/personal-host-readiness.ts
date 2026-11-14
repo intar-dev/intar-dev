@@ -1,18 +1,7 @@
 import { strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
-import type { HostStateReportV2 } from "@/generated/bridge";
 import type { HostStateReportV3 } from "@/generated/contracts/bridge-message-v9";
-import { hostSupportsRunCliV1, hostSupportsSpeedRedesign } from "@/lib/scenario-hosts";
 
-export function personalHostReportReady(report: HostStateReportV2 | null, requireRunCli: boolean): boolean {
-  const cpu = strictCpuCapacity(report);
-  return !!report && report.relay_connected === true && !!cpu && cpu.schedulableCpuMillis > 0 &&
-    report.capabilities.arch === "x86_64" &&
-    report.capacity.total_cpu_millis >= 2000 &&
-    report.capacity.memory_total_mib >= 4096 &&
-    hostSupportsSpeedRedesign(report) && (!requireRunCli || hostSupportsRunCliV1(report));
-}
-
-/** A bridge 9 report is Ready on the same capacity floor, from its hardware facts. */
+/** A host report is Ready on a capacity floor, from its hardware facts. */
 export function hostReportV3Ready(report: HostStateReportV3 | null): boolean {
   const cpu = strictCpuCapacity(report);
   return !!report && report.relay_connected === true && !!cpu && cpu.schedulableCpuMillis > 0 &&
@@ -22,18 +11,16 @@ export function hostReportV3Ready(report: HostStateReportV3 | null): boolean {
 
 /**
  * Persist readiness and placement together. Admission cannot see Ready with cloud placement.
- * A bridge 9 report (V3) names a VM by its machine name; its host-local id is
- * the name and the run id.
+ * A report names a VM by its machine name; its host-local id is the name and
+ * the run id.
  */
 export async function persistHostReport(input: {
   d1: D1Database; hostId: string; sessionId: string; credentialGeneration: number;
-  report: HostStateReportV2 | HostStateReportV3; now: number; requireRunCli: boolean;
+  report: HostStateReportV3; now: number;
 }): Promise<boolean> {
   const { d1, hostId, sessionId, credentialGeneration, report, now } = input;
-  const v2 = "capabilities" in report;
-  const vmName = v2 ? "json_extract(reported.value, '$.vm_name')"
-    : "json_extract(reported.value, '$.name') || '-' || json_extract(reported.value, '$.run_id')";
-  const ready = (v2 ? personalHostReportReady(report, input.requireRunCli) : hostReportV3Ready(report)) ? 1 : 0;
+  const vmName = "json_extract(reported.value, '$.name') || '-' || json_extract(reported.value, '$.run_id')";
+  const ready = hostReportV3Ready(report) ? 1 : 0;
   if (report.host_id !== hostId) return false;
   const currentHost = `id = ?1 AND active_session_id = ?2 AND credential_generation = ?3 AND disabled = 0`;
   // Reports include stopping VMs after access is revoked. Check their identity

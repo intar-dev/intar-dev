@@ -8,7 +8,6 @@ import {
 } from "@/control-plane/host-cpu-reservations";
 import { readKinoPin } from "@/control-plane/image-registry/push";
 import { agentHosts, hostActualState, hostCpuReservations } from "@/db/schema";
-import type { HostStateReportV2 } from "@/generated/bridge";
 import type {
   DesiredVmV3,
   HostDesiredStateV3,
@@ -19,7 +18,6 @@ import { AppError, appError } from "@/lib/app-error";
 import type { assertCourseScenarioStartAllowed } from "@/lib/course-catalogs";
 import {
   checkedHostDesiredStateV3,
-  isHostDesiredStateV3,
   loadStoredHostDesiredState,
   markStoredDesiredVmsAbsent,
 } from "@/lib/desired-state-store";
@@ -27,7 +25,7 @@ import { hostHealth } from "@/lib/host-health";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { createAppId } from "@/lib/id";
 import { metalPlacementForUser } from "@/lib/metal-placement";
-import { preparationAuthoritySql } from "@/lib/personal-image-access";
+import { PERSONAL_IMAGE_PREPARATION_TTL_MS, preparationAuthoritySql } from "@/lib/personal-image-access";
 import { hostReportV3Ready } from "@/lib/personal-host-readiness";
 import { assertAgentKvmRunsOpen } from "@/lib/run-admission-gate";
 import { revisionVmId } from "@/lib/run-lifecycle";
@@ -53,7 +51,6 @@ import {
   generateScenarioRunSshKeyDraft,
   prepareScenarioRunSshKeyRows,
 } from "@/lib/scenario-run-ssh-keys";
-import { PERSONAL_IMAGE_PREPARATION_TTL_MS } from "@/lib/personal-image-preparation";
 import type { AdmissionContentAccess } from "./admission-guards";
 import {
   ADMISSION_CAS_ATTEMPTS,
@@ -257,14 +254,15 @@ export async function admitRevisionRun(context: {
     tasks: initialRunTasks(doc.tasks),
   });
   // The run's immutable snapshot per machine: what it boots, with which
-  // spec and Kino. The VM mirror row keeps it as the image key.
+  // spec and Kino. The VM mirror row keeps the three digests.
   const runtimeVms: Array<RuntimeVmSpec & { runtimeVmId: string }> = machines.map(({ machine, ordinal, vmId, runtimeVmName, image }) => ({
     runtimeVmId: createAppId(),
     vmId,
     ordinal,
     runtimeVmName,
-    imageKey: { build_key: machine.build_key, spec: verifyScopeKey ? machine.verify_spec : machine.spec, kino: pin.current },
-    imageSha256: image,
+    imageDigest: image,
+    specDigest: verifyScopeKey ? machine.verify_spec : machine.spec,
+    kinoDigest: pin.current,
     cpuMillis: machine.cpu_millis,
     memoryMib: machine.memory_mib,
     diskMib: machine.disk_mib,
@@ -407,8 +405,6 @@ export async function admitRevisionRun(context: {
       cpuMillis,
       reservationResources,
       leaseExpiresAt,
-      candidateProof: null,
-      sourceAnchor: null,
       revisionAnchor: verifyScopeKey ? null : revision.rev,
       verifyScopeKey,
       ...(input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
@@ -585,7 +581,7 @@ async function eligibleRevisionHosts(input: {
       (row.scope !== "platform" && !hostReportV3Ready(report))
     ) continue;
     const desired = await loadStoredHostDesiredState(db, row.id, input.now);
-    if (!isHostDesiredStateV3(desired) || desired.kino_pin !== input.kino) continue;
+    if (desired.kino_pin !== input.kino) continue;
     candidates.push({
       hostId: row.id,
       scope: row.scope,
@@ -615,7 +611,6 @@ async function planRevisionHost(input: {
   const db = drizzle(env.DB);
   for (const candidate of input.candidates) {
     const current = await loadStoredHostDesiredState(db, candidate.hostId, input.now);
-    if (!isHostDesiredStateV3(current)) continue;
     const reservations = await db
       .select({ runId: hostCpuReservations.runId, cpuMillis: hostCpuReservations.cpuMillis, state: hostCpuReservations.state })
       .from(hostCpuReservations)
@@ -625,7 +620,7 @@ async function planRevisionHost(input: {
     const snapshot = await loadActiveRuntimeResourceSnapshot(input.now, [candidate.hostId]);
     const available = availableRuntimeHostResources({
       hostId: candidate.hostId,
-      report: capacityReportView(candidate.report),
+      report: candidate.report,
       snapshot,
     });
     if (!available || !runtimeResourcesFit(input.reservationResources, available)) continue;
@@ -655,14 +650,6 @@ async function planRevisionHost(input: {
   throw appError(409, "scenario_host_capacity_contended", "no scenario host has room for this run; retry the start");
 }
 
-/** A bridge 9 report as the shared capacity reader names its VMs. */
-function capacityReportView(report: HostStateReportV3): HostStateReportV2 {
-  return {
-    ...report,
-    vms: report.vms.map((vm) => ({ ...vm, vm_name: revisionVmId(vm.name, vm.run_id) })),
-  } as unknown as HostStateReportV2;
-}
-
 /**
  * On a personal or organization host, grants the run's images before the
  * run exists, as the catalog start's preparation does: the preparation row
@@ -681,7 +668,6 @@ async function prepareRevisionImages(input: {
   if (!host || host.scope === "platform") return;
   const db = drizzle(env.DB);
   const current = await loadStoredHostDesiredState(db, host.hostId, input.now);
-  if (!isHostDesiredStateV3(current)) return;
   const others = await env.DB.prepare(`SELECT images_json FROM personal_image_preparations prep
       WHERE prep.host_id = ?1 AND prep.user_id <> ?2 AND ${preparationAuthoritySql()}`)
     .bind(host.hostId, input.access.userId).all<{ images_json: string }>();

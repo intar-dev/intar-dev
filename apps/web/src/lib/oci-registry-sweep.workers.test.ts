@@ -164,9 +164,9 @@ const ROOTS: Array<[string, () => Promise<{ keep: string[]; pins?: string }>]> =
   ["an active run's snapshot", async () => {
     const [vmImage, pin, spec] = [await image(), await kino(), await specBlob(`run-${n++}`)];
     await seedExecution("exec-1", "archiving");
-    await env.DB.prepare(`INSERT INTO runtime_vms (id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json, image_sha256,
-      cpu_millis, memory_mib, disk_mib) VALUES ('rv-1', 'exec-1', 'vm-1', 0, 'web', ?1, ?2, 1000, 512, 4096)`)
-      .bind(JSON.stringify({ build_key: `sha256:${"b".repeat(64)}`, spec, kino: pin }), vmImage).run();
+    await env.DB.prepare(`INSERT INTO runtime_vms (id, execution_id, vm_id, ordinal, runtime_vm_name, image_digest, spec_digest,
+      kino_digest, cpu_millis, memory_mib, disk_mib) VALUES ('rv-1', 'exec-1', 'vm-1', 0, 'web', ?1, ?2, ?3, 1000, 512, 4096)`)
+      .bind(vmImage, spec, pin).run();
     return { keep: [...await closure(vmImage), ...await closure(pin), key(spec)] };
   }],
   ["a bridge 9 desired state", async () => {
@@ -428,9 +428,9 @@ describe("the OCI sweep", () => {
     // lease refuses until the pass ends.
     const vmImage = await image();
     await seedExecution("exec-1", "ready");
-    await env.DB.prepare(`INSERT INTO runtime_vms (id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json, image_sha256,
-      cpu_millis, memory_mib, disk_mib) VALUES ('rv-1', 'exec-1', 'vm-1', 0, 'web', ?1, ?2, 1000, 512, 4096)`)
-      .bind(JSON.stringify({ build_key: `sha256:${"b".repeat(64)}`, spec: `sha256:${"9".repeat(64)}`, kino: vmImage }), vmImage).run();
+    await env.DB.prepare(`INSERT INTO runtime_vms (id, execution_id, vm_id, ordinal, runtime_vm_name, image_digest, spec_digest,
+      kino_digest, cpu_millis, memory_mib, disk_mib) VALUES ('rv-1', 'exec-1', 'vm-1', 0, 'web', ?1, ?2, ?1, 1000, 512, 4096)`)
+      .bind(vmImage, `sha256:${"9".repeat(64)}`).run();
     await bucket.put(`oci/sha256/${"9".repeat(64)}`, "spec");
     const keep = await closure(vmImage);
     let writerDuringPass: boolean | null = null;
@@ -512,18 +512,18 @@ describe("the OCI sweep", () => {
     });
 
     const reported = await runCleanup(child("report-only"), { source: "rpc" });
-    expect(reported.oci?.status).toBe("report-only");
+    expect(reported.status).toBe("report-only");
     // The live clock is inside the age guard of everything stored here.
-    expect(reported.oci?.report.youngObjects).toBe(orphanKeys.length);
+    expect(reported.result?.youngObjects).toBe(orphanKeys.length);
     expect(await present(orphanKeys)).toBe(true);
 
     const planOnly = await runCleanup(child("delete"), { source: "rpc", planOnly: true });
-    expect(planOnly.oci?.report.mode).toBe("report-only");
+    expect(planOnly.result?.mode).toBe("report-only");
     expect(await present(orphanKeys)).toBe(true);
 
     const deleting = await runCleanup(child("delete"), { source: "rpc" });
-    expect(deleting.oci?.report.mode).toBe("delete");
-    expect(deleting.oci?.report.youngObjects).toBe(orphanKeys.length);
+    expect(deleting.result?.mode).toBe("delete");
+    expect(deleting.result?.youngObjects).toBe(orphanKeys.length);
     expect(await present(orphanKeys)).toBe(true);
   });
 });

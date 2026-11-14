@@ -137,9 +137,9 @@ desired AS (
 desired_vms AS (
   SELECT desired.host_id, vm.value AS v FROM desired, json_each(desired.doc_json, '$.vms') vm),
 run_vms AS (
-  SELECT vm.execution_id, vm.image_sha256, vm.image_key_json FROM runtime_vms vm
+  SELECT vm.execution_id, vm.image_digest, vm.spec_digest, vm.kino_digest FROM runtime_vms vm
     JOIN runtime_executions execution ON execution.id = vm.execution_id
-   WHERE execution.state IN (${ACTIVE_EXECUTIONS}) AND json_type(vm.image_key_json, '$.kino') IS NOT NULL),
+   WHERE execution.state IN (${ACTIVE_EXECUTIONS})),
 revision_roots(kind, digest, source) AS (
   SELECT 'manifest', json_extract(m, '$.image_digest'), 'revision ' || source FROM machines
   UNION ALL SELECT 'blob', json_extract(m, '$.spec'), 'revision ' || source FROM machines
@@ -149,9 +149,9 @@ revision_roots(kind, digest, source) AS (
 activity_roots(kind, digest, source) AS (
   SELECT 'manifest', image_digest, 'build ' || build_key FROM machine_builds
    WHERE state IN ('queued', 'assigned', 'building') OR updated_at >= ?1
-  UNION ALL SELECT 'manifest', image_sha256, 'run ' || execution_id FROM run_vms
-  UNION ALL SELECT 'blob', json_extract(image_key_json, '$.spec'), 'run ' || execution_id FROM run_vms
-  UNION ALL SELECT 'manifest', json_extract(image_key_json, '$.kino'), 'run ' || execution_id FROM run_vms
+  UNION ALL SELECT 'manifest', image_digest, 'run ' || execution_id FROM run_vms
+  UNION ALL SELECT 'blob', spec_digest, 'run ' || execution_id FROM run_vms
+  UNION ALL SELECT 'manifest', kino_digest, 'run ' || execution_id FROM run_vms
   UNION ALL SELECT 'manifest', image.value, 'preparation ' || prep.user_id
     FROM personal_image_preparations prep, json_each(prep.images_json) image
    WHERE prep.expires_at >= ?1 AND image.type = 'text'),

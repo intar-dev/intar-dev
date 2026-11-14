@@ -1,7 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { resetD1Database } from "@/test/d1-migrations";
-import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import {
   REGISTRY_ADMISSION_KEY,
   REGISTRY_CLOSED_SESSION_RETAIN_MS,
@@ -396,127 +395,6 @@ describe("image registry admission", () => {
     expect((await readRegistryIdleState(env)).idle).toBe(true);
   });
 
-  it("requires a valid owned open session on the publish route", async () => {
-    // The route must judge the session itself, not the presence of the header.
-    await setRegistryEnforcement(env, "enforce");
-
-    const withoutSession = await publishRequest();
-    expect(withoutSession.status).toBe(400);
-    await expect(withoutSession.json()).resolves.toMatchObject({
-      code: "registry_session_required",
-    });
-
-    const unknown = await publishRequest("not-a-session");
-    expect(unknown.status).toBe(404);
-    await expect(unknown.json()).resolves.toMatchObject({
-      code: "registry_session_unknown",
-    });
-
-    // A session that belongs to another credential is not this caller's session.
-    const foreign = await createRegistryUploadSession(env, {
-      owner: { kind: "builder", id: "builder-other" },
-    });
-    expect(foreign.ok).toBe(true);
-    if (!foreign.ok) return;
-    const borrowed = await publishRequest(foreign.sessionId);
-    expect(borrowed.status).toBe(403);
-    await expect(borrowed.json()).resolves.toMatchObject({
-      code: "registry_session_owner_mismatch",
-    });
-
-    const expiring = await createRegistryUploadSession(env, {
-      owner: { kind: "publish_token", id: "publish-token" },
-    });
-    expect(expiring.ok).toBe(true);
-    if (!expiring.ok) return;
-    await env.DB.prepare(
-      "UPDATE image_registry_upload_sessions SET expires_at = ?1 WHERE id = ?2",
-    )
-      .bind(Date.now() - 1, expiring.sessionId)
-      .run();
-    const expired = await publishRequest(expiring.sessionId);
-    expect(expired.status).toBe(409);
-    await expect(expired.json()).resolves.toMatchObject({
-      code: "registry_session_superseded",
-    });
-
-    const abandoned = await createRegistryUploadSession(env, {
-      owner: { kind: "publish_token", id: "publish-token" },
-    });
-    expect(abandoned.ok).toBe(true);
-    if (!abandoned.ok) return;
-    await completeRegistryUploadSession(env, {
-      owner: { kind: "publish_token", id: "publish-token" },
-      sessionId: abandoned.sessionId,
-      outcome: "abandoned",
-    });
-    const closed = await publishRequest(abandoned.sessionId);
-    expect(closed.status).toBe(409);
-    await expect(closed.json()).resolves.toMatchObject({
-      code: "registry_session_closed",
-    });
-
-    // An owned open session passes admission and reaches the handler, which
-    // then rejects this session-less request for its own reason. That proves the
-    // route admitted it on the session and not on the header.
-    const open = await createRegistryUploadSession(env, {
-      owner: { kind: "publish_token", id: "publish-token" },
-    });
-    expect(open.ok).toBe(true);
-    if (!open.ok) return;
-    const reached = await publishRequest(open.sessionId);
-    expect(reached.status).toBe(400);
-    await expect(reached.json()).resolves.toMatchObject({
-      error: "multipart form data is required",
-    });
-  });
-
-  it("refuses a token publish on the live route while a sweep holds the gate", async () => {
-    // The live route is what matters: a raw handler call proves nothing about the
-    // router. A sweep can only start when no session is open, so during a sweep a
-    // client cannot obtain one, and the route must still refuse the token.
-    const sweep = await acquireRegistrySweep(env, { owner: "collector-a" });
-    expect(sweep.ok).toBe(true);
-
-    const withoutSession = await publishRequest();
-    expect(withoutSession.status).toBe(409);
-    await expect(withoutSession.json()).resolves.toMatchObject({
-      code: "registry_sweep_in_progress",
-    });
-
-    // A header value is not protection either: a stale session id gets the same
-    // refusal, because the sweep outranks whatever the request carries.
-    const withStaleSession = await publishRequest("stale-session-id");
-    expect(withStaleSession.status).toBe(409);
-    await expect(withStaleSession.json()).resolves.toMatchObject({
-      code: "registry_sweep_in_progress",
-    });
-
-    // Neither refusal left a writer row behind.
-    expect(await writerRowIds()).toEqual([]);
-
-    if (!sweep.ok) return;
-    await finishRegistrySweep(env, {
-      sweepToken: sweep.lease.sweepToken,
-      outcome: "completed",
-    });
-
-    // With the sweep finished, a session-carrying publish is admitted again and
-    // reaches the handler, which rejects the empty body for its own reason. That
-    // is the proof the route judges admission rather than the request path.
-    const session = await createRegistryUploadSession(env, {
-      owner: { kind: "publish_token", id: "publish-token" },
-      intent: "image_publish",
-    });
-    expect(session.ok).toBe(true);
-    if (!session.ok) return;
-    const afterSweep = await publishRequest(session.sessionId);
-    expect(afterSweep.status).toBe(400);
-    await expect(afterSweep.json()).resolves.toMatchObject({
-      error: "multipart form data is required",
-    });
-  });
-
   it("keeps a publish write protected while its own session closes", async () => {
     // This is the state a publish is in while it writes: the handler takes this
     // lease before it stores the first object.
@@ -591,20 +469,6 @@ async function writerRowIds(): Promise<string[]> {
     "SELECT id FROM image_registry_operation_writers ORDER BY created_at",
   ).all<{ id: string }>();
   return (rows.results ?? []).map((row) => row.id);
-}
-
-async function publishRequest(sessionId?: string): Promise<Response> {
-  const headers = new Headers({ authorization: `Bearer ${PUBLISH_TOKEN}` });
-  if (sessionId) headers.set(REGISTRY_SESSION_HEADER, sessionId);
-  const response = await handleImageRegistryRequest(
-    new Request("https://intar.test/registry/v1/publish", {
-      method: "POST",
-      headers,
-    }),
-    env,
-  );
-  if (!response) throw new Error("publish route did not match");
-  return response;
 }
 
 async function sessionRowCount(): Promise<number> {

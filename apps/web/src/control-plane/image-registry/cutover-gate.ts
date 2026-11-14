@@ -5,7 +5,6 @@ import {
   IMAGE_CUTOVER_GATE,
   IMAGE_CUTOVER_WIPED,
   isCutoverDrained,
-  promotionHoldActive,
 } from "@/lib/run-admission-gate";
 import { hasRegistryPublishToken, isRecord, jsonResponse } from "./shared";
 
@@ -54,9 +53,9 @@ export async function handleImageCutoverGate(
   )
     .bind(IMAGE_CUTOVER_GATE)
     .first<{ state: "open" | "drained" | "wiped"; updated_at: number }>();
-  // `platform` is image-ops' contract: it promotes guest tools on platform
-  // hosts only. The cutover unschedules every host, so its runbook waits on
-  // `all_scopes`, which also counts organization, personal and unscoped hosts.
+  // `platform` is image-ops' contract: it counts platform hosts only. The
+  // cutover unschedules every host, so its runbook waits on `all_scopes`,
+  // which also counts organization, personal and unscoped hosts.
   const active = await env.DB.prepare(
     `SELECT COALESCE(SUM(host.scope = 'platform'), 0) AS platform, COUNT(*) AS all_scopes
        FROM host_desired_state
@@ -64,8 +63,6 @@ export async function handleImageCutoverGate(
        JOIN json_each(host_desired_state.doc_json, '$.vms') AS vm
       WHERE json_extract(vm.value, '$.desired_phase') = 'running'`,
   ).first<{ platform: number; all_scopes: number }>();
-  // `state` stays the operators' drain; Intar's own hold is reported apart,
-  // so a runbook sees a promotion in progress before it acts.
   return jsonResponse({
     ok: true,
     // `wiped` is drained to every reader of `state` (image-ops checks it).
@@ -74,6 +71,5 @@ export async function handleImageCutoverGate(
     active_desired_vms: active?.platform ?? 0,
     all_scopes_active_desired_vms: active?.all_scopes ?? 0,
     updated_at_unix_ms: gate?.updated_at ?? null,
-    promotion_hold: (await promotionHoldActive(env.DB)) ? "drained" : "open",
   });
 }

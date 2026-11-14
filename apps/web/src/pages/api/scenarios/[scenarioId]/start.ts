@@ -1,10 +1,6 @@
 import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
-import {
-  isSafeBuildId,
-  isSafeBundleRev,
-} from "@/control-plane/image-registry/shared";
 import { isRevisionScenarioId, isSafeScenarioId } from "@/lib/scenario-id";
 import {
   courseLocationFromRunSnapshot,
@@ -21,8 +17,6 @@ const PLAY_REF = /^[A-Za-z0-9._-]{1,64}$/;
 interface StartScenarioBody {
   hostId?: unknown;
   organizationId?: unknown;
-  candidateRevision?: unknown;
-  candidateBuildId?: unknown;
   launchSource?: unknown;
   ref?: unknown;
 }
@@ -69,8 +63,6 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
 
   let hostId: string | undefined;
   let organizationId: string | null = null;
-  let candidateRevision: string | undefined;
-  let candidateBuildId: string | undefined;
   let play = false;
   let ref: string | undefined;
   if (request.headers.get("content-type")?.includes("application/json")) {
@@ -107,24 +99,6 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
         { status: 400 },
       );
     }
-    if (
-      body.candidateRevision !== undefined &&
-      typeof body.candidateRevision !== "string"
-    ) {
-      return jsonResponse(
-        { error: "candidateRevision must be a string" },
-        { status: 400 },
-      );
-    }
-    if (
-      body.candidateBuildId !== undefined &&
-      typeof body.candidateBuildId !== "string"
-    ) {
-      return jsonResponse(
-        { error: "candidateBuildId must be a string" },
-        { status: 400 },
-      );
-    }
     if (body.launchSource !== undefined && body.launchSource !== "play") {
       return jsonResponse({ error: "launchSource must be play", code: "invalid_launch_source" }, { status: 400 });
     }
@@ -138,7 +112,7 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
       }
       ref = body.ref;
     }
-    if (play && (body.organizationId != null || body.hostId !== undefined || body.candidateRevision !== undefined || body.candidateBuildId !== undefined)) {
+    if (play && (body.organizationId != null || body.hostId !== undefined)) {
       return jsonResponse(
         { error: "a play start takes only a ref", code: "invalid_play_start" },
         { status: 400 },
@@ -167,34 +141,6 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     if (hostId && !authz.context.isAdmin) {
       return jsonResponse({ error: "admin required" }, { status: 403 });
     }
-    if (
-      body.candidateRevision !== undefined ||
-      body.candidateBuildId !== undefined
-    ) {
-      if (
-        typeof body.candidateRevision !== "string" ||
-        typeof body.candidateBuildId !== "string"
-      ) {
-        return jsonResponse(
-          { error: "candidateRevision and candidateBuildId are required" },
-          { status: 400 },
-        );
-      }
-      candidateRevision = body.candidateRevision.trim();
-      candidateBuildId = body.candidateBuildId.trim();
-      if (
-        !isSafeBundleRev(candidateRevision) ||
-        !isSafeBuildId(candidateBuildId)
-      ) {
-        return jsonResponse(
-          { error: "candidateRevision or candidateBuildId is invalid" },
-          { status: 400 },
-        );
-      }
-      if (!authz.context.isAdmin) {
-        return jsonResponse({ error: "admin required" }, { status: 403 });
-      }
-    }
   }
 
   try {
@@ -204,9 +150,6 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
       idempotencyKey,
       ...(organizationId ? { organizationId } : {}),
       ...(hostId ? { hostId } : {}),
-      ...(candidateRevision && candidateBuildId
-        ? { candidateRevision, candidateBuildId }
-        : {}),
       ...(authz.context.isAdmin ? { allowDrainedAdminProof: true } : {}),
       ...(authz.context.isAdmin && !play ? { allowSequenceBypass: true } : {}),
       ...(play ? { launchSource: "play" as const } : {}),

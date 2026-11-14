@@ -423,15 +423,15 @@ function pendingRunHasDurableDesiredVms(input: {
   const desiredNames = new Set<string>();
   for (const vm of desiredVms) {
     if (
-      !projectedNames.has(vm.vm_name) ||
-      desiredNames.has(vm.vm_name) ||
-      !Number.isSafeInteger(vm.resources.cpu_millis) ||
-      vm.resources.cpu_millis <= 0
+      !projectedNames.has(vm.vm_id) ||
+      desiredNames.has(vm.vm_id) ||
+      !Number.isSafeInteger(vm.cpu_millis) ||
+      vm.cpu_millis <= 0
     ) {
       return false;
     }
-    desiredNames.add(vm.vm_name);
-    cpuMillis += vm.resources.cpu_millis;
+    desiredNames.add(vm.vm_id);
+    cpuMillis += vm.cpu_millis;
     if (!Number.isSafeInteger(cpuMillis)) return false;
   }
   return cpuMillis === input.reservation.cpuMillis;

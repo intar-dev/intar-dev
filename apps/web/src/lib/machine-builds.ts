@@ -20,16 +20,17 @@ import type {
   DesiredSourceCompileV2,
 } from "@/generated/contracts/bridge-message-v9";
 import type { ScenarioRevisionV1 } from "@/generated/contracts/scenario-revision-v1";
-import {
-  BUILD_REPORT_STALE_AFTER_MS,
-  BUILDER_BUILD_SLOTS,
-  BUILDER_REASSIGN_AFTER_MS,
-} from "@/lib/build-scheduler-core";
 import { HOST_DESIRED_STATE_SCHEMA_VERSION_V3, mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
+import { HOST_DEGRADED_AFTER_MS } from "@/lib/host-health";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { canonicalJson, sha256Digest } from "@/lib/scenario-contract/canonical-json";
 
 export const MAX_MACHINE_BUILD_ATTEMPTS = 3;
+/** A build or compile whose builder stayed away this long is taken back. */
+export const BUILDER_REASSIGN_AFTER_MS = 10 * 60 * 1000;
+const BUILD_REPORT_STALE_AFTER_MS = 30 * 60 * 1000;
+/** intar-builder's maximum build workers (main.rs validate_job_config). */
+const BUILDER_BUILD_SLOTS = 2;
 /** What a learner or tenant reads about a revision whose image failed. */
 export const REVISION_BUILD_FAILURE = "An image of this scenario failed to build.";
 const MAX_BUILD_ERROR_CHARS = 4096;
@@ -106,6 +107,26 @@ export async function syncBuilderDesiredState(env: Env, hostId: string, now: num
     draft.source_compiles = wantedCompiles;
   });
   return changed;
+}
+
+/**
+ * Connected, healthy platform builders on this source compile digest with no
+ * compile in flight, least loaded first. A builder whose last report predates
+ * its hello is not counted as connected yet.
+ */
+export async function freeSourceCompileBuilders(env: Env, now: number, compileDigest: string): Promise<string[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT host.id FROM agent_hosts host JOIN host_actual_state state ON state.host_id = host.id
+      WHERE host.role = 'builder' AND host.scope = 'platform' AND host.disabled = 0
+        AND host.connected = 1 AND host.active_session_id IS NOT NULL
+        AND state.updated_at >= host.last_client_hello_at AND state.updated_at >= ?2
+        AND json_extract(host.hello_json, '$.builder.source_compile_digest') = ?1
+        AND NOT EXISTS (SELECT 1 FROM scenario_source_commits busy
+          WHERE busy.compile_host_id = host.id AND busy.state = 'compiling')
+      ORDER BY (SELECT count(*) FROM machine_builds build
+          WHERE build.host_id = host.id AND build.state IN ('assigned', 'building')), host.id`,
+  ).bind(compileDigest, now - HOST_DEGRADED_AFTER_MS).all<{ id: string }>();
+  return results.map((row) => row.id);
 }
 
 /**

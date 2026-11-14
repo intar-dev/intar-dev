@@ -6,8 +6,6 @@ import {
   agentHosts,
   bundles,
   hostEnrollments,
-  imageBuildBundles,
-  imageBuilds,
   member,
   organization,
   organizationMemberRemovals,
@@ -19,7 +17,6 @@ import {
   scenarioSources,
   ssoProvider,
   user,
-  vmScenarios,
 } from "@/db/schema";
 import { activeAdminSql } from "@/lib/account-access";
 import { signOutQueries } from "@/lib/account-sign-out";
@@ -958,21 +955,6 @@ async function organizationHasOwnedResources(
       .select({ id: ssoProvider.id })
       .from(ssoProvider)
       .where(eq(ssoProvider.organizationId, organizationId))
-      .limit(1),
-    db
-      .select({ id: vmScenarios.scenarioId })
-      .from(vmScenarios)
-      .where(eq(vmScenarios.organizationId, organizationId))
-      .limit(1),
-    db
-      .select({ id: imageBuildBundles.rev })
-      .from(imageBuildBundles)
-      .where(eq(imageBuildBundles.organizationId, organizationId))
-      .limit(1),
-    db
-      .select({ id: imageBuilds.id })
-      .from(imageBuilds)
-      .where(eq(imageBuilds.organizationId, organizationId))
       .limit(1),
     db
       .select({ id: scenarios.id })

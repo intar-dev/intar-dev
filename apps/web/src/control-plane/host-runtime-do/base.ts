@@ -11,7 +11,6 @@ import {
   recomputeRunState,
   type RunStateDocument,
 } from "@/lib/run-state";
-import { recordProbeTransitions } from "@/lib/run-probe-history";
 import { RUN_STATUS_PING, RUN_STATUS_PONG } from "@/lib/run-status-heartbeat";
 import { nextSolvedAt } from "@/lib/scenario-run-outcome";
 import {
@@ -21,11 +20,8 @@ import {
 import { recordLinkedCourseUnitCompletionForRun } from "@/lib/course-catalogs";
 import {
   loadStoredHostDesiredState,
-  mutateStoredHostDesiredState,
-  type StoredHostDesiredState,
 } from "@/lib/desired-state-store";
-import { removeDesiredBuild } from "@/lib/desired-state";
-import type { HostDesiredStateV2 } from "@/generated/bridge";
+import type { HostDesiredStateV3 } from "@/generated/contracts/bridge-message-v9";
 
 export const HOST_BUILD_MAINTENANCE_INTERVAL_MS = 60_000;
 export const DESIRED_VERSION_LAG_REPUSH_AFTER_MS = 10_000;
@@ -42,13 +38,12 @@ export interface SocketAttachment {
   hostId: string;
   credentialGeneration: number;
   /** Host scope admitted at connect; every later admission check requires the host to still have it. */
-  scope: HostDesiredStateV2["scope"];
+  scope: HostDesiredStateV3["scope"];
   organizationId?: string | null;
   sessionId: string | null;
   connectedAt: number;
   helloReceived: boolean;
-  /** "v6" speaks bridge 8, "v9" bridge 9. */
-  bridgeProtocol: "v6" | "v9" | null;
+  bridgeProtocol: "v9" | null;
   /** The guest contract a bridge 9 hello stated. */
   guestContract?: number | null;
   lastDesiredVersionSent: number | null;
@@ -309,12 +304,6 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         });
       }
 
-      await recordProbeTransitions(db, {
-        runId,
-        current,
-        next: merged,
-        observedAt: now,
-      });
       if (!current.canOpenTerminal && merged.canOpenTerminal) {
         logLifecycleTiming({
           metric: "accepted_to_terminal_ready",
@@ -338,27 +327,6 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       return { kind: "updated", revision: now };
     }
     throw new Error(`run projection CAS did not converge for ${runId}`);
-  }
-
-  protected async removeTerminalBuildsFromDesiredState(
-    hostId: string,
-    buildIds: string[],
-    nowUnixMs: number,
-  ): Promise<void> {
-    if (!buildIds.length) {
-      return;
-    }
-
-    await mutateStoredHostDesiredState(
-      drizzle(this.env.DB),
-      hostId,
-      nowUnixMs,
-      (draft) => {
-        for (const buildId of buildIds) {
-          removeDesiredBuild(draft, { buildId });
-        }
-      },
-    );
   }
 
   protected async scheduleNextAlarm(hostId: string): Promise<void> {
@@ -657,7 +625,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
             ? Math.floor(parsed.connectedAt)
             : 0,
         helloReceived: Boolean(parsed.helloReceived),
-        bridgeProtocol: parsed.bridgeProtocol === "v6" || parsed.bridgeProtocol === "v9" ? parsed.bridgeProtocol : null,
+        bridgeProtocol: parsed.bridgeProtocol === "v9" ? "v9" : null,
         guestContract: typeof parsed.guestContract === "number" && Number.isSafeInteger(parsed.guestContract) ? parsed.guestContract : null,
         lastDesiredVersionSent:
           typeof parsed.lastDesiredVersionSent === "number" &&
@@ -712,7 +680,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   protected async loadDesiredVersionLag(
     hostId: string,
     nowUnixMs: number,
-    desiredState?: StoredHostDesiredState,
+    desiredState?: HostDesiredStateV3,
   ): Promise<{
     lagging: boolean;
     desiredVersion: number;

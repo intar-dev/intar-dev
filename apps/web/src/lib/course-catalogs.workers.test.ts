@@ -1,42 +1,34 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   agentHosts,
   courseUnitCompletions,
   runtimeOperationGates,
-  imageBuilds,
   member,
   organization,
   courseCatalogs,
+  scenarioRevisions,
   scenarioRuns,
+  scenarios,
   user,
-  vmScenarios,
   type CourseCatalogCourseV2,
   type CourseCatalogLectureV2,
   type CourseCatalogSnapshotV2,
 } from "@/db/schema";
-import type { ScenarioManifestV5 } from "@/generated/catalog";
-import type { ScenarioBriefing } from "@/lib/scenario-model";
 import {
-  applyLectureBriefingPresentation,
-  applyLecturePresentation,
   assertCourseScenarioStartAllowed,
-  backfillCourseUnitCompletions,
   completePureCourseLectureForUser,
-  findCourseLecturePresentation,
   listCourseCatalogForUser,
   loadCourseLectureDetailForUser,
   recordLinkedCourseUnitCompletionForRun,
   resolveCourseLectureForScenario,
-  syncCourseCatalogSnapshot,
-  validateCourseCatalogReferences,
 } from "@/lib/course-catalogs";
 import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
+import { revisionDoc } from "@/lib/scenario-runs/revision-test-fixtures";
 
 const learnerId = "learner";
 
@@ -69,225 +61,17 @@ describe("V2 course catalogs", () => {
     })).resolves.toEqual({ courses: [], capacityPressure: 100, resourceCapacity });
   });
 
-  it("fully replaces a scope snapshot and backfills its first linked unit", async () => {
-    const db = drizzle(env.DB);
-    await seedLearnerAndHost();
-    await insertOrganization("org-a");
-    await insertScenario(null, "historical");
-    await insertRun({
-      runId: "historical-run",
-      scenarioId: "historical",
-      organizationId: "org-a",
-      state: "completed",
-      solvedAt: 2_000,
-      completedAt: 3_000,
-    });
-
-    const first = snapshot(
-      course("first", [lecture("first-lecture", "historical")]),
-    );
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: first,
-      sourceRevision: "first-revision",
-      organizationId: null,
-      nowUnixMs: 100,
-    });
-
-    const [firstRow] = await db
-      .select()
-      .from(courseCatalogs)
-      .where(eq(courseCatalogs.scopeKey, "public"));
-    expect(firstRow).toMatchObject({
-      catalogJson: first,
-      sourceRevision: "first-revision",
-      createdAt: 100,
-      updatedAt: 100,
-    });
-    await expect(db.select().from(courseUnitCompletions)).resolves.toEqual([
-      expect.objectContaining({
-        userId: learnerId,
-        scopeKey: "public",
-        courseId: "first",
-        lectureId: "first-lecture",
-        sourceRunId: "historical-run",
-        completedAt: 3_000,
-      }),
-    ]);
-
-    await db.delete(courseUnitCompletions);
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: first,
-      sourceRevision: "first-revision",
-      organizationId: null,
-      nowUnixMs: 200,
-    });
-    await expect(db.select().from(courseUnitCompletions)).resolves.toHaveLength(
-      1,
-    );
-
-    const replacement = snapshot(course("second", [lecture("theory")]));
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: replacement,
-      sourceRevision: "replacement-revision",
-      organizationId: null,
-      nowUnixMs: 90,
-    });
-
-    const [replacementRow] = await db
-      .select()
-      .from(courseCatalogs)
-      .where(eq(courseCatalogs.scopeKey, "public"));
-    expect(replacementRow).toMatchObject({
-      catalogJson: replacement,
-      sourceRevision: "replacement-revision",
-      createdAt: 100,
-      updatedAt: 101,
-    });
-  });
-
-  it("backfills more than one D1 parameter batch", async () => {
-    const db = drizzle(env.DB);
-    await seedLearnerAndHost();
-    const lectures: CourseCatalogLectureV2[] = [];
-    for (let index = 1; index <= 101; index += 1) {
-      const scenarioId = `historical-${index}`;
-      await insertScenario(null, scenarioId);
-      await insertRun({
-        runId: `${scenarioId}-run`,
-        scenarioId,
-        state: "completed",
-        solvedAt: 2_000 + index,
-        completedAt: 3_000 + index,
-      });
-      lectures.push(lecture(`lecture-${index}`, scenarioId));
-    }
-
-    await backfillCourseUnitCompletions(db, {
-      snapshot: snapshot(course("batched", lectures)),
-      organizationId: null,
-    });
-
-    await expect(db.select().from(courseUnitCompletions)).resolves.toHaveLength(101);
-  });
-
-  it("validates only linked V2 scenario references in the upload scope", async () => {
-    const db = drizzle(env.DB);
-    await insertOrganization("org-a");
-    await insertOrganization("org-b");
-    await insertScenario(null, "public-enabled");
-    await insertScenario("org-b", "org-b-enabled");
-
-    await expect(
-      validateCourseCatalogReferences(db, {
-        snapshot: snapshot(
-          course("public", [
-            lecture("existing", "public-enabled"),
-            lecture("new", "new-public"),
-            lecture("theory"),
-          ]),
-        ),
-        bundleScenarioIds: ["new-public"],
-        organizationId: null,
-      }),
-    ).resolves.toEqual([]);
-
-    await expect(
-      validateCourseCatalogReferences(db, {
-        snapshot: snapshot(
-          course("invalid", [lecture("other", "org-b-enabled")]),
-        ),
-        bundleScenarioIds: [],
-        organizationId: "org-a",
-      }),
-    ).resolves.toEqual(["org-b-enabled"]);
-  });
-
-  it("hard-cuts unlinked public scenarios, including a content-only catalog", async () => {
-    const db = drizzle(env.DB);
-    await insertOrganization("org-a");
-    await insertScenario(null, "public-kept");
-    await insertScenario(null, "public-removed");
-    await insertScenario("org-a", "organization-kept");
-
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("public", [lecture("kept", "public-kept")])),
-      sourceRevision: "public-first",
-      organizationId: null,
-      nowUnixMs: 200,
-    });
-
-    await expectScenarioEnabled(db, "public-kept", true, 100);
-    await expectScenarioEnabled(db, "public-removed", false, null);
-    await expectScenarioEnabled(db, "organization-kept", true, 100);
-
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("public", [lecture("theory")])),
-      sourceRevision: "public-content-only",
-      organizationId: null,
-      nowUnixMs: 300,
-    });
-
-    await expectScenarioEnabled(db, "public-kept", false, null);
-    await expectScenarioEnabled(db, "organization-kept", true, 100);
-  });
-
-  it("hard-cuts only unlinked scenarios in the published organization scope", async () => {
-    const db = drizzle(env.DB);
-    await insertOrganization("org-a");
-    await insertOrganization("org-b");
-    await insertScenario(null, "public-kept");
-    await insertScenario("org-a", "org-a-kept");
-    await insertScenario("org-a", "org-a-removed");
-    await insertScenario("org-b", "org-b-kept");
-
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: snapshot(course("organization", [lecture("kept", "org-a-kept")])),
-      sourceRevision: "organization-first",
-      organizationId: "org-a",
-      nowUnixMs: 200,
-    });
-
-    await expectScenarioEnabled(db, "org-a-kept", true, 100);
-    await expectScenarioEnabled(db, "org-a-removed", false, null);
-    await expectScenarioEnabled(db, "public-kept", true, 100);
-    await expectScenarioEnabled(db, "org-b-kept", true, 100);
-  });
-
-  it("syncs a catalog that links more than D1's 100 bound parameters", async () => {
-    const db = drizzle(env.DB);
-    await insertOrganization("org-a");
-    const linked = Array.from({ length: 110 }, (_, index) => `org-a-${index}`);
-    for (const scenarioId of linked) await insertScenario("org-a", scenarioId);
-    await insertScenario("org-a", "org-a-removed");
-
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: snapshot(
-        course("organization", linked.map((scenarioId) => lecture(scenarioId, scenarioId))),
-      ),
-      sourceRevision: "organization-wide",
-      organizationId: "org-a",
-      nowUnixMs: 200,
-    });
-
-    const rows = await db
-      .select({ enabled: vmScenarios.enabled, sourceRevision: vmScenarios.sourceRevision })
-      .from(vmScenarios);
-    expect(rows.filter((row) => row.enabled && row.sourceRevision === "organization-wide"))
-      .toHaveLength(110);
-    await expectScenarioEnabled(db, "org-a-removed", false, null);
-  });
-
   it("lists public and organization courses that link more than 100 scenarios", async () => {
     const db = drizzle(env.DB);
     await seedLearnerAndHost();
     await insertOrganization("org-a");
     await insertMembership("org-a");
     for (const [organizationId, prefix] of [[null, "public"], ["org-a", "org-a"]] as const) {
-      const ids = Array.from({ length: 60 }, (_, index) => `${prefix}-${index}`);
+      const ids = Array.from({ length: 60 }, (_, index) => `s/${prefix}-${index}`);
       for (const scenarioId of ids) await insertScenario(organizationId, scenarioId);
-      await syncCourseCatalogSnapshot(db, {
+      await publishCatalog(db, {
         snapshot: snapshot(
-          course(`${prefix}-course`, ids.map((scenarioId) => lecture(scenarioId, scenarioId)), false),
+          course(`${prefix}-course`, ids.map((scenarioId) => lecture(scenarioId.slice(2), scenarioId)), false),
         ),
         sourceRevision: `${prefix}-revision`,
         organizationId,
@@ -310,81 +94,34 @@ describe("V2 course catalogs", () => {
     ).toBe(true);
   });
 
-  it("updates stored presentation fields for a Markdown-only publish", async () => {
-    const db = drizzle(env.DB);
-    await insertScenario(null, "task");
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: snapshot(
-        course("course", [lecture("lesson", "task", { title: "First title" })]),
-      ),
-      sourceRevision: "first",
-      organizationId: null,
-      nowUnixMs: 100,
-    });
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: snapshot(
-        course("course", [
-          lecture("lesson", "task", {
-            title: "Markdown title",
-            summary: "Markdown summary",
-            bodyMarkdown: "Markdown theory",
-            category: "markdown",
-            difficulty: "hard",
-            estimatedMinutes: 42,
-            tags: ["markdown"],
-          }),
-        ]),
-      ),
-      sourceRevision: "markdown-only",
-      organizationId: null,
-      nowUnixMs: 200,
-    });
-
-    const [stored] = await db
-      .select()
-      .from(vmScenarios)
-      .where(eq(vmScenarios.scenarioId, "task"));
-    expect(stored).toMatchObject({
-      sourceRevision: "markdown-only",
-      title: "Markdown title",
-      category: "markdown",
-      description: "Markdown summary",
-      difficulty: "hard",
-      estimatedMinutes: 42,
-      tagsJson: ["markdown"],
-      briefingMarkdown: "Markdown theory",
-    });
-    await expect(db.select().from(imageBuilds)).resolves.toEqual([]);
-  });
-
   it("shows public and organization courses with linked-scenario override", async () => {
     const db = drizzle(env.DB);
     await seedLearnerAndHost();
     await insertOrganization("org-a");
     await insertMembership("org-a");
-    await insertScenario(null, "shared");
-    await insertScenario(null, "building", false);
-    await insertScenario(null, "waiting", false);
+    await insertScenario(null, "s/shared");
+    await insertScenario(null, "s/building", false);
+    await insertScenario(null, "s/waiting", false);
 
-    await syncCourseCatalogSnapshot(db, {
+    await publishCatalog(db, {
       snapshot: snapshot(
         course("public-course", [
-          lecture("public-shared", "shared"),
+          lecture("public-shared", "s/shared"),
           lecture("public-theory"),
-          lecture("public-building", "building"),
+          lecture("public-building", "s/building"),
         ]),
       ),
       sourceRevision: "public-revision",
       organizationId: null,
       nowUnixMs: 100,
     });
-    await syncCourseCatalogSnapshot(db, {
+    await publishCatalog(db, {
       snapshot: snapshot(
         course(
           "organization-course",
           [
-            lecture("organization-shared", "shared"),
-            lecture("organization-waiting", "waiting"),
+            lecture("organization-shared", "s/shared"),
+            lecture("organization-waiting", "s/waiting"),
           ],
           false,
         ),
@@ -395,7 +132,7 @@ describe("V2 course catalogs", () => {
     });
     await insertRun({
       runId: "organization-active",
-      scenarioId: "shared",
+      scenarioId: "s/shared",
       organizationId: "org-a",
       active: true,
       courseScopeKey: "organization:org-a",
@@ -421,7 +158,7 @@ describe("V2 course catalogs", () => {
           },
           {
             lectureId: "public-building",
-            scenarioId: "building",
+            scenarioId: "s/building",
             state: "locked",
             blockedBy: {
               courseId: "public-course",
@@ -436,14 +173,14 @@ describe("V2 course catalogs", () => {
         lectures: [
           {
             lectureId: "organization-shared",
-            scenarioId: "shared",
+            scenarioId: "s/shared",
             state: "in_progress",
             activeRunId: "organization-active",
             scenarioReady: true,
           },
           {
             lectureId: "organization-waiting",
-            scenarioId: "waiting",
+            scenarioId: "s/waiting",
             state: "waiting_for_scenario",
             scenarioReady: false,
           },
@@ -470,17 +207,17 @@ describe("V2 course catalogs", () => {
     await insertOrganization("org-a");
     await insertOrganization("org-b");
     await insertMembership("org-a");
-    await insertScenario(null, "shared");
-    await insertScenario("org-a", "org-a-task");
+    await insertScenario(null, "s/shared");
+    await insertScenario("org-a", "s/org-a-task");
     for (const [organizationId, catalog] of [
-      [null, snapshot(course("public-course", [lecture("public-shared", "shared")]))],
+      [null, snapshot(course("public-course", [lecture("public-shared", "s/shared")]))],
       ["org-a", snapshot(course("org-a-course", [
-        lecture("org-a-shared", "shared"),
-        lecture("org-a-task", "org-a-task"),
+        lecture("org-a-shared", "s/shared"),
+        lecture("org-a-task", "s/org-a-task"),
       ], false))],
       ["org-b", snapshot(course("org-b-course", [lecture("org-b-theory")]))],
     ] as const) {
-      await syncCourseCatalogSnapshot(db, {
+      await publishCatalog(db, {
         snapshot: catalog,
         sourceRevision: "revision",
         organizationId,
@@ -518,7 +255,7 @@ describe("V2 course catalogs", () => {
         db,
         userId: learnerId,
         organizationId: null,
-        scenarioId: "org-a-task",
+        scenarioId: "s/org-a-task",
       }),
     ).resolves.toBeNull();
   });
@@ -526,12 +263,12 @@ describe("V2 course catalogs", () => {
   it("enforces sequence order, completes pure lectures, and resolves starts", async () => {
     const db = drizzle(env.DB);
     await seedLearnerAndHost();
-    await insertScenario(null, "task");
-    await syncCourseCatalogSnapshot(db, {
+    await insertScenario(null, "s/task");
+    await publishCatalog(db, {
       snapshot: snapshot(
         course("sequence", [
           lecture("theory"),
-          lecture("task", "task"),
+          lecture("task", "s/task"),
           lecture("final"),
         ]),
       ),
@@ -557,7 +294,7 @@ describe("V2 course catalogs", () => {
         db,
         userId: learnerId,
         organizationId: null,
-        scenarioId: "task",
+        scenarioId: "s/task",
       }),
     ).rejects.toMatchObject({ code: "course_lecture_locked" });
     await expect(
@@ -661,7 +398,7 @@ describe("V2 course catalogs", () => {
         db,
         userId: learnerId,
         organizationId: null,
-        scenarioId: "task",
+        scenarioId: "s/task",
       }),
     ).resolves.toMatchObject({
       courseScopeKey: "public",
@@ -686,13 +423,13 @@ describe("V2 course catalogs", () => {
     await seedLearnerAndHost();
     await insertOrganization("org-a");
     await insertMembership("org-a");
-    await syncCourseCatalogSnapshot(db, {
+    await publishCatalog(db, {
       snapshot: snapshot(course("shared-id", [lecture("public-theory")])),
       sourceRevision: "public-revision",
       organizationId: null,
       nowUnixMs: 100,
     });
-    await syncCourseCatalogSnapshot(db, {
+    await publishCatalog(db, {
       snapshot: snapshot(course("shared-id", [lecture("private-theory")])),
       sourceRevision: "private-revision",
       organizationId: "org-a",
@@ -774,79 +511,6 @@ describe("V2 course catalogs", () => {
       }),
     ]);
   });
-
-  it("overlays Markdown presentation without changing technical scenario data", () => {
-    const lesson = lecture("presentation", "task", {
-      title: "Markdown title",
-      summary: "Markdown summary",
-      bodyMarkdown: "Markdown body",
-      category: "markdown-category",
-      tags: ["markdown"],
-      difficulty: "hard",
-      estimatedMinutes: 42,
-    });
-    const manifest = {
-      schema_version: 5,
-      scenario_id: "task",
-      name: "task",
-      title: "Technical title",
-      category: "technical",
-      description: "Technical description",
-      difficulty: "easy",
-      estimated_minutes: 10,
-      tags: ["technical"],
-      briefing_markdown: "Technical context",
-      solution_markdown: "Technical solution",
-      hints: [],
-      vms: [],
-    } satisfies ScenarioManifestV5;
-    const scenarioPresentation = {
-      title: "Technical title",
-      tagline: "Technical description",
-      category: "technical",
-      difficulty: "easy",
-      estimatedMinutes: 10,
-      briefingMarkdown: "Technical context",
-      tags: ["technical"],
-      objectives: [],
-    } satisfies ScenarioBriefing;
-
-    expect(
-      findCourseLecturePresentation(
-        snapshot(course("presentation", [lesson])),
-        "task",
-      ),
-    ).toBe(lesson);
-    expect(
-      findCourseLecturePresentation(
-        snapshot(course("presentation", [lesson])),
-        "missing",
-      ),
-    ).toBeNull();
-
-    expect(applyLecturePresentation(manifest, lesson)).toMatchObject({
-      title: "Markdown title",
-      category: "markdown-category",
-      description: "Markdown summary",
-      difficulty: "hard",
-      estimated_minutes: 42,
-      tags: ["markdown"],
-      briefing_markdown: "Markdown body",
-      solution_markdown: "Technical solution",
-    });
-    expect(
-      applyLectureBriefingPresentation(scenarioPresentation, lesson),
-    ).toMatchObject({
-      title: "Markdown title",
-      tagline: "Markdown summary",
-      category: "markdown-category",
-      difficulty: "hard",
-      estimatedMinutes: 42,
-      tags: ["markdown"],
-      briefingMarkdown: "Markdown body",
-      objectives: [],
-    });
-  });
 });
 
 function snapshot(
@@ -927,42 +591,38 @@ async function insertMembership(organizationId: string): Promise<void> {
   });
 }
 
+/** A scenario with a live revision; a disabled one waits for its scenario. */
 async function insertScenario(
   organizationId: string | null,
   scenarioId: string,
   enabled = true,
 ): Promise<void> {
-  const now = 100;
-  await drizzle(env.DB).insert(vmScenarios).values({
-    scenarioId,
-    organizationId,
-    title: scenarioId,
-    category: "test",
-    description: `${scenarioId} description`,
-    difficulty: "easy",
-    estimatedMinutes: 10,
-    tagsJson: [],
-    briefingMarkdown: `${scenarioId} theory`,
-    solutionMarkdown: `${scenarioId} solution`,
-    hintsJson: [],
-    enabled,
-    enabledAt: enabled ? now : null,
-    createdAt: now,
-    updatedAt: now,
+  const db = drizzle(env.DB);
+  const [namespace, slug] = scenarioId.split("/") as [string, string];
+  await db.insert(scenarios).values({
+    id: scenarioId, namespace, slug, organizationId,
+    scopeKey: organizationId ? `organization:${organizationId}` : "public",
+    enabled, play: false, liveRev: "r1",
+  });
+  await db.insert(scenarioRevisions).values({
+    scenarioId, rev: "r1", guestContract: 3, state: "ready",
+    docJson: revisionDoc({}, { web: `sha256:${"3".repeat(64)}` }),
   });
 }
 
-async function expectScenarioEnabled(
+/** Publishes a scope's catalog as a promoted revision leaves it. */
+async function publishCatalog(
   db: ReturnType<typeof drizzle>,
-  scenarioId: string,
-  enabled: boolean,
-  enabledAt: number | null,
+  input: { snapshot: CourseCatalogSnapshotV2; sourceRevision: string; organizationId: string | null; nowUnixMs: number },
 ): Promise<void> {
-  const [scenario] = await db
-    .select({ enabled: vmScenarios.enabled, enabledAt: vmScenarios.enabledAt })
-    .from(vmScenarios)
-    .where(eq(vmScenarios.scenarioId, scenarioId));
-  expect(scenario).toEqual({ enabled, enabledAt });
+  await db.insert(courseCatalogs).values({
+    scopeKey: input.organizationId ? `organization:${input.organizationId}` : "public",
+    organizationId: input.organizationId,
+    sourceRevision: input.sourceRevision,
+    catalogJson: input.snapshot,
+    createdAt: input.nowUnixMs,
+    updatedAt: input.nowUnixMs,
+  });
 }
 
 async function insertRun(input: {

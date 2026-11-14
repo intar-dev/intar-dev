@@ -253,7 +253,7 @@ export function registryAdmissionBlockedReason(
 
 /**
  * Only the object-creating upload path opens an upload session. Operator
- * operations (catalog pointers, guest-tools convergence) are single short
+ * operations (catalog pointers) are single short
  * commits: forcing an operator workflow to open an upload session would make
  * the collector unreachable and adds no protection.
  */
@@ -463,53 +463,6 @@ async function readInternalWriterRefusal(
       : "registry_sweep_active";
   }
   return "registry_gate_closed";
-}
-
-/**
- * Writer guard for a handler that writes in stages, such as a publish that
- * stores images, commits catalog pointers, and then asks the collector to
- * sweep. The guard holds the lease across the writes and settles it before the
- * long collector request, so the two can never overlap.
- *
- * `release` is idempotent. `finish` is the safety net for a path that never
- * reached an explicit release: it records a hold when a write may already have
- * landed, and a settled end when the request was rejected before any write.
- */
-export interface RegistryWriterGuard {
-  /** Records that the first write may now have started. */
-  markWriteStarted(): void;
-  /** Settles the guard. Later calls do nothing. */
-  release(outcome: "ok" | "error" | "unknown"): Promise<void>;
-  /** Settles the guard for a path that did not release it explicitly. */
-  finish(): Promise<void>;
-}
-
-export function createRegistryWriterGuard(
-  lease: RegistryOperationLease,
-): RegistryWriterGuard {
-  let writeStarted = false;
-  let released = false;
-  const release = async (
-    outcome: "ok" | "error" | "unknown",
-  ): Promise<void> => {
-    if (released) return;
-    released = true;
-    writeStarted = true;
-    await lease.complete(outcome);
-  };
-  return {
-    markWriteStarted(): void {
-      writeStarted = true;
-    },
-    release,
-    async finish(): Promise<void> {
-      if (released) return;
-      // A request that was rejected before its first write is settled: nothing
-      // was stored, so no sweep needs protection from it. A request that threw
-      // after a write began is a hold, because part of it may have committed.
-      await release(writeStarted ? "unknown" : "error");
-    },
-  };
 }
 
 async function releaseRegistryOperation(

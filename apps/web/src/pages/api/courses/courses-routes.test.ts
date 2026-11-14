@@ -201,7 +201,7 @@ describe("course routes", () => {
     });
     expect(mocks.loadScenarioCapacity).toHaveBeenCalledTimes(1);
     expect(mocks.loadScenarioCapacity).toHaveBeenCalledWith(
-      "learner-1", undefined, undefined, "organization-1",
+      "learner-1", undefined, "organization-1",
     );
   });
 

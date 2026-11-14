@@ -49,15 +49,11 @@ async function responseBody(
 
 const BODYLESS_CUSTOM_MUTATIONS = [
   ["DELETE", "/api/admin/runs/run-1"],
-  ["POST", "/api/admin/builds/build-1/retry"],
-  ["POST", "/api/admin/scenarios/demo/enabled"],
-  ["DELETE", "/api/admin/scenarios/demo/enabled"],
   ["POST", "/api/admin/hosts/host-1/revoke"],
   ["DELETE", "/api/organizations/org/assignments/assignment-1"],
   ["DELETE", "/api/organizations/org"],
   ["POST", "/api/organizations/org/leave"],
   ["DELETE", "/api/organizations/org/members/member-1"],
-  ["DELETE", "/api/organizations/org/scenarios/demo"],
   ["DELETE", "/api/organizations/org/sso"],
   ["POST", "/api/organizations/org/sso/verification"],
   ["POST", "/api/organizations/org/sso/verify"],
@@ -422,11 +418,6 @@ describe("worker API request security", () => {
       ),
     ).toBe("ssh-issuance");
     expect(
-      sensitiveRateLimitActionFor(
-        customMutation("/api/admin/builds/build-1/retry"),
-      ),
-    ).toBe("build-retry");
-    expect(
       sensitiveRateLimitActionFor(customMutation("/api/auth/sign-in/social")),
     ).toBe("auth-start");
     // Signed-out organization sign-in and connecting GitHub start OAuth too.
@@ -451,7 +442,6 @@ describe("worker API request security", () => {
     for (const path of [
       "/api/organizations/org/scenario-source",
       "/api/admin/scenario-source",
-      "/api/admin/image-promotion",
     ]) {
       expect(sensitiveRateLimitActionFor(customMutation(path))).toBe(
         "scenario-source",

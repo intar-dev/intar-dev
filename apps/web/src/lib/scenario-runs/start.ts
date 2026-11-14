@@ -1,9 +1,9 @@
-import { personalHostReportReady } from "@/lib/personal-host-readiness";
+import { hostReportV3Ready } from "@/lib/personal-host-readiness";
 import { env } from "cloudflare:workers";
 import { capacityHostAccessForUser, metalPlacementForUser } from "@/lib/metal-placement";
-import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, or } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
-import { AppError, appError, errorChainMatches } from "@/lib/app-error";
+import { AppError, errorChainMatches } from "@/lib/app-error";
 import {
   cpuReservationForVms,
   strictCpuCapacity,
@@ -14,7 +14,6 @@ import { hostHealth } from "@/lib/host-health";
 import {
   availableRuntimeHostResources,
   loadActiveRuntimeResourceSnapshot,
-  runtimeResourcesFit,
   type RuntimeResourceDemand,
 } from "@/lib/runtime-capacity";
 import type { RuntimeVmSpec } from "@/lib/runtime-executions";
@@ -22,33 +21,14 @@ import type { ResourceCapacity } from "@/lib/resource-capacity";
 import { revokeAllRoutes } from "@/lib/route-revocation";
 import type { RunStateDocument, RunVmStateDocument } from "@/lib/run-state";
 import {
-  hostHasImagesReady,
-  imageKeyIdentity,
-  type RequiredScenarioImage,
-} from "@/lib/scenario-host-readiness";
-import {
-  hostSupportsRunCliV1,
-  hostSupportsSpeedRedesign,
   isAvailableScenarioLaunchHost,
-  isFreshHostHeartbeat,
-  isScenarioLaunchHost,
 } from "@/lib/scenario-hosts";
-import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
 import { deleteStargateRoute, stargateRouteTtlMs } from "@/lib/stargate";
-import { traceOperation } from "../tracing";
 import { parseRunState } from "./storage";
 
 export { deterministicRuntimeVmName } from "./runtime-vm-name";
 
 export const HOST_HEARTBEAT_TTL_MS = 90_000;
-
-export type HostSelectionResult =
-  | { ok: true; hostIds: string[] }
-  | {
-      ok: false;
-      reason: "unavailable" | "image_not_ready" | "resource_capacity";
-      message?: string;
-    };
 
 export type ScenarioRouteType =
   | "browser"
@@ -71,120 +51,6 @@ export function scenarioRuntimeReservationResources(
     ...resources,
     cpuMillis: cpuReservationForVms(cpuMillisByVm),
   };
-}
-
-export async function assertScenarioLaunchHostForUser(
-  hostId: string,
-  userId: string,
-  requiredImages: RequiredScenarioImage[],
-  organizationId: string | null = null,
-): Promise<void> {
-  await loadScenarioLaunchHostForUser(hostId, userId, requiredImages, organizationId);
-}
-
-/** Returns the exact host/report snapshot checked for admission. */
-export async function loadScenarioLaunchHostForUser(
-  hostId: string,
-  userId: string,
-  requiredImages: RequiredScenarioImage[],
-  organizationId: string | null = null,
-) {
-  const now = Date.now();
-  const db = drizzle(env.DB);
-  const rows = await db
-    .select({
-      scope: agentHosts.scope,
-      role: agentHosts.role,
-      disabled: agentHosts.disabled,
-      scenarioEnabled: agentHosts.scenarioEnabled,
-      connected: agentHosts.connected,
-      lastHeartbeatAt: agentHosts.lastHeartbeatAt,
-      credentialGeneration: agentHosts.credentialGeneration,
-      activeSessionId: agentHosts.activeSessionId,
-      actualReportedAt: hostActualState.updatedAt,
-      actualReport: hostActualState.reportJson,
-      actualReportText: sql<string | null>`${hostActualState.reportJson}`,
-    })
-    .from(agentHosts)
-    .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
-    .where(
-      and(
-        eq(agentHosts.id, hostId),
-        metalPlacementForUser(userId, organizationId),
-      ),
-    )
-    .limit(1);
-  const host = rows[0];
-  if (!host) {
-    throw appError(404, "scenario_host_not_found", "host not found");
-  }
-  if (host.disabled) {
-    throw appError(403, "scenario_host_disabled", "host is disabled");
-  }
-  if (host.role !== "agent") {
-    throw appError(
-      403,
-      "scenario_host_not_launchable",
-      "host cannot run scenarios",
-    );
-  }
-  if (
-    !isScenarioLaunchHost({
-      role: host.role,
-      disabled: host.disabled,
-      scenarioEnabled: host.scenarioEnabled,
-    })
-  ) {
-    throw appError(
-      403,
-      "scenario_host_not_launchable",
-      "host cannot run scenarios",
-    );
-  }
-  if (
-    !host.connected ||
-    !isFreshHostHeartbeat(host.lastHeartbeatAt, now, HOST_HEARTBEAT_TTL_MS) ||
-    hostHealth(host.actualReportedAt ?? null, now) !== "healthy"
-  ) {
-    throw appError(409, "scenario_host_unavailable", "host is not connected");
-  }
-  if (host.scope !== "platform" && !personalHostReportReady(host.actualReport, learnerRunCliV1EnforcementEnabled(env))) {
-    throw appError(409, host.scope === "organization" ? "organization_server_not_ready" : "personal_server_not_ready",
-      host.scope === "organization" ? "The organization server is not Ready. Ask an organization administrator to repair it."
-        : "Your server is not Ready. Open Profile → My servers and run the repair action.");
-  }
-  if (!hostHasImagesReady(host.actualReport, requiredImages)) {
-    throw appError(
-      409,
-      "image_not_ready",
-      "scenario images are not ready on this host",
-    );
-  }
-  if (!hostSupportsSpeedRedesign(host.actualReport)) {
-    throw appError(
-      409,
-      "scenario_host_unavailable",
-      "host does not support chunked images and pinned guest tools",
-    );
-  }
-  if (
-    learnerRunCliV1EnforcementEnabled(env) &&
-    !hostSupportsRunCliV1(host.actualReport)
-  ) {
-    throw appError(
-      409,
-      "scenario_host_unavailable",
-      "host does not support the learner CLI yet",
-    );
-  }
-  if (strictCpuCapacity(host.actualReport) === null) {
-    throw appError(
-      409,
-      "scenario_host_not_performance_ready",
-      "host does not attest the required template, CPU-limit, and fast-filesystem launch path",
-    );
-  }
-  return host;
 }
 
 export function isActiveKeyUniqueViolation(error: unknown): boolean {
@@ -215,30 +81,6 @@ export async function markRunVmsAbsentInDesiredState(input: {
     input.nowUnixMs,
     (vm) => vm.run_id === input.runId && names.has(vm.name),
   );
-}
-
-export function requiredImagesForScenarioLaunch(
-  launchSpecs: Array<{
-    imageKey: RequiredScenarioImage["imageKey"] | null;
-    imageSha256: string | null;
-  }>,
-): RequiredScenarioImage[] {
-  const byIdentity = new Map<string, RequiredScenarioImage>();
-  for (const spec of launchSpecs) {
-    const imageSha256 = spec.imageSha256?.trim() ?? "";
-    if (!spec.imageKey || !imageSha256) {
-      throw appError(
-        409,
-        "image_not_ready",
-        "scenario image metadata is not ready",
-      );
-    }
-    byIdentity.set(imageKeyIdentity(spec.imageKey), {
-      imageKey: spec.imageKey,
-      imageSha256,
-    });
-  }
-  return [...byIdentity.values()];
 }
 
 export function buildRunVmRouteUsername(
@@ -392,7 +234,6 @@ async function revokeScenarioRouteTypesForUser(
 async function loadEligibleScenarioLaunchHosts(
   userId: string,
   now = Date.now(),
-  requireRunCli = learnerRunCliV1EnforcementEnabled(env),
   organizationId: string | null = null,
   hostScope = metalPlacementForUser(userId, organizationId),
 ) {
@@ -423,8 +264,7 @@ async function loadEligibleScenarioLaunchHosts(
 
   const candidates = rows
     .map((row) => {
-      // The bridge v7 state report is the live source of per-host VM load
-      // and capacity; the legacy inventory upload no longer exists.
+      // The state report is the live source of per-host VM load and capacity.
       const capacity = row.actualReport?.capacity ?? null;
       const inventoryVmCount = row.actualReport?.vms?.length ?? 0;
       const cpuCores = Math.max(1, (capacity?.total_cpu_millis ?? 0) / 1000);
@@ -458,10 +298,8 @@ async function loadEligibleScenarioLaunchHosts(
           HOST_HEARTBEAT_TTL_MS,
         ) &&
         hostHealth(row.actualReportedAt ?? null, now) === "healthy" &&
-        (row.scope === "platform" || personalHostReportReady(row.actualReport, requireRunCli)) &&
-        strictCpuCapacity(row.actualReport) !== null &&
-        hostSupportsSpeedRedesign(row.actualReport) &&
-        (!requireRunCli || hostSupportsRunCliV1(row.actualReport)),
+        (row.scope === "platform" || hostReportV3Ready(row.actualReport)) &&
+        strictCpuCapacity(row.actualReport) !== null,
     );
 
   return candidates;
@@ -471,10 +309,9 @@ async function loadEligibleScenarioLaunchHosts(
 export async function loadScenarioCapacityPressure(
   userId: string,
   now = Date.now(),
-  requireRunCli = learnerRunCliV1EnforcementEnabled(env),
   organizationId: string | null = null,
 ): Promise<number | null> {
-  return (await loadScenarioCapacity(userId, now, requireRunCli, organizationId))
+  return (await loadScenarioCapacity(userId, now, organizationId))
     .capacityPressure;
 }
 
@@ -482,7 +319,6 @@ export async function loadScenarioCapacityPressure(
 export async function loadScenarioCapacity(
   userId: string,
   now = Date.now(),
-  requireRunCli = learnerRunCliV1EnforcementEnabled(env),
   organizationId: string | null = null,
 ): Promise<{
   capacityPressure: number | null;
@@ -491,7 +327,6 @@ export async function loadScenarioCapacity(
   const hosts = await loadEligibleScenarioLaunchHosts(
     userId,
     now,
-    requireRunCli,
     organizationId,
     capacityHostAccessForUser(userId, organizationId),
   );
@@ -605,135 +440,4 @@ function usedFraction(total: number, available: number): number {
 
 function isPositiveSafeInteger(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0;
-}
-
-export async function selectScenarioHosts(
-  requiredImages: RequiredScenarioImage[],
-  userId: string,
-  requiredResources?: RuntimeResourceDemand,
-  now = Date.now(),
-  requireRunCli = learnerRunCliV1EnforcementEnabled(env),
-  organizationId: string | null = null,
-): Promise<HostSelectionResult> {
-  return traceOperation("scenario.select_host", async () => {
-  const db = drizzle(env.DB);
-  const candidates = await loadEligibleScenarioLaunchHosts(
-    userId,
-    now,
-    requireRunCli,
-    organizationId,
-  );
-
-  if (!candidates.length) {
-    return hostSelectionFailure(userId, organizationId, "unavailable");
-  }
-
-  let imageReadyCandidates = candidates.filter((candidate) =>
-    hostHasImagesReady(candidate.actualReport, requiredImages),
-  );
-
-  if (!imageReadyCandidates.length) {
-    return hostSelectionFailure(userId, organizationId, "image_not_ready");
-  }
-
-  const availableResourcesByHost = new Map<string, RuntimeResourceDemand>();
-  if (requiredResources) {
-    const snapshot = await loadActiveRuntimeResourceSnapshot(
-      now,
-      imageReadyCandidates.map((candidate) => candidate.id),
-    );
-    imageReadyCandidates = imageReadyCandidates.filter((candidate) => {
-      if (!candidate.actualReport) return false;
-      const available = availableRuntimeHostResources({
-        hostId: candidate.id,
-        report: candidate.actualReport,
-        snapshot,
-      });
-      if (!available) return false;
-      availableResourcesByHost.set(candidate.id, available);
-      return runtimeResourcesFit(requiredResources, available);
-    });
-    if (!imageReadyCandidates.length) {
-      return hostSelectionFailure(userId, organizationId, "resource_capacity");
-    }
-  }
-
-  const activeRuns = await db
-    .select({
-      hostId: scenarioRuns.hostId,
-    })
-    .from(scenarioRuns)
-    .where(
-      and(
-        inArray(
-          scenarioRuns.hostId,
-          imageReadyCandidates.map((candidate) => candidate.id),
-        ),
-        isNull(scenarioRuns.completedAt),
-        isNull(scenarioRuns.failedAt),
-      ),
-    );
-
-  const activeRunCounts = new Map<string, number>();
-  for (const row of activeRuns) {
-    activeRunCounts.set(row.hostId, (activeRunCounts.get(row.hostId) ?? 0) + 1);
-  }
-
-  imageReadyCandidates.sort((left, right) => {
-    const leftRuns = activeRunCounts.get(left.id) ?? 0;
-    const rightRuns = activeRunCounts.get(right.id) ?? 0;
-    if (leftRuns !== rightRuns) {
-      return leftRuns - rightRuns;
-    }
-    const leftAvailable = availableResourcesByHost.get(left.id);
-    const rightAvailable = availableResourcesByHost.get(right.id);
-    if (
-      leftAvailable &&
-      rightAvailable &&
-      leftAvailable.cpuMillis !== rightAvailable.cpuMillis
-    ) {
-      return rightAvailable.cpuMillis - leftAvailable.cpuMillis;
-    }
-    if (left.reportedFreeCpuMillis !== right.reportedFreeCpuMillis) {
-      return right.reportedFreeCpuMillis - left.reportedFreeCpuMillis;
-    }
-    if (left.inventoryVmCount !== right.inventoryVmCount) {
-      return left.inventoryVmCount - right.inventoryVmCount;
-    }
-    if (left.loadPerCpu !== right.loadPerCpu) {
-      return left.loadPerCpu - right.loadPerCpu;
-    }
-    if (left.memoryAvailableMib !== right.memoryAvailableMib) {
-      return right.memoryAvailableMib - left.memoryAvailableMib;
-    }
-    if (left.updatedAt !== right.updatedAt) {
-      return right.updatedAt - left.updatedAt;
-    }
-    return left.id.localeCompare(right.id);
-  });
-
-  const hostIds = imageReadyCandidates.map((candidate) => candidate.id);
-  return hostIds.length
-    ? { ok: true, hostIds }
-    : { ok: false, reason: "unavailable" };
-
-  });
-}
-
-async function hostSelectionFailure(userId: string, organizationId: string | null, reason: "unavailable" | "image_not_ready" | "resource_capacity"): Promise<HostSelectionResult> {
-  const owner = await env.DB.prepare("SELECT metal_placement FROM user WHERE id = ?").bind(userId).first<{ metal_placement: string }>();
-  if (owner?.metal_placement !== "personal") {
-    const org = organizationId ? await env.DB.prepare("SELECT metal_placement FROM organization WHERE id = ?").bind(organizationId).first<{ metal_placement: string }>() : null;
-    if (org?.metal_placement !== "organization") return { ok: false, reason };
-    return { ok: false, reason, message: reason === "resource_capacity"
-      ? "The organization servers do not have enough free CPU, memory, or storage. Wait for a run to finish."
-      : reason === "image_not_ready"
-        ? "The organization server is preparing the required images. Wait, then start the run again."
-        : "The organization servers are offline, paused, or need repair. Ask an organization administrator to restore a Ready server." };
-  }
-  return { ok: false, reason, message: reason === "resource_capacity"
-    ? "Your servers do not have enough free CPU, memory, or storage. Wait for a run to finish."
-    : reason === "image_not_ready"
-      ? "Your server is preparing the required images. Wait, then start the run again."
-      : "Your servers are offline, paused, or need repair. Open Profile → My servers to restore a Ready server." };
 }

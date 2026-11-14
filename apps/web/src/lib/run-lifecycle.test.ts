@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { HostStateReportV2, VmReportV2 } from "@/generated/bridge";
+import type { VmStateV3 } from "@/generated/contracts/bridge-message-v9";
 import {
-  applyHostReportToRunState,
-  applyVmReportToRunState,
+  applyVmStateV3ToRunState,
   deriveVmPhase,
-  matchesInventoryVmIdentity,
   matchesVmReportIdentity,
 } from "@/lib/run-lifecycle";
 import {
@@ -69,53 +67,6 @@ describe("run lifecycle", () => {
     ).toBe(false);
   });
 
-  it("matches inventory by run id and vm name when a run id is present", () => {
-    expect(
-      matchesInventoryVmIdentity({
-        value: {
-          run_id: "run-a",
-          vm_name: "webserver",
-        },
-        runId: "run-a",
-        runtimeVmName: "webserver",
-      }),
-    ).toBe(true);
-
-    expect(
-      matchesInventoryVmIdentity({
-        value: {
-          run_id: "run-b",
-          vm_name: "webserver",
-        },
-        runId: "run-a",
-        runtimeVmName: "webserver",
-      }),
-    ).toBe(false);
-
-    expect(
-      matchesInventoryVmIdentity({
-        value: {
-          run_id: "run-a",
-          vm_name: "database",
-        },
-        runId: "run-a",
-        runtimeVmName: "webserver",
-      }),
-    ).toBe(false);
-  });
-
-  it("rejects inventory snapshots without run identity", () => {
-    expect(
-      matchesInventoryVmIdentity({
-        value: {
-          name: "webserver",
-        },
-        runId: "run-a",
-        runtimeVmName: "webserver",
-      }),
-    ).toBe(false);
-  });
-
   it("ignores reports with a matching vm name from a different run", () => {
     const current = initialRunState();
     const next = applyVmReportToRunState({
@@ -131,113 +82,6 @@ describe("run lifecycle", () => {
 
     expect(next.vms[0]?.phase).toBe("queued");
     expect(next.phase).toBe("queued");
-  });
-
-  it("promotes a matching vm report with passing scenario probes to solved", () => {
-    const current = initialRunState();
-    const next = applyVmReportToRunState({
-      runId: "run-a",
-      current,
-      report: vmReport({
-        runId: "run-a",
-        vmName: "webserver",
-        phase: "running",
-        probes: [
-          {
-            id: "boot-ssh",
-            phase: "boot",
-            status: "pass",
-            checked_at_unix_ms: 1_762_041_660_000,
-          },
-          {
-            id: "nginx-running",
-            phase: "scenario",
-            status: "pass",
-            checked_at_unix_ms: 1_762_041_660_000,
-          },
-        ],
-      }),
-    });
-
-    expect(next.vms[0]?.phase).toBe("solved");
-    expect(next.phase).toBe("solved");
-    expect(next.vms[0]?.scenarioProbes[0]?.status).toBe("pass");
-  });
-
-  it("keeps a probe message as ordinary repair-result detail", () => {
-    const mismatch = applyVmReportToRunState({
-      runId: "run-a",
-      current: initialRunState(),
-      report: vmReport({
-        runId: "run-a",
-        vmName: "webserver",
-        phase: "running",
-        observedAt: 1_000,
-        probes: [
-          {
-            id: "nginx-running",
-            phase: "scenario",
-            status: "fail",
-            message: "connection refused",
-            checked_at_unix_ms: 1_000,
-          },
-        ],
-      }),
-    });
-    expect(mismatch.vms[0]?.scenarioProbes[0]).toMatchObject({
-      status: "fail",
-      error: "connection refused",
-    });
-    expect(mismatch.vms[0]).not.toHaveProperty("verificationCollectionError");
-  });
-
-  it("applies host reports to only the matching run vm", () => {
-    const current = initialRunState();
-    const next = applyHostReportToRunState({
-      runId: "run-a",
-      current,
-      report: hostReport([
-        { owner_user_id: "user-1", runtime_execution_id: "run-b", generation: 1,
-          run_id: "run-b",
-          vm_name: "webserver",
-          phase: "failed",
-          terminal: {
-            state: "failed",
-            reason: "other run failed",
-            observed_at_unix_ms: 1_762_041_660_000,
-          },
-          ssh_host_keys_openssh: [],
-          probes: [],
-          error: "other run failed",
-          updated_at_unix_ms: 1_762_041_660_000,
-        },
-        { owner_user_id: "user-1", runtime_execution_id: "run-a", generation: 1,
-          run_id: "run-a",
-          vm_name: "webserver",
-          phase: "ready",
-          terminal: {
-            state: "pending",
-            reason: "terminal readiness pending",
-            observed_at_unix_ms: 1_762_041_660_000,
-          },
-          ssh_host_keys_openssh: [],
-          probes: [
-            {
-              id: "boot-ssh",
-              phase: "boot",
-              status: "pass",
-              checked_at_unix_ms: 1_762_041_660_000,
-            },
-          ],
-          updated_at_unix_ms: 1_762_041_660_000,
-        },
-      ]),
-    });
-
-    expect(next.vms[0]?.phase).toBe("ready");
-    expect(next.vms[0]?.phaseDetail).toBe(
-      "Boot probes passed. Waiting for shell target.",
-    );
   });
 
   it("copies reported network and ssh host key into the terminal target", () => {
@@ -630,28 +474,28 @@ describe("run lifecycle", () => {
   });
 
   it("rejects phase regression attempts from later reports", () => {
-    const solved = applyVmReportToRunState({
+    const ready = applyVmReportToRunState({
       runId: "run-a",
       current: initialRunState(),
       report: vmReport({
         runId: "run-a",
         vmName: "webserver",
-        phase: "solved",
+        phase: "ready",
         observedAt: 2_000,
       }),
     });
     const regressed = applyVmReportToRunState({
       runId: "run-a",
-      current: solved,
+      current: ready,
       report: vmReport({
         runId: "run-a",
         vmName: "webserver",
-        phase: "ready",
+        phase: "booting",
         observedAt: 2_001,
       }),
     });
 
-    expect(regressed.vms[0]?.phase).toBe("solved");
+    expect(regressed.vms[0]?.phase).toBe("ready");
     expect(regressed.vms[0]?.runtimeObservedAt).toBe(2_001);
   });
 
@@ -716,7 +560,7 @@ function initialRunState(): RunStateDocument {
         ordinal: 0,
         scenarioVmId: "scenario-vm-web",
         scenarioVmName: "webserver",
-        runtimeVmName: "webserver",
+        runtimeVmName: "webserver-run-a",
         hostname: "webserver",
         launchSummary: {
           scenarioVmName: "webserver",
@@ -754,26 +598,34 @@ function initialRunState(): RunStateDocument {
   return state;
 }
 
+/** Applies one bridge 9 VM state whose guest lab is ready. */
+function applyVmReportToRunState(input: {
+  runId: string;
+  current: RunStateDocument;
+  report: VmStateV3;
+}): RunStateDocument {
+  return applyVmStateV3ToRunState({ runId: input.runId, current: input.current, vm: input.report });
+}
+
 function vmReport(input: {
   runId: string;
   vmName: string;
-  phase: VmReportV2["phase"];
-  network?: VmReportV2["network"];
-  terminal?: VmReportV2["terminal"];
-  runtimeConstraints?: VmReportV2["runtime_constraints"];
-  resourceState?: VmReportV2["resource_state"];
+  phase: VmStateV3["phase"];
+  network?: VmStateV3["network"];
+  terminal?: VmStateV3["terminal"];
+  runtimeConstraints?: VmStateV3["runtime_constraints"];
+  resourceState?: VmStateV3["resource_state"];
   sshHostKeysOpenssh?: string[];
-  probes?: VmReportV2["probes"];
   error?: string | null;
   observedAt?: number;
-}): VmReportV2 {
-  return { owner_user_id: "user-1", runtime_execution_id: input.runId, generation: 1,
-    schema_version: 6,
-    host_id: "host-alpha",
+}): VmStateV3 {
+  return {
+    owner_user_id: "user-1",
+    runtime_execution_id: input.runId,
+    generation: 1,
     run_id: input.runId,
-    vm_name: input.vmName,
+    name: input.vmName,
     desired_version: 42,
-    observed_at_unix_ms: input.observedAt ?? 1_762_041_660_000,
     phase: input.phase,
     network: input.network ?? null,
     terminal: input.terminal ?? {
@@ -788,9 +640,10 @@ function vmReport(input: {
     resource_state: input.resourceState ?? null,
     sandbox: null,
     ssh_host_keys_openssh: input.sshHostKeysOpenssh ?? [],
-    probes: input.probes ?? [],
     archive: null,
     error: input.error ?? null,
+    lab: { state: "ready", kino_version: "test", ready: [], tasks: [], timings_ms: {} },
+    updated_at_unix_ms: input.observedAt ?? 1_762_041_660_000,
   };
 }
 
@@ -800,8 +653,8 @@ function readyTerminalEvidence(input: {
   observedAt: number;
   generation?: string;
 }): {
-  terminal: NonNullable<VmReportV2["terminal"]>;
-  runtimeConstraints: NonNullable<VmReportV2["runtime_constraints"]>;
+  terminal: NonNullable<VmStateV3["terminal"]>;
+  runtimeConstraints: NonNullable<VmStateV3["runtime_constraints"]>;
 } {
   return {
     terminal: {
@@ -822,7 +675,7 @@ function readyTerminalEvidence(input: {
   };
 }
 
-function vmResourceState(): NonNullable<VmReportV2["resource_state"]> {
+function vmResourceState(): NonNullable<VmStateV3["resource_state"]> {
   return {
     cpu_millis: 1_000,
     cpu_quota_us: 100_000,
@@ -833,46 +686,5 @@ function vmResourceState(): NonNullable<VmReportV2["resource_state"]> {
     cpu_nr_periods: 1,
     cpu_nr_throttled: 0,
     cpu_throttled_usec: 0,
-  };
-}
-
-function hostReport(vms: HostStateReportV2["vms"]): HostStateReportV2 {
-  return { relay_connected: true,
-    schema_version: 7,
-    host_id: "host-alpha",
-    observed_at_unix_ms: 1_762_041_660_000,
-    applied_desired_version: 42,
-    capacity: {
-      total_cpu_millis: 8_000,
-      reserved_cpu_millis: 1_000,
-      schedulable_cpu_millis: 7_000,
-      committed_cpu_millis: 1_000,
-      memory_total_mib: 32768,
-      memory_available_mib: 24576,
-      disk_probe_path: "/var/lib/intar-agent",
-      disk_total_mib: 524288,
-      disk_available_mib: 400000,
-    },
-    capabilities: {
-      arch: "x86_64",
-      cloud_hypervisor_sha256:
-        "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-      supports_kvm: true,
-      supports_vsock: true,
-      supports_reflink: true,
-      supports_nftables: true,
-      supports_jailer_v2: true,
-      supports_jailer_v3: true,
-      supports_raw_chunks_v1: true,
-      supports_scenario_guest_tools_v1: true,
-      supports_template_backed_launch: true,
-      fast_template_store: true,
-      supports_hard_cpu_quota: true,
-      supports_landlock: true,
-      supports_cgroup_v2: true,
-    },
-    cached_images: [],
-    vms,
-    builds: [],
   };
 }

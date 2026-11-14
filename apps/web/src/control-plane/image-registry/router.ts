@@ -1,39 +1,13 @@
 import {
-  handleBundleUpload,
   handleSourceBundleUpload,
   handleSourceCompilerDescriptor,
 } from "./bundle";
-import { handlePublish } from "./publish";
 import {
-  handleUploadCreate,
-  handleUploadPart,
-  handleUploadComplete,
-} from "./uploads";
-import {
-  handleAgentImageIndex,
-  handleAgentImageDownload,
-  handleAgentArtifactDownload,
   handleAgentBundleDownload,
   handleAgentBuildLogUpload,
   handleAgentSourceResult,
   handleAgentSourceSnapshot,
 } from "./agent";
-import {
-  handleAgentImageChunkDownload,
-  handleAgentImageManifestDownload,
-  handleAgentToolsDiskDownload,
-  handleImageChunkExists,
-  handleImageChunkUpload,
-  handleImageManifestUpload,
-} from "./chunks";
-import {
-  handleScenarioGuestToolsPromotion,
-  handleScenarioGuestToolsWarm,
-} from "./guest-tools";
-import { handleImageBuildRevisionStatus } from "./build-status";
-import {
-  handleCatalogRollback,
-} from "./catalog-promotion";
 import { handleImageCutoverGate } from "./cutover-gate";
 import {
   handleBlobHead,
@@ -92,12 +66,6 @@ export async function handleImageRegistryRequest(
     return handleRegistryAdmissionReap(request, env);
   }
 
-  if (url.pathname === "/registry/v1/bundles") {
-    return admitted(request, env, "POST", "bundle_put", () =>
-      handleBundleUpload(request, env),
-    );
-  }
-
   // Scenario sources hold no writer: they only stage under builds/**, which
   // the collector never sweeps.
   if (url.pathname === SOURCE_BUNDLES_PATH) {
@@ -107,89 +75,8 @@ export async function handleImageRegistryRequest(
     return handleSourceCompilerDescriptor(request, env);
   }
 
-  if (url.pathname === "/registry/v1/publish") {
-    // Publication awaits the cleanup service, so it holds no writer lease here.
-    // The handler takes a short lease around its own catalog commit instead.
-    return handlePublish(request, env);
-  }
-
-  if (url.pathname === "/registry/v1/uploads") {
-    return admitted(request, env, "POST", "multipart_create", () =>
-      handleUploadCreate(request, env),
-    );
-  }
-
-  if (url.pathname === "/registry/v1/uploads/parts") {
-    return admitted(request, env, "PUT", "multipart_part", () =>
-      handleUploadPart(request, env, url),
-    );
-  }
-
-  if (url.pathname === "/registry/v1/uploads/complete") {
-    return admitted(request, env, "POST", "multipart_complete", () =>
-      handleUploadComplete(request, env),
-    );
-  }
-
-  if (url.pathname === "/registry/v1/image-chunks/exists") {
-    return admitted(request, env, "POST", "chunk_exists", () =>
-      handleImageChunkExists(request, env),
-    );
-  }
-  if (url.pathname === "/registry/v1/guest-tools/promote") {
-    return admitted(request, env, "POST", "guest_tools", () =>
-      handleScenarioGuestToolsPromotion(request, env),
-    );
-  }
-  if (url.pathname === "/registry/v1/guest-tools/warm") {
-    return admitted(request, env, "POST", "guest_tools", () =>
-      handleScenarioGuestToolsWarm(request, env),
-    );
-  }
   if (url.pathname === "/registry/v1/cutover/gate") {
     return handleImageCutoverGate(request, env);
-  }
-
-  const buildStatusMatch = url.pathname.match(
-    /^\/registry\/v1\/builds\/revisions\/([A-Za-z0-9._-]{1,128})$/,
-  );
-  if (buildStatusMatch) {
-    return handleImageBuildRevisionStatus(
-      request,
-      env,
-      buildStatusMatch[1] ?? "",
-    );
-  }
-
-  const catalogRollbackMatch = url.pathname.match(
-    /^\/registry\/v1\/catalog\/rollback\/([A-Za-z0-9._-]{1,128})$/,
-  );
-  if (catalogRollbackMatch) {
-    return admitted(request, env, "POST", "pointer_mutation", () =>
-      handleCatalogRollback(request, env, catalogRollbackMatch[1] ?? ""),
-    );
-  }
-
-  const imageChunkUploadMatch = url.pathname.match(
-    /^\/registry\/v1\/image-chunks\/([a-f0-9]{64})$/,
-  );
-  if (imageChunkUploadMatch) {
-    return admitted(request, env, "PUT", "chunk_put", () =>
-      handleImageChunkUpload(request, env, imageChunkUploadMatch[1] ?? ""),
-    );
-  }
-
-  const imageManifestUploadMatch = url.pathname.match(
-    /^\/registry\/v1\/image-manifests\/([a-f0-9]{64})\.json$/,
-  );
-  if (imageManifestUploadMatch) {
-    return admitted(request, env, "PUT", "manifest_put", () =>
-      handleImageManifestUpload(
-        request,
-        env,
-        imageManifestUploadMatch[1] ?? "",
-      ),
-    );
   }
 
   const ociMatch = url.pathname.match(
@@ -218,62 +105,6 @@ export async function handleImageRegistryRequest(
   if (buildResultMatch) {
     return admitted(request, env, "POST", "build_result", () =>
       handleBuildResult(request, env, buildResultMatch[1] ?? ""),
-    );
-  }
-
-  if (url.pathname === "/agent/registry/images") {
-    return handleAgentImageIndex(request, env);
-  }
-
-  const scopedChunkMatch = url.pathname.match(
-    /^\/agent\/registry\/image-manifests\/([a-f0-9]{64})\/chunks\/([a-f0-9]{64})$/,
-  );
-  if (scopedChunkMatch) {
-    return handleAgentImageChunkDownload(request, env, scopedChunkMatch[2]!, scopedChunkMatch[1]!);
-  }
-
-  const agentManifestMatch = url.pathname.match(
-    /^\/agent\/registry\/image-manifests\/([a-f0-9]{64})$/,
-  );
-  if (agentManifestMatch) {
-    return handleAgentImageManifestDownload(
-      request,
-      env,
-      agentManifestMatch[1] ?? "",
-    );
-  }
-
-  const agentToolsDiskMatch = url.pathname.match(
-    /^\/agent\/registry\/guest-tools\/disks\/([a-f0-9]{64})$/,
-  );
-  if (agentToolsDiskMatch) {
-    return handleAgentToolsDiskDownload(
-      request,
-      env,
-      agentToolsDiskMatch[1] ?? "",
-    );
-  }
-
-  const downloadMatch = url.pathname.match(
-    /^\/agent\/registry\/images\/([^/]+)\/([A-Fa-f0-9]{64})$/,
-  );
-  if (downloadMatch) {
-    return handleAgentImageDownload(
-      request,
-      env,
-      decodeURIComponent(downloadMatch[1] ?? ""),
-      (downloadMatch[2] ?? "").toLowerCase(),
-    );
-  }
-
-  const artifactMatch = url.pathname.match(
-    /^\/agent\/registry\/artifacts\/([A-Fa-f0-9]{64})$/,
-  );
-  if (artifactMatch) {
-    return handleAgentArtifactDownload(
-      request,
-      env,
-      (artifactMatch[1] ?? "").toLowerCase(),
     );
   }
 

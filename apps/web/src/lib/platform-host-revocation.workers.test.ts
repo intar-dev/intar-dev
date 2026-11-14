@@ -10,7 +10,8 @@ import { POST } from "@/pages/api/admin/hosts/[hostId]/revoke";
 import { resetD1Database } from "@/test/d1-migrations";
 import { FIXTURE_ADMIN_ID, ensureFixtureAdmin, ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtures";
 import { seedHost, seedRun, desiredRunningVm } from "@/control-plane/host-runtime-do/test-fixtures";
-import { mutateStoredHostDesiredState, loadOrCreateHostDesiredState } from "./desired-state-store";
+import { loadStoredHostDesiredState } from "./desired-state-store";
+import { mutateDesiredState } from "@/control-plane/host-runtime-do/test-fixtures";
 import { destroyScenarioRunForUser } from "./scenario-runs/lifecycle";
 import { loadRunRow, updateRunState } from "./scenario-runs/storage";
 
@@ -75,16 +76,13 @@ it("lets a different admin revoke a connected platform host after its creator lo
   expect(effects.retire).toHaveBeenCalledWith("platform");
 });
 
-it("fails active builds and keeps the credential revoked while cleanup is retried", async () => {
-  await env.DB.prepare("INSERT INTO image_build_bundles (rev, r2_key, meta_json) VALUES ('rev', 'bundle', '{}')").run();
-  await env.DB.prepare("INSERT INTO image_builds (id, scenario_id, arch, rev, content_hash, host_id, status, phase) VALUES ('build', 'scenario', 'x86_64', 'rev', 'hash', 'platform', 'building', 'building')").run();
+it("keeps the credential revoked while cleanup is retried", async () => {
   effects.retire.mockRejectedValueOnce(new Error("offline"));
   expect((await revoke()).status).toBe(503);
   expect((await bootstrap()).status).toBe(401);
   expect((await revoke()).status).toBe(202);
   expect(await env.DB.prepare("SELECT credential_generation FROM agent_hosts WHERE id = 'platform'").first())
     .toEqual({ credential_generation: 2 });
-  expect(await env.DB.prepare("SELECT status FROM image_builds WHERE id = 'build'").first()).toEqual({ status: "failed" });
 });
 
 it("rearms lease cleanup after retirement settles, including a failed retirement", async () => {
@@ -128,10 +126,10 @@ it("revokes routes and preserves lease records for a failed run with a live sibl
   const db = drizzle(env.DB);
   const now = Date.now();
   await seedRun({ db, hostId: "platform", runId: "partly-failed", now, vms: [
-    { id: "failed", scenarioVmId: "failed", scenarioVmName: "failed", runtimeVmName: "failed", hostname: "failed" },
-    { id: "live", scenarioVmId: "live", scenarioVmName: "live", runtimeVmName: "live", hostname: "live" },
+    { id: "failed", scenarioVmId: "failed", scenarioVmName: "failed", runtimeVmName: "failed-partly-failed", hostname: "failed" },
+    { id: "live", scenarioVmId: "live", scenarioVmName: "live", runtimeVmName: "live-partly-failed", hostname: "live" },
   ] });
-  await mutateStoredHostDesiredState(db, "platform", now, (draft) => {
+  await mutateDesiredState(db, "platform", now, (draft) => {
     draft.vms = [desiredRunningVm("partly-failed", "failed", now), desiredRunningVm("partly-failed", "live", now)];
   });
   await updateRunState("partly-failed", { mutate: (state) => ({
@@ -144,7 +142,7 @@ it("revokes routes and preserves lease records for a failed run with a live sibl
   expect(await revoked.json()).toMatchObject({ accessRevoked: true, physicalCleanup: "unconfirmed" });
   expect(effects.destroy).toHaveBeenCalledWith({ runId: "partly-failed", userId: "user-1" });
   expect(effects.deleteRoute).toHaveBeenCalledTimes(6);
-  const desired = await loadOrCreateHostDesiredState(db, "platform", Date.now());
+  const desired = await loadStoredHostDesiredState(db, "platform", Date.now());
   expect(desired.vms.map(vm => [vm.desired_phase, vm.lease_expires_at_unix_ms]))
     .toEqual([["absent", now + 60_000], ["absent", now + 60_000]]);
   expect((await loadRunRow("partly-failed"))?.state.vms.find(vm => vm.id === "live")?.phase).toBe("ready");

@@ -8,23 +8,11 @@ import {
   text,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
-import type {
-  BuildPhase,
-  HostDesiredStateV2,
-  HostStateReportV2,
-} from "@/generated/bridge";
-import type {
-  ImageArchitecture,
-  ScenarioManifestV5,
-} from "@/generated/catalog";
-import type { BuildPhaseV2, BuildTargetV1 } from "@/generated/contracts/bridge-message-v9";
+import type { BuildPhaseV2, BuildTargetV1, HostDesiredStateV3, HostStateReportV3 } from "@/generated/contracts/bridge-message-v9";
 import { organization, user } from "./core";
 import {
   type AgentHostRole,
   type HostCpuReservationState,
-  type ImageBuildBundleMeta,
-  type ImageBuildStatus,
-  type ImageBuildTimings,
   type ImageRegistryEnforcementMode,
   type ImageRegistryGateState,
   type ImageRegistryGcRunState,
@@ -87,99 +75,6 @@ export const agentHosts = sqliteTable(
   ],
 );
 
-export const imageBuildBundles = sqliteTable(
-  "image_build_bundles",
-  {
-    rev: text("rev").primaryKey(),
-    organizationId: text("organization_id").references(() => organization.id, {
-      onDelete: "restrict",
-    }),
-    r2Key: text("r2_key").notNull(),
-    metaJson: jsonText<ImageBuildBundleMeta>("meta_json").notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    index("image_build_bundles_organization_idx").on(
-      table.organizationId,
-      table.updatedAt,
-    ),
-  ],
-);
-
-export const imageBuilds = sqliteTable(
-  "image_builds",
-  {
-    id: text("id").primaryKey(),
-    organizationId: text("organization_id").references(() => organization.id, {
-      onDelete: "restrict",
-    }),
-    scenarioId: text("scenario_id").notNull(),
-    arch: text("arch").$type<ImageArchitecture>().notNull(),
-    rev: text("rev")
-      .notNull()
-      .references(() => imageBuildBundles.rev, { onDelete: "cascade" }),
-    contentHash: text("content_hash").notNull(),
-    catalogChannel: text("catalog_channel")
-      .$type<"candidate" | "live">()
-      .default("live")
-      .notNull(),
-    hostId: text("host_id").references(() => agentHosts.id, {
-      onDelete: "set null",
-    }),
-    status: text("status")
-      .$type<ImageBuildStatus>()
-      .default("queued")
-      .notNull(),
-    phase: text("phase").$type<BuildPhase>().default("queued").notNull(),
-    attempt: integer("attempt").default(0).notNull(),
-    error: text("error"),
-    logR2Key: text("log_r2_key"),
-    publishedManifestJson: jsonText<ScenarioManifestV5>(
-      "published_manifest_json",
-    ),
-    /**
-     * Set when the catalog policy retires this build's objects. A build whose
-     * artifacts are retired is no longer a reason to keep its R2 objects.
-     */
-    artifactsRetiredAt: integer("artifacts_retired_at"),
-    timingsJson: jsonText<ImageBuildTimings>("timings_json")
-      .default({})
-      .notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("image_builds_scenario_arch_hash_uidx").on(
-      table.scenarioId,
-      table.arch,
-      table.contentHash,
-    ),
-    index("image_builds_status_idx").on(table.status, table.updatedAt),
-    index("image_builds_organization_idx").on(
-      table.organizationId,
-      table.status,
-      table.updatedAt,
-    ),
-    index("image_builds_host_idx").on(table.hostId, table.status),
-    index("image_builds_rev_idx").on(table.rev),
-  ],
-);
-
-export const imageBuildCoordinationLocks = sqliteTable(
-  "image_build_coordination_locks",
-  {
-    key: text("key").primaryKey(),
-    ownerToken: text("owner_token").notNull(),
-    expiresAt: integer("expires_at").notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    index("image_build_coordination_locks_expiry_idx").on(table.expiresAt),
-  ],
-);
-
 export const runtimeOperationGates = sqliteTable("runtime_operation_gates", {
   key: text("key").primaryKey(),
   state: text("state").$type<"open" | "drained" | "wiped">().notNull(),
@@ -194,7 +89,7 @@ export const hostDesiredState = sqliteTable(
       .primaryKey()
       .references(() => agentHosts.id, { onDelete: "cascade" }),
     version: integer("version").notNull(),
-    docJson: jsonText<HostDesiredStateV2>("doc_json").notNull(),
+    docJson: jsonText<HostDesiredStateV3>("doc_json").notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
@@ -209,7 +104,7 @@ export const hostActualState = sqliteTable(
       .references(() => agentHosts.id, { onDelete: "cascade" }),
     appliedDesiredVersion: integer("applied_desired_version").notNull(),
     observedAt: integer("observed_at").notNull(),
-    reportJson: jsonText<HostStateReportV2>("report_json").notNull(),
+    reportJson: jsonText<HostStateReportV3>("report_json").notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },

@@ -4,6 +4,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   CloudflareD1RestClient,
+  type D1ReadClient,
   type D1Statement,
   type D1WriteClient,
 } from "./d1-rest-client";
@@ -20,17 +21,25 @@ export interface RehearsalEvidence {
   readonly appliedMigrationCount: number;
   readonly committedMigrationCount: number;
   readonly foreignKeyViolations: number;
-  readonly scenarioCounts: readonly [number, number, number];
+  /** Tables the pending migrations dropped, by name. */
+  readonly droppedTables: readonly string[];
+  /** Tables that survived with every row and their schema unchanged. */
+  readonly preservedTables: number;
+  readonly preservedRows: number;
 }
+
+/** The one table the pending migrations may rebuild; it is empty after the wipe. */
+export const REBUILT_TABLES: readonly string[] = ["runtime_vms"];
 
 /**
  * Rehearses the pending generated migrations on a disposable database.
  *
  * The baseline is the committed prefix production reports, built with the same
- * atomic applier production uses, and the seed writes the rows that must
- * survive. The pending set is then applied and the result is verified against
- * the full committed schema, so the rehearsal proves the real transition
- * rather than a schema-only reproduction.
+ * atomic applier production uses, and the seed writes rows in the shape of
+ * that baseline after the scenario wipe. The pending set is then applied, the
+ * result is verified against the full committed schema, and every table that
+ * survives must hold exactly the rows it held before, quoted value for quoted
+ * value, under an unchanged definition.
  */
 export async function runRehearsal(input: {
   client: D1WriteClient;
@@ -39,6 +48,7 @@ export async function runRehearsal(input: {
   const { client } = input;
   const baselineTags = await applyBaselineMigrations(client, input.appliedCount);
   await client.batch(rehearsalSeedStatements());
+  const before = await snapshotTables(client);
   const applied = await applyGeneratedMigrations(client);
   if (applied.appliedTags.length === 0) {
     throw new Error("the rehearsal applied no pending migration");
@@ -49,20 +59,8 @@ export async function runRehearsal(input: {
       `rehearsal applied ${proof.appliedMigrationCount} of ${proof.committedMigrationCount} committed migrations`,
     );
   }
-  const scenarioCounts = await client.batchRead?.([
-    {
-      sql: "SELECT count(*) AS count FROM runtime_executions WHERE domain_kind = 'scenario'",
-    },
-    { sql: "SELECT count(*) AS count FROM runtime_vms" },
-    { sql: "SELECT count(*) AS count FROM runtime_artifacts" },
-  ]);
-  if (
-    !scenarioCounts ||
-    scenarioCounts.length !== 3 ||
-    scenarioCounts.some((result) => result.rows[0]?.count !== 1)
-  ) {
-    throw new Error("disposable D1 rehearsal did not preserve scenario data");
-  }
+  const after = await snapshotTables(client);
+  const preserved = comparePreservedTables(before, after);
   return {
     schemaSha256: proof.schemaSha256,
     baselineTags,
@@ -70,7 +68,69 @@ export async function runRehearsal(input: {
     appliedMigrationCount: proof.appliedMigrationCount,
     committedMigrationCount: proof.committedMigrationCount,
     foreignKeyViolations: proof.foreignKeyViolations,
-    scenarioCounts: [1, 1, 1],
+    ...preserved,
+  };
+}
+
+export interface TableSnapshot {
+  readonly sql: string;
+  /** Every row as its columns' SQL `quote()` text, sorted. */
+  readonly rows: readonly string[];
+}
+
+/** Each application table's definition and rows, by name. */
+export async function snapshotTables(
+  client: D1ReadClient,
+): Promise<ReadonlyMap<string, TableSnapshot>> {
+  const tables = await client.query(
+    "SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_%' ESCAPE '\\' AND name <> '_cf_KV' ORDER BY name",
+  );
+  const snapshot = new Map<string, TableSnapshot>();
+  for (const table of tables.rows) {
+    const name = String(table.name);
+    const columns = await client.query(
+      "SELECT name FROM pragma_table_info(?1) ORDER BY cid",
+      [name],
+    );
+    const quoted = columns.rows
+      .map((column) => `quote("${String(column.name).replaceAll('"', '""')}")`)
+      .join(" || ',' || ");
+    const rows = await client.query(
+      `SELECT ${quoted} AS row FROM "${name.replaceAll('"', '""')}"`,
+    );
+    snapshot.set(name, {
+      sql: String(table.sql),
+      rows: rows.rows.map((row) => String(row.row)).sort(),
+    });
+  }
+  return snapshot;
+}
+
+/**
+ * Every table present after the migrations must hold the rows it held before;
+ * every one but a rebuilt table must also keep its definition. A table that
+ * appears only afterwards is refused: the removal adds none.
+ */
+export function comparePreservedTables(
+  before: ReadonlyMap<string, TableSnapshot>,
+  after: ReadonlyMap<string, TableSnapshot>,
+): Pick<RehearsalEvidence, "droppedTables" | "preservedTables" | "preservedRows"> {
+  let preservedRows = 0;
+  for (const [name, table] of after) {
+    const earlier = before.get(name);
+    if (!earlier) throw new Error(`the migrations added the table ${name}`);
+    if (!REBUILT_TABLES.includes(name) && earlier.sql !== table.sql) {
+      throw new Error(`the migrations changed the definition of ${name}`);
+    }
+    if (JSON.stringify(earlier.rows) !== JSON.stringify(table.rows)) {
+      throw new Error(`the migrations changed the rows of ${name}`);
+    }
+    preservedRows += table.rows.length;
+  }
+  return {
+    droppedTables: [...before.keys()].filter((name) => !after.has(name)),
+    preservedTables: after.size,
+    preservedRows,
   };
 }
 
@@ -110,40 +170,55 @@ if (import.meta.main) {
 }
 
 /**
- * Rows that exercise the pending migrations on realistic data.
- *
- * The seed writes only tables that still exist at the baseline prefix: the
- * retired domain tables (provider connections and credentials, workshop
- * workspaces) were dropped by the removal migration, so a rehearsal that
- * started at a later prefix could not insert them. What must survive is the
- * scenario runtime data, and one scenario execution with its VM, artifact, and
- * a run row is the shape that proves it.
+ * Rows in the shape of the production baseline after the scenario wipe: no
+ * run or execution is left, while accounts, organizations, hosts, enrollment,
+ * gates, registry state, sources, catalogs and the revision model's scenarios
+ * remain. The retired scenario and build tables hold rows too, so the drop is
+ * rehearsed on data rather than on empty tables.
  */
 export function rehearsalSeedStatements(): D1Statement[] {
-  const sha = (character: string) => character.repeat(64);
+  const digest = (character: string) => "sha256:" + character.repeat(64);
   return [
-    {
-      sql: "INSERT INTO user (id, name, email) VALUES ('user-1', 'User', 'user@example.test')",
-    },
-    {
-      sql: "INSERT INTO organization (id, name, slug, created_at) VALUES ('org-1', 'Org', 'org', 1)",
-    },
-    {
-      sql: "INSERT INTO agent_hosts (id, user_id, name) VALUES ('host-1', 'user-1', 'Host')",
-    },
-    {
-      sql: "INSERT INTO scenario_runs (run_id, user_id, host_id, scenario_id, scenario_name, title, tagline, briefing_markdown, objectives_json, difficulty, estimated_minutes, tags_json, hints_json, solution_markdown, revealed_hints_json, solution_assisted, vm_count, state, state_rank, active_key, state_json, created_at, updated_at) VALUES ('run-1', 'user-1', 'host-1', 'broken-nginx', 'broken-nginx', 'Title', 'Tagline', 'Briefing', '[]', 'beginner', 30, '[]', '[]', 'Solution', '[]', 0, 1, 'provisioning', 1, 'user-1', '{}', 1, 1)",
-    },
-    {
-      sql: "INSERT INTO runtime_executions (id, user_id, host_id, domain_kind, domain_id, generation, state) VALUES ('run-1', 'user-1', 'host-1', 'scenario', 'run-1', 1, 'provisioning')",
-    },
-    {
-      sql: "INSERT INTO runtime_vms (id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json, image_sha256, cpu_millis, memory_mib, disk_mib) VALUES ('runtime-vm-1', 'run-1', 'vm-1', 0, 'server', '{}', '" + sha("a") + "', 1000, 1024, 4096)",
-    },
-    {
-      sql: "INSERT INTO runtime_artifacts (id, execution_id, runtime_vm_id, ordinal, kind, filename, content_type, size_bytes, sha256, r2_key, upload_status, uploaded_at) VALUES ('artifact-1', 'run-1', 'runtime-vm-1', 0, 'terminal_recording', 'recording.krec', 'application/octet-stream', 1, '" + sha("b") + "', 'runs/run-1/recording.krec', 'uploaded', 1)",
-    },
-  ];
+    "INSERT INTO user (id, name, email, created_at, updated_at) VALUES ('user-1', 'User', 'user@example.test', 1, 2)",
+    "INSERT INTO session (id, expires_at, token, created_at, updated_at, user_id) VALUES ('session-1', 9, 'token-1', 1, 2, 'user-1')",
+    "INSERT INTO account (id, account_id, provider_id, user_id, created_at, updated_at) VALUES ('account-1', '42', 'github', 'user-1', 1, 2)",
+    "INSERT INTO verification (id, identifier, value, expires_at) VALUES ('verification-1', 'email', 'code', 9)",
+    "INSERT INTO user_ssh_keys (id, user_id, key_type, public_key_openssh, fingerprint_sha256) VALUES ('ssh-key-1', 'user-1', 'ssh-ed25519', 'ssh-ed25519 AAAA', 'SHA256:abc')",
+    "INSERT INTO organization (id, name, slug, created_at) VALUES ('org-1', 'Org', 'org', 1)",
+    "INSERT INTO organization_entitlements (organization_id) VALUES ('org-1')",
+    "INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('member-1', 'org-1', 'user-1', 'owner', 1)",
+    "INSERT INTO invitation (id, organization_id, email, role, status, expires_at, inviter_id) VALUES ('invitation-1', 'org-1', 'invitee@example.test', 'member', 'pending', 9, 'user-1')",
+    "INSERT INTO sso_provider (id, issuer, domain, user_id, provider_id, organization_id) VALUES ('sso-1', 'https://issuer.example.test', 'example.test', 'user-1', 'provider-1', 'org-1')",
+    "INSERT INTO oauth_client (id, client_id, redirect_uris) VALUES ('oauth-client-1', 'client-1', '[]')",
+    "INSERT INTO oauth_resource (id, identifier, name) VALUES ('oauth-resource-1', 'https://api.example.test', 'API')",
+    "INSERT INTO oauth_consent (id, client_id, user_id, scopes) VALUES ('consent-1', 'client-1', 'user-1', 'openid')",
+    "INSERT INTO signup_settings (id, signup_limit, version, updated_at) VALUES (1, 10, 1, 1)",
+    "INSERT INTO signup_reservations (user_id, created_at, expires_at) VALUES ('user-1', 1, 9)",
+    "INSERT INTO support_topics (id, title, type, body, status, author_id) VALUES ('topic-1', 'Topic', 'help', 'Body', 'open', 'user-1')",
+    "INSERT INTO support_comments (id, topic_id, body, author_id) VALUES ('comment-1', 'topic-1', 'Comment', 'user-1')",
+    "INSERT INTO access_events (id, event_type) VALUES ('access-event-1', 'granted')",
+    "INSERT INTO access_revocations (user_id, revocation_id, revoked_by, reason, revoked_at) VALUES ('user-1', 'revocation-1', 'user-1', 'test', 1)",
+    "INSERT INTO agent_hosts (id, user_id, name) VALUES ('host-1', 'user-1', 'Host')",
+    "INSERT INTO agent_bootstrap_tokens (id, host_id, token_hash) VALUES ('bootstrap-1', 'host-1', 'hash-1')",
+    "INSERT INTO host_enrollments (token_hash, host_id, user_id, name, scope, role, expires_at) VALUES ('enrollment-hash-1', 'host-1', 'user-1', 'Host', 'personal', 'agent', 9)",
+    "INSERT INTO host_desired_state (host_id, version, doc_json) VALUES ('host-1', 3, '{\"vms\":[]}')",
+    "INSERT INTO host_actual_state (host_id, applied_desired_version, observed_at, report_json) VALUES ('host-1', 3, 1, '{\"vms\":[]}')",
+    "INSERT INTO runtime_operation_gates (key, state) VALUES ('image_cutover', 'wiped')",
+    "INSERT INTO image_registry_admission (key, protocol_version) VALUES ('registry', 1)",
+    "INSERT INTO image_registry_gc_runs (id, owner, sweep_token, started_at, heartbeat_at) VALUES ('gc-1', 'oci-registry-sweep', 'sweep-1', 1, 2)",
+    `INSERT INTO registry_manifests (digest, media_type, artifact_type, size) VALUES ('${digest("a")}', 'application/vnd.oci.image.manifest.v1+json', 'application/vnd.intar.machine.v1', 10)`,
+    `INSERT INTO registry_manifest_blobs (manifest_digest, blob_digest) VALUES ('${digest("a")}', '${digest("b")}')`,
+    "INSERT INTO scenario_sources (scope_key, github_installation_id, github_repository_id, github_repository, default_branch) VALUES ('public', 1, 2, 'owner/scenarios', 'main')",
+    "INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, state) VALUES ('commit-1', 'public', 'deploy', 'abc', 'rev-1', 'push', 'live')",
+    "INSERT INTO course_catalogs (scope_key, catalog_json, source_revision) VALUES ('public', '{\"version\":2,\"courses\":[]}', 'rev-1')",
+    "INSERT INTO bundles (rev, scope_key, compiler_version, r2_key) VALUES ('rev-1', 'public', '1.0.0', 'bundles/rev-1.json.gz')",
+    "INSERT INTO scenarios (id, namespace, slug, scope_key, enabled, play) VALUES ('intar/nginx', 'intar', 'nginx', 'public', 1, 0)",
+    "INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state) VALUES ('intar/nginx', 'rev-1', 3, '{}', 'verified')",
+    "INSERT INTO machine_builds (build_key, image_format, bundle_rev, state) VALUES ('" + digest("c") + "', 'raw', 'rev-1', 'succeeded')",
+    "INSERT INTO image_build_bundles (rev, r2_key, meta_json) VALUES ('legacy-rev', 'legacy/bundle.tar', '{}')",
+    "INSERT INTO image_builds (id, scenario_id, arch, rev, content_hash) VALUES ('legacy-build', 'legacy-scenario', 'x86_64', 'legacy-rev', 'hash')",
+    "INSERT INTO vm_scenarios (scenario_id, title, description, difficulty, estimated_minutes, tags_json, briefing_markdown, solution_markdown, hints_json) VALUES ('legacy-scenario', 'Legacy', 'Retired', 'easy', 10, '[]', '', '', '[]')",
+  ].map((sql) => ({ sql }));
 }
 
 /**

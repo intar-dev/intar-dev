@@ -203,38 +203,6 @@ export const scenarioRunSshKeys = sqliteTable(
   ],
 );
 
-export const scenarioRunProbeSnapshots = sqliteTable(
-  "scenario_run_probe_snapshots",
-  {
-    id: text("id").primaryKey(),
-    runId: text("run_id")
-      .notNull()
-      .references(() => scenarioRuns.runId, { onDelete: "cascade" }),
-    vmId: text("vm_id").notNull(),
-    runtimeVmName: text("runtime_vm_name").notNull(),
-    messageId: text("message_id").notNull(),
-    collectionState: text("collection_state"),
-    collectionError: text("collection_error"),
-    summaryJson: text("summary_json"),
-    snapshotJson: text("snapshot_json").notNull(),
-    generatedAt: integer("generated_at"),
-    observedAt: integer("observed_at").notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("scenario_run_probe_snapshots_run_vm_message_uidx").on(
-      table.runId,
-      table.vmId,
-      table.messageId,
-    ),
-    index("scenario_run_probe_snapshots_run_vm_idx").on(
-      table.runId,
-      table.vmId,
-      table.createdAt,
-    ),
-  ],
-);
-
 export const scenarioRunArtifacts = sqliteTable(
   "scenario_run_artifacts",
   {

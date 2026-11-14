@@ -2,15 +2,7 @@
 
 import { env } from "cloudflare:workers";
 import { createExecutionContext, createScheduledController } from "cloudflare:test";
-import { drizzle } from "drizzle-orm/d1";
-import { eq } from "drizzle-orm";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import {
-  imageBuildBundles,
-  imageBuilds,
-  vmScenarios,
-  vmScenarioVms,
-} from "@/db/schema";
 import { MaintenanceState } from "@/maintenance-state";
 import {
   handleMaintenanceMode,
@@ -18,15 +10,9 @@ import {
   REGISTRY_CLEANUP_GATE_PATH,
 } from "@/maintenance";
 import {
-  bootArtifactObjectKey,
-  imageObjectKey,
-} from "@/lib/image-artifact-retention";
-import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
-import {
   REGISTRY_ADMISSION_KEY,
   REGISTRY_ADMISSION_PROTOCOL_VERSION,
 } from "@/lib/image-registry-admission";
-import { DEFAULT_CLEANUP_OWNER } from "@/lib/image-registry-cleanup";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
   CLEANUP_PAUSE_REASON,
@@ -42,58 +28,15 @@ import cleanupWorker from "../../workers/image-registry-cleanup/src/worker";
  * real retention projection and sweep core.
  */
 
-const SCENARIO_ID = "registry-cleanup-fixture";
-const VM_NAME = "control-plane";
-const ARCH = "x86_64";
-
-/** A live catalog image the sweep must keep. */
-const IMAGE_ID = "1".repeat(64);
-/** A live kernel artifact the sweep must keep. */
-const KERNEL_SHA256 = "2".repeat(64);
-/** A live initrd artifact the sweep must keep. */
-const INITRD_SHA256 = "3".repeat(64);
-/** An object no reference names: the only candidate of these tests. */
-const ORPHAN_SHA256 = "4".repeat(64);
-const ORPHAN_BYTES = 3;
-/** A published build whose only member nothing references any more. */
-const RETIRED_BUILD_ID = "registry-cleanup-retired-build";
-const RETIRED_REV = "registry-cleanup-retired-rev";
-const PENDING_WRITER_ID = "registry-cleanup-pending-writer";
-const CLEANUP_OWNER = DEFAULT_CLEANUP_OWNER;
-const RETIRED_IMAGE_ID = "5".repeat(64);
-const RETIRED_IMAGE_KEY = imageObjectKey(
-  { scenario: SCENARIO_ID, vm: "retired", arch: ARCH },
-  RETIRED_IMAGE_ID,
-);
-
-const IMAGE_KEY = imageObjectKey(
-  { scenario: SCENARIO_ID, vm: VM_NAME, arch: ARCH },
-  IMAGE_ID,
-);
-const KERNEL_KEY = bootArtifactObjectKey(KERNEL_SHA256);
-const INITRD_KEY = bootArtifactObjectKey(INITRD_SHA256);
-const ORPHAN_KEY = bootArtifactObjectKey(ORPHAN_SHA256);
-
-/**
- * Every object this file puts in R2. The pool shares one D1 database and one
- * R2 bucket across test files, so a file may only add and remove its own
- * fixture: it must never wipe a prefix, and it must never assume the bucket or
- * the database is otherwise empty.
- */
-const FIXTURE_OBJECT_KEYS = [
-  IMAGE_KEY,
-  KERNEL_KEY,
-  INITRD_KEY,
-  ORPHAN_KEY,
-  RETIRED_IMAGE_KEY,
-];
+/** An object no reference names, which only a delete pass may remove. */
+const ORPHAN_KEY = "registry-cleanup-worker-fixture/orphan";
 
 function childEnv(overrides: Partial<CleanupEnv> = {}): CleanupEnv {
   return {
     DB: env.DB,
     VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
     REGISTRY_CLEANUP_MODE: "report-only",
-    CONTROL_PLANE: new MaintenanceState(createExecutionContext(), env),
+    CONTROL_PLANE: pinlessParent(),
     ...overrides,
   };
 }
@@ -102,240 +45,45 @@ function child(overrides: Partial<CleanupEnv> = {}): RegistryCleanup {
   return new RegistryCleanup(createExecutionContext(), childEnv(overrides));
 }
 
-/** The parent entrypoint of a version that has maintenance on. */
-function fencedParent(): MaintenanceState {
+/** The parent entrypoint with some of its variables replaced. */
+function parentWith(vars: Record<string, string>): MaintenanceState {
   return new MaintenanceState(
     createExecutionContext(),
     new Proxy(env, {
       get(target, property, receiver) {
-        if (property === "CONTROL_PLANE_MAINTENANCE") return "on";
+        if (typeof property === "string" && property in vars) return vars[property];
         return Reflect.get(target, property, receiver);
       },
     }),
   );
 }
 
-/**
- * Sweep rows are shared, and another file may have run a sweep before this one.
- * A test that asserts about the collector's own rows counts the rows that exist
- * around it instead of assuming the table is empty.
- */
-async function gcRunIds(): Promise<Set<string>> {
-  // The OCI store's pass records its own rows under another owner.
-  const rows = await env.DB.prepare("SELECT id FROM image_registry_gc_runs WHERE owner = ?1")
-    .bind(CLEANUP_OWNER)
-    .all<{ id: string }>();
-  return new Set((rows.results ?? []).map((row) => row.id));
-}
-
-async function gcRunsAddedSince(before: Set<string>): Promise<GcRunRow[]> {
-  const added = [...(await gcRunIds())].filter((id) => !before.has(id));
-  if (!added.length) return [];
-  const rows = await env.DB.prepare(
-    `SELECT state, scanned_objects, deleted_objects, blocked_objects,
-            bytes_reclaimed, error
-       FROM image_registry_gc_runs
-      WHERE id IN (${added.map(() => "?").join(",")})`,
-  )
-    .bind(...added)
-    .all<GcRunRow>();
-  return rows.results ?? [];
-}
-
-/** The first moment this file touched the shared storage. */
-const FIXTURE_STARTED_AT_MS = Date.now();
-
-/**
- * Remove this file's footprint and nothing else, so a later file starts from
- * the state it expects and a re-run of this file is deterministic.
- *
- * `reset()` from the pool only deletes Durable Objects in this version, so D1
- * and R2 rows survive a test file and must be removed by hand. Everything here
- * is scoped to this file: its own fixture keys, its own scenario, and the sweep
- * rows the collector wrote from the moment this file started.
- */
-async function resetCollectorFixture(): Promise<void> {
-  await env.VM_IMAGE_REGISTRY_BUCKET.delete([...FIXTURE_OBJECT_KEYS]);
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM image_registry_operation_writers WHERE id = ?").bind(
-      PENDING_WRITER_ID,
-    ),
-    env.DB.prepare(
-      "DELETE FROM image_registry_gc_runs WHERE owner = ? AND created_at >= ?",
-    ).bind(CLEANUP_OWNER, FIXTURE_STARTED_AT_MS),
-    env.DB.prepare("DELETE FROM image_builds WHERE id = ?").bind(RETIRED_BUILD_ID),
-    env.DB.prepare("DELETE FROM image_build_bundles WHERE rev = ?").bind(
-      RETIRED_REV,
-    ),
-    env.DB.prepare("DELETE FROM vm_scenario_vms WHERE scenario_id = ?").bind(
-      SCENARIO_ID,
-    ),
-    env.DB.prepare("DELETE FROM vm_scenarios WHERE scenario_id = ?").bind(
-      SCENARIO_ID,
-    ),
-    env.DB.prepare("DELETE FROM image_registry_admission WHERE key = ?").bind(
-      REGISTRY_ADMISSION_KEY,
-    ),
-  ]);
+/** The parent entrypoint of a version that has maintenance on. */
+function fencedParent(): MaintenanceState {
+  return parentWith({ CONTROL_PLANE_MAINTENANCE: "on" });
 }
 
 /**
- * One live scenario whose image, kernel, and initrd must survive a sweep.
- * These are the references the projection retains; the objects are in R2, so
- * the retained-coverage check finds nothing missing and reports no fault.
+ * The parent entrypoint of a version that pins no Kino. The test pin names a
+ * Kino this file does not store, which a sweep rightly reports as a fault.
  */
-async function seedReferencedCatalog(): Promise<void> {
-  const db = drizzle(env.DB);
-  await db.insert(vmScenarios).values({
-    scenarioId: SCENARIO_ID,
-    sourceRevision: "fixture",
-    title: "Registry cleanup fixture",
-    description: "A live scenario the sweep must not break.",
-    difficulty: "easy",
-    estimatedMinutes: 5,
-    tagsJson: [],
-    briefingMarkdown: "",
-    solutionMarkdown: "",
-    hintsJson: [],
-    enabled: true,
-    enabledAt: Date.now(),
-  });
-  await db.insert(vmScenarioVms).values({
-    id: `${SCENARIO_ID}:${VM_NAME}`,
-    scenarioId: SCENARIO_ID,
-    ordinal: 0,
-    vmName: VM_NAME,
-    image: "fixture.raw.zst",
-    imageKeyJson: { scenario: SCENARIO_ID, vm: VM_NAME, arch: ARCH },
-    imageSha256: IMAGE_ID,
-    imageFormat: "raw_zstd",
-    imageVirtualSizeBytes: 1_024,
-    kernelSha256: KERNEL_SHA256,
-    initrdSha256: INITRD_SHA256,
-    bootCmdline: "root=/dev/vda rw console=ttyS0",
-    memoryMib: 512,
-    diskMib: 1_024,
-  });
-  await Promise.all([
-    env.VM_IMAGE_REGISTRY_BUCKET.put(
-      IMAGE_KEY,
-      new Uint8Array([1, 2, 3, 4, 5, 6, 7]),
-    ),
-    env.VM_IMAGE_REGISTRY_BUCKET.put(
-      KERNEL_KEY,
-      new Uint8Array([1, 2, 3, 4, 5]),
-    ),
-    env.VM_IMAGE_REGISTRY_BUCKET.put(
-      INITRD_KEY,
-      new Uint8Array([1, 2, 3, 4, 5, 6]),
-    ),
-  ]);
+function pinlessParent(): MaintenanceState {
+  return parentWith({ KINO_PINS_JSON: "" });
 }
 
 /** An object inside a swept prefix that no reference names. */
+async function resetCollectorFixture(): Promise<void> {
+  await env.VM_IMAGE_REGISTRY_BUCKET.delete(ORPHAN_KEY);
+  await env.DB.prepare("DELETE FROM image_registry_admission WHERE key = ?")
+    .bind(REGISTRY_ADMISSION_KEY)
+    .run();
+}
+
 async function seedOrphan(): Promise<void> {
   await env.VM_IMAGE_REGISTRY_BUCKET.put(
     ORPHAN_KEY,
     new Uint8Array([9, 9, 9]),
   );
-}
-
-/**
- * A published build whose members nothing else references. The projection
- * retires it, which frees its artifacts for the next pass: the trigger for a
- * pass that finished its bounded work and still needs another one.
- */
-async function seedSupersededBuild(): Promise<void> {
-  const db = drizzle(env.DB);
-  const rev = RETIRED_REV;
-  await db.insert(imageBuildBundles).values({
-    rev,
-    r2Key: `builds/bundles/${rev}.tar.gz`,
-    metaJson: {
-      buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
-      catalogChannel: "live",
-      scenarios: [],
-    },
-  });
-  await db.insert(imageBuilds).values({
-    id: RETIRED_BUILD_ID,
-    scenarioId: SCENARIO_ID,
-    arch: ARCH,
-    rev,
-    contentHash: "6".repeat(64),
-    catalogChannel: "live",
-    status: "succeeded",
-    phase: "succeeded",
-    publishedManifestJson: {
-      scenario_id: SCENARIO_ID,
-      vms: [
-        {
-          name: "retired",
-          image_key: { scenario: SCENARIO_ID, vm: "retired", arch: ARCH },
-          image_id: RETIRED_IMAGE_ID,
-        },
-      ],
-    } as never,
-  });
-  await env.VM_IMAGE_REGISTRY_BUCKET.put(
-    RETIRED_IMAGE_KEY,
-    new Uint8Array([7, 7]),
-  );
-}
-
-/** A live scenario whose retained image manifest is absent from R2. */
-async function breakRetainedManifest(): Promise<void> {
-  const db = drizzle(env.DB);
-  await db
-    .update(vmScenarioVms)
-    .set({ chunkManifestSha256: "9".repeat(64), imageFormat: "raw_chunks_v1" })
-    .where(eq(vmScenarioVms.id, `${SCENARIO_ID}:${VM_NAME}`));
-}
-
-/** An unresolved writer, which is what makes a sweep refuse to start. */
-async function seedPendingWriter(): Promise<void> {
-  const now = Date.now();
-  await env.DB.prepare(
-    `INSERT INTO image_registry_operation_writers
-       (id, session_id, owner_kind, owner_id, operation, epoch, outcome,
-        created_at, heartbeat_at, expires_at, released_at)
-     VALUES (?1, NULL, 'builder', 'builder-host', 'publish', 1, 'pending',
-             ?2, ?2, ?3, NULL)`,
-  )
-    .bind(PENDING_WRITER_ID, now, now + 60_000)
-    .run();
-}
-
-/** Turn the shared gate on, which is what allows a delete at all. */
-async function enforceRegistrySweep(): Promise<void> {
-  const now = Date.now();
-  await env.DB.prepare(
-    `INSERT INTO image_registry_admission
-       (key, protocol_version, enforcement, epoch, state, updated_at)
-     VALUES (?1, ?2, 'enforce', 0, 'open', ?3)
-     ON CONFLICT(key) DO UPDATE SET
-       enforcement = 'enforce',
-       state = 'open',
-       sweep_token = NULL,
-       sweep_owner = NULL,
-       sweep_started_at = NULL,
-       sweep_heartbeat_at = NULL,
-       sweep_expires_at = NULL,
-       paused_at = NULL,
-       pause_reason = NULL,
-       updated_at = ?3`,
-  )
-    .bind(REGISTRY_ADMISSION_KEY, REGISTRY_ADMISSION_PROTOCOL_VERSION, now)
-    .run();
-}
-
-interface GcRunRow {
-  state: string;
-  scanned_objects: number;
-  deleted_objects: number;
-  blocked_objects: number;
-  bytes_reclaimed: number;
-  error: string | null;
 }
 
 async function objectExists(key: string): Promise<boolean> {
@@ -395,13 +143,6 @@ function parentEnvWithoutDatabase(overrides: Record<string, unknown>): Cloudflar
   } as unknown as Cloudflare.Env;
 }
 
-function findEvent(
-  logs: Array<Record<string, unknown>>,
-  event: string,
-): Record<string, unknown> | undefined {
-  return logs.find((entry) => entry.event === event);
-}
-
 describe("image registry cleanup worker", () => {
   // The pool shares one database and one bucket across files in this version,
   // so this file removes its fixture before each test and again at the end.
@@ -432,7 +173,6 @@ describe("image registry cleanup worker", () => {
   it("fences the scheduled run when the parent reports maintenance", async () => {
     await resetD1Database();
     await resetCollectorFixture();
-    await seedReferencedCatalog();
     await seedOrphan();
 
     const parent = fencedParent();
@@ -487,7 +227,6 @@ describe("image registry cleanup worker", () => {
     await resetD1Database();
     await resetCollectorFixture();
     await seedOrphan();
-    const before = await gcRunIds();
     const now = Date.now();
     await env.DB.prepare(
       `INSERT INTO image_registry_admission
@@ -510,197 +249,27 @@ describe("image registry cleanup worker", () => {
     expect(eventNames(logs)).toContain("registry_cleanup_busy");
     expect(eventNames(logs)).not.toContain("registry_cleanup_finished");
     expect(await objectExists(ORPHAN_KEY)).toBe(true);
-    expect(await gcRunsAddedSince(before)).toEqual([]);
   });
 
-  it("plans the real sweep against live references and mutates nothing", async () => {
+  it("plans the OCI sweep and mutates nothing", async () => {
     await resetD1Database();
     await resetCollectorFixture();
-    await seedReferencedCatalog();
     await seedOrphan();
 
-    const before = await gcRunIds();
+    const planned = await child({ REGISTRY_CLEANUP_MODE: "delete" }).plan();
 
-    const planned = await child().plan();
-
-    // A report-only pass must succeed on a valid fixture. It may not fall back
-    // to a failure, or the pass would prove nothing about the sweep at all.
+    // A plan never deletes, whatever mode the collector was configured with.
+    expect(planned.mode).toBe("delete");
+    expect(planned.result?.mode).toBe("report-only");
     expect(planned.status).toBe("report-only");
     expect(planned.error).toBeNull();
-    expect(planned.result).toBeNull();
-    const plan = planned.plan;
-    expect(plan).not.toBeNull();
-    if (!plan) throw new Error("the report-only pass returned no plan");
-
-    expect(planned.mode).toBe("report-only");
-    expect(plan.mode).toBe("report-only");
-    expect(plan.truncated).toBe(false);
-    expect(plan.details.faults).toEqual([]);
-    expect(plan.details.deleteAllowedByReferences).toBe(true);
-
-    // The orphan is a candidate and nothing this file retains is one. The plan
-    // covers every object in the shared bucket, so the assertions name this
-    // file's keys rather than the whole listing.
-    const candidates = plan.candidateObjects.map((object) => object.key);
-    expect(candidates).toContain(ORPHAN_KEY);
-    for (const retained of [IMAGE_KEY, KERNEL_KEY, INITRD_KEY, RETIRED_IMAGE_KEY]) {
-      expect(candidates, retained).not.toContain(retained);
-    }
-    const orphan = plan.candidateObjects.find(
-      (object) => object.key === ORPHAN_KEY,
-    );
-    expect(orphan).toMatchObject({
-      key: ORPHAN_KEY,
-      bytes: ORPHAN_BYTES,
-      category: "boot_artifact",
-    });
-
-    // Zero mutation: every object is still there and no run was recorded.
+    expect(planned.result?.deletedObjects).toBe(0);
     expect(await objectExists(ORPHAN_KEY)).toBe(true);
-    expect(await objectExists(IMAGE_KEY)).toBe(true);
-    expect(await objectExists(KERNEL_KEY)).toBe(true);
-    expect(await objectExists(INITRD_KEY)).toBe(true);
-    expect(await gcRunsAddedSince(before)).toEqual([]);
-  });
-
-  it("deletes the orphan on a scheduled pass and keeps every live reference", async () => {
-    await resetD1Database();
-    await resetCollectorFixture();
-    await seedReferencedCatalog();
-    await seedOrphan();
-    await enforceRegistrySweep();
-    const before = await gcRunIds();
-
-    const logs = await runScheduled({ REGISTRY_CLEANUP_MODE: "delete" });
-
-    const finished = findEvent(logs, "registry_cleanup_finished");
-    expect(finished).toBeDefined();
-    expect(finished).toMatchObject({
-      status: "ok",
-      candidateTotal: 1,
-      deletedObjects: 1,
-      deletedBytes: ORPHAN_BYTES,
-      failedObjects: 0,
-      blockedObjects: 0,
-      error: null,
-    });
-
-    // The orphan is gone; every referenced object is still readable.
-    expect(await objectExists(ORPHAN_KEY)).toBe(false);
-    expect(await objectExists(IMAGE_KEY)).toBe(true);
-    expect(await objectExists(KERNEL_KEY)).toBe(true);
-    expect(await objectExists(INITRD_KEY)).toBe(true);
-
-    // Exactly one sweep row was written by this pass, it records the counters,
-    // and it is closed. Rows from another file's sweep are not this file's
-    // business, so the assertion names the rows this pass added.
-    const added = await gcRunsAddedSince(before);
-    expect(added).toHaveLength(1);
-    expect(added[0]).toMatchObject({
-      state: "completed",
-      blocked_objects: 0,
-      error: null,
-    });
-    expect(added[0]?.deleted_objects).toBe(1);
-    expect(added[0]?.bytes_reclaimed).toBe(ORPHAN_BYTES);
-    // The listing of the shared bucket also holds other files' objects, so the
-    // count is bounded below by this file's four rather than equal to it.
-    expect(added[0]?.scanned_objects).toBeGreaterThanOrEqual(4);
-    expect(await child().status()).toMatchObject({
-      sweepActive: false,
-      idle: true,
-    });
-  });
-
-  it("fails the pass when a retained manifest is missing, and deletes nothing", async () => {
-    await resetD1Database();
-    await resetCollectorFixture();
-    await seedReferencedCatalog();
-    await seedOrphan();
-    // The live scenario still points at a chunked image whose manifest is not in
-    // the bucket. The sweep cannot prove what a retained object needs, so it
-    // must stop. Reporting this as success would let a promotion believe that
-    // retired artifacts are gone.
-    await breakRetainedManifest();
-    await enforceRegistrySweep();
-
-    const outcome = await runCleanup(childEnv({ REGISTRY_CLEANUP_MODE: "delete" }), {
-      source: "scheduled",
-    });
-
-    expect(outcome.status).toBe("core-failed");
-    expect(outcome.plan).toBeNull();
-    expect(outcome.result?.deletedObjects).toBe(0);
-    expect(outcome.error).toContain("reference verification stopped the sweep");
-    expect(outcome.error).toContain("retained_manifest_missing");
-    // Nothing was deleted, not even the orphan that no reference names.
-    expect(await objectExists(ORPHAN_KEY)).toBe(true);
-    expect(await objectExists(IMAGE_KEY)).toBe(true);
-    expect(await objectExists(KERNEL_KEY)).toBe(true);
-  });
-
-  it("reports busy, not success, when an unresolved writer blocks the sweep", async () => {
-    await resetD1Database();
-    await resetCollectorFixture();
-    await seedReferencedCatalog();
-    await seedOrphan();
-    await enforceRegistrySweep();
-    // A writer that never released holds the registry: the sweep refuses.
-    await seedPendingWriter();
-    const before = await gcRunIds();
-
-    const outcome = await runCleanup(childEnv({ REGISTRY_CLEANUP_MODE: "delete" }), {
-      source: "scheduled",
-    });
-
-    expect(outcome.status).toBe("busy");
-    expect(outcome.result?.deletedObjects).toBe(0);
-    expect(outcome.result?.resumeRequired).toBe(true);
-    expect(await objectExists(ORPHAN_KEY)).toBe(true);
-    // A refusal must not leave a sweep behind, so the next attempt can run.
-    expect(await gcRunsAddedSince(before)).toEqual([]);
-  });
-
-  it("completes in one pass when retirement and deletion agree", async () => {
-    await resetD1Database();
-    await resetCollectorFixture();
-    await seedReferencedCatalog();
-    await seedOrphan();
-    await seedSupersededBuild();
-    await enforceRegistrySweep();
-
-    const outcome = await runCleanup(childEnv({ REGISTRY_CLEANUP_MODE: "delete" }), {
-      source: "scheduled",
-    });
-
-    // The retention projection decides retirement and the retained set in one
-    // step, so the plan a pass executes already excludes the artifacts that
-    // retirement frees. There is nothing left for a second pass, and the core
-    // says so through `completed`: the collector copies that verdict, `ok`.
-    expect(outcome.status).toBe("ok");
-    expect(outcome.mode).toBe("delete");
-    expect(outcome.result?.error).toBeNull();
-    expect(outcome.result?.failedObjects).toBe(0);
-    expect(outcome.result?.phases.retired_builds).toBe(1);
-    expect(outcome.result?.completed).toBe(true);
-
-    const retired = await drizzle(env.DB)
-      .select({ retiredAt: imageBuilds.artifactsRetiredAt })
-      .from(imageBuilds)
-      .where(eq(imageBuilds.id, RETIRED_BUILD_ID));
-    expect(retired[0]?.retiredAt).toBeGreaterThan(0);
-    // The retired build no longer pins its image, so this pass deleted it.
-    expect(await objectExists(RETIRED_IMAGE_KEY)).toBe(false);
-    // Everything the live scenario still needs survives.
-    expect(await objectExists(IMAGE_KEY)).toBe(true);
-    expect(await objectExists(KERNEL_KEY)).toBe(true);
-    expect(await objectExists(INITRD_KEY)).toBe(true);
   });
 
   it("reaches the real collector through the parent gate while maintenance is off", async () => {
     await resetD1Database();
     await resetCollectorFixture();
-    await seedReferencedCatalog();
     await seedOrphan();
 
     // The parent D1 binding is a trap: the gate must reach the collector
@@ -729,13 +298,9 @@ describe("image registry cleanup worker", () => {
       parentEnv,
     );
     expect(planned?.status).toBe(200);
-    const plannedBody = (await planned?.json()) as {
-      result: { status: string; plan: { candidateObjects: Array<{ key: string }> } | null };
-    };
-    expect(plannedBody.result.status).toBe("report-only");
-    expect(
-      plannedBody.result.plan?.candidateObjects.map((object) => object.key),
-    ).toEqual([ORPHAN_KEY]);
+    await expect(planned?.json()).resolves.toMatchObject({
+      result: { status: "report-only", result: { mode: "report-only", deletedObjects: 0 } },
+    });
     expect(await objectExists(ORPHAN_KEY)).toBe(true);
 
     const paused = await handleRegistryCleanupGateRequest(

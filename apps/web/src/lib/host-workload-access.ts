@@ -1,23 +1,20 @@
 import { currentRunHostScopeCondition } from "@/lib/metal-placement";
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
-import {
-  desiredVmName,
-  markStoredDesiredVmsAbsent,
-  type StoredHostDesiredState,
-} from "@/lib/desired-state-store";
+import type { HostDesiredStateV3 } from "@/generated/contracts/bridge-message-v9";
+import { markStoredDesiredVmsAbsent } from "@/lib/desired-state-store";
 import { currentScenarioRunContentAccessCondition } from "@/lib/scenario-runs/admission-guards";
 import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
 import { revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
 import { requestScenarioRunRouteCleanup } from "@/lib/scenario-runs/route-cleanup";
 
 /** Also runs after hibernation/reconnect. A saved desired document is not an access grant. */
-export async function enforceHostWorkloadAccess<T extends StoredHostDesiredState>(
-  state: T,
+export async function enforceHostWorkloadAccess(
+  state: HostDesiredStateV3,
   // Called for each run this pass wrote to, whether or not its destroy
   // finished, so a watching browser hears about it.
   onRunChanged?: (runId: string) => void,
-): Promise<T> {
+): Promise<HostDesiredStateV3> {
   const { results } = await env.DB.prepare(`WITH permitted_runs AS MATERIALIZED (
     SELECT run.run_id, run.user_id, run.runtime_execution_id, run.organization_id,
       run.scenario_id, run.course_scope_key, run.course_id, run.lecture_id, run.request_scope_json,
@@ -46,14 +43,14 @@ export async function enforceHostWorkloadAccess<T extends StoredHostDesiredState
     .map(row => JSON.stringify([row.run_id, row.id, row.generation, row.user_id, row.runtime_vm_name])));
   const pending = new Map(results.filter(row => row.kind === "cleanup").map(row => [row.run_id, row.user_id]));
   const denied = state.vms.filter(vm => vm.desired_phase === "running" &&
-    !allowed.has(JSON.stringify([vm.run_id, vm.runtime_execution_id, vm.generation, vm.owner_user_id, desiredVmName(vm)])));
+    !allowed.has(JSON.stringify([vm.run_id, vm.runtime_execution_id, vm.generation, vm.owner_user_id, vm.vm_id])));
   // Commit cleanup intent first. A restart after the absence write must still
   // find terminal runs whose active slot was already released.
   const newlyDenied = [...new Set(denied.map(vm => vm.run_id))].filter(runId => !pending.has(runId));
   for (const run of await requestScenarioRunRouteCleanup(state.host_id, newlyDenied)) pending.set(run.runId, run.userId);
-  const deniedIdentities = new Set(denied.map(vm => JSON.stringify([vm.runtime_execution_id, vm.generation, desiredVmName(vm)])));
+  const deniedIdentities = new Set(denied.map(vm => JSON.stringify([vm.runtime_execution_id, vm.generation, vm.vm_id])));
   let next = (denied.length ? await markStoredDesiredVmsAbsent(drizzle(env.DB), state.host_id, Date.now(),
-    vm => deniedIdentities.has(JSON.stringify([vm.runtime_execution_id, vm.generation, vm.name])), state) : state) as T;
+    vm => deniedIdentities.has(JSON.stringify([vm.runtime_execution_id, vm.generation, vm.name]))) : state);
   // Preserve the finite leases. The host can receive a stop even when route cleanup fails;
   // Stargate's short host grant also removes these targets on this dispatch.
   for (const [runId, userId] of pending) {
@@ -64,7 +61,7 @@ export async function enforceHostWorkloadAccess<T extends StoredHostDesiredState
         markVmsAbsent: async input => {
           const names = new Set(input.vms.map(vm => vm.runtimeVmName));
           next = await markStoredDesiredVmsAbsent(drizzle(env.DB), state.host_id, input.nowUnixMs,
-            vm => vm.run_id === runId && names.has(vm.name), next) as T;
+            vm => vm.run_id === runId && names.has(vm.name));
         },
         revokeRoutes: revokeScenarioRunRoutes,
         // This is already inside the host dispatch lock. Waking it here

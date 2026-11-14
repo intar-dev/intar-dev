@@ -20,8 +20,7 @@ import {
   type RunPhase,
   type VmPhase,
 } from "@/lib/run-state";
-import { upsertDesiredVm } from "@/lib/desired-state";
-import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
+import { mutateDesiredState, upsertDesiredVm } from "@/control-plane/host-runtime-do/test-fixtures";
 import { expireOverdueRuntimeExecutions } from "@/lib/runtime-lease-expiry";
 import { expireOverdueRunLeases } from "@/lib/scenario-runs/lifecycle";
 import { seedArtifactRuntime } from "./agent-run-artifacts/test-fixtures";
@@ -98,13 +97,14 @@ describe("agent run artifact sealing", () => {
     )
       .bind(leaseExpiresAt)
       .run();
-    await mutateStoredHostDesiredState(
+    await mutateDesiredState(
       drizzle(env.DB),
       "host-1",
       leaseExpiresAt,
       (draft) =>
         upsertDesiredVm(draft, {
           ...desiredRunningVm("run-1", "vm-runtime", leaseExpiresAt),
+          vm_id: "vm-runtime",
           lease_expires_at_unix_ms: leaseExpiresAt,
         }),
     );

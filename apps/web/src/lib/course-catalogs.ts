@@ -3,8 +3,6 @@ import {
   eq,
   inArray,
   isNotNull,
-  isNull,
-  not,
   or,
   sql,
   type SQLWrapper,
@@ -18,16 +16,13 @@ import {
   scenarioRuns,
   scenarioRevisions,
   scenarios,
-  vmScenarios,
   type CourseCatalogCourseV2,
   type CourseCatalogLectureV2,
   type CourseCatalogSnapshotV2,
 } from "@/db/schema";
-import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { appError } from "@/lib/app-error";
 import { isRevisionScenarioId } from "@/lib/scenario-id";
 import { CUTOVER_WIPED_SQL, cutoverWipedError } from "@/lib/run-admission-gate";
-import type { ScenarioBriefing } from "@/lib/scenario-model";
 import type { ResourceCapacity } from "@/lib/resource-capacity";
 
 export type {
@@ -37,8 +32,6 @@ export type {
 } from "@/db/schema";
 
 const PUBLIC_COURSE_CATALOG_SCOPE = "public";
-const COURSE_COMPLETION_SCENARIO_READ_BATCH_SIZE = 96;
-const COURSE_COMPLETION_INSERT_BATCH_SIZE = 16;
 
 // D1 allows 100 bound parameters, and a catalog can link more scenarios than
 // that, so an id list travels as one JSON array.
@@ -133,17 +126,6 @@ export interface ResolvedCourseLecture {
   lecture: CourseCatalogLectureV2;
 }
 
-export type LecturePresentation = Pick<
-  CourseCatalogLectureV2,
-  | "title"
-  | "summary"
-  | "bodyMarkdown"
-  | "category"
-  | "tags"
-  | "difficulty"
-  | "estimatedMinutes"
->;
-
 interface CourseSource {
   scopeKey: string;
   organizationId: string | null;
@@ -169,220 +151,6 @@ export function courseCatalogScopeKey(
   return organizationId
     ? `organization:${organizationId}`
     : PUBLIC_COURSE_CATALOG_SCOPE;
-}
-
-export async function validateCourseCatalogReferences(
-  db: DrizzleD1Database,
-  input: {
-    snapshot: CourseCatalogSnapshotV2;
-    bundleScenarioIds: Iterable<string>;
-    organizationId: string | null;
-  },
-): Promise<string[]> {
-  assertV2Snapshot(input.snapshot);
-  const referencedIds = linkedScenarioIds(input.snapshot);
-  if (!referencedIds.length) {
-    return [];
-  }
-
-  // Load disabled rows too. An existing row in another scope cannot be
-  // claimed by this upload, even when the catalog does not expose it.
-  const rows = await db
-    .select({
-      scenarioId: vmScenarios.scenarioId,
-      organizationId: vmScenarios.organizationId,
-      enabled: vmScenarios.enabled,
-    })
-    .from(vmScenarios);
-  const existingById = new Map(rows.map((row) => [row.scenarioId, row]));
-  const bundledIds = new Set(input.bundleScenarioIds);
-  const invalidScenarioIds: string[] = [];
-
-  for (const scenarioId of referencedIds) {
-    const existing = existingById.get(scenarioId);
-    const bundled = bundledIds.has(scenarioId);
-    const existingIsInUploadScope =
-      !existing || existing.organizationId === input.organizationId;
-
-    if (bundled) {
-      if (!existingIsInUploadScope) invalidScenarioIds.push(scenarioId);
-      continue;
-    }
-
-    const existingIsVisible = Boolean(
-      existing &&
-        existing.enabled &&
-        (existing.organizationId === null ||
-          existing.organizationId === input.organizationId),
-    );
-    if (!existingIsVisible) invalidScenarioIds.push(scenarioId);
-  }
-
-  return invalidScenarioIds;
-}
-
-/** Replaces the complete V2 snapshot for one publication scope. */
-export async function syncCourseCatalogSnapshot(
-  db: DrizzleD1Database,
-  input: {
-    snapshot: CourseCatalogSnapshotV2;
-    sourceRevision: string;
-    organizationId: string | null;
-    nowUnixMs: number;
-  },
-): Promise<void> {
-  assertV2Snapshot(input.snapshot);
-  const scopeKey = courseCatalogScopeKey(input.organizationId);
-
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const [existing] = await db
-      .select({
-        catalog: courseCatalogs.catalogJson,
-        sourceRevision: courseCatalogs.sourceRevision,
-        updatedAt: courseCatalogs.updatedAt,
-      })
-      .from(courseCatalogs)
-      .where(eq(courseCatalogs.scopeKey, scopeKey))
-      .limit(1);
-
-    if (!existing) {
-      const inserted = await db
-        .insert(courseCatalogs)
-        .values({
-          scopeKey,
-          organizationId: input.organizationId,
-          catalogJson: input.snapshot,
-          sourceRevision: input.sourceRevision,
-          createdAt: input.nowUnixMs,
-          updatedAt: input.nowUnixMs,
-        })
-        .onConflictDoNothing()
-        .returning({ scopeKey: courseCatalogs.scopeKey });
-      if (inserted.length) {
-        await syncScenarioPresentationFromCourseCatalog(db, input);
-        await disableUnlinkedScenariosFromCourseCatalog(db, input);
-        await backfillCourseUnitCompletions(db, {
-          snapshot: input.snapshot,
-          organizationId: input.organizationId,
-        });
-        return;
-      }
-      continue;
-    }
-
-    const sameCatalog =
-      JSON.stringify(existing.catalog) === JSON.stringify(input.snapshot);
-    if (sameCatalog && existing.sourceRevision === input.sourceRevision) {
-      await syncScenarioPresentationFromCourseCatalog(db, input);
-      await disableUnlinkedScenariosFromCourseCatalog(db, input);
-      await backfillCourseUnitCompletions(db, {
-        snapshot: input.snapshot,
-        organizationId: input.organizationId,
-      });
-      return;
-    }
-
-    const encodedExistingCatalog = JSON.stringify(existing.catalog);
-    const updated = await db
-      .update(courseCatalogs)
-      .set({
-        catalogJson: input.snapshot,
-        sourceRevision: input.sourceRevision,
-        updatedAt: Math.max(input.nowUnixMs, existing.updatedAt + 1),
-      })
-      .where(
-        and(
-          eq(courseCatalogs.scopeKey, scopeKey),
-          eq(courseCatalogs.sourceRevision, existing.sourceRevision),
-          eq(courseCatalogs.updatedAt, existing.updatedAt),
-          sql`${courseCatalogs.catalogJson} = ${encodedExistingCatalog}`,
-        ),
-      )
-      .returning({ scopeKey: courseCatalogs.scopeKey });
-    if (updated.length) {
-      await syncScenarioPresentationFromCourseCatalog(db, input);
-      await disableUnlinkedScenariosFromCourseCatalog(db, input);
-      return;
-    }
-  }
-
-  throw new Error("course catalog update did not converge");
-}
-
-/**
- * A Markdown-only publish has no VM build. Keep the persisted presentation
- * current for same-scope scenarios so ordinary detail/run reads do not retain
- * stale HCL-era text. Organization courses that point at public scenarios are
- * kept as request-time overlays and therefore do not rewrite public content.
- */
-async function syncScenarioPresentationFromCourseCatalog(
-  db: DrizzleD1Database,
-  input: {
-    snapshot: CourseCatalogSnapshotV2;
-    sourceRevision: string;
-    organizationId: string | null;
-    nowUnixMs: number;
-  },
-): Promise<void> {
-  const byScenario = new Map<string, LecturePresentation>();
-  for (const course of input.snapshot.courses) {
-    for (const lecture of course.lectures) {
-      if (lecture.scenarioId) byScenario.set(lecture.scenarioId, lecture);
-    }
-  }
-  const scenarioIds = [...byScenario.keys()];
-  if (!scenarioIds.length) return;
-
-  const rows = await db
-    .select({
-      scenarioId: vmScenarios.scenarioId,
-      organizationId: vmScenarios.organizationId,
-      difficulty: vmScenarios.difficulty,
-    })
-    .from(vmScenarios)
-    .where(inJson(vmScenarios.scenarioId, scenarioIds));
-  for (const row of rows) {
-    if (row.organizationId !== input.organizationId) continue;
-    const lecture = byScenario.get(row.scenarioId);
-    if (!lecture) continue;
-    await db
-      .update(vmScenarios)
-      .set({
-        sourceRevision: input.sourceRevision,
-        title: lecture.title,
-        category: lecture.category,
-        description: lecture.summary,
-        difficulty: lecture.difficulty ?? row.difficulty,
-        estimatedMinutes: lecture.estimatedMinutes,
-        tagsJson: [...lecture.tags],
-        briefingMarkdown: lecture.bodyMarkdown,
-        updatedAt: input.nowUnixMs,
-      })
-      .where(eq(vmScenarios.scenarioId, row.scenarioId));
-  }
-}
-
-/** Disables enabled technical scenarios that the replacement catalog omits. */
-async function disableUnlinkedScenariosFromCourseCatalog(
-  db: DrizzleD1Database,
-  input: {
-    snapshot: CourseCatalogSnapshotV2;
-    organizationId: string | null;
-    nowUnixMs: number;
-  },
-): Promise<void> {
-  const scenarioIds = linkedScenarioIds(input.snapshot);
-  const scope = input.organizationId
-    ? eq(vmScenarios.organizationId, input.organizationId)
-    : isNull(vmScenarios.organizationId);
-  const omitted = scenarioIds.length
-    ? not(inJson(vmScenarios.scenarioId, scenarioIds))
-    : undefined;
-
-  await db
-    .update(vmScenarios)
-    .set({ enabled: false, enabledAt: null, updatedAt: input.nowUnixMs })
-    .where(and(scope, eq(vmScenarios.enabled, true), omitted));
 }
 
 /**
@@ -656,161 +424,6 @@ export async function recordLinkedCourseUnitCompletionForRun<
     .onConflictDoNothing();
 }
 
-/**
- * Backfills linked completion only when a scope receives its first V2 catalog.
- * Existing completion rows make a repeated call harmless.
- */
-export async function backfillCourseUnitCompletions(
-  db: DrizzleD1Database,
-  input: {
-    snapshot: CourseCatalogSnapshotV2;
-    organizationId: string | null;
-  },
-): Promise<void> {
-  assertV2Snapshot(input.snapshot);
-  const scenarioIds = linkedScenarioIds(input.snapshot);
-  if (!scenarioIds.length) return;
-
-  const successfulRuns: Array<{
-    runId: string;
-    userId: string;
-    scenarioId: string;
-    solvedAt: number | null;
-    completedAt: number | null;
-  }> = [];
-  for (const scenarioBatch of chunked(
-    scenarioIds,
-    COURSE_COMPLETION_SCENARIO_READ_BATCH_SIZE,
-  )) {
-    successfulRuns.push(
-      ...(await db
-        .select({
-          runId: scenarioRuns.runId,
-          userId: scenarioRuns.userId,
-          scenarioId: scenarioRuns.scenarioId,
-          solvedAt: scenarioRuns.solvedAt,
-          completedAt: scenarioRuns.completedAt,
-        })
-        .from(scenarioRuns)
-        .where(
-          and(
-            inArray(scenarioRuns.scenarioId, scenarioBatch),
-            eq(scenarioRuns.state, "completed"),
-            isNotNull(scenarioRuns.solvedAt),
-            ...(input.organizationId
-              ? [eq(scenarioRuns.organizationId, input.organizationId)]
-              : []),
-          ),
-        )),
-    );
-  }
-  const earliestRunByUserScenario = new Map<
-    string,
-    (typeof successfulRuns)[number]
-  >();
-  for (const run of successfulRuns) {
-    const key = `${run.userId}\u0000${run.scenarioId}`;
-    const current = earliestRunByUserScenario.get(key);
-    const completedAt = run.completedAt ?? run.solvedAt ?? 0;
-    const currentCompletedAt = current
-      ? (current.completedAt ?? current.solvedAt ?? 0)
-      : Number.POSITIVE_INFINITY;
-    if (!current || completedAt < currentCompletedAt) {
-      earliestRunByUserScenario.set(key, run);
-    }
-  }
-
-  const scopeKey = courseCatalogScopeKey(input.organizationId);
-  const completions: Array<typeof courseUnitCompletions.$inferInsert> = [];
-  for (const course of input.snapshot.courses) {
-    for (const lecture of course.lectures) {
-      if (!lecture.scenarioId) continue;
-      for (const run of earliestRunByUserScenario.values()) {
-        if (run.scenarioId !== lecture.scenarioId) continue;
-        completions.push({
-          userId: run.userId,
-          scopeKey,
-          courseId: course.courseId,
-          lectureId: lecture.lectureId,
-          sourceRunId: run.runId,
-          completedAt: run.completedAt ?? run.solvedAt ?? 0,
-        });
-      }
-    }
-  }
-  if (!completions.length) return;
-
-  const completionBatches = chunked(
-    completions,
-    COURSE_COMPLETION_INSERT_BATCH_SIZE,
-  );
-  const firstBatch = completionBatches[0];
-  if (!firstBatch) return;
-  await db.batch([
-    db.insert(courseUnitCompletions).values(firstBatch).onConflictDoNothing(),
-    ...completionBatches.slice(1).map((batch) =>
-      db.insert(courseUnitCompletions).values(batch).onConflictDoNothing(),
-    ),
-  ]);
-}
-
-function chunked<T>(values: readonly T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let offset = 0; offset < values.length; offset += size) {
-    chunks.push(values.slice(offset, offset + size));
-  }
-  return chunks;
-}
-
-/** Finds the Markdown presentation associated with one technical scenario. */
-export function findCourseLecturePresentation(
-  snapshot: CourseCatalogSnapshotV2,
-  scenarioId: string,
-): LecturePresentation | null {
-  assertV2Snapshot(snapshot);
-  for (const course of snapshot.courses) {
-    const lecture = course.lectures.find(
-      (candidate) => candidate.scenarioId === scenarioId,
-    );
-    if (lecture) return lecture;
-  }
-  return null;
-}
-
-/** Applies Markdown lecture presentation to a technical scenario manifest. */
-export function applyLecturePresentation(
-  manifest: ScenarioManifestV5,
-  lecture: LecturePresentation,
-): ScenarioManifestV5 {
-  return {
-    ...manifest,
-    title: lecture.title,
-    category: lecture.category,
-    description: lecture.summary,
-    difficulty: lecture.difficulty ?? manifest.difficulty,
-    estimated_minutes: lecture.estimatedMinutes,
-    tags: [...lecture.tags],
-    briefing_markdown: lecture.bodyMarkdown,
-  };
-}
-
-/** Applies the same learner presentation to a loaded scenario briefing. */
-export function applyLectureBriefingPresentation(
-  briefing: ScenarioBriefing,
-  lecture: LecturePresentation,
-): ScenarioBriefing {
-  return {
-    ...briefing,
-    title: lecture.title,
-    tagline: lecture.summary,
-    category: lecture.category,
-    difficulty: lecture.difficulty ?? briefing.difficulty,
-    estimatedMinutes: lecture.estimatedMinutes,
-    tags: [...lecture.tags],
-    briefingMarkdown: lecture.bodyMarkdown,
-  };
-}
-
 async function loadCourseViews(input: {
   db: DrizzleD1Database;
   userId: string;
@@ -848,11 +461,9 @@ async function loadCourseViews(input: {
       ),
     ),
   ];
-  // A namespaced id names a scenario of the revision model, and only that
-  // model is read for it.
+  // Only a namespaced id names a scenario.
   const revisionIds = scenarioIds.filter(isRevisionScenarioId);
-  const catalogIds = scenarioIds.filter((id) => !isRevisionScenarioId(id));
-  const [completionRows, activeRunRows, scenarioRows] = await Promise.all([
+  const [completionRows, activeRunRows] = await Promise.all([
     input.db
       .select({
         scopeKey: courseUnitCompletions.scopeKey,
@@ -880,21 +491,10 @@ async function loadCourseViews(input: {
           isNotNull(scenarioRuns.activeKey),
         ),
       ),
-    catalogIds.length
-      ? input.db
-          .select({
-            scenarioId: vmScenarios.scenarioId,
-            organizationId: vmScenarios.organizationId,
-            enabled: vmScenarios.enabled,
-            enabledAt: vmScenarios.enabledAt,
-          })
-          .from(vmScenarios)
-          .where(inJson(vmScenarios.scenarioId, catalogIds))
-      : Promise.resolve([]),
   ]);
-  const readyRows: Array<{ scenarioId: string; organizationId: string | null; enabled: boolean; enabledAt: number | null }> = [...scenarioRows];
-  // A scenario of the revision model is ready while it is enabled with a
-  // live revision that can start, as content access and the start require.
+  const readyRows: Array<{ scenarioId: string; organizationId: string | null; enabled: boolean; enabledAt: number | null }> = [];
+  // A scenario is ready while it is enabled with a live revision that can
+  // start, as content access and the start require.
   if (revisionIds.length) {
     const revised = await input.db
       .select({

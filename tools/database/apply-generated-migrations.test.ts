@@ -61,6 +61,7 @@ describe("generated migration apply", () => {
         "0043_freezing_black_queen",
         "0044_swift_zzzax",
         "0045_lying_wendell_vaughn",
+        "0046_yielding_smiling_tiger",
       ]);
     } finally {
       fixture.database.close(false);
@@ -71,7 +72,9 @@ describe("generated migration apply", () => {
     const fixture = prefixDatabase(APPENDED_IDX);
     try {
       const client = fixture.client;
-      // Populated production-shaped data: a live run and its runtime VM.
+      // Populated production-shaped data: a live run and its execution. A
+      // runtime VM row is not kept: the epoch removal refuses one, because the
+      // old row has no image digests (rehearse-removal-migration.test.ts).
       client.database
         .query(
           "INSERT INTO user (id, name, email) VALUES ('u1', 'User', 'u@example.test')",
@@ -90,11 +93,6 @@ describe("generated migration apply", () => {
       client.database
         .query(
           "INSERT INTO runtime_executions (id, user_id, host_id, domain_kind, domain_id, generation, state) VALUES ('run-1', 'u1', 'h1', 'scenario', 'run-1', 1, 'provisioning')",
-        )
-        .run();
-      client.database
-        .query(
-          "INSERT INTO runtime_vms (id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json, image_sha256, cpu_millis, memory_mib, disk_mib) VALUES ('vm-1', 'run-1', 'vm-1', 0, 'web', '{}', '2222222222222222222222222222222222222222222222222222222222222222', 1000, 512, 4096)",
         )
         .run();
 
@@ -130,6 +128,7 @@ describe("generated migration apply", () => {
         "0043_freezing_black_queen",
         "0044_swift_zzzax",
         "0045_lying_wendell_vaughn",
+        "0046_yielding_smiling_tiger",
       ]);
 
       const evidence = await applyGeneratedMigrations(client);
@@ -161,7 +160,7 @@ describe("generated migration apply", () => {
       expect(columns.map((column) => column.name)).not.toContain("boot_cpu_millis");
       expect(columns.map((column) => column.name)).not.toContain("steady_cpu_millis");
       expect(columns.map((column) => column.name)).not.toContain("quota_phase");
-      expect(client.database.query("SELECT count(*) AS count FROM pragma_table_info('vm_scenario_vms') WHERE name = 'vcpu_count'").get()).toEqual({ count: 0 });
+      expect(client.database.query("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'vm_scenario_vms'").get()).toEqual({ count: 0 });
       expect(client.batches).toHaveLength(COMMITTED_COUNT - APPENDED_IDX);
       for (const batch of client.batches) {
         expect(batch.at(-1)?.sql).toBe("INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)");
@@ -180,12 +179,6 @@ describe("generated migration apply", () => {
       expect(run.request_idempotency_key).toBeNull();
       expect(run.request_scope_json).toBeNull();
       expect(run.route_cleanup_id).toBeNull();
-      const vm = client.database
-        .query(
-          "SELECT terminal_attached_at FROM runtime_vms WHERE id = 'vm-1'",
-        )
-        .get() as { terminal_attached_at: number | null };
-      expect(vm.terminal_attached_at).toBeNull();
 
       // The retired lock table is gone, and the unique index is enforced on the
       // populated table: several runs may hold a NULL key, one may not be

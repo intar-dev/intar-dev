@@ -9,12 +9,8 @@ import {
   admissionStatements,
   type AdmissionCommitInput,
 } from "@/lib/scenario-runs/begin";
-import {
-  desiredVmFromRunVm,
-  mutateDesiredState,
-  upsertDesiredVm,
-} from "@/lib/desired-state";
-import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
+import { desiredRunningVm } from "@/control-plane/host-runtime-do/test-fixtures";
+import { loadStoredHostDesiredState } from "@/lib/desired-state-store";
 import { buildInitialVmState, type RunVmStateDocument } from "@/lib/run-state";
 import {
   FIXTURE_ADMIN_ID,
@@ -22,7 +18,7 @@ import {
   revokeFixtureAccount,
 } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
-import { seedAdmissionGuardFixture } from "@/lib/scenario-runs/admission-test-fixtures";
+import { ADMISSION_SCENARIO_ID, seedAdmissionGuardFixture } from "@/lib/scenario-runs/admission-test-fixtures";
 
 /**
  * The account fence of the single admission batch. The old per-step API
@@ -188,26 +184,23 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
     userId: "scenario-user", organizationId: "scenario-organization", hostId: "platform-host",
   });
   const vmState = scenarioVm("admission-run");
-  const current = await loadOrCreateHostDesiredState(
+  const current = await loadStoredHostDesiredState(
     db,
     "platform-host",
     now,
   );
-  const desiredVm = desiredVmFromRunVm({ ownerUserId: "scenario-user", runtimeExecutionId: "admission-run", generation: 1,
-    runId: "admission-run",
-    vm: vmState,
-    nowUnixMs: now,
-    sshAuthorizedKeysOpenssh: ["ssh-ed25519 AAAAC3Nza admission"],
-    guestTools,
-  });
-  if (!desiredVm) throw new Error("desired vm");
-  const next = mutateDesiredState(
-    current,
-    (draft) => {
-      upsertDesiredVm(draft, desiredVm);
-    },
-    { nowUnixMs: now },
-  );
+  const desiredVm = {
+    ...desiredRunningVm("admission-run", vmState.runtimeVmName, now),
+    owner_user_id: "scenario-user",
+    vm_id: vmState.runtimeVmName,
+    ssh_authorized_keys: ["ssh-ed25519 AAAAC3Nza admission"],
+  };
+  const next = {
+    ...current,
+    vms: [...current.vms, desiredVm],
+    version: current.version + 1,
+    generated_at_unix_ms: now,
+  };
   return {
     run: {
       runId: "admission-run",
@@ -215,8 +208,8 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
       organizationId: "scenario-organization",
       runtimeExecutionId: "admission-run",
       hostId: "platform-host",
-      scenarioId: "scenario-one",
-      scenarioName: "scenario-one",
+      scenarioId: ADMISSION_SCENARIO_ID,
+      scenarioName: ADMISSION_SCENARIO_ID,
       courseScopeKey: "organization:scenario-organization",
       courseId: "linux-operations",
       lectureId: "01-repair-nginx",
@@ -237,7 +230,7 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
       activeKey: "scenario-user",
       requestIdempotencyKey: "key-abcdefgh",
       requestScopeJson: {
-        scenarioId: "scenario-one",
+        scenarioId: ADMISSION_SCENARIO_ID,
         organizationId: "scenario-organization",
         hostId: null,
         candidateRevision: null,
@@ -266,8 +259,9 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
         vmId: "admission-run-vm",
         ordinal: 0,
         runtimeVmName: "admission-run-vm",
-        imageKey: { scenario: "scenario-one", vm: "web", arch: "x86_64" },
-        imageSha256: "2".repeat(64),
+        imageDigest: `sha256:${"2".repeat(64)}`,
+        specDigest: `sha256:${"3".repeat(64)}`,
+        kinoDigest: `sha256:${"4".repeat(64)}`,
         cpuMillis: 1_000,
         memoryMib: 512,
         diskMib: 4_096,
@@ -294,13 +288,6 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
   } satisfies AdmissionCommitInput;
 }
 
-/** The guest bootstrap ABI the release set ships. ABI 1 is refused. */
-const guestTools = {
-  tools_disk_sha256: "a".repeat(64),
-  tools_disk_size_bytes: 64 * 1024 * 1024,
-  kino_sha256: "b".repeat(64),
-  bootstrap_abi: 2,
-} as const;
 
 function scenarioVm(runId: string): RunVmStateDocument {
   const vm = buildInitialVmState({
@@ -322,7 +309,7 @@ function scenarioVm(runId: string): RunVmStateDocument {
     provisioning: {
       ...vm.provisioning,
       image: "ghcr.io/intar/scenario@sha256:fixture",
-      imageKey: { scenario: "scenario-one", vm: "web", arch: "x86_64" },
+      imageKey: { scenario: ADMISSION_SCENARIO_ID, vm: "web", arch: "x86_64" },
       imageSha256: "2".repeat(64),
       resources: {
         cpuMillis: 1_000,

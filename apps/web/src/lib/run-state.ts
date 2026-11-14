@@ -163,12 +163,6 @@ export interface RunVmLabState {
   verify?: VmVerifyV1;
 }
 
-/** Immutable origin for an administrator-started staged-image proof run. */
-export interface CandidateRunSourceIdentityV1 {
-  revision: string;
-  buildId: string;
-}
-
 export interface RunStateDocument {
   phase: RunPhase;
   phaseTitle: string;
@@ -182,7 +176,6 @@ export interface RunStateDocument {
   replayArtifacts: ScenarioReplayArtifact[];
   terminalTarget: TerminalTarget;
   vms: RunVmStateDocument[];
-  candidateSource?: CandidateRunSourceIdentityV1;
   /// The run's tasks on the revision model; absent on probe runs.
   tasks?: RunTaskState[];
 }
@@ -313,9 +306,6 @@ export function recomputeRunState(current: RunStateDocument): RunStateDocument {
   const descriptor = describeRunPhase(phase, vms, current.phaseDetail, current.tasks);
 
   return {
-    ...(current.candidateSource
-      ? { candidateSource: current.candidateSource }
-      : {}),
     ...(current.tasks ? { tasks: current.tasks } : {}),
     phase,
     phaseTitle: descriptor.title,

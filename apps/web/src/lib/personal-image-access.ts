@@ -1,6 +1,7 @@
-import { sql } from "drizzle-orm";
-import { vmScenarios, vmScenarioVms } from "@/db/schema";
 import { playableScenarioCondition } from "@/lib/scenario-runs/content-access";
+
+/** How long a personal or organization host keeps a start's image grant. */
+export const PERSONAL_IMAGE_PREPARATION_TTL_MS = 15 * 60_000;
 
 // SQL identifiers here are fixed server text. Use the same live access fence
 // for issuing a grant, reconciling its cache, and reading registry content.
@@ -34,9 +35,7 @@ export function preparationAuthoritySql(): string {
   // depth limit when image, manifest, and artifact routes add their own fences.
   return `CASE WHEN ${field("launchSource")} = 'play' THEN ${play} ELSE EXISTS (SELECT 1 FROM agent_hosts host
     JOIN user owner ON owner.id = prep.user_id
-    JOIN (SELECT scenario_id, organization_id FROM vm_scenarios
-        WHERE enabled = 1 AND enabled_at IS NOT NULL
-      UNION ALL SELECT id, organization_id FROM scenarios
+    JOIN (SELECT id AS scenario_id, organization_id FROM scenarios
         WHERE enabled = 1 AND live_rev IS NOT NULL) scenario ON scenario.scenario_id = ${field("scenarioId")}
     JOIN course_catalogs catalog ON catalog.scope_key = ${field("courseScopeKey")}
     JOIN json_each(catalog.catalog_json, '$.courses') course
@@ -59,24 +58,4 @@ export function preparationAuthoritySql(): string {
             AND NOT EXISTS (SELECT 1 FROM course_unit_completions done WHERE done.user_id = prep.user_id
               AND (done.scope_key, done.course_id, done.lecture_id) =
                 (catalog.scope_key, ${field("courseId")}, json_extract(prior.value, '$.lectureId')))))) END`;
-}
-
-/** Correlated with vmScenarios/vmScenarioVms, just like the workload grant. */
-export function personalPreparationImageAccess(hostId: string) {
-  return sql`EXISTS (SELECT 1 FROM personal_image_preparations prep
-    JOIN agent_hosts host ON host.id = prep.host_id
-    JOIN json_each(prep.images_json) image
-    JOIN host_desired_state desired ON desired.host_id = prep.host_id
-    JOIN json_each(desired.doc_json, '$.cached_images') intent
-    WHERE prep.host_id = ${hostId} AND ${sql.raw(preparationAuthoritySql())}
-      AND (json_extract(desired.doc_json, '$.scope'), json_extract(desired.doc_json, '$.owner_user_id')) = (host.scope, host.user_id)
-      AND json_extract(prep.access_json, '$.scenarioId') = ${vmScenarios.scenarioId}
-      AND (json_extract(image.value, '$.imageSha256'), json_extract(image.value, '$.imageKey.scenario'),
-        json_extract(image.value, '$.imageKey.vm'), json_extract(image.value, '$.imageKey.arch')) =
-        (${vmScenarioVms.imageSha256}, json_extract(${vmScenarioVms.imageKeyJson}, '$.scenario'),
-          json_extract(${vmScenarioVms.imageKeyJson}, '$.vm'), json_extract(${vmScenarioVms.imageKeyJson}, '$.arch'))
-      AND (json_extract(intent.value, '$.image_id'), json_extract(intent.value, '$.image_key.scenario'),
-        json_extract(intent.value, '$.image_key.vm'), json_extract(intent.value, '$.image_key.arch')) =
-        (json_extract(image.value, '$.imageSha256'), json_extract(image.value, '$.imageKey.scenario'),
-          json_extract(image.value, '$.imageKey.vm'), json_extract(image.value, '$.imageKey.arch')))`;
 }

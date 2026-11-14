@@ -74,14 +74,10 @@ function contentAccessCondition(field: (name: keyof typeof currentRunFields) => 
     WHEN ${field("launchSource")} = 'play' THEN ${play} ELSE ${administered}
     AND (${org} IS NULL OR EXISTS (SELECT 1 FROM member membership
       WHERE membership.user_id = ${user} AND membership.organization_id = ${org}))
-    AND (EXISTS (SELECT 1 FROM vm_scenarios scenario
-      WHERE scenario.scenario_id = ${scenario} AND scenario.enabled = 1
-        AND scenario.enabled_at IS NOT NULL
-        AND (scenario.organization_id IS NULL OR scenario.organization_id = ${org}))
-      OR EXISTS (SELECT 1 FROM scenarios revised
+    AND EXISTS (SELECT 1 FROM scenarios revised
       WHERE revised.id = ${scenario} AND revised.enabled = 1
         AND revised.live_rev IS NOT NULL
-        AND (revised.organization_id IS NULL OR revised.organization_id = ${org})))
+        AND (revised.organization_id IS NULL OR revised.organization_id = ${org}))
     AND EXISTS (SELECT 1 FROM course_catalogs catalog,
         json_each(catalog.catalog_json, '$.courses') course,
         json_each(course.value, '$.lectures') lecture

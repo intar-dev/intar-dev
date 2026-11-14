@@ -1,153 +1,22 @@
-import { and, eq, sql, type SQL } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { agentHosts, hostDesiredState } from "@/db/schema";
-import type { HostDesiredStateV2 } from "@/generated/bridge";
 import { BRIDGE_PROTOCOL_VERSION_9 } from "@/generated/constants";
 import type { HostDesiredStateV3 } from "@/generated/contracts/bridge-message-v9";
 import validateBridgeMessageV9 from "@/generated/contracts/bridge-message-v9.validate";
-import {
-  createEmptyHostDesiredState,
-  mutateDesiredState,
-  type DesiredStateMutator,
-  validateStoredHostDesiredState,
-} from "@/lib/desired-state";
-
-export async function loadOrCreateHostDesiredState(
-  db: DrizzleD1Database,
-  hostId: string,
-  nowUnixMs: number,
-): Promise<HostDesiredStateV2> {
-  const [host] = await db.select({ scope: agentHosts.scope, ownerUserId: agentHosts.userId, organizationId: agentHosts.organizationId, role: agentHosts.role })
-    .from(agentHosts).where(eq(agentHosts.id, hostId)).limit(1);
-  if (!host || !host.scope || !host.ownerUserId) throw new Error("host ownership is not enrolled");
-  if (host.scope === "organization" && (!host.organizationId || host.role !== "agent")) throw new Error("invalid organization host");
-  for (let attempt = 0; attempt < MUTATE_DESIRED_STATE_MAX_ATTEMPTS; attempt++) {
-    const rows = await db
-      .select({
-        version: hostDesiredState.version,
-        docJson: hostDesiredState.docJson,
-      })
-      .from(hostDesiredState)
-      .where(eq(hostDesiredState.hostId, hostId))
-      .limit(1);
-    const existing = rows[0];
-    if (existing) {
-      const desired = validateStoredHostDesiredState({
-        document: existing.docJson,
-        hostId,
-        rowVersion: existing.version,
-        nowUnixMs,
-      });
-      if (desired.scope !== host.scope || desired.owner_user_id !== host.ownerUserId) {
-        throw new Error("stored desired state has wrong host owner");
-      }
-      return desired;
-    }
-
-    const doc = createEmptyHostDesiredState({ hostId, nowUnixMs, scope: host.scope, ownerUserId: host.ownerUserId });
-    const inserted = await db
-      .insert(hostDesiredState)
-      .values({
-        hostId,
-        version: doc.version,
-        docJson: doc,
-        createdAt: nowUnixMs,
-        updatedAt: nowUnixMs,
-      })
-      .onConflictDoNothing()
-      .returning({ version: hostDesiredState.version });
-    if (inserted.length > 0) {
-      return doc;
-    }
-  }
-
-  throw new Error(
-    `desired-state load for host ${hostId} lost ${MUTATE_DESIRED_STATE_MAX_ATTEMPTS} version races`,
-  );
-}
 
 const MUTATE_DESIRED_STATE_MAX_ATTEMPTS = 5;
-
-export interface HostDesiredStateWriteGuard {
-  condition: SQL;
-  assertSatisfied: () => Promise<void>;
-}
-
-export async function mutateStoredHostDesiredState(
-  db: DrizzleD1Database,
-  hostId: string,
-  nowUnixMs: number,
-  mutator: DesiredStateMutator,
-  initialState?: HostDesiredStateV2,
-  writeGuard?: HostDesiredStateWriteGuard,
-): Promise<HostDesiredStateV2> {
-  // Optimistic concurrency: the doc is mutated by worker routes and the host
-  // runtime DO alarm concurrently, and an unconditional write would silently
-  // drop one side's version bump. The update only lands when the version we
-  // read is still current; otherwise reload and re-apply the mutator.
-  for (let attempt = 0; attempt < MUTATE_DESIRED_STATE_MAX_ATTEMPTS; attempt++) {
-    const current =
-      attempt === 0 && initialState?.host_id === hostId
-        ? initialState
-        : await loadOrCreateHostDesiredState(db, hostId, nowUnixMs);
-    const next = mutateDesiredState(current, mutator, { nowUnixMs });
-    if (next === current) {
-      return current;
-    }
-
-    const updated = await db
-      .update(hostDesiredState)
-      .set({
-        version: next.version,
-        docJson: next,
-        updatedAt: nowUnixMs,
-      })
-      .where(
-        and(
-          eq(hostDesiredState.hostId, hostId),
-          eq(hostDesiredState.version, current.version),
-          writeGuard?.condition,
-        ),
-      )
-      .returning({ version: hostDesiredState.version });
-    if (updated.length > 0) {
-      return next;
-    }
-    await writeGuard?.assertSatisfied();
-  }
-
-  throw new Error(
-    `desired-state mutation for host ${hostId} lost ${MUTATE_DESIRED_STATE_MAX_ATTEMPTS} version races`,
-  );
-}
 
 /** Schema of the desired state bridge 9 serves (`HostDesiredStateV3`). */
 export const HOST_DESIRED_STATE_SCHEMA_VERSION_V3 = 7;
 
-export type StoredHostDesiredState = HostDesiredStateV2 | HostDesiredStateV3;
-
-/**
- * The stored desired state in whichever schema it has; a missing one is
- * created in the old schema, as `loadOrCreateHostDesiredState` does. Only
- * what both schemas share (version, VM phases and leases, builds) is meant
- * to be read from it.
- */
+/** The host's stored desired state; see `mutateHostDesiredStateV3`. */
 export async function loadStoredHostDesiredState(
   db: DrizzleD1Database,
   hostId: string,
   nowUnixMs: number,
-): Promise<StoredHostDesiredState> {
-  const [row] = await db
-    .select({ schema: sql<number | null>`json_extract(${hostDesiredState.docJson}, '$.schema_version')` })
-    .from(hostDesiredState)
-    .where(eq(hostDesiredState.hostId, hostId));
-  return row?.schema === HOST_DESIRED_STATE_SCHEMA_VERSION_V3
-    ? (await mutateHostDesiredStateV3(db, hostId, nowUnixMs)).state
-    : loadOrCreateHostDesiredState(db, hostId, nowUnixMs);
-}
-
-export function isHostDesiredStateV3(state: StoredHostDesiredState): state is HostDesiredStateV3 {
-  return state.schema_version === HOST_DESIRED_STATE_SCHEMA_VERSION_V3;
+): Promise<HostDesiredStateV3> {
+  return (await mutateHostDesiredStateV3(db, hostId, nowUnixMs)).state;
 }
 
 /**
@@ -206,11 +75,11 @@ export async function mutateHostDesiredStateV3(
     );
     const written = row
       ? await db.update(hostDesiredState)
-          .set({ version: next.version, docJson: next as unknown as HostDesiredStateV2, updatedAt: nowUnixMs })
+          .set({ version: next.version, docJson: next, updatedAt: nowUnixMs })
           .where(and(eq(hostDesiredState.hostId, hostId), eq(hostDesiredState.version, row.version)))
           .returning({ version: hostDesiredState.version })
       : await db.insert(hostDesiredState)
-          .values({ hostId, version: next.version, docJson: next as unknown as HostDesiredStateV2, createdAt: nowUnixMs, updatedAt: nowUnixMs })
+          .values({ hostId, version: next.version, docJson: next, createdAt: nowUnixMs, updatedAt: nowUnixMs })
           .onConflictDoNothing()
           .returning({ version: hostDesiredState.version });
     if (written.length > 0) return { state: next, role: host.role };
@@ -235,31 +104,19 @@ export function checkedHostDesiredStateV3(document: unknown, hostId: string, row
   return state;
 }
 
-/** A desired VM's host-local name: `vm_id` under bridge 9, `vm_name` before. */
-export function desiredVmName(vm: HostDesiredStateV2["vms"][number] | HostDesiredStateV3["vms"][number]): string {
-  return "vm_name" in vm ? vm.vm_name : vm.vm_id;
-}
-
 /**
- * Marks the running VMs `select` picks absent in the stored desired state of
- * either schema, keeping their leases, and returns the stored result.
- * `initialState` saves the first read when the caller already holds it.
+ * Marks the running VMs `select` picks absent in the stored desired state,
+ * keeping their leases, and returns the stored result.
  */
 export async function markStoredDesiredVmsAbsent(
   db: DrizzleD1Database,
   hostId: string,
   nowUnixMs: number,
   select: (vm: { run_id: string; name: string; runtime_execution_id: string; generation: number }) => boolean,
-  initialState?: StoredHostDesiredState,
-): Promise<StoredHostDesiredState> {
-  const mark = <T extends HostDesiredStateV2["vms"][number] | HostDesiredStateV3["vms"][number]>(vms: T[]) => {
-    for (const vm of vms) {
-      if (vm.desired_phase === "running" && select({ ...vm, name: desiredVmName(vm) })) vm.desired_phase = "absent";
+): Promise<HostDesiredStateV3> {
+  return (await mutateHostDesiredStateV3(db, hostId, nowUnixMs, (draft) => {
+    for (const vm of draft.vms) {
+      if (vm.desired_phase === "running" && select({ ...vm, name: vm.vm_id })) vm.desired_phase = "absent";
     }
-  };
-  const current = initialState ?? await loadStoredHostDesiredState(db, hostId, nowUnixMs);
-  if (isHostDesiredStateV3(current)) {
-    return (await mutateHostDesiredStateV3(db, hostId, nowUnixMs, (draft) => mark(draft.vms))).state;
-  }
-  return mutateStoredHostDesiredState(db, hostId, nowUnixMs, (draft) => mark(draft.vms), current);
+  })).state;
 }

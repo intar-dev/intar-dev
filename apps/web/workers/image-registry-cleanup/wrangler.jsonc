@@ -15,9 +15,8 @@
     "REGISTRY_CLEANUP_MODE": "report-only"
   },
   "triggers": {
-    // Every six hours at minute 17 UTC: 00:17, 06:17, 12:17, 18:17. A publish
-    // still sweeps immediately through the promotion RPC; this is the recovery
-    // tick that catches what a failed run left behind.
+    // Every six hours at minute 17 UTC: 00:17, 06:17, 12:17, 18:17. Each tick
+    // sweeps one key window of the OCI store.
     "crons": ["17 */6 * * *"]
   },
   "d1_databases": [

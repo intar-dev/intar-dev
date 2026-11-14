@@ -1,8 +1,6 @@
 import type {
-  HostStateReportV2,
   VmActualStateV2,
   VmPhase as BridgeVmPhase,
-  VmReportV2,
   VmRuntimeConstraintsV2,
   VmTerminalStateV1,
 } from "@/generated/bridge";
@@ -70,36 +68,6 @@ export function deriveVmPhase(input: {
   }
 
   return { phase, phaseDetail: detail };
-}
-
-export function applyVmReportToRunState(input: {
-  runId: string;
-  current: RunStateDocument;
-  report: VmReportV2;
-}): RunStateDocument {
-  const next = {
-    ...input.current,
-    vms: input.current.vms.map((vm) =>
-      applyReportedVmState({
-        runId: input.runId,
-        vm,
-        report: {
-          run_id: input.report.run_id,
-          vm_name: input.report.vm_name,
-          phase: input.report.phase,
-          network: input.report.network ?? null,
-          terminal: input.report.terminal ?? null,
-          runtime_constraints: input.report.runtime_constraints ?? null,
-          resource_state: input.report.resource_state ?? null,
-          ssh_host_keys_openssh: input.report.ssh_host_keys_openssh,
-          probes: input.report.probes,
-          error: input.report.error ?? null,
-          updated_at_unix_ms: input.report.observed_at_unix_ms,
-        },
-      }),
-    ),
-  };
-  return recomputeRunState(next);
 }
 
 /** The host-local VM id of a machine in a revision-model run. */
@@ -174,23 +142,6 @@ export function applyVmStateV3ToRunState(input: {
   return recomputeRunState({ ...input.current, vms, ...(tasks ? { tasks } : {}) });
 }
 
-export function applyHostReportToRunState(input: {
-  runId: string;
-  current: RunStateDocument;
-  report: HostStateReportV2;
-}): RunStateDocument {
-  let next = input.current;
-  for (const report of input.report.vms) {
-    next = {
-      ...next,
-      vms: next.vms.map((vm) =>
-        applyReportedVmState({ runId: input.runId, vm, report }),
-      ),
-    };
-  }
-  return recomputeRunState(next);
-}
-
 export function matchesVmReportIdentity(input: {
   runId: string;
   runtimeVmName: string;
@@ -201,29 +152,6 @@ export function matchesVmReportIdentity(input: {
     input.runId === input.reportRunId &&
     input.runtimeVmName === input.reportVmName
   );
-}
-
-export function matchesInventoryVmIdentity(input: {
-  value: unknown;
-  runId: string;
-  runtimeVmName: string;
-}): boolean {
-  if (!isRecord(input.value)) {
-    return false;
-  }
-
-  const reportRunId = readString(input.value.run_id);
-  const reportVmName = readString(input.value.vm_name);
-  if (!reportRunId || !reportVmName) {
-    return false;
-  }
-
-  return matchesVmReportIdentity({
-    runId: input.runId,
-    runtimeVmName: input.runtimeVmName,
-    reportRunId,
-    reportVmName,
-  });
 }
 
 function applyReportedVmState(input: {
@@ -576,12 +504,4 @@ function currentTerminalProjection(current: RunVmStateDocument) {
         ? current.terminalTarget
         : clearedTerminalTarget(current),
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
 }

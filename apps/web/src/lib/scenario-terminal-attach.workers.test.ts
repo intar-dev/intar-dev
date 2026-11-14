@@ -1,5 +1,6 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
+import { GUEST_USERNAME } from "@/generated/constants";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   drizzle,
@@ -96,7 +97,7 @@ describe("scenario terminal attach", () => {
         target: expect.objectContaining({
           transport: {kind:"relay", target:{host:{host_id:"host-1",session_id:"session-1",credential_generation:1},
             owner_id:"user-1",execution_id:RUN_ID,execution_generation:1,vm_id:"vm-1",service:"ssh"}},
-          username: "ubuntu",
+          username: GUEST_USERNAME,
           privateKeyOpenssh: "PRIVATE KEY",
           authorizedClientPublicKeysOpenssh: [
             "ssh-ed25519 ACCESS access@example.test",
@@ -428,12 +429,12 @@ async function markRunActive(): Promise<void> {
 async function seedTerminalTarget(): Promise<void> {
   await env.DB.prepare(
     "INSERT INTO runtime_vms (" +
-      " id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json," +
-      " image_sha256, cpu_millis, memory_mib, disk_mib, terminal_host," +
+      " id, execution_id, vm_id, ordinal, runtime_vm_name, image_digest," +
+      " spec_digest, kino_digest, cpu_millis, memory_mib, disk_mib, terminal_host," +
       " terminal_port, terminal_username, terminal_host_key_openssh," +
       " terminal_private_key_ciphertext_b64, terminal_private_key_iv_b64," +
       " terminal_observed_at, created_at, updated_at" +
-      " ) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, 1000, 512, 4096, ?7, 22, 'ubuntu'," +
+      " ) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?10, 1000, 512, 4096, ?7, 22, 'user'," +
       " ?8, 'cipher', 'iv', ?9, ?9, ?9)",
   )
     .bind(
@@ -441,11 +442,12 @@ async function seedTerminalTarget(): Promise<void> {
       RUN_ID,
       "vm-1",
       "run-1-webserver",
-      JSON.stringify({ schema_version: 1 }),
-      "2".repeat(64),
+      `sha256:${"2".repeat(64)}`,
+      `sha256:${"3".repeat(64)}`,
       "10.0.0.10",
       "ssh-ed25519 HOST host@example.test",
       NOW,
+      `sha256:${"4".repeat(64)}`,
     )
     .run();
 }

@@ -16,12 +16,8 @@ import {
   scenarioRuns,
   user,
 } from "@/db/schema";
-import {
-  desiredVmFromRunVm,
-  mutateDesiredState,
-  upsertDesiredVm,
-} from "@/lib/desired-state";
-import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
+import { desiredRunningVm } from "@/control-plane/host-runtime-do/test-fixtures";
+import { loadStoredHostDesiredState } from "@/lib/desired-state-store";
 import { buildInitialVmState, type RunVmStateDocument } from "@/lib/run-state";
 import {
   admissionStatements,
@@ -34,7 +30,7 @@ import {
   revokeFixtureAccount,
 } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
-import { seedAdmissionGuardFixture } from "./admission-test-fixtures";
+import { ADMISSION_SCENARIO_ID, seedAdmissionGuardFixture } from "./admission-test-fixtures";
 
 const USER_ID = "admission-user";
 const HOST_ID = "admission-host";
@@ -43,12 +39,6 @@ const RUN_ID = "admission-run";
 const VM_ID = "admission-vm";
 const NOW = 20_000;
 
-const guestTools = {
-  tools_disk_sha256: "a".repeat(64),
-  tools_disk_size_bytes: 64 * 1024 * 1024,
-  kino_sha256: "b".repeat(64),
-  bootstrap_abi: 2,
-} as const;
 
 describe("admission batch", () => {
   beforeEach(resetD1Database);
@@ -119,7 +109,7 @@ describe("admission batch", () => {
 
   it.each([
     ["membership removed", "DELETE FROM member"],
-    ["scenario disabled", "UPDATE vm_scenarios SET enabled = 0"],
+    ["scenario disabled", "UPDATE scenarios SET enabled = 0"],
     ["catalog removed", "DELETE FROM course_catalogs"],
     ["lecture unlinked", "UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].scenarioId', NULL)"],
     ["host disconnected", "UPDATE agent_hosts SET connected = 0, active_session_id = NULL"],
@@ -356,7 +346,7 @@ function admissionVm(): RunVmStateDocument {
     provisioning: {
       ...vm.provisioning,
       image: "ghcr.io/intar/scenario@sha256:fixture",
-      imageKey: { scenario: "scenario-one", vm: "web", arch: "x86_64" },
+      imageKey: { scenario: ADMISSION_SCENARIO_ID, vm: "web", arch: "x86_64" },
       imageSha256: "2".repeat(64),
       resources: {
         cpuMillis: 1_000,
@@ -415,22 +405,19 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
   const readiness = await seedAdmissionGuardFixture({
     userId: USER_ID, organizationId: ORG_ID, hostId: HOST_ID,
   });
-  const current = await loadOrCreateHostDesiredState(db, HOST_ID, NOW);
-  const desiredVm = desiredVmFromRunVm({ ownerUserId: USER_ID, runtimeExecutionId: RUN_ID, generation: 1,
-    runId: RUN_ID,
-    vm: admissionVm(),
-    nowUnixMs: NOW,
-    sshAuthorizedKeysOpenssh: ["ssh-ed25519 AAAAC3Nza admission"],
-    guestTools,
-  });
-  if (!desiredVm) throw new Error("desired vm");
-  const next = mutateDesiredState(
-    current,
-    (draft) => {
-      upsertDesiredVm(draft, desiredVm);
-    },
-    { nowUnixMs: NOW },
-  );
+  const current = await loadStoredHostDesiredState(db, HOST_ID, NOW);
+  const desiredVm = {
+    ...desiredRunningVm(RUN_ID, admissionVm().runtimeVmName, NOW),
+    owner_user_id: USER_ID,
+    vm_id: admissionVm().runtimeVmName,
+    ssh_authorized_keys: ["ssh-ed25519 AAAAC3Nza admission"],
+  };
+  const next = {
+    ...current,
+    vms: [...current.vms, desiredVm],
+    version: current.version + 1,
+    generated_at_unix_ms: NOW,
+  };
   return {
     run: {
       runId: RUN_ID,
@@ -438,8 +425,8 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
       organizationId: ORG_ID,
       runtimeExecutionId: RUN_ID,
       hostId: HOST_ID,
-      scenarioId: "scenario-one",
-      scenarioName: "scenario-one",
+      scenarioId: ADMISSION_SCENARIO_ID,
+      scenarioName: ADMISSION_SCENARIO_ID,
       courseScopeKey: "organization:" + ORG_ID,
       courseId: "linux-operations",
       lectureId: "01-repair-nginx",
@@ -460,7 +447,7 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
       activeKey: USER_ID,
       requestIdempotencyKey: "key-abcdefgh",
       requestScopeJson: {
-        scenarioId: "scenario-one",
+        scenarioId: ADMISSION_SCENARIO_ID,
         organizationId: ORG_ID,
         hostId: null,
         candidateRevision: null,
@@ -489,8 +476,9 @@ async function admissionInput(): Promise<AdmissionCommitInput> {
         vmId: VM_ID,
         ordinal: 0,
         runtimeVmName: VM_ID,
-        imageKey: { scenario: "scenario-one", vm: "web", arch: "x86_64" },
-        imageSha256: "2".repeat(64),
+        imageDigest: `sha256:${"2".repeat(64)}`,
+        specDigest: `sha256:${"3".repeat(64)}`,
+        kinoDigest: `sha256:${"4".repeat(64)}`,
         cpuMillis: 1_000,
         memoryMib: 512,
         diskMib: 4_096,

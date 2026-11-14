@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  courseCatalogs,
   member,
   organization,
   scenarioAssignments,
@@ -12,7 +13,6 @@ import {
   type CourseCatalogSnapshotV2,
 } from "@/db/schema";
 import { listMyAssignments } from "@/lib/assignments";
-import { syncCourseCatalogSnapshot } from "@/lib/course-catalogs";
 import { resetD1Database } from "@/test/d1-migrations";
 
 describe("course assignments", () => {
@@ -48,11 +48,11 @@ describe("course assignments", () => {
       assignedBy: "learner",
       createdAt: 1,
     });
-    await syncCourseCatalogSnapshot(db, {
-      snapshot: snapshot(),
-      sourceRevision: "course-revision",
+    await db.insert(courseCatalogs).values({
+      scopeKey: "organization:org",
       organizationId: "org",
-      nowUnixMs: 1,
+      sourceRevision: "course-revision",
+      catalogJson: snapshot(),
     });
 
     await expect(listMyAssignments({ userId: "learner" })).resolves.toEqual([

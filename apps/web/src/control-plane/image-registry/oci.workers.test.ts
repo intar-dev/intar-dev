@@ -2,11 +2,12 @@
 
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
+import { seedScenarioRow } from "@/control-plane/host-runtime-do/test-fixtures";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleAgentBootstrap, handleAgentConnect, mintRegistryToken, sha256Hex } from "@/control-plane/auth";
 import {
   agentBootstrapTokens, agentHosts, courseCatalogs, member, organization, runtimeExecutions,
-  scenarioRevisions, scenarioRuns, scenarios, user, vmScenarios,
+  scenarioRevisions, scenarioRuns, scenarios, user,
 } from "@/db/schema";
 import { handleMaintenanceMode } from "@/maintenance";
 import { ensureFixtureMember } from "@/test/account-fixtures";
@@ -16,7 +17,7 @@ import { blob, machineConfig, manifestOf, type PushedBlob } from "./oci-test-fix
 import { KINO_CONFIG_MEDIA_TYPE } from "./push";
 
 const ORIGIN = "https://intar.test";
-const SCENARIO = "private-assigned";
+const SCENARIO = "org-a/private-assigned";
 let limited = false;
 const testEnv = () => ({
   ...env,
@@ -84,9 +85,7 @@ function desiredVm(image: string, specDigest: string, lease = Date.now() + 60_00
 async function seedRun() {
   const db = drizzle(env.DB);
   const now = Date.now();
-  await db.insert(vmScenarios).values({ scenarioId: SCENARIO, organizationId: "org-a", title: SCENARIO, category: "test",
-    description: "", difficulty: "easy", estimatedMinutes: 10, tagsJson: [], briefingMarkdown: "", solutionMarkdown: "",
-    hintsJson: [], enabled: true, enabledAt: now, createdAt: now, updatedAt: now });
+  await seedScenarioRow(db, SCENARIO, "org-a");
   await db.insert(courseCatalogs).values({ scopeKey: "organization:org-a", organizationId: "org-a", sourceRevision: "test",
     catalogJson: { version: 2, courses: [{ courseId: "course", title: "Course", summary: "", bodyMarkdown: "", sequential: false,
       lectures: [{ lectureId: SCENARIO, scenarioId: SCENARIO, title: "Lecture", summary: "", bodyMarkdown: "", category: "test",
@@ -267,7 +266,7 @@ describe("/v2 pull API", () => {
 
   it.each([
     ["the owner leaves the organization", "DELETE FROM member"],
-    ["the scenario is disabled", "UPDATE vm_scenarios SET enabled = 0"],
+    ["the scenario is disabled", "UPDATE scenarios SET enabled = 0"],
   ])("denies mid-pull when %s while desired state still lists the image", async (_reason, change) => {
     let changed = false;
     const racing = { ...testEnv(), VM_IMAGE_REGISTRY_BUCKET: {

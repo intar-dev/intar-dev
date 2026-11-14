@@ -9,8 +9,7 @@
  * depends on how many read batches the caller makes.
  *
  * These tests use the real D1 schema, the real admission code, and the real
- * host runtime wake path. Only the pure candidate catalog read is replaced,
- * because candidate rows belong to the image build area.
+ * host runtime wake path, against live scenario revisions.
  */
 
 import { env } from "cloudflare:workers";
@@ -25,32 +24,35 @@ import {
   activeRuntimeSlots,
   agentHosts,
   hostActualState,
+  courseCatalogs,
   hostDesiredState,
-  imageBuildBundles,
-  imageBuilds,
   member,
   organization,
   runtimeExecutions,
-  scenarioCatalogCandidates,
+  scenarioRevisions,
+  scenarios,
   scenarioRuns,
   user,
-  vmScenarios,
-  vmScenarioVms,
   runtimeOperationGates,
 } from "@/db/schema";
-import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { setPlatformUserRole } from "@/lib/platform-admin-authority";
-import { syncCourseCatalogSnapshot } from "@/lib/course-catalogs";
-import { createEmptyHostDesiredState } from "@/lib/desired-state";
-import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
+import { KINO_CONFIG_MEDIA_TYPE } from "@/control-plane/image-registry/push";
+import { emptyDesiredState } from "@/control-plane/host-runtime-do/test-fixtures";
+import type { HostStateReportV3 } from "@/generated/contracts/bridge-message-v9";
 import {
   acquireRegistrySweep,
   admitInternalRegistryOperation,
   finishRegistrySweep,
 } from "@/lib/image-registry-admission";
-import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
-import { IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE } from "@/lib/run-admission-gate";
-import { candidateScenarioId } from "@/lib/scenario-catalog-candidates";
+import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
+import {
+  HARDWARE,
+  KINO,
+  machineImage,
+  revisionDoc,
+  specBlob,
+  store,
+} from "./revision-test-fixtures";
 import { beginScenarioRun, type BeginScenarioRunInput } from "@/lib/scenario-runs/begin";
 import {
   FIXTURE_ADMIN_ID,
@@ -197,83 +199,16 @@ vi.mock("cloudflare:workers", async (importOriginal) => {
   return { ...actual, env: facadeEnv };
 });
 
-vi.mock("@/lib/scenario-runs/candidate", async () => {
-  const { loadEnabledScenarioRows } = await import(
-    "@/lib/scenario-runs/storage"
-  );
-  return {
-    loadCandidateScenarioRunSource: async (
-      db: never,
-      input: {
-        revision: string;
-        buildId: string;
-        scenarioId: string;
-        organizationId: string | null;
-      },
-    ) => {
-      void db;
-      const [scenario] = await loadEnabledScenarioRows(
-        input.scenarioId,
-        input.organizationId,
-      );
-      if (!scenario) {
-        return null;
-      }
-      // The read returns the staged text as the commit fingerprint, so the mock
-      // takes it from the same row the commit anchor compares.
-      const staged = await env.DB.prepare(
-        "SELECT manifest_json AS manifestText FROM scenario_catalog_candidates" +
-          " WHERE id = ?1",
-      )
-        .bind(
-          candidateScenarioId(
-            input.organizationId,
-            input.revision,
-            input.scenarioId,
-          ),
-        )
-        .first<{ manifestText: string }>();
-      if (!staged) {
-        return null;
-      }
-      return {
-        ...scenario,
-        candidateSource: {
-          revision: input.revision,
-          buildId: input.buildId,
-        },
-        candidateManifestText: staged.manifestText,
-      };
-    },
-  };
-});
-
 const HOST_ID = "admission-runner";
-const SCENARIO_ID = "scenario-one";
-const SECOND_SCENARIO_ID = "scenario-two";
-const THIRD_SCENARIO_ID = "scenario-three";
+const SCENARIO_ID = "intar/scenario-one";
+const SECOND_SCENARIO_ID = "intar/scenario-two";
+/** Owned by the fixture organization. */
+const THIRD_SCENARIO_ID = "admission-organization/scenario-three";
 const RUNNER_USER_ID = "admission-user";
 const FIRST_VM_CPU_MILLIS = 1_000;
 const VM_MEMORY_MIB = 512;
 const VM_DISK_MIB = 4_096;
 const HOST_CPU_MILLIS = 8_000;
-const IMAGE_SHA_ONE = "2".repeat(64);
-/** The direct-boot ABI that a launchable scenario image must declare. */
-const SCENARIO_VM_GUEST_BOOTSTRAP_ABI = 2;
-/** The artifact identity every seeded scenario VM publishes. */
-const SCENARIO_VM_CHUNK_MANIFEST_SHA = "d".repeat(64);
-const SCENARIO_VM_KERNEL_SHA = "a".repeat(64);
-const SCENARIO_VM_INITRD_SHA = "b".repeat(64);
-/** The seeded VM row id of the first scenario VM. */
-const SEEDED_VM_ROW_ID = `${SCENARIO_ID}:webserver`;
-const CANDIDATE_REVISION_A = "candidate-rev-a";
-const CANDIDATE_BUILD_A = "candidate-build-a";
-const CANDIDATE_REVISION_B = "candidate-rev-b";
-const CANDIDATE_BUILD_B = "candidate-build-b";
-/** The content hash of the seeded candidate build. */
-const CANDIDATE_CONTENT_HASH = "c".repeat(64);
-/** The content hash of the second seeded candidate build. */
-const SECOND_CANDIDATE_CONTENT_HASH = "e".repeat(64);
 
 describe("scenario admission batch", () => {
   beforeEach(async () => {
@@ -309,7 +244,7 @@ describe("scenario admission batch", () => {
     await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
     expect(admissionHarness.state.admissionBatches).toBe(0);
     // A rejected request never touches the registry gate either: the writer is
-    // opened after the key and candidate-proof validation.
+    // opened after the key validation.
     await expect(openWriterRows()).resolves.toBe(0);
   });
 
@@ -350,7 +285,7 @@ describe("scenario admission batch", () => {
     expect(desired.vms[0]).toMatchObject({
       run_id: result.runId,
       desired_phase: "running",
-      image_id: IMAGE_SHA_ONE,
+      image: fixture.images[SCENARIO_ID],
     });
 
     // One admission batch, and no host runtime hop before it.
@@ -385,37 +320,46 @@ describe("scenario admission batch", () => {
     });
   });
 
-  for (const candidate of [false, true]) {
-    it.each([
+  it.each([
       ["membership removed", "DELETE FROM member"],
-      ["scenario disabled", "UPDATE vm_scenarios SET enabled = 0"],
-      ["scenario unpublished", "UPDATE vm_scenarios SET enabled_at = NULL"],
       ["catalog removed", "DELETE FROM course_catalogs WHERE scope_key = 'public'"],
       ["lecture unlinked", "UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].scenarioId', NULL) WHERE scope_key = 'public'"],
-      ["public lecture hidden by organization", "UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].scenarioId', 'scenario-one') WHERE organization_id IS NOT NULL"],
+      ["public lecture hidden by organization", `UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].scenarioId', '${SCENARIO_ID}') WHERE organization_id IS NOT NULL`],
       ["new incomplete prerequisite", "UPDATE course_catalogs SET catalog_json = json_insert(catalog_json, '$.courses[0].lectures[#]', json_extract(catalog_json, '$.courses[0].lectures[0]')) WHERE scope_key = 'public'; UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].lectureId', 'new-prerequisite', '$.courses[0].lectures[0].scenarioId', NULL) WHERE scope_key = 'public'"],
-    ])(`rolls back ${candidate ? "candidate" : "live"} content and slots when %s before commit`, async (_name, sql) => {
+    ])("rolls back content and slots when %s before commit", async (_name, sql) => {
       const fixture = await seedAdmissionFixture();
-      if (candidate) await seedCandidateProof({
-        revision: CANDIDATE_REVISION_A,
-        buildId: CANDIDATE_BUILD_A,
-        scenarioId: SCENARIO_ID,
-        organizationId: fixture.organizationId,
-        imageSha256: IMAGE_SHA_ONE,
-      });
       admissionHarness.armBeforeAdmissionBatch(async () => {
         // The admission statements are already prepared and bound here.
         for (const statement of sql.split("; ")) await env.DB.prepare(statement).run();
       });
-      await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID, candidate ? candidateProofInput() : {}))).rejects.toMatchObject({
+      await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID))).rejects.toMatchObject({
         code: "scenario_content_access_changed",
       });
       await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
       expect((await desiredDocument()).vms).toEqual([]);
       expect(admissionHarness.state.admissionBatches).toBe(1);
       expect(admissionHarness.eventIndex(`host-runtime-id:${HOST_ID}`)).toBe(-1);
+  });
+
+  it.each(["moves", "is disabled"])("refuses a start whose live revision %s in the commit window", async (change) => {
+    const fixture = await seedAdmissionFixture();
+    admissionHarness.armBeforeAdmissionBatch(async () => {
+      if (change === "is disabled") {
+        await env.DB.prepare("UPDATE scenarios SET enabled = 0 WHERE id = ?1").bind(SCENARIO_ID).run();
+        return;
+      }
+      await drizzle(env.DB).insert(scenarioRevisions).values({
+        scenarioId: SCENARIO_ID, rev: "r2", guestContract: 3, docJson: fixture.docs[SCENARIO_ID]!, state: "ready",
+      });
+      await env.DB.prepare("UPDATE scenarios SET live_rev = 'r2' WHERE id = ?1").bind(SCENARIO_ID).run();
     });
-  }
+    await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID))).rejects.toMatchObject({
+      status: 409,
+      code: "scenario_source_changed",
+    });
+    await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
+    expect((await desiredDocument()).vms).toEqual([]);
+  });
 
   for (const automatic of [false, true]) {
     it.each([
@@ -424,8 +368,7 @@ describe("scenario admission batch", () => {
       ["session cleared", "UPDATE agent_hosts SET active_session_id = NULL"],
       ["heartbeat expired", "UPDATE agent_hosts SET last_heartbeat_at = 1"],
       ["report expired", "UPDATE host_actual_state SET updated_at = 1"],
-      ["capability removed", "UPDATE host_actual_state SET report_json = json_set(report_json, '$.capabilities.supports_kvm', json('false'))"],
-      ["image removed", "UPDATE host_actual_state SET report_json = json_set(report_json, '$.cached_images', json('[]'))"],
+      ["hardware lost KVM", "UPDATE host_actual_state SET report_json = json_set(report_json, '$.hardware.kvm', json('false'))"],
       ["capacity reduced", "UPDATE host_actual_state SET report_json = json_set(report_json, '$.capacity.memory_available_mib', 0)"],
     ])(`refuses ${automatic ? "automatic" : "explicit"} admission when host %s before commit`, async (_name, sql) => {
       const fixture = await seedAdmissionFixture();
@@ -472,8 +415,6 @@ describe("scenario admission batch", () => {
 
   it("admits current organization content through its private course", async () => {
     const fixture = await seedAdmissionFixture({ withSecondScenario: true });
-    await env.DB.prepare("UPDATE vm_scenarios SET organization_id = ?1, enabled = 1, enabled_at = ?2 WHERE scenario_id = ?3")
-      .bind(fixture.organizationId, Date.now(), THIRD_SCENARIO_ID).run();
     const result = await beginScenarioRun(fixture.input(RUNNER_USER_ID, { scenarioId: THIRD_SCENARIO_ID }));
     await result.deliveryHint;
     expect(await loadRunRow(result.runId)).toMatchObject({
@@ -519,15 +460,13 @@ describe("scenario admission batch", () => {
       await env.DB.prepare("UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].lectureId', 'locked-prerequisite', '$.courses[0].lectures[0].scenarioId', NULL) WHERE scope_key = 'public'").run();
     }
     if (proof) {
-      await seedCandidateProof({ revision: CANDIDATE_REVISION_A, buildId: CANDIDATE_BUILD_A,
-        scenarioId: SCENARIO_ID, organizationId: fixture.organizationId, imageSha256: IMAGE_SHA_ONE });
       await drizzle(env.DB).insert(runtimeOperationGates).values({ key: IMAGE_CUTOVER_GATE, state: "drained" });
     }
     admissionHarness.armBeforeAdmissionBatch(() => setPlatformUserRole({
       d1: env.DB, targetUserId: RUNNER_USER_ID, actorUserId: FIXTURE_ADMIN_ID, role: "user",
     }));
     await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID, {
-      ...(proof ? candidateProofInput() : {}), allowSequenceBypass: sequence,
+      ...(proof ? { allowDrainedAdminProof: true } : {}), allowSequenceBypass: sequence,
     }))).rejects.toMatchObject({ status: 409, code: "scenario_content_access_changed" });
     await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
     expect((await desiredDocument()).vms).toEqual([]);
@@ -552,6 +491,8 @@ describe("scenario admission batch", () => {
     const fallbackId = "fallback-runner";
     await db.insert(agentHosts).values({ ...host, id: fallbackId, activeSessionId: "fallback-session", updatedAt: host.updatedAt - 1 });
     await db.insert(hostActualState).values({ ...actual, hostId: fallbackId, reportJson: { ...actual.reportJson, host_id: fallbackId } });
+    const [desired] = await db.select().from(hostDesiredState).where(eq(hostDesiredState.hostId, HOST_ID));
+    await db.insert(hostDesiredState).values({ ...desired!, hostId: fallbackId, docJson: { ...desired!.docJson, host_id: fallbackId } });
     admissionHarness.armBeforeAdmissionBatch(async () => {
       await env.DB.prepare("UPDATE agent_hosts SET connected = 0, active_session_id = NULL WHERE id = ?1").bind(HOST_ID).run();
       admissionHarness.armBeforeAdmissionBatch(async () => {
@@ -570,7 +511,7 @@ describe("scenario admission batch", () => {
 
   it("refuses an unknown explicit host before creating desired state", async () => {
     const fixture = await seedAdmissionFixture();
-    await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID, { hostId: "unknown-host" }))).rejects.toMatchObject({ code: "scenario_host_not_found" });
+    await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID, { hostId: "unknown-host" }))).rejects.toMatchObject({ code: "scenario_host_unavailable" });
     await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
   });
 
@@ -660,15 +601,16 @@ describe("scenario admission batch", () => {
 
   it("admits two half-CPU VMs into one CPU from startup", async () => {
     const fixture = await seedAdmissionFixture({ userIds: ["half-a", "half-b"], hostCpuMillis: 1000 });
-    await drizzle(env.DB).update(vmScenarioVms).set({ cpuMillis: 500 })
-      .where(eq(vmScenarioVms.scenarioId, SCENARIO_ID));
+    await env.DB.prepare(
+      "UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].cpu_millis', 500) WHERE scenario_id = ?1",
+    ).bind(SCENARIO_ID).run();
     for (const userId of ["half-a", "half-b"]) {
       const result = await beginScenarioRun(fixture.input(userId));
       await result.deliveryHint;
     }
     await expect(admissionSnapshot()).resolves.toMatchObject({ runs: 2, cpuReservations: 2, cpuMillis: 1000 });
     const overflow = await fixture.addUser("half-c");
-    await expect(beginScenarioRun(overflow)).rejects.toMatchObject({ code: "scenario_host_unavailable" });
+    await expect(beginScenarioRun(overflow)).rejects.toMatchObject({ code: "scenario_host_capacity_contended" });
     await expect(admissionSnapshot()).resolves.toMatchObject({ runs: 2, cpuReservations: 2, cpuMillis: 1000 });
   });
 
@@ -689,7 +631,7 @@ describe("scenario admission batch", () => {
 
     const overflow = await fixture.addUser("fill-user-5");
     await expect(beginScenarioRun(overflow)).rejects.toMatchObject({
-      code: "scenario_host_unavailable",
+      code: "scenario_host_capacity_contended",
     });
     await expect(admissionSnapshot()).resolves.toMatchObject({
       runs: 4,
@@ -803,32 +745,7 @@ describe("scenario admission batch", () => {
 
   it("rejects the same key with different parameters and writes nothing", async () => {
     const fixture = await seedAdmissionFixture({ withSecondScenario: true });
-    await seedCandidateProof({
-      revision: CANDIDATE_REVISION_A,
-      buildId: CANDIDATE_BUILD_A,
-      scenarioId: SCENARIO_ID,
-      organizationId: fixture.organizationId,
-      imageSha256: IMAGE_SHA_ONE,
-    });
-    // The second candidate is staged too, because a candidate start reads its
-    // row before it can reach the idempotency replay that this test checks.
-    await seedCandidateProof({
-      revision: CANDIDATE_REVISION_B,
-      buildId: CANDIDATE_BUILD_B,
-      scenarioId: SCENARIO_ID,
-      organizationId: fixture.organizationId,
-      imageSha256: IMAGE_SHA_ONE,
-      // One content hash belongs to one build row, so the second candidate
-      // stages its own build.
-      contentHash: SECOND_CANDIDATE_CONTENT_HASH,
-    });
-    const first = await beginScenarioRun(
-      fixture.input(RUNNER_USER_ID, {
-        candidateRevision: CANDIDATE_REVISION_A,
-        candidateBuildId: CANDIDATE_BUILD_A,
-        allowDrainedAdminProof: true,
-      }),
-    );
+    const first = await beginScenarioRun(fixture.input(RUNNER_USER_ID));
     await first.deliveryHint;
     const before = await admissionSnapshot();
 
@@ -842,12 +759,8 @@ describe("scenario admission batch", () => {
         input: fixture.input(RUNNER_USER_ID, { scenarioId: SECOND_SCENARIO_ID }),
       },
       {
-        name: "candidate revision",
-        input: fixture.input(RUNNER_USER_ID, {
-          candidateRevision: CANDIDATE_REVISION_B,
-          candidateBuildId: CANDIDATE_BUILD_B,
-          allowDrainedAdminProof: true,
-        }),
+        name: "drained proof flag",
+        input: fixture.input(RUNNER_USER_ID, { allowDrainedAdminProof: true }),
       },
       {
         name: "sequence bypass flag",
@@ -884,7 +797,7 @@ describe("scenario admission batch", () => {
     await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
   });
 
-  it.each([IMAGE_CUTOVER_GATE, PROMOTION_HOLD_GATE])("stops a start when %s closes after the selection", async (key) => {
+  it.each([IMAGE_CUTOVER_GATE])("stops a start when %s closes after the selection", async (key) => {
     const fixture = await seedAdmissionFixture();
     admissionHarness.armBeforeAdmissionBatch(async () => {
       await env.DB.prepare(
@@ -994,7 +907,7 @@ describe("scenario admission batch", () => {
       beginScenarioRun(fixture.input(RUNNER_USER_ID, { hostId: HOST_ID })),
     ).rejects.toMatchObject({
       status: 409,
-      code: "scenario_host_unavailable",
+      code: "scenario_host_capacity_contended",
     });
     await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
   });
@@ -1005,13 +918,13 @@ describe("scenario admission batch", () => {
     });
     await expect(
       beginScenarioRun(fixture.input("memory-user")),
-    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
+    ).rejects.toMatchObject({ code: "scenario_host_capacity_contended" });
     // The requested host path makes the same decision without the selection.
     await expect(
       beginScenarioRun(fixture.input("memory-user", { hostId: HOST_ID })),
     ).rejects.toMatchObject({
       status: 409,
-      code: "scenario_host_unavailable",
+      code: "scenario_host_capacity_contended",
     });
     await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
   });
@@ -1023,13 +936,13 @@ describe("scenario admission batch", () => {
     });
     await expect(
       beginScenarioRun(fixture.input("disk-user")),
-    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
+    ).rejects.toMatchObject({ code: "scenario_host_capacity_contended" });
     // The requested host path makes the same decision without the selection.
     await expect(
       beginScenarioRun(fixture.input("disk-user", { hostId: HOST_ID })),
     ).rejects.toMatchObject({
       status: 409,
-      code: "scenario_host_unavailable",
+      code: "scenario_host_capacity_contended",
     });
     await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
   });
@@ -1096,7 +1009,7 @@ describe("scenario admission batch", () => {
 
       // A collector that tried to sweep in that window must not acquire: the
       // image reference of this run is not committed yet, so a sweep could
-      // retire the candidate and delete the image the run is about to point at.
+      // delete the image the run is about to point at.
       expect(sweepInWindow).toEqual({
         ok: false,
         code: "registry_admission_busy",
@@ -1181,381 +1094,16 @@ describe("scenario admission batch", () => {
       await admitted.lease.complete("ok");
       await expect(openWriterRows()).resolves.toBe(0);
     });
-
-    it("refuses a candidate run whose candidate row left the commit window", async () => {
-      const fixture = await seedAdmissionFixture();
-      await seedCandidateProof({
-        revision: CANDIDATE_REVISION_A,
-        buildId: CANDIDATE_BUILD_A,
-        scenarioId: SCENARIO_ID,
-        organizationId: fixture.organizationId,
-        imageSha256: IMAGE_SHA_ONE,
-      });
-      // A promotion retires the candidate row between the source read and the
-      // commit. The shared writer does not serialize the start against another
-      // shared writer, so only the commit anchor can catch this.
-      admissionHarness.armBeforeAdmissionBatch(async () => {
-        await env.DB.prepare(
-          "DELETE FROM scenario_catalog_candidates WHERE id = ?1",
-        )
-          .bind(
-            candidateScenarioId(
-              fixture.organizationId,
-              CANDIDATE_REVISION_A,
-              SCENARIO_ID,
-            ),
-          )
-          .run();
-      });
-
-      await expect(
-        beginScenarioRun(fixture.input(RUNNER_USER_ID, candidateProofInput())),
-      ).rejects.toMatchObject({
-        status: 409,
-        code: "scenario_candidate_not_ready",
-      });
-      // The refused insert rolls the whole batch back: no run, and no orphan
-      // runtime execution or desired VM that no run can release.
-      await expect(admissionSnapshot()).resolves.toEqual(
-        emptyAdmissionSnapshot(),
-      );
-      expect((await desiredDocument()).vms).toHaveLength(0);
-    });
-
-    it("refuses a candidate run whose build artifacts were retired in the commit window", async () => {
-      const fixture = await seedAdmissionFixture();
-      await seedCandidateProof({
-        revision: CANDIDATE_REVISION_A,
-        buildId: CANDIDATE_BUILD_A,
-        scenarioId: SCENARIO_ID,
-        organizationId: fixture.organizationId,
-        imageSha256: IMAGE_SHA_ONE,
-      });
-      admissionHarness.armBeforeAdmissionBatch(async () => {
-        await env.DB.prepare(
-          "UPDATE image_builds SET artifacts_retired_at = ?1 WHERE id = ?2",
-        )
-          .bind(Date.now(), CANDIDATE_BUILD_A)
-          .run();
-      });
-
-      await expect(
-        beginScenarioRun(fixture.input(RUNNER_USER_ID, candidateProofInput())),
-      ).rejects.toMatchObject({
-        status: 409,
-        code: "scenario_candidate_not_ready",
-      });
-      await expect(admissionSnapshot()).resolves.toEqual(
-        emptyAdmissionSnapshot(),
-      );
-    });
-
-    it("refuses a candidate run whose manifest was rewritten in the commit window", async () => {
-      const fixture = await seedAdmissionFixture();
-      await seedCandidateProof({
-        revision: CANDIDATE_REVISION_A,
-        buildId: CANDIDATE_BUILD_A,
-        scenarioId: SCENARIO_ID,
-        organizationId: fixture.organizationId,
-        imageSha256: IMAGE_SHA_ONE,
-      });
-      // A republish of the same revision and build rewrites the manifest of the
-      // candidate row between the source read and the commit. The run was built
-      // from the manifest the read returned, so the row no longer describes it
-      // and the batch must refuse instead of committing an old spec.
-      admissionHarness.armBeforeAdmissionBatch(async () => {
-        const republished = candidateProofManifest(SCENARIO_ID, IMAGE_SHA_ONE);
-        republished.title = "Republished candidate";
-        await env.DB.prepare(
-          "UPDATE scenario_catalog_candidates SET manifest_json = ?1, updated_at = ?2" +
-            " WHERE id = ?3",
-        )
-          .bind(
-            JSON.stringify(republished),
-            Date.now(),
-            candidateScenarioId(
-              fixture.organizationId,
-              CANDIDATE_REVISION_A,
-              SCENARIO_ID,
-            ),
-          )
-          .run();
-      });
-
-      await expect(
-        beginScenarioRun(fixture.input(RUNNER_USER_ID, candidateProofInput())),
-      ).rejects.toMatchObject({
-        status: 409,
-        code: "scenario_candidate_not_ready",
-      });
-      await expect(admissionSnapshot()).resolves.toEqual(
-        emptyAdmissionSnapshot(),
-      );
-      expect((await desiredDocument()).vms).toHaveLength(0);
-    });
-
-    it("keeps a committed candidate run whole and leaves no writer behind", async () => {
-      const fixture = await seedAdmissionFixture();
-      await seedCandidateProof({
-        revision: CANDIDATE_REVISION_A,
-        buildId: CANDIDATE_BUILD_A,
-        scenarioId: SCENARIO_ID,
-        organizationId: fixture.organizationId,
-        imageSha256: IMAGE_SHA_ONE,
-      });
-
-      const result = await beginScenarioRun(
-        fixture.input(RUNNER_USER_ID, candidateProofInput()),
-      );
-      await result.deliveryHint;
-
-      // Every row the retention projection and the host both read is present:
-      // the run, its runtime VM mirror, its desired VM, and the capacity
-      // reservation. The start's writer is gone, so the next sweep can run.
-      await expect(admissionSnapshot()).resolves.toMatchObject({
-        runs: 1,
-        sshKeys: 1,
-        runtimeExecutions: 1,
-        runtimeVms: 1,
-        accessKeys: 1,
-        cpuReservations: 1,
-        cpuMillis: FIRST_VM_CPU_MILLIS,
-        resourceReservations: 1,
-        activeSlots: 1,
-        desiredVersion: 1,
-      });
-      expect(await loadRunRow(result.runId)).toMatchObject({
-        userId: RUNNER_USER_ID,
-        scenarioId: SCENARIO_ID,
-        hostId: HOST_ID,
-        state: "provisioning",
-      });
-      expect((await desiredDocument()).vms).toHaveLength(1);
-      await expect(openWriterRows()).resolves.toBe(0);
-    });
-
-    it("keeps the candidate image proof separate from changed live image rows", async () => {
-      const fixture = await seedAdmissionFixture();
-      await seedCandidateProof({
-        revision: CANDIDATE_REVISION_A,
-        buildId: CANDIDATE_BUILD_A,
-        scenarioId: SCENARIO_ID,
-        organizationId: fixture.organizationId,
-        imageSha256: IMAGE_SHA_ONE,
-      });
-      admissionHarness.armBeforeAdmissionBatch(() => env.DB.prepare(
-        "UPDATE vm_scenario_vms SET image_sha256 = ?1 WHERE scenario_id = ?2",
-      ).bind("9".repeat(64), SCENARIO_ID).run());
-      const result = await beginScenarioRun(fixture.input(RUNNER_USER_ID, candidateProofInput()));
-      await result.deliveryHint;
-      expect((await desiredDocument()).vms[0]).toMatchObject({ image_id: IMAGE_SHA_ONE });
-      expect(admissionHarness.state.admissionBatches).toBe(1);
-    });
-
-    it("does not let an administrative candidate proof bypass a cleared host session", async () => {
-      const fixture = await seedAdmissionFixture();
-      await seedCandidateProof({
-        revision: CANDIDATE_REVISION_A,
-        buildId: CANDIDATE_BUILD_A,
-        scenarioId: SCENARIO_ID,
-        organizationId: fixture.organizationId,
-        imageSha256: IMAGE_SHA_ONE,
-      });
-      admissionHarness.armBeforeAdmissionBatch(() => env.DB.prepare(
-        "UPDATE agent_hosts SET active_session_id = NULL",
-      ).run());
-      await expect(beginScenarioRun(fixture.input(RUNNER_USER_ID, candidateProofInput()))).rejects.toMatchObject({ status: 409 });
-      await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
-      expect((await desiredDocument()).vms).toEqual([]);
-    });
-
-    it("refuses a live start for each identity field a publish can replace", async () => {
-      const fixture = await seedAdmissionFixture();
-      // A live row has no candidate proof to anchor on, so a publish can
-      // replace the image of the scenario between the source read and the
-      // commit. The run was built from what the read returned, so the batch
-      // must refuse instead of launching an image the read never saw. One
-      // field changes per attempt, so every comparison in the anchor carries
-      // its own evidence: drop a single one and that attempt commits.
-      const replacements = [
-        { label: "image id", set: "image_sha256 = ?1", value: "9".repeat(64) },
-        {
-          label: "chunk manifest",
-          set: "chunk_manifest_sha256 = ?1",
-          value: "7".repeat(64),
-        },
-        { label: "kernel", set: "kernel_sha256 = ?1", value: "8".repeat(64) },
-        { label: "initrd", set: "initrd_sha256 = ?1", value: "6".repeat(64) },
-        {
-          label: "key arch",
-          set: "image_key_json = json_set(image_key_json, '$.arch', ?1)",
-          value: "aarch64",
-        },
-        {
-          label: "key vm",
-          set: "image_key_json = json_set(image_key_json, '$.vm', ?1)",
-          value: "database",
-        },
-        {
-          label: "key scenario",
-          set: "image_key_json = json_set(image_key_json, '$.scenario', ?1)",
-          value: "other-scenario",
-        },
-        { label: "vm name", set: "vm_name = ?1", value: "database" },
-      ];
-      for (const replacement of replacements) {
-        admissionHarness.armBeforeAdmissionBatch(async () => {
-          await env.DB.prepare(
-            "UPDATE vm_scenario_vms SET " +
-              replacement.set +
-              " WHERE id = ?2",
-          )
-            .bind(replacement.value, SEEDED_VM_ROW_ID)
-            .run();
-        });
-        await expect(
-          beginScenarioRun(
-            fixture.input(RUNNER_USER_ID, {
-              idempotencyKey: `identity-${replacement.label.replaceAll(" ", "-")}`,
-            }),
-          ),
-          replacement.label,
-        ).rejects.toMatchObject({
-          status: 409,
-          code: "scenario_source_changed",
-        });
-        await restoreSeededScenarioVmRow();
-      }
-      // Every refused insert rolled its whole batch back: no run, no orphan
-      // runtime execution, and no desired VM that no run can release.
-      await expect(admissionSnapshot()).resolves.toEqual(
-        emptyAdmissionSnapshot(),
-      );
-      expect((await desiredDocument()).vms).toHaveLength(0);
-      await expect(openWriterRows()).resolves.toBe(0);
-    });
-
-    it("refuses a live start when the scenario gains a VM in the commit window", async () => {
-      const fixture = await seedAdmissionFixture();
-      // The count is part of the anchor, so a VM that appears inside the window
-      // refuses the run instead of committing a one-VM launch spec for a
-      // scenario that now declares two.
-      admissionHarness.armBeforeAdmissionBatch(async () => {
-        await drizzle(env.DB)
-          .insert(vmScenarioVms)
-          .values({
-            id: `${SCENARIO_ID}:database`,
-            scenarioId: SCENARIO_ID,
-            ordinal: 1,
-            vmName: "database",
-            image: `${SCENARIO_ID}-database-x86_64.raw_chunks.json`,
-            imageKeyJson: {
-              scenario: SCENARIO_ID,
-              vm: "database",
-              arch: "x86_64",
-            },
-            imageSha256: "5".repeat(64),
-            imageFormat: "raw_chunks_v1",
-            imageVirtualSizeBytes: 1_073_741_824,
-            chunkManifestSha256: "d".repeat(64),
-            guestBootstrapAbi: SCENARIO_VM_GUEST_BOOTSTRAP_ABI,
-            kernelSha256: "a".repeat(64),
-            initrdSha256: "b".repeat(64),
-            bootCmdline: "root=/dev/vda rw",
-            cpuMillis: FIRST_VM_CPU_MILLIS,
-            memoryMib: VM_MEMORY_MIB,
-            diskMib: VM_DISK_MIB,
-          });
-      });
-
-      await expect(
-        beginScenarioRun(fixture.input(RUNNER_USER_ID)),
-      ).rejects.toMatchObject({
-        status: 409,
-        code: "scenario_source_changed",
-      });
-      await expect(admissionSnapshot()).resolves.toEqual(
-        emptyAdmissionSnapshot(),
-      );
-    });
-
-    it("keeps a legacy live start whose image has no chunk manifest", async () => {
-      const fixture = await seedAdmissionFixture();
-      // A legacy image has no chunk manifest, so the fingerprint carries null
-      // for that field. The anchor compares null-safely: an absent manifest
-      // matches an absent manifest instead of refusing a launchable image.
-      await env.DB.prepare(
-        "UPDATE vm_scenario_vms SET image_format = 'raw_zstd'," +
-          " chunk_manifest_sha256 = NULL, guest_bootstrap_abi = NULL" +
-          " WHERE scenario_id = ?1",
-      )
-        .bind(SCENARIO_ID)
-        .run();
-
-      const result = await beginScenarioRun(fixture.input(RUNNER_USER_ID));
-      await result.deliveryHint;
-
-      expect(result.reused).toBe(false);
-      await expect(admissionSnapshot()).resolves.toMatchObject({
-        runs: 1,
-        runtimeVms: 1,
-        desiredVersion: 1,
-      });
-      expect((await desiredDocument()).vms).toHaveLength(1);
-      await expect(openWriterRows()).resolves.toBe(0);
-    });
-
-    it("keeps a live start when only metadata changes in the commit window", async () => {
-      const fixture = await seedAdmissionFixture();
-      // The anchor covers image identity, not presentation: the run carries the
-      // briefing, the probes, and the resources of the read it did, so a title
-      // or description edit inside the window cannot make the launch spec
-      // inconsistent with the catalog row it came from.
-      admissionHarness.armBeforeAdmissionBatch(async () => {
-        const now = Date.now();
-        await drizzle(env.DB)
-          .update(vmScenarios)
-          .set({
-            title: `${SCENARIO_ID} renamed`,
-            description: "renamed while the run was starting",
-            updatedAt: now,
-          })
-          .where(eq(vmScenarios.scenarioId, SCENARIO_ID));
-      });
-
-      const result = await beginScenarioRun(fixture.input(RUNNER_USER_ID));
-      await result.deliveryHint;
-
-      expect(result.reused).toBe(false);
-      await expect(admissionSnapshot()).resolves.toMatchObject({
-        runs: 1,
-        sshKeys: 1,
-        runtimeExecutions: 1,
-        runtimeVms: 1,
-        accessKeys: 1,
-        cpuReservations: 1,
-        resourceReservations: 1,
-        activeSlots: 1,
-        desiredVersion: 1,
-      });
-      expect((await desiredDocument()).vms).toHaveLength(1);
-      await expect(openWriterRows()).resolves.toBe(0);
-    });
   });
 });
-
-/** The candidate proof arguments that the fixture can start from. */
-function candidateProofInput(): Partial<BeginScenarioRunInput> {
-  return {
-    candidateRevision: CANDIDATE_REVISION_A,
-    candidateBuildId: CANDIDATE_BUILD_A,
-    allowDrainedAdminProof: true,
-  };
-}
 
 interface AdmissionFixture {
   hostId: string;
   organizationId: string;
+  /** The machine image digest of each seeded scenario. */
+  images: Record<string, string>;
+  /** The live revision document of each seeded scenario. */
+  docs: Record<string, ReturnType<typeof revisionDoc>>;
   keyFor(userId: string): string;
   /** Seeds one more member for this host and returns that user's input. */
   addUser(userId: string): Promise<BeginScenarioRunInput>;
@@ -1581,116 +1129,6 @@ async function seedAdmissionFixture(
   return fixture;
 }
 
-/**
- * Seeds the candidate proof a candidate start commits from: the bundle rev the
- * build references, the succeeded build, and the candidate row. The candidate
- * source read is mocked in this file, but the commit anchor of the start reads
- * these rows, so a test can retire one of them inside the commit window.
- */
-async function seedCandidateProof(input: {
-  revision: string;
-  buildId: string;
-  scenarioId: string;
-  organizationId: string | null;
-  imageSha256: string;
-  contentHash?: string;
-}): Promise<void> {
-  const db = drizzle(env.DB);
-  // Candidate proof starts use a current administrator's bypass permission.
-  await db.update(user).set({ role: "admin" }).where(eq(user.id, RUNNER_USER_ID));
-  const now = Date.now();
-  const bundleRev = `${input.buildId}-bundle`;
-  const contentHash = input.contentHash ?? CANDIDATE_CONTENT_HASH;
-  const manifest = candidateProofManifest(input.scenarioId, input.imageSha256);
-  await db.insert(imageBuildBundles).values({
-    rev: bundleRev,
-    organizationId: input.organizationId,
-    r2Key: `builds/bundles/${bundleRev}.json`,
-    metaJson: {
-      buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
-      catalogChannel: "candidate",
-      scenarios: [
-        {
-          scenarioId: input.scenarioId,
-          arch: "x86_64",
-          contentHash,
-        },
-      ],
-    },
-    createdAt: now,
-    updatedAt: now,
-  });
-  await db.insert(imageBuilds).values({
-    id: input.buildId,
-    organizationId: input.organizationId,
-    scenarioId: input.scenarioId,
-    arch: "x86_64",
-    rev: bundleRev,
-    contentHash,
-    catalogChannel: "candidate",
-    status: "succeeded",
-    publishedManifestJson: manifest,
-    createdAt: now,
-    updatedAt: now,
-  });
-  await db.insert(scenarioCatalogCandidates).values({
-    id: candidateScenarioId(
-      input.organizationId,
-      input.revision,
-      input.scenarioId,
-    ),
-    revision: input.revision,
-    organizationId: input.organizationId,
-    scenarioId: input.scenarioId,
-    buildId: input.buildId,
-    manifestJson: manifest,
-    createdAt: now,
-    updatedAt: now,
-  });
-}
-
-/** One scenario VM, so the seeded candidate describes the seeded host image. */
-function candidateProofManifest(
-  scenarioId: string,
-  imageSha256: string,
-): ScenarioManifestV5 {
-  return {
-    schema_version: 5,
-    scenario_id: scenarioId,
-    name: scenarioId,
-    title: scenarioId,
-    category: "test",
-    description: `${scenarioId} candidate`,
-    difficulty: "easy",
-    estimated_minutes: 15,
-    tags: [],
-    briefing_markdown: `# ${scenarioId}`,
-    solution_markdown: "solution",
-    hints: [],
-    vms: [
-      {
-        name: "webserver",
-        image_key: { scenario: scenarioId, vm: "webserver", arch: "x86_64" },
-        image_id: imageSha256,
-        image_format: "raw_chunks_v1",
-        image_virtual_size_bytes: 1_073_741_824,
-        chunk_manifest_sha256: "d".repeat(64),
-        guest_bootstrap_abi: SCENARIO_VM_GUEST_BOOTSTRAP_ABI,
-        boot: {
-          kernel_sha256: "a".repeat(64),
-          initrd_sha256: "b".repeat(64),
-          cmdline: "console=hvc0 root=/dev/vda rw",
-        },
-        cpu_millis: FIRST_VM_CPU_MILLIS,
-        memory_mib: VM_MEMORY_MIB,
-        disk_mib: VM_DISK_MIB,
-        probes: [],
-      },
-    ],
-  };
-}
-
-/** The shared registry writers that still hold the collector, if any. */
 async function openWriterRows(): Promise<number> {
   const row = await env.DB.prepare(
     "SELECT count(*) AS count FROM image_registry_operation_writers" +
@@ -1703,23 +1141,6 @@ async function openWriterRows(): Promise<number> {
  * Puts the seeded VM row back to the identity the fixture publishes, so one
  * test can replace field after field against the same scenario.
  */
-async function restoreSeededScenarioVmRow(): Promise<void> {
-  await env.DB.prepare(
-    "UPDATE vm_scenario_vms SET vm_name = 'webserver'," +
-      " image_key_json = ?1, image_sha256 = ?2, chunk_manifest_sha256 = ?3," +
-      " kernel_sha256 = ?4, initrd_sha256 = ?5 WHERE id = ?6",
-  )
-    .bind(
-      JSON.stringify({ scenario: SCENARIO_ID, vm: "webserver", arch: "x86_64" }),
-      IMAGE_SHA_ONE,
-      SCENARIO_VM_CHUNK_MANIFEST_SHA,
-      SCENARIO_VM_KERNEL_SHA,
-      SCENARIO_VM_INITRD_SHA,
-      SEEDED_VM_ROW_ID,
-    )
-    .run();
-}
-
 async function seedHostAndCatalog(input: {
   userIds: string[];
   hostCpuMillis?: number;
@@ -1742,33 +1163,28 @@ async function seedHostAndCatalog(input: {
     await seedUser(userId);
   }
 
-  const scenarios = [
-    { scenarioId: SCENARIO_ID, imageSha256: IMAGE_SHA_ONE },
-    {
-      scenarioId: SECOND_SCENARIO_ID,
-      imageSha256: "3".repeat(64),
-    },
-    {
-      scenarioId: THIRD_SCENARIO_ID,
-      imageSha256: "4".repeat(64),
-    },
-  ];
-  for (const scenario of scenarios) {
-    await insertScenario(db, scenario.scenarioId, scenario.imageSha256, now);
+  // The newest Kino of guest contract 3, which the host's desired state pins.
+  expect(await store("application/vnd.intar.kino.v1", KINO_CONFIG_MEDIA_TYPE, { guest_contract: 3, version: "run-test" },
+    [["application/octet-stream", "kino binary"]])).toBe(KINO);
+  const images: Record<string, string> = {};
+  const docs: Record<string, ReturnType<typeof revisionDoc>> = {};
+  for (const scenarioId of [SCENARIO_ID, SECOND_SCENARIO_ID, THIRD_SCENARIO_ID]) {
+    const image = await machineImage(scenarioId);
+    images[scenarioId] = image;
+    docs[scenarioId] = await insertScenario(
+      db, scenarioId, scenarioId === THIRD_SCENARIO_ID ? organizationId : null, image, await specBlob(scenarioId),
+    );
   }
 
-  await syncCourseCatalogSnapshot(db, {
-    snapshot: courseCatalog(),
-    sourceRevision: "admission-fixture",
-    organizationId: null,
-    nowUnixMs: now,
-  });
-  await syncCourseCatalogSnapshot(db, {
-    snapshot: organizationCourseCatalog(),
-    sourceRevision: "admission-fixture",
-    organizationId,
-    nowUnixMs: now,
-  });
+  await db.insert(courseCatalogs).values([
+    { scopeKey: "public", organizationId: null, sourceRevision: "admission-fixture", catalogJson: courseCatalog() },
+    {
+      scopeKey: `organization:${organizationId}`,
+      organizationId,
+      sourceRevision: "admission-fixture",
+      catalogJson: organizationCourseCatalog(),
+    },
+  ]);
 
   const hostId = HOST_ID;
   await db.insert(agentHosts).values({
@@ -1797,17 +1213,6 @@ async function seedHostAndCatalog(input: {
       schedulableCpuMillis: input.hostCpuMillis ?? HOST_CPU_MILLIS,
       memoryAvailableMib: input.memoryAvailableMib ?? 4_096,
       diskAvailableMib: input.diskAvailableMib ?? 80_000,
-      images: (input.withSecondScenario
-        ? scenarios
-        : scenarios.slice(0, 1)
-      ).map((scenario) => ({
-        imageKey: {
-          scenario: scenario.scenarioId,
-          vm: "webserver",
-          arch: "x86_64" as const,
-        },
-        imageSha256: scenario.imageSha256,
-      })),
     }),
     createdAt: now,
     updatedAt: now,
@@ -1815,7 +1220,10 @@ async function seedHostAndCatalog(input: {
   await db.insert(hostDesiredState).values({
     hostId,
     version: 0,
-    docJson: createEmptyHostDesiredState({ ownerUserId: input.userIds[0]!, scope: "platform", hostId, nowUnixMs: now }),
+    docJson: {
+      ...emptyDesiredState({ ownerUserId: input.userIds[0]!, scope: "platform", hostId, nowUnixMs: now }),
+      kino_pin: KINO,
+    },
     createdAt: now,
     updatedAt: now,
   });
@@ -1825,6 +1233,8 @@ async function seedHostAndCatalog(input: {
   return {
     hostId,
     organizationId,
+    images,
+    docs,
     keyFor: (userId: string) => `${userId}-admission-key`,
     async addUser(userId: string) {
       await addUser(userId);
@@ -1920,48 +1330,26 @@ async function seedForeignActiveSlot(userId: string): Promise<void> {
     });
 }
 
+/** Seeds a live revision of `scenarioId` with one `webserver` machine and returns its document. */
 async function insertScenario(
   db: ReturnType<typeof drizzle>,
   scenarioId: string,
-  imageSha256: string,
-  now: number,
-): Promise<void> {
-  await db.insert(vmScenarios).values({
-    scenarioId,
-    organizationId: null,
-    title: scenarioId,
-    category: "test",
-    description: `${scenarioId} description`,
-    difficulty: "easy",
-    estimatedMinutes: 15,
-    tagsJson: [],
-    briefingMarkdown: `# ${scenarioId}`,
-    solutionMarkdown: "solution",
-    hintsJson: [],
-    enabled: true,
-    enabledAt: now,
-    createdAt: now,
-    updatedAt: now,
+  organizationId: string | null,
+  image: string,
+  spec: string,
+): Promise<ReturnType<typeof revisionDoc>> {
+  const base = revisionDoc({}, {});
+  const machine = { ...base.machines[0]!, name: "webserver", image_digest: image, spec, cpu_millis: FIRST_VM_CPU_MILLIS,
+    memory_mib: VM_MEMORY_MIB, disk_mib: VM_DISK_MIB };
+  const doc = { ...base, title: scenarioId, machines: [machine],
+    tasks: [{ id: "serve", title: "Serve", machine: "webserver", needs: [], optional: false, ordinal: 0, hints: [] }] };
+  const [namespace, slug] = scenarioId.split("/") as [string, string];
+  await db.insert(scenarios).values({
+    id: scenarioId, namespace, slug, organizationId,
+    scopeKey: organizationId ? `organization:${organizationId}` : "public", enabled: true, play: false, liveRev: "r1",
   });
-  await db.insert(vmScenarioVms).values({
-    id: `${scenarioId}:webserver`,
-    scenarioId,
-    ordinal: 0,
-    vmName: "webserver",
-    image: `${scenarioId}-webserver-x86_64.raw_chunks.json`,
-    imageKeyJson: { scenario: scenarioId, vm: "webserver", arch: "x86_64" },
-    imageSha256,
-    imageFormat: "raw_chunks_v1",
-    imageVirtualSizeBytes: 1_073_741_824,
-    chunkManifestSha256: SCENARIO_VM_CHUNK_MANIFEST_SHA,
-    guestBootstrapAbi: SCENARIO_VM_GUEST_BOOTSTRAP_ABI,
-    kernelSha256: SCENARIO_VM_KERNEL_SHA,
-    initrdSha256: SCENARIO_VM_INITRD_SHA,
-    bootCmdline: "root=/dev/vda rw",
-    cpuMillis: FIRST_VM_CPU_MILLIS,
-    memoryMib: VM_MEMORY_MIB,
-    diskMib: VM_DISK_MIB,
-  });
+  await db.insert(scenarioRevisions).values({ scenarioId, rev: "r1", guestContract: 3, docJson: doc, state: "ready" });
+  return doc;
 }
 
 function lecture(
@@ -2031,16 +1419,15 @@ function hostReport(input: {
   schedulableCpuMillis: number;
   memoryAvailableMib: number;
   diskAvailableMib: number;
-  images: Array<{
-    imageKey: { scenario: string; vm: string; arch: "x86_64" };
-    imageSha256: string;
-  }>;
-}): typeof hostActualState.$inferInsert.reportJson {
-  return { relay_connected: true,
-    schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
+}): HostStateReportV3 {
+  return {
+    relay_connected: true,
+    schema_version: 8,
     host_id: input.hostId,
     observed_at_unix_ms: input.now,
     applied_desired_version: 0,
+    guest_contract: 3,
+    hardware: HARDWARE,
     capacity: {
       total_cpu_millis: input.schedulableCpuMillis + 1_000,
       reserved_cpu_millis: 1_000,
@@ -2052,32 +1439,9 @@ function hostReport(input: {
       disk_total_mib: 100_000,
       disk_available_mib: input.diskAvailableMib,
     },
-    capabilities: {
-      arch: "x86_64",
-      cloud_hypervisor_sha256:
-        "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-      supports_kvm: true,
-      supports_vsock: true,
-      supports_reflink: true,
-      supports_nftables: true,
-      supports_jailer_v2: true,
-      supports_jailer_v3: true,
-      supports_raw_chunks_v1: true,
-      supports_scenario_guest_tools_v1: true,
-      supports_template_backed_launch: true,
-      fast_template_store: true,
-      supports_hard_cpu_quota: true,
-      supports_landlock: true,
-      supports_cgroup_v2: true,
-    },
-    cached_images: input.images.map((image) => ({
-      image_key: image.imageKey,
-      image_id: image.imageSha256,
-      phase: "ready",
-    })),
+    cached_images: [],
     vms: [],
-    builds: [],
-  } as unknown as typeof hostActualState.$inferInsert.reportJson;
+  };
 }
 
 interface AdmissionSnapshot {
@@ -2129,7 +1493,7 @@ async function admissionSnapshot(): Promise<AdmissionSnapshot> {
 
 async function desiredDocument(): Promise<{
   version: number;
-  vms: Array<{ run_id: string; desired_phase: string; image_id: string }>;
+  vms: Array<{ run_id: string; desired_phase: string; image: string }>;
 }> {
   const row = await env.DB.prepare(
     "SELECT doc_json FROM host_desired_state WHERE host_id = ?1",
@@ -2141,7 +1505,7 @@ async function desiredDocument(): Promise<{
   }
   return JSON.parse(row.doc_json) as {
     version: number;
-    vms: Array<{ run_id: string; desired_phase: string; image_id: string }>;
+    vms: Array<{ run_id: string; desired_phase: string; image: string }>;
   };
 }
 

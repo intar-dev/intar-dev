@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { expireOverdueRuntimeExecutions } from "@/lib/runtime-lease-expiry";
-import type { HostStateReportV2 } from "@/generated/bridge";
+import type { HostStateReportV3 } from "@/generated/contracts/bridge-message-v9";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 
 const stargateMocks = vi.hoisted(() => ({
@@ -20,8 +20,7 @@ import {
   runtimeVms,
 } from "@/db/schema";
 import {
-  testImageKey,
-  testGuestTools,
+  testImageDigest,
   desiredRunningVm,
   seedHost,
   connectHost,
@@ -39,14 +38,10 @@ import {
   env,
   eq,
   drizzle,
-  courseCatalogs,
   hostDesiredState,
   scenarioRuns,
-  vmScenarios,
-  vmScenarioVms,
-  upsertDesiredCachedImage,
   upsertDesiredVm,
-  mutateStoredHostDesiredState,
+  mutateDesiredState,
   type RunStateDocument,
   resetHostRuntimeTestDatabase,
 } from "./test-fixtures";
@@ -63,7 +58,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     const leaseExpiry = Date.now() + 120_000;
     await seedRun({ db: drizzle(env.DB), hostId, runId: "run", runtimeVmName: "vm", now: Date.now() });
     await drizzle(env.DB).update(runtimeExecutions).set({ leaseExpiresAt: leaseExpiry }).where(eq(runtimeExecutions.id, "run"));
-    await mutateStoredHostDesiredState(drizzle(env.DB), hostId, Date.now(), draft => {
+    await mutateDesiredState(drizzle(env.DB), hostId, Date.now(), draft => {
       upsertDesiredVm(draft, { ...desiredRunningVm("run", "vm", Date.now()), lease_expires_at_unix_ms: leaseExpiry });
     });
     const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
@@ -113,7 +108,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     await seedHost(hostId);
     await seedRun({ db: drizzle(env.DB), hostId, runId: "run", runtimeVmName: "vm", now: Date.now() });
     await drizzle(env.DB).update(runtimeExecutions).set({ leaseExpiresAt: Date.now() + 60_000 }).where(eq(runtimeExecutions.id, "run"));
-    await mutateStoredHostDesiredState(drizzle(env.DB), hostId, Date.now(), draft => {
+    await mutateDesiredState(drizzle(env.DB), hostId, Date.now(), draft => {
       upsertDesiredVm(draft, desiredRunningVm("run", "vm", Date.now()));
     });
     const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
@@ -149,12 +144,10 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     await seedRun({ db, hostId, runId: "run", now });
     const leaseExpiry = Date.now() + 120_000;
     await db.update(runtimeExecutions).set({ leaseExpiresAt: leaseExpiry }).where(eq(runtimeExecutions.id, "run"));
-    const retained = await mutateStoredHostDesiredState(db, hostId, now, draft => {
+    const retained = await mutateDesiredState(db, hostId, now, draft => {
       upsertDesiredVm(draft, { ...desiredRunningVm("run", "runtime-web", now), lease_expires_at_unix_ms: leaseExpiry });
       upsertDesiredVm(draft, { ...desiredRunningVm("run", "already-absent", now), desired_phase: "absent" });
-      draft.cached_images = [{ image_key: testImageKey, image_id: "2".repeat(64) }];
-      draft.cached_guest_tools = [testGuestTools];
-      draft.builds = [{ build_id: "build", scenario_id: "scenario", arch: "x86_64", rev: "revision", content_hash: "3".repeat(64), bundle_ref: "bundle" }];
+      draft.cached_images = [testImageDigest];
     });
     const before = await env.DB.prepare("SELECT state, state_json, updated_at FROM scenario_runs WHERE run_id = 'run'").first();
     const executionBefore = await env.DB.prepare("SELECT state, ended_at FROM runtime_executions WHERE id = 'run'").first();
@@ -173,10 +166,10 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     expect(await close).toBe(1001);
     const stop = await waitForBridgeMessage(messages, frame => frame.type === "desired_state" && frame.desired_state.version === retained.version + 1);
     if (stop.type !== "desired_state") throw new Error("expected stop state");
-    expect(stop.desired_state.vms.map(vm => [vm.vm_name, vm.desired_phase])).toEqual([
-      ["already-absent", "absent"], ["runtime-web", "absent"],
+    expect(stop.desired_state.vms.map(vm => [vm.name, vm.desired_phase])).toEqual([
+      ["runtime-web", "absent"], ["already-absent", "absent"],
     ]);
-    expect(stop.desired_state).toMatchObject({ cached_images: [], cached_guest_tools: [], builds: [] });
+    expect(stop.desired_state).toMatchObject({ cached_images: [], builds: [], source_compiles: [] });
     const [stored] = await db.select().from(hostDesiredState).where(eq(hostDesiredState.hostId, hostId));
     expect(stored?.docJson).toEqual(stop.desired_state);
     expect(stop.desired_state.vms.map(vm => vm.lease_expires_at_unix_ms))
@@ -207,6 +200,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform' WHERE id = ?").bind(hostId).run();
     const db = drizzle(env.DB);
     await seedRun({ db, hostId, runId, now });
+    await env.DB.prepare("UPDATE scenario_runs SET state_json = json_set(state_json, '$.tasks', json('[]')) WHERE run_id = ?").bind(runId).run();
     const leaseExpiry = now + 120_000;
     await db.update(runtimeExecutions).set({ leaseExpiresAt: leaseExpiry }).where(eq(runtimeExecutions.id, runId));
     const { stub, ws, messages } = await connectHost(hostId);
@@ -217,7 +211,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     await runInDurableObject(stub, async instance => {
       const runtime = instance as unknown as {
         persistRunState(...args: unknown[]): Promise<unknown>;
-        applyBridgeStateReport(hostId: string, report: HostStateReportV2, sessionId: string, generation: number): Promise<void>;
+        applyBridgeStateReportV3(hostId: string, report: HostStateReportV3, sessionId: string, generation: number): Promise<void>;
       };
       const session = await env.DB.prepare("SELECT active_session_id FROM agent_hosts WHERE id = ?").bind(hostId).first<{active_session_id:string}>();
       const persist = runtime.persistRunState.bind(runtime);
@@ -235,7 +229,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
         return persist(...args);
       });
       try {
-        await runtime.applyBridgeStateReport(hostId, message.report, session!.active_session_id, 1);
+        await runtime.applyBridgeStateReportV3(hostId, message.report, session!.active_session_id, 1);
         expect(spy).toHaveBeenCalledOnce();
         expect(await env.DB.prepare("SELECT state, state_json, updated_at FROM scenario_runs WHERE run_id = ?").bind(runId).first()).toEqual(expiredState);
       } finally { spy.mockRestore(); }
@@ -277,9 +271,9 @@ describe("HostRuntimeDO run lifecycle projection", () => {
         executionId: runId,
         vmId: "vm-1",
         ordinal: 0,
-        runtimeVmName,
-        imageKeyJson: testImageKey,
-        imageSha256: "2".repeat(64),
+        runtimeVmName: `${runtimeVmName}-${runId}`,
+        imageDigest: `sha256:${"2".repeat(64)}`,
+        specDigest: `sha256:${"3".repeat(64)}`, kinoDigest: `sha256:${"4".repeat(64)}`,
         cpuMillis: 1_000,
         memoryMib: 512,
         diskMib: 4_096,
@@ -297,20 +291,10 @@ describe("HostRuntimeDO run lifecycle projection", () => {
         updatedAt: now,
       }),
     ]);
-    await mutateStoredHostDesiredState(db, hostId, now, (draft) => {
-      upsertDesiredVm(draft, { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1, vm_id: runtimeVmName,
-        run_id: runId,
-        vm_name: runtimeVmName,
-        desired_phase: "running",
-        image_key: testImageKey,
-        image_id: "2".repeat(64),
-        guest_tools: testGuestTools,
-        resources: {
-          cpu_millis: 1_000,
-          memory_mib: 512,
-          disk_mib: 4096,
-        },
-        ssh_authorized_keys_openssh: ["ssh-ed25519 AAAATEST user@test"],
+    await mutateDesiredState(db, hostId, now, (draft) => {
+      upsertDesiredVm(draft, {
+        ...desiredRunningVm(runId, runtimeVmName, now),
+        ssh_authorized_keys: ["ssh-ed25519 AAAATEST user@test"],
         lease_expires_at_unix_ms: now - 1,
       });
     });
@@ -338,7 +322,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       .from(hostDesiredState)
       .where(eq(hostDesiredState.hostId, hostId));
     const desiredVm = desiredRow?.docJson.vms.find(
-      (vm) => vm.run_id === runId && vm.vm_name === runtimeVmName,
+      (vm) => vm.run_id === runId && vm.name === runtimeVmName,
     );
     expect(desiredVm?.desired_phase).toBe("absent");
 
@@ -379,14 +363,14 @@ describe("HostRuntimeDO run lifecycle projection", () => {
           id: "vm-web",
           scenarioVmId: "scenario-vm-web",
           scenarioVmName: "web",
-          runtimeVmName: "runtime-web",
+          runtimeVmName: `runtime-web-${runId}`,
           hostname: "web",
         },
         {
           id: "vm-db",
           scenarioVmId: "scenario-vm-db",
           scenarioVmName: "db",
-          runtimeVmName: "runtime-db",
+          runtimeVmName: `runtime-db-${runId}`,
           hostname: "db",
         },
       ],
@@ -454,15 +438,15 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     );
 
     const state = await waitForRunState(db, runId, (state) => {
-      const web = state.vms.find((vm) => vm.runtimeVmName === "runtime-web");
-      const dbVm = state.vms.find((vm) => vm.runtimeVmName === "runtime-db");
+      const web = state.vms.find((vm) => vm.runtimeVmName === `runtime-web-${runId}`);
+      const dbVm = state.vms.find((vm) => vm.runtimeVmName === `runtime-db-${runId}`);
       return (
         web?.runtimeObservedAt === now + 110 &&
         dbVm?.runtimeObservedAt === now + 100
       );
     });
-    const web = state.vms.find((vm) => vm.runtimeVmName === "runtime-web");
-    const dbVm = state.vms.find((vm) => vm.runtimeVmName === "runtime-db");
+    const web = state.vms.find((vm) => vm.runtimeVmName === `runtime-web-${runId}`);
+    const dbVm = state.vms.find((vm) => vm.runtimeVmName === `runtime-db-${runId}`);
     expect(web).toMatchObject({
       phase: "ready",
       runtimeState: "ready",
@@ -500,12 +484,12 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     if (legacy.type !== "vm_report") {
       throw new Error("expected vm report");
     }
-    legacy.report.terminal = {
+    legacy.report.vm.terminal = {
       state: "pending",
       observed_at_unix_ms: now + 10,
     };
-    legacy.report.phase = "pending";
-    delete legacy.report.runtime_constraints;
+    legacy.report.vm.phase = "pending";
+    delete legacy.report.vm.runtime_constraints;
     sendBridge(ws, legacy);
 
     let state = await waitForRunState(
@@ -528,11 +512,11 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       22_001,
       "10.77.0.2",
     );
-    if (unsealed.type !== "vm_report" || !unsealed.report.runtime_constraints) {
+    if (unsealed.type !== "vm_report" || !unsealed.report.vm.runtime_constraints) {
       throw new Error("expected runtime constraints");
     }
-    unsealed.report.phase = "booting";
-    unsealed.report.runtime_constraints = {
+    unsealed.report.vm.phase = "booting";
+    unsealed.report.vm.runtime_constraints = {
       generation: "generation-runtime-web",
       cpu_millis: 1_000,
     };
@@ -610,7 +594,6 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     const hostId = "host-reconnect-sync";
     await seedHost(hostId);
     await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform' WHERE id = ?").bind(hostId).run();
-    await seedCatalogImage("3".repeat(64));
     const first = await connectHost(hostId);
     await waitForBridgeMessage(
       first.messages,
@@ -619,28 +602,25 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     first.ws.close();
 
     const db = drizzle(env.DB);
-    await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
-      upsertDesiredCachedImage(draft, {
-        image_key: testImageKey,
-        image_id: "3".repeat(64),
-      });
+    await mutateDesiredState(db, hostId, Date.now(), (draft) => {
+      draft.cached_images = [testImageDigest];
     });
 
     const { messages, ws } = await connectHost(hostId, {
       lastAppliedDesiredVersion: 0,
     });
-    expect(
-      await waitForBridgeMessage(
-        messages,
-        (message) =>
-          message.type === "desired_state" &&
-          message.desired_state.version === 1,
-      ),
-    ).toMatchObject({ type: "desired_state" });
+    // The reconnect reconcile may publish a newer version than the change.
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "desired_state" && message.desired_state.version >= 1,
+    );
+    await sleep(50);
+    const version = Math.max(...messages.flatMap((message) =>
+      message.type === "desired_state" ? [message.desired_state.version] : []));
 
     sendBridge(ws, {
       type: "sync_request",
-      protocol_version: 8,
+      protocol_version: 9,
       host_id: hostId,
       reason: "reconnect",
     });
@@ -649,7 +629,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
         messages,
         (message) =>
           message.type === "desired_state" &&
-          message.desired_state.version === 1,
+          message.desired_state.version === version,
         2,
       ),
     ).toBeGreaterThanOrEqual(2);
@@ -658,14 +638,9 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       ws,
       stateReport(hostId, {
         observedAt: Date.now(),
-        appliedDesiredVersion: 1,
+        appliedDesiredVersion: version,
         cachedImages: [
-          {
-            image_key: testImageKey,
-            image_id: "3".repeat(64),
-            phase: "ready",
-            updated_at_unix_ms: Date.now(),
-          },
+          { image: testImageDigest, phase: "ready", updated_at_unix_ms: Date.now() },
         ],
       }),
     );
@@ -673,166 +648,8 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     await waitForHostActualState(
       db,
       hostId,
-      (row) => row.appliedDesiredVersion === 1,
+      (row) => row.appliedDesiredVersion === version,
     );
-    ws.close();
-  });
-
-  it("seeds a host registered after publication before its first desired-state dispatch", async () => {
-    const hostId = "host-created-after-publication";
-    const sha256 = "4".repeat(64);
-    await seedHost(hostId);
-    await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform' WHERE id = ?").bind(hostId).run();
-    await seedCatalogImage(sha256);
-
-    const { messages, ws } = await connectHost(hostId);
-    await waitForBridgeMessage(
-      messages,
-      (message) => message.type === "server_hello",
-    );
-    const desired = await waitForBridgeMessage(
-      messages,
-      (message) =>
-        message.type === "desired_state" &&
-        message.desired_state.cached_images.some(
-          (entry) => entry.image_id === sha256,
-        ),
-    );
-
-    expect(desired).toMatchObject({
-      type: "desired_state",
-      desired_state: {
-        version: 1,
-        cached_images: [
-          {
-            image_key: testImageKey,
-            image_id: sha256,
-          },
-        ],
-      },
-    });
-    expect(messages.slice(0, 2).map((message) => message.type)).toEqual([
-      "server_hello",
-      "desired_state",
-    ]);
-    ws.close();
-  });
-
-  it("periodically repairs catalog cache drift on an already connected host", async () => {
-    const hostId = "host-periodic-image-repair";
-    const sha256 = "5".repeat(64);
-    await seedHost(hostId);
-    await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform' WHERE id = ?").bind(hostId).run();
-    await seedCatalogImage(sha256);
-    const { messages, ws } = await connectHost(hostId);
-    await waitForBridgeMessage(
-      messages,
-      (message) =>
-        message.type === "desired_state" &&
-        message.desired_state.cached_images[0]?.image_id === sha256,
-    );
-
-    const db = drizzle(env.DB);
-    const cleared = await mutateStoredHostDesiredState(
-      db,
-      hostId,
-      Date.now(),
-      (draft) => {
-        draft.cached_images = [];
-      },
-    );
-    sendBridge(
-      ws,
-      stateReport(hostId, {
-        observedAt: Date.now(),
-        appliedDesiredVersion: cleared.version,
-        cachedImages: [],
-      }),
-    );
-
-    const repaired = await waitForBridgeMessage(
-      messages,
-      (message) =>
-        message.type === "desired_state" &&
-        message.desired_state.version > cleared.version &&
-        message.desired_state.cached_images[0]?.image_id === sha256,
-    );
-    expect(repaired).toMatchObject({ type: "desired_state" });
     ws.close();
   });
 });
-
-async function seedCatalogImage(sha256: string): Promise<void> {
-  const db = drizzle(env.DB);
-  const now = Date.now();
-  await db.batch([
-    db.insert(courseCatalogs).values({
-      scopeKey: "public",
-      organizationId: null,
-      catalogJson: {
-        version: 2,
-        courses: [
-          {
-            courseId: "host-runtime-cache",
-            title: "Host runtime cache",
-            summary: "Cache test course.",
-            bodyMarkdown: "Cache test course body.",
-            sequential: false,
-            lectures: [
-              {
-                lectureId: "cache-image",
-                title: "Cache image",
-                summary: "Cache image test lecture.",
-                bodyMarkdown: "Cache image test lecture body.",
-                category: "test",
-                tags: [],
-                difficulty: "easy",
-                estimatedMinutes: 10,
-                scenarioId: testImageKey.scenario,
-              },
-            ],
-          },
-        ],
-      },
-      sourceRevision: "fixture",
-      createdAt: now,
-      updatedAt: now,
-    }),
-    db.insert(vmScenarios).values({
-      scenarioId: testImageKey.scenario,
-      organizationId: null,
-      title: "Broken nginx",
-      category: "test",
-      description: "host image reconciliation test",
-      difficulty: "easy",
-      estimatedMinutes: 10,
-      tagsJson: [],
-      briefingMarkdown: "briefing",
-      solutionMarkdown: "solution",
-      hintsJson: [],
-      enabled: true,
-      enabledAt: now,
-      createdAt: now,
-      updatedAt: now,
-    }),
-    db.insert(vmScenarioVms).values({
-      id: `${testImageKey.scenario}:${testImageKey.vm}`,
-      scenarioId: testImageKey.scenario,
-      ordinal: 0,
-      vmName: testImageKey.vm,
-      image: "broken-nginx-webserver-x86_64.chunks.json",
-      imageKeyJson: testImageKey,
-      imageSha256: sha256,
-      imageFormat: "raw_chunks_v1",
-      imageVirtualSizeBytes: 1_024,
-      chunkManifestSha256: "d".repeat(64),
-      guestBootstrapAbi: 2,
-      kernelSha256: "a".repeat(64),
-      initrdSha256: "b".repeat(64),
-      bootCmdline: "console=ttyS0 root=/dev/vda rw",
-      cpuMillis: 1_000,
-      memoryMib: 512,
-      diskMib: 1_024,
-    }),
-  ]);
-}

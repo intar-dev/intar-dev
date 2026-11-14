@@ -2,7 +2,7 @@
 // the coarser view phases the run UI renders (boot screens, terminal state,
 // teardown screens), plus their display titles.
 
-import type { ScenarioDetail, ScenarioRunRecord } from "@/lib/scenario-runs";
+import type { ScenarioRunRecord } from "@/lib/scenario-runs";
 
 export type RunViewPhase =
   | "launching"
@@ -16,23 +16,6 @@ export type RunViewPhase =
   | "failed";
 
 export type VmViewPhase = RunViewPhase;
-
-export function presentScenarioDetail(detail: ScenarioDetail) {
-  return {
-    ...detail,
-    activeRun: detail.activeRun
-      ? (() => {
-          const phase = toRunViewPhase(detail.activeRun);
-          return {
-            ...detail.activeRun,
-            phase:
-              phase === "completed" || phase === "failed" ? "running" : phase,
-            phaseTitle: runViewPhaseTitle(phase),
-          };
-        })()
-      : null,
-  };
-}
 
 export function presentScenarioRun(run: ScenarioRunRecord) {
   const phase = toRunViewPhase(run);
@@ -52,9 +35,7 @@ export function presentScenarioRun(run: ScenarioRunRecord) {
 }
 
 function toRunViewPhase(run: {
-  phase:
-    | ScenarioRunRecord["phase"]
-    | NonNullable<ScenarioDetail["activeRun"]>["phase"];
+  phase: ScenarioRunRecord["phase"];
   canOpenTerminal?: boolean;
   terminalPhase?: ScenarioRunRecord["terminalPhase"];
 }): RunViewPhase {

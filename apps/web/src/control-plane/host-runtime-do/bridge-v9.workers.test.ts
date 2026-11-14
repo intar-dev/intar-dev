@@ -16,7 +16,6 @@ import { expireMachineBuildLeases, maintainMachineBuilds, REVISION_BUILD_FAILURE
 import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { canonicalJson, sha256Digest } from "@/lib/scenario-contract/canonical-json";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
-import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import { resetHostRuntimeTestDatabase, seedHost, sleep } from "./test-fixtures";
 
 const HARDWARE = {
@@ -118,11 +117,13 @@ describe("bridge 9 transport", () => {
     await seedHost("host-a");
     const db = drizzle(env.DB);
     // An old-schema document at version 3.
-    for (let version = 0; version < 3; version += 1) {
-      await mutateStoredHostDesiredState(db, "host-a", Date.now(), (draft) => {
-        draft.cached_guest_tools = version % 2 ? [] : [{ tools_disk_sha256: "1".repeat(64), tools_disk_size_bytes: 1, kino_sha256: "2".repeat(64), bootstrap_abi: 2 }];
-      });
-    }
+    await db.insert(hostDesiredState).values({
+      hostId: "host-a",
+      version: 3,
+      docJson: { schema_version: 6, host_id: "host-a", version: 3, cached_guest_tools: [] } as never,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
     expect((await db.select().from(hostDesiredState))[0]?.version).toBe(3);
 
     const first = await connect("host-a", hello("host-a", "agent"));

@@ -27,7 +27,7 @@ describe("rehearsal entrypoint", () => {
           fakeApi,
           entrypoint,
           "--applied",
-          "15",
+          "46",
           "--evidence",
           evidencePath,
         ],
@@ -55,46 +55,17 @@ describe("rehearsal entrypoint", () => {
         appliedMigrationCount: number;
         committedMigrationCount: number;
         foreignKeyViolations: number;
-        scenarioCounts: number[];
+        droppedTables: string[];
+        preservedTables: number;
+        preservedRows: number;
       };
-      expect(evidence.baselineTags).toHaveLength(15);
-      expect(evidence.appliedTags).toEqual([
-        "0015_parched_captain_marvel",
-        "0016_salty_shiver_man",
-        "0017_narrow_angel",
-        "0018_exotic_deathbird",
-        "0019_military_lightspeed",
-        "0020_noisy_plazm",
-        "0021_greedy_trish_tilby",
-        "0022_petite_colleen_wing",
-        "0023_fuzzy_mastermind",
-        "0024_white_masque",
-        "0025_cheerful_sway",
-        "0026_groovy_doctor_octopus",
-        "0027_real_big_bertha",
-        "0028_married_rogue",
-        "0029_powerful_zzzax",
-        "0030_gifted_miek",
-        "0031_open_mariko_yashida",
-        "0032_cuddly_cloak",
-        "0033_third_zeigeist",
-        "0034_mean_doctor_octopus",
-        "0035_motionless_green_goblin",
-        "0036_slim_quicksilver",
-        "0037_careful_carlie_cooper",
-        "0038_skinny_annihilus",
-        "0039_dark_medusa",
-        "0040_sparkling_madame_hydra",
-        "0041_plain_polaris",
-        "0042_hot_jimmy_woo",
-        "0043_freezing_black_queen",
-        "0044_swift_zzzax",
-        "0045_lying_wendell_vaughn",
-      ]);
-      expect(evidence.appliedMigrationCount).toBe(46);
-      expect(evidence.committedMigrationCount).toBe(46);
+      expect(evidence.baselineTags).toHaveLength(46);
+      expect(evidence.appliedTags).toEqual(["0046_yielding_smiling_tiger"]);
+      expect(evidence.appliedMigrationCount).toBe(47);
+      expect(evidence.committedMigrationCount).toBe(47);
       expect(evidence.foreignKeyViolations).toBe(0);
-      expect(evidence.scenarioCounts).toEqual([1, 1, 1]);
+      expect(evidence.droppedTables).toContain("vm_scenarios");
+      expect(evidence.preservedRows).toBeGreaterThan(0);
 
       const log = JSON.parse(readFileSync(requestLog, "utf8")) as {
         requests: string[];
@@ -105,7 +76,7 @@ describe("rehearsal entrypoint", () => {
       // The disposable database is deleted in the entrypoint's finally block,
       // so the run leaves nothing behind.
       expect(log.requests.some((entry) => entry.startsWith("DELETE"))).toBe(true);
-      expect(log.ledgerRows).toBe(46);
+      expect(log.ledgerRows).toBe(47);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

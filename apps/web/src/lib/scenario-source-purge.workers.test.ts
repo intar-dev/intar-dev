@@ -7,17 +7,14 @@ import {
   agentHosts,
   courseCatalogs,
   courseUnitCompletions,
-  imageBuildBundles,
-  imageBuilds,
+  bundles,
   member,
   organization,
   scenarioAssignments,
   scenarioRuns,
   scenarioSources,
-  vmScenarios,
-  vmScenarioVms,
+  scenarios,
 } from "@/db/schema";
-import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { buildInitialRunState, recomputeRunState, RUN_PHASE_ORDER } from "@/lib/run-state";
 import { changeScenarioSource, scenarioSourceScope } from "@/lib/scenario-sources";
 import { createFixtureMember } from "@/test/account-fixtures";
@@ -26,9 +23,10 @@ import { resetD1Database } from "@/test/d1-migrations";
 const ORG = "org-a";
 const SCOPE = scenarioSourceScope(ORG);
 const OWNER = "owner";
-const SCENARIO = "org-a-demo";
-const PUBLIC_SCENARIO = "public-demo";
+const SCENARIO = "org-a/demo";
+const PUBLIC_SCENARIO = "intar/demo";
 const REV = `git-9-${"b".repeat(40)}-digest`;
+const BUNDLE_KEY = `builds/bundles/${REV}.json.gz`;
 
 const purge = (actorUserId = OWNER) =>
   changeScenarioSource({
@@ -55,21 +53,15 @@ beforeEach(async () => {
     liveRev: REV, disconnectedAt: 1, disconnectReason: "admin",
   });
   for (const [scenarioId, organizationId] of [[SCENARIO, ORG], [PUBLIC_SCENARIO, null]] as const) {
-    await db.insert(vmScenarios).values({
-      scenarioId, organizationId, title: scenarioId, description: "d", difficulty: "easy",
-      estimatedMinutes: 10, tagsJson: [], briefingMarkdown: "b", solutionMarkdown: "s",
-      hintsJson: [], enabled: true,
+    const [namespace, slug] = scenarioId.split("/") as [string, string];
+    await db.insert(scenarios).values({
+      id: scenarioId, namespace, slug, organizationId,
+      scopeKey: organizationId ? SCOPE.key : "public", enabled: true, play: false, liveRev: null,
     });
     await db.insert(scenarioAssignments).values({
       id: `assignment-${scenarioId}`, organizationId: ORG, scenarioId, assignedBy: OWNER,
     });
   }
-  await db.insert(vmScenarioVms).values({
-    id: "vm", scenarioId: SCENARIO, ordinal: 0, vmName: "vm", image: "img",
-    imageKeyJson: { scenario: SCENARIO, vm: "vm", arch: "x86_64" } as never,
-    imageFormat: "qcow2", imageVirtualSizeBytes: 1, kernelSha256: "k", initrdSha256: "i",
-    bootCmdline: "", memoryMib: 512, diskMib: 1024,
-  });
   await db.insert(courseCatalogs).values({
     scopeKey: SCOPE.key, organizationId: ORG, catalogJson: { version: 2, courses: [] },
     sourceRevision: REV,
@@ -77,17 +69,10 @@ beforeEach(async () => {
   await db.insert(courseUnitCompletions).values({
     userId: OWNER, scopeKey: SCOPE.key, courseId: "c", lectureId: "l", completedAt: 1,
   });
-  await db.insert(imageBuildBundles).values({
-    rev: REV, organizationId: ORG, r2Key: `builds/bundles/${REV}.tar.gz`,
-    metaJson: { buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION, scenarios: [] },
+  await db.insert(bundles).values({
+    rev: REV, scopeKey: SCOPE.key, organizationId: ORG, compilerVersion: "2", r2Key: BUNDLE_KEY,
   });
-  await env.VM_IMAGE_REGISTRY_BUCKET.put(`builds/bundles/${REV}.tar.gz`, "bundle");
-  await env.VM_IMAGE_REGISTRY_BUCKET.put("builds/logs/build.log", "log");
-  await db.insert(imageBuilds).values({
-    id: "build", organizationId: ORG, scenarioId: SCENARIO, arch: "x86_64", rev: REV,
-    contentHash: "a".repeat(64), status: "succeeded", phase: "succeeded",
-    logR2Key: "builds/logs/build.log",
-  });
+  await env.VM_IMAGE_REGISTRY_BUCKET.put(BUNDLE_KEY, "bundle");
   await insertRun("org-run", SCENARIO, "completed");
   await insertRun("public-run", PUBLIC_SCENARIO, "completed");
 });
@@ -135,19 +120,17 @@ describe("purging a disconnected scope", () => {
     await expect(purge()).resolves.toBeNull();
 
     for (const table of [
-      "scenario_sources", "course_catalogs", "course_unit_completions", "image_builds",
-      "image_build_bundles", "vm_scenario_vms",
+      "scenario_sources", "course_catalogs", "course_unit_completions", "bundles",
     ]) {
       expect(await count(table), table).toBe(0);
     }
-    expect(await count("vm_scenarios")).toBe(1);
+    expect(await count("scenarios")).toBe(1);
     expect(await count("scenario_assignments", `scenario_id = '${PUBLIC_SCENARIO}'`)).toBe(1);
     expect(await count("scenario_assignments")).toBe(1);
     expect(await count("scenario_runs", "run_id = 'public-run'")).toBe(1);
     expect(await count("scenario_runs")).toBe(1);
     expect(await count("access_events", "event_type = 'run.deleted_by_admin'")).toBe(1);
-    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(`builds/bundles/${REV}.tar.gz`)).toBeNull();
-    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head("builds/logs/build.log")).toBeNull();
+    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(BUNDLE_KEY)).toBeNull();
   });
 
   it("refuses a connected scope, an unfinished run and a running build, and deletes nothing", async () => {
@@ -173,11 +156,14 @@ describe("purging a disconnected scope", () => {
     await env.DB.prepare(
       "UPDATE scenario_runs SET state_json = json_set(state_json, '$.vms[0].phase', 'completed') WHERE run_id = 'org-run'",
     ).run();
-    await env.DB.prepare("UPDATE image_builds SET status = 'building'").run();
+    await env.DB.prepare(
+      `INSERT INTO machine_builds (build_key, image_format, bundle_rev, target_json, state)
+       VALUES ('sha256:${"c".repeat(64)}', 'raw', ?1, '{}', 'building')`,
+    ).bind(REV).run();
     await expect(purge()).rejects.toMatchObject({ status: 409, code: "scenario_source_deploying" });
 
     expect(await count("course_catalogs")).toBe(1);
-    expect(await count("vm_scenarios", "enabled = 1")).toBe(2);
+    expect(await count("scenarios", "enabled = 1")).toBe(2);
     expect(await count("scenario_sources", "disconnect_reason = 'admin'")).toBe(1);
   });
 
@@ -201,14 +187,12 @@ describe("purging a disconnected scope", () => {
   it("keeps the rows naming the objects until their R2 delete succeeds", async () => {
     vi.spyOn(env.VM_IMAGE_REGISTRY_BUCKET, "delete").mockRejectedValueOnce(new Error("r2 down"));
     await expect(purge()).rejects.toThrow("r2 down");
-    expect(await count("image_build_bundles")).toBe(1);
-    expect(await count("image_builds")).toBe(1);
+    expect(await count("bundles")).toBe(1);
     expect(await count("scenario_sources", "disconnect_reason = 'purging'")).toBe(1);
 
     await expect(purge()).resolves.toBeNull();
     expect(await count("scenario_sources")).toBe(0);
-    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(`builds/bundles/${REV}.tar.gz`)).toBeNull();
-    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head("builds/logs/build.log")).toBeNull();
+    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(BUNDLE_KEY)).toBeNull();
   });
 
   it("resumes a purge that was cut off", async () => {
@@ -216,6 +200,6 @@ describe("purging a disconnected scope", () => {
     await env.DB.prepare("DELETE FROM course_catalogs").run();
     await expect(purge()).resolves.toBeNull();
     expect(await count("scenario_sources")).toBe(0);
-    expect(await count("vm_scenarios")).toBe(1);
+    expect(await count("scenarios")).toBe(1);
   });
 });

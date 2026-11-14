@@ -21,7 +21,6 @@ type SensitiveRateLimitAction =
   | "support-write"
   | "scenario-start"
   | "ssh-issuance"
-  | "build-retry"
   | "scenario-source"
   | "run-share";
 
@@ -246,13 +245,9 @@ export function sensitiveRateLimitActionFor(
   if (/^\/api\/scenarios\/runs\/[^/]+\/share$/u.test(pathname)) {
     return "run-share";
   }
-  if (/^\/api\/admin\/builds\/[^/]+\/retry$/u.test(pathname)) {
-    return "build-retry";
-  }
   if (
     /^\/api\/organizations\/[^/]+\/scenario-source$/u.test(pathname) ||
-    pathname === "/api/admin/scenario-source" ||
-    pathname === "/api/admin/image-promotion"
+    pathname === "/api/admin/scenario-source"
   ) {
     return "scenario-source";
   }

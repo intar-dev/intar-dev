@@ -63,8 +63,6 @@ export async function startScenarioRunForUser(params: {
   idempotencyKey: string;
   organizationId?: string | null;
   hostId?: string;
-  candidateRevision?: string;
-  candidateBuildId?: string;
   allowDrainedAdminProof?: boolean;
   allowSequenceBypass?: boolean;
   launchSource?: "play";
