@@ -2,9 +2,9 @@
 # image-ops workflow, kino job, "Push the Kino artifact" step.
 # Stores the Kino artifact of a published kino release in the registry, as
 # the publish token: the config blob, the binary and the manifest whose digest
-# the release workflow wrote into tools/deploy/kino-pin.json. The Worker counts
-# that pin only once this artifact is stored, so this runs before the pin pull
-# request merges. A Kino release that keeps the guest contract needs no drain:
+# the release workflow wrote into tools/deploy/kino-pin.json. The website
+# deploy refuses that pin until this artifact is stored, so this runs before
+# the pin pull request merges. A Kino release that keeps the guest contract needs no drain:
 # running VMs keep their Kino, new ones get the pinned one.
 set -euo pipefail
 [[ "${KINO_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "kino_version must be X.Y.Z" >&2; exit 1; }

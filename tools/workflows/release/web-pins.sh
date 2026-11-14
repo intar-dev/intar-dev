@@ -132,7 +132,7 @@ if [ -e tools/deploy/kino-pin.json ]; then
 fi
 git commit --quiet -m "${title}"
 tools/workflows/release/push-bot-branch.sh "${branch}"
-body="The website deploy picks up $(printf '%s; ' "${changes[@]}")a Kino pin counts only once image-ops kino-promote stored that artifact."
+body="The website deploy picks up $(printf '%s; ' "${changes[@]}")merge a Kino pin only after image-ops kino-promote stored that artifact, or the website deploy stops."
 pr="$(gh pr list --head "${branch}" --base main --state open --json number --jq '.[0].number // empty')"
 if [ -n "${pr}" ]; then
   gh pr edit "${pr}" --title "${title}" --body "${body}"

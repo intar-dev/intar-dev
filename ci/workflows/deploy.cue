@@ -299,7 +299,7 @@ tasks: {
 	"deploy-find-builds": #Script & {_script: "tools/workflows/deploy/find-builds.sh"}
 	"deploy-verify-revision": #Script & {_script: "tools/workflows/deploy/verify-revision.sh"}
 	"website-pin-production-config": #Script & {_script: "tools/workflows/website/pin-production-config.sh"}
-	"website-pin-kino": #Script & {_script: "tools/workflows/website/pin-kino.sh"}
+	"website-pin-kino": #Script & {_script: "tools/workflows/website/pin-kino.sh", _production: true}
 	"website-plan-d1-migrations": #Script & {_script: "tools/workflows/website/plan-d1-migrations.sh", _production: true}
 	"website-capture-pre-migration-d1-evidence": #Script & {_script: "tools/workflows/website/capture-pre-migration-d1-evidence.sh", _production: true}
 	"website-hold-registry-collector": #Script & {_script: "tools/workflows/website/hold-registry-collector.sh", _production: true}
