@@ -263,6 +263,9 @@ mutated=true
 # Convert only removed CPU settings. The helper preserves other values and
 # writes root-only rollback copies before replacing either configuration.
 python3 "${archive_dir}/deploy/migrate-cpu-config.py"
+# The new jailerd refuses unknown keys: drop the retired ones and keep
+# config.toml.pre-epoch for a rollback. The agent's config has none.
+python3 "${archive_dir}/deploy/migrate-epoch-config.py" jailerd
 
 # Remove legacy direct KVM/TUN group access from the unprivileged agent.
 for group in kvm netdev; do

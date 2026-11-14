@@ -103,9 +103,10 @@ root-owned generation store. One failed route withdraws v3 and fast-template
 capability for the host; launch never degrades to copying.
 
 The store GC removes every template directory that is not of the current
-schema, unless a live VM was booted from it. The retired
-`legacy_template_retention_seconds` key is still accepted in
-`/etc/intar-jailerd/config.toml` and ignored.
+schema, unless a live VM was booted from it. `deploy/install.sh` drops the
+retired `legacy_template_retention_seconds` key from an existing
+`/etc/intar-jailerd/config.toml` (`deploy/migrate-epoch-config.py`), keeping
+the previous file as `config.toml.pre-epoch`.
 
 Agent doctor is read-only. The root-only self-test runs under the same
 private-mount/filesystem sandbox as the installed service and uses an isolated

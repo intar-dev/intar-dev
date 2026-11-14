@@ -1,0 +1,37 @@
+[bridge]
+enabled = true
+base_url = "https://intar.dev"
+host_id = ""
+bootstrap_token = ""
+heartbeat_interval_seconds = 20
+
+[builder]
+work_root = "/var/lib/intar-builder/work"
+cache_root = "/var/cache/intar-builder"
+state_db = "/var/lib/intar-builder/state.sqlite3"
+
+[qemu]
+qemu_binary = "qemu-system-x86_64"
+mke2fs_binary = "mke2fs"
+e2fsck_binary = "e2fsck"
+resize2fs_binary = "resize2fs"
+provision_timeout_seconds = 2400
+qemu_exit_timeout_seconds = 300
+accelerator = "kvm"
+build_cpus = 4
+build_memory_mb = 4096
+
+[qemu.layered]
+qemu_img_binary = "qemu-img"
+buildctl_binary = "buildctl"
+umoci_binary = "umoci"
+debian_image = "docker.io/library/debian@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f"
+oci_cache_root = "/var/cache/intar-builder/oci"
+checkpoint_cache_root = "/var/cache/intar-builder/checkpoints"
+use_cache = true
+oci_cache_bytes = 8589934592
+checkpoint_cache_bytes = 42949672960
+minimum_free_bytes = 21474836480
+
+[jobs]
+max_concurrent_builds = 2

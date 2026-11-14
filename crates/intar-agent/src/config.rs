@@ -527,6 +527,21 @@ fn is_safe_image_key(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The agent's config has no retired keys: the previous release's
+    /// example loads unchanged, so the installer leaves it alone.
+    #[test]
+    fn loads_the_previous_release_example_unchanged() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            include_str!("../../intar-jailerd/tests/fixtures/config-migration/agent.main.toml"),
+        )
+        .expect("write config");
+        let cfg = load(&path).expect("previous example loads");
+        assert!(!cfg.wake.enabled);
+    }
+
     #[test]
     fn load_parses_valid_toml() -> Result<()> {
         let dir = tempfile::tempdir()?;

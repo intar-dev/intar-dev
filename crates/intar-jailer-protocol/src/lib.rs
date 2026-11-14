@@ -891,11 +891,6 @@ pub struct JailerdConfig {
     pub template_budget_bytes: u64,
     pub minimum_free_space_bytes: u64,
     pub store_gc_grace_seconds: u64,
-    /// Deprecated and ignored: templates of an older schema are collected
-    /// like any other unreferenced entry. Still accepted so a host's existing
-    /// config loads; the installer drops the key in stage 7.
-    #[serde(skip_serializing)]
-    pub legacy_template_retention_seconds: Option<u64>,
 }
 
 impl Default for JailerdConfig {
@@ -922,7 +917,6 @@ impl Default for JailerdConfig {
             template_budget_bytes: 96 * 1024 * 1024 * 1024,
             minimum_free_space_bytes: 128 * 1024 * 1024 * 1024,
             store_gc_grace_seconds: 60 * 60,
-            legacy_template_retention_seconds: None,
         }
     }
 }

@@ -895,16 +895,39 @@ fn source(path: &str, access: ArtifactAccess) -> ArtifactSource {
 }
 
 #[test]
-fn a_config_loads_with_and_without_the_retired_retention_key() {
+fn the_installer_leaves_configs_this_parser_loads() {
     let example = include_str!("../deploy/config.example.toml");
-    assert!(!example.contains("legacy_template_retention_seconds"));
-    let without: JailerdConfig = toml::from_str(example).expect("example config");
-    without.validate().expect("valid example");
-    // Hosts still carry the key until the installer drops it (stage 7).
-    let with: JailerdConfig = toml::from_str(&format!(
-        "{example}\nlegacy_template_retention_seconds = 604800\n"
+    let config: JailerdConfig = toml::from_str(example).expect("example config");
+    config.validate().expect("valid example");
+    // The retired key now stops jailerd, so install.sh drops it
+    // (deploy/migrate-epoch-config.py; tests/test_epoch_config_migration.py
+    // checks these files are its output for the previous release's example
+    // and for a host config). install.sh then pins the runtime lines.
+    let retired = format!("{example}\nlegacy_template_retention_seconds = 604800\n");
+    assert!(toml::from_str::<JailerdConfig>(&retired).is_err());
+    for migrated in [
+        include_str!("../tests/fixtures/config-migration/jailerd.main.migrated.toml"),
+        include_str!("../tests/fixtures/config-migration/jailerd.host.migrated.toml"),
+    ] {
+        let installed = std::iter::once(
+            "cloud_hypervisor_binary = \"/usr/lib/intar/cloud-hypervisor-v55.0.0\"",
+        )
+        .chain(
+            migrated
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("cloud_hypervisor_binary")),
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+        let config: JailerdConfig = toml::from_str(&installed).expect("migrated config");
+        config.validate().expect("valid migrated config");
+    }
+    let host: JailerdConfig = toml::from_str(include_str!(
+        "../tests/fixtures/config-migration/jailerd.host.migrated.toml"
     ))
-    .expect("config with the retired key");
-    with.validate().expect("valid with the retired key");
-    assert_eq!(with.legacy_template_retention_seconds, Some(604_800));
+    .expect("host config");
+    assert_eq!((host.agent_uid, host.agent_gid), (1002, 1003));
+    assert_eq!((host.uid_gid_start, host.uid_gid_end), (300_000, 365_535));
+    assert_eq!(host.template_budget_bytes, 32_212_254_720);
+    assert_eq!(host.vmm_file_size_limit_bytes, Some(137_438_953_472));
 }
