@@ -19,7 +19,7 @@ import { ensureFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
   HARDWARE, HINT_BODY, HOST, KINO, LEARNER, OTHER_HOST, ORIGIN, SOLUTION, STRANGER, TASK_BODY, connect, desiredDoc, disconnect, enrollHost,
-  labState, machineImage, registryToken, revisionDoc, runRow, seedScenario, sendVm, specBlob,
+  labState, machineImage, registryToken, revisionDoc, runRow, seedScenario, sendState, sendVm, specBlob,
   store, until, v2, vmState,
 } from "./revision-test-fixtures";
 
@@ -196,10 +196,11 @@ describe("runs of a live scenario revision", () => {
   });
 
   it("grants a preparation's digests to the preparing host before the run exists", async () => {
-    // Too big for the host: the start prepares the images, then finds no room.
-    await env.DB.prepare(`UPDATE scenario_revisions SET doc_json = json_set(doc_json,
-      '$.machines[0].cpu_millis', 6000, '$.machines[1].cpu_millis', 6000)`).run();
-    await expect(begin()).rejects.toMatchObject({ code: "scenario_host_capacity_contended" });
+    // The host has not pulled the images: the start prepares them and is refused.
+    sendState(ws, HOST, [], []);
+    await until(() => env.DB.prepare("SELECT json_array_length(report_json, '$.cached_images') AS count FROM host_actual_state WHERE host_id = ?1")
+      .bind(HOST).first<number>("count"), (count) => count === 0);
+    await expect(begin()).rejects.toMatchObject({ code: "scenario_image_preparing" });
     const own = await registryToken(HOST, LEARNER);
     const manifest = `/v2/machines/${images.client!.slice(7)}/manifests/machine`;
     expect((await desiredDoc(HOST))!.cached_images).toEqual(Object.values(images).sort());

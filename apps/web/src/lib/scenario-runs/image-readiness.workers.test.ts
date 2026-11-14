@@ -120,5 +120,25 @@ describe("starts wait for their images on a host", () => {
       const { hostId } = await begin("start-key-2");
       expect(hostId).toBe(HOST);
     });
+
+    it("prepares the server that has room when the ready one is full, and starts there once it is ready", async () => {
+      await host(HOST, "personal", Object.values(images));
+      const other = await host(OTHER_HOST, "personal", []);
+      // The ready server is full, and placement tries it first.
+      await env.DB.prepare(`UPDATE host_actual_state SET report_json = json_set(report_json,
+          '$.capacity.schedulable_cpu_millis', 0, '$.capacity.memory_available_mib', 0) WHERE host_id = ?1`).bind(HOST).run();
+      await env.DB.prepare("UPDATE agent_hosts SET updated_at = ?2 WHERE id = ?1").bind(HOST, Date.now() + 60_000).run();
+
+      await expect(begin("start-key-1")).rejects.toMatchObject({ code: "scenario_image_preparing" });
+      const prep = await env.DB.prepare("SELECT host_id FROM personal_image_preparations WHERE user_id = ?1")
+        .bind(LEARNER).first<string>("host_id");
+      expect(prep).toBe(OTHER_HOST);
+      expect((await desiredDoc(OTHER_HOST))!.cached_images).toEqual(Object.values(images).sort());
+
+      sendState(other, OTHER_HOST, [], Object.values(images));
+      await reported(OTHER_HOST, 2);
+      const { hostId } = await begin("start-key-2");
+      expect(hostId).toBe(OTHER_HOST);
+    });
   });
 });

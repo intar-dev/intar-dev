@@ -398,13 +398,30 @@ export async function admitRevisionRun(context: {
       platformOnly: verifyScopeKey !== null,
       now,
     });
-    await prepareRevisionImages({ access, requestKey: context.idempotencyKey, candidates, images, now });
     // Only a host that reports every image ready may take the run. The commit
     // fences on that exact report, so a host whose image went away since
     // this read fails the commit and the next attempt reads it again.
-    const ready = candidates.filter((candidate) => reportHasImagesReady(candidate.report, images));
-    if (!ready.length) throw scenarioImagePreparing();
-    const allocated = await planRevisionHost({ candidates: ready, desiredVms, cpuMillis, reservationResources, now });
+    const isReady = (candidate: RevisionHostCandidate) => reportHasImagesReady(candidate.report, images);
+    const ready = candidates.filter(isReady);
+    let allocated: AdmissionHostAllocation;
+    if (candidates[0]!.scope === "platform") {
+      // Platform hosts cache every live and candidate image on their own.
+      if (!ready.length) throw scenarioImagePreparing();
+      allocated = await planRevisionHost({ candidates: ready, desiredVms, cpuMillis, reservationResources, now });
+    } else {
+      // The learner's own servers: the host with room, ready ones first, is
+      // told to cache the images. Until it reports them ready the start is
+      // refused; the preparation it wrote is what makes the host pull.
+      const planned = await planRevisionHost({
+        candidates: [...ready, ...candidates.filter((candidate) => !isReady(candidate))],
+        desiredVms, cpuMillis, reservationResources, now,
+      });
+      const chosen = candidates.find((candidate) => candidate.hostId === planned.hostId)!;
+      await prepareRevisionImages({ access, requestKey: context.idempotencyKey, candidates: [chosen], images, now });
+      if (!isReady(chosen)) throw scenarioImagePreparing();
+      // The preparation moved the desired state; plan against the new version.
+      allocated = await planRevisionHost({ candidates: [chosen], desiredVms, cpuMillis, reservationResources, now });
+    }
     await assertAgentKvmRunsOpen(env.DB, input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {});
     const outcome = await commitAdmissionBatch({
       run: { ...run, hostId: allocated.hostId },
@@ -667,8 +684,9 @@ async function planRevisionHost(input: {
  * names the digests (`images_json`) and the host caches them. Content
  * access is rechecked inside the write. A platform host already caches
  * every live and candidate image. The run is admitted only once the host
- * reports the images ready; until then the start is refused and this
- * preparation, which a later start renews, keeps the host pulling.
+ * reports the images ready; until then the start is refused, and this
+ * preparation, which it writes on purpose and a later start renews, keeps
+ * the host pulling.
  */
 async function prepareRevisionImages(input: {
   access: AdmissionContentAccess;
