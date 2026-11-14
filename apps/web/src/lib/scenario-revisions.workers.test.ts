@@ -437,6 +437,33 @@ describe("promotion, rollback and verify runs", () => {
       expect((await desiredDoc("personal-1"))!.vms).toEqual([]);
     });
 
+    it("waits for a platform host to report the candidate's images ready, which its cache already asks for", async () => {
+      // The candidate is not live, yet the platform host is told to cache it.
+      expect(await scenarioRow(PUBLIC_ID)).toEqual({ live_rev: null, candidate_rev: rev("a") });
+      expect((await until(() => desiredDoc(PLATFORM), (doc) => !!doc?.cached_images.includes(image)))!.cached_images)
+        .toContain(image);
+      const reported = (ready: boolean) => until(
+        () => env.DB.prepare("SELECT json_array_length(report_json, '$.cached_images') AS count FROM host_actual_state WHERE host_id = ?1")
+          .bind(PLATFORM).first<number>("count"),
+        (count) => ready ? (count ?? 0) > 0 : count === 0,
+      );
+      const imagesReady = async () => (await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.revisions
+        .find((revision) => revision.rev === rev("a"))!.imagesReady;
+
+      sendState(ws, PLATFORM, [], []);
+      await reported(false);
+      expect(await imagesReady()).toBe(false);
+      await expect(verify()).rejects.toMatchObject({ status: 409, code: "scenario_image_preparing" });
+      expect(await env.DB.prepare("SELECT count(*) AS count FROM scenario_runs").first("count")).toBe(0);
+      expect((await desiredDoc(PLATFORM))!.vms).toEqual([]);
+
+      sendState(ws, PLATFORM, []);
+      await reported(true);
+      expect(await imagesReady()).toBe(true);
+      const { hostId } = await verify();
+      expect(hostId).toBe(PLATFORM);
+    });
+
     it("passes the operator drain only for a platform admin", async () => {
       await publish(rev("c"), image, "org-a");
       await drain();

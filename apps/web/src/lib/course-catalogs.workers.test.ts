@@ -28,12 +28,16 @@ import {
 } from "@/lib/course-catalogs";
 import { IMAGE_CUTOVER_GATE } from "@/lib/run-admission-gate";
 import { resetD1Database } from "@/test/d1-migrations";
-import { revisionDoc } from "@/lib/scenario-runs/revision-test-fixtures";
+import { revisionDoc, seedReadyPlatformHost } from "@/lib/scenario-runs/revision-test-fixtures";
 
 const learnerId = "learner";
 
 describe("V2 course catalogs", () => {
-  beforeEach(resetD1Database);
+  beforeEach(async () => {
+    await resetD1Database();
+    // A learner on the platform needs a live platform host with the images.
+    await seedReadyPlatformHost("platform-ready", [READY_IMAGE]);
+  });
 
   it("defaults capacity to unknown and preserves pressure-only callers", async () => {
     const input = { db: drizzle(env.DB), userId: learnerId, organizationId: null };
@@ -606,9 +610,11 @@ async function insertScenario(
   });
   await db.insert(scenarioRevisions).values({
     scenarioId, rev: "r1", guestContract: 3, state: "ready",
-    docJson: revisionDoc({}, { web: `sha256:${"3".repeat(64)}` }),
+    docJson: revisionDoc({ web: READY_IMAGE, client: READY_IMAGE }, { web: `sha256:${"3".repeat(64)}` }),
   });
 }
+
+const READY_IMAGE = `sha256:${"7".repeat(64)}`;
 
 /** Publishes a scope's catalog as a promoted revision leaves it. */
 async function publishCatalog(

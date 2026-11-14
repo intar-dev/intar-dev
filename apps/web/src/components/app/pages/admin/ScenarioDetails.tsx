@@ -117,7 +117,7 @@ function RevisionRow({
   const actions = !scenario.canManage || live
     ? null
     : candidate && revision.state === "ready" && !verifying
-      ? <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ?? "Verify"}</Button>
+      ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ?? (revision.imagesReady ? "Verify" : "Preparing")}</Button>
       : candidate && revision.canGoLive
         ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
         : revision.canGoLive && revision.liveAt !== null

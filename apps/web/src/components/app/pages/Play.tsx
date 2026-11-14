@@ -25,6 +25,8 @@ interface PlayScenario {
   credit: string | null;
   tags?: string[];
   briefing?: string;
+  /** Signed in: false while a start would wait for the scenario's images. */
+  ready?: boolean;
 }
 
 /** A scenario's public play page: anyone reads it, signed-in people start it. */
@@ -113,6 +115,11 @@ export function Play() {
               {signedIn ? (
                 <>
                   {data.briefing ? <Markdown headingOffset={1}>{data.briefing}</Markdown> : null}
+                  {data.ready === false ? (
+                    <Button size="lg" className="w-full sm:w-auto" disabled>
+                      Scenario preparing
+                    </Button>
+                  ) : (
                   <Button
                     size="lg"
                     className="w-full sm:w-auto"
@@ -134,6 +141,7 @@ export function Play() {
                     Start scenario
                     <ArrowRight className="size-4" />
                   </Button>
+                  )}
                 </>
               ) : (
                 <>

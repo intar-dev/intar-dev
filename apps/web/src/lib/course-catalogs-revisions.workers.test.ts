@@ -5,6 +5,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { courseCatalogs, member, organization, user } from "@/db/schema";
 import { listCourseCatalogForUser, loadCourseLectureDetailForUser } from "@/lib/course-catalogs";
+import { seedReadyPlatformHost } from "@/lib/scenario-runs/revision-test-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 
 const lecture = (lectureId: string, scenarioId?: string) => ({
@@ -47,6 +48,8 @@ describe("course catalogs on scenario revisions", () => {
       { scopeKey: "organization:acme", organizationId: "acme", sourceRevision: "t",
         catalogJson: catalog("acme-course", [lecture("private", "acme/private")]) },
     ]);
+    // A learner on the platform needs a live platform host with the images.
+    await seedReadyPlatformHost();
   });
 
   const states = async (userId: string) => {

@@ -12,7 +12,7 @@ export const prerender = false;
  */
 export const GET: APIRoute = async ({ request, params }) => {
   const authz = await requireUserContext(request);
-  const scenario = await loadPlayScenario(env.DB, params.namespace ?? "", params.slug ?? "", authz.ok);
+  const scenario = await loadPlayScenario(env.DB, params.namespace ?? "", params.slug ?? "", authz.ok ? authz.context.userId : null);
   if (!scenario) {
     return jsonResponse({ error: "scenario not found", code: "scenario_not_found" }, { status: 404 });
   }

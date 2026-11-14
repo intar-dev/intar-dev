@@ -22,7 +22,7 @@ import type {
 import type { ScenarioRevisionV1 } from "@/generated/contracts/scenario-revision-v1";
 import { HOST_DESIRED_STATE_SCHEMA_VERSION_V3, mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { HOST_DEGRADED_AFTER_MS } from "@/lib/host-health";
-import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
 import { canonicalJson, sha256Digest } from "@/lib/scenario-contract/canonical-json";
 
 export const MAX_MACHINE_BUILD_ATTEMPTS = 3;
@@ -309,6 +309,9 @@ export async function settleScenarioRevisions(env: Env, by: { rev: string } | { 
       ).bind(revision.scenario_id, revision.rev, ready, await sha256Digest(ready)),
       selectCandidateRevision(env.DB, revision.scenario_id, revision.rev),
     ]);
+    // A new candidate's images enter the platform hosts' cache now, so its
+    // verify run finds them ready.
+    await wakePlatformAgents();
   }
 }
 

@@ -22,6 +22,7 @@ import {
 } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { isRevisionScenarioId } from "@/lib/scenario-id";
+import { liveHostHasRevisionImagesSql, scenarioImagePreparing } from "@/lib/scenario-runs/image-readiness";
 import { CUTOVER_WIPED_SQL, cutoverWipedError } from "@/lib/run-admission-gate";
 import type { ResourceCapacity } from "@/lib/resource-capacity";
 
@@ -122,6 +123,8 @@ export interface ResolvedCourseLecture {
   blockedBy: CourseLectureBlocker | null;
   activeRunId: string | null;
   scenarioReady: boolean;
+  /** The scenario has a startable live revision; `scenarioReady` also needs its images on a host. */
+  scenarioLive: boolean;
   course: CourseCatalogCourseV2;
   lecture: CourseCatalogLectureV2;
 }
@@ -139,6 +142,7 @@ interface LectureView {
   blockedBy: CourseLectureBlocker | null;
   activeRunId: string | null;
   scenarioReady: boolean | null;
+  scenarioLive: boolean | null;
 }
 
 interface CourseView extends CourseSource {
@@ -333,6 +337,7 @@ export async function resolveCourseLectureForScenario(input: {
       blockedBy: lecture.blockedBy,
       activeRunId: lecture.activeRunId,
       scenarioReady: lecture.scenarioReady === true,
+      scenarioLive: lecture.scenarioLive === true,
       course: course.course,
       lecture: lecture.lecture,
     };
@@ -366,6 +371,7 @@ export async function assertCourseScenarioStartAllowed(input: {
       "complete the required lecture first",
     );
   }
+  if (!resolved.scenarioReady && resolved.scenarioLive) throw scenarioImagePreparing();
   if (!resolved.scenarioReady) {
     throw appError(
       409,
@@ -492,10 +498,22 @@ async function loadCourseViews(input: {
         ),
       ),
   ]);
-  const readyRows: Array<{ scenarioId: string; organizationId: string | null; enabled: boolean; enabledAt: number | null }> = [];
+  const readyRows: Array<{
+    scenarioId: string; organizationId: string | null; enabled: boolean; enabledAt: number | null; imagesReady: number;
+  }> = [];
   // A scenario is ready while it is enabled with a live revision that can
-  // start, as content access and the start require.
+  // start, as content access and the start require. A learner placed on the
+  // platform also needs a live platform host that reports the revision's
+  // images ready; a learner's own server is prepared by the start itself.
   if (revisionIds.length) {
+    const platformImagesReady = sql.raw(liveHostHasRevisionImagesSql(
+      "(SELECT live.doc_json FROM scenario_revisions live WHERE live.scenario_id = scenarios.id AND live.rev = scenarios.live_rev)",
+      "agent_hosts.scope = 'platform'",
+    ));
+    const platformPlaced = sql`EXISTS (SELECT 1 FROM user placed WHERE placed.id = ${input.userId}
+      AND placed.metal_placement = 'platform'
+      AND (${input.organizationId} IS NULL OR EXISTS (SELECT 1 FROM organization placed_org
+        WHERE placed_org.id = ${input.organizationId} AND placed_org.metal_placement = 'platform')))`;
     const revised = await input.db
       .select({
         scenarioId: scenarios.id,
@@ -504,6 +522,7 @@ async function loadCourseViews(input: {
         enabledAt: sql<number | null>`CASE WHEN EXISTS (SELECT 1 FROM ${scenarioRevisions} live
           WHERE live.scenario_id = ${scenarios.id} AND live.rev = ${scenarios.liveRev}
             AND live.state IN ('ready', 'verified')) THEN 0 ELSE NULL END`,
+        imagesReady: sql<number>`(NOT ${platformPlaced} OR ${platformImagesReady})`,
       })
       .from(scenarios)
       .where(inJson(scenarios.id, revisionIds));
@@ -536,12 +555,15 @@ async function loadCourseViews(input: {
       );
       const completed = completedUnitKeys.has(unitKey);
       const activeRunId = activeRunByUnitKey.get(unitKey) ?? null;
-      const scenarioReady = lecture.scenarioId
+      const scenarioLive = lecture.scenarioId
         ? isScenarioReady(
             scenarioById.get(lecture.scenarioId),
             source.organizationId ?? input.organizationId,
           )
         : null;
+      const scenarioReady = scenarioLive === null
+        ? null
+        : scenarioLive && scenarioById.get(lecture.scenarioId!)?.imagesReady === 1;
       const blockedBy =
         source.course.sequential &&
         !input.allowSequenceBypass &&
@@ -561,7 +583,7 @@ async function loadCourseViews(input: {
       if (!completed && !firstIncomplete) {
         firstIncomplete = courseLectureBlocker(source.course.courseId, lecture);
       }
-      return { lecture, state, blockedBy, activeRunId, scenarioReady };
+      return { lecture, state, blockedBy, activeRunId, scenarioReady, scenarioLive };
     });
     return { ...source, lectures };
   });

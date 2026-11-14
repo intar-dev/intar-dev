@@ -101,7 +101,7 @@ describe("play pages", () => {
     const text = await (await play("intar", "web")).text();
     expect(JSON.parse(text)).toEqual({
       scenario: { id: "intar/web", title: "Web", summary: "Fix the web server", difficulty: "easy", minutes: 10, credit: CREDIT,
-        tags: ["nginx"], briefing: "Fix it." },
+        tags: ["nginx"], briefing: "Fix it.", ready: true },
       signedIn: true,
     });
     for (const secret of [SOLUTION, HINT_BODY, TASK_BODY, SCRIPT_TEXT, "sha256:"]) expect(text).not.toContain(secret);

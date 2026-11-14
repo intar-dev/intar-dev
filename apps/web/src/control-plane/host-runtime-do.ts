@@ -674,8 +674,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
       draft.source_compiles = [];
       if (pin) draft.kino_pin = pin.current;
       else delete draft.kino_pin;
-      // A platform host holds every live image of its guest contract and the
-      // images its running VMs use. ponytail: no eviction; add an LRU when
+      // A platform host holds every live and candidate image of its guest
+      // contract and the images its running VMs use. ponytail: no eviction; add an LRU when
       // the live set outgrows the host cache.
       if (draft.scope === "platform") {
         draft.cached_images = [...new Set([

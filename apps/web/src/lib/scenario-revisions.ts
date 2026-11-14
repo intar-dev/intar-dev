@@ -15,9 +15,10 @@ import type { BuildTargetV1, VmVerifyV1 } from "@/generated/contracts/bridge-mes
 import { activeAccountSql, activeAdminSql } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { courseCatalogScopeKey } from "@/lib/course-catalogs";
-import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
 import { admitInternalRegistryOperation } from "@/lib/image-registry-admission";
 import { KEPT_REVISIONS_CTE, revisionImagesPresentSql } from "@/lib/kept-revisions";
+import { liveHostHasRevisionImagesSql } from "@/lib/scenario-runs/image-readiness";
 import { verifyOutcome, type VerifyOutcome } from "@/lib/run-tasks";
 import type { RunStateDocument } from "@/lib/run-state";
 import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
@@ -61,6 +62,8 @@ export interface ScenarioRevisionSummary {
    * current guest contract, kept by the registry sweep, its images stored.
    */
   canGoLive: boolean;
+  /** Whether a live platform host reports every image of the revision ready, as a verify run needs. */
+  imagesReady: boolean;
 }
 
 export interface VerifyReport {
@@ -104,7 +107,8 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
           revision.failure_reason, revision.verify_run_id, revision.verify_report_json, revision.live_at,
           revision.created_at, (revision.state = 'verified' AND revision.guest_contract = ?3
             AND EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = revision.scenario_id AND kept.rev = revision.rev)
-            AND ${revisionImagesPresentSql("revision.scenario_id", "revision.rev")}) AS can_go_live
+            AND ${revisionImagesPresentSql("revision.scenario_id", "revision.rev")}) AS can_go_live,
+          ${liveHostHasRevisionImagesSql("revision.doc_json", "agent_hosts.scope = 'platform'")} AS images_ready
         FROM scenario_revisions revision JOIN scenarios scenario ON scenario.id = revision.scenario_id
         WHERE ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2)
         ORDER BY revision.created_at DESC, revision.rev DESC`,
@@ -124,6 +128,7 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
     scenario_id: string; rev: string; state: ScenarioRevisionSummary["state"]; guest_contract: number;
     content_digest: string | null; failure_reason: string | null; verify_run_id: string | null;
     verify_report_json: string | null; live_at: number | null; created_at: number; can_go_live: number;
+    images_ready: number;
   };
   const byScenario = new Map<string, AdministeredScenario>();
   for (const row of scenarios!.results as ScenarioRow[]) {
@@ -139,6 +144,7 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
       failureReason: row.failure_reason, verifyRunId: row.verify_run_id,
       verifyReport: row.verify_report_json ? (JSON.parse(row.verify_report_json) as VerifyReport) : null,
       liveAt: row.live_at, createdAt: row.created_at, canGoLive: row.can_go_live === 1,
+      imagesReady: row.images_ready === 1,
     });
   }
   for (const row of runs!.results as Array<{ run_id: string; scenario_id: string; scenario_rev: string }>) {
@@ -312,13 +318,6 @@ async function namespacedCatalog(r2Key: string | null, namespace: string): Promi
   };
 }
 
-/** Each connected platform agent rebuilds its desired state, whose `cached_images` follow the live revisions. */
-async function wakePlatformAgents(): Promise<void> {
-  const { results } = await env.DB.prepare(
-    `SELECT id FROM agent_hosts WHERE scope = 'platform' AND role = 'agent' AND disabled = 0 AND connected = 1`,
-  ).all<{ id: string }>();
-  await Promise.all(results.map((host) => tryWakeHostRuntime(host.id)));
-}
 
 /**
  * Settles verify run `runId` from its stored state, which only the run's own

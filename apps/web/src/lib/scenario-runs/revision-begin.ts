@@ -71,6 +71,7 @@ import {
 import { HOST_HEARTBEAT_TTL_MS, scenarioRuntimeReservationResources } from "./start";
 import { activeKeyFor } from "./storage";
 import { playableScenarioCondition, VALIDATION_USER_ID } from "./content-access";
+import { reportHasImagesReady, scenarioImagePreparing } from "./image-readiness";
 
 /** A run's VMs live this long unless the run renews them; a verify run's never renew. */
 const REVISION_RUN_LEASE_MS = 3_600_000;
@@ -173,13 +174,18 @@ export async function liveRevisionHolds(d1: D1Database, scenarioId: string, rev:
   return row?.anchored === 1;
 }
 
-/** Every machine image of a live revision of guest contract `contract`. */
+/**
+ * Every machine image of a live or candidate revision of guest contract
+ * `contract`: what a platform host caches, so a learner start and a verify
+ * run find their images ready. Each enabled scenario adds at most two
+ * revisions; one leaves the set when it is neither live nor candidate.
+ */
 export async function liveRevisionImages(d1: D1Database, contract: number): Promise<string[]> {
   const { results } = await d1.prepare(
     `SELECT DISTINCT json_extract(machine.value, '$.image_digest') AS image
        FROM scenarios scenario
        JOIN scenario_revisions revision
-         ON revision.scenario_id = scenario.id AND revision.rev = scenario.live_rev
+         ON revision.scenario_id = scenario.id AND revision.rev IN (scenario.live_rev, scenario.candidate_rev)
        JOIN json_each(revision.doc_json, '$.machines') machine
       WHERE scenario.enabled = 1 AND revision.state IN ('ready', 'verified')
         AND revision.guest_contract = ?1
@@ -393,7 +399,12 @@ export async function admitRevisionRun(context: {
       now,
     });
     await prepareRevisionImages({ access, requestKey: context.idempotencyKey, candidates, images, now });
-    const allocated = await planRevisionHost({ candidates, desiredVms, cpuMillis, reservationResources, now });
+    // Only a host that reports every image ready may take the run. The commit
+    // fences on that exact report, so a host whose image went away since
+    // this read fails the commit and the next attempt reads it again.
+    const ready = candidates.filter((candidate) => reportHasImagesReady(candidate.report, images));
+    if (!ready.length) throw scenarioImagePreparing();
+    const allocated = await planRevisionHost({ candidates: ready, desiredVms, cpuMillis, reservationResources, now });
     await assertAgentKvmRunsOpen(env.DB, input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {});
     const outcome = await commitAdmissionBatch({
       run: { ...run, hostId: allocated.hostId },
@@ -655,7 +666,9 @@ async function planRevisionHost(input: {
  * run exists, as the catalog start's preparation does: the preparation row
  * names the digests (`images_json`) and the host caches them. Content
  * access is rechecked inside the write. A platform host already caches
- * every live image.
+ * every live and candidate image. The run is admitted only once the host
+ * reports the images ready; until then the start is refused and this
+ * preparation, which a later start renews, keeps the host pulling.
  */
 async function prepareRevisionImages(input: {
   access: AdmissionContentAccess;

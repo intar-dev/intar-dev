@@ -46,7 +46,16 @@ export async function store(artifactType: string, configMediaType: string, confi
   return manifest.digest;
 }
 
-export const machineImage = (label: string) => store("application/vnd.intar.machine.v1", "application/vnd.intar.machine.config.v1+json",
+/** Every machine image the fixtures stored; a host reports them ready unless told otherwise. */
+export const storedImages: string[] = [];
+
+export const machineImage = async (label: string) => {
+  const image = await storeMachineImage(label);
+  storedImages.push(image);
+  return image;
+};
+
+const storeMachineImage = (label: string) => store("application/vnd.intar.machine.v1", "application/vnd.intar.machine.config.v1+json",
   machineConfig(`sha256:${"b".repeat(64)}`, { boot: { cmdline: label } }),
   [["application/vnd.intar.kernel.v1", `kernel ${label}`], ["application/vnd.intar.disk.chunk.v1+zstd", `chunk ${label}`]]);
 
@@ -176,11 +185,13 @@ export function vmState(runId: string, name: string, lab: VmLabV1, at = Date.now
   } as VmStateV3;
 }
 
-/** A full state report of `hostId` with `vms`. */
-export function sendState(ws: WebSocket, hostId: string, vms: VmStateV3[]) {
+/** A full state report of `hostId` with `vms`, its `readyImages` cached. */
+export function sendState(ws: WebSocket, hostId: string, vms: VmStateV3[], readyImages: readonly string[] = storedImages) {
+  const at = Date.now();
   ws.send(JSON.stringify({ type: "state_report", protocol_version: 9, host_id: hostId, report: {
-    schema_version: 8, host_id: hostId, observed_at_unix_ms: Date.now(), applied_desired_version: 0, relay_connected: true,
-    guest_contract: 3, hardware: HARDWARE, cached_images: [], vms,
+    schema_version: 8, host_id: hostId, observed_at_unix_ms: at, applied_desired_version: 0, relay_connected: true,
+    guest_contract: 3, hardware: HARDWARE,
+    cached_images: readyImages.map((image) => ({ image, phase: "ready", updated_at_unix_ms: at })), vms,
     capacity: { total_cpu_millis: 8000, reserved_cpu_millis: 0, schedulable_cpu_millis: 8000, committed_cpu_millis: 0,
       memory_total_mib: 16384, memory_available_mib: 16384, disk_probe_path: "/var/lib", disk_total_mib: 100_000,
       disk_available_mib: 100_000 },
@@ -204,3 +215,34 @@ export const v2 = async (path: string, token: string) => {
 export const registryToken = async (hostId: string, owner: string, scope: "personal" | "platform" = "personal") => (await mintRegistryToken(env, {
   scope, organizationId: null, credentialGeneration: 1, hostId, userId: owner, role: "agent",
 }))!.token;
+
+/**
+ * A connected platform agent whose fresh report lists `images`, by default
+ * every machine image the stored revisions name, as ready.
+ */
+export async function seedReadyPlatformHost(hostId = "platform-ready", images?: readonly string[]) {
+  const now = Date.now();
+  const ready = images ?? (await env.DB.prepare(
+    `SELECT DISTINCT json_extract(machine.value, '$.image_digest') AS image
+       FROM scenario_revisions revision, json_each(revision.doc_json, '$.machines') machine
+      WHERE json_extract(machine.value, '$.image_digest') IS NOT NULL`,
+  ).all<{ image: string }>()).results.map((row) => row.image);
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO user (id, name, email, email_verified) VALUES ('platform-owner', 'Platform', 'platform@users.invalid', 1)`,
+  ).run();
+  await env.DB.prepare(
+    `INSERT INTO agent_hosts (id, user_id, name, scope, role, credential_generation, active_session_id, scenario_enabled,
+        disabled, connected, last_heartbeat_at, created_at, updated_at)
+      VALUES (?1, 'platform-owner', ?1, 'platform', 'agent', 1, 'ready-session', 1, 0, 1, ?2, ?2, ?2)`,
+  ).bind(hostId, now).run();
+  const report = { schema_version: 8, host_id: hostId, observed_at_unix_ms: now, applied_desired_version: 0,
+    relay_connected: true, guest_contract: 3, hardware: HARDWARE, vms: [],
+    capacity: { total_cpu_millis: 8000, reserved_cpu_millis: 0, schedulable_cpu_millis: 8000, committed_cpu_millis: 0,
+      memory_total_mib: 16384, memory_available_mib: 16384, disk_probe_path: "/var/lib", disk_total_mib: 100_000,
+      disk_available_mib: 100_000 },
+    cached_images: ready.map((image) => ({ image, phase: "ready", updated_at_unix_ms: now })) };
+  await env.DB.prepare(
+    `INSERT INTO host_actual_state (host_id, applied_desired_version, observed_at, report_json, created_at, updated_at)
+      VALUES (?1, 0, ?2, ?3, ?2, ?2)`,
+  ).bind(hostId, now, JSON.stringify(report)).run();
+}

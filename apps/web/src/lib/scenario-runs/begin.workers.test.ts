@@ -1213,6 +1213,7 @@ async function seedHostAndCatalog(input: {
       schedulableCpuMillis: input.hostCpuMillis ?? HOST_CPU_MILLIS,
       memoryAvailableMib: input.memoryAvailableMib ?? 4_096,
       diskAvailableMib: input.diskAvailableMib ?? 80_000,
+      readyImages: Object.values(images),
     }),
     createdAt: now,
     updatedAt: now,
@@ -1419,6 +1420,8 @@ function hostReport(input: {
   schedulableCpuMillis: number;
   memoryAvailableMib: number;
   diskAvailableMib: number;
+  /** The images the host reports ready. */
+  readyImages: readonly string[];
 }): HostStateReportV3 {
   return {
     relay_connected: true,
@@ -1439,7 +1442,7 @@ function hostReport(input: {
       disk_total_mib: 100_000,
       disk_available_mib: input.diskAvailableMib,
     },
-    cached_images: [],
+    cached_images: input.readyImages.map((image) => ({ image, phase: "ready", updated_at_unix_ms: input.now })),
     vms: [],
   };
 }
