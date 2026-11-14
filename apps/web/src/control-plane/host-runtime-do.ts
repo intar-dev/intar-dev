@@ -795,8 +795,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
   /**
    * The bridge 9 desired state as it is served: a builder runs no VMs and
-   * holds no Kino; an agent builds and compiles nothing, carries the Kino
-   * pin of its guest contract, and without one runs no VMs.
+   * holds no Kino; an agent builds and compiles nothing and carries the Kino
+   * pin of its guest contract. Without a pin no new VM is placed on it, but
+   * the VMs it has keep running and tearing down: each names its own Kino.
    */
   private async prepareDesiredStateV3(
     hostId: string,
@@ -812,12 +813,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
       }
       draft.builds = [];
       draft.source_compiles = [];
-      if (pin) {
-        draft.kino_pin = pin.current;
-      } else {
-        delete draft.kino_pin;
-        draft.vms = [];
-      }
+      if (pin) draft.kino_pin = pin.current;
+      else delete draft.kino_pin;
       // A platform host holds every live image of its guest contract and the
       // images its running VMs use. ponytail: no eviction; add an LRU when
       // the live set outgrows the host cache.

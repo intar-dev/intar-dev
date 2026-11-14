@@ -261,6 +261,23 @@ describe("runs of a live scenario revision", () => {
     await expect(begin()).rejects.toMatchObject({ code: "scenario_host_unavailable" });
   });
 
+  it("keeps running VMs when the Kino pin goes away", async () => {
+    const { runId } = await begin();
+    await env.DB.prepare("DELETE FROM registry_manifests WHERE digest = ?1").bind(KINO).run();
+    ws.close();
+    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(HOST));
+    const response = await stub.fetch("http://host-runtime/connect", {
+      headers: { upgrade: "websocket", "x-agent-host-id": HOST, "x-agent-credential-generation": "1", "intar-bridge-protocol": "9" },
+    });
+    ws = response.webSocket!;
+    ws.accept();
+    ws.send(JSON.stringify({ type: "client_hello", protocol_version: 9, host_id: HOST, agent_version: "1.0.0", role: "agent",
+      guest_contract: 3, hardware: HARDWARE }));
+    const doc = await until(() => desiredDoc(HOST), (current) => current?.kino_pin === undefined);
+    expect(doc?.kino_pin).toBeUndefined();
+    expect(doc?.vms.map((vm) => [vm.run_id, vm.desired_phase, vm.kino])).toEqual([[runId, "running", KINO], [runId, "running", KINO]]);
+  });
+
   it("keeps another organization's scenario invisible and unstartable", async () => {
     await seedScenario("org-a/secret", "org-a", revisionDoc(images, specs));
     expect(await liveScenarioRevision(env.DB, "org-a/secret", "org-b")).toBeNull();

@@ -143,7 +143,7 @@ describe("bridge 9 transport", () => {
     second.ws.close();
   });
 
-  it("gives an agent without a Kino pin no VMs and a builder no VMs", async () => {
+  it("keeps an agent's VMs without a Kino pin and gives a builder no VMs", async () => {
     await seedHost("host-b");
     await seedBuilder("builder-b");
     const vm = {
@@ -162,7 +162,9 @@ describe("bridge 9 transport", () => {
         .bind(hostId, JSON.stringify(doc)).run();
       const { messages, ws } = await connect(hostId, hello(hostId, role));
       const desired = await until(() => desiredStates(messages), (all) => all.length > 0);
-      expect(desired[0]!.desired_state).toMatchObject({ version: 6, vms: [] });
+      const served = desired[0]!.desired_state;
+      expect(served.kino_pin).toBeUndefined();
+      expect(served.vms.map((entry) => entry.vm_id)).toEqual(role === "agent" ? ["vm-1"] : []);
       ws.close();
     }
   });
