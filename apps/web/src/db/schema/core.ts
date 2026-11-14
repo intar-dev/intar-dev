@@ -169,6 +169,8 @@ export const organization = sqliteTable(
       .$type<"platform" | "organization">()
       .default("platform")
       .notNull(),
+    // When the organization used its one slug rename, or null.
+    slugRenamedAt: integer("slug_renamed_at"),
   },
   (table) => [
     uniqueIndex("organization_slug_uidx").on(table.slug),

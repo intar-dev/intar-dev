@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "50a21c91-9af3-4bda-8623-e6f4d10b8c32",
-  "prevId": "8d3d0d33-d6b9-4efb-9e6f-895c16d72a7a",
+  "id": "6c2718e3-7651-4ba2-9a52-26931bcb8a27",
+  "prevId": "50a21c91-9af3-4bda-8623-e6f4d10b8c32",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -4034,6 +4034,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'platform'"
+        },
+        "slug_renamed_at": {
+          "name": "slug_renamed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {

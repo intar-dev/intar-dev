@@ -31,6 +31,7 @@ describe("organization boundaries", () => {
     await expect(
       createOrganization({
         name: "Denied Org",
+        slug: "denied-org",
         ownerUserId: "creator",
         featureToggleService: new StaticFeatureToggleService(),
       }),
@@ -38,6 +39,7 @@ describe("organization boundaries", () => {
 
     const created = await createOrganization({
       name: "Allowed Org",
+      slug: "allowed-org",
       ownerUserId: "creator",
       featureToggleService: new StaticFeatureToggleService({
         "organization-creation": true,
@@ -47,6 +49,7 @@ describe("organization boundaries", () => {
     await expect(
       createOrganization({
         name: "Second Org",
+        slug: "second-org",
         ownerUserId: "creator",
         featureToggleService: new StaticFeatureToggleService({
           "organization-creation": true,

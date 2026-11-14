@@ -82,6 +82,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
   const admin = detail.role !== "member";
   const owner = detail.role === "owner";
   const [name, setName] = useState(detail.name);
+  const [slug, setSlug] = useState(detail.slug);
   const [issuer, setIssuer] = useState("");
   const [domain, setDomain] = useState("");
   const [clientId, setClientId] = useState("");
@@ -124,6 +125,23 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
     },
     onSuccess: invalidateDetail,
   });
+  const renameSlug = useMutation({
+    mutationFn: async () => {
+      const response = await fetch(
+        `/api/organizations/${encodeURIComponent(detail.id)}/slug`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ slug: slug.trim() }),
+        },
+      );
+      await mutationResponse(response, "Failed to change the slug");
+    },
+    onSuccess: invalidateDetail,
+  });
+  const slugState = detail.slugState;
+  const slugChangeable = Boolean(slugState && slugState.renamedAt === null && !slugState.inUse);
   const register = useMutation({
     mutationFn: async () => {
       const response = await fetch(oidcEndpoint, {
@@ -204,6 +222,10 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
   const renameFailure = describeApiError<"name">(rename.error, {
     fallback: "Couldn't rename the organization. Try again.",
     defaultField: "name",
+  });
+  const slugFailure = describeApiError<"slug">(renameSlug.error, {
+    fallback: "Couldn't change the slug. Try again.",
+    defaultField: "slug",
   });
   const registerFailure = describeApiError<"issuer" | "domain" | "clientId">(
     register.error,
@@ -290,7 +312,7 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
         <Section
           density="compact"
           title="Organization profile"
-          description="The slug remains stable so identity-provider links do not change when you rename the organization."
+          description="Renaming keeps the slug, so sign-in links and scenario ids stay the same."
         >
           <form
             className="flex flex-wrap items-end gap-2"
@@ -339,6 +361,72 @@ export function OrganizationSettingsSection({ detail }: { detail: Detail }) {
             <InlineFeedback tone="error" className="mt-2">
               {renameFailure.message}
             </InlineFeedback>
+          ) : null}
+          {slugChangeable ? (
+            <form
+              className="mt-4 flex flex-wrap items-end gap-2"
+              data-organization-slug-form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (slug.trim() && !renameSlug.isPending) renameSlug.mutate();
+              }}
+            >
+              <Field
+                label="Slug"
+                className="w-full max-w-sm"
+                hint="You can change the slug once, before scenarios, a scenario source, or single sign-on use it."
+                error={slugFailure?.field === "slug" ? slugFailure.message : null}
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={slug}
+                    onChange={(event) => {
+                      setSlug(event.target.value.toLowerCase());
+                      if (renameSlug.error) renameSlug.reset();
+                    }}
+                    maxLength={39}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                )}
+              </Field>
+              <Button
+                type="submit"
+                variant="outline"
+                aria-busy={renameSlug.isPending || undefined}
+                disabled={!slug.trim() || slug.trim() === detail.slug || renameSlug.isPending}
+                focusableWhenDisabled={renameSlug.isPending}
+              >
+                <AsyncLabel
+                  state={renameSlug.isPending ? "pending" : "idle"}
+                  idle="Change slug"
+                  pending="Saving…"
+                />
+              </Button>
+            </form>
+          ) : slugState ? (
+            <p className="mt-4 text-metadata" data-organization-slug>
+              Slug {detail.slug}.{" "}
+              {slugState.renamedAt !== null
+                ? "It was changed once and stays as it is."
+                : "Scenarios, a scenario source, or single sign-on use it, so it stays as it is."}
+            </p>
+          ) : null}
+          {slugFailure && slugFailure.field === null ? (
+            <InlineFeedback tone="error" className="mt-2">
+              {slugFailure.message}
+            </InlineFeedback>
+          ) : null}
+          {slugState && !slugState.scenarioNamespace ? (
+            <Alert variant="warning" className="mt-4" data-organization-slug-namespace>
+              <AlertTitle>Scenarios can't be published under this slug</AlertTitle>
+              <AlertDescription>
+                {slugChangeable
+                  ? "Change the slug to 3 to 39 lowercase letters, digits, and single hyphens to publish scenarios."
+                  : "The slug can no longer change, so this organization can't publish scenarios."}
+              </AlertDescription>
+            </Alert>
           ) : null}
         </Section>
       ) : null}

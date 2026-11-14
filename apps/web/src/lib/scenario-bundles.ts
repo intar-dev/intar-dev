@@ -16,11 +16,8 @@ import { canonicalJson } from "@/lib/scenario-contract/canonical-json";
 import { machineSpec, scenarioRevision, specBlob } from "@/lib/scenario-contract/machine-spec";
 import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
 import { maintainMachineBuilds, settleScenarioRevisions } from "@/lib/machine-builds";
+import { isScenarioNamespace, PUBLIC_NAMESPACE } from "@/lib/organization-slugs";
 
-/** The namespace of the public scope. */
-export const PUBLIC_NAMESPACE = "intar";
-// The organization slug charset, up to the 55 characters existing slugs use.
-const NAMESPACE = /^[a-z0-9](?:[a-z0-9-]{0,53}[a-z0-9])?$/;
 
 export function sourceBundleObjectKey(rev: string): string {
   return `builds/bundles/${rev}.json.gz`;
@@ -65,7 +62,7 @@ export async function ingestSourceBundle(
           .bind(organizationId)
           .first<{ slug: string }>();
   const namespace = owner?.slug ?? "";
-  if (!NAMESPACE.test(namespace) || (organizationId !== null && namespace === PUBLIC_NAMESPACE)) {
+  if (organizationId !== null && !isScenarioNamespace(namespace)) {
     return `the organization slug \`${namespace}\` is not a scenario namespace`;
   }
   const id = (slug: string) => `${namespace}/${slug}`;
