@@ -22,7 +22,7 @@ import {
 } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { isRevisionScenarioId } from "@/lib/scenario-id";
-import { liveHostHasRevisionImagesSql, scenarioImagePreparing } from "@/lib/scenario-runs/image-readiness";
+import { liveHostHasRevisionImagesSql } from "@/lib/scenario-runs/image-readiness";
 import { CUTOVER_WIPED_SQL, cutoverWipedError } from "@/lib/run-admission-gate";
 import type { ResourceCapacity } from "@/lib/resource-capacity";
 
@@ -371,8 +371,9 @@ export async function assertCourseScenarioStartAllowed(input: {
       "complete the required lecture first",
     );
   }
-  if (!resolved.scenarioReady && resolved.scenarioLive) throw scenarioImagePreparing();
-  if (!resolved.scenarioReady) {
+  // Image readiness is admission's: a same-key replay of a committed start
+  // must still answer with its run while no host has the images.
+  if (!resolved.scenarioLive) {
     throw appError(
       409,
       "course_scenario_waiting",

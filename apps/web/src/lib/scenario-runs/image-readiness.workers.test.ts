@@ -89,6 +89,14 @@ describe("starts wait for their images on a host", () => {
       expect(await written()).toEqual({ runs: 0, executions: 0, active: 0 });
     });
 
+    it("answers a same-key retry of a committed start with its run while no host has the images", async () => {
+      const ws = await host(HOST, "platform", Object.values(images));
+      const { runId } = await begin("start-key-1");
+      sendState(ws, HOST, [], []);
+      await reported(HOST, 0);
+      await expect(begin("start-key-1")).resolves.toMatchObject({ runId, reused: true });
+    });
+
     it("answers the lecture and play pages from the same readiness", async () => {
       const ws = await host(HOST, "platform", []);
       const lecture = async () => (await listCourseCatalogForUser({ db: drizzle(env.DB), userId: LEARNER, organizationId: null }))
