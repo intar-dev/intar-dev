@@ -11,6 +11,7 @@ import { env } from "cloudflare:workers";
 import { normalizeCourseCatalogSnapshot } from "@/control-plane/image-registry/bundle";
 import type { CourseCatalogSnapshotV2 } from "@/db/schema/shared";
 import { GUEST_CONTRACT } from "@/generated/constants";
+import type { BuildTargetV1 } from "@/generated/contracts/bridge-message-v9";
 import { activeAccountSql, activeAdminSql } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { courseCatalogScopeKey } from "@/lib/course-catalogs";
@@ -304,4 +305,59 @@ export async function settleVerifyRun(
     }
   }
   return true;
+}
+
+export interface MachineBuildSummary {
+  buildKey: string;
+  bundleRev: string;
+  organizationId: string | null;
+  target: string;
+  state: string;
+  phase: string | null;
+  attempt: number;
+  error: string | null;
+  hasLog: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Holds while ?{actor} may read the machine_builds row aliased `build`: a platform admin all, an organization's admins its bundles' builds. */
+function buildReaderSql(actor: number): string {
+  return `(EXISTS (SELECT 1 FROM user reader WHERE reader.id = ?${actor} AND ${activeAdminSql("reader")})
+    OR EXISTS (SELECT 1 FROM bundles build_bundle JOIN member actor_member ON actor_member.organization_id = build_bundle.organization_id
+        JOIN user actor ON actor.id = actor_member.user_id
+      WHERE build_bundle.rev = build.bundle_rev AND actor_member.user_id = ?${actor}
+        AND actor_member.role IN ('owner', 'admin') AND ${activeAccountSql("actor")}))`;
+}
+
+/** The newest machine builds `actorUserId` may read. */
+export async function listAdministeredMachineBuilds(actorUserId: string): Promise<MachineBuildSummary[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT build.build_key, build.bundle_rev, bundle.organization_id, build.target_json, build.state, build.phase,
+        build.attempt, build.error, build.log_key IS NOT NULL AS has_log, build.created_at, build.updated_at
+      FROM machine_builds build LEFT JOIN bundles bundle ON bundle.rev = build.bundle_rev
+      WHERE ${buildReaderSql(1)} ORDER BY build.updated_at DESC LIMIT 200`,
+  ).bind(actorUserId).all<{
+    build_key: string; bundle_rev: string; organization_id: string | null; target_json: string; state: string;
+    phase: string | null; attempt: number; error: string | null; has_log: number; created_at: number; updated_at: number;
+  }>();
+  return results.map((row) => ({
+    buildKey: row.build_key, bundleRev: row.bundle_rev, organizationId: row.organization_id,
+    target: buildTargetLabel(row.target_json), state: row.state, phase: row.phase, attempt: row.attempt,
+    error: row.error, hasLog: row.has_log === 1, createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
+}
+
+/** `<scenario>/<machine>` for a machine build, the image name for an image build. */
+function buildTargetLabel(targetJson: string): string {
+  const target = JSON.parse(targetJson) as BuildTargetV1;
+  return target.kind === "machine" ? `${target.scenario}/${target.machine}` : target.name;
+}
+
+/** The build log of `buildKey` when `actorUserId` may read that build, else null. */
+export async function readAdministeredMachineBuildLog(actorUserId: string, buildKey: string): Promise<R2ObjectBody | null> {
+  const row = await env.DB.prepare(
+    `SELECT build.log_key FROM machine_builds build WHERE build.build_key = ?2 AND ${buildReaderSql(1)}`,
+  ).bind(actorUserId, buildKey).first<{ log_key: string | null }>();
+  return row?.log_key ? env.VM_IMAGE_REGISTRY_BUCKET.get(row.log_key) : null;
 }
