@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   testImageDigest,
   seedHost,
@@ -20,6 +20,7 @@ import {
   resetHostRuntimeTestDatabase,
   sleep,
   type BridgeMessageV9,
+  settleHostRuntimeSockets,
 } from "./test-fixtures";
 import {
   DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
@@ -30,6 +31,7 @@ import { agentHosts } from "@/db/schema";
 
 describe("HostRuntimeDO desired-state re-push", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+  afterEach(settleHostRuntimeSockets);
 
   it("re-pushes a lagging desired version from the alarm loop after the dispatch threshold", async () => {
     const { messages, stub, ws } = await connectLaggingHost("host-lag-repush");

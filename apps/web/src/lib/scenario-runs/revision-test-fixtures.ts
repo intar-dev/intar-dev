@@ -2,6 +2,7 @@
 // Fixtures for runs of scenario revisions: registry artifacts, revision
 // rows, bridge 9 hosts and their reports.
 
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import { expect } from "vitest";
@@ -127,6 +128,19 @@ export async function connect(hostId: string): Promise<WebSocket> {
   await until(() => env.DB.prepare("SELECT json_extract(report_json, '$.schema_version') AS schema FROM host_actual_state WHERE host_id = ?1")
     .bind(hostId).first("schema"), (schema) => schema === 8);
   return ws;
+}
+
+/**
+ * Closes a host's socket and waits until its Durable Object has released the
+ * session, so the close handler does not run on into the next test or past
+ * the end of the file.
+ */
+export async function disconnect(ws: WebSocket, hostId: string): Promise<void> {
+  ws.close();
+  await until(() => env.DB.prepare("SELECT connected FROM agent_hosts WHERE id = ?1").bind(hostId).first<number>("connected"),
+    (connected) => connected !== 1);
+  const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+  await runInDurableObject(stub, async (_instance, state) => { await state.storage.getAlarm(); });
 }
 
 export async function desiredDoc(hostId: string): Promise<HostDesiredStateV3 | null> {

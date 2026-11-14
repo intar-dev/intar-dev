@@ -18,7 +18,7 @@ import { getScenarioRunStatusForUser } from "@/lib/scenario-runs/status";
 import { ensureFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  HARDWARE, HINT_BODY, HOST, KINO, LEARNER, OTHER_HOST, ORIGIN, SOLUTION, STRANGER, TASK_BODY, connect, desiredDoc, enrollHost,
+  HARDWARE, HINT_BODY, HOST, KINO, LEARNER, OTHER_HOST, ORIGIN, SOLUTION, STRANGER, TASK_BODY, connect, desiredDoc, disconnect, enrollHost,
   labState, machineImage, registryToken, revisionDoc, runRow, seedScenario, sendVm, specBlob,
   store, until, v2, vmState,
 } from "./revision-test-fixtures";
@@ -51,7 +51,7 @@ describe("runs of a live scenario revision", () => {
     agentToken = await enrollHost(HOST, LEARNER);
     ws = await connect(HOST);
   });
-  afterEach(() => ws.close());
+  afterEach(() => disconnect(ws, HOST));
 
   const begin = (key = "start-key-1", scenarioId = "intar/web", userId = LEARNER, organizationId: string | null = null) =>
     beginScenarioRun({ scenarioId, userId, idempotencyKey: key, organizationId });
@@ -128,7 +128,7 @@ describe("runs of a live scenario revision", () => {
     expect(ready.state).toBe("active_full");
     sendVm(ws, HOST, vmState(runId, "client", labState("ready", [{ id: "fetch", status: "pass", message: "ok" }])));
     expect((await until(() => runRow(runId), (row) => row.state === "solved")).state).toBe("solved");
-    other.close();
+    await disconnect(other, OTHER_HOST);
   });
 
   it("ends a failed lab with lab_failed, the fixed text, and no admin detail for the learner", async () => {

@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { listDurableObjectIds, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { eq } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import { expect, vi } from "vitest";
@@ -394,6 +394,21 @@ export async function waitForHostActualState(
     await sleep(10);
   }
   throw new Error(`timed out waiting for actual state ${hostId}`);
+}
+
+/**
+ * Waits until every host runtime object has seen the close of each socket a
+ * test opened, so no close handler is still running when the next test resets
+ * storage or the file ends.
+ */
+export async function settleHostRuntimeSockets(): Promise<void> {
+  for (const id of await listDurableObjectIds(env.HOST_RUNTIME)) {
+    const stub = env.HOST_RUNTIME.get(id);
+    const deadline = Date.now() + 2_000;
+    while (await runInDurableObject(stub, (_instance, state) => state.getWebSockets().length) > 0 && Date.now() < deadline) {
+      await sleep(10);
+    }
+  }
 }
 
 export function sleep(ms: number): Promise<void> {

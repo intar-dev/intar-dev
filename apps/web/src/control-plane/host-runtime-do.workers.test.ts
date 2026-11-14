@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   testImageDigest,
   desiredRunningVm,
@@ -29,6 +29,7 @@ import {
   mutateDesiredState,
   type RunStateDocument,
   resetHostRuntimeTestDatabase,
+  settleHostRuntimeSockets,
 } from "./host-runtime-do/test-fixtures";
 import { runInDurableObject } from "cloudflare:test";
 import { organization } from "@/db/schema";
@@ -36,6 +37,7 @@ import { revokeFixtureAccount } from "@/test/account-fixtures";
 
 describe("HostRuntimeDO bridge dispatch and sessions", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+  afterEach(settleHostRuntimeSockets);
 
   it("connects organization hosts after creator deletion and binds the organization identity", async () => {
     const hostId = "org-host";

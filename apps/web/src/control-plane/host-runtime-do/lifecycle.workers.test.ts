@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { expireOverdueRuntimeExecutions } from "@/lib/runtime-lease-expiry";
 import type { HostStateReportV3 } from "@/generated/contracts/bridge-message-v9";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
@@ -44,6 +44,7 @@ import {
   mutateDesiredState,
   type RunStateDocument,
   resetHostRuntimeTestDatabase,
+  settleHostRuntimeSockets,
 } from "./test-fixtures";
 
 // Workerd eviction drains active requests for up to five seconds per eviction.
@@ -51,6 +52,7 @@ vi.setConfig({ testTimeout: 20_000 });
 
 describe("HostRuntimeDO run lifecycle projection", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+  afterEach(settleHostRuntimeSockets);
 
   it("restores its alarm when a slow retirement clears a concurrent wake", async () => {
     const hostId = "late-retirement";

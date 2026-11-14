@@ -28,7 +28,7 @@ import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  KINO, connect, desiredDoc, enrollHost, labState, machineImage, registryToken, sendState, sendVm, store, until, v2, vmState,
+  KINO, connect, desiredDoc, disconnect, enrollHost, labState, machineImage, registryToken, sendState, sendVm, store, until, v2, vmState,
 } from "./scenario-runs/revision-test-fixtures";
 
 const candidateOf = (id: string) => env.DB.prepare("SELECT candidate_rev FROM scenarios WHERE id = ?1").bind(id).first("candidate_rev");
@@ -137,7 +137,7 @@ const verifyVm = (runId: string, lab: VmLabV1) => ({ ...vmState(runId, "webserve
 describe("promotion, rollback and verify runs", () => {
   let image: string;
   let ws: WebSocket;
-  const sockets: WebSocket[] = [];
+  const sockets: Array<[WebSocket, string]> = [];
 
   beforeAll(async () => {
     digest = await sourceCompileDigest();
@@ -165,12 +165,12 @@ describe("promotion, rollback and verify runs", () => {
     image = await machineImage("webserver");
     await enrollHost(PLATFORM, ADMIN, "platform");
     ws = await connect(PLATFORM);
-    sockets.push(ws);
+    sockets.push([ws, PLATFORM]);
     await publish(rev("a"), image);
   });
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
-    for (const socket of sockets.splice(0)) socket.close();
+    for (const [socket, hostId] of sockets.splice(0)) await disconnect(socket, hostId);
   });
 
   it("ingests into a ready candidate that is not live", async () => {
@@ -418,7 +418,7 @@ describe("promotion, rollback and verify runs", () => {
 
     it("runs as the validation account on a platform host, in verify mode with the verify spec", async () => {
       await enrollHost("personal-1", LEARNER);
-      sockets.push(await connect("personal-1"));
+      sockets.push([await connect("personal-1"), "personal-1"]);
       await drain();
       const { runId, hostId } = await verify();
       expect(hostId).toBe(PLATFORM);
@@ -451,7 +451,7 @@ describe("promotion, rollback and verify runs", () => {
       ws.close();
       await env.DB.prepare("UPDATE agent_hosts SET connected = 0 WHERE id = ?1").bind(PLATFORM).run();
       await enrollHost("personal-1", LEARNER);
-      sockets.push(await connect("personal-1"));
+      sockets.push([await connect("personal-1"), "personal-1"]);
       await expect(verify()).rejects.toMatchObject({ code: "scenario_host_unavailable" });
     });
 
@@ -570,7 +570,7 @@ describe("promotion, rollback and verify runs", () => {
       const { runId } = await verify();
       await enrollHost(PLATFORM_2, ADMIN, "platform");
       const other = await connect(PLATFORM_2);
-      sockets.push(other);
+      sockets.push([other, PLATFORM_2]);
       sendVm(other, PLATFORM_2, verifyVm(runId, verifyLab({ steps: [], done: true, passed: true, pre_done: true })));
       // A report from the run's own host that changes nothing, as a barrier.
       sendVm(ws, PLATFORM, verifyVm(runId, verifyLab({ steps: [], done: false, passed: false, pre_done: true })));

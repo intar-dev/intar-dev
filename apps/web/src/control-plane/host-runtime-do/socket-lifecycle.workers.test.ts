@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   HOST_HELLO_TIMEOUT_MS, MAX_PENDING_HOST_SOCKETS, MAX_STATUS_SOCKETS,
   MAX_STATUS_SOCKETS_PER_USER, STATUS_SOCKET_LIFETIME_MS,
@@ -9,7 +9,7 @@ import {
 } from "./base";
 import {
   clientHello, connectHost, drizzle, env,
-  resetHostRuntimeTestDatabase, seedHost, seedRun, waitForBridgeMessage,
+  resetHostRuntimeTestDatabase, seedHost, seedRun, settleHostRuntimeSockets, waitForBridgeMessage,
 } from "./test-fixtures";
 
 function deferred() {
@@ -59,6 +59,7 @@ vi.setConfig({ testTimeout: 20_000 });
 
 describe("HostRuntimeDO socket lifecycle", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+  afterEach(settleHostRuntimeSockets);
 
   it("preserves Pause written after hello reads the host", async () => {
     const hostId = "pause-during-hello";

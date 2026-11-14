@@ -1,10 +1,11 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clientHello, connectHost, drizzle, env, resetHostRuntimeTestDatabase,
   seedHost, seedRun, sendBridge, stateReport, testImageDigest, testKinoDigest, testSpecDigest, vmReport, waitForBridgeMessage,
+  settleHostRuntimeSockets,
 } from "./test-fixtures";
 import { runtimeActualStateFromReport, vmReportV2FromV3 } from "@/control-plane/host-runtime-do";
 import type { RunStateDocument } from "@/lib/run-state";
@@ -19,6 +20,7 @@ vi.setConfig({ testTimeout: 20_000 });
 
 describe("host credential generation", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+  afterEach(settleHostRuntimeSockets);
 
   it("rejects connections without a generation before accepting a socket", async () => {
     await seedHost("host");

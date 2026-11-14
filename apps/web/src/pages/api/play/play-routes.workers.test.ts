@@ -10,7 +10,7 @@ import { setPublicPlay } from "@/lib/organization-entitlements";
 import { ensureFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  HINT_BODY, HOST, KINO, LEARNER, SOLUTION, STRANGER, TASK_BODY, connect, enrollHost, machineImage, revisionDoc,
+  HINT_BODY, HOST, KINO, LEARNER, SOLUTION, STRANGER, TASK_BODY, connect, disconnect, enrollHost, machineImage, revisionDoc,
   seedScenario, specBlob, store,
 } from "@/lib/scenario-runs/revision-test-fixtures";
 import { GET as readPlay } from "@/pages/api/play/[namespace]/[slug]";
@@ -77,7 +77,10 @@ describe("play pages", () => {
       env.DB.prepare("UPDATE scenarios SET live_rev = NULL WHERE id = 'intar/unlive'"),
     ]);
   });
-  afterEach(() => ws?.close());
+  afterEach(async () => {
+    if (ws) await disconnect(ws, HOST);
+    ws = undefined;
+  });
 
   it("shows a signed-out visitor only the public fields", async () => {
     signedOut();
