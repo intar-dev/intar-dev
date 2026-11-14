@@ -539,12 +539,12 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       }
       updateFixtureLinkedLectureState(
         server.state.courseCatalog,
-        "repair-nginx",
+        "intar/repair-nginx",
         runState,
       );
       updateFixtureLinkedLectureState(
         server.state.organizationCourseCatalog,
-        "repair-nginx",
+        "intar/repair-nginx",
         runState,
       );
       server.state.terminalMode =
@@ -941,7 +941,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
       if (
-        /^\/api\/scenarios\/[^/]+\/start$/.test(pathname) &&
+        /^\/api\/scenarios\/[^/]+\/[^/]+\/start$/.test(pathname) &&
         method === "POST"
       ) {
         await json(
@@ -949,7 +949,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           {
             accepted: true,
             runId: "run-active",
-            scenarioId: "repair-nginx",
+            scenarioId: "intar/repair-nginx",
             acceptedAt: FIXED_NOW,
             reused: false,
             run: withoutShareOffer(server.state.run),

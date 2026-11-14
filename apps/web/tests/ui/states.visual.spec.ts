@@ -221,7 +221,7 @@ test.describe("focused visual states", () => {
         body: JSON.stringify({
           accepted: true,
           runId: "run-active",
-          scenarioId: "repair-nginx",
+          scenarioId: "intar/repair-nginx",
           acceptedAt: Date.now(),
           reused: false,
           run: ui.server.state.run,
@@ -237,7 +237,7 @@ test.describe("focused visual states", () => {
     await page.getByRole("link", { name: "Run again" }).click();
 
     try {
-      await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
+      await expect(page).toHaveURL(/\/runs\/start\/intar\/repair-nginx/);
       await expect(page.locator("[data-run-start-sequence]")).toBeVisible();
       await expectDesktopMissionPane(page);
       await expect(

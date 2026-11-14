@@ -208,7 +208,7 @@ export function createMockApiState(input?: {
           tags: briefing.tags,
           difficulty: "medium",
           estimatedMinutes: briefing.estimatedMinutes,
-          scenarioId: "repair-nginx",
+          scenarioId: "intar/repair-nginx",
           state: nginxLectureState,
           blockedBy: null,
           activeRunId: runIsForeground ? "run-active" : null,
@@ -224,7 +224,7 @@ export function createMockApiState(input?: {
           tags: ["dns", "networking", "observability"],
           difficulty: "hard",
           estimatedMinutes: 60,
-          scenarioId: "repair-dns",
+          scenarioId: "intar/repair-dns",
           state:
             nginxLectureState === "completed"
               ? "waiting_for_scenario"
@@ -255,7 +255,7 @@ export function createMockApiState(input?: {
           tags: ["postgresql", "storage"],
           difficulty: "easy",
           estimatedMinutes: 20,
-          scenarioId: "recover-postgres",
+          scenarioId: "intar/recover-postgres",
           state: "waiting_for_scenario",
           blockedBy: null,
           activeRunId: null,
@@ -315,7 +315,7 @@ export function createMockApiState(input?: {
           tags: ["linux", "storage", "organization"],
           difficulty: "medium",
           estimatedMinutes: 35,
-          scenarioId: "platform-logrotate",
+          scenarioId: "intar/platform-logrotate",
           state: "locked",
           blockedBy: {
             courseId: "platform-repair",
@@ -452,7 +452,7 @@ export function createMockApiState(input?: {
           {
             id: "assignment-nginx",
             assignmentId: "assignment-nginx",
-            scenarioId: "platform-logrotate",
+            scenarioId: "intar/platform-logrotate",
             scenarioTitle: "Recover the platform log rotation job",
             organizationId: "org-platform",
             organizationName: organizationDetail.name,
@@ -472,7 +472,7 @@ export function createMockApiState(input?: {
     progress: {
       scenarios: empty
         ? []
-        : [{ scenarioId: "repair-nginx", title: briefing.title }],
+        : [{ scenarioId: "intar/repair-nginx", title: briefing.title }],
       rows: empty
         ? []
         : organizationDetail.members.map((member, index) => ({
@@ -481,7 +481,7 @@ export function createMockApiState(input?: {
             githubUsername: member.githubUsername,
             cells: [
               {
-                scenarioId: "repair-nginx",
+                scenarioId: "intar/repair-nginx",
                 status:
                   index === 0
                     ? "solved"
@@ -702,6 +702,7 @@ function scenarioRevisions() {
     verifyReport: null,
     liveAt: null,
     canGoLive: state === "verified",
+    imagesReady: true,
     createdAt: FIXED_NOW - age,
     ...extra,
   });

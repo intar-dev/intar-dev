@@ -210,7 +210,7 @@ export function runListEntry(input: {
   const activity = input.activity ?? (input.active ? "foreground" : "settled");
   return {
     runId: input.runId,
-    scenarioId: "repair-nginx",
+    scenarioId: "intar/repair-nginx",
     scenarioName: "repair-nginx",
     title: input.title,
     difficulty: "medium",
