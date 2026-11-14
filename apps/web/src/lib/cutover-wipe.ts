@@ -1,6 +1,8 @@
 // The cutover's one admin action (#306, §10.4 in #306): delete every row of
 // scenario data on the current Worker, keep accounts, organizations, hosts,
-// enrollment and credentials. R2 objects stay for the +14 d job.
+// enrollment and credentials. The R2 objects under the old prefixes (images,
+// image chunks, image manifests, artifacts, old bundles and build logs) are
+// left in the bucket, and nothing in the tree removes them.
 import { env } from "cloudflare:workers";
 import { appError } from "@/lib/app-error";
 import { IMAGE_CUTOVER_GATE, IMAGE_CUTOVER_WIPED } from "@/lib/run-admission-gate";
