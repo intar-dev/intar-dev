@@ -78,8 +78,9 @@ other registry.
   again only for a tag whose commit never passed CI there. A failed build
   leaves its draft, and the next run of the workflow rebuilds and publishes
   it: after the next merge, a re-run, or a dispatch from main.
-- **After an image CLI release,** the workflow opens a pull request that points
-  the website at the new scenario compiler.
+- **After an image CLI or kino release,** the workflow opens a pull request
+  that points the website at the new scenario compiler, and writes the Kino
+  artifact's digest into `tools/deploy/kino-pin.json`.
 
 Never bump a product version, edit a product `CHANGELOG.md`, or create a
 product tag as part of other work, and never push a tag by hand. To release a
@@ -168,7 +169,12 @@ before the workflow attested them have no attestation. Then:
   a rollback; after each `swamp workflow approve builder-rollout <step>`,
   `swamp workflow resume builder-rollout` continues the run.
 - **Stargate:** see "Rolling out" in `deploy/stargate/README.md`.
-- **Kino:** no rollout path for now. The guest tools disk is gone, and machine
-  images do not carry Kino yet.
+- **Kino:** hosts put the pinned Kino on each new VM's run disk, so a Kino
+  release that keeps the guest contract needs no drain: running VMs keep
+  theirs. Once the release is published, dispatch image-ops `kino-promote` with
+  `kino_version=X.Y.Z`; it stores the release's Kino artifact in the registry
+  under the digest the pin pull request names. Then merge the pin pull request;
+  the website deploy that follows serves the pin. A pin whose artifact is not
+  stored pins nothing, and without a pin no VM is placed.
 - **Image CLI:** merge the website pin pull request that the release opens. The
   next website deploy uses it.

@@ -24,6 +24,8 @@ test.each([
   // update-release-pr.sh, web-pins.sh, and Dependabot (.github/dependabot.yml).
   "chore(release): agent/v0.15.0, builder/v0.3.1",
   "chore(web): pin the scenario compiler to intar-image-cli 0.14.0",
+  "chore(web): pin kino 0.6.0",
+  "chore(web): pin the scenario compiler to intar-image-cli 0.14.0 and kino 0.6.0",
   "ci(deps): bump the actions group across 2 directories with 3 updates",
   "ci(deps): [security] bump actions/checkout from 6.0.0 to 6.0.1",
 ])("accepts %p", (title) => {
