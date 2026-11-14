@@ -231,7 +231,7 @@ pub(super) async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm
                 .await
                 {
                     Ok(Ok(())) => {
-                        // Pinned Cloud Hypervisor v53 returns from vm.shutdown
+                        // The pinned Cloud Hypervisor returns from vm.shutdown
                         // only after it has dropped the running VM and retained
                         // the reusable configuration. vm.info=Created is the
                         // proof for that exact state. A missing VM is also
@@ -250,11 +250,11 @@ pub(super) async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm
                                 let shutdown_proven =
                                     post_shutdown_vm_info_proves_stopped(probe_result);
                                 match probe_result {
-                                    Ok(info) if v53_post_shutdown_state_is_proven(info) => {
+                                    Ok(info) if post_shutdown_state_is_proven(info) => {
                                         info!(
                                             vm = vm_name,
                                             socket = ch_socket_path,
-                                            "cloud-hypervisor shutdown was proven by pinned-v53 vm.info"
+                                            "cloud-hypervisor shutdown was proven by vm.info"
                                         );
                                     }
                                     Err(error) if vm_info_confirms_vm_absent(error) => {
@@ -269,7 +269,7 @@ pub(super) async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm
                                             vm = vm_name,
                                             socket = ch_socket_path,
                                             state = ?info.state,
-                                            "cloud-hypervisor vm.info did not prove pinned-v53 shutdown; preserving grace period"
+                                            "cloud-hypervisor vm.info did not prove shutdown; preserving grace period"
                                         );
                                     }
                                     Err(error) => {
@@ -338,7 +338,7 @@ pub(super) async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm
 }
 
 /// Wait until the supplied post-response deadline unless the `vm.info`
-/// response proves that pinned Cloud Hypervisor v53 has stopped the VM. The
+/// response proves that the pinned Cloud Hypervisor has stopped the VM. The
 /// deadline is a Tokio instant so the timer and its timeout use the same clock.
 pub(super) async fn wait_for_post_shutdown_probe_grace<Probe, IsProven>(
     grace_deadline: tokio::time::Instant,
@@ -368,16 +368,16 @@ pub(super) fn post_shutdown_vm_info_proves_stopped(
     >,
 ) -> bool {
     match probe_result {
-        Ok(info) => v53_post_shutdown_state_is_proven(info),
+        Ok(info) => post_shutdown_state_is_proven(info),
         Err(error) => vm_info_confirms_vm_absent(error),
     }
 }
 
-/// Pinned Cloud Hypervisor v53 returns `Created` after a successful
+/// The pinned Cloud Hypervisor returns `Created` after a successful
 /// `vm.shutdown`: it has synchronously dropped the running VM while retaining
 /// only the reusable configuration. Do not accept other states here; they do
 /// not prove that the VM has stopped.
-pub(super) fn v53_post_shutdown_state_is_proven(info: &cloud_hypervisor_client::VmInfo) -> bool {
+pub(super) fn post_shutdown_state_is_proven(info: &cloud_hypervisor_client::VmInfo) -> bool {
     matches!(info.state, cloud_hypervisor_client::VmState::Created)
 }
 

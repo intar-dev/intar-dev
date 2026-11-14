@@ -231,13 +231,13 @@ fn vm_info_status_classification() {
 }
 
 #[test]
-fn pinned_v53_shutdown_proof_requires_created_or_definitively_absent_vm() {
+fn shutdown_proof_requires_created_or_definitively_absent_vm() {
     let created = cloud_hypervisor_client::VmInfo {
         config: cloud_hypervisor_client::VmConfig::default(),
         state: cloud_hypervisor_client::VmState::Created,
         memory_actual_size: None,
     };
-    assert!(v53_post_shutdown_state_is_proven(&created));
+    assert!(post_shutdown_state_is_proven(&created));
 
     for state in [
         cloud_hypervisor_client::VmState::Running,
@@ -245,11 +245,21 @@ fn pinned_v53_shutdown_proof_requires_created_or_definitively_absent_vm() {
         cloud_hypervisor_client::VmState::Shutdown,
     ] {
         assert!(
-            !v53_post_shutdown_state_is_proven(&cloud_hypervisor_client::VmInfo {
+            !post_shutdown_state_is_proven(&cloud_hypervisor_client::VmInfo {
                 state,
                 ..created.clone()
             }),
-            "only pinned-v53 Created proves a completed shutdown"
+            "only Created proves a completed shutdown"
+        );
+    }
+
+    // The VMM version is pinned elsewhere; a version named in this code goes
+    // stale on the next bump.
+    let cleanup = include_str!("../cleanup.rs");
+    for stale in ["pinned-v", "Hypervisor v", "v53"] {
+        assert!(
+            !cleanup.contains(stale),
+            "cleanup.rs names a VMM version: {stale}"
         );
     }
 
@@ -267,7 +277,7 @@ fn pinned_v53_shutdown_proof_requires_created_or_definitively_absent_vm() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn post_shutdown_grace_only_skips_the_two_definitive_v53_proofs() {
+async fn post_shutdown_grace_only_skips_the_two_definitive_proofs() {
     let grace = Duration::from_secs(DELETE_SHUTDOWN_GRACE_SECONDS);
     let created = cloud_hypervisor_client::VmInfo {
         config: cloud_hypervisor_client::VmConfig::default(),
