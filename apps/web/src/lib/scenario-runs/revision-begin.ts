@@ -73,7 +73,7 @@ import {
 } from "./begin";
 import { HOST_HEARTBEAT_TTL_MS, scenarioRuntimeReservationResources } from "./start";
 import { activeKeyFor } from "./storage";
-import { VALIDATION_USER_ID } from "./content-access";
+import { playableScenarioCondition, VALIDATION_USER_ID } from "./content-access";
 
 /** A run's VMs live this long unless the run renews them; a verify run's never renew. */
 const REVISION_RUN_LEASE_MS = 3_600_000;
@@ -131,23 +131,26 @@ export interface LiveScenarioRevision {
 
 /**
  * The revision a learner start runs: the scenario's `live_rev`, while the
- * scenario is enabled for this organization and that revision is ready or
- * verified. Promotion owns `live_rev`; this is its only reader for starts.
+ * scenario is enabled for this organization (or, for `play`, open to play)
+ * and that revision is ready or verified. Promotion owns `live_rev`; this is
+ * its only reader for starts.
  */
 export async function liveScenarioRevision(
   d1: D1Database,
   scenarioId: string,
   organizationId: string | null,
+  options: { play?: boolean } = {},
 ): Promise<LiveScenarioRevision | null> {
-  const row = await d1.prepare(
-    `SELECT scenario.id, revision.rev, revision.guest_contract, revision.doc_json
+  const sql = `SELECT scenario.id, revision.rev, revision.guest_contract, revision.doc_json
        FROM scenarios scenario
        JOIN scenario_revisions revision
          ON revision.scenario_id = scenario.id AND revision.rev = scenario.live_rev
       WHERE scenario.id = ?1 AND scenario.enabled = 1
         AND revision.state IN ('ready', 'verified')
-        AND (scenario.organization_id IS NULL OR scenario.organization_id = ?2)`,
-  ).bind(scenarioId, organizationId).first<{ id: string; rev: string; guest_contract: number; doc_json: string }>();
+        AND ${options.play ? playableScenarioCondition("scenario") : "(scenario.organization_id IS NULL OR scenario.organization_id = ?2)"}`;
+  const statement = d1.prepare(sql);
+  const row = await (options.play ? statement.bind(scenarioId) : statement.bind(scenarioId, organizationId))
+    .first<{ id: string; rev: string; guest_contract: number; doc_json: string }>();
   if (!row) return null;
   return { scenarioId: row.id, rev: row.rev, guestContract: row.guest_contract, doc: JSON.parse(row.doc_json) };
 }
@@ -197,7 +200,7 @@ export async function admitRevisionRun(context: {
   input: BeginScenarioRunInput;
   revision: LiveScenarioRevision;
   organizationId: string | null;
-  /** Null only for a verify run. */
+  /** Null for a verify run and a play run. */
   courseLecture: Awaited<ReturnType<typeof assertCourseScenarioStartAllowed>> | null;
   idempotencyKey: string;
   scope: ScenarioStartRequestScope;
@@ -325,7 +328,10 @@ export async function admitRevisionRun(context: {
     scenarioName: revision.scenarioId,
     scenarioRev: revision.rev,
     tasksJson: doc.tasks,
-    launchSource: verifyScopeKey ? "verify" as const : "course" as const,
+    launchSource: verifyScopeKey
+      ? "verify" as const
+      : input.launchSource === "play" ? "play" as const : "course" as const,
+    ref: input.launchSource === "play" ? input.ref ?? null : null,
     courseScopeKey: courseLecture?.courseScopeKey ?? null,
     courseId: courseLecture?.courseId ?? null,
     courseTitle: courseLecture?.courseTitle ?? null,

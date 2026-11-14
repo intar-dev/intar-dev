@@ -145,6 +145,10 @@ export interface BeginScenarioRunInput {
   candidateBuildId?: string;
   allowDrainedAdminProof?: boolean;
   allowSequenceBypass?: boolean;
+  /** A start from a play page: no course, and play access instead. */
+  launchSource?: "play";
+  /** Where the play page was opened from, as the start route validated it. */
+  ref?: string;
 }
 
 export interface BeginScenarioRunResult {
@@ -316,6 +320,11 @@ async function admitScenarioStart(
   // revision; candidate proofs exist only on the catalog model.
   const revisionStart = isRevisionScenarioId(input.scenarioId);
   if (revisionStart && candidateRequest) throw scenarioCandidateNotReady();
+  const play = input.launchSource === "play";
+  // A play start is personal and exists only on the revision model.
+  if (play && (!revisionStart || organizationId !== null || candidateRequest)) {
+    throw appError(404, "scenario_not_found", "scenario not found");
+  }
   const [source, revision, active] = await Promise.all([
     revisionStart
       ? null
@@ -325,7 +334,9 @@ async function admitScenarioStart(
           organizationId,
           candidateRequest,
         }),
-    revisionStart ? liveScenarioRevision(env.DB, input.scenarioId, organizationId) : null,
+    revisionStart
+      ? liveScenarioRevision(env.DB, input.scenarioId, organizationId, { play })
+      : null,
     loadActiveRunRow(input.userId),
   ]);
   if (!source && !revision) {
@@ -337,13 +348,15 @@ async function admitScenarioStart(
   const scenarioId = source?.scenario.scenarioId ?? input.scenarioId;
   // Resolve the V2 unit before any reuse can return, so an old direct
   // request cannot revive an unlinked scenario around the course gate.
-  const courseLecture = await assertCourseScenarioStartAllowed({
-    db,
-    userId: input.userId,
-    organizationId,
-    scenarioId,
-    ...(input.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
-  });
+  const courseLecture = play
+    ? null
+    : await assertCourseScenarioStartAllowed({
+        db,
+        userId: input.userId,
+        organizationId,
+        scenarioId,
+        ...(input.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
+      });
   await assertAccountActive(input.userId);
 
   const replayed = await loadRunByIdempotencyKey(
@@ -384,7 +397,7 @@ async function admitScenarioStart(
       scope,
     });
   }
-  if (!source) throw appError(404, "scenario_not_found", "scenario not found");
+  if (!source || !courseLecture) throw appError(404, "scenario_not_found", "scenario not found");
   return admitNewRun({
     input,
     scenario: source.scenario,
@@ -468,6 +481,7 @@ function scenarioStartRequestScope(
     candidateBuildId: input.candidateBuildId?.trim() ?? null,
     allowDrainedAdminProof: input.allowDrainedAdminProof === true,
     allowSequenceBypass: input.allowSequenceBypass === true,
+    ...(input.launchSource === "play" ? { launchSource: "play" as const, ref: input.ref ?? null } : {}),
   };
 }
 
@@ -1743,6 +1757,7 @@ const RUN_INSERT_COLUMNS = [
   "scenario_rev",
   "tasks_json",
   "launch_source",
+  "ref",
 ];
 
 /**
@@ -1894,6 +1909,7 @@ function insertRunStatement(
     run.scenarioRev ?? null,
     run.tasksJson ? JSON.stringify(run.tasksJson) : null,
     run.launchSource ?? null,
+    run.ref ?? null,
   ];
   const hostParam = values.length + 1;
   const userParam = values.length + 2;

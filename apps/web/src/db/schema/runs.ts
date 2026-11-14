@@ -26,6 +26,9 @@ export interface ScenarioStartRequestScope {
   candidateBuildId: string | null;
   allowDrainedAdminProof: boolean;
   allowSequenceBypass: boolean;
+  /** Present on a start from a play page, with the page's `ref`. */
+  launchSource?: "play";
+  ref?: string | null;
 }
 
 export const scenarioRuns = sqliteTable(

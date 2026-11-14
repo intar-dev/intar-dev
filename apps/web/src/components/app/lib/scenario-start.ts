@@ -71,6 +71,8 @@ export async function requestScenarioStartWithCapacityWait(
     organizationId?: string | null;
     candidateRevision?: string;
     candidateBuildId?: string;
+    launchSource?: "play";
+    ref?: string;
   },
 ): Promise<ScenarioStartAcceptedResponse> {
   const startedAt = Date.now();
@@ -99,6 +101,8 @@ export async function requestScenarioStartWithCapacityWait(
           ...(options.candidateBuildId
             ? { candidateBuildId: options.candidateBuildId }
             : {}),
+          ...(options.launchSource ? { launchSource: options.launchSource } : {}),
+          ...(options.ref ? { ref: options.ref } : {}),
         },
       );
     } catch (error) {
@@ -196,6 +200,8 @@ async function requestScenarioStart(
     organizationId: string | null;
     candidateRevision?: string;
     candidateBuildId?: string;
+    launchSource?: "play";
+    ref?: string;
   },
 ): Promise<ScenarioStartAcceptedResponse> {
   let response: Response;
@@ -221,6 +227,8 @@ async function requestScenarioStart(
           ...(options.candidateBuildId
             ? { candidateBuildId: options.candidateBuildId }
             : {}),
+          ...(options.launchSource ? { launchSource: options.launchSource } : {}),
+          ...(options.ref ? { ref: options.ref } : {}),
         }),
       },
     );

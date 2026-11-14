@@ -198,7 +198,8 @@ const courseLectureRoute = createRoute({
 
 const scenarioRunStartRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "runs/start/$scenarioId",
+  // A splat, so a namespaced id keeps its slash: /runs/start/intar/<slug>.
+  path: "runs/start/$",
   validateSearch: validateScenarioRunStartSearch,
   head: () =>
     routeHead(
@@ -523,6 +524,8 @@ function validateScenarioRunStartSearch(search: Record<string, unknown>) {
     organizationId: text(search.organizationId),
     courseId: text(search.courseId),
     lectureId: text(search.lectureId),
+    source: search.source === "play" ? ("play" as const) : undefined,
+    ref: text(search.ref),
   };
 }
 

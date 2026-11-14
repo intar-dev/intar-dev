@@ -15,11 +15,16 @@ import { resolveOrganizationId } from "@/lib/organizations";
 
 export const prerender = false;
 
+/** A play page's `ref`: where its link was shared, as a short token. */
+const PLAY_REF = /^[A-Za-z0-9._-]{1,64}$/;
+
 interface StartScenarioBody {
   hostId?: unknown;
   organizationId?: unknown;
   candidateRevision?: unknown;
   candidateBuildId?: unknown;
+  launchSource?: unknown;
+  ref?: unknown;
 }
 
 export const POST: APIRoute = async ({ request, params, locals }) => {
@@ -66,6 +71,8 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
   let organizationId: string | null = null;
   let candidateRevision: string | undefined;
   let candidateBuildId: string | undefined;
+  let play = false;
+  let ref: string | undefined;
   if (request.headers.get("content-type")?.includes("application/json")) {
     let parsedBody: unknown;
     try {
@@ -115,6 +122,25 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     ) {
       return jsonResponse(
         { error: "candidateBuildId must be a string" },
+        { status: 400 },
+      );
+    }
+    if (body.launchSource !== undefined && body.launchSource !== "play") {
+      return jsonResponse({ error: "launchSource must be play", code: "invalid_launch_source" }, { status: 400 });
+    }
+    play = body.launchSource === "play";
+    if (body.ref !== undefined) {
+      if (!play || typeof body.ref !== "string" || !PLAY_REF.test(body.ref)) {
+        return jsonResponse(
+          { error: "ref must be 1 to 64 letters, digits, dots, hyphens or underscores on a play start", code: "invalid_ref" },
+          { status: 400 },
+        );
+      }
+      ref = body.ref;
+    }
+    if (play && (body.organizationId != null || body.hostId !== undefined || body.candidateRevision !== undefined || body.candidateBuildId !== undefined)) {
+      return jsonResponse(
+        { error: "a play start takes only a ref", code: "invalid_play_start" },
         { status: 400 },
       );
     }
@@ -182,7 +208,9 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
         ? { candidateRevision, candidateBuildId }
         : {}),
       ...(authz.context.isAdmin ? { allowDrainedAdminProof: true } : {}),
-      ...(authz.context.isAdmin ? { allowSequenceBypass: true } : {}),
+      ...(authz.context.isAdmin && !play ? { allowSequenceBypass: true } : {}),
+      ...(play ? { launchSource: "play" as const } : {}),
+      ...(ref ? { ref } : {}),
     });
     // The dispatch hint is background work, so it never enters the response
     // body and never delays it. The durable outbox sweep delivers the

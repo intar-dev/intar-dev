@@ -70,7 +70,7 @@ export function safeDynamicPageLabel(pathname: string): string | null {
   if (/^\/runs\/[^/]+$/.test(pathname)) {
     return "Scenario run";
   }
-  if (/^\/runs\/start\/[^/]+$/.test(pathname)) {
+  if (/^\/runs\/start\/[^/]+(?:\/[^/]+)?$/.test(pathname)) {
     return "Starting run";
   }
   if (/^\/admin\/people\/[^/]+$/.test(pathname)) {
