@@ -16,6 +16,7 @@ import {
   organization,
   courseCatalogs,
   scenarioRuns,
+  scenarioRevisions,
   scenarios,
   vmScenarios,
   type CourseCatalogCourseV2,
@@ -24,6 +25,7 @@ import {
 } from "@/db/schema";
 import type { ScenarioManifestV5 } from "@/generated/catalog";
 import { appError } from "@/lib/app-error";
+import { isRevisionScenarioId } from "@/lib/scenario-id";
 import { CUTOVER_WIPED_SQL, cutoverWipedError } from "@/lib/run-admission-gate";
 import type { ScenarioBriefing } from "@/lib/scenario-model";
 import type { ResourceCapacity } from "@/lib/resource-capacity";
@@ -846,6 +848,10 @@ async function loadCourseViews(input: {
       ),
     ),
   ];
+  // A namespaced id names a scenario of the revision model, and only that
+  // model is read for it.
+  const revisionIds = scenarioIds.filter(isRevisionScenarioId);
+  const catalogIds = scenarioIds.filter((id) => !isRevisionScenarioId(id));
   const [completionRows, activeRunRows, scenarioRows] = await Promise.all([
     input.db
       .select({
@@ -874,7 +880,7 @@ async function loadCourseViews(input: {
           isNotNull(scenarioRuns.activeKey),
         ),
       ),
-    scenarioIds.length
+    catalogIds.length
       ? input.db
           .select({
             scenarioId: vmScenarios.scenarioId,
@@ -883,22 +889,24 @@ async function loadCourseViews(input: {
             enabledAt: vmScenarios.enabledAt,
           })
           .from(vmScenarios)
-          .where(inJson(vmScenarios.scenarioId, scenarioIds))
+          .where(inJson(vmScenarios.scenarioId, catalogIds))
       : Promise.resolve([]),
   ]);
   const readyRows: Array<{ scenarioId: string; organizationId: string | null; enabled: boolean; enabledAt: number | null }> = [...scenarioRows];
   // A scenario of the revision model is ready while it is enabled with a
-  // live revision, as content access requires.
-  if (scenarioIds.length) {
+  // live revision that can start, as content access and the start require.
+  if (revisionIds.length) {
     const revised = await input.db
       .select({
         scenarioId: scenarios.id,
         organizationId: scenarios.organizationId,
         enabled: scenarios.enabled,
-        enabledAt: sql<number | null>`CASE WHEN ${scenarios.liveRev} IS NULL THEN NULL ELSE 0 END`,
+        enabledAt: sql<number | null>`CASE WHEN EXISTS (SELECT 1 FROM ${scenarioRevisions} live
+          WHERE live.scenario_id = ${scenarios.id} AND live.rev = ${scenarios.liveRev}
+            AND live.state IN ('ready', 'verified')) THEN 0 ELSE NULL END`,
       })
       .from(scenarios)
-      .where(inJson(scenarios.id, scenarioIds));
+      .where(inJson(scenarios.id, revisionIds));
     readyRows.push(...revised);
   }
   const completedUnitKeys = new Set(
