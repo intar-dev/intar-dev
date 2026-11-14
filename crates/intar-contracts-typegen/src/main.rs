@@ -4,13 +4,8 @@ use std::{fs, path::Path};
 
 use anyhow::{Context as _, Result, anyhow};
 use intar_contracts::{
-    bridge::{
-        BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV8, BuildReportV1,
-        DesiredBuildV1, DesiredSourceCompileV1, HOST_DESIRED_STATE_SCHEMA_VERSION,
-        HOST_STATE_REPORT_SCHEMA_VERSION, HostDesiredStateV2, HostStateReportV2,
-        VM_REPORT_SCHEMA_VERSION, VmReportV2,
-    },
-    catalog::{CourseCatalogSnapshotV2, ScenarioManifestV5},
+    bridge::HOST_STATE_REPORT_SCHEMA_VERSION,
+    catalog::CourseCatalogSnapshotV2,
     guest::{
         ENV_DNS_SERVERS, ENV_GATEWAY, ENV_GUEST_BOOTSTRAP_ABI, ENV_GUEST_IP_CIDR,
         ENV_KINO_HOST_READY_PORT, ENV_KINO_SHA256, ENV_KINO_VSOCK_CID, ENV_KINO_VSOCK_PORT,
@@ -26,7 +21,7 @@ use intar_contracts::{
     },
     source::{
         AGENT_SOURCES_PATH, SOURCE_BUNDLE_FIELD, SOURCE_BUNDLES_PATH, SOURCE_COMPILER_PATH,
-        SOURCE_COMPILER_VERSION, SOURCE_META_FIELD, SourceRefusalV1, platform_compile_digest,
+        SOURCE_META_FIELD, SourceRefusalV1,
     },
     source::{
         MAX_SOURCE_BUNDLE_GZIP_BYTES, SOURCE_COMPILER_VERSION_V2, SourceBundleMetaV2,
@@ -59,14 +54,29 @@ fn main() -> Result<()> {
     fs::create_dir_all(&schema_dir).context("create schema output directory")?;
     fs::create_dir_all(fixture_dir.join("stargate"))
         .context("create stargate fixture directory")?;
-    fs::create_dir_all(fixture_dir.join("catalog")).context("create catalog fixture directory")?;
-    fs::create_dir_all(fixture_dir.join("bridge")).context("create bridge fixture directory")?;
     fs::create_dir_all(fixture_dir.join("run-cli")).context("create run CLI fixture directory")?;
     fs::create_dir_all(fixture_dir.join("source")).context("create source fixture directory")?;
     fs::create_dir_all(fixture_dir.join("scenario"))
         .context("create scenario fixture directory")?;
 
     for obsolete in [
+        "schemas/catalog-scenario-manifest-v5.schema.json",
+        "schemas/bridge-host-desired-state-v2.schema.json",
+        "schemas/bridge-host-state-report-v2.schema.json",
+        "schemas/bridge-vm-report-v2.schema.json",
+        "schemas/bridge-desired-build-v1.schema.json",
+        "schemas/bridge-desired-source-compile-v1.schema.json",
+        "schemas/bridge-build-report-v1.schema.json",
+        "schemas/bridge-message-v8.schema.json",
+        "fixtures/catalog/scenario-manifest-v5.json",
+        "fixtures/bridge/host-desired-state-v2.json",
+        "fixtures/bridge/host-state-report-v2.json",
+        "fixtures/bridge/vm-report-v2.json",
+        "fixtures/bridge/desired-build-v1.json",
+        "fixtures/bridge/desired-source-compile-v1.json",
+        "fixtures/bridge/build-report-v1.json",
+        "fixtures/bridge/sync-request-v8.json",
+        "fixtures/source/compile-digest.json",
         "schemas/catalog-scenario-manifest-v4.schema.json",
         "fixtures/catalog/scenario-manifest-v4.json",
         "schemas/bridge-message-v7.schema.json",
@@ -133,32 +143,8 @@ fn main() -> Result<()> {
         &schema_for!(ShareIngestMessage),
     )?;
     write_schema(
-        &schema_dir.join("catalog-scenario-manifest-v5.schema.json"),
-        &schema_for!(ScenarioManifestV5),
-    )?;
-    write_schema(
         &schema_dir.join("catalog-course-catalog-v2.schema.json"),
         &schema_for!(CourseCatalogSnapshotV2),
-    )?;
-    write_schema(
-        &schema_dir.join("bridge-host-desired-state-v2.schema.json"),
-        &schema_for!(HostDesiredStateV2),
-    )?;
-    write_schema(
-        &schema_dir.join("bridge-host-state-report-v2.schema.json"),
-        &schema_for!(HostStateReportV2),
-    )?;
-    write_schema(
-        &schema_dir.join("bridge-vm-report-v2.schema.json"),
-        &schema_for!(VmReportV2),
-    )?;
-    write_schema(
-        &schema_dir.join("bridge-desired-build-v1.schema.json"),
-        &schema_for!(DesiredBuildV1),
-    )?;
-    write_schema(
-        &schema_dir.join("bridge-desired-source-compile-v1.schema.json"),
-        &schema_for!(DesiredSourceCompileV1),
     )?;
     write_schema(
         &schema_dir.join("source-refusal-v1.schema.json"),
@@ -171,14 +157,6 @@ fn main() -> Result<()> {
     write_schema(
         &schema_dir.join("source-bundle-meta-v2.schema.json"),
         &schema_for!(SourceBundleMetaV2),
-    )?;
-    write_schema(
-        &schema_dir.join("bridge-build-report-v1.schema.json"),
-        &schema_for!(BuildReportV1),
-    )?;
-    write_schema(
-        &schema_dir.join("bridge-message-v8.schema.json"),
-        &schema_for!(BridgeMessageV8),
     )?;
     write_schema(
         &schema_dir.join("bridge-message-v9.schema.json"),
@@ -278,40 +256,8 @@ fn main() -> Result<()> {
         )?;
     }
     copy_fixture(
-        "crates/intar-contracts/fixtures/catalog/scenario-manifest-v5.json",
-        &fixture_dir.join("catalog/scenario-manifest-v5.json"),
-    )?;
-    copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/host-desired-state-v2.json",
-        &fixture_dir.join("bridge/host-desired-state-v2.json"),
-    )?;
-    copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/host-state-report-v2.json",
-        &fixture_dir.join("bridge/host-state-report-v2.json"),
-    )?;
-    copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/vm-report-v2.json",
-        &fixture_dir.join("bridge/vm-report-v2.json"),
-    )?;
-    copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/desired-build-v1.json",
-        &fixture_dir.join("bridge/desired-build-v1.json"),
-    )?;
-    copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/desired-source-compile-v1.json",
-        &fixture_dir.join("bridge/desired-source-compile-v1.json"),
-    )?;
-    copy_fixture(
         "crates/intar-contracts/fixtures/source/source-refusal-v1.json",
         &fixture_dir.join("source/source-refusal-v1.json"),
-    )?;
-    copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/build-report-v1.json",
-        &fixture_dir.join("bridge/build-report-v1.json"),
-    )?;
-    copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/sync-request-v8.json",
-        &fixture_dir.join("bridge/sync-request-v8.json"),
     )?;
     copy_fixture(
         "crates/intar-contracts/fixtures/run-cli/request-v1.json",
@@ -333,7 +279,6 @@ fn main() -> Result<()> {
         "crates/intar-contracts/fixtures/run-cli/probe-check-complete-v1.json",
         &fixture_dir.join("run-cli/probe-check-complete-v1.json"),
     )?;
-    write_compile_digest_fixture(&fixture_dir.join("source/compile-digest.json"))?;
     write_compile_digest_v2_fixture(&fixture_dir.join("source/compile-digest-v2.json"))?;
     copy_fixture(
         "crates/intar-contracts/fixtures/scenario/build-keys.json",
@@ -572,23 +517,8 @@ fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     fs::write(path, format!("{body}\n")).with_context(|| format!("write {}", path.display()))
 }
 
-/// A fixed vector for the platform compile digest formula, so the Worker and
+/// A fixed vector for the source compile digest formula, so the Worker and
 /// the compilers can each assert that they derive the same value.
-fn write_compile_digest_fixture(path: &Path) -> Result<()> {
-    let format_version = "intar-image-build-v17";
-    let compiler_version = "intar-source-compiler-v1";
-    let base_images_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let fixture = serde_json::json!({
-        "format_version": format_version,
-        "compiler_version": compiler_version,
-        "base_images_sha256": base_images_sha256,
-        "digest": platform_compile_digest(format_version, compiler_version, base_images_sha256),
-    });
-    let body = serde_json::to_string_pretty(&fixture).context("serialize compile digest")?;
-    fs::write(path, format!("{body}\n")).with_context(|| format!("write {}", path.display()))
-}
-
-/// The same for the v2 compiler, whose digest has no base-images input.
 fn write_compile_digest_v2_fixture(path: &Path) -> Result<()> {
     let image_format = intar_contracts::oci::IMAGE_FORMAT;
     let fixture = serde_json::json!({
@@ -627,12 +557,7 @@ export const RECORDING_DISK_LABEL = "{}";
 export const TOOLS_DISK_LABEL = "{}";
 export const RUNTIME_ENV_FILENAME = "{}";
 export const GUEST_USERNAME = "{}";
-export const BRIDGE_PROTOCOL_VERSION = {};
-export const HOST_DESIRED_STATE_SCHEMA_VERSION = {};
 export const HOST_STATE_REPORT_SCHEMA_VERSION = {};
-export const BUILD_REPORT_SCHEMA_VERSION = {};
-export const VM_REPORT_SCHEMA_VERSION = {};
-export const SOURCE_COMPILER_VERSION = "{}";
 export const SOURCE_COMPILER_VERSION_V2 = "{}";
 export const MAX_SOURCE_BUNDLE_GZIP_BYTES = {};
 export const SOURCE_BUNDLES_PATH = "{}";
@@ -697,12 +622,7 @@ export const runtimeEnvKeys = {{
         TOOLS_DISK_LABEL,
         RUNTIME_ENV_FILENAME,
         GUEST_USERNAME,
-        BRIDGE_PROTOCOL_VERSION,
-        HOST_DESIRED_STATE_SCHEMA_VERSION,
         HOST_STATE_REPORT_SCHEMA_VERSION,
-        BUILD_REPORT_SCHEMA_VERSION,
-        VM_REPORT_SCHEMA_VERSION,
-        SOURCE_COMPILER_VERSION,
         SOURCE_COMPILER_VERSION_V2,
         MAX_SOURCE_BUNDLE_GZIP_BYTES,
         SOURCE_BUNDLES_PATH,
@@ -970,99 +890,12 @@ export interface CourseCatalogLectureV2 {
   scenario_id?: string | null;
 }
 
-export interface ScenarioHintManifestV3 {
-  id: string;
-  title?: string | null;
-  body_markdown: string;
-}
-
-export interface ScenarioProbeManifestV3 {
-  id: string;
-  phase: ProbePhase;
-  kind: string;
-  display_name: string;
-  title?: string | null;
-  body_markdown?: string | null;
-  hints: ScenarioHintManifestV3[];
-}
-
-export interface ScenarioVmBootManifestV5 {
-  kernel_sha256: string;
-  initrd_sha256: string;
-  cmdline: string;
-}
-
-export interface ScenarioVmManifestV5 {
-  name: string;
-  image_key: ImageKey;
-  image_id: string;
-  image_format: ImageFormat;
-  image_virtual_size_bytes: number;
-  chunk_manifest_sha256: string;
-  guest_bootstrap_abi: number;
-  boot: ScenarioVmBootManifestV5;
-  cpu_millis: number;
-  memory_mib: Mib;
-  disk_mib: Mib;
-  probes: ScenarioProbeManifestV3[];
-}
-
-export interface ScenarioManifestV5 {
-  schema_version: number;
-  scenario_id: string;
-  name: string;
-  title: string;
-  category: string;
-  description: string;
-  difficulty: ScenarioDifficulty;
-  estimated_minutes: number;
-  tags: string[];
-  briefing_markdown: string;
-  solution_markdown: string;
-  hints: ScenarioHintManifestV3[];
-  vms: ScenarioVmManifestV5[];
-}
-
-export interface ImageChunkManifestV1 {
-  schema_version: number;
-  image_id: string;
-  virtual_size_bytes: number;
-  chunk_size_bytes: number;
-  encoding: string;
-  chunks: ImageChunkV1[];
-}
-
-export interface ImageChunkV1 {
-  index: number;
-  raw_size_bytes: number;
-  raw_sha256: string;
-  encoded_size_bytes: number;
-  encoded_sha256: string;
-}
-
-/** `meta.source` of a bundle compiled from an `intar.yaml` repository. */
-export interface BundleSourceV1 {
-  scope: string;
-  courses_root: string;
-  compiler_version: string;
-}
-
 export type SourceRefusalCode =
   | "compiler_outdated"
   | "superseded"
   | "fenced"
   | "binding_inactive"
   | "issuer_unsupported";
-
-/**
- * A refusal named by a `SourceRefusalCode`: `AppErrorResponseBody` with a
- * mandatory code. Any other non-2xx source route answer is a plain
- * `AppErrorResponseBody`.
- */
-export interface SourceRefusalV1 {
-  error: string;
-  code: SourceRefusalCode;
-}
 
 export type SourceCompileErrorCode =
   | "manifest_missing"
@@ -1080,29 +913,11 @@ export type SourceCompileErrorCode =
 fn bridge_ts() -> &'static str {
     r#"// Generated by `cargo run -p intar-contracts-typegen`.
 import type {
-  ImageArchitecture,
   ImageKey,
   Mib,
   ProbePhase,
   SourceCompileErrorCode,
 } from "./catalog";
-
-export type SyncRequestReason =
-  | "connect"
-  | "reconnect"
-  | "desired_version_lag"
-  | "operator_requested";
-
-export type HostRoleV1 = "agent" | "builder";
-
-export interface ClientHelloV8 {
-  protocol_version: number;
-  host_id: string;
-  agent_version: string;
-  role: HostRoleV1;
-  last_applied_desired_version?: number | null;
-  capabilities: HostCapabilitiesV2;
-}
 
 export interface HostRelayCredentials {
   websocket_url: string;
@@ -1112,154 +927,12 @@ export interface HostRelayCredentials {
   expires_at_unix_ms: number;
 }
 
-export interface ServerHelloV8 {
-  session_id: string;
-  relay?: HostRelayCredentials | null;
-  protocol_version: number;
-  host_id: string;
-  desired_version: number;
-}
-
-export interface DesiredStateV8 {
-  relay?: HostRelayCredentials | null;
-  protocol_version: number;
-  host_id: string;
-  desired_state: HostDesiredStateV2;
-}
-
-export interface StateReportV8 {
-  protocol_version: number;
-  host_id: string;
-  report: HostStateReportV2;
-}
-
-export interface VmReportV8 {
-  protocol_version: number;
-  host_id: string;
-  report: VmReportV2;
-}
-
-export interface BuildReportV8 {
-  protocol_version: number;
-  host_id: string;
-  report: BuildReportV1;
-}
-
-export interface SyncRequestV8 {
-  protocol_version: number;
-  host_id: string;
-  reason: SyncRequestReason;
-}
-
-export type BridgeMessageV8 =
-  | ({ type: "client_hello" } & ClientHelloV8)
-  | ({ type: "server_hello" } & ServerHelloV8)
-  | ({ type: "desired_state" } & DesiredStateV8)
-  | ({ type: "state_report" } & StateReportV8)
-  | ({ type: "vm_report" } & VmReportV8)
-  | ({ type: "build_report" } & BuildReportV8)
-  | ({ type: "sync_request" } & SyncRequestV8);
-
-export type HostScope = "personal" | "platform" | "organization";
-
-export interface HostDesiredStateV2 {
-  scope: HostScope;
-  owner_user_id: string;
-  schema_version: number;
-  host_id: string;
-  version: number;
-  generated_at_unix_ms: number;
-  cached_images: DesiredCachedImageV1[];
-  cached_guest_tools?: DesiredGuestToolsV1[];
-  vms: DesiredVmV2[];
-  builds: DesiredBuildV1[];
-  source_compiles?: DesiredSourceCompileV1[];
-}
-
-export interface DesiredCachedImageV1 {
-  image_key: ImageKey;
-  image_id: string;
-}
-
-export interface DesiredBuildV1 {
-  build_id: string;
-  scenario_id: string;
-  arch: ImageArchitecture;
-  rev: string;
-  content_hash: string;
-  bundle_ref: string;
-}
-
-/**
- * One repository snapshot a builder compiles, fetched by `compile_id` and
- * `attempt`. No secret and no scope.
- */
-export interface DesiredSourceCompileV1 {
-  compile_id: string;
-  attempt: number;
-  rev: string;
-  validate_only: boolean;
-  arch: ImageArchitecture;
-}
-
-/** The builder's result body when a source compile fails. */
-export interface SourceCompileFailureV1 {
-  compile_id: string;
-  attempt: number;
-  errors: SourceCompileErrorV1[];
-}
-
 export interface SourceCompileErrorV1 {
   /** Repository-relative path. */
   path?: string;
   line?: number;
   code: SourceCompileErrorCode;
   message: string;
-}
-
-export type DesiredVmPhase = "running" | "absent";
-
-export interface DesiredVmV2 {
-  vm_id: string;
-  owner_user_id: string;
-  runtime_execution_id: string;
-  generation: number;
-  run_id: string;
-  vm_name: string;
-  desired_phase: DesiredVmPhase;
-  image_key: ImageKey;
-  image_id: string;
-  guest_tools: DesiredGuestToolsV1;
-  resources: VmResourcesV3;
-  ssh_authorized_keys_openssh: string[];
-  lease_expires_at_unix_ms: number;
-}
-
-export interface DesiredGuestToolsV1 {
-  tools_disk_sha256: string;
-  tools_disk_size_bytes: number;
-  kino_sha256: string;
-  bootstrap_abi: number;
-}
-
-export interface VmResourcesV3 {
-  cpu_millis: number;
-  memory_mib: Mib;
-  disk_mib: Mib;
-}
-
-export interface HostStateReportV2 {
-  relay_connected: boolean;
-  schema_version: number;
-  host_id: string;
-  observed_at_unix_ms: number;
-  applied_desired_version: number;
-  capacity: HostCapacityV2;
-  capabilities: HostCapabilitiesV2;
-  cached_images: CachedImageStateV1[];
-  cached_guest_tools?: CachedGuestToolsStateV1[];
-  vms: VmActualStateV2[];
-  builds: BuildReportV1[];
 }
 
 export interface HostCapacityV2 {
@@ -1277,27 +950,6 @@ export interface HostCapacityV2 {
   load_avg_15m?: number | null;
   primary_ipv4?: string | null;
   primary_ipv6?: string | null;
-}
-
-export interface HostCapabilitiesV2 {
-  arch: ImageArchitecture;
-  cloud_hypervisor_sha256: string | null;
-  supports_kvm: boolean;
-  supports_vsock: boolean;
-  supports_reflink: boolean;
-  supports_nftables: boolean;
-  supports_jailer_v2: boolean;
-  supports_template_backed_launch: boolean;
-  fast_template_store: boolean;
-  supports_hard_cpu_quota: boolean;
-  supports_landlock: boolean;
-  supports_cgroup_v2: boolean;
-  supports_raw_chunks_v1?: boolean;
-  supports_scenario_guest_tools_v1?: boolean;
-  supports_jailer_v3?: boolean;
-  supports_run_cli_v1?: boolean;
-  supports_run_cli_completion_v1?: boolean;
-  source_compile_platform?: string;
 }
 
 export interface VmResourceStateV3 {
@@ -1320,30 +972,6 @@ export interface VmSandboxStateV1 {
   seccomp_enabled: boolean;
   landlock_enabled: boolean;
   no_new_privs: boolean;
-}
-
-export type ImageCachePhase =
-  | "missing"
-  | "queued"
-  | "downloading"
-  | "ready"
-  | "failed";
-
-export interface CachedImageStateV1 {
-  image_key: ImageKey;
-  image_id: string;
-  phase: ImageCachePhase;
-  bytes_on_disk?: number | null;
-  error?: string | null;
-  updated_at_unix_ms: number;
-}
-
-export interface CachedGuestToolsStateV1 {
-  guest_tools: DesiredGuestToolsV1;
-  phase: ImageCachePhase;
-  bytes_on_disk?: number | null;
-  error?: string | null;
-  updated_at_unix_ms: number;
 }
 
 export type VmPhase =
@@ -1466,33 +1094,7 @@ export interface VmReportV2 {
   probes: VmProbeSnapshotV1[];
   archive?: VmArchiveStateV1 | null;
   error?: string | null;
-}
-
-export type BuildPhase =
-  | "queued"
-  | "fetching_sources"
-  | "building_base"
-  | "building"
-  | "publishing"
-  | "uploading_logs"
-  | "succeeded"
-  | "failed";
-
-export interface BuildReportV1 {
-  schema_version: number;
-  host_id: string;
-  build_id: string;
-  scenario_id: string;
-  content_hash: string;
-  observed_at_unix_ms: number;
-  phase: BuildPhase;
-  current_vm?: string | null;
-  started_at_unix_ms?: number | null;
-  finished_at_unix_ms?: number | null;
-  attempt: number;
-  error?: string | null;
-}
-"#
+}"#
 }
 
 fn run_cli_ts() -> String {
@@ -1641,7 +1243,7 @@ fn label_to_string(label: [u8; 11]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{bridge_ts, catalog_ts, stargate_ts};
+    use super::{catalog_ts, stargate_ts};
     use intar_contracts::source::{SourceCompileErrorCode, SourceRefusalCode};
     use schemars::schema_for;
 
@@ -1678,9 +1280,6 @@ mod tests {
             assert_eq!(emitted, expected, "{name} drifted from the Rust enum");
         }
 
-        let bridge = bridge_ts();
-        assert!(bridge.contains("source_compiles?: DesiredSourceCompileV1[];"));
-        assert!(bridge.contains("source_compile_platform?: string;"));
     }
 
     /// One emitted interface block, so a check names the type it means. The

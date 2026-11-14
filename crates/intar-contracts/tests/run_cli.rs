@@ -1,5 +1,4 @@
 use intar_contracts::{
-    bridge::HostStateReportV2,
     run_cli::{
         RUN_CLI_FRAME_HEADER_BYTES, RUN_CLI_MAX_COMPLETION_ALIASES, RUN_CLI_MAX_HINT_ALIAS_BYTES,
         RUN_CLI_MAX_PROBE_ID_BYTES, RUN_CLI_MAX_PROBE_IDS, RUN_CLI_MAX_REQUEST_ID_BYTES,
@@ -500,21 +499,6 @@ fn run_cli_frame_round_trips_and_rejects_invalid_lengths() {
         run_cli_frame_payload_len(u32::MAX.to_be_bytes()),
         Err(RunCliFrameError::PayloadTooLarge { .. })
     ));
-}
-
-#[test]
-fn missing_run_cli_capability_defaults_to_false_for_old_agents() {
-    let mut value: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/bridge/host-state-report-v2.json"))
-            .expect("fixture JSON");
-    value["capabilities"]
-        .as_object_mut()
-        .expect("capabilities object")
-        .remove("supports_run_cli_v1");
-
-    let report: HostStateReportV2 =
-        serde_json::from_value(value).expect("old bridge report still parses");
-    assert!(!report.capabilities.supports_run_cli_v1);
 }
 
 fn fixture<T>(name: &str) -> T
