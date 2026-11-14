@@ -1257,7 +1257,6 @@ mod tests {
             expected.sort_unstable();
             assert_eq!(emitted, expected, "{name} drifted from the Rust enum");
         }
-
     }
 
     /// One emitted interface block, so a check names the type it means. The
