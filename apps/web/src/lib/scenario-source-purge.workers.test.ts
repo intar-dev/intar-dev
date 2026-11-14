@@ -15,6 +15,7 @@ import {
   scenarioSources,
   scenarios,
 } from "@/db/schema";
+import { REVISION_BUILD_FAILURE } from "@/lib/machine-builds";
 import { buildInitialRunState, recomputeRunState, RUN_PHASE_ORDER } from "@/lib/run-state";
 import { changeScenarioSource, scenarioSourceScope } from "@/lib/scenario-sources";
 import { createFixtureMember } from "@/test/account-fixtures";
@@ -193,6 +194,50 @@ describe("purging a disconnected scope", () => {
     await expect(purge()).resolves.toBeNull();
     expect(await count("scenario_sources")).toBe(0);
     expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(BUNDLE_KEY)).toBeNull();
+  });
+
+  it("fails the scope's queued builds and fails another scope's revision that waits on one", async () => {
+    const shared = `sha256:${"d".repeat(64)}`;
+    const own = `sha256:${"e".repeat(64)}`;
+    for (const key of [shared, own]) {
+      await env.DB.prepare(
+        `INSERT INTO machine_builds (build_key, image_format, bundle_rev, target_json, state)
+         VALUES (?1, 'raw', ?2, '{}', 'queued')`,
+      ).bind(key, REV).run();
+    }
+    await env.DB.prepare(
+      `INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state)
+       VALUES (?1, 'public-rev', 3, ?2, 'building')`,
+    ).bind(PUBLIC_SCENARIO, JSON.stringify({ machines: [{ name: "vm", build_key: shared }] })).run();
+
+    await expect(purge()).resolves.toBeNull();
+    expect(await env.DB.prepare("SELECT build_key, state, error FROM machine_builds").all().then((r) => r.results))
+      .toEqual([{ build_key: shared, state: "failed", error: "purged" }]);
+    expect(await env.DB.prepare("SELECT state, failure_reason FROM scenario_revisions").first())
+      .toEqual({ state: "failed", failure_reason: REVISION_BUILD_FAILURE });
+  });
+
+  it("deletes the logs and rows of the scope's builds that no other scope needs", async () => {
+    const shared = `sha256:${"d".repeat(64)}`;
+    const own = `sha256:${"e".repeat(64)}`;
+    for (const key of [shared, own]) {
+      const logKey = `builds/logs/${key.slice(7)}.log`;
+      await env.DB.prepare(
+        `INSERT INTO machine_builds (build_key, image_format, bundle_rev, target_json, state, log_key)
+         VALUES (?1, 'raw', ?2, '{}', 'succeeded', ?3)`,
+      ).bind(key, REV, logKey).run();
+      await env.VM_IMAGE_REGISTRY_BUCKET.put(logKey, "log");
+    }
+    await env.DB.prepare(
+      `INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state)
+       VALUES (?1, 'public-rev', 3, ?2, 'building')`,
+    ).bind(PUBLIC_SCENARIO, JSON.stringify({ machines: [{ name: "vm", build_key: shared }] })).run();
+
+    await expect(purge()).resolves.toBeNull();
+    expect(await env.DB.prepare("SELECT build_key FROM machine_builds").all().then((r) => r.results))
+      .toEqual([{ build_key: shared }]);
+    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(`builds/logs/${"e".repeat(64)}.log`)).toBeNull();
+    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(`builds/logs/${"d".repeat(64)}.log`)).not.toBeNull();
   });
 
   it("resumes a purge that was cut off", async () => {

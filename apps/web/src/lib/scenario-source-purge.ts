@@ -5,6 +5,7 @@
 import { env } from "cloudflare:workers";
 import { ACTIVE_RUNTIME_EXECUTION_STATES } from "@/db/schema";
 import { appError } from "@/lib/app-error";
+import { settleScenarioRevisions } from "@/lib/machine-builds";
 import { deleteFinishedScenarioRunForAdmin } from "@/lib/scenario-runs/lifecycle";
 
 // ponytail: runs are deleted one by one through the run delete path, so one
@@ -15,6 +16,14 @@ const RUNS_PER_REQUEST = 20;
 const ORG_SCENARIOS = "SELECT id FROM scenarios WHERE scope_key = ?1 AND organization_id = ?2";
 const BUILDING = `EXISTS (SELECT 1 FROM machine_builds WHERE state IN ('assigned', 'building')
       AND bundle_rev IN (SELECT rev FROM bundles WHERE scope_key = ?1))`;
+// The scope's builds that no revision of another scope needs, so their rows and
+// logs go with the scope.
+const SCOPE_BUILDS = `bundle_rev IN (SELECT rev FROM bundles WHERE scope_key = ?1)
+      AND state NOT IN ('assigned', 'building')
+      AND NOT EXISTS (SELECT 1 FROM scenario_revisions revision
+        JOIN scenarios scenario ON scenario.id = revision.scenario_id,
+        json_each(revision.doc_json, '$.machines') machine
+        WHERE scenario.scope_key <> ?1 AND json_extract(machine.value, '$.build_key') = machine_builds.build_key)`;
 const ACTIVE_STATES = ACTIVE_RUNTIME_EXECUTION_STATES.map((state) => `'${state}'`).join(", ");
 
 // Holds while nothing of the scope is still moving and every run of its
@@ -62,15 +71,24 @@ export async function purgeScenarioSource(input: {
     );
 
   // Every call re-checks the guard, so a role change or a new run stops it.
-  // Removing the catalog and disabling the scenarios stops new starts.
-  const [marked] = await d1.batch([
+  // Removing the catalog and disabling the scenarios stops new starts. A
+  // queued build of the scope can no longer read its bundle, so it fails
+  // here instead of going to a builder.
+  const [marked, , , purgedBuilds] = await d1.batch([
     bind(`UPDATE scenario_sources SET disconnect_reason = 'purging', updated_at = ?4
       WHERE scope_key = ?1 AND ${QUIET} RETURNING scope_key`),
     bind(`DELETE FROM course_catalogs WHERE scope_key = ?1 AND ${QUIET}`),
     bind(`UPDATE scenarios SET enabled = 0, updated_at = ?4
       WHERE scope_key = ?1 AND organization_id = ?2 AND enabled = 1 AND ${QUIET}`),
+    bind(`UPDATE machine_builds SET state = 'failed', error = 'purged', updated_at = ?4
+      WHERE state = 'queued' AND bundle_rev IN (SELECT rev FROM bundles WHERE scope_key = ?1) AND ${QUIET}
+      RETURNING build_key`),
   ]);
   if (!marked?.results.length) throw await refusal(input);
+  // Revisions of other scopes that wait on such a build fail with it.
+  for (const { build_key: buildKey } of purgedBuilds!.results as Array<{ build_key: string }>) {
+    await settleScenarioRevisions(env, { buildKey });
+  }
 
   const { results: runs } = await bind(
     `SELECT run_id FROM scenario_runs WHERE scenario_id IN (${ORG_SCENARIOS}) LIMIT ${RUNS_PER_REQUEST + 1}`,
@@ -84,7 +102,8 @@ export async function purgeScenarioSource(input: {
   // between reads the same keys again. R2 deletes take at most 1000 keys.
   // The marker is still set, so no reconnect writes under these keys.
   const { results: keys } = await bind(
-    `SELECT r2_key AS key FROM bundles WHERE scope_key = ?1 AND organization_id = ?2`,
+    `SELECT r2_key AS key FROM bundles WHERE scope_key = ?1 AND organization_id = ?2
+      UNION ALL SELECT log_key FROM machine_builds WHERE log_key IS NOT NULL AND ${SCOPE_BUILDS}`,
   ).all<{ key: string }>();
   for (let offset = 0; offset < keys.length; offset += 1000) {
     await env.VM_IMAGE_REGISTRY_BUCKET.delete(
@@ -99,6 +118,7 @@ export async function purgeScenarioSource(input: {
     bind(`DELETE FROM scenario_assignments WHERE organization_id = ?2
       AND scenario_id IN (${ORG_SCENARIOS}) AND ${PURGING}`),
     bind(`DELETE FROM scenarios WHERE scope_key = ?1 AND organization_id = ?2 AND ${PURGING}`),
+    bind(`DELETE FROM machine_builds WHERE ${SCOPE_BUILDS} AND ${PURGING}`),
     bind(`DELETE FROM bundles WHERE scope_key = ?1 AND organization_id = ?2 AND ${PURGING}`),
     bind(`DELETE FROM scenario_sources WHERE scope_key = ?1 AND ${PURGING}
       AND NOT EXISTS (${ORG_SCENARIOS})`),
