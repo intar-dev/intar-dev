@@ -588,7 +588,6 @@ export const DISK_CHUNK_MEDIA_TYPE = "{}";
 export const KINO_ARTIFACT_TYPE = "{}";
 export const MACHINE_SPEC_MEDIA_TYPE = "{}";
 export const WAKE_RAM_CHUNK_MEDIA_TYPE = "{}";
-export const WAKE_DELTA_MEDIA_TYPE = "{}";
 export const WAKE_STUB_MEDIA_TYPE = "{}";
 export const WAKE_CPU_PROFILE_MEDIA_TYPE = "{}";
 export const PLATFORM_BASE_IMAGE = "{}";
@@ -647,7 +646,6 @@ export const runtimeEnvKeys = {{
         intar_contracts::oci::KINO_ARTIFACT_TYPE,
         intar_contracts::oci::MACHINE_SPEC_MEDIA_TYPE,
         intar_contracts::oci::WAKE_RAM_CHUNK_MEDIA_TYPE,
-        intar_contracts::oci::WAKE_DELTA_MEDIA_TYPE,
         intar_contracts::oci::WAKE_STUB_MEDIA_TYPE,
         intar_contracts::oci::WAKE_CPU_PROFILE_MEDIA_TYPE,
         intar_contracts::scenario::PLATFORM_BASE_IMAGE,

@@ -199,20 +199,13 @@ pub(super) async fn ensure_jailer_image_template(
     Ok(result)
 }
 
-/// The suspended guest's RAM size plus a pack's delta bytes, when asked.
+/// The suspended guest's RAM size, when asked.
 pub(super) fn wake_prepare_bytes(
     image: &image_cache::PulledMachine,
     prepare_wake: bool,
 ) -> Option<u64> {
     let ram = image.config.wake.as_ref()?.ram.size_bytes;
-    prepare_wake.then(|| {
-        image
-            .manifest
-            .layers
-            .iter()
-            .filter(|layer| layer.media_type == intar_contracts::oci::WAKE_DELTA_MEDIA_TYPE)
-            .fold(ram, |total, layer| total.saturating_add(layer.size))
-    })
+    prepare_wake.then_some(ram)
 }
 
 fn validate_prepared_image_v3_result(

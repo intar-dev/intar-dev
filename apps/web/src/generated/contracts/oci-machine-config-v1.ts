@@ -39,8 +39,8 @@ export interface MachineDiskV1 {
  */
 export interface WakeV1 {
   /**
-   * When the base was cold-booted, carried unchanged into every pack.
-   * The guest's certificates date from that boot.
+   * When the image's guest was cold-booted before its suspend. Its
+   * certificates date from that boot.
    */
   booted_at_unix_ms: number;
   /**
@@ -48,29 +48,12 @@ export interface WakeV1 {
    * digits.
    */
   cpu_profile: string;
-  /**
-   * Set on a pack, absent on a base.
-   */
-  pack?: WakePackV1 | null;
   ram: WakeRamV1;
   shape: WakeShapeV1;
   vmm: WakeVmmV1;
 }
-export interface WakePackV1 {
-  /**
-   * An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex
-   * digits.
-   */
-  base: string;
-  /**
-   * A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so
-   * nothing else parses.
-   */
-  ram_sha256: string;
-}
 /**
- * The base's RAM file. A pack repeats its base's value, so a host needs
- * no other manifest to assemble it.
+ * The guest's whole RAM file at its suspend.
  */
 export interface WakeRamV1 {
   chunk_size: number;

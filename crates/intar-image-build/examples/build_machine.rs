@@ -7,8 +7,7 @@
 //! build_machine wake-ram <out dir> <sha256:MANIFEST> <ram>
 //! ```
 //!
-//! `wake-ram` writes the RAM file a wake image wakes from: the base's chunks,
-//! and on a pack its delta applied to them.
+//! `wake-ram` writes the RAM file a wake image wakes from, out of its chunks.
 //!
 //! `qemu.json` is a `QemuBuildConfig`; make the bundle with `intar-image-cli bundle`.
 
@@ -75,9 +74,8 @@ fn main() -> Result<()> {
                     .wake
                     .as_ref()
                     .map_or("none".to_owned(), |wake| format!(
-                        "ram_chunks={} pack={}",
-                        wake.ram.chunks.len(),
-                        wake.pack.is_some()
+                        "ram_chunks={}",
+                        wake.ram.chunks.len()
                     ))
             );
             Ok(())
@@ -100,31 +98,11 @@ fn wake_ram(out: &Path, manifest: &OciDigest, ram: &Path) -> Result<()> {
         let layer = &image.manifest.layers[index as usize];
         Ok(std::fs::read(out.join("sha256").join(layer.digest.hex()))?)
     };
-    let base = if wake.pack.is_some() {
-        ram.with_extension("base")
-    } else {
-        ram.to_path_buf()
-    };
-    let mut file = std::fs::File::create(&base)?;
+    let mut file = std::fs::File::create(ram)?;
     file.set_len(wake.ram.size_bytes)?;
     for (index, layer, _) in &wake.ram.chunks {
         file.seek(SeekFrom::Start(index * wake.ram.chunk_size))?;
         file.write_all(&zstd::stream::decode_all(blob(*layer)?.as_slice())?)?;
-    }
-    drop(file);
-    if wake.pack.is_some() {
-        let delta = ram.with_extension("delta");
-        let mut parts = std::fs::File::create(&delta)?;
-        for layer in &image.manifest.layers {
-            if layer.media_type == intar_contracts::oci::WAKE_DELTA_MEDIA_TYPE {
-                parts.write_all(&std::fs::read(out.join("sha256").join(layer.digest.hex()))?)?;
-            }
-        }
-        drop(parts);
-        let threads = std::thread::available_parallelism().map_or(1, usize::from);
-        intar_snapdelta::apply(&base, &delta, ram, threads)?;
-        std::fs::remove_file(&delta)?;
-        std::fs::remove_file(&base)?;
     }
     Ok(())
 }

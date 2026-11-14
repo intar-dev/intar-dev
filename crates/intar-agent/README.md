@@ -152,7 +152,7 @@ Cloud Hypervisor v55.0.0 path and SHA-256 belong only in the root-owned
 An image may carry a suspended guest (`wake` in its machine config). With
 `[wake] enabled = true`, an image whose `wake.cpu_profile` is listed in
 `profiles` (`sha256:<hex>`, pinned per host by the operator) also has its RAM
-chunks, wake stub, CPU profile and pack delta pulled, and jailerd prepares them
+chunks, wake stub and CPU profile pulled, and jailerd prepares them
 with `prepare_wake`. If that prepare fails, the image is prepared without them
 and stays usable for cold boots.
 

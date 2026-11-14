@@ -1,9 +1,9 @@
 //! Media types and config shapes of the artifacts in the registry.
 //!
 //! A wake image is a machine image whose manifest also carries a suspended
-//! guest: the RAM file of a base, a pack's delta against it, the stub that
-//! jumps to the guest's wake vector, and the CPU profile the base was built
-//! under. A puller that cannot wake skips these layers and cold-boots.
+//! guest: its whole RAM file, the stub that jumps to the guest's wake
+//! vector, and the CPU profile it was suspended under. A puller that cannot
+//! wake skips these layers and cold-boots.
 
 pub mod verify;
 
@@ -26,15 +26,11 @@ pub const KINO_ARTIFACT_TYPE: &str = "application/vnd.intar.kino.v1";
 /// A machine spec, stored as a plain blob.
 pub const MACHINE_SPEC_MEDIA_TYPE: &str = "application/vnd.intar.machine.spec.v1+json";
 
-/// One zstd-compressed chunk of a base's RAM file.
+/// One zstd-compressed chunk of a wake image's RAM file.
 pub const WAKE_RAM_CHUNK_MEDIA_TYPE: &str = "application/vnd.intar.wake.ram.chunk.v1+zstd";
-/// A pack's RAM file as an `intar-snapdelta` delta against its base's, or
-/// one part of it when the delta is over the blob size limit. Parts are
-/// concatenated in layer order.
-pub const WAKE_DELTA_MEDIA_TYPE: &str = "application/vnd.intar.wake.delta.v1";
-/// The wake stub of a base, given to the VMM as the kernel.
+/// The wake stub of a wake image, given to the VMM as the kernel.
 pub const WAKE_STUB_MEDIA_TYPE: &str = "application/vnd.intar.wake.stub.v1";
-/// The cloud-hypervisor CPU profile a base was built under.
+/// The cloud-hypervisor CPU profile a wake image was suspended under.
 pub const WAKE_CPU_PROFILE_MEDIA_TYPE: &str = "application/vnd.intar.wake.cpu-profile.v1+json";
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -186,19 +182,15 @@ pub struct KinoConfigV1 {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WakeV1 {
-    /// The base's RAM file. A pack repeats its base's value, so a host needs
-    /// no other manifest to assemble it.
+    /// The guest's whole RAM file at its suspend.
     pub ram: WakeRamV1,
-    /// Set on a pack, absent on a base.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pack: Option<WakePackV1>,
     pub shape: WakeShapeV1,
     /// The CPU profile layer. A host wakes the image only when it knows a
     /// profile with this digest and its KVM offers what that profile needs.
     pub cpu_profile: OciDigest,
     pub vmm: WakeVmmV1,
-    /// When the base was cold-booted, carried unchanged into every pack.
-    /// The guest's certificates date from that boot.
+    /// When the image's guest was cold-booted before its suspend. Its
+    /// certificates date from that boot.
     pub booted_at_unix_ms: u64,
 }
 
@@ -212,17 +204,6 @@ pub struct WakeRamV1 {
     pub chunks: Vec<(u64, u32, Sha256Hex)>,
     /// SHA-256 of the assembled file, checked once per host.
     pub sha256: Sha256Hex,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WakePackV1 {
-    /// Manifest digest of the base the delta applies to. It is a check, not
-    /// a reference to fetch: the pack's manifest lists the base's layers.
-    pub base: OciDigest,
-    /// SHA-256 of the RAM file rebuilt from the base's and the delta. The
-    /// build checks it; a start does not hash the file.
-    pub ram_sha256: Sha256Hex,
 }
 
 /// What the guest was suspended with. A VM's size is chosen at the wake,
@@ -259,7 +240,6 @@ mod tests {
         let hex = |digit: &str| digit.repeat(64);
         serde_json::json!({
             "ram": {"size_bytes": 4_294_967_296_u64, "chunk_size": 4_194_304, "chunks": [[0, 7, hex("b")]], "sha256": hex("c")},
-            "pack": {"base": format!("sha256:{}", hex("a")), "ram_sha256": hex("e")},
             "shape": {"memory_bytes": 4_294_967_296_u64, "boot_vcpus": 2, "max_vcpus": 4, "balloon": true, "max_phys_bits": 36},
             "cpu_profile": format!("sha256:{}", hex("d")),
             "vmm": {"min_version": "v55.0.0", "built_with": "v55.0.0"},
@@ -273,9 +253,13 @@ mod tests {
         let wake: WakeV1 = serde_json::from_value(json.clone())?;
         assert_eq!(serde_json::to_value(&wake)?, json);
 
-        let mut unknown = json;
+        let mut unknown = json.clone();
         unknown["later"] = true.into();
         assert!(serde_json::from_value::<WakeV1>(unknown).is_err());
+        // A delta against another image's RAM is no longer a wake.
+        let mut pack = json;
+        pack["pack"] = serde_json::json!({"base": format!("sha256:{}", "a".repeat(64)), "ram_sha256": "e".repeat(64)});
+        assert!(serde_json::from_value::<WakeV1>(pack).is_err());
         Ok(())
     }
 

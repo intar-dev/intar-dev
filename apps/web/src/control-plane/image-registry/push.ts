@@ -8,7 +8,6 @@ import {
   MACHINE_ARTIFACT_TYPE,
   MACHINE_CONFIG_MEDIA_TYPE,
   WAKE_CPU_PROFILE_MEDIA_TYPE,
-  WAKE_DELTA_MEDIA_TYPE,
   WAKE_RAM_CHUNK_MEDIA_TYPE,
   WAKE_STUB_MEDIA_TYPE,
 } from "@/generated/constants";
@@ -29,7 +28,7 @@ export const OCI_PREFIX = "oci/sha256/";
 export const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
 export const KINO_CONFIG_MEDIA_TYPE = "application/vnd.intar.kino.config.v1+json";
 const KINO_BINARY_MEDIA_TYPE = "application/octet-stream";
-/** A delta part is 32 MiB and a kernel about 11 MB; a Worker body is capped at 100 MB. */
+/** A kernel is about 11 MB and a chunk at most 8 MiB; a Worker body is capped at 100 MB. */
 export const MAX_BLOB_BYTES = 64 * 1024 * 1024;
 export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_RESULT_BYTES = 4096;
@@ -46,7 +45,6 @@ const MACHINE_LAYER_MEDIA_TYPES = new Set([
   INITRD_MEDIA_TYPE,
   DISK_CHUNK_MEDIA_TYPE,
   WAKE_RAM_CHUNK_MEDIA_TYPE,
-  WAKE_DELTA_MEDIA_TYPE,
   WAKE_STUB_MEDIA_TYPE,
   WAKE_CPU_PROFILE_MEDIA_TYPE,
 ]);

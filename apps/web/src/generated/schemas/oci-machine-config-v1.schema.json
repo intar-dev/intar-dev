@@ -109,24 +109,6 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
-    "WakePackV1": {
-      "type": "object",
-      "properties": {
-        "base": {
-          "description": "Manifest digest of the base the delta applies to. It is a check, not\na reference to fetch: the pack's manifest lists the base's layers.",
-          "$ref": "#/$defs/OciDigest"
-        },
-        "ram_sha256": {
-          "description": "SHA-256 of the RAM file rebuilt from the base's and the delta. The\nbuild checks it; a start does not hash the file.",
-          "$ref": "#/$defs/Sha256Hex"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "base",
-        "ram_sha256"
-      ]
-    },
     "WakeRamV1": {
       "type": "object",
       "properties": {
@@ -221,7 +203,7 @@
       "type": "object",
       "properties": {
         "booted_at_unix_ms": {
-          "description": "When the base was cold-booted, carried unchanged into every pack.\nThe guest's certificates date from that boot.",
+          "description": "When the image's guest was cold-booted before its suspend. Its\ncertificates date from that boot.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -230,19 +212,8 @@
           "description": "The CPU profile layer. A host wakes the image only when it knows a\nprofile with this digest and its KVM offers what that profile needs.",
           "$ref": "#/$defs/OciDigest"
         },
-        "pack": {
-          "description": "Set on a pack, absent on a base.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/WakePackV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "ram": {
-          "description": "The base's RAM file. A pack repeats its base's value, so a host needs\nno other manifest to assemble it.",
+          "description": "The guest's whole RAM file at its suspend.",
           "$ref": "#/$defs/WakeRamV1"
         },
         "shape": {

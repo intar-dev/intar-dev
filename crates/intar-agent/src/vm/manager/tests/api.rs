@@ -517,34 +517,19 @@ fn an_old_run_stays_queued_until_its_network_is_gone() {
 }
 
 #[test]
-fn a_wake_prepare_budget_adds_its_ram_delta_and_apply() {
+fn a_wake_prepare_budget_adds_its_ram() {
     let rate = BACKGROUND_PREPARE_BYTES_PER_SECOND;
-    let (disk, wake) = (8_u64 << 30, (16_u64 << 30) + (1 << 30));
-    let expected = (disk + wake).div_ceil(rate) * 2
-        + JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS
-        + intar_jailer_protocol::WAKE_APPLY_TIMEOUT_SECONDS;
+    let (disk, wake) = (8_u64 << 30, 16_u64 << 30);
+    let expected = (disk + wake).div_ceil(rate) * 2 + JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS;
     assert_eq!(
         jailer_prepare_timeout(RequestClass::Background, disk, Some(wake)),
         Duration::from_secs(expected)
-    );
-    // A small wake still gets the apply's limit on top.
-    assert_eq!(
-        jailer_prepare_timeout(RequestClass::Background, 0, Some(0)),
-        Duration::from_secs(
-            JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS
-                + intar_jailer_protocol::WAKE_APPLY_TIMEOUT_SECONDS
-        )
-        .max(JAILER_PREPARE_IMAGE_TIMEOUT)
     );
     // The wake bytes are clamped as the disk is.
     let max = intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES;
     assert_eq!(
         jailer_prepare_timeout(RequestClass::Background, disk, Some(u64::MAX)),
-        jailer_prepare_timeout(
-            RequestClass::Background,
-            disk,
-            Some(max + image_cache::MAX_WAKE_DELTA_BYTES)
-        )
+        jailer_prepare_timeout(RequestClass::Background, disk, Some(max))
     );
     assert_eq!(
         jailer_prepare_timeout(RequestClass::Foreground, disk, Some(wake)),

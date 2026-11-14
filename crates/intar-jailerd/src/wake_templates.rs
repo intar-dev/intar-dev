@@ -1,11 +1,8 @@
 //! The suspended guest of a machine image, prepared into its template.
 //!
-//! A base's RAM file is assembled once per host from its chunk blobs into
-//! the root-owned store `ram/<sha256>.ram`, and the template's `ram` is a
-//! clone of it. A pack's `ram` is its base's store file with the pack's
-//! delta applied; the delta is registry content, so the apply runs in the
-//! sandbox of [`crate::wake_apply`], and its output counts for nothing until
-//! its SHA-256 is the one the pack names.
+//! A wake image's RAM file is assembled once per host from its chunk blobs
+//! into the root-owned store `ram/<sha256>.ram`, and the template's `ram`
+//! is a clone of it.
 
 use super::*;
 
@@ -13,12 +10,6 @@ use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 
 use intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES;
 use intar_jailer_protocol::{WAKE_CPU_PROFILE_FILE, WAKE_RAM_FILE, WAKE_STUB_FILE, WakeArtifacts};
-
-/// A pack's apply rewrites at most 64 GiB of mostly sparse RAM.
-const WAKE_APPLY_TIMEOUT: Duration =
-    Duration::from_secs(intar_jailer_protocol::WAKE_APPLY_TIMEOUT_SECONDS);
-/// The helper's buffers (two threads, two at most 256 MiB each) and zstd.
-const WAKE_APPLY_MEMORY_MAX_BYTES: u64 = 1536 * 1024 * 1024;
 
 /// Prepare `ram`, `stub` and `cpu-profile.json` into `template`, the
 /// unpublished template directory.
@@ -45,29 +36,11 @@ pub(super) fn prepare_wake_files(
     )?;
     let store = ensure_ram_store(config, chunk_cache, wake, lane)?;
     let ram_path = template.join(WAKE_RAM_FILE);
-    let ram_sha256 = match &wake.pack {
-        None => {
-            stage_prepared_template_source_file(store, &ram_path, 0o400)?;
-            wake.ram_sha256.clone()
-        }
-        Some((deltas, ram_sha256)) => {
-            drop(store);
-            apply_pack(
-                config,
-                chunk_cache,
-                wake,
-                deltas,
-                ram_sha256,
-                template,
-                lane,
-            )?;
-            ram_sha256.clone()
-        }
-    };
+    stage_prepared_template_source_file(store, &ram_path, 0o400)?;
     let ram = File::open(&ram_path)?;
     Ok(ImageTemplateWakeV1 {
         ram_store_sha256: Sha256Digest::parse(wake.ram_sha256.clone())?,
-        ram: root_template_artifact(&ram, &ram_sha256, wake.ram_size_bytes)?,
+        ram: root_template_artifact(&ram, &wake.ram_sha256, wake.ram_size_bytes)?,
         stub,
         cpu_profile,
     })
@@ -232,72 +205,6 @@ pub(super) fn assemble_ram(
         file_sha256(file)? == wake.ram_sha256,
         "assembled wake RAM SHA-256 mismatch"
     );
-    Ok(())
-}
-
-/// Rebuild a pack's RAM file into `template/ram` from the base's store file
-/// and the delta parts, applied by the sandboxed helper.
-fn apply_pack(
-    config: &JailerdConfig,
-    chunk_cache: &OwnedFd,
-    wake: &VerifiedWake,
-    deltas: &[WakeLayer],
-    ram_sha256: &str,
-    template: &Path,
-    lane: &PrepareLane,
-) -> Result<()> {
-    let delta_path = template.join(".delta");
-    let ram_path = template.join(WAKE_RAM_FILE);
-    let store_path = config
-        .jail_root
-        .join("ram")
-        .join(format!("{}.ram", wake.ram_sha256));
-    let operation = (|| -> Result<File> {
-        let mut delta = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o400)
-            .open(&delta_path)?;
-        for part in deltas {
-            append_verified_blob(config, chunk_cache, part, &mut delta, lane)?;
-        }
-        drop(delta);
-        let out = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&ram_path)?;
-        crate::wake_apply::apply_snapdelta_sandboxed(
-            &config.jailer_binary,
-            &store_path,
-            &delta_path,
-            &ram_path,
-            WAKE_APPLY_TIMEOUT,
-            WAKE_APPLY_MEMORY_MAX_BYTES,
-        )
-        .context("apply the wake pack's RAM delta in the sandbox")?;
-        Ok(out)
-    })();
-    let _ = std::fs::remove_file(&delta_path);
-    let out = operation?;
-    // The helper's output is untrusted until its digest matches.
-    let metadata = out.metadata()?;
-    ensure!(
-        metadata.is_file() && metadata.nlink() == 1 && metadata.len() == wake.ram_size_bytes,
-        "wake pack RAM has the wrong shape"
-    );
-    ensure!(
-        file_sha256(&out)? == ram_sha256,
-        "wake pack RAM SHA-256 mismatch"
-    );
-    out.sync_all()?;
-    rustix::fs::fchmod(&out, Mode::RUSR)?;
-    rustix::fs::fchown(
-        &out,
-        Some(rustix::process::Uid::ROOT),
-        Some(rustix::process::Gid::ROOT),
-    )?;
     Ok(())
 }
 
@@ -499,7 +406,6 @@ mod tests {
                 sha256: "b".repeat(64),
                 size_bytes: 1,
             },
-            pack: None,
         };
         Ok((file, encoded, wake))
     }
@@ -582,82 +488,18 @@ mod tests {
         Ok(())
     }
 
-    /// The whole pack path on a real host: the base's RAM store assembled,
-    /// the two delta parts joined, the apply run in the sandbox, its output
-    /// checked. Needs root, systemd >= 253, Landlock ABI 3 and an
-    /// `intar-jailer` the dynamic user can execute, at
-    /// `INTAR_SNAPDELTA_TEST_JAILER`.
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "needs root, systemd and a reachable intar-jailer"]
-    fn a_pack_is_prepared_through_the_sandbox() -> Result<()> {
-        let page = |byte: u8| vec![byte; 4096];
-        let base = [page(1), page(2), page(3), page(4)].concat();
-        let fork = [page(1), page(0), page(7), page(8)].concat();
-        let delta = crate::wake_apply::tests::delta_for(&base, &fork)?;
-        let (first, second) = delta.split_at(delta.len() / 2);
-        let encoded = zstd::encode_all(&base[..], 3)?;
-        let (stub, profile) = (b"stub".as_slice(), b"{}".as_slice());
-        let cache = cache(&[&encoded, first, second, stub, profile])?;
-        let jail_root = tempfile::tempdir()?;
-        let config = JailerdConfig {
-            jail_root: jail_root.path().to_owned(),
-            jailer_binary: PathBuf::from(std::env::var("INTAR_SNAPDELTA_TEST_JAILER")?),
-            ..cache.config.clone()
-        };
-        let layer = |bytes: &[u8]| WakeLayer {
-            sha256: sha(bytes),
-            size_bytes: bytes.len() as u64,
-        };
-        let wake = |ram_sha256: String| VerifiedWake {
-            ram_size_bytes: base.len() as u64,
-            ram_sha256: sha(&base),
-            ram_chunks: vec![chunk(0, &base, &encoded)],
-            stub: layer(stub),
-            cpu_profile: layer(profile),
-            pack: Some((vec![layer(first), layer(second)], ram_sha256)),
-        };
-        let lane = PrepareLane::claim(RequestClass::Foreground)?;
-        let template = jail_root.path().join("templates/.prepare-test");
-        std::fs::create_dir_all(&template)?;
-
-        let prepared = prepare_wake_files(&config, &wake(sha(&fork)), &cache.fd, &template, &lane)?;
-        assert_eq!(std::fs::read(template.join("ram"))?, fork);
-        assert_eq!(prepared.ram.sha256.as_str(), sha(&fork));
-        assert_eq!(prepared.ram_store_sha256.as_str(), sha(&base));
-        assert!(!template.join(".delta").exists());
-        let store = jail_root.path().join(format!("ram/{}.ram", sha(&base)));
-        assert_eq!(std::fs::read(&store)?, base);
-        for path in [store, template.join("ram"), template.join("stub")] {
-            let metadata = std::fs::metadata(&path)?;
-            assert_eq!((metadata.uid(), metadata.mode() & 0o777), (0, 0o400));
-        }
-
-        // An output that is not the pack's RAM is refused.
-        let other = jail_root.path().join("templates/.prepare-other");
-        std::fs::create_dir_all(&other)?;
-        let error = prepare_wake_files(&config, &wake(sha(&base)), &cache.fd, &other, &lane)
-            .expect_err("a wrong pack digest");
-        assert!(format!("{error:#}").contains("wake pack RAM SHA-256 mismatch"));
-        Ok(())
-    }
-
     /// A published template gains its wake files on a `prepare_wake`
     /// request, keeping its root disk and kernel; a cold prepare needs no
     /// wake layer; an image without `wake` cannot be prepared with it. The
-    /// disk has no chunks, so no reflink is needed. Needs what
-    /// [`a_pack_is_prepared_through_the_sandbox`] needs.
+    /// disk has no chunks, so no reflink is needed. Needs root.
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "needs root, systemd and a reachable intar-jailer"]
+    #[ignore = "needs root"]
     fn a_template_gains_its_wake_files_under_its_lock() -> Result<()> {
         use intar_jailer_protocol::TrustedDirectorySource;
 
         let page = |byte: u8| vec![byte; 4096];
         let base = [page(1), page(2), page(3), page(4)].concat();
-        let fork = [page(1), page(0), page(7), page(8)].concat();
-        let delta = crate::wake_apply::tests::delta_for(&base, &fork)?;
-        let (first, second) = delta.split_at(delta.len() / 2);
         let ram_chunk = zstd::encode_all(&base[..], 3)?;
         let (kernel, stub, profile) = (b"kernel".as_slice(), b"stub".as_slice(), b"{}".as_slice());
 
@@ -680,7 +522,6 @@ mod tests {
                 machine["wake"] = serde_json::json!({
                     "ram": {"size_bytes": base.len(), "chunk_size": 4 << 20,
                             "chunks": [[0, 1, sha(&base)]], "sha256": sha(&base)},
-                    "pack": {"base": format!("sha256:{}", "9".repeat(64)), "ram_sha256": sha(&fork)},
                     "shape": {"memory_bytes": base.len(), "boot_vcpus": 1, "max_vcpus": 2, "balloon": true, "max_phys_bits": 36},
                     "cpu_profile": format!("sha256:{}", sha(profile)),
                     "vmm": {"min_version": "v50.0", "built_with": "v50.0"},
@@ -690,8 +531,6 @@ mod tests {
                     descriptor("application/vnd.intar.wake.ram.chunk.v1+zstd", &ram_chunk),
                     descriptor("application/vnd.intar.wake.stub.v1", stub),
                     descriptor("application/vnd.intar.wake.cpu-profile.v1+json", profile),
-                    descriptor("application/vnd.intar.wake.delta.v1", first),
-                    descriptor("application/vnd.intar.wake.delta.v1", second),
                 ]);
             }
             let config = serde_json::to_vec(&machine)?;
@@ -736,7 +575,6 @@ mod tests {
         let jail_root = tempfile::tempdir()?;
         let config = JailerdConfig {
             jail_root: jail_root.path().to_owned(),
-            jailer_binary: PathBuf::from(std::env::var("INTAR_SNAPDELTA_TEST_JAILER")?),
             allowed_source_roots: vec![sources.path().to_owned()],
             ..JailerdConfig::default()
         };
@@ -758,7 +596,7 @@ mod tests {
             identity(template(&request).join("kernel"))?,
         );
 
-        for blob in [&ram_chunk[..], stub, profile, first, second] {
+        for blob in [&ram_chunk[..], stub, profile] {
             put(blob)?;
         }
         request.prepare_wake = true;
@@ -768,7 +606,7 @@ mod tests {
             (warm.root_disk.clone(), warm.kernel.clone()),
             (cold.root_disk, cold.kernel)
         );
-        assert_eq!(std::fs::read(template(&request).join("ram"))?, fork);
+        assert_eq!(std::fs::read(template(&request).join("ram"))?, base);
         assert_eq!(
             before,
             (

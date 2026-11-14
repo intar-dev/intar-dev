@@ -521,10 +521,8 @@ const JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS: u64 = 300;
 /// `2 * MAX_CHUNKED_IMAGE_BYTES / BACKGROUND_PREPARE_BYTES_PER_SECOND + margin`.
 /// A foreground request keeps [`JAILER_PREPARE_IMAGE_TIMEOUT`].
 ///
-/// A `prepare_wake` request also writes the suspended guest's RAM and a
-/// pack's delta through the same lane and runs the sandboxed apply:
-/// `wake_bytes` is the RAM size plus the delta bytes, clamped the same way,
-/// and the apply's own limit is added.
+/// A `prepare_wake` request also writes the suspended guest's RAM through
+/// the same lane: `wake_bytes` is its size, clamped the same way.
 fn jailer_prepare_timeout(
     class: RequestClass,
     virtual_size_bytes: u64,
@@ -536,18 +534,11 @@ fn jailer_prepare_timeout(
     let max = intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES;
     let bytes = virtual_size_bytes
         .min(max)
-        .saturating_add(wake_bytes.map_or(0, |bytes| {
-            bytes.min(max + image_cache::MAX_WAKE_DELTA_BYTES)
-        }));
+        .saturating_add(wake_bytes.map_or(0, |bytes| bytes.min(max)));
     let seconds = bytes
         .div_ceil(BACKGROUND_PREPARE_BYTES_PER_SECOND)
         .saturating_mul(2)
-        .saturating_add(JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS)
-        .saturating_add(if wake_bytes.is_some() {
-            intar_jailer_protocol::WAKE_APPLY_TIMEOUT_SECONDS
-        } else {
-            0
-        });
+        .saturating_add(JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS);
     JAILER_PREPARE_IMAGE_TIMEOUT.max(Duration::from_secs(seconds))
 }
 

@@ -15,8 +15,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 use intar_contracts::oci::{
     DISK_CHUNK_MEDIA_TYPE, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE, KINO_ARTIFACT_TYPE,
     MACHINE_ARTIFACT_TYPE, MACHINE_CONFIG_MEDIA_TYPE, MachineConfigV1, OciDescriptorV1, OciDigest,
-    OciManifestV1, WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_DELTA_MEDIA_TYPE, WAKE_RAM_CHUNK_MEDIA_TYPE,
-    WAKE_STUB_MEDIA_TYPE,
+    OciManifestV1, WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_RAM_CHUNK_MEDIA_TYPE, WAKE_STUB_MEDIA_TYPE,
 };
 use reqwest::StatusCode;
 use sha2::{Digest as _, Sha256};
@@ -36,8 +35,6 @@ const MAX_BOOT_LAYER_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DISK_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 /// A CPU profile is a small JSON document.
 const MAX_WAKE_CPU_PROFILE_BYTES: u64 = 1024 * 1024;
-/// A pack's delta, all parts together; jailerd refuses more.
-pub(crate) const MAX_WAKE_DELTA_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// A registry token lives 15 minutes; it is renewed this long before its end.
 const TOKEN_MARGIN: Duration = Duration::from_secs(60);
 /// Blobs of one image pulled at once; each still takes a global transfer slot.
@@ -449,7 +446,7 @@ impl OciRegistry {
     }
 
     /// The suspended guest's layers of a pulled machine image: its RAM
-    /// chunks, stub, CPU profile and, on a pack, the delta parts. Sizes are
+    /// chunks, stub and CPU profile. Sizes are
     /// checked before a byte is fetched. The blobs are the image's, so the
     /// manifest's pin protects them like its other layers.
     pub(crate) async fn pull_wake_layers(
@@ -469,11 +466,10 @@ impl OciRegistry {
                 .filter(|layer| layer.media_type == media_type)
                 .collect()
         };
-        let (chunks, stubs, profiles, deltas) = (
+        let (chunks, stubs, profiles) = (
             of(WAKE_RAM_CHUNK_MEDIA_TYPE),
             of(WAKE_STUB_MEDIA_TYPE),
             of(WAKE_CPU_PROFILE_MEDIA_TYPE),
-            of(WAKE_DELTA_MEDIA_TYPE),
         );
         ensure!(
             stubs.len() == 1 && profiles.len() == 1,
@@ -486,17 +482,12 @@ impl OciRegistry {
                 && stubs.iter().all(|layer| layer.size <= MAX_BOOT_LAYER_BYTES)
                 && profiles
                     .iter()
-                    .all(|layer| layer.size <= MAX_WAKE_CPU_PROFILE_BYTES)
-                && deltas
-                    .iter()
-                    .try_fold(0_u64, |total, layer| total.checked_add(layer.size))
-                    .is_some_and(|total| total <= MAX_WAKE_DELTA_BYTES),
+                    .all(|layer| layer.size <= MAX_WAKE_CPU_PROFILE_BYTES),
             "unsupported_artifact: a wake layer is over its size limit"
         );
         let mut wanted = chunks;
         wanted.extend(stubs);
         wanted.extend(profiles);
-        wanted.extend(deltas);
         wanted.sort_by(|left, right| left.digest.cmp(&right.digest));
         wanted.dedup_by(|left, right| left.digest == right.digest);
         let repository = format!("machines/{}", pulled.image.hex());

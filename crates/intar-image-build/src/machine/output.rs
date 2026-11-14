@@ -15,8 +15,7 @@ use intar_contracts::oci::{
     DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE,
     MACHINE_ARTIFACT_TYPE, MACHINE_CONFIG_MEDIA_TYPE, MachineBootV1, MachineConfigV1,
     MachineDiskV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1, Sha256Hex,
-    WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_DELTA_MEDIA_TYPE, WAKE_RAM_CHUNK_MEDIA_TYPE,
-    WAKE_STUB_MEDIA_TYPE,
+    WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_RAM_CHUNK_MEDIA_TYPE, WAKE_STUB_MEDIA_TYPE,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -277,9 +276,7 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
                 read_blob(&blobs, &layer.digest, Some(layer.size))?;
                 continue;
             }
-            WAKE_STUB_MEDIA_TYPE | WAKE_CPU_PROFILE_MEDIA_TYPE | WAKE_DELTA_MEDIA_TYPE
-                if config.wake.is_some() =>
-            {
+            WAKE_STUB_MEDIA_TYPE | WAKE_CPU_PROFILE_MEDIA_TYPE if config.wake.is_some() => {
                 read_blob(&blobs, &layer.digest, Some(layer.size))?;
                 continue;
             }

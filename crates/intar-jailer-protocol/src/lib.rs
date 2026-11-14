@@ -48,8 +48,6 @@ pub const MAX_SSH_PUBLIC_PORT: u16 = 32_767;
 /// `MAX_CHUNKED_IMAGE_BYTES / BACKGROUND_PREPARE_BYTES_PER_SECOND` abandons
 /// an import that jailerd is still running.
 pub const BACKGROUND_PREPARE_BYTES_PER_SECOND: u64 = 16 * 1024 * 1024;
-/// How long jailerd lets a pack's sandboxed delta apply run.
-pub const WAKE_APPLY_TIMEOUT_SECONDS: u64 = 15 * 60;
 
 /// Pinned Cloud Hypervisor release.
 /// The release builds this version from a pinned commit of upstream's main
@@ -620,8 +618,7 @@ pub struct JailerCapabilities {
     pub supports_template_backed_launch: bool,
     pub fast_template_store: bool,
     /// The host can prepare and launch an image's suspended guest: it is
-    /// ready for template launches and can apply a pack's RAM delta in the
-    /// sandbox. Left out when false.
+    /// ready for template launches. Left out when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub supports_wake: bool,
     pub supports_hard_cpu_quota: bool,

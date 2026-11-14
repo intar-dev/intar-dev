@@ -26,10 +26,6 @@ tar.workspace = true
 tokio.workspace = true
 zstd.workspace = true
 
-[dev-dependencies]
-# The `build_machine` example rebuilds a pack's RAM from its delta.
-intar-snapdelta = { path = "../intar-snapdelta" }
-
 [target.'cfg(target_os = "linux")'.dependencies]
 reflink-copy.workspace = true
 

@@ -15,7 +15,6 @@ rustix.workspace = true
 intar-jailer-protocol = { path = "../intar-jailer-protocol" }
 nix.workspace = true
 serde_json.workspace = true
-intar-snapdelta = { path = "../intar-snapdelta" }
 landlock = "=0.4.7"
 
 [dev-dependencies]

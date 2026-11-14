@@ -36,7 +36,6 @@ export const DISK_CHUNK_MEDIA_TYPE = "application/vnd.intar.disk.chunk.v1+zstd";
 export const KINO_ARTIFACT_TYPE = "application/vnd.intar.kino.v1";
 export const MACHINE_SPEC_MEDIA_TYPE = "application/vnd.intar.machine.spec.v1+json";
 export const WAKE_RAM_CHUNK_MEDIA_TYPE = "application/vnd.intar.wake.ram.chunk.v1+zstd";
-export const WAKE_DELTA_MEDIA_TYPE = "application/vnd.intar.wake.delta.v1";
 export const WAKE_STUB_MEDIA_TYPE = "application/vnd.intar.wake.stub.v1";
 export const WAKE_CPU_PROFILE_MEDIA_TYPE = "application/vnd.intar.wake.cpu-profile.v1+json";
 export const PLATFORM_BASE_IMAGE = "trixie";

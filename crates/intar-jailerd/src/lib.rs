@@ -777,7 +777,6 @@ mod prepare_lane;
 use prepare_lane::*;
 mod store_gc;
 pub use store_gc::{StoreGcReport, gc_root_stores};
-mod wake_apply;
 mod wake_templates;
 use wake_templates::*;
 const IMAGE_TEMPLATE_METADATA_V3: u16 = 3;
@@ -820,7 +819,7 @@ struct ImageTemplateMetadataV2 {
 #[serde(deny_unknown_fields)]
 struct ImageTemplateWakeV1 {
     /// The host's RAM store file (`ram/<sha256>.ram`) the template's `ram`
-    /// comes from: its clone on a base, the base a pack's delta applied to.
+    /// is a clone of.
     ram_store_sha256: Sha256Digest,
     ram: ImageTemplateArtifactV2,
     stub: ImageTemplateArtifactV2,

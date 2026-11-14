@@ -2071,7 +2071,6 @@ dependencies = [
  "fs2",
  "intar-contracts",
  "intar-kino-proto",
- "intar-snapdelta",
  "reflink-copy",
  "ring",
  "russh",
@@ -2133,7 +2132,6 @@ dependencies = [
  "anyhow",
  "clap",
  "intar-jailer-protocol",
- "intar-snapdelta",
  "landlock",
  "nix",
  "rustix",
@@ -2208,15 +2206,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "intar-snapdelta"
-version = "0.1.0"
-dependencies = [
- "tempfile",
- "thiserror",
- "zstd",
 ]
 
 [[package]]

@@ -439,32 +439,35 @@ async fn an_oversized_kino_is_refused_before_its_download() -> Result<()> {
     Ok(())
 }
 
-/// A pack: a machine image with a suspended guest's RAM chunk, stub, CPU
-/// profile and delta. `grow` raises one RAM chunk's declared size.
-fn wake_machine(registry: &Registry, grow: u64) -> (OciDigest, Vec<OciDescriptorV1>) {
+/// A machine image with a suspended guest's RAM chunk, stub and CPU
+/// profile. `grow` raises one RAM chunk's declared size; `pack` adds the
+/// retired delta-against-a-base field.
+fn wake_machine(registry: &Registry, grow: u64, pack: bool) -> (OciDigest, Vec<OciDescriptorV1>) {
     let kernel = registry.descriptor(KERNEL_MEDIA_TYPE, b"kernel bytes");
     let chunk = registry.descriptor(DISK_CHUNK_MEDIA_TYPE, b"disk chunk");
     let mut ram = registry.descriptor(WAKE_RAM_CHUNK_MEDIA_TYPE, b"ram chunk");
     ram.size += grow;
     let stub = registry.descriptor(WAKE_STUB_MEDIA_TYPE, b"stub");
     let profile = registry.descriptor(WAKE_CPU_PROFILE_MEDIA_TYPE, b"{}");
-    let delta = registry.descriptor(WAKE_DELTA_MEDIA_TYPE, b"delta");
     let hex = "a".repeat(64);
-    let config = serde_json::to_vec(&serde_json::json!({
+    let mut config = serde_json::json!({
         "guest_contract": 3, "image_format": IMAGE_FORMAT, "build_key": format!("sha256:{hex}"),
         "boot": {"cmdline": "root=LABEL=INTARROOT"},
         "disk": {"size_bytes": 4 << 20, "chunk_size": 4 << 20, "chunks": [[0, 1, hex]]},
         "wake": {
             "ram": {"size_bytes": 4 << 20, "chunk_size": 4 << 20, "chunks": [[0, 2, hex]], "sha256": hex},
-            "pack": {"base": format!("sha256:{hex}"), "ram_sha256": hex},
             "shape": {"memory_bytes": 4 << 20, "boot_vcpus": 1, "max_vcpus": 2, "balloon": true, "max_phys_bits": 36},
             "cpu_profile": profile.digest.as_str(),
             "vmm": {"min_version": "v55.0.0", "built_with": "v55.0.0"},
             "booted_at_unix_ms": 1,
         },
-    }))
-    .expect("config");
-    let layers = vec![kernel, chunk, ram, stub, profile, delta];
+    });
+    if pack {
+        config["wake"]["pack"] =
+            serde_json::json!({"base": format!("sha256:{hex}"), "ram_sha256": hex});
+    }
+    let config = serde_json::to_vec(&config).expect("config");
+    let layers = vec![kernel, chunk, ram, stub, profile];
     let manifest = OciManifestV1 {
         schema_version: 2,
         media_type: OCI_MANIFEST_MEDIA_TYPE.to_owned(),
@@ -481,7 +484,7 @@ fn wake_machine(registry: &Registry, grow: u64) -> (OciDigest, Vec<OciDescriptor
 #[tokio::test]
 async fn a_suspended_guest_is_pulled_only_when_asked() -> Result<()> {
     let (registry, client, _temp, store) = serve().await;
-    let (image, layers) = wake_machine(&registry, 0);
+    let (image, layers) = wake_machine(&registry, 0, false);
 
     let pulled = client.pull_machine(&image, &store).await?;
     for layer in &layers[2..] {
@@ -504,7 +507,7 @@ async fn a_suspended_guest_is_pulled_only_when_asked() -> Result<()> {
 #[tokio::test]
 async fn an_oversized_wake_layer_is_refused_before_any_download() -> Result<()> {
     let (registry, client, _temp, store) = serve().await;
-    let (image, layers) = wake_machine(&registry, MAX_DISK_CHUNK_BYTES);
+    let (image, layers) = wake_machine(&registry, MAX_DISK_CHUNK_BYTES, false);
     let pulled = client.pull_machine(&image, &store).await?;
 
     let error = client
@@ -515,6 +518,17 @@ async fn an_oversized_wake_layer_is_refused_before_any_download() -> Result<()> 
     for layer in &layers[2..] {
         assert!(registry.requests_for(&layer.digest).is_empty());
     }
+
+    // A delta against another image's RAM is no image this agent reads.
+    let (pack, _) = wake_machine(&registry, 0, true);
+    let error = client
+        .pull_machine(&pack, &store)
+        .await
+        .expect_err("a pack");
+    assert!(
+        error.to_string().starts_with("unsupported_artifact:"),
+        "{error}"
+    );
 
     // An image without a suspended guest has none to pull.
     let (cold, _) = machine(&registry);

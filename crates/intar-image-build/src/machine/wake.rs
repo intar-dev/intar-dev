@@ -858,9 +858,8 @@ async fn quiet(pid: u32) -> Result<bool> {
     Ok(false)
 }
 
-/// The config of a wake image: its own RAM, never a delta to another
-/// image's, so the contract's base form (no `pack`) serves a pack as well,
-/// and `booted_at_unix_ms` is this image's own cold boot.
+/// The config of a wake image: its own whole RAM, and
+/// `booted_at_unix_ms` its own cold boot.
 fn wake_machine_config(
     build_key: &OciDigest,
     cmdline: String,
@@ -878,7 +877,6 @@ fn wake_machine_config(
         disk,
         wake: Some(WakeV1 {
             ram,
-            pack: None,
             shape: shape(),
             cpu_profile,
             vmm,
@@ -924,7 +922,6 @@ mod tests {
         assert_eq!(config.build_key, digest("e"));
         assert_eq!(config.boot.cmdline, "console=hvc0");
         let wake = config.wake.expect("wake");
-        assert!(wake.pack.is_none(), "a wake image is never a delta");
         assert_eq!((wake.ram, wake.booted_at_unix_ms), (ram, 1_234));
         assert_eq!(wake.shape, shape());
         assert_eq!(wake.cpu_profile, digest("f"));

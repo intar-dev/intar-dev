@@ -15,7 +15,6 @@
       "crates/intar-jailerd/**",
       "crates/intar-kino-proto/**",
       "crates/intar-observability/**",
-      "crates/intar-snapdelta/**",
       "crates/stargate-core/**",
       "deploy/personal-metal/**",
       "tools/workflows/release/build-release-artifacts.sh"
@@ -38,7 +37,6 @@
       "crates/intar-jailerd/deploy/migrate-epoch-config.py",
       "crates/intar-kino-proto/**",
       "crates/intar-observability/**",
-      "crates/intar-snapdelta/**",
       "tools/workflows/release/build-release-artifacts.sh"
     ]
   },

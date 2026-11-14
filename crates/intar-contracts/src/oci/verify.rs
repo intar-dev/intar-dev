@@ -6,8 +6,8 @@
 use super::{
     DISK_CHUNK_MEDIA_TYPE, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE, MACHINE_ARTIFACT_TYPE,
     MACHINE_CONFIG_MEDIA_TYPE, MachineConfigV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1,
-    OciManifestV1, Sha256Hex, WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_DELTA_MEDIA_TYPE,
-    WAKE_RAM_CHUNK_MEDIA_TYPE, WAKE_STUB_MEDIA_TYPE, WakeV1,
+    OciManifestV1, Sha256Hex, WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_RAM_CHUNK_MEDIA_TYPE,
+    WAKE_STUB_MEDIA_TYPE, WakeV1,
 };
 use crate::catalog::{IMAGE_CHUNK_SIZE_BYTES, MAX_CHUNKED_IMAGE_BYTES};
 
@@ -18,8 +18,6 @@ const MAX_WAKE_VCPUS: u32 = 64;
 /// x86-64 guest physical address widths cloud-hypervisor accepts.
 const MIN_WAKE_PHYS_BITS: u8 = 32;
 const MAX_WAKE_PHYS_BITS: u8 = 52;
-/// The most a pack's delta layers may hold together.
-pub const MAX_WAKE_DELTA_BYTES: u64 = 4 * GIB;
 const MAX_WAKE_STUB_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_WAKE_CPU_PROFILE_BYTES: u64 = 1024 * 1024;
 
@@ -51,15 +49,12 @@ pub struct WakeLayer {
 /// The suspended guest of a verified machine image.
 #[derive(Debug, Eq, PartialEq)]
 pub struct VerifiedWake {
-    /// The base's RAM file, as its chunks and its whole-file SHA-256.
+    /// The RAM file, as its chunks and its whole-file SHA-256.
     pub ram_size_bytes: u64,
     pub ram_sha256: String,
     pub ram_chunks: Vec<ImageChunk>,
     pub stub: WakeLayer,
     pub cpu_profile: WakeLayer,
-    /// A pack's delta parts in layer order, and the SHA-256 of the RAM file
-    /// they rebuild from the base's.
-    pub pack: Option<(Vec<WakeLayer>, String)>,
 }
 
 /// Follow the chain the image's identity commits to: the OCI manifest names
@@ -188,10 +183,10 @@ fn verified_chunks(
     Ok(chunks)
 }
 
-/// Check `wake` against the manifest the image id commits to: one stub, one
-/// CPU profile (the one `wake` names), a RAM file in rising chunks of the
-/// disk's size that the shape's memory equals, a bounded shape, and delta
-/// parts on a pack only.
+/// Check `wake` against the manifest the image id commits to: no layer of
+/// a kind a wake image does not have, one stub, one CPU profile (the one
+/// `wake` names), a RAM file in rising chunks that the shape's memory
+/// equals, and a bounded shape.
 ///
 /// # Errors
 /// Returns the first rule the wake breaks.
@@ -200,6 +195,24 @@ pub fn verified_wake(manifest: &OciManifestV1, wake: &WakeV1) -> Result<Verified
         sha256: descriptor.digest.hex().to_owned(),
         size_bytes: descriptor.size,
     };
+    let known = [
+        KERNEL_MEDIA_TYPE,
+        INITRD_MEDIA_TYPE,
+        DISK_CHUNK_MEDIA_TYPE,
+        WAKE_RAM_CHUNK_MEDIA_TYPE,
+        WAKE_STUB_MEDIA_TYPE,
+        WAKE_CPU_PROFILE_MEDIA_TYPE,
+    ];
+    if let Some(unknown) = manifest
+        .layers
+        .iter()
+        .find(|layer| !known.contains(&layer.media_type.as_str()))
+    {
+        return Err(format!(
+            "a wake image has a layer of unknown type {}",
+            unknown.media_type
+        ));
+    }
     let stubs = layers_of(manifest, WAKE_STUB_MEDIA_TYPE);
     let profiles = layers_of(manifest, WAKE_CPU_PROFILE_MEDIA_TYPE);
     let ([stub], [profile]) = (stubs.as_slice(), profiles.as_slice()) else {
@@ -241,35 +254,12 @@ pub fn verified_wake(manifest: &OciManifestV1, wake: &WakeV1) -> Result<Verified
         WAKE_RAM_CHUNK_MEDIA_TYPE,
         "wake RAM chunk",
     )?;
-    let deltas = layers_of(manifest, WAKE_DELTA_MEDIA_TYPE);
-    let pack = match &wake.pack {
-        None => {
-            ensure(deltas.is_empty(), "a wake base carries no delta")?;
-            None
-        }
-        Some(pack) => {
-            let total = deltas.iter().try_fold(0_u64, |total, delta| {
-                (delta.size > 0)
-                    .then(|| total.checked_add(delta.size))
-                    .flatten()
-            });
-            ensure(
-                !deltas.is_empty() && total.is_some_and(|total| total <= MAX_WAKE_DELTA_BYTES),
-                "wake pack delta is missing or too large",
-            )?;
-            Some((
-                deltas.iter().map(layer).collect(),
-                pack.ram_sha256.as_str().to_owned(),
-            ))
-        }
-    };
     Ok(VerifiedWake {
         ram_size_bytes: ram.size_bytes,
         ram_sha256: ram.sha256.as_str().to_owned(),
         ram_chunks,
         stub: layer(stub),
         cpu_profile: layer(profile),
-        pack,
     })
 }
 
@@ -405,9 +395,8 @@ mod tests {
     const GIB: u64 = 1024 * MIB;
 
     /// [`image`] with a suspended guest: a 9 MiB RAM file (chunk 1 a hole)
-    /// in layer 3, the stub in 4, the CPU profile in 5 and, on a pack, the
-    /// delta in two parts, 6 and 7.
-    fn wake_image(pack: bool) -> (serde_json::Value, serde_json::Value) {
+    /// in layer 3, the stub in 4 and the CPU profile in 5.
+    fn wake_image() -> (serde_json::Value, serde_json::Value) {
         let (mut manifest, mut machine) = image();
         let layer = |media: &str, digit: &str, size: u64| serde_json::json!({"mediaType": media, "digest": format!("sha256:{}", hex(digit)), "size": size});
         let layers = manifest["layers"].as_array_mut().expect("layers");
@@ -422,10 +411,6 @@ mod tests {
             "6",
             700,
         ));
-        if pack {
-            layers.push(layer("application/vnd.intar.wake.delta.v1", "7", 3 * GIB));
-            layers.push(layer("application/vnd.intar.wake.delta.v1", "8", MIB));
-        }
         machine["wake"] = serde_json::json!({
             "ram": {"size_bytes": 9 * MIB, "chunk_size": 4 * MIB,
                     "chunks": [[0, 3, hex("d")], [2, 3, hex("e")]], "sha256": hex("f")},
@@ -434,16 +419,11 @@ mod tests {
             "vmm": {"min_version": "v50.0", "built_with": "v50.0"},
             "booted_at_unix_ms": 1,
         });
-        if pack {
-            machine["wake"]["pack"] = serde_json::json!({
-                "base": format!("sha256:{}", hex("9")), "ram_sha256": hex("a"),
-            });
-        }
         (manifest, machine)
     }
 
-    /// The RAM chunks, the stub's and profile's digests, and the delta parts.
-    type WakeSummary = (Vec<(u32, u32)>, String, String, Option<Vec<u64>>);
+    /// The RAM chunks, and the stub's and profile's digests.
+    type WakeSummary = (Vec<(u32, u32)>, String, String);
 
     fn verify_wake(
         manifest: &serde_json::Value,
@@ -472,30 +452,23 @@ mod tests {
                     .collect(),
                 wake.stub.sha256,
                 wake.cpu_profile.sha256,
-                wake.pack.map(|(parts, ram_sha256)| {
-                    assert_eq!(ram_sha256, hex("a"));
-                    parts.iter().map(|part| part.size_bytes).collect()
-                }),
             )
         }))
     }
 
     #[test]
-    fn a_sound_base_and_a_sound_pack_yield_their_wake() {
-        let ram = vec![(0, 4 << 20), (2, 1 << 20)];
-        let (manifest, machine) = wake_image(false);
+    fn a_sound_wake_image_yields_its_wake() {
+        let (manifest, machine) = wake_image();
         assert_eq!(
             verify_wake(&manifest, &machine),
-            Ok(Some((ram.clone(), hex("5"), hex("6"), None)))
-        );
-        let (manifest, machine) = wake_image(true);
-        assert_eq!(
-            verify_wake(&manifest, &machine),
-            Ok(Some((ram, hex("5"), hex("6"), Some(vec![3 * GIB, MIB]))))
+            Ok(Some((vec![(0, 4 << 20), (2, 1 << 20)], hex("5"), hex("6"))))
         );
         // Without `wake` the image is checked exactly as before, whatever
         // else the manifest lists.
-        let (manifest, mut machine) = wake_image(true);
+        let (mut manifest, mut machine) = wake_image();
+        manifest["layers"].as_array_mut().expect("layers").push(
+            serde_json::json!({"mediaType": "application/vnd.intar.wake.delta.v1", "digest": format!("sha256:{}", hex("7")), "size": 1}),
+        );
         machine
             .as_object_mut()
             .expect("machine config")
@@ -506,78 +479,74 @@ mod tests {
     #[test]
     fn every_break_in_a_wake_is_refused() {
         type Break = fn(&mut serde_json::Value, &mut serde_json::Value);
-        let broken: [(bool, &str, Break); 20] = [
-            (false, "exactly one stub", |m, _| {
-                m["layers"][4]["mediaType"] = "application/vnd.intar.kernel.v2".into()
+        let broken: [(&str, Break); 18] = [
+            ("exactly one stub", |m, _| {
+                m["layers"][4]["mediaType"] =
+                    "application/vnd.intar.wake.cpu-profile.v1+json".into()
             }),
-            (false, "exactly one stub", |m, _| {
+            ("exactly one stub", |m, _| {
                 m["layers"][5]["mediaType"] = "application/vnd.intar.wake.stub.v1".into()
             }),
-            (false, "CPU profile is not the one", |_, c| {
+            ("CPU profile is not the one", |_, c| {
                 c["wake"]["cpu_profile"] = format!("sha256:{}", hex("5")).into()
             }),
-            (false, "implausible size", |m, _| {
+            ("implausible size", |m, _| {
                 m["layers"][4]["size"] = (257 * MIB).into()
             }),
-            (false, "implausible size", |m, _| {
+            ("implausible size", |m, _| {
                 m["layers"][5]["size"] = (2 * MIB).into()
             }),
-            (false, "RAM geometry", |_, c| {
+            ("RAM geometry", |_, c| {
                 c["wake"]["ram"]["chunk_size"] = 4096.into()
             }),
-            (false, "RAM geometry", |_, c| {
+            ("RAM geometry", |_, c| {
                 c["wake"]["shape"]["memory_bytes"] = (8 * MIB).into()
             }),
-            (false, "RAM geometry", |_, c| {
+            ("RAM geometry", |_, c| {
                 c["wake"]["ram"]["size_bytes"] = (65 * GIB).into();
                 c["wake"]["shape"]["memory_bytes"] = (65 * GIB).into();
             }),
-            (false, "vCPU shape", |_, c| {
+            ("vCPU shape", |_, c| {
                 c["wake"]["shape"]["boot_vcpus"] = 3.into()
             }),
-            (false, "vCPU shape", |_, c| {
+            ("vCPU shape", |_, c| {
                 c["wake"]["shape"]["boot_vcpus"] = 0.into()
             }),
-            (false, "vCPU shape", |_, c| {
+            ("vCPU shape", |_, c| {
                 c["wake"]["shape"]["max_vcpus"] = 65.into()
             }),
-            (false, "physical address width", |_, c| {
+            ("physical address width", |_, c| {
                 c["wake"]["shape"]["max_phys_bits"] = 31.into()
             }),
-            (false, "physical address width", |_, c| {
+            ("physical address width", |_, c| {
                 c["wake"]["shape"]["max_phys_bits"] = 53.into()
             }),
-            (false, "wake RAM chunk 0 is out of order", |_, c| {
+            ("wake RAM chunk 0 is out of order", |_, c| {
                 c["wake"]["ram"]["chunks"][1][0] = 0.into()
             }),
             (
-                false,
                 "wake RAM chunk 3 is out of order or out of range",
                 |_, c| c["wake"]["ram"]["chunks"][1][0] = 3.into(),
             ),
-            (false, "wake RAM chunk 0 names no chunk layer", |_, c| {
+            ("wake RAM chunk 0 names no chunk layer", |_, c| {
                 c["wake"]["ram"]["chunks"][0][1] = 2.into()
             }),
             (
-                false,
                 "wake RAM chunk 0 has an implausible encoded size",
                 |m, _| m["layers"][3]["size"] = (9 * MIB).into(),
             ),
-            (false, "a wake base carries no delta", |m, _| {
-                let delta = serde_json::json!({"mediaType": "application/vnd.intar.wake.delta.v1", "digest": format!("sha256:{}", hex("7")), "size": 1});
-                if let Some(layers) = m["layers"].as_array_mut() {
-                    layers.push(delta);
-                }
-            }),
-            (true, "delta is missing or too large", |m, _| {
-                m["layers"][7]["size"] = (GIB + 1).into()
-            }),
-            (true, "delta is missing or too large", |m, _| {
-                m["layers"][7]["size"] = 0.into()
-            }),
+            (
+                "layer of unknown type application/vnd.intar.wake.delta.v1",
+                |m, _| {
+                    let delta = serde_json::json!({"mediaType": "application/vnd.intar.wake.delta.v1", "digest": format!("sha256:{}", hex("7")), "size": 1});
+                    if let Some(layers) = m["layers"].as_array_mut() {
+                        layers.push(delta);
+                    }
+                },
+            ),
         ];
-        for (pack, expected, change) in broken {
-            let (mut manifest, mut machine) = wake_image(pack);
+        for (expected, change) in broken {
+            let (mut manifest, mut machine) = wake_image();
             change(&mut manifest, &mut machine);
             let error = verify_wake(&manifest, &machine).expect_err(expected);
             assert!(
@@ -585,13 +554,5 @@ mod tests {
                 "expected `{expected}` in `{error}`"
             );
         }
-        // A pack without any delta part.
-        let (mut manifest, machine) = wake_image(true);
-        manifest["layers"]
-            .as_array_mut()
-            .expect("layers")
-            .truncate(6);
-        let error = verify_wake(&manifest, &machine).expect_err("no delta");
-        assert!(error.contains("delta is missing"), "{error}");
     }
 }
