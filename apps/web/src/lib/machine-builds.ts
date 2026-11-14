@@ -277,12 +277,32 @@ export async function settleScenarioRevisions(env: Env, by: { rev: string } | { 
       ...doc,
       machines: doc.machines.map((machine) => ({ ...machine, image_digest: byKey.get(machine.build_key)!.image_digest })),
     });
-    await env.DB.prepare(
-      `UPDATE scenario_revisions SET doc_json = ?3, content_digest = ?4,
-          state = CASE WHEN EXISTS (SELECT 1 FROM scenario_revisions twin WHERE twin.scenario_id = ?1
-            AND twin.content_digest = ?4 AND twin.guest_contract = scenario_revisions.guest_contract
-            AND twin.state = 'verified') THEN 'verified' ELSE 'ready' END
-        WHERE scenario_id = ?1 AND rev = ?2 AND state = 'building'`,
-    ).bind(revision.scenario_id, revision.rev, ready, await sha256Digest(ready)).run();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE scenario_revisions SET doc_json = ?3, content_digest = ?4,
+            state = CASE WHEN EXISTS (SELECT 1 FROM scenario_revisions twin WHERE twin.scenario_id = ?1
+              AND twin.content_digest = ?4 AND twin.guest_contract = scenario_revisions.guest_contract
+              AND twin.state = 'verified') THEN 'verified' ELSE 'ready' END
+          WHERE scenario_id = ?1 AND rev = ?2 AND state = 'building'`,
+      ).bind(revision.scenario_id, revision.rev, ready, await sha256Digest(ready)),
+      selectCandidateRevision(env.DB, revision.scenario_id, revision.rev),
+    ]);
   }
+}
+
+/**
+ * Makes `rev` its scenario's candidate when it is ready or verified and the
+ * scenario's head: no revision of the scenario was ingested after it. An
+ * older revision that settles late, or one behind a newer building or failed
+ * head, leaves the candidate as it is.
+ */
+export function selectCandidateRevision(d1: D1Database, scenarioId: string, rev: string): D1PreparedStatement {
+  return d1.prepare(
+    `UPDATE scenarios SET candidate_rev = ?2, updated_at = ?3
+      WHERE id = ?1 AND candidate_rev IS NOT ?2
+        AND EXISTS (SELECT 1 FROM scenario_revisions head WHERE head.scenario_id = ?1 AND head.rev = ?2
+          AND head.state IN ('ready', 'verified')
+          AND NOT EXISTS (SELECT 1 FROM scenario_revisions newer WHERE newer.scenario_id = ?1
+            AND (newer.created_at > head.created_at OR (newer.created_at = head.created_at AND newer.rev > head.rev))))`,
+  ).bind(scenarioId, rev, Date.now());
 }
