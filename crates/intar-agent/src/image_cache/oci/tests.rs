@@ -3,7 +3,7 @@ use super::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{HeaderMap, StatusCode as Status, header};
@@ -18,6 +18,8 @@ struct Registry {
     token: StdMutex<String>,
     exchanges: AtomicUsize,
     requests: StdMutex<Vec<(String, Option<String>)>>,
+    /// Answer a range request with the whole object as a range from byte 0.
+    wrong_range: AtomicBool,
 }
 
 impl Registry {
@@ -95,7 +97,18 @@ async fn object(
             .ok()
     }) {
         Some(from) if from < bytes.len() => {
-            (Status::PARTIAL_CONTENT, bytes[from..].to_vec()).into_response()
+            let from = if registry.wrong_range.load(Ordering::SeqCst) {
+                0
+            } else {
+                from
+            };
+            let range = format!("bytes {from}-{}/{}", bytes.len() - 1, bytes.len());
+            (
+                Status::PARTIAL_CONTENT,
+                [(header::CONTENT_RANGE, range)],
+                bytes[from..].to_vec(),
+            )
+                .into_response()
         }
         _ => bytes.into_response(),
     }
@@ -232,6 +245,10 @@ async fn a_partial_blob_is_continued_and_a_wrong_one_is_dropped() -> Result<()> 
         error.to_string().contains("does not hash to its digest"),
         "{error}"
     );
+    assert!(
+        !super::super::ready::is_definitive_failure(&error),
+        "{error}"
+    );
     assert!(!part.exists() && !store.path(&other.digest).exists());
     assert_eq!(
         tokio::fs::read(client.blob("machines/x", &other, &store).await?).await?,
@@ -252,6 +269,51 @@ async fn a_partial_blob_is_continued_and_a_wrong_one_is_dropped() -> Result<()> 
     );
     assert!(!store.path(&other.digest).exists());
     Ok(())
+}
+
+#[tokio::test]
+async fn a_range_answer_from_another_byte_drops_the_partial_blob() -> Result<()> {
+    let (registry, client, _temp, store) = serve().await;
+    let content: Vec<u8> = (0..5_000_u32).flat_map(u32::to_le_bytes).collect();
+    let blob = registry.descriptor(DISK_CHUNK_MEDIA_TYPE, &content);
+    tokio::fs::create_dir_all(store.directory()).await?;
+    let part = store
+        .directory()
+        .join(format!(".{}.part", blob.digest.hex()));
+    tokio::fs::write(&part, &content[..1_000]).await?;
+    registry.wrong_range.store(true, Ordering::SeqCst);
+
+    let error = client
+        .blob("machines/x", &blob, &store)
+        .await
+        .expect_err("a range from another byte");
+    assert!(error.to_string().contains("with another range"), "{error}");
+    assert!(
+        !super::super::ready::is_definitive_failure(&error),
+        "{error}"
+    );
+    assert!(!part.exists() && !store.path(&blob.digest).exists());
+
+    registry.wrong_range.store(false, Ordering::SeqCst);
+    let path = client.blob("machines/x", &blob, &store).await?;
+    assert_eq!(tokio::fs::read(&path).await?, content);
+    Ok(())
+}
+
+#[test]
+fn content_range_names_its_first_byte() {
+    assert_eq!(content_range_start("bytes 300-999/1000"), Some(300));
+    assert_eq!(content_range_start("bytes 0-9/*"), Some(0));
+    assert_eq!(content_range_start("bytes */1000"), None);
+    assert_eq!(content_range_start("items 3-4/5"), None);
+}
+
+#[test]
+fn only_a_fresh_transfer_that_misses_its_digest_is_definitive() {
+    let fresh = anyhow::anyhow!(digest_mismatch_message("/v2/x", false));
+    let resumed = anyhow::anyhow!(digest_mismatch_message("/v2/x", true));
+    assert!(super::super::ready::is_definitive_failure(&fresh));
+    assert!(!super::super::ready::is_definitive_failure(&resumed));
 }
 
 #[tokio::test]

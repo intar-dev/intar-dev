@@ -281,8 +281,8 @@ fn image_failures() -> &'static StdMutex<HashMap<OciDigest, ImageFailure>> {
 }
 
 /// The error codes of a failure that no retry fixes: the registry neither
-/// has nor grants the image, its bytes are not its digest, or this agent
-/// cannot run it. Anything else (network, a 5xx, jailerd) is transient.
+/// has nor grants the image, a fresh transfer's bytes are not its digest, or
+/// this agent cannot run it. Anything else (network, a 5xx, jailerd) is transient.
 const DEFINITIVE_FAILURE_CODES: &[&str] = &[
     "image_not_found:",
     "image_denied:",

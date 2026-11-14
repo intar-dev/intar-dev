@@ -113,6 +113,24 @@ fn sha256_hex(bytes: &[u8]) -> String {
     to_hex_lower(&Sha256::digest(bytes))
 }
 
+/// The first byte of a `Content-Range: bytes <start>-<end>/<total>` answer.
+fn content_range_start(value: &str) -> Option<u64> {
+    let range = value.trim().strip_prefix("bytes ")?;
+    let (start, _) = range.split_once('-')?;
+    start.trim().parse().ok()
+}
+
+/// A blob that does not hash to its digest. After a resumed transfer the
+/// partial bytes kept from an earlier attempt may be at fault, and the part
+/// is gone, so the next attempt starts clean: that is not definitive.
+fn digest_mismatch_message(path: &str, resumed: bool) -> String {
+    if resumed {
+        format!("{path} does not hash to its digest after a resumed transfer")
+    } else {
+        format!("digest_mismatch: {path} does not hash to its digest")
+    }
+}
+
 impl OciRegistry {
     pub(crate) fn new(origin: reqwest::Url, client: reqwest::Client, agent_jwt: AgentJwt) -> Self {
         Self {
@@ -292,6 +310,18 @@ impl OciRegistry {
         if have > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
             have = 0;
         }
+        if have > 0 {
+            let start = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(content_range_start);
+            if start != Some(have) {
+                let _ = tokio::fs::remove_file(part.clone()).await;
+                bail!("{path} answered a range from byte {have} with another range");
+            }
+        }
+        let resumed = have > 0;
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -321,7 +351,7 @@ impl OciRegistry {
         let actual = super::registry::sha256_file(&part).await?;
         if actual != digest.hex() {
             let _ = tokio::fs::remove_file(part.clone()).await;
-            bail!("digest_mismatch: {path} does not hash to its digest");
+            bail!(digest_mismatch_message(&path, resumed));
         }
         let published = store.path(digest);
         tokio::fs::rename(part.clone(), published.clone())
