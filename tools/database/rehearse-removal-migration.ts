@@ -28,7 +28,13 @@ export interface RehearsalEvidence {
   readonly preservedRows: number;
 }
 
-/** The one table the pending migrations may rebuild; it is empty after the wipe. */
+/**
+ * The one table the pending migrations may rebuild. The rebuild copies rows
+ * only when runtime_vms is empty, as the cutover wipe leaves it: before 0046
+ * the table has no digest columns, so a leftover row fails the digest CHECK
+ * and the whole batch rolls back. The deploy checks the wipe before
+ * maintenance instead of relying on that.
+ */
 export const REBUILT_TABLES: readonly string[] = ["runtime_vms"];
 
 /**

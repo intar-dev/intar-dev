@@ -106,7 +106,7 @@ describe("removal migration D1 rehearsal", () => {
     }
   });
 
-  test("fails and changes nothing when runtime_vms still holds a row", async () => {
+  test("fails and changes nothing when an execution and its VM survived the wipe", async () => {
     const database = new Database(":memory:", { strict: true });
     database.exec("PRAGMA foreign_keys = ON");
     const client = new PrefixWriteClient(database);
@@ -118,11 +118,16 @@ describe("removal migration D1 rehearsal", () => {
         { sql: "INSERT INTO runtime_vms (id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json, image_sha256, cpu_millis, memory_mib, disk_mib) VALUES ('runtime-vm-1', 'run-1', 'vm-1', 0, 'server', '{}', '" + "a".repeat(64) + "', 1000, 1024, 4096)" },
       ]);
       const before = await snapshotTables(client);
-      // The old row has no digests to copy, so the rebuild refuses it.
+      // Before 0046 runtime_vms has no digest columns: the rebuild copies the
+      // quoted names as string literals, and the digest CHECK refuses the row.
       await expect(applyGeneratedMigrations(client)).rejects.toThrow(/CHECK constraint failed/u);
       const after = await snapshotTables(client);
       expect([...after.keys()]).toEqual([...before.keys()]);
+      // Every table keeps its definition and rows, the leftover ones included.
+      expect([...after].map(([name, table]) => [name, table.sql])).toEqual([...before].map(([name, table]) => [name, table.sql]));
       expect(comparePreservedTables(before, after).droppedTables).toEqual([]);
+      expect(after.get("runtime_executions")?.rows).toHaveLength(1);
+      expect(after.get("runtime_vms")?.rows).toHaveLength(1);
     } finally {
       database.close(false);
     }
