@@ -49,7 +49,18 @@ class EpochConfigurationMigration(unittest.TestCase):
 
     def test_install_sh_runs_it_for_jailerd(self):
         install = (HERE.parent / "deploy/install.sh").read_text()
-        self.assertIn('python3 "${archive_dir}/deploy/migrate-epoch-config.py" jailerd', install)
+        self.assertIn('python3 "${archive_dir}/deploy/migrate-epoch-config.py" jailerd\n', install)
+
+    def test_the_builder_rollout_migrates_before_it_stops_the_builder(self):
+        rollout = (HERE.parents[2] / "workflows/workflow-builder-rollout.yaml").read_text()
+        migrate = rollout.index("deploy/migrate-epoch-config.py' builder\n")
+        self.assertLess(migrate, rollout.index("systemctl stop intar-builder", migrate - 2000))
+
+    def test_install_sh_refuses_before_it_stops_anything(self):
+        install = (HERE.parent / "deploy/install.sh").read_text()
+        check = install.index('migrate-epoch-config.py" jailerd --print >/dev/null || \\\n  die')
+        for later in ("mutated=false", "systemctl stop intar-jailerd.socket", "systemctl stop intar-jailerd.service"):
+            self.assertLess(check, install.index(later), later)
 
 
 class EpochConfigurationFile(unittest.TestCase):
@@ -103,6 +114,27 @@ class EpochConfigurationFile(unittest.TestCase):
         self.path.unlink()
         self.assertFalse(self.migrate())
         self.assertFalse(self.path.exists())
+
+    def test_the_dry_run_refuses_what_the_real_run_refuses(self):
+        dry = lambda: module.migrated_text(self.path, "jailerd", os.getuid())
+        self.assertEqual(dry(), (FIXTURES / "jailerd.host.migrated.toml").read_text())
+        self.assertEqual(self.path.read_text(), self.source)
+        os.chmod(self.path, 0o660)
+        with self.assertRaises(SystemExit):
+            dry()
+        os.chmod(self.path, 0o600)
+        os.link(self.path, Path(self.directory.name) / "other")
+        with self.assertRaises(SystemExit):
+            dry()
+        os.unlink(Path(self.directory.name) / "other")
+        with self.assertRaises(SystemExit):
+            module.migrated_text(self.path, "jailerd", os.getuid() + 1)
+        self.path.write_text("legacy_template_retention_seconds = \n")
+        with self.assertRaises(SystemExit):
+            dry()
+        self.path.unlink()
+        self.assertEqual(dry(), "")
+        self.assertFalse(self.backup.exists())
 
 
 if __name__ == "__main__":

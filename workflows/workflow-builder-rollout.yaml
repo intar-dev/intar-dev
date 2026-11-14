@@ -161,9 +161,11 @@ jobs:
                 sleep 10
               done
               [ -e "$pre" ] || cp -p /usr/local/bin/intar-builder "$pre"
-              systemctl stop intar-builder
-              # Only drops keys, so the previous binary also reads the result.
+              # Only drops keys the running binary defaults, so it runs before the
+              # stop: a refusal leaves the builder serving. The previous binary
+              # also reads the result.
               python3 '/var/tmp/intar-builder-v${{ inputs.version }}/deploy/migrate-epoch-config.py' builder
+              systemctl stop intar-builder
               install -m 0755 "$new" /usr/local/bin/intar-builder
               since="@$(date +%s)"
               systemctl start intar-builder

@@ -106,7 +106,8 @@ The store GC removes every template directory that is not of the current
 schema, unless a live VM was booted from it. `deploy/install.sh` drops the
 retired `legacy_template_retention_seconds` key from an existing
 `/etc/intar-jailerd/config.toml` (`deploy/migrate-epoch-config.py`), keeping
-the previous file as `config.toml.pre-epoch`.
+the previous file as `config.toml.pre-epoch`. It checks the config before it
+stops anything, so a config the migration refuses leaves the host running.
 
 Agent doctor is read-only. The root-only self-test runs under the same
 private-mount/filesystem sandbox as the installed service and uses an isolated

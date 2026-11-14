@@ -106,22 +106,40 @@ def write_atomically(path: Path, data: str, mode: int, uid: int, gid: int, repla
     return True
 
 
+def checked(path: Path, kind: str, owner: int):
+    """The file's stat, text and migrated text, or None when it is absent.
+
+    Refuses, changing nothing, a file `owner` does not own alone or that it
+    cannot migrate, so a dry run refuses exactly what the real run would.
+    """
+    if not path.exists() and not path.is_symlink():
+        return None
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != owner or info.st_mode & 0o022:
+        raise SystemExit(f"untrusted configuration: {path}")
+    current = path.read_text()
+    try:
+        return info, current, migrate(current, kind)
+    except (tomllib.TOMLDecodeError, ValueError) as error:
+        raise SystemExit(f"{path} was left unchanged: {error}") from None
+
+
+def migrated_text(path: Path, kind: str, owner: int = 0) -> str:
+    """What the real run would write; empty when the file is absent."""
+    found = checked(path, kind, owner)
+    return "" if found is None else found[2]
+
+
 def migrate_file(path: Path, kind: str, owner: int = 0, group: int = 0) -> bool:
     """Migrates one config file owned by `owner`; True when it changed.
 
     The rollback copy belongs to `owner` and `group`; the file keeps its own
     owner, group and mode.
     """
-    if not path.exists() and not path.is_symlink():
+    found = checked(path, kind, owner)
+    if found is None:
         return False
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != owner or info.st_mode & 0o022:
-        raise SystemExit(f"untrusted configuration: {path}")
-    current = path.read_text()
-    try:
-        updated = migrate(current, kind)
-    except (tomllib.TOMLDecodeError, ValueError) as error:
-        raise SystemExit(f"{path} was left unchanged: {error}") from None
+    info, current, updated = found
     if updated == current:
         return False
     backup = path.with_name(BACKUP_NAME)
@@ -137,10 +155,7 @@ def main(argv: list[str]) -> None:
         raise SystemExit(f"usage: {argv[0]} jailerd|builder [--print]")
     kind, path = argv[1], PATHS[argv[1]]
     if argv[2:] == ["--print"]:
-        try:
-            sys.stdout.write(migrate(path.read_text(), kind))
-        except (tomllib.TOMLDecodeError, ValueError) as error:
-            raise SystemExit(f"{path} cannot be migrated: {error}") from None
+        sys.stdout.write(migrated_text(path, kind))
         return
     if os.geteuid() != 0:
         raise SystemExit("configuration migration requires root")

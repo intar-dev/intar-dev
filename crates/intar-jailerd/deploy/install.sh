@@ -126,6 +126,10 @@ if [ -e /etc/intar-jailerd/config.toml ] || [ -L /etc/intar-jailerd/config.toml 
     *) die "/etc/intar-jailerd/config.toml must be root:root, 0400/0600 and one link" ;;
   esac
 fi
+# The migration below runs with the daemon stopped; a config it would refuse
+# stops the install here, while everything still runs.
+python3 "${archive_dir}/deploy/migrate-epoch-config.py" jailerd --print >/dev/null || \
+  die "/etc/intar-jailerd/config.toml cannot be migrated; nothing was changed"
 
 active_state() {
   systemctl show --property=ActiveState --value "$1"
