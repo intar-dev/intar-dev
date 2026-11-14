@@ -103,12 +103,30 @@ assignment_counts_sql='SELECT organization_id, scenario_id,
   ORDER BY organization_id, scenario_id;'
 d1_readonly_query "${assignment_counts_sql}" "${assignment_counts}"
 
-enabled_scenarios_sql="SELECT id,
+# The deploy that applies the removal migration also applies the one that
+# creates `scenarios`, so this runs while only `vm_scenarios` exists. While
+# both exist, `vm_scenarios` holds what the removal migration drops.
+scenario_tables="${RUNNER_TEMP}/pre-migration-scenario-tables.json"
+d1_readonly_query "SELECT name FROM sqlite_master
+  WHERE type = 'table' AND name IN ('vm_scenarios', 'scenarios')
+  ORDER BY name;" "${scenario_tables}"
+scenario_table="$(jq -er '
+  [.result[0].results[].name] |
+  if index("vm_scenarios") != null then "vm_scenarios"
+  elif index("scenarios") != null then "scenarios"
+  else error("neither scenario table exists") end
+' "${scenario_tables}")"
+if [ "${scenario_table}" = vm_scenarios ]; then
+  scenario_id=scenario_id
+else
+  scenario_id=id
+fi
+enabled_scenarios_sql="SELECT ${scenario_id} AS id,
     CASE
       WHEN organization_id IS NULL THEN 'public'
       ELSE 'organization:' || organization_id
     END AS scope_key
-  FROM scenarios
+  FROM ${scenario_table}
   WHERE enabled = 1
   ORDER BY scope_key, id;"
 d1_readonly_query "${enabled_scenarios_sql}" "${enabled_scenarios}"

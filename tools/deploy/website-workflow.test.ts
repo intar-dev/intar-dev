@@ -377,12 +377,13 @@ it("breaks glass with a build whose own lane jobs passed in a run that failed el
 
 // Runs the pre-migration evidence step against a fake D1 API that answers the
 // drain audit with `drain` and records every query it was sent.
-function captureEvidence(applied: number, drain: Record<string, unknown>) {
+function captureEvidence(applied: number, drain: Record<string, unknown>, tables = ["scenarios"]) {
   const root = mkdtempSync(join(tmpdir(), "intar-pre-migration-"));
   const bin = join(root, "bin");
   mkdirSync(bin);
   writeFileSync(join(root, "production-d1-plan.json"), JSON.stringify({ appliedMigrationCount: applied }));
   writeFileSync(join(root, "drain.json"), JSON.stringify(drain));
+  writeFileSync(join(root, "tables.json"), JSON.stringify(tables.map((name) => ({ name }))));
   writeFileSync(join(bin, "curl"), `#!/usr/bin/env bash
 data=""; url=""
 while [ $# -gt 0 ]; do
@@ -394,6 +395,8 @@ case "$url" in
     jq -r .sql "$data" >> "${root}/queries.sql"
     if jq -e '.sql | contains("runtime_vm_count")' "$data" >/dev/null; then
       jq -c '{success: true, result: [{success: true, results: [.]}]}' "${root}/drain.json"
+    elif jq -e '.sql | contains("sqlite_master")' "$data" >/dev/null; then
+      jq -c '{success: true, result: [{success: true, results: .}]}' "${root}/tables.json"
     else echo '{"success":true,"result":[{"success":true,"results":[]}]}'; fi ;;
   *) echo '{"success":true,"result":{"uuid":"db","name":"intar","version":"production"}}' ;;
 esac
@@ -410,13 +413,22 @@ esac
   }
 }
 
-it("captures enabled scenarios from the scenarios table and stops before maintenance on an unwiped runtime", () => {
+it("captures enabled scenarios from the scenario table D1 has and stops before maintenance on an unwiped runtime", () => {
   const drained = { active_scenario_run_count: 0, non_uploaded_run_artifact_count: 0, enabled_agent_host_count: 1 };
   const wiped = { ...drained, runtime_execution_count: 0, runtime_vm_count: 0, cutover_gate_state: "wiped" };
   const ok = captureEvidence(46, wiped);
   expect(ok.status, ok.stderr).toBe(0);
   expect(ok.queries).toContain("FROM scenarios\n  WHERE enabled = 1");
-  expect(ok.queries).not.toContain("vm_scenarios");
+  expect(ok.queries).not.toContain("FROM vm_scenarios");
+  // The deploy that applies the removal migration runs on a D1 that has not
+  // created `scenarios` yet; while both exist, the table being dropped is read.
+  for (const tables of [["vm_scenarios"], ["scenarios", "vm_scenarios"]]) {
+    const old = captureEvidence(39, wiped, tables);
+    expect(old.status, old.stderr).toBe(0);
+    expect(old.queries).toContain("SELECT scenario_id AS id,");
+    expect(old.queries).toContain("FROM vm_scenarios\n  WHERE enabled = 1");
+  }
+  expect(captureEvidence(46, wiped, []).status).not.toBe(0);
   // While the runtime_vms rebuild is pending, leftover runtime rows or an open gate stop the deploy.
   for (const leftover of [{ runtime_execution_count: 1 }, { runtime_vm_count: 1 }, { cutover_gate_state: "drained" }]) {
     expect(captureEvidence(46, { ...wiped, ...leftover }).status).not.toBe(0);
