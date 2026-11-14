@@ -76,3 +76,26 @@ async fn a_failed_wake_prepare_leaves_the_image_ready_for_cold_boots() -> Result
     assert!(ready::wake_prepare_failure(&image).is_some_and(|why| why.contains("wake_invalid")));
     Ok(())
 }
+
+#[test]
+fn only_a_failure_no_retry_fixes_is_definitive() {
+    for definitive in [
+        "image_not_found: /v2/x is unknown or not granted to this host",
+        "image_denied: GET /v2/x was refused with a fresh registry token",
+        "digest_mismatch: /v2/x does not hash to its digest",
+        "unsupported_artifact: image format \"intar-image-2\", this agent reads \"intar-image-3\"",
+        "guest_contract_mismatch: the image speaks guest contract 2, this agent 3",
+    ] {
+        let error = anyhow::anyhow!(definitive).context("failed to cache image");
+        assert!(ready::is_definitive_failure(&error), "{definitive}");
+    }
+    for transient in [
+        "GET /v2/x failed with HTTP 503 Service Unavailable",
+        "registry token exchange failed with HTTP 500",
+        "reading /v2/x",
+        "jailerd prepare_failed: no space left",
+    ] {
+        let error = anyhow::anyhow!(transient).context("failed to cache image");
+        assert!(!ready::is_definitive_failure(&error), "{transient}");
+    }
+}

@@ -156,9 +156,9 @@ pub(super) async fn ensure_jailer_image_template(
         chunk_cache_root: trusted_directory_source(store.directory(), roots)?,
         kernel: blob(&image.kernel)?,
         initrd: image.initrd.as_ref().map(blob).transpose()?,
-        // A learner launch waits for this template, so the launch path passes
-        // `Foreground` and is never parked. The background cache warmer passes
-        // `Background`, which keeps it inside jailerd's background lane.
+        // The cache pass is the only caller and passes `Background`, which
+        // keeps the import inside jailerd's background lane. A launch never
+        // imports: it waits for the pass to write the launch descriptor.
         request_class,
         prepare_wake,
     };
@@ -824,24 +824,57 @@ async fn wait_for_prepared_image(
     let deadline = Instant::now() + budget;
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        ensure_create_not_deleted(inner, req.name).await?;
-        match image_cache::require_ready_image(cache_root, req.image).await {
-            Ok(ready) => return Ok(ready),
-            Err(error) if Instant::now() < deadline => {
-                debug!(vm = req.name, error = %error, "waiting for event-driven image preparation");
-            }
-            Err(error) => {
-                return Err(match image_cache::image_failure(req.image) {
-                    Some(failure) => error.context(failure),
-                    None => error,
-                })
-                .context(format!(
-                    "image was not prepared within {} seconds",
-                    budget.as_secs()
-                ));
-            }
+        let ready = image_cache::require_ready_image(cache_root, req.image).await;
+        if let Err(error) = &ready {
+            debug!(vm = req.name, error = %error, "waiting for event-driven image preparation");
+        }
+        if let Some(outcome) = prepare_wait_step(
+            ready,
+            is_delete_requested(inner, req.name).await,
+            image_cache::image_failure_state(req.image),
+            Instant::now() >= deadline,
+        ) {
+            return outcome;
         }
     }
+}
+
+/// One poll of a launch waiting for its image: `None` keeps waiting.
+///
+/// A delete request ends the wait first, then a ready image; a failure the
+/// cache pass recorded as definitive ends it with that failure, and only the
+/// budget ends a wait behind a transient one. `failure` is the pass's last
+/// record for the image and whether it is definitive.
+pub(super) fn prepare_wait_step<T>(
+    ready: Result<T>,
+    delete_requested: bool,
+    failure: Option<(String, bool)>,
+    expired: bool,
+) -> Option<Result<T>> {
+    if delete_requested {
+        return Some(Err(anyhow::anyhow!(
+            "vm create cancelled by delete request"
+        )));
+    }
+    let error = match ready {
+        Ok(ready) => return Some(Ok(ready)),
+        Err(error) => error,
+    };
+    let error = match failure {
+        Some((failure, true)) => {
+            return Some(Err(error
+                .context(failure)
+                .context("the image cannot be prepared")));
+        }
+        Some((failure, false)) => error.context(failure),
+        None => error,
+    };
+    expired.then(|| {
+        Err(error.context(format!(
+            "image was not prepared within {} seconds",
+            image_prepare_wait().as_secs()
+        )))
+    })
 }
 
 pub(super) async fn run_create(

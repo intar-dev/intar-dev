@@ -188,12 +188,14 @@ impl OciRegistry {
             match response.status() {
                 StatusCode::UNAUTHORIZED if !refresh => continue,
                 // A denied grant looks exactly like an unknown object.
-                StatusCode::NOT_FOUND => bail!("{path} is unknown or not granted to this host"),
+                StatusCode::NOT_FOUND => {
+                    bail!("image_not_found: {path} is unknown or not granted to this host")
+                }
                 status if status.is_success() => return Ok(response),
                 status => bail!("GET {path} failed with HTTP {status}"),
             }
         }
-        bail!("GET {path} was refused with a fresh registry token")
+        bail!("image_denied: GET {path} was refused with a fresh registry token")
     }
 
     /// A manifest by digest: its bytes, verified.
@@ -215,7 +217,7 @@ impl OciRegistry {
         }
         ensure!(
             sha256_hex(&body) == digest.hex(),
-            "{path} does not hash to its digest"
+            "digest_mismatch: {path} does not hash to its digest"
         );
         Ok(body)
     }
@@ -319,7 +321,7 @@ impl OciRegistry {
         let actual = super::registry::sha256_file(&part).await?;
         if actual != digest.hex() {
             let _ = tokio::fs::remove_file(part.clone()).await;
-            bail!("{path} does not hash to its digest");
+            bail!("digest_mismatch: {path} does not hash to its digest");
         }
         let published = store.path(digest);
         tokio::fs::rename(part.clone(), published.clone())
@@ -549,7 +551,7 @@ impl OciRegistry {
         }
         ensure!(
             sha256_hex(&body) == spec.hex(),
-            "{path} does not hash to its digest"
+            "digest_mismatch: {path} does not hash to its digest"
         );
         Ok(body)
     }

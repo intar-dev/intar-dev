@@ -551,3 +551,54 @@ fn a_wake_prepare_budget_adds_its_ram_delta_and_apply() {
         JAILER_PREPARE_IMAGE_TIMEOUT
     );
 }
+
+#[test]
+fn a_launch_wait_stops_on_a_definitive_failure_and_waits_through_a_transient_one() {
+    let unready = || {
+        Err::<(), _>(anyhow::anyhow!(
+            "the image's launch descriptor is unavailable"
+        ))
+    };
+    let definitive = || Some(("image_not_found: gone".to_owned(), true));
+    let transient = || Some(("GET x failed with HTTP 503".to_owned(), false));
+
+    assert!(matches!(
+        prepare_wait_step(Ok(()), false, None, false),
+        Some(Ok(()))
+    ));
+    assert!(matches!(
+        prepare_wait_step(Ok(()), false, definitive(), true),
+        Some(Ok(()))
+    ));
+    assert!(prepare_wait_step(unready(), false, None, false).is_none());
+    assert!(prepare_wait_step(unready(), false, transient(), false).is_none());
+
+    let stopped = prepare_wait_step(unready(), false, definitive(), false);
+    let error = format!(
+        "{:#}",
+        stopped
+            .and_then(Result::err)
+            .expect("a definitive failure stops")
+    );
+    assert!(error.contains("image_not_found: gone"), "{error}");
+
+    for ready in [Ok(()), unready()] {
+        let stopped = prepare_wait_step(ready, true, transient(), false);
+        assert!(
+            matches!(stopped, Some(Err(_))),
+            "a delete request stops the wait"
+        );
+    }
+
+    let expired = prepare_wait_step(unready(), false, transient(), true);
+    let error = format!(
+        "{:#}",
+        expired
+            .and_then(Result::err)
+            .expect("the budget ends a wait")
+    );
+    assert!(
+        error.contains("HTTP 503") && error.contains("not prepared within"),
+        "{error}"
+    );
+}

@@ -268,15 +268,49 @@ pub(crate) fn sweep_cache_layout(cache_root: &Path) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
-fn image_failures() -> &'static StdMutex<HashMap<OciDigest, String>> {
-    static FAILURES: OnceLock<StdMutex<HashMap<OciDigest, String>>> = OnceLock::new();
+/// Why an image could not be prepared, and whether retrying can fix it.
+#[derive(Clone)]
+struct ImageFailure {
+    message: String,
+    definitive: bool,
+}
+
+fn image_failures() -> &'static StdMutex<HashMap<OciDigest, ImageFailure>> {
+    static FAILURES: OnceLock<StdMutex<HashMap<OciDigest, ImageFailure>>> = OnceLock::new();
     FAILURES.get_or_init(Default::default)
 }
 
-/// Keep why an image could not be prepared, for the state report.
+/// The error codes of a failure that no retry fixes: the registry neither
+/// has nor grants the image, its bytes are not its digest, or this agent
+/// cannot run it. Anything else (network, a 5xx, jailerd) is transient.
+const DEFINITIVE_FAILURE_CODES: &[&str] = &[
+    "image_not_found:",
+    "image_denied:",
+    "digest_mismatch:",
+    "unsupported_artifact:",
+    "guest_contract_mismatch:",
+];
+
+pub(crate) fn is_definitive_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        DEFINITIVE_FAILURE_CODES
+            .iter()
+            .any(|code| message.starts_with(code))
+    })
+}
+
+/// Keep why an image could not be prepared, for the state report and for a
+/// launch that waits on it.
 pub(crate) fn record_image_failure(image: &OciDigest, error: &anyhow::Error) {
     if let Ok(mut failures) = image_failures().lock() {
-        failures.insert(image.clone(), format!("{error:#}"));
+        failures.insert(
+            image.clone(),
+            ImageFailure {
+                message: format!("{error:#}"),
+                definitive: is_definitive_failure(error),
+            },
+        );
     }
 }
 
@@ -287,7 +321,14 @@ fn clear_image_failure(image: &OciDigest) {
 }
 
 pub(crate) fn image_failure(image: &OciDigest) -> Option<String> {
-    image_failures().lock().ok()?.get(image).cloned()
+    Some(image_failures().lock().ok()?.get(image)?.message.clone())
+}
+
+/// Why the image could not be prepared, and whether no retry can fix it.
+pub(crate) fn image_failure_state(image: &OciDigest) -> Option<(String, bool)> {
+    let failures = image_failures().lock().ok()?;
+    let failure = failures.get(image)?;
+    Some((failure.message.clone(), failure.definitive))
 }
 
 fn wake_prepare_failures() -> &'static StdMutex<HashMap<OciDigest, String>> {

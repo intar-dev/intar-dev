@@ -85,7 +85,8 @@ const REQUEUE_ROUNDS_PER_PASS: usize = 12;
 ///
 /// The pass holds the single image prepare job for the whole process, parks
 /// between two images while a boot is live, and sends each import to jailerd's
-/// background lane. A learner launch never waits for this pass.
+/// background lane. A launch whose image is not ready wakes this pass and
+/// waits for it outside its boot window, so the pass can proceed.
 ///
 /// A requeue is not a failure. Jailerd parks a background import at a block
 /// boundary when a boot needs the CPU, and the pass retries the same image
