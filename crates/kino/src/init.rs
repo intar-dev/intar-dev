@@ -67,10 +67,25 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     if let Err(error) = boot::bring_up(&boot, &digest, woken, &report).await {
         return fail(&report, error).await;
     }
+    // A woken guest's id file and journal carry the run's id already; PID 1
+    // takes it with a re-exec in the background, which the lab release waits
+    // for before anything of Kino's asks PID 1 for more.
+    let reexec = woken.then(|| tokio::spawn(boot::reexec_pid1(report.clone())));
     if let Err(error) = std::fs::write(APPLIED_BOOT_PATH, &digest) {
         return fail(&report, format!("{APPLIED_BOOT_PATH}: {error}")).await;
     }
-    boot::release_lab(&boot.spec, &report).await;
+    let pid1 = async move {
+        match reexec {
+            Some(task) => task
+                .await
+                .map_err(|error| format!("PID 1 re-exec: {error}"))?,
+            None => Ok(()),
+        }
+    };
+    if let Err(error) = boot::release_lab(&boot.spec, &report, pid1).await {
+        lab_failed(&report, boot.mode, Some(error));
+        std::future::pending::<()>().await;
+    }
     run(
         &boot.spec,
         boot.mode,
@@ -148,16 +163,7 @@ pub(crate) async fn run(
             .collect();
     });
     if !run_ready(&spec.ready, &spec.env, dir, report).await {
-        // After SSH_READY this is a lab failure: the VM stays up.
-        report.send_modify(|report| {
-            report.set_phase(Phase::Failed);
-            if mode == SpecMode::Verify {
-                report.verify = Some(Verify {
-                    done: true,
-                    ..Verify::default()
-                });
-            }
-        });
+        lab_failed(report, mode, None);
         return;
     }
     // Tasks start only after READY.
@@ -166,6 +172,23 @@ pub(crate) async fn run(
         SpecMode::Learn => run_tasks(&spec.tasks, &spec.env, dir, report).await,
         SpecMode::Verify => verify::run(spec, peers, dir, report).await,
     }
+}
+
+/// After `SSH_READY` a failure is the lab's: the VM stays up. `failure`, when
+/// given, is the report's failure text.
+fn lab_failed(report: &watch::Sender<Report>, mode: SpecMode, failure: Option<String>) {
+    report.send_modify(|report| {
+        report.set_phase(Phase::Failed);
+        if let Some(failure) = failure {
+            report.failure = head(&failure, FAILURE_BYTES).to_owned();
+        }
+        if mode == SpecMode::Verify {
+            report.verify = Some(Verify {
+                done: true,
+                ..Verify::default()
+            });
+        }
+    });
 }
 
 /// Each script every 2 s until it exits 0, all within 300 s.

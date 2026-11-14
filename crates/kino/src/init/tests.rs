@@ -324,26 +324,76 @@ fn a_machine_id_is_a_v4_id_of_the_random_bytes_and_the_run() {
 }
 
 #[test]
-fn the_machine_id_steps_write_then_reexec_then_restart_the_readers() {
+fn the_machine_id_steps_before_ssh_write_then_restart_the_readers() {
     use super::boot::{IdStep, machine_id_steps};
+    // PID 1's re-exec is not among them: it runs after SSH_READY.
     assert_eq!(
         machine_id_steps(true),
         vec![
             IdStep::Write("/etc/machine-id"),
             IdStep::Write("/var/lib/dbus/machine-id"),
-            IdStep::Reexec,
             IdStep::RestartIfActive("systemd-journald.service"),
             IdStep::RestartIfActive("systemd-hostnamed.service"),
             IdStep::PruneJournals,
         ]
     );
     // Debian's D-Bus file is a link to /etc/machine-id: nothing to write.
-    let steps = machine_id_steps(false);
     assert_eq!(
-        steps[..2],
-        [IdStep::Write("/etc/machine-id"), IdStep::Reexec]
+        machine_id_steps(false),
+        vec![
+            IdStep::Write("/etc/machine-id"),
+            IdStep::RestartIfActive("systemd-journald.service"),
+            IdStep::RestartIfActive("systemd-hostnamed.service"),
+            IdStep::PruneJournals,
+        ]
     );
-    assert_eq!(steps.last(), Some(&IdStep::PruneJournals));
+}
+
+#[test]
+fn the_background_reexec_fails_the_lab_on_an_error_or_past_its_bound() {
+    use super::boot::{REEXEC_BOUND, reexec_outcome};
+    assert_eq!(reexec_outcome(Some(Ok(()))), Ok(()));
+    let failed = reexec_outcome(Some(Err(
+        "systemctl daemon-reexec: exit status: 1".to_owned()
+    )))
+    .expect_err("a failed re-exec");
+    assert!(failed.contains("exit status: 1"), "{failed}");
+    let late = reexec_outcome(None).expect_err("a re-exec past its bound");
+    assert!(late.contains("past 30 s"), "{late}");
+    assert_eq!(REEXEC_BOUND, Duration::from_secs(30));
+}
+
+#[tokio::test]
+async fn the_lab_release_waits_for_pid1_and_fails_with_it() {
+    let (report, _changes) = watch::channel(Report::default());
+    let released =
+        |report: &watch::Sender<Report>| report.borrow().timings_ms.contains_key("lab_released");
+    let spec = spec(r#"{"machine":"vm"}"#);
+
+    let (done, gate) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    let release = {
+        let report = report.clone();
+        let spec = spec.clone();
+        tokio::spawn(async move {
+            boot::release_lab(&spec, &report, async {
+                gate.await.unwrap_or(Err("dropped".to_owned()))
+            })
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!released(&report), "released while PID 1 re-executes");
+    done.send(Ok(())).expect("the release waits");
+    assert_eq!(release.await.expect("joined"), Ok(()));
+    assert!(released(&report));
+
+    let (report, _changes) = watch::channel(Report::default());
+    let failed = boot::release_lab(&spec, &report, async {
+        Err("PID 1 did not take it".to_owned())
+    })
+    .await;
+    assert_eq!(failed, Err("PID 1 did not take it".to_owned()));
+    assert!(!released(&report), "a failed re-exec releases nothing");
 }
 
 #[test]

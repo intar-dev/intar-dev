@@ -85,21 +85,66 @@ pub(crate) async fn bring_up(
     Ok(())
 }
 
-/// Start the deferred units.
+/// Start the deferred units, once `pid1` says PID 1 is past a woken guest's
+/// re-exec: the lab release, and the ready scripts and tasks after it, are
+/// what Kino asks of PID 1 after `SSH_READY`, and a call into a manager that
+/// is re-executing fails. An error of `pid1` is the lab's failure.
 ///
 /// ponytail: waits the 5 s fallback whenever units are deferred; the
 /// recorder's `recording_started` over the control socket releases earlier
 /// once the run CLI of guest contract 3 lands.
-pub(crate) async fn release_lab(spec: &MachineSpecV1, report: &watch::Sender<Report>) {
+pub(crate) async fn release_lab(
+    spec: &MachineSpecV1,
+    report: &watch::Sender<Report>,
+    pid1: impl Future<Output = Result<(), String>>,
+) -> Result<(), String> {
     mark(report, Phase::Preparing, "preparing");
-    if !spec.defer.is_empty() {
-        tokio::time::sleep(LAB_RELEASE_FALLBACK).await;
-    }
+    let fallback = async {
+        if !spec.defer.is_empty() {
+            tokio::time::sleep(LAB_RELEASE_FALLBACK).await;
+        }
+    };
+    let (pid1, ()) = tokio::join!(pid1, fallback);
+    pid1?;
     // Not waiting for the units: the ready scripts say when the lab is up.
     if let Err(error) = run("systemctl", &["start", "--no-block", "intar-lab.target"]).await {
         eprintln!("kino init: lab release: {error}");
     }
     mark(report, Phase::Preparing, "lab_released");
+    Ok(())
+}
+
+/// How long a woken guest's PID 1 re-exec may take: about 2.6 s right after
+/// a wake, and 0.9 s in a settled guest.
+pub(crate) const REEXEC_BOUND: Duration = Duration::from_secs(30);
+
+/// The re-exec that makes PID 1 read the run's machine id; until it is done
+/// its `%m` and its `GetMachineId` are the image's. Run after `SSH_READY`, so
+/// the learner does not wait for it.
+pub(crate) async fn reexec_pid1(report: watch::Sender<Report>) -> Result<(), String> {
+    let done = tokio::time::timeout(REEXEC_BOUND, run("systemctl", &["daemon-reexec"]))
+        .await
+        .ok();
+    reexec_outcome(done)?;
+    let now = uptime_ms();
+    report.send_modify(|report| {
+        report
+            .timings_ms
+            .insert("machine_id_reexec_done".to_owned(), now);
+    });
+    Ok(())
+}
+
+/// The re-exec's result, or `None` when it ran past [`REEXEC_BOUND`].
+pub(crate) fn reexec_outcome(done: Option<Result<(), String>>) -> Result<(), String> {
+    match done {
+        Some(Ok(())) => Ok(()),
+        Some(Err(error)) => Err(format!("PID 1 did not take the run's machine id: {error}")),
+        None => Err(format!(
+            "PID 1 did not take the run's machine id: its re-exec ran past {} s",
+            REEXEC_BOUND.as_secs()
+        )),
+    }
 }
 
 const MACHINE_ID: &str = "/etc/machine-id";
@@ -124,8 +169,6 @@ const MACHINE_ID_READERS: &[&str] = &[
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum IdStep {
     Write(&'static str),
-    /// PID 1 caches the id; a re-executed manager reads the file again.
-    Reexec,
     RestartIfActive(&'static str),
     /// Remove every volatile journal but the new id's: the file of a woken
     /// guest is empty, so the old id is known only by its directory.
@@ -147,14 +190,13 @@ pub(crate) fn machine_id(random: &[u8; 32], boot_sha256: &str) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// What makes a woken guest take a new id: the files, PID 1, the daemons
+/// What makes a woken guest take a new id before SSH: the files, the daemons
 /// that read it at start, and the journals of earlier ids.
 pub(crate) fn machine_id_steps(dbus_file: bool) -> Vec<IdStep> {
     let mut steps = vec![IdStep::Write(MACHINE_ID)];
     if dbus_file {
         steps.push(IdStep::Write(DBUS_MACHINE_ID));
     }
-    steps.push(IdStep::Reexec);
     steps.extend(
         MACHINE_ID_READERS
             .iter()
@@ -178,7 +220,6 @@ async fn renew_machine_id(boot_sha256: &str, report: &watch::Sender<Report>) -> 
     for step in machine_id_steps(dbus_file) {
         match step {
             IdStep::Write(path) => write_id(path, &id)?,
-            IdStep::Reexec => run("systemctl", &["daemon-reexec"]).await?,
             IdStep::RestartIfActive(unit) => {
                 let code = exit_code("systemctl", &["is-active", "--quiet", unit]).await?;
                 if is_active(unit, code)? {

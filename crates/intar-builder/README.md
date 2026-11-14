@@ -54,22 +54,33 @@ empties it, and removes the suspended-base cache of earlier releases
 `wake.booted_at_unix_ms` is its own boot, and run hosts stop waking guests
 booted 330 days ago, so an image that old must be rebuilt.
 
-A woken guest starts with the image's machine id, so before anything of the
-run starts Kino gives the run its own, as it gives it its own host key. It
-writes `/etc/machine-id` in place (and `/var/lib/dbus/machine-id` when that is
-a file), re-executes PID 1, restarts journald and hostnamed when they run, and
-removes every other id's volatile journal (a woken guest's file is empty, so
-the old id is known only by its journal). The id is 128 bits of the guest's
-RNG, which the kernel reseeds on the resume, hashed with the run's `boot.json`
-digest. A cold boot keeps the id systemd generates.
+A woken guest starts with the image's machine id. Before SSH is up, Kino
+gives the run its own, as it gives it its own host key: it writes
+`/etc/machine-id` in place (and `/var/lib/dbus/machine-id` when that is a
+file), restarts journald and, when it runs, hostnamed, and removes every other
+id's volatile journal (a woken guest's file is empty, so the old id is known
+only by its journal). The id is 128 bits of the guest's RNG, which the kernel
+reseeds on the resume, hashed with the run's `boot.json` digest. So from the
+learner's first login the file, the journal's `_MACHINE_ID` and `hostnamectl`
+show the run's id. A cold boot keeps the id systemd generates.
+
+PID 1 takes the id by re-executing, which costs 1 to 3 s right after a wake,
+so it runs after `SSH_READY`, in the background. Until it is done, PID 1's
+`%m` and its own `GetMachineId` are still the image's, and a learner's
+`systemctl` fails instead of waiting: the old manager closes its private
+socket and the new one binds it again, so a call in between is refused. The
+lab release, and with it every ready script and task check, waits for the
+re-exec; one that fails or runs past 30 s fails the lab
+(`machine_id_reexec_done` in the report's timings when it finishes).
 
 Anything else that read the id before the suspend keeps the image's until it
 restarts. That includes the system bus (its own `GetMachineId` answer; a bus
-restart is unsupported), logind, networkd (its DHCPv6 DUID) and the `defer`
-units, which the build's lab release starts. A service that must see the
-run's id has to read it again or be restarted by the scenario. The kernel's
-`boot_id` is the build boot's in every run woken from one image; the kernel
-sets it once per boot and offers no way to change it.
+restart is unsupported), logind, networkd (its DHCPv6 DUID) and whatever the
+image already runs at the suspend, the `defer` units among them, since the
+build's lab release starts them. A service that must see the run's id has to
+read it again or be restarted by the scenario. The kernel's `boot_id` is the
+build boot's in every run woken from one image; the kernel sets it once per
+boot and offers no way to change it.
 
 A guest that must keep its address across wakes cannot use the run's address:
 every run gets a new one. k3s, for example, should be pinned to a fixed node
