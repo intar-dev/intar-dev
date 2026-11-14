@@ -5,6 +5,7 @@ import { makeMultiReplayRun } from "./fixtures/data";
 import { routeCase } from "./routes";
 import { expectNoAxeViolations } from "./support/axe";
 import { expectNoHorizontalOverflow, setRootTextScale200 } from "./support/layout";
+import { PLAY_PATH, mockPlayScenario } from "./support/play";
 
 const TEMPORARY_RUN_SSH_COMMAND = buildTemporaryNativeSshCommand({
   username: "route-test-only",
@@ -2318,4 +2319,21 @@ test.describe("small-screen access management", () => {
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
+});
+
+test.describe("play page", () => {
+  for (const signedIn of [false, true]) {
+    test(`${signedIn ? "signed in" : "signed out"}`, async ({ page, ui }, testInfo) => {
+      await mockPlayScenario(page, signedIn);
+      await ui.open({ path: PLAY_PATH, sessionRole: signedIn ? "learner" : "anonymous", theme: signedIn ? "dark" : "light" });
+      await expect(page.getByRole("heading", { level: 1, name: "Repair the nginx front door" })).toBeVisible();
+      if (signedIn) {
+        await expect(page.getByRole("link", { name: "Start scenario" })).toBeVisible();
+      } else {
+        await expect(page.getByText("The front door returns")).toHaveCount(0);
+      }
+      await expectNoHorizontalOverflow(page);
+      await expectNoAxeViolations(page, testInfo);
+    });
+  }
 });

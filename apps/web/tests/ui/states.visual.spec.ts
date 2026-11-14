@@ -1,6 +1,7 @@
 import { expect, test } from "./fixtures/test";
 import { makeMultiReplayRun } from "./fixtures/data";
 import { routeCase } from "./routes";
+import { PLAY_PATH, mockPlayScenario } from "./support/play";
 import { expectRouteScreenshot } from "./support/screenshot";
 
 async function expectRunTimer(
@@ -1002,3 +1003,23 @@ for (const viewport of [
     }
   });
 }
+
+test.describe("play page", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("signed out shows only the public fields", async ({ page, ui }) => {
+    await mockPlayScenario(page, false);
+    await ui.open({ path: PLAY_PATH, sessionRole: "anonymous", theme: "light" });
+    await expect(page.getByRole("heading", { name: "Repair the nginx front door" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sign in with GitHub to start" })).toBeVisible();
+    await expectRouteScreenshot(page, "play-signed-out-light-desktop");
+  });
+
+  test("signed in shows the briefing and the start", async ({ page, ui }) => {
+    await mockPlayScenario(page, true);
+    await ui.open({ path: PLAY_PATH, sessionRole: "learner", theme: "dark" });
+    const start = page.getByRole("link", { name: "Start scenario" });
+    await expect(start).toHaveAttribute("href", "/runs/start/intar/repair-nginx?source=play&ref=stream-42");
+    await expectRouteScreenshot(page, "play-signed-in-dark-desktop");
+  });
+});
