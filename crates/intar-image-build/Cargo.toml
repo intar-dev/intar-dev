@@ -15,7 +15,6 @@ flate2.workspace = true
 fs2.workspace = true
 intar-contracts = { path = "../intar-contracts" }
 intar-kino-proto = { path = "../intar-kino-proto" }
-intar-snapdelta = { path = "../intar-snapdelta" }
 russh.workspace = true
 rustix.workspace = true
 ring.workspace = true
@@ -26,6 +25,10 @@ tempfile.workspace = true
 tar.workspace = true
 tokio.workspace = true
 zstd.workspace = true
+
+[dev-dependencies]
+# The `build_machine` example rebuilds a pack's RAM from its delta.
+intar-snapdelta = { path = "../intar-snapdelta" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 reflink-copy.workspace = true

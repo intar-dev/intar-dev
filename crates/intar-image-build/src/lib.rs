@@ -37,7 +37,7 @@ pub use kernel::{
 #[cfg(unix)]
 pub use machine::{
     BuildPlan, BuildTarget, MachineBuildOutput, MachineBuildRequest, MachineImage, PlannedNode,
-    PlannedStage, VerifiedMachineImage, WAKE_CHILD_ARG, WakeRole, build_machine_image,
+    PlannedStage, VerifiedMachineImage, WAKE_CHILD_ARG, build_machine_image,
     machine_build_log_path, plan_build, reconstruct_machine_disk, run_wake_child,
     verify_machine_image, wake_unavailable, write_machine_image,
 };

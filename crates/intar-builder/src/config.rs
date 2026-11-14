@@ -48,8 +48,7 @@ impl BuilderConfig {
                 vmm_version: self.wake.vmm_version.clone(),
                 cpu_profile: self.wake.cpu_profile.clone(),
                 kino: self.wake.kino.clone(),
-                base_cache: self.builder.cache_root.join("wake-bases"),
-                max_cached_bases: self.wake.max_cached_bases,
+                work_dir: self.builder.cache_root.join("wake"),
             }),
         }
     }
@@ -159,8 +158,9 @@ pub struct WakeConfig {
     pub vmm_version: String,
     pub cpu_profile: PathBuf,
     pub kino: PathBuf,
-    /// Suspended bases kept in `cache_root/wake-bases`.
-    pub max_cached_bases: usize,
+    /// Ignored: wake builds keep no suspended bases any more. Accepted so a
+    /// config that still sets it loads.
+    pub max_cached_bases: Option<usize>,
 }
 
 impl Default for WakeConfig {
@@ -172,7 +172,7 @@ impl Default for WakeConfig {
             vmm_version: String::new(),
             cpu_profile: PathBuf::new(),
             kino: PathBuf::new(),
-            max_cached_bases: 4,
+            max_cached_bases: None,
         }
     }
 }
@@ -341,12 +341,12 @@ vmm_sha256 = "00"
 vmm_version = "v55.0.0"
 cpu_profile = "/etc/intar-builder/cpu-profile.json"
 kino = "/usr/lib/intar-builder/kino"
+max_cached_bases = 4
 "#,
         )
         .unwrap();
         let wake = config.qemu_build_config().wake.unwrap();
         assert_eq!(wake.vmm_version, "v55.0.0");
-        assert_eq!(wake.max_cached_bases, 4);
         assert_eq!(wake.kino, PathBuf::from("/usr/lib/intar-builder/kino"));
     }
 

@@ -25,7 +25,7 @@ pub use output::{
     MachineImage, VerifiedMachineImage, reconstruct_machine_disk, verify_machine_image,
     write_machine_image,
 };
-pub use plan::{BuildPlan, BuildTarget, PlannedNode, PlannedStage, WakeRole, plan_build};
+pub use plan::{BuildPlan, BuildTarget, PlannedNode, PlannedStage, plan_build};
 pub use wake::{WAKE_CHILD_ARG, run_wake_child, wake_unavailable};
 
 /// One build: a target of a bundle, the key the caller expects, and where
@@ -84,7 +84,7 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
         .tempdir_in(work_root)?;
     let started = Instant::now();
     fs::create_dir_all(&request.output_dir)?;
-    if plan.wake.is_some() && builds_wake(&request.config, &log_path)? {
+    if plan.wake && builds_wake(&request.config, &log_path)? {
         let image = wake::build_wake_target(request, &plan, &base, &log_path)?;
         return Ok(MachineBuildOutput {
             plan,
@@ -157,8 +157,7 @@ mod tests {
             vmm_version: "v55.0.0".to_owned(),
             cpu_profile: dir.path().join("profile.json"),
             kino: dir.path().join("kino"),
-            base_cache: dir.path().join("bases"),
-            max_cached_bases: 4,
+            work_dir: dir.path().join("wake"),
         });
         let error = builds_wake(&config, &log).expect_err("broken wake");
         assert!(

@@ -6,10 +6,17 @@ Builds the machine images the Worker asks for and pushes them to the registry.
 
 ## Wake images
 
-An image with `wake = true` is published with its guest suspended, so a run
-host can wake it instead of booting it. A machine `from` such an image is a
-pack: its own setup runs in the woken base, and it is published as a RAM delta
-on the base's RAM. A pack's machine may not use `packages`; it has no network.
+An image with `wake = true`, and every machine `from` one (a pack), is
+published with its guest suspended, so a run host can wake it instead of
+booting it. Each is built as a plain image is: its whole setup runs in the
+QEMU build VM and the disk is finalized. The builder then cold-boots that disk
+in cloud-hypervisor the way a run host boots it (same kernel, initrd, command
+line, devices, memory layout and CPU profile), waits for Kino's READY and a
+quiet guest, and suspends it. So setup that takes effect only at boot (a unit
+it disabled, an fstab, a service reading its config at start) has taken
+effect in the suspended guest, as on a cold boot. The image carries its whole
+RAM; a pack is no delta to another image's. A pack's machine may not use
+`packages`.
 
 ```toml
 [wake]
@@ -41,16 +48,13 @@ builder). When any of these is missing, `doctor` warns and every wake target
 fails with the reason until it is fixed; plain targets still build. With
 `enabled = false`, wake targets build as plain images and their logs say so.
 
-A wake base is cached under `cache_root/wake-bases`, keyed by the image's build
-key, the profile, the VMM, the VM config, the command line and the guest
-steps, so an image and its packs share one base. The cache keeps
-`max_cached_bases` (default 4) and evicts the least recently used; a base
-booted over 30 days ago is rebuilt, since packs inherit its boot time and run
-hosts stop waking guests booted 330 days ago.
+The VMM runs in a directory under `cache_root/wake`, whose path is short
+enough for its sockets. Nothing is kept there between builds: an image's
+`wake.booted_at_unix_ms` is its own boot, and run hosts stop waking guests
+booted 330 days ago, so an image that old must be rebuilt.
 
 A guest that must keep its address across wakes cannot use the run's address:
 every run gets a new one. k3s, for example, should be pinned to a fixed node
 address in the base image: a unit before k3s runs
 `ip addr replace 10.255.255.1/32 dev <first NIC> scope host`, and the k3s
-config sets `node-ip: 10.255.255.1`. In a pack instead, the k3s restart makes
-the delta about 100 MB.
+config sets `node-ip: 10.255.255.1`.

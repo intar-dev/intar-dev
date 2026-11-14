@@ -1,6 +1,8 @@
-//! The wake steps (#348 §3): a wake image's base step boots its repacked
-//! disk in cloud-hypervisor and suspends it; a pack wakes its base, runs the
-//! machine's own stages and suspends again, published as a RAM delta.
+//! The wake step (#348 §3): a wake image or pack is built as a plain image
+//! is, then its disk is cold-booted in cloud-hypervisor as a run host boots
+//! it, and the guest is suspended once it is READY and quiet. The image
+//! carries that whole RAM; a pack is no delta to another image's, so its
+//! setup has taken effect through a boot, as on a cold-booted host.
 //!
 //! The VMM runs unprivileged in a user and network namespace of its own:
 //! the builder re-executes itself under `unshare` with [`WAKE_CHILD_ARG`],
@@ -24,21 +26,17 @@ use intar_contracts::guest::{
     BOOT_JSON_FILENAME, GUEST_CONTRACT, GUEST_USERNAME, GuestBootV3, GuestNetworkV3, GuestSshV3,
     KINO_FILENAME, RECORDING_DISK_LABEL, REPORT_PORT, RUNTIME_DISK_LABEL,
 };
-use intar_contracts::oci::verify::MAX_WAKE_DELTA_BYTES;
 use intar_contracts::oci::{
     DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE, MachineBootV1,
-    MachineConfigV1, OciDigest, Sha256Hex, WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_DELTA_MEDIA_TYPE,
-    WAKE_RAM_CHUNK_MEDIA_TYPE, WAKE_STUB_MEDIA_TYPE, WakePackV1, WakeRamV1, WakeShapeV1, WakeV1,
-    WakeVmmV1,
+    MachineConfigV1, OciDigest, Sha256Hex, WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_RAM_CHUNK_MEDIA_TYPE,
+    WAKE_STUB_MEDIA_TYPE, WakeRamV1, WakeShapeV1, WakeV1, WakeVmmV1,
 };
 use intar_contracts::scenario::{MachineSpecV1, SpecMode};
 use serde::{Deserialize, Serialize};
 
 use super::output::{ImageWriter, MachineImage};
-use super::plan::{BuildPlan, BuildTarget, WakeRole, plan_build};
-use super::script::{
-    UPLOAD_PATH, as_root, finalize_script, record_boot_files, stage_command, stage_file,
-};
+use super::plan::BuildPlan;
+use super::script::{as_root, finalize_script, record_boot_files};
 use super::{MachineBuildRequest, vm};
 use crate::config::{QemuBuildConfig, WakeBuildConfig};
 use crate::rootfs::BaseRootfsArtifact;
@@ -67,9 +65,6 @@ pub const WAKE_BUILD_VSOCK_CID: u32 = 10_000;
 const RUN_DISK_BYTES: u64 = 16 * 1024 * 1024;
 const RECORDING_DISK_BYTES: u64 = 256 * 1024 * 1024;
 const RECORDING_VOLUME_ID: u32 = 0x494e_5441;
-/// A pack's delta is published in parts of this size.
-const DELTA_PART_BYTES: usize = 32 * 1024 * 1024;
-const DELTA_LEVEL: i32 = 19;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 const SUSPEND_TIMEOUT: Duration = Duration::from_secs(120);
@@ -190,41 +185,23 @@ pub(crate) fn build_wake_target(
     log: &Path,
 ) -> Result<MachineImage> {
     let wake = request.config.wake.as_ref().context("wake is off")?;
+    ensure!(plan.wake, "not a wake target");
     let steps = Steps {
         config: &request.config,
         wake,
         base,
         log,
     };
-    match &plan.wake {
-        // The image and its packs share one base: the cache's.
-        Some(WakeRole::Base) => {
-            let BuildTarget::Image(name) = &request.target else {
-                bail!("a wake base is an image");
-            };
-            let cached = steps.cached_base(request, name, Some(&request.output_dir))?;
-            cached.image.context("the base was not published")
-        }
-        Some(WakeRole::Pack { base: name }) => {
-            let cached = steps.cached_base(request, name, None)?;
-            // The VMM binds its sockets in this directory, and a socket path
-            // must fit in SUN_LEN. The build's work directory is too deep
-            // for that under the builder service; the base cache, where the
-            // base step runs for the same reason, is not.
-            // ponytail: a killed build leaves its `.pack-` directory behind;
-            // sweep them at service start if that ever fills the cache disk.
-            let pack = tempfile::Builder::new()
-                .prefix(".pack-")
-                .tempdir_in(&steps.wake.base_cache)?;
-            steps.pack(
-                plan,
-                &(cached.dir.clone(), cached.record.clone()),
-                pack.path(),
-                &request.output_dir,
-            )
-        }
-        None => bail!("not a wake target"),
-    }
+    // The VMM binds its sockets in this directory, and a socket path must
+    // fit in SUN_LEN. The build's work directory is too deep for that under
+    // the builder service; the wake work directory is not.
+    // ponytail: a killed build leaves its `.wake-` directory behind; sweep
+    // them at service start if that ever fills the cache disk.
+    fs::create_dir_all(&wake.work_dir)?;
+    let dir = tempfile::Builder::new()
+        .prefix(".wake-")
+        .tempdir_in(&wake.work_dir)?;
+    steps.build(plan, dir.path(), &request.output_dir)
 }
 
 struct Steps<'a> {
@@ -232,77 +209,6 @@ struct Steps<'a> {
     wake: &'a WakeBuildConfig,
     base: &'a BaseRootfsArtifact,
     log: &'a Path,
-}
-
-/// A suspended base, as the base step leaves it.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct BaseRecord {
-    manifest: OciDigest,
-    config: MachineConfigV1,
-    vector: u32,
-    bars: String,
-    disk_sha256: String,
-    stub_sha256: String,
-    kernel_sha256: String,
-    initrd_sha256: String,
-}
-
-/// A base of the cache, held against eviction while this lives.
-struct CachedBase {
-    dir: PathBuf,
-    record: BaseRecord,
-    image: Option<MachineImage>,
-    _in_use: fs::File,
-}
-
-/// A base in the cache is rebuilt after this many days: packs carry the
-/// base's `booted_at`, and run hosts stop waking a guest booted 330 days
-/// ago, so an old base would publish packs that soon cold-boot only.
-const MAX_CACHED_BASE_AGE_DAYS: u64 = 30;
-const BUILDING_PREFIX: &str = ".building-";
-
-fn expired(booted_at_unix_ms: u64, now_unix_ms: u64) -> bool {
-    now_unix_ms.saturating_sub(booted_at_unix_ms) > MAX_CACHED_BASE_AGE_DAYS * 24 * 3_600_000
-}
-
-/// Remove the least recently used bases past `max`, counting `keep`; never
-/// `keep`, nor one a build holds.
-fn evict_bases(cache: &Path, keep: &Path, max: usize) -> Result<Vec<PathBuf>> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(cache)? {
-        let path = entry?.path();
-        let hidden = path
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with('.'));
-        if hidden || path == keep || !path.is_dir() {
-            continue;
-        }
-        let used = fs::metadata(path.join("base.json"))
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(UNIX_EPOCH);
-        entries.push((used, path));
-    }
-    entries.sort();
-    let excess = (entries.len() + 1).saturating_sub(max.max(1));
-    let mut removed = Vec::new();
-    for (_, path) in entries {
-        if removed.len() == excess {
-            break;
-        }
-        let held = fs::File::open(path.join(".lock"))
-            .is_ok_and(|lock| fs2::FileExt::try_lock_exclusive(&lock).is_err());
-        if held {
-            continue;
-        }
-        fs::remove_dir_all(&path)?;
-        removed.push(path);
-    }
-    Ok(removed)
-}
-
-struct BuiltBase {
-    image: MachineImage,
-    record: BaseRecord,
 }
 
 /// What the namespace child runs.
@@ -325,15 +231,15 @@ struct ChildJob {
     ssh_key: String,
     log: PathBuf,
     steps: Vec<GuestStep>,
-    expected_bars: Option<String>,
     result: PathBuf,
     timeout_seconds: u64,
 }
 
+/// A command the guest runs as `user` before it is suspended.
 #[derive(Debug, Deserialize, Serialize)]
-enum GuestStep {
-    Run { label: String, command: String },
-    Upload { local: PathBuf },
+struct GuestStep {
+    label: String,
+    command: String,
 }
 
 /// One boot of the wake VM.
@@ -343,7 +249,6 @@ struct GuestRun<'a> {
     disk: &'a Path,
     ram: &'a Path,
     steps: Vec<GuestStep>,
-    expected_bars: Option<&'a str>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -359,8 +264,9 @@ struct ChildResult {
 }
 
 impl Steps<'_> {
-    /// Boot the repacked disk of `plan` and suspend it.
-    fn base(&self, plan: &BuildPlan, dir: &Path, output: &Path) -> Result<BuiltBase> {
+    /// Build the disk of `plan` as a plain image's, cold-boot it, and
+    /// suspend it once it is READY and quiet.
+    fn build(&self, plan: &BuildPlan, dir: &Path, output: &Path) -> Result<MachineImage> {
         let started = Instant::now();
         let qemu = dir.join("qemu");
         fs::create_dir_all(&qemu)?;
@@ -378,11 +284,11 @@ impl Steps<'_> {
         let cmdline = wake_cmdline(initrd_bytes);
         let finalize = as_root(&finalize_script(&plan.defer, true));
         let steps = vec![
-            GuestStep::Run {
+            GuestStep {
                 label: "record boot files".to_owned(),
                 command: record_boot_files(),
             },
-            GuestStep::Run {
+            GuestStep {
                 label: "finalize".to_owned(),
                 command: finalize,
             },
@@ -396,7 +302,6 @@ impl Steps<'_> {
                 disk: &disk,
                 ram: &ram,
                 steps,
-                expected_bars: None,
             },
         )?;
 
@@ -411,8 +316,6 @@ impl Steps<'_> {
         let bars = parse_bar_table(&result.bars)?;
         let templates = stub_templates(&self.base.base_ext4_path)?;
         let stub = patch_stub(&stub_template(&templates, bars.len())?, vector, &bars, acpi)?;
-        let stub_path = dir.join("stub");
-        fs::write(&stub_path, &stub)?;
         let ram_sha256 = sha256_file_hex(&ram)?;
         log_line(
             self.log,
@@ -431,49 +334,31 @@ impl Steps<'_> {
         let ram_chunks = writer.chunks(&ram, WAKE_RAM_CHUNK_MEDIA_TYPE)?;
         writer.bytes(&stub, WAKE_STUB_MEDIA_TYPE)?;
         let profile = writer.file(&self.wake.cpu_profile, WAKE_CPU_PROFILE_MEDIA_TYPE)?;
-        let config = MachineConfigV1 {
-            guest_contract: GUEST_CONTRACT,
-            image_format: IMAGE_FORMAT.to_owned(),
-            build_key: plan.build_key.clone(),
-            boot: MachineBootV1 { cmdline },
-            disk: disk_chunks.disk,
-            wake: Some(WakeV1 {
-                ram: WakeRamV1 {
-                    size_bytes: ram_chunks.disk.size_bytes,
-                    chunk_size: ram_chunks.disk.chunk_size,
-                    chunks: ram_chunks.disk.chunks,
-                    sha256: Sha256Hex::try_from(ram_sha256).map_err(anyhow::Error::msg)?,
-                },
-                pack: None,
-                shape: shape(),
-                cpu_profile: profile.digest,
-                vmm: self.vmm(),
-                booted_at_unix_ms: result.booted_at_unix_ms,
-            }),
-        };
-        let image = writer.finish(config.clone())?;
+        let config = wake_machine_config(
+            &plan.build_key,
+            cmdline,
+            disk_chunks.disk,
+            WakeRamV1 {
+                size_bytes: ram_chunks.disk.size_bytes,
+                chunk_size: ram_chunks.disk.chunk_size,
+                chunks: ram_chunks.disk.chunks,
+                sha256: Sha256Hex::try_from(ram_sha256).map_err(anyhow::Error::msg)?,
+            },
+            profile.digest,
+            self.vmm(),
+            result.booted_at_unix_ms,
+        );
+        let image = writer.finish(config)?;
         log_line(
             self.log,
             &format!(
-                "base image manifest={} ram_chunks={} elapsed_ms={}",
+                "wake image manifest={} ram_chunks={} elapsed_ms={}",
                 image.manifest_digest.as_str(),
                 ram_chunks.count,
                 started.elapsed().as_millis()
             ),
         )?;
-        Ok(BuiltBase {
-            record: BaseRecord {
-                manifest: image.manifest_digest.clone(),
-                config,
-                vector,
-                bars: result.bars,
-                disk_sha256: sha256_file_hex(&disk)?,
-                stub_sha256: sha256_file_hex(&stub_path)?,
-                kernel_sha256: sha256_file_hex(&self.base.kernel_path)?,
-                initrd_sha256: sha256_file_hex(&self.base.initrd_path)?,
-            },
-            image,
-        })
+        Ok(image)
     }
 
     fn vmm(&self) -> WakeVmmV1 {
@@ -481,292 +366,6 @@ impl Steps<'_> {
             min_version: self.wake.vmm_version.clone(),
             built_with: self.wake.vmm_version.clone(),
         }
-    }
-
-    /// The suspended base `name` of the cache, verified, or built into it;
-    /// with `publish`, also its image there. The returned lock keeps the
-    /// entry from eviction while the caller reads it.
-    ///
-    /// ponytail: one lock for the whole cache, so base builds wait for each
-    /// other; lock per entry if bases are built often.
-    fn cached_base(
-        &self,
-        request: &MachineBuildRequest,
-        name: &str,
-        publish: Option<&Path>,
-    ) -> Result<CachedBase> {
-        let plan = plan_build(&request.bundle, &BuildTarget::Image(name.to_owned()), None)?;
-        let recipe = self.recipe(&plan)?;
-        let cache = &self.wake.base_cache;
-        fs::create_dir_all(cache)?;
-        let cache_lock = fs::File::create(cache.join(".lock"))?;
-        fs2::FileExt::lock_exclusive(&cache_lock)?;
-        let dir = cache.join(recipe);
-        fs::create_dir_all(&dir)?;
-        let in_use = fs::File::create(dir.join(".lock"))?;
-        fs2::FileExt::lock_shared(&in_use)?;
-        let record_path = dir.join("base.json");
-        let reused = fs::read(&record_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<BaseRecord>(&bytes).ok())
-            .map(|record| self.verify_cached(&dir, &record).map(|()| record));
-        match reused {
-            Some(Ok(record)) => {
-                log_line(self.log, &format!("base {name} reused from the cache"))?;
-                fs::File::options()
-                    .write(true)
-                    .open(&record_path)?
-                    .set_modified(SystemTime::now())?;
-                let image = publish
-                    .map(|output| self.publish_base(&dir, &record, output))
-                    .transpose()?;
-                return Ok(CachedBase {
-                    dir,
-                    record,
-                    image,
-                    _in_use: in_use,
-                });
-            }
-            Some(Err(error)) => {
-                log_line(self.log, &format!("base {name} cache refused: {error:#}"))?;
-            }
-            None => log_line(self.log, &format!("base {name} not cached; building it"))?,
-        }
-        let _ = fs::remove_file(&record_path);
-        // Built beside the cache, so the files move in by rename; what a
-        // crashed build left is removed first.
-        for entry in fs::read_dir(cache)? {
-            let path = entry?.path();
-            if path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(BUILDING_PREFIX))
-            {
-                fs::remove_dir_all(&path)?;
-            }
-        }
-        let build = tempfile::Builder::new()
-            .prefix(BUILDING_PREFIX)
-            .tempdir_in(cache)?;
-        let oci = build.path().join("oci");
-        let built = self.base(&plan, build.path(), publish.unwrap_or(&oci))?;
-        for file in ["disk.raw", "ram", "stub"] {
-            fs::rename(build.path().join(file), dir.join(file))?;
-        }
-        fs::write(&record_path, serde_json::to_vec(&built.record)?)?;
-        for removed in evict_bases(cache, &dir, self.wake.max_cached_bases)? {
-            log_line(
-                self.log,
-                &format!("base cache evicted {}", removed.display()),
-            )?;
-        }
-        Ok(CachedBase {
-            dir,
-            record: built.record,
-            image: publish.map(|_| built.image),
-            _in_use: in_use,
-        })
-    }
-
-    /// What a base is reused for: the same image, CPU profile, VMM, VM
-    /// config (paths aside), command line and guest scripts.
-    fn recipe(&self, plan: &BuildPlan) -> Result<String> {
-        let cmdline = wake_cmdline(fs::metadata(&self.base.initrd_path)?.len());
-        let vm = build_vm_config(&ChildJob {
-            cmdline,
-            ..ChildJob::default()
-        })?;
-        Ok(base_recipe(&[
-            plan.build_key.as_str(),
-            &self.base.definition_hash,
-            &sha256_file_hex(&self.wake.cpu_profile)?,
-            &self.wake.vmm_sha256,
-            &serde_json::to_string(&vm)?,
-        ]))
-    }
-
-    /// The image of the cached base: the same bytes, so the same manifest.
-    fn publish_base(&self, dir: &Path, record: &BaseRecord, output: &Path) -> Result<MachineImage> {
-        let mut writer = ImageWriter::new(output)?;
-        writer.file(&self.base.kernel_path, KERNEL_MEDIA_TYPE)?;
-        writer.file(&self.base.initrd_path, INITRD_MEDIA_TYPE)?;
-        writer.chunks(&dir.join("disk.raw"), DISK_CHUNK_MEDIA_TYPE)?;
-        writer.chunks(&dir.join("ram"), WAKE_RAM_CHUNK_MEDIA_TYPE)?;
-        writer.file(&dir.join("stub"), WAKE_STUB_MEDIA_TYPE)?;
-        writer.file(&self.wake.cpu_profile, WAKE_CPU_PROFILE_MEDIA_TYPE)?;
-        let image = writer.finish(record.config.clone())?;
-        ensure!(
-            image.manifest_digest == record.manifest,
-            "the cached base publishes as {}, not {}",
-            image.manifest_digest.as_str(),
-            record.manifest.as_str()
-        );
-        Ok(image)
-    }
-
-    fn verify_cached(&self, dir: &Path, record: &BaseRecord) -> Result<()> {
-        let ram = record.config.wake.as_ref().context("no wake")?;
-        ensure!(
-            !expired(ram.booted_at_unix_ms, unix_ms()),
-            "the base was booted over {} days ago",
-            MAX_CACHED_BASE_AGE_DAYS
-        );
-        for (file, expected) in [
-            (dir.join("disk.raw"), record.disk_sha256.as_str()),
-            (dir.join("ram"), ram.ram.sha256.as_str()),
-            (dir.join("stub"), record.stub_sha256.as_str()),
-            (self.base.kernel_path.clone(), record.kernel_sha256.as_str()),
-            (self.base.initrd_path.clone(), record.initrd_sha256.as_str()),
-        ] {
-            ensure!(
-                sha256_file_hex(&file)? == expected,
-                "{} changed",
-                file.display()
-            );
-        }
-        Ok(())
-    }
-
-    /// Wake the cached base, run the machine's own stages, suspend, and
-    /// publish the RAM as a delta to the base's.
-    fn pack(
-        &self,
-        plan: &BuildPlan,
-        (base_dir, base): &(PathBuf, BaseRecord),
-        dir: &Path,
-        output: &Path,
-    ) -> Result<MachineImage> {
-        fs::create_dir_all(dir)?;
-        let base_wake = base.config.wake.as_ref().context("the base has no wake")?;
-        let (disk, ram) = (dir.join("disk.raw"), dir.join("ram"));
-        crate::wake::clone_or_sparse_copy(&base_dir.join("disk.raw"), &disk)?;
-        crate::wake::clone_or_sparse_copy(&base_dir.join("ram"), &ram)?;
-        let mut steps = vec![GuestStep::Run {
-            label: "record boot files".to_owned(),
-            command: record_boot_files(),
-        }];
-        for (index, stage) in plan.stages.iter().enumerate() {
-            if stage.node_key != plan.build_key {
-                continue;
-            }
-            let local = dir.join(format!("stage-{index}.sh"));
-            fs::write(&local, &stage.script)?;
-            steps.push(GuestStep::Upload { local });
-            steps.push(GuestStep::Run {
-                label: format!("stage {index} {}", stage.name),
-                command: stage_command(&stage_file(index, &stage.name), &stage.env),
-            });
-        }
-        steps.push(GuestStep::Run {
-            label: "finalize".to_owned(),
-            command: as_root(&finalize_script(&plan.defer, true)),
-        });
-        let stub = base_dir.join("stub").display().to_string();
-        let result = self.run_guest(
-            dir,
-            GuestRun {
-                kernel: &stub,
-                cmdline: &base.config.boot.cmdline,
-                disk: &disk,
-                ram: &ram,
-                steps,
-                expected_bars: Some(&base.bars),
-            },
-        )?;
-        let mut low = vec![0_u8; 1024 * 1024];
-        fs::File::open(&ram)?.read_exact(&mut low)?;
-        ensure!(
-            find_wake_vector(&low)? == base.vector,
-            "the pack's wake vector is not its base's"
-        );
-
-        let started = Instant::now();
-        let threads = std::thread::available_parallelism().map_or(1, usize::from);
-        let delta = dir.join("delta");
-        let stats =
-            intar_snapdelta::diff(&base_dir.join("ram"), &ram, &delta, DELTA_LEVEL, threads)
-                .context("diff the pack's RAM")?;
-        ensure!(
-            stats.delta_bytes <= MAX_WAKE_DELTA_BYTES,
-            "the pack's RAM delta is {} bytes, over the {MAX_WAKE_DELTA_BYTES} byte limit",
-            stats.delta_bytes
-        );
-        let diffed = started.elapsed();
-        let check = dir.join("check");
-        intar_snapdelta::apply(&base_dir.join("ram"), &delta, &check, threads)
-            .context("apply the pack's delta")?;
-        ensure!(
-            same_bytes(&check, &ram)?,
-            "the delta does not rebuild the pack's RAM"
-        );
-        fs::remove_file(&check)?;
-        let ram_sha256 = sha256_file_hex(&ram)?;
-        log_line(
-            self.log,
-            &format!(
-                "pack delta_bytes={} diff_ms={} apply_and_compare_ms={}",
-                stats.delta_bytes,
-                diffed.as_millis(),
-                (started.elapsed() - diffed).as_millis()
-            ),
-        )?;
-
-        let started = Instant::now();
-        let mut writer = ImageWriter::new(output)?;
-        writer.file(&self.base.kernel_path, KERNEL_MEDIA_TYPE)?;
-        writer.file(&self.base.initrd_path, INITRD_MEDIA_TYPE)?;
-        let disk_chunks = writer.chunks(&disk, DISK_CHUNK_MEDIA_TYPE)?;
-        let ram_chunks = writer.chunks(&base_dir.join("ram"), WAKE_RAM_CHUNK_MEDIA_TYPE)?;
-        let raw = |chunks: &[(u64, u32, Sha256Hex)]| -> Vec<(u64, Sha256Hex)> {
-            chunks
-                .iter()
-                .map(|(index, _, sha)| (*index, sha.clone()))
-                .collect()
-        };
-        ensure!(
-            raw(&ram_chunks.disk.chunks) == raw(&base_wake.ram.chunks),
-            "the cached base RAM is not the base's"
-        );
-        writer.file(&base_dir.join("stub"), WAKE_STUB_MEDIA_TYPE)?;
-        let profile = writer.file(&self.wake.cpu_profile, WAKE_CPU_PROFILE_MEDIA_TYPE)?;
-        ensure!(
-            profile.digest == base_wake.cpu_profile,
-            "the CPU profile is not the base's"
-        );
-        let parts = write_delta_parts(&mut writer, &delta, MAX_WAKE_DELTA_BYTES)?;
-        let config = MachineConfigV1 {
-            guest_contract: GUEST_CONTRACT,
-            image_format: IMAGE_FORMAT.to_owned(),
-            build_key: plan.build_key.clone(),
-            boot: base.config.boot.clone(),
-            disk: disk_chunks.disk,
-            wake: Some(WakeV1 {
-                ram: WakeRamV1 {
-                    chunks: ram_chunks.disk.chunks,
-                    ..base_wake.ram.clone()
-                },
-                pack: Some(WakePackV1 {
-                    base: base.manifest.clone(),
-                    ram_sha256: Sha256Hex::try_from(ram_sha256).map_err(anyhow::Error::msg)?,
-                }),
-                shape: base_wake.shape.clone(),
-                cpu_profile: base_wake.cpu_profile.clone(),
-                vmm: base_wake.vmm.clone(),
-                booted_at_unix_ms: base_wake.booted_at_unix_ms,
-            }),
-        };
-        let image = writer.finish(config)?;
-        log_line(
-            self.log,
-            &format!(
-                "pack image manifest={} delta_parts={} quiet={} quiet_ms={} elapsed_ms={}",
-                image.manifest_digest.as_str(),
-                parts,
-                result.quiet,
-                result.quiet_ms,
-                started.elapsed().as_millis()
-            ),
-        )?;
-        Ok(image)
     }
 
     /// Boot `disk` and `ram` with `kernel` in the namespace child, run
@@ -778,7 +377,6 @@ impl Steps<'_> {
             disk,
             ram,
             steps,
-            expected_bars,
         } = run;
         check_vmm(self.wake)?;
         let key = generate_build_ssh_key()?;
@@ -837,7 +435,6 @@ impl Steps<'_> {
             ssh_key: private_key_to_openssh(&key.private_key)?,
             log: self.log.to_path_buf(),
             steps,
-            expected_bars: expected_bars.map(str::to_owned),
             result: dir.join("result.json"),
             timeout_seconds: self.config.provision_timeout_seconds.max(60),
         };
@@ -911,34 +508,6 @@ impl Steps<'_> {
     }
 }
 
-/// The delta as [`DELTA_PART_BYTES`] layers, read a part at a time; a delta
-/// over `limit` (what a run host accepts) fails the build.
-fn write_delta_parts(writer: &mut ImageWriter, delta: &Path, limit: u64) -> Result<usize> {
-    let mut file = fs::File::open(delta)?;
-    let size = file.metadata()?.len();
-    ensure!(
-        size <= limit,
-        "the pack's RAM delta is {size} bytes, over the {limit} byte limit"
-    );
-    let mut part = vec![0_u8; DELTA_PART_BYTES];
-    let mut parts = 0;
-    loop {
-        let mut filled = 0;
-        while filled < part.len() {
-            let read = file.read(&mut part[filled..])?;
-            if read == 0 {
-                break;
-            }
-            filled += read;
-        }
-        if filled == 0 {
-            return Ok(parts);
-        }
-        writer.bytes(&part[..filled], WAKE_DELTA_MEDIA_TYPE)?;
-        parts += 1;
-    }
-}
-
 fn write_fat(
     path: &Path,
     bytes: u64,
@@ -981,24 +550,6 @@ fn stub_templates(base_ext4: &Path) -> Result<Vec<u8>> {
         "the platform base has no wake stub templates"
     );
     Ok(output.stdout)
-}
-
-fn same_bytes(one: &Path, other: &Path) -> Result<bool> {
-    let (mut one, mut other) = (fs::File::open(one)?, fs::File::open(other)?);
-    if one.metadata()?.len() != other.metadata()?.len() {
-        return Ok(false);
-    }
-    let (mut left, mut right) = (vec![0_u8; 4 << 20], vec![0_u8; 4 << 20]);
-    loop {
-        let read = one.read(&mut left)?;
-        if read == 0 {
-            return Ok(true);
-        }
-        other.read_exact(&mut right[..read])?;
-        if left[..read] != right[..read] {
-            return Ok(false);
-        }
-    }
 }
 
 /// The namespace child: `<builder> __intar-wake-child <job.json>`.
@@ -1060,7 +611,7 @@ fn ip(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// The VM the base and pack steps boot: the agent's cold config in the wake
+/// The VM the wake step boots: the agent's cold config in the wake
 /// shape, the RAM shared so the file is the guest's memory.
 fn build_vm_config(job: &ChildJob) -> Result<cloud_hypervisor_client::VmConfig> {
     let cold = machine_vm_config(&MachineVmInput {
@@ -1181,26 +732,17 @@ async fn child(job: &ChildJob) -> Result<ChildResult> {
         }
     };
     let started = Instant::now();
-    for step in &job.steps {
+    for GuestStep { label, command } in &job.steps {
         let left = deadline.saturating_duration_since(Instant::now());
-        match step {
-            GuestStep::Upload { local } => {
-                timeout(left, ssh.upload_file(local, UPLOAD_PATH, 0o600))
-                    .await
-                    .context("upload timed out")??;
-            }
-            GuestStep::Run { label, command } => {
-                let step_started = Instant::now();
-                timeout(left, ssh.run_logged(command, log))
-                    .await
-                    .with_context(|| format!("{label} timed out"))?
-                    .with_context(|| format!("{label} failed"))?;
-                log_line(
-                    log,
-                    &format!("{label} elapsed_ms={}", step_started.elapsed().as_millis()),
-                )?;
-            }
-        }
+        let step_started = Instant::now();
+        timeout(left, ssh.run_logged(command, log))
+            .await
+            .with_context(|| format!("{label} timed out"))?
+            .with_context(|| format!("{label} failed"))?;
+        log_line(
+            log,
+            &format!("{label} elapsed_ms={}", step_started.elapsed().as_millis()),
+        )?;
     }
     let steps_ms = u64::try_from(started.elapsed().as_millis())?;
 
@@ -1209,12 +751,6 @@ async fn child(job: &ChildJob) -> Result<ChildResult> {
     let quiet_ms = u64::try_from(started.elapsed().as_millis())?;
     log_line(log, &format!("quiet={quiet} quiet_ms={quiet_ms}"))?;
     let bars = String::from_utf8(ssh.run_output(&as_root(BARS_SCRIPT)).await?)?;
-    if let Some(expected) = &job.expected_bars {
-        ensure!(
-            bars == *expected,
-            "the guest's BAR table is not its base's:\n{bars}"
-        );
-    }
     let started = Instant::now();
     ssh.run(&as_root(&format!(
         "systemd-run --quiet --collect --unit=intar-suspend sh -c {}",
@@ -1322,85 +858,76 @@ async fn quiet(pid: u32) -> Result<bool> {
     Ok(false)
 }
 
-/// The cache name of a suspended base. The build key holds no text baked
-/// into the platform base (loader, units, kernel), so the base rootfs's
-/// definition hash, which does, is among `parts`.
-fn base_recipe(parts: &[&str]) -> String {
-    crate::sha256::sha256_bytes_hex(
-        format!("{}\n{BARS_SCRIPT}\n{SUSPEND_SCRIPT}", parts.join("\n")).as_bytes(),
-    )
+/// The config of a wake image: its own RAM, never a delta to another
+/// image's, so the contract's base form (no `pack`) serves a pack as well,
+/// and `booted_at_unix_ms` is this image's own cold boot.
+fn wake_machine_config(
+    build_key: &OciDigest,
+    cmdline: String,
+    disk: intar_contracts::oci::MachineDiskV1,
+    ram: WakeRamV1,
+    cpu_profile: OciDigest,
+    vmm: WakeVmmV1,
+    booted_at_unix_ms: u64,
+) -> MachineConfigV1 {
+    MachineConfigV1 {
+        guest_contract: GUEST_CONTRACT,
+        image_format: IMAGE_FORMAT.to_owned(),
+        build_key: build_key.clone(),
+        boot: MachineBootV1 { cmdline },
+        disk,
+        wake: Some(WakeV1 {
+            ram,
+            pack: None,
+            shape: shape(),
+            cpu_profile,
+            vmm,
+            booted_at_unix_ms,
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn a_changed_platform_base_is_another_cached_base() {
-        let platform = |hook: &str| {
-            crate::oci::layered_definition_hash(
-                &crate::platform::platform_base_spec(),
-                "essential",
-                hook,
-                &crate::config::QemuBuildConfig::default(),
-            )
+    fn a_wake_image_carries_its_own_ram_and_boot() {
+        let digest = |digit: &str| {
+            OciDigest::try_from(format!("sha256:{}", digit.repeat(64))).expect("digest")
         };
-        let recipe =
-            |hook: &str| super::base_recipe(&["sha256:key", &platform(hook), "cpu", "vmm"]);
-        assert_ne!(recipe("loader one"), recipe("loader two"));
-        assert_eq!(recipe("loader one"), recipe("loader one"));
-    }
-
-    #[test]
-    fn the_delta_is_written_in_parts_and_capped() {
-        let dir = tempfile::tempdir().expect("dir");
-        let delta = dir.path().join("delta");
-        fs::write(&delta, vec![7_u8; DELTA_PART_BYTES + 5]).expect("delta");
-        let mut writer = ImageWriter::new(&dir.path().join("out")).expect("writer");
-        assert_eq!(
-            write_delta_parts(&mut writer, &delta, u64::MAX).expect("parts"),
-            2
-        );
-        let limit = u64::try_from(DELTA_PART_BYTES).expect("size");
-        assert!(write_delta_parts(&mut writer, &delta, limit).is_err());
-    }
-
-    #[test]
-    fn old_bases_expire() {
-        let day = 24 * 3_600_000;
-        assert!(!expired(0, 30 * day));
-        assert!(expired(0, 30 * day + 1));
-    }
-
-    #[test]
-    fn the_cache_evicts_the_least_recently_used_bases_not_held_ones() {
-        let cache = tempfile::tempdir().expect("cache");
-        let entry = |name: &str, age_s: u64| {
-            let dir = cache.path().join(name);
-            fs::create_dir_all(&dir).expect("entry");
-            let record = fs::File::create(dir.join("base.json")).expect("record");
-            record
-                .set_modified(SystemTime::now() - Duration::from_secs(age_s))
-                .expect("mtime");
-            fs::File::create(dir.join(".lock")).expect("lock");
-            dir
+        let sha = |digit: &str| Sha256Hex::try_from(digit.repeat(64)).expect("sha");
+        let disk = intar_contracts::oci::MachineDiskV1 {
+            size_bytes: 4 << 20,
+            chunk_size: 4 << 20,
+            chunks: vec![(0, 0, sha("a"))],
         };
-        let (old, held, recent, keep) = (
-            entry("old", 400),
-            entry("held", 300),
-            entry("recent", 100),
-            entry("keep", 1_000),
+        let ram = WakeRamV1 {
+            size_bytes: WAKE_MEMORY_BYTES,
+            chunk_size: 4 << 20,
+            chunks: vec![(0, 1, sha("c"))],
+            sha256: sha("d"),
+        };
+        let vmm = WakeVmmV1 {
+            min_version: "v55.0.0".to_owned(),
+            built_with: "v55.0.0".to_owned(),
+        };
+        let config = wake_machine_config(
+            &digest("e"),
+            "console=hvc0".to_owned(),
+            disk,
+            ram.clone(),
+            digest("f"),
+            vmm,
+            1_234,
         );
-        fs::create_dir_all(cache.path().join(".building-x")).expect("leftover");
-        let lock = fs::File::open(held.join(".lock")).expect("lock");
-        fs2::FileExt::lock_shared(&lock).expect("hold");
-        assert_eq!(
-            evict_bases(cache.path(), &keep, 3).expect("evict"),
-            vec![old.clone()]
-        );
-        assert_eq!(
-            evict_bases(cache.path(), &keep, 2).expect("evict"),
-            vec![recent.clone()]
-        );
-        assert!(held.exists() && keep.exists() && !old.exists() && !recent.exists());
+        assert_eq!(config.build_key, digest("e"));
+        assert_eq!(config.boot.cmdline, "console=hvc0");
+        let wake = config.wake.expect("wake");
+        assert!(wake.pack.is_none(), "a wake image is never a delta");
+        assert_eq!((wake.ram, wake.booted_at_unix_ms), (ram, 1_234));
+        assert_eq!(wake.shape, shape());
+        assert_eq!(wake.cpu_profile, digest("f"));
     }
 
     #[test]
@@ -1411,21 +938,6 @@ mod tests {
         fs::write(&log, b"12345").expect("log");
         assert!(log_over_limit(&log, 5).is_none());
         assert!(log_over_limit(&log, 4).is_some());
-    }
-
-    use super::*;
-
-    #[test]
-    fn the_same_bytes_are_the_same() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (one, other) = (dir.path().join("one"), dir.path().join("other"));
-        fs::write(&one, vec![7_u8; 5 << 20]).expect("one");
-        fs::write(&other, vec![7_u8; 5 << 20]).expect("other");
-        assert!(same_bytes(&one, &other).expect("compare"));
-        let mut changed = vec![7_u8; 5 << 20];
-        changed[(5 << 20) - 1] = 8;
-        fs::write(&other, changed).expect("other");
-        assert!(!same_bytes(&one, &other).expect("compare"));
     }
 
     #[test]

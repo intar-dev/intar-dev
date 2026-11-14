@@ -50,16 +50,9 @@ pub struct WakeBuildConfig {
     pub cpu_profile: PathBuf,
     /// The Kino binary the build guest runs.
     pub kino: PathBuf,
-    /// Where suspended bases outlive a build, so an image and its packs
-    /// share one.
-    pub base_cache: PathBuf,
-    /// The most bases the cache keeps; the least recently used go first.
-    #[serde(default = "default_max_cached_bases")]
-    pub max_cached_bases: usize,
-}
-
-fn default_max_cached_bases() -> usize {
-    4
+    /// Where wake builds run: a short path, since the VMM's socket paths
+    /// must fit in `SUN_LEN`.
+    pub work_dir: PathBuf,
 }
 
 impl Default for QemuBuildConfig {
