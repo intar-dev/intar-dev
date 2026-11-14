@@ -88,11 +88,6 @@ export interface MockApiState {
   organizationOidc: Record<string, unknown> | null;
   hosts: Array<Record<string, unknown>>;
   hostRuns: Record<string, unknown>;
-  adminScenarios: Array<Record<string, unknown>>;
-  imagePromotion: Record<string, unknown>;
-  adminScenarioDetail: Record<string, unknown>;
-  builds: Array<Record<string, unknown>>;
-  buildDetails: Record<string, Record<string, unknown>>;
   scenarioRevisions: Array<Record<string, unknown> & { id: string }>;
   machineBuilds: Array<Record<string, unknown>>;
 }

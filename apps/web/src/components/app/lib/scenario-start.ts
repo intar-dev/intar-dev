@@ -69,8 +69,6 @@ export async function requestScenarioStartWithCapacityWait(
     signal: AbortSignal;
     onCapacityWait: (contention: ScenarioStartContention) => void;
     organizationId?: string | null;
-    candidateRevision?: string;
-    candidateBuildId?: string;
     launchSource?: "play";
     ref?: string;
   },
@@ -95,12 +93,6 @@ export async function requestScenarioStartWithCapacityWait(
         {
           idempotencyKey,
           organizationId: options.organizationId ?? null,
-          ...(options.candidateRevision
-            ? { candidateRevision: options.candidateRevision }
-            : {}),
-          ...(options.candidateBuildId
-            ? { candidateBuildId: options.candidateBuildId }
-            : {}),
           ...(options.launchSource ? { launchSource: options.launchSource } : {}),
           ...(options.ref ? { ref: options.ref } : {}),
         },
@@ -198,8 +190,6 @@ async function requestScenarioStart(
   options: {
     idempotencyKey: string;
     organizationId: string | null;
-    candidateRevision?: string;
-    candidateBuildId?: string;
     launchSource?: "play";
     ref?: string;
   },
@@ -220,12 +210,6 @@ async function requestScenarioStart(
         body: JSON.stringify({
           ...(options.organizationId
             ? { organizationId: options.organizationId }
-            : {}),
-          ...(options.candidateRevision
-            ? { candidateRevision: options.candidateRevision }
-            : {}),
-          ...(options.candidateBuildId
-            ? { candidateBuildId: options.candidateBuildId }
             : {}),
           ...(options.launchSource ? { launchSource: options.launchSource } : {}),
           ...(options.ref ? { ref: options.ref } : {}),

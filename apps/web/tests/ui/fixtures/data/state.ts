@@ -6,9 +6,6 @@ import {
   day,
   minute,
   runListEntry,
-  scenarioHints,
-  scenarioProbes,
-  scenarioVm,
   sha,
 } from "./shared";
 import { makeRun } from "./run";
@@ -143,69 +140,6 @@ function makeHostRuns() {
         },
       },
     ],
-  };
-}
-
-function makeAdminScenario(enabled = true) {
-  return {
-    scenarioId: "repair-nginx",
-    title: briefing.title,
-    category: briefing.category,
-    description: briefing.tagline,
-    difficulty: briefing.difficulty,
-    estimatedMinutes: briefing.estimatedMinutes,
-    tags: briefing.tags,
-    scenarioHintCount: 1,
-    probeCount: scenarioProbes.length,
-    vmCount: 1,
-    requiredResources: {
-      cpuMillis: 2_000,
-      memoryMib: scenarioVm.memoryMib,
-      diskMib: scenarioVm.diskMib,
-    },
-    enabled,
-    enabledAt: enabled ? FIXED_NOW - 45 * day : null,
-    createdAt: FIXED_NOW - 60 * day,
-    updatedAt: FIXED_NOW - 2 * day,
-  };
-}
-
-function makeBuild(status: string, id: string) {
-  return {
-    id,
-    scenarioId: id === "build-2" ? "repair-dns" : "repair-nginx",
-    arch: "x86_64",
-    rev: "rev-20260710-01",
-    contentHash: sha,
-    hostId: status === "queued" ? null : "host-builder-1",
-    hostName: status === "queued" ? null : "builder-eu-1",
-    status,
-    phase:
-      status === "failed"
-        ? "failed"
-        : status === "succeeded"
-          ? "done"
-          : "building",
-    attempt: 1,
-    error:
-      status === "failed"
-        ? "qemu image conversion exited with code 1"
-        : status === "stale"
-          ? "superseded by bundle rev-20260710-02"
-          : null,
-    canRetry: status === "failed",
-    hasLog: status !== "queued",
-    timings: {
-      queuedAt: FIXED_NOW - 20 * minute,
-      startedAt: status === "queued" ? null : FIXED_NOW - 18 * minute,
-      finishedAt: ["failed", "succeeded"].includes(status)
-        ? FIXED_NOW - 2 * minute
-        : null,
-      lastReportAt: status === "queued" ? null : FIXED_NOW - minute,
-    },
-    bundleR2Key: `bundles/${id}.tar.zst`,
-    createdAt: FIXED_NOW - 20 * minute,
-    updatedAt: FIXED_NOW - minute,
   };
 }
 
@@ -432,13 +366,6 @@ export function createMockApiState(input?: {
   ];
   const host = makeHost();
   const hostRuns = makeHostRuns();
-  const adminScenario = makeAdminScenario(true);
-  const builds = [
-    makeBuild("stale", "build-4"),
-    makeBuild("building", "build-1"),
-    makeBuild("failed", "build-2"),
-    makeBuild("succeeded", "build-3"),
-  ];
   const organizationDetail = {
     id: "org-platform",
     name: long
@@ -756,59 +683,8 @@ export function createMockApiState(input?: {
     },
     hosts: empty ? [] : [host],
     hostRuns: empty ? { liveVms: [], archivedRuns: [] } : hostRuns,
-    // No attempt yet keeps the admin scenarios page free of relative times.
-    imagePromotion: {
-      attempt: null,
-      holdingRuns: false,
-      operatorDrained: false,
-      pendingRevision: null,
-      runningVms: 0,
-    },
-    adminScenarios: empty
-      ? []
-      : [
-          adminScenario,
-          {
-            ...makeAdminScenario(false),
-            scenarioId: "repair-dns",
-            title: "Trace an intermittent DNS failure",
-          },
-        ],
-    adminScenarioDetail: {
-      ...adminScenario,
-      briefingMarkdown: briefing.briefingMarkdown,
-      solutionMarkdown:
-        "Validate `/etc/nginx/nginx.conf`, restore the service unit, and restart nginx.",
-      hints: scenarioHints,
-      probes: scenarioProbes,
-      vms: [scenarioVm],
-    },
-    builds: empty ? [] : builds,
     scenarioRevisions: empty ? [] : scenarioRevisions(),
     machineBuilds: empty ? [] : machineBuilds(),
-    buildDetails: Object.fromEntries(
-      builds.map((build) => [
-        build.id,
-        {
-          ...build,
-          host:
-            build.hostId == null
-              ? null
-              : {
-                  id: build.hostId,
-                  name: build.hostName,
-                  role: "builder",
-                  connected: true,
-                  lastHeartbeatAt: FIXED_NOW - minute,
-                },
-          bundle: {
-            rev: build.rev,
-            r2Key: build.bundleR2Key,
-            meta: { fixture: true },
-          },
-        },
-      ]),
-    ),
   };
 }
 
