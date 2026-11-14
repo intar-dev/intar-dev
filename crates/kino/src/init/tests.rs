@@ -304,3 +304,48 @@ async fn an_oversized_host_frame_ends_the_stream() {
     // Returns at the oversized length instead of allocating 4 GiB.
     wire::read_host_frames(stream.as_slice()).await;
 }
+
+#[test]
+fn a_machine_id_is_a_v4_id_of_the_random_bytes_and_the_run() {
+    use super::boot::machine_id;
+    let id = machine_id(&[7; 32], "ab");
+    assert_eq!(id.len(), 32);
+    assert!(
+        id.bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    );
+    assert_eq!(&id[12..13], "4");
+    assert!(matches!(&id[16..17], "8" | "9" | "a" | "b"));
+    assert_eq!(id, machine_id(&[7; 32], "ab"));
+    // Either input alone makes another id: two runs from one image differ
+    // when the RNG does, and when their boot.json does.
+    assert_ne!(id, machine_id(&[8; 32], "ab"));
+    assert_ne!(id, machine_id(&[7; 32], "ac"));
+}
+
+#[test]
+fn the_machine_id_steps_write_then_reexec_then_restart_the_readers() {
+    use super::boot::{IdStep, machine_id_steps};
+    assert_eq!(
+        machine_id_steps(true),
+        vec![
+            IdStep::Write("/etc/machine-id"),
+            IdStep::Write("/var/lib/dbus/machine-id"),
+            IdStep::Reexec,
+            IdStep::RestartIfActive("systemd-journald.service"),
+            IdStep::RestartIfActive("dbus.service"),
+            IdStep::RestartIfActive("dbus-broker.service"),
+            IdStep::RestartIfActive("systemd-logind.service"),
+            IdStep::RestartIfActive("systemd-networkd.service"),
+            IdStep::RestartIfActive("systemd-hostnamed.service"),
+            IdStep::PruneJournals,
+        ]
+    );
+    // Debian's D-Bus file is a link to /etc/machine-id: nothing to write.
+    let steps = machine_id_steps(false);
+    assert_eq!(
+        steps[..2],
+        [IdStep::Write("/etc/machine-id"), IdStep::Reexec]
+    );
+    assert_eq!(steps.last(), Some(&IdStep::PruneJournals));
+}

@@ -5,6 +5,8 @@
 use super::{Phase, Report};
 use intar_contracts::guest::{GUEST_USERNAME, GuestBootV3, RUN_CLI_PORT};
 use intar_contracts::scenario::MachineSpecV1;
+use sha2::{Digest as _, Sha256};
+use std::io::Read as _;
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
@@ -45,11 +47,19 @@ pub(crate) fn mark(report: &watch::Sender<Report>, phase: Phase, timing: &str) {
 /// is the returned message.
 pub(crate) async fn bring_up(
     boot: &GuestBootV3,
+    boot_sha256: &str,
     woken: bool,
     report: &watch::Sender<Report>,
 ) -> Result<(), String> {
     let ssh = boot.ssh.enabled;
-    let (network, prepared, recording) = tokio::join!(
+    let (renewed, network, prepared, recording) = tokio::join!(
+        async {
+            if woken {
+                renew_machine_id(boot_sha256, report).await
+            } else {
+                Ok(())
+            }
+        },
         network(boot, woken),
         async {
             if ssh {
@@ -60,6 +70,7 @@ pub(crate) async fn bring_up(
         },
         async { if ssh { recording_disk().await } else { Ok(()) } },
     );
+    renewed?;
     network?;
     prepared?;
     recording?;
@@ -93,6 +104,120 @@ pub(crate) async fn release_lab(spec: &MachineSpecV1, report: &watch::Sender<Rep
         eprintln!("kino init: lab release: {error}");
     }
     mark(report, Phase::Preparing, "lab_released");
+}
+
+const MACHINE_ID: &str = "/etc/machine-id";
+const DBUS_MACHINE_ID: &str = "/var/lib/dbus/machine-id";
+/// The daemons of the base that read the machine id once, at their start, in
+/// the order they restart: the journal first, the bus before its clients.
+/// Only the active ones restart; content's own units are not among them.
+const MACHINE_ID_READERS: &[&str] = &[
+    "systemd-journald.service",
+    "dbus.service",
+    "dbus-broker.service",
+    "systemd-logind.service",
+    "systemd-networkd.service",
+    "systemd-hostnamed.service",
+];
+
+/// One step of [`machine_id_steps`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IdStep {
+    Write(&'static str),
+    /// PID 1 caches the id; a re-executed manager reads the file again.
+    Reexec,
+    RestartIfActive(&'static str),
+    /// Remove every volatile journal but the new id's: the file of a woken
+    /// guest is empty, so the old id is known only by its directory.
+    PruneJournals,
+}
+
+/// The run's machine id: 128 bits of the kernel's RNG, which reseeds on the
+/// resume, hashed with the run's `boot.json` digest, shaped as a v4 UUID
+/// like the ids systemd generates.
+pub(crate) fn machine_id(random: &[u8; 32], boot_sha256: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"intar machine-id\0");
+    hash.update(random);
+    hash.update(boot_sha256.as_bytes());
+    let mut id: [u8; 16] = [0; 16];
+    id.copy_from_slice(&hash.finalize()[..16]);
+    id[6] = (id[6] & 0x0f) | 0x40;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    id.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// What makes a woken guest take a new id: the files, PID 1, the daemons
+/// that read it at start, and the journals of earlier ids.
+pub(crate) fn machine_id_steps(dbus_file: bool) -> Vec<IdStep> {
+    let mut steps = vec![IdStep::Write(MACHINE_ID)];
+    if dbus_file {
+        steps.push(IdStep::Write(DBUS_MACHINE_ID));
+    }
+    steps.push(IdStep::Reexec);
+    steps.extend(
+        MACHINE_ID_READERS
+            .iter()
+            .copied()
+            .map(IdStep::RestartIfActive),
+    );
+    steps.push(IdStep::PruneJournals);
+    steps
+}
+
+/// A woken guest holds the image's machine id, the same in every run woken
+/// from it: give this run its own, before anything of the run reads it.
+async fn renew_machine_id(boot_sha256: &str, report: &watch::Sender<Report>) -> Result<(), String> {
+    let mut random = [0_u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut urandom| urandom.read_exact(&mut random))
+        .map_err(|error| format!("/dev/urandom: {error}"))?;
+    let id = machine_id(&random, boot_sha256);
+    // A symlink (Debian's) points at /etc/machine-id already.
+    let dbus_file = std::fs::symlink_metadata(DBUS_MACHINE_ID).is_ok_and(|meta| meta.is_file());
+    for step in machine_id_steps(dbus_file) {
+        match step {
+            IdStep::Write(path) => replace(path, &format!("{id}\n"))?,
+            IdStep::Reexec => run("systemctl", &["daemon-reexec"]).await?,
+            IdStep::RestartIfActive(unit) => {
+                if run("systemctl", &["is-active", "--quiet", unit])
+                    .await
+                    .is_ok()
+                {
+                    run("systemctl", &["restart", unit]).await?;
+                }
+            }
+            IdStep::PruneJournals => prune_journals(&id)?,
+        }
+    }
+    mark(report, Phase::Booting, "machine_id_renewed");
+    Ok(())
+}
+
+fn prune_journals(id: &str) -> Result<(), String> {
+    const JOURNALS: &str = "/run/log/journal";
+    let entries = match std::fs::read_dir(JOURNALS) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries.map_err(|error| format!("{JOURNALS}: {error}"))?,
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if entry.file_name() != id && path.is_dir() {
+            std::fs::remove_dir_all(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write `path` whole through a rename, mode 0444 as systemd makes it.
+fn replace(path: &str, content: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let next = format!("{path}.intar-new");
+    std::fs::write(&next, content)
+        .and_then(|()| std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o444)))
+        .and_then(|()| std::fs::rename(&next, path))
+        .map_err(|error| format!("{path}: {error}"))
 }
 
 async fn network(boot: &GuestBootV3, woken: bool) -> Result<(), String> {

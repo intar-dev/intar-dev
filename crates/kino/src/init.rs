@@ -64,7 +64,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     if woken {
         boot::mark(&report, Phase::Booting, "woken");
     }
-    if let Err(error) = boot::bring_up(&boot, woken, &report).await {
+    if let Err(error) = boot::bring_up(&boot, &digest, woken, &report).await {
         return fail(&report, error).await;
     }
     if let Err(error) = std::fs::write(APPLIED_BOOT_PATH, &digest) {
