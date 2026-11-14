@@ -14,15 +14,13 @@ import {
   organization,
   courseCatalogs,
   scenarioRuns,
-  scenarioRevisions,
-  scenarios,
   type CourseCatalogCourseV2,
   type CourseCatalogLectureV2,
   type CourseCatalogSnapshotV2,
 } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { isRevisionScenarioId } from "@/lib/scenario-id";
-import { liveHostHasRevisionImagesSql } from "@/lib/scenario-runs/image-readiness";
+import { platformHasRevisionImagesSql, readyPlatformImagesCtes } from "@/lib/scenario-runs/image-readiness";
 import { CUTOVER_WIPED_SQL, cutoverWipedError } from "@/lib/run-admission-gate";
 import type { ResourceCapacity } from "@/lib/resource-capacity";
 
@@ -507,26 +505,26 @@ async function loadCourseViews(input: {
   // platform also needs a live platform host that reports the revision's
   // images ready; a learner's own server is prepared by the start itself.
   if (revisionIds.length) {
-    const platformImagesReady = sql.raw(liveHostHasRevisionImagesSql(
-      "(SELECT live.doc_json FROM scenario_revisions live WHERE live.scenario_id = scenarios.id AND live.rev = scenarios.live_rev)",
-      "agent_hosts.scope = 'platform'",
-    ));
     const platformPlaced = sql`EXISTS (SELECT 1 FROM user placed WHERE placed.id = ${input.userId}
       AND placed.metal_placement = 'platform'
       AND (${input.organizationId} IS NULL OR EXISTS (SELECT 1 FROM organization placed_org
         WHERE placed_org.id = ${input.organizationId} AND placed_org.metal_placement = 'platform')))`;
-    const revised = await input.db
-      .select({
-        scenarioId: scenarios.id,
-        organizationId: scenarios.organizationId,
-        enabled: scenarios.enabled,
-        enabledAt: sql<number | null>`CASE WHEN EXISTS (SELECT 1 FROM ${scenarioRevisions} live
-          WHERE live.scenario_id = ${scenarios.id} AND live.rev = ${scenarios.liveRev}
-            AND live.state IN ('ready', 'verified')) THEN 0 ELSE NULL END`,
-        imagesReady: sql<number>`(NOT ${platformPlaced} OR ${platformImagesReady})`,
-      })
-      .from(scenarios)
-      .where(inJson(scenarios.id, revisionIds));
+    const rows = await input.db.all<{
+      scenario_id: string; organization_id: string | null; enabled: number; enabled_at: number | null; images_ready: number;
+    }>(sql`WITH ${sql.raw(readyPlatformImagesCtes())}
+      SELECT scenario.id AS scenario_id, scenario.organization_id, scenario.enabled,
+          CASE WHEN live.state IN ('ready', 'verified') THEN 0 ELSE NULL END AS enabled_at,
+          (NOT ${platformPlaced} OR ${sql.raw(platformHasRevisionImagesSql("live.doc_json"))}) AS images_ready
+        FROM scenarios scenario
+        LEFT JOIN scenario_revisions live ON live.scenario_id = scenario.id AND live.rev = scenario.live_rev
+       WHERE scenario.id IN (SELECT value FROM json_each(${JSON.stringify(revisionIds)}))`);
+    const revised = rows.map((row) => ({
+      scenarioId: row.scenario_id,
+      organizationId: row.organization_id,
+      enabled: row.enabled === 1,
+      enabledAt: row.enabled_at,
+      imagesReady: row.images_ready,
+    }));
     readyRows.push(...revised);
   }
   const completedUnitKeys = new Set(

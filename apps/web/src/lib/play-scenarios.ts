@@ -1,6 +1,6 @@
 import { playableScenarioCondition } from "@/lib/scenario-runs/content-access";
 import { isRevisionScenarioId } from "@/lib/scenario-id";
-import { liveHostHasRevisionImagesSql } from "@/lib/scenario-runs/image-readiness";
+import { platformHasRevisionImagesSql, readyPlatformImagesCtes } from "@/lib/scenario-runs/image-readiness";
 
 /** What anyone may read about a scenario open to play. */
 export interface PlayScenarioPublic {
@@ -39,7 +39,8 @@ export async function loadPlayScenario(
   const id = `${namespace}/${slug}`;
   if (!isRevisionScenarioId(id)) return null;
   const row = await d1.prepare(
-    `SELECT scenario.id,
+    `${signedIn ? `WITH ${readyPlatformImagesCtes()}` : ""}
+    SELECT scenario.id,
         json_extract(revision.doc_json, '$.title') AS title,
         json_extract(revision.doc_json, '$.summary') AS summary,
         json_extract(revision.doc_json, '$.difficulty') AS difficulty,
@@ -48,7 +49,7 @@ export async function loadPlayScenario(
         ${signedIn ? `, json_extract(revision.doc_json, '$.tags') AS tags,
         json_extract(revision.doc_json, '$.briefing') AS briefing,
         (NOT EXISTS (SELECT 1 FROM user placed WHERE placed.id = ?3 AND placed.metal_placement = 'platform')
-          OR ${liveHostHasRevisionImagesSql("revision.doc_json", "agent_hosts.scope = 'platform'")}) AS ready` : ""}
+          OR ${platformHasRevisionImagesSql("revision.doc_json")}) AS ready` : ""}
        FROM scenarios scenario
        JOIN scenario_revisions revision
          ON revision.scenario_id = scenario.id AND revision.rev = scenario.live_rev

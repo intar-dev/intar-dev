@@ -18,7 +18,7 @@ import { courseCatalogScopeKey } from "@/lib/course-catalogs";
 import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
 import { admitInternalRegistryOperation } from "@/lib/image-registry-admission";
 import { KEPT_REVISIONS_CTE, revisionImagesPresentSql } from "@/lib/kept-revisions";
-import { liveHostHasRevisionImagesSql } from "@/lib/scenario-runs/image-readiness";
+import { platformHasRevisionImagesSql, readyPlatformImagesCtes } from "@/lib/scenario-runs/image-readiness";
 import { verifyOutcome, type VerifyOutcome } from "@/lib/run-tasks";
 import type { RunStateDocument } from "@/lib/run-state";
 import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
@@ -102,13 +102,13 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
         FROM scenarios scenario WHERE ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2) ORDER BY scenario.id`,
     ).bind(actorUserId, scenarioId ?? null),
     env.DB.prepare(
-      `WITH ${KEPT_REVISIONS_CTE}
+      `WITH ${KEPT_REVISIONS_CTE}, ${readyPlatformImagesCtes()}
       SELECT revision.scenario_id, revision.rev, revision.state, revision.guest_contract, revision.content_digest,
           revision.failure_reason, revision.verify_run_id, revision.verify_report_json, revision.live_at,
           revision.created_at, (revision.state = 'verified' AND revision.guest_contract = ?3
             AND EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = revision.scenario_id AND kept.rev = revision.rev)
             AND ${revisionImagesPresentSql("revision.scenario_id", "revision.rev")}) AS can_go_live,
-          ${liveHostHasRevisionImagesSql("revision.doc_json", "agent_hosts.scope = 'platform'")} AS images_ready
+          ${platformHasRevisionImagesSql("revision.doc_json")} AS images_ready
         FROM scenario_revisions revision JOIN scenarios scenario ON scenario.id = revision.scenario_id
         WHERE ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2)
         ORDER BY revision.created_at DESC, revision.rev DESC`,
