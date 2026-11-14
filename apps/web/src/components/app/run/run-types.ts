@@ -174,7 +174,7 @@ export function runTaskChecks(run: ScenarioRunRecord, vmName: string | null): {
       })),
     objectives: run.tasks.map((task) => ({
       probeName: task.id, vmName: task.machine, label: task.title, title: task.title,
-      bodyMarkdown: task.body,
+      bodyMarkdown: null, description: task.body,
       hintCount: run.hints.filter((hint) => hint.probeName === task.id).length,
     })),
   };
@@ -186,6 +186,8 @@ export interface ScenarioObjective {
   label: string;
   title: string | null;
   bodyMarkdown: string | null;
+  /** A task's description for the learner. Shown, unlike `bodyMarkdown`, which older runs keep hidden. */
+  description?: string | null;
   hintCount: number;
 }
 

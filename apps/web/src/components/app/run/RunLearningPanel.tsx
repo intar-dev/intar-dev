@@ -865,9 +865,9 @@ function WorkOrder(props: {
                 <p className="text-sm font-medium leading-6">
                   {repairObjectiveTitle(objective, index)}
                 </p>
-                {objective.bodyMarkdown ? (
+                {objective.description ? (
                   <Markdown className="max-w-[68ch] space-y-1 text-sm leading-5 text-muted-foreground">
-                    {objective.bodyMarkdown}
+                    {objective.description}
                   </Markdown>
                 ) : null}
               </div>
