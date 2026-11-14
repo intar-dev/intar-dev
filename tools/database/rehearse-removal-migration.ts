@@ -42,10 +42,11 @@ export const REBUILT_TABLES: readonly string[] = ["runtime_vms"];
  *
  * The baseline is the committed prefix production reports, built with the same
  * atomic applier production uses, and the seed writes rows in the shape of
- * that baseline after the scenario wipe. The pending set is then applied, the
- * result is verified against the full committed schema, and every table that
- * survives must hold exactly the rows it held before, quoted value for quoted
- * value, under an unchanged definition.
+ * that baseline after the scenario wipe: only into its tables and columns,
+ * since production may be several migrations behind. The pending set is then
+ * applied, the result is verified against the full committed schema, and
+ * every table that survives must hold exactly the rows it held before, quoted
+ * value for quoted value in the baseline's columns.
  */
 export async function runRehearsal(input: {
   client: D1WriteClient;
@@ -53,7 +54,7 @@ export async function runRehearsal(input: {
 }): Promise<RehearsalEvidence> {
   const { client } = input;
   const baselineTags = await applyBaselineMigrations(client, input.appliedCount);
-  await client.batch(rehearsalSeedStatements());
+  await client.batch(rehearsalSeedStatements(await snapshotTables(client)));
   const before = await snapshotTables(client);
   const applied = await applyGeneratedMigrations(client);
   if (applied.appliedTags.length === 0) {
@@ -80,11 +81,12 @@ export async function runRehearsal(input: {
 
 export interface TableSnapshot {
   readonly sql: string;
-  /** Every row as its columns' SQL `quote()` text, sorted. */
-  readonly rows: readonly string[];
+  readonly columns: readonly string[];
+  /** Every row as its columns' SQL `quote()` texts, in column order, sorted. */
+  readonly rows: readonly (readonly string[])[];
 }
 
-/** Each application table's definition and rows, by name. */
+/** Each application table's definition, columns and rows, by name. */
 export async function snapshotTables(
   client: D1ReadClient,
 ): Promise<ReadonlyMap<string, TableSnapshot>> {
@@ -94,50 +96,77 @@ export async function snapshotTables(
   const snapshot = new Map<string, TableSnapshot>();
   for (const table of tables.rows) {
     const name = String(table.name);
-    const columns = await client.query(
+    const columns = (await client.query(
       "SELECT name FROM pragma_table_info(?1) ORDER BY cid",
       [name],
-    );
-    const quoted = columns.rows
-      .map((column) => `quote("${String(column.name).replaceAll('"', '""')}")`)
-      .join(" || ',' || ");
-    const rows = await client.query(
-      `SELECT ${quoted} AS row FROM "${name.replaceAll('"', '""')}"`,
-    );
+    )).rows.map((column) => String(column.name));
+    const quoted = columns
+      .map((column, index) => `quote(${quoteIdentifier(column)}) AS c${index}`)
+      .join(", ");
+    const rows = await client.query(`SELECT ${quoted} FROM ${quoteIdentifier(name)}`);
     snapshot.set(name, {
       sql: String(table.sql),
-      rows: rows.rows.map((row) => String(row.row)).sort(),
+      columns,
+      rows: rows.rows
+        .map((row) => columns.map((_, index) => String(row[`c${index}`])))
+        .sort(compareRows),
     });
   }
   return snapshot;
 }
 
 /**
- * Every table present after the migrations must hold the rows it held before;
- * every one but a rebuilt table must also keep its definition. A table that
- * appears only afterwards is refused: the removal adds none.
+ * Every table present before the migrations must keep every column it had
+ * and hold the rows it held, compared in those columns; a table whose columns
+ * did not change must also keep its definition, unless it is a rebuilt one.
+ * A table the migrations add must be empty.
  */
 export function comparePreservedTables(
   before: ReadonlyMap<string, TableSnapshot>,
   after: ReadonlyMap<string, TableSnapshot>,
 ): Pick<RehearsalEvidence, "droppedTables" | "preservedTables" | "preservedRows"> {
   let preservedRows = 0;
+  let preservedTables = 0;
   for (const [name, table] of after) {
     const earlier = before.get(name);
-    if (!earlier) throw new Error(`the migrations added the table ${name}`);
-    if (!REBUILT_TABLES.includes(name) && earlier.sql !== table.sql) {
+    if (!earlier) {
+      if (table.rows.length > 0) throw new Error(`the migrations added rows to the new table ${name}`);
+      continue;
+    }
+    const rebuilt = REBUILT_TABLES.includes(name);
+    // A rebuilt table may lose columns; its rows are compared in the ones it kept.
+    const kept = earlier.columns.flatMap((column, index) =>
+      table.columns.includes(column) ? [index] : rebuilt ? [] : [-1]);
+    if (kept.includes(-1)) throw new Error(`the migrations dropped a column of ${name}`);
+    const sameColumns = JSON.stringify(earlier.columns) === JSON.stringify(table.columns);
+    if (sameColumns && !rebuilt && earlier.sql !== table.sql) {
       throw new Error(`the migrations changed the definition of ${name}`);
     }
-    if (JSON.stringify(earlier.rows) !== JSON.stringify(table.rows)) {
+    const project = (columns: readonly string[], rows: TableSnapshot["rows"]) => {
+      const indexes = kept.map((index) => columns.indexOf(earlier.columns[index]!));
+      return JSON.stringify(rows.map((row) => indexes.map((index) => row[index]!)).sort(compareRows));
+    };
+    if (project(earlier.columns, earlier.rows) !== project(table.columns, table.rows)) {
       throw new Error(`the migrations changed the rows of ${name}`);
     }
     preservedRows += table.rows.length;
+    preservedTables += 1;
   }
   return {
     droppedTables: [...before.keys()].filter((name) => !after.has(name)),
-    preservedTables: after.size,
+    preservedTables,
     preservedRows,
   };
+}
+
+function compareRows(left: readonly string[], right: readonly string[]): number {
+  const a = JSON.stringify(left);
+  const b = JSON.stringify(right);
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function quoteIdentifier(name: string): string {
+  return `"${name.replaceAll('"', '""')}"`;
 }
 
 if (import.meta.main) {
@@ -181,10 +210,16 @@ if (import.meta.main) {
  * gates, registry state, sources, catalogs and the revision model's scenarios
  * remain. The retired scenario and build tables hold rows too, so the drop is
  * rehearsed on data rather than on empty tables.
+ *
+ * With a `baseline`, a row goes only into a table it has, with only the
+ * columns it has: a baseline before the revision model has none of its
+ * tables, and some of its own tables lack columns added since.
  */
-export function rehearsalSeedStatements(): D1Statement[] {
+export function rehearsalSeedStatements(
+  baseline?: ReadonlyMap<string, Pick<TableSnapshot, "columns">>,
+): D1Statement[] {
   const digest = (character: string) => "sha256:" + character.repeat(64);
-  return [
+  const statements = [
     "INSERT INTO user (id, name, email, created_at, updated_at) VALUES ('user-1', 'User', 'user@example.test', 1, 2)",
     "INSERT INTO session (id, expires_at, token, created_at, updated_at, user_id) VALUES ('session-1', 9, 'token-1', 1, 2, 'user-1')",
     "INSERT INTO account (id, account_id, provider_id, user_id, created_at, updated_at) VALUES ('account-1', '42', 'github', 'user-1', 1, 2)",
@@ -224,7 +259,39 @@ export function rehearsalSeedStatements(): D1Statement[] {
     "INSERT INTO image_build_bundles (rev, r2_key, meta_json) VALUES ('legacy-rev', 'legacy/bundle.tar', '{}')",
     "INSERT INTO image_builds (id, scenario_id, arch, rev, content_hash) VALUES ('legacy-build', 'legacy-scenario', 'x86_64', 'legacy-rev', 'hash')",
     "INSERT INTO vm_scenarios (scenario_id, title, description, difficulty, estimated_minutes, tags_json, briefing_markdown, solution_markdown, hints_json) VALUES ('legacy-scenario', 'Legacy', 'Retired', 'easy', 10, '[]', '', '', '[]')",
-  ].map((sql) => ({ sql }));
+  ];
+  return statements.flatMap((sql) => {
+    if (!baseline) return [{ sql }];
+    const insert = /^INSERT INTO (\w+) \(([^)]*)\) VALUES \((.*)\)$/su.exec(sql);
+    if (!insert) throw new Error(`unreadable seed statement: ${sql}`);
+    const table = baseline.get(insert[1]!);
+    if (!table) return [];
+    const columns = insert[2]!.split(",").map((column) => column.trim());
+    const values = splitValues(insert[3]!);
+    if (values.length !== columns.length) throw new Error(`unreadable seed statement: ${sql}`);
+    const kept = columns.flatMap((column, index) => (table.columns.includes(column) ? [index] : []));
+    return [{
+      sql: `INSERT INTO ${insert[1]} (${kept.map((index) => columns[index]).join(", ")}) VALUES (${kept.map((index) => values[index]).join(", ")})`,
+    }];
+  });
+}
+
+/** The comma-separated SQL literals of a seed row; a quoted literal may hold commas. */
+function splitValues(text: string): string[] {
+  const values: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (const character of text) {
+    if (character === "'") quoted = !quoted;
+    if (character === "," && !quoted) {
+      values.push(current.trim());
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  values.push(current.trim());
+  return values;
 }
 
 /**

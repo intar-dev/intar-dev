@@ -11,8 +11,10 @@ import { applyGeneratedMigrations } from "./apply-generated-migrations";
 import type { D1Statement, D1StatementResult } from "./d1-rest-client";
 import { BunSqliteD1ReadClient } from "./generated-d1-schema";
 
-/** The production baseline: every committed migration before the removal. */
+/** Every committed migration before the removal. */
 const BASELINE = 46;
+/** What production applied before this change: the migrations before the revision model's. */
+const BEFORE_REVISION_MODEL = 39;
 
 describe("removal migration D1 rehearsal", () => {
   test("seeds the post-wipe baseline: no run, no execution", () => {
@@ -86,6 +88,28 @@ describe("removal migration D1 rehearsal", () => {
     }
   });
 
+  test("rehearses from the baseline production serves before the revision model", async () => {
+    const database = new Database(":memory:", { strict: true });
+    database.exec("PRAGMA foreign_keys = ON");
+    try {
+      const evidence = await runRehearsal({
+        client: new PrefixWriteClient(database),
+        appliedCount: BEFORE_REVISION_MODEL,
+      });
+      expect(evidence.baselineTags).toHaveLength(BEFORE_REVISION_MODEL);
+      expect(evidence.appliedTags[0]).toBe("0039_dark_medusa");
+      expect(evidence.appliedMigrationCount).toBe(evidence.committedMigrationCount);
+      expect(evidence.foreignKeyViolations).toBe(0);
+      expect(evidence.droppedTables).toContain("vm_scenarios");
+      // The revision model's rows are not seeded into a baseline without its tables.
+      const seeded = rehearsalSeedStatements().map(({ sql }) => /^INSERT INTO (\w+)/u.exec(sql)?.[1]);
+      expect(seeded).toContain("scenarios");
+      expect(evidence.preservedRows).toBeGreaterThan(20);
+    } finally {
+      database.close(false);
+    }
+  });
+
   test("applies on a post-wipe database with an empty runtime_vms", async () => {
     const database = new Database(":memory:", { strict: true });
     database.exec("PRAGMA foreign_keys = ON");
@@ -145,12 +169,21 @@ describe("removal migration D1 rehearsal", () => {
     }
   });
 
-  test("refuses a changed row, a changed definition and an added table", () => {
-    const table = { sql: "CREATE TABLE t (a)", rows: ["'x'"] };
+  test("refuses a changed row, a changed definition, a dropped column and rows in an added table", () => {
+    const table = { sql: "CREATE TABLE t (a)", columns: ["a"], rows: [["'x'"]] };
     const before = new Map([["t", table]]);
-    expect(() => comparePreservedTables(before, new Map([["t", { ...table, rows: ["'y'"] }]]))).toThrow(/rows of t/u);
-    expect(() => comparePreservedTables(before, new Map([["t", { ...table, sql: "CREATE TABLE t (b)" }]]))).toThrow(/definition of t/u);
-    expect(() => comparePreservedTables(before, new Map([["t", table], ["u", table]]))).toThrow(/added the table u/u);
+    expect(() => comparePreservedTables(before, new Map([["t", { ...table, rows: [["'y'"]] }]]))).toThrow(/rows of t/u);
+    expect(() => comparePreservedTables(before, new Map([["t", { ...table, sql: "CREATE TABLE t ( a )" }]]))).toThrow(/definition of t/u);
+    expect(() => comparePreservedTables(before, new Map([["t", { ...table, columns: ["b"] }]]))).toThrow(/dropped a column of t/u);
+    expect(() => comparePreservedTables(before, new Map([["t", table], ["u", table]]))).toThrow(/new table u/u);
+    // An added column and an empty added table are what the additive migrations do.
+    const added = { sql: "CREATE TABLE t (a, b)", columns: ["a", "b"], rows: [["'x'", "NULL"]] };
+    const empty = { sql: "CREATE TABLE u (c)", columns: ["c"], rows: [] };
+    expect(comparePreservedTables(before, new Map([["t", added], ["u", empty]]))).toEqual({
+      droppedTables: [],
+      preservedTables: 1,
+      preservedRows: 1,
+    });
   });
 });
 
