@@ -156,7 +156,7 @@ export async function assignQueuedMachineBuilds(env: Env, now: number): Promise<
     if (!builder) break;
     const claimed = await env.DB.prepare(
       `UPDATE machine_builds SET state = 'assigned', host_id = ?2, attempt = attempt + 1, phase = NULL,
-          error = NULL, assigned_at = ?3, updated_at = ?3
+          error = NULL, log_key = NULL, assigned_at = ?3, updated_at = ?3
         WHERE build_key = ?1 AND state = 'queued'
           AND (SELECT count(*) FROM machine_builds slot
             WHERE slot.host_id = ?2 AND slot.state IN ('assigned', 'building')) < ?4
@@ -192,6 +192,7 @@ export async function expireMachineBuildLeases(env: Env, now: number): Promise<s
     const state = build.image_digest ? "succeeded" : build.attempt >= MAX_MACHINE_BUILD_ATTEMPTS ? "failed" : "queued";
     const moved = await env.DB.prepare(
       `UPDATE machine_builds SET state = ?4, host_id = CASE WHEN ?4 = 'queued' THEN NULL ELSE host_id END,
+          log_key = CASE WHEN ?4 = 'queued' THEN NULL ELSE log_key END,
           error = CASE ?4 WHEN 'succeeded' THEN error ELSE ?5 END, updated_at = ?6
         WHERE build_key = ?1 AND host_id IS ?2 AND attempt = ?3 AND state IN ('assigned', 'building')
         RETURNING build_key`,

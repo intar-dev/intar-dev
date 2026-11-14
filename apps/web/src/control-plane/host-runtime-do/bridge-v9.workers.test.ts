@@ -207,6 +207,8 @@ describe("machine builds over bridge 9", () => {
     build_key: string; state: string; attempt: number; host_id: string | null; image_digest: string | null; error: string | null;
     updated_at: number;
   }>();
+  const logKey = () => env.DB.prepare("SELECT log_key FROM machine_builds").first<string | null>("log_key");
+  const setLog = () => env.DB.prepare("UPDATE machine_builds SET log_key = 'builds/logs/old.log'").run();
   const revision = (n: number) => env.DB.prepare(
     "SELECT state, content_digest, doc_json, failure_reason FROM scenario_revisions WHERE rev = ?1",
   ).bind(rev(n)).first<{ state: string; content_digest: string | null; doc_json: string; failure_reason: string | null }>();
@@ -306,9 +308,12 @@ describe("machine builds over bridge 9", () => {
     await maintainMachineBuilds(env, null, Date.now());
     expect(await build()).toMatchObject({ state: "assigned", attempt: 2, host_id: "builder-1" });
 
+    // The next attempt never shows the log of the one before.
+    await setLog();
     ws.send(report(key, 2, "failed", { error: "qemu exited" }));
     await until(build, (row) => row?.attempt === 3);
     expect(await build()).toMatchObject({ state: "assigned", attempt: 3, host_id: "builder-1" });
+    expect(await logKey()).toBeNull();
     expect(await revision(1)).toMatchObject({ state: "building" });
     // The superseded attempt can no longer record an image.
     expect((await postResult(key, 2, await pushImage(key))).status).toBe(409);
@@ -372,6 +377,21 @@ describe("machine builds over bridge 9", () => {
     await expireMachineBuildLeases(env, Date.now());
     expect(await build()).toMatchObject({ state: "failed" });
     expect(await revision(1)).toMatchObject({ state: "failed" });
+
+    // Queued again by the next ingest, it drops the failed attempt's log.
+    await setLog();
+    await ingest(2);
+    expect(await build()).toMatchObject({ state: "queued", attempt: 0 });
+    expect(await logKey()).toBeNull();
+  });
+
+  it("drops the log of a silent attempt it queues again", async () => {
+    await ingest(1);
+    await env.DB.prepare("UPDATE machine_builds SET state = 'building', host_id = 'builder-1', attempt = 1, updated_at = 0").run();
+    await setLog();
+    await expireMachineBuildLeases(env, Date.now());
+    expect(await build()).toMatchObject({ state: "queued", host_id: null });
+    expect(await logKey()).toBeNull();
   });
 
   it("verifies an equal revision by carry-forward only from a verified twin of the same guest contract", async () => {

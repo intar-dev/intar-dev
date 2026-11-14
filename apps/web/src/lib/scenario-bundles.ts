@@ -178,7 +178,7 @@ export async function ingestSourceBundle(
           created_at, updated_at)
         SELECT key, ?2, ?3, value, 'queued', 0, ?4, ?4 FROM json_each(?1)
         WHERE true ON CONFLICT (build_key) DO UPDATE SET state = 'queued', host_id = NULL, phase = NULL,
-          error = NULL, image_digest = NULL, attempt = 0, assigned_at = NULL, bundle_rev = excluded.bundle_rev, target_json = excluded.target_json,
+          error = NULL, image_digest = NULL, log_key = NULL, attempt = 0, assigned_at = NULL, bundle_rev = excluded.bundle_rev, target_json = excluded.target_json,
           updated_at = excluded.updated_at
         WHERE machine_builds.state = 'failed'`,
     ).bind(
