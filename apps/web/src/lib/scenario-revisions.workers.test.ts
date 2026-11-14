@@ -9,6 +9,7 @@ import { member, organization } from "@/db/schema";
 import type { DesiredVmV3, VmLabV1, VmVerifyV1 } from "@/generated/contracts/bridge-message-v9";
 import validateBridgeMessageV9 from "@/generated/contracts/bridge-message-v9.validate";
 import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
+import { acquireRegistrySweep, finishRegistrySweep, setRegistryEnforcement } from "@/lib/image-registry-admission";
 import { selectCandidateRevision, settleScenarioRevisions } from "@/lib/machine-builds";
 import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
@@ -294,6 +295,64 @@ describe("promotion, rollback and verify runs", () => {
       await drain();
       expect(await rollback(rev("a"), rev("b"))).toEqual({ liveRev: rev("a") });
       expect(await scenarioRow(PUBLIC_ID)).toEqual({ live_rev: rev("a"), candidate_rev: rev("b") });
+    });
+
+    it("goes back only to a revision the registry sweep keeps", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      await publish(rev("b"), image);
+      await markVerified(PUBLIC_ID, rev("b"));
+      await promote(rev("b"), rev("a"));
+      // rev a is the third newest verified revision, so it is kept.
+      await publish(rev("c"), image);
+      await markVerified(PUBLIC_ID, rev("c"));
+      expect((await listAdministeredScenarios(ADMIN))[0]?.revisions.find((r) => r.rev === rev("a"))?.canGoLive).toBe(true);
+      // A fourth verified revision pushes it out of the kept set.
+      await publish(rev("d"), image);
+      await markVerified(PUBLIC_ID, rev("d"));
+      expect((await listAdministeredScenarios(ADMIN))[0]?.revisions.find((r) => r.rev === rev("a"))?.canGoLive).toBe(false);
+      await expect(rollback(rev("a"), rev("b"))).rejects.toMatchObject({ code: "revision_not_retained" });
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("b"));
+    });
+
+    it("refuses a target whose machine image is no longer indexed, for a promotion too", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      await publish(rev("b"), image);
+      await markVerified(PUBLIC_ID, rev("b"));
+      const gone = `sha256:${"0".repeat(64)}`;
+      await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].image_digest', ?1) WHERE rev = ?2")
+        .bind(gone, rev("b")).run();
+      expect((await listAdministeredScenarios(ADMIN))[0]?.revisions.find((r) => r.rev === rev("b"))?.canGoLive).toBe(false);
+      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ code: "revision_images_gone" });
+
+      await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].image_digest', ?1) WHERE rev = ?2")
+        .bind(image, rev("b")).run();
+      await promote(rev("b"), rev("a"));
+      await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].image_digest', ?1) WHERE rev = ?2")
+        .bind(gone, rev("a")).run();
+      await expect(rollback(rev("a"), rev("b"))).rejects.toMatchObject({ code: "revision_images_gone" });
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("b"));
+    });
+
+    it("waits for a sweep that holds the registry, and leaves the live images in place", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      await publish(rev("b"), image);
+      await markVerified(PUBLIC_ID, rev("b"));
+      await promote(rev("b"), rev("a"));
+      await setRegistryEnforcement(env, "enforce");
+      const sweep = await acquireRegistrySweep(env, { owner: "rollback-test-collector" });
+      if (!sweep.ok) throw new Error(`the test sweep did not acquire: ${sweep.code}`);
+
+      await expect(rollback(rev("a"), rev("b"))).rejects.toMatchObject({ status: 503, code: "registry_busy" });
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("b"));
+      expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM registry_manifests WHERE digest = ?1").bind(image).first("n")).toBe(1);
+
+      await finishRegistrySweep(env, { sweepToken: sweep.lease.sweepToken, outcome: "completed" });
+      expect(await rollback(rev("a"), rev("b"))).toEqual({ liveRev: rev("a") });
+      // The move's writer lease is closed again, so the next sweep can start.
+      expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM image_registry_operation_writers WHERE released_at IS NULL").first("n")).toBe(0);
     });
   });
 

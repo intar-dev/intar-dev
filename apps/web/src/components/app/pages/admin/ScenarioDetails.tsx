@@ -132,9 +132,9 @@ function RevisionRow({
     ? null
     : candidate && revision.state === "ready" && !verifying
       ? <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ?? "Verify"}</Button>
-      : candidate && revision.state === "verified"
+      : candidate && revision.canGoLive
         ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
-        : revision.state === "verified" && revision.liveAt !== null
+        : revision.canGoLive && revision.liveAt !== null
           ? <Button size="sm" variant="outline" disabled={busy} onClick={() => move("rollback")}>{pending ? PENDING_WORDS[pending] : "Roll back"}</Button>
           : null;
   return (

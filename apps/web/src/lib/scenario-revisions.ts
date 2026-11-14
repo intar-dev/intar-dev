@@ -16,6 +16,8 @@ import { activeAccountSql, activeAdminSql } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { courseCatalogScopeKey } from "@/lib/course-catalogs";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { admitInternalRegistryOperation } from "@/lib/image-registry-admission";
+import { KEPT_REVISIONS_CTE, revisionImagesPresentSql } from "@/lib/kept-revisions";
 import { verifyOutcome, type VerifyOutcome } from "@/lib/run-tasks";
 import type { RunStateDocument } from "@/lib/run-state";
 import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
@@ -54,6 +56,11 @@ export interface ScenarioRevisionSummary {
   verifyReport: VerifyReport | null;
   liveAt: number | null;
   createdAt: number;
+  /**
+   * Whether the server would make this revision live now: verified, of the
+   * current guest contract, kept by the registry sweep, its images stored.
+   */
+  canGoLive: boolean;
 }
 
 export interface VerifyReport {
@@ -92,13 +99,16 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
         FROM scenarios scenario WHERE ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2) ORDER BY scenario.id`,
     ).bind(actorUserId, scenarioId ?? null),
     env.DB.prepare(
-      `SELECT revision.scenario_id, revision.rev, revision.state, revision.guest_contract, revision.content_digest,
+      `WITH ${KEPT_REVISIONS_CTE}
+      SELECT revision.scenario_id, revision.rev, revision.state, revision.guest_contract, revision.content_digest,
           revision.failure_reason, revision.verify_run_id, revision.verify_report_json, revision.live_at,
-          revision.created_at
+          revision.created_at, (revision.state = 'verified' AND revision.guest_contract = ?3
+            AND EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = revision.scenario_id AND kept.rev = revision.rev)
+            AND ${revisionImagesPresentSql("revision.scenario_id", "revision.rev")}) AS can_go_live
         FROM scenario_revisions revision JOIN scenarios scenario ON scenario.id = revision.scenario_id
         WHERE ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2)
         ORDER BY revision.created_at DESC, revision.rev DESC`,
-    ).bind(actorUserId, scenarioId ?? null),
+    ).bind(actorUserId, scenarioId ?? null, GUEST_CONTRACT),
     env.DB.prepare(
       `SELECT run.run_id, run.scenario_id, run.scenario_rev FROM scenario_runs run
         JOIN scenarios scenario ON scenario.id = run.scenario_id
@@ -113,7 +123,7 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
   type RevisionRow = {
     scenario_id: string; rev: string; state: ScenarioRevisionSummary["state"]; guest_contract: number;
     content_digest: string | null; failure_reason: string | null; verify_run_id: string | null;
-    verify_report_json: string | null; live_at: number | null; created_at: number;
+    verify_report_json: string | null; live_at: number | null; created_at: number; can_go_live: number;
   };
   const byScenario = new Map<string, AdministeredScenario>();
   for (const row of scenarios!.results as ScenarioRow[]) {
@@ -128,7 +138,7 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
       rev: row.rev, state: row.state, guestContract: row.guest_contract, contentDigest: row.content_digest,
       failureReason: row.failure_reason, verifyRunId: row.verify_run_id,
       verifyReport: row.verify_report_json ? (JSON.parse(row.verify_report_json) as VerifyReport) : null,
-      liveAt: row.live_at, createdAt: row.created_at,
+      liveAt: row.live_at, createdAt: row.created_at, canGoLive: row.can_go_live === 1,
     });
   }
   for (const row of runs!.results as Array<{ run_id: string; scenario_id: string; scenario_rev: string }>) {
@@ -166,8 +176,11 @@ export async function moveLiveRevision(input: {
 }): Promise<{ liveRev: string }> {
   const { scenarioId, rev, liveRev, kind, actorUserId } = input;
   const row = await env.DB.prepare(
-    `SELECT scenario.namespace, scenario.organization_id, scenario.live_rev, scenario.candidate_rev,
-        revision.state, revision.guest_contract, revision.live_at, bundle.r2_key, ${scopeAdminSql(3)} AS manage
+    `WITH ${KEPT_REVISIONS_CTE}
+    SELECT scenario.namespace, scenario.organization_id, scenario.live_rev, scenario.candidate_rev,
+        revision.state, revision.guest_contract, revision.live_at, bundle.r2_key, ${scopeAdminSql(3)} AS manage,
+        EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = ?1 AND kept.rev = ?2) AS kept,
+        ${revisionImagesPresentSql("?1", "?2")} AS images_present
       FROM scenarios scenario
       JOIN scenario_revisions revision ON revision.scenario_id = scenario.id AND revision.rev = ?2
       LEFT JOIN bundles bundle ON bundle.rev = revision.rev AND bundle.scope_key = scenario.scope_key
@@ -175,6 +188,7 @@ export async function moveLiveRevision(input: {
   ).bind(scenarioId, rev, actorUserId).first<{
     namespace: string; organization_id: string | null; live_rev: string | null; candidate_rev: string | null;
     state: string; guest_contract: number; live_at: number | null; r2_key: string | null; manage: number;
+    kept: number; images_present: number;
   }>();
   if (!row?.manage) throw appError(404, "scenario_revision_not_found", "scenario revision not found");
   if (row.live_rev === rev) throw appError(409, "revision_already_live", "this revision is already live");
@@ -189,6 +203,10 @@ export async function moveLiveRevision(input: {
   if (row.guest_contract !== GUEST_CONTRACT) {
     throw appError(409, "guest_contract_mismatch", "this revision was built for another guest contract");
   }
+  if (!row.kept) {
+    throw appError(409, "revision_not_retained", "only the newest verified revisions stay available to roll back to");
+  }
+  if (!row.images_present) throw appError(409, "revision_images_gone", "this revision's images are no longer stored");
   const scopeKey = courseCatalogScopeKey(row.organization_id);
   // Only a promotion of a newer bundle moves the scope's catalog; a rollback
   // or a lagging candidate leaves it, so the catalog never goes backwards.
@@ -203,9 +221,14 @@ export async function moveLiveRevision(input: {
   // The marker the dependent writes check: this move's own row write.
   const moved = `EXISTS (SELECT 1 FROM scenarios WHERE id = ?1 AND live_rev = ?2 AND updated_at = ?3)`;
   const statements = [
+    // The target must be one the registry sweep keeps, with its images still
+    // indexed, so a revision never goes live after its images were swept.
     env.DB.prepare(
-      `UPDATE scenarios SET live_rev = ?2, updated_at = ?3
+      `WITH ${KEPT_REVISIONS_CTE}
+      UPDATE scenarios SET live_rev = ?2, updated_at = ?3
         WHERE id = ?1 AND live_rev IS ?4 AND enabled = 1
+          AND EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = ?1 AND kept.rev = ?2)
+          AND ${revisionImagesPresentSql("?1", "?2")}
           AND (?5 = 'rollback' OR candidate_rev = ?2)
           AND EXISTS (SELECT 1 FROM scenario_revisions revision WHERE revision.scenario_id = ?1 AND revision.rev = ?2
             AND revision.state = 'verified' AND revision.guest_contract = ?6
@@ -228,7 +251,22 @@ export async function moveLiveRevision(input: {
           source_revision = excluded.source_revision, updated_at = max(course_catalogs.updated_at + 1, excluded.updated_at)`,
     ).bind(scenarioId, rev, now, scopeKey, row.organization_id, catalogJson));
   }
-  const [changed] = await env.DB.batch(statements);
+  // A registry writer for the move: refused while a sweep holds the gate, and
+  // no sweep starts while it is open, so the move never overlaps a deleting
+  // pass that marked without it.
+  const writer = await admitInternalRegistryOperation(env, {
+    operation: "pointer_mutation",
+    owner: { kind: "system", id: actorUserId },
+  });
+  if (!writer.ok) throw appError(503, "registry_busy", "the image registry is busy; try again shortly");
+  let outcome: "ok" | "error" = "error";
+  let changed: D1Result | undefined;
+  try {
+    [changed] = await env.DB.batch(statements);
+    outcome = "ok";
+  } finally {
+    await writer.lease.complete(outcome);
+  }
   if (!changed?.results.length) {
     if (catalogJson !== null && (await countUnitGuardRuns(env.DB, row.organization_id, JSON.parse(catalogJson)))) {
       throw activeRunsWouldLoseAccess();

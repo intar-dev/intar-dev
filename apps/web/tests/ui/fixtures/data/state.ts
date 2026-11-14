@@ -825,6 +825,7 @@ function scenarioRevisions() {
     verifyRunId: null,
     verifyReport: null,
     liveAt: null,
+    canGoLive: state === "verified",
     createdAt: FIXED_NOW - age,
     ...extra,
   });
