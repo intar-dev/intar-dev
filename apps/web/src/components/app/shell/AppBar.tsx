@@ -82,7 +82,7 @@ export function safeDynamicPageLabel(pathname: string): string | null {
   if (/^\/organizations\/[^/]+$/.test(pathname)) {
     return "Organization";
   }
-  if (/^\/admin\/scenarios\/[^/]+$/.test(pathname)) {
+  if (/^\/admin\/scenarios\/[^/]+\/[^/]+$/.test(pathname)) {
     return "Scenario";
   }
   if (
@@ -146,6 +146,8 @@ export function buildCrumbs(
     // This path segment is structural, not learner-facing navigation.
     if (segment === "lectures") return;
     const isLast = index === segments.length - 1;
+    // A scenario's namespace is part of its id, not a page of its own.
+    if (!isLast && /^\/admin\/scenarios\/[^/]+$/.test(acc)) return;
     crumbs.push(
       isLast
         ? { label: labelForFinal(acc, segment, overrides) }

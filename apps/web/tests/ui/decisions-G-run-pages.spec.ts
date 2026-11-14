@@ -98,32 +98,27 @@ test("admin tab panels stay mounted so work survives a tab switch", async ({
   );
 });
 
-test("a failed scenario toggle reports inside its row, named after it", async ({
+test("a refused promotion reports inside its revision row", async ({
   page,
   ui,
 }) => {
-  await ui.open({ ...routeCase("admin-scenarios"), theme: "light" });
-  await page.route("**/api/admin/scenarios/repair-dns/enabled", (route) => {
-    ui.server.expectedUnavailable += 1;
+  await ui.open({ ...routeCase("admin-scenario-detail"), theme: "light" });
+  await page.route("**/api/admin/scenario-revisions/intar/repair-nginx", (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    ui.server.expectedConflicts += 1;
     return route.fulfill({
-      status: 503,
-      json: { error: "The registry is read-only right now." },
+      status: 409,
+      json: { error: "The live revision changed; reload and try again.", code: "live_revision_changed" },
     });
   });
 
-  const row = page
-    .locator("div.py-3")
-    .filter({ hasText: "Trace an intermittent DNS failure" })
-    .filter({ has: page.getByRole("button", { name: /(En|Dis)able scenario/ }) });
-  await row.getByRole("button", { name: "Enable scenario" }).click();
+  await page.getByRole("button", { name: "Promote" }).click();
 
-  const alert = row.getByRole("alert");
-  await expect(alert).toContainText(
-    "Could not enable Trace an intermittent DNS failure",
-  );
-  await expect(alert).toContainText("The registry is read-only right now.");
-  // Only that row shows it.
-  await expect(page.getByRole("alert")).toHaveCount(1);
+  const alert = page.getByRole("alert");
+  await expect(alert).toHaveCount(1);
+  await expect(alert).toContainText("The live revision changed; reload and try again.");
+  // The row of the revision that was refused shows it.
+  await expect(page.locator("div.py-3", { has: alert }).getByRole("button", { name: "Promote" })).toBeVisible();
 });
 
 test("a failed host refresh reports inside its host row", async ({ page, ui }) => {

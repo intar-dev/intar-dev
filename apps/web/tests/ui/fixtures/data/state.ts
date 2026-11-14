@@ -784,6 +784,8 @@ export function createMockApiState(input?: {
       vms: [scenarioVm],
     },
     builds: empty ? [] : builds,
+    scenarioRevisions: empty ? [] : scenarioRevisions(),
+    machineBuilds: empty ? [] : machineBuilds(),
     buildDetails: Object.fromEntries(
       builds.map((build) => [
         build.id,
@@ -808,4 +810,95 @@ export function createMockApiState(input?: {
       ]),
     ),
   };
+}
+
+const rev = (commit: string) => `git-42-${commit.repeat(40)}-${"d".repeat(64)}`;
+
+/** One public scenario with a live, a verified candidate and a failed verify run, and one never live. */
+function scenarioRevisions() {
+  const revision = (commit: string, state: string, age: number, extra: Record<string, unknown> = {}) => ({
+    rev: rev(commit),
+    state,
+    guestContract: 3,
+    contentDigest: null,
+    failureReason: null,
+    verifyRunId: null,
+    verifyReport: null,
+    liveAt: null,
+    createdAt: FIXED_NOW - age,
+    ...extra,
+  });
+  return [
+    {
+      id: "intar/repair-nginx",
+      namespace: "intar",
+      slug: "repair-nginx",
+      organizationId: null,
+      title: "Repair a broken nginx service",
+      enabled: true,
+      play: false,
+      liveRev: rev("a"),
+      candidateRev: rev("c"),
+      canManage: true,
+      verifyRuns: {},
+      revisions: [
+        revision("c", "verified", 2 * 60 * minute, { verifyRunId: "run-verify-2" }),
+        revision("b", "ready", day, {
+          verifyRunId: "run-verify-1",
+          verifyReport: {
+            runId: "run-verify-1",
+            outcome: "failed",
+            at: FIXED_NOW - day + 30 * minute,
+            machines: [{
+              name: "webserver",
+              failure: null,
+              verify: {
+                done: true,
+                passed: false,
+                pre_done: true,
+                steps: [{ task_id: "nginx-running", pre: "fail", solve_exit: 1, post: "fail", duration_ms: 900, tail: "solve.sh: nginx: [emerg] unknown directive", waiting_for: [] }],
+              },
+            }],
+          },
+        }),
+        revision("a", "verified", 3 * day, { verifyRunId: "run-verify-0", liveAt: FIXED_NOW - 3 * day + 60 * minute }),
+      ],
+    },
+    {
+      id: "intar/repair-dns",
+      namespace: "intar",
+      slug: "repair-dns",
+      organizationId: null,
+      title: "Trace an intermittent DNS failure",
+      enabled: true,
+      play: false,
+      liveRev: null,
+      candidateRev: rev("e"),
+      canManage: true,
+      verifyRuns: { [rev("e")]: "run-verify-3" },
+      revisions: [revision("e", "ready", 30 * minute)],
+    },
+  ];
+}
+
+function machineBuilds() {
+  const build = (key: string, target: string, state: string, extra: Record<string, unknown> = {}) => ({
+    buildKey: `sha256:${key.repeat(64)}`,
+    bundleRev: rev("c"),
+    organizationId: null,
+    target,
+    state,
+    phase: null,
+    attempt: 1,
+    error: null,
+    hasLog: true,
+    createdAt: FIXED_NOW - 2 * 60 * minute,
+    updatedAt: FIXED_NOW - 90 * minute,
+    ...extra,
+  });
+  return [
+    build("1", "repair-dns/resolver", "building", { phase: "converting", hasLog: false, updatedAt: FIXED_NOW - minute }),
+    build("2", "repair-nginx/webserver", "failed", { attempt: 2, error: "machine build failed: apt-get exited with 100" }),
+    build("3", "trixie", "succeeded"),
+  ];
 }

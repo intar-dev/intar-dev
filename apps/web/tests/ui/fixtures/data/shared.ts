@@ -93,6 +93,8 @@ export interface MockApiState {
   adminScenarioDetail: Record<string, unknown>;
   builds: Array<Record<string, unknown>>;
   buildDetails: Record<string, Record<string, unknown>>;
+  scenarioRevisions: Array<Record<string, unknown> & { id: string }>;
+  machineBuilds: Array<Record<string, unknown>>;
 }
 
 export const minute = 60_000;

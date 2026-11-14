@@ -11,7 +11,7 @@ import { env } from "cloudflare:workers";
 import { normalizeCourseCatalogSnapshot } from "@/control-plane/image-registry/bundle";
 import type { CourseCatalogSnapshotV2 } from "@/db/schema/shared";
 import { GUEST_CONTRACT } from "@/generated/constants";
-import type { BuildTargetV1 } from "@/generated/contracts/bridge-message-v9";
+import type { BuildTargetV1, VmVerifyV1 } from "@/generated/contracts/bridge-message-v9";
 import { activeAccountSql, activeAdminSql } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { courseCatalogScopeKey } from "@/lib/course-catalogs";
@@ -60,7 +60,7 @@ export interface VerifyReport {
   runId: string;
   outcome: VerifyOutcome;
   at: number;
-  machines: Array<{ name: string; verify: unknown; failure: string | null }>;
+  machines: Array<{ name: string; verify: VmVerifyV1 | null; failure: string | null }>;
 }
 
 export interface AdministeredScenario {

@@ -1,26 +1,31 @@
 import { useMemo } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
-import { CircleCheckBig, CircleOff, ExternalLink } from "lucide-react";
+import { useParams } from "@tanstack/react-router";
 import { Markdown } from "@/components/app/Markdown";
+import {
+  REVISION_STATES,
+  type AdministeredScenario,
+  type RevisionAction,
+  type ScenarioRevisionSummary,
+  shortRev,
+  useAdministeredScenario,
+  useRevisionAction,
+} from "@/components/app/admin/scenario-revisions";
 import type { AdminScenarioSummary } from "@/components/app/admin/hosts/types";
-import { formatBytes, formatTimestamp } from "@/components/app/lib/format";
-import { ContentHeader } from "@/components/app/patterns/ContentHeader";
+import { apiErrorMessage } from "@/components/app/lib/api-errors";
+import { formatBytes, formatRelativeTime, formatTimestamp } from "@/components/app/lib/format";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
+import { MetaLine } from "@/components/app/patterns/MetaLine";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
-import { MetaDifficulty, MetaLine } from "@/components/app/patterns/MetaLine";
+import { TableSkeleton } from "@/components/app/patterns/Skeletons";
 import { ErrorState } from "@/components/app/patterns/StateCard";
+import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import type { ScenarioHintManifestV3 } from "@/generated/catalog";
-import type {
-  ScenarioProbeRecord,
-  ScenarioVmRecord,
-} from "@/lib/scenario-model";
+import type { ScenarioProbeRecord, ScenarioVmRecord } from "@/lib/scenario-model";
 import type { CourseLocation } from "@/lib/scenario-runs";
 
 export interface ScenarioRecord extends AdminScenarioSummary {
@@ -32,323 +37,171 @@ export interface ScenarioRecord extends AdminScenarioSummary {
   courseLocation: CourseLocation | null;
 }
 
-interface ScenarioDetailResponse {
-  scenario: ScenarioRecord;
-}
-
 export function ScenarioDetails() {
-  const { scenarioId } = useParams({
-    from: "/app/admin/scenarios/$scenarioId",
-  });
-  const queryClient = useQueryClient();
-
-  const scenario = useQuery({
-    queryKey: ["admin-scenarios", "detail", scenarioId],
-    queryFn: async () => {
-      const response = await fetch(
-        `/api/admin/scenarios/${encodeURIComponent(scenarioId)}`,
-        {
-          method: "GET",
-          credentials: "include",
-        },
-      );
-
-      const body = (await response.json().catch(() => null)) as
-        ScenarioDetailResponse | { error?: string } | null;
-
-      if (!response.ok || !body || !("scenario" in body)) {
-        throw new Error(
-          body && "error" in body && typeof body.error === "string"
-            ? body.error
-            : `Failed to load scenario (${response.status})`,
-        );
-      }
-
-      return body.scenario;
-    },
-    staleTime: 5_000,
-  });
-
-  const enableScenario = useMutation({
-    mutationFn: async () => {
-      const response = await fetch(
-        `/api/admin/scenarios/${encodeURIComponent(scenarioId)}/enabled`,
-        {
-          method: "POST",
-          credentials: "include",
-        },
-      );
-
-      const body = (await response.json().catch(() => null)) as
-        ScenarioDetailResponse | { error?: string } | null;
-
-      if (!response.ok || !body || !("scenario" in body)) {
-        throw new Error(
-          body && "error" in body && typeof body.error === "string"
-            ? body.error
-            : "Failed to enable scenario",
-        );
-      }
-
-      return body.scenario;
-    },
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["admin-scenarios"] }),
-        queryClient.invalidateQueries({
-          queryKey: ["admin-scenarios", "detail", scenarioId],
-        }),
-        queryClient.invalidateQueries({ queryKey: ["scenarios"] }),
-      ]);
-    },
-  });
-
-  const disableScenario = useMutation({
-    mutationFn: async () => {
-      const response = await fetch(
-        `/api/admin/scenarios/${encodeURIComponent(scenarioId)}/enabled`,
-        {
-          method: "DELETE",
-          credentials: "include",
-        },
-      );
-
-      const body = (await response.json().catch(() => null)) as
-        ScenarioDetailResponse | { error?: string } | null;
-
-      if (!response.ok || !body || !("scenario" in body)) {
-        throw new Error(
-          body && "error" in body && typeof body.error === "string"
-            ? body.error
-            : "Failed to disable scenario",
-        );
-      }
-
-      return body.scenario;
-    },
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["admin-scenarios"] }),
-        queryClient.invalidateQueries({
-          queryKey: ["admin-scenarios", "detail", scenarioId],
-        }),
-        queryClient.invalidateQueries({ queryKey: ["scenarios"] }),
-      ]);
-    },
-  });
-
-  const scenarioRecord = scenario.data ?? null;
-  const enabled = scenarioRecord?.enabled ?? false;
-  const learnerCourseLocation = scenarioRecord?.courseLocation ?? null;
+  const { namespace, slug } = useParams({ from: "/app/admin/scenarios/$namespace/$slug" });
+  const scenarioId = `${namespace}/${slug}`;
+  const scenario = useAdministeredScenario(scenarioId);
+  const action = useRevisionAction(scenarioId);
+  const record = scenario.data ?? null;
 
   usePageChrome({
-    title: scenarioRecord?.title,
+    title: record?.title ?? scenarioId,
     status: useMemo(
-      () =>
-        scenarioRecord ? (
-          // The page body repeats the availability, so the chip yields its
-          // app-bar space to the title on narrow screens.
-          <Badge
-            variant={enabled ? "success" : "outline"}
-            className="hidden sm:inline-flex"
-          >
-            {enabled ? "Enabled" : "Disabled"}
-          </Badge>
-        ) : undefined,
-      [scenarioRecord, enabled],
-    ),
-    action: useMemo(
-      () =>
-        scenarioRecord ? (
-          enabled ? (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => disableScenario.mutate()}
-              disabled={disableScenario.isPending || enableScenario.isPending}
-            >
-              <CircleOff />
-              {disableScenario.isPending ? "Disabling…" : "Disable scenario"}
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              onClick={() => enableScenario.mutate()}
-              disabled={enableScenario.isPending || disableScenario.isPending}
-            >
-              <CircleCheckBig />
-              {enableScenario.isPending ? "Enabling…" : "Enable scenario"}
-            </Button>
-          )
-        ) : undefined,
-      [
-        scenarioRecord,
-        enabled,
-        enableScenario.isPending,
-        enableScenario.mutate,
-        disableScenario.isPending,
-        disableScenario.mutate,
-      ],
+      () => (record && !record.enabled ? <Badge variant="outline" className="hidden sm:inline-flex">Disabled</Badge> : undefined),
+      [record],
     ),
   });
 
-  return (
-    <PageShell variant="workspace" density="compact">
-      {scenario.error ? (
+  if (scenario.error) {
+    return (
+      <PageShell variant="workspace" density="compact">
         <ErrorState
-          title="Could not load scenario"
-          description={
-            scenario.error instanceof Error
-              ? scenario.error.message
-              : "Failed to load scenario"
-          }
+          title="Could not load the scenario"
+          description={scenario.error instanceof Error ? scenario.error.message : "Failed to load the scenario"}
           onRetry={() => void scenario.refetch()}
         />
-      ) : !scenarioRecord ? (
-        <div role="status" className="space-y-4">
-          <span className="sr-only">Loading…</span>
-          <div className="space-y-2">
-            <Skeleton className="h-7 w-72 max-w-full" />
-            <Skeleton className="h-4 w-80 max-w-full" />
-            <Skeleton className="h-3 w-56" />
-          </div>
-          <Skeleton className="h-48 rounded-xl" />
-          <Skeleton className="h-48 rounded-xl" />
-        </div>
-      ) : (
-        <>
-          <ContentHeader
-            title={scenarioRecord.title}
-            summary={scenarioRecord.description}
-            meta={
-              <MetaLine
-                items={[
-                  <MetaDifficulty
-                    key="difficulty"
-                    difficulty={scenarioRecord.difficulty}
-                  />,
-                  scenarioVerificationSummary(scenarioRecord.probes, enabled),
-                ]}
-              />
-            }
-            actions={
-              enabled && learnerCourseLocation ? (
-                <LearnerCourseAction
-                  courseLocation={learnerCourseLocation}
-                />
-              ) : undefined
-            }
-          />
+      </PageShell>
+    );
+  }
+  if (!record) {
+    return (
+      <PageShell variant="workspace" density="compact">
+        <TableSkeleton />
+      </PageShell>
+    );
+  }
 
-          {enableScenario.error ? (
-            <Alert variant="destructive" just>
-              <AlertTitle>Enable failed</AlertTitle>
-              <AlertDescription>
-                {enableScenario.error instanceof Error
-                  ? enableScenario.error.message
-                  : "Failed to enable scenario"}
-              </AlertDescription>
-            </Alert>
-          ) : null}
-
-          {disableScenario.error ? (
-            <Alert variant="destructive" just>
-              <AlertTitle>Disable failed</AlertTitle>
-              <AlertDescription>
-                {disableScenario.error instanceof Error
-                  ? disableScenario.error.message
-                  : "Failed to disable scenario"}
-              </AlertDescription>
-            </Alert>
-          ) : null}
-
-          <ScenarioLearnerPreview
-            briefingMarkdown={scenarioRecord.briefingMarkdown}
-            hints={scenarioRecord.hints}
-            solutionMarkdown={scenarioRecord.solutionMarkdown}
-          />
-          <ScenarioVerificationContract probes={scenarioRecord.probes} />
-          <ScenarioOperationalRecord
-            scenario={scenarioRecord}
-            enabled={enabled}
-          />
-        </>
-      )}
+  const failed = action.error ? apiErrorMessage(action.error, "Try again.") ?? "Try again." : null;
+  return (
+    <PageShell variant="workspace" density="compact">
+      <Section density="compact" title="Revisions" description={pointerSummary(record)} bodyClassName="divide-y">
+        {record.revisions.length ? (
+          record.revisions.map((revision) => (
+            <RevisionRow
+              key={revision.rev}
+              scenario={record}
+              revision={revision}
+              busy={action.isPending}
+              pending={action.isPending && action.variables?.rev === revision.rev ? action.variables.action : null}
+              error={action.variables?.rev === revision.rev ? failed : null}
+              onAction={(request) => action.mutate(request)}
+            />
+          ))
+        ) : (
+          <p className="py-3 text-sm text-muted-foreground">No revisions yet.</p>
+        )}
+      </Section>
     </PageShell>
   );
 }
 
-function LearnerCourseAction({
-  courseLocation,
-}: {
-  courseLocation: NonNullable<ScenarioRecord["courseLocation"]>;
-}) {
-  const location = courseLocation;
-  const lectureId = location.lectureId;
-  if (!lectureId) return null;
+function pointerSummary(scenario: AdministeredScenario): string {
+  const live = scenario.liveRev ? `Learners start ${shortRev(scenario.liveRev)}` : "No revision is live, so learners cannot start this scenario";
+  return scenario.candidateRev && scenario.candidateRev !== scenario.liveRev
+    ? `${live}; ${shortRev(scenario.candidateRev)} is the candidate.`
+    : `${live}.`;
+}
 
-  const courseId = location.courseId;
-  if (location.scope === "public") {
-    return (
-      <Button
-        size="sm"
-        variant="outline"
-        render={
-          <Link
-            to="/courses/$courseId/lectures/$lectureId"
-            params={{ courseId, lectureId }}
+const PENDING_WORDS: Record<RevisionAction["action"], string> = {
+  verify: "Starting…",
+  promote: "Promoting…",
+  rollback: "Rolling back…",
+};
+
+function RevisionRow({
+  scenario,
+  revision,
+  busy,
+  pending,
+  error,
+  onAction,
+}: {
+  scenario: AdministeredScenario;
+  revision: ScenarioRevisionSummary;
+  busy: boolean;
+  pending: RevisionAction["action"] | null;
+  error: string | null;
+  onAction: (request: RevisionAction) => void;
+}) {
+  const live = revision.rev === scenario.liveRev;
+  const candidate = revision.rev === scenario.candidateRev;
+  const verifying = Boolean(scenario.verifyRuns[revision.rev]);
+  const state = REVISION_STATES[revision.state];
+  const move = (kind: "promote" | "rollback") => onAction({ action: kind, rev: revision.rev, liveRev: scenario.liveRev });
+  const actions = !scenario.canManage || live
+    ? null
+    : candidate && revision.state === "ready" && !verifying
+      ? <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ?? "Verify"}</Button>
+      : candidate && revision.state === "verified"
+        ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
+        : revision.state === "verified" && revision.liveAt !== null
+          ? <Button size="sm" variant="outline" disabled={busy} onClick={() => move("rollback")}>{pending ? PENDING_WORDS[pending] : "Roll back"}</Button>
+          : null;
+  return (
+    <div className="space-y-2 py-3 first:pt-0 last:pb-0">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <h3 className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+            <code title={revision.rev}>{shortRev(revision.rev)}</code>
+            {live ? <Badge variant="success">Live</Badge> : null}
+            {candidate && !live ? <Badge variant="outline">Candidate</Badge> : null}
+          </h3>
+          <MetaLine
+            items={[
+              `Guest contract ${revision.guestContract}`,
+              `Built ${formatRelativeTime(revision.createdAt)}`,
+              revision.liveAt ? `First live ${formatTimestamp(revision.liveAt)}` : null,
+            ]}
           />
-        }
-      >
-        <ExternalLink />
-        View as learner
-      </Button>
-    );
-  }
-  if (!location.organizationId) return null;
-  if (location.scope === "organization-public") {
-    return (
-      <Button
-        size="sm"
-        variant="outline"
-        render={
-          <Link
-            to="/organizations/$orgId/courses/public/$courseId/lectures/$lectureId"
-            params={{
-              orgId: location.organizationId,
-              courseId,
-              lectureId,
-            }}
-          />
-        }
-      >
-        <ExternalLink />
-        View as learner
-      </Button>
-    );
-  }
-  if (location.scope === "organization-private") {
-    return (
-      <Button
-        size="sm"
-        variant="outline"
-        render={
-          <Link
-            to="/organizations/$orgId/courses/private/$courseId/lectures/$lectureId"
-            params={{
-              orgId: location.organizationId,
-              courseId,
-              lectureId,
-            }}
-          />
-        }
-      >
-        <ExternalLink />
-        View as learner
-      </Button>
-    );
-  }
-  return null;
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {verifying ? <StatusToken tone="live" word="Verifying" pulse /> : <StatusToken tone={state.tone} word={state.word} />}
+          {actions}
+        </div>
+      </div>
+      {revision.failureReason ? <InlineFeedback tone="error" announce={false}>{revision.failureReason}</InlineFeedback> : null}
+      {revision.verifyReport ? <VerifyReportRow report={revision.verifyReport} /> : null}
+      {error ? <InlineFeedback tone="error">{error}</InlineFeedback> : null}
+    </div>
+  );
+}
+
+const OUTCOME_WORDS = { passed: "Passed", failed: "Failed", verify_timeout: "Timed out" } as const;
+
+function VerifyReportRow({ report }: { report: NonNullable<ScenarioRevisionSummary["verifyReport"]> }) {
+  return (
+    <DisclosureRow
+      density="compact"
+      title={`Last verify run: ${OUTCOME_WORDS[report.outcome]}`}
+      meta={formatRelativeTime(report.at)}
+    >
+      <div className="space-y-3 text-sm">
+        {report.machines.map((machine) => {
+          const steps = machine.verify?.steps ?? [];
+          return (
+            <div key={machine.name} className="space-y-1">
+              <p className="font-medium">{machine.name}</p>
+              {machine.failure ? <InlineFeedback tone="error" announce={false}>{machine.failure}</InlineFeedback> : null}
+              {steps.map((step) => (
+                <div key={step.task_id} className="space-y-1">
+                  <MetaLine
+                    items={[
+                      <code key="task">{step.task_id}</code>,
+                      `Before ${step.pre}`,
+                      `Solve exit ${step.solve_exit}`,
+                      `After ${step.post}`,
+                    ]}
+                  />
+                  {step.tail ? <pre className="overflow-x-auto rounded-md bg-terminal-background p-2 font-mono text-xs text-terminal-foreground">{step.tail}</pre> : null}
+                </div>
+              ))}
+              {!machine.failure && !steps.length ? <p className="text-muted-foreground">No verify steps reported.</p> : null}
+            </div>
+          );
+        })}
+      </div>
+    </DisclosureRow>
+  );
 }
 
 export function scenarioVerificationSummary(

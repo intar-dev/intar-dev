@@ -376,7 +376,7 @@ const adminBuildsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin/builds",
   head: () =>
-    routeHead("Builds", "Monitor scenario image builds, logs, and retries."),
+    routeHead("Builds", "Monitor scenario machine builds and their logs."),
   // Organization owners and admins see their own builds here too; the API
   // decides what each caller may read.
   component: lazyRouteComponent(
@@ -391,9 +391,10 @@ const adminScenariosRoute = createRoute({
   head: () =>
     routeHead(
       "Scenario registry",
-      "Manage learner availability and scenario records.",
+      "Verify, promote, and roll back scenario revisions.",
     ),
-  beforeLoad: requireAdminRoute,
+  // Organization owners and admins manage their own scenarios here too; the
+  // API decides what each caller may read and change.
   component: lazyRouteComponent(
     () => import("./pages/admin/ScenarioRegistry"),
     "ScenarioRegistry",
@@ -402,13 +403,12 @@ const adminScenariosRoute = createRoute({
 
 const adminScenarioDetailsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "admin/scenarios/$scenarioId",
+  path: "admin/scenarios/$namespace/$slug",
   head: () =>
     routeHead(
       "Scenario record",
-      "Inspect scenario configuration, checks, hints, and machine definitions.",
+      "Inspect a scenario's revisions and their verify runs.",
     ),
-  beforeLoad: requireAdminRoute,
   component: lazyRouteComponent(
     () => import("./pages/admin/ScenarioDetails"),
     "ScenarioDetails",

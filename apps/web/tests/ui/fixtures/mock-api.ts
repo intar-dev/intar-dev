@@ -1639,6 +1639,45 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
 
+      if (pathname === "/api/admin/scenario-revisions" && method === "GET") {
+        await json(route, { scenarios: server.state.scenarioRevisions });
+        return;
+      }
+      const revisionScenarioId = segment(
+        pathname,
+        /^\/api\/admin\/scenario-revisions\/([^/]+\/[^/]+)$/,
+      );
+      if (revisionScenarioId) {
+        const scenario = server.state.scenarioRevisions.find(
+          (candidate) => candidate.id === revisionScenarioId,
+        );
+        if (!scenario) {
+          await json(route, { error: "scenario not found", code: "scenario_not_found" }, 404);
+          return;
+        }
+        if (method === "POST") {
+          const body = await requestBody(route);
+          if (body.action === "verify") {
+            scenario.verifyRuns = { [String(body.rev)]: "run-verify-new" };
+          } else {
+            scenario.liveRev = body.rev;
+          }
+        }
+        await json(route, { scenario });
+        return;
+      }
+      if (pathname === "/api/admin/machine-builds" && method === "GET") {
+        await json(route, { builds: server.state.machineBuilds });
+        return;
+      }
+      if (/^\/api\/admin\/machine-builds\/[^/]+\/log$/.test(pathname) && method === "GET") {
+        await route.fulfill({
+          status: 200,
+          contentType: "text/plain; charset=utf-8",
+          body: "builder: downloading bundle\nbuilder: converting image\nbuilder: done\n",
+        });
+        return;
+      }
       if (pathname === "/api/admin/builds" && method === "GET") {
         await json(route, { builds: server.state.builds });
         return;

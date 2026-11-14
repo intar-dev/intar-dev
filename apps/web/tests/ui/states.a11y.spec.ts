@@ -690,24 +690,24 @@ test.describe("focused state accessibility", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("build details", async ({ page, ui }, testInfo) => {
+  test("build queue", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("admin-builds"), theme: "dark" });
-    const supersededBuild = page.locator('[data-build-id="build-4"]');
-
-    await expect(
-      supersededBuild.getByText("Superseded", { exact: true }),
-    ).toBeVisible();
-    await expect(
-      supersededBuild.getByRole("button", { name: "Retry" }),
-    ).toBeDisabled();
     const queuePosture = page
       .getByRole("heading", { name: "Queue posture" })
       .locator("../../..");
     await expect(queuePosture).toContainText(/Active\s*1/);
-    await expect(queuePosture).toContainText(/Needs attention\s*1/);
-    await page.getByRole("button", { name: "Details" }).first().click();
+    await expect(queuePosture).toContainText(/Failed\s*1/);
+    await expect(page.getByText("apt-get exited with 100")).toBeVisible();
+    // A build without a log yet offers none.
+    await expect(page.getByRole("button", { name: "Log" }).first()).toBeDisabled();
+    await expect(page.getByRole("link", { name: "Log" })).toHaveCount(2);
+    await expectNoAxeViolations(page, testInfo);
+  });
 
-    await expect(page.getByText("Content hash").first()).toBeVisible();
+  test("scenario verify report", async ({ page, ui }, testInfo) => {
+    await ui.open({ ...routeCase("admin-scenario-detail"), theme: "dark" });
+    await page.getByRole("button", { name: /Last verify run: Failed/ }).click();
+    await expect(page.getByText("solve.sh: nginx: [emerg] unknown directive")).toBeVisible();
     await expectNoAxeViolations(page, testInfo);
   });
 

@@ -645,11 +645,11 @@ test.describe("focused visual states", () => {
     );
   });
 
-  test("build master detail", async ({ page, ui }) => {
-    await ui.open({ ...routeCase("admin-builds"), theme: "dark" });
-    await page.getByRole("button", { name: "Details" }).first().click();
-    await expect(page.getByText("Content hash").first()).toBeVisible();
-    await expectRouteScreenshot(page, "build-detail-dark-desktop");
+  test("scenario verify report", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("admin-scenario-detail"), theme: "dark" });
+    await page.getByRole("button", { name: /Last verify run: Failed/ }).click();
+    await expect(page.getByText("solve.sh: nginx: [emerg] unknown directive")).toBeVisible();
+    await expectRouteScreenshot(page, "scenario-verify-report-dark-desktop");
   });
 
   for (const tab of [
