@@ -70,7 +70,6 @@ import (
 			env: {
 				CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
 				CLOUDFLARE_API_TOKEN:  "${{ secrets.CLOUDFLARE_API_TOKEN }}"
-				BUCKET:                "intar-dev-vm-image-registry-20260709"
 			}
 			environment: {
 				name: "production"
@@ -111,8 +110,8 @@ import (
 				"working-directory": "."
 				#StepTask & {#task: "website-pin-production-config"}
 			}, {
-				name: "Resolve and inject the verified guest-tools pin"
-				#StepTask & {#task: "website-pin-guest-tools"}
+				name: "Inject the Kino pin"
+				#StepTask & {#task: "website-pin-kino"}
 			}, {
 				name: "Plan production D1 migrations"
 				id:   "migrations"
@@ -300,7 +299,7 @@ tasks: {
 	"deploy-find-builds": #Script & {_script: "tools/workflows/deploy/find-builds.sh"}
 	"deploy-verify-revision": #Script & {_script: "tools/workflows/deploy/verify-revision.sh"}
 	"website-pin-production-config": #Script & {_script: "tools/workflows/website/pin-production-config.sh"}
-	"website-pin-guest-tools": #Script & {_script: "tools/workflows/website/pin-guest-tools.sh", _production: true}
+	"website-pin-kino": #Script & {_script: "tools/workflows/website/pin-kino.sh"}
 	"website-plan-d1-migrations": #Script & {_script: "tools/workflows/website/plan-d1-migrations.sh", _production: true}
 	"website-capture-pre-migration-d1-evidence": #Script & {_script: "tools/workflows/website/capture-pre-migration-d1-evidence.sh", _production: true}
 	"website-hold-registry-collector": #Script & {_script: "tools/workflows/website/hold-registry-collector.sh", _production: true}

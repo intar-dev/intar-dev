@@ -141,6 +141,8 @@ must stay paused.
 Hosts take Kino as a stored Kino artifact. `KINO_PINS_JSON` pins one per
 guest contract, as `{"<contract>":{"current":"sha256:<hex>","previous":null}}`;
 a pin whose digest is not a stored Kino artifact for that contract pins nothing.
+The website deploy sets it from `tools/deploy/kino-pin.json`, which the release
+workflow writes; without that file the variable is unset and no VM is placed.
 
 ## Sign-ups
 

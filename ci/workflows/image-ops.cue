@@ -6,15 +6,14 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 	name:       "Image operations"
 	"run-name": "Image ops ${{ inputs.operation }} @ ${{ github.sha }}"
 
-	// One operator lane for the image flywheel work that stays manual: the run
-	// gate and the registry cleanup. Intar
-	// promotes image catalogs itself (Admin, Scenarios, Image promotion), also
-	// inside a drain this lane holds. Each operation keeps its own inputs and its
-	// own job, so the plane fence and the deliberate-release property stay
-	// explicit; the production environment admits only main. Three lock groups keep unrelated work from blocking
-	// recovery: the image pipeline group, the cleanup campaign group, and the
-	// cleanup status group, which must stay readable while a campaign holds the
-	// other two.
+	// One operator lane for the registry work that stays manual: the run gate,
+	// storing a Kino release, and the registry cleanup. Intar promotes scenario
+	// revisions itself. Each operation keeps its own inputs and its own job, so
+	// the plane fence and the deliberate-release property stay explicit; the
+	// production environment admits only main. Three lock groups keep unrelated
+	// work from blocking recovery: the gate and Kino group, the cleanup campaign
+	// group, and the cleanup status group, which must stay readable while a
+	// campaign holds the other two.
 	on: {
 		workflow_dispatch: inputs: {
 			operation: {
@@ -24,11 +23,18 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				options: [
 					"gate-open",
 					"gate-drained",
+					"kino-promote",
 					"cleanup-status",
 					"cleanup-plan",
 					"cleanup-run",
 					"cleanup-resolve",
 				]
+			}
+			kino_version: {
+				description: "the published kino release to store, X.Y.Z, for a kino promote"
+				required:    false
+				default:     ""
+				type:        "string"
 			}
 			expected_gc_run_id: {
 				description: "the stalled sweep to abort, for a cleanup resolve"
@@ -72,6 +78,9 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					    job=gate
 					    state=drained
 					    ;;
+					  kino-promote)
+					    job=kino
+					    ;;
 					  cleanup-status)
 					    job=cleanup
 					    action=status
@@ -90,7 +99,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					    ;;
 					  *)
 					    echo "unsupported operation: ${OPERATION}" >&2
-					    echo 'Use gate-open, gate-drained, cleanup-status, cleanup-plan, cleanup-run, or cleanup-resolve.' >&2
+					    echo 'Use gate-open, gate-drained, kino-promote, cleanup-status, cleanup-plan, cleanup-run, or cleanup-resolve.' >&2
 					    exit 1
 					    ;;
 					esac
@@ -179,6 +188,44 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					  | jq -e '.state == "open"' >/dev/null
 
 					"""
+			}]
+		}
+		kino: {
+			name:      "Store a Kino release in the registry"
+			"runs-on": "namespace-profile-intar-dev"
+			needs: ["request"]
+			if: "needs.request.outputs.job == 'kino'"
+			concurrency: {
+				group:                "intar-image-catalog-promotion"
+				"cancel-in-progress": false
+			}
+			"timeout-minutes": 15
+			environment:       "production"
+			// gh reads the release and verifies its attestation.
+			permissions: {
+				attestations: "read"
+				contents:     "read"
+			}
+			env: {
+				GH_TOKEN:                  "${{ github.token }}"
+				INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
+				KINO_VERSION:              "${{ inputs.kino_version }}"
+				REGISTRY_URL:              "https://intar.dev/registry/v1"
+			}
+			steps: [{
+				name: "Checkout exact main revision"
+				uses: gha.pin.checkout.ref
+				with: "persist-credentials": false
+			}, {
+				name: "Set up cuenv"
+				uses: "./.github/actions/setup-cuenv"
+			}, {
+				name: "Set up Bun"
+				uses: gha.pin."setup-bun".ref
+				with: "bun-version": "1.4.4"
+			}, {
+				name: "Push the Kino artifact"
+				#StepTask & {#task: "image-ops-kino-promote"}
 			}]
 		}
 		cleanup: {
@@ -302,6 +349,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 // that authenticates to production or changes anything outside the runner is
 // _production; the authority check and the evidence scrub touch only the runner.
 tasks: {
+	"image-ops-kino-promote": #Script & {_script: "tools/workflows/image-ops/kino-promote.sh", _production: true}
 	"image-ops-validate-cleanup-authority": #Script & {_script: "tools/workflows/image-ops/validate-cleanup-authority.sh"}
 	"image-ops-read-cleanup-state": #Script & {_script: "tools/workflows/image-ops/read-cleanup-state.sh", _production: true}
 	"image-ops-plan-cleanup": #Script & {_script: "tools/workflows/image-ops/plan-cleanup.sh", _production: true}

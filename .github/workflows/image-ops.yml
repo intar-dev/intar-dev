@@ -12,10 +12,16 @@ run-name: Image ops ${{ inputs.operation }} @ ${{ github.sha }}
         options:
           - gate-open
           - gate-drained
+          - kino-promote
           - cleanup-status
           - cleanup-plan
           - cleanup-run
           - cleanup-resolve
+      kino_version:
+        description: the published kino release to store, X.Y.Z, for a kino promote
+        required: false
+        default: ""
+        type: string
       expected_gc_run_id:
         description: the stalled sweep to abort, for a cleanup resolve
         required: false
@@ -54,6 +60,9 @@ jobs:
               job=gate
               state=drained
               ;;
+            kino-promote)
+              job=kino
+              ;;
             cleanup-status)
               job=cleanup
               action=status
@@ -72,7 +81,7 @@ jobs:
               ;;
             *)
               echo "unsupported operation: ${OPERATION}" >&2
-              echo 'Use gate-open, gate-drained, cleanup-status, cleanup-plan, cleanup-run, or cleanup-resolve.' >&2
+              echo 'Use gate-open, gate-drained, kino-promote, cleanup-status, cleanup-plan, cleanup-run, or cleanup-resolve.' >&2
               exit 1
               ;;
           esac
@@ -143,6 +152,38 @@ jobs:
             --header "Authorization: Bearer ${INTAR_IMAGE_PUBLISH_TOKEN}" \
             "https://intar.dev/registry/v1/cutover/gate" \
             | jq -e '.state == "open"' >/dev/null
+  kino:
+    name: Store a Kino release in the registry
+    if: needs.request.outputs.job == 'kino'
+    needs:
+      - request
+    runs-on: namespace-profile-intar-dev
+    concurrency:
+      group: intar-image-catalog-promotion
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+      KINO_VERSION: ${{ inputs.kino_version }}
+      REGISTRY_URL: https://intar.dev/registry/v1
+    environment: production
+    permissions:
+      attestations: read
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - name: Push the Kino artifact
+        run: cuenv task -p ci --package ci image-ops-kino-promote
   cleanup:
     name: Image registry cleanup
     if: needs.request.outputs.job == 'cleanup'

@@ -436,3 +436,40 @@ it("captures enabled scenarios from the scenario table D1 has and stops before m
   // Once it applied, runtime rows are ordinary again.
   expect(captureEvidence(47, { ...wiped, runtime_vm_count: 3, cutover_gate_state: "open" }).status).toBe(0);
 });
+
+it("injects the Kino pin when the repository has one and deploys without it otherwise", () => {
+  const { index: pin } = step("Inject the Kino pin");
+  expect(pin).toBeGreaterThan(step("Pin and verify production configuration").index);
+  expect(pin).toBeLessThan(step("Plan production D1 migrations").index);
+  const root = mkdtempSync(join(tmpdir(), "intar-kino-pin-"));
+  const repo = join(root, "repo");
+  mkdirSync(join(repo, "tools/deploy"), { recursive: true });
+  for (const file of ["tools/deploy/kino-artifact.ts"]) writeFileSync(join(repo, file), readFileSync(file));
+  const config = join(root, "wrangler.json");
+  const inject = () => {
+    writeFileSync(config, JSON.stringify({ name: "intar-dev", vars: { CONTROL_PLANE_MAINTENANCE: "off" } }));
+    const run = spawnSync("bash", [resolve("tools/workflows/website/pin-kino.sh")], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, DEPLOYMENT_CONFIG: config, GITHUB_STEP_SUMMARY: join(root, "summary.md") },
+    });
+    expect(run.status, run.stderr).toBe(0);
+    return JSON.parse(readFileSync(config, "utf8")) as { vars: Record<string, string> };
+  };
+  try {
+    expect(inject().vars).toEqual({ CONTROL_PLANE_MAINTENANCE: "off" });
+    const digest = `sha256:${"a".repeat(64)}`;
+    writeFileSync(join(repo, "tools/deploy/kino-pin.json"), `{"3": {"current": "${digest}", "previous": null}}\n`);
+    expect(inject().vars.KINO_PINS_JSON).toBe(`{"3":{"current":"${digest}","previous":null}}`);
+    // A pin the Worker could not read stops the deploy.
+    writeFileSync(join(repo, "tools/deploy/kino-pin.json"), `{"3": {"current": "sha256:x"}}\n`);
+    const bad = spawnSync("bash", [resolve("tools/workflows/website/pin-kino.sh")], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, DEPLOYMENT_CONFIG: config, GITHUB_STEP_SUMMARY: join(root, "summary.md") },
+    });
+    expect(bad.status).not.toBe(0);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
