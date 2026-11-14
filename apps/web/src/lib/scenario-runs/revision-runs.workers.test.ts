@@ -303,6 +303,26 @@ describe("runs of a live scenario revision", () => {
     expect(status.tasks?.map((task) => task.id)).toEqual(["serve", "fetch"]);
   });
 
+  it("takes back a run whose owner was banned inside the commit", async () => {
+    await env.DB.prepare(`CREATE TRIGGER ban_on_commit AFTER UPDATE ON host_desired_state
+      WHEN NEW.doc_json LIKE '%"desired_phase":"running"%' AND OLD.doc_json NOT LIKE '%"desired_phase":"running"%'
+      BEGIN UPDATE user SET banned = 1 WHERE id = '${LEARNER}'; END`).run();
+    await expect(begin()).rejects.toMatchObject({ code: "access_revoked" });
+    const run = await env.DB.prepare("SELECT state, delete_requested_at FROM scenario_runs").first<{ state: string; delete_requested_at: number }>();
+    expect(run).toMatchObject({ state: "teardown_requested", delete_requested_at: expect.any(Number) });
+    expect((await desiredDoc(HOST))!.vms.map((vm) => vm.desired_phase)).toEqual(["absent", "absent"]);
+  });
+
+  it("leaves the run in teardown when taking back its VMs fails", async () => {
+    await env.DB.prepare(`CREATE TRIGGER ban_on_commit AFTER UPDATE ON host_desired_state
+      WHEN NEW.doc_json LIKE '%"desired_phase":"running"%' AND OLD.doc_json NOT LIKE '%"desired_phase":"running"%'
+      BEGIN UPDATE user SET banned = 1 WHERE id = '${LEARNER}'; END`).run();
+    await env.DB.prepare(`CREATE TRIGGER crash_on_absent BEFORE UPDATE ON host_desired_state
+      WHEN NEW.doc_json LIKE '%"desired_phase":"absent"%' BEGIN SELECT RAISE(ABORT, 'crash'); END`).run();
+    await expect(begin()).rejects.toThrow(/Failed query: update "host_desired_state"/);
+    expect(await env.DB.prepare("SELECT state FROM scenario_runs").first("state")).toBe("teardown_requested");
+  });
+
   it("tears an expired lease out of the desired state", async () => {
     const { runId } = await begin();
     await mutateHostDesiredStateV3(drizzle(env.DB), HOST, Date.now(), (draft) => {

@@ -600,14 +600,15 @@ async function prepareRevisionImages(input: {
 
 /**
  * Cancels a committed revision run whose owner lost access inside the commit
- * window: its VMs go absent, then the run to teardown. A crash in between
- * leaves VMs whose run no longer passes the workload filter, which marks
- * them absent on the next dispatch.
+ * window: the run to teardown first, then its VMs absent. A crash in between
+ * leaves a run in teardown, which the teardown sweep finishes, and VMs
+ * whose run no longer passes the workload filter, which marks them absent
+ * on the next dispatch.
  */
 async function cancelRevisionRun(input: { runId: string; userId: string; hostId: string }): Promise<void> {
   const now = Date.now();
-  await markStoredDesiredVmsAbsent(drizzle(env.DB), input.hostId, now, (vm) => vm.run_id === input.runId);
   await cancelRunStatement(input, now).run();
+  await markStoredDesiredVmsAbsent(drizzle(env.DB), input.hostId, now, (vm) => vm.run_id === input.runId);
   await deliveryHint(input.hostId);
 }
 
