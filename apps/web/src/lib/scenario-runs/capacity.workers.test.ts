@@ -1,7 +1,7 @@
 import { beforeEach, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { agentHosts, hostActualState, hostResourceReservations, runtimeExecutions, runtimeVms, user } from "@/db/schema";
-import { actualVm, drizzle, env, resetHostRuntimeTestDatabase, seedHost, stateReport, type HostStateReportV2 } from "@/control-plane/host-runtime-do/test-fixtures";
+import { actualVm, drizzle, env, resetHostRuntimeTestDatabase, seedHost, stateReport, type HostStateReportV3 } from "@/control-plane/host-runtime-do/test-fixtures";
 import { loadScenarioCapacity, loadScenarioCapacityPressure } from "./start";
 
 const now = 1_800_000_000_000;
@@ -9,7 +9,7 @@ const unknownCapacity = { capacityPressure: null, resourceCapacity: null };
 
 beforeEach(resetHostRuntimeTestDatabase);
 
-async function host(hostId: string, change?: (report: HostStateReportV2) => void) {
+async function host(hostId: string, change?: (report: HostStateReportV3) => void) {
   await seedHost(hostId);
   const db = drizzle(env.DB);
   await db.update(user).set({ metalPlacement: "platform" }).where(eq(user.id, "user-1"));
@@ -23,8 +23,8 @@ async function host(hostId: string, change?: (report: HostStateReportV2) => void
 }
 
 async function capacity() {
-  const result = await loadScenarioCapacity("user-1", now, false);
-  expect(await loadScenarioCapacityPressure("user-1", now, false)).toBe(result.capacityPressure);
+  const result = await loadScenarioCapacity("user-1", now);
+  expect(await loadScenarioCapacityPressure("user-1", now)).toBe(result.capacityPressure);
   return result;
 }
 
@@ -66,7 +66,7 @@ it("charges pending and committed reservations without counting reported CPU twi
     });
     await db.insert(runtimeVms).values({
       id: `${id}-vm`, executionId: id, vmId: "web", ordinal: 0,
-      runtimeVmName: "runtime-web", imageKeyJson: {}, imageSha256: "2".repeat(64),
+      runtimeVmName: `runtime-web-${id}`, imageDigest: `sha256:${"2".repeat(64)}`, specDigest: `sha256:${"3".repeat(64)}`, kinoDigest: `sha256:${"4".repeat(64)}`,
       cpuMillis, memoryMib, diskMib: 1024, createdAt: now, updatedAt: now,
     });
     await db.insert(hostResourceReservations).values({
@@ -138,8 +138,7 @@ it.each([
   ["$.capacity.schedulable_cpu_millis", -1],
   ["$.capacity.committed_cpu_millis", 4001],
   ["$.capacity.total_cpu_millis", Number.MAX_SAFE_INTEGER + 1],
-  ["$.capabilities.supports_hard_cpu_quota", 0],
-  ["$.capabilities.supports_raw_chunks_v1", 0],
+  ["$.hardware.hard_cpu_quota", false],
   ["$.vms", null],
 ] as const)("excludes invalid %s = %s", async (path, value) => {
   await host("invalid");

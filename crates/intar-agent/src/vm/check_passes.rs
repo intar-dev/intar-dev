@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! When each check (probe) of a VM first passed, kept in the VM's artifact
+//! When each task of a VM first passed, kept in the VM's artifact
 //! spool while it runs so the replay renderer can write the passes into the
 //! session casts as asciicast `m` (marker) events. The file stays on the
 //! host: only logs and `.krec` recordings are collected for upload.
@@ -15,49 +15,40 @@ use std::time::Duration;
 
 #[cfg(any(test, target_os = "linux"))]
 use anyhow::{Context as _, Result};
-use tracing::warn;
-
 #[cfg(any(test, target_os = "linux"))]
-use crate::kino_probe::ProbeView;
+use intar_contracts::bridge_v9::{CheckStatus, VmTaskV1};
+use tracing::warn;
 
 pub(crate) const CHECK_PASSES_FILENAME: &str = "check-passes.json";
 
-/// Probe id to the guest unix time (ms) of its first pass.
+/// Task id to the guest unix time (ms) of its first pass.
 pub(crate) type CheckPasses = BTreeMap<String, u64>;
 
-/// Adds every passing probe that has no recorded pass yet; a probe that
+/// Adds every passing task that has no recorded pass yet; a task that
 /// passes, fails and passes again keeps its first time. True when anything
 /// was added.
 #[cfg(any(test, target_os = "linux"))]
-pub(crate) fn merge_first_passes(
-    passes: &mut CheckPasses,
-    probes: &[ProbeView],
-    generated_at_ms: i64,
-) -> bool {
+pub(crate) fn merge_first_passes(passes: &mut CheckPasses, tasks: &[VmTaskV1]) -> bool {
     let mut changed = false;
-    for probe in probes {
-        if probe.status != "pass" || passes.contains_key(&probe.id) {
+    for task in tasks {
+        if task.status != CheckStatus::Pass || passes.contains_key(&task.id) {
             continue;
         }
-        let Ok(at_ms) = u64::try_from(probe.last_success_at_ms.unwrap_or(generated_at_ms)) else {
+        let Some(at_ms) = task.passed_at_unix_ms else {
             continue;
         };
-        passes.insert(probe.id.clone(), at_ms);
+        passes.insert(task.id.clone(), at_ms);
         changed = true;
     }
     changed
 }
 
-/// Records the first passes in `probes` beside the VM's artifacts. Most
-/// snapshots add nothing and write nothing; a write replaces the file
+/// Records the first passes in `tasks` beside the VM's artifacts. Most
+/// reports add nothing and write nothing; a write replaces the file
 /// atomically, so a crash never leaves half a document.
 #[cfg(any(test, target_os = "linux"))]
-pub(crate) async fn record_check_passes(
-    artifacts_dir: &Path,
-    probes: &[ProbeView],
-    generated_at_ms: i64,
-) -> Result<()> {
-    if !probes.iter().any(|probe| probe.status == "pass") {
+pub(crate) async fn record_check_passes(artifacts_dir: &Path, tasks: &[VmTaskV1]) -> Result<()> {
+    if !tasks.iter().any(|task| task.status == CheckStatus::Pass) {
         return Ok(());
     }
     let path = artifacts_dir.join(CHECK_PASSES_FILENAME);
@@ -68,7 +59,7 @@ pub(crate) async fn record_check_passes(
             return Err(error).with_context(|| format!("failed to read {}", path.display()));
         }
     };
-    if !merge_first_passes(&mut passes, probes, generated_at_ms) {
+    if !merge_first_passes(&mut passes, tasks) {
         return Ok(());
     }
     tokio::fs::create_dir_all(artifacts_dir)
@@ -135,50 +126,45 @@ pub(crate) fn session_check_markers(
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use serde_json::Value;
+    use intar_contracts::bridge_v9::{CheckStatus, VmTaskV1};
 
     use super::{
         CHECK_PASSES_FILENAME, CheckPasses, load_check_passes, merge_first_passes,
         record_check_passes, session_check_markers,
     };
-    use crate::kino_probe::ProbeView;
 
-    fn probe(id: &str, status: &str, last_success_at_ms: Option<i64>) -> ProbeView {
-        ProbeView {
+    fn task(id: &str, status: CheckStatus, passed_at_unix_ms: Option<u64>) -> VmTaskV1 {
+        VmTaskV1 {
             id: id.to_string(),
-            kind: "service".to_string(),
-            status: status.to_string(),
-            every_seconds: 5,
-            last_attempt_at_ms: last_success_at_ms,
-            last_success_at_ms,
-            last_duration_ms: 1,
-            error: None,
-            value: Value::Null,
+            status,
+            message: String::new(),
+            passed_at_unix_ms,
         }
     }
 
     #[test]
-    fn keeps_the_first_pass_of_each_probe() {
+    fn keeps_the_first_pass_of_each_task() {
         let mut passes = CheckPasses::new();
         assert!(merge_first_passes(
             &mut passes,
             &[
-                probe("nginx", "pass", Some(1_000)),
-                probe("site", "fail", None)
+                task("nginx", CheckStatus::Pass, Some(1_000)),
+                task("site", CheckStatus::Fail, None)
             ],
-            1_500,
         ));
-        // A later snapshot where it still (or again) passes changes nothing.
+        // A later report where it still (or again) passes changes nothing.
         assert!(!merge_first_passes(
             &mut passes,
-            &[probe("nginx", "pass", Some(9_000))],
-            9_500
+            &[task("nginx", CheckStatus::Pass, Some(9_000))],
         ));
-        // A pass without a success time falls back to the snapshot time.
+        // A pass without a pass time is not recorded.
+        assert!(!merge_first_passes(
+            &mut passes,
+            &[task("site", CheckStatus::Pass, None)],
+        ));
         assert!(merge_first_passes(
             &mut passes,
-            &[probe("site", "pass", None)],
-            4_000
+            &[task("site", CheckStatus::Pass, Some(4_000))],
         ));
         assert_eq!(
             passes,
@@ -187,21 +173,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn records_passes_across_snapshots_and_reads_them_back() -> Result<()> {
+    async fn records_passes_across_reports_and_reads_them_back() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let artifacts = dir.path().join("artifacts");
 
-        record_check_passes(&artifacts, &[probe("nginx", "fail", None)], 1).await?;
+        record_check_passes(&artifacts, &[task("nginx", CheckStatus::Fail, None)]).await?;
         assert!(!artifacts.join(CHECK_PASSES_FILENAME).exists());
 
-        record_check_passes(&artifacts, &[probe("nginx", "pass", Some(7_000))], 7_100).await?;
+        record_check_passes(&artifacts, &[task("nginx", CheckStatus::Pass, Some(7_000))]).await?;
         record_check_passes(
             &artifacts,
             &[
-                probe("nginx", "pass", Some(8_000)),
-                probe("site", "pass", Some(21_000)),
+                task("nginx", CheckStatus::Pass, Some(8_000)),
+                task("site", CheckStatus::Pass, Some(21_000)),
             ],
-            21_100,
         )
         .await?;
 

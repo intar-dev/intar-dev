@@ -100,8 +100,8 @@ jobs:
       - uses: ${pinnedBun}
         with:
           bun-version: 1.4.4
-      - run: rustup toolchain install 1.99.1 --profile minimal
-      - run: rustup target add --toolchain 1.99.1 x86_64-unknown-linux-musl
+      - run: rustup toolchain install 1.100.0 --profile minimal
+      - run: rustup target add --toolchain 1.100.0 x86_64-unknown-linux-musl
       - run: apt-get install --yes shellcheck=0.9.0-1
 `),
     ).toEqual([]);
@@ -163,9 +163,9 @@ jobs:
       "taiki tool cargo-deny@stable must use an exact version",
     );
     expect(output).toContain("Zig must be pinned to 0.17.0");
-    expect(output).toContain("Rust toolchain must be pinned to 1.99.1");
+    expect(output).toContain("Rust toolchain must be pinned to 1.100.0");
     expect(output).toContain(
-      "rustup target and component installs must use --toolchain 1.99.1",
+      "rustup target and component installs must use --toolchain 1.100.0",
     );
     expect(output).toContain(
       "cargo install must use an exact --version and --locked",
@@ -185,7 +185,7 @@ jobs:
     const violations = check("jobs: {}\n", undefined, undefined, {
       [script]: `#!/usr/bin/env bash
 # rustup toolchain install stable
-rustup toolchain install 1.99.1 --profile minimal
+rustup toolchain install 1.100.0 --profile minimal
 rustup toolchain install stable --profile minimal
 rustup target add --toolchain stable x86_64-unknown-linux-musl
 cargo install cargo-foo
@@ -193,8 +193,8 @@ sudo apt-get install -y libfoo
 `,
     });
     expect(violations).toEqual([
-      `${script}:4: Rust toolchain must be pinned to 1.99.1`,
-      `${script}:5: rustup target and component installs must use --toolchain 1.99.1`,
+      `${script}:4: Rust toolchain must be pinned to 1.100.0`,
+      `${script}:5: rustup target and component installs must use --toolchain 1.100.0`,
       `${script}:6: cargo install must use an exact --version and --locked`,
       `${script}:7: apt installs must pin every package with package=version`,
     ]);

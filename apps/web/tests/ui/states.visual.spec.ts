@@ -1,6 +1,7 @@
 import { expect, test } from "./fixtures/test";
 import { makeMultiReplayRun } from "./fixtures/data";
 import { routeCase } from "./routes";
+import { PLAY_PATH, mockPlayScenario } from "./support/play";
 import { expectRouteScreenshot } from "./support/screenshot";
 
 async function expectRunTimer(
@@ -211,7 +212,7 @@ test.describe("focused visual states", () => {
     const startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
-    await page.route("**/api/scenarios/*/start", async (route) => {
+    await page.route("**/api/scenarios/*/*/start", async (route) => {
       await startGate;
       ui.server.setRunState("launching");
       await route.fulfill({
@@ -220,7 +221,7 @@ test.describe("focused visual states", () => {
         body: JSON.stringify({
           accepted: true,
           runId: "run-active",
-          scenarioId: "repair-nginx",
+          scenarioId: "intar/repair-nginx",
           acceptedAt: Date.now(),
           reused: false,
           run: ui.server.state.run,
@@ -236,7 +237,7 @@ test.describe("focused visual states", () => {
     await page.getByRole("link", { name: "Run again" }).click();
 
     try {
-      await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
+      await expect(page).toHaveURL(/\/runs\/start\/intar\/repair-nginx/);
       await expect(page.locator("[data-run-start-sequence]")).toBeVisible();
       await expectDesktopMissionPane(page);
       await expect(
@@ -645,11 +646,11 @@ test.describe("focused visual states", () => {
     );
   });
 
-  test("build master detail", async ({ page, ui }) => {
-    await ui.open({ ...routeCase("admin-builds"), theme: "dark" });
-    await page.getByRole("button", { name: "Details" }).first().click();
-    await expect(page.getByText("Content hash").first()).toBeVisible();
-    await expectRouteScreenshot(page, "build-detail-dark-desktop");
+  test("scenario verify report", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("admin-scenario-detail"), theme: "dark" });
+    await page.getByRole("button", { name: /Last verify run: Failed/ }).click();
+    await expect(page.getByText("solve.sh: nginx: [emerg] unknown directive")).toBeVisible();
+    await expectRouteScreenshot(page, "scenario-verify-report-dark-desktop");
   });
 
   for (const tab of [
@@ -1002,3 +1003,23 @@ for (const viewport of [
     }
   });
 }
+
+test.describe("play page", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("signed out shows only the public fields", async ({ page, ui }) => {
+    await mockPlayScenario(page, false);
+    await ui.open({ path: PLAY_PATH, sessionRole: "anonymous", theme: "light" });
+    await expect(page.getByRole("heading", { name: "Repair the nginx front door" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sign in with GitHub to start" })).toBeVisible();
+    await expectRouteScreenshot(page, "play-signed-out-light-desktop");
+  });
+
+  test("signed in shows the briefing and the start", async ({ page, ui }) => {
+    await mockPlayScenario(page, true);
+    await ui.open({ path: PLAY_PATH, sessionRole: "learner", theme: "dark" });
+    const start = page.getByRole("link", { name: "Start scenario" });
+    await expect(start).toHaveAttribute("href", "/runs/start/intar/repair-nginx?source=play&ref=stream-42");
+    await expectRouteScreenshot(page, "play-signed-in-dark-desktop");
+  });
+});

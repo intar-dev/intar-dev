@@ -423,15 +423,15 @@ function pendingRunHasDurableDesiredVms(input: {
   const desiredNames = new Set<string>();
   for (const vm of desiredVms) {
     if (
-      !projectedNames.has(vm.vm_name) ||
-      desiredNames.has(vm.vm_name) ||
-      !Number.isSafeInteger(vm.resources.cpu_millis) ||
-      vm.resources.cpu_millis <= 0
+      !projectedNames.has(vm.vm_id) ||
+      desiredNames.has(vm.vm_id) ||
+      !Number.isSafeInteger(vm.cpu_millis) ||
+      vm.cpu_millis <= 0
     ) {
       return false;
     }
-    desiredNames.add(vm.vm_name);
-    cpuMillis += vm.resources.cpu_millis;
+    desiredNames.add(vm.vm_id);
+    cpuMillis += vm.cpu_millis;
     if (!Number.isSafeInteger(cpuMillis)) return false;
   }
   return cpuMillis === input.reservation.cpuMillis;
@@ -716,19 +716,33 @@ function reportedCpuMillisByRun(
   return byRun;
 }
 
+/** The schema of a bridge 9 host state report. */
+export const HOST_STATE_REPORT_SCHEMA_VERSION_V3 = 8;
+
 export function strictCpuCapacity(
   report: unknown,
 ): Pick<
   HostCpuReservationCapacity,
   "schedulableCpuMillis" | "reportedCommittedCpuMillis"
 > | null {
-  if (!isRecord(report) || report.schema_version !== HOST_STATE_REPORT_SCHEMA_VERSION) {
-    return null;
-  }
+  if (!isRecord(report)) return null;
   const capacity = isRecord(report.capacity) ? report.capacity : null;
-  const capabilities = isRecord(report.capabilities)
-    ? report.capabilities
+  // A bridge 9 report states hardware facts; every launch path it has is
+  // the attested one.
+  const hardware = report.schema_version === HOST_STATE_REPORT_SCHEMA_VERSION_V3 && isRecord(report.hardware)
+    ? report.hardware
     : null;
+  const capabilities = hardware
+    ? {
+        supports_kvm: hardware.kvm, supports_vsock: hardware.vsock, supports_reflink: hardware.reflink,
+        supports_nftables: true, supports_jailer_v3: true, supports_template_backed_launch: true,
+        fast_template_store: true, supports_hard_cpu_quota: hardware.hard_cpu_quota,
+        supports_landlock: hardware.landlock, supports_cgroup_v2: hardware.cgroup_v2,
+        cloud_hypervisor_sha256: hardware.cloud_hypervisor_sha256,
+      }
+    : report.schema_version === HOST_STATE_REPORT_SCHEMA_VERSION && isRecord(report.capabilities)
+      ? report.capabilities
+      : null;
   if (
     !capacity ||
     !capabilities ||

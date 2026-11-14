@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::config::QemuBuildConfig;
 
@@ -25,7 +25,6 @@ pub struct DirectBootQemuInput<'a> {
 
 #[derive(Debug, Clone)]
 pub struct DirectBootQemuCommand {
-    pub binary: PathBuf,
     pub args: Vec<String>,
 }
 
@@ -77,10 +76,7 @@ pub fn render_direct_boot_qemu_command(input: &DirectBootQemuInput<'_>) -> Direc
         ),
     ];
 
-    DirectBootQemuCommand {
-        binary: input.config.qemu_binary.clone(),
-        args,
-    }
+    DirectBootQemuCommand { args }
 }
 
 #[cfg(test)]
@@ -116,7 +112,6 @@ mod tests {
             boot_cmdline: TRUSTED_BOOT_CMDLINE,
         });
 
-        assert_eq!(command.binary, Path::new("qemu-system-x86_64"));
         assert!(
             command
                 .args

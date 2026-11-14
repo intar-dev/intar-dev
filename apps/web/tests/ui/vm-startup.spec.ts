@@ -53,7 +53,7 @@ test("a lecture start click records terminal-start evidence", async ({ page, ui 
   lecture.activeRunId = null;
   lecture.scenarioReady = true;
   let startRequests = 0;
-  await page.route("**/api/scenarios/repair-nginx/start", async (route) => {
+  await page.route("**/api/scenarios/intar/repair-nginx/start", async (route) => {
     startRequests += 1;
     ui.server.setRunState("running");
     await route.fulfill({
@@ -61,7 +61,7 @@ test("a lecture start click records terminal-start evidence", async ({ page, ui 
       json: {
         accepted: true,
         runId: "run-active",
-        scenarioId: "repair-nginx",
+        scenarioId: "intar/repair-nginx",
         acceptedAt: FIXED_NOW,
         reused: false,
         run: ui.server.state.run,
@@ -75,7 +75,7 @@ test("a lecture start click records terminal-start evidence", async ({ page, ui 
   await ui.settle();
   const startResponse = page.waitForResponse(
     (response) =>
-      response.url().endsWith("/api/scenarios/repair-nginx/start") &&
+      response.url().endsWith("/api/scenarios/intar/repair-nginx/start") &&
       response.status() === 202,
   );
   await page.getByRole("link", { name: "Start scenario" }).click();
@@ -103,7 +103,7 @@ test("a lecture start click records terminal-start evidence", async ({ page, ui 
   expect(evidence).not.toBeNull();
   expect(evidence).toMatchObject({
     runId: "run-active",
-    scenarioId: "repair-nginx",
+    scenarioId: "intar/repair-nginx",
   });
   expect(evidence!.stages["start-click"]).toBe(evidence!.startUnixMs);
   expect(evidence!.stages["start-request"]).toBeGreaterThanOrEqual(
@@ -531,7 +531,7 @@ async function seedBenchmarkEvidence(page: Page) {
         "intar:vm-boot:run-active",
         JSON.stringify({
           runId: "run-active",
-          scenarioId: "repair-nginx",
+          scenarioId: "intar/repair-nginx",
           startUnixMs,
           benchmark: true,
           stages: { "start-click": startUnixMs },

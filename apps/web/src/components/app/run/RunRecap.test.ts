@@ -764,7 +764,6 @@ function vm(
     sessionTimeline: sessions ?? null,
     provisioning: {
       image: "hidden-image",
-      imageKey: null,
       imageSha256: "hidden-sha256",
       resources: null,
       leaseDurationSeconds: null,

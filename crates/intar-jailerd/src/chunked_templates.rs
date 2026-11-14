@@ -4,11 +4,15 @@ use std::num::NonZeroU64;
 use std::os::unix::fs::MetadataExt as _;
 
 use crate::store_gc::touch_chunked_template;
-use intar_contracts::catalog::{IMAGE_CHUNK_SIZE_BYTES, ImageChunkManifestV1, ImageChunkV1};
+use intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES;
+use intar_contracts::oci::{MachineConfigV1, OciManifestV1};
 use intar_jailer_protocol::TrustedDirectorySource;
 use reflink_copy::ReflinkBlockBuilder;
 
 const MAX_CHUNK_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+pub(super) use intar_contracts::oci::verify::{
+    ImageChunk, VerifiedImage, VerifiedWake, WakeLayer, verified_image,
+};
 
 pub(super) fn prepare_chunked_image_template(
     config: &JailerdConfig,
@@ -18,7 +22,12 @@ pub(super) fn prepare_chunked_image_template(
     request
         .validate()
         .context("validate chunked image request")?;
-    if let Ok(metadata) = validate_existing_chunked_template(config, request) {
+    // A template with its wake files satisfies a request with or without.
+    let satisfies =
+        |metadata: &ImageTemplateMetadataV2| !request.prepare_wake || metadata.wake.is_some();
+    if let Ok(metadata) = validate_existing_chunked_template(config, request)
+        && satisfies(&metadata)
+    {
         return prepared_image_v3_result(&metadata);
     }
 
@@ -42,7 +51,16 @@ pub(super) fn prepare_chunked_image_template(
     validate_root_regular_file(&lock_fd, "chunked image single-flight lock")?;
     rustix::fs::flock(&lock_fd, rustix::fs::FlockOperation::LockExclusive)?;
     if let Ok(metadata) = validate_existing_chunked_template(config, request) {
-        return prepared_image_v3_result(&metadata);
+        if satisfies(&metadata) {
+            return prepared_image_v3_result(&metadata);
+        }
+        add_wake_to_template(config, request, &templates, metadata, lane)?;
+        let actual = validate_existing_chunked_template(config, request)?;
+        ensure!(
+            actual.wake.is_some(),
+            "chunked template lost its wake files"
+        );
+        return prepared_image_v3_result(&actual);
     }
     if rustix::fs::statat(
         &templates,
@@ -89,6 +107,11 @@ pub(super) fn prepare_chunked_image_template(
                 copy_template_source(config, source, &temporary.join("initrd"), None, None)
             })
             .transpose()?;
+        let wake = manifest
+            .wake
+            .as_ref()
+            .map(|wake| prepare_wake_files(config, wake, &chunk_cache, &temporary, lane))
+            .transpose()?;
         let metadata = ImageTemplateMetadataV2 {
             schema_version: IMAGE_TEMPLATE_METADATA_V3,
             image_sha256: request.image_id.clone(),
@@ -102,20 +125,9 @@ pub(super) fn prepare_chunked_image_template(
             root_disk,
             kernel,
             initrd,
+            wake,
         };
-        let mut metadata_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o400)
-            .open(temporary.join("metadata-v2.json"))?;
-        to_writer(&mut metadata_file, &metadata)?;
-        metadata_file.write_all(b"\n")?;
-        rustix::fs::fchmod(&metadata_file, Mode::RUSR)?;
-        rustix::fs::fchown(
-            &metadata_file,
-            Some(rustix::process::Uid::ROOT),
-            Some(rustix::process::Gid::ROOT),
-        )?;
+        write_template_metadata(&temporary.join("metadata-v2.json"), &metadata)?;
         rustix::fs::renameat(&templates, temporary_name.as_str(), &templates, &image_name)?;
         #[cfg(target_os = "linux")]
         rustix::fs::syncfs(&templates)?;
@@ -131,6 +143,76 @@ pub(super) fn prepare_chunked_image_template(
         "published chunked template metadata changed"
     );
     prepared_image_v3_result(&actual)
+}
+
+fn write_template_metadata(path: &Path, metadata: &ImageTemplateMetadataV2) -> Result<()> {
+    let mut metadata_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o400)
+        .open(path)?;
+    to_writer(&mut metadata_file, metadata)?;
+    metadata_file.write_all(b"\n")?;
+    metadata_file.sync_all()?;
+    rustix::fs::fchmod(&metadata_file, Mode::RUSR)?;
+    rustix::fs::fchown(
+        &metadata_file,
+        Some(rustix::process::Uid::ROOT),
+        Some(rustix::process::Gid::ROOT),
+    )?;
+    Ok(())
+}
+
+/// Give a published template without wake files its image's: prepared
+/// beside it, moved in, then the metadata replaced. The root disk, kernel
+/// and initrd stay as they are. The caller holds the template's lock.
+fn add_wake_to_template(
+    config: &JailerdConfig,
+    request: &PrepareChunkedImageV3Request,
+    templates: &OwnedFd,
+    mut metadata: ImageTemplateMetadataV2,
+    lane: &PrepareLane,
+) -> Result<()> {
+    let wake = read_verified_chunk_manifest(config, request)?
+        .wake
+        .context("machine image carries no suspended guest")?;
+    let chunk_cache = open_trusted_chunk_cache(config, &request.chunk_cache_root)?;
+    let image_name = CString::new(request.image_id.as_str()).expect("SHA-256 contains no NUL");
+    let image_directory =
+        open_lifecycle_entry_at(templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+    validate_root_directory(&image_directory, "chunked image template")?;
+    let temporary_name = format!(".wake-{}", Uuid::new_v4());
+    let temporary = config.jail_root.join("templates").join(&temporary_name);
+    rustix::fs::mkdirat(
+        templates,
+        temporary_name.as_str(),
+        Mode::RUSR | Mode::WUSR | Mode::XUSR,
+    )?;
+    let operation = (|| -> Result<()> {
+        metadata.wake = Some(prepare_wake_files(
+            config,
+            &wake,
+            &chunk_cache,
+            &temporary,
+            lane,
+        )?);
+        let staged = temporary.join("metadata-v2.json");
+        write_template_metadata(&staged, &metadata)?;
+        let directory = config
+            .jail_root
+            .join("templates")
+            .join(request.image_id.as_str());
+        // The files first, the metadata that names them last: until then the
+        // template is the one it was.
+        for name in ["ram", "stub", "cpu-profile.json", "metadata-v2.json"] {
+            std::fs::rename(temporary.join(name), directory.join(name))?;
+        }
+        #[cfg(target_os = "linux")]
+        rustix::fs::syncfs(&image_directory)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&temporary);
+    operation
 }
 
 pub(super) fn validate_existing_chunked_template(
@@ -174,6 +256,9 @@ pub(super) fn validate_existing_chunked_template(
         let file = open_lifecycle_entry_at(&image_directory, c"initrd", OFlags::RDONLY)?;
         validate_template_artifact_stat(&rustix::fs::fstat(&file)?, expected, "chunked initrd")?;
     }
+    if let Some(wake) = &metadata.wake {
+        validate_wake_template(&image_directory, wake)?;
+    }
     touch_chunked_template(config, &request.image_id)?;
     Ok(metadata)
 }
@@ -202,42 +287,91 @@ pub(super) fn validate_prepared_chunked_launch(
     ensure!(
         request.launch.artifacts.root_disk == expected.root_disk
             && request.launch.artifacts.kernel == expected.kernel
-            && request.launch.artifacts.initrd == expected.initrd,
+            && request.launch.artifacts.initrd == expected.initrd
+            // A launch may cold-boot an image that carries a suspended guest.
+            && request
+                .launch
+                .artifacts
+                .wake
+                .as_ref()
+                .is_none_or(|wake| Some(wake) == expected.wake.as_ref()),
         "prepared chunked launch descriptors do not match root-owned metadata"
     );
     Ok(())
 }
 
-fn read_verified_chunk_manifest(
+/// A source file of at most 4 MiB whose SHA-256 the request names.
+fn read_verified_source(
     config: &JailerdConfig,
-    request: &PrepareChunkedImageV3Request,
-) -> Result<ImageChunkManifestV1> {
-    let mut file = open_trusted_source(
-        config,
-        request.manifest.source_root,
-        &request.manifest.relative_path,
-    )?;
+    source: &ArtifactSource,
+    expected: &Sha256Digest,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let mut file = open_trusted_source(config, source.source_root, &source.relative_path)?;
     let mut bytes = Vec::new();
     std::io::Read::by_ref(&mut file)
         .take(MAX_CHUNK_MANIFEST_BYTES + 1)
         .read_to_end(&mut bytes)?;
     ensure!(
         bytes.len() as u64 <= MAX_CHUNK_MANIFEST_BYTES,
-        "chunk manifest exceeds the bounded size"
+        "{label} exceeds the bounded size"
     );
     ensure!(
-        sha256_digest(&bytes) == request.chunk_manifest_sha256,
-        "chunk manifest SHA-256 mismatch"
+        sha256_digest(&bytes) == *expected,
+        "{label} SHA-256 mismatch"
     );
-    let manifest: ImageChunkManifestV1 =
-        serde_json::from_slice(&bytes).context("decode chunk manifest")?;
-    manifest.validate().context("validate chunk manifest")?;
+    Ok(bytes)
+}
+
+/// Follow the chain the image's identity commits to: the OCI manifest (its
+/// digest is the image id) names the machine config and every layer by
+/// digest and size; the config maps each non-zero chunk of the disk to a
+/// layer and to the SHA-256 of its raw content. Nothing outside that chain
+/// is believed: the kernel and initrd the request offers must be the
+/// manifest's.
+fn read_verified_chunk_manifest(
+    config: &JailerdConfig,
+    request: &PrepareChunkedImageV3Request,
+) -> Result<VerifiedImage> {
+    let bytes = read_verified_source(
+        config,
+        &request.image_manifest,
+        &request.image_id,
+        "image manifest",
+    )?;
+    let manifest: OciManifestV1 =
+        serde_json::from_slice(&bytes).context("decode image manifest")?;
+    let bytes = read_verified_source(
+        config,
+        &request.manifest,
+        &request.chunk_manifest_sha256,
+        "machine config",
+    )?;
+    let mut machine: MachineConfigV1 =
+        serde_json::from_slice(&bytes).context("decode machine config")?;
+    if !request.prepare_wake {
+        // Ignored, not checked: a cold template needs nothing of it.
+        machine.wake = None;
+    }
+    let image = verified_image(
+        &manifest,
+        &machine,
+        bytes.len() as u64,
+        request.chunk_manifest_sha256.as_str(),
+        request.virtual_size_bytes,
+        request.kernel.sha256.as_ref().map(Sha256Digest::as_str),
+        request
+            .initrd
+            .as_ref()
+            .and_then(|source| source.sha256.as_ref())
+            .map(Sha256Digest::as_str),
+    )
+    .map_err(anyhow::Error::msg)?;
     ensure!(
-        manifest.image_id == request.image_id.as_str()
-            && manifest.virtual_size_bytes == request.virtual_size_bytes,
-        "chunk manifest identity does not match prepare request"
+        !request.prepare_wake || image.wake.is_some(),
+        "machine image carries no suspended guest"
     );
-    Ok(manifest)
+    Ok(image)
 }
 
 fn open_trusted_chunk_cache(
@@ -268,7 +402,7 @@ fn open_trusted_chunk_cache(
 
 fn assemble_chunked_root(
     config: &JailerdConfig,
-    manifest: &ImageChunkManifestV1,
+    manifest: &VerifiedImage,
     image_id: &Sha256Digest,
     chunk_cache: &OwnedFd,
     chunk_store: &OwnedFd,
@@ -319,7 +453,7 @@ fn ensure_raw_chunk(
     config: &JailerdConfig,
     chunk_cache: &OwnedFd,
     chunk_store: &OwnedFd,
-    chunk: &ImageChunkV1,
+    chunk: &ImageChunk,
 ) -> Result<File> {
     let raw_name = format!("{}.raw", chunk.raw_sha256);
     let lock_name = format!(".lock-{}", chunk.raw_sha256);
@@ -334,19 +468,65 @@ fn ensure_raw_chunk(
         return Ok(existing);
     }
 
-    let encoded_name = format!("{}.raw.zst", chunk.raw_sha256);
-    let encoded_fd = open_source_beneath(chunk_cache, Path::new(&encoded_name))?;
-    let mut encoded = File::from(encoded_fd);
-    let before = encoded.metadata()?;
+    let raw = read_verified_chunk(config, chunk_cache, chunk)?;
+
+    let temporary_name = format!(".chunk-{}", Uuid::new_v4());
+    let temporary_path = config.jail_root.join("chunks").join(&temporary_name);
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o400)
+        .open(&temporary_path)?;
+    output.write_all(&raw)?;
+    output.sync_all()?;
+    rustix::fs::fchmod(&output, Mode::RUSR)?;
+    rustix::fs::fchown(
+        &output,
+        Some(rustix::process::Uid::ROOT),
+        Some(rustix::process::Gid::ROOT),
+    )?;
+    drop(output);
+    rustix::fs::renameat(chunk_store, &temporary_name, chunk_store, &raw_name)?;
+    open_verified_raw_chunk(chunk_store, &raw_name, chunk)
+}
+
+/// A blob of the cache, which names every blob by its digest: a regular,
+/// singly linked file of the agent or root, not world-writable, of the
+/// expected size.
+pub(super) fn trusted_blob(
+    config: &JailerdConfig,
+    chunk_cache: &OwnedFd,
+    sha256: &str,
+    size_bytes: u64,
+) -> Result<(File, std::fs::Metadata)> {
+    let file = File::from(open_source_beneath(chunk_cache, Path::new(sha256))?);
+    let metadata = file.metadata()?;
     ensure!(
-        before.is_file()
-            && before.nlink() == 1
-            && (before.uid() == 0 || before.uid() == config.agent_uid)
-            && (before.gid() == 0 || before.gid() == config.agent_gid)
-            && before.mode() & 0o002 == 0
-            && before.len() == chunk.encoded_size_bytes,
+        metadata.is_file()
+            && metadata.nlink() == 1
+            && (metadata.uid() == 0 || metadata.uid() == config.agent_uid)
+            && (metadata.gid() == 0 || metadata.gid() == config.agent_gid)
+            && metadata.mode() & 0o002 == 0
+            && metadata.len() == size_bytes,
         "encoded image chunk source is not trusted"
     );
+    Ok((file, metadata))
+}
+
+/// The raw content of one chunk, from its blob in the cache: the blob is a
+/// trusted file of the encoded size and digest, and it decodes to the raw
+/// size and digest.
+pub(super) fn read_verified_chunk(
+    config: &JailerdConfig,
+    chunk_cache: &OwnedFd,
+    chunk: &ImageChunk,
+) -> Result<Vec<u8>> {
+    let (mut encoded, before) = trusted_blob(
+        config,
+        chunk_cache,
+        &chunk.encoded_sha256,
+        chunk.encoded_size_bytes,
+    )?;
     let mut encoded_bytes = Vec::with_capacity(chunk.encoded_size_bytes as usize);
     std::io::Read::by_ref(&mut encoded)
         .take(chunk.encoded_size_bytes + 1)
@@ -379,31 +559,13 @@ fn ensure_raw_chunk(
             && sha256_digest(&raw).as_str() == chunk.raw_sha256,
         "decoded image chunk hash or size mismatch"
     );
-
-    let temporary_name = format!(".chunk-{}", Uuid::new_v4());
-    let temporary_path = config.jail_root.join("chunks").join(&temporary_name);
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o400)
-        .open(&temporary_path)?;
-    output.write_all(&raw)?;
-    output.sync_all()?;
-    rustix::fs::fchmod(&output, Mode::RUSR)?;
-    rustix::fs::fchown(
-        &output,
-        Some(rustix::process::Uid::ROOT),
-        Some(rustix::process::Gid::ROOT),
-    )?;
-    drop(output);
-    rustix::fs::renameat(chunk_store, &temporary_name, chunk_store, &raw_name)?;
-    open_verified_raw_chunk(chunk_store, &raw_name, chunk)
+    Ok(raw)
 }
 
 fn open_verified_raw_chunk(
     chunk_store: &OwnedFd,
     raw_name: &str,
-    chunk: &ImageChunkV1,
+    chunk: &ImageChunk,
 ) -> Result<File> {
     let fd = rustix::fs::openat(
         chunk_store,
@@ -463,6 +625,10 @@ fn prepared_image_v3_result(metadata: &ImageTemplateMetadataV2) -> Result<Prepar
             )
         }),
         fast_template_store: true,
+        wake: metadata
+            .wake
+            .as_ref()
+            .map(|wake| wake_artifacts(&metadata.image_sha256, wake)),
     })
 }
 

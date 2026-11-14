@@ -52,8 +52,14 @@ impl VmManager {
             }
         }
 
-        let (kino_readiness_tx, _) = broadcast::channel(256);
-        let (probe_updates_tx, _) = broadcast::channel(256);
+        let (guest_reports_tx, _) = broadcast::channel(256);
+        let (lab_updates_tx, _) = broadcast::channel(256);
+        let oci = image_cache::oci_registry(
+            &cfg.image_registry,
+            &cfg.bridge,
+            image_cache::registry_http_client()?,
+        )
+        .context("failed to initialize the image registry client")?;
         let (terminal_updates_tx, _) = broadcast::channel(256);
         let (inventory_updates_tx, _) = watch::channel(0);
         let inner = Inner {
@@ -64,7 +70,7 @@ impl VmManager {
             jailer_request_timeout_seconds: cfg.jailer.request_timeout_seconds,
             jailer_launch_capabilities: OnceCell::new(),
             bridge: cfg.bridge.clone(),
-            image_registry: cfg.image_registry.clone(),
+            oci: Arc::new(oci),
             ssh_access: cfg.ssh_access.clone(),
             db,
             http: HttpClient::builder()
@@ -82,8 +88,9 @@ impl VmManager {
             states: RwLock::new(states),
             lease_expiry_error_log: RwLock::new(BTreeMap::new()),
             probe_tasks: Mutex::new(BTreeMap::new()),
-            kino_readiness_tx,
-            probe_updates_tx,
+            guest_reports_tx,
+            lab_updates_tx,
+            vmm_started_at: std::sync::Mutex::default(),
             run_cli_access_token: Mutex::new(RunCliAccessTokenCache::default()),
             run_cli_access_token_refresh: Mutex::new(()),
             run_cli_broker_tasks: Mutex::new(BTreeMap::new()),
@@ -100,6 +107,8 @@ impl VmManager {
             archive_transfer_sem: Semaphore::new(ARCHIVE_HOST_TRANSFER_CONCURRENCY),
             archive_jobs_lock: Mutex::new(()),
             archive_jobs_notify: Notify::new(),
+            wake: cfg.wake.clone(),
+            wake_fallbacks: std::sync::Mutex::new(BTreeMap::new()),
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -112,8 +121,14 @@ impl VmManager {
         repair_vm_networks(&self.inner).await
     }
 
-    pub fn subscribe_probe_updates(&self) -> broadcast::Receiver<ProbeUpdateEnvelope> {
-        self.inner.probe_updates_tx.subscribe()
+    /// Lab updates of VMs past their ready boundary.
+    pub(crate) fn subscribe_lab_updates(&self) -> broadcast::Receiver<GuestUpdate> {
+        self.inner.lab_updates_tx.subscribe()
+    }
+
+    /// The `/v2` client this agent pulls images, Kino and specs with.
+    pub(crate) fn oci_registry(&self) -> &image_cache::OciRegistry {
+        &self.inner.oci
     }
 
     pub fn subscribe_terminal_updates(&self) -> broadcast::Receiver<VmTerminalState> {
@@ -214,20 +229,97 @@ impl VmManager {
         }
     }
 
-    /// Import a cached boot bundle into jailerd's root-owned template store.
+    /// Import a pulled machine image into jailerd's root-owned template
+    /// store.
     ///
     /// Only the background cache worker prepares a template. A learner launch
     /// waits for the ready descriptor instead, so this request carries the
     /// background class and a launch never queues behind the import.
-    pub async fn ensure_cached_image_template_background(
+    pub(crate) async fn ensure_cached_image_template_background(
         &self,
-        image: &image_cache::CachedChunkedImage,
+        image: &image_cache::PulledMachine,
+        prepare_wake: bool,
     ) -> Result<PreparedImageV3Result> {
-        ensure_jailer_image_template(&self.inner, image, RequestClass::Background).await
+        ensure_jailer_image_template(&self.inner, image, RequestClass::Background, prepare_wake)
+            .await
+    }
+
+    /// The host's `[wake]` settings.
+    pub(crate) fn wake_config(&self) -> &crate::config::WakeConfig {
+        &self.inner.wake
     }
 
     pub async fn inspect_jailed_vm(&self, generation: &str) -> Result<Option<VmInspection>> {
         jailer_identity_request(&self.inner, generation, JailerIdentityOperation::Inspect).await
+    }
+
+    /// Tear down the VMs an older state schema tracked: jailerd destroys
+    /// each one, and its agent-owned directories go. A row that fails stays
+    /// for the next start; nothing here fails the agent.
+    pub async fn tear_down_previous_schema(&self) {
+        let rows = match self.inner.db.load_pending_teardowns().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(error = %error, "failed to load VMs left by an older state schema");
+                return;
+            }
+        };
+        let work_dir = match resolve_work_dir(&self.inner.defaults) {
+            Ok(path) => path,
+            Err(error) => {
+                warn!(error = %error, "failed to resolve the vm work dir for teardown");
+                return;
+            }
+        };
+        let mut outcomes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let destroyed = match previous_schema_jail_selector(&row) {
+                Ok(Some(selector)) => cleanup_jailed_vm_by_selector(&self.inner, selector).await,
+                Ok(None) => {
+                    warn!(
+                        vm = row.vm_name,
+                        "a VM of an older state schema has neither a jail generation nor a run; \
+                         jailerd cannot be asked to destroy it, check the host by hand"
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = &destroyed {
+                warn!(error = %error, vm = row.vm_name, "failed to destroy a VM of an older state schema");
+            } else {
+                let mut removed = Vec::new();
+                for path in previous_schema_vm_dirs(&work_dir, &row) {
+                    match tokio::fs::remove_dir_all(&path).await {
+                        Ok(()) => removed.push(path.display().to_string()),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            warn!(error = %error, path = %path.display(), "failed to remove a VM directory")
+                        }
+                    }
+                }
+                info!(vm = row.vm_name, run_id = ?row.run_id, ?removed, "tore down a VM of an older state schema");
+            }
+            outcomes.push((row, destroyed.is_ok()));
+        }
+        let mut released = BTreeSet::new();
+        for run_id in previous_schema_runs_to_release(&outcomes) {
+            match destroy_previous_schema_run_network(&self.inner, &run_id).await {
+                Ok(()) => {
+                    released.insert(run_id);
+                }
+                Err(error) => {
+                    warn!(error = %error, run_id, "failed to destroy the run network of an older state schema")
+                }
+            }
+        }
+        // A run's rows stay queued until its network is gone too, so a
+        // failed network destroy is retried on the next start.
+        for vm_name in previous_schema_teardowns_done(&outcomes, &released) {
+            if let Err(error) = self.inner.db.delete_pending_teardown(vm_name.clone()).await {
+                warn!(error = %error, vm = vm_name, "failed to forget a torn-down VM");
+            }
+        }
     }
 
     pub async fn reconcile_tracked_vms(&self) -> Result<()> {
@@ -288,14 +380,16 @@ impl VmManager {
         req: CreateScenarioVmRequest,
     ) -> Result<CreateVmResponse, ApiError> {
         let api_started_at = Instant::now();
+        // A VM without a terminal has no SSH: its keys are dropped.
         let ssh_authorized_keys_openssh = req
             .runtime
             .ssh_authorized_keys_openssh
             .into_iter()
+            .filter(|_| req.terminal)
             .map(|key| key.trim().to_string())
             .filter(|key| !key.is_empty())
             .collect::<Vec<_>>();
-        if ssh_authorized_keys_openssh.is_empty() {
+        if req.terminal && ssh_authorized_keys_openssh.is_empty() {
             return Err(ApiError::bad_request(
                 "runtime.ssh_authorized_keys_openssh must not be empty",
             ));
@@ -321,9 +415,12 @@ impl VmManager {
             api_started_at,
             requested_name: req.name,
             requested_run_id: req.run_id,
-            requested_image: req.image,
-            requested_image_sha256: req.image_sha256,
-            guest_tools: req.guest_tools,
+            image: req.image,
+            kino: req.kino,
+            spec: req.spec,
+            mode: req.mode,
+            egress: req.egress,
+            terminal: req.terminal,
             requested_resources: req.resources,
             requested_hostname: req.hostname,
             lease_duration_seconds: req.lease_duration_seconds,
@@ -343,9 +440,12 @@ impl VmManager {
             api_started_at,
             requested_name,
             requested_run_id,
-            requested_image,
-            requested_image_sha256,
-            guest_tools,
+            image,
+            kino,
+            spec,
+            mode,
+            egress,
+            terminal,
             requested_resources,
             requested_hostname,
             lease_duration_seconds,
@@ -371,31 +471,6 @@ impl VmManager {
         if !is_safe_key(&run_id) {
             return Err(ApiError::bad_request("run_id must match [A-Za-z0-9_-]+"));
         }
-
-        let image_key = requested_image.trim().to_string();
-        if image_key.is_empty() {
-            return Err(ApiError::bad_request("image must not be empty"));
-        }
-        if !is_safe_key(&image_key) {
-            return Err(ApiError::bad_request("image must match [A-Za-z0-9_-]+"));
-        }
-        let image_sha256 = normalize_sha256(requested_image_sha256.trim())
-            .ok_or_else(|| ApiError::bad_request("image_sha256 must be a SHA-256 digest"))?;
-        let tools_disk_sha256 = normalize_sha256(&guest_tools.tools_disk_sha256)
-            .ok_or_else(|| ApiError::bad_request("guest_tools.tools_disk_sha256 is invalid"))?;
-        let kino_sha256 = normalize_sha256(&guest_tools.kino_sha256)
-            .ok_or_else(|| ApiError::bad_request("guest_tools.kino_sha256 is invalid"))?;
-        if guest_tools.tools_disk_size_bytes != 64 * 1024 * 1024
-            || guest_tools.bootstrap_abi != GUEST_BOOTSTRAP_ABI_V2
-        {
-            return Err(ApiError::bad_request("guest_tools pin is incompatible"));
-        }
-        let guest_tools = DesiredGuestToolsV1 {
-            tools_disk_sha256: tools_disk_sha256.clone(),
-            tools_disk_size_bytes: guest_tools.tools_disk_size_bytes,
-            kino_sha256: kino_sha256.clone(),
-            bootstrap_abi: guest_tools.bootstrap_abi,
-        };
 
         {
             let states = self.inner.states.read().await;
@@ -522,16 +597,6 @@ impl VmManager {
             }
             None => allocate_kino_vsock_cid(&self.inner).await?,
         };
-        let kino_vsock_port = scenario_runtime
-            .kino
-            .as_ref()
-            .and_then(|kino| kino.vsock_port)
-            .unwrap_or(KINO_VSOCK_PORT);
-        if kino_vsock_port == 0 {
-            return Err(ApiError::bad_request(
-                "runtime.kino.vsock_port must be >= 1",
-            ));
-        }
 
         let mac = mac::generate_local_unicast_mac();
         let ssh_public_port = if self.inner.ssh_access.enabled {
@@ -572,9 +637,10 @@ impl VmManager {
             owner_user_id,
             runtime_execution_id,
             generation,
-            image_key: Some(image_key.clone()),
-            image_sha256: Some(image_sha256.clone()),
-            guest_tools: Some(guest_tools.clone()),
+            image: Some(image.clone()),
+            kino: Some(kino.clone()),
+            boot_sha256: None,
+            machine_name: Some(hostname.clone()),
             run_id: Some(run_id.clone()),
             root_disk_path: root_disk_path.display().to_string(),
             seed_disk_path: config_disk_path.display().to_string(),
@@ -602,10 +668,10 @@ impl VmManager {
             jail_gid: None,
             jail_netns_name: None,
             kino_vsock_cid: Some(kino_vsock_cid),
-            kino_vsock_port: Some(kino_vsock_port),
             kino_vsock_path: Some(kino_vsock_path.display().to_string()),
             ssh_host_keys_openssh: Vec::new(),
             cpu_runtime: None,
+            start: None,
         };
 
         let status = VmStatusResponse {
@@ -685,35 +751,29 @@ impl VmManager {
         let network_for_task = network.clone();
         let peer_guest_ips_for_task = peer_guest_ips.clone();
         let name_for_task = name.clone();
-        let image_key_for_task = image_key.clone();
-        let image_sha256_for_task = image_sha256.clone();
         let hostname_for_task = hostname.clone();
         let runtime_for_task = runtime.clone();
         let tap_for_task = tap_name.clone();
-        let tools_disk_sha256_for_task = tools_disk_sha256.clone();
-        let kino_sha256_for_task = kino_sha256.clone();
 
         tokio::spawn(async move {
             let _permit = permit;
             let boot_guard = boot_guard;
-            let span = tracing::info_span!("vm_create", vm = %name_for_task, run_id = %run_id, image = %image_key_for_task);
+            let span = tracing::info_span!("vm_create", vm = %name_for_task, run_id = %run_id, image = image.as_str());
 
             let create_input = RunCreateInput {
                 api_started_at,
                 name: &name_for_task,
                 run_id: &run_id,
-                image_key: &image_key_for_task,
-                expected_image_sha256: &image_sha256_for_task,
-                tools_disk_sha256: &tools_disk_sha256_for_task,
-                tools_disk_size_bytes: guest_tools.tools_disk_size_bytes,
-                kino_sha256: &kino_sha256_for_task,
-                guest_bootstrap_abi: guest_tools.bootstrap_abi,
+                image: &image,
+                kino: &kino,
+                spec: &spec,
+                mode,
+                egress,
+                terminal,
                 runtime: &runtime_for_task,
                 tap: &tap_for_task,
                 ssh_public_port,
                 kino_vsock_cid,
-                kino_vsock_port,
-                kino_host_ready_port: KINO_HOST_READY_PORT,
                 cpu_millis: resources.cpu_millis,
                 memory_mib: resources.memory_mib,
                 disk_mib: resources.disk_mib,

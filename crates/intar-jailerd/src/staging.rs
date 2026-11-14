@@ -1,5 +1,4 @@
 use super::*;
-use std::os::unix::fs::MetadataExt as _;
 
 pub(super) fn prepare_jail_files(
     config: &JailerdConfig,
@@ -140,7 +139,11 @@ pub(super) fn prepare_jail_files(
             spec_path,
             jail_root_inode: Some(root_stat.st_ino),
             vmm_executable_identity,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            paths: jail_paths(
+                &root,
+                request.artifacts.initrd.is_some(),
+                request.artifacts.wake.is_some(),
+            ),
         })
     })();
     match operation {
@@ -195,6 +198,20 @@ pub(super) fn stage_artifacts_v2(
             .set_len(root_disk_size_bytes)
             .context("expand cloned generation root disk")?;
     }
+    // The suspended guest: the generation's own clone of the RAM file, which
+    // the VM writes as its root disk is written, and the stub and CPU
+    // profile read-only, as the kernel is.
+    if let Some(wake) = &artifacts.wake {
+        stage_source(config, &wake.ram, &root.join("disks/wake.ram"), 0o600)?;
+        stage_source(config, &wake.stub, &root.join("boot/wake-stub"), 0o444)?;
+        stage_source(
+            config,
+            &wake.cpu_profile,
+            &root.join("boot/cpu-profile.json"),
+            0o444,
+        )?;
+        set_owner(&root.join("disks/wake.ram"), uid, gid)?;
+    }
     // Runtime state remains per-VM and read-only, but the recording disk is a
     // preformatted root-owned blank. Its agent descriptor is retained solely
     // as the trusted export destination after the cgroup drains.
@@ -216,10 +233,6 @@ pub(super) fn stage_artifacts_v2(
     // Clone its extents exactly instead of copying and syncing 16 MiB on every
     // launch; a cross-filesystem host is not fast-launch eligible and fails.
     stage_prepared_template_source_file(runtime_source, &root.join("disks/runtime.raw"), 0o444)?;
-    if let Some(tools_disk) = &artifacts.tools_disk {
-        let tools_source = open_or_import_tools_disk(config, tools_disk)?;
-        stage_prepared_template_source_file(tools_source, &root.join("disks/tools.ext4"), 0o444)?;
-    }
     stage_prepared_template_source_file(
         open_host_template_artifact(config, host_template, c"recordings.vfat")?,
         &root.join("disks/recordings.vfat"),
@@ -234,55 +247,7 @@ pub(super) fn stage_artifacts_v2(
     }
     set_mode(&root.join("disks/runtime.raw"), 0o444)?;
     set_owner(&root.join("disks/runtime.raw"), 0, 0)?;
-    if artifacts.tools_disk.is_some() {
-        set_mode(&root.join("disks/tools.ext4"), 0o444)?;
-        set_owner(&root.join("disks/tools.ext4"), 0, 0)?;
-    }
     Ok(())
-}
-
-fn open_or_import_tools_disk(config: &JailerdConfig, source: &ArtifactSource) -> Result<File> {
-    let sha256 = source
-        .sha256
-        .as_ref()
-        .context("tools disk source is missing SHA-256")?;
-    let jail_root = trusted_jail_root_fd(config)?;
-    let store = ensure_root_directory_at(&jail_root, c"tools")?;
-    let name = format!("{}.ext4", sha256.as_str());
-    let lock_name = format!(".lock-{}", sha256.as_str());
-    let lock = rustix::fs::openat(
-        &store,
-        &lock_name,
-        OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::RUSR | Mode::WUSR,
-    )?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
-    let open_existing = || -> Result<File> {
-        let fd = rustix::fs::openat(
-            &store,
-            &name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )?;
-        let file = File::from(fd);
-        let metadata = file.metadata()?;
-        ensure!(
-            metadata.is_file()
-                && metadata.len() == 64 * 1024 * 1024
-                && metadata.nlink() == 1
-                && metadata.uid() == 0
-                && metadata.gid() == 0
-                && metadata.mode() & 0o777 == 0o400,
-            "root-owned tools disk metadata is invalid"
-        );
-        Ok(file)
-    };
-    if let Ok(file) = open_existing() {
-        return Ok(file);
-    }
-    let destination = config.jail_root.join("tools").join(&name);
-    copy_template_source(config, source, &destination, Some(64 * 1024 * 1024), None)?;
-    open_existing()
 }
 
 pub(super) fn stage_artifacts(
@@ -293,6 +258,10 @@ pub(super) fn stage_artifacts(
     gid: u32,
 ) -> Result<()> {
     validate_template_launch_sources(artifacts)?;
+    ensure!(
+        artifacts.wake.is_none(),
+        "a suspended guest launches only from a prepared template"
+    );
     stage_source(config, &artifacts.kernel, &root.join("boot/kernel"), 0o444)?;
     if let Some(initrd) = &artifacts.initrd {
         stage_source(config, initrd, &root.join("boot/initrd"), 0o444)?;
@@ -315,9 +284,6 @@ pub(super) fn stage_artifacts(
         &root.join("disks/recordings.vfat"),
         0o600,
     )?;
-    if let Some(tools_disk) = &artifacts.tools_disk {
-        stage_source(config, tools_disk, &root.join("disks/tools.ext4"), 0o444)?;
-    }
     for path in [
         root.join("disks/root.raw"),
         root.join("disks/recordings.vfat"),
@@ -327,10 +293,6 @@ pub(super) fn stage_artifacts(
     }
     set_mode(&root.join("disks/runtime.raw"), 0o444)?;
     set_owner(&root.join("disks/runtime.raw"), 0, 0)?;
-    if artifacts.tools_disk.is_some() {
-        set_mode(&root.join("disks/tools.ext4"), 0o444)?;
-        set_owner(&root.join("disks/tools.ext4"), 0, 0)?;
-    }
     Ok(())
 }
 
@@ -515,6 +477,53 @@ fn reflink_route_is_unavailable(error: rustix::io::Errno) -> bool {
     )
 }
 
+/// Write the generation's kernel into its staged wake stub, so the VMM's
+/// next boot of the same path (a guest reboot) is a cold boot. The stub's
+/// own inode is rewritten, not replaced: the VMM's Landlock rule for its
+/// kernel holds that inode. The stub is the generation's own clone, root
+/// owned and read-only to the VM, as the kernel is; both keep their mode.
+pub(super) fn replace_wake_stub(record: &VmRecord) -> Result<bool> {
+    let wake = record.paths.wake.as_ref().context("the VM was not woken")?;
+    replace_stub_with_kernel(&record.paths.host_kernel, &wake.host_stub)
+}
+
+/// [`replace_wake_stub`] on paths; `false` when the stub already is the
+/// kernel.
+pub(super) fn replace_stub_with_kernel(host_kernel: &Path, stub: &Path) -> Result<bool> {
+    use std::io::{Read as _, Seek as _, Write as _};
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let no_follow = rustix::fs::OFlags::NOFOLLOW.bits() as i32;
+    let mut kernel = Vec::new();
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(no_follow)
+        .open(host_kernel)
+        .context("open the staged kernel")?
+        .read_to_end(&mut kernel)?;
+    let mut target = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(no_follow)
+        .open(stub)
+        .context("open the staged wake stub")?;
+    let metadata = target.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.nlink() == 1,
+        "the staged wake stub is not a private regular file"
+    );
+    let mut current = Vec::new();
+    target.read_to_end(&mut current)?;
+    if current == kernel {
+        return Ok(false);
+    }
+    target.rewind()?;
+    target.write_all(&kernel)?;
+    target.set_len(kernel.len() as u64)?;
+    target.sync_all()?;
+    Ok(true)
+}
+
 #[cfg(not(target_os = "linux"))]
 pub(super) fn export_recording_disk(_config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
     bail!("recording export is supported only on Linux")
@@ -560,15 +569,18 @@ pub(super) fn validate_template_launch_sources(artifacts: &SourceArtifacts) -> R
     let root_template = template_source_image(&artifacts.root_disk);
     let kernel_template = template_source_image(&artifacts.kernel);
     let initrd_template = artifacts.initrd.as_ref().and_then(template_source_image);
+    let wake_templates = artifacts
+        .wake
+        .iter()
+        .flat_map(|wake| [&wake.ram, &wake.stub, &wake.cpu_profile])
+        .map(template_source_image)
+        .collect::<Vec<_>>();
     let has_any_template = root_template.is_some()
         || kernel_template.is_some()
         || initrd_template.is_some()
+        || wake_templates.iter().any(Option::is_some)
         || artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-        || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-        || artifacts
-            .tools_disk
-            .as_ref()
-            .is_some_and(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT);
+        || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT;
     if !has_any_template {
         return Ok(());
     }
@@ -578,12 +590,9 @@ pub(super) fn validate_template_launch_sources(artifacts: &SourceArtifacts) -> R
             .initrd
             .as_ref()
             .is_some_and(|_| initrd_template != Some(image))
+        || wake_templates.iter().any(|wake| *wake != Some(image))
         || artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
         || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-        || artifacts
-            .tools_disk
-            .as_ref()
-            .is_some_and(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT)
     {
         bail!(
             "template-backed launch must use one prepared boot bundle and agent-owned runtime disks"
@@ -629,10 +638,8 @@ pub(super) fn open_prepared_template_source(
             .context("open root-owned image template")?;
     validate_root_directory(&image_directory, "root-owned image template")?;
     let metadata = open_template_metadata(&image_directory)?;
-    if !matches!(
-        metadata.schema_version,
-        IMAGE_TEMPLATE_METADATA_V2 | IMAGE_TEMPLATE_METADATA_V3
-    ) || metadata.image_sha256 != image_sha256
+    if metadata.schema_version != IMAGE_TEMPLATE_METADATA_V3
+        || metadata.image_sha256 != image_sha256
     {
         bail!("prepared image template metadata identity mismatch")
     }
@@ -646,6 +653,17 @@ pub(super) fn open_prepared_template_source(
                 .context("prepared image does not contain an initrd")?,
             ArtifactAccess::ReadOnly,
         ),
+        "ram" | "stub" | "cpu-profile.json" => {
+            let wake = metadata
+                .wake
+                .as_ref()
+                .context("prepared image does not carry a suspended guest")?;
+            match file_name {
+                "ram" => (&wake.ram, ArtifactAccess::ReadWrite),
+                "stub" => (&wake.stub, ArtifactAccess::ReadOnly),
+                _ => (&wake.cpu_profile, ArtifactAccess::ReadOnly),
+            }
+        }
         _ => bail!("prepared template artifact name is not allowed"),
     };
     if source.access != expected_access || source.sha256.as_ref() != Some(&expected.sha256) {

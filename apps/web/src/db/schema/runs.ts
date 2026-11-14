@@ -6,6 +6,7 @@ import {
   text,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
+import type { RevisionTaskV1 } from "@/generated/contracts/scenario-revision-v1";
 import { organization, user } from "./core";
 import { agentHosts } from "./platform";
 import { runtimeExecutions } from "./runtime";
@@ -25,6 +26,9 @@ export interface ScenarioStartRequestScope {
   candidateBuildId: string | null;
   allowDrainedAdminProof: boolean;
   allowSequenceBypass: boolean;
+  /** Present on a start from a play page, with the page's `ref`. */
+  launchSource?: "play";
+  ref?: string | null;
 }
 
 export const scenarioRuns = sqliteTable(
@@ -46,6 +50,14 @@ export const scenarioRuns = sqliteTable(
       .references(() => agentHosts.id, { onDelete: "restrict" }),
     scenarioId: text("scenario_id").notNull(),
     scenarioName: text("scenario_name").notNull(),
+    // The scenario revision the run started from, and its tasks.
+    scenarioRev: text("scenario_rev"),
+    tasksJson: jsonText<RevisionTaskV1[]>("tasks_json"),
+    launchSource: text("launch_source").$type<
+      "course" | "play" | "assignment" | "verify"
+    >(),
+    ref: text("ref"),
+    endReason: text("end_reason").$type<"lab_failed" | "verify_timeout">(),
     // Immutable course/lecture context. Old runs remain readable with nulls.
     courseScopeKey: text("course_scope_key"),
     courseId: text("course_id"),
@@ -187,38 +199,6 @@ export const scenarioRunSshKeys = sqliteTable(
     index("scenario_run_ssh_keys_run_runtime_idx").on(
       table.runId,
       table.runtimeVmName,
-    ),
-  ],
-);
-
-export const scenarioRunProbeSnapshots = sqliteTable(
-  "scenario_run_probe_snapshots",
-  {
-    id: text("id").primaryKey(),
-    runId: text("run_id")
-      .notNull()
-      .references(() => scenarioRuns.runId, { onDelete: "cascade" }),
-    vmId: text("vm_id").notNull(),
-    runtimeVmName: text("runtime_vm_name").notNull(),
-    messageId: text("message_id").notNull(),
-    collectionState: text("collection_state"),
-    collectionError: text("collection_error"),
-    summaryJson: text("summary_json"),
-    snapshotJson: text("snapshot_json").notNull(),
-    generatedAt: integer("generated_at"),
-    observedAt: integer("observed_at").notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("scenario_run_probe_snapshots_run_vm_message_uidx").on(
-      table.runId,
-      table.vmId,
-      table.messageId,
-    ),
-    index("scenario_run_probe_snapshots_run_vm_idx").on(
-      table.runId,
-      table.vmId,
-      table.createdAt,
     ),
   ],
 );

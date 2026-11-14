@@ -274,6 +274,62 @@
       "when": 1791161628673,
       "tag": "0038_skinny_annihilus",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1794595445853,
+      "tag": "0039_dark_medusa",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1794606985208,
+      "tag": "0040_sparkling_madame_hydra",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "6",
+      "when": 1794609007852,
+      "tag": "0041_plain_polaris",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "6",
+      "when": 1794610876731,
+      "tag": "0042_hot_jimmy_woo",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "6",
+      "when": 1794615230894,
+      "tag": "0043_freezing_black_queen",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "6",
+      "when": 1794619694842,
+      "tag": "0044_swift_zzzax",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "6",
+      "when": 1794621454858,
+      "tag": "0045_lying_wendell_vaughn",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "6",
+      "when": 1794624458026,
+      "tag": "0046_yielding_smiling_tiger",
+      "breakpoints": true
     }
   ]
 }

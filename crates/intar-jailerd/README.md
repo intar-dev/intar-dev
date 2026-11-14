@@ -8,9 +8,10 @@ typed capability, run-network, launch, inspect, stop, and destroy operations;
 it accepts no arbitrary command, host path, cgroup file, or systemd property.
 
 The root-owned configuration lives at `/etc/intar-jailerd/config.toml`; start
-from `deploy/config.example.toml`. It pins Cloud Hypervisor v53.0 at
-`/usr/lib/intar/cloud-hypervisor-v53.0` with SHA-256
-`448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc`,
+from `deploy/config.example.toml`. It pins Cloud Hypervisor v55.0.0 at
+`/usr/lib/intar/cloud-hypervisor-v55.0.0`, with the SHA-256 that the release
+recorded for its build of the runtime (`deploy/cloud-hypervisor-v55.0.0.sha256`;
+`install.sh` writes it into the config),
 reserves 1000 host millicores by default, and allocates per-generation
 identities from `200000..=265535`. Audit that range for local/directory identity
 collisions before deployment.
@@ -73,12 +74,40 @@ Doctor must run as the configured agent identity so its cache paths and
 
 For an offline host, pre-seed the two files listed in the wrapper/notices under
 `/var/lib/intar/self-test-assets/downloads/`, then pass `--offline`. The
-production `allowed_source_roots` remains agent-cache-only: the binary adds the
-fresh fixture root solely to its isolated in-memory self-test configuration.
+self-test boots through the same image path as the agent: it splits the fresh
+root disk into 4 MiB chunks, skips the all-zero ones, zstd-encodes the rest and
+writes a machine image (OCI manifest, machine config, kernel and chunk blobs,
+each named by its SHA-256) into a blob cache inside its disposable jail
+directory, then sends `PrepareChunkedImageV3` and `LaunchVmV3`. The production
+`allowed_source_roots` remains agent-cache-only: the binary adds the fixture
+root and that blob cache's root solely to its isolated in-memory self-test
+configuration. Its image carries no suspended guest, so the self-test does not
+cover a wake: neither the RAM store, the sandboxed delta apply, nor the staging
+of `ram`, `stub` and `cpu-profile.json`.
+
+When an image's machine config has `wake`, `PrepareChunkedImageV3` also checks
+it against the manifest and prepares `ram`, `stub` and `cpu-profile.json` into
+the template, reading every wake layer from the same blob cache. A base's RAM
+file is assembled once per host into the root-owned store `ram/<sha256>.ram`
+and cloned; a pack's is the base's with the pack's delta applied by
+`intar-jailer apply-snapdelta` in a transient, unprivileged systemd unit
+(dynamic user, no network or capabilities, syscall filter, Landlock, bounded
+memory and time) that gets only the three files as open descriptors. Its
+output counts only once its SHA-256 is the pack's. The store GC keeps a RAM
+store file while any template names it. `supports_wake` is advertised when the
+host is ready for template launches, systemd is at least 253 (`OpenFile=`) and
+the jailer binary is present.
 Fast-host readiness creates root-owned anonymous probes in the template store
 and every configured source filesystem, then exact-reflinks each probe into the
-root-owned generation store. One failed route withdraws v2 and fast-template
+root-owned generation store. One failed route withdraws v3 and fast-template
 capability for the host; launch never degrades to copying.
+
+The store GC removes every template directory that is not of the current
+schema, unless a live VM was booted from it. `deploy/install.sh` drops the
+retired `legacy_template_retention_seconds` key from an existing
+`/etc/intar-jailerd/config.toml` (`deploy/migrate-epoch-config.py`), keeping
+the previous file as `config.toml.pre-epoch`. It checks the config before it
+stops anything, so a config the migration refuses leaves the host running.
 
 Agent doctor is read-only. The root-only self-test runs under the same
 private-mount/filesystem sandbox as the installed service and uses an isolated

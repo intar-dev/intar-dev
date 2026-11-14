@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use tokio::task::JoinSet;
 
 #[cfg(target_os = "linux")]
-const RUN_CLI_HOST_PORT: u32 = 18_082;
+const RUN_CLI_HOST_PORT: u32 = intar_contracts::guest::RUN_CLI_PORT;
 /// A guest must send its bounded one-shot request promptly. Keeping this
 /// short releases the bounded admission slot even if a learner-controlled
 /// client opens a connection and never completes a frame.

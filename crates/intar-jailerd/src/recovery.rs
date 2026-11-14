@@ -196,7 +196,11 @@ pub(super) fn validate_recovered_record(config: &JailerdConfig, record: &VmRecor
         bail!("persisted CPU quota attestation is invalid")
     }
     let expected_root = generation_directory(config, &record.generation).join("root");
-    let expected_paths = jail_paths(&expected_root, record.paths.host_initrd.is_some());
+    let expected_paths = jail_paths(
+        &expected_root,
+        record.paths.host_initrd.is_some(),
+        record.paths.wake.is_some(),
+    );
     if record.paths != expected_paths {
         bail!("persisted jail paths do not match the generation root")
     }

@@ -1,11 +1,10 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { env, drizzle, seedHost, seedRun, seedEnabledScenario, desiredRunningVm, resetHostRuntimeTestDatabase } from "@/control-plane/host-runtime-do/test-fixtures";
-import { HOST_DESIRED_STATE_SCHEMA_VERSION } from "@/generated/constants";
 const mocks=vi.hoisted(()=>({admin:vi.fn()}));
 vi.mock("@/lib/stargate",()=>({stargateRelayAdminRequest:mocks.admin}));
 import { refreshStargateHostRelay, revokeStargateHostRelayCredentials, loadStargateSshTransport } from "./stargate-relay";
-import { loadOrCreateHostDesiredState } from "./desired-state-store";
+import { HOST_DESIRED_STATE_SCHEMA_VERSION_V3, loadStoredHostDesiredState } from "./desired-state-store";
 const session={hostId:"host-1",sessionId:"session-1",credentialGeneration:1};
 const target={host:{host_id:"host-1",session_id:"session-1",credential_generation:1},owner_id:"user-1",execution_id:"run-1",execution_generation:1,vm_id:"vm-1",service:"ssh"};
 
@@ -18,7 +17,7 @@ describe("host relay lease",()=>{
     await env.DB.prepare("UPDATE agent_hosts SET connected=1, connected_at=?1, active_session_id=?2 WHERE id=?3").bind(now-1_000,session.sessionId,session.hostId).run();
     await env.DB.prepare("UPDATE scenario_runs SET course_scope_key='public', course_id='linux-operations', lecture_id='01-broken-nginx' WHERE run_id='run-1'").run();
     const vm={...desiredRunningVm("run-1","runtime-web",now),vm_id:"vm-1",owner_user_id:"user-1",runtime_execution_id:"run-1",generation:1,lease_expires_at_unix_ms:now+300_000};
-    await env.DB.prepare("INSERT INTO host_desired_state(host_id,version,doc_json,updated_at) VALUES(?1,1,?2,?3)").bind("host-1",JSON.stringify({schema_version:HOST_DESIRED_STATE_SCHEMA_VERSION,scope:"personal",owner_user_id:"user-1",host_id:"host-1",version:1,generated_at_unix_ms:now,cached_images:[],vms:[vm],builds:[]}),now).run();
+    await env.DB.prepare("INSERT INTO host_desired_state(host_id,version,doc_json,updated_at) VALUES(?1,1,?2,?3)").bind("host-1",JSON.stringify({schema_version:HOST_DESIRED_STATE_SCHEMA_VERSION_V3,scope:"personal",owner_user_id:"user-1",host_id:"host-1",version:1,generated_at_unix_ms:now,cached_images:[],vms:[vm],builds:[],source_compiles:[]}),now).run();
     mocks.admin.mockImplementation(async(action,body)=>action==="grant"?Response.json({identity:body.identity,token:"1".repeat(64),websocket_url:"wss://gateway.example.test/v1/host-relay/ws",gateway_host_key_openssh:"ssh-ed25519 test",expires_at_unix_ms:body.expires_at_unix_ms}):new Response(null,{status:204}));
   });
   it("binds one host grant to current owner, control session, credentials, execution and VM",async()=>{
@@ -36,7 +35,7 @@ describe("host relay lease",()=>{
     await env.DB.prepare("UPDATE agent_hosts SET scope='organization', organization_id='org-1', user_id='creator' WHERE id='host-1'").run();
     await env.DB.prepare("UPDATE scenario_runs SET organization_id='org-1' WHERE run_id='run-1'").run();
     await env.DB.prepare("UPDATE host_desired_state SET doc_json=json_set(doc_json,'$.scope','organization','$.owner_user_id','creator') WHERE host_id='host-1'").run();
-    const state = await loadOrCreateHostDesiredState(drizzle(env.DB), "host-1", Date.now());
+    const state = await loadStoredHostDesiredState(drizzle(env.DB), "host-1", Date.now());
     expect(state).toMatchObject({ scope: "organization", owner_user_id: "creator", vms: [{ owner_user_id: "user-1" }] });
     const transport = () => loadStargateSshTransport({hostId:"host-1",ownerId:"user-1",executionId:"run-1",executionGeneration:1,vmId:"vm-1",directHost:"203.0.113.10",directPort:2222});
     expect(await transport()).toEqual({ kind: "relay", target });
@@ -58,10 +57,10 @@ describe("host relay lease",()=>{
   });
 
   it("removes a workload when its content or desired execution no longer permits access",async()=>{
-    await env.DB.prepare("UPDATE vm_scenarios SET enabled=0 WHERE scenario_id='broken-nginx'").run();
+    await env.DB.prepare("UPDATE scenarios SET enabled=0 WHERE id='intar/broken-nginx'").run();
     await refreshStargateHostRelay(session);
     expect(mocks.admin.mock.calls[0]![1].targets).toEqual([]);
-    await env.DB.prepare("UPDATE vm_scenarios SET enabled=1 WHERE scenario_id='broken-nginx'").run();
+    await env.DB.prepare("UPDATE scenarios SET enabled=1 WHERE id='intar/broken-nginx'").run();
     await env.DB.prepare("UPDATE host_desired_state SET doc_json=json_set(doc_json,'$.vms[0].generation',2)").run();
     await refreshStargateHostRelay(session);
     expect(mocks.admin.mock.calls[1]![1].targets).toEqual([]);

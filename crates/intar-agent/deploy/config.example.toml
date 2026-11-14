@@ -1,7 +1,7 @@
 [server]
 bind = "127.0.0.1:8080"
 
-# intar-agent is unprivileged. Cloud Hypervisor v53.0 and its checksum are
+# intar-agent is unprivileged. Cloud Hypervisor v55.0.0 and its checksum are
 # configured only in the root-owned /etc/intar-jailerd/config.toml.
 [jailer]
 socket = "/run/intar-jailerd/control.sock"
@@ -42,8 +42,8 @@ guest_cidr = "10.77.0.0/16"
 dns = ["1.1.1.1", "8.8.8.8"]
 
 [image_registry]
-# The Worker index includes image_id, raw_chunks_v1 manifest metadata, the
-# pinned guest-tools disk, boot artifacts, and immutable download URLs.
+# The agent pulls images and Kino through /v2 at this URL's origin; the path
+# is ignored.
 url = "https://intar.dev/agent/registry/images"
 refresh_interval_minutes = 15
 # Optional HTTP basic auth used for local/dev registries. Production agents use bridge JWT auth.
@@ -51,7 +51,15 @@ refresh_interval_minutes = 15
 # password = ""
 
 [image_cache]
-# Maximum bytes for compressed chunks, manifests, guest tools, and direct-boot
-# artifacts. The default is 53687091200 (50 GiB). The agent does not keep a
-# full unprivileged raw image. Pinned entries are never deleted to reach it.
+# Maximum bytes for image blobs, manifests, Kino binaries and machine specs.
+# The default is 53687091200 (50 GiB). The agent does not keep a full
+# unprivileged raw image. Pinned entries are never deleted to reach it.
 # max_bytes = 53687091200
+
+[wake]
+# Start VMs from an image's suspended guest instead of booting it. Off by
+# default. A VM is woken only under a CPU profile pinned here for this host
+# (the digest of the image's `wake.cpu_profile` layer); anything else boots
+# cold, and a wake that does not report within 10 s falls back to a cold boot.
+enabled = false
+profiles = []

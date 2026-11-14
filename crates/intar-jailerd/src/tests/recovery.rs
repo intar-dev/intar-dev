@@ -14,8 +14,8 @@ fn launch_grants_mknod_only_for_the_jail_devices() {
     .expect("core");
     ensure_test_network(&mut core);
     assert!(matches!(
-        launch_prepared_v2(&mut core, 0, 125),
-        Response::LaunchVmV2(_)
+        launch_prepared_v3(&mut core, 0, 125),
+        Response::LaunchVmV3(_)
     ));
     assert_eq!(core.backend.started_specs.len(), 1);
     assert_eq!(
@@ -42,8 +42,8 @@ fn reservation_is_held_until_destroy_after_exit() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match launch_prepared_v2(&mut core, 1, 125) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match launch_prepared_v3(&mut core, 1, 125) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected response {other:?}"),
     };
     assert_eq!(core.capabilities().committed_cpu_millis, 125);
@@ -73,8 +73,8 @@ fn destroy_continues_after_systemd_garbage_collects_a_drained_unit() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match launch_prepared_v2(&mut core, 1, 125) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match launch_prepared_v3(&mut core, 1, 125) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected response {other:?}"),
     };
     let identity = VmIdentityRequest::by_generation(launched.generation.clone());
@@ -111,8 +111,8 @@ fn destroy_refuses_a_populated_unit() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match launch_prepared_v2(&mut core, 1, 125) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match launch_prepared_v3(&mut core, 1, 125) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected response {other:?}"),
     };
 
@@ -139,13 +139,13 @@ fn logical_vm_launch_is_idempotent_and_conflicts_on_changed_resources() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let request = prepare_launch_v2(&mut core, 1, 125);
-    let first = match core.handle(Request::LaunchVmV2(Box::new(request.clone()))) {
-        Response::LaunchVmV2(value) => value,
+    let request = launch_v3(1, 125);
+    let first = match core.handle(Request::LaunchVmV3(Box::new(request.clone()))) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected first launch response {other:?}"),
     };
-    let second = match core.handle(Request::LaunchVmV2(Box::new(request.clone()))) {
-        Response::LaunchVmV2(value) => value,
+    let second = match core.handle(Request::LaunchVmV3(Box::new(request.clone()))) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected idempotent launch response {other:?}"),
     };
     assert_eq!(first.generation, second.generation);
@@ -153,7 +153,7 @@ fn logical_vm_launch_is_idempotent_and_conflicts_on_changed_resources() {
 
     let mut changed = request;
     changed.launch.cpu_millis = 126;
-    let response = core.handle(Request::LaunchVmV2(Box::new(changed)));
+    let response = core.handle(Request::LaunchVmV3(Box::new(changed)));
     assert!(matches!(
         response,
         Response::Error(ProtocolError { ref code, .. }) if code == "conflict"
@@ -173,9 +173,9 @@ fn idempotent_launch_still_rejects_a_changed_live_process_identity() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let request = prepare_launch_v2(&mut core, 1, 125);
-    let launched = match core.handle(Request::LaunchVmV2(Box::new(request.clone()))) {
-        Response::LaunchVmV2(value) => value,
+    let request = launch_v3(1, 125);
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(request.clone()))) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected first launch response {other:?}"),
     };
     core.backend
@@ -184,7 +184,7 @@ fn idempotent_launch_still_rejects_a_changed_live_process_identity() {
         .expect("fake unit")
         .pid_start_time_ticks = Some(8);
 
-    let response = core.handle(Request::LaunchVmV2(Box::new(request)));
+    let response = core.handle(Request::LaunchVmV3(Box::new(request)));
     assert!(matches!(
         response,
         Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
@@ -208,8 +208,8 @@ fn inspect_healthy_vm_still_requires_a_live_api_ping() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match launch_prepared_v2(&mut core, 1, 125) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match launch_prepared_v3(&mut core, 1, 125) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected launch response {other:?}"),
     };
 
@@ -242,7 +242,7 @@ fn network_setup_failure_revokes_partial_network_and_quarantines_generation() {
     ensure_test_network(&mut core);
 
     assert!(matches!(
-        launch_prepared_v2(&mut core, 1, 125),
+        launch_prepared_v3(&mut core, 1, 125),
         Response::Error(_)
     ));
     assert!(core.records.is_empty());
@@ -274,7 +274,7 @@ fn partial_start_failure_stops_then_destroys_the_transient_unit() {
     .expect("core");
     ensure_test_network(&mut core);
 
-    let response = launch_prepared_v2(&mut core, 1, 125);
+    let response = launch_prepared_v3(&mut core, 1, 125);
     assert!(matches!(response, Response::Error(_)));
     assert!(core.records.is_empty());
     let generation = core
@@ -314,7 +314,7 @@ fn post_start_persistence_failure_rolls_back_the_transient_unit() {
     .expect("core");
     ensure_test_network(&mut core);
 
-    let response = launch_prepared_v2(&mut core, 1, 125);
+    let response = launch_prepared_v3(&mut core, 1, 125);
     assert!(matches!(response, Response::Error(_)));
     assert!(core.records.is_empty());
     let generation = core
@@ -349,7 +349,7 @@ fn runtime_socket_acl_failure_rolls_back_the_transient_unit() {
     .expect("core");
     ensure_test_network(&mut core);
 
-    let Response::Error(error) = launch_prepared_v2(&mut core, 1, 125) else {
+    let Response::Error(error) = launch_prepared_v3(&mut core, 1, 125) else {
         panic!("runtime socket ACL failure unexpectedly succeeded")
     };
     assert!(
@@ -396,7 +396,7 @@ fn failed_launch_reports_every_rollback_failure() {
     .expect("core");
     ensure_test_network(&mut core);
 
-    let Response::Error(error) = core.handle(Request::LaunchVmV2(Box::new(launch_v2(1, 1_000))))
+    let Response::Error(error) = core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 1_000))))
     else {
         panic!("failed launch unexpectedly succeeded")
     };
@@ -451,7 +451,7 @@ fn drained_failed_launch_reports_network_and_quarantine_failures() {
     .expect("core");
     ensure_test_network(&mut core);
 
-    let Response::Error(error) = core.handle(Request::LaunchVmV2(Box::new(launch_v2(1, 1_000))))
+    let Response::Error(error) = core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 1_000))))
     else {
         panic!("failed launch unexpectedly succeeded")
     };
@@ -486,7 +486,7 @@ fn mismatched_started_unit_never_controls_the_returned_unit_name() {
     ensure_test_network(&mut core);
 
     assert!(matches!(
-        launch_prepared_v2(&mut core, 1, 125),
+        launch_prepared_v3(&mut core, 1, 125),
         Response::Error(_)
     ));
     assert!(core.records.is_empty());
@@ -619,7 +619,7 @@ fn recovery_reattaches_a_matching_drained_generation() {
 
 #[test]
 fn recovery_accepts_persisted_v2_and_v3_template_launches() {
-    for with_tools in [false, true] {
+    {
         let directory = tempfile::tempdir().expect("recovery directory");
         let mut config = test_config();
         config.jail_root = directory.path().to_path_buf();
@@ -630,14 +630,6 @@ fn recovery_accepts_persisted_v2_and_v3_template_launches() {
             template_artifact_source(&image, "root.raw", &image, ArtifactAccess::ReadWrite);
         record.request.artifacts.kernel =
             template_artifact_source(&image, "kernel", &image, ArtifactAccess::ReadOnly);
-        if with_tools {
-            let root = generation_directory(&config, &record.generation).join("root");
-            std::fs::create_dir_all(root.join("disks")).expect("tools directory");
-            std::fs::write(root.join("disks/tools.ext4"), b"tools").expect("tools fixture");
-            record.request.artifacts.tools_disk =
-                Some(source("tools.ext4", ArtifactAccess::ReadOnly));
-            record.paths = jail_paths(&root, record.request.artifacts.initrd.is_some());
-        }
         record.request_fingerprint = request_fingerprint(&record.request).expect("fingerprint");
         let record = decode_vm_record_v2(&serde_json::to_vec(&record).expect("persist record"))
             .expect("decode persisted template launch");

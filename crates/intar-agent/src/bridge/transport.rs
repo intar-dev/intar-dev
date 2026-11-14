@@ -1,15 +1,5 @@
 use super::*;
 
-pub(super) fn command_exists(command: &str) -> bool {
-    std::env::var_os("PATH")
-        .and_then(|path| {
-            std::env::split_paths(&path)
-                .map(|dir| dir.join(command))
-                .find(|path| path.is_file())
-        })
-        .is_some()
-}
-
 pub(crate) async fn bootstrap_agent_access(
     cfg: &BridgeConfig,
     http: &HttpClient,
@@ -17,6 +7,7 @@ pub(crate) async fn bootstrap_agent_access(
     let url = format!("{}/api/agent/bootstrap", cfg.base_url.trim_end_matches('/'));
     let response = http
         .post(&url)
+        .header(BRIDGE_PROTOCOL_HEADER, BRIDGE_PROTOCOL_VERSION)
         .json(&AgentBootstrapRequest {
             host_id: &cfg.host_id,
             bootstrap_token: &cfg.credential,
@@ -26,6 +17,9 @@ pub(crate) async fn bootstrap_agent_access(
         .with_context(|| format!("failed to bootstrap agent against {url}"))?;
 
     let status = response.status();
+    if status == reqwest::StatusCode::UPGRADE_REQUIRED {
+        return Err(UpgradeRequired.into());
+    }
     if !status.is_success() {
         anyhow::bail!("agent bootstrap failed with HTTP {status}");
     }
@@ -63,7 +57,7 @@ pub(super) fn default_ws_url(base_url: &str, host_id: &str) -> String {
     format!("{ws_base}/api/agent/bridge/{host_id}")
 }
 
-pub(super) async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV8) -> Result<()>
+pub(super) async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV9) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
@@ -75,7 +69,7 @@ where
         .context("failed to send bridge websocket message")
 }
 
-pub(super) fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV8>> {
+pub(super) fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV9>> {
     match message {
         Message::Text(raw) => parse_bridge_json(&raw).map(Some),
         Message::Binary(raw) => {
@@ -84,23 +78,29 @@ pub(super) fn parse_bridge_message(message: Message) -> Result<Option<BridgeMess
         }
         Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => Ok(None),
         Message::Close(frame) => {
+            if frame
+                .as_ref()
+                .is_some_and(|frame| u16::from(frame.code) == CLOSE_UPGRADE_REQUIRED)
+            {
+                return Err(UpgradeRequired.into());
+            }
             anyhow::bail!("bridge websocket closed by peer: {:?}", frame);
         }
     }
 }
 
-pub(super) fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV8> {
+pub(super) fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV9> {
     let message =
-        serde_json::from_str::<BridgeMessageV8>(raw).context("invalid bridge v7 JSON message")?;
-    if !message_has_v7_protocol(&message) {
-        anyhow::bail!("invalid bridge protocol version; expected v8");
+        serde_json::from_str::<BridgeMessageV9>(raw).context("invalid bridge v9 JSON message")?;
+    if !message_has_current_protocol(&message) {
+        anyhow::bail!("invalid bridge protocol version; expected v9");
     }
     Ok(message)
 }
 
-pub(super) fn validate_bridge_message(message: &BridgeMessageV8, host_id: &str) -> Result<()> {
-    if !message_has_v7_protocol(message) {
-        anyhow::bail!("invalid bridge protocol version; expected v8");
+pub(super) fn validate_bridge_message(message: &BridgeMessageV9, host_id: &str) -> Result<()> {
+    if !message_has_current_protocol(message) {
+        anyhow::bail!("invalid bridge protocol version; expected v9");
     }
     let message_host_id = bridge_message_host_id(message);
     if message_host_id != host_id {
@@ -111,7 +111,7 @@ pub(super) fn validate_bridge_message(message: &BridgeMessageV8, host_id: &str) 
 
 pub(super) fn validate_desired_state(
     cfg: &BridgeConfig,
-    desired: &HostDesiredStateV2,
+    desired: &HostDesiredStateV3,
 ) -> Result<()> {
     let host_id = &cfg.host_id;
     if desired.schema_version != HOST_DESIRED_STATE_SCHEMA_VERSION {
@@ -133,19 +133,27 @@ pub(super) fn validate_desired_state(
             && !desired.owner_user_id.trim().is_empty(),
         "desired host ownership mismatch"
     );
+    anyhow::ensure!(
+        desired.builds.is_empty() && desired.source_compiles.is_empty(),
+        "an agent host builds and compiles nothing"
+    );
+    let mut vm_ids = BTreeSet::new();
     let mut names = BTreeSet::new();
     let mut runs = BTreeMap::new();
     for vm in &desired.vms {
         cfg.validate_owner(&vm.owner_user_id, &vm.runtime_execution_id, vm.generation)?;
+        // `vm_id` keys the VM on this host (its state row, work directory and
+        // jail); `name` is the machine's name inside its run.
         anyhow::ensure!(
-            !vm.run_id.trim().is_empty()
-                && !vm.vm_name.trim().is_empty()
-                && !vm.vm_id.trim().is_empty(),
-            "VM identity is empty"
+            crate::vm::is_safe_key(&vm.run_id)
+                && crate::vm::is_safe_key(&vm.name)
+                && crate::vm::is_safe_key(&vm.vm_id),
+            "VM identity must match [A-Za-z0-9_-]+"
         );
+        anyhow::ensure!(vm_ids.insert(&vm.vm_id), "duplicate vm_id in desired state");
         anyhow::ensure!(
-            names.insert(&vm.vm_name),
-            "duplicate VM name in desired state"
+            names.insert((&vm.run_id, &vm.name)),
+            "duplicate VM name within a run in desired state"
         );
         let identity = (&vm.owner_user_id, &vm.runtime_execution_id, vm.generation);
         if let Some(previous) = runs.insert(&vm.run_id, identity) {
@@ -155,60 +163,43 @@ pub(super) fn validate_desired_state(
             );
         }
     }
-    if !desired.builds.is_empty() {
-        anyhow::bail!(
-            "agent desired state must not contain build assignments; received {}",
-            desired.builds.len()
-        );
-    }
     Ok(())
 }
 
-pub(super) fn message_has_v7_protocol(message: &BridgeMessageV8) -> bool {
+pub(super) fn message_has_current_protocol(message: &BridgeMessageV9) -> bool {
+    let version = match message {
+        BridgeMessageV9::ClientHello(message) => message.protocol_version,
+        BridgeMessageV9::ServerHello(message) => message.protocol_version,
+        BridgeMessageV9::DesiredState(message) => message.protocol_version,
+        BridgeMessageV9::StateReport(message) => message.protocol_version,
+        BridgeMessageV9::VmReport(message) => message.protocol_version,
+        BridgeMessageV9::BuildReport(message) => message.protocol_version,
+        BridgeMessageV9::SyncRequest(message) => message.protocol_version,
+    };
+    version == BRIDGE_PROTOCOL_VERSION
+}
+
+pub(super) fn bridge_message_host_id(message: &BridgeMessageV9) -> &str {
     match message {
-        BridgeMessageV8::ClientHello(message) => {
-            message.protocol_version == BRIDGE_PROTOCOL_VERSION
-        }
-        BridgeMessageV8::ServerHello(message) => {
-            message.protocol_version == BRIDGE_PROTOCOL_VERSION
-        }
-        BridgeMessageV8::DesiredState(message) => {
-            message.protocol_version == BRIDGE_PROTOCOL_VERSION
-        }
-        BridgeMessageV8::StateReport(message) => {
-            message.protocol_version == BRIDGE_PROTOCOL_VERSION
-        }
-        BridgeMessageV8::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
-        BridgeMessageV8::BuildReport(message) => {
-            message.protocol_version == BRIDGE_PROTOCOL_VERSION
-        }
-        BridgeMessageV8::SyncRequest(message) => {
-            message.protocol_version == BRIDGE_PROTOCOL_VERSION
-        }
+        BridgeMessageV9::ClientHello(message) => &message.host_id,
+        BridgeMessageV9::ServerHello(message) => &message.host_id,
+        BridgeMessageV9::DesiredState(message) => &message.host_id,
+        BridgeMessageV9::StateReport(message) => &message.host_id,
+        BridgeMessageV9::VmReport(message) => &message.host_id,
+        BridgeMessageV9::BuildReport(message) => &message.host_id,
+        BridgeMessageV9::SyncRequest(message) => &message.host_id,
     }
 }
 
-pub(super) fn bridge_message_host_id(message: &BridgeMessageV8) -> &str {
+pub(super) fn bridge_message_type(message: &BridgeMessageV9) -> &'static str {
     match message {
-        BridgeMessageV8::ClientHello(message) => &message.host_id,
-        BridgeMessageV8::ServerHello(message) => &message.host_id,
-        BridgeMessageV8::DesiredState(message) => &message.host_id,
-        BridgeMessageV8::StateReport(message) => &message.host_id,
-        BridgeMessageV8::VmReport(message) => &message.host_id,
-        BridgeMessageV8::BuildReport(message) => &message.host_id,
-        BridgeMessageV8::SyncRequest(message) => &message.host_id,
-    }
-}
-
-pub(super) fn bridge_message_type(message: &BridgeMessageV8) -> &'static str {
-    match message {
-        BridgeMessageV8::ClientHello(_) => "client_hello",
-        BridgeMessageV8::ServerHello(_) => "server_hello",
-        BridgeMessageV8::DesiredState(_) => "desired_state",
-        BridgeMessageV8::StateReport(_) => "state_report",
-        BridgeMessageV8::VmReport(_) => "vm_report",
-        BridgeMessageV8::BuildReport(_) => "build_report",
-        BridgeMessageV8::SyncRequest(_) => "sync_request",
+        BridgeMessageV9::ClientHello(_) => "client_hello",
+        BridgeMessageV9::ServerHello(_) => "server_hello",
+        BridgeMessageV9::DesiredState(_) => "desired_state",
+        BridgeMessageV9::StateReport(_) => "state_report",
+        BridgeMessageV9::VmReport(_) => "vm_report",
+        BridgeMessageV9::BuildReport(_) => "build_report",
+        BridgeMessageV9::SyncRequest(_) => "sync_request",
     }
 }
 
@@ -269,40 +260,25 @@ pub(super) fn terminal_identities_match(
     }
 }
 
-pub(super) fn resources_from_desired(resources: &VmResourcesV3) -> CreateVmResources {
+/// A `disk_mib` of 0 keeps the image's own disk size.
+pub(super) fn resources_from_desired(vm: &DesiredVmV3) -> CreateVmResources {
     CreateVmResources {
-        cpu_millis: resources.cpu_millis,
-        memory_mib: resources.memory_mib.0,
-        disk_mib: Some(resources.disk_mib.0),
+        cpu_millis: vm.cpu_millis,
+        memory_mib: vm.memory_mib,
+        disk_mib: (vm.disk_mib > 0).then_some(vm.disk_mib),
     }
 }
 
-pub(super) fn desired_lease_duration_seconds(vm: &DesiredVmV2, now_ms: i64) -> Result<u64> {
+pub(super) fn desired_lease_duration_seconds(vm: &DesiredVmV3, now_ms: i64) -> Result<u64> {
     let remaining_ms = vm.lease_expires_at_unix_ms.saturating_sub(now_ms);
     anyhow::ensure!(remaining_ms > 0, "desired VM lease expired");
     let seconds = u64::try_from((remaining_ms / 1_000).max(1)).unwrap_or(u64::MAX);
     Ok(seconds)
 }
 
-pub(super) fn image_cache_key(image_key: &ImageKey) -> String {
-    format!(
-        "{}-{}-{}",
-        image_key.scenario,
-        image_key.vm,
-        image_architecture_slug(&image_key.arch)
-    )
-}
-
-pub(super) fn image_architecture_slug(arch: &ImageArchitecture) -> &'static str {
-    match arch {
-        ImageArchitecture::X86_64 => "x86_64",
-        ImageArchitecture::Aarch64 => "aarch64",
-    }
-}
-
-pub(super) fn kino_vsock_cid(desired_version: u64, vm: &DesiredVmV2) -> u32 {
+pub(super) fn kino_vsock_cid(desired_version: u64, vm: &DesiredVmV3) -> u32 {
     let mut hash = desired_version;
-    for byte in vm.run_id.bytes().chain(vm.vm_name.bytes()) {
+    for byte in vm.run_id.bytes().chain(vm.vm_id.bytes()) {
         hash = hash.wrapping_mul(16_777_619) ^ u64::from(byte);
     }
     10_000 + u32::try_from(hash % 50_000).unwrap_or(0)

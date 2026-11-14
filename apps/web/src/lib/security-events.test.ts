@@ -48,6 +48,8 @@ describe("security events", () => {
     expect(securityRoute("/api/account-links/secret-provider")).toBe("auth/account-links");
     // Listing sign-in methods changes nothing.
     expect(securityRoute("/api/account-links")).toBe("api");
+    expect(securityRoute("/v2/token")).toBe("registry/token");
+    expect(securityRoute("/v2/machines/x/blobs/y")).toBe("registry/oci");
     recordSecurityResponse(new Request("https://intar.dev/api/organization-sign-in/start"), new Response(null, { status: 200 }));
     recordSecurityResponse(new Request("https://intar.dev/api/account-links/sso/start"), new Response(null, { status: 502 }));
     expect(JSON.parse(String(info.mock.calls[0]?.[0]))).toMatchObject({ event: "security.auth_request", outcome: "accepted" });

@@ -1,3 +1,4 @@
+import { GUEST_USERNAME } from "@/generated/constants";
 import { currentRunHostScopeCondition } from "@/lib/metal-placement";
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -1960,7 +1961,7 @@ export function parseRunState(raw: string): RunStateDocument {
       terminalTarget: {
         host: null,
         port: 22,
-        username: "ubuntu",
+        username: GUEST_USERNAME,
         hostKeyOpenssh: null,
         checkedAt: null,
       },

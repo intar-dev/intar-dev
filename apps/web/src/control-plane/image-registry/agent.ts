@@ -1,19 +1,14 @@
-import { and, eq, or, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import {
-  hostDesiredState,
-  imageBuilds,
-  imageBuildBundles,
-  scenarioCatalogCandidates,
+  bundles,
+  machineBuilds,
   scenarioSourceCommits,
   scenarioSources,
-  vmScenarios,
-  vmScenarioVms,
 } from "@/db/schema";
 import type { VerifiedAgentHost } from "@/control-plane/auth";
-import type { ScenarioVmManifestV5 } from "@/generated/catalog";
 import { type AppErrorResponseBody, appError, toErrorResponse } from "@/lib/app-error";
 import { BodyLimitExceededError, readBoundedBody } from "@/lib/request-security";
 import {
@@ -31,51 +26,8 @@ import {
   isRecord,
   isSafeBundleRev,
   isSafeBuildId,
-  isImageKey,
-  normalizeSha256,
-  registryImageKey,
-  imageObjectKey,
-  artifactObjectKey,
-  readString,
-  IMAGE_KEY_RE,
-  SHA256_HEX_RE,
 } from "./shared";
-import { imageManifestObjectKey } from "./chunks";
-import { agentScenarioImageAccess, currentAgentHost } from "./image-access";
-
-interface AgentChunkedImageIndexSource {
-  imageKey: unknown;
-  imageId: string | null;
-  imageFormat: string;
-  imageVirtualSizeBytes: number;
-  chunkManifestSha256: string | null;
-  guestBootstrapAbi: number | null;
-  kernelSha256: string | null;
-  initrdSha256: string | null;
-  bootCmdline: string | null;
-}
-
-interface AgentImageIndexEntry {
-  image_key: string;
-  image_id?: string;
-  image_sha256?: string;
-  image_format: string;
-  image_virtual_size_bytes: number;
-  chunk_manifest_sha256?: string;
-  guest_bootstrap_abi?: number;
-  boot: {
-    kernel_sha256: string;
-    initrd_sha256: string;
-    cmdline: string;
-  };
-  bytes: number;
-  manifest_download_url?: string;
-  chunk_download_base_url?: string;
-  download_url?: string;
-}
-
-const IMAGE_INDEX_CONCURRENCY = 4;
-type RegistryHeadCache = Map<string, Promise<R2Object | null>>;
+import { currentAgentHost } from "./image-access";
 
 export async function handleAgentBundleDownload(
   request: Request,
@@ -94,20 +46,7 @@ export async function handleAgentBundleDownload(
   }
 
   const db = drizzle(env.DB);
-  const activeAssignment = and(
-    currentAgentHost(verified.agent),
-    eq(imageBuilds.rev, rev),
-    eq(imageBuilds.hostId, verified.agent.hostId),
-    or(eq(imageBuilds.status, "assigned"), eq(imageBuilds.status, "building")),
-  );
-  const rows = await db
-    .select({ id: imageBuilds.id, r2Key: imageBuildBundles.r2Key })
-    .from(imageBuilds)
-    .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
-    .where(activeAssignment)
-    .limit(1);
-  const assignment = rows[0];
-  const objectKey = assignment?.r2Key;
+  const objectKey = await assignedBundleKey(db, verified.agent, rev);
   if (!objectKey) {
     return jsonResponse({ error: "bundle not found" }, 404);
   }
@@ -119,17 +58,7 @@ export async function handleAgentBundleDownload(
 
   // R2 can wait across a credential rotation or an assignment change. Check
   // the same assignment and object before exposing any source bytes.
-  const current = await db
-    .select({ id: imageBuilds.id })
-    .from(imageBuilds)
-    .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
-    .where(and(
-      activeAssignment,
-      eq(imageBuilds.id, assignment.id),
-      eq(imageBuildBundles.r2Key, objectKey),
-    ))
-    .limit(1);
-  if (!current.length) {
+  if ((await assignedBundleKey(db, verified.agent, rev)) !== objectKey) {
     await object.body.cancel();
     return jsonResponse({ error: "bundle not found" }, 404);
   }
@@ -144,6 +73,29 @@ export async function handleAgentBundleDownload(
       "x-build-bundle-rev": rev,
     },
   });
+}
+
+/**
+ * The object key of bundle `rev` while a machine build of it is assigned to
+ * or running on this builder, else null.
+ */
+async function assignedBundleKey(
+  db: DrizzleD1Database,
+  agent: VerifiedAgentHost,
+  rev: string,
+): Promise<string | null> {
+  const [build] = await db
+    .select({ r2Key: bundles.r2Key })
+    .from(machineBuilds)
+    .innerJoin(bundles, eq(bundles.rev, machineBuilds.bundleRev))
+    .where(and(
+      currentAgentHost(agent),
+      eq(machineBuilds.bundleRev, rev),
+      eq(machineBuilds.hostId, agent.hostId),
+      inArray(machineBuilds.state, ["assigned", "building"]),
+    ))
+    .limit(1);
+  return build?.r2Key ?? null;
 }
 
 const MAX_DIAGNOSTICS_CHARS = 64 * 1024;
@@ -417,473 +369,42 @@ export async function handleAgentBuildLogUpload(
     return jsonResponse({ error: "invalid build id" }, 400);
   }
 
-  const db = drizzle(env.DB);
-  const rows = await db
-    .select({ hostId: imageBuilds.hostId })
-    .from(imageBuilds)
-    .where(eq(imageBuilds.id, buildId))
-    .limit(1);
-  const build = rows[0];
-  if (!build) {
+  if (!/^[0-9a-f]{64}$/.test(buildId)) {
     return jsonResponse({ error: "build not found" }, 404);
   }
-  if (build.hostId !== verified.agent.hostId) {
-    return jsonResponse(
-      { error: "build is not assigned to this builder" },
-      409,
-    );
-  }
+  return putMachineBuildLog(request, env, buildId, verified.agent.hostId);
+}
 
+/** The builder logs two 4 MiB tails and an error line. */
+const MAX_MACHINE_BUILD_LOG_BYTES = 9 * 1024 * 1024;
+
+/** Stores the log of a machine build, keyed by its build key hex, for its assigned builder. */
+async function putMachineBuildLog(
+  request: Request,
+  env: Cloudflare.Env,
+  hex: string,
+  hostId: string,
+): Promise<Response> {
+  const buildKey = `sha256:${hex}`;
+  const assigned = await env.DB.prepare(
+    "SELECT 1 FROM machine_builds WHERE build_key = ?1 AND host_id = ?2",
+  ).bind(buildKey, hostId).first();
+  if (!assigned) return jsonResponse({ error: "build is not assigned to this builder" }, 409);
+  const length = Number(request.headers.get("content-length") ?? "NaN");
+  if (!Number.isSafeInteger(length) || length > MAX_MACHINE_BUILD_LOG_BYTES) {
+    return jsonResponse({ error: "a log of at most 9 MiB with a Content-Length is required" }, 413);
+  }
   const payload = await request.arrayBuffer();
-  const objectKey = `builds/logs/${buildId}.log`;
+  if (payload.byteLength > MAX_MACHINE_BUILD_LOG_BYTES) return jsonResponse({ error: "the log is too large" }, 413);
+  const objectKey = `builds/logs/${hex}.log`;
   await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
     httpMetadata: { contentType: "text/plain; charset=utf-8" },
-    customMetadata: {
-      build_id: buildId,
-      host_id: verified.agent.hostId,
-    },
+    customMetadata: { build_id: hex, host_id: hostId },
   });
-
-  const updated = await db
-    .update(imageBuilds)
-    .set({
-      logR2Key: objectKey,
-      updatedAt: Date.now(),
-    })
-    .where(
-      and(
-        eq(imageBuilds.id, buildId),
-        eq(imageBuilds.hostId, verified.agent.hostId),
-      ),
-    )
-    .returning({ id: imageBuilds.id });
-  if (!updated.length) {
-    await env.VM_IMAGE_REGISTRY_BUCKET.delete(objectKey);
-    return jsonResponse(
-      { error: "build assignment changed during log upload" },
-      409,
-    );
-  }
-
-  return jsonResponse({ ok: true, build_id: buildId, log_key: objectKey });
-}
-
-export async function handleAgentImageIndex(
-  request: Request,
-  env: Cloudflare.Env,
-): Promise<Response> {
-  if (request.method !== "GET") {
-    return jsonResponse({ error: "method not allowed" }, 405);
-  }
-
-  const verified = await requireVerifiedAgentRequest(request, env);
-  if (!verified.ok) return verified.response;
-
-  const db = drizzle(env.DB);
-  const sources = await loadAgentImageIndexSources(db, verified.agent);
-  const byKey = new Map<string, AgentImageIndexEntry>();
-  const headCache: RegistryHeadCache = new Map();
-  await addChunkedImageIndexEntries(byKey, env, sources, headCache);
-
-  // R2 reads can wait across access revocation or replacement of image metadata.
-  // Return only captured entries which still have an exact current source.
-  const currentSources = await loadAgentImageIndexSources(db, verified.agent);
-  const currentByIdentity = new Map(groupChunkedImageIndexSources(currentSources)
-    .map(group => [chunkedImageIndexIdentity(group[0]!), group]));
-  return jsonResponse({
-    images: [...byKey.entries()]
-      .filter(([identity, entry]) => currentByIdentity.get(identity)?.some(source =>
-        imageIndexEntryMatchesSource(entry, source)))
-      .map(([, entry]) => entry)
-      .sort((a, b) => a.image_key.localeCompare(b.image_key)),
-  });
-}
-
-async function loadAgentImageIndexSources(
-  db: DrizzleD1Database,
-  agent: VerifiedAgentHost,
-): Promise<AgentChunkedImageIndexSource[]> {
-  const rows = await db
-    .select({
-      imageKey: vmScenarioVms.imageKeyJson,
-      imageSha256: vmScenarioVms.imageSha256,
-      imageFormat: vmScenarioVms.imageFormat,
-      imageVirtualSizeBytes: vmScenarioVms.imageVirtualSizeBytes,
-      chunkManifestSha256: vmScenarioVms.chunkManifestSha256,
-      guestBootstrapAbi: vmScenarioVms.guestBootstrapAbi,
-      kernelSha256: vmScenarioVms.kernelSha256,
-      initrdSha256: vmScenarioVms.initrdSha256,
-      bootCmdline: vmScenarioVms.bootCmdline,
-    })
-    .from(vmScenarioVms)
-    .innerJoin(
-      vmScenarios,
-      eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId),
-    )
-    .where(agentScenarioImageAccess(agent));
-
-  return [
-    ...rows.map((row) => ({
-      imageKey: row.imageKey,
-      imageId: row.imageSha256,
-      imageFormat: row.imageFormat,
-      imageVirtualSizeBytes: row.imageVirtualSizeBytes,
-      chunkManifestSha256: row.chunkManifestSha256,
-      guestBootstrapAbi: row.guestBootstrapAbi,
-      kernelSha256: row.kernelSha256,
-      initrdSha256: row.initrdSha256,
-      bootCmdline: row.bootCmdline,
-    })),
-    ...(await loadDesiredCandidateVms(db, agent)).map((vm) => ({
-      imageKey: vm.image_key,
-      imageId: vm.image_id,
-      imageFormat: vm.image_format,
-      imageVirtualSizeBytes: vm.image_virtual_size_bytes,
-      chunkManifestSha256: vm.chunk_manifest_sha256,
-      guestBootstrapAbi: vm.guest_bootstrap_abi,
-      kernelSha256: vm.boot.kernel_sha256,
-      initrdSha256: vm.boot.initrd_sha256,
-      bootCmdline: vm.boot.cmdline,
-    })),
-  ];
-}
-
-async function addChunkedImageIndexEntry(
-  byKey: Map<string, AgentImageIndexEntry>,
-  env: Cloudflare.Env,
-  source: AgentChunkedImageIndexSource,
-  headCache: RegistryHeadCache,
-): Promise<void> {
-  if (!isImageKey(source.imageKey)) return;
-  const imageId = normalizeSha256(source.imageId ?? "");
-  const chunkManifestSha256 = normalizeSha256(source.chunkManifestSha256 ?? "");
-  const kernelSha256 = normalizeSha256(source.kernelSha256 ?? "");
-  const initrdSha256 = normalizeSha256(source.initrdSha256 ?? "");
-  const bootCmdline = source.bootCmdline?.trim() ?? "";
-  if (
-    !imageId ||
-    !chunkManifestSha256 ||
-    source.imageFormat !== "raw_chunks_v1" ||
-    !Number.isSafeInteger(source.imageVirtualSizeBytes) ||
-    source.imageVirtualSizeBytes <= 0 ||
-    source.guestBootstrapAbi !== 2 ||
-    !kernelSha256 ||
-    !initrdSha256 ||
-    !bootCmdline
-  ) {
-    return;
-  }
-
-  const imageKey = registryImageKey(source.imageKey);
-  const identity = `${imageKey}:${imageId}`;
-  const existing = byKey.get(identity);
-  if (
-    existing && imageIndexEntryMatchesSource(existing, source)
-  ) {
-    return;
-  }
-  const object = await registryObjectHead(
-    env,
-    headCache,
-    imageManifestObjectKey(chunkManifestSha256),
-  );
-  if (
-    !object ||
-    object.customMetadata?.manifest_sha256 !== chunkManifestSha256 ||
-    object.customMetadata?.image_id !== imageId ||
-    !(await bootArtifactsExist(env, [kernelSha256, initrdSha256], headCache))
-  ) {
-    return;
-  }
-
-  byKey.set(identity, {
-    image_key: imageKey,
-    image_id: imageId,
-    image_format: source.imageFormat,
-    image_virtual_size_bytes: source.imageVirtualSizeBytes,
-    chunk_manifest_sha256: chunkManifestSha256,
-    guest_bootstrap_abi: 2,
-    boot: {
-      kernel_sha256: kernelSha256,
-      initrd_sha256: initrdSha256,
-      cmdline: bootCmdline,
-    },
-    bytes: source.imageVirtualSizeBytes,
-    manifest_download_url: `/agent/registry/image-manifests/${chunkManifestSha256}`,
-    chunk_download_base_url: `/agent/registry/image-manifests/${chunkManifestSha256}/chunks`,
-  });
-}
-
-function imageIndexEntryMatchesSource(
-  entry: AgentImageIndexEntry,
-  source: AgentChunkedImageIndexSource,
-): boolean {
-  return entry.image_format === source.imageFormat &&
-    entry.image_virtual_size_bytes === source.imageVirtualSizeBytes &&
-    entry.chunk_manifest_sha256 === normalizeSha256(source.chunkManifestSha256 ?? "") &&
-    entry.guest_bootstrap_abi === source.guestBootstrapAbi &&
-    entry.boot.kernel_sha256 === normalizeSha256(source.kernelSha256 ?? "") &&
-    entry.boot.initrd_sha256 === normalizeSha256(source.initrdSha256 ?? "") &&
-    entry.boot.cmdline === source.bootCmdline?.trim();
-}
-
-async function addChunkedImageIndexEntries(
-  byKey: Map<string, AgentImageIndexEntry>,
-  env: Cloudflare.Env,
-  sources: AgentChunkedImageIndexSource[],
-  headCache: RegistryHeadCache,
-): Promise<void> {
-  const groups = groupChunkedImageIndexSources(sources);
-  const entriesByGroup: Array<Map<string, AgentImageIndexEntry> | undefined> =
-    Array(groups.length);
-  let nextGroup = 0;
-  await Promise.all(
-    Array.from(
-      { length: Math.min(IMAGE_INDEX_CONCURRENCY, groups.length) },
-      async () => {
-        for (;;) {
-          const groupIndex = nextGroup++;
-          const group = groups[groupIndex];
-          if (!group) return;
-          const groupEntries = new Map<string, AgentImageIndexEntry>();
-          for (const source of group) {
-            await addChunkedImageIndexEntry(
-              groupEntries,
-              env,
-              source,
-              headCache,
-            );
-          }
-          entriesByGroup[groupIndex] = groupEntries;
-        }
-      },
-    ),
-  );
-  for (const groupEntries of entriesByGroup) {
-    if (!groupEntries) continue;
-    for (const [identity, entry] of groupEntries) {
-      byKey.set(identity, entry);
-    }
-  }
-}
-
-function groupChunkedImageIndexSources(
-  sources: AgentChunkedImageIndexSource[],
-): AgentChunkedImageIndexSource[][] {
-  const groups = new Map<string, AgentChunkedImageIndexSource[]>();
-  for (const [index, source] of sources.entries()) {
-    const identity = chunkedImageIndexIdentity(source) ?? `invalid:${index}`;
-    const group = groups.get(identity);
-    if (group) group.push(source);
-    else groups.set(identity, [source]);
-  }
-  return [...groups.values()];
-}
-
-function chunkedImageIndexIdentity(
-  source: AgentChunkedImageIndexSource,
-): string | null {
-  if (!isImageKey(source.imageKey)) return null;
-  const imageId = normalizeSha256(source.imageId ?? "");
-  return imageId ? `${registryImageKey(source.imageKey)}:${imageId}` : null;
-}
-
-async function loadDesiredCandidateVms(
-  db: DrizzleD1Database,
-  agent: VerifiedAgentHost,
-): Promise<ScenarioVmManifestV5[]> {
-  // Candidate prewarming has no owner workload grant for personal hosts.
-  if (agent.scope !== "platform") return [];
-  const desiredRows = await db
-    .select({ docJson: hostDesiredState.docJson })
-    .from(hostDesiredState)
-    .where(and(eq(hostDesiredState.hostId, agent.hostId), currentAgentHost(agent)))
-    .limit(1);
-  const desiredImages = new Set(
-    (desiredRows[0]?.docJson.cached_images ?? []).flatMap((image) => {
-      if (!isImageKey(image.image_key)) return [];
-      const imageId = normalizeSha256(image.image_id);
-      return imageId ? [`${registryImageKey(image.image_key)}:${imageId}`] : [];
-    }),
-  );
-  if (desiredImages.size === 0) return [];
-
-  const candidateRows = await db
-    .select({ manifest: scenarioCatalogCandidates.manifestJson })
-    .from(scenarioCatalogCandidates)
-    .where(currentAgentHost(agent));
-  const matches = new Map<string, ScenarioVmManifestV5>();
-  for (const candidate of candidateRows) {
-    if (
-      candidate.manifest.schema_version !== 5 ||
-      !Array.isArray(candidate.manifest.vms)
-    ) {
-      continue;
-    }
-    for (const vm of candidate.manifest.vms) {
-      if (!isImageKey(vm.image_key)) continue;
-      const imageId = normalizeSha256(vm.image_id);
-      if (!imageId) continue;
-      const identity = `${registryImageKey(vm.image_key)}:${imageId}`;
-      if (desiredImages.has(identity) && !matches.has(identity)) {
-        matches.set(identity, vm);
-      }
-    }
-  }
-  return [...matches.values()];
-}
-
-export async function bootArtifactsExist(
-  env: Cloudflare.Env,
-  sha256s: string[],
-  headCache: RegistryHeadCache = new Map(),
-): Promise<boolean> {
-  const objectKeys = [...new Set(sha256s.map(artifactObjectKey))];
-  const objects = await Promise.all(
-    objectKeys.map((objectKey) =>
-      registryObjectHead(env, headCache, objectKey),
-    ),
-  );
-  return objects.every((head, index) => {
-    const objectKey = objectKeys[index];
-    const sha256 = objectKey?.slice("artifacts/".length) ?? "";
-    return bootArtifactObjectMatchesSha(head, sha256);
-  });
-}
-
-function registryObjectHead(
-  env: Cloudflare.Env,
-  headCache: RegistryHeadCache,
-  objectKey: string,
-): Promise<R2Object | null> {
-  const cached = headCache.get(objectKey);
-  if (cached) return cached;
-  const head = env.VM_IMAGE_REGISTRY_BUCKET.head(objectKey);
-  headCache.set(objectKey, head);
-  void head.then(
-    (object) => {
-      if (!object && headCache.get(objectKey) === head)
-        headCache.delete(objectKey);
-    },
-    () => {
-      if (headCache.get(objectKey) === head) headCache.delete(objectKey);
-    },
-  );
-  return head;
-}
-
-export function imageObjectMatchesSha<
-  T extends { customMetadata?: Record<string, string> },
->(object: T | null, imageKey: string, sha256: string): object is T {
-  if (!object) {
-    return false;
-  }
-  const metadataSha256 = normalizeSha256(
-    object.customMetadata?.image_sha256 ??
-      object.customMetadata?.imageSha256 ??
-      "",
-  );
-  const metadataImageKey =
-    readString(object.customMetadata?.image_key) ??
-    readString(object.customMetadata?.imageKey);
-  return metadataSha256 === sha256 && metadataImageKey === imageKey;
-}
-
-export function bootArtifactObjectMatchesSha<
-  T extends { customMetadata?: Record<string, string> },
->(object: T | null, sha256: string): object is T {
-  if (!object) {
-    return false;
-  }
-  const metadataSha256 = normalizeSha256(
-    object.customMetadata?.artifact_sha256 ??
-      object.customMetadata?.artifactSha256 ??
-      "",
-  );
-  return metadataSha256 === sha256;
-}
-
-export async function handleAgentImageDownload(
-  request: Request,
-  env: Cloudflare.Env,
-  imageKey: string,
-  sha256: string,
-): Promise<Response> {
-  if (request.method !== "GET") {
-    return jsonResponse({ error: "method not allowed" }, 405);
-  }
-
-  const verified = await requireVerifiedAgentRequest(request, env);
-  if (!verified.ok) return verified.response;
-
-  if (!IMAGE_KEY_RE.test(imageKey) || !SHA256_HEX_RE.test(sha256)) {
-    return jsonResponse({ error: "invalid image key or sha256" }, 400);
-  }
-
-  const db = drizzle(env.DB);
-  if (!(await agentCanAccessImage(db, verified.agent, imageKey, sha256))) {
-    return jsonResponse({ error: "image not found" }, 404);
-  }
-
-  const objectKey = imageObjectKey(imageKey, sha256);
-  const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(objectKey);
-  if (!imageObjectMatchesSha(object, imageKey, sha256) ||
-      !await agentCanAccessImage(db, verified.agent, imageKey, sha256)) {
-    return jsonResponse({ error: "image not found" }, 404);
-  }
-
-  return new Response(object.body, {
-    status: 200,
-    headers: {
-      "content-type": "application/octet-stream",
-      "content-length": String(object.size),
-      "cache-control": "private, max-age=31536000, immutable",
-      etag: object.httpEtag,
-      "x-image-key": imageKey,
-      "x-image-sha256": sha256,
-    },
-  });
-}
-
-export async function handleAgentArtifactDownload(
-  request: Request,
-  env: Cloudflare.Env,
-  sha256: string,
-): Promise<Response> {
-  if (request.method !== "GET") {
-    return jsonResponse({ error: "method not allowed" }, 405);
-  }
-
-  const verified = await requireVerifiedAgentRequest(request, env);
-  if (!verified.ok) return verified.response;
-
-  if (!SHA256_HEX_RE.test(sha256)) {
-    return jsonResponse({ error: "invalid artifact sha256" }, 400);
-  }
-
-  const db = drizzle(env.DB);
-  if (!(await agentCanAccessArtifact(db, verified.agent, sha256))) {
-    return jsonResponse({ error: "artifact not found" }, 404);
-  }
-
-  const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(
-    artifactObjectKey(sha256),
-  );
-  if (!bootArtifactObjectMatchesSha(object, sha256) ||
-      !await agentCanAccessArtifact(db, verified.agent, sha256)) {
-    return jsonResponse({ error: "artifact not found" }, 404);
-  }
-
-  return new Response(object.body, {
-    status: 200,
-    headers: {
-      "content-type": "application/octet-stream",
-      "content-length": String(object.size),
-      "cache-control": "private, max-age=31536000, immutable",
-      etag: object.httpEtag,
-      "x-artifact-sha256": sha256,
-    },
-  });
+  await env.DB.prepare(
+    "UPDATE machine_builds SET log_key = ?3 WHERE build_key = ?1 AND host_id = ?2",
+  ).bind(buildKey, hostId, objectKey).run();
+  return jsonResponse({ ok: true, build_id: hex, log_key: objectKey });
 }
 
 export async function requireBuilderAgentRequest(
@@ -908,71 +429,4 @@ export async function requireBuilderAgentRequest(
     };
   }
   return verified;
-}
-
-async function agentCanAccessImage(
-  db: DrizzleD1Database,
-  agent: VerifiedAgentHost,
-  requestedImageKey: string,
-  sha256: string,
-): Promise<boolean> {
-  const rows = await db
-    .select({ imageKey: vmScenarioVms.imageKeyJson })
-    .from(vmScenarioVms)
-    .innerJoin(
-      vmScenarios,
-      eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId),
-    )
-    .where(
-      and(
-        eq(vmScenarioVms.imageSha256, sha256),
-        agentScenarioImageAccess(agent),
-      ),
-    );
-  if (
-    rows.some(
-      (row) =>
-        isImageKey(row.imageKey) &&
-        registryImageKey(row.imageKey) === requestedImageKey,
-    )
-  ) {
-    return true;
-  }
-  return false;
-}
-
-async function agentCanAccessArtifact(
-  db: DrizzleD1Database,
-  agent: VerifiedAgentHost,
-  sha256: string,
-): Promise<boolean> {
-  const rows = await db
-    .select({ id: vmScenarioVms.id })
-    .from(vmScenarioVms)
-    .innerJoin(
-      vmScenarios,
-      eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId),
-    )
-    .where(
-      and(
-        or(
-          eq(vmScenarioVms.kernelSha256, sha256),
-          eq(vmScenarioVms.initrdSha256, sha256),
-        ),
-        agentScenarioImageAccess(agent),
-      ),
-    )
-    .limit(1);
-  if (rows.length > 0) return true;
-  const desiredCandidates = await loadDesiredCandidateVms(db, agent);
-  if (
-    desiredCandidates.some(
-      (vm) =>
-        normalizeSha256(vm.boot.kernel_sha256) === sha256 ||
-        normalizeSha256(vm.boot.initrd_sha256) === sha256,
-    )
-  ) {
-    return true;
-  }
-  return false;
 }

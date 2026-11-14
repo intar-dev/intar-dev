@@ -1,6 +1,7 @@
 mod config;
 mod host_keys;
 mod http;
+mod init;
 mod lab_release;
 mod probe;
 mod proto;
@@ -27,7 +28,7 @@ use std::time::Instant;
 #[command(about = "Probe service and in-VM SSH recorder for ephemeral VM validation")]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Option<CliCommand>,
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 }
@@ -48,10 +49,14 @@ impl From<ShellStartupModeArg> for recording::ShellStartupMode {
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
+enum CliCommand {
+    /// The guest supervisor of guest contract 3.
+    Init,
     RecordSsh {
         #[arg(long, value_name = "PATH")]
-        config: PathBuf,
+        config: Option<PathBuf>,
+        #[command(flatten)]
+        recording: RecordingArgs,
         #[arg(long, value_name = "COMMAND")]
         command: Option<String>,
         #[arg(long, value_enum, default_value_t = ShellStartupModeArg::Login)]
@@ -59,16 +64,96 @@ enum Command {
     },
     RecordCommand {
         #[arg(long, value_name = "PATH")]
-        config: PathBuf,
+        config: Option<PathBuf>,
+        #[command(flatten)]
+        recording: RecordingArgs,
         #[arg(long, value_name = "COMMAND")]
         command: String,
     },
+}
+
+/// The recorder's settings. Guest contract 3 passes none and takes the
+/// defaults; `--config` is the baked HCL file of the old guest.
+#[derive(Debug, clap::Args)]
+struct RecordingArgs {
+    #[arg(long, default_value = "/var/lib/kino-recordings")]
+    output_dir: PathBuf,
+    #[arg(long, default_value = "/bin/bash")]
+    real_shell: PathBuf,
+}
+
+impl RecordingArgs {
+    fn resolve(self, config: Option<&std::path::Path>) -> anyhow::Result<config::RecordingConfig> {
+        let Some(path) = config else {
+            return Ok(config::RecordingConfig {
+                output_dir: self.output_dir,
+                real_shell: self.real_shell,
+            });
+        };
+        config::load_from_file(path)
+            .with_context(|| format!("failed to load config from {}", path.display()))?
+            .recording
+            .context("recording configuration is required for the recorders")
+    }
+}
+
+/// What a login as `kino-shell` runs. The image's sshd forces this name on
+/// every session of the learner, so it must record whatever was asked for.
+#[derive(Debug, Eq, PartialEq)]
+enum ShellSession {
+    /// A recorded terminal, optionally running one command in it.
+    Terminal(Option<String>),
+    /// A recorded command without a terminal.
+    Command(String),
+}
+
+/// `original` is `SSH_ORIGINAL_COMMAND`; `args` are the arguments after the
+/// program name (a login shell is called as `-c <command>`).
+fn shell_session(original: Option<String>, args: &[String], terminal: bool) -> ShellSession {
+    let command = original
+        .filter(|command| !command.is_empty())
+        .or_else(|| match args {
+            [flag, command, ..] if flag == "-c" => Some(command.clone()),
+            _ => None,
+        });
+    match command {
+        Some(command) if !terminal => ShellSession::Command(command),
+        command => ShellSession::Terminal(command),
+    }
+}
+
+fn run_kino_shell() -> anyhow::Result<i32> {
+    use std::io::IsTerminal as _;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    // Guest contract 3 has no recorder config: the defaults are the contract.
+    let recording = RecordingArgs {
+        output_dir: PathBuf::from("/var/lib/kino-recordings"),
+        real_shell: PathBuf::from("/bin/bash"),
+    }
+    .resolve(None)?;
+    match shell_session(std::env::var("SSH_ORIGINAL_COMMAND").ok(), &args, terminal) {
+        ShellSession::Terminal(command) => recording::record_ssh(
+            &recording,
+            command.as_deref(),
+            recording::ShellStartupMode::Interactive,
+        ),
+        ShellSession::Command(command) => recording::record_command(&recording, &command),
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let kino_started_at = Instant::now();
 
+    let invoked_as = std::env::args_os().next().and_then(|argv0| {
+        PathBuf::from(argv0)
+            .file_name()
+            .map(std::ffi::OsStr::to_owned)
+    });
+    if invoked_as.as_deref() == Some(std::ffi::OsStr::new("kino-shell")) {
+        std::process::exit(run_kino_shell()?);
+    }
     if std::env::args_os()
         .next()
         .is_some_and(|argv0| run_cli::invoked_as_intar(&argv0))
@@ -79,32 +164,25 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::RecordSsh {
-            config: config_path,
+        Some(CliCommand::Init) => init::main().await,
+        Some(CliCommand::RecordSsh {
+            config,
+            recording,
             command,
             shell_startup,
         }) => {
-            let app_config = config::load_from_file(&config_path)
-                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let recording_config = app_config
-                .recording
-                .as_ref()
-                .context("recording configuration is required for 'record-ssh'")?;
+            let recording_config = recording.resolve(config.as_deref())?;
             let exit_code =
-                recording::record_ssh(recording_config, command.as_deref(), shell_startup.into())?;
+                recording::record_ssh(&recording_config, command.as_deref(), shell_startup.into())?;
             std::process::exit(exit_code);
         }
-        Some(Command::RecordCommand {
-            config: config_path,
+        Some(CliCommand::RecordCommand {
+            config,
+            recording,
             command,
         }) => {
-            let app_config = config::load_from_file(&config_path)
-                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let recording_config = app_config
-                .recording
-                .as_ref()
-                .context("recording configuration is required for 'record-command'")?;
-            let exit_code = recording::record_command(recording_config, &command)?;
+            let recording_config = recording.resolve(config.as_deref())?;
+            let exit_code = recording::record_command(&recording_config, &command)?;
             std::process::exit(exit_code);
         }
         None => {
@@ -276,6 +354,44 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::run_probe_service;
+    use super::{ShellSession, shell_session};
+
+    #[test]
+    fn kino_shell_records_every_kind_of_session() {
+        let own = |text: &str| Some(text.to_owned());
+        let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        // A plain login.
+        assert_eq!(shell_session(None, &[], true), ShellSession::Terminal(None));
+        assert_eq!(
+            shell_session(own(""), &[], true),
+            ShellSession::Terminal(None)
+        );
+        // `ssh host command`, with and without a terminal.
+        assert_eq!(
+            shell_session(own("ls"), &[], true),
+            ShellSession::Terminal(own("ls"))
+        );
+        assert_eq!(
+            shell_session(own("ls"), &[], false),
+            ShellSession::Command("ls".to_owned())
+        );
+        // Called as a login shell.
+        assert_eq!(
+            shell_session(None, &args(&["-c", "id"]), false),
+            ShellSession::Command("id".to_owned())
+        );
+        // The forced command wins over what the shell was called with.
+        assert_eq!(
+            shell_session(own("ls"), &args(&["-c", "id"]), false),
+            ShellSession::Command("ls".to_owned())
+        );
+        // Without a terminal and without a command there is still a session.
+        assert_eq!(
+            shell_session(None, &[], false),
+            ShellSession::Terminal(None)
+        );
+    }
+
     use crate::config::{AppConfig, ServerBind};
     use crate::ready_push::{ready_push_start_count, reset_ready_push_start_count};
     use std::net::TcpListener;

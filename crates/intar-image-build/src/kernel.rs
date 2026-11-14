@@ -39,8 +39,11 @@ pub const KERNEL_UPSTREAM_VERSION: &str = "6.12.96";
 /// so the release string stays inside the shape guests expect from uname -r.
 pub const KERNEL_LOCALVERSION: &str = "-intar-cutover";
 
-/// Upstream directory that holds the source files.
-pub const KERNEL_SOURCE_BASE_URL: &str = "https://deb.debian.org/debian/pool/main/l/linux";
+/// Directory that holds the source files: the pool of the same dated
+/// snapshot as [`KERNEL_APT_SNAPSHOT`]. Debian's moving pool drops a version
+/// once a newer one lands, which broke every cold base build (#288).
+pub const KERNEL_SOURCE_BASE_URL: &str =
+    "https://snapshot.debian.org/archive/debian/20260912T000000Z/pool/main/l/linux";
 
 /// Dated Debian snapshot that the kernel stage installs its toolchain from.
 /// A floating compiler would break the reproducibility claim, so the stage
@@ -80,6 +83,18 @@ pub const KERNEL_INITRAMFS_INIT_SCRIPT: &str = include_str!("../kernel/intar-ini
 
 /// Path of the kernel provenance record inside the built image.
 pub const KERNEL_PROVENANCE_PATH: &str = "/usr/lib/intar/kernel/kernel-build.json";
+
+/// The kvmclock resume change: a guest woken from a suspended image starts
+/// on a new VM's kvmclock, so `sched_clock()` is re-based on resume.
+pub const KERNEL_PATCH: &str = include_str!("../kernel/kvmclock-resume.patch");
+
+/// The wake stub and its linker script. The kernel stage assembles one
+/// template per number of BAR writes into [`WAKE_STUB_TEMPLATES_PATH`].
+pub const WAKE_STUB_SOURCE: &str = include_str!("../kernel/wake-stub.S");
+pub const WAKE_STUB_LINKER_SCRIPT: &str = include_str!("../kernel/wake-stub.ld");
+
+/// A tar of `<count>.elf` stub templates inside the built image.
+pub const WAKE_STUB_TEMPLATES_PATH: &str = "/usr/lib/intar/kernel/wake-stubs.tar";
 
 /// One pinned source file of the kernel build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +211,16 @@ pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     "CONFIG_VETH",
     "CONFIG_TUN",
     "CONFIG_PACKET",
+    // a wake image suspends to RAM, loads its `\_S3_` table from the initrd,
+    // takes hot-added vCPUs and gives memory back through the balloon.
+    "CONFIG_SUSPEND",
+    "CONFIG_PM_SLEEP",
+    "CONFIG_ACPI_SLEEP",
+    "CONFIG_ACPI_TABLE_UPGRADE",
+    "CONFIG_HOTPLUG_CPU",
+    "CONFIG_ACPI_HOTPLUG_CPU",
+    "CONFIG_VIRTIO_BALLOON",
+    "CONFIG_HW_RANDOM_VIRTIO",
 ];
 
 /// The build script template, with the @TOKEN@ fields that
@@ -319,7 +344,7 @@ pub fn render_kernel_build_script(config: &QemuBuildConfig) -> String {
 #[must_use]
 pub fn kernel_profile_digest() -> String {
     let mut identity = String::new();
-    identity.push_str("intar-kernel-profile-v2\n");
+    identity.push_str("intar-kernel-profile-v3\n");
     identity.push_str(&format!("source_version={KERNEL_SOURCE_VERSION}\n"));
     identity.push_str(&format!("upstream_version={KERNEL_UPSTREAM_VERSION}\n"));
     identity.push_str(&format!("localversion={KERNEL_LOCALVERSION}\n"));
@@ -341,7 +366,12 @@ pub fn kernel_profile_digest() -> String {
     identity.push_str(KERNEL_CONFIG_FRAGMENT);
     identity.push_str("--init-script--\n");
     identity.push_str(KERNEL_INITRAMFS_INIT_SCRIPT);
-    crate::content_hash::sha256_bytes_hex(identity.as_bytes())
+    identity.push_str("--kernel-patch--\n");
+    identity.push_str(KERNEL_PATCH);
+    identity.push_str("--wake-stub--\n");
+    identity.push_str(WAKE_STUB_SOURCE);
+    identity.push_str(WAKE_STUB_LINKER_SCRIPT);
+    crate::sha256::sha256_bytes_hex(identity.as_bytes())
 }
 
 /// Return required symbols that are not built in (value y) in a kernel .config.

@@ -1,0 +1,1 @@
+ALTER TABLE `machine_builds` ADD `target_json` text;

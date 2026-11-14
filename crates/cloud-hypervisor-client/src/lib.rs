@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod machine;
+
 use std::fmt;
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -235,6 +237,8 @@ pub struct VmConfig {
     pub console: Option<ConsoleConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vsock: Option<VsockConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon: Option<BalloonConfig>,
     /// Install Cloud Hypervisor's VM-specific Landlock rules when the VM is
     /// created. The launcher separately enables Landlock for the VMM's
     /// infrastructure threads.
@@ -258,11 +262,56 @@ pub struct PayloadConfig {
 pub struct CpusConfig {
     pub boot_vcpus: u32,
     pub max_vcpus: u32,
+    /// The CPU the guest is shown instead of the host's. Write-only:
+    /// `vm.info` reports other shapes here (`"Host"`), which nothing reads.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<CpuProfile>,
+    /// The guest's physical address width; the VMM's default when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_phys_bits: Option<u8>,
+}
+
+/// A CPU profile; cloud-hypervisor takes it as `{"File": "<path>"}`.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CpuProfile {
+    File(String),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MemoryConfig {
+    /// 0 when the memory is all in `zones`.
     pub size: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zones: Option<Vec<MemoryZoneConfig>>,
+}
+
+/// A memory zone. With `file` and `shared: false` the guest's memory starts
+/// as that file's content and its writes stay private to the VM.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemoryZoneConfig {
+    pub id: String,
+    pub size: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub shared: bool,
+}
+
+/// A balloon of `size` bytes: memory taken from the guest.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BalloonConfig {
+    pub size: i64,
+}
+
+/// `vm.resize`: fields left out stay as they are.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct VmResize {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_vcpus: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_ram: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_balloon: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -285,7 +334,7 @@ pub enum DiskImageType {
     Unknown,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct NetConfig {
     pub tap: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,6 +343,14 @@ pub struct NetConfig {
     pub ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<String>,
+    /// Offloads the guest negotiated at a wake image's build; its wake
+    /// must offer the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload_tso: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload_ufo: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload_csum: Option<bool>,
 }
 
 /// Cloud Hypervisor serial output config.
@@ -451,6 +508,25 @@ impl Client {
         let url = Self::api_url("vm.add-disk");
 
         let resp = self.http.put(url).json(cfg).send().await?;
+        let status = resp.status();
+
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let body = body.trim().to_string();
+            return Err(Error::HttpStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// PUT /api/v1/vm.resize
+    pub async fn vm_resize(&self, resize: &VmResize) -> Result<(), Error> {
+        let url = Self::api_url("vm.resize");
+
+        let resp = self.http.put(url).json(resize).send().await?;
         let status = resp.status();
 
         if !status.is_success() {
@@ -645,6 +721,77 @@ mod tests {
             )
             .expect("write add-disk denial response");
         })
+    }
+
+    #[test]
+    fn vm_config_serializes_a_wake() {
+        let vm = VmConfig {
+            cpus: Some(CpusConfig {
+                boot_vcpus: 2,
+                max_vcpus: 4,
+                profile: Some(CpuProfile::File("/profile.json".to_string())),
+                max_phys_bits: None,
+            }),
+            memory: Some(MemoryConfig {
+                size: 0,
+                zones: Some(vec![MemoryZoneConfig {
+                    id: "mem0".to_string(),
+                    size: 4 << 30,
+                    file: Some("/ram".to_string()),
+                    shared: false,
+                }]),
+            }),
+            balloon: Some(BalloonConfig { size: 1 << 30 }),
+            ..VmConfig::default()
+        };
+        let value = serde_json::to_value(vm).expect("serialize");
+        assert_eq!(
+            value["cpus"]["profile"],
+            serde_json::json!({"File": "/profile.json"})
+        );
+        assert_eq!(
+            value["memory"],
+            serde_json::json!({"size": 0, "zones": [
+                {"id": "mem0", "size": 4_294_967_296_i64, "file": "/ram", "shared": false}
+            ]})
+        );
+        assert_eq!(value["balloon"], serde_json::json!({"size": 1_073_741_824}));
+        // A cold boot's config is unchanged: none of the new keys appear.
+        let cold = serde_json::to_value(VmConfig {
+            cpus: Some(CpusConfig {
+                boot_vcpus: 2,
+                max_vcpus: 2,
+                profile: None,
+                max_phys_bits: None,
+            }),
+            memory: Some(MemoryConfig {
+                size: 1,
+                zones: None,
+            }),
+            ..VmConfig::default()
+        })
+        .expect("serialize");
+        assert_eq!(
+            cold["cpus"],
+            serde_json::json!({"boot_vcpus": 2, "max_vcpus": 2})
+        );
+        assert_eq!(cold["memory"], serde_json::json!({"size": 1}));
+        assert!(cold.get("balloon").is_none());
+        // What the VMM reports for a cold boot must still parse.
+        let info: CpusConfig = serde_json::from_value(
+            serde_json::json!({"boot_vcpus": 1, "max_vcpus": 1, "profile": "Host"}),
+        )
+        .expect("vm.info cpus");
+        assert_eq!(info.profile, None);
+        let resize = VmResize {
+            desired_vcpus: Some(4),
+            desired_balloon: Some(0),
+            ..VmResize::default()
+        };
+        assert_eq!(
+            serde_json::to_value(resize).expect("serialize"),
+            serde_json::json!({"desired_vcpus": 4, "desired_balloon": 0})
+        );
     }
 
     #[test]

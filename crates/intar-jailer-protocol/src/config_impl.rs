@@ -22,7 +22,9 @@ impl JailerdConfig {
         if self.agent_uid == 0 || self.agent_gid == 0 {
             return Err(ValidationError::RootAgentIdentity);
         }
-        if self.cloud_hypervisor_sha256.as_str() != CLOUD_HYPERVISOR_SHA256 {
+        if self.cloud_hypervisor_binary.file_name()
+            != Some(std::ffi::OsStr::new(CLOUD_HYPERVISOR_BINARY_NAME))
+        {
             return Err(ValidationError::UnpinnedRuntime);
         }
         if self.vmm_file_size_limit_bytes == Some(0) {
@@ -41,7 +43,6 @@ impl JailerdConfig {
         if self.template_budget_bytes == 0
             || self.minimum_free_space_bytes == 0
             || self.store_gc_grace_seconds == 0
-            || self.legacy_template_retention_seconds < 7 * 24 * 60 * 60
         {
             return Err(ValidationError::InvalidStoreGcPolicy);
         }

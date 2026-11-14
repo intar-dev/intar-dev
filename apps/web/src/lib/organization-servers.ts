@@ -8,10 +8,9 @@ import { HOST_DEGRADED_AFTER_MS } from "@/lib/host-health";
 import { cleanupRemovedHost } from "@/lib/host-workload-retirement";
 import { requireOrganizationRole, resolveOrganizationId } from "@/lib/organizations";
 import { serializeManagedServer } from "@/lib/personal-servers";
-import { personalHostReportReady } from "@/lib/personal-host-readiness";
+import { hostReportV3Ready } from "@/lib/personal-host-readiness";
 import { currentPersonalOwnerSql } from "@/lib/personal-host-retirement";
 import { loadActiveRuntimeResourceSnapshot } from "@/lib/runtime-capacity";
-import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
 
 // Binding 1 is the actor; binding 2 is the organization.
 const currentOrganizationAdminSql = `${currentPersonalOwnerSql} AND EXISTS (
@@ -80,7 +79,7 @@ export async function updateOrganizationServer(d1: D1Database, context: UserCont
       AND ${currentOrganizationAdminSql} ${snapshotGuard} RETURNING id`)
     .bind(...args, rename ? (input.name as string).trim() : input.paused ? 0 : 1, Date.now(),
       ...(snapshot ? [snapshot.sessionId, snapshot.generation, JSON.stringify(snapshot.report), snapshot.reportedAt] : []))];
-  if (snapshot && personalHostReportReady(snapshot.report, learnerRunCliV1EnforcementEnabled(env))) {
+  if (snapshot && hostReportV3Ready(snapshot.report)) {
     statements.push(d1.prepare(`UPDATE organization SET metal_placement = 'organization'
       WHERE id = ?2 AND metal_placement = 'platform' AND ${currentOrganizationAdminSql}
         AND EXISTS (SELECT 1 FROM agent_hosts host JOIN host_actual_state actual ON actual.host_id = host.id

@@ -2005,7 +2005,6 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
- "zstd",
 ]
 
 [[package]]
@@ -2028,6 +2027,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "toml",
@@ -2052,8 +2052,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "intar-contracts",
+ "intar-image-scenario",
  "schemars",
+ "serde",
  "serde_json",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -2062,22 +2065,22 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "cloud-hypervisor-client",
  "fatfs",
  "flate2",
  "fs2",
- "hcl-rs",
  "intar-contracts",
- "intar-image-scenario",
+ "intar-kino-proto",
+ "intar-snapdelta",
+ "reflink-copy",
  "ring",
  "russh",
  "rustix",
  "serde",
- "serde-saphyr 2.0.0",
  "serde_json",
  "sha2 0.11.1",
  "tar",
  "tempfile",
- "thiserror",
  "tokio",
  "zstd",
 ]
@@ -2088,30 +2091,26 @@ version = "0.10.3"
 dependencies = [
  "anyhow",
  "clap",
- "hcl-rs",
+ "flate2",
  "intar-contracts",
- "intar-image-build",
  "intar-image-scenario",
- "intar-image-upload",
  "reqwest",
- "serde",
  "serde_json",
  "tempfile",
- "tokio",
 ]
 
 [[package]]
 name = "intar-image-scenario"
 version = "0.1.0"
 dependencies = [
- "hcl-edit",
+ "flate2",
  "hcl-rs",
- "jsonpath-rust",
- "regex",
+ "intar-contracts",
+ "pulldown-cmark",
  "serde",
+ "serde-saphyr 2.0.0",
  "serde_json",
- "sha2 0.11.1",
- "thiserror",
+ "tempfile",
 ]
 
 [[package]]
@@ -2134,6 +2133,7 @@ dependencies = [
  "anyhow",
  "clap",
  "intar-jailer-protocol",
+ "intar-snapdelta",
  "landlock",
  "nix",
  "rustix",
@@ -2189,9 +2189,11 @@ dependencies = [
 name = "intar-kino-proto"
 version = "0.1.0"
 dependencies = [
+ "intar-contracts",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "thiserror",
 ]
 
 [[package]]
@@ -2206,6 +2208,15 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "intar-snapdelta"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror",
+ "zstd",
 ]
 
 [[package]]
@@ -2434,6 +2445,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "signal-hook 0.4.5",
  "tempfile",
  "thiserror",
@@ -3515,6 +3527,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f0cff49b5194f464ce14bfaef7d6dba180889934e9bfa37ca5f2528ea515c0b"
 dependencies = [
  "rustix",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]

@@ -13,16 +13,21 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use futures_util::{Sink, SinkExt, StreamExt, future::join_all};
 use intar_contracts::bridge::{
-    BRIDGE_PROTOCOL_VERSION, BridgeMessageV8, CachedGuestToolsStateV1, CachedImageStateV1,
-    ClientHelloV8, DesiredStateV8, DesiredVmPhase, DesiredVmV2, HOST_DESIRED_STATE_SCHEMA_VERSION,
-    HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV2, HostCapacityV2, HostDesiredStateV2,
-    HostRoleV1, HostStateReportV2, ImageCachePhase, StateReportV8, SyncRequestReason,
-    SyncRequestV8, VM_REPORT_SCHEMA_VERSION, VmActualStateV2, VmArchivePhase, VmArchiveStateV1,
-    VmGuestToolsStateV1, VmNetworkStateV1, VmPhase, VmProbeSnapshotV1, VmProbeStatus, VmReportV2,
-    VmReportV8, VmResourceStateV3, VmResourcesV3, VmRuntimeConstraintsV2, VmSandboxStateV1,
-    VmTerminalStateKindV1, VmTerminalStateV1, VmTerminalTargetV1,
+    DesiredVmPhase, HostCapacityV2, HostRoleV1, SyncRequestReason, VmArchivePhase,
+    VmArchiveStateV1, VmNetworkStateV1, VmResourceStateV3, VmRuntimeConstraintsV2,
+    VmSandboxStateV1, VmTerminalStateKindV1, VmTerminalStateV1, VmTerminalTargetV1,
 };
-use intar_contracts::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
+use intar_contracts::bridge_v9::{
+    BRIDGE_PROTOCOL_VERSION_9 as BRIDGE_PROTOCOL_VERSION, BridgeMessageV9, CachedImageStateV2,
+    ClientHelloV9, DesiredStateV9, DesiredVmV3,
+    HOST_DESIRED_STATE_SCHEMA_VERSION_7 as HOST_DESIRED_STATE_SCHEMA_VERSION,
+    HOST_STATE_REPORT_SCHEMA_VERSION_8 as HOST_STATE_REPORT_SCHEMA_VERSION, HostDesiredStateV3,
+    HostHardwareV1, HostStateReportV3, StateReportV9, SyncRequestV9,
+    VM_REPORT_SCHEMA_VERSION_7 as VM_REPORT_SCHEMA_VERSION, VmLabV1, VmPhaseV2, VmReportV3,
+    VmReportV9, VmStartPath, VmStartV1, VmStateV3,
+};
+use intar_contracts::catalog::Mib;
+use intar_contracts::guest::GUEST_CONTRACT;
 use intar_jailer_protocol::{JailerCapabilities, SandboxHealth, VmInspection};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
@@ -34,13 +39,13 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, warn};
 
-use crate::config::{BridgeConfig, normalize_sha256};
-use crate::db::{Db, DesiredStateRow, VmProbeStateRow};
+use crate::config::BridgeConfig;
+use crate::db::{Db, DesiredStateRow, VmLabRow};
 use crate::host_profile;
-use crate::kino_probe::{ProbeUpdateEnvelope, ProbeView};
+use crate::image_cache::RequiredPins;
 use crate::vm::{
     CreateScenarioVmRequest, CreateScenarioVmRuntime, CreateScenarioVmRuntimeKino,
-    CreateScenarioVmRuntimeNetwork, CreateVmResources, VmLifecycleState, VmManager,
+    CreateScenarioVmRuntimeNetwork, CreateVmResources, GuestUpdate, VmLifecycleState, VmManager,
     VmStatusResponse, VmTerminalState, VmTerminalStateKind,
 };
 
@@ -57,38 +62,43 @@ const INVENTORY_DELIVERY_TARGET_MS: u64 = 250;
 const URGENT_OUTBOUND_CAPACITY: usize = 8;
 const INVENTORY_OUTBOUND_CAPACITY: usize = 1;
 const NORMAL_OUTBOUND_CAPACITY: usize = 64;
-const DEFAULT_KINO_VSOCK_PORT: u32 = 18_080;
+/// The bridge protocol this agent speaks, sent on bootstrap and on the
+/// websocket upgrade so the Worker can refuse an old agent with 426/4426.
+const BRIDGE_PROTOCOL_HEADER: &str = "Intar-Bridge-Protocol";
+/// A Worker that wants another protocol is not going to change its mind in
+/// seconds: wait long, without hot-looping, for an operator to roll out.
+const UPGRADE_RETRY_MS: u64 = 10 * 60 * 1_000;
+/// The websocket close code for "upgrade required".
+const CLOSE_UPGRADE_REQUIRED: u16 = 4426;
 
 #[derive(Clone)]
 struct BridgeReportCache {
     host_profile: Arc<RwLock<host_profile::HostProfile>>,
     jailer_capabilities: Arc<RwLock<Option<JailerCapabilities>>>,
-    host_capabilities: Arc<RwLock<HostCapabilitiesV2>>,
-    cached_images: Arc<RwLock<Vec<CachedImageStateV1>>>,
-    cached_guest_tools: Arc<RwLock<Vec<CachedGuestToolsStateV1>>>,
+    hardware: Arc<RwLock<HostHardwareV1>>,
+    cached_images: Arc<RwLock<Vec<CachedImageStateV2>>>,
 }
 
 impl BridgeReportCache {
     fn new(
         host_profile: host_profile::HostProfile,
         jailer_capabilities: Option<JailerCapabilities>,
-        host_capabilities: HostCapabilitiesV2,
+        hardware: HostHardwareV1,
     ) -> Self {
         Self {
             host_profile: Arc::new(RwLock::new(host_profile)),
             jailer_capabilities: Arc::new(RwLock::new(jailer_capabilities)),
-            host_capabilities: Arc::new(RwLock::new(host_capabilities)),
+            hardware: Arc::new(RwLock::new(hardware)),
             cached_images: Arc::new(RwLock::new(Vec::new())),
-            cached_guest_tools: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
 
 #[derive(Clone)]
 struct BridgeOutbound {
-    urgent: mpsc::Sender<BridgeMessageV8>,
-    inventory: mpsc::Sender<BridgeMessageV8>,
-    normal: mpsc::Sender<BridgeMessageV8>,
+    urgent: mpsc::Sender<BridgeMessageV9>,
+    inventory: mpsc::Sender<BridgeMessageV9>,
+    normal: mpsc::Sender<BridgeMessageV9>,
 }
 
 #[derive(Clone)]
@@ -154,11 +164,58 @@ pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: Path
                 reconnect = true;
             }
             Err(error) => {
-                warn!(error = %error, retry_ms, "bridge connection loop failed");
-                sleep(Duration::from_millis(retry_ms)).await;
-                retry_ms = (retry_ms.saturating_mul(2)).min(RETRY_MAX_MS);
+                let upgrade_required = error.downcast_ref::<UpgradeRequired>().is_some();
+                let (wait_ms, next_ms) = retry_after_failure(retry_ms, upgrade_required);
+                if upgrade_required {
+                    warn!(
+                        error = %error,
+                        retry_ms = wait_ms,
+                        protocol = BRIDGE_PROTOCOL_VERSION,
+                        "the Worker requires another bridge protocol; waiting for an agent rollout"
+                    );
+                } else {
+                    warn!(error = %error, retry_ms = wait_ms, "bridge connection loop failed");
+                }
+                sleep(Duration::from_millis(wait_ms)).await;
+                retry_ms = next_ms;
                 reconnect = true;
             }
+        }
+    }
+}
+
+/// The Worker refused this agent's bridge protocol (HTTP 426 or close 4426).
+#[derive(Debug, thiserror::Error)]
+#[error("the Worker refused bridge protocol {BRIDGE_PROTOCOL_VERSION}: upgrade required")]
+pub(crate) struct UpgradeRequired;
+
+/// How long to wait after a failed connection, and the backoff for the next
+/// one. An upgrade-required refusal waits long and keeps the backoff at its
+/// ceiling, so a fleet of old agents never hot-loops against the Worker.
+fn retry_after_failure(retry_ms: u64, upgrade_required: bool) -> (u64, u64) {
+    if upgrade_required {
+        (UPGRADE_RETRY_MS, RETRY_MAX_MS)
+    } else {
+        (retry_ms, retry_ms.saturating_mul(2).min(RETRY_MAX_MS))
+    }
+}
+
+/// Authenticate before local recovery. A Worker that refuses this agent's
+/// protocol is waited out in place: exiting would only have systemd restart
+/// the agent into the same refusal.
+pub(crate) async fn bootstrap_before_recovery(cfg: &BridgeConfig, http: &HttpClient) -> Result<()> {
+    loop {
+        match bootstrap_agent_access(cfg, http).await {
+            Ok(_) => return Ok(()),
+            Err(error) if error.downcast_ref::<UpgradeRequired>().is_some() => {
+                warn!(
+                    retry_ms = UPGRADE_RETRY_MS,
+                    protocol = BRIDGE_PROTOCOL_VERSION,
+                    "the Worker requires another bridge protocol; waiting before local recovery"
+                );
+                sleep(Duration::from_millis(UPGRADE_RETRY_MS)).await;
+            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -169,7 +226,7 @@ async fn connect_once(
     vm: &VmManager,
     db: &Db,
     disk_probe_path: &Path,
-    current_desired_state: &mut Option<HostDesiredStateV2>,
+    current_desired_state: &mut Option<HostDesiredStateV3>,
     reconnect: bool,
 ) -> Result<()> {
     let bootstrap = bootstrap_agent_access(cfg, http).await?;
@@ -187,24 +244,36 @@ async fn connect_once(
         HeaderValue::from_str(&format!("Bearer {}", bootstrap.access_token))
             .context("failed to build websocket auth header")?,
     );
+    request.headers_mut().insert(
+        BRIDGE_PROTOCOL_HEADER,
+        HeaderValue::from(BRIDGE_PROTOCOL_VERSION),
+    );
 
-    let (ws_stream, _) = connect_async(request)
-        .await
-        .context("failed to connect bridge websocket")?;
+    let (ws_stream, _) = match connect_async(request).await {
+        Ok(connected) => connected,
+        Err(tokio_tungstenite::tungstenite::Error::Http(response))
+            if response.status() == reqwest::StatusCode::UPGRADE_REQUIRED.as_u16() =>
+        {
+            return Err(UpgradeRequired.into());
+        }
+        Err(error) => return Err(error).context("failed to connect bridge websocket"),
+    };
     info!(host_id = %cfg.host_id, "bridge websocket connected");
 
     let (mut write, mut read) = ws_stream.split();
     let hello_jailer = vm.jailer_capabilities().await.ok();
-    let hello_capabilities = collect_host_capabilities(hello_jailer.as_ref());
+    let hello_hardware = collect_host_hardware(hello_jailer.as_ref());
     send_bridge_message(
         &mut write,
-        &BridgeMessageV8::ClientHello(ClientHelloV8 {
+        &BridgeMessageV9::ClientHello(ClientHelloV9 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: cfg.host_id.clone(),
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             role: HostRoleV1::Agent,
             last_applied_desired_version: current_desired_state.as_ref().map(|state| state.version),
-            capabilities: hello_capabilities.clone(),
+            guest_contract: GUEST_CONTRACT,
+            hardware: hello_hardware.clone(),
+            builder: None,
         }),
     )
     .await?;
@@ -218,7 +287,7 @@ async fn connect_once(
             if let Some(message) = parse_bridge_message(message)? {
                 validate_bridge_message(&message, &cfg.host_id)?;
                 match message {
-                    BridgeMessageV8::ServerHello(server_hello) => break Ok(server_hello),
+                    BridgeMessageV9::ServerHello(server_hello) => break Ok(server_hello),
                     other => {
                         anyhow::bail!("expected server_hello, got {}", bridge_message_type(&other))
                     }
@@ -236,7 +305,7 @@ async fn connect_once(
     info!(
         host_id = %server_hello.host_id,
         desired_version = server_hello.desired_version,
-        "bridge v8 handshake complete"
+        "bridge v9 handshake complete"
     );
 
     send_sync_request(
@@ -253,7 +322,7 @@ async fn connect_once(
     // the initial full snapshot remains pending for the independent fast path.
     // Terminal transitions no longer advance inventory until their targeted
     // report is queued, so this subscription must also precede the snapshot.
-    let mut probe_updates = vm.subscribe_probe_updates();
+    let mut lab_updates = vm.subscribe_lab_updates();
     let mut terminal_updates = vm.subscribe_terminal_updates();
     let inventory_updates = vm.subscribe_inventory_updates();
     let mut relay_updates = vm.subscribe_inventory_updates();
@@ -261,6 +330,9 @@ async fn connect_once(
     let mut relay_status = relay.subscribe();
     vm.set_relay_status(relay_status.clone());
     vm.set_control_connected(true);
+    if reconnect {
+        crate::image_cache::wake_cache_refresh_if_unready(current_desired_state.as_ref());
+    }
     let mut relay_credentials = server_hello.relay;
     // Wait for a current desired state on this authenticated connection before
     // granting relay access to any records recovered from disk.
@@ -269,7 +341,7 @@ async fn connect_once(
     let report_cache = BridgeReportCache::new(
         host_profile::collect(disk_probe_path),
         hello_jailer.clone(),
-        hello_capabilities,
+        hello_hardware,
     );
     let report_sources = BridgeReportSources {
         cfg: cfg.clone(),
@@ -326,7 +398,7 @@ async fn connect_once(
                     let inbound = inbound.context("failed reading bridge message")?;
                     if let Some(message) = parse_bridge_message(inbound)? {
                         validate_bridge_message(&message, &cfg.host_id)?;
-                        if let BridgeMessageV8::DesiredState(desired) = &message {
+                        if let BridgeMessageV9::DesiredState(desired) = &message {
                             validate_desired_state(cfg, &desired.desired_state)?;
                             validate_relay_identity(cfg, &server_hello.session_id, desired.relay.as_ref())?;
                             if !desired_state_is_stale(current_desired_state.as_ref(), &desired.desired_state) {
@@ -370,10 +442,10 @@ async fn connect_once(
                     vm.cache_run_cli_access_token(&access.access_token).await;
                     crate::image_cache::cache_registry_access_token(&access.access_token).await;
                 }
-                update = probe_updates.recv() => {
+                update = lab_updates.recv() => {
                     match update {
                         Ok(update) => {
-                            if let Some(report) = build_vm_report_from_probe_update(
+                            if let Some(report) = build_vm_report_from_lab_update(
                                 &cfg.host_id,
                                 vm,
                                 current_desired_state.as_ref(),
@@ -384,7 +456,7 @@ async fn connect_once(
                             }
                         }
                         Err(error) => {
-                            debug!(error = %error, "probe update channel lagged");
+                            debug!(error = %error, "lab update channel lagged");
                         }
                     }
                 }
@@ -402,7 +474,7 @@ async fn connect_once(
                                     );
                                     continue;
                                 }
-                                let probes = load_probe_snapshots_for_vm(
+                                let lab = load_lab_for_vm(
                                     db,
                                     &update.run_id,
                                     &update.vm_name,
@@ -417,7 +489,7 @@ async fn connect_once(
                                     vm.ssh_advertised_host().as_deref(),
                                     current_desired_state.as_ref(),
                                     status,
-                                    probes,
+                                    lab,
                                     None,
                                     Some(&update),
                                 );
@@ -469,17 +541,17 @@ async fn connect_once(
 }
 
 async fn handle_server_message(
-    outbound: &mpsc::Sender<BridgeMessageV8>,
+    outbound: &mpsc::Sender<BridgeMessageV9>,
     sources: &BridgeReportSources,
-    current_desired_state: &mut Option<HostDesiredStateV2>,
-    desired_state_tx: &watch::Sender<Option<HostDesiredStateV2>>,
-    message: BridgeMessageV8,
+    current_desired_state: &mut Option<HostDesiredStateV3>,
+    desired_state_tx: &watch::Sender<Option<HostDesiredStateV3>>,
+    message: BridgeMessageV9,
 ) -> Result<()> {
     let cfg = &sources.cfg;
     let vm = &sources.vm;
     let db = &sources.db;
     match message {
-        BridgeMessageV8::DesiredState(message) => {
+        BridgeMessageV9::DesiredState(message) => {
             validate_desired_state(cfg, &message.desired_state)?;
             let desired_state = message.desired_state.clone();
             if desired_state_is_stale(current_desired_state.as_ref(), &desired_state) {
@@ -511,16 +583,16 @@ async fn handle_server_message(
             }
             send_state_report(outbound, sources, current_desired_state.as_ref()).await?;
         }
-        BridgeMessageV8::SyncRequest(_) => {
+        BridgeMessageV9::SyncRequest(_) => {
             send_state_report(outbound, sources, current_desired_state.as_ref()).await?;
         }
-        BridgeMessageV8::ServerHello(_) => {
+        BridgeMessageV9::ServerHello(_) => {
             anyhow::bail!("received duplicate server_hello after handshake");
         }
-        BridgeMessageV8::ClientHello(_)
-        | BridgeMessageV8::StateReport(_)
-        | BridgeMessageV8::VmReport(_)
-        | BridgeMessageV8::BuildReport(_) => {
+        BridgeMessageV9::ClientHello(_)
+        | BridgeMessageV9::StateReport(_)
+        | BridgeMessageV9::VmReport(_)
+        | BridgeMessageV9::BuildReport(_) => {
             anyhow::bail!("server sent agent-originated bridge message");
         }
     }
@@ -528,78 +600,25 @@ async fn handle_server_message(
 }
 
 fn desired_state_is_stale(
-    current: Option<&HostDesiredStateV2>,
-    incoming: &HostDesiredStateV2,
+    current: Option<&HostDesiredStateV3>,
+    incoming: &HostDesiredStateV3,
 ) -> bool {
     current.is_some_and(|current| incoming.version < current.version)
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
-struct RequiredCachePins {
-    images: BTreeSet<(String, String, String, String)>,
-    guest_tools: BTreeSet<(String, u64, String, u16)>,
-}
-
-fn required_cache_pins(desired: &HostDesiredStateV2) -> RequiredCachePins {
-    let mut pins = RequiredCachePins::default();
-    for image in &desired.cached_images {
-        pins.images
-            .insert(image_cache_pin(&image.image_key, &image.image_id));
-    }
-    for tools in &desired.cached_guest_tools {
-        pins.guest_tools.insert(guest_tools_cache_pin(tools));
-    }
-    for vm in desired
-        .vms
-        .iter()
-        .filter(|vm| vm.desired_phase == DesiredVmPhase::Running)
-    {
-        pins.images
-            .insert(image_cache_pin(&vm.image_key, &vm.image_id));
-        pins.guest_tools
-            .insert(guest_tools_cache_pin(&vm.guest_tools));
-    }
-    pins
-}
-
-fn image_cache_pin(
-    image_key: &intar_contracts::catalog::ImageKey,
-    image_id: &str,
-) -> (String, String, String, String) {
-    (
-        image_key.scenario.clone(),
-        image_key.vm.clone(),
-        image_architecture_slug(&image_key.arch).to_string(),
-        normalized_cache_pin_digest(image_id),
-    )
-}
-
 fn required_cache_pins_changed(
-    current: Option<&HostDesiredStateV2>,
-    incoming: &HostDesiredStateV2,
+    current: Option<&HostDesiredStateV3>,
+    incoming: &HostDesiredStateV3,
 ) -> bool {
-    current.is_none_or(|current| required_cache_pins(current) != required_cache_pins(incoming))
-}
-
-fn guest_tools_cache_pin(
-    tools: &intar_contracts::bridge::DesiredGuestToolsV1,
-) -> (String, u64, String, u16) {
-    (
-        normalized_cache_pin_digest(&tools.tools_disk_sha256),
-        tools.tools_disk_size_bytes,
-        normalized_cache_pin_digest(&tools.kino_sha256),
-        tools.bootstrap_abi,
-    )
-}
-
-fn normalized_cache_pin_digest(value: &str) -> String {
-    normalize_sha256(value).unwrap_or_else(|| value.trim().to_ascii_lowercase())
+    current.is_none_or(|current| {
+        RequiredPins::from_desired_state(current) != RequiredPins::from_desired_state(incoming)
+    })
 }
 
 pub(crate) async fn load_cached_desired_state(
     cfg: &BridgeConfig,
     db: &Db,
-) -> Option<HostDesiredStateV2> {
+) -> Option<HostDesiredStateV3> {
     let row = match db.load_desired_state().await {
         Ok(Some(row)) => row,
         Ok(None) => return None,
@@ -617,7 +636,7 @@ pub(crate) async fn load_cached_desired_state(
         return None;
     }
 
-    let desired_state = match serde_json::from_str::<HostDesiredStateV2>(&row.doc_json) {
+    let desired_state = match serde_json::from_str::<HostDesiredStateV3>(&row.doc_json) {
         Ok(value) => value,
         Err(error) => {
             warn!(error = %error, "cached desired state is invalid JSON");
@@ -641,7 +660,7 @@ pub(crate) async fn load_cached_desired_state(
     Some(desired_state)
 }
 
-async fn cache_desired_state(db: &Db, desired_state: &HostDesiredStateV2) -> Result<()> {
+async fn cache_desired_state(db: &Db, desired_state: &HostDesiredStateV3) -> Result<()> {
     let version = i64::try_from(desired_state.version)
         .context("desired state version exceeds sqlite INTEGER range")?;
     let doc_json =
@@ -658,8 +677,8 @@ async fn cache_desired_state(db: &Db, desired_state: &HostDesiredStateV2) -> Res
 async fn apply_desired_state(
     cfg: &BridgeConfig,
     vm: &VmManager,
-    message: &DesiredStateV8,
-) -> Result<Vec<VmReportV2>> {
+    message: &DesiredStateV9,
+) -> Result<Vec<VmReportV3>> {
     validate_desired_state(cfg, &message.desired_state)?;
     let desired = &message.desired_state;
     let now = now_ms();
@@ -667,13 +686,13 @@ async fn apply_desired_state(
     let desired_identities = desired
         .vms
         .iter()
-        .map(|vm| (vm.run_id.as_str(), vm.vm_name.as_str()))
+        .map(|vm| (vm.run_id.as_str(), vm.vm_id.as_str()))
         .collect::<BTreeSet<_>>();
     let desired_absent = desired
         .vms
         .iter()
         .filter(|vm| vm.desired_phase == DesiredVmPhase::Absent)
-        .map(|vm| (vm.run_id.as_str(), vm.vm_name.as_str()))
+        .map(|vm| (vm.run_id.as_str(), vm.vm_id.as_str()))
         .collect::<BTreeSet<_>>();
 
     for local in vm.list_vms().await {
@@ -704,7 +723,8 @@ async fn apply_desired_state(
                 warn!(
                     error = %error,
                     run_id = %desired_vm.run_id,
-                    vm = %desired_vm.vm_name,
+                    vm_id = %desired_vm.vm_id,
+                    vm = %desired_vm.name,
                     "failed to reconcile desired vm"
                 );
                 failures.push(failed_vm_report(
@@ -724,15 +744,15 @@ async fn apply_desired_state(
 async fn reconcile_desired_vm(
     _cfg: &BridgeConfig,
     vm: &VmManager,
-    desired: &HostDesiredStateV2,
-    desired_vm: &DesiredVmV2,
+    desired: &HostDesiredStateV3,
+    desired_vm: &DesiredVmV3,
     now: i64,
 ) -> Result<()> {
     if desired_vm.lease_expires_at_unix_ms <= now {
-        delete_vm_if_present(vm, &desired_vm.vm_name).await;
+        delete_vm_if_present(vm, &desired_vm.vm_id).await;
         anyhow::bail!("desired VM lease expired");
     }
-    if let Some(existing) = vm.get_vm(&desired_vm.vm_name).await {
+    if let Some(existing) = vm.get_vm(&desired_vm.vm_id).await {
         let existing_run_id = local_run_id(&existing);
         if existing_run_id.as_deref() == Some(desired_vm.run_id.as_str())
             && existing.details.as_ref().is_some_and(|d| {
@@ -744,25 +764,16 @@ async fn reconcile_desired_vm(
             return Ok(());
         }
         warn!(
-            vm = %desired_vm.vm_name,
+            vm_id = %desired_vm.vm_id,
             desired_run_id = %desired_vm.run_id,
             existing_run_id = ?existing_run_id,
-            "desired vm name is occupied by another run; deleting existing vm first"
+            "desired vm_id is occupied by another execution; deleting existing vm first"
         );
-        delete_vm_if_present(vm, &desired_vm.vm_name).await;
+        delete_vm_if_present(vm, &desired_vm.vm_id).await;
         return Ok(());
     }
 
-    let authorized_keys = desired_vm
-        .ssh_authorized_keys_openssh
-        .iter()
-        .map(|key| key.trim())
-        .filter(|key| !key.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if authorized_keys.is_empty() {
-        anyhow::bail!("desired vm has no ssh_authorized_keys_openssh entry");
-    }
+    let authorized_keys = desired_authorized_keys(desired_vm)?;
     let lease_duration_seconds = desired_lease_duration_seconds(desired_vm, now)?;
     let peer_vm_aliases = desired_peer_vm_aliases(desired, desired_vm);
 
@@ -770,20 +781,23 @@ async fn reconcile_desired_vm(
         owner_user_id: desired_vm.owner_user_id.clone(),
         runtime_execution_id: desired_vm.runtime_execution_id.clone(),
         generation: desired_vm.generation,
-        name: desired_vm.vm_name.clone(),
+        // The host key is `vm_id`; `name` is what the guest sees.
+        name: desired_vm.vm_id.clone(),
         run_id: desired_vm.run_id.clone(),
-        image: image_cache_key(&desired_vm.image_key),
-        image_sha256: desired_vm.image_id.clone(),
-        guest_tools: desired_vm.guest_tools.clone(),
-        resources: Some(resources_from_desired(&desired_vm.resources)),
-        hostname: Some(desired_vm.vm_name.clone()),
+        image: desired_vm.image.clone(),
+        kino: desired_vm.kino.clone(),
+        spec: desired_vm.spec.clone(),
+        mode: desired_vm.mode,
+        egress: desired_vm.egress,
+        terminal: desired_vm.terminal,
+        resources: Some(resources_from_desired(desired_vm)),
+        hostname: Some(desired_vm.name.clone()),
         lease_duration_seconds: Some(lease_duration_seconds),
         runtime: CreateScenarioVmRuntime {
             ssh_authorized_keys_openssh: authorized_keys,
             network: None::<CreateScenarioVmRuntimeNetwork>,
             kino: Some(CreateScenarioVmRuntimeKino {
                 vsock_cid: kino_vsock_cid(desired.version, desired_vm),
-                vsock_port: Some(DEFAULT_KINO_VSOCK_PORT),
             }),
             peer_vm_names: peer_vm_aliases.keys().cloned().collect(),
             peer_vm_aliases,
@@ -794,16 +808,43 @@ async fn reconcile_desired_vm(
     .map_err(|error| anyhow::anyhow!("{}", error.message))
 }
 
+/// The SSH keys of a desired VM: required with a terminal, dropped without
+/// one (such a VM has no SSH).
+fn desired_authorized_keys(desired_vm: &DesiredVmV3) -> Result<Vec<String>> {
+    if !desired_vm.terminal {
+        return Ok(Vec::new());
+    }
+    let keys = desired_vm
+        .ssh_authorized_keys
+        .iter()
+        .map(|key| key.trim())
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !keys.is_empty(),
+        "desired vm has no ssh_authorized_keys entry"
+    );
+    Ok(keys)
+}
+
+/// The peers a desired VM names, resolved to the running VMs of the same
+/// run with that name: their `vm_id` (the host key) to their `name` (what
+/// the guest's `/etc/hosts` says).
 fn desired_peer_vm_aliases(
-    desired: &HostDesiredStateV2,
-    desired_vm: &DesiredVmV2,
+    desired: &HostDesiredStateV3,
+    desired_vm: &DesiredVmV3,
 ) -> BTreeMap<String, String> {
     desired
         .vms
         .iter()
-        .filter(|vm| vm.desired_phase == DesiredVmPhase::Running)
-        .filter(|vm| vm.run_id == desired_vm.run_id && vm.vm_name != desired_vm.vm_name)
-        .map(|vm| (vm.vm_name.clone(), vm.image_key.vm.clone()))
+        .filter(|vm| {
+            vm.desired_phase == DesiredVmPhase::Running
+                && vm.run_id == desired_vm.run_id
+                && vm.vm_id != desired_vm.vm_id
+                && desired_vm.peers.contains(&vm.name)
+        })
+        .map(|vm| (vm.vm_id.clone(), vm.name.clone()))
         .collect()
 }
 
@@ -843,7 +884,7 @@ pub(crate) async fn validate_restart(
             u64::try_from(row.generation).context("invalid persisted generation")?,
         )?;
         anyhow::ensure!(
-            desired.vms.iter().any(|vm| vm.vm_name == row.name
+            desired.vms.iter().any(|vm| vm.vm_id == row.name
                 && Some(vm.run_id.as_str()) == row.run_id.as_deref()
                 && vm.owner_user_id == row.owner_user_id
                 && vm.runtime_execution_id == row.runtime_execution_id
@@ -875,7 +916,7 @@ async fn update_relay(
     cfg: &BridgeConfig,
     vm: &VmManager,
     credentials: Option<intar_contracts::bridge::HostRelayCredentials>,
-    desired: Option<&HostDesiredStateV2>,
+    desired: Option<&HostDesiredStateV3>,
 ) -> Result<()> {
     use intar_contracts::stargate::{RelayService, RelayTarget};
     let mut assignments = Vec::new();
@@ -892,7 +933,7 @@ async fn update_relay(
                 {
                     continue;
                 }
-                let Some(local) = vm.get_vm(&target.vm_name).await else {
+                let Some(local) = vm.get_vm(&target.vm_id).await else {
                     continue;
                 };
                 let Some(details) = local.details.as_ref() else {
@@ -905,7 +946,7 @@ async fn update_relay(
                 {
                     continue;
                 }
-                let Some(terminal) = vm.committed_terminal_state(&target.vm_name).await else {
+                let Some(terminal) = vm.committed_terminal_state(&target.vm_id).await else {
                     continue;
                 };
                 if terminal.state != VmTerminalStateKind::Ready {
@@ -939,8 +980,8 @@ async fn update_relay(
 }
 
 fn validate_desired_transition(
-    current: Option<&HostDesiredStateV2>,
-    incoming: &HostDesiredStateV2,
+    current: Option<&HostDesiredStateV3>,
+    incoming: &HostDesiredStateV3,
 ) -> Result<()> {
     let Some(current) = current else {
         return Ok(());

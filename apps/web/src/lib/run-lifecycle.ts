@@ -1,11 +1,11 @@
 import type {
-  HostStateReportV2,
   VmActualStateV2,
   VmPhase as BridgeVmPhase,
-  VmReportV2,
   VmRuntimeConstraintsV2,
   VmTerminalStateV1,
 } from "@/generated/bridge";
+import type { VmStateV3 } from "@/generated/contracts/bridge-message-v9";
+import { LAB_FAILED_TEXT, mergeReportedTasks } from "@/lib/run-tasks";
 import {
   applyProbeSnapshotToVm,
   canAdvanceVmPhase,
@@ -22,21 +22,28 @@ export function deriveVmPhase(input: {
   vm: RunVmStateDocument;
   reportPhase?: BridgeVmPhase | null | undefined;
   collectionError?: string | null | undefined;
+  /** False holds the VM below ready, whatever the host reports. */
+  readyGate?: boolean;
 }): {
   phase: VmPhase;
   phaseDetail: string;
 } {
   const vm = input.vm;
-  const bootGateSatisfied = bootProbesPassing(vm);
+  const gated = input.readyGate === false;
+  const bootGateSatisfied = bootProbesPassing(vm) && !gated;
   const scenarioPassing = vm.scenarioProbes.length
     ? vm.scenarioProbes.every((probe) => isVerificationPassed(probe.status))
     : false;
 
   let phase = vm.phase;
   let detail = vm.phaseDetail;
-  const reportPhase = input.reportPhase
+  const mappedPhase = input.reportPhase
     ? bridgeVmPhaseToRunVmPhase(input.reportPhase)
     : null;
+  const reportPhase =
+    gated && (mappedPhase === "ready" || mappedPhase === "solved")
+      ? "booting"
+      : mappedPhase;
 
   if (reportPhase && canAdvanceVmPhase(phase, reportPhase)) {
     phase = reportPhase;
@@ -63,51 +70,76 @@ export function deriveVmPhase(input: {
   return { phase, phaseDetail: detail };
 }
 
-export function applyVmReportToRunState(input: {
-  runId: string;
-  current: RunStateDocument;
-  report: VmReportV2;
-}): RunStateDocument {
-  const next = {
-    ...input.current,
-    vms: input.current.vms.map((vm) =>
-      applyReportedVmState({
-        runId: input.runId,
-        vm,
-        report: {
-          run_id: input.report.run_id,
-          vm_name: input.report.vm_name,
-          phase: input.report.phase,
-          network: input.report.network ?? null,
-          terminal: input.report.terminal ?? null,
-          runtime_constraints: input.report.runtime_constraints ?? null,
-          resource_state: input.report.resource_state ?? null,
-          ssh_host_keys_openssh: input.report.ssh_host_keys_openssh,
-          probes: input.report.probes,
-          error: input.report.error ?? null,
-          updated_at_unix_ms: input.report.observed_at_unix_ms,
-        },
-      }),
-    ),
-  };
-  return recomputeRunState(next);
+/** The host-local VM id of a machine in a revision-model run. */
+export function revisionVmId(machine: string, runId: string): string {
+  return `${machine}-${runId}`;
 }
 
-export function applyHostReportToRunState(input: {
+/**
+ * Applies one bridge 9 VM state to a run on the revision model. The VM is
+ * ready only once its guest's lab is ready; a failed lab fails the VM with
+ * a fixed text, and the guest's own failure text stays admin-only.
+ */
+export function applyVmStateV3ToRunState(input: {
   runId: string;
   current: RunStateDocument;
-  report: HostStateReportV2;
+  vm: VmStateV3;
 }): RunStateDocument {
-  let next = input.current;
-  for (const report of input.report.vms) {
-    next = {
-      ...next,
-      vms: next.vms.map((vm) =>
-        applyReportedVmState({ runId: input.runId, vm, report }),
-      ),
-    };
-  }
-  return recomputeRunState(next);
+  const reported = input.vm;
+  if (reported.run_id !== input.runId) return input.current;
+  const runtimeVmName = revisionVmId(reported.name, reported.run_id);
+  const lab = reported.lab ?? null;
+  let tasks = input.current.tasks;
+  const vms = input.current.vms.map((vm) => {
+    if (vm.runtimeVmName !== runtimeVmName) return vm;
+    const applied = applyReportedVmState({
+      runId: input.runId,
+      vm,
+      report: {
+        run_id: reported.run_id,
+        vm_name: runtimeVmName,
+        phase: reported.phase,
+        network: reported.network ?? null,
+        terminal: reported.terminal,
+        runtime_constraints: reported.runtime_constraints ?? null,
+        resource_state: reported.resource_state ?? null,
+        ssh_host_keys_openssh: reported.ssh_host_keys_openssh,
+        probes: [],
+        // Host error text is for operators.
+        error: null,
+        updated_at_unix_ms: reported.updated_at_unix_ms,
+      },
+      // Without a lab in this report, the last one counts only within the
+      // same runtime generation: a new generation starts a new guest.
+      readyGate: lab
+        ? lab.state === "ready"
+        : vm.lab?.state === "ready" &&
+          (reported.runtime_constraints?.generation ?? null) === (vm.runtimeConstraints?.generation ?? null),
+    });
+    if (applied === vm) return vm;
+    if (lab && tasks) {
+      tasks = mergeReportedTasks(tasks, vm.scenarioVmName, lab.tasks, reported.updated_at_unix_ms);
+    }
+    // `applied.lab` is cleared when the report starts a new generation.
+    const labState = lab
+      ? {
+          state: applied.lab?.state === "failed" ? "failed" as const : lab.state,
+          ready: lab.ready.slice(0, 64).map(({ name, status }) => ({ name, status })),
+          failure: lab.failure?.slice(0, 4096) ?? applied.lab?.failure ?? null,
+          ...(lab.verify ? { verify: lab.verify } : {}),
+        }
+      : (applied.lab ?? null);
+    if (labState?.state !== "failed") return { ...applied, lab: labState };
+    return decorateVmState({
+      ...applied,
+      lab: labState,
+      phase: "failed",
+      phaseDetail: LAB_FAILED_TEXT,
+      terminalPhase: "failed",
+      terminalReason: LAB_FAILED_TEXT,
+    });
+  });
+  return recomputeRunState({ ...input.current, vms, ...(tasks ? { tasks } : {}) });
 }
 
 export function matchesVmReportIdentity(input: {
@@ -120,29 +152,6 @@ export function matchesVmReportIdentity(input: {
     input.runId === input.reportRunId &&
     input.runtimeVmName === input.reportVmName
   );
-}
-
-export function matchesInventoryVmIdentity(input: {
-  value: unknown;
-  runId: string;
-  runtimeVmName: string;
-}): boolean {
-  if (!isRecord(input.value)) {
-    return false;
-  }
-
-  const reportRunId = readString(input.value.run_id);
-  const reportVmName = readString(input.value.vm_name);
-  if (!reportRunId || !reportVmName) {
-    return false;
-  }
-
-  return matchesVmReportIdentity({
-    runId: input.runId,
-    runtimeVmName: input.runtimeVmName,
-    reportRunId,
-    reportVmName,
-  });
 }
 
 function applyReportedVmState(input: {
@@ -162,6 +171,7 @@ function applyReportedVmState(input: {
     | "error"
     | "updated_at_unix_ms"
   >;
+  readyGate?: boolean;
 }): RunVmStateDocument {
   if (
     !matchesVmReportIdentity({
@@ -239,6 +249,7 @@ function applyReportedVmState(input: {
     vm: withRuntimeEvidence,
     reportPhase: input.report.phase,
     collectionError: input.report.error ?? null,
+    ...(input.readyGate === undefined ? {} : { readyGate: input.readyGate }),
   });
 
   return decorateVmState({
@@ -382,6 +393,7 @@ function resetVmForRuntimeGeneration(
     },
     runtimeConstraints: null,
     resourceState: null,
+    lab: null,
     bootProbes: resetProbes(current.bootProbes),
     scenarioProbes: resetProbes(current.scenarioProbes),
   };
@@ -492,12 +504,4 @@ function currentTerminalProjection(current: RunVmStateDocument) {
         ? current.terminalTarget
         : clearedTerminalTarget(current),
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
 }

@@ -1,11 +1,14 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clientHello, connectHost, drizzle, env, resetHostRuntimeTestDatabase,
-  seedHost, seedRun, sendBridge, stateReport, vmReport, waitForBridgeMessage,
+  seedHost, seedRun, sendBridge, stateReport, testImageDigest, testKinoDigest, testSpecDigest, vmReport, waitForBridgeMessage,
+  settleHostRuntimeSockets,
 } from "./test-fixtures";
+import { runtimeActualStateFromReport, vmReportV2FromV3 } from "@/control-plane/host-runtime-do";
+import type { RunStateDocument } from "@/lib/run-state";
 import type { VmReportV2 } from "@/generated/bridge";
 import { runtimeVms, runtimeVmAccessKeys } from "@/db/schema";
 import { encryptRuntimeVmAccessKey, recordRuntimeVmActualState } from "@/lib/runtime-vm-state";
@@ -17,6 +20,7 @@ vi.setConfig({ testTimeout: 20_000 });
 
 describe("host credential generation", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+  afterEach(settleHostRuntimeSockets);
 
   it("rejects connections without a generation before accepting a socket", async () => {
     await seedHost("host");
@@ -68,7 +72,7 @@ describe("host credential generation", () => {
     await runInDurableObject(stub, async instance => {
       const runtime = instance as unknown as {
         withRunProjectionLock(id: string, operation: () => Promise<void>): Promise<void>;
-        applyBridgeVmReport(hostId: string, report: VmReportV2, sessionId: string, generation: number): Promise<void>;
+        applyBridgeVmReport(hostId: string, report: VmReportV2, sessionId: string, generation: number, project: (latest: RunStateDocument) => RunStateDocument): Promise<void>;
       };
       const row = await env.DB.prepare("SELECT active_session_id FROM agent_hosts WHERE id = 'host'").first<{ active_session_id: string }>();
       let release!: () => void;
@@ -81,7 +85,7 @@ describe("host credential generation", () => {
       await started;
       const message = vmReport("host", "run", "runtime-web", "ready", now + 1, 22001, "10.77.0.2");
       if (message.type !== "vm_report") throw new Error("expected a VM report");
-      const waiting = runtime.applyBridgeVmReport("host", message.report, row!.active_session_id, 1);
+      const waiting = runtime.applyBridgeVmReport("host", vmReportV2FromV3(message.report), row!.active_session_id, 1, latest => latest);
       await env.DB.prepare("UPDATE agent_hosts SET credential_generation = 2 WHERE id = 'host'").run();
       release();
       await Promise.all([holding, waiting]);
@@ -153,11 +157,10 @@ describe("host credential generation", () => {
     await seedRun({ db, hostId: "host", runId: "run", now, seedRuntimeVms: false });
     await db.insert(runtimeVms).values({
       id: "vm", executionId: "run", vmId: "vm-1", ordinal: 0,
-      runtimeVmName: "runtime-web", imageKeyJson: { scenario: "broken-nginx", vm: "webserver", arch: "x86_64" },
-      imageSha256: "2".repeat(64), cpuMillis: 1000, memoryMib: 512, diskMib: 4096,
+      runtimeVmName: "web-run", imageDigest: testImageDigest, specDigest: testSpecDigest, kinoDigest: testKinoDigest, cpuMillis: 1000, memoryMib: 512, diskMib: 4096,
     });
     const encrypted = await encryptRuntimeVmAccessKey({
-      executionId: "run", vmId: "vm-1", runtimeVmName: "runtime-web",
+      executionId: "run", vmId: "vm-1", runtimeVmName: "web-run",
       publicKeyOpenssh: "test-public-key", privateKeyOpenssh: "test-private-key",
     });
     await db.insert(runtimeVmAccessKeys).values({
@@ -170,12 +173,12 @@ describe("host credential generation", () => {
       return decrypt(...args);
     });
     try {
-      const message = vmReport("host", "run", "runtime-web", "ready", now, 22001, "10.77.0.2");
+      const message = vmReport("host", "run", "web", "ready", now, 22001, "10.77.0.2");
       if (message.type !== "vm_report") throw new Error("expected a VM report");
       const recording = recordRuntimeVmActualState({
         executionId: "run", expectedGeneration: 1, vmId: "vm-1", hostId: "host",
         expectedHostSessionId: "host-session", expectedHostCredentialGeneration: 1,
-        report: { ...message.report, updated_at_unix_ms: now },
+        report: runtimeActualStateFromReport(vmReportV2FromV3(message.report)),
       });
       if (rotate) await expect(recording).rejects.toMatchObject({ code: "runtime_generation_stale" });
       else await expect(recording).resolves.toBe("updated");

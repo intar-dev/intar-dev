@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  hostSupportsRunCliV1,
   isAvailableScenarioLaunchHost,
   isFreshHostHeartbeat,
   isReportedHostRoleAllowed,
@@ -88,27 +87,5 @@ describe("scenario host launch eligibility", () => {
 
   it("treats missing heartbeats as stale", () => {
     expect(isFreshHostHeartbeat(null, 1_762_041_660_000, 90_000)).toBe(false);
-  });
-
-  it("requires both learner CLI capabilities", () => {
-    expect(hostSupportsRunCliV1(null)).toBe(false);
-    expect(
-      hostSupportsRunCliV1({
-        capabilities: {},
-      }),
-    ).toBe(false);
-    expect(
-      hostSupportsRunCliV1({
-        capabilities: { supports_run_cli_v1: true },
-      }),
-    ).toBe(false);
-    expect(
-      hostSupportsRunCliV1({
-        capabilities: {
-          supports_run_cli_v1: true,
-          supports_run_cli_completion_v1: true,
-        },
-      }),
-    ).toBe(true);
   });
 });

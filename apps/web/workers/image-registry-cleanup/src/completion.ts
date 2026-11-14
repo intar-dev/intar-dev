@@ -1,15 +1,17 @@
-import type { ImageRegistryCleanupRunResult } from "@/lib/image-registry-cleanup";
+import type { OciSweepReport } from "@/lib/oci-registry-sweep";
 import type { CleanupStatus } from "./types";
 
 /**
- * The one place that turns a sweep result into a collector status.
+ * The one place that turns a sweep report into a collector status.
  *
- * The core owns the completion rule and reports it as `result.completed`. The
+ * The sweep owns the completion rule and reports it as `completed`. The
  * collector does not restate that rule: it copies the verdict, and when the
  * verdict is not complete it only classifies the reason so a caller knows
  * whether to retry, to wait, or to treat the pass as failed.
  *
- *   completed === true  -> ok          (the core proved the sweep finished)
+ *   any fault           -> core-failed (in either mode)
+ *   report-only         -> report-only (a plan never completes)
+ *   completed === true  -> ok          (the sweep proved the store finished)
  *   contention reason   -> busy        (another writer or sweep holds it)
  *   withholding reason  -> paused      (a hold or disabled enforcement)
  *   any other reason    -> core-failed (a fault stopped the sweep)
@@ -43,14 +45,9 @@ export const CLEANUP_WITHHOLD_REASONS: readonly string[] = [
 /** The enforcement refusal carries its observed mode, so it is matched by prefix. */
 const ENFORCEMENT_REFUSAL_PREFIX = "registry admission enforcement is ";
 
-export function completionStatus(
-  result: ImageRegistryCleanupRunResult,
-): CleanupStatus {
-  // `completed` is the core's verdict, and the only signal that means a
-  // finished sweep. Nothing else in the result may promote it to success.
-  if (result.completed === true) return "ok";
-
-  const reason = typeof result.error === "string" ? result.error.trim() : "";
+/** Classifies why a pass did not complete. */
+function incompleteStatus(error: string | null): CleanupStatus {
+  const reason = typeof error === "string" ? error.trim() : "";
   if (!reason) return "pending";
   if (CLEANUP_CONTENTION_REASONS.includes(reason)) return "busy";
   if (CLEANUP_WITHHOLD_REASONS.includes(reason)) return "paused";
@@ -58,7 +55,9 @@ export function completionStatus(
   return "core-failed";
 }
 
-/** True only for a pass the core proved complete. */
-export function isAppliedCompletion(status: CleanupStatus): boolean {
-  return status === "ok";
+export function completionStatus(report: OciSweepReport): CleanupStatus {
+  if (report.faults.length) return "core-failed";
+  if (report.mode !== "delete") return "report-only";
+  if (report.completed) return "ok";
+  return incompleteStatus(report.error);
 }

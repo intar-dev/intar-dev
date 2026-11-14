@@ -31,10 +31,9 @@ Never hand-edit migration SQL or metadata, create custom migrations, or add SQL
 triggers. Run `bun run --cwd apps/web db:generate` after a typed schema change
 and `bun run check:database-migrations` before committing it.
 
-`content/courses/` contains Markdown-first Course source. Each Course contains
-`course.md` and ordered Lecture directories. Each Lecture contains `lecture.md`
-and can contain a technical `scenario.hcl`. The base image catalog remains at
-`content/scenarios/base-images.hcl`.
+`content/` is a scenario repository: `intar.hcl`, `scenarios/<slug>/scenario.hcl`
+and Markdown-first Course source under `courses/`. Each Course contains
+`course.md` and ordered Lecture directories, each with a `lecture.md`.
 
 ## Releasing
 
@@ -79,8 +78,9 @@ other registry.
   again only for a tag whose commit never passed CI there. A failed build
   leaves its draft, and the next run of the workflow rebuilds and publishes
   it: after the next merge, a re-run, or a dispatch from main.
-- **After an image CLI release,** the workflow opens a pull request that points
-  the website at the new scenario compiler.
+- **After an image CLI or kino release,** the workflow opens a pull request
+  that points the website at the new scenario compiler, and writes the Kino
+  artifact's digest into `tools/deploy/kino-pin.json`.
 
 Never bump a product version, edit a product `CHANGELOG.md`, or create a
 product tag as part of other work, and never push a tag by hand. To release a
@@ -136,23 +136,32 @@ before the workflow attested them have no attestation. Then:
      boot, so starting the agent alone skips it), then
      `systemctl start intar-agent`.
   5. Check that the installed binaries match the release and that the journal
-     shows `bridge v8 handshake complete` with no warnings. Then dispatch
-     image-ops `gate-open`, after any Kino rollout that shares the drain.
+     shows `bridge v9 handshake complete` with no warnings. Then dispatch
+     image-ops `gate-open`, unless a later step of a larger rollout opens it.
 
   If a check fails, stop the agent and run `install.sh` from the rollback
-  release's directory instead.
+  release's directory instead. `install.sh` sets the Cloud Hypervisor path and
+  hash in `/etc/intar-jailerd/config.toml` to its own release's; a rollback to
+  a release that still pinned v53.0, whose installer leaves the config alone, also needs both
+  lines set back by hand to that release's `deploy/config.example.toml`.
 
   `swamp workflow run agent-rollout --input version=X.Y.Z --input
   rollback_version=<running X.Y.Z>`, run from the repository root after
-  `swamp extension install`, runs these steps. It stops for approval before
+  `swamp extension install`, runs these steps; `--input gate_open=false`
+  leaves the gate drained at the end. It stops for approval before
   the drain and again before a rollback; after each
   `swamp workflow approve agent-rollout <step>`,
   `swamp workflow resume agent-rollout` continues the run.
-- **Builder:** on the builder host, run the new binary's
-  `sudo ./intar-builder doctor --config /etc/intar-builder/config.toml`. Wait
+- **Builder:** on the builder host, write the config the new binary reads with
+  `sudo python3 deploy/migrate-epoch-config.py builder --print > config.toml` from
+  the unpacked archive (it drops the keys the release retired) and run the new
+  binary's `sudo ./intar-builder doctor --config config.toml`. Wait
   until the host is idle: the latest `applied builder desired state` journal line
   shows `"desired_builds":0`, and nothing matches `pgrep -f '^/usr/bin/qemu'`.
-  Then `systemctl stop intar-builder`, keep the old binary as
+  Then, while the service still runs, run
+  `sudo python3 deploy/migrate-epoch-config.py builder` (it keeps the previous
+  file as `/etc/intar-builder/config.toml.pre-epoch`, and the running binary
+  reads the result too), `systemctl stop intar-builder`, keep the old binary as
   `/usr/local/bin/intar-builder.pre-vX.Y.Z`, `install -m 0755` the new one,
   start the service, and check the journal for the handshake and the desired
   state with no warnings. The binary has no `--version`; tell releases apart by
@@ -161,7 +170,12 @@ before the workflow attested them have no attestation. Then:
   a rollback; after each `swamp workflow approve builder-rollout <step>`,
   `swamp workflow resume builder-rollout` continues the run.
 - **Stargate:** see "Rolling out" in `deploy/stargate/README.md`.
-- **Kino:** image-ops `tools-build` with the `kino_tag`, then the guest-tools
-  steps in `apps/web/README.md`.
+- **Kino:** hosts put the pinned Kino on each new VM's run disk, so a Kino
+  release that keeps the guest contract needs no drain: running VMs keep
+  theirs. Once the release is published, dispatch image-ops `kino-promote` with
+  `kino_version=X.Y.Z`; it stores the release's Kino artifact in the registry
+  under the digest the pin pull request names. Then merge the pin pull request;
+  the website deploy that follows serves the pin. A pin whose artifact is not
+  stored pins nothing, and without a pin no VM is placed.
 - **Image CLI:** merge the website pin pull request that the release opens. The
-  next website deploy uses it, and `tools-build` builds tools disks with it.
+  next website deploy uses it.

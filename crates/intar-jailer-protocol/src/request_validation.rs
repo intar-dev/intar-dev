@@ -2,24 +2,13 @@ use super::*;
 
 impl VmLaunchRequest {
     pub fn validate(&self) -> Result<CpuQuota, ValidationError> {
-        if self.artifacts.tools_disk.is_some() {
-            return Err(ValidationError::InvalidToolsDisk);
-        }
         self.validate_inner(false)
     }
 
-    /// Recheck a persisted launch after its V2/V3 wrapper was validated.
-    /// Prepared boot sources and verified tools remain valid during recovery;
-    /// incoming requests must still use their complete launch wrapper.
+    /// Recheck a persisted launch after its V3 wrapper was validated.
+    /// Prepared boot sources remain valid during recovery; incoming requests
+    /// must still use their complete launch wrapper.
     pub fn validate_persisted(&self) -> Result<CpuQuota, ValidationError> {
-        if self
-            .artifacts
-            .tools_disk
-            .as_ref()
-            .is_some_and(|source| source.sha256.is_none())
-        {
-            return Err(ValidationError::InvalidToolsDisk);
-        }
         self.validate_inner(true)
     }
 
@@ -51,11 +40,6 @@ impl VmLaunchRequest {
             || self.artifacts.root_disk.access != ArtifactAccess::ReadWrite
             || self.artifacts.runtime_disk.access != ArtifactAccess::ReadOnly
             || self.artifacts.recording_disk.access != ArtifactAccess::ReadWrite
-            || self
-                .artifacts
-                .tools_disk
-                .as_ref()
-                .is_some_and(|source| source.access != ArtifactAccess::ReadOnly)
         {
             return Err(ValidationError::InvalidArtifactAccess);
         }
@@ -65,7 +49,6 @@ impl VmLaunchRequest {
             Some(&self.artifacts.root_disk),
             Some(&self.artifacts.runtime_disk),
             Some(&self.artifacts.recording_disk),
-            self.artifacts.tools_disk.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -77,21 +60,18 @@ impl VmLaunchRequest {
             Some(&self.artifacts.kernel),
             self.artifacts.initrd.as_ref(),
         ];
+        // A suspended guest exists only as prepared template files.
         if !allow_prepared_boot_artifacts
-            && boot_artifacts
-                .into_iter()
-                .flatten()
-                .any(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT)
+            && (self.artifacts.wake.is_some()
+                || boot_artifacts
+                    .into_iter()
+                    .flatten()
+                    .any(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT))
         {
             return Err(ValidationError::TemplateLaunchRequiresV2);
         }
         if self.artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
             || self.artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-            || self
-                .artifacts
-                .tools_disk
-                .as_ref()
-                .is_some_and(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT)
         {
             return Err(ValidationError::InvalidTemplateRuntimeSource);
         }

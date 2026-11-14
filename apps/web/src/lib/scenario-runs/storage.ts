@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   drizzleQueryToD1Statement,
@@ -12,11 +12,8 @@ import {
   runtimeVms,
   scenarioRunArtifacts,
   scenarioRuns,
-  type ScenarioRunHintSnapshot,
 } from "@/db/schema";
 import {
-  buildScenarioLaunchSpecs,
-  deriveScenarioBriefing,
   parseScenarioDifficulty,
   type ScenarioDifficulty,
   type ScenarioObjective,
@@ -26,10 +23,8 @@ import {
   buildInitialRunState,
   recomputeRunState,
   redactProbeResults,
-  type RunPhase,
   type ScenarioReplayArtifact,
   type RunStateDocument,
-  type CandidateRunSourceIdentityV1,
 } from "@/lib/run-state";
 import {
   buildScenarioRunHintViews,
@@ -39,92 +34,16 @@ import {
   deriveScenarioRunOutcome,
   deriveScenarioRunSolveDurationMs,
   nextSolvedAt,
-  type ScenarioRunOutcome,
 } from "@/lib/scenario-run-outcome";
-import {
-  listEnabledScenarios,
-  loadEnabledScenario,
-  type ScenarioDetailRecord,
-} from "@/lib/scenarios";
 import { recordLinkedCourseUnitCompletionForRun } from "@/lib/course-catalogs";
 import { type ScenarioRunRecord } from "./types";
+import { learnerLab, taskViews } from "@/lib/run-tasks";
 import { runShareUrl } from "@/lib/run-share/links";
 import {
   deriveScenarioRunActivity,
   deriveScenarioRunReplayState,
 } from "./activity";
 import { deriveScenarioRunSavingStage } from "./saving-stage";
-
-export interface ScenarioRunContentSnapshot {
-  tags: string[];
-  hints: ScenarioRunHintSnapshot[];
-  solutionMarkdown: string;
-}
-
-export interface ScenarioRunLaunchSource {
-  scenarioId: string;
-  organizationId: string | null;
-  enabledAt: number;
-  briefing: ReturnType<typeof deriveScenarioBriefing>;
-  content: ScenarioRunContentSnapshot;
-  launchSpecs: ReturnType<typeof buildScenarioLaunchSpecs>;
-  candidateSource?: CandidateRunSourceIdentityV1;
-}
-
-export async function loadEnabledScenarioRows(
-  scenarioId?: string,
-  organizationId: string | null = null,
-) {
-  const scenarios = scenarioId
-    ? [await loadEnabledScenario(scenarioId, { organizationId })].filter(
-        (scenario): scenario is ScenarioDetailRecord => Boolean(scenario),
-      )
-    : await listEnabledScenarios({ organizationId });
-
-  return scenarios.map(scenarioRunLaunchSourceFromDetail);
-}
-
-export function scenarioRunLaunchSourceFromDetail(
-  scenario: ScenarioDetailRecord,
-): ScenarioRunLaunchSource {
-  return {
-    scenarioId: scenario.scenarioId,
-    organizationId: scenario.organizationId,
-    enabledAt: scenario.enabledAt ?? Date.now(),
-    briefing: deriveScenarioBriefing(scenario),
-    content: scenarioRunContentSnapshot(scenario),
-    launchSpecs: buildScenarioLaunchSpecs(scenario),
-  };
-}
-
-export function scenarioRunContentSnapshot(
-  scenario: ScenarioDetailRecord,
-): ScenarioRunContentSnapshot {
-  return {
-    tags: scenario.tags,
-    solutionMarkdown: scenario.solutionMarkdown,
-    hints: [
-      ...scenario.hints.map((hint) => ({
-        key: `scenario:${hint.id}`,
-        scope: "scenario" as const,
-        probeName: null,
-        id: hint.id,
-        title: hint.title ?? null,
-        bodyMarkdown: hint.body_markdown,
-      })),
-      ...scenario.probes.flatMap((probe) =>
-        probe.hints.map((hint) => ({
-          key: `probe:${probe.scenarioVmName}:${probe.name}:${hint.id}`,
-          scope: "probe" as const,
-          probeName: probe.name,
-          id: hint.id,
-          title: hint.title ?? null,
-          bodyMarkdown: hint.body_markdown,
-        })),
-      ),
-    ],
-  };
-}
 
 export async function loadActiveRunRow(userId: string) {
   const db = drizzle(env.DB);
@@ -134,67 +53,6 @@ export async function loadActiveRunRow(userId: string) {
     .where(eq(scenarioRuns.activeKey, activeKeyFor(userId)))
     .limit(1);
   return rows[0] ? fromDbRow(rows[0]) : null;
-}
-
-export async function loadFinishedRuns(
-  userId: string,
-  scenarioId: string,
-  organizationId: string | null = null,
-) {
-  const db = drizzle(env.DB);
-  const rows = await db
-    .select({
-      runId: scenarioRuns.runId,
-      state: scenarioRuns.state,
-      stateJson: scenarioRuns.stateJson,
-      createdAt: scenarioRuns.createdAt,
-      completedAt: scenarioRuns.completedAt,
-      solvedAt: scenarioRuns.solvedAt,
-      failedAt: scenarioRuns.failedAt,
-      deleteRequestedAt: scenarioRuns.deleteRequestedAt,
-      solutionAssisted: scenarioRuns.solutionAssisted,
-    })
-    .from(scenarioRuns)
-    .where(
-      and(
-        eq(scenarioRuns.userId, userId),
-        eq(scenarioRuns.scenarioId, scenarioId),
-        organizationId
-          ? eq(scenarioRuns.organizationId, organizationId)
-          : isNull(scenarioRuns.organizationId),
-        isNull(scenarioRuns.activeKey),
-        inArray(scenarioRuns.state, ["completed", "failed"]),
-      ),
-    )
-    .orderBy(desc(scenarioRuns.createdAt));
-
-  return rows.map((row) => {
-    const replayState = deriveScenarioRunReplayState(
-      parseRunState(row.stateJson),
-    );
-    return {
-      runId: row.runId,
-      phase: row.state as "completed" | "failed",
-      outcome: toFinishedRunOutcome(
-        deriveScenarioRunOutcome({
-          phase: row.state as RunPhase,
-          solvedAt: row.solvedAt,
-          deleteRequestedAt: row.deleteRequestedAt,
-          failedAt: row.failedAt,
-        }),
-      ),
-      createdAt: row.createdAt,
-      finishedAt: row.completedAt ?? row.failedAt ?? row.createdAt,
-      solvedAt: row.solvedAt,
-      solveDurationMs: deriveScenarioRunSolveDurationMs({
-        createdAt: row.createdAt,
-        solvedAt: row.solvedAt,
-      }),
-      solutionAssisted: row.solutionAssisted,
-      replayState,
-      hasReplay: replayState === "ready",
-    };
-  });
 }
 
 export async function loadRunRow(runId: string, userId?: string) {
@@ -357,6 +215,7 @@ export function toScenarioRunRecord(
     phase: row.state.phase,
   });
   const replayState = deriveScenarioRunReplayState(row.state);
+  const { tasks, ...stateWithoutTasks } = row.state;
   return {
     id: row.runId,
     scenarioId: row.scenarioId,
@@ -400,13 +259,15 @@ export function toScenarioRunRecord(
     share: row.shareId ? { url: runShareUrl(row.shareId) } : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    ...row.state,
+    ...stateWithoutTasks,
+    ...(tasks ? { tasks: taskViews(tasks) } : {}),
     bootProbes: redactProbeResults(row.state.bootProbes),
     scenarioProbes: redactProbeResults(row.state.scenarioProbes),
     vms: row.state.vms.map((vm) => ({
       ...vm,
       bootProbes: redactProbeResults(vm.bootProbes),
       scenarioProbes: redactProbeResults(vm.scenarioProbes),
+      ...(vm.lab === undefined ? {} : { lab: learnerLab(vm.lab) }),
     })),
   };
 }
@@ -438,12 +299,6 @@ export async function hydrateScenarioRunSavingStage(
       archiveStageRanks: rows.map((row) => row.archiveStageRank),
     }),
   };
-}
-
-export function toFinishedRunOutcome(
-  outcome: ScenarioRunOutcome,
-): Exclude<ScenarioRunOutcome, "in_progress"> {
-  return outcome === "in_progress" ? "cancelled" : outcome;
 }
 
 export function parseRunState(raw: string): RunStateDocument {
@@ -521,16 +376,6 @@ export function scenarioRunDifficulty(
     500,
     "scenario_run_invalid",
     `scenario run ${runId} has invalid difficulty`,
-  );
-}
-
-export function slugify(value: string) {
-  return (
-    value
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "scenario"
   );
 }
 

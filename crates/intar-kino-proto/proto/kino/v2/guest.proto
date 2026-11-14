@@ -1,0 +1,47 @@
+syntax = "proto3";
+package kino.v2;
+
+// One stream on the vsock connection Kino opens to the host's report port.
+// Each frame is a 4-byte big-endian length and that many bytes, at most
+// 256 KiB. Kino sends GuestFrame, the host sends HostFrame.
+message GuestFrame { oneof frame { Report report = 1; } }
+message HostFrame  { oneof frame { PeerTasks peer_tasks = 1; } }
+
+message Report {
+  uint32 contract = 1;                    // the guest contract; the host fails the VM on a mismatch
+  string kino_version = 2;
+  uint64 seq = 3;
+  Phase phase = 4;
+  repeated string ssh_host_keys_openssh = 5;
+  map<string, uint64> timings_ms = 6;
+  repeated Ready ready = 7;
+  repeated Task tasks = 8;
+  Verify verify = 9;                      // set only in verify mode
+  string failure = 10;                    // phase FAILED, admin-only, at most 1 KiB
+  // SHA-256 (hex) of the boot.json this Kino applied; empty until it has
+  // parsed one. A guest woken from an image first runs the build's Kino,
+  // so the host drops every report whose value is not that of the run
+  // disk it wrote.
+  string boot_sha256 = 11;
+}
+// A report shows the latest phase, and phases only advance, so a host may
+// never see SSH_READY itself: PREPARING and READY imply it. FAILED is a lab
+// failure, with SSH still up, when timings_ms holds "ssh_ready".
+enum Phase  { PHASE_UNSPECIFIED = 0; BOOTING = 1; SSH_READY = 2; PREPARING = 3; READY = 4; FAILED = 5; }
+enum Status { STATUS_UNSPECIFIED = 0; PENDING = 1; PASS = 2; FAIL = 3; ERROR = 4; }
+message Ready { string name = 1; Status status = 2; string tail = 3; }   // tail at most 2 KiB, admin-only
+message Task  { string id = 1; Status status = 2; string message = 3; uint64 passed_at_unix_ms = 4; } // message at most 512 B, learner-safe
+// In verify mode `tasks` stay unevaluated; the steps are the result. A step's
+// solve_exit of 0 means success only once its post status is set.
+message Verify { repeated Step steps = 1; bool done = 2; bool passed = 3; bool pre_done = 4; }
+message Step {
+  string task_id = 1; Status pre = 2; int32 solve_exit = 3; Status post = 4;
+  uint32 duration_ms = 5; string tail = 6;                               // tail at most 4 KiB, admin-only
+  repeated string waiting_for = 7;                                       // peer task ids
+}
+message PeerTasks {                                                      // same run only
+  map<string, TaskIds> passed = 1;                                       // machine -> latched task ids
+  repeated string pre_done = 2;                                          // machines whose Verify.pre_done is set
+  repeated string failed = 3;                                            // machines whose Verify is done and not passed
+}
+message TaskIds { repeated string ids = 1; }

@@ -63,7 +63,7 @@ export const ROUTE_CASES = [
   },
   {
     id: "admin-scenario-detail",
-    path: "/admin/scenarios/repair-nginx",
+    path: "/admin/scenarios/intar/repair-nginx",
     sessionRole: "global-admin",
   },
   {

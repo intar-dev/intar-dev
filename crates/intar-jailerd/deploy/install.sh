@@ -109,8 +109,14 @@ done < "${archive_dir}/deploy/SHA256SUMS"
   done
 (cd "${archive_dir}" && sha256sum --check --strict deploy/SHA256SUMS)
 
-expected=448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc
-actual=$(sha256sum "${archive_dir}/cloud-hypervisor-v53.0" | awk '{print $1}')
+# The release built this runtime from source and recorded its hash; the
+# SHA256SUMS check above covers both files.
+expected=$(awk 'NR == 1 { print $1 }' "${archive_dir}/deploy/cloud-hypervisor-v55.0.0.sha256")
+case "${expected}" in
+  ''|*[!0-9a-f]*) die "Cloud Hypervisor digest file is malformed" ;;
+esac
+[ "${#expected}" -eq 64 ] || die "Cloud Hypervisor digest file is malformed"
+actual=$(sha256sum "${archive_dir}/cloud-hypervisor-v55.0.0" | awk '{print $1}')
 [ "${actual}" = "${expected}" ] || die "Cloud Hypervisor archive digest mismatch"
 
 if [ -e /etc/intar-jailerd/config.toml ] || [ -L /etc/intar-jailerd/config.toml ]; then
@@ -120,6 +126,10 @@ if [ -e /etc/intar-jailerd/config.toml ] || [ -L /etc/intar-jailerd/config.toml 
     *) die "/etc/intar-jailerd/config.toml must be root:root, 0400/0600 and one link" ;;
   esac
 fi
+# The migration below runs with the daemon stopped; a config it would refuse
+# stops the install here, while everything still runs.
+python3 "${archive_dir}/deploy/migrate-epoch-config.py" jailerd --print >/dev/null || \
+  die "/etc/intar-jailerd/config.toml cannot be migrated; nothing was changed"
 
 active_state() {
   systemctl show --property=ActiveState --value "$1"
@@ -257,6 +267,9 @@ mutated=true
 # Convert only removed CPU settings. The helper preserves other values and
 # writes root-only rollback copies before replacing either configuration.
 python3 "${archive_dir}/deploy/migrate-cpu-config.py"
+# The new jailerd refuses unknown keys: drop the retired ones and keep
+# config.toml.pre-epoch for a rollback. The agent's config has none.
+python3 "${archive_dir}/deploy/migrate-epoch-config.py" jailerd
 
 # Remove legacy direct KVM/TUN group access from the unprivileged agent.
 for group in kvm netdev; do
@@ -279,9 +292,9 @@ install -d -o root -g root -m 0755 /usr/lib/intar /usr/local/bin
 publish_file "${archive_dir}/intar-agent" /usr/local/bin/intar-agent 0755
 publish_file "${archive_dir}/intar-jailerd" /usr/lib/intar/intar-jailerd 0755
 publish_file "${archive_dir}/intar-jailer" /usr/lib/intar/intar-jailer 0755
-publish_file "${archive_dir}/cloud-hypervisor-v53.0" /usr/lib/intar/cloud-hypervisor-v53.0 0555
+publish_file "${archive_dir}/cloud-hypervisor-v55.0.0" /usr/lib/intar/cloud-hypervisor-v55.0.0 0555
 publish_file "${archive_dir}/deploy/intar-jailerd-self-test.sh" /usr/lib/intar/intar-jailerd-self-test 0755
-publish_file "${archive_dir}/deploy/cloud-hypervisor-v53.0.sha256" /usr/lib/intar/cloud-hypervisor-v53.0.sha256 0644
+publish_file "${archive_dir}/deploy/cloud-hypervisor-v55.0.0.sha256" /usr/lib/intar/cloud-hypervisor-v55.0.0.sha256 0644
 
 install -d -o root -g root -m 0755 /usr/share/doc/intar-jailerd
 publish_file "${archive_dir}/deploy/THIRD_PARTY_NOTICES.md" /usr/share/doc/intar-jailerd/THIRD_PARTY_NOTICES.md 0644
@@ -293,7 +306,7 @@ for license in Apache-2.0.txt BSD-3-Clause.txt CC-BY-4.0.txt; do
     "/usr/share/doc/intar-jailerd/cloud-hypervisor-LICENSES/${license}" 0644
 done
 
-actual=$(sha256sum /usr/lib/intar/cloud-hypervisor-v53.0 | awk '{print $1}')
+actual=$(sha256sum /usr/lib/intar/cloud-hypervisor-v55.0.0 | awk '{print $1}')
 [ "${actual}" = "${expected}" ] || die "Cloud Hypervisor digest changed during installation"
 
 install -d -o root -g root -m 0755 /etc/intar-jailerd
@@ -302,9 +315,31 @@ if [ ! -e /etc/intar-jailerd/config.toml ]; then
   sed \
     -e "s/^agent_uid = .*/agent_uid = ${agent_uid}/" \
     -e "s/^agent_gid = .*/agent_gid = ${agent_gid}/" \
+    -e "s/^cloud_hypervisor_sha256 = .*/cloud_hypervisor_sha256 = \"${expected}\"/" \
     "${archive_dir}/deploy/config.example.toml" > "${config_tmp}"
   chown root:root "${config_tmp}"
   chmod 0600 "${config_tmp}"
+  mv -f -- "${config_tmp}" /etc/intar-jailerd/config.toml
+else
+  # An existing config keeps every setting except the runtime this release
+  # ships: its path and the hash of this build. Both lines are dropped
+  # wherever they are and written first, so a config without the hash line or
+  # with other spacing ends up right too; the result is read back.
+  config_tmp=$(mktemp /etc/intar-jailerd/.config.toml.XXXXXX)
+  {
+    printf 'cloud_hypervisor_binary = "/usr/lib/intar/cloud-hypervisor-v55.0.0"\n'
+    printf 'cloud_hypervisor_sha256 = "%s"\n' "${expected}"
+    sed -E '/^[[:space:]]*cloud_hypervisor_(binary|sha256)[[:space:]]*=/d' /etc/intar-jailerd/config.toml
+  } > "${config_tmp}"
+  python3 - "${config_tmp}" "${expected}" <<'PY' || { rm -f -- "${config_tmp}"; die "could not update /etc/intar-jailerd/config.toml"; }
+import sys, tomllib
+with open(sys.argv[1], "rb") as handle:
+    config = tomllib.load(handle)
+assert config["cloud_hypervisor_binary"] == "/usr/lib/intar/cloud-hypervisor-v55.0.0"
+assert config["cloud_hypervisor_sha256"] == sys.argv[2]
+PY
+  chown root:root "${config_tmp}"
+  chmod --reference=/etc/intar-jailerd/config.toml "${config_tmp}"
   mv -f -- "${config_tmp}" /etc/intar-jailerd/config.toml
 fi
 

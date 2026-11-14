@@ -1,7 +1,5 @@
 export type {
-  ScenarioCatalogEntry,
   CourseLocation,
-  ScenarioDetail,
   ScenarioRunRecord,
   ScenarioTerminalSessionResult,
   ScenarioRunListEntry,
@@ -10,8 +8,7 @@ export type {
 } from "./scenario-runs/types";
 export type { ScenarioRunSavingStage } from "./scenario-runs/saving-stage";
 export {
-  listEnabledScenariosForUser,
-  loadEnabledScenarioForUser,
+  listEnabledScenarioTitles,
   getScenarioRunForUser,
   listScenarioRunsForUser,
   resolveScenarioCourseLocationForUser,

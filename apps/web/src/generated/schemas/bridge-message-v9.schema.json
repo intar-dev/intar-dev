@@ -1,0 +1,1684 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BridgeMessageV9",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "agent_version": {
+          "type": "string"
+        },
+        "builder": {
+          "description": "What a builder builds and compiles for; absent on an agent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuilderHelloV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "guest_contract": {
+          "description": "Picks the host's Kino and gates placement.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hardware": {
+          "$ref": "#/$defs/HostHardwareV1"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "last_applied_desired_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 9,
+          "minimum": 9
+        },
+        "role": {
+          "$ref": "#/$defs/HostRoleV1"
+        },
+        "type": {
+          "type": "string",
+          "const": "client_hello"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "protocol_version",
+        "host_id",
+        "agent_version",
+        "role",
+        "guest_contract",
+        "hardware"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "desired_version": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 9,
+          "minimum": 9
+        },
+        "relay": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostRelayCredentials"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "server_hello"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "session_id",
+        "protocol_version",
+        "host_id",
+        "desired_version"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "desired_state": {
+          "$ref": "#/$defs/HostDesiredStateV3"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 9,
+          "minimum": 9
+        },
+        "relay": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostRelayCredentials"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "desired_state"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "protocol_version",
+        "host_id",
+        "desired_state"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 9,
+          "minimum": 9
+        },
+        "report": {
+          "$ref": "#/$defs/HostStateReportV3"
+        },
+        "type": {
+          "type": "string",
+          "const": "state_report"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "protocol_version",
+        "host_id",
+        "report"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 9,
+          "minimum": 9
+        },
+        "report": {
+          "$ref": "#/$defs/VmReportV3"
+        },
+        "type": {
+          "type": "string",
+          "const": "vm_report"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "protocol_version",
+        "host_id",
+        "report"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 9,
+          "minimum": 9
+        },
+        "report": {
+          "$ref": "#/$defs/BuildReportV2"
+        },
+        "type": {
+          "type": "string",
+          "const": "build_report"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "protocol_version",
+        "host_id",
+        "report"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 9,
+          "minimum": 9
+        },
+        "reason": {
+          "$ref": "#/$defs/SyncRequestReason"
+        },
+        "type": {
+          "type": "string",
+          "const": "sync_request"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "protocol_version",
+        "host_id",
+        "reason"
+      ]
+    }
+  ],
+  "$defs": {
+    "BuildPhaseV2": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "fetching_sources",
+        "building",
+        "pushing",
+        "succeeded",
+        "failed"
+      ]
+    },
+    "BuildReportV2": {
+      "description": "One build's state, sent as soon as it changes. `image_digest` is the\npushed manifest, present exactly when the build succeeded.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "build_id": {
+          "type": "string"
+        },
+        "build_key": {
+          "$ref": "#/$defs/OciDigest"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finished_at_unix_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "image_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OciDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "phase": {
+          "$ref": "#/$defs/BuildPhaseV2"
+        },
+        "started_at_unix_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "build_id",
+        "build_key",
+        "attempt",
+        "phase",
+        "observed_at_unix_ms"
+      ]
+    },
+    "BuildTargetV1": {
+      "description": "What a build builds: a repository image (`trixie` is the platform base)\nor a scenario's machine.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "image"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "machine"
+            },
+            "machine": {
+              "type": "string"
+            },
+            "scenario": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "scenario",
+            "machine"
+          ]
+        }
+      ]
+    },
+    "BuilderHelloV1": {
+      "description": "A builder is assigned only builds of its `image_format` and compiles of\nits `source_compile_digest`.",
+      "type": "object",
+      "properties": {
+        "image_format": {
+          "type": "string"
+        },
+        "source_compile_digest": {
+          "description": "`source_compile_digest(image_format, compiler version)`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "image_format",
+        "source_compile_digest"
+      ]
+    },
+    "CachedImageStateV2": {
+      "type": "object",
+      "properties": {
+        "bytes_on_disk": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image": {
+          "$ref": "#/$defs/OciDigest"
+        },
+        "phase": {
+          "$ref": "#/$defs/ImageCachePhase"
+        },
+        "updated_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "phase",
+        "updated_at_unix_ms"
+      ]
+    },
+    "CheckStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "pass",
+        "fail",
+        "error"
+      ]
+    },
+    "DesiredBuildV2": {
+      "description": "One image to build out of a stored bundle, and push.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "build_id": {
+          "type": "string"
+        },
+        "build_key": {
+          "description": "The key the builder recomputes from the bundle; a mismatch refuses\nthe build.",
+          "$ref": "#/$defs/OciDigest"
+        },
+        "bundle_rev": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/BuildTargetV1"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "build_id",
+        "build_key",
+        "bundle_rev",
+        "target",
+        "attempt"
+      ]
+    },
+    "DesiredSourceCompileV2": {
+      "description": "One repository snapshot to compile into a bundle, or only validate.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "compile_id": {
+          "type": "string"
+        },
+        "rev": {
+          "type": "string"
+        },
+        "validate_only": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "compile_id",
+        "attempt",
+        "rev",
+        "validate_only"
+      ]
+    },
+    "DesiredVmPhase": {
+      "type": "string",
+      "enum": [
+        "running",
+        "absent"
+      ]
+    },
+    "DesiredVmV3": {
+      "description": "One VM to run. It carries no address: the host allocates the run's\nnetwork.",
+      "type": "object",
+      "properties": {
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "desired_phase": {
+          "$ref": "#/$defs/DesiredVmPhase"
+        },
+        "disk_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "egress": {
+          "description": "Internet behind the floor; otherwise only the run's own network.",
+          "type": "boolean"
+        },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "image": {
+          "description": "The machine image's manifest.",
+          "$ref": "#/$defs/OciDigest"
+        },
+        "kino": {
+          "description": "The Kino manifest this run was pinned to at its start.",
+          "$ref": "#/$defs/OciDigest"
+        },
+        "lease_expires_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "memory_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "mode": {
+          "$ref": "#/$defs/SpecMode"
+        },
+        "name": {
+          "description": "The machine's name in its scenario.",
+          "type": "string"
+        },
+        "owner_user_id": {
+          "type": "string"
+        },
+        "peers": {
+          "description": "The run's other machines, by name.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "runtime_execution_id": {
+          "type": "string"
+        },
+        "spec": {
+          "description": "The machine spec blob for `mode`.",
+          "$ref": "#/$defs/OciDigest"
+        },
+        "ssh_authorized_keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "terminal": {
+          "description": "False for a helper machine: no SSH, no recording disk.",
+          "type": "boolean"
+        },
+        "vm_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "vm_id",
+        "name",
+        "run_id",
+        "runtime_execution_id",
+        "owner_user_id",
+        "generation",
+        "desired_phase",
+        "lease_expires_at_unix_ms",
+        "image",
+        "kino",
+        "spec",
+        "mode",
+        "cpu_millis",
+        "memory_mib",
+        "disk_mib",
+        "peers",
+        "ssh_authorized_keys",
+        "terminal",
+        "egress"
+      ]
+    },
+    "HostCapacityV2": {
+      "type": "object",
+      "properties": {
+        "committed_cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "disk_available_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "disk_probe_path": {
+          "description": "Filesystem the disk figures were probed on (the VM/image data root).",
+          "type": "string"
+        },
+        "disk_total_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "load_avg_15m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "load_avg_1m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "load_avg_5m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "memory_available_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "memory_total_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "primary_ipv4": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "primary_ipv6": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reserved_cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "schedulable_cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total_cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "total_cpu_millis",
+        "reserved_cpu_millis",
+        "schedulable_cpu_millis",
+        "committed_cpu_millis",
+        "memory_total_mib",
+        "memory_available_mib",
+        "disk_probe_path",
+        "disk_total_mib",
+        "disk_available_mib"
+      ]
+    },
+    "HostDesiredStateV3": {
+      "type": "object",
+      "properties": {
+        "builds": {
+          "description": "Empty for an agent.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DesiredBuildV2"
+          }
+        },
+        "cached_images": {
+          "description": "Machine images to hold, by manifest digest.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OciDigest"
+          }
+        },
+        "generated_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "kino_pin": {
+          "description": "The newest Kino of this host's guest contract; `None` when there is\nnone, and then the host is not placed.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OciDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_user_id": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 7,
+          "minimum": 7
+        },
+        "scope": {
+          "$ref": "#/$defs/HostScope"
+        },
+        "source_compiles": {
+          "description": "Empty for an agent.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DesiredSourceCompileV2"
+          }
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DesiredVmV3"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "owner_user_id",
+        "schema_version",
+        "host_id",
+        "version",
+        "generated_at_unix_ms",
+        "cached_images",
+        "vms",
+        "builds",
+        "source_compiles"
+      ]
+    },
+    "HostHardwareV1": {
+      "description": "What the host can do. Facts only: no rollout switches.",
+      "type": "object",
+      "properties": {
+        "cgroup_v2": {
+          "type": "boolean"
+        },
+        "cloud_hypervisor_sha256": {
+          "description": "Root-owned runtime identity. `None` means the host has no live\njailerd attestation and is never performance-ready.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hard_cpu_quota": {
+          "type": "boolean"
+        },
+        "kvm": {
+          "type": "boolean"
+        },
+        "landlock": {
+          "type": "boolean"
+        },
+        "reflink": {
+          "type": "boolean"
+        },
+        "vsock": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kvm",
+        "vsock",
+        "reflink",
+        "landlock",
+        "cgroup_v2",
+        "hard_cpu_quota"
+      ]
+    },
+    "HostRelayCredentials": {
+      "type": "object",
+      "properties": {
+        "expires_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "gateway_host_key_openssh": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/HostRelayIdentity"
+        },
+        "token": {
+          "type": "string"
+        },
+        "websocket_url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "websocket_url",
+        "token",
+        "gateway_host_key_openssh",
+        "identity",
+        "expires_at_unix_ms"
+      ]
+    },
+    "HostRelayIdentity": {
+      "type": "object",
+      "properties": {
+        "credential_generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host_id",
+        "session_id",
+        "credential_generation"
+      ]
+    },
+    "HostRoleV1": {
+      "type": "string",
+      "enum": [
+        "agent",
+        "builder"
+      ]
+    },
+    "HostScope": {
+      "type": "string",
+      "enum": [
+        "personal",
+        "platform",
+        "organization"
+      ]
+    },
+    "HostStateReportV3": {
+      "type": "object",
+      "properties": {
+        "applied_desired_version": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cached_images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CachedImageStateV2"
+          }
+        },
+        "capacity": {
+          "$ref": "#/$defs/HostCapacityV2"
+        },
+        "guest_contract": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hardware": {
+          "$ref": "#/$defs/HostHardwareV1"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "observed_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "relay_connected": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 8,
+          "minimum": 8
+        },
+        "vms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VmStateV3"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "host_id",
+        "observed_at_unix_ms",
+        "applied_desired_version",
+        "relay_connected",
+        "guest_contract",
+        "hardware",
+        "capacity",
+        "cached_images",
+        "vms"
+      ]
+    },
+    "ImageCachePhase": {
+      "type": "string",
+      "enum": [
+        "missing",
+        "queued",
+        "downloading",
+        "ready",
+        "failed"
+      ]
+    },
+    "LabState": {
+      "type": "string",
+      "enum": [
+        "preparing",
+        "ready",
+        "failed"
+      ]
+    },
+    "OciDigest": {
+      "description": "An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "SpecMode": {
+      "type": "string",
+      "enum": [
+        "learn",
+        "verify"
+      ]
+    },
+    "SyncRequestReason": {
+      "type": "string",
+      "enum": [
+        "connect",
+        "reconnect",
+        "desired_version_lag",
+        "operator_requested"
+      ]
+    },
+    "VmArchivePhase": {
+      "type": "string",
+      "enum": [
+        "none",
+        "pending",
+        "uploading",
+        "complete",
+        "failed"
+      ]
+    },
+    "VmArchiveStateV1": {
+      "type": "object",
+      "properties": {
+        "artifact_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/VmArchivePhase"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "artifact_count"
+      ]
+    },
+    "VmLabV1": {
+      "description": "What Kino reported, re-truncated on the host. Only `tasks` is for\nlearners; tails and `failure` are for admins.",
+      "type": "object",
+      "properties": {
+        "failure": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kino_version": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VmReadyV1"
+          }
+        },
+        "state": {
+          "$ref": "#/$defs/LabState"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VmTaskV1"
+          }
+        },
+        "timings_ms": {
+          "description": "Guest uptime in ms at each step.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "verify": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmVerifyV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "kino_version",
+        "ready",
+        "tasks",
+        "timings_ms"
+      ]
+    },
+    "VmNetworkStateV1": {
+      "type": "object",
+      "properties": {
+        "bridge_name": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "guest_cidr": {
+          "type": "string"
+        },
+        "guest_ip": {
+          "type": "string"
+        },
+        "ssh_host": {
+          "description": "Publicly routable address of the agent host's SSH forward for this VM\n(the agent's advertised host). The guest IP is only reachable within\nthe agent's internal VM network.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ssh_host_port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "bridge_name",
+        "guest_ip",
+        "guest_cidr",
+        "gateway"
+      ]
+    },
+    "VmPhaseV2": {
+      "description": "`Ready` means SSH is up and a terminal can open; the lab's own state is\n`lab`. The host decides nothing about tasks.",
+      "type": "string",
+      "enum": [
+        "pending",
+        "pulling_image",
+        "creating_disks",
+        "booting",
+        "running",
+        "ready",
+        "stopping",
+        "stopped",
+        "failed",
+        "absent"
+      ]
+    },
+    "VmReadyV1": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "tail": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "status",
+        "tail"
+      ]
+    },
+    "VmReportV3": {
+      "description": "A VM report is one VM's state, sent as soon as it changes.",
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": "string"
+        },
+        "observed_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 7,
+          "minimum": 7
+        },
+        "vm": {
+          "$ref": "#/$defs/VmStateV3"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "host_id",
+        "observed_at_unix_ms",
+        "vm"
+      ]
+    },
+    "VmResourceStateV3": {
+      "type": "object",
+      "properties": {
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "cpu_nr_periods": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_nr_throttled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_period_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cpu_quota_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cpu_system_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_throttled_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_usage_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_user_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cpu_millis",
+        "cpu_quota_us",
+        "cpu_period_us",
+        "cpu_usage_usec",
+        "cpu_user_usec",
+        "cpu_system_usec",
+        "cpu_nr_periods",
+        "cpu_nr_throttled",
+        "cpu_throttled_usec"
+      ]
+    },
+    "VmRuntimeConstraintsV2": {
+      "type": "object",
+      "properties": {
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "generation": {
+          "description": "Jailer-owned generation to which every quota and ingress attestation\nin this object applies. The breaking v2 contract never accepts\ngeneration-less quota evidence.",
+          "type": "string"
+        },
+        "quota_verified_at_unix_ms": {
+          "description": "Timestamp of the authoritative live cgroup readback. Required by the\ncontrol plane before a verified runtime can expose a terminal.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "generation",
+        "cpu_millis"
+      ]
+    },
+    "VmSandboxStateV1": {
+      "type": "object",
+      "properties": {
+        "cgroup_path": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "string"
+        },
+        "healthy": {
+          "type": "boolean"
+        },
+        "landlock_enabled": {
+          "type": "boolean"
+        },
+        "no_new_privs": {
+          "type": "boolean"
+        },
+        "seccomp_enabled": {
+          "type": "boolean"
+        },
+        "systemd_unit": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "healthy",
+        "generation",
+        "systemd_unit",
+        "cgroup_path",
+        "seccomp_enabled",
+        "landlock_enabled",
+        "no_new_privs"
+      ]
+    },
+    "VmStartPath": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "cold",
+            "wake"
+          ]
+        },
+        {
+          "description": "A wake that did not report in time; the VM was cold-booted instead.",
+          "type": "string",
+          "const": "wake_fallback"
+        }
+      ]
+    },
+    "VmStartV1": {
+      "type": "object",
+      "properties": {
+        "first_report_ms": {
+          "description": "From the VMM's start to Kino's first report for this run.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "path": {
+          "$ref": "#/$defs/VmStartPath"
+        },
+        "reason": {
+          "description": "Why not a wake, or why the wake fell back; for operators.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "VmStateV3": {
+      "type": "object",
+      "properties": {
+        "archive": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmArchiveStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "desired_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OciDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kino": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OciDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lab": {
+          "description": "Absent until Kino's first report for this run's `boot.json`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmLabV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "network": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmNetworkStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_user_id": {
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/$defs/VmPhaseV2"
+        },
+        "resource_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmResourceStateV3"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "runtime_constraints": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmRuntimeConstraintsV2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_execution_id": {
+          "type": "string"
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmSandboxStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ssh_host_keys_openssh": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "start": {
+          "description": "How the VM was started; absent until it was.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmStartV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal": {
+          "$ref": "#/$defs/VmTerminalStateV1"
+        },
+        "updated_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "owner_user_id",
+        "runtime_execution_id",
+        "generation",
+        "run_id",
+        "name",
+        "phase",
+        "terminal",
+        "ssh_host_keys_openssh",
+        "updated_at_unix_ms"
+      ]
+    },
+    "VmTaskV1": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "passed_at_unix_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "$ref": "#/$defs/CheckStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "message"
+      ]
+    },
+    "VmTerminalStateKindV1": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "ready",
+        "failed"
+      ]
+    },
+    "VmTerminalStateV1": {
+      "type": "object",
+      "properties": {
+        "observed_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/VmTerminalStateKindV1"
+        },
+        "target": {
+          "description": "Present only when `state` is `ready`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmTerminalTargetV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "observed_at_unix_ms"
+      ]
+    },
+    "VmTerminalTargetV1": {
+      "type": "object",
+      "properties": {
+        "checked_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "port",
+        "username",
+        "checked_at_unix_ms"
+      ]
+    },
+    "VmVerifyStepV1": {
+      "type": "object",
+      "properties": {
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "post": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "pre": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "solve_exit": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "tail": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "waiting_for": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "pre",
+        "solve_exit",
+        "post",
+        "duration_ms",
+        "tail",
+        "waiting_for"
+      ]
+    },
+    "VmVerifyV1": {
+      "type": "object",
+      "properties": {
+        "done": {
+          "type": "boolean"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "pre_done": {
+          "type": "boolean"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VmVerifyStepV1"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "steps",
+        "done",
+        "passed",
+        "pre_done"
+      ]
+    }
+  }
+}

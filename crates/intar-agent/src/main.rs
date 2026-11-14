@@ -6,9 +6,7 @@ mod db;
 mod drain;
 mod host_profile;
 mod image_cache;
-mod kino_probe;
 mod preflight;
-mod proto;
 mod relay;
 mod tls_provider;
 mod vm;
@@ -110,7 +108,7 @@ async fn main() -> Result<()> {
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
             .build()?;
-        bridge::bootstrap_agent_access(&cfg.bridge, &http)
+        bridge::bootstrap_before_recovery(&cfg.bridge, &http)
             .await
             .context("host authentication failed before local recovery")?;
     }
@@ -120,6 +118,12 @@ async fn main() -> Result<()> {
     bridge::validate_restart(&cfg.bridge, &db, &persisted).await?;
     let vm = vm::VmManager::new(&cfg, db.clone(), persisted)
         .context("failed to initialize VM manager HTTP clients")?;
+    vm.tear_down_previous_schema().await;
+    match image_cache::default_cache_root().and_then(|root| image_cache::sweep_cache_layout(&root))
+    {
+        Ok(_) => {}
+        Err(error) => tracing::warn!(error = %error, "failed to sweep the image cache layout"),
+    }
     image_cache::spawn_warm_cache_with_bridge(
         cfg.image_registry.clone(),
         cfg.bridge.clone(),
@@ -213,7 +217,6 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to bind to {bind}"))?;
 
     info!(bind = %bind, "intar-agent listening");
-    image_cache::spawn_log_cache_state_with_bridge(cfg.image_registry.clone(), cfg.bridge.clone());
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

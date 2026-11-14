@@ -138,32 +138,11 @@ existing reason with `registry_cleanup_hold`, and its release resumes the
 collector. Pause a `report-only` collector again after a website deploy if it
 must stay paused.
 
-To roll out new guest tools, run these from `main` in order:
-
-1. image-ops `gate-drained`, which stops new runs and waits for the fleet to
-   drain.
-2. image-ops `tools-build` with the published `kino_tag`. It builds the tools
-   disk from that Kino release and the image CLI release the website pins,
-   uploads the candidate, and keeps it in the `guest-tools-deployment-<run_id>`
-   artifact.
-3. image-ops `tools-promote` with a verified build `revision` to warm and
-   check against, and `expected_candidate_sha256`, the SHA-256 of that
-   artifact's `candidate.json`. It makes the candidate the stable channel.
-4. A Deploy dispatch from `main` (`gh workflow run deploy.yml --ref main`). It
-   deploys `main`'s tip from its latest successful CI run, and every deploy
-   pins the stable channel, so this one pins the promoted tools. When that CI
-   run's builds have expired, dispatch CI instead
-   (`gh workflow run ci.yml --ref main`); it deploys once it passes. When no CI
-   run passed for the tip because of a job outside the web lane, add
-   `-f break_glass=true` to the Deploy dispatch.
-5. image-ops `gate-open`.
-
-`swamp workflow run kino-rollout --input version=X.Y.Z --input revision=<rev>`,
-run from the repository root, runs these steps. It takes the
-`candidate.json` SHA-256 from the build's artifact itself, and stops for
-approval before the drain and before the promotion; after each
-`swamp workflow approve kino-rollout <step>`,
-`swamp workflow resume kino-rollout` continues the run.
+Hosts take Kino as a stored Kino artifact. `KINO_PINS_JSON` pins one per
+guest contract, as `{"<contract>":{"current":"sha256:<hex>","previous":null}}`;
+a pin whose digest is not a stored Kino artifact for that contract pins nothing.
+The website deploy sets it from `tools/deploy/kino-pin.json`, which the release
+workflow writes; without that file the variable is unset and no VM is placed.
 
 ## Sign-ups
 

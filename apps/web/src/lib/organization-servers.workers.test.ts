@@ -14,9 +14,7 @@ import { GET } from "@/pages/api/organizations/[orgId]/servers/index";
 import { POST } from "@/pages/api/organizations/[orgId]/servers/enrollments";
 import { PATCH, DELETE } from "@/pages/api/organizations/[orgId]/servers/[hostId]";
 import { DELETE as CANCEL } from "@/pages/api/organizations/[orgId]/servers/enrollments/[enrollmentId]";
-import fixture from "@/generated/fixtures/bridge/host-state-report-v2.json";
-import type { HostStateReportV2 } from "@/generated/bridge";
-import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
+import { stateReport } from "@/control-plane/host-runtime-do/test-fixtures";
 
 const mocks = vi.hoisted(() => ({ auth: vi.fn(), cleanup: vi.fn() }));
 vi.mock("@/lib/agent-bridge", async importOriginal => ({ ...await importOriginal<typeof import("@/lib/agent-bridge")>(), requireUserContext: mocks.auth }));
@@ -157,7 +155,7 @@ it("lets another admin cancel an enrollment and never cancels an enrolled host",
 it("keeps placement sticky when paused and returns the personal server row fields", async () => {
   await host();
   const now = Date.now();
-  const report = { ...structuredClone(fixture), host_id: "host", schema_version: HOST_STATE_REPORT_SCHEMA_VERSION, relay_connected: true, vms: [], builds: [] } as HostStateReportV2;
+  const report = stateReport("host", { observedAt: now, appliedDesiredVersion: 0 }).report;
   await drizzle(env.DB).insert(hostActualState).values({ hostId: "host", appliedDesiredVersion: 0, observedAt: now, reportJson: report, updatedAt: now });
   await env.DB.prepare("UPDATE agent_hosts SET connected = 1, last_heartbeat_at = ?").bind(now).run();
   await env.DB.prepare("UPDATE organization SET metal_placement = 'organization' WHERE id = 'org'").run();
@@ -265,7 +263,7 @@ it("rechecks the acting admin when changing a member role", async () => {
 async function pausedHostReport(reportedAt = Date.now()) {
   await host();
   const now = Date.now();
-  const report = { ...structuredClone(fixture), host_id: "host", schema_version: HOST_STATE_REPORT_SCHEMA_VERSION, relay_connected: true, vms: [], builds: [] } as HostStateReportV2;
+  const report = stateReport("host", { observedAt: now, appliedDesiredVersion: 0 }).report;
   await drizzle(env.DB).insert(hostActualState).values({ hostId: "host", appliedDesiredVersion: 0, observedAt: reportedAt, reportJson: report, updatedAt: reportedAt });
   await env.DB.prepare("UPDATE agent_hosts SET scenario_enabled = 0, connected = 1, active_session_id = 'session', last_heartbeat_at = ? WHERE id = 'host'").bind(now).run();
 }

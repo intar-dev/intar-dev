@@ -1,5 +1,8 @@
 import { HttpResponseError } from "@/components/app/lib/http-response-error";
-import type { OrganizationRemovedMemberRecord } from "@/lib/organizations";
+import type {
+  OrganizationRemovedMemberRecord,
+  OrganizationSlugState,
+} from "@/lib/organizations";
 
 export type OrganizationRole = "owner" | "admin" | "member";
 
@@ -22,6 +25,8 @@ export interface OrganizationDetailResponse {
     }>;
     /** People an admin removed; only admins receive them. */
     removedMembers: OrganizationRemovedMemberRecord[];
+    /** Whether the slug can still change; only admins receive it. */
+    slugState: OrganizationSlugState | null;
   };
 }
 

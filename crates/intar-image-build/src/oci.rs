@@ -9,17 +9,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use fs2::FileExt as _;
-use intar_image_scenario::BaseImageSpec;
 use serde::{Deserialize, Serialize};
 use tar::Archive;
 
-use crate::artifact::sha256_file_hex;
 use crate::config::QemuBuildConfig;
-use crate::content_hash::sha256_bytes_hex;
 use crate::rootfs::{
-    BASE_EXT4_LABEL, BaseRootfsArtifact, BaseRootfsLease, RootfsBuildPlan,
+    BASE_EXT4_LABEL, BaseImageSpec, BaseRootfsArtifact, BaseRootfsLease, RootfsBuildPlan,
     base_rootfs_artifact_from_plan, create_base_ext4, install_kernel_boot_artifacts,
 };
+use crate::sha256::sha256_bytes_hex;
+use crate::sha256::sha256_file_hex;
 
 const OCI_BASE_CACHE_ABI: &str = "intar-oci-base-v3";
 const OCI_IMAGE_NAME: &str = "intar-base:latest";
@@ -44,10 +43,16 @@ const KERNEL_STAGE_NAME: &str = "intar-kernel";
 const KERNEL_BUILD_SCRIPT_FILE: &str = "intar-kernel-build.sh";
 const KERNEL_CONFIG_FILE: &str = "intar-kernel.config";
 const KERNEL_INIT_SCRIPT_FILE: &str = "intar-initramfs-init.sh";
+const KERNEL_PATCH_FILE: &str = "kvmclock-resume.patch";
+const WAKE_STUB_SOURCE_FILE: &str = "wake-stub.S";
+const WAKE_STUB_LINKER_FILE: &str = "wake-stub.ld";
 /// In-container paths for the kernel stage.
 const KERNEL_BUILD_SCRIPT_PATH: &str = "/usr/local/libexec/intar/intar-kernel-build.sh";
 const KERNEL_STAGE_CONFIG_PATH: &str = "/build/intar-kernel.config";
 const KERNEL_STAGE_INIT_PATH: &str = "/build/intar-initramfs-init.sh";
+const KERNEL_STAGE_PATCH_PATH: &str = "/build/kvmclock-resume.patch";
+const WAKE_STUB_STAGE_SOURCE_PATH: &str = "/build/wake-stub.S";
+const WAKE_STUB_STAGE_LINKER_PATH: &str = "/build/wake-stub.ld";
 const KERNEL_STAGE_OUTPUT_DIR: &str = "/kernel";
 
 static OCI_BUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -103,12 +108,13 @@ pub(crate) fn layered_definition_hash(
     config: &QemuBuildConfig,
 ) -> String {
     let identity = format!(
-        "{}\n--hooks--\n{essential_hook}\n--\n{customize_hook}\n--layered-oci--\nabi={OCI_BASE_CACHE_ABI}\nimage={}\nplatform=linux/{}\nfilesystem=ext4\nlabel={BASE_EXT4_LABEL}\nmke2fs={}\nkernel={}",
+        "{}\n--hooks--\n{essential_hook}\n--\n{customize_hook}\n--layered-oci--\nabi={OCI_BASE_CACHE_ABI}\nimage={}\nplatform=linux/{}\nfilesystem=ext4\nlabel={BASE_EXT4_LABEL}\nmke2fs={}\nkernel={}\ns3_ssdt={}",
         base.content_identity(),
         config.layered.debian_image,
         base.arch,
         config.mke2fs_binary.display(),
         crate::kernel::kernel_profile_digest(),
+        sha256_bytes_hex(&crate::wake::ssdt_initrd_prefix()),
     );
     sha256_bytes_hex(identity.as_bytes())
 }
@@ -577,6 +583,17 @@ fn write_oci_build_context(
             context_dir.display()
         )
     })?;
+    for (file, content) in [
+        (KERNEL_PATCH_FILE, crate::kernel::KERNEL_PATCH),
+        (WAKE_STUB_SOURCE_FILE, crate::kernel::WAKE_STUB_SOURCE),
+        (
+            WAKE_STUB_LINKER_FILE,
+            crate::kernel::WAKE_STUB_LINKER_SCRIPT,
+        ),
+    ] {
+        fs::write(context_dir.join(file), content)
+            .with_context(|| format!("failed to write {file} in '{}'", context_dir.display()))?;
+    }
     fs::write(
         context_dir.join(KERNEL_INIT_SCRIPT_FILE),
         crate::kernel::KERNEL_INITRAMFS_INIT_SCRIPT,
@@ -642,6 +659,25 @@ fn render_oci_dockerfile(base: &BaseImageSpec, config: &QemuBuildConfig) -> Resu
     dockerfile.push_str(&format!(
         "COPY {KERNEL_INIT_SCRIPT_FILE} {KERNEL_STAGE_INIT_PATH}\n"
     ));
+    for (file, path, variable) in [
+        (
+            KERNEL_PATCH_FILE,
+            KERNEL_STAGE_PATCH_PATH,
+            "INTAR_KERNEL_PATCH",
+        ),
+        (
+            WAKE_STUB_SOURCE_FILE,
+            WAKE_STUB_STAGE_SOURCE_PATH,
+            "INTAR_WAKE_STUB_SOURCE",
+        ),
+        (
+            WAKE_STUB_LINKER_FILE,
+            WAKE_STUB_STAGE_LINKER_PATH,
+            "INTAR_WAKE_STUB_LINKER",
+        ),
+    ] {
+        dockerfile.push_str(&format!("COPY {file} {path}\nENV {variable}={path}\n"));
+    }
     dockerfile.push_str(&docker_run([
         "rm",
         "-f",
@@ -713,6 +749,10 @@ fn render_oci_dockerfile(base: &BaseImageSpec, config: &QemuBuildConfig) -> Resu
     dockerfile.push_str(&format!(
         "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/kernel-build.json {}\n",
         crate::kernel::KERNEL_PROVENANCE_PATH
+    ));
+    dockerfile.push_str(&format!(
+        "COPY --from={KERNEL_STAGE_NAME} {KERNEL_STAGE_OUTPUT_DIR}/wake-stubs.tar {}\n",
+        crate::kernel::WAKE_STUB_TEMPLATES_PATH
     ));
     dockerfile.push_str(&docker_run(["update-ca-certificates", "--fresh"])?);
     dockerfile.push_str(&docker_run([
@@ -1016,7 +1056,7 @@ fn cached_base_rootfs_artifact(
         kernel_path: directory.join(KERNEL_FILE),
         initrd_path: directory.join(INITRD_FILE),
         definition_hash: plan.definition_hash.clone(),
-        lease: Arc::new(BaseRootfsLease::Cache { _lock: lease }),
+        _lease: Arc::new(BaseRootfsLease::Cache { _lock: lease }),
     })
 }
 
@@ -1385,7 +1425,6 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
-    use intar_image_scenario::BaseImageCatalog;
     use tar::{Archive, Builder, EntryType, Header};
 
     use super::{
@@ -1399,23 +1438,8 @@ mod tests {
         write_artifact_record, write_oci_build_context, write_oci_neutral_host_files,
     };
     use crate::config::QemuBuildConfig;
-    use crate::content_hash::sha256_bytes_hex;
-    use crate::rootfs::render_rootfs_build_plan;
-
-    fn base_image() -> intar_image_scenario::BaseImageSpec {
-        let catalog = BaseImageCatalog::parse(
-            r#"
-base_image "trixie" {
-  suite          = "trixie"
-  mirror         = "https://deb.debian.org/debian"
-  arch           = "amd64"
-  packages       = ["acpid", "openssh-server", "ca-certificates", "curl", "iproute2", "e2fsprogs", "kmod", "systemd-sysv", "udev", "sudo"]
-}
-"#,
-        )
-        .unwrap();
-        catalog.base_image_by_name("trixie").unwrap().clone()
-    }
+    use crate::platform::{platform_base_spec, render_platform_rootfs_plan};
+    use crate::sha256::sha256_bytes_hex;
 
     fn layered_config(root: &std::path::Path) -> QemuBuildConfig {
         let mut config = QemuBuildConfig {
@@ -1432,7 +1456,7 @@ base_image "trixie" {
     #[test]
     fn dockerfile_uses_a_pinned_debian_base_and_current_bootstrap_contract() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
+        let base = platform_base_spec();
         let dockerfile = render_oci_dockerfile(&base, &layered_config(root.path())).unwrap();
 
         assert!(!dockerfile.starts_with("# syntax="));
@@ -1536,9 +1560,9 @@ base_image "trixie" {
         let root = tempfile::tempdir().unwrap();
         let context = root.path().join("context");
         fs::create_dir_all(&context).unwrap();
-        let base = base_image();
+        let base = platform_base_spec();
         let config = layered_config(root.path());
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let bytes =
             b"-----BEGIN CERTIFICATE-----\npublic test certificate\n-----END CERTIFICATE-----\n"
                 .to_vec();
@@ -1570,7 +1594,7 @@ base_image "trixie" {
     #[test]
     fn layered_definition_hash_covers_the_pinned_base_and_generated_hooks() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
+        let base = platform_base_spec();
         let config = layered_config(root.path());
         let original = layered_definition_hash(&base, "essential", "customize", &config);
 
@@ -1600,9 +1624,9 @@ base_image "trixie" {
     #[test]
     fn buildctl_plan_exports_an_oci_archive_through_the_isolated_builder_socket() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
+        let base = platform_base_spec();
         let config = layered_config(root.path());
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let artifact_parent = plan.paths.base_ext4_path.parent().unwrap();
         let staging = staged_paths(&plan, artifact_parent, "base").unwrap();
 
@@ -1777,9 +1801,8 @@ base_image "trixie" {
     #[test]
     fn converted_artifact_is_verified_before_reuse() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
         let config = layered_config(root.path());
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let source = root.path().join("converted");
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join(ROOTFS_FILE), b"rootfs").unwrap();
@@ -1845,9 +1868,8 @@ base_image "trixie" {
     #[test]
     fn active_base_lease_prevents_converted_cache_eviction() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
         let config = layered_config(root.path());
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let cache_root = config.layered.oci_cache_root.clone().unwrap();
         let manifest = format!("sha256:{}", "a".repeat(64));
         let root_hash = sha256_bytes_hex(b"rootfs");
@@ -1886,9 +1908,8 @@ base_image "trixie" {
     #[test]
     fn private_base_artifact_stays_alive_until_its_lease_is_dropped() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
         let config = layered_config(root.path());
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let private_dir = private_artifact_directory(&config).unwrap();
         let staging = staged_paths(&plan, private_dir.path(), "base").unwrap();
         fs::create_dir_all(&staging.artifact_dir).unwrap();
@@ -1920,7 +1941,7 @@ base_image "trixie" {
 
         let artifact = finalize_private_staging(&staging, &record, private_dir).unwrap();
         let artifact_path = artifact.base_ext4_path.clone();
-        let lease = artifact.lease.clone();
+        let lease = artifact._lease.clone();
         assert_ne!(artifact_path, plan.paths.base_ext4_path);
         drop(artifact);
         assert!(artifact_path.is_file());
@@ -1938,10 +1959,10 @@ base_image "trixie" {
     #[test]
     fn the_dockerfile_writes_the_artifacts_where_the_installer_reads_them() {
         let root = tempfile::tempdir().unwrap();
-        let base = base_image();
+        let base = platform_base_spec();
         let config = layered_config(root.path());
         let dockerfile = render_oci_dockerfile(&base, &config).unwrap();
-        let plan = render_rootfs_build_plan(&base, &config);
+        let plan = render_platform_rootfs_plan(&config);
         let artifact_parent = plan.paths.base_ext4_path.parent().unwrap();
         let staging = staged_paths(&plan, artifact_parent, "base").unwrap();
         let rootfs = &staging.rootfs_plan.paths.rootfs_dir;
@@ -1961,8 +1982,8 @@ base_image "trixie" {
         }
         assert_eq!(
             copies.len(),
-            4,
-            "the kernel stage copies the kernel, the initramfs, the module tree, and the record: {copies:?}"
+            5,
+            "the kernel stage copies the kernel, the initramfs, the module tree, the record, and the wake stubs: {copies:?}"
         );
 
         // Write one distinguishable payload at every file destination the
@@ -1977,7 +1998,7 @@ base_image "trixie" {
             fs::write(&path, format!("image bytes from {source}\n")).unwrap();
             file_copies.push((source.clone(), destination.clone()));
         }
-        assert_eq!(file_copies.len(), 3, "{file_copies:?}");
+        assert_eq!(file_copies.len(), 4, "{file_copies:?}");
 
         install_kernel_boot_artifacts(&staging.rootfs_plan).unwrap();
 
@@ -1989,9 +2010,11 @@ base_image "trixie" {
             fs::read_to_string(&staging.rootfs_plan.paths.kernel_path).unwrap(),
             expected_kernel
         );
+        let mut initrd = crate::wake::ssdt_initrd_prefix();
+        initrd.extend_from_slice(expected_initrd.as_bytes());
         assert_eq!(
-            fs::read_to_string(&staging.rootfs_plan.paths.initrd_path).unwrap(),
-            expected_initrd
+            fs::read(&staging.rootfs_plan.paths.initrd_path).unwrap(),
+            initrd
         );
         // The image keeps its own copies at the destinations the writer chose.
         for (_, destination) in &file_copies {

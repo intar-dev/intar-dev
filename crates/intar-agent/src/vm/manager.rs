@@ -11,22 +11,22 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use axum::http::StatusCode;
-use cloud_hypervisor_client::{
-    Client as ChClient, ConsoleConfig, CpusConfig, DiskConfig, DiskImageType, MemoryConfig,
-    NetConfig, PayloadConfig, SerialConfig, VmConfig, VsockConfig,
-};
+use cloud_hypervisor_client::{Client as ChClient, VmConfig};
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use getrandom::fill as getrandom_fill;
-use intar_contracts::bridge::{DesiredGuestToolsV1, VmRuntimeConstraintsV2};
-use intar_contracts::catalog::GUEST_BOOTSTRAP_ABI_V2;
+use intar_contracts::bridge::VmRuntimeConstraintsV2;
+use intar_contracts::bridge_v9::{VmLabV1, VmStartPath, VmStartV1};
+use intar_contracts::oci::OciDigest;
+use intar_contracts::scenario::SpecMode;
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, AsyncSeqpacketClient, BACKGROUND_PREPARE_BYTES_PER_SECOND,
-    DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest, FinalizeVmBootResult,
-    JailPathMap, JailerCapabilities, LaunchVmV3Request, PREPARED_IMAGE_SOURCE_ROOT,
-    PrepareChunkedImageV3Request, PreparedImageV3Result, Request as JailerRequest, RequestClass,
-    Response as JailerResponse, RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts,
-    TrustedDirectorySource, ValidatedId, VmCpuRuntimeState, VmIdentityRequest, VmInspection,
-    VmLaunchRequest, VmLaunchResult,
+    CLOUD_HYPERVISOR_VERSION, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
+    FinalizeVmBootRequest, FinalizeVmBootResult, JailPathMap, JailerCapabilities,
+    LaunchVmV3Request, PREPARED_IMAGE_SOURCE_ROOT, PrepareChunkedImageV3Request,
+    PreparedImageV3Result, Request as JailerRequest, RequestClass, Response as JailerResponse,
+    RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts, TrustedDirectorySource,
+    ValidatedId, VmCpuRuntimeState, VmIdentityRequest, VmInspection, VmLaunchRequest,
+    VmLaunchResult,
 };
 use reqwest::Client as HttpClient;
 use russh::{
@@ -44,15 +44,9 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::timeout;
 use tracing::{Instrument as _, debug, error, info, warn};
 
-use crate::config::{
-    AgentConfig, BridgeConfig, ImageRegistryConfig, SshAccessConfig, VmDefaultsConfig,
-    normalize_sha256,
-};
-use crate::db::{ArchiveJobRow, Db, VmProbeStateRow, VmRow};
+use crate::config::{AgentConfig, BridgeConfig, SshAccessConfig, VmDefaultsConfig};
+use crate::db::{ArchiveJobRow, Db, PendingTeardownRow, VmLabRow, VmRow};
 use crate::image_cache;
-use crate::kino_probe::{ProbeCollectionState, ProbeUpdateEnvelope};
-#[cfg(target_os = "linux")]
-use crate::kino_probe::{ProbePollResult, decode_probe_snapshot};
 
 use super::{mac, replay_media, runtime_disk};
 
@@ -73,9 +67,17 @@ pub struct CreateScenarioVmRequest {
 
     pub name: String,
     pub run_id: String,
-    pub image: String,
-    pub image_sha256: String,
-    pub guest_tools: DesiredGuestToolsV1,
+    /// The machine image's manifest digest.
+    pub image: OciDigest,
+    /// The Kino artifact's manifest digest.
+    pub kino: OciDigest,
+    /// The machine spec blob's digest.
+    pub spec: OciDigest,
+    pub mode: SpecMode,
+    /// The VM may reach the internet; its `boot.json` then names resolvers.
+    pub egress: bool,
+    /// SSH (and with it the terminal) is enabled in the guest.
+    pub terminal: bool,
     pub resources: Option<CreateVmResources>,
     pub hostname: Option<String>,
     pub lease_duration_seconds: Option<u64>,
@@ -106,7 +108,6 @@ pub struct CreateScenarioVmRuntimeNetwork {
 #[serde(deny_unknown_fields)]
 pub struct CreateScenarioVmRuntimeKino {
     pub vsock_cid: u32,
-    pub vsock_port: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,11 +148,15 @@ pub struct VmDetails {
     pub generation: u64,
 
     #[serde(skip_serializing)]
-    pub image_key: Option<String>,
+    pub image: Option<OciDigest>,
     #[serde(skip_serializing)]
-    pub image_sha256: Option<String>,
+    pub kino: Option<OciDigest>,
+    /// SHA-256 (hex) of the exact `boot.json` bytes on the run disk.
     #[serde(skip_serializing)]
-    pub guest_tools: Option<DesiredGuestToolsV1>,
+    pub boot_sha256: Option<String>,
+    /// The machine's name in its scenario: the guest's hostname and the
+    /// name reported to the control plane. The VM's key is its `vm_id`.
+    pub machine_name: Option<String>,
     pub run_id: Option<String>,
     pub root_disk_path: String,
     pub seed_disk_path: String,
@@ -179,11 +184,13 @@ pub struct VmDetails {
     pub jail_gid: Option<u32>,
     pub jail_netns_name: Option<String>,
     pub kino_vsock_cid: Option<u32>,
-    pub kino_vsock_port: Option<u32>,
     pub kino_vsock_path: Option<String>,
     pub ssh_host_keys_openssh: Vec<String>,
     #[serde(skip_serializing)]
     pub cpu_runtime: Option<VmCpuRuntimeState>,
+    /// How the VM was started; `first_report_ms` is the lab's.
+    #[serde(skip_serializing)]
+    pub start: Option<intar_contracts::bridge_v9::VmStartV1>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -248,6 +255,65 @@ impl VmLifecycleState {
     }
 }
 
+#[cfg(test)]
+impl VmStatusResponse {
+    /// A queued VM with details and nothing launched, for tests.
+    pub(crate) fn test_status(name: &str, run_id: Option<&str>) -> Self {
+        VmStatusResponse {
+            name: name.to_string(),
+            state: VmLifecycleState::Queued,
+            created_at: "1970-01-01T00:00:00Z".to_string(),
+            updated_at: "1970-01-01T00:00:00Z".to_string(),
+            details: Some(VmDetails {
+                owner_user_id: "user-1".to_string(),
+                runtime_execution_id: "execution-1".to_string(),
+                generation: 1,
+                image: None,
+                kino: None,
+                boot_sha256: None,
+                machine_name: None,
+                run_id: run_id.map(str::to_string),
+                root_disk_path: format!("/tmp/{name}/root.raw"),
+                seed_disk_path: format!("/tmp/{name}/runtime.img"),
+                recording_disk_path: None,
+                spool_dir: None,
+                mac: "02:00:00:00:00:01".to_string(),
+                cpu_millis: Some(125),
+                guest_ip: None,
+                guest_ip_cidr: None,
+                gateway: None,
+                bridge_name: None,
+                ssh_public_port: None,
+                tap_name: None,
+                ch_socket_path: None,
+                ch_pid: None,
+                ch_start_time_ticks: None,
+                host_boot_id: None,
+                ch_executable_sha256: None,
+                jail_generation: None,
+                jail_unit_name: None,
+                jail_cgroup_path: None,
+                jail_root_path: None,
+                jail_root_inode: None,
+                jail_uid: None,
+                jail_gid: None,
+                jail_netns_name: None,
+                kino_vsock_cid: None,
+                kino_vsock_path: None,
+                ssh_host_keys_openssh: Vec::new(),
+                cpu_runtime: None,
+                start: None,
+            }),
+            error: None,
+            lease_duration_seconds: None,
+            lease_expires_at: None,
+            created_at_s: 0,
+            updated_at_s: 0,
+            running_at_s: None,
+        }
+    }
+}
+
 impl VmStatusResponse {
     fn to_db_row(&self) -> VmRow {
         VmRow {
@@ -268,14 +334,16 @@ impl VmStatusResponse {
                 .unwrap_or_default(),
             name: self.name.clone(),
             state: self.state.as_str().to_string(),
-            image_key: self.details.as_ref().and_then(|d| d.image_key.clone()),
-            image_sha256: self.details.as_ref().and_then(|d| d.image_sha256.clone()),
-            guest_tools_json: self.details.as_ref().and_then(|details| {
-                details
-                    .guest_tools
-                    .as_ref()
-                    .and_then(|pin| serde_json::to_string(pin).ok())
-            }),
+            image: self
+                .details
+                .as_ref()
+                .and_then(|d| d.image.as_ref().map(|digest| digest.as_str().to_owned())),
+            kino: self
+                .details
+                .as_ref()
+                .and_then(|d| d.kino.as_ref().map(|digest| digest.as_str().to_owned())),
+            boot_sha256: self.details.as_ref().and_then(|d| d.boot_sha256.clone()),
+            machine_name: self.details.as_ref().and_then(|d| d.machine_name.clone()),
             created_at_s: self.created_at_s,
             updated_at_s: self.updated_at_s,
             running_at_s: self.running_at_s,
@@ -345,11 +413,6 @@ impl VmStatusResponse {
                 .as_ref()
                 .and_then(|d| d.kino_vsock_cid)
                 .map(i64::from),
-            kino_vsock_port: self
-                .details
-                .as_ref()
-                .and_then(|d| d.kino_vsock_port)
-                .map(i64::from),
             kino_vsock_path: self
                 .details
                 .as_ref()
@@ -367,6 +430,11 @@ impl VmStatusResponse {
                 .as_ref()
                 .and_then(|d| d.recording_disk_path.clone()),
             spool_dir: self.details.as_ref().and_then(|d| d.spool_dir.clone()),
+            start_json: self
+                .details
+                .as_ref()
+                .and_then(|d| d.start.as_ref())
+                .and_then(|start| serde_json::to_string(start).ok()),
         }
     }
 
@@ -394,9 +462,12 @@ struct QueueVmCreateRequest {
     api_started_at: Instant,
     requested_name: String,
     requested_run_id: String,
-    requested_image: String,
-    requested_image_sha256: String,
-    guest_tools: DesiredGuestToolsV1,
+    image: OciDigest,
+    kino: OciDigest,
+    spec: OciDigest,
+    mode: SpecMode,
+    egress: bool,
+    terminal: bool,
     requested_resources: Option<CreateVmResources>,
     requested_hostname: Option<String>,
     lease_duration_seconds: Option<u64>,
@@ -405,8 +476,6 @@ struct QueueVmCreateRequest {
 
 const LEASE_EXPIRY_ERROR_LOG_INTERVAL_S: i64 = 60;
 const RUN_SUBNET_PREFIX: u8 = 28;
-const KINO_VSOCK_PORT: u32 = 18_080;
-const KINO_HOST_READY_PORT: u32 = 18_081;
 const KINO_VSOCK_CID_MIN: u32 = 10_000;
 const ARTIFACT_UPLOAD_PART_BYTES: usize = 16 * 1024 * 1024;
 const ARTIFACT_UPLOAD_CONCURRENCY: usize = 4;
@@ -451,25 +520,52 @@ const JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS: u64 = 300;
 /// contract maximum, so the result stays below
 /// `2 * MAX_CHUNKED_IMAGE_BYTES / BACKGROUND_PREPARE_BYTES_PER_SECOND + margin`.
 /// A foreground request keeps [`JAILER_PREPARE_IMAGE_TIMEOUT`].
-fn jailer_prepare_timeout(class: RequestClass, virtual_size_bytes: u64) -> Duration {
+///
+/// A `prepare_wake` request also writes the suspended guest's RAM and a
+/// pack's delta through the same lane and runs the sandboxed apply:
+/// `wake_bytes` is the RAM size plus the delta bytes, clamped the same way,
+/// and the apply's own limit is added.
+fn jailer_prepare_timeout(
+    class: RequestClass,
+    virtual_size_bytes: u64,
+    wake_bytes: Option<u64>,
+) -> Duration {
     if class == RequestClass::Foreground {
         return JAILER_PREPARE_IMAGE_TIMEOUT;
     }
-    let bytes = virtual_size_bytes.min(intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES);
+    let max = intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES;
+    let bytes = virtual_size_bytes
+        .min(max)
+        .saturating_add(wake_bytes.map_or(0, |bytes| {
+            bytes.min(max + image_cache::MAX_WAKE_DELTA_BYTES)
+        }));
     let seconds = bytes
         .div_ceil(BACKGROUND_PREPARE_BYTES_PER_SECOND)
         .saturating_mul(2)
-        .saturating_add(JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS);
+        .saturating_add(JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS)
+        .saturating_add(if wake_bytes.is_some() {
+            intar_jailer_protocol::WAKE_APPLY_TIMEOUT_SECONDS
+        } else {
+            0
+        });
     JAILER_PREPARE_IMAGE_TIMEOUT.max(Duration::from_secs(seconds))
+}
+
+/// Longest a launch waits for the cache pass to prepare its image.
+///
+/// The launch cannot know the image's size before the pass has pulled it, so
+/// it takes the budget the pass gives the largest import the contract admits,
+/// suspended guest included. The wait is never shorter than that import and
+/// stays finite; a delete request, which the lease's end also sends, ends it
+/// sooner.
+fn image_prepare_wait() -> Duration {
+    jailer_prepare_timeout(RequestClass::Background, u64::MAX, Some(u64::MAX))
 }
 const SCENARIO_READY_PROCESS_POLL_INTERVAL_MILLIS: u64 = 500;
 const SCENARIO_READY_API_POLL_INTERVAL_SECONDS: u64 = 3;
 const SCENARIO_READY_API_PROBE_TIMEOUT_SECONDS: u64 = 2;
-#[cfg(target_os = "linux")]
-const MAX_KINO_READY_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const CLOUD_HYPERVISOR_STDERR_LOG_NAME: &str = "cloud-hypervisor.stderr.log";
 const RUNTIME_DISK_FILENAME: &str = "runtime.img";
-const RUNTIME_DISK_ID_SUFFIX: &str = "runtime";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LeaseExpiryErrorLogState {
@@ -489,6 +585,24 @@ struct CpuCapacityPending {
 #[error("jailerd requeued the background image preparation: {message}")]
 pub(crate) struct ImagePrepareRequeued {
     pub(crate) message: String,
+}
+
+/// One report of a VM's Kino for this run's `boot.json`, as the host read
+/// it (`intar_kino_proto::host::decode`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GuestUpdate {
+    pub(crate) vm_name: String,
+    pub(crate) run_id: String,
+    pub(crate) jail_generation: String,
+    /// SSH is up in the guest.
+    pub(crate) ssh_ready: bool,
+    /// The guest failed: the VM fails with this text.
+    pub(crate) failed: Option<String>,
+    pub(crate) ssh_host_keys_openssh: Vec<String>,
+    pub(crate) lab: VmLabV1,
+    /// Milliseconds from the VMM start to this run's first report.
+    pub(crate) first_report_ms: Option<u64>,
+    pub(crate) received_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -655,7 +769,8 @@ struct Inner {
     jailer_request_timeout_seconds: u64,
     jailer_launch_capabilities: OnceCell<JailerCapabilities>,
     bridge: BridgeConfig,
-    image_registry: ImageRegistryConfig,
+    /// The `/v2` client: images, Kino and specs.
+    oci: Arc<image_cache::OciRegistry>,
     ssh_access: SshAccessConfig,
     db: Db,
     http: HttpClient,
@@ -663,11 +778,13 @@ struct Inner {
     states: RwLock<BTreeMap<String, VmStatusResponse>>,
     lease_expiry_error_log: RwLock<BTreeMap<String, LeaseExpiryErrorLogState>>,
     probe_tasks: Mutex<BTreeMap<String, VmProbeTask>>,
-    /// Guest readiness is an internal launch signal. It is deliberately
-    /// separate from `probe_updates_tx`, whose subscribers project data to the
+    /// Guest reports are an internal launch signal. It is deliberately
+    /// separate from `lab_updates_tx`, whose subscribers project data to the
     /// control plane only after the ready boundary is durably committed.
-    kino_readiness_tx: broadcast::Sender<ProbeUpdateEnvelope>,
-    probe_updates_tx: broadcast::Sender<ProbeUpdateEnvelope>,
+    guest_reports_tx: broadcast::Sender<GuestUpdate>,
+    lab_updates_tx: broadcast::Sender<GuestUpdate>,
+    /// When each VM's VMM was asked to boot, for `VmStartV1.first_report_ms`.
+    vmm_started_at: std::sync::Mutex<BTreeMap<String, Instant>>,
     run_cli_access_token: Mutex<RunCliAccessTokenCache>,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     run_cli_access_token_refresh: Mutex<()>,
@@ -694,6 +811,11 @@ struct Inner {
     /// A permit is retained when the archive worker is between waits, so a
     /// durable queue insertion never has to wait for the ten-second sweep.
     archive_jobs_notify: Notify,
+    /// The host's `[wake]` settings.
+    wake: crate::config::WakeConfig,
+    /// When an image last fell back from a wake to a cold boot on this host,
+    /// keyed by image digest. A fresh entry keeps its VMs cold for an hour.
+    wake_fallbacks: std::sync::Mutex<BTreeMap<String, Instant>>,
 }
 
 const RUN_CLI_ACCESS_TOKEN_CACHE_TTL: Duration = Duration::from_secs(90);
@@ -768,6 +890,9 @@ use jailer_network::*;
 mod network_allocation;
 use network_allocation::*;
 mod state;
+mod wake;
+pub(crate) use state::is_safe_key;
 use state::*;
+use wake::*;
 #[cfg(test)]
 mod tests;

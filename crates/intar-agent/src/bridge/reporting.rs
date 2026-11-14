@@ -2,9 +2,9 @@ use super::*;
 
 pub(super) async fn run_bridge_writer<W>(
     mut write: W,
-    mut urgent: mpsc::Receiver<BridgeMessageV8>,
-    mut inventory: mpsc::Receiver<BridgeMessageV8>,
-    mut normal: mpsc::Receiver<BridgeMessageV8>,
+    mut urgent: mpsc::Receiver<BridgeMessageV9>,
+    mut inventory: mpsc::Receiver<BridgeMessageV9>,
+    mut normal: mpsc::Receiver<BridgeMessageV9>,
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
@@ -23,10 +23,10 @@ where
 }
 
 pub(super) async fn next_outbound_message(
-    urgent: &mut mpsc::Receiver<BridgeMessageV8>,
-    inventory: &mut mpsc::Receiver<BridgeMessageV8>,
-    normal: &mut mpsc::Receiver<BridgeMessageV8>,
-) -> Option<BridgeMessageV8> {
+    urgent: &mut mpsc::Receiver<BridgeMessageV9>,
+    inventory: &mut mpsc::Receiver<BridgeMessageV9>,
+    normal: &mut mpsc::Receiver<BridgeMessageV9>,
+) -> Option<BridgeMessageV9> {
     tokio::select! {
         biased;
         message = urgent.recv() => message,
@@ -38,8 +38,8 @@ pub(super) async fn next_outbound_message(
 pub(super) async fn run_inventory_reporter(
     sources: BridgeReportSources,
     mut inventory_updates: watch::Receiver<u64>,
-    mut desired_state: watch::Receiver<Option<HostDesiredStateV2>>,
-    outbound: mpsc::Sender<BridgeMessageV8>,
+    mut desired_state: watch::Receiver<Option<HostDesiredStateV3>>,
+    outbound: mpsc::Sender<BridgeMessageV9>,
 ) -> Result<()> {
     loop {
         tokio::select! {
@@ -56,8 +56,8 @@ pub(super) async fn run_inventory_reporter(
 }
 
 pub(super) async fn enqueue_bridge_message(
-    outbound: &mpsc::Sender<BridgeMessageV8>,
-    message: BridgeMessageV8,
+    outbound: &mpsc::Sender<BridgeMessageV9>,
+    message: BridgeMessageV9,
 ) -> Result<()> {
     outbound
         .send(message)
@@ -66,9 +66,9 @@ pub(super) async fn enqueue_bridge_message(
 }
 
 pub(super) async fn send_state_report(
-    outbound: &mpsc::Sender<BridgeMessageV8>,
+    outbound: &mpsc::Sender<BridgeMessageV9>,
     sources: &BridgeReportSources,
-    desired: Option<&HostDesiredStateV2>,
+    desired: Option<&HostDesiredStateV3>,
 ) -> Result<()> {
     let report = build_host_state_report(
         &sources.cfg.host_id,
@@ -82,7 +82,7 @@ pub(super) async fn send_state_report(
     .await;
     enqueue_bridge_message(
         outbound,
-        BridgeMessageV8::StateReport(StateReportV8 {
+        BridgeMessageV9::StateReport(StateReportV9 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: sources.cfg.host_id.clone(),
             report,
@@ -92,9 +92,9 @@ pub(super) async fn send_state_report(
 }
 
 pub(super) async fn send_inventory_state_report(
-    outbound: &mpsc::Sender<BridgeMessageV8>,
+    outbound: &mpsc::Sender<BridgeMessageV9>,
     sources: &BridgeReportSources,
-    desired: Option<&HostDesiredStateV2>,
+    desired: Option<&HostDesiredStateV3>,
 ) -> Result<()> {
     // Lifecycle-triggered snapshots use the generation-fenced state already
     // committed by VmManager. Full process/cgroup inspection is deliberately
@@ -112,7 +112,7 @@ pub(super) async fn send_inventory_state_report(
     .await;
     enqueue_bridge_message(
         outbound,
-        BridgeMessageV8::StateReport(StateReportV8 {
+        BridgeMessageV9::StateReport(StateReportV9 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: sources.cfg.host_id.clone(),
             report,
@@ -122,13 +122,13 @@ pub(super) async fn send_inventory_state_report(
 }
 
 pub(super) async fn send_vm_report(
-    outbound: &mpsc::Sender<BridgeMessageV8>,
+    outbound: &mpsc::Sender<BridgeMessageV9>,
     host_id: &str,
-    report: VmReportV2,
+    report: VmReportV3,
 ) -> Result<()> {
     enqueue_bridge_message(
         outbound,
-        BridgeMessageV8::VmReport(VmReportV8 {
+        BridgeMessageV9::VmReport(VmReportV9 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             report,
@@ -148,7 +148,7 @@ where
 {
     send_bridge_message(
         write,
-        &BridgeMessageV8::SyncRequest(SyncRequestV8 {
+        &BridgeMessageV9::SyncRequest(SyncRequestV9 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             reason,
@@ -162,10 +162,10 @@ pub(super) async fn build_host_state_report(
     vm: &VmManager,
     db: &Db,
     disk_probe_path: &Path,
-    desired: Option<&HostDesiredStateV2>,
+    desired: Option<&HostDesiredStateV3>,
     inspect_runtime: bool,
     report_cache: &BridgeReportCache,
-) -> HostStateReportV2 {
+) -> HostStateReportV3 {
     let now = now_ms();
     let profile = if inspect_runtime {
         let profile = host_profile::collect(disk_probe_path);
@@ -176,20 +176,23 @@ pub(super) async fn build_host_state_report(
         // last periodic snapshot so they cannot consume inventory latency.
         report_cache.host_profile.read().await.clone()
     };
-    let probe_rows = if inspect_runtime {
-        match db.load_all_vm_probe_states().await {
+    let lab_rows = if inspect_runtime {
+        match db.load_all_vm_labs().await {
             Ok(rows) => rows,
             Err(error) => {
-                warn!(error = %error, "failed to load persisted probe state for bridge report");
+                warn!(error = %error, "failed to load persisted labs for bridge report");
                 Vec::new()
             }
         }
     } else {
-        // Probe transitions already have their own targeted VM report. Avoid
+        // Lab transitions already have their own targeted VM report. Avoid
         // putting SQLite actor latency in the inventory freshness path.
         Vec::new()
     };
-    let probes_by_vm = probe_snapshots_by_vm(probe_rows);
+    let labs_by_vm = lab_rows
+        .into_iter()
+        .map(|row| ((row.run_id.clone(), row.vm_name.clone()), row))
+        .collect::<BTreeMap<_, _>>();
     let ssh_host = vm.ssh_advertised_host();
     let statuses = vm.list_vms().await;
     let profile_total_cpu_millis = u32::try_from(profile.cpu_cores)
@@ -275,39 +278,26 @@ pub(super) async fn build_host_state_report(
         (inspection, terminal)
     }))
     .await;
-    let (reported_capabilities, reported_cached_images, reported_cached_guest_tools) =
-        if inspect_runtime {
-            let capabilities = collect_host_capabilities(attested_jailer.as_ref());
-            let (cached_images, cached_guest_tools) = if let Some(state) = desired {
-                let cache_root = crate::image_cache::default_cache_root().ok();
-                let images = cached_image_states(
-                    state,
-                    now,
-                    attested_jailer.as_ref().is_some_and(|capabilities| {
-                        capabilities.supports_template_backed_launch
-                            && capabilities.fast_template_store
-                    }),
-                );
-                let tools =
-                    cached_guest_tools_states_with_cache_root(state, now, cache_root.as_deref())
-                        .await;
-                (images, tools)
-            } else {
-                (Vec::new(), Vec::new())
-            };
-            *report_cache.host_capabilities.write().await = capabilities.clone();
-            *report_cache.cached_images.write().await = cached_images.clone();
-            *report_cache.cached_guest_tools.write().await = cached_guest_tools.clone();
-            (capabilities, cached_images, cached_guest_tools)
-        } else {
-            (
-                report_cache.host_capabilities.read().await.clone(),
-                report_cache.cached_images.read().await.clone(),
-                report_cache.cached_guest_tools.read().await.clone(),
-            )
+    let (reported_hardware, reported_cached_images) = if inspect_runtime {
+        let hardware = collect_host_hardware(attested_jailer.as_ref());
+        let cached_images = match (desired, crate::image_cache::default_cache_root()) {
+            (Some(state), Ok(cache_root)) => crate::image_cache::cached_image_states(
+                &cache_root,
+                &RequiredPins::from_desired_state(state),
+            ),
+            _ => Vec::new(),
         };
+        *report_cache.hardware.write().await = hardware.clone();
+        *report_cache.cached_images.write().await = cached_images.clone();
+        (hardware, cached_images)
+    } else {
+        (
+            report_cache.hardware.read().await.clone(),
+            report_cache.cached_images.read().await.clone(),
+        )
+    };
 
-    HostStateReportV2 {
+    HostStateReportV3 {
         relay_connected: vm.relay_connected(),
         schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
         host_id: host_id.to_string(),
@@ -329,9 +319,9 @@ pub(super) async fn build_host_state_report(
             primary_ipv4: profile.primary_ipv4,
             primary_ipv6: profile.primary_ipv6,
         },
-        capabilities: reported_capabilities,
+        guest_contract: GUEST_CONTRACT,
+        hardware: reported_hardware,
         cached_images: reported_cached_images,
-        cached_guest_tools: reported_cached_guest_tools,
         vms: statuses
             .into_iter()
             .zip(observations)
@@ -341,32 +331,51 @@ pub(super) async fn build_host_state_report(
                     .details
                     .as_ref()
                     .and_then(|details| details.jail_generation.as_deref());
-                let probes = probes_by_vm
-                    .get(&(run_id.clone(), status.name.clone()))
-                    .filter(|(generation, _)| generation.as_deref() == current_generation)
-                    .map(|(_, probes)| probes.clone())
-                    .unwrap_or_default();
-                actual_state_from_status(
-                    host_id,
+                let lab = labs_by_vm
+                    .get(&(run_id, status.name.clone()))
+                    .filter(|row| Some(row.jail_generation.as_str()) == current_generation)
+                    .and_then(ReportedLab::from_row);
+                vm_state_from_status(
                     ssh_host.as_deref(),
                     desired,
                     status,
-                    probes,
+                    lab,
                     inspection.as_ref(),
                     terminal.as_ref(),
                 )
             })
             .collect(),
-        builds: Vec::new(),
     }
 }
 
-pub(super) async fn build_vm_report_from_probe_update(
+/// A VM's latest lab and when its first report came, as reported.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ReportedLab {
+    pub(super) lab: VmLabV1,
+    pub(super) first_report_ms: Option<u64>,
+}
+
+impl ReportedLab {
+    pub(super) fn from_row(row: &VmLabRow) -> Option<Self> {
+        match serde_json::from_str::<VmLabV1>(&row.lab_json) {
+            Ok(lab) => Some(Self {
+                lab,
+                first_report_ms: row.first_report_ms.and_then(|ms| u64::try_from(ms).ok()),
+            }),
+            Err(error) => {
+                warn!(error = %error, vm = row.vm_name, "ignoring an unreadable persisted lab");
+                None
+            }
+        }
+    }
+}
+
+pub(super) async fn build_vm_report_from_lab_update(
     host_id: &str,
     vm: &VmManager,
-    desired: Option<&HostDesiredStateV2>,
-    update: &ProbeUpdateEnvelope,
-) -> Option<VmReportV2> {
+    desired: Option<&HostDesiredStateV3>,
+    update: &GuestUpdate,
+) -> Option<VmReportV3> {
     let status = vm.get_vm(&update.vm_name).await?;
     let current_generation = status
         .details
@@ -378,7 +387,7 @@ pub(super) async fn build_vm_report_from_probe_update(
             run_id = update.run_id,
             update_generation = ?update.jail_generation,
             current_generation = ?current_generation,
-            "dropping stale-generation Kino projection"
+            "dropping stale-generation lab projection"
         );
         return None;
     }
@@ -388,7 +397,10 @@ pub(super) async fn build_vm_report_from_probe_update(
         vm.ssh_advertised_host().as_deref(),
         desired,
         status,
-        probe_snapshots_from_update(update),
+        Some(ReportedLab {
+            lab: update.lab.clone(),
+            first_report_ms: update.first_report_ms,
+        }),
         None,
         terminal.as_ref(),
     ))
@@ -397,53 +409,47 @@ pub(super) async fn build_vm_report_from_probe_update(
 pub(super) fn build_vm_report_from_status(
     host_id: &str,
     ssh_host: Option<&str>,
-    desired: Option<&HostDesiredStateV2>,
+    desired: Option<&HostDesiredStateV3>,
     status: VmStatusResponse,
-    probes: Vec<VmProbeSnapshotV1>,
+    lab: Option<ReportedLab>,
     inspection: Option<&VmInspection>,
     terminal: Option<&VmTerminalState>,
-) -> VmReportV2 {
-    let actual = actual_state_from_status(
-        host_id, ssh_host, desired, status, probes, inspection, terminal,
-    );
-    VmReportV2 {
+) -> VmReportV3 {
+    let vm = vm_state_from_status(ssh_host, desired, status, lab, inspection, terminal);
+    VmReportV3 {
         schema_version: VM_REPORT_SCHEMA_VERSION,
         host_id: host_id.to_string(),
-        owner_user_id: actual.owner_user_id,
-        runtime_execution_id: actual.runtime_execution_id,
-        generation: actual.generation,
-        run_id: actual.run_id,
-        vm_name: actual.vm_name,
-        desired_version: actual.desired_version,
-        observed_at_unix_ms: actual.updated_at_unix_ms,
-        phase: actual.phase,
-        guest_tools: actual.guest_tools,
-        network: actual.network,
-        terminal: actual.terminal,
-        runtime_constraints: actual.runtime_constraints,
-        resource_state: actual.resource_state,
-        sandbox: actual.sandbox,
-        ssh_host_keys_openssh: actual.ssh_host_keys_openssh,
-        probes: actual.probes,
-        archive: actual.archive,
-        error: actual.error,
+        observed_at_unix_ms: vm.updated_at_unix_ms,
+        vm,
     }
 }
 
-pub(super) fn actual_state_from_status(
-    _host_id: &str,
+/// How the VM was started, with the lab's first-report time. A VM without a
+/// recorded start (one started before the record existed) started cold.
+pub(super) fn vm_start(recorded: Option<&VmStartV1>, first_report_ms: Option<u64>) -> VmStartV1 {
+    VmStartV1 {
+        first_report_ms,
+        ..recorded.cloned().unwrap_or(VmStartV1 {
+            path: VmStartPath::Cold,
+            reason: None,
+            first_report_ms: None,
+        })
+    }
+}
+
+pub(super) fn vm_state_from_status(
     ssh_host: Option<&str>,
-    desired: Option<&HostDesiredStateV2>,
+    desired: Option<&HostDesiredStateV3>,
     status: VmStatusResponse,
-    probes: Vec<VmProbeSnapshotV1>,
+    lab: Option<ReportedLab>,
     inspection: Option<&VmInspection>,
     terminal: Option<&VmTerminalState>,
-) -> VmActualStateV2 {
+) -> VmStateV3 {
     let run_id = local_run_id(&status).unwrap_or_default();
     let desired_vm = desired.and_then(|state| {
         state.vms.iter().find(|vm| {
             vm.run_id == run_id
-                && vm.vm_name == status.name
+                && vm.vm_id == status.name
                 && status.details.as_ref().is_some_and(|d| {
                     d.owner_user_id == vm.owner_user_id
                         && d.runtime_execution_id == vm.runtime_execution_id
@@ -463,53 +469,44 @@ pub(super) fn actual_state_from_status(
     let updated_at_unix_ms = terminal.map_or(status_updated_at, |state| {
         state.observed_at.max(status_updated_at)
     });
-
-    let phase = vm_phase_from_status(&status, &probes);
-    let actual_guest_tools = status
-        .details
-        .as_ref()
-        .and_then(|details| details.guest_tools.as_ref())
-        .or_else(|| desired_vm.map(|vm| &vm.guest_tools));
-    let guest_tools = actual_guest_tools.map(|pin| VmGuestToolsStateV1 {
-        tools_disk_sha256: pin.tools_disk_sha256.clone(),
-        kino_sha256: pin.kino_sha256.clone(),
-        bootstrap_abi: pin.bootstrap_abi,
-        verified: matches!(phase, VmPhase::Ready | VmPhase::Solved),
-    });
-    VmActualStateV2 {
-        owner_user_id: status
-            .details
-            .as_ref()
-            .map(|d| d.owner_user_id.clone())
-            .unwrap_or_default(),
-        runtime_execution_id: status
-            .details
-            .as_ref()
+    let details = status.details.as_ref();
+    let (lab, first_report_ms) = match lab {
+        Some(reported) => (Some(reported.lab), reported.first_report_ms),
+        None => (None, None),
+    };
+    VmStateV3 {
+        owner_user_id: details.map(|d| d.owner_user_id.clone()).unwrap_or_default(),
+        runtime_execution_id: details
             .map(|d| d.runtime_execution_id.clone())
             .unwrap_or_default(),
-        generation: status
-            .details
-            .as_ref()
-            .map(|d| d.generation)
-            .unwrap_or_default(),
-        phase,
+        generation: details.map(|d| d.generation).unwrap_or_default(),
+        phase: vm_phase_from_status(&status),
         run_id,
-        vm_name: status.name.clone(),
+        // The local key is `vm_id`; the report names the machine.
+        name: details
+            .and_then(|d| d.machine_name.clone())
+            .or_else(|| desired_vm.map(|vm| vm.name.clone()))
+            .unwrap_or_else(|| status.name.clone()),
         desired_version: desired_vm.and_then(|_| desired.map(|state| state.version)),
-        image_key: desired_vm.map(|vm| vm.image_key.clone()),
-        image_id: desired_vm.map(|vm| vm.image_id.clone()),
-        guest_tools,
+        image: details
+            .and_then(|d| d.image.clone())
+            .or_else(|| desired_vm.map(|vm| vm.image.clone())),
+        kino: details
+            .and_then(|d| d.kino.clone())
+            .or_else(|| desired_vm.map(|vm| vm.kino.clone())),
+        start: Some(vm_start(
+            details.and_then(|d| d.start.as_ref()),
+            first_report_ms,
+        )),
         network: network_state_from_status(&status, ssh_host),
         terminal: terminal_state,
         runtime_constraints,
         resource_state: resource_state_from_status(&status, inspection),
         sandbox: sandbox_state_from_status(&status, inspection),
-        ssh_host_keys_openssh: status
-            .details
-            .as_ref()
+        ssh_host_keys_openssh: details
             .map(|details| details.ssh_host_keys_openssh.clone())
             .unwrap_or_default(),
-        probes,
+        lab,
         archive: archive_state_from_status(&status),
         error: status.error.clone(),
         updated_at_unix_ms,
@@ -518,42 +515,42 @@ pub(super) fn actual_state_from_status(
 
 pub(super) fn failed_vm_report(
     host_id: &str,
-    desired: &HostDesiredStateV2,
-    vm: &DesiredVmV2,
+    desired: &HostDesiredStateV3,
+    vm: &DesiredVmV3,
     observed_at_unix_ms: i64,
     error: String,
-) -> VmReportV2 {
-    VmReportV2 {
+) -> VmReportV3 {
+    VmReportV3 {
         schema_version: VM_REPORT_SCHEMA_VERSION,
         host_id: host_id.to_string(),
-        owner_user_id: vm.owner_user_id.clone(),
-        runtime_execution_id: vm.runtime_execution_id.clone(),
-        generation: vm.generation,
-        run_id: vm.run_id.clone(),
-        vm_name: vm.vm_name.clone(),
-        desired_version: Some(desired.version),
         observed_at_unix_ms,
-        phase: VmPhase::Failed,
-        guest_tools: Some(VmGuestToolsStateV1 {
-            tools_disk_sha256: vm.guest_tools.tools_disk_sha256.clone(),
-            kino_sha256: vm.guest_tools.kino_sha256.clone(),
-            bootstrap_abi: vm.guest_tools.bootstrap_abi,
-            verified: false,
-        }),
-        network: None,
-        terminal: VmTerminalStateV1 {
-            state: VmTerminalStateKindV1::Failed,
-            target: None,
-            reason: Some(error.clone()),
-            observed_at_unix_ms,
+        vm: VmStateV3 {
+            owner_user_id: vm.owner_user_id.clone(),
+            runtime_execution_id: vm.runtime_execution_id.clone(),
+            generation: vm.generation,
+            run_id: vm.run_id.clone(),
+            name: vm.name.clone(),
+            desired_version: Some(desired.version),
+            phase: VmPhaseV2::Failed,
+            image: Some(vm.image.clone()),
+            kino: Some(vm.kino.clone()),
+            start: Some(vm_start(None, None)),
+            network: None,
+            terminal: VmTerminalStateV1 {
+                state: VmTerminalStateKindV1::Failed,
+                target: None,
+                reason: Some(error.clone()),
+                observed_at_unix_ms,
+            },
+            runtime_constraints: None,
+            resource_state: None,
+            sandbox: None,
+            ssh_host_keys_openssh: Vec::new(),
+            lab: None,
+            archive: None,
+            error: Some(error),
+            updated_at_unix_ms: observed_at_unix_ms,
         },
-        runtime_constraints: None,
-        resource_state: None,
-        sandbox: None,
-        ssh_host_keys_openssh: Vec::new(),
-        probes: Vec::new(),
-        archive: None,
-        error: Some(error),
     }
 }
 
@@ -635,50 +632,43 @@ pub(super) fn terminal_state_from_manager(state: &VmTerminalState) -> VmTerminal
     }
 }
 
-pub(super) fn vm_phase_from_status(
-    status: &VmStatusResponse,
-    probes: &[VmProbeSnapshotV1],
-) -> VmPhase {
+/// Ready means SSH is up in the guest (the readiness gate committed the VM
+/// only after Kino said so) and the SSH forward is published.
+pub(super) fn vm_phase_from_status(status: &VmStatusResponse) -> VmPhaseV2 {
     match status.state {
-        VmLifecycleState::Queued => VmPhase::Pending,
-        VmLifecycleState::CachingImage => VmPhase::PullingImage,
-        VmLifecycleState::PreparingDisks => VmPhase::CreatingDisks,
+        VmLifecycleState::Queued => VmPhaseV2::Pending,
+        VmLifecycleState::CachingImage => VmPhaseV2::PullingImage,
+        VmLifecycleState::PreparingDisks => VmPhaseV2::CreatingDisks,
         VmLifecycleState::CreatingVm => {
             creating_vm_report_phase(runtime_constraints_from_status(status).is_some())
         }
-        VmLifecycleState::BootingVm => VmPhase::Booting,
+        VmLifecycleState::BootingVm => VmPhaseV2::Booting,
         VmLifecycleState::Running => {
-            if !probes.is_empty()
-                && probes
-                    .iter()
-                    .all(|probe| probe.status == VmProbeStatus::Pass)
-            {
-                VmPhase::Solved
-            } else if status
+            if status
                 .details
                 .as_ref()
                 .and_then(|details| details.ssh_public_port)
                 .is_some()
             {
-                VmPhase::Ready
+                VmPhaseV2::Ready
             } else {
-                VmPhase::Running
+                VmPhaseV2::Running
             }
         }
-        VmLifecycleState::DeletingVm | VmLifecycleState::ArchivingArtifacts => VmPhase::Stopping,
-        VmLifecycleState::Failed | VmLifecycleState::DeleteFailed => VmPhase::Failed,
+        VmLifecycleState::DeletingVm | VmLifecycleState::ArchivingArtifacts => VmPhaseV2::Stopping,
+        VmLifecycleState::Failed | VmLifecycleState::DeleteFailed => VmPhaseV2::Failed,
     }
 }
 
-pub(super) fn creating_vm_report_phase(has_runtime_constraints: bool) -> VmPhase {
+pub(super) fn creating_vm_report_phase(has_runtime_constraints: bool) -> VmPhaseV2 {
     if has_runtime_constraints {
-        VmPhase::Booting
+        VmPhaseV2::Booting
     } else {
         // The external Booting phase requires a generation and live CPU
         // contract. Keep the pre-jailer launch window in disk/staging state;
         // persist_jail_launch emits another inventory revision as soon as the
         // boot quota is available.
-        VmPhase::CreatingDisks
+        VmPhaseV2::CreatingDisks
     }
 }
 
@@ -731,205 +721,41 @@ pub(super) fn archive_state_from_status(status: &VmStatusResponse) -> Option<VmA
     }
 }
 
-pub(super) async fn load_probe_snapshots_for_vm(
+pub(super) async fn load_lab_for_vm(
     db: &Db,
     run_id: &str,
     vm_name: &str,
     generation: Option<&str>,
-) -> Vec<VmProbeSnapshotV1> {
-    match db.load_vm_probe_state(vm_name.to_string()).await {
+) -> Option<ReportedLab> {
+    match db.load_vm_lab(vm_name.to_string()).await {
         Ok(Some(row))
-            if row.run_id == run_id
-                && probe_generation_from_state_row(&row).as_deref() == generation =>
+            if row.run_id == run_id && Some(row.jail_generation.as_str()) == generation =>
         {
-            probe_snapshots_from_state_row(&row)
+            ReportedLab::from_row(&row)
         }
-        Ok(_) => Vec::new(),
+        Ok(_) => None,
         Err(error) => {
-            warn!(error = %error, run_id, vm = vm_name, "failed to load vm probe state");
-            Vec::new()
+            warn!(error = %error, run_id, vm = vm_name, "failed to load the VM's lab");
+            None
         }
     }
 }
 
-pub(super) fn probe_snapshots_by_vm(
-    rows: Vec<VmProbeStateRow>,
-) -> BTreeMap<(String, String), (Option<String>, Vec<VmProbeSnapshotV1>)> {
-    rows.into_iter()
-        .map(|row| {
-            (
-                (row.run_id.clone(), row.vm_name.clone()),
-                (
-                    probe_generation_from_state_row(&row),
-                    probe_snapshots_from_state_row(&row),
-                ),
-            )
-        })
-        .collect()
-}
-
-pub(super) fn probe_generation_from_state_row(row: &VmProbeStateRow) -> Option<String> {
-    serde_json::from_str::<ProbeUpdateEnvelope>(&row.snapshot_json)
-        .ok()
-        .map(|update| update.jail_generation)
-}
-
-pub(super) fn probe_snapshots_from_state_row(row: &VmProbeStateRow) -> Vec<VmProbeSnapshotV1> {
-    serde_json::from_str::<ProbeUpdateEnvelope>(&row.snapshot_json)
-        .map(|update| probe_snapshots_from_update(&update))
-        .unwrap_or_default()
-}
-
-pub(super) fn probe_snapshots_from_update(update: &ProbeUpdateEnvelope) -> Vec<VmProbeSnapshotV1> {
-    probe_snapshots_from_probes(update.generated_at_ms, &update.probes)
-}
-
-pub(super) fn probe_snapshots_from_probes(
-    observed_at_unix_ms: i64,
-    probes: &[ProbeView],
-) -> Vec<VmProbeSnapshotV1> {
-    probes
-        .iter()
-        .filter(|probe| !probe.id.trim().is_empty())
-        .map(|probe| VmProbeSnapshotV1 {
-            id: probe.id.clone(),
-            phase: ProbePhase::Scenario,
-            status: probe_status(&probe.status),
-            checked_at_unix_ms: probe.last_attempt_at_ms.unwrap_or(observed_at_unix_ms),
-            message: probe.error.clone(),
-            value: if probe.value.is_null() {
-                None
-            } else {
-                Some(probe.value.clone())
-            },
-        })
-        .collect()
-}
-
-pub(super) fn probe_status(status: &str) -> VmProbeStatus {
-    match status.trim().to_ascii_lowercase().as_str() {
-        "pass" | "passed" | "ready" | "ok" | "succeeded" | "success" => VmProbeStatus::Pass,
-        "fail" | "failed" | "error" | "errored" => VmProbeStatus::Fail,
-        _ => VmProbeStatus::Unknown,
-    }
-}
-
-pub(super) fn cached_image_states(
-    desired: &HostDesiredStateV2,
-    now: i64,
-    require_template: bool,
-) -> Vec<CachedImageStateV1> {
-    let cache_root = crate::image_cache::default_cache_root().ok();
-    cached_image_states_with_cache_root(desired, now, cache_root.as_deref(), require_template)
-}
-
-pub(super) fn cached_image_states_with_cache_root(
-    desired: &HostDesiredStateV2,
-    now: i64,
-    cache_root: Option<&Path>,
-    require_template: bool,
-) -> Vec<CachedImageStateV1> {
-    desired
-        .cached_images
-        .iter()
-        .map(|desired_image| {
-            let key = image_cache_key(&desired_image.image_key);
-            let metadata = cache_root.and_then(|root| {
-                crate::image_cache::verified_cached_image_metadata(
-                    root,
-                    &key,
-                    &desired_image.image_id,
-                    require_template,
-                )
-            });
-            CachedImageStateV1 {
-                image_key: desired_image.image_key.clone(),
-                image_id: desired_image.image_id.clone(),
-                phase: if metadata.is_some() {
-                    ImageCachePhase::Ready
-                } else {
-                    ImageCachePhase::Missing
-                },
-                bytes_on_disk: metadata.map(|meta| meta.len()),
-                error: None,
-                updated_at_unix_ms: now,
-            }
-        })
-        .collect()
-}
-
-pub(super) async fn cached_guest_tools_states_with_cache_root(
-    desired: &HostDesiredStateV2,
-    now: i64,
-    cache_root: Option<&Path>,
-) -> Vec<CachedGuestToolsStateV1> {
-    let mut states = Vec::with_capacity(desired.cached_guest_tools.len());
-    for pin in &desired.cached_guest_tools {
-        let ready = match cache_root {
-            Some(root) => {
-                crate::image_cache::verify_cached_tools_disk(
-                    root,
-                    &pin.tools_disk_sha256,
-                    pin.tools_disk_size_bytes,
-                )
-                .await
-            }
-            None => false,
-        };
-        states.push(CachedGuestToolsStateV1 {
-            guest_tools: pin.clone(),
-            phase: if ready {
-                ImageCachePhase::Ready
-            } else {
-                ImageCachePhase::Missing
-            },
-            bytes_on_disk: ready.then_some(pin.tools_disk_size_bytes),
-            error: None,
-            updated_at_unix_ms: now,
-        });
-    }
-    states
-}
-
-pub(super) fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> HostCapabilitiesV2 {
-    let supports_cgroup_v2 = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
+pub(super) fn collect_host_hardware(jailer: Option<&JailerCapabilities>) -> HostHardwareV1 {
+    let cgroup_v2 = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
         .is_ok_and(|value| value.split_whitespace().any(|item| item == "cpu"));
-    let supports_jailer_v2 = jailer.is_some_and(|capabilities| capabilities.supports_jailer_v2);
-    let supports_jailer_v3 = jailer.is_some_and(|capabilities| capabilities.supports_jailer_v3);
-    let supports_run_cli_v1 = cfg!(target_os = "linux") && supports_jailer_v3;
-    HostCapabilitiesV2 {
-        arch: host_architecture(),
+    HostHardwareV1 {
         cloud_hypervisor_sha256: jailer
             .map(|capabilities| capabilities.cloud_hypervisor_sha256.clone()),
         // The service deliberately runs with PrivateDevices=true. A successful
         // jailerd readiness attestation, not agent-visible device access, is
         // the authority for KVM availability and complete helper accounting.
-        supports_kvm: supports_jailer_v2,
-        supports_vsock: true,
-        // The broker relies on the jailer-attested Cloud Hypervisor vsock
-        // device and only exists in the Linux host implementation.
-        supports_run_cli_v1,
-        // Completion uses the same Linux-only, jailer-attested broker as the
-        // learner CLI. Advertise it separately so the control plane can keep
-        // old agents out of the final rollout.
-        supports_run_cli_completion_v1: supports_run_cli_v1,
-        supports_reflink: supports_reflink_for_image_cache(),
-        supports_nftables: command_exists("nft"),
-        supports_jailer_v2,
-        supports_jailer_v3,
-        supports_raw_chunks_v1: supports_jailer_v3,
-        supports_scenario_guest_tools_v1: supports_jailer_v3,
-        supports_template_backed_launch: jailer
-            .is_some_and(|capabilities| capabilities.supports_template_backed_launch),
-        fast_template_store: jailer.is_some_and(|capabilities| capabilities.fast_template_store),
-        supports_hard_cpu_quota: jailer
-            .is_some_and(|capabilities| capabilities.supports_hard_cpu_quota),
-        supports_landlock: jailer.is_some_and(|capabilities| capabilities.supports_landlock),
-        supports_cgroup_v2: jailer.map_or(supports_cgroup_v2, |capabilities| {
-            capabilities.supports_cgroup_v2
-        }),
-        // Agents never compile scenario sources.
-        source_compile_platform: None,
+        kvm: jailer.is_some_and(|capabilities| capabilities.supports_jailer_v3),
+        vsock: true,
+        reflink: supports_reflink_for_image_cache(),
+        landlock: jailer.is_some_and(|capabilities| capabilities.supports_landlock),
+        cgroup_v2: jailer.map_or(cgroup_v2, |capabilities| capabilities.supports_cgroup_v2),
+        hard_cpu_quota: jailer.is_some_and(|capabilities| capabilities.supports_hard_cpu_quota),
     }
 }
 
@@ -1043,12 +869,4 @@ pub(super) fn probe_reflink_for_image_cache() -> bool {
     let _ = std::fs::remove_file(&src);
     let _ = std::fs::remove_file(&dst);
     supported
-}
-
-pub(super) fn host_architecture() -> ImageArchitecture {
-    if cfg!(target_arch = "aarch64") {
-        ImageArchitecture::Aarch64
-    } else {
-        ImageArchitecture::X86_64
-    }
 }

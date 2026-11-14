@@ -861,9 +861,16 @@ function WorkOrder(props: {
               <span className="text-sm font-semibold text-faint-foreground tabular-nums">
                 {String(index + 1).padStart(2, "0")}
               </span>
-              <span className="text-sm font-medium leading-6">
-                {repairObjectiveTitle(objective, index)}
-              </span>
+              <div className="min-w-0 space-y-1">
+                <p className="text-sm font-medium leading-6">
+                  {repairObjectiveTitle(objective, index)}
+                </p>
+                {objective.description ? (
+                  <Markdown className="max-w-[68ch] space-y-1 text-sm leading-5 text-muted-foreground">
+                    {objective.description}
+                  </Markdown>
+                ) : null}
+              </div>
             </li>
           ))}
         </ol>

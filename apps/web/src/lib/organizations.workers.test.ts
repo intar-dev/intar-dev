@@ -10,13 +10,10 @@ import {
   scenarioSourceCommits,
   scenarioSources,
   user,
-  vmScenarios,
-  vmScenarioVms,
 } from "@/db/schema";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
 import { errorChainMatches } from "@/lib/app-error";
 import { createOrganization, deleteOrganization } from "@/lib/organizations";
-import { listEnabledScenarios, loadScenario } from "@/lib/scenarios";
 import { interleaveBefore } from "@/test/d1-interleave";
 import { resetD1Database } from "@/test/d1-migrations";
 
@@ -31,6 +28,7 @@ describe("organization boundaries", () => {
     await expect(
       createOrganization({
         name: "Denied Org",
+        slug: "denied-org",
         ownerUserId: "creator",
         featureToggleService: new StaticFeatureToggleService(),
       }),
@@ -38,6 +36,7 @@ describe("organization boundaries", () => {
 
     const created = await createOrganization({
       name: "Allowed Org",
+      slug: "allowed-org",
       ownerUserId: "creator",
       featureToggleService: new StaticFeatureToggleService({
         "organization-creation": true,
@@ -47,6 +46,7 @@ describe("organization boundaries", () => {
     await expect(
       createOrganization({
         name: "Second Org",
+        slug: "second-org",
         ownerUserId: "creator",
         featureToggleService: new StaticFeatureToggleService({
           "organization-creation": true,
@@ -73,35 +73,6 @@ describe("organization boundaries", () => {
         /unique constraint failed|member_single_owner_uidx/i,
       ),
     );
-  });
-
-  it("shows public scenarios plus only the requesting organization catalog", async () => {
-    await Promise.all([
-      insertOrganization("org-a"),
-      insertOrganization("org-b"),
-    ]);
-    await Promise.all([
-      insertScenario(null, "public-scenario"),
-      insertScenario("org-a", "org-a-private"),
-      insertScenario("org-b", "org-b-private"),
-    ]);
-
-    expect(scenarioIds(await listEnabledScenarios())).toEqual([
-      "public-scenario",
-    ]);
-    expect(
-      scenarioIds(await listEnabledScenarios({ organizationId: "org-a" })),
-    ).toEqual(["org-a-private", "public-scenario"]);
-    expect(
-      scenarioIds(await listEnabledScenarios({ organizationId: "org-b" })),
-    ).toEqual(["org-b-private", "public-scenario"]);
-    await expect(loadScenario("org-a-private")).resolves.toBeNull();
-    await expect(
-      loadScenario("org-a-private", { organizationId: "org-a" }),
-    ).resolves.toMatchObject({
-      scenarioId: "org-a-private",
-      organizationId: "org-a",
-    });
   });
 
   it("refuses deletion while a scenario source binding can still write", async () => {
@@ -219,54 +190,4 @@ async function insertOrganization(id: string) {
     slug: id,
     createdAt: new Date(),
   });
-}
-
-async function insertScenario(
-  organizationId: string | null,
-  scenarioId: string,
-) {
-  const db = drizzle(env.DB);
-  const now = Date.now();
-  await db.batch([
-    db.insert(vmScenarios).values({
-      scenarioId,
-      organizationId,
-      title: scenarioId,
-      category: "test",
-      description: "test scenario",
-      difficulty: "easy",
-      estimatedMinutes: 10,
-      tagsJson: [],
-      briefingMarkdown: "briefing",
-      solutionMarkdown: "solution",
-      hintsJson: [],
-      enabled: true,
-      enabledAt: now,
-      createdAt: now,
-      updatedAt: now,
-    }),
-    db.insert(vmScenarioVms).values({
-      id: `${scenarioId}:vm`,
-      scenarioId,
-      ordinal: 0,
-      vmName: "vm",
-      image: `${scenarioId}-vm-x86_64.raw.zst`,
-      imageKeyJson: { scenario: scenarioId, vm: "vm", arch: "x86_64" },
-      imageSha256: "a".repeat(64),
-      imageFormat: "raw_zstd",
-      imageVirtualSizeBytes: 1024,
-      kernelSha256: "b".repeat(64),
-      initrdSha256: "c".repeat(64),
-      bootCmdline: "console=ttyS0 root=/dev/vda rw",
-      cpuMillis: 1_000,
-      memoryMib: 512,
-      diskMib: 1_024,
-    }),
-  ]);
-}
-
-function scenarioIds(
-  scenarios: Awaited<ReturnType<typeof listEnabledScenarios>>,
-) {
-  return scenarios.map((scenario) => scenario.scenarioId).sort();
 }

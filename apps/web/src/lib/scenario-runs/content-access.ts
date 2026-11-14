@@ -1,3 +1,25 @@
+import { PUBLIC_NAMESPACE } from "@/lib/organization-slugs";
+
+/**
+ * Holds while the scenario aliased `alias` is open to everyone signed in:
+ * enabled, marked for play, with a live revision, and in the public
+ * namespace or of an organization a platform admin granted public play.
+ */
+export function playableScenarioCondition(alias: string): string {
+  return `(${alias}.enabled = 1 AND ${alias}.play = 1 AND ${alias}.live_rev IS NOT NULL
+    AND ((${alias}.namespace = '${PUBLIC_NAMESPACE}' AND ${alias}.organization_id IS NULL)
+      OR EXISTS (SELECT 1 FROM organization_entitlements entitlement
+        WHERE entitlement.organization_id = ${alias}.organization_id
+          AND entitlement.public_play_granted_at IS NOT NULL)))`;
+}
+
+/**
+ * The account that owns every verify run. It has no sign-in, is never an
+ * administrator and joins no organization; a verify run's access is its
+ * revision's, not this account's.
+ */
+export const VALIDATION_USER_ID = "scenario-validation";
+
 /** Recheck access before any run content or desired VMs can be committed. */
 export function admissionContentAccessCondition(parameter: number): string {
   return contentAccessCondition(name => `json_extract(?${parameter}, '$.${name}')`);
@@ -13,6 +35,8 @@ const currentRunFields = {
   allowSequenceBypass: "coalesce(json_extract(run.request_scope_json, '$.allowSequenceBypass'), 0)",
   requiresAdmin: `(coalesce(json_extract(run.request_scope_json, '$.allowSequenceBypass'), 0)
     OR coalesce(json_extract(run.request_scope_json, '$.allowDrainedAdminProof'), 0))`,
+  launchSource: "run.launch_source",
+  scenarioRev: "run.scenario_rev",
 };
 
 /** Current access for a scenario_runs table aliased as run. */
@@ -24,6 +48,12 @@ function contentAccessCondition(field: (name: keyof typeof currentRunFields) => 
   const user = field("userId");
   const org = field("organizationId");
   const scenario = field("scenarioId");
+  // A verify run: the validation account, on a revision of an enabled
+  // scenario that is still ready or that this run verified.
+  const verify = `${user} = '${VALIDATION_USER_ID}' AND EXISTS (SELECT 1 FROM scenarios verified_scenario
+      JOIN scenario_revisions verified_revision ON verified_revision.scenario_id = verified_scenario.id
+    WHERE verified_scenario.id = ${scenario} AND verified_scenario.enabled = 1
+      AND verified_revision.rev = ${field("scenarioRev")} AND verified_revision.state IN ('ready', 'verified'))`;
   // Organization links hide the same scenario in the public catalog, just as
   // loadVisibleCourseSources does. This also applies to prerequisite lectures.
   const shadowed = (scenarioId: string) => `EXISTS (
@@ -32,17 +62,22 @@ function contentAccessCondition(field: (name: keyof typeof currentRunFields) => 
       json_each(private_course.value, '$.lectures') private_lecture
     WHERE private_catalog.organization_id = ${org}
       AND json_extract(private_lecture.value, '$.scenarioId') = ${scenarioId})`;
-  return `(${field("requiresAdmin")} = 0 OR EXISTS (
+  const administered = `(${field("requiresAdmin")} = 0 OR EXISTS (
       SELECT 1 FROM user administrator WHERE administrator.id = ${user}
         AND administrator.deleted_at IS NULL
         AND coalesce(administrator.banned, 0) = 0
-        AND instr(',' || replace(lower(coalesce(administrator.role, '')), ' ', '') || ',', ',admin,') > 0))
+        AND instr(',' || replace(lower(coalesce(administrator.role, '')), ' ', '') || ',', ',admin,') > 0))`;
+  // A play run: personal, of a scenario still open to play; no course.
+  const play = `${administered} AND ${org} IS NULL AND EXISTS (SELECT 1 FROM scenarios played
+      WHERE played.id = ${scenario} AND ${playableScenarioCondition("played")})`;
+  return `CASE WHEN ${field("launchSource")} = 'verify' THEN ${verify}
+    WHEN ${field("launchSource")} = 'play' THEN ${play} ELSE ${administered}
     AND (${org} IS NULL OR EXISTS (SELECT 1 FROM member membership
       WHERE membership.user_id = ${user} AND membership.organization_id = ${org}))
-    AND EXISTS (SELECT 1 FROM vm_scenarios scenario
-      WHERE scenario.scenario_id = ${scenario} AND scenario.enabled = 1
-        AND scenario.enabled_at IS NOT NULL
-        AND (scenario.organization_id IS NULL OR scenario.organization_id = ${org}))
+    AND EXISTS (SELECT 1 FROM scenarios revised
+      WHERE revised.id = ${scenario} AND revised.enabled = 1
+        AND revised.live_rev IS NOT NULL
+        AND (revised.organization_id IS NULL OR revised.organization_id = ${org}))
     AND EXISTS (SELECT 1 FROM course_catalogs catalog,
         json_each(catalog.catalog_json, '$.courses') course,
         json_each(course.value, '$.lectures') lecture
@@ -65,5 +100,5 @@ function contentAccessCondition(field: (name: keyof typeof currentRunFields) => 
               AND NOT EXISTS (SELECT 1 FROM course_unit_completions completed
                 WHERE completed.user_id = ${user} AND completed.scope_key = catalog.scope_key
                   AND completed.course_id = ${field("courseId")}
-                  AND completed.lecture_id = json_extract(prior.value, '$.lectureId')))))`;
+                  AND completed.lecture_id = json_extract(prior.value, '$.lectureId'))))) END`;
 }

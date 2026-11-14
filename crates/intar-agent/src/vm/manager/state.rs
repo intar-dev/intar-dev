@@ -106,20 +106,19 @@ pub(super) async fn mark_vm_delete_failed(inner: &Inner, name: &str, message: St
 pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
     let state = VmLifecycleState::parse(&row.state)
         .ok_or_else(|| anyhow::anyhow!("unknown vm state \"{}\"", row.state))?;
-    let guest_tools = row
-        .guest_tools_json
-        .as_deref()
-        .map(serde_json::from_str::<DesiredGuestToolsV1>)
-        .transpose()
-        .context("decode persisted VM guest-tools pin")?;
-    if let Some(pin) = &guest_tools {
+    let digest = |value: &Option<String>, what: &str| {
+        value
+            .clone()
+            .map(OciDigest::try_from)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("persisted VM {what} digest is invalid: {error}"))
+    };
+    let image = digest(&row.image, "image")?;
+    let kino = digest(&row.kino, "kino")?;
+    if let Some(sha) = &row.boot_sha256 {
         anyhow::ensure!(
-            normalize_sha256(&pin.tools_disk_sha256).as_deref()
-                == Some(pin.tools_disk_sha256.as_str())
-                && pin.tools_disk_size_bytes == 64 * 1024 * 1024
-                && normalize_sha256(&pin.kino_sha256).as_deref() == Some(pin.kino_sha256.as_str())
-                && pin.bootstrap_abi == GUEST_BOOTSTRAP_ABI_V2,
-            "persisted VM guest-tools pin is invalid"
+            intar_contracts::oci::Sha256Hex::try_from(sha.clone()).is_ok(),
+            "persisted VM boot.json digest is invalid"
         );
     }
 
@@ -129,9 +128,10 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
             runtime_execution_id: row.runtime_execution_id.clone(),
             generation: u64::try_from(row.generation)
                 .context("invalid persisted execution generation")?,
-            image_key: row.image_key.clone(),
-            image_sha256: row.image_sha256.clone(),
-            guest_tools,
+            image,
+            kino,
+            boot_sha256: row.boot_sha256.clone(),
+            machine_name: row.machine_name.clone(),
             run_id: row.run_id.clone(),
             root_disk_path: root_disk_path.clone(),
             seed_disk_path: seed_disk_path.clone(),
@@ -163,15 +163,16 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
             jail_gid: row.jail_gid.and_then(|value| u32::try_from(value).ok()),
             jail_netns_name: row.jail_netns_name.clone(),
             kino_vsock_cid: row.kino_vsock_cid.and_then(|v| u32::try_from(v).ok()),
-            kino_vsock_port: row
-                .kino_vsock_port
-                .and_then(|v| u32::try_from(v).ok())
-                .or_else(|| row.kino_vsock_cid.map(|_| KINO_VSOCK_PORT)),
             kino_vsock_path: row.kino_vsock_path.clone(),
             ssh_host_keys_openssh: parse_ssh_host_keys_json(
                 row.ssh_host_keys_openssh_json.as_deref(),
             ),
             cpu_runtime: None,
+            // Only a report reads it; an unreadable one is left out.
+            start: row
+                .start_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str(json).ok()),
         }),
         _ => None,
     };
@@ -281,7 +282,7 @@ pub(super) fn compute_lease_expires_at(
     Some(format_rfc3339_s(lease_expires_at_s))
 }
 
-pub(super) fn is_safe_key(s: &str) -> bool {
+pub(crate) fn is_safe_key(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -293,6 +294,83 @@ pub(super) fn run_spool_dir(work_dir: &Path, run_id: &str) -> PathBuf {
 
 pub(super) fn vm_spool_dir(work_dir: &Path, run_id: &str, vm_name: &str) -> PathBuf {
     run_spool_dir(work_dir, run_id).join(vm_name)
+}
+
+/// The agent-owned directories of a VM an older schema tracked, derived
+/// from the work dir rather than trusted from the old row: the VM dir and,
+/// when its run is known, its spool.
+pub(super) fn previous_schema_vm_dirs(work_dir: &Path, row: &PendingTeardownRow) -> Vec<PathBuf> {
+    let safe = |part: &str| {
+        !part.is_empty()
+            && Path::new(part).components().count() == 1
+            && matches!(
+                Path::new(part).components().next(),
+                Some(std::path::Component::Normal(_))
+            )
+    };
+    if !safe(&row.vm_name) {
+        return Vec::new();
+    }
+    let mut dirs = vec![work_dir.join("vms").join(&row.vm_name)];
+    if let Some(run_id) = row.run_id.as_deref().filter(|run_id| safe(run_id)) {
+        dirs.push(vm_spool_dir(work_dir, run_id, &row.vm_name));
+    }
+    dirs
+}
+
+/// How jailerd finds a VM an older schema launched: by its jail generation
+/// when the row has one, else by (run_id, the row's name), the logical id
+/// the agent launched it under. `None`: jailerd cannot be asked at all.
+pub(super) fn previous_schema_jail_selector(
+    row: &PendingTeardownRow,
+) -> Result<Option<VmIdentityRequest>> {
+    if let Some(generation) = row.jail_generation.as_deref().filter(|g| !g.is_empty()) {
+        return Ok(Some(VmIdentityRequest::by_generation(
+            ValidatedId::parse(generation.to_owned()).context("validate an old jail generation")?,
+        )));
+    }
+    let Some(run_id) = row.run_id.as_deref().filter(|run_id| !run_id.is_empty()) else {
+        return Ok(None);
+    };
+    Ok(Some(VmIdentityRequest::by_logical_id(
+        ValidatedId::parse(run_id.to_owned()).context("validate an old run ID")?,
+        ValidatedId::parse(row.vm_name.clone()).context("validate an old VM ID")?,
+    )))
+}
+
+/// The runs whose every old VM was torn down: their networks can go.
+pub(super) fn previous_schema_runs_to_release(
+    outcomes: &[(PendingTeardownRow, bool)],
+) -> Vec<String> {
+    let mut runs: BTreeMap<&str, bool> = BTreeMap::new();
+    for (row, torn_down) in outcomes {
+        if let Some(run_id) = row.run_id.as_deref() {
+            *runs.entry(run_id).or_insert(true) &= *torn_down;
+        }
+    }
+    runs.into_iter()
+        .filter(|(_, all_gone)| *all_gone)
+        .map(|(run_id, _)| run_id.to_owned())
+        .collect()
+}
+
+/// The queued rows that can be forgotten: torn down, and their run's
+/// network (if they had a run) destroyed.
+pub(super) fn previous_schema_teardowns_done(
+    outcomes: &[(PendingTeardownRow, bool)],
+    released_runs: &BTreeSet<String>,
+) -> Vec<String> {
+    outcomes
+        .iter()
+        .filter(|(row, torn_down)| {
+            *torn_down
+                && row
+                    .run_id
+                    .as_ref()
+                    .is_none_or(|run_id| released_runs.contains(run_id))
+        })
+        .map(|(row, _)| row.vm_name.clone())
+        .collect()
 }
 
 pub(super) fn matching_vm_names_for_run_id(

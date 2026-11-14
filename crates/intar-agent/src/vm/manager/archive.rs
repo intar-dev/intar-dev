@@ -583,7 +583,7 @@ pub(super) async fn release_jailed_runtime(inner: &Inner, vm: &VmStatusResponse)
             .with_context(|| format!("destroy jail generation {generation}"))?;
     } else if let Some(selector) = generationless_v6_launch_cleanup_selector(vm)? {
         // A process crash can leave SQLite in any prelaunch state after
-        // jailerd has committed LaunchVmV2 but before persist_jail_launch records
+        // jailerd has committed LaunchVmV3 but before persist_jail_launch records
         // the fresh generation (an earlier state transition may itself have
         // failed to persist). Resolve only that narrow V6 window by the
         // protocol's typed logical identity and drain it before considering
@@ -605,6 +605,11 @@ pub(super) async fn release_jailed_runtime(inner: &Inner, vm: &VmStatusResponse)
         return Ok(());
     }
 
+    destroy_previous_schema_run_network(inner, run_id).await
+}
+
+/// Ask jailerd to destroy a run's network; one it does not know is gone.
+pub(super) async fn destroy_previous_schema_run_network(inner: &Inner, run_id: &str) -> Result<()> {
     let run_id = ValidatedId::parse(run_id.to_string()).context("validate persisted run ID")?;
     match request_jailerd(
         inner,

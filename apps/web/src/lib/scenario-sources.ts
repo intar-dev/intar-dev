@@ -2,42 +2,39 @@
 // through the Intar GitHub App. The binding is the only thing Intar trusts
 // about where a repository may publish.
 import { env } from "cloudflare:workers";
-import { and, asc, desc, eq, exists, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, exists, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import { assertCutoverNotWiped, CUTOVER_WIPED_SQL } from "@/lib/run-admission-gate";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import {
-  readBundleMeta,
-  readGzipBundleArchive,
-  readTarFile,
+  normalizeCourseCatalogSnapshot,
 } from "@/control-plane/image-registry/bundle";
 import {
   isRecord,
+  isSafeBundleRev,
   jsonResponse,
-  sha256Hex,
 } from "@/control-plane/image-registry/shared";
 import {
   account,
-  imageBuildBundles,
-  imageBuilds,
   scenarioSourceCommits,
   scenarioSources,
-  vmScenarios,
   type CourseCatalogSnapshotV2,
 } from "@/db/schema";
 import type { ScenarioSourceCommitState } from "@/db/schema/scenarios";
 import type { SourceCompileErrorV1 } from "@/generated/bridge";
 import type { SourceRefusalCode } from "@/generated/catalog";
 import {
+  MAX_SOURCE_BUNDLE_GZIP_BYTES,
   SOURCE_BUNDLE_FIELD,
-  SOURCE_COMPILER_VERSION,
   SOURCE_META_FIELD,
 } from "@/generated/constants";
+import validateSourceBundleMeta from "@/generated/contracts/source-bundle-meta-v2.validate";
+import { readSourceBundle, sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { activeAccountExistsSql, activeAdminSql } from "@/lib/account-access";
 import type { UserContext } from "@/lib/agent-bridge";
 import { type AppError, appError, errorChainMatches } from "@/lib/app-error";
 import { courseCatalogScopeKey } from "@/lib/course-catalogs";
-import { reconcileHostSourceCompiles } from "@/lib/build-scheduler";
+import { syncBuilderDesiredState } from "@/lib/machine-builds";
 import type { FeatureToggleService } from "@/lib/feature-toggles";
 import {
   findRepositoryInstallation,
@@ -48,10 +45,6 @@ import {
   type RepositoryHead,
 } from "@/lib/github-app";
 import { createAppId } from "@/lib/id";
-import {
-  IMAGE_BUILD_FORMAT_VERSION,
-  platformCompileDigest,
-} from "@/lib/image-build-format";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { featureToggleService } from "@/lib/organization-access";
 import { administersOrganization } from "@/lib/organizations";
@@ -94,8 +87,6 @@ export interface ScenarioSourceView {
   disconnectReason: string | null;
   liveSha: string | null;
   liveAt: number | null;
-  /** The organization's runs that hold the pending target: the unit guard's count. */
-  activeRuns: number;
   commit: {
     sha: string;
     state: ScenarioSourceCommitState;
@@ -103,13 +94,6 @@ export interface ScenarioSourceView {
     diagnostics: Array<Pick<SourceCompileErrorV1, "path" | "line" | "message">>;
     updatedAt: number;
   } | null;
-  builds: Array<{
-    scenarioId: string;
-    arch: string;
-    status: string;
-    phase: string;
-    error: string | null;
-  }>;
 }
 
 export interface ScenarioSourceCard {
@@ -163,85 +147,32 @@ export async function countUnitGuardRuns(
   organizationId: string | null,
   snapshot: CourseCatalogSnapshotV2,
 ): Promise<number> {
-  const access = currentScenarioRunContentAccessCondition();
-  const scope = organizationId === null ? "" : "run.organization_id = ?1 AND ";
-  // The CTE shadows course_catalogs for the proposed check only; the other
-  // scopes' catalogs are read from the table itself.
   const row = await d1
-    .prepare(
-      `SELECT COUNT(*) AS runs FROM scenario_runs AS run
-        WHERE ${scope}run.state NOT IN ('completed', 'failed')
-          AND (${access})
-          AND (run.scenario_id IN (SELECT scenario_id FROM vm_scenarios
-                WHERE organization_id IS ?1 AND enabled = 1
-                  AND scenario_id NOT IN (SELECT json_extract(lecture.value, '$.scenarioId')
-                    FROM json_each(?3, '$.courses') AS course,
-                      json_each(course.value, '$.lectures') AS lecture
-                    WHERE json_extract(lecture.value, '$.scenarioId') IS NOT NULL))
-            OR NOT (WITH course_catalogs AS (
-                SELECT scope_key, organization_id, catalog_json FROM main.course_catalogs
-                  WHERE scope_key <> ?2
-                UNION ALL SELECT ?2, ?1, ?3)
-              SELECT ${access}))`,
-    )
+    .prepare(`SELECT COUNT(*) AS runs ${unitGuardRunsSql(1, 2, 3)}`)
     .bind(organizationId, courseCatalogScopeKey(organizationId), JSON.stringify(snapshot))
     .first<{ runs: number }>();
   return row?.runs ?? 0;
 }
 
 /**
- * Whether Intar's image promotion may promote a `git-` rev: it is the rev
- * whose catalog `public` applied, or the public binding's live rev (a retry
- * of a committed promotion), and no public promotion of another rev is in
- * flight. A superseded rev the binding abandoned, because its head went back
- * to live_rev's commit, never goes live, even before a paused binding
- * retargets. The promotion's checks, its in-lock recheck and build-status
- * share it.
+ * `FROM … WHERE` of the active runs that would lose access if the catalog
+ * of scope ?{scopeKey} (organization ?{organization}) became the JSON
+ * snapshot ?{snapshot}; see countUnitGuardRuns. A write can embed it as
+ * `NOT EXISTS (SELECT 1 …)` to hold the guard in its own statement.
  */
-export async function publicSourceRevPromotable(
-  d1: D1Database,
-  rev: string,
-): Promise<boolean> {
-  const row = await d1
-    .prepare(
-      `SELECT ?1 IN (SELECT source_revision FROM course_catalogs WHERE scope_key = 'public'
-            UNION ALL SELECT live_rev FROM scenario_sources WHERE scope_key = 'public')
-          AND NOT EXISTS (SELECT 1 FROM scenario_source_commits
-            WHERE scope_key = 'public' AND purpose = 'deploy' AND state = 'promoting'
-              AND rev <> ?1)
-          AND NOT EXISTS (SELECT 1 FROM scenario_source_commits AS c
-            JOIN scenario_sources AS s ON s.scope_key = c.scope_key
-            WHERE c.scope_key = 'public' AND c.purpose = 'deploy' AND c.rev = ?1
-              AND c.state = 'superseded'
-              AND (s.target_rev IS s.live_rev OR s.head_sha IS s.live_sha)) AS promotable`,
-    )
-    .bind(rev)
-    .first<{ promotable: number | null }>();
-  return row?.promotable === 1;
-}
-
-/**
- * Intar's image promotion committed a public rev. One transaction makes it the
- * binding's live commit, whatever state its row was left in, and supersedes
- * the previous live row. The poke lets the check leave `Promoting` within a
- * minute.
- */
-export async function recordPublicSourceLive(
-  d1: D1Database,
-  rev: string,
-): Promise<void> {
-  const statements = [
-    `UPDATE scenario_sources SET live_rev = ?1, live_at = ?2, updated_at = ?2, poked_at = ?2,
-        live_sha = (SELECT sha FROM scenario_source_commits
-          WHERE scope_key = 'public' AND purpose = 'deploy' AND rev = ?1)
-      WHERE scope_key = 'public' AND live_rev IS NOT ?1`,
-    `UPDATE scenario_source_commits SET state = 'superseded', updated_at = ?2
-      WHERE scope_key = 'public' AND purpose = 'deploy' AND state = 'live' AND rev <> ?1`,
-    `UPDATE scenario_source_commits SET state = 'live', detail = NULL, updated_at = ?2
-      WHERE scope_key = 'public' AND purpose = 'deploy' AND rev = ?1 AND state <> 'live'`,
-  ];
-  const now = Date.now();
-  await d1.batch(statements.map((statement) => d1.prepare(statement).bind(rev, now)));
+export function unitGuardRunsSql(organization: number, scopeKey: number, snapshot: number): string {
+  const access = currentScenarioRunContentAccessCondition();
+  // The CTE shadows course_catalogs for the proposed check only; the other
+  // scopes' catalogs are read from the table itself.
+  return `FROM scenario_runs AS run
+        WHERE (?${organization} IS NULL OR run.organization_id = ?${organization})
+          AND run.state NOT IN ('completed', 'failed')
+          AND (${access})
+          AND NOT (WITH course_catalogs AS (
+                SELECT scope_key, organization_id, catalog_json FROM main.course_catalogs
+                  WHERE scope_key <> ?${scopeKey}
+                UNION ALL SELECT ?${scopeKey}, ?${organization}, ?${snapshot})
+              SELECT ${access})`;
 }
 
 /** Removes every absolute path; repository-relative paths stay readable. */
@@ -298,45 +229,6 @@ export async function loadScenarioSource(
     )
     .orderBy(desc(scenarioSourceCommits.createdAt), desc(scenarioSourceCommits.id))
     .limit(1);
-  const builds = commit
-    ? await db
-        .select({
-          scenarioId: imageBuilds.scenarioId,
-          arch: imageBuilds.arch,
-          status: imageBuilds.status,
-          phase: imageBuilds.phase,
-          error: imageBuilds.error,
-        })
-        .from(imageBuilds)
-        .where(
-          and(
-            eq(imageBuilds.rev, commit.rev),
-            scope.organizationId === null
-              ? isNull(imageBuilds.organizationId)
-              : eq(imageBuilds.organizationId, scope.organizationId),
-          ),
-        )
-        .orderBy(asc(imageBuilds.scenarioId), asc(imageBuilds.arch))
-    : [];
-  const [target] =
-    scope.organizationId !== null &&
-    binding.targetRev !== null &&
-    binding.targetRev !== binding.liveRev
-      ? await db
-          .select({ meta: imageBuildBundles.metaJson })
-          .from(imageBuildBundles)
-          .where(
-            and(
-              eq(imageBuildBundles.rev, binding.targetRev),
-              eq(imageBuildBundles.organizationId, scope.organizationId),
-            ),
-          )
-          .limit(1)
-      : [];
-  const activeRuns =
-    scope.organizationId !== null && target?.meta.courseCatalog
-      ? await countUnitGuardRuns(env.DB, scope.organizationId, target.meta.courseCatalog)
-      : 0;
   return {
     repository: binding.githubRepository,
     defaultBranch: binding.defaultBranch,
@@ -347,7 +239,6 @@ export async function loadScenarioSource(
     disconnectReason: binding.disconnectReason,
     liveSha: binding.liveSha,
     liveAt: binding.liveAt,
-    activeRuns,
     commit: commit
       ? {
           sha: commit.sha,
@@ -357,10 +248,6 @@ export async function loadScenarioSource(
           updatedAt: commit.updatedAt,
         }
       : null,
-    builds: builds.map((build) => ({
-      ...build,
-      error: build.error === null ? null : redactHostPaths(build.error),
-    })),
   };
 }
 
@@ -824,54 +711,8 @@ export async function loadPushScenarioSource(
   return binding ?? null;
 }
 
-/**
- * Token-route gates. Scenario ids owned by a connected binding's scope are
- * refused, except public-owned ids in a benchmark rev, and while `public` is
- * connected the token route leaves the public catalog alone. A paused binding
- * still gates; a disconnected one does not.
- */
-export async function tokenUploadGate(
-  db: DrizzleD1Database,
-  input: { scenarioIds: string[]; benchmark: boolean },
-): Promise<{ refusedScenarioIds: string[]; publicConnected: boolean }> {
-  const connected = isNull(scenarioSources.disconnectedAt);
-  const [owned, publicSource] = await Promise.all([
-    db
-      .select({
-        scenarioId: vmScenarios.scenarioId,
-        organizationId: vmScenarios.organizationId,
-      })
-      .from(vmScenarios)
-      .innerJoin(
-        scenarioSources,
-        and(
-          sql`${scenarioSources.organizationId} IS ${vmScenarios.organizationId}`,
-          connected,
-        ),
-      ),
-    db
-      .select({ scopeKey: scenarioSources.scopeKey })
-      .from(scenarioSources)
-      .where(and(eq(scenarioSources.scopeKey, "public"), connected))
-      .limit(1),
-  ]);
-  const ids = new Set(input.scenarioIds);
-  return {
-    refusedScenarioIds: owned
-      .filter(
-        (row) =>
-          ids.has(row.scenarioId) &&
-          !(input.benchmark && row.organizationId === null),
-      )
-      .map((row) => row.scenarioId),
-    publicConnected: publicSource.length > 0,
-  };
-}
-
-/** 2 MiB of compressed git bundle, plus 2 MiB for the meta part and framing. */
+/** 2 MiB of compressed bundle, plus 2 MiB for the meta part and framing. */
 export const MAX_SOURCE_UPLOAD_BYTES = 4 * 1024 * 1024;
-/** The expanded git-bundle cap. */
-export const MAX_SOURCE_BUNDLE_TAR_BYTES = 4 * 1024 * 1024;
 /**
  * A pull compile that expires, or is refused as outdated, this many attempts
  * after the row's claim fails its row.
@@ -886,6 +727,7 @@ const SETTLED_STATES: readonly ScenarioSourceCommitState[] = [
   "promoting",
   "awaiting_promote",
   "live",
+  "validated",
 ];
 
 /**
@@ -897,7 +739,7 @@ export type SourceUploadClaim =
   | { via: "push"; headSha: string; observedAt: number }
   | { via: "pull"; commitId: string; attempt: number; hostId: string };
 
-/** Where a row's staged `bundle.tar.gz` and `meta.json` live. */
+/** Where a row's staged objects live. */
 export function stagedSourceObjectPrefix(
   scopeKey: string,
   rev: string,
@@ -956,50 +798,35 @@ export async function acceptScenarioSourceUpload(
   const metaField = form.get(SOURCE_META_FIELD);
   const rawMeta =
     typeof metaField === "string" ? metaField : await metaField?.text();
-  const digest = await platformCompileDigest(
-    workerEnv.PLATFORM_BASE_IMAGES_SHA256,
-  );
   const revPrefix = `git-${input.repositoryId}-${input.sha}-`;
-  const rev = digest === null ? null : `${revPrefix}${digest}`;
-  // An older CLI or builder is told to re-read the descriptor before any
-  // other meta check can call its output malformed.
   const lenient = parseRecord(rawMeta);
-  const compilerVersion = isRecord(lenient.source)
-    ? lenient.source.compiler_version
-    : undefined;
-  const formatVersion =
-    lenient.build_format_version ?? lenient.buildFormatVersion;
-  if (
-    (typeof lenient.rev === "string" &&
-      lenient.rev.startsWith(revPrefix) &&
-      lenient.rev !== rev) ||
-    (typeof compilerVersion === "string" &&
-      compilerVersion !== SOURCE_COMPILER_VERSION) ||
-    (typeof formatVersion === "string" &&
-      formatVersion !== IMAGE_BUILD_FORMAT_VERSION)
-  ) {
+  // An older CLI or builder, whose meta names its source, is told to re-read
+  // the compiler descriptor before any other check calls its output malformed.
+  if (Object.hasOwn(lenient, "source")) {
     throw sourceRefusal(
       409,
       "compiler_outdated",
       "Intar now compiles with another compiler. Re-read the compiler descriptor and publish again.",
     );
   }
-  const meta = await readBundleMeta(rawMeta ?? null);
-  if (!meta.ok) return meta.response;
-  if (rev === null || meta.value.rev !== rev) {
+  if (!validateSourceBundleMeta(lenient)) {
+    throw appError(400, "source_meta_invalid", "meta must be exactly {\"rev\": ...}");
+  }
+  if (!isSafeBundleRev(lenient.rev) || !lenient.rev.startsWith(revPrefix)) {
     throw appError(400, "source_rev_invalid", "meta.rev does not name this commit");
   }
-  const source = meta.value.bundleMeta.source;
-  if (
-    !isRecord(source) ||
-    typeof source.scope !== "string" ||
-    typeof source.courses_root !== "string" ||
-    typeof source.compiler_version !== "string"
-  ) {
-    throw appError(400, "source_meta_invalid", "meta.source is required");
+  const digest = await sourceCompileDigest();
+  const rev = `${revPrefix}${digest}`;
+  if (lenient.rev !== rev) {
+    throw sourceRefusal(
+      409,
+      "compiler_outdated",
+      "Intar now compiles with another compiler. Re-read the compiler descriptor and publish again.",
+    );
   }
   const bundle = form.get(SOURCE_BUNDLE_FIELD);
-  if (!(bundle instanceof File) || bundle.size === 0) {
+  // A validate-only compile result carries no bundle.
+  if (purpose === "deploy" && !(bundle instanceof File)) {
     throw appError(400, "bundle_required", "bundle form field is required");
   }
 
@@ -1018,46 +845,32 @@ export async function acceptScenarioSourceUpload(
     .limit(1);
   if (existing && SETTLED_STATES.includes(existing.state)) return receipt(rev);
 
-  const payload = await bundle.arrayBuffer();
-  // Empty and theory-only commits carry no base catalog.
-  if (meta.value.bundleMeta.scenarios.length) {
-    const archive = await readGzipBundleArchive(
-      payload,
-      MAX_SOURCE_BUNDLE_TAR_BYTES,
-    );
-    if (!archive.ok) return archive.response;
-    const baseImages = readTarFile(archive.bytes, "base-images.hcl");
-    if (!baseImages) {
-      throw appError(
-        400,
-        "bundle_invalid",
-        "bundle archive is missing base-images.hcl",
-      );
+  const files: Array<[name: string, body: Uint8Array<ArrayBuffer>, type: string]> = [];
+  if (bundle instanceof File) {
+    if (bundle.size > MAX_SOURCE_BUNDLE_GZIP_BYTES) {
+      throw appError(413, "payload_too_large", `The bundle is over ${MAX_SOURCE_BUNDLE_GZIP_BYTES} bytes gzipped.`);
     }
-    if (
-      (await sha256Hex(baseImages.slice().buffer)) !==
-      workerEnv.PLATFORM_BASE_IMAGES_SHA256
-    ) {
-      throw sourceRefusal(
-        409,
-        "compiler_outdated",
-        "The bundle was compiled against another base-image catalog. Re-read the compiler descriptor and publish again.",
-      );
+    const gzip = new Uint8Array(await bundle.arrayBuffer());
+    const read = await readSourceBundle(gzip);
+    if (!normalizeCourseCatalogSnapshot(read.course_catalog)) {
+      throw appError(400, "bundle_invalid", "The course catalog is invalid.");
     }
+    if (purpose === "deploy") files.push(["bundle.json.gz", gzip, "application/gzip"]);
   }
+  // A validate-only result has nothing left to do once it is claimed.
+  const claimState = purpose === "validate" ? "validated" : "ingesting";
 
   // Before staging: nothing lands in the wiped tables or the bucket. The
   // claim's own predicate covers a wipe that starts after this read.
   await assertCutoverNotWiped(workerEnv.DB);
   const staged = stagedSourceObjectPrefix(scope.key, rev, purpose);
-  await Promise.all([
-    workerEnv.VM_IMAGE_REGISTRY_BUCKET.put(`${staged}bundle.tar.gz`, payload, {
-      httpMetadata: { contentType: "application/gzip" },
-    }),
-    workerEnv.VM_IMAGE_REGISTRY_BUCKET.put(`${staged}meta.json`, rawMeta ?? "", {
-      httpMetadata: { contentType: "application/json" },
-    }),
-  ]);
+  await Promise.all(
+    files.map(([name, body, contentType]) =>
+      workerEnv.VM_IMAGE_REGISTRY_BUCKET.put(`${staged}${name}`, body, {
+        httpMetadata: { contentType },
+      }),
+    ),
+  );
 
   const now = Date.now();
   const headIsRev = sql`EXISTS (SELECT 1 FROM scenario_sources
@@ -1078,10 +891,10 @@ export async function acceptScenarioSourceUpload(
           sql`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha,
               rev, via, state, created_at, updated_at)
             SELECT ${createAppId()}, ${scope.key}, ${purpose}, ${input.sha},
-              ${rev}, 'push', 'ingesting', ${now}, ${now}
+              ${rev}, 'push', ${claimState}, ${now}, ${now}
             WHERE ${headIsRev} AND NOT ${sql.raw(CUTOVER_WIPED_SQL)}
             ON CONFLICT (scope_key, rev, purpose) DO UPDATE SET
-              state = 'ingesting', via = 'push', attempt = attempt + 1,
+              state = ${claimState}, via = 'push', attempt = attempt + 1,
               detail = NULL, diagnostics_json = NULL,
               updated_at = excluded.updated_at
             WHERE scenario_source_commits.state IN
@@ -1089,7 +902,7 @@ export async function acceptScenarioSourceUpload(
         ]
       : [
           sql`UPDATE scenario_source_commits
-            SET state = 'ingesting', updated_at = ${now}
+            SET state = ${claimState}, updated_at = ${now}
             WHERE id = ${claim.commitId} AND attempt = ${claim.attempt}
               AND compile_host_id = ${claim.hostId} AND state = 'compiling'
               AND scope_key = ${scope.key} AND rev = ${rev}
@@ -1134,15 +947,13 @@ export async function endSourceCompiles(
 ): Promise<void> {
   const hosts = [...new Set(hostIds)].filter((id): id is string => id !== null);
   if (!hosts.length) return;
-  const db = drizzle(workerEnv.DB);
   const now = Date.now();
   for (const hostId of hosts) {
-    if (await reconcileHostSourceCompiles(db, hostId, now)) {
+    if (await syncBuilderDesiredState(workerEnv, hostId, now)) {
       await tryWakeHostRuntimeViaNamespace(workerEnv.HOST_RUNTIME, hostId);
     }
   }
-  const digest = await platformCompileDigest(workerEnv.PLATFORM_BASE_IMAGES_SHA256);
-  if (digest === null) return;
+  const digest = await sourceCompileDigest();
   // The oldest head with nothing in flight; the every-minute cron delivers it.
   await workerEnv.DB.prepare(
     `UPDATE scenario_sources SET poked_at = ?1

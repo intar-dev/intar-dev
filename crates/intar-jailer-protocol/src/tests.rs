@@ -109,113 +109,7 @@ fn finalize_boot_is_generation_fenced_and_rejects_extra_authority() {
 }
 
 #[test]
-fn prepare_image_v2_is_hash_bound_and_cannot_reimport_templates() {
-    let digest = Sha256Digest::parse("a".repeat(64)).expect("digest");
-    let source = |path: &str| ArtifactSource {
-        source_root: 0,
-        relative_path: PathBuf::from(path),
-        sha256: Some(digest.clone()),
-        access: ArtifactAccess::ReadOnly,
-    };
-    let request = PrepareImageV2Request {
-        image_sha256: digest.clone(),
-        virtual_size_bytes: 4 * 1024 * 1024 * 1024,
-        root_disk: source("images/root.raw"),
-        kernel: source("artifacts/kernel"),
-        initrd: Some(source("artifacts/initrd")),
-        request_class: RequestClass::Foreground,
-    };
-    request.validate().expect("valid prepared image request");
-    let envelope = RequestEnvelope::new(9, Request::PrepareImageV2(Box::new(request.clone())));
-    assert_eq!(
-        RequestEnvelope::decode(&envelope.encode().expect("encode")).expect("decode"),
-        envelope
-    );
-
-    let mut invalid = request;
-    invalid.root_disk.source_root = PREPARED_IMAGE_SOURCE_ROOT;
-    assert_eq!(
-        invalid.validate(),
-        Err(ValidationError::InvalidTemplateSource)
-    );
-    invalid.root_disk.source_root = 0;
-    invalid.root_disk.sha256 = None;
-    assert_eq!(
-        invalid.validate(),
-        Err(ValidationError::MissingTemplateArtifactHash)
-    );
-}
-
-#[test]
-fn launch_vm_v2_is_template_bound_and_v1_rejects_prepared_sources() {
-    let image_sha256 = Sha256Digest::parse("b".repeat(64)).expect("image digest");
-    let artifact_sha256 = Sha256Digest::parse("c".repeat(64)).expect("artifact digest");
-    let prepared = |name: &str, access| ArtifactSource {
-        source_root: PREPARED_IMAGE_SOURCE_ROOT,
-        relative_path: PathBuf::from(image_sha256.as_str()).join(name),
-        sha256: Some(artifact_sha256.clone()),
-        access,
-    };
-    let agent_owned = |name: &str, access| ArtifactSource {
-        source_root: 0,
-        relative_path: PathBuf::from(name),
-        sha256: Some(Sha256Digest::for_bytes(b"fixture")),
-        access,
-    };
-    let launch = VmLaunchRequest {
-        run_id: ValidatedId::parse("run-1").expect("run ID"),
-        vm_id: ValidatedId::parse("vm-1").expect("VM ID"),
-        cpu_millis: 1_000,
-        memory_mib: 512,
-        root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
-        tap_name: "tap-test".to_string(),
-        mac_address: "02:00:00:00:00:01".to_string(),
-        guest_ip_cidr: "10.77.0.2/28".to_string(),
-        ssh_public_port: Some(22_000),
-        vsock_cid: 3,
-        artifacts: SourceArtifacts {
-            kernel: prepared("kernel", ArtifactAccess::ReadOnly),
-            initrd: Some(prepared("initrd", ArtifactAccess::ReadOnly)),
-            root_disk: prepared("root.raw", ArtifactAccess::ReadWrite),
-            runtime_disk: agent_owned("runtime.raw", ArtifactAccess::ReadOnly),
-            recording_disk: agent_owned("recordings.vfat", ArtifactAccess::ReadWrite),
-            tools_disk: None,
-        },
-    };
-    assert_eq!(
-        launch.validate(),
-        Err(ValidationError::TemplateLaunchRequiresV2)
-    );
-
-    let request = LaunchVmV2Request {
-        image_sha256,
-        virtual_size_bytes: 4 * 1024 * 1024 * 1024,
-        launch,
-    };
-    request.validate().expect("valid v2 launch");
-    let mut undersized = request.clone();
-    undersized.launch.root_disk_size_bytes = undersized.virtual_size_bytes - 1;
-    assert_eq!(
-        undersized.validate(),
-        Err(ValidationError::RootDiskSmallerThanTemplate)
-    );
-    let envelope = RequestEnvelope::new(10, Request::LaunchVmV2(Box::new(request.clone())));
-    assert_eq!(
-        RequestEnvelope::decode(&envelope.encode().expect("encode")).expect("decode"),
-        envelope
-    );
-
-    let mut wrong_bundle = request;
-    wrong_bundle.launch.artifacts.kernel.relative_path =
-        PathBuf::from(wrong_bundle.image_sha256.as_str()).join("other-kernel");
-    assert_eq!(
-        wrong_bundle.validate(),
-        Err(ValidationError::InvalidPreparedLaunchArtifact)
-    );
-}
-
-#[test]
-fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
+fn chunked_v3_uses_a_bounded_manifest_root_and_prepared_boot_artifacts() {
     let image_id = Sha256Digest::parse("a".repeat(64)).expect("image digest");
     let manifest_sha256 = Sha256Digest::parse("b".repeat(64)).expect("manifest digest");
     let artifact_sha256 = Sha256Digest::parse("c".repeat(64)).expect("artifact digest");
@@ -229,6 +123,7 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         image_id: image_id.clone(),
         chunk_manifest_sha256: manifest_sha256.clone(),
         virtual_size_bytes: 8 * 1024 * 1024,
+        image_manifest: readonly("blobs/manifest", image_id.clone()),
         manifest: readonly("manifests/image.json", manifest_sha256.clone()),
         chunk_cache_root: TrustedDirectorySource {
             source_root: 0,
@@ -237,8 +132,15 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         kernel: readonly("artifacts/kernel", artifact_sha256.clone()),
         initrd: Some(readonly("artifacts/initrd", artifact_sha256.clone())),
         request_class: RequestClass::Foreground,
+        prepare_wake: false,
     };
     prepare.validate().expect("valid chunked prepare");
+    let mut other_manifest = prepare.clone();
+    other_manifest.image_manifest.sha256 = Some(manifest_sha256.clone());
+    assert!(
+        other_manifest.validate().is_err(),
+        "the image manifest's hash must be the image id"
+    );
     let envelope = RequestEnvelope::new(
         11,
         Request::PrepareChunkedImageV3(Box::new(prepare.clone())),
@@ -287,21 +189,18 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         guest_ip_cidr: "10.77.0.2/28".to_string(),
         ssh_public_port: Some(22_000),
         vsock_cid: 3,
+        egress: false,
         artifacts: SourceArtifacts {
             kernel: prepared("kernel", ArtifactAccess::ReadOnly),
             initrd: Some(prepared("initrd", ArtifactAccess::ReadOnly)),
             root_disk: prepared("root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: agent("runtime.raw", ArtifactAccess::ReadOnly, None),
             recording_disk: agent("recordings.vfat", ArtifactAccess::ReadWrite, None),
-            tools_disk: Some(agent(
-                "tools/tools.ext4",
-                ArtifactAccess::ReadOnly,
-                Some(Sha256Digest::parse("d".repeat(64)).expect("tools digest")),
-            )),
+            wake: None,
         },
     };
     let request = LaunchVmV3Request {
-        image_id,
+        image_id: image_id.clone(),
         chunk_manifest_sha256: manifest_sha256,
         virtual_size_bytes: 8 * 1024 * 1024,
         launch,
@@ -311,29 +210,59 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_requires_read_only_tools() {
         .launch
         .validate_persisted()
         .expect("persisted v3 launch");
-    assert!(
-        request.launch.validate().is_err(),
-        "raw launch must still reject tools"
+    assert_eq!(
+        request.launch.validate(),
+        Err(ValidationError::TemplateLaunchRequiresV2),
+        "a raw launch must not reference prepared boot artifacts"
     );
-    let mut unhashed_tools = request.clone();
-    unhashed_tools
-        .launch
-        .artifacts
-        .tools_disk
-        .as_mut()
-        .expect("tools disk")
-        .sha256 = None;
-    assert!(unhashed_tools.launch.validate_persisted().is_err());
-    let mut writable_tools = request;
-    writable_tools
-        .launch
-        .artifacts
-        .tools_disk
-        .as_mut()
-        .expect("tools disk")
-        .access = ArtifactAccess::ReadWrite;
-    assert!(writable_tools.validate().is_err());
-    assert!(writable_tools.launch.validate_persisted().is_err());
+    let mut writable_runtime = request.clone();
+    writable_runtime.launch.artifacts.runtime_disk.access = ArtifactAccess::ReadWrite;
+    assert_eq!(
+        writable_runtime.validate(),
+        Err(ValidationError::InvalidArtifactAccess)
+    );
+
+    // A suspended guest: the launch's own template files, RAM writable.
+    let wake = WakeArtifacts {
+        ram: prepared("ram", ArtifactAccess::ReadWrite),
+        stub: prepared("stub", ArtifactAccess::ReadOnly),
+        cpu_profile: prepared("cpu-profile.json", ArtifactAccess::ReadOnly),
+    };
+    let mut waking = request;
+    waking.launch.artifacts.wake = Some(wake.clone());
+    waking.validate().expect("valid wake launch");
+    assert_eq!(
+        waking.launch.validate(),
+        Err(ValidationError::TemplateLaunchRequiresV2),
+        "a raw launch carries no suspended guest"
+    );
+    let broken: [fn(&mut WakeArtifacts); 5] = [
+        |wake| wake.ram.access = ArtifactAccess::ReadOnly,
+        |wake| wake.stub.access = ArtifactAccess::ReadWrite,
+        |wake| {
+            wake.cpu_profile.relative_path = PathBuf::from("b".repeat(64)).join("cpu-profile.json")
+        },
+        |wake| wake.stub.source_root = 0,
+        |wake| wake.ram.sha256 = None,
+    ];
+    for change in broken {
+        let mut broken = waking.clone();
+        if let Some(wake) = broken.launch.artifacts.wake.as_mut() {
+            change(wake);
+        }
+        assert_eq!(
+            broken.validate(),
+            Err(ValidationError::InvalidPreparedLaunchArtifact)
+        );
+    }
+    // An older peer's launch, without the field, still decodes.
+    let mut value = serde_json::to_value(&waking).expect("encode");
+    value["launch"]["artifacts"]
+        .as_object_mut()
+        .expect("artifacts")
+        .remove("wake");
+    let decoded: LaunchVmV3Request = serde_json::from_value(value).expect("decode");
+    assert!(decoded.launch.artifacts.wake.is_none());
 }
 
 #[test]
@@ -355,8 +284,8 @@ fn unknown_envelope_fields_are_rejected() {
 }
 
 #[test]
-fn protocol_v4_rejects_legacy_handshake_authority() {
-    assert_eq!(PROTOCOL_VERSION, 4);
+fn protocol_v5_rejects_legacy_handshake_authority() {
+    assert_eq!(PROTOCOL_VERSION, 5);
     let legacy = RequestEnvelope::decode(
         br#"{"version":1,"request_id":1,"request":{"operation":"capabilities"}}"#,
     )
@@ -365,19 +294,19 @@ fn protocol_v4_rejects_legacy_handshake_authority() {
 }
 
 #[test]
-fn protocol_v2_capabilities_require_every_fast_launch_attestation() {
+fn capabilities_require_every_fast_launch_attestation() {
     let capabilities = JailerCapabilities {
         protocol_version: PROTOCOL_VERSION,
         cloud_hypervisor_version: CLOUD_HYPERVISOR_VERSION.to_owned(),
-        cloud_hypervisor_sha256: CLOUD_HYPERVISOR_SHA256.to_owned(),
+        cloud_hypervisor_sha256: "a".repeat(64),
         total_cpu_millis: 8_000,
         reserved_cpu_millis: 1_000,
         schedulable_cpu_millis: 7_000,
         committed_cpu_millis: 2_000,
-        supports_jailer_v2: true,
         supports_jailer_v3: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
+        supports_wake: false,
         supports_hard_cpu_quota: true,
         supports_landlock: true,
         supports_cgroup_v2: true,
@@ -403,9 +332,21 @@ fn protocol_v2_capabilities_require_every_fast_launch_attestation() {
         ssh_public_port_start: DEFAULT_SSH_PUBLIC_PORT_START,
         ssh_public_port_end: DEFAULT_SSH_PUBLIC_PORT_END,
     };
-    let encoded = serde_json::to_value(capabilities).expect("serialize capabilities");
+    let encoded = serde_json::to_value(&capabilities).expect("serialize capabilities");
+    // A host without wake support says nothing of it, as an older one did.
+    assert!(encoded.get("supports_wake").is_none());
+    let waking = JailerCapabilities {
+        supports_wake: true,
+        ..capabilities
+    };
+    let waking_encoded = serde_json::to_value(&waking).expect("serialize capabilities");
+    assert_eq!(waking_encoded["supports_wake"], serde_json::json!(true));
+    assert_eq!(
+        serde_json::from_value::<JailerCapabilities>(waking_encoded).expect("decode"),
+        waking
+    );
     for required in [
-        "supports_jailer_v2",
+        "supports_jailer_v3",
         "supports_template_backed_launch",
         "fast_template_store",
     ] {
@@ -465,13 +406,14 @@ fn guest_cpu_count_cannot_be_added_to_launch_request() {
         guest_ip_cidr: "10.77.0.2/28".to_owned(),
         ssh_public_port: Some(22000),
         vsock_cid: 3,
+        egress: false,
         artifacts: SourceArtifacts {
             kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
             initrd: None,
             root_disk: source("/trusted/root", ArtifactAccess::ReadWrite),
             runtime_disk: source("/trusted/runtime", ArtifactAccess::ReadOnly),
             recording_disk: source("/trusted/recording", ArtifactAccess::ReadWrite),
-            tools_disk: None,
+            wake: None,
         },
     };
     assert_eq!(
@@ -534,12 +476,11 @@ fn vm_selectors_are_exactly_generation_or_logical_identity() {
 }
 
 #[test]
-fn jailerd_config_rejects_runtime_hash_overrides() {
+fn jailerd_config_rejects_another_runtime_binary() {
     let config = JailerdConfig {
         agent_uid: 991,
         agent_gid: 991,
-        cloud_hypervisor_sha256: Sha256Digest::parse("a".repeat(64))
-            .expect("syntactically valid digest"),
+        cloud_hypervisor_binary: PathBuf::from("/usr/lib/intar/cloud-hypervisor-v53.0"),
         ..JailerdConfig::default()
     };
     assert_eq!(config.validate(), Err(ValidationError::UnpinnedRuntime));
@@ -708,4 +649,24 @@ fn source(path: &str, access: ArtifactAccess) -> ArtifactSource {
         sha256: Some(Sha256Digest::for_bytes(b"fixture")),
         access,
     }
+}
+
+#[test]
+fn the_wake_stub_replacement_names_one_generation() {
+    let generation = ValidatedId::parse("generation-1").expect("generation");
+    let envelope = RequestEnvelope::new(
+        8,
+        Request::ReplaceWakeStub(VmIdentityRequest::by_generation(generation)),
+    );
+    let encoded = envelope.encode().expect("encode");
+    assert!(String::from_utf8_lossy(&encoded).contains(r#""operation":"replace_wake_stub""#));
+    assert_eq!(RequestEnvelope::decode(&encoded).expect("decode"), envelope);
+    let response = ResponseEnvelope::new(
+        8,
+        Response::ReplaceWakeStub(OperationResult { changed: true }),
+    );
+    assert_eq!(
+        ResponseEnvelope::decode(&response.encode().expect("encode")).expect("decode"),
+        response
+    );
 }

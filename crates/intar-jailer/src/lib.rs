@@ -28,10 +28,16 @@ const CLOUD_HYPERVISOR_ARGS: [&str; 4] = [
     "true",
 ];
 
+#[cfg(target_os = "linux")]
+mod snapdelta;
+
 #[derive(Debug, Parser)]
 #[command(name = "intar-jailer")]
 #[command(about = "Single-use Cloud Hypervisor isolation boundary")]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
     #[arg(long, value_name = "PATH", required_unless_present = "stage2")]
     spec: Option<std::path::PathBuf>,
     #[arg(long, hide = true)]
@@ -42,10 +48,21 @@ struct Cli {
     gid: Option<u32>,
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Rebuild a VM memory file from a base and an untrusted snapdelta, from
+    /// the descriptors `base`, `delta` and `out` that systemd passes in
+    /// (`OpenFile=`). Run only by jailerd, inside its sandboxed unit.
+    ApplySnapdelta,
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     #[cfg(target_os = "linux")]
     {
+        if let Some(Command::ApplySnapdelta) = cli.command {
+            return snapdelta::run();
+        }
         if cli.stage2 {
             return linux::run_stage2(
                 cli.uid.context("stage2 requires --uid")?,
@@ -308,14 +325,7 @@ mod linux {
             uid,
             gid,
         )?;
-        match open_jail_rule_anchor(&root, "boot/initrd") {
-            Ok(fd) => {
-                validate_rule_anchor(&fd, "boot/initrd", RuleAnchorKind::RootFile, uid, gid)?;
-                rules.push((fd, AccessFs::ReadFile.into()));
-            }
-            Err(error) if error == rustix::io::Errno::NOENT => {}
-            Err(error) => return Err(error).context("open optional Landlock anchor boot/initrd"),
-        }
+        push_optional_jail_rules(&mut rules, &root, uid, gid)?;
         for (path, kind, access) in [
             (
                 "disks/root.raw",
@@ -334,16 +344,6 @@ mod linux {
             ),
         ] {
             push_jail_rule(&mut rules, &root, path, kind, access, uid, gid)?;
-        }
-        match open_jail_rule_anchor(&root, "disks/tools.ext4") {
-            Ok(fd) => {
-                validate_rule_anchor(&fd, "disks/tools.ext4", RuleAnchorKind::RootFile, uid, gid)?;
-                rules.push((fd, AccessFs::ReadFile.into()));
-            }
-            Err(error) if error == rustix::io::Errno::NOENT => {}
-            Err(error) => {
-                return Err(error).context("open optional Landlock anchor disks/tools.ext4");
-            }
         }
         for path in [
             "logs/serial.log",
@@ -429,6 +429,54 @@ mod linux {
         validate_rule_anchor(&proc_fd, "proc", RuleAnchorKind::RootDirectory, uid, gid)?;
         rules.push((proc_fd, make_bitflags!(AccessFs::{ReadFile | ReadDir})));
         Ok(rules)
+    }
+
+    /// The files a launch carries only sometimes: an initrd, and a suspended
+    /// guest's stub, CPU profile and RAM. Each is ruled when present.
+    /// Returns the paths ruled.
+    fn push_optional_jail_rules(
+        rules: &mut Vec<LandlockRule>,
+        root: &impl std::os::fd::AsFd,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Vec<&'static str>> {
+        let mut ruled = Vec::new();
+        for (path, kind, access) in [
+            (
+                "boot/initrd",
+                RuleAnchorKind::RootFile,
+                BitFlags::from(AccessFs::ReadFile),
+            ),
+            (
+                "boot/wake-stub",
+                RuleAnchorKind::RootFile,
+                AccessFs::ReadFile.into(),
+            ),
+            (
+                "boot/cpu-profile.json",
+                RuleAnchorKind::RootFile,
+                AccessFs::ReadFile.into(),
+            ),
+            (
+                "disks/wake.ram",
+                RuleAnchorKind::VmFile,
+                make_bitflags!(AccessFs::{ReadFile | WriteFile | Truncate}),
+            ),
+        ] {
+            match open_jail_rule_anchor(root, path) {
+                Ok(fd) => {
+                    validate_rule_anchor(&fd, path, kind, uid, gid)?;
+                    rules.push((fd, access));
+                    ruled.push(path);
+                }
+                Err(error) if error == rustix::io::Errno::NOENT => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("open optional Landlock anchor {path}"));
+                }
+            }
+        }
+        Ok(ruled)
     }
 
     fn open_jail_rule_anchor(
@@ -835,6 +883,45 @@ mod linux {
             )
             .expect_err("ordinary file must fail namespace validation");
             assert!(error.to_string().contains("root-owned nsfs entry"));
+        }
+
+        #[test]
+        #[ignore = "needs root: the anchors must be root-owned"]
+        fn optional_rules_follow_the_files_a_launch_carries() {
+            let jail = tempfile::tempdir().expect("temp directory");
+            for directory in ["boot", "disks"] {
+                std::fs::create_dir(jail.path().join(directory)).expect("create directory");
+            }
+            let root = open(
+                jail.path(),
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("open jail");
+            let ruled = |files: &[&str]| {
+                for file in files {
+                    std::fs::write(jail.path().join(file), b"x").expect("write anchor");
+                }
+                push_optional_jail_rules(&mut Vec::new(), &root, 0, 0).expect("rules")
+            };
+
+            assert!(ruled(&[]).is_empty(), "a cold launch without initrd");
+            assert_eq!(ruled(&["boot/initrd"]), ["boot/initrd"]);
+            assert_eq!(
+                ruled(&[
+                    "boot/wake-stub",
+                    "boot/cpu-profile.json",
+                    "disks/wake.ram",
+                    "disks/tools.ext4",
+                ]),
+                [
+                    "boot/initrd",
+                    "boot/wake-stub",
+                    "boot/cpu-profile.json",
+                    "disks/wake.ram",
+                ],
+                "a wake rules its files and nothing else"
+            );
         }
     }
 }

@@ -1,16 +1,6 @@
 use super::*;
 
 impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
-    pub(super) fn launch_vm_v2(&mut self, request: LaunchVmV2Request) -> Result<VmLaunchResult> {
-        let quota = request
-            .validate()
-            .context("validate template-backed VM launch request")?;
-        self.preparer
-            .validate_prepared_launch(&self.config, &request)
-            .context("validate root-owned prepared image template")?;
-        self.launch_vm_validated(request.launch, quota, false)
-    }
-
     pub(super) fn launch_vm_v3(&mut self, request: LaunchVmV3Request) -> Result<VmLaunchResult> {
         let quota = request
             .validate()
@@ -18,14 +8,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         self.preparer
             .validate_prepared_launch_v3(&self.config, &request)
             .context("validate root-owned chunked image template")?;
-        self.launch_vm_validated(request.launch, quota, true)
+        self.launch_vm_validated(request.launch, quota)
     }
 
     pub(super) fn launch_vm_validated(
         &mut self,
         request: VmLaunchRequest,
         quota: CpuQuota,
-        use_v3: bool,
     ) -> Result<VmLaunchResult> {
         self.config
             .validate_ssh_public_port(request.ssh_public_port)
@@ -68,25 +57,14 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let identity = self.allocate_identity()?;
         self.preparer
             .reserve_identity(&self.config, &generation, identity, identity)?;
-        let prepare_result = if use_v3 {
-            self.preparer.prepare_v3(
-                &self.config,
-                &request,
-                &run_network.result,
-                &generation,
-                identity,
-                identity,
-            )
-        } else {
-            self.preparer.prepare_v2(
-                &self.config,
-                &request,
-                &run_network.result,
-                &generation,
-                identity,
-                identity,
-            )
-        };
+        let prepare_result = self.preparer.prepare_v3(
+            &self.config,
+            &request,
+            &run_network.result,
+            &generation,
+            identity,
+            identity,
+        );
         let prepared = match prepare_result {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -518,6 +496,19 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let changed = self.backend.stop_unit(&record.unit_name)?;
         self.preparer.export_recording(&self.config, record)?;
         Ok(changed)
+    }
+
+    pub(super) fn replace_wake_stub(&mut self, request: VmIdentityRequest) -> Result<bool> {
+        let generation = self.resolve_generation(&request)?;
+        let record = self
+            .records
+            .get(&generation)
+            .context("unknown jail generation")?;
+        ensure!(
+            record.request.artifacts.wake.is_some(),
+            "the VM was not woken"
+        );
+        self.preparer.replace_wake_stub(&self.config, record)
     }
 
     pub(super) fn destroy_vm(&mut self, request: VmIdentityRequest) -> Result<bool> {

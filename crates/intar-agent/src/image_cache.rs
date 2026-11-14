@@ -1,15 +1,16 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{HashMap, HashSet};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::collections::{BTreeMap, HashSet};
+use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
-use futures_util::StreamExt as _;
-use intar_contracts::catalog::{GUEST_BOOTSTRAP_ABI_V2, ImageChunkManifestV1};
+use intar_contracts::bridge::ImageCachePhase;
+use intar_contracts::bridge_v9::CachedImageStateV2;
+use intar_contracts::oci::OciDigest;
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, PREPARED_IMAGE_SOURCE_ROOT, PreparedImageV3Result, Sha256Digest,
 };
@@ -19,51 +20,14 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tracing::{Instrument as _, debug, error, info, warn};
 
-use crate::config::{
-    BridgeConfig, ImageCacheConfig, ImageRegistryConfig, normalize_sha256, redact_url_userinfo,
-};
-use crate::db::{Db, ImageCacheAccessRow};
+use crate::config::{BridgeConfig, ImageCacheConfig, ImageRegistryConfig, redact_url_userinfo};
+use crate::db::Db;
 
 const REGISTRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(60);
-const REGISTRY_INDEX_TIMEOUT: Duration = Duration::from_secs(15);
 const REGISTRY_ACCESS_TOKEN_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const REGISTRY_ACCESS_TOKEN_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
-type CacheEntryLockKey = (PathBuf, String);
-type CacheEntryLocks = Mutex<HashMap<CacheEntryLockKey, Arc<Mutex<CacheEntryState>>>>;
-
-/// Identity of the guest tools disk descriptor that a verification covered.
-///
-/// Hashing 64 MiB on every launch is the cost this record removes, so the
-/// record must be invalidated by anything that can change the file content.
-/// A device/inode pair catches replacement (including an atomic rename), and
-/// the nanosecond change times catch an in-place write whose author restored
-/// the modification time. Only the identity that is stable across a full read
-/// is recorded, so a concurrent writer cannot donate its identity to an
-/// unverified file.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ToolsDiskFileIdentity {
-    device: u64,
-    inode: u64,
-    size_bytes: u64,
-    mtime_seconds: i64,
-    mtime_nanoseconds: i64,
-    ctime_seconds: i64,
-    ctime_nanoseconds: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct VerifiedToolsDisk {
-    identity: ToolsDiskFileIdentity,
-}
-
-#[derive(Default)]
-struct CacheEntryState {
-    verified_tools_disk: Option<VerifiedToolsDisk>,
-}
-
-static CACHE_ENTRY_LOCKS: OnceLock<CacheEntryLocks> = OnceLock::new();
 static CACHE_REFRESH_WAKE: OnceLock<Notify> = OnceLock::new();
 static REGISTRY_ACCESS_TOKEN: OnceLock<Mutex<RegistryAccessTokenCache>> = OnceLock::new();
 static REGISTRY_ACCESS_TOKEN_REFRESH: OnceLock<Mutex<()>> = OnceLock::new();
@@ -132,7 +96,10 @@ async fn cached_registry_access_token() -> Option<String> {
         .get(Instant::now())
 }
 
-async fn registry_access_token(bridge: &BridgeConfig, client: &reqwest::Client) -> Result<String> {
+pub(crate) async fn registry_access_token(
+    bridge: &BridgeConfig,
+    client: &reqwest::Client,
+) -> Result<String> {
     if let Some(access_token) = cached_registry_access_token().await {
         return Ok(access_token);
     }
@@ -180,13 +147,23 @@ pub(crate) fn wake_cache_refresh() {
     CACHE_REFRESH_WAKE.get_or_init(Notify::new).notify_one();
 }
 
-fn cache_entry_locks() -> &'static CacheEntryLocks {
-    CACHE_ENTRY_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-async fn cache_entry_lock(cache_root: &Path, key: String) -> Arc<Mutex<CacheEntryState>> {
-    let mut locks = cache_entry_locks().lock().await;
-    Arc::clone(locks.entry((cache_root.to_path_buf(), key)).or_default())
+/// Wake the cache pass when a pinned image of `desired` is not ready, as
+/// after the bridge reconnects: a pass that failed while the network was
+/// down would otherwise wait for the scrub timer.
+pub(crate) fn wake_cache_refresh_if_unready(
+    desired: Option<&intar_contracts::bridge_v9::HostDesiredStateV3>,
+) {
+    let Some(desired) = desired else { return };
+    let Ok(cache_root) = default_cache_root() else {
+        return;
+    };
+    if RequiredPins::from_desired_state(desired)
+        .images
+        .iter()
+        .any(|image| !ready::is_image_ready(&cache_root, image))
+    {
+        wake_cache_refresh();
+    }
 }
 
 pub(crate) fn registry_http_client() -> Result<reqwest::Client> {
@@ -210,94 +187,22 @@ pub(crate) fn registry_http_client() -> Result<reqwest::Client> {
         .context("failed to build registry HTTP client")
 }
 
-#[derive(Debug, Clone)]
-struct RegistryImageRecord {
-    image_key: String,
-    image_id: String,
-    image_virtual_size_bytes: u64,
-    chunk_manifest_sha256: String,
-    guest_bootstrap_abi: u16,
-    boot: RegistryImageBoot,
-    manifest_download_url: String,
-    chunk_download_base_url: String,
-}
-
-#[derive(Debug, Clone)]
-struct RegistryImageBoot {
-    kernel_sha256: String,
-    initrd_sha256: String,
-    cmdline: String,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct CachedChunkedImage {
-    pub image_key: String,
-    pub image_id: String,
-    pub chunk_manifest_path: PathBuf,
-    pub chunk_manifest_sha256: String,
-    pub chunk_cache_root: PathBuf,
-    pub kernel_path: PathBuf,
-    pub initrd_path: PathBuf,
-    pub kernel_sha256: String,
-    pub initrd_sha256: String,
-    pub cmdline: String,
-    pub virtual_size_bytes: u64,
-    pub guest_bootstrap_abi: u16,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ChunkedLaunchDescriptorV1 {
-    schema_version: u8,
-    image_key: String,
-    image_id: String,
-    chunk_manifest_path: PathBuf,
-    chunk_manifest_sha256: String,
-    chunk_cache_root: PathBuf,
-    image_virtual_size_bytes: u64,
-    guest_bootstrap_abi: u16,
-    kernel_path: PathBuf,
-    kernel_sha256: String,
-    initrd_path: PathBuf,
-    initrd_sha256: String,
-    cmdline: String,
-    prepared_image: PreparedImageV3Result,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct ReadyImageLaunch {
-    pub image: CachedChunkedImage,
-    pub prepared_image: PreparedImageV3Result,
-}
-
-#[derive(Debug, Deserialize)]
-struct RegistryIndex {
-    images: Vec<RegistryIndexImage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RegistryIndexImage {
-    image_key: String,
-    #[serde(default)]
-    image_id: Option<String>,
-    image_format: String,
-    image_virtual_size_bytes: u64,
-    #[serde(default)]
-    chunk_manifest_sha256: Option<String>,
-    #[serde(default)]
-    guest_bootstrap_abi: Option<u16>,
-    boot: RegistryIndexImageBoot,
-    #[serde(default)]
-    manifest_download_url: Option<String>,
-    #[serde(default)]
-    chunk_download_base_url: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RegistryIndexImageBoot {
-    kernel_sha256: String,
-    initrd_sha256: String,
-    cmdline: String,
+/// The `/v2` client for the configured registry's origin. Its agent JWT is
+/// the bootstrap access token the bridge already holds.
+pub(crate) fn oci_registry(
+    registry: &ImageRegistryConfig,
+    bridge: &BridgeConfig,
+    client: reqwest::Client,
+) -> Result<OciRegistry> {
+    let origin = registry_origin(registry)?;
+    let bridge = bridge.clone();
+    let token_client = client.clone();
+    let agent_jwt: AgentJwt = Box::new(move || {
+        let bridge = bridge.clone();
+        let client = token_client.clone();
+        Box::pin(async move { registry_access_token(&bridge, &client).await })
+    });
+    Ok(OciRegistry::new(origin, client, agent_jwt))
 }
 
 pub fn spawn_warm_cache_with_bridge(
@@ -315,14 +220,6 @@ pub fn spawn_warm_cache_with_bridge(
                 return;
             }
         };
-
-        let client = match registry_http_client() {
-            Ok(client) => client,
-            Err(error) => {
-                error!(error = %error, "failed to initialize image registry HTTP client");
-                return;
-            }
-        };
         info!(
             cache_root = %cache_root.display(),
             poll_interval_minutes = registry.refresh_interval_minutes,
@@ -331,12 +228,10 @@ pub fn spawn_warm_cache_with_bridge(
         );
 
         let refresh_context = refresh::CacheRefreshContext {
-            registry: &registry,
-            bridge: Some(&bridge),
+            bridge: &bridge,
             cache: &cache,
-            db: Some(&db),
+            db: &db,
             cache_root: &cache_root,
-            client: &client,
             vm: &vm,
         };
         // Startup prepares the pinned entries that the agent already knows
@@ -362,108 +257,21 @@ pub fn spawn_warm_cache_with_bridge(
     });
 }
 
-pub fn spawn_log_cache_state_with_bridge(registry: ImageRegistryConfig, bridge: BridgeConfig) {
-    tokio::spawn(async move {
-        let cache_root = match default_cache_root() {
-            Ok(path) => path,
-            Err(e) => {
-                error!("failed to determine image cache dir: {e}");
-                return;
-            }
-        };
-
-        let client = match registry_http_client() {
-            Ok(client) => client,
-            Err(error) => {
-                error!(error = %error, "failed to initialize image registry HTTP client");
-                return;
-            }
-        };
-        let images = match list_registry_images(&registry, Some(&bridge), &client).await {
-            Ok(images) => images,
-            Err(e) => {
-                error!(
-                    registry = %redact_url_userinfo(&registry.url),
-                    "failed to list image registry for cache state: {e}"
-                );
-                return;
-            }
-        };
-
-        let mut present: usize = 0;
-        let mut missing: usize = 0;
-        let mut unknown: usize = 0;
-
-        for image in images {
-            let path = cache_root
-                .join("manifests")
-                .join(format!("{}.json", image.chunk_manifest_sha256));
-            match verified_cached_image_metadata(
-                &cache_root,
-                &image.image_key,
-                &image.image_id,
-                true,
-            ) {
-                Some(meta) => {
-                    present = present.saturating_add(1);
-                    info!(
-                        image = %image.image_key,
-                        path = %path.display(),
-                        bytes = meta.len(),
-                        "cache present"
-                    );
-                }
-                None if !path.exists() => {
-                    missing = missing.saturating_add(1);
-                    info!(image = %image.image_key, path = %path.display(), "cache missing");
-                }
-                None => {
-                    unknown = unknown.saturating_add(1);
-                    warn!(
-                        image = %image.image_key,
-                        path = %path.display(),
-                        "cache unverified"
-                    );
-                }
-            }
-        }
-
-        info!(
-            cache_root = %cache_root.display(),
-            present,
-            missing,
-            unknown,
-            registry = %redact_url_userinfo(&registry.url),
-            "image cache state"
-        );
-    });
-}
-
 pub fn default_cache_root() -> Result<PathBuf> {
     let base = dirs::cache_dir().ok_or_else(|| anyhow::anyhow!("cache dir unavailable"))?;
     Ok(base.join("intar-agent").join("images"))
 }
 
-fn regular_cached_file(path: &Path, label: &str) -> Result<std::fs::Metadata> {
-    let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("stat cached {label} {}", path.display()))?;
-    anyhow::ensure!(
-        metadata.file_type().is_file() && metadata.len() > 0,
-        "cached {label} is not a non-empty regular file"
-    );
-    Ok(metadata)
-}
-
 fn validate_prepared_source(
     source: &ArtifactSource,
-    image_sha256: &str,
+    image_hex: &str,
     file_name: &str,
     expected_sha256: &str,
     access: ArtifactAccess,
 ) -> Result<()> {
     anyhow::ensure!(
         source.source_root == PREPARED_IMAGE_SOURCE_ROOT
-            && source.relative_path == PathBuf::from(image_sha256).join(file_name)
+            && source.relative_path == PathBuf::from(image_hex).join(file_name)
             && source.sha256.as_ref().map(Sha256Digest::as_str) == Some(expected_sha256)
             && source.access == access,
         "launch descriptor prepared {file_name} source mismatch"
@@ -471,12 +279,11 @@ fn validate_prepared_source(
     Ok(())
 }
 
-mod chunked;
-use chunked::ensure_cached_chunked_image_entry;
-pub(crate) use chunked::{
-    ToolsDiskVerification, ensure_cached_tools_disk, mark_template_ready,
-    require_ready_image_launch, touch_cached_image, verified_cached_image_metadata,
-    verify_cached_tools_disk,
+mod ready;
+pub(crate) use ready::{
+    ReadyImage, check_machine_config, check_prepared_wake, image_failure, image_failure_state,
+    is_image_ready, mark_template_ready, record_image_failure, require_ready_image,
+    sweep_cache_layout,
 };
 mod priority;
 pub(crate) use priority::{
@@ -484,16 +291,47 @@ pub(crate) use priority::{
 };
 mod budget;
 mod hashing;
+mod oci;
 use hashing::hash_file_bounded;
+pub(crate) use oci::{AgentJwt, BlobStore, MAX_WAKE_DELTA_BYTES, OciRegistry, PulledMachine};
 mod pins;
-use pins::RequiredPins;
+pub(crate) use pins::RequiredPins;
 mod refresh;
 mod scheduler;
 use refresh::*;
 
 mod storage;
 use storage::*;
+mod wait;
+pub(crate) use wait::{AwaitedImage, RewakeBackoff, pass_running};
 mod registry;
 use registry::*;
 #[cfg(test)]
 mod tests;
+
+/// What the host reports about each pinned image.
+pub(crate) fn cached_image_states(
+    cache_root: &Path,
+    pins: &RequiredPins,
+) -> Vec<CachedImageStateV2> {
+    let now = now_unix_ms();
+    pins.images
+        .iter()
+        .map(|image| {
+            let (phase, error) = if ready::is_image_ready(cache_root, image) {
+                (ImageCachePhase::Ready, None)
+            } else if let Some(error) = image_failure(image) {
+                (ImageCachePhase::Failed, Some(error))
+            } else {
+                (ImageCachePhase::Missing, None)
+            };
+            CachedImageStateV2 {
+                image: image.clone(),
+                phase,
+                bytes_on_disk: None,
+                error,
+                updated_at_unix_ms: now,
+            }
+        })
+        .collect()
+}

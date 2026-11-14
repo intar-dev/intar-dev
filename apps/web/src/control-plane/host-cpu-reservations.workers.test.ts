@@ -20,13 +20,13 @@ import {
   scenarioRuns,
   user,
 } from "@/db/schema";
-import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import {
   drizzleQueryToD1Statement,
   executeScenarioRunRuntimeProjection,
 } from "@/lib/runtime-executions";
 import { resetD1Database } from "@/test/d1-migrations";
-import type { VmActualStateV2 } from "@/generated/bridge";
+import type { HostStateReportV3, VmStateV3 } from "@/generated/contracts/bridge-message-v9";
+import { desiredRunningVm, emptyDesiredState } from "@/control-plane/host-runtime-do/test-fixtures";
 
 describe("host CPU reservations", () => {
   beforeEach(async () => {
@@ -40,22 +40,12 @@ describe("host CPU reservations", () => {
     );
   });
 
-  it("rejects legacy host reports without the complete v3 fast-launch contract", () => {
-    const report = strictReport("host-legacy", 4_000, 1, 0);
-    report.capabilities.supports_jailer_v3 = false;
-    expect(strictCpuCapacity(report)).toBeNull();
-
-    report.capabilities.supports_jailer_v3 = true;
-    report.capabilities.fast_template_store = false;
-    expect(strictCpuCapacity(report)).toBeNull();
-  });
-
   it("rejects hosts without hard CPU enforcement or a pinned runtime", () => {
     const report = strictReport("host-policy-drift", 4000, 1, 0);
-    report.capabilities.supports_hard_cpu_quota = false;
+    report.hardware.hard_cpu_quota = false;
     expect(strictCpuCapacity(report)).toBeNull();
-    report.capabilities.supports_hard_cpu_quota = true;
-    report.capabilities.cloud_hypervisor_sha256 = null;
+    report.hardware.hard_cpu_quota = true;
+    report.hardware.cloud_hypervisor_sha256 = null;
     expect(strictCpuCapacity(report)).toBeNull();
   });
 
@@ -390,7 +380,7 @@ describe("host CPU reservations", () => {
       .set({ state: "committed", expiresAt: null, updatedAt: now })
       .where(eq(hostCpuReservations.runId, runId));
 
-    const desired = createEmptyHostDesiredState({ ownerUserId: "user-1", scope: "platform", hostId, nowUnixMs: now });
+    const desired = emptyDesiredState({ ownerUserId: "user-1", scope: "platform", hostId, nowUnixMs: now });
     const desiredAtVersionOne = { ...desired, version: 1 };
     await db.insert(hostDesiredState).values({
       hostId,
@@ -507,13 +497,25 @@ function strictReport(
   schedulableCpuMillis: number,
   appliedDesiredVersion: number,
   committedCpuMillis: number,
-  vms: VmActualStateV2[] = [],
-): typeof hostActualState.$inferInsert.reportJson {
-  return { relay_connected: true,
-    schema_version: 7,
+  vms: VmStateV3[] = [],
+): HostStateReportV3 {
+  return {
+    relay_connected: true,
+    schema_version: 8,
     host_id: hostId,
     observed_at_unix_ms: Date.now(),
     applied_desired_version: appliedDesiredVersion,
+    guest_contract: 3,
+    hardware: {
+      cloud_hypervisor_sha256:
+        "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
+      kvm: true,
+      vsock: true,
+      reflink: true,
+      landlock: true,
+      cgroup_v2: true,
+      hard_cpu_quota: true,
+    },
     capacity: {
       total_cpu_millis: schedulableCpuMillis + 1_000,
       reserved_cpu_millis: 1_000,
@@ -525,35 +527,19 @@ function strictReport(
       disk_total_mib: 100_000,
       disk_available_mib: 80_000,
     },
-    capabilities: {
-      arch: "x86_64",
-      cloud_hypervisor_sha256:
-        "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-      supports_kvm: true,
-      supports_vsock: true,
-      supports_reflink: true,
-      supports_nftables: true,
-      supports_jailer_v2: true,
-      supports_jailer_v3: true,
-      supports_raw_chunks_v1: true,
-      supports_scenario_guest_tools_v1: true,
-      supports_template_backed_launch: true,
-      fast_template_store: true,
-      supports_hard_cpu_quota: true,
-      supports_landlock: true,
-      supports_cgroup_v2: true,
-    },
     cached_images: [],
     vms,
-    builds: [],
-  } as typeof hostActualState.$inferInsert.reportJson;
+  };
 }
 
-function runningVmReport(runId: string, cpuMillis: number): VmActualStateV2 {
+function runningVmReport(runId: string, cpuMillis: number): VmStateV3 {
   const observedAt = Date.now();
-  return { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1,
+  return {
+    owner_user_id: "user-1",
+    runtime_execution_id: runId,
+    generation: 1,
     run_id: runId,
-    vm_name: `${runId}-vm`,
+    name: `${runId}-vm`,
     phase: "running",
     terminal: {
       state: "pending",
@@ -571,7 +557,6 @@ function runningVmReport(runId: string, cpuMillis: number): VmActualStateV2 {
       cpu_throttled_usec: 0,
     },
     ssh_host_keys_openssh: [],
-    probes: [],
     updated_at_unix_ms: observedAt,
   };
 }
@@ -648,26 +633,15 @@ async function seedRunningDesiredState(
   now: number,
   cpuMillis = 1_000,
 ): Promise<void> {
-  const empty = createEmptyHostDesiredState({ ownerUserId: "user-1", scope: "platform", hostId, nowUnixMs: now });
+  const empty = emptyDesiredState({ ownerUserId: "user-1", scope: "platform", hostId, nowUnixMs: now });
   const desired = {
     ...empty,
     version: 1,
     vms: [
-      { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1, vm_id: vmName,
-        run_id: runId,
-        vm_name: vmName,
-        desired_phase: "running" as const,
-        image_key: { scenario: "scenario", vm: "vm", arch: "x86_64" as const },
-        image_sha256: "2".repeat(64),
-        resources: {
-          cpu_millis: cpuMillis,
-          memory_mib: 512,
-          disk_mib: 4_096,
-        },
-        ssh_authorized_keys_openssh: [
-          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest capacity@test",
-        ],
-        lease_expires_at_unix_ms: now + 60_000,
+      {
+        ...desiredRunningVm(runId, vmName, now),
+        vm_id: vmName,
+        cpu_millis: cpuMillis,
       },
     ],
   };
@@ -702,15 +676,16 @@ async function seedGenericRuntimeReservation(
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO runtime_vms (
-         id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json,
-         image_sha256, cpu_millis, memory_mib, disk_mib, created_at, updated_at
-       ) VALUES (?, ?, 'vm', 0, ?, ?, ?, 1000, 512, 4096, ?, ?)`,
+         id, execution_id, vm_id, ordinal, runtime_vm_name, image_digest,
+         spec_digest, kino_digest, cpu_millis, memory_mib, disk_mib, created_at, updated_at
+       ) VALUES (?, ?, 'vm', 0, ?, ?, ?, ?, 1000, 512, 4096, ?, ?)`,
     ).bind(
       `${runId}:vm`,
       runId,
       `${runId}-vm`,
-      JSON.stringify({ scenario: "scenario", vm: "vm", arch: "x86_64" }),
-      "2".repeat(64),
+      `sha256:${"2".repeat(64)}`,
+      `sha256:${"3".repeat(64)}`,
+      `sha256:${"4".repeat(64)}`,
       now,
       now,
     ),
@@ -730,10 +705,10 @@ function quotaVmReport(input: {
   phase: "booting" | "running";
   quotaVerifiedAt: number | null;
   updatedAt: number;
-}): VmActualStateV2 {
+}): VmStateV3 {
   return { owner_user_id: "user-1", runtime_execution_id: input.runId, generation: 1,
     run_id: input.runId,
-    vm_name: input.vmName,
+    name: input.vmName,
     phase: input.phase,
     terminal: {
       state: "pending",
@@ -756,7 +731,6 @@ function quotaVmReport(input: {
       cpu_throttled_usec: 0,
     },
     ssh_host_keys_openssh: [],
-    probes: [],
     updated_at_unix_ms: input.updatedAt,
   };
 }

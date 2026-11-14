@@ -4,15 +4,9 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
     pub(super) fn execute(mut self) -> DetachedLaunchOutcome {
         let mut progress = DetachedLaunchProgress::default();
         let operation = (|| -> Result<(VmRecord, VmLaunchResult)> {
-            match &self.prepared_request {
-                PreparedLaunchRequest::V2(request) => self
-                    .preparer
-                    .validate_prepared_launch(&self.config, request),
-                PreparedLaunchRequest::V3(request) => self
-                    .preparer
-                    .validate_prepared_launch_v3(&self.config, request),
-            }
-            .context("validate root-owned prepared image template")?;
+            self.preparer
+                .validate_prepared_launch_v3(&self.config, &self.prepared_request)
+                .context("validate root-owned prepared image template")?;
 
             progress.identity_reserved = true;
             self.preparer
@@ -25,25 +19,17 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
                 .context("persist generation identity reservation")?;
 
             progress.jail_prepare_attempted = true;
-            let prepared = match self.prepared_request {
-                PreparedLaunchRequest::V2(_) => self.preparer.prepare_v2(
+            let prepared = self
+                .preparer
+                .prepare_v3(
                     &self.config,
                     &self.reservation.request,
                     &self.reservation.run_network.result,
                     &self.reservation.generation,
                     self.reservation.uid,
                     self.reservation.gid,
-                ),
-                PreparedLaunchRequest::V3(_) => self.preparer.prepare_v3(
-                    &self.config,
-                    &self.reservation.request,
-                    &self.reservation.run_network.result,
-                    &self.reservation.generation,
-                    self.reservation.uid,
-                    self.reservation.gid,
-                ),
-            }
-            .context("prepare jail filesystem")?;
+                )
+                .context("prepare jail filesystem")?;
 
             progress.network_prepare_attempted = true;
             self.backend

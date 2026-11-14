@@ -144,6 +144,20 @@ pub(super) fn mac_conflicts_with_bridge(bridge_mac: &str, guest_mac: &str, tap_m
     bridge_mac == guest_mac || bridge_mac == tap_mac
 }
 
+/// The egress floor every run gets, measured on the staging host in T5 (a)
+/// (#291): mail submission is dropped, and new flows, bytes and packets out
+/// of the run are bounded per run (each run has its own table and buckets).
+/// It limits egress only; replies to the guest are never limited. A one-way
+/// flood never leaves conntrack's `new` state, so the new-flow limit also
+/// bounds it; the packet ceiling bounds an established one.
+const EGRESS_FLOOR_SMTP_PORTS: &str = "25, 465, 587";
+const EGRESS_FLOOR_PACKETS_PER_SECOND: u32 = 20_000;
+const EGRESS_FLOOR_PACKET_BURST: u32 = 5_000;
+const EGRESS_FLOOR_MBYTES_PER_SECOND: u32 = 12;
+const EGRESS_FLOOR_MBYTE_BURST: u32 = 24;
+const EGRESS_FLOOR_NEW_FLOWS_PER_SECOND: u32 = 30;
+const EGRESS_FLOOR_NEW_FLOW_BURST: u32 = 120;
+
 pub(super) fn render_nft_rules(state: &RunState) -> Result<String> {
     let host_transit = cidr_address(&state.result.host_transit_cidr)?;
     // A destination owned by the host is routed through the input hook, not
@@ -153,18 +167,16 @@ pub(super) fn render_nft_rules(state: &RunState) -> Result<String> {
     // complete, then drop every other packet entering from the run veth. New
     // guest-to-host flows remain blocked, and all other host interfaces and the
     // run's forwarded traffic stay untouched.
+    let veth = &state.result.host_veth_name;
     let mut rules = format!(
-        "table inet {} {{\n  chain input {{\n    type filter hook input priority filter; policy accept;\n    iifname \"{}\" ip saddr {} ct state established,related accept\n    iifname \"{}\" counter drop\n  }}\n  chain forward {{\n    type filter hook forward priority filter; policy accept;\n    iifname \"{}\" meta nfproto ipv6 drop\n    iifname \"{}\" ip saddr != {} drop\n    iifname \"{}\" ct state established,related accept\n    iifname \"{}\" fib daddr type local drop\n",
-        state.nft_table,
-        state.result.host_veth_name,
-        state.request.guest_cidr,
-        state.result.host_veth_name,
-        state.result.host_veth_name,
-        state.result.host_veth_name,
-        state.request.guest_cidr,
-        state.result.host_veth_name,
-        state.result.host_veth_name
+        "table inet {} {{\n  chain input {{\n    type filter hook input priority filter; policy accept;\n    iifname \"{veth}\" ip saddr {} ct state established,related accept\n    iifname \"{veth}\" counter drop\n  }}\n  chain forward {{\n    type filter hook forward priority filter; policy accept;\n    iifname \"{veth}\" meta nfproto ipv6 drop\n    iifname \"{veth}\" ip saddr != {} drop\n",
+        state.nft_table, state.request.guest_cidr, state.request.guest_cidr,
     );
+    // The floor runs before the established fast path, so it also bounds a
+    // flow conntrack already tracks.
+    rules.push_str(&format!(
+        "    iifname \"{veth}\" tcp dport {{ {EGRESS_FLOOR_SMTP_PORTS} }} drop\n    iifname \"{veth}\" limit rate over {EGRESS_FLOOR_PACKETS_PER_SECOND}/second burst {EGRESS_FLOOR_PACKET_BURST} packets drop\n    iifname \"{veth}\" limit rate over {EGRESS_FLOOR_MBYTES_PER_SECOND} mbytes/second burst {EGRESS_FLOOR_MBYTE_BURST} mbytes drop\n    iifname \"{veth}\" ct state new limit rate over {EGRESS_FLOOR_NEW_FLOWS_PER_SECOND}/second burst {EGRESS_FLOOR_NEW_FLOW_BURST} packets drop\n    iifname \"{veth}\" ct state established,related accept\n    iifname \"{veth}\" fib daddr type local drop\n",
+    ));
     // The root-owned guest pool is constrained to 10.77.0.0/16, so the 10/8
     // guard isolates every other run without embedding the mutable active-run
     // set in each table. Adding or removing a run can therefore update exactly
@@ -190,9 +202,18 @@ pub(super) fn render_nft_rules(state: &RunState) -> Result<String> {
         "    iifname \"{}\" ip daddr {host_transit} drop\n",
         state.result.host_veth_name
     ));
+    // Only a VM launched with egress may open a connection out of its run;
+    // everything else from the run ends here, also an address no VM holds.
+    // Replies to connections from outside (SSH) took the established path
+    // above, and VMs of one run reach each other inside the run's namespace.
+    for attachment in state.attachments.values() {
+        if attachment.egress {
+            let guest = cidr_address(&attachment.guest_ip_cidr)?;
+            rules.push_str(&format!("    iifname \"{veth}\" ip saddr {guest} accept\n"));
+        }
+    }
     rules.push_str(&format!(
-        "    iifname \"{}\" accept\n  }}\n  chain prerouting {{\n    type nat hook prerouting priority dstnat; policy accept;\n",
-        state.result.host_veth_name
+        "    iifname \"{veth}\" counter drop\n  }}\n  chain prerouting {{\n    type nat hook prerouting priority dstnat; policy accept;\n",
     ));
     for attachment in state.attachments.values() {
         if attachment.ssh_forward_active

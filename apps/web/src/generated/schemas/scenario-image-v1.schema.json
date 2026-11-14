@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ImageV1",
+  "description": "A repository image, `images/<name>.hcl`.",
+  "type": "object",
+  "properties": {
+    "defer": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "disk_mib": {
+      "description": "The chain's build geometry: set exactly when `from` is `trixie`.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "from": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "setup": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ScriptV1"
+      }
+    },
+    "wake": {
+      "description": "Published with a suspended guest; a machine `from` it is a pack.",
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "from",
+    "defer",
+    "setup"
+  ],
+  "$defs": {
+    "ScriptV1": {
+      "description": "A named lowered bash script: a setup stage or a ready block.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "script"
+      ]
+    }
+  }
+}

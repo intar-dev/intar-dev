@@ -62,58 +62,6 @@ describe("generated contract schemas", () => {
     )).toBe(false);
   });
 
-  it("validates the scenario manifest fixture", () => {
-    expect(validateFixture(
-      "schemas/catalog-scenario-manifest-v5.schema.json",
-      "fixtures/catalog/scenario-manifest-v5.json",
-    )).toBe(true);
-  });
-
-  it("rejects a v3 scenario manifest version", () => {
-    const fixture = readJson(
-      "fixtures/catalog/scenario-manifest-v5.json",
-    ) as Record<string, unknown>;
-    expect(validateValue(
-      "schemas/catalog-scenario-manifest-v5.schema.json",
-      { ...fixture, schema_version: 2 },
-    )).toBe(false);
-  });
-
-  it("validates the bridge desired state fixture", () => {
-    expect(validateFixture(
-      "schemas/bridge-host-desired-state-v2.schema.json",
-      "fixtures/bridge/host-desired-state-v2.json",
-    )).toBe(true);
-  });
-
-  it("validates the bridge host state report fixture", () => {
-    expect(validateFixture(
-      "schemas/bridge-host-state-report-v2.schema.json",
-      "fixtures/bridge/host-state-report-v2.json",
-    )).toBe(true);
-  });
-
-  it("validates the bridge vm report fixture", () => {
-    expect(validateFixture(
-      "schemas/bridge-vm-report-v2.schema.json",
-      "fixtures/bridge/vm-report-v2.json",
-    )).toBe(true);
-  });
-
-  it("validates the bridge desired build fixture", () => {
-    expect(validateFixture(
-      "schemas/bridge-desired-build-v1.schema.json",
-      "fixtures/bridge/desired-build-v1.json",
-    )).toBe(true);
-  });
-
-  it("validates the bridge desired source compile fixture", () => {
-    expect(validateFixture(
-      "schemas/bridge-desired-source-compile-v1.schema.json",
-      "fixtures/bridge/desired-source-compile-v1.json",
-    )).toBe(true);
-  });
-
   it("validates the source refusal fixture", () => {
     expect(validateFixture(
       "schemas/source-refusal-v1.schema.json",
@@ -129,20 +77,6 @@ describe("generated contract schemas", () => {
       "schemas/source-refusal-v1.schema.json",
       { ...fixture, code: "internal_error" },
     )).toBe(false);
-  });
-
-  it("validates the bridge build report fixture", () => {
-    expect(validateFixture(
-      "schemas/bridge-build-report-v1.schema.json",
-      "fixtures/bridge/build-report-v1.json",
-    )).toBe(true);
-  });
-
-  it("validates the bridge message fixture", () => {
-    expect(validateFixture(
-      "schemas/bridge-message-v8.schema.json",
-      "fixtures/bridge/sync-request-v8.json",
-    )).toBe(true);
   });
 
   it("validates the run CLI request fixture", () => {
@@ -199,16 +133,6 @@ describe("generated contract schemas", () => {
     ) as Record<string, any>;
     fixture.event.completed_count = 0;
     expect(validateValue("schemas/run-cli-probe-check-event-v1.schema.json", fixture)).toBe(false);
-  });
-
-  it("rejects a v5 bridge protocol version", () => {
-    const fixture = readJson(
-      "fixtures/bridge/sync-request-v8.json",
-    ) as Record<string, unknown>;
-    expect(validateValue(
-      "schemas/bridge-message-v8.schema.json",
-      { ...fixture, protocol_version: 5 },
-    )).toBe(false);
   });
 });
 

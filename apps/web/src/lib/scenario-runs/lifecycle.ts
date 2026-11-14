@@ -1,3 +1,5 @@
+import { settleVerifyRun } from "@/lib/scenario-revisions";
+import { GUEST_USERNAME } from "@/generated/constants";
 import { loadStargateSshTransport } from "@/lib/stargate-relay";
 import { env } from "cloudflare:workers";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
@@ -9,10 +11,9 @@ import {
   scenarioRunArtifactUploads,
   scenarioRuns,
 } from "@/db/schema";
-import { markDesiredVmAbsent } from "@/lib/desired-state";
 import {
-  loadOrCreateHostDesiredState,
-  mutateStoredHostDesiredState,
+  loadStoredHostDesiredState,
+  markStoredDesiredVmsAbsent,
 } from "@/lib/desired-state-store";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { deleteScenarioArtifactStorage } from "@/lib/scenario-artifact-storage";
@@ -62,10 +63,10 @@ export async function startScenarioRunForUser(params: {
   idempotencyKey: string;
   organizationId?: string | null;
   hostId?: string;
-  candidateRevision?: string;
-  candidateBuildId?: string;
   allowDrainedAdminProof?: boolean;
   allowSequenceBypass?: boolean;
+  launchSource?: "play";
+  ref?: string;
 }): Promise<{
   accepted: true;
   runId: string;
@@ -402,11 +403,7 @@ export async function expireOverdueRunLeases(
   updatedRunRevisions: Array<{ runId: string; revision: number }>;
 }> {
   const db = options?.db ?? drizzle(env.DB);
-  const desiredState = await loadOrCreateHostDesiredState(
-    db,
-    hostId,
-    nowUnixMs,
-  );
+  const desiredState = await loadStoredHostDesiredState(db, hostId, nowUnixMs);
   const overdue = selectOverdueRunLeases(desiredState, nowUnixMs);
   const expiredRunIds: string[] = [];
   const updatedRunRevisions: Array<{ runId: string; revision: number }> = [];
@@ -444,16 +441,16 @@ export async function expireOverdueRunLeases(
       if (revision !== null) {
         updatedRunRevisions.push({ runId: row.runId, revision });
       }
+      // A verify run without an outcome by now timed out.
+      await settleVerifyRun(row.runId, { hostId, leaseEnded: true });
     }
 
     // Clear the expired VMs from the desired doc even when the run row is
     // missing, on another host, or already terminal: a leftover overdue lease
     // re-arms the host alarm immediately and leaves the VM running forever.
-    await mutateStoredHostDesiredState(db, hostId, nowUnixMs, (draft) => {
-      for (const vmName of lease.vmNames) {
-        markDesiredVmAbsent(draft, { runId: lease.runId, vmName });
-      }
-    });
+    const expired = new Set(lease.vmNames);
+    await markStoredDesiredVmsAbsent(db, hostId, nowUnixMs,
+      (vm) => vm.run_id === lease.runId && expired.has(vm.name));
     expiredRunIds.push(lease.runId);
   }
 
@@ -527,7 +524,7 @@ export async function createScenarioSshSessionForUser(params: {
       typeof vm.terminalTarget.port === "number" && vm.terminalTarget.port > 0
         ? vm.terminalTarget.port
         : 0;
-    const targetUsername = vm.terminalTarget.username?.trim() || "ubuntu";
+    const targetUsername = vm.terminalTarget.username?.trim() || GUEST_USERNAME;
     const targetHostKeyOpenssh =
       vm.terminalTarget.hostKeyOpenssh?.trim() ?? "";
     if (!host || !port || !targetHostKeyOpenssh) {

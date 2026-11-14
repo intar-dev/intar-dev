@@ -122,7 +122,7 @@ function vm(): VmStatus {
       reason: null,
       host: "127.0.0.1",
       port: 22,
-      username: "ubuntu",
+      username: "user",
       checkedAt: 0,
     },
     scenario_meta: {

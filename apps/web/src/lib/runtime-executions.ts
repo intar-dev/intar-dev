@@ -14,8 +14,9 @@ export interface RuntimeVmSpec {
   vmId: string;
   ordinal: number;
   runtimeVmName: string;
-  imageKey: object;
-  imageSha256: string;
+  imageDigest: string;
+  specDigest: string;
+  kinoDigest: string;
   cpuMillis: number;
   memoryMib: number;
   diskMib: number;
@@ -393,6 +394,7 @@ function scenarioRunRuntimeProjectionStatements(
          WHERE run.run_id = ?1
            AND run.active_key IS NOT NULL
            AND run.runtime_execution_id IS NOT NULL
+           AND run.launch_source IS NOT 'verify'
            AND EXISTS (SELECT 1 FROM runtime_executions execution
              WHERE execution.id = run.runtime_execution_id AND execution.state <> 'archived')
            AND NOT EXISTS (
@@ -903,17 +905,18 @@ function runtimeVmInsert(
 ): D1PreparedStatement {
   return env.DB.prepare(
     `INSERT INTO runtime_vms (
-       id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json,
-       image_sha256, cpu_millis, memory_mib, disk_mib, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       id, execution_id, vm_id, ordinal, runtime_vm_name, image_digest,
+       spec_digest, kino_digest, cpu_millis, memory_mib, disk_mib, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     vm.runtimeVmId,
     vm.executionId,
     vm.vmId,
     vm.ordinal,
     vm.runtimeVmName,
-    JSON.stringify(vm.imageKey),
-    vm.imageSha256,
+    vm.imageDigest,
+    vm.specDigest,
+    vm.kinoDigest,
     vm.cpuMillis,
     vm.memoryMib,
     vm.diskMib,
@@ -974,15 +977,13 @@ function prepareVmRows(executionId: string, input: RuntimeVmSpec[]) {
     vmIds.add(vmId);
     ordinals.add(ordinal);
     runtimeNames.add(runtimeVmName);
-    if (!isRecord(candidate.imageKey)) {
-      throw invalidRuntimeInput("vms[].imageKey must be an object");
-    }
     return {
       vmId,
       ordinal,
       runtimeVmName,
-      imageKey: candidate.imageKey,
-      imageSha256: requiredId(candidate.imageSha256, "vms[].imageSha256"),
+      imageDigest: requiredId(candidate.imageDigest, "vms[].imageDigest"),
+      specDigest: requiredId(candidate.specDigest, "vms[].specDigest"),
+      kinoDigest: requiredId(candidate.kinoDigest, "vms[].kinoDigest"),
       cpuMillis: positiveInteger(candidate.cpuMillis, "vms[].cpuMillis"),
       memoryMib: positiveInteger(candidate.memoryMib, "vms[].memoryMib"),
       diskMib: positiveInteger(candidate.diskMib, "vms[].diskMib"),
@@ -1132,10 +1133,6 @@ function optionalTimestamp(
 
 function invalidRuntimeInput(message: string) {
   return appError(400, "runtime_execution_invalid", message);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function encryptRuntimePrivateKey(input: {

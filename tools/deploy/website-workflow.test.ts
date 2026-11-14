@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
@@ -373,4 +373,131 @@ it("breaks glass with a build whose own lane jobs passed in a run that failed el
   const noSmoke = { ...runs, 79: failed(["web"]) };
   expect(findBuilds({ BREAK_GLASS: "true" }, noSmoke, list).output).toBe(web(3, 77) + docsBuild(1, 76));
   expect(findBuilds({}, runs, list).output).toBe(web(2, 76) + docsBuild(1, 76));
+});
+
+// Runs the pre-migration evidence step against a fake D1 API that answers the
+// drain audit with `drain` and records every query it was sent.
+function captureEvidence(applied: number, drain: Record<string, unknown>, tables = ["scenarios"]) {
+  const root = mkdtempSync(join(tmpdir(), "intar-pre-migration-"));
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(root, "production-d1-plan.json"), JSON.stringify({ appliedMigrationCount: applied }));
+  writeFileSync(join(root, "drain.json"), JSON.stringify(drain));
+  writeFileSync(join(root, "tables.json"), JSON.stringify(tables.map((name) => ({ name }))));
+  writeFileSync(join(bin, "curl"), `#!/usr/bin/env bash
+data=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in --data-binary) data="\${2#@}"; shift 2 ;; --request|--header) shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac
+done
+case "$url" in
+  */time_travel/bookmark) echo '{"success":true,"result":{"bookmark":"00000000-00000000-00000000-00000000000000000000000000000000"}}' ;;
+  */query)
+    jq -r .sql "$data" >> "${root}/queries.sql"
+    if jq -e '.sql | contains("runtime_vm_count")' "$data" >/dev/null; then
+      jq -c '{success: true, result: [{success: true, results: [.]}]}' "${root}/drain.json"
+    elif jq -e '.sql | contains("sqlite_master")' "$data" >/dev/null; then
+      jq -c '{success: true, result: [{success: true, results: .}]}' "${root}/tables.json"
+    else echo '{"success":true,"result":[{"success":true,"results":[]}]}'; fi ;;
+  *) echo '{"success":true,"result":{"uuid":"db","name":"intar","version":"production"}}' ;;
+esac
+`);
+  chmodSync(join(bin, "curl"), 0o755);
+  try {
+    const run = spawnSync("bash", ["tools/workflows/website/capture-pre-migration-d1-evidence.sh"], {
+      encoding: "utf8",
+      env: { PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: root, DATABASE_ID: "db", CLOUDFLARE_ACCOUNT_ID: "a", CLOUDFLARE_API_TOKEN: "t" },
+    });
+    return { status: run.status, stderr: run.stderr, queries: readFileSync(join(root, "queries.sql"), "utf8") };
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+}
+
+it("captures enabled scenarios from the scenario table D1 has and stops before maintenance on an unwiped runtime", () => {
+  const drained = { active_scenario_run_count: 0, non_uploaded_run_artifact_count: 0, enabled_agent_host_count: 1 };
+  const wiped = { ...drained, runtime_execution_count: 0, runtime_vm_count: 0, cutover_gate_state: "wiped" };
+  const ok = captureEvidence(46, wiped);
+  expect(ok.status, ok.stderr).toBe(0);
+  expect(ok.queries).toContain("FROM scenarios\n  WHERE enabled = 1");
+  expect(ok.queries).not.toContain("FROM vm_scenarios");
+  // The deploy that applies the removal migration runs on a D1 that has not
+  // created `scenarios` yet; while both exist, the table being dropped is read.
+  for (const tables of [["vm_scenarios"], ["scenarios", "vm_scenarios"]]) {
+    const old = captureEvidence(39, wiped, tables);
+    expect(old.status, old.stderr).toBe(0);
+    expect(old.queries).toContain("SELECT scenario_id AS id,");
+    expect(old.queries).toContain("FROM vm_scenarios\n  WHERE enabled = 1");
+  }
+  expect(captureEvidence(46, wiped, []).status).not.toBe(0);
+  // While the runtime_vms rebuild is pending, leftover runtime rows or an open gate stop the deploy.
+  for (const leftover of [{ runtime_execution_count: 1 }, { runtime_vm_count: 1 }, { cutover_gate_state: "drained" }]) {
+    expect(captureEvidence(46, { ...wiped, ...leftover }).status).not.toBe(0);
+  }
+  // Once it applied, runtime rows are ordinary again.
+  expect(captureEvidence(47, { ...wiped, runtime_vm_count: 3, cutover_gate_state: "open" }).status).toBe(0);
+});
+
+it("injects the Kino pin only when the registry stores every pinned artifact", () => {
+  const { index: pin } = step("Inject the Kino pin");
+  expect(pin).toBeGreaterThan(step("Pin and verify production configuration").index);
+  expect(pin).toBeLessThan(step("Plan production D1 migrations").index);
+  const root = mkdtempSync(join(tmpdir(), "intar-kino-pin-"));
+  const repo = join(root, "repo");
+  const bin = join(root, "bin");
+  mkdirSync(join(repo, "tools/deploy"), { recursive: true });
+  mkdirSync(bin);
+  writeFileSync(join(repo, "tools/deploy/kino-artifact.ts"), readFileSync("tools/deploy/kino-artifact.ts"));
+  // D1 stand-in: tables.json answers sqlite_master, stored.json the manifests.
+  writeFileSync(join(bin, "curl"), `#!/usr/bin/env bash
+data=""
+while [ $# -gt 0 ]; do case "$1" in --data-binary) data="\${2#@}"; shift 2 ;; --request|--header) shift 2 ;; *) shift ;; esac; done
+jq -r .sql "$data" >> "${root}/queries.sql"
+if jq -e '.sql | contains("sqlite_master")' "$data" >/dev/null; then f=tables; else f=stored; fi
+jq -c '{success: true, result: [{success: true, results: .}]}' "${root}/$f.json"
+`);
+  chmodSync(join(bin, "curl"), 0o755);
+  const config = join(root, "wrangler.json");
+  const inject = (tables: string[], stored: string[]) => {
+    writeFileSync(join(root, "tables.json"), JSON.stringify(tables.map((name) => ({ name }))));
+    writeFileSync(join(root, "stored.json"), JSON.stringify(stored.map((digest) => ({ digest }))));
+    writeFileSync(config, JSON.stringify({ name: "intar-dev", vars: { CONTROL_PLANE_MAINTENANCE: "off" } }));
+    const run = spawnSync("bash", [resolve("tools/workflows/website/pin-kino.sh")], {
+      cwd: repo,
+      encoding: "utf8",
+      env: {
+        ...process.env, PATH: `${bin}:${process.env.PATH}`, DEPLOYMENT_CONFIG: config, RUNNER_TEMP: root,
+        GITHUB_STEP_SUMMARY: join(root, "summary.md"), DATABASE_ID: "db", CLOUDFLARE_ACCOUNT_ID: "a", CLOUDFLARE_API_TOKEN: "t",
+      },
+    });
+    return { status: run.status, stderr: run.stderr, vars: (JSON.parse(readFileSync(config, "utf8")) as { vars: Record<string, string> }).vars };
+  };
+  try {
+    // No pin: deploys with no Kino and asks D1 nothing, also before the registry exists.
+    expect(inject([], []).vars).toEqual({ CONTROL_PLANE_MAINTENANCE: "off" });
+    expect(existsSync(join(root, "queries.sql"))).toBe(false);
+    const current = `sha256:${"a".repeat(64)}`;
+    const previous = `sha256:${"b".repeat(64)}`;
+    writeFileSync(join(repo, "tools/deploy/kino-pin.json"), `{"3": {"current": "${current}", "previous": "${previous}"}}\n`);
+    const ok = inject(["registry_manifests"], [current, previous]);
+    expect(ok.status, ok.stderr).toBe(0);
+    expect(ok.vars.KINO_PINS_JSON).toBe(`{"3":{"current":"${current}","previous":"${previous}"}}`);
+    expect(readFileSync(join(root, "queries.sql"), "utf8")).toContain(
+      `artifact_type = 'application/vnd.intar.kino.v1' AND digest IN ('${current}','${previous}')`,
+    );
+    // A pin whose artifact image-ops has not pushed stops the deploy and names the fix.
+    const missing = inject(["registry_manifests"], [current]);
+    expect(missing.status).not.toBe(0);
+    expect(missing.stderr).toContain(previous);
+    expect(missing.stderr).toContain("kino-promote");
+    expect(missing.vars.KINO_PINS_JSON).toBeUndefined();
+    // Before the registry migrations, a pin cannot be checked and stops the deploy.
+    const early = inject([], []);
+    expect(early.status).not.toBe(0);
+    expect(early.stderr).toContain("no registry yet");
+    // A pin the Worker could not read stops the deploy.
+    writeFileSync(join(repo, "tools/deploy/kino-pin.json"), `{"3": {"current": "sha256:x"}}\n`);
+    expect(inject(["registry_manifests"], []).status).not.toBe(0);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
 });

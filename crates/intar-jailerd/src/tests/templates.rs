@@ -217,6 +217,7 @@ fn chunked_template_metadata_is_bounded_separately_from_protocol_frames() {
         root_disk: artifact.clone(),
         kernel: artifact.clone(),
         initrd: Some(artifact),
+        wake: None,
     };
     let bytes = serde_json::to_vec(&metadata).expect("encode template metadata");
     assert!(bytes.len() > intar_jailer_protocol::MAX_FRAME_BYTES);

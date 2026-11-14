@@ -88,11 +88,8 @@ export interface MockApiState {
   organizationOidc: Record<string, unknown> | null;
   hosts: Array<Record<string, unknown>>;
   hostRuns: Record<string, unknown>;
-  adminScenarios: Array<Record<string, unknown>>;
-  imagePromotion: Record<string, unknown>;
-  adminScenarioDetail: Record<string, unknown>;
-  builds: Array<Record<string, unknown>>;
-  buildDetails: Record<string, Record<string, unknown>>;
+  scenarioRevisions: Array<Record<string, unknown> & { id: string }>;
+  machineBuilds: Array<Record<string, unknown>>;
 }
 
 export const minute = 60_000;
@@ -136,7 +133,6 @@ export const scenarioVm = {
   ordinal: 0,
   name: "web",
   image: "debian-13",
-  imageKey: { scenario: "repair-nginx", vm: "web", arch: "x86_64" },
   imageSha256: sha,
   imageFormat: "raw_zstd",
   imageVirtualSizeBytes: 8 * 1024 * 1024 * 1024,
@@ -214,7 +210,7 @@ export function runListEntry(input: {
   const activity = input.activity ?? (input.active ? "foreground" : "settled");
   return {
     runId: input.runId,
-    scenarioId: "repair-nginx",
+    scenarioId: "intar/repair-nginx",
     scenarioName: "repair-nginx",
     title: input.title,
     difficulty: "medium",

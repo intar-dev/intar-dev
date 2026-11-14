@@ -1,0 +1,38 @@
+# A builder host's config with its own enrollment, binaries and limits.
+[bridge]
+enabled = true
+base_url = "https://intar.dev"
+host_id = "builder-host-id"
+bootstrap_token = "not-a-real-token"
+heartbeat_interval_seconds = 30
+
+[builder]
+work_root = "/srv/builder/work"
+cache_root = "/srv/builder/cache"
+state_db = "/srv/builder/state.sqlite3"
+
+[ qemu ]
+qemu_binary = "/usr/bin/qemu-system-x86_64"
+mke2fs_binary = "/usr/sbin/mke2fs"
+e2fsck_binary = "/usr/sbin/e2fsck"
+resize2fs_binary = "/usr/sbin/resize2fs"
+provision_timeout_seconds = 3600
+qemu_exit_timeout_seconds = 120
+accelerator = "kvm"
+build_cpus = 8
+build_memory_mb = 8192
+
+[qemu.layered]
+qemu_img_binary = "/usr/bin/qemu-img"
+buildctl_binary = "/usr/local/bin/buildctl"
+umoci_binary = "/usr/local/bin/umoci"
+debian_image = "docker.io/library/debian@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f"
+oci_cache_root = "/srv/builder/cache/oci"
+checkpoint_cache_root = "/srv/builder/cache/checkpoints"
+use_cache = false
+oci_cache_bytes = 4294967296
+checkpoint_cache_bytes = 21474836480
+minimum_free_bytes = 10737418240
+
+[jobs]
+max_concurrent_builds = 1

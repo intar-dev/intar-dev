@@ -15,9 +15,16 @@ pub struct VmRow {
     pub generation: i64,
     pub name: String,
     pub state: String,
-    pub image_key: Option<String>,
-    pub image_sha256: Option<String>,
-    pub guest_tools_json: Option<String>,
+    /// The image manifest digest (`sha256:<hex>`).
+    pub image: Option<String>,
+    /// The Kino artifact digest (`sha256:<hex>`).
+    pub kino: Option<String>,
+    /// SHA-256 (hex) of the exact `boot.json` bytes on the run disk; a
+    /// guest report for any other digest is stale.
+    pub boot_sha256: Option<String>,
+    /// The machine's name in its scenario (`DesiredVmV3.name`): the guest's
+    /// hostname. The row's `name` is the agent's key, `DesiredVmV3.vm_id`.
+    pub machine_name: Option<String>,
     pub created_at_s: i64,
     pub updated_at_s: i64,
     pub running_at_s: Option<i64>,
@@ -45,7 +52,6 @@ pub struct VmRow {
     pub jail_gid: Option<i64>,
     pub jail_netns_name: Option<String>,
     pub kino_vsock_cid: Option<i64>,
-    pub kino_vsock_port: Option<i64>,
     pub kino_vsock_path: Option<String>,
     pub ssh_host_keys_openssh_json: Option<String>,
     pub run_id: Option<String>,
@@ -53,20 +59,34 @@ pub struct VmRow {
     pub spool_dir: Option<String>,
     pub cpu_millis: Option<i64>,
     pub ch_executable_sha256: Option<String>,
+    /// How the VM was started (`VmStartV1` without its timing), as JSON.
+    pub start_json: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct VmProbeStateRow {
+/// The latest lab a VM's Kino reported, as strict `VmLabV1` JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmLabRow {
     pub vm_name: String,
     pub run_id: String,
-    pub fingerprint: String,
-    pub collection_state: String,
-    pub collection_error: Option<String>,
-    pub summary_json: String,
-    pub snapshot_json: String,
-    pub generated_at_ms: i64,
+    pub jail_generation: String,
+    pub lab_json: String,
+    /// Milliseconds from the VMM start to the first report for this run.
+    pub first_report_ms: Option<i64>,
     pub updated_at_ms: i64,
 }
+
+/// A VM of an older state schema that jailerd still has to destroy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTeardownRow {
+    pub vm_name: String,
+    pub run_id: Option<String>,
+    /// The jail generation, when the old row recorded one.
+    pub jail_generation: Option<String>,
+}
+
+/// The `PRAGMA user_version` of the agent's state. Any other value resets
+/// the state (see `ensure_schema`).
+pub(crate) const STATE_SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveJobRow {
@@ -89,16 +109,6 @@ pub struct DesiredStateRow {
     pub version: i64,
     pub doc_json: String,
     pub updated_at_ms: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageCacheAccessRow {
-    pub image_key: String,
-    pub image_sha256: String,
-    pub kernel_sha256: String,
-    pub initrd_sha256: String,
-    pub raw_bytes: i64,
-    pub last_accessed_at_ms: i64,
 }
 
 /// One completed byte-level verification of immutable cached content.
@@ -128,16 +138,16 @@ enum Op {
         name: String,
         resp: oneshot::Sender<Result<()>>,
     },
-    LoadVmProbeState {
+    LoadVmLab {
         vm_name: String,
-        resp: oneshot::Sender<Result<Option<VmProbeStateRow>>>,
+        resp: oneshot::Sender<Result<Option<VmLabRow>>>,
     },
-    LoadAllVmProbeStates {
-        resp: oneshot::Sender<Result<Vec<VmProbeStateRow>>>,
+    LoadAllVmLabs {
+        resp: oneshot::Sender<Result<Vec<VmLabRow>>>,
     },
-    UpsertReadyVmAndProbeState {
+    UpsertVmAndLab {
         vm: Box<VmRow>,
-        probe: Box<VmProbeStateRow>,
+        lab: Box<VmLabRow>,
         resp: oneshot::Sender<Result<()>>,
     },
     UpsertArchiveJob {
@@ -170,10 +180,6 @@ enum Op {
         row: Box<DesiredStateRow>,
         resp: oneshot::Sender<Result<()>>,
     },
-    TouchImageCacheEntry {
-        row: Box<ImageCacheAccessRow>,
-        resp: oneshot::Sender<Result<()>>,
-    },
     LoadVerifiedContent {
         resp: oneshot::Sender<Result<Vec<CacheVerifyRow>>>,
     },
@@ -181,21 +187,14 @@ enum Op {
         row: Box<CacheVerifyRow>,
         resp: oneshot::Sender<Result<()>>,
     },
-    #[cfg(test)]
-    #[allow(dead_code)]
-    LoadImageCacheAccess {
-        resp: oneshot::Sender<Result<Vec<ImageCacheAccessRow>>>,
-    },
-    LoadLocalVmImageShas {
+    LoadLocalVmDigests {
         resp: oneshot::Sender<Result<Vec<String>>>,
     },
-    LoadLocalVmGuestToolsJsons {
-        resp: oneshot::Sender<Result<Vec<String>>>,
+    LoadPendingTeardowns {
+        resp: oneshot::Sender<Result<Vec<PendingTeardownRow>>>,
     },
-    #[cfg(test)]
-    #[allow(dead_code)]
-    DeleteImageCacheAccess {
-        image_sha256: String,
+    DeletePendingTeardown {
+        vm_name: String,
         resp: oneshot::Sender<Result<()>>,
     },
 }
@@ -291,55 +290,68 @@ impl Db {
             .context("db thread dropped vm delete response")?
     }
 
-    pub async fn load_vm_probe_state(&self, vm_name: String) -> Result<Option<VmProbeStateRow>> {
-        let (resp_tx, resp_rx) = oneshot::channel::<Result<Option<VmProbeStateRow>>>();
+    pub async fn load_vm_lab(&self, vm_name: String) -> Result<Option<VmLabRow>> {
+        let (resp, rx) = oneshot::channel();
         self.tx
-            .send(Op::LoadVmProbeState {
-                vm_name,
-                resp: resp_tx,
-            })
+            .send(Op::LoadVmLab { vm_name, resp })
             .await
             .context("db channel closed")?;
-
-        resp_rx
-            .await
-            .context("db thread dropped vm probe state response")?
+        rx.await.context("db thread dropped vm lab response")?
     }
 
-    pub async fn load_all_vm_probe_states(&self) -> Result<Vec<VmProbeStateRow>> {
-        let (resp_tx, resp_rx) = oneshot::channel::<Result<Vec<VmProbeStateRow>>>();
+    pub async fn load_all_vm_labs(&self) -> Result<Vec<VmLabRow>> {
+        let (resp, rx) = oneshot::channel();
         self.tx
-            .send(Op::LoadAllVmProbeStates { resp: resp_tx })
+            .send(Op::LoadAllVmLabs { resp })
             .await
             .context("db channel closed")?;
-
-        resp_rx
-            .await
-            .context("db thread dropped all vm probe states response")?
+        rx.await.context("db thread dropped vm labs response")?
     }
 
-    /// Commit the externally visible ready boundary in one SQLite
-    /// transaction. Callers must not publish terminal readiness unless this
-    /// operation succeeds: a running VM row without its authenticated Kino
-    /// snapshot (or vice versa) is not a durable ready state.
-    pub async fn upsert_ready_vm_and_probe_state(
-        &self,
-        vm: VmRow,
-        probe: VmProbeStateRow,
-    ) -> Result<()> {
-        let (resp_tx, resp_rx) = oneshot::channel::<Result<()>>();
+    /// Persist a VM row and its latest lab in one SQLite transaction.
+    /// Callers must not publish readiness unless this succeeds.
+    pub async fn upsert_vm_and_lab(&self, vm: VmRow, lab: VmLabRow) -> Result<()> {
+        let (resp, rx) = oneshot::channel();
         self.tx
-            .send(Op::UpsertReadyVmAndProbeState {
+            .send(Op::UpsertVmAndLab {
                 vm: Box::new(vm),
-                probe: Box::new(probe),
-                resp: resp_tx,
+                lab: Box::new(lab),
+                resp,
             })
             .await
             .context("db channel closed")?;
+        rx.await.context("db thread dropped VM and lab response")?
+    }
 
-        resp_rx
+    /// Every image and Kino digest a persisted VM boots from.
+    pub async fn load_local_vm_digests(&self) -> Result<Vec<String>> {
+        let (resp, rx) = oneshot::channel();
+        self.tx
+            .send(Op::LoadLocalVmDigests { resp })
             .await
-            .context("db thread dropped ready VM transaction response")?
+            .context("db channel closed")?;
+        rx.await
+            .context("db thread dropped local VM digests response")?
+    }
+
+    pub async fn load_pending_teardowns(&self) -> Result<Vec<PendingTeardownRow>> {
+        let (resp, rx) = oneshot::channel();
+        self.tx
+            .send(Op::LoadPendingTeardowns { resp })
+            .await
+            .context("db channel closed")?;
+        rx.await
+            .context("db thread dropped pending teardown response")?
+    }
+
+    pub async fn delete_pending_teardown(&self, vm_name: String) -> Result<()> {
+        let (resp, rx) = oneshot::channel();
+        self.tx
+            .send(Op::DeletePendingTeardown { vm_name, resp })
+            .await
+            .context("db channel closed")?;
+        rx.await
+            .context("db thread dropped pending teardown delete response")?
     }
 
     pub async fn upsert_archive_job(&self, row: ArchiveJobRow) -> Result<()> {
@@ -448,21 +460,6 @@ impl Db {
             .context("db thread dropped desired state upsert response")?
     }
 
-    pub async fn touch_image_cache_entry(&self, row: ImageCacheAccessRow) -> Result<()> {
-        let (resp_tx, resp_rx) = oneshot::channel::<Result<()>>();
-        self.tx
-            .send(Op::TouchImageCacheEntry {
-                row: Box::new(row),
-                resp: resp_tx,
-            })
-            .await
-            .context("db channel closed")?;
-
-        resp_rx
-            .await
-            .context("db thread dropped image cache touch response")?
-    }
-
     pub async fn load_verified_content(&self) -> Result<Vec<CacheVerifyRow>> {
         let (resp_tx, resp_rx) = oneshot::channel::<Result<Vec<CacheVerifyRow>>>();
         self.tx
@@ -488,61 +485,6 @@ impl Db {
         resp_rx
             .await
             .context("db thread dropped verified content upsert response")?
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub async fn load_image_cache_access(&self) -> Result<Vec<ImageCacheAccessRow>> {
-        let (resp_tx, resp_rx) = oneshot::channel::<Result<Vec<ImageCacheAccessRow>>>();
-        self.tx
-            .send(Op::LoadImageCacheAccess { resp: resp_tx })
-            .await
-            .context("db channel closed")?;
-
-        resp_rx
-            .await
-            .context("db thread dropped image cache access response")?
-    }
-
-    pub async fn load_local_vm_image_shas(&self) -> Result<Vec<String>> {
-        let (resp_tx, resp_rx) = oneshot::channel::<Result<Vec<String>>>();
-        self.tx
-            .send(Op::LoadLocalVmImageShas { resp: resp_tx })
-            .await
-            .context("db channel closed")?;
-
-        resp_rx
-            .await
-            .context("db thread dropped local vm image sha load response")?
-    }
-
-    pub async fn load_local_vm_guest_tools_jsons(&self) -> Result<Vec<String>> {
-        let (resp_tx, resp_rx) = oneshot::channel::<Result<Vec<String>>>();
-        self.tx
-            .send(Op::LoadLocalVmGuestToolsJsons { resp: resp_tx })
-            .await
-            .context("db channel closed")?;
-
-        resp_rx
-            .await
-            .context("db thread dropped local vm guest-tools load response")?
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub async fn delete_image_cache_access(&self, image_sha256: String) -> Result<()> {
-        let (resp_tx, resp_rx) = oneshot::channel::<Result<()>>();
-        self.tx
-            .send(Op::DeleteImageCacheAccess {
-                image_sha256,
-                resp: resp_tx,
-            })
-            .await
-            .context("db channel closed")?;
-
-        resp_rx
-            .await
-            .context("db thread dropped image cache delete response")?
     }
 }
 

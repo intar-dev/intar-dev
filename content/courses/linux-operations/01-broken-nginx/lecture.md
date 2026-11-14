@@ -5,6 +5,7 @@ category: web
 tags: [nginx, systemd, linux]
 difficulty: easy
 estimated_minutes: 15
+scenario: broken-nginx
 ---
 
 Nginx is a web server. It accepts HTTP requests and returns website content.

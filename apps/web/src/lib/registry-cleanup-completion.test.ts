@@ -3,136 +3,82 @@ import {
   CLEANUP_CONTENTION_REASONS,
   CLEANUP_WITHHOLD_REASONS,
   completionStatus,
-  isAppliedCompletion,
 } from "../../workers/image-registry-cleanup/src/completion";
-import type { ImageRegistryCleanupRunResult } from "@/lib/image-registry-cleanup";
+import type { OciSweepReport } from "@/lib/oci-registry-sweep";
 
-function run(
-  overrides: Partial<ImageRegistryCleanupRunResult> = {},
-): ImageRegistryCleanupRunResult {
+function report(overrides: Partial<OciSweepReport> = {}): OciSweepReport {
   return {
+    mode: "delete",
+    completed: false,
+    resumeRequired: false,
+    faults: [],
+    startAfter: null,
+    nextStartAfter: null,
+    listedObjects: 0,
+    listedBytes: 0,
+    unrecognizedObjects: 0,
+    markedObjects: 0,
+    youngObjects: 0,
+    candidateObjects: 0,
+    candidateBytes: 0,
+    candidateSample: [],
     deletedObjects: 0,
     deletedBytes: 0,
-    failedObjects: 0,
-    skippedObjects: 0,
-    wouldDeleteObjects: 0,
-    wouldDeleteBytes: 0,
-    blockedObjects: 0,
-    completed: false,
-    planSummary: null,
-    postState: null,
-    verifiedDeletedObjects: 0,
-    verifiedDeletedBytes: 0,
-    unverifiedObjects: 0,
-    unverifiedKeys: [],
-    deletedKeys: [],
-    deletedKeysTruncated: false,
-    deletedKeysDigest: "0".repeat(64),
-    resumeRequired: false,
-    phases: {},
+    revisionCandidates: 0,
+    deletedRevisions: 0,
     error: null,
     ...overrides,
   };
 }
 
 describe("registry cleanup completion mapping", () => {
-  it("copies the core verdict: completed means ok, and only that", () => {
-    const status = completionStatus(
-      run({
-        completed: true,
-        deletedObjects: 12,
-        verifiedDeletedObjects: 12,
-        wouldDeleteObjects: 12,
-      }),
-    );
-
-    expect(status).toBe("ok");
-    expect(isAppliedCompletion(status)).toBe(true);
-  });
-
-  it("never reports ok while the core withholds completion", () => {
-    // The core withholds `completed` for a partial pass, a blocked batch, an
-    // unproven delete, and a post-state that changed. The collector copies that
-    // verdict: it does not re-derive it from counters that happen to look good.
-    const withheld = [
-      run({ completed: false, resumeRequired: true }),
-      run({ completed: false, blockedObjects: 1 }),
-      run({ completed: false, unverifiedObjects: 1 }),
-      run({ completed: false, failedObjects: 1 }),
-      run({ completed: false, wouldDeleteObjects: 12, deletedObjects: 12 }),
-      run({ completed: false, phases: { retired_builds: 3 } }),
-    ];
-
-    for (const result of withheld) {
-      const status = completionStatus(result);
-      expect(status, JSON.stringify(result)).not.toBe("ok");
-      expect(isAppliedCompletion(status)).toBe(false);
+  it("copies the sweep verdict: completed means ok, and only that", () => {
+    expect(completionStatus(report({ completed: true, deletedObjects: 12 }))).toBe("ok");
+    // The sweep withholds `completed` for a partial pass; counters that look
+    // good do not make it ok.
+    for (const withheld of [
+      report({ resumeRequired: true, deletedObjects: 12, candidateObjects: 12 }),
+      report({ nextStartAfter: "a".repeat(64) }),
+    ]) {
+      expect(completionStatus(withheld), JSON.stringify(withheld)).not.toBe("ok");
     }
   });
 
-  it("reports core-failed for a retention fault that stopped the sweep", () => {
-    // The production hazard: a missing retained manifest must never read as a
-    // completed pass, because a promotion then believes artifacts are gone.
-    const status = completionStatus(
-      run({
-        completed: false,
-        error:
-          "reference verification stopped the sweep: retained_manifest_missing",
-        blockedObjects: 1,
-      }),
-    );
-
-    expect(status).toBe("core-failed");
-    expect(isAppliedCompletion(status)).toBe(false);
+  it("reports core-failed for any fault, in either mode", () => {
+    const faults = [{ code: "listing_failed", detail: "list" }] as OciSweepReport["faults"];
+    expect(completionStatus(report({ completed: true, faults }))).toBe("core-failed");
+    expect(completionStatus(report({ mode: "report-only", faults }))).toBe("core-failed");
   });
 
-  it("reports core-failed for a delete that failed", () => {
-    expect(
-      completionStatus(
-        run({ completed: false, failedObjects: 2, error: "2 object delete(s) failed" }),
-      ),
-    ).toBe("core-failed");
+  it("reports report-only for a plan, which never completes", () => {
+    expect(completionStatus(report({ mode: "report-only", completed: true }))).toBe("report-only");
   });
 
   it("reports busy when another actor holds the registry", () => {
     for (const reason of CLEANUP_CONTENTION_REASONS) {
-      const status = completionStatus(run({ completed: false, error: reason }));
-      expect(status, reason).toBe("busy");
-      expect(isAppliedCompletion(status)).toBe(false);
+      expect(completionStatus(report({ error: reason })), reason).toBe("busy");
     }
   });
 
   it("reports paused when the registry withholds deletes", () => {
     for (const reason of CLEANUP_WITHHOLD_REASONS) {
-      expect(completionStatus(run({ completed: false, error: reason })), reason).toBe(
-        "paused",
-      );
+      expect(completionStatus(report({ error: reason })), reason).toBe("paused");
     }
     expect(
-      completionStatus(
-        run({
-          completed: false,
-          error: "registry admission enforcement is report_only",
-        }),
-      ),
+      completionStatus(report({ error: "registry admission enforcement is report_only" })),
     ).toBe("paused");
   });
 
-  it("reports pending when the core stopped without a reason", () => {
-    // A bounded pass that still has work leaves no error behind. Another pass
-    // finishes it, so the status is pending and never a failure or a success.
-    const status = completionStatus(
-      run({
-        completed: false,
-        deletedObjects: 5_000,
-        wouldDeleteObjects: 12_000,
-        resumeRequired: true,
-        skippedObjects: 7_000,
-      }),
-    );
+  it("reports core-failed for any other reason", () => {
+    expect(completionStatus(report({ error: "2 object delete(s) failed" }))).toBe("core-failed");
+  });
 
-    expect(status).toBe("pending");
-    expect(isAppliedCompletion(status)).toBe(false);
+  it("reports pending when the sweep stopped without a reason", () => {
+    // A bounded pass that still has work leaves no error behind; another pass
+    // finishes it.
+    expect(
+      completionStatus(report({ resumeRequired: true, deletedObjects: 5_000, nextStartAfter: "b".repeat(64) })),
+    ).toBe("pending");
   });
 
   it("keeps the refusal vocabularies disjoint and non-empty", () => {

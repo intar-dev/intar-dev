@@ -13,9 +13,7 @@
 #   * the collector's own status says what D1 upload admission enforcement is.
 # A hold or release that finds the lane's own maintenance version serving takes
 # the recovery path below instead of calling the fenced gate.
-# An unreadable answer of either kind stops the deployment. Nothing here reads
-# LEARNER_RUN_CLI_V1_ENFORCEMENT: that variable controls the learner-run CLI
-# rollout and has nothing to do with registry admission.
+# An unreadable answer of either kind stops the deployment.
 set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
@@ -49,11 +47,16 @@ readonly call_timeout_s=120
 readonly run_call_timeout_s=600
 # Key lists are evidence, not a data dump: every list in the record is capped.
 readonly max_evidence_keys=5000
+# One plan covers one key window of the OCI store, so an inventory walks the
+# windows from the start; this bounds the walk.
+readonly max_plan_windows="${REGISTRY_CLEANUP_PLAN_WINDOWS:-64}"
 readonly runtime_root="${RUNNER_TEMP:-/tmp}/intar-registry-cleanup-gate-${GITHUB_RUN_ID:-local}"
 readonly deployment="${runtime_root}/deployment.json"
 readonly version="${runtime_root}/version.json"
 readonly response="${runtime_root}/response.json"
 readonly plan_response="${runtime_root}/plan-response.json"
+readonly plan_walk="${runtime_root}/plan-walk.json"
+readonly final_report_walk="${runtime_root}/final-report-walk.json"
 readonly status_response="${runtime_root}/status-response.json"
 readonly pass_response="${runtime_root}/pass-response.json"
 readonly final_report_response="${runtime_root}/final-report.json"
@@ -130,6 +133,8 @@ chmod 700 "${runtime_root}"
 # skipped gate makes no call at all.
 touch "${deployment}" "${response}" "${plan_response}" "${status_response}"
 touch "${pass_response}" "${final_report_response}" "${leftover_response}"
+printf '[]' > "${plan_walk}"
+printf '[]' > "${final_report_walk}"
 # The record starts as null, so the evidence build always has a file to read.
 printf 'null\n' > "${campaign_record}"
 test ! -e "${evidence}"
@@ -314,19 +319,46 @@ take_admission_proof() {
 
 # Turning deletes on is a change of authority, so it needs a successful report
 # inventory from the collector that is about to delete: a live listing of the
-# delete set, taken while the control plane still serves. The plan itself must
-# prove completeness: a truncated listing, a fault, or a plan that withheld
-# deletes by reference is not evidence for turning deletes on, whatever the
+# delete set, taken while the control plane still serves. The plans themselves
+# must prove completeness: a fault in any window, or a walk that stopped before
+# the end of the store, is not evidence for turning deletes on, whatever the
 # envelope status says. Sets inventory_json and inventory_problem.
 take_inventory_proof() {
   local plan_status plan_class
-  plan_status="$(call_gate plan "${plan_response}")"
+  plan_status="$(walk_plan_windows "${plan_response}" "${plan_walk}")"
   plan_class="$(classify_gate_response "${plan_status}" "${plan_response}")"
   if [ "${plan_class}" != ok ]; then
     mark_inventory_unreadable "${plan_status}" "${plan_class}"
     return 0
   fi
-  evaluate_plan_file "${plan_response}"
+  evaluate_plan_walk "${plan_walk}"
+}
+
+# Plans the OCI store window by window from its start: each report names the
+# window after it in `nextStartAfter`, null after the last. The served reports
+# are journaled as a JSON array in the walk file, and the latest body keeps the
+# given name. The walk stops at the last window, at the first refused call or
+# unclean window, or at max_plan_windows, and prints the last HTTP status.
+walk_plan_windows() {
+  local body_file="$1" walk_file="$2" cursor='' call_status='' window=0
+  printf '[]' > "${walk_file}"
+  while [ "${window}" -lt "${max_plan_windows}" ]; do
+    window=$(( window + 1 ))
+    call_status="$(call_gate plan "${body_file}" "$(jq -cn --arg cursor "${cursor}" '{oci_start_after: $cursor}')")"
+    if [ "$(classify_gate_response "${call_status}" "${body_file}")" != ok ] ||
+       ! jq -e . "${body_file}" >/dev/null 2>&1; then
+      break
+    fi
+    jq -c --slurpfile walk "${walk_file}" '$walk[0] + [(.result // .)]' "${body_file}" \
+      > "${walk_file}.next" && mv -f "${walk_file}.next" "${walk_file}"
+    cursor="$(jq -r '((.result // .) | .result.nextStartAfter) // empty' "${body_file}")"
+    if [ -z "${cursor}" ] ||
+       ! jq -e '((.result // .) | .status == "report-only" and ((.result.faults // null) | type == "array" and length == 0))' \
+         "${body_file}" >/dev/null 2>&1; then
+      break
+    fi
+  done
+  printf '%s' "${call_status}"
 }
 
 # A release that failed while the site served leaves the deploy's pause in the
@@ -375,53 +407,48 @@ mark_inventory_unreadable() {
   inventory_problem="the inventory call answered HTTP $1"
 }
 
-# The plan checks of one envelope already in hand. One plan call is one bucket
-# scan, so the callers that hold an answer evaluate it here instead of asking
-# the collector again. Sets inventory_json and inventory_problem.
-evaluate_plan_file() {
-  local response_file="$1"
+# The checks of one plan walk already on disk. Every window must be a
+# fault-free report-only plan, and the last one must end the store. Sets
+# inventory_json and inventory_problem.
+evaluate_plan_walk() {
+  local walk_file="$1"
   inventory_json="$(jq -c '
-    (.result // .) as $envelope |
-    ($envelope.plan // null) as $plan |
-    ($plan.details // {}) as $details |
-    ($details.faults // null) as $faults |
+    . as $walk |
+    ($walk | last // {}) as $last |
+    ($last.result // null) as $plan |
+    [$walk[] | (.result.faults // null)] as $fault_lists |
     {
-      status: ($envelope.status // null),
+      status: ($last.status // null),
       plan_present: (($plan | type) == "object"),
-      candidates: (($plan.candidateObjects // []) | length),
-      candidates_total: ($details.candidateTotal // null),
-      scanned_objects: ($plan.objectsScanned // null),
-      # `//` would turn a boolean false into null, so presence is tested
-      # with has() and the value is read directly.
-      truncated: (if ($plan | type) == "object" and ($plan | has("truncated"))
-                  then $plan.truncated else null end),
-      delete_allowed_by_references:
-        (if ($details | type) == "object" and ($details | has("deleteAllowedByReferences"))
-         then $details.deleteAllowedByReferences else null end),
-      faults: (if ($faults | type) == "array" then ($faults | length) else null end),
+      windows: ($walk | length),
+      statuses: [$walk[] | (.status // null)] | unique,
+      # `//` would turn a null cursor into a missing one, so presence is
+      # tested with has() and the value is read directly.
+      complete: (($plan | type) == "object" and ($plan | has("nextStartAfter")) and $plan.nextStartAfter == null),
+      candidates: ([$walk[] | (.result.candidateObjects // 0)] | add // 0),
+      candidate_bytes: ([$walk[] | (.result.candidateBytes // 0)] | add // 0),
+      listed_objects: ([$walk[] | (.result.listedObjects // 0)] | add // 0),
+      candidate_sample: ([$walk[] | (.result.candidateSample // [])[]] | .[0:50]),
+      faults: (if ($fault_lists | length) > 0 and all($fault_lists[]; type == "array")
+               then ([$fault_lists[] | length] | add) else null end),
       # An empty fault list must produce an empty array, so the iteration
       # is inside the array and every element carries its own fallback.
-      fault_codes: [($faults // [])[]? | (.code? // "unknown")],
-      ok: (
-        (($plan | type) == "object") and
-        ($plan.truncated == false) and
-        ($details.deleteAllowedByReferences == true) and
-        (($faults | type) == "array") and
-        (($faults | length) == 0)
-      )
-    }' "${response_file}")"
+      fault_codes: [$fault_lists[] | (. // [])[]? | (.code? // "unknown")],
+      ok: false
+    } |
+    .ok = (.plan_present and .statuses == ["report-only"] and .faults == 0 and .complete)
+    ' "${walk_file}")"
   inventory_problem="$(jq -r '
-    # The status is named first: a fenced or failed pass explains itself, while
-    # a missing plan only says the answer carried nothing to read.
+    # Faults are named first, since a faulted window also fails its status;
+    # a fenced pass explains itself, while a missing plan only says the answer
+    # carried nothing to read.
     if (.status // "") == "" then "the collector reported no status"
-    elif (.status != "report-only" and .status != "ok") then "the collector status is \"" + (.status | tostring) + "\""
+    elif (.faults // 0) != 0 then "the plan carries " + (.faults | tostring) + " fault(s): " + ((.fault_codes // []) | join(","))
+    elif .statuses != ["report-only"] then "the collector status is \"" + ((.statuses | map(tostring) | join(",")) // "") + "\""
     elif (.plan_present // false) != true then "the collector listed no plan"
-    elif .truncated == null then "the plan carries no truncated flag"
-    elif .truncated != false then "the bucket listing was truncated"
     elif .faults == null then "the plan carries no fault list"
     elif .faults != 0 then "the plan carries " + (.faults | tostring) + " fault(s): " + ((.fault_codes // []) | join(","))
-    elif .delete_allowed_by_references == null then "the plan carries no deleteAllowedByReferences flag"
-    elif .delete_allowed_by_references != true then "the plan withheld deletes by reference"
+    elif .complete != true then "the plan walk stopped after " + (.windows | tostring) + " window(s), before the end of the store"
     else "ok" end' <<<"${inventory_json}")"
 }
 
@@ -429,8 +456,8 @@ evaluate_plan_file() {
 # the reason and the caller exits non-zero.
 run_refusal() {
   jq -cn --arg reason "$1" '{ok: false, reason: $reason, passes: 0, max_passes: 0,
-    deadline_ms: 0, deleted_objects_total: 0, verified_deleted_objects_total: 0,
-    post_state_digest: null, final_report: null, preflight: null, campaign: []}'
+    deadline_ms: 0, deleted_objects_total: 0, deleted_bytes_total: 0,
+    deleted_revisions_total: 0, final_report: null, preflight: null, campaign: []}'
 }
 
 # The campaign journal is replaced atomically, so a jq that fails leaves every
@@ -447,7 +474,8 @@ append_failed_pass() {
     > "${campaign_passes}.next" && mv -f "${campaign_passes}.next" "${campaign_passes}"
 }
 
-# Appends the record of one served pass, with its capped key lists.
+# Appends the record of one served pass. A pass reports counters and a
+# bounded candidate sample, never every deleted key.
 append_served_pass() {
   local pass="$1" status="$2" class="$3" body="$4"
   jq -cn --slurpfile passes "${campaign_passes}" --slurpfile response "${body}" \
@@ -458,21 +486,16 @@ append_served_pass() {
       {pass: $pass, http_status: ($status | tonumber? // null), gate_class: $class,
        status: ($envelope.status // null), completed: ($result.completed // false),
        error: ($envelope.error // $result.error // null),
+       start_after: ($result.startAfter // null),
+       next_start_after: ($result.nextStartAfter // null),
+       listed_objects: ($result.listedObjects // 0),
+       candidate_objects: ($result.candidateObjects // 0),
        deleted_objects: ($result.deletedObjects // 0),
        deleted_bytes: ($result.deletedBytes // 0),
-       verified_deleted_objects: ($result.verifiedDeletedObjects // 0),
-       verified_deleted_bytes: ($result.verifiedDeletedBytes // 0),
-       failed_objects: ($result.failedObjects // 0),
-       blocked_objects: ($result.blockedObjects // 0),
+       deleted_revisions: ($result.deletedRevisions // 0),
        resume_required: ($result.resumeRequired // false),
-       candidate_total: ($result.planSummary.details.candidateTotal // null),
-       post_state_unchanged: ($result.postState.unchanged // false),
-       post_state_digest: ($result.postState.scanned.digest // null),
-       deleted_keys: (($result.deletedKeys // [])[0:$cap]),
-       deleted_keys_retained: ((($result.deletedKeys // []) | length) | if . > $cap then $cap else . end),
-       deleted_keys_truncated: (($result.deletedKeysTruncated // false) or ((($result.deletedKeys // []) | length) > $cap)),
-       unverified_keys: (($result.unverifiedKeys // [])[0:$cap]),
-       unverified_keys_truncated: ((($result.unverifiedKeys // []) | length) > $cap)}]' \
+       fault_codes: [($result.faults // [])[]? | (.code? // "unknown")],
+       candidate_sample: (($result.candidateSample // [])[0:$cap])}]' \
     > "${campaign_passes}.next" && mv -f "${campaign_passes}.next" "${campaign_passes}"
 }
 
@@ -498,7 +521,7 @@ replace_campaign_record() {
 # argument list.
 run_cleanup_to_completion() {
   local pass=0 pass_status pass_class envelope_status completed=true
-  local reason='' deadline_ms now_ms post_digest='' finished=false ok=false
+  local reason='' deadline_ms now_ms finished=false ok=false
   local pass_raw='' pass_attempt=''
   printf '[]' > "${campaign_passes}"
   deadline_ms=$(( $(date +%s) * 1000 + run_deadline_ms ))
@@ -560,34 +583,28 @@ run_cleanup_to_completion() {
     reason="the campaign reached its ${run_max_passes} pass limit"
   fi
   if [ "${finished}" = true ]; then ok=true; fi
-  post_digest="$(jq -r '[.[] | .post_state_digest] | map(select(. != null)) | last // empty' "${campaign_passes}")"
   jq -cn \
     --argjson ok "${ok}" \
     --arg reason "${reason}" \
     --slurpfile passes "${campaign_passes}" \
     --argjson max_passes "${run_max_passes}" \
     --argjson deadline_ms "${run_deadline_ms}" \
-    --arg post_digest "${post_digest}" \
     '($passes[0] // []) as $passes |
      {ok: $ok, reason: (if ($reason | length) == 0 then null else $reason end),
       passes: ($passes | length), max_passes: $max_passes, deadline_ms: $deadline_ms,
-      deleted_objects_total: ([$passes[].deleted_objects] | add // 0),
-      deleted_bytes_total: ([$passes[].deleted_bytes] | add // 0),
-      verified_deleted_objects_total: ([$passes[].verified_deleted_objects] | add // 0),
-      verified_deleted_bytes_total: ([$passes[].verified_deleted_bytes] | add // 0),
-      post_state_digest: (if ($post_digest | length) == 0 then null else $post_digest end),
+      deleted_objects_total: ([$passes[].deleted_objects // 0] | add // 0),
+      deleted_bytes_total: ([$passes[].deleted_bytes // 0] | add // 0),
+      deleted_revisions_total: ([$passes[].deleted_revisions // 0] | add // 0),
       final_report: null,
       campaign: $passes}' > "${campaign_record}"
 }
 
-# The exact proof that the backlog is gone: a fresh report whose candidate set
-# is empty and whose scanned keyset digest is the one the finished campaign
-# proved. Counts alone cannot tell one key from another, so the digest is what
-# this compares. Writes final_report_proof_json, never an argument.
+# The proof that the backlog is gone: a fresh walk of the whole store whose
+# every window is a fault-free plan and lists no candidate. Writes
+# final_report_proof_json, never an argument.
 final_report_proof() {
-  local expected_json report_status report_class reason_text
-  expected_json="$(jq -cn --arg digest "${1:-}" 'if ($digest | length) == 0 then null else $digest end')"
-  report_status="$(call_gate plan "${final_report_response}")"
+  local report_status report_class reason_text saved_inventory saved_problem
+  report_status="$(walk_plan_windows "${final_report_response}" "${final_report_walk}")"
   report_class="$(classify_gate_response "${report_status}" "${final_report_response}")"
   if [ "${report_class}" != ok ]; then
     reason_text="the final report reached the gate with HTTP ${report_status:-none} (${report_class})"
@@ -596,43 +613,17 @@ final_report_proof() {
       > "${final_report_proof_json}"
     return 0
   fi
-  jq -cn \
-    --argjson expected "${expected_json}" \
-    --argjson cap "${max_evidence_keys}" \
-    --arg unknown fault \
-    --slurpfile envelope "${final_report_response}" \
-    '($envelope[0] // {}) as $outer |
-     ($outer.result // $outer) as $report |
-     ($report.plan // null) as $plan |
-     ($plan.details // {}) as $details |
-     ($details.keysets // {}) as $keysets |
-     (($details.faults // null) | if type == "array" then length else null end) as $faults |
-     {ok: (
-        (($plan | type) == "object") and
-        ($plan.truncated == false) and
-        ($details.deleteAllowedByReferences == true) and
-        ($faults == 0) and
-        (($details.candidateTotal // null) == 0) and
-        (($keysets.candidates.objects // null) == 0) and
-        ($expected != null) and
-        (($keysets.scanned.digest // null) == $expected)
-      ),
-      status: ($report.status // null),
-      truncated: (if ($plan | type) == "object" and ($plan | has("truncated")) then $plan.truncated else null end),
-      delete_allowed_by_references:
-        (if ($details | type) == "object" and ($details | has("deleteAllowedByReferences")) then $details.deleteAllowedByReferences else null end),
-      faults: $faults,
-      fault_codes: [(($details.faults // [])[]) | (.code? // $unknown)],
-      candidate_total: ($details.candidateTotal // null),
-      candidate_objects: (($plan.candidateObjects // []) | length),
-      candidate_sample: (($plan.candidateObjects // [])[0:$cap]),
-      candidate_sample_truncated: ((($plan.candidateObjects // []) | length) > $cap),
-      scanned_objects: ($plan.objectsScanned // null),
-      retained_objects: ($plan.retainedObjects // null),
-      keysets: {scanned: ($keysets.scanned // null), retained: ($keysets.retained // null), candidates: ($keysets.candidates // null)},
-      expected_scanned_digest: $expected,
-      post_digest_match: (($keysets.scanned.digest // null) == $expected)}' \
-    > "${final_report_proof_json}"
+  # The walk checks set the inventory globals, which keep the preflight's.
+  saved_inventory="${inventory_json}"
+  saved_problem="${inventory_problem}"
+  evaluate_plan_walk "${final_report_walk}"
+  jq -c --arg problem "${inventory_problem}" '
+    . + {ok: (.ok and .candidates == 0),
+         reason: (if $problem != "ok" then $problem
+                  elif .candidates != 0 then "the final report still lists " + (.candidates | tostring) + " candidate(s)"
+                  else null end)}' <<<"${inventory_json}" > "${final_report_proof_json}"
+  inventory_json="${saved_inventory}"
+  inventory_problem="${saved_problem}"
 }
 
 # Live state selects the transport. A collector that does not exist can not
@@ -838,7 +829,7 @@ else
       take_inventory_proof
       if [ "${inventory_problem}" != ok ]; then
         echo "the delete mode needs a completed, fault-free report inventory, but ${inventory_problem}." >&2
-        echo 'A truncated listing or a retention fault means the delete set is unproven, so deletes stay off.' >&2
+        echo 'A faulted window or a walk that did not reach the end of the store leaves the delete set unproven, so deletes stay off.' >&2
         exit 1
       fi
     fi
@@ -868,7 +859,7 @@ else
         else
           run_cleanup_to_completion
           if [ "$(jq -r '.ok' "${campaign_record}")" = true ]; then
-            final_report_proof "$(jq -r '.post_state_digest // empty' "${campaign_record}")"
+            final_report_proof
             # The jq program is single-quoted on purpose; $run[0] is a jq
             # array subscript, not a shell expansion.
             # shellcheck disable=SC2016
@@ -891,7 +882,7 @@ else
   elif [ "${action}" = release ]; then
     http_status="$(call_gate resume "${response}")"
   elif [ "${action}" = plan ]; then
-    http_status="$(call_gate plan "${response}")"
+    http_status="$(walk_plan_windows "${response}" "${plan_walk}")"
   else
     http_status="$(call_gate pause "${response}" "$(jq -cn --argjson waitMs "${wait_ms}" '{wait_ms: $waitMs}')")"
   fi
@@ -934,10 +925,10 @@ else
     # that serves traffic and that parent is open, and the plan it produced is
     # complete and fault free. A child whose CONTROL_PLANE binding is missing
     # reports maintenanceSource "unavailable" and fences itself, so a reachable
-    # gate alone is not that proof. The envelope is already in hand, so this is
-    # one call and one bucket scan.
+    # gate alone is not that proof. The walk is already on disk, so this is
+    # one scan of the store.
     if [ "${gate_class}" = ok ]; then
-      evaluate_plan_file "${response}"
+      evaluate_plan_walk "${plan_walk}"
     else
       mark_inventory_unreadable "${http_status}" "${gate_class}"
     fi
@@ -951,7 +942,7 @@ else
          maintenance_source: ($report.maintenanceSource // null),
          status: ($report.status // null),
          mode: ($report.mode // null),
-         plan_mode: (($report.plan // null) | if type == "object" then .mode else null end),
+         plan_mode: (($report.result // null) | if type == "object" then .mode else null end),
          maintenance_off: (($report.maintenance // null) == "off"),
          maintenance_source_control_plane: (($report.maintenanceSource // null) == "control-plane"),
          inventory: $inventory,
@@ -1010,6 +1001,7 @@ jq -n \
   --slurpfile deployment "${deployment}" \
   --slurpfile probe "${state}" \
   --slurpfile plan "${plan_response}" \
+  --slurpfile plan_walk "${plan_walk}" \
   --slurpfile status "${status_response}" \
   '{
     schema_version: 1,
@@ -1039,6 +1031,7 @@ jq -n \
     response: (if ($response | length) == 0 then null else $response[0] end),
     deployment: (if ($deployment | length) == 0 then null else $deployment[0] end),
     plan_response: (if ($plan | length) == 0 then null else $plan[0] end),
+    plan_walk: ($plan_walk[0] // []),
     status_response: (if ($status | length) == 0 then null else $status[0] end),
     probe: $probe[0]
   }' > "${evidence}"
@@ -1054,7 +1047,7 @@ if [ "${action}" = run ]; then
     exit 0
   fi
   if jq -e '.run.ok == true' "${evidence}" >/dev/null; then
-    echo "the cleanup campaign finished: $(jq -c '.run | {passes, deleted_objects_total, verified_deleted_objects_total, final_report: {candidate_total: .final_report.candidate_total, post_digest_match: .final_report.post_digest_match}}' "${evidence}")"
+    echo "the cleanup campaign finished: $(jq -c '.run | {passes, deleted_objects_total, deleted_bytes_total, deleted_revisions_total, final_report: {windows: .final_report.windows, candidates: .final_report.candidates}}' "${evidence}")"
     exit 0
   fi
   echo 'the cleanup campaign did not finish.' >&2
@@ -1115,11 +1108,11 @@ if [ "${action}" = plan ]; then
     explain_fatal_gate_class "${gate_class}" "${http_status}" "${response}"
   fi
   if jq -e '.preview.ok == true' "${evidence}" >/dev/null; then
-    echo "the report preview is clean: $(jq -c '.preview | {maintenance, maintenance_source, status, mode, scanned_objects, candidates_total}' "${evidence}")"
+    echo "the report preview is clean: $(jq -c '.preview | {maintenance, maintenance_source, status, mode, windows: .inventory.windows, candidates: .inventory.candidates}' "${evidence}")"
     exit 0
   fi
   echo 'the report preview did not prove a healthy report-only collector.' >&2
-  jq -c '.preview | {maintenance, maintenance_source, status, mode, problem, fault_codes: .inventory.fault_codes, truncated: .inventory.truncated}' "${evidence}" >&2
+  jq -c '.preview | {maintenance, maintenance_source, status, mode, problem, fault_codes: .inventory.fault_codes, complete: .inventory.complete}' "${evidence}" >&2
   exit 1
 fi
 

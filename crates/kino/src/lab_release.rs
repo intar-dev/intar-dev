@@ -205,6 +205,11 @@ pub(crate) fn notify_recording_started(request_id: &str) {
     let spawned = std::thread::Builder::new()
         .name("kino-lab-release".to_owned())
         .spawn(move || {
+            // No control socket means a supervisor that releases the lab on
+            // its timer alone; that is not an error to show a learner.
+            if !crate::run_cli_control::configured_socket_path().exists() {
+                return;
+            }
             if let Err(error) = send_recording_started(&request_id) {
                 eprintln!("kino lab release request was not accepted: {error}");
             }

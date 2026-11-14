@@ -1,47 +1,30 @@
-mod artifact;
+//! Machine and repository-image builds of image format 3 from a
+//! `SourceBundleV2`: the platform base, the build VM with its checkpoints,
+//! and the OCI image output.
+
 mod checkpoint;
 mod chunked;
 mod compute;
 mod config;
-mod content_hash;
-mod direct;
 mod disk;
-mod guest_tools;
 mod kernel;
-mod manifest;
+#[cfg(unix)]
+mod machine;
 mod oci;
-mod provision;
+mod platform;
 mod qemu;
 mod rootfs;
 mod seed;
 mod sha256;
-pub mod source_bundle;
 mod ssh;
+pub mod wake;
 
-pub use artifact::{RawZstdArtifact, sha256_file_hex, write_raw_zstd_artifact};
 pub use chunked::{
     ChunkedImageArtifact, EncodedImageChunkArtifact, ReusedEncodedImageChunk, ScannedChunkedImage,
     ScannedImageChunk, reconstruct_chunked_image, scan_raw_image_chunks,
     write_chunked_image_artifact, write_scanned_chunked_image_artifact,
 };
-pub use config::{BuildConfig, ConfigError, LayeredBuildConfig, QemuBuildConfig, RawUploadConfig};
-pub use content_hash::{
-    BUILD_FORMAT_VERSION, ScenarioContentHashInput, scenario_content_hash, sha256_bytes_hex,
-};
-pub use direct::{
-    DirectBuildArtifact, DirectBuildOutput, DirectBuildPaths, DirectBuildPrepareInput,
-    DirectBuildRequest, DirectQemuShutdownInput, RawDirectBuild, RenderedDirectBuild,
-    acknowledged_qmp_shutdown, acknowledged_qmp_shutdown_with_cancel,
-    finish_direct_build_from_scan, prepare_direct_build_inputs, render_direct_build,
-    run_direct_build, run_direct_build_to_raw,
-};
-pub use disk::{
-    ScenarioDiskCommand, ScenarioDiskPlan, prepare_scenario_disk, render_scenario_disk_plan,
-};
-pub use guest_tools::{
-    GUEST_TOOLS_DISK_LABEL, GUEST_TOOLS_DISK_SIZE_BYTES, GuestToolsDiskArtifact,
-    GuestToolsDiskManifestV1, write_guest_tools_disk,
-};
+pub use config::{LayeredBuildConfig, QemuBuildConfig, WakeBuildConfig};
 pub use kernel::{
     KERNEL_APT_SNAPSHOT, KERNEL_APT_SNAPSHOT_URL, KERNEL_BUILD_HOST, KERNEL_BUILD_SCRIPT_SOURCE,
     KERNEL_BUILD_USER, KERNEL_BUSYBOX_STATIC_VERSION, KERNEL_CONFIG_FRAGMENT,
@@ -51,17 +34,13 @@ pub use kernel::{
     KernelSourceFile, kernel_build_script_tokens, kernel_image_file_name, kernel_initrd_file_name,
     kernel_profile_digest, kernel_release, missing_required_builtins, render_kernel_build_script,
 };
-pub use manifest::{build_direct_manifest_json, combine_scenario_manifests};
-pub use qemu::{
-    BUILD_BOOT_CMDLINE, DirectBootQemuCommand, DirectBootQemuInput, PUBLISHED_BOOT_CMDLINE,
-    render_direct_boot_qemu_command,
+#[cfg(unix)]
+pub use machine::{
+    BuildPlan, BuildTarget, MachineBuildOutput, MachineBuildRequest, MachineImage, PlannedNode,
+    PlannedStage, VerifiedMachineImage, WAKE_CHILD_ARG, WakeRole, build_machine_image,
+    machine_build_log_path, plan_build, reconstruct_machine_disk, run_wake_child,
+    verify_machine_image, wake_unavailable, write_machine_image,
 };
-pub use rootfs::{
-    BaseRootfsArtifact, RootfsBuildPaths, RootfsBuildPlan, ensure_base_rootfs,
-    render_rootfs_build_plan,
-};
-pub use seed::{
-    AUTHORIZED_KEYS_FILENAME, BUILD_ENV_FILENAME, BuildSeedInput, INTAR_BUILD_SEED_LABEL,
-    INTAR_BUILD_SEED_LABEL_TEXT, render_build_env, write_build_seed,
-};
-pub use ssh::{BuildSshKey, BuildSshSession, generate_build_ssh_key, private_key_to_openssh};
+pub use platform::{PLATFORM_BASE_DISK_BYTES, ensure_platform_base, render_platform_rootfs_plan};
+pub use rootfs::{BaseRootfsArtifact, RootfsBuildPaths, RootfsBuildPlan};
+pub use sha256::sha256_file_hex;

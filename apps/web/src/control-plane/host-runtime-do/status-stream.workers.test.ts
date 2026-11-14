@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hostCpuReservations, runtimeExecutions, session } from "@/db/schema";
 import { RUN_STATUS_PING, RUN_STATUS_PONG } from "@/lib/run-status-heartbeat";
 import { ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtures";
@@ -12,12 +12,13 @@ import {
   drizzle,
   env,
   eq,
-  mutateStoredHostDesiredState,
+  mutateDesiredState,
   runNextScheduledAlarm,
   scenarioRuns,
   seedHost,
   seedRun,
   sendBridge,
+  settleHostRuntimeSockets,
   sleep,
   upsertDesiredVm,
   user,
@@ -41,6 +42,7 @@ const isInvalidate = (
 
 describe("HostRuntimeDO run status stream", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+  afterEach(settleHostRuntimeSockets);
 
   it("serializes broadcasts across runs and keeps only the newest pending revision", async () => {
     const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName("fanout-queue"));
@@ -266,7 +268,7 @@ describe("HostRuntimeDO run status stream", () => {
       (message): message is Extract<StatusMessage, { type: "subscribed" }> =>
         message.type === "subscribed",
     );
-    await mutateStoredHostDesiredState(db, hostId, now, (draft) => {
+    await mutateDesiredState(db, hostId, now, (draft) => {
       upsertDesiredVm(draft, {
         ...desiredRunningVm(runId, "runtime-web", now),
         lease_expires_at_unix_ms: now - 1,

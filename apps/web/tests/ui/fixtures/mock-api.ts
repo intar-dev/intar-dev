@@ -392,105 +392,6 @@ function scenarioRunStatus(run: FixtureRecord, revision: number) {
   };
 }
 
-function probeSnapshots(variant: MockApiState["variant"]) {
-  if (variant === "long") {
-    return [
-      {
-        id: "snapshot-dense-1",
-        vmId: "run-vm-web",
-        runtimeVmName: "repair-nginx-web-7f3a",
-        observedAt: FIXED_NOW - 5 * 60_000,
-        probes: [
-          {
-            id: "boot-ready",
-            label: "Machine ready",
-            kind: "systemd_unit",
-            phase: "boot",
-            status: "pending",
-          },
-          {
-            id: "nginx-listening",
-            label: "nginx listens on port 80",
-            kind: "tcp_connect",
-            phase: "scenario",
-            status: "fail",
-          },
-          {
-            id: "health-endpoint",
-            label: "health endpoint returns ok",
-            kind: "http_request",
-            phase: "scenario",
-            status: "pending",
-          },
-        ],
-      },
-      {
-        id: "snapshot-dense-2",
-        vmId: "run-vm-web",
-        runtimeVmName: "repair-nginx-web-7f3a",
-        observedAt: FIXED_NOW - 2 * 60_000,
-        probes: [
-          {
-            id: "boot-ready",
-            label: "Machine ready",
-            kind: "systemd_unit",
-            phase: "boot",
-            status: "pass",
-          },
-          {
-            id: "nginx-listening",
-            label: "nginx listens on port 80",
-            kind: "tcp_connect",
-            phase: "scenario",
-            status: "pass",
-          },
-          {
-            id: "health-endpoint",
-            label:
-              "health endpoint returns ok through the public ingress while preserving the original host header, forwarding the full request path, keeping cache-control intact, and refusing fallback content from the maintenance virtual host",
-            kind: "http_request",
-            phase: "scenario",
-            status: "pass",
-          },
-        ],
-      },
-    ];
-  }
-
-  return [
-    {
-      id: "snapshot-1",
-      vmId: "run-vm-web",
-      runtimeVmName: "repair-nginx-web-7f3a",
-      observedAt: FIXED_NOW - 5 * 60_000,
-      probes: [
-        {
-          id: "nginx-listening",
-          label: "nginx listens on port 80",
-          kind: "tcp_connect",
-          phase: "scenario",
-          status: "fail",
-        },
-      ],
-    },
-    {
-      id: "snapshot-2",
-      vmId: "run-vm-web",
-      runtimeVmName: "repair-nginx-web-7f3a",
-      observedAt: FIXED_NOW - 2 * 60_000,
-      probes: [
-        {
-          id: "nginx-listening",
-          label: "nginx listens on port 80",
-          kind: "tcp_connect",
-          phase: "scenario",
-          status: "pass",
-        },
-      ],
-    },
-  ];
-}
-
 /** The access history of a fixture user, created on first use. */
 function historyOf(
   state: MockApiState,
@@ -638,12 +539,12 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       }
       updateFixtureLinkedLectureState(
         server.state.courseCatalog,
-        "repair-nginx",
+        "intar/repair-nginx",
         runState,
       );
       updateFixtureLinkedLectureState(
         server.state.organizationCourseCatalog,
-        "repair-nginx",
+        "intar/repair-nginx",
         runState,
       );
       server.state.terminalMode =
@@ -1040,7 +941,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
       if (
-        /^\/api\/scenarios\/[^/]+\/start$/.test(pathname) &&
+        /^\/api\/scenarios\/[^/]+\/[^/]+\/start$/.test(pathname) &&
         method === "POST"
       ) {
         await json(
@@ -1048,7 +949,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           {
             accepted: true,
             runId: "run-active",
-            scenarioId: "repair-nginx",
+            scenarioId: "intar/repair-nginx",
             acceptedAt: FIXED_NOW,
             reused: false,
             run: withoutShareOffer(server.state.run),
@@ -1181,16 +1082,6 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         });
         return;
       }
-      if (
-        /^\/api\/scenarios\/runs\/[^/]+\/probe-snapshots$/.test(pathname) &&
-        method === "GET"
-      ) {
-        await json(route, {
-          snapshots: probeSnapshots(server.state.variant),
-        });
-        return;
-      }
-
       const statusRunId = segment(
         pathname,
         /^\/api\/scenarios\/runs\/([^/]+)\/status$/,
@@ -1603,14 +1494,6 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
 
-      if (pathname === "/api/admin/scenarios" && method === "GET") {
-        await json(route, { scenarios: server.state.adminScenarios });
-        return;
-      }
-      if (pathname === "/api/admin/image-promotion" && method === "GET") {
-        await json(route, server.state.imagePromotion);
-        return;
-      }
       if (pathname === "/api/admin/scenario-source" && method === "GET") {
         await json(route, {
           enabled: false,
@@ -1620,45 +1503,38 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         });
         return;
       }
-      const adminScenarioId = segment(
+      if (pathname === "/api/admin/scenario-revisions" && method === "GET") {
+        await json(route, { scenarios: server.state.scenarioRevisions });
+        return;
+      }
+      const revisionScenarioId = segment(
         pathname,
-        /^\/api\/admin\/scenarios\/([^/]+)$/,
+        /^\/api\/admin\/scenario-revisions\/([^/]+\/[^/]+)$/,
       );
-      if (adminScenarioId && method === "GET") {
-        await json(route, { scenario: server.state.adminScenarioDetail });
+      if (revisionScenarioId) {
+        const scenario = server.state.scenarioRevisions.find(
+          (candidate) => candidate.id === revisionScenarioId,
+        );
+        if (!scenario) {
+          await json(route, { error: "scenario not found", code: "scenario_not_found" }, 404);
+          return;
+        }
+        if (method === "POST") {
+          const body = await requestBody(route);
+          if (body.action === "verify") {
+            scenario.verifyRuns = { [String(body.rev)]: "run-verify-new" };
+          } else {
+            scenario.liveRev = body.rev;
+          }
+        }
+        await json(route, { scenario });
         return;
       }
-      if (
-        /^\/api\/admin\/scenarios\/[^/]+\/enabled$/.test(pathname) &&
-        (method === "POST" || method === "DELETE")
-      ) {
-        server.state.adminScenarioDetail.enabled = method === "POST";
-        server.state.adminScenarioDetail.enabledAt =
-          method === "POST" ? FIXED_NOW : null;
-        await json(route, { scenario: server.state.adminScenarioDetail });
+      if (pathname === "/api/admin/machine-builds" && method === "GET") {
+        await json(route, { builds: server.state.machineBuilds });
         return;
       }
-
-      if (pathname === "/api/admin/builds" && method === "GET") {
-        await json(route, { builds: server.state.builds });
-        return;
-      }
-      const buildId = segment(pathname, /^\/api\/admin\/builds\/([^/]+)$/);
-      if (buildId && method === "GET") {
-        await json(route, { build: server.state.buildDetails[buildId] });
-        return;
-      }
-      if (
-        /^\/api\/admin\/builds\/[^/]+\/retry$/.test(pathname) &&
-        method === "POST"
-      ) {
-        await json(route, { accepted: true });
-        return;
-      }
-      if (
-        /^\/api\/admin\/builds\/[^/]+\/log$/.test(pathname) &&
-        method === "GET"
-      ) {
+      if (/^\/api\/admin\/machine-builds\/[^/]+\/log$/.test(pathname) && method === "GET") {
         await route.fulfill({
           status: 200,
           contentType: "text/plain; charset=utf-8",
@@ -1666,7 +1542,6 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         });
         return;
       }
-
       if (pathname === "/api/admin/signups" && method === "GET") {
         await json(route, adminSignupStatus(server.state.signups));
         return;

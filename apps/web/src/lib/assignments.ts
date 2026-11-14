@@ -5,7 +5,7 @@ import { member, organization, scenarioAssignments } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import { assertCutoverNotWiped, CUTOVER_WIPED_SQL } from "@/lib/run-admission-gate";
-import { listEnabledScenariosForUser } from "@/lib/scenario-runs";
+import { listEnabledScenarioTitles } from "@/lib/scenario-runs";
 import type { CourseLocation } from "@/lib/scenario-runs";
 import {
   resolveCourseLectureForScenario,
@@ -43,7 +43,7 @@ export interface MyAssignment {
 async function scenarioTitleMap(
   organizationId: string,
 ): Promise<Map<string, string>> {
-  const scenarios = await listEnabledScenariosForUser({ organizationId });
+  const scenarios = await listEnabledScenarioTitles(organizationId);
   return new Map(scenarios.map((entry) => [entry.scenarioId, entry.title]));
 }
 

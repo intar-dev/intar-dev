@@ -30,7 +30,7 @@ export const GET: APIRoute = async ({ request, params }) => {
       db: drizzle(env.DB),
       userId: authz.context.userId,
       organizationId,
-      ...await loadScenarioCapacity(authz.context.userId, undefined, undefined, organizationId),
+      ...await loadScenarioCapacity(authz.context.userId, undefined, organizationId),
       allowSequenceBypass: authz.context.isAdmin,
     });
     return jsonResponse(catalog);

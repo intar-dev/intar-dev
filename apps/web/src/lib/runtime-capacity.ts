@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
-import type { HostStateReportV2, VmActualStateV2 } from "@/generated/bridge";
+import type { HostStateReportV3, VmStateV3 } from "@/generated/contracts/bridge-message-v9";
 
 export const RUNTIME_PENDING_RESOURCE_RESERVATION_TTL_MS = 5 * 60_000;
 
@@ -95,7 +95,7 @@ export async function loadActiveRuntimeResourceSnapshot(
  */
 export function availableRuntimeHostResources(input: {
   hostId: string;
-  report: HostStateReportV2;
+  report: HostStateReportV3;
   snapshot: ActiveRuntimeResourceSnapshot;
 }): RuntimeResourceDemand | null {
   const cpuCapacity = strictCpuCapacity(input.report);
@@ -117,7 +117,8 @@ export function availableRuntimeHostResources(input: {
   for (const vm of input.report.vms) {
     const reservation = reservationByExecution.get(vm.run_id);
     if (!reservation) continue;
-    const key = `${vm.run_id}\0${vm.vm_name}`;
+    // A VM's host-local name is its machine name and run id.
+    const key = `${vm.run_id}\0${vm.name}-${vm.run_id}`;
     const reservedVm = reservedVmByIdentity.get(key);
     if (!reservedVm) continue;
     const effectiveCpuMillis = reportedEffectiveCpuMillis(vm);
@@ -177,7 +178,7 @@ export function runtimeResourcesFit(
   );
 }
 
-function reportedEffectiveCpuMillis(vm: VmActualStateV2): number | null {
+function reportedEffectiveCpuMillis(vm: VmStateV3): number | null {
   const effective = vm.runtime_constraints?.cpu_millis;
   if (Number.isSafeInteger(effective) && (effective ?? 0) > 0) {
     return effective ?? null;

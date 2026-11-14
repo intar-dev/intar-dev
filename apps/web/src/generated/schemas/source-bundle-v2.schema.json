@@ -1,0 +1,463 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SourceBundleV2",
+  "description": "One compiled repository: the `bundle` field of an upload, gzipped JSON.\nEvery script is lowered and every `file()` and `markdown()` inlined; no\nHCL and no author path survives.",
+  "type": "object",
+  "properties": {
+    "compiler": {
+      "description": "[`SOURCE_COMPILER_VERSION_V2`] of the compiler that wrote it.",
+      "type": "string"
+    },
+    "course_catalog": {
+      "description": "Lecture `scenario_id`s are bare scenario slugs of this bundle; the\nWorker namespaces them from the repository's binding.",
+      "$ref": "#/$defs/CourseCatalogSnapshotV2"
+    },
+    "image_format": {
+      "description": "`IMAGE_FORMAT` the compiler targets.",
+      "type": "string"
+    },
+    "images": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ImageV1"
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ScenarioV1"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "compiler",
+    "image_format",
+    "scenarios",
+    "images",
+    "course_catalog"
+  ],
+  "$defs": {
+    "CourseCatalogCourseV2": {
+      "type": "object",
+      "properties": {
+        "body_markdown": {
+          "type": "string"
+        },
+        "course_id": {
+          "type": "string"
+        },
+        "lectures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CourseCatalogLectureV2"
+          }
+        },
+        "sequential": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "course_id",
+        "title",
+        "summary",
+        "body_markdown",
+        "sequential",
+        "lectures"
+      ]
+    },
+    "CourseCatalogLectureV2": {
+      "type": "object",
+      "properties": {
+        "body_markdown": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "difficulty": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScenarioDifficulty"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "estimated_minutes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "lecture_id": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "lecture_id",
+        "title",
+        "summary",
+        "body_markdown",
+        "category",
+        "tags",
+        "estimated_minutes"
+      ]
+    },
+    "CourseCatalogSnapshotV2": {
+      "description": "The published, Markdown-authored course catalog.\n\n`version` is intentionally a field rather than an enum tag. The bundle\nreceiver must reject a catalog version that it does not understand.",
+      "type": "object",
+      "properties": {
+        "courses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CourseCatalogCourseV2"
+          }
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 2,
+          "minimum": 2
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "courses"
+      ]
+    },
+    "Difficulty": {
+      "type": "string",
+      "enum": [
+        "easy",
+        "medium",
+        "hard"
+      ]
+    },
+    "HintV1": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "body"
+      ]
+    },
+    "ImageV1": {
+      "description": "A repository image, `images/<name>.hcl`.",
+      "type": "object",
+      "properties": {
+        "defer": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "disk_mib": {
+          "description": "The chain's build geometry: set exactly when `from` is `trixie`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "from": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "setup": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScriptV1"
+          }
+        },
+        "wake": {
+          "description": "Published with a suspended guest; a machine `from` it is a pack.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "from",
+        "defer",
+        "setup"
+      ]
+    },
+    "MachineV1": {
+      "type": "object",
+      "properties": {
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "defer": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "disk_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "egress": {
+          "type": "boolean"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "from": {
+          "description": "`trixie` or the name of an image.",
+          "type": "string"
+        },
+        "memory_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScriptV1"
+          }
+        },
+        "setup": {
+          "description": "Build-time stages in run order; `packages` is lowered to the first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScriptV1"
+          }
+        },
+        "terminal": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "cpu_millis",
+        "memory_mib",
+        "disk_mib",
+        "from",
+        "defer",
+        "terminal",
+        "egress",
+        "env",
+        "setup",
+        "ready"
+      ]
+    },
+    "ScenarioDifficulty": {
+      "type": "string",
+      "enum": [
+        "easy",
+        "medium",
+        "hard"
+      ]
+    },
+    "ScenarioV1": {
+      "type": "object",
+      "properties": {
+        "briefing": {
+          "type": "string"
+        },
+        "credit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "difficulty": {
+          "$ref": "#/$defs/Difficulty"
+        },
+        "hints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HintV1"
+          }
+        },
+        "machines": {
+          "description": "File order is the terminal tab order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MachineV1"
+          }
+        },
+        "minutes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "play": {
+          "type": "boolean"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "solution": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tasks": {
+          "description": "File order is the order learners see.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskV1"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "slug",
+        "title",
+        "summary",
+        "difficulty",
+        "minutes",
+        "tags",
+        "play",
+        "briefing",
+        "solution",
+        "hints",
+        "machines",
+        "tasks"
+      ]
+    },
+    "ScriptV1": {
+      "description": "A named lowered bash script: a setup stage or a ready block.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "script"
+      ]
+    },
+    "TaskV1": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "check": {
+          "description": "The task's check bodies lowered into one script.",
+          "type": "string"
+        },
+        "hints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HintV1"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "needs": {
+          "description": "Bare task IDs, on any machine.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "optional": {
+          "type": "boolean"
+        },
+        "solve": {
+          "description": "Absent on an implied task: it must pass once its needs pass.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "machine",
+        "needs",
+        "optional",
+        "check",
+        "hints"
+      ]
+    }
+  }
+}

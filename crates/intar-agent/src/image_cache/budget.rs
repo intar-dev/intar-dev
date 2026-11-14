@@ -17,9 +17,9 @@ pub(super) const TRANSFER_LIMIT: usize = 5;
 ///
 /// The waiter holds the exclusive prepare job, so only one background entry
 /// opens chunk transfers at a time. The last transfer slot always stays free
-/// for a learner-visible transfer: the launch path downloads a missing pinned
-/// guest tools disk through the same budget, and a boot must not queue behind
-/// a background image warm. Nothing holds a transfer slot while it waits for a
+/// for a learner-visible transfer: the launch path pulls a missing pinned blob
+/// through the same budget, and a boot must not queue behind a background
+/// image warm. Nothing holds a transfer slot while it waits for a
 /// boot window or for the prepare job, so the reservation cannot deadlock.
 pub(super) const BACKGROUND_CHUNK_FANOUT: usize = 4;
 

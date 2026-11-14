@@ -16,15 +16,15 @@ export async function seedArtifactRuntime(d1: D1Database, runId = "run-1") {
     d1
       .prepare(
         `INSERT INTO runtime_vms
-      (id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json, image_sha256,
+      (id, execution_id, vm_id, ordinal, runtime_vm_name, image_digest, spec_digest, kino_digest,
        cpu_millis, memory_mib, disk_mib, artifact_writes_sealed, archive_stage_rank)
       SELECT 'runtime-' || json_extract(vm.value, '$.id'), run.run_id,
         json_extract(vm.value, '$.id'), vm.key, json_extract(vm.value, '$.runtimeVmName'),
-        '{}', ?, 1000, 512, 4096,
+        ?1, ?1, ?1, 1000, 512, 4096,
         CASE WHEN json_extract(vm.value, '$.phase') = 'completed' THEN 1 ELSE 0 END, 1
-      FROM scenario_runs run, json_each(run.state_json, '$.vms') vm WHERE run.run_id = ?`,
+      FROM scenario_runs run, json_each(run.state_json, '$.vms') vm WHERE run.run_id = ?2`,
       )
-      .bind("a".repeat(64), runId),
+      .bind(`sha256:${"a".repeat(64)}`, runId),
     d1
       .prepare(
         "UPDATE scenario_runs SET runtime_execution_id = run_id WHERE run_id = ?",

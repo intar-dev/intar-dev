@@ -1,9 +1,9 @@
 import {
-  type ScenarioBriefing,
   type ScenarioDifficulty,
   type ScenarioObjective,
 } from "@/lib/scenario-model";
 import { type RunPhase, type RunStateDocument } from "@/lib/run-state";
+import type { RunTaskView } from "@/lib/run-tasks";
 import {
   type ScenarioRunHintView,
   type ScenarioRunSolutionView,
@@ -15,21 +15,6 @@ import {
 } from "@/lib/stargate";
 import type { ScenarioRunActivity, ScenarioRunReplayState } from "./activity";
 import type { ScenarioRunSavingStage } from "./saving-stage";
-
-export interface ScenarioCatalogEntry {
-  scenarioId: string;
-  organizationId: string | null;
-  slug: string;
-  title: string;
-  tagline: string;
-  difficulty: ScenarioDifficulty;
-  estimatedMinutes: number;
-  tags: string[];
-  category: string;
-  scenarioName: string;
-  enabledAt: number;
-  vmCount: number;
-}
 
 /**
  * The canonical course context for a scenario.  A scenario can be linked from
@@ -47,48 +32,9 @@ export interface CourseLocation {
   steps: number;
 }
 
-export interface ScenarioDetail {
-  scenarioId: string;
-  organizationId: string | null;
-  slug: string;
-  enabledAt: number;
-  scenarioName: string;
-  briefing: ScenarioBriefing;
-  vmCount: number;
-  hasActiveRun: boolean;
-  activeRunId: string | null;
-  activeRun: {
-    runId: string;
-    phase: RunStateDocument["phase"];
-    phaseTitle: string;
-    phaseDetail: string;
-    canOpenTerminal: boolean;
-    terminalPhase: RunStateDocument["terminalPhase"];
-    updatedAt: number;
-  } | null;
-  blockingRun: {
-    runId: string;
-    scenarioId: string;
-    slug: string;
-    title: string;
-  } | null;
-  /** Null when this scenario is no longer visible in the current catalog. */
-  courseLocation: CourseLocation | null;
-  finishedRuns: Array<{
-    runId: string;
-    phase: "completed" | "failed";
-    outcome: Exclude<ScenarioRunOutcome, "in_progress">;
-    createdAt: number;
-    finishedAt: number;
-    solvedAt: number | null;
-    solveDurationMs: number | null;
-    solutionAssisted: boolean;
-    replayState: ScenarioRunReplayState;
-    hasReplay: boolean;
-  }>;
-}
-
-export interface ScenarioRunRecord extends RunStateDocument {
+export interface ScenarioRunRecord extends Omit<RunStateDocument, "tasks"> {
+  /** A revision-model run's tasks, as the learner may see them. */
+  tasks?: RunTaskView[];
   id: string;
   scenarioId: string;
   organizationId: string | null;

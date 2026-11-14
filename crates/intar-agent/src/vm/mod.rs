@@ -9,7 +9,6 @@ mod replay_media;
 mod runtime_disk;
 mod transcript;
 
-pub(crate) use manager::ImagePrepareRequeued;
 #[cfg(test)]
 pub use manager::VmTerminalTarget;
 pub use manager::{
@@ -17,3 +16,4 @@ pub use manager::{
     CreateScenarioVmRuntimeNetwork, CreateVmResources, VmLifecycleState, VmManager,
     VmStatusResponse, VmTerminalState, VmTerminalStateKind,
 };
+pub(crate) use manager::{GuestUpdate, ImagePrepareRequeued, is_safe_key};

@@ -4,7 +4,6 @@ import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
 import { scenarioRuns } from "@/db/schema";
 import {
-  applyLectureBriefingPresentation,
   resolveCourseLectureForScenario,
   type ResolvedCourseLecture,
 } from "@/lib/course-catalogs";
@@ -14,17 +13,11 @@ import {
   deriveScenarioRunSolveDurationMs,
 } from "@/lib/scenario-run-outcome";
 import {
-  type ScenarioCatalogEntry,
-  type ScenarioDetail,
   type ScenarioRunRecord,
   type ScenarioRunListEntry,
   type CourseLocation,
 } from "./types";
 import {
-  loadEnabledScenarioRows,
-  slugify,
-  loadActiveRunRow,
-  loadFinishedRuns,
   loadRunRow,
   toScenarioRunRecord,
   hydrateScenarioRunSavingStage,
@@ -37,102 +30,21 @@ import {
   deriveScenarioRunReplayState,
 } from "./activity";
 
-export async function listEnabledScenariosForUser(options?: {
-  organizationId?: string | null;
-}): Promise<ScenarioCatalogEntry[]> {
-  const scenarios = await loadEnabledScenarioRows(
-    undefined,
-    options?.organizationId ?? null,
-  );
-  return scenarios.map((scenario) => ({
-    scenarioId: scenario.scenarioId,
-    organizationId: scenario.organizationId,
-    slug: slugify(scenario.scenarioId),
-    title: scenario.briefing.title,
-    tagline: scenario.briefing.tagline,
-    difficulty: scenario.briefing.difficulty,
-    estimatedMinutes: scenario.briefing.estimatedMinutes,
-    tags: scenario.briefing.tags,
-    category: scenario.briefing.category,
-    scenarioName: scenario.scenarioId,
-    enabledAt: scenario.enabledAt,
-    vmCount: scenario.launchSpecs.length,
-  }));
-}
-
-export async function loadEnabledScenarioForUser(params: {
-  scenarioId: string;
-  userId: string;
-  organizationId?: string | null;
-  allowSequenceBypass?: boolean;
-}): Promise<ScenarioDetail | null> {
-  const organizationId = params.organizationId ?? null;
-  const courseLecture = await resolveCourseLectureForScenario({
-    db: drizzle(env.DB),
-    userId: params.userId,
-    organizationId,
-    scenarioId: params.scenarioId,
-    ...(params.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
-  });
-  // Standalone scenarios and locked units are intentionally not detailable.
-  if (!courseLecture || courseLecture.state === "locked") return null;
-  const rows = await loadEnabledScenarioRows(
-    params.scenarioId,
-    organizationId,
-  );
-  const enabled = rows[0];
-  if (!enabled) {
-    return null;
-  }
-
-  const active = await loadActiveRunRow(params.userId);
-  const activeHere =
-    active &&
-    active.scenarioId === enabled.scenarioId &&
-    active.organizationId === organizationId
-      ? active
-      : null;
-  const finishedRuns = await loadFinishedRuns(
-    params.userId,
-    enabled.scenarioId,
-    organizationId,
-  );
-  return {
-    scenarioId: enabled.scenarioId,
-    organizationId: enabled.organizationId,
-    slug: slugify(enabled.scenarioId),
-    enabledAt: enabled.enabledAt,
-    scenarioName: enabled.scenarioId,
-    briefing: applyLectureBriefingPresentation(
-      enabled.briefing,
-      courseLecture.lecture,
-    ),
-    vmCount: enabled.launchSpecs.length,
-    hasActiveRun: activeHere !== null,
-    activeRunId: activeHere?.runId ?? null,
-    activeRun: activeHere
-      ? {
-          runId: activeHere.runId,
-          phase: activeHere.state.phase,
-          phaseTitle: activeHere.state.phaseTitle,
-          phaseDetail: activeHere.state.phaseDetail,
-          canOpenTerminal: activeHere.state.canOpenTerminal,
-          terminalPhase: activeHere.state.terminalPhase,
-          updatedAt: activeHere.updatedAt,
-        }
-      : null,
-    blockingRun:
-      active && !activeHere
-        ? {
-            runId: active.runId,
-            scenarioId: active.scenarioId,
-            slug: slugify(active.scenarioId),
-            title: active.title,
-          }
-        : null,
-    courseLocation: courseLocationFromResolved(courseLecture, organizationId),
-    finishedRuns,
-  };
+/**
+ * The title of every enabled scenario with a live revision that the
+ * organization, or anyone when it is null, may start.
+ */
+export async function listEnabledScenarioTitles(
+  organizationId: string | null,
+): Promise<Array<{ scenarioId: string; title: string }>> {
+  const { results } = await env.DB.prepare(
+    `SELECT scenario.id AS scenarioId, json_extract(live.doc_json, '$.title') AS title
+      FROM scenarios scenario
+      JOIN scenario_revisions live ON live.scenario_id = scenario.id AND live.rev = scenario.live_rev
+      WHERE scenario.enabled = 1 AND (scenario.organization_id IS NULL OR scenario.organization_id = ?1)
+      ORDER BY scenario.id`,
+  ).bind(organizationId).all<{ scenarioId: string; title: string }>();
+  return results;
 }
 
 export async function getScenarioRunForUser(params: {

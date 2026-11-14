@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MachineConfigV1",
+  "description": "The config blob of a machine image. The image's identity is its\nmanifest's digest.",
+  "type": "object",
+  "properties": {
+    "boot": {
+      "$ref": "#/$defs/MachineBootV1"
+    },
+    "build_key": {
+      "$ref": "#/$defs/OciDigest"
+    },
+    "disk": {
+      "$ref": "#/$defs/MachineDiskV1"
+    },
+    "guest_contract": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "image_format": {
+      "type": "string"
+    },
+    "wake": {
+      "description": "Set when the manifest also carries a suspended guest.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WakeV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "guest_contract",
+    "image_format",
+    "build_key",
+    "boot",
+    "disk"
+  ],
+  "$defs": {
+    "MachineBootV1": {
+      "type": "object",
+      "properties": {
+        "cmdline": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmdline"
+      ]
+    },
+    "MachineDiskV1": {
+      "type": "object",
+      "properties": {
+        "chunk_size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "chunks": {
+          "description": "`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              {
+                "$ref": "#/$defs/Sha256Hex"
+              }
+            ]
+          }
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "size_bytes",
+        "chunk_size",
+        "chunks"
+      ]
+    },
+    "OciDigest": {
+      "description": "An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "Sha256Hex": {
+      "description": "A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "WakePackV1": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "description": "Manifest digest of the base the delta applies to. It is a check, not\na reference to fetch: the pack's manifest lists the base's layers.",
+          "$ref": "#/$defs/OciDigest"
+        },
+        "ram_sha256": {
+          "description": "SHA-256 of the RAM file rebuilt from the base's and the delta. The\nbuild checks it; a start does not hash the file.",
+          "$ref": "#/$defs/Sha256Hex"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "base",
+        "ram_sha256"
+      ]
+    },
+    "WakeRamV1": {
+      "type": "object",
+      "properties": {
+        "chunk_size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "chunks": {
+          "description": "`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              {
+                "$ref": "#/$defs/Sha256Hex"
+              }
+            ]
+          }
+        },
+        "sha256": {
+          "description": "SHA-256 of the assembled file, checked once per host.",
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "size_bytes",
+        "chunk_size",
+        "chunks",
+        "sha256"
+      ]
+    },
+    "WakeShapeV1": {
+      "description": "What the guest was suspended with. A VM's size is chosen at the wake,\nby the balloon and by adding vCPUs, within this shape.",
+      "type": "object",
+      "properties": {
+        "balloon": {
+          "type": "boolean"
+        },
+        "boot_vcpus": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_phys_bits": {
+          "description": "The guest's physical address width, the same at build and wake.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "max_vcpus": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "memory_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "memory_bytes",
+        "boot_vcpus",
+        "max_vcpus",
+        "balloon",
+        "max_phys_bits"
+      ]
+    },
+    "WakeV1": {
+      "description": "The `wake` object of a machine config.",
+      "type": "object",
+      "properties": {
+        "booted_at_unix_ms": {
+          "description": "When the base was cold-booted, carried unchanged into every pack.\nThe guest's certificates date from that boot.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_profile": {
+          "description": "The CPU profile layer. A host wakes the image only when it knows a\nprofile with this digest and its KVM offers what that profile needs.",
+          "$ref": "#/$defs/OciDigest"
+        },
+        "pack": {
+          "description": "Set on a pack, absent on a base.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WakePackV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ram": {
+          "description": "The base's RAM file. A pack repeats its base's value, so a host needs\nno other manifest to assemble it.",
+          "$ref": "#/$defs/WakeRamV1"
+        },
+        "shape": {
+          "$ref": "#/$defs/WakeShapeV1"
+        },
+        "vmm": {
+          "$ref": "#/$defs/WakeVmmV1"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ram",
+        "shape",
+        "cpu_profile",
+        "vmm",
+        "booted_at_unix_ms"
+      ]
+    },
+    "WakeVmmV1": {
+      "description": "cloud-hypervisor versions as the VMM reports them (`v55.0.0`), compared\nnumber by number.",
+      "type": "object",
+      "properties": {
+        "built_with": {
+          "description": "The version that suspended it.",
+          "type": "string",
+          "pattern": "^v[0-9]+(\\.[0-9]+){1,2}$"
+        },
+        "min_version": {
+          "description": "The lowest version that can wake the image.",
+          "type": "string",
+          "pattern": "^v[0-9]+(\\.[0-9]+){1,2}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min_version",
+        "built_with"
+      ]
+    }
+  }
+}

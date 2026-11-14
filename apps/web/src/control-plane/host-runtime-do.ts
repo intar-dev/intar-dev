@@ -1,8 +1,11 @@
-import { organizationHostAdmissionCondition } from "./auth";
+import {
+  CLOSE_UPGRADE_REQUIRED,
+  organizationHostAdmissionCondition,
+  recordBridgeProtocolRefusal,
+} from "./auth";
 import { enforceHostWorkloadAccess } from "@/lib/host-workload-access";
 import { refreshStargateHostRelay, revokeStargateHostRelay, revokeStargateHostRelayCredentials } from "@/lib/stargate-relay";
 import { persistHostReport } from "@/lib/personal-host-readiness";
-import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
 import { notifyRunStatusListeners } from "./host-runtime-do/run-status-fanout";
 import { traceOperation } from "@/lib/tracing";
 import {
@@ -21,10 +24,6 @@ import {
 import { and, eq, exists, sql } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
-  parseBridgeMessageV8,
-  serializeBridgeMessageV8,
-} from "@/control-plane/bridge-v8";
-import {
   agentHosts,
   hostActualState,
   hostDesiredState,
@@ -36,14 +35,26 @@ import {
 } from "@/control-plane/host-cpu-reservations";
 import { createAppId } from "@/lib/id";
 import {
-  applyHostReportToRunState,
-  applyVmReportToRunState,
+  applyVmStateV3ToRunState,
+  revisionVmId,
 } from "@/lib/run-lifecycle";
-import { loadOrCreateHostDesiredState, mutateStoredHostDesiredState } from "@/lib/desired-state-store";
+import type { RunStateDocument } from "@/lib/run-state";
+import { liveRevisionImages } from "@/lib/scenario-runs/revision-begin";
+import { settleVerifyRun } from "@/lib/scenario-revisions";
+import { VALIDATION_USER_ID } from "@/lib/scenario-runs/content-access";
 import {
-  maintainHostBuildAssignments,
-  recordHostBuildReports,
-} from "@/lib/build-scheduler";
+  mutateHostDesiredStateV3,
+} from "@/lib/desired-state-store";
+import { BRIDGE_PROTOCOL_VERSION_9 } from "@/generated/constants";
+import type {
+  BridgeMessageV9,
+  HostDesiredStateV3,
+  HostStateReportV3,
+  VmReportV3,
+} from "@/generated/contracts/bridge-message-v9";
+import validateBridgeMessageV9 from "@/generated/contracts/bridge-message-v9.validate";
+import { readKinoPin } from "@/control-plane/image-registry/push";
+import { maintainMachineBuilds, recordMachineBuildReport } from "@/lib/machine-builds";
 import { expireOverdueRunLeases } from "@/lib/scenario-runs";
 import { expireOverdueRuntimeExecutions } from "@/lib/runtime-lease-expiry";
 import { recordRuntimeVmActualState } from "@/lib/runtime-vm-state";
@@ -56,23 +67,18 @@ import {
   isReportedHostRoleAllowed,
 } from "@/lib/scenario-hosts";
 import type {
-  BridgeMessageV8,
-  HostCapabilitiesV2,
   HostRelayCredentials,
-  HostDesiredStateV2,
   VmActualStateV2,
   VmReportV2,
 } from "@/generated/bridge";
-import { reconcileHostScenarioImages } from "@/lib/scenario-image-cache";
 import { activeAccountExistsSql, activeAccountSql } from "@/lib/account-access";
 import {
   controlPlaneMaintenanceEnabled,
   maintenanceJsonResponse,
 } from "@/maintenance";
 
-export const SCENARIO_IMAGE_CACHE_RECONCILIATION_INTERVAL_MS = 5 * 60_000;
-const SCENARIO_IMAGE_CACHE_NEXT_RECONCILIATION_STORAGE_KEY =
-  "scenario-image-cache-next-reconciliation-at-ms";
+/** A bridge 9 message larger than this closes the socket. */
+export const MAX_BRIDGE_V9_MESSAGE_BYTES = 1024 * 1024;
 
 type RuntimeVmReportContext = {
   executionId: string;
@@ -94,7 +100,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
   private desiredDispatchQueue: Promise<void> = Promise.resolve();
   private clientHelloQueue: Promise<void> = Promise.resolve();
   private readonly pendingClientHellos = new Set<WebSocket>();
-  private nextScenarioImageCacheReconciliationAtMs: number | null = null;
   private sendingStatusNotifications = false;
   private readonly pendingStatusNotifications = new Map<
     string, { runId: string; hostId: string; revision: number }
@@ -178,14 +183,37 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return;
     }
 
-    const bridgeMessage = parseBridgeMessageV8(message);
-    if (bridgeMessage) {
-      await traceOperation("host.bridge.message", () => this.handleBridgeMessageV8(ws, attachment, bridgeMessage), { "intar.bridge.message_type": bridgeMessage.type });
+    if ((typeof message === "string" ? message.length : message.byteLength) > MAX_BRIDGE_V9_MESSAGE_BYTES) {
+      try {
+        ws.close(1009, "bridge message too large");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    const raw = parseJsonRecord(message);
+    const helloVersion = raw?.type === "client_hello" ? raw.protocol_version : undefined;
+    if (attachment.bridgeProtocol === "v9" || helloVersion === BRIDGE_PROTOCOL_VERSION_9) {
+      await traceOperation("host.bridge.message", () => this.handleBridgeMessageV9(ws, attachment, raw), { "intar.bridge.message_type": String(raw?.type) });
+      return;
+    }
+    // A hello of any other protocol is refused with the close code the
+    // clients wait on.
+    if (helloVersion !== undefined) {
+      if (!attachment.helloReceived) {
+        await recordBridgeProtocolRefusal(this.env, attachment.hostId,
+          typeof raw?.agent_version === "string" ? raw.agent_version : null);
+      }
+      try {
+        ws.close(CLOSE_UPGRADE_REQUIRED, "upgrade required");
+      } catch {
+        // ignore
+      }
       return;
     }
 
     try {
-      ws.close(1003, "invalid bridge v7 message");
+      ws.close(1003, "invalid bridge message");
     } catch {
       // ignore
     }
@@ -464,7 +492,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
           .some((socket) => socket.readyState === WebSocket.OPEN)
       ) {
         const activeSocket = await this.findActiveSocket(hostId);
-        if (activeSocket?.attachment.bridgeProtocol === "v6") {
+        if (activeSocket?.attachment.bridgeProtocol) {
           await this.dispatchBridgeDesiredStateIfNeeded(
             hostId,
             activeSocket.socket,
@@ -518,32 +546,45 @@ export class HostRuntimeDO extends HostRuntimeBase {
     }
   }
 
-  private async handleBridgeMessageV8(
+  /**
+   * One bridge 9 message. Every message is checked against the contract
+   * schema first; anything else closes the socket. After the hello, a
+   * message must name this socket's host and arrive on its current session.
+   */
+  private async handleBridgeMessageV9(
     ws: WebSocket,
     attachment: SocketAttachment,
-    message: BridgeMessageV8,
+    raw: Record<string, unknown> | null,
   ): Promise<void> {
+    if (!validateBridgeMessageV9(raw)) {
+      try {
+        ws.close(1003, "invalid bridge v9 message");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    const message = raw;
     if (message.type === "client_hello") {
       if (attachment.helloReceived || this.pendingClientHellos.has(ws)) {
         ws.close(1008, "client hello already received");
         return;
       }
+      // The schema allows any role's hello to carry builder facts; only a
+      // builder may, and it must.
+      if ((message.role === "builder") !== Boolean(message.builder)) {
+        ws.close(1008, "builder hello mismatch");
+        return;
+      }
       this.pendingClientHellos.add(ws);
       try {
-        await this.withClientHelloLock(() =>
-          this.handleBridgeClientHello(ws, attachment, message),
-        );
+        await this.withClientHelloLock(() => this.handleBridgeClientHello(ws, attachment, message));
       } finally {
         this.pendingClientHellos.delete(ws);
       }
       return;
     }
-
-    if (
-      attachment.bridgeProtocol !== "v6" ||
-      !attachment.helloReceived ||
-      !attachment.sessionId
-    ) {
+    if (attachment.bridgeProtocol !== "v9" || !attachment.helloReceived || !attachment.sessionId) {
       try {
         ws.close(1008, "client hello required");
       } catch {
@@ -551,7 +592,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
       }
       return;
     }
-
     if (message.host_id !== attachment.hostId) {
       try {
         ws.close(1008, "host mismatch");
@@ -560,7 +600,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
       }
       return;
     }
-
     if (
       !(await this.isCurrentHostSessionAdmission(
         attachment.hostId,
@@ -570,65 +609,134 @@ export class HostRuntimeDO extends HostRuntimeBase {
         attachment.organizationId,
       ))
     ) {
-      await this.rejectClientHelloAdmission(
-        ws,
-        attachment.hostId,
-        "host admission is no longer active",
-      );
+      await this.rejectClientHelloAdmission(ws, attachment.hostId, "host admission is no longer active");
       return;
     }
 
+    const hostId = attachment.hostId;
     if (message.type === "state_report") {
-      await this.applyBridgeStateReport(
-        message.host_id,
-        message.report,
-        attachment.sessionId,
-        attachment.credentialGeneration,
-      );
-      // State-report projection already reconciles CPU reservations.
-      await this.reconcileHost(message.host_id, {
-        reconcileCpuReservations: false,
-      });
-    } else if (message.type === "vm_report") {
-      await this.applyBridgeVmReport(
-        message.host_id,
-        message.report,
-        attachment.sessionId,
-        attachment.credentialGeneration,
-      );
-      // VM-report projection owns this latency path. Desired-state commits
-      // explicitly wake the host runtime; this alarm remains the durable
-      // fallback without reloading desired state after every boot report.
-      await this.scheduleAlarmNoLaterThan(
-        Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
-      );
+      if (message.report.host_id !== hostId) return;
+      await this.applyBridgeStateReportV3(hostId, message.report, attachment.sessionId, attachment.credentialGeneration);
+      await this.reconcileHost(hostId);
     } else if (message.type === "build_report") {
-      await this.applyBridgeBuildReport(
-        message.host_id,
-        message.report,
+      // recordMachineBuildReport takes reports only from the build's own
+      // builder on its current session, so an agent's report is dropped. A
+      // replay that moved nothing needs no reconcile.
+      const moved = await recordMachineBuildReport(this.env, hostId, message.report, {
+        sessionId: attachment.sessionId,
+        credentialGeneration: attachment.credentialGeneration,
+      });
+      if (moved) await this.reconcileHost(hostId);
+    } else if (message.type === "vm_report") {
+      if (message.report.host_id !== hostId) return;
+      const vm = message.report.vm;
+      await this.applyBridgeVmReport(
+        hostId,
+        vmReportV2FromV3(message.report),
         attachment.sessionId,
         attachment.credentialGeneration,
+        (latest) => applyVmStateV3ToRunState({ runId: vm.run_id, current: latest, vm }),
       );
-      await this.reconcileHost(message.host_id);
+      // Only this host's own projection reaches the stored state it reads.
+      await settleVerifyRun(vm.run_id, { hostId, wake: () => this.scheduleAlarmNoLaterThan(Date.now()) });
+      await this.scheduleAlarmNoLaterThan(Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
     } else if (message.type === "sync_request") {
-      await this.dispatchBridgeDesiredStateIfNeeded(message.host_id, ws, {
-        force: true,
-      });
-      await this.reconcileHost(message.host_id);
+      await this.dispatchBridgeDesiredStateIfNeeded(hostId, ws, { force: true });
+      await this.reconcileHost(hostId);
     } else {
       try {
         ws.close(1003, "server message type");
       } catch {
         // ignore
       }
-      return;
+    }
+  }
+
+  /**
+   * The bridge 9 desired state as it is served: a builder runs no VMs and
+   * holds no Kino; an agent builds and compiles nothing and carries the Kino
+   * pin of its guest contract. Without a pin no new VM is placed on it, but
+   * the VMs it has keep running and tearing down: each names its own Kino.
+   */
+  private async prepareDesiredStateV3(
+    hostId: string,
+    guestContract: number | null | undefined,
+  ): Promise<HostDesiredStateV3> {
+    const pin = typeof guestContract === "number" ? await readKinoPin(this.env, guestContract) : null;
+    const liveImages = typeof guestContract === "number" ? await liveRevisionImages(this.env.DB, guestContract) : [];
+    const { state } = await mutateHostDesiredStateV3(drizzle(this.env.DB), hostId, Date.now(), (draft, host) => {
+      if (host.role === "builder") {
+        draft.vms = [];
+        delete draft.kino_pin;
+        return;
+      }
+      draft.builds = [];
+      draft.source_compiles = [];
+      if (pin) draft.kino_pin = pin.current;
+      else delete draft.kino_pin;
+      // A platform host holds every live and candidate image of its guest
+      // contract and the images its running VMs use. ponytail: no eviction; add an LRU when
+      // the live set outgrows the host cache.
+      if (draft.scope === "platform") {
+        draft.cached_images = [...new Set([
+          ...liveImages,
+          ...draft.vms.filter((vm) => vm.desired_phase === "running").map((vm) => vm.image),
+        ])].sort();
+      }
+    });
+    return state;
+  }
+
+  /**
+   * Stores a bridge 9 state report as the host's actual state, fenced on the
+   * session and the VM's ownership.
+   */
+  private async applyBridgeStateReportV3(
+    hostId: string,
+    report: HostStateReportV3,
+    expectedSessionId: string,
+    expectedCredentialGeneration: number,
+  ): Promise<void> {
+    const accepted = await persistHostReport({
+      d1: this.env.DB, hostId, report, now: Date.now(),
+      sessionId: expectedSessionId,
+      credentialGeneration: expectedCredentialGeneration,
+    });
+    if (!accepted) return;
+    for (const run of await this.listOpenRunsForHost(hostId)) {
+      const vms = report.vms.filter((vm) => vm.run_id === run.runId);
+      if (!vms.length || vms.some((vm) => vm.runtime_execution_id !== run.executionId ||
+        vm.generation !== run.executionGeneration || vm.owner_user_id !== run.userId)) continue;
+      const outcome = await this.withRunProjectionLock(run.runId, async () => {
+        const current = await this.loadRun(run.runId);
+        if (!current || current.hostId !== hostId || !current.state.tasks) {
+          return { kind: "unchanged" } satisfies RunProjectionOutcome;
+        }
+        return this.persistRunState(
+          run.runId,
+          (latest) => vms.reduce((state, vm) => applyVmStateV3ToRunState({ runId: run.runId, current: state, vm }), latest),
+          {
+            keepDeleteRequestedAt: true,
+            initialRow: current,
+            expectedExecution: { id: run.executionId, ownerUserId: run.userId, generation: run.executionGeneration },
+            expectedHostSession: { hostId, activeSessionId: expectedSessionId, credentialGeneration: expectedCredentialGeneration },
+          },
+        );
+      });
+      if (outcome.kind === "updated") {
+        this.scheduleRunStatusInvalidation({ runId: run.runId, hostId, revision: outcome.revision });
+      }
+      // A verify outcome can arrive in a state report alone.
+      if (run.userId === VALIDATION_USER_ID) {
+        await settleVerifyRun(run.runId, { hostId, wake: () => this.scheduleAlarmNoLaterThan(Date.now()) });
+      }
     }
   }
 
   private async handleBridgeClientHello(
     ws: WebSocket,
     attachment: SocketAttachment,
-    message: Extract<BridgeMessageV8, { type: "client_hello" }>,
+    message: Extract<BridgeMessageV9, { type: "client_hello" }>,
   ): Promise<void> {
     if (ws.readyState !== WebSocket.OPEN) return;
     if (attachment.connectedAt + HOST_HELLO_TIMEOUT_MS <= Date.now()) {
@@ -713,6 +821,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
           lastClientHelloAt: now,
           lastServerHelloAt: now,
           agentVersion: message.agent_version,
+          helloJson: JSON.stringify(message),
           updatedAt: now,
         })
         .where(activationFence)
@@ -748,17 +857,11 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return;
     }
 
-    // Persist the session fence before trusting the hello architecture. Bulk
-    // catalog reconciliation cannot see actual-state reports from before this
-    // hello, and the desired-state CAS below is tied to this exact session.
-    let reconciliation: Awaited<ReturnType<typeof reconcileHostScenarioImages>>;
+    // The desired state is rewritten to the bridge 9 schema the first time it
+    // is served, after the session fence above is persisted.
+    let desiredState: { version: number };
     try {
-      reconciliation = await reconcileHostScenarioImages(db, {
-        hostId: message.host_id,
-        architecture: message.capabilities.arch,
-        nowUnixMs: now,
-        expectedActiveSessionId: sessionId,
-      });
+      desiredState = await this.prepareDesiredStateV3(message.host_id, message.guest_contract);
     } catch (error) {
       await this.rollbackPendingClientHello(db, host, sessionId);
       try {
@@ -768,7 +871,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
       }
       throw error;
     }
-    const desiredState = reconciliation.desiredState;
     const admissionStillCurrent = await this.isCurrentHostSessionAdmission(
       message.host_id,
       sessionId,
@@ -786,8 +888,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return;
     }
     if (
-      !desiredState ||
-      reconciliation.outcome === "stale_host_snapshot" ||
       ws.readyState !== WebSocket.OPEN ||
       attachment.connectedAt + HOST_HELLO_TIMEOUT_MS <= Date.now()
     ) {
@@ -802,7 +902,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
     const nextAttachment: SocketAttachment = {
       ...pendingAttachment,
       helloReceived: true,
-      bridgeProtocol: "v6",
+      bridgeProtocol: "v9",
+      guestContract: message.guest_contract,
       lastDesiredVersionSent:
         message.last_applied_desired_version === desiredState.version
           ? desiredState.version
@@ -810,18 +911,15 @@ export class HostRuntimeDO extends HostRuntimeBase {
     };
     try {
       // No await is allowed between promoting the attachment and this frame:
-      // server_hello must be the first server message on a v6 connection.
+      // server_hello must be the first server message on a connection.
       ws.serializeAttachment(nextAttachment);
-      ws.send(
-        serializeBridgeMessageV8({
-          type: "server_hello",
-          protocol_version: message.protocol_version,
-          host_id: message.host_id,
-          session_id: sessionId,
-          desired_version: desiredState.version,
-          relay: null,
-        }),
-      );
+      ws.send(JSON.stringify({
+        type: "server_hello",
+        protocol_version: BRIDGE_PROTOCOL_VERSION_9,
+        host_id: message.host_id,
+        session_id: sessionId,
+        desired_version: desiredState.version,
+      } satisfies BridgeMessageV9));
     } catch (error) {
       await this.rollbackPendingClientHello(db, host, sessionId);
       try {
@@ -830,21 +928,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
         // ignore
       }
       throw error;
-    }
-
-    this.nextScenarioImageCacheReconciliationAtMs = 0;
-    try {
-      await this.ctx.storage.delete(
-        SCENARIO_IMAGE_CACHE_NEXT_RECONCILIATION_STORAGE_KEY,
-      );
-    } catch (error) {
-      console.warn(
-        JSON.stringify({
-          message: "failed to reset scenario image reconciliation schedule",
-          hostId: message.host_id,
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      );
     }
 
     await this.closeOlderSockets(message.host_id, ws, sessionId);
@@ -865,16 +948,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
     ws: WebSocket,
     attachment: SocketAttachment,
     hostId: string,
-    state: HostDesiredStateV2,
+    state: HostDesiredStateV3,
     relay: HostRelayCredentials | null,
   ): Promise<void> {
-    const serialized = serializeBridgeMessageV8({
-      type: "desired_state",
-      protocol_version: 8,
-      host_id: hostId,
-      desired_state: state,
-      relay,
-    });
+    const serialized = desiredStateFrame(hostId, state, relay);
     const dispatchedAtUnixMs = Date.now();
     ws.send(serialized);
     ws.serializeAttachment({
@@ -884,110 +961,12 @@ export class HostRuntimeDO extends HostRuntimeBase {
     });
   }
 
-  private async applyBridgeStateReport(
-    hostId: string,
-    report: Extract<BridgeMessageV8, { type: "state_report" }>["report"],
-    expectedSessionId: string,
-    expectedCredentialGeneration: number,
-  ): Promise<void> {
-    const db = drizzle(this.env.DB);
-    const now = Date.now();
-    const accepted = await persistHostReport({
-      d1: this.env.DB, hostId, report, now,
-      sessionId: expectedSessionId,
-      credentialGeneration: expectedCredentialGeneration,
-      requireRunCli: learnerRunCliV1EnforcementEnabled(this.env),
-    });
-    if (!accepted) return;
-
-    const buildUpdates = await recordHostBuildReports(
-      db,
-      hostId,
-      report.builds,
-      now,
-      { sessionId: expectedSessionId, credentialGeneration: expectedCredentialGeneration },
-    );
-    await this.removeTerminalBuildsFromDesiredState(
-      hostId,
-      buildUpdates.terminalBuildIds,
-      now,
-    );
-
-    const runs = await this.listOpenRunsForHost(hostId);
-    for (const run of runs) {
-      if (report.vms.some(vm => vm.run_id === run.runId && (vm.runtime_execution_id !== run.executionId ||
-        vm.generation !== run.executionGeneration || vm.owner_user_id !== run.userId))) continue;
-      const projectionOutcome = await this.withRunProjectionLock(
-        run.runId,
-        async () => {
-          // A direct VM report can arrive while an inventory report is awaiting
-          // D1. Reload only after entering the per-run ordering domain so this
-          // projection is always derived from the latest durable evidence.
-          const current = await this.loadRun(run.runId);
-          if (!current || current.hostId !== hostId) {
-            return { kind: "unchanged" } satisfies RunProjectionOutcome;
-          }
-          return this.persistRunState(
-            run.runId,
-            (latest) =>
-              applyHostReportToRunState({
-                runId: run.runId,
-                current: latest,
-                report,
-              }),
-            {
-              keepDeleteRequestedAt: true,
-              initialRow: current,
-              expectedExecution: { id: run.executionId, ownerUserId: run.userId, generation: run.executionGeneration },
-              expectedHostSession: {
-                hostId,
-                activeSessionId: expectedSessionId,
-                credentialGeneration: expectedCredentialGeneration,
-              },
-            },
-          );
-        },
-      );
-      if (projectionOutcome.kind === "updated") {
-        this.scheduleRunStatusInvalidation({
-          runId: run.runId,
-          hostId,
-          revision: projectionOutcome.revision,
-        });
-      }
-    }
-    const reservations = await this.withCpuReservationLock(() =>
-      reconcileHostCpuReservations(db, hostId, now),
-    );
-    this.scheduleRunStatusRefresh(hostId, reservations.expiredRunIds);
-
-    try {
-      await this.reconcileScenarioImageCacheIfDue({
-        db,
-        hostId,
-        architecture: report.capabilities.arch,
-        expectedSessionId,
-        nowUnixMs: now,
-      });
-    } catch (error) {
-      // Cache repair is durable, best-effort maintenance. Never discard an
-      // authoritative inventory report because catalog reconciliation failed;
-      // leave the due marker unchanged so the next report retries.
-      console.error(
-        JSON.stringify({
-          message: "periodic scenario image cache reconciliation failed",
-          hostId,
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      );
-    }
-  }
-
   private async applyBridgeVmReport(
     hostId: string,
-    report: Extract<BridgeMessageV8, { type: "vm_report" }>["report"],
+    report: VmReportV2,
     expectedSessionId: string,
     expectedCredentialGeneration: number,
+    project: (latest: RunStateDocument) => RunStateDocument,
   ): Promise<void> {
     const execution = await this.loadRuntimeVmReportContext(hostId, report.runtime_execution_id, report.vm_name);
     if (!execution || execution.domainId !== report.run_id || execution.userId !== report.owner_user_id ||
@@ -1000,12 +979,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
           run?.hostId === hostId
             ? await this.persistRunState(
                 report.run_id,
-                (latest) =>
-                  applyVmReportToRunState({
-                    runId: report.run_id,
-                    current: latest,
-                    report,
-                  }),
+                project,
                 {
                   keepDeleteRequestedAt: true,
                   initialRow: run,
@@ -1237,46 +1211,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
     };
   }
 
-  private async applyBridgeBuildReport(
-    hostId: string,
-    report: Extract<BridgeMessageV8, { type: "build_report" }>["report"],
-    expectedSessionId: string,
-    expectedCredentialGeneration: number,
-  ): Promise<void> {
-    const db = drizzle(this.env.DB);
-    const now = Date.now();
-    const heartbeat = await db
-      .update(agentHosts)
-      .set({
-        connected: true,
-        disconnectedAt: null,
-        lastHeartbeatAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(agentHosts.id, hostId),
-          eq(agentHosts.activeSessionId, expectedSessionId),
-          eq(agentHosts.credentialGeneration, expectedCredentialGeneration),
-          eq(agentHosts.disabled, false),
-        ),
-      )
-      .returning({ id: agentHosts.id });
-    if (!heartbeat.length) return;
-    const buildUpdates = await recordHostBuildReports(
-      db,
-      hostId,
-      [report],
-      now,
-      { sessionId: expectedSessionId, credentialGeneration: expectedCredentialGeneration },
-    );
-    await this.removeTerminalBuildsFromDesiredState(
-      hostId,
-      buildUpdates.terminalBuildIds,
-      now,
-    );
-  }
-
   private async reconcileHost(
     hostId: string,
     options?: {
@@ -1285,11 +1219,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
   ): Promise<void> {
     const now = Date.now();
     const db = drizzle(this.env.DB);
-    await maintainHostBuildAssignments(db, hostId, now);
-    const expiredLeases = await expireOverdueRunLeases(hostId, now, {
-      db,
-      wakeHostRuntime: false,
-    });
+    await maintainMachineBuilds(this.env, hostId, now);
+    const expiredLeases = await expireOverdueRunLeases(hostId, now, { db, wakeHostRuntime: false });
     for (const expired of expiredLeases.updatedRunRevisions) {
       this.scheduleRunStatusInvalidation({
         runId: expired.runId,
@@ -1328,7 +1259,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     }
 
     const activeSocket = await this.findActiveSocket(hostId);
-    if (activeSocket?.attachment.bridgeProtocol === "v6") {
+    if (activeSocket?.attachment.bridgeProtocol) {
       const lag = await this.loadDesiredVersionLag(hostId, now);
       const shouldRepushLaggingVersion =
         lag.lagging &&
@@ -1354,7 +1285,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       const attachment = this.readSocketAttachment(ws);
       if (
         ws.readyState !== WebSocket.OPEN ||
-        attachment?.bridgeProtocol !== "v6" ||
+        !attachment?.bridgeProtocol ||
         !attachment.sessionId ||
         attachment.hostId !== hostId
       ) {
@@ -1362,11 +1293,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       }
 
       const desiredState = await enforceHostWorkloadAccess(
-        await loadOrCreateHostDesiredState(
-          drizzle(this.env.DB),
-          hostId,
-          Date.now(),
-        ),
+        await this.prepareDesiredStateV3(hostId, attachment.guestContract),
         (runId) => this.scheduleRunStatusRefresh(hostId, [runId]),
       );
       const lastSent = attachment.lastDesiredVersionSent;
@@ -1401,7 +1328,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       if (
         !admissionStillCurrent ||
         ws.readyState !== WebSocket.OPEN ||
-        latestAttachment?.bridgeProtocol !== "v6" ||
+        latestAttachment?.bridgeProtocol !== attachment.bridgeProtocol ||
         !latestAttachment.sessionId ||
         latestAttachment.hostId !== hostId ||
         latestAttachment.sessionId !== attachment.sessionId
@@ -1605,7 +1532,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     })();
     // Observe failure immediately; close control sockets even if Stargate is unavailable.
     const relayResult = relayCleanup.then(() => null, (error: unknown) => error);
-    let stopState: HostDesiredStateV2 | undefined;
+    let stopState: HostDesiredStateV3 | undefined;
     let stopReadFailed = false;
     try {
       // Persist a new desired version so an agent can accept the final stop.
@@ -1614,12 +1541,14 @@ export class HostRuntimeDO extends HostRuntimeBase {
         .select({ version: hostDesiredState.version, state: hostDesiredState.docJson })
         .from(hostDesiredState)
         .where(eq(hostDesiredState.hostId, hostId));
-      if (retained) stopState = await mutateStoredHostDesiredState(drizzle(this.env.DB), hostId, Date.now(), draft => {
-        draft.cached_images = [];
-        draft.cached_guest_tools = [];
-        draft.builds = [];
-        for (const vm of draft.vms) vm.desired_phase = "absent";
-      }, retained.state);
+      if (retained) {
+        stopState = (await mutateHostDesiredStateV3(drizzle(this.env.DB), hostId, Date.now(), draft => {
+          draft.cached_images = [];
+          draft.builds = [];
+          draft.source_compiles = [];
+          for (const vm of draft.vms) vm.desired_phase = "absent";
+        })).state;
+      }
     } catch (error) {
       stopReadFailed = true;
       // A failed read must not keep a revoked socket connected.
@@ -1639,12 +1568,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
         const attachment = this.readSocketAttachment(socket);
         if (
           stopState && socket.readyState === WebSocket.OPEN && attachment?.hostId === hostId &&
-          attachment.helloReceived && attachment.bridgeProtocol === "v6"
+          attachment.helloReceived && attachment.bridgeProtocol === "v9"
         ) {
-          socket.send(serializeBridgeMessageV8({
-            type: "desired_state", protocol_version: 8, host_id: hostId, relay: null,
-            desired_state: stopState,
-          }));
+          socket.send(desiredStateFrame(hostId, stopState, null));
         }
       } catch {
         // Delivery is best effort; never wait for a revoked host's report.
@@ -1694,41 +1620,6 @@ export class HostRuntimeDO extends HostRuntimeBase {
     if (relayError) throw relayError;
     if (stopReadFailed) throw new Error("host retirement stop state could not be read");
   }
-
-  private async reconcileScenarioImageCacheIfDue(input: {
-    db: DrizzleD1Database;
-    hostId: string;
-    architecture: HostCapabilitiesV2["arch"];
-    expectedSessionId: string;
-    nowUnixMs: number;
-  }): Promise<void> {
-    const nextReconciliationAt =
-      this.nextScenarioImageCacheReconciliationAtMs ??
-      (await this.ctx.storage.get<number>(
-        SCENARIO_IMAGE_CACHE_NEXT_RECONCILIATION_STORAGE_KEY,
-      )) ??
-      0;
-    this.nextScenarioImageCacheReconciliationAtMs = nextReconciliationAt;
-    if (input.nowUnixMs < nextReconciliationAt) {
-      return;
-    }
-
-    const result = await reconcileHostScenarioImages(input.db, {
-      hostId: input.hostId,
-      architecture: input.architecture,
-      nowUnixMs: input.nowUnixMs,
-      expectedActiveSessionId: input.expectedSessionId,
-    });
-    if (result.outcome !== "stale_host_snapshot") {
-      const nextAt =
-        input.nowUnixMs + SCENARIO_IMAGE_CACHE_RECONCILIATION_INTERVAL_MS;
-      await this.ctx.storage.put(
-        SCENARIO_IMAGE_CACHE_NEXT_RECONCILIATION_STORAGE_KEY,
-        nextAt,
-      );
-      this.nextScenarioImageCacheReconciliationAtMs = nextAt;
-    }
-  }
 }
 
 function parseRunStatusStreamAttachment(
@@ -1771,7 +1662,36 @@ function requiredRunStatusHeader(
     : null;
 }
 
-function runtimeActualStateFromReport(report: VmReportV2): VmActualStateV2 {
+/**
+ * A bridge 9 VM report in the shape the runtime mirror and the run CLI fence
+ * read: the VM is named by its host-local id and carries no probes.
+ */
+export function vmReportV2FromV3(report: VmReportV3): VmReportV2 {
+  const vm = report.vm;
+  return {
+    owner_user_id: vm.owner_user_id,
+    runtime_execution_id: vm.runtime_execution_id,
+    generation: vm.generation,
+    schema_version: report.schema_version,
+    host_id: report.host_id,
+    run_id: vm.run_id,
+    vm_name: revisionVmId(vm.name, vm.run_id),
+    desired_version: vm.desired_version ?? null,
+    observed_at_unix_ms: report.observed_at_unix_ms,
+    phase: vm.phase,
+    network: vm.network ?? null,
+    terminal: vm.terminal,
+    runtime_constraints: vm.runtime_constraints ?? null,
+    resource_state: vm.resource_state ?? null,
+    sandbox: vm.sandbox ?? null,
+    ssh_host_keys_openssh: vm.ssh_host_keys_openssh,
+    probes: [],
+    archive: vm.archive ?? null,
+    error: vm.error ?? null,
+  };
+}
+
+export function runtimeActualStateFromReport(report: VmReportV2): VmActualStateV2 {
   return {
     owner_user_id: report.owner_user_id,
     runtime_execution_id: report.runtime_execution_id,
@@ -1797,6 +1717,29 @@ function runtimeActualStateFromReport(report: VmReportV2): VmActualStateV2 {
     ...(report.archive !== undefined ? { archive: report.archive } : {}),
     ...(report.error !== undefined ? { error: report.error } : {}),
   };
+}
+
+function desiredStateFrame(
+  hostId: string,
+  state: HostDesiredStateV3,
+  relay: HostRelayCredentials | null,
+): string {
+  return JSON.stringify({
+    type: "desired_state",
+    protocol_version: BRIDGE_PROTOCOL_VERSION_9,
+    host_id: hostId,
+    desired_state: state,
+    ...(relay ? { relay } : {}),
+  } satisfies BridgeMessageV9);
+}
+
+function parseJsonRecord(message: string | ArrayBuffer): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

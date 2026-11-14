@@ -135,8 +135,11 @@ export const runtimeVms = sqliteTable(
     vmId: text("vm_id").notNull(),
     ordinal: integer("ordinal").notNull(),
     runtimeVmName: text("runtime_vm_name").notNull(),
-    imageKeyJson: jsonText<Record<string, unknown>>("image_key_json").notNull(),
-    imageSha256: text("image_sha256").notNull(),
+    // The machine image manifest, its spec blob and the Kino manifest the
+    // run began with.
+    imageDigest: text("image_digest").notNull(),
+    specDigest: text("spec_digest").notNull(),
+    kinoDigest: text("kino_digest").notNull(),
     cpuMillis: integer("cpu_millis").notNull(),
     memoryMib: integer("memory_mib").notNull(),
     diskMib: integer("disk_mib").notNull(),
@@ -180,21 +183,24 @@ export const runtimeVms = sqliteTable(
       table.executionId,
       table.runtimeVmName,
     ),
-    check("runtime_vms_ordinal_valid", sql`${table.ordinal} >= 0`),
-    check("runtime_vms_cpu_positive", sql`${table.cpuMillis} > 0`),
-    check("runtime_vms_memory_positive", sql`${table.memoryMib} > 0`),
-    check("runtime_vms_disk_positive", sql`${table.diskMib} > 0`),
+    check("runtime_vms_ordinal_valid", sql`"ordinal" >= 0`),
+    check("runtime_vms_cpu_positive", sql`"cpu_millis" > 0`),
+    check("runtime_vms_memory_positive", sql`"memory_mib" > 0`),
+    check("runtime_vms_disk_positive", sql`"disk_mib" > 0`),
+    // Each digest is `sha256:` and 64 hex digits, so a row without one is
+    // refused rather than stored. The checks name bare columns, so a table
+    // rebuild keeps them valid after its rename.
     check(
-      "runtime_vms_terminal_target_complete",
-      sql`(${table.terminalHost} is null AND ${table.terminalPort} is null AND ${table.terminalUsername} is null AND ${table.terminalHostKeyOpenssh} is null AND ${table.terminalPrivateKeyCiphertextB64} is null AND ${table.terminalPrivateKeyIvB64} is null AND ${table.terminalObservedAt} is null) OR (${table.terminalHost} is not null AND ${table.terminalPort} > 0 AND ${table.terminalUsername} is not null AND ${table.terminalHostKeyOpenssh} is not null AND ${table.terminalPrivateKeyCiphertextB64} is not null AND ${table.terminalPrivateKeyIvB64} is not null AND ${table.terminalObservedAt} is not null)`,
+      "runtime_vms_digests_valid",
+      sql`length("image_digest") = 71 AND substr("image_digest", 1, 7) = 'sha256:' AND length("spec_digest") = 71 AND substr("spec_digest", 1, 7) = 'sha256:' AND length("kino_digest") = 71 AND substr("kino_digest", 1, 7) = 'sha256:'`,
     ),
     check(
-      "runtime_vms_image_key_json_valid",
-      sql`json_valid(${table.imageKeyJson})`,
+      "runtime_vms_terminal_target_complete",
+      sql`("terminal_host" is null AND "terminal_port" is null AND "terminal_username" is null AND "terminal_host_key_openssh" is null AND "terminal_private_key_ciphertext_b64" is null AND "terminal_private_key_iv_b64" is null AND "terminal_observed_at" is null) OR ("terminal_host" is not null AND "terminal_port" > 0 AND "terminal_username" is not null AND "terminal_host_key_openssh" is not null AND "terminal_private_key_ciphertext_b64" is not null AND "terminal_private_key_iv_b64" is not null AND "terminal_observed_at" is not null)`,
     ),
     check(
       "runtime_vms_artifact_writes_sealed_valid",
-      sql`${table.artifactWritesSealed} in (0, 1)`,
+      sql`"artifact_writes_sealed" in (0, 1)`,
     ),
   ],
 );

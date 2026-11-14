@@ -743,7 +743,7 @@ test("the startup rail carries on from the start screen instead of loading again
   const startGate = new Promise<void>((resolve) => {
     releaseStart = resolve;
   });
-  await page.route("**/api/scenarios/*/start", async (route) => {
+  await page.route("**/api/scenarios/*/*/start", async (route) => {
     await startGate;
     ui.server.setRunState("launching");
     await route.fulfill({
@@ -752,7 +752,7 @@ test("the startup rail carries on from the start screen instead of loading again
       body: JSON.stringify({
         accepted: true,
         runId: "run-active",
-        scenarioId: "repair-nginx",
+        scenarioId: "intar/repair-nginx",
         acceptedAt: Date.now(),
         reused: false,
         run: ui.server.state.run,
@@ -785,7 +785,7 @@ test("the startup rail carries on from the start screen instead of loading again
 
   await page.getByRole("link", { name: "Run again" }).click();
   try {
-    await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
+    await expect(page).toHaveURL(/\/runs\/start\/intar\/repair-nginx/);
     await expect(position).toHaveText("Stage 1 of 4");
     await expect(track).toHaveCount(4);
   } finally {
@@ -1037,7 +1037,7 @@ test.describe("lecture reading flow", () => {
     const startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
-    await page.route("**/api/scenarios/*/start", async (route) => {
+    await page.route("**/api/scenarios/*/*/start", async (route) => {
       await startGate;
       ui.server.setRunState("launching");
       await route.fulfill({
@@ -1046,7 +1046,7 @@ test.describe("lecture reading flow", () => {
         body: JSON.stringify({
           accepted: true,
           runId: "run-active",
-          scenarioId: "repair-nginx",
+          scenarioId: "intar/repair-nginx",
           acceptedAt: Date.now(),
           reused: false,
           run: ui.server.state.run,
@@ -1062,7 +1062,7 @@ test.describe("lecture reading flow", () => {
     await page.getByRole("link", { name: "Run again" }).click();
 
     try {
-      await expect(page).toHaveURL(/\/runs\/start\/repair-nginx/);
+      await expect(page).toHaveURL(/\/runs\/start\/intar\/repair-nginx/);
       await expect(page.locator("[data-run-start-sequence]")).toBeVisible();
       await expect(page.locator("[data-run-learning-panel]")).toBeVisible();
       await expect(
@@ -1159,7 +1159,7 @@ test.describe("lecture reading flow", () => {
     await rerun.click();
     await expect(page).toHaveURL("/runs/run-active");
     expect(ui.server.requests).toContain(
-      "POST /api/scenarios/repair-nginx/start",
+      "POST /api/scenarios/intar/repair-nginx/start",
     );
   });
 

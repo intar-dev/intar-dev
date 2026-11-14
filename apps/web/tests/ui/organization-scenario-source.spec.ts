@@ -14,7 +14,6 @@ const disconnected = (disconnectReason: string) => ({
   liveAt: null,
   activeRuns: 0,
   commit: null,
-  builds: [],
 });
 
 test("an owner deletes what a disconnected repository published", async ({ page, ui }) => {

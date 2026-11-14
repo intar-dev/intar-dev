@@ -1,9 +1,5 @@
 use super::*;
 
-use std::collections::BTreeMap;
-
-use intar_contracts::bridge::HostDesiredStateV2;
-
 use crate::db::CacheVerifyRow;
 
 /// What starts one cache pass.
@@ -19,130 +15,61 @@ pub(super) enum CacheRefreshScope {
 
 #[derive(Clone, Copy)]
 pub(super) struct CacheRefreshContext<'a> {
-    pub registry: &'a ImageRegistryConfig,
-    pub bridge: Option<&'a BridgeConfig>,
+    pub bridge: &'a BridgeConfig,
     pub cache: &'a ImageCacheConfig,
-    pub db: Option<&'a Db>,
+    pub db: &'a Db,
     pub cache_root: &'a Path,
-    pub client: &'a reqwest::Client,
     pub vm: &'a crate::vm::VmManager,
 }
 
-/// The desired state to serve, and the pins it requires.
-struct RetainedPins {
-    desired: HostDesiredStateV2,
-    pins: RequiredPins,
+impl CacheRefreshContext<'_> {
+    fn store(&self) -> BlobStore {
+        BlobStore::new(self.cache_root)
+    }
 }
 
 pub(super) async fn run_cache_refresh_cycle(
     context: CacheRefreshContext<'_>,
     scope: CacheRefreshScope,
 ) {
-    let Some(retained) = load_retained_pins(context).await else {
+    let Some(desired) = crate::bridge::load_cached_desired_state(context.bridge, context.db).await
+    else {
+        info!("image cache has no desired state; waiting for one");
         return;
     };
-    if retained.pins.is_empty() {
-        // No fallback to the full registry. The registry keeps the full
-        // authorization inventory; the cache downloads only pinned entries.
+    let _running = wait::PassRunning::start();
+    let pins = RequiredPins::from_desired_state(&desired);
+    if pins.is_empty() {
+        info!("image cache has no required pins; waiting for a desired-state intent");
+    } else {
         info!(
-            registry = %redact_url_userinfo(&context.registry.url),
-            "image cache has no required pins; waiting for a desired-state intent"
+            cache_root = %context.cache_root.display(),
+            pinned_images = pins.images.len(),
+            pinned_kino = pins.kino.len(),
+            ?scope,
+            "running image cache pass"
         );
-        return;
+        // A VM cannot boot without its Kino. This runs in both scopes, so a
+        // fresh host reaches a bootable Kino without waiting for a scrub.
+        warm_required_kino(&pins, context).await;
+        prepare_missing_pinned_entries(&pins, context).await;
+        if scope == CacheRefreshScope::Scrub
+            && let Err(error) = scrub_retained_content(context, &pins).await
+        {
+            warn!(error = %error, "image cache scrub pass failed");
+        }
     }
-
-    let advertised =
-        match list_registry_images(context.registry, context.bridge, context.client).await {
-            Ok(images) => images,
-            Err(error) => {
-                error!(
-                    registry = %redact_url_userinfo(&context.registry.url),
-                    "failed to list image registry: {error}"
-                );
-                return;
-            }
-        };
-    let retained_images = scheduler::retained_registry_images(&advertised, &retained.pins);
-    if retained_images.is_empty() {
-        warn!(
-            pinned_images = retained.pins.images.len(),
-            advertised_images = advertised.len(),
-            "the registry advertises none of the pinned images"
-        );
-    }
-    info!(
-        cache_root = %context.cache_root.display(),
-        pinned_images = retained.pins.images.len(),
-        pinned_guest_tools = retained.pins.guest_tools.len(),
-        retained_images = retained_images.len(),
-        advertised_images = advertised.len(),
-        ?scope,
-        "running image cache pass"
-    );
-
-    // A pinned guest tools disk must exist before a VM can boot, and the
-    // control plane can move the pin to a disk this host has never seen. This
-    // runs in both scopes, so a fresh host reaches a bootable tools disk
-    // without waiting for a scrub pass.
-    warm_required_guest_tools(
-        &retained.pins,
-        context.registry,
-        context.bridge,
-        context.cache_root,
-        context.client,
-    )
-    .await;
-    prepare_missing_pinned_entries(&retained, &retained_images, context).await;
-
-    if scope == CacheRefreshScope::Scrub
-        && let Err(error) = scrub_retained_content(context, &retained).await
-    {
-        warn!(error = %error, "image cache scrub pass failed");
-    }
-
-    if let Some(db) = context.db
-        && let Err(error) = evict_cache_if_needed(context.cache, db, context.cache_root).await
-    {
+    if let Err(error) = evict_cache_if_needed(context.cache, context.db, context.cache_root).await {
         warn!(error = %error, cache_root = %context.cache_root.display(), "image cache eviction failed");
     }
 }
 
-async fn load_retained_pins(context: CacheRefreshContext<'_>) -> Option<RetainedPins> {
-    let Some(db) = context.db else {
-        warn!("image cache has no desired-state source; waiting for a pin set");
-        return None;
-    };
-    let desired = crate::bridge::load_cached_desired_state(context.bridge?, db).await?;
-    let pins = RequiredPins::from_desired_state(&desired);
-    Some(RetainedPins { desired, pins })
-}
-
-/// Ensure every pinned guest tools disk is present and verified.
-///
-/// The launch path also calls this, so a boot never waits for a pass. This call
-/// is what makes a fresh host ready: it downloads the compressed disk, decodes
-/// it, and verifies the published digest before any VM uses it.
-pub(super) async fn warm_required_guest_tools(
-    pins: &RequiredPins,
-    registry: &ImageRegistryConfig,
-    bridge: Option<&BridgeConfig>,
-    cache_root: &Path,
-    client: &reqwest::Client,
-) {
-    for (sha256, size_bytes, _, _) in &pins.guest_tools {
+async fn warm_required_kino(pins: &RequiredPins, context: CacheRefreshContext<'_>) {
+    let store = context.store();
+    for kino in &pins.kino {
         wait_for_vm_boot_idle().await;
-        if let Err(error) = ensure_cached_tools_disk(
-            sha256,
-            *size_bytes,
-            registry,
-            bridge,
-            cache_root,
-            client,
-            ToolsDiskVerification::ReuseVerified,
-        )
-        .await
-        {
-            warn!(error = %error, tools_disk_sha256 = %sha256, "failed to warm guest tools disk");
+        if let Err(error) = context.vm.oci_registry().pull_kino(kino, &store).await {
+            warn!(error = %error, kino = kino.as_str(), "failed to warm a pinned Kino");
         }
     }
 }
@@ -155,22 +82,19 @@ const REQUEUE_RETRY_DELAY: Duration = Duration::from_secs(5);
 /// lost, and the bound keeps one pass from running forever behind boots.
 const REQUEUE_ROUNDS_PER_PASS: usize = 12;
 
-/// Prepare the pinned images that are not ready, one image at a time.
+/// Prepare the pinned images that are not ready, one image at a time, the
+/// ones a launch waits on first.
 ///
 /// The pass holds the single image prepare job for the whole process, parks
 /// between two images while a boot is live, and sends each import to jailerd's
-/// background lane. A learner launch never waits for this pass.
+/// background lane. A launch whose image is not ready wakes this pass and
+/// waits for it outside its boot window, so the pass can proceed.
 ///
 /// A requeue is not a failure. Jailerd parks a background import at a block
 /// boundary when a boot needs the CPU, and the pass retries the same image
 /// after a short delay until the pinned entries are ready or the round budget
 /// is used up.
-async fn prepare_missing_pinned_entries(
-    retained: &RetainedPins,
-    retained_images: &[RegistryImageRecord],
-    context: CacheRefreshContext<'_>,
-) {
-    let _ = retained;
+async fn prepare_missing_pinned_entries(pins: &RequiredPins, context: CacheRefreshContext<'_>) {
     let _prepare = match budget::acquire_prepare_job().await {
         Ok(permit) => permit,
         Err(error) => {
@@ -181,34 +105,35 @@ async fn prepare_missing_pinned_entries(
     let mut rounds = 0usize;
     loop {
         rounds = rounds.saturating_add(1);
-        let missing = scheduler::missing_registry_images(retained_images.to_vec(), |image| {
-            verified_cached_image_metadata(
-                context.cache_root,
-                &image.image_key,
-                &image.image_id,
-                true,
-            )
-            .is_some()
-        });
+        let mut missing = pins
+            .images
+            .iter()
+            .filter(|image| {
+                ready::needs_prepare(context.cache_root, image, context.vm.wake_config())
+            })
+            .collect::<Vec<_>>();
         if missing.is_empty() {
             return;
         }
         let mut requeued = Vec::new();
-        for image in missing {
+        // An image a launch waits on goes next, even when the launch began
+        // after this round did; a transfer under way is never cut short.
+        while !missing.is_empty() {
+            let image = missing.remove(wait::next_pending(&missing, wait::is_awaited));
             wait_for_vm_boot_idle().await;
-            let span = tracing::info_span!(
-                "image_cache_prepare",
-                image = %image.image_key,
-                registry = %redact_url_userinfo(&context.registry.url),
-            );
-            match prepare_one_image(&image, context).instrument(span).await {
-                Ok(()) => info!(image = %image.image_key, "image boot bundle cache ready"),
+            let span = tracing::info_span!("image_cache_prepare", image = image.as_str());
+            match prepare_one_image(image, context).instrument(span).await {
+                Ok(()) => info!(image = image.as_str(), "image template ready"),
                 Err(error) if is_requeued(&error) => {
-                    debug!(image = %image.image_key, "jailerd requeued the background import");
+                    debug!(
+                        image = image.as_str(),
+                        "jailerd requeued the background import"
+                    );
                     requeued.push(image);
                 }
                 Err(error) => {
-                    error!(error = %error, image = %image.image_key, "failed to cache image")
+                    error!(error = %format!("{error:#}"), image = image.as_str(), "failed to cache image");
+                    record_image_failure(image, &error);
                 }
             }
         }
@@ -233,31 +158,59 @@ fn is_requeued(error: &anyhow::Error) -> bool {
         .is_some()
 }
 
-async fn prepare_one_image(
-    image: &RegistryImageRecord,
-    context: CacheRefreshContext<'_>,
+/// Pull one pinned image into the blob store, refuse a config this agent's
+/// Kino contract cannot boot, and have jailerd build its template in the
+/// background lane.
+///
+/// When this host wants the image's suspended guest, its layers are pulled
+/// too and jailerd prepares it. If that fails the image is prepared without
+/// it, so cold boots still work, and why is kept.
+async fn prepare_one_image(image: &OciDigest, context: CacheRefreshContext<'_>) -> Result<()> {
+    let store = context.store();
+    let registry = context.vm.oci_registry();
+    let pulled = registry.pull_machine(image, &store).await?;
+    check_machine_config(&pulled.config)?;
+    let warm = ready::wants_wake(context.vm.wake_config(), &pulled.config).then_some(async {
+        registry.pull_wake_layers(&pulled, &store).await?;
+        context
+            .vm
+            .ensure_cached_image_template_background(&pulled, true)
+            .await
+            .map(drop)
+    });
+    let cold = async {
+        context
+            .vm
+            .ensure_cached_image_template_background(&pulled, false)
+            .await
+            .map(drop)
+            .context("failed to prepare the root-owned jail image template")
+    };
+    prepare_warm_or_cold(image, warm, cold).await
+}
+
+/// Prepare an image with its suspended guest when `warm` is given. Any
+/// failure of that but a requeue is kept and the image is prepared cold.
+pub(super) async fn prepare_warm_or_cold(
+    image: &OciDigest,
+    warm: Option<impl Future<Output = Result<()>>>,
+    cold: impl Future<Output = Result<()>>,
 ) -> Result<()> {
-    let cached_image = ensure_cached_chunked_image_entry(
-        image,
-        context.registry,
-        context.bridge,
-        context.cache_root,
-        context.client,
-    )
-    .await?;
-    // The import runs in jailerd's background lane: it cannot hold the learner
-    // launch lane, and it yields between its own fixed-size blocks.
-    context
-        .vm
-        .ensure_cached_image_template_background(&cached_image)
-        .await
-        .context("failed to prepare the root-owned jail image template")?;
-    if let Some(db) = context.db
-        && let Err(error) = touch_cached_image(db, &cached_image).await
-    {
-        warn!(error = %error, image = %image.image_key, "failed to update image cache access metadata");
+    if let Some(warm) = warm {
+        match warm.await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_requeued(&error) => return Err(error),
+            Err(error) => {
+                warn!(
+                    error = %format!("{error:#}"),
+                    image = image.as_str(),
+                    "the image's suspended guest could not be prepared; preparing it for cold boots"
+                );
+                ready::record_wake_prepare_failure(image, &error);
+            }
+        }
     }
-    Ok(())
+    cold.await
 }
 
 /// Verify retained cache content with the bounded background hash reader.
@@ -268,12 +221,10 @@ async fn prepare_one_image(
 /// read writes a verification record.
 async fn scrub_retained_content(
     context: CacheRefreshContext<'_>,
-    retained: &RetainedPins,
+    pins: &RequiredPins,
 ) -> Result<()> {
-    let db = context
-        .db
-        .context("scrub pass requires the agent database")?;
-    let items = scrub_items(context.cache_root, retained).await;
+    let db = context.db;
+    let items = scrub_items(&context.store(), pins);
     if items.is_empty() {
         return Ok(());
     }
@@ -349,67 +300,27 @@ async fn verify_scrub_item(db: &Db, item: &scheduler::ScrubItem) -> Result<bool>
     Ok(true)
 }
 
-/// Rebuild the owner of a failed cache file.
+/// Re-pull the owner of a blob that failed verification. The bad blob goes
+/// first: the store keeps a file of the right size, so a corrupt one would
+/// otherwise be kept.
 async fn repair_scrub_item(
     context: CacheRefreshContext<'_>,
     item: &scheduler::ScrubItem,
 ) -> Result<()> {
-    match &item.target {
-        // A tools disk has its own repair path. It downloads the compressed
-        // disk, decodes it, and verifies the digest, and it never runs through
-        // the image path.
-        scheduler::ScrubTarget::GuestTools {
-            tools_disk_sha256,
-            tools_disk_size_bytes,
-        } => {
-            let _prepare = budget::acquire_prepare_job().await?;
-            repair_cached_tools_disk(
-                tools_disk_sha256,
-                *tools_disk_size_bytes,
-                &item.expected_sha256,
-                context.registry,
-                context.bridge,
-                context.cache_root,
-                context.client,
-            )
-            .await?;
-            Ok(())
-        }
-        scheduler::ScrubTarget::Image {
-            image_key,
-            image_id,
-        } => {
-            let advertised =
-                list_registry_images(context.registry, context.bridge, context.client).await?;
-            anyhow::ensure!(
-                normalize_sha256(image_id).as_deref() == Some(item.expected_sha256.as_str()),
-                "image repair digest mismatch"
-            );
-            let Some(record) = advertised
-                .into_iter()
-                .find(|record| record.image_key == *image_key && record.image_id == *image_id)
-            else {
-                return Ok(());
-            };
-            let _prepare = budget::acquire_prepare_job().await?;
-            // `ensure_cached_chunked_image_entry` re-verifies every cached
-            // object against its digest and downloads only what is missing or
-            // corrupt, so the bad chunk is replaced and the good ones are kept.
-            let cached = ensure_cached_chunked_image_entry(
-                &record,
-                context.registry,
-                context.bridge,
-                context.cache_root,
-                context.client,
-            )
-            .await?;
-            context
-                .vm
-                .ensure_cached_image_template_background(&cached)
-                .await?;
-            Ok(())
-        }
+    match tokio::fs::remove_file(&item.path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("remove a corrupt blob"),
     }
+    let _prepare = budget::acquire_prepare_job().await?;
+    let store = context.store();
+    match &item.target {
+        scheduler::ScrubTarget::Kino(kino) => {
+            context.vm.oci_registry().pull_kino(kino, &store).await?;
+        }
+        scheduler::ScrubTarget::Image(image) => prepare_one_image(image, context).await?,
+    }
+    Ok(())
 }
 
 async fn verified_content_map(db: &Db) -> Result<BTreeMap<String, i64>> {
@@ -420,134 +331,34 @@ async fn verified_content_map(db: &Db) -> Result<BTreeMap<String, i64>> {
     Ok(map)
 }
 
-/// Rebuild a guest tools disk that failed verification.
-///
-/// The digest of the item and the digest of the pin must agree before any
-/// download starts, so a bad pin can never overwrite a good disk. The rebuild
-/// reads the whole decoded disk and verifies the published digest, which is why
-/// this path uses `Full` and not the launch path's reuse hint.
-pub(super) async fn repair_cached_tools_disk(
-    tools_disk_sha256: &str,
-    tools_disk_size_bytes: u64,
-    expected_sha256: &str,
-    registry: &ImageRegistryConfig,
-    bridge: Option<&BridgeConfig>,
-    cache_root: &Path,
-    client: &reqwest::Client,
-) -> Result<PathBuf> {
-    anyhow::ensure!(
-        normalize_sha256(tools_disk_sha256).as_deref() == Some(expected_sha256),
-        "tools disk repair digest mismatch"
-    );
-    ensure_cached_tools_disk(
-        tools_disk_sha256,
-        tools_disk_size_bytes,
-        registry,
-        bridge,
-        cache_root,
-        client,
-        ToolsDiskVerification::Full,
-    )
-    .await
-}
-
-/// Every cache file that backs a retained pin.
-async fn scrub_items(cache_root: &Path, retained: &RetainedPins) -> Vec<scheduler::ScrubItem> {
+/// Every blob that backs a pin: the manifest and everything it names. A
+/// blob's expected SHA-256 is its name.
+fn scrub_items(store: &BlobStore, pins: &RequiredPins) -> Vec<scheduler::ScrubItem> {
+    let owners = pins
+        .images
+        .iter()
+        .map(|image| (image, scheduler::ScrubTarget::Image(image.clone())))
+        .chain(
+            pins.kino
+                .iter()
+                .map(|kino| (kino, scheduler::ScrubTarget::Kino(kino.clone()))),
+        );
     let mut items = Vec::new();
-    // The pins are the source, not the desired cache list: a running VM can pin
-    // an image that the desired cache does not list.
-    for pinned in retained.pins.image_pins() {
-        match scrub_items_for_image(cache_root, &pinned.image_key, &pinned.image_id).await {
-            Ok(mut found) => items.append(&mut found),
-            Err(error) => {
-                warn!(error = %error, image = %pinned.image_key, "failed to enumerate scrub items");
-            }
+    for (manifest, target) in owners {
+        if !store.path(manifest).is_file() {
+            // Not pulled yet: the prepare path owns it.
+            continue;
+        }
+        for blob in
+            std::iter::once(manifest.clone()).chain(ready::manifest_references(store, manifest))
+        {
+            items.push(scheduler::ScrubItem {
+                dedup_key: blob.hex().to_owned(),
+                path: store.path(&blob),
+                expected_sha256: blob.hex().to_owned(),
+                target: target.clone(),
+            });
         }
     }
-    for (sha256, size_bytes, _, _) in &retained.pins.guest_tools {
-        if let Some(item) = tools_scrub_item(cache_root, sha256, *size_bytes) {
-            items.push(item);
-        }
-    }
-    let _ = &retained.desired;
     items
-}
-
-/// The cache files that back one pinned image: its chunk manifest, every
-/// compressed chunk, and its boot artifacts.
-async fn scrub_items_for_image(
-    cache_root: &Path,
-    image_key: &str,
-    image_id: &str,
-) -> Result<Vec<scheduler::ScrubItem>> {
-    let ready = match require_ready_image_launch(cache_root, image_key, Some(image_id)).await {
-        Ok(ready) => ready,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let image = ready.image;
-    let target = scheduler::ScrubTarget::Image {
-        image_key: image.image_key.clone(),
-        image_id: image.image_id.clone(),
-    };
-    let mut items = vec![scheduler::ScrubItem {
-        dedup_key: relative_cache_key(cache_root, &image.chunk_manifest_path),
-        path: image.chunk_manifest_path.clone(),
-        expected_sha256: image.chunk_manifest_sha256.clone(),
-        target: target.clone(),
-    }];
-    let manifest_bytes = tokio::fs::read(&image.chunk_manifest_path).await?;
-    let manifest: ImageChunkManifestV1 = serde_json::from_slice(&manifest_bytes)
-        .context("decode cached image chunk manifest for scrub")?;
-    manifest.validate()?;
-    for chunk in &manifest.chunks {
-        let path = image
-            .chunk_cache_root
-            .join(format!("{}.raw.zst", chunk.raw_sha256));
-        items.push(scheduler::ScrubItem {
-            dedup_key: relative_cache_key(cache_root, &path),
-            path,
-            expected_sha256: chunk.encoded_sha256.clone(),
-            target: target.clone(),
-        });
-    }
-    for (path, sha256) in [
-        (&image.kernel_path, &image.kernel_sha256),
-        (&image.initrd_path, &image.initrd_sha256),
-    ] {
-        items.push(scheduler::ScrubItem {
-            dedup_key: relative_cache_key(cache_root, path),
-            path: path.clone(),
-            expected_sha256: sha256.clone(),
-            target: target.clone(),
-        });
-    }
-    Ok(items)
-}
-
-pub(super) fn tools_scrub_item(
-    cache_root: &Path,
-    tools_disk_sha256: &str,
-    tools_disk_size_bytes: u64,
-) -> Option<scheduler::ScrubItem> {
-    if tools_disk_size_bytes != 64 * 1024 * 1024 {
-        return None;
-    }
-    let sha256 = normalize_sha256(tools_disk_sha256)?;
-    let path = cache_root.join("tools").join(format!("{sha256}.ext4"));
-    Some(scheduler::ScrubItem {
-        dedup_key: relative_cache_key(cache_root, &path),
-        path,
-        expected_sha256: sha256.clone(),
-        target: scheduler::ScrubTarget::GuestTools {
-            tools_disk_sha256: sha256,
-            tools_disk_size_bytes,
-        },
-    })
-}
-
-fn relative_cache_key(cache_root: &Path, path: &Path) -> String {
-    path.strip_prefix(cache_root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .to_string()
 }

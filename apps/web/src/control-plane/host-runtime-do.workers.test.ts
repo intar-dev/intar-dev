@@ -1,8 +1,8 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  testImageKey,
+  testImageDigest,
   desiredRunningVm,
   seedHost,
   connectHost,
@@ -25,11 +25,11 @@ import {
   user,
   hostDesiredState,
   scenarioRuns,
-  upsertDesiredCachedImage,
   upsertDesiredVm,
-  mutateStoredHostDesiredState,
+  mutateDesiredState,
   type RunStateDocument,
   resetHostRuntimeTestDatabase,
+  settleHostRuntimeSockets,
 } from "./host-runtime-do/test-fixtures";
 import { runInDurableObject } from "cloudflare:test";
 import { organization } from "@/db/schema";
@@ -37,6 +37,7 @@ import { revokeFixtureAccount } from "@/test/account-fixtures";
 
 describe("HostRuntimeDO bridge dispatch and sessions", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+  afterEach(settleHostRuntimeSockets);
 
   it("connects organization hosts after creator deletion and binds the organization identity", async () => {
     const hostId = "org-host";
@@ -138,31 +139,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
 
     await revokeFixtureAccount({ d1: env.DB, userId: "user-1" });
 
-    sendBridge(ws, {
-      type: "client_hello",
-      protocol_version: 8,
-      host_id: hostId,
-      agent_version: "test-agent",
-      role: "agent",
-      capabilities: {
-        arch: "x86_64",
-        cloud_hypervisor_sha256:
-          "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
-        supports_kvm: true,
-        supports_vsock: true,
-        supports_reflink: true,
-        supports_nftables: true,
-        supports_jailer_v2: true,
-      supports_jailer_v3: true,
-      supports_raw_chunks_v1: true,
-      supports_scenario_guest_tools_v1: true,
-        supports_template_backed_launch: true,
-        fast_template_store: true,
-        supports_hard_cpu_quota: true,
-        supports_landlock: true,
-        supports_cgroup_v2: true,
-      },
-    });
+    sendBridge(ws, clientHello(hostId));
     await sleep(50);
 
     const host = await drizzle(env.DB)
@@ -309,11 +286,8 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     ).toMatchObject({ type: "desired_state" });
 
     const db = drizzle(env.DB);
-    await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
-      upsertDesiredCachedImage(draft, {
-        image_key: testImageKey,
-        image_id: "1".repeat(64),
-      });
+    await mutateDesiredState(db, hostId, Date.now(), (draft) => {
+      draft.cached_images = [testImageDigest];
     });
 
     await runNextScheduledAlarm(stub);
@@ -325,12 +299,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     expect(desired).toMatchObject({
       type: "desired_state",
       desired_state: {
-        cached_images: [
-          {
-            image_key: testImageKey,
-            image_id: "1".repeat(64),
-          },
-        ],
+        cached_images: [testImageDigest],
       },
     });
 
@@ -353,11 +322,8 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     );
 
     const db = drizzle(env.DB);
-    await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
-      upsertDesiredCachedImage(draft, {
-        image_key: testImageKey,
-        image_id: "1".repeat(64),
-      });
+    await mutateDesiredState(db, hostId, Date.now(), (draft) => {
+      draft.cached_images = [testImageDigest];
     });
     expect(
       messages.some(
@@ -382,12 +348,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     expect(desired).toMatchObject({
       type: "desired_state",
       desired_state: {
-        cached_images: [
-          {
-            image_key: testImageKey,
-            image_id: "1".repeat(64),
-          },
-        ],
+        cached_images: [testImageDigest],
       },
     });
 
@@ -405,15 +366,12 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     );
 
     const db = drizzle(env.DB);
-    const desiredV1 = await mutateStoredHostDesiredState(
+    const desiredV1 = await mutateDesiredState(
       db,
       hostId,
       Date.now(),
       (draft) => {
-        upsertDesiredCachedImage(draft, {
-          image_key: testImageKey,
-          image_id: "1".repeat(64),
-        });
+        draft.cached_images = [testImageDigest];
       },
     );
     await stub.fetch("http://host-runtime/_internal/wake", {
@@ -469,11 +427,8 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
 
     const db = drizzle(env.DB);
     await seedRun({ db, hostId, runId, now: Date.now() });
-    await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
-      upsertDesiredCachedImage(draft, {
-        image_key: testImageKey,
-        image_id: "1".repeat(64),
-      });
+    await mutateDesiredState(db, hostId, Date.now(), (draft) => {
+      draft.cached_images = [testImageDigest];
     });
     expect(
       messages.some(
@@ -541,7 +496,7 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     );
     const db = drizzle(env.DB);
     await seedRun({ db, hostId, runId, now });
-    await mutateStoredHostDesiredState(db, hostId, now + 1, (draft) => {
+    await mutateDesiredState(db, hostId, now + 1, (draft) => {
       upsertDesiredVm(draft, desiredRunningVm(runId, "runtime-web", now));
     });
     const wake = await stub.fetch("http://host-runtime/_internal/wake", {
@@ -760,6 +715,9 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     );
     const db = drizzle(env.DB);
     await seedRun({ db, hostId, runId, now });
+    // A state report projects only into a run on the revision model.
+    await env.DB.prepare("UPDATE scenario_runs SET state_json = json_set(state_json, '$.tasks', json('[]')) WHERE run_id = ?1")
+      .bind(runId).run();
 
     await env.DB.prepare(
       `CREATE TRIGGER replace_state_report_session_before_projection
@@ -841,11 +799,8 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     // it. There is no reservation commit to gate on any more: the admission
     // batch writes the run, its quota, and the desired version in one
     // transaction, and the wake is only the latency hint.
-    await mutateStoredHostDesiredState(db, hostId, now + 1, (draft) => {
-      upsertDesiredCachedImage(draft, {
-        image_key: testImageKey,
-        image_id: "1".repeat(64),
-      });
+    await mutateDesiredState(db, hostId, now + 1, (draft) => {
+      draft.cached_images = [testImageDigest];
     });
     const woke = await stub.fetch("http://host-runtime/_internal/wake", {
       method: "POST",
@@ -906,11 +861,8 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
     const db = drizzle(env.DB);
     await waitForHostActualState(db, hostId, (row) => row.observedAt === now);
 
-    await mutateStoredHostDesiredState(db, hostId, now + 1, (draft) => {
-      upsertDesiredCachedImage(draft, {
-        image_key: testImageKey,
-        image_id: "1".repeat(64),
-      });
+    await mutateDesiredState(db, hostId, now + 1, (draft) => {
+      draft.cached_images = [testImageDigest];
     });
     expect(
       replacement.messages.some(

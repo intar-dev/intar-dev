@@ -6,9 +6,6 @@ import {
   day,
   minute,
   runListEntry,
-  scenarioHints,
-  scenarioProbes,
-  scenarioVm,
   sha,
 } from "./shared";
 import { makeRun } from "./run";
@@ -146,69 +143,6 @@ function makeHostRuns() {
   };
 }
 
-function makeAdminScenario(enabled = true) {
-  return {
-    scenarioId: "repair-nginx",
-    title: briefing.title,
-    category: briefing.category,
-    description: briefing.tagline,
-    difficulty: briefing.difficulty,
-    estimatedMinutes: briefing.estimatedMinutes,
-    tags: briefing.tags,
-    scenarioHintCount: 1,
-    probeCount: scenarioProbes.length,
-    vmCount: 1,
-    requiredResources: {
-      cpuMillis: 2_000,
-      memoryMib: scenarioVm.memoryMib,
-      diskMib: scenarioVm.diskMib,
-    },
-    enabled,
-    enabledAt: enabled ? FIXED_NOW - 45 * day : null,
-    createdAt: FIXED_NOW - 60 * day,
-    updatedAt: FIXED_NOW - 2 * day,
-  };
-}
-
-function makeBuild(status: string, id: string) {
-  return {
-    id,
-    scenarioId: id === "build-2" ? "repair-dns" : "repair-nginx",
-    arch: "x86_64",
-    rev: "rev-20260710-01",
-    contentHash: sha,
-    hostId: status === "queued" ? null : "host-builder-1",
-    hostName: status === "queued" ? null : "builder-eu-1",
-    status,
-    phase:
-      status === "failed"
-        ? "failed"
-        : status === "succeeded"
-          ? "done"
-          : "building",
-    attempt: 1,
-    error:
-      status === "failed"
-        ? "qemu image conversion exited with code 1"
-        : status === "stale"
-          ? "superseded by bundle rev-20260710-02"
-          : null,
-    canRetry: status === "failed",
-    hasLog: status !== "queued",
-    timings: {
-      queuedAt: FIXED_NOW - 20 * minute,
-      startedAt: status === "queued" ? null : FIXED_NOW - 18 * minute,
-      finishedAt: ["failed", "succeeded"].includes(status)
-        ? FIXED_NOW - 2 * minute
-        : null,
-      lastReportAt: status === "queued" ? null : FIXED_NOW - minute,
-    },
-    bundleR2Key: `bundles/${id}.tar.zst`,
-    createdAt: FIXED_NOW - 20 * minute,
-    updatedAt: FIXED_NOW - minute,
-  };
-}
-
 export function createMockApiState(input?: {
   sessionRole?: SessionRole;
   organizationRole?: "owner" | "admin" | "member";
@@ -274,7 +208,7 @@ export function createMockApiState(input?: {
           tags: briefing.tags,
           difficulty: "medium",
           estimatedMinutes: briefing.estimatedMinutes,
-          scenarioId: "repair-nginx",
+          scenarioId: "intar/repair-nginx",
           state: nginxLectureState,
           blockedBy: null,
           activeRunId: runIsForeground ? "run-active" : null,
@@ -290,7 +224,7 @@ export function createMockApiState(input?: {
           tags: ["dns", "networking", "observability"],
           difficulty: "hard",
           estimatedMinutes: 60,
-          scenarioId: "repair-dns",
+          scenarioId: "intar/repair-dns",
           state:
             nginxLectureState === "completed"
               ? "waiting_for_scenario"
@@ -321,7 +255,7 @@ export function createMockApiState(input?: {
           tags: ["postgresql", "storage"],
           difficulty: "easy",
           estimatedMinutes: 20,
-          scenarioId: "recover-postgres",
+          scenarioId: "intar/recover-postgres",
           state: "waiting_for_scenario",
           blockedBy: null,
           activeRunId: null,
@@ -381,7 +315,7 @@ export function createMockApiState(input?: {
           tags: ["linux", "storage", "organization"],
           difficulty: "medium",
           estimatedMinutes: 35,
-          scenarioId: "platform-logrotate",
+          scenarioId: "intar/platform-logrotate",
           state: "locked",
           blockedBy: {
             courseId: "platform-repair",
@@ -432,13 +366,6 @@ export function createMockApiState(input?: {
   ];
   const host = makeHost();
   const hostRuns = makeHostRuns();
-  const adminScenario = makeAdminScenario(true);
-  const builds = [
-    makeBuild("stale", "build-4"),
-    makeBuild("building", "build-1"),
-    makeBuild("failed", "build-2"),
-    makeBuild("succeeded", "build-3"),
-  ];
   const organizationDetail = {
     id: "org-platform",
     name: long
@@ -525,7 +452,7 @@ export function createMockApiState(input?: {
           {
             id: "assignment-nginx",
             assignmentId: "assignment-nginx",
-            scenarioId: "platform-logrotate",
+            scenarioId: "intar/platform-logrotate",
             scenarioTitle: "Recover the platform log rotation job",
             organizationId: "org-platform",
             organizationName: organizationDetail.name,
@@ -545,7 +472,7 @@ export function createMockApiState(input?: {
     progress: {
       scenarios: empty
         ? []
-        : [{ scenarioId: "repair-nginx", title: briefing.title }],
+        : [{ scenarioId: "intar/repair-nginx", title: briefing.title }],
       rows: empty
         ? []
         : organizationDetail.members.map((member, index) => ({
@@ -554,7 +481,7 @@ export function createMockApiState(input?: {
             githubUsername: member.githubUsername,
             cells: [
               {
-                scenarioId: "repair-nginx",
+                scenarioId: "intar/repair-nginx",
                 status:
                   index === 0
                     ? "solved"
@@ -756,56 +683,100 @@ export function createMockApiState(input?: {
     },
     hosts: empty ? [] : [host],
     hostRuns: empty ? { liveVms: [], archivedRuns: [] } : hostRuns,
-    // No attempt yet keeps the admin scenarios page free of relative times.
-    imagePromotion: {
-      attempt: null,
-      holdingRuns: false,
-      operatorDrained: false,
-      pendingRevision: null,
-      runningVms: 0,
-    },
-    adminScenarios: empty
-      ? []
-      : [
-          adminScenario,
-          {
-            ...makeAdminScenario(false),
-            scenarioId: "repair-dns",
-            title: "Trace an intermittent DNS failure",
-          },
-        ],
-    adminScenarioDetail: {
-      ...adminScenario,
-      briefingMarkdown: briefing.briefingMarkdown,
-      solutionMarkdown:
-        "Validate `/etc/nginx/nginx.conf`, restore the service unit, and restart nginx.",
-      hints: scenarioHints,
-      probes: scenarioProbes,
-      vms: [scenarioVm],
-    },
-    builds: empty ? [] : builds,
-    buildDetails: Object.fromEntries(
-      builds.map((build) => [
-        build.id,
-        {
-          ...build,
-          host:
-            build.hostId == null
-              ? null
-              : {
-                  id: build.hostId,
-                  name: build.hostName,
-                  role: "builder",
-                  connected: true,
-                  lastHeartbeatAt: FIXED_NOW - minute,
-                },
-          bundle: {
-            rev: build.rev,
-            r2Key: build.bundleR2Key,
-            meta: { fixture: true },
-          },
-        },
-      ]),
-    ),
+    scenarioRevisions: empty ? [] : scenarioRevisions(),
+    machineBuilds: empty ? [] : machineBuilds(),
   };
+}
+
+const rev = (commit: string) => `git-42-${commit.repeat(40)}-${"d".repeat(64)}`;
+
+/** One public scenario with a live, a verified candidate and a failed verify run, and one never live. */
+function scenarioRevisions() {
+  const revision = (commit: string, state: string, age: number, extra: Record<string, unknown> = {}) => ({
+    rev: rev(commit),
+    state,
+    guestContract: 3,
+    contentDigest: null,
+    failureReason: null,
+    verifyRunId: null,
+    verifyReport: null,
+    liveAt: null,
+    canGoLive: state === "verified",
+    imagesReady: true,
+    createdAt: FIXED_NOW - age,
+    ...extra,
+  });
+  return [
+    {
+      id: "intar/repair-nginx",
+      namespace: "intar",
+      slug: "repair-nginx",
+      organizationId: null,
+      title: "Repair a broken nginx service",
+      enabled: true,
+      play: false,
+      liveRev: rev("a"),
+      candidateRev: rev("c"),
+      canManage: true,
+      verifyRuns: {},
+      revisions: [
+        revision("c", "verified", 2 * 60 * minute, { verifyRunId: "run-verify-2" }),
+        revision("b", "ready", day, {
+          verifyRunId: "run-verify-1",
+          verifyReport: {
+            runId: "run-verify-1",
+            outcome: "failed",
+            at: FIXED_NOW - day + 30 * minute,
+            machines: [{
+              name: "webserver",
+              failure: null,
+              verify: {
+                done: true,
+                passed: false,
+                pre_done: true,
+                steps: [{ task_id: "nginx-running", pre: "fail", solve_exit: 1, post: "fail", duration_ms: 900, tail: "solve.sh: nginx: [emerg] unknown directive", waiting_for: [] }],
+              },
+            }],
+          },
+        }),
+        revision("a", "verified", 3 * day, { verifyRunId: "run-verify-0", liveAt: FIXED_NOW - 3 * day + 60 * minute }),
+      ],
+    },
+    {
+      id: "intar/repair-dns",
+      namespace: "intar",
+      slug: "repair-dns",
+      organizationId: null,
+      title: "Trace an intermittent DNS failure",
+      enabled: true,
+      play: false,
+      liveRev: null,
+      candidateRev: rev("e"),
+      canManage: true,
+      verifyRuns: { [rev("e")]: "run-verify-3" },
+      revisions: [revision("e", "ready", 30 * minute)],
+    },
+  ];
+}
+
+function machineBuilds() {
+  const build = (key: string, target: string, state: string, extra: Record<string, unknown> = {}) => ({
+    buildKey: `sha256:${key.repeat(64)}`,
+    bundleRev: rev("c"),
+    organizationId: null,
+    target,
+    state,
+    phase: null,
+    attempt: 1,
+    error: null,
+    hasLog: true,
+    createdAt: FIXED_NOW - 2 * 60 * minute,
+    updatedAt: FIXED_NOW - 90 * minute,
+    ...extra,
+  });
+  return [
+    build("1", "repair-dns/resolver", "building", { phase: "converting", hasLog: false, updatedAt: FIXED_NOW - minute }),
+    build("2", "repair-nginx/webserver", "failed", { attempt: 2, error: "machine build failed: apt-get exited with 100" }),
+    build("3", "trixie", "succeeded"),
+  ];
 }

@@ -12,14 +12,11 @@ state_db = "/var/lib/intar-builder/state.sqlite3"
 
 [qemu]
 qemu_binary = "qemu-system-x86_64"
-qemu_storage_daemon_binary = "/usr/bin/qemu-storage-daemon"
 mke2fs_binary = "mke2fs"
 e2fsck_binary = "e2fsck"
 resize2fs_binary = "resize2fs"
-ssh_wait_timeout_seconds = 1200
 provision_timeout_seconds = 2400
 qemu_exit_timeout_seconds = 300
-raw_view_read_timeout_seconds = 1200
 accelerator = "kvm"
 build_cpus = 4
 build_memory_mb = 4096
@@ -37,5 +34,8 @@ checkpoint_cache_bytes = 42949672960
 minimum_free_bytes = 21474836480
 
 [jobs]
-max_attempts = 3
 max_concurrent_builds = 2
+
+# Wake images (see README.md); off, they build as plain images.
+[wake]
+enabled = false

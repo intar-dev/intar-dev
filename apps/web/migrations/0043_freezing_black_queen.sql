@@ -1,0 +1,1 @@
+ALTER TABLE `scenario_revisions` ADD `live_at` integer;

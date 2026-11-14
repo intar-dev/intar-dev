@@ -1,9 +1,9 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  testImageKey,
+  testImageDigest,
   seedHost,
   connectHost,
   sendBridge,
@@ -12,494 +12,26 @@ import {
   runNextScheduledAlarm,
   waitForMessageCount,
   waitForHostActualState,
-  seedEnabledScenario,
   stateReport,
   env,
   eq,
   drizzle,
-  hostActualState,
-  hostCpuReservations,
-  scenarioRuns,
-  user,
-  upsertDesiredCachedImage,
-  mutateStoredHostDesiredState,
-  startScenarioRunForUser,
+  mutateDesiredState,
   resetHostRuntimeTestDatabase,
-  type BridgeMessageV8,
+  sleep,
+  type BridgeMessageV9,
+  settleHostRuntimeSockets,
 } from "./test-fixtures";
 import {
   DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
   RUNTIME_ALARM_KEY,
   type SocketAttachment,
 } from "./base";
-import {
-  hostResourceReservations,
-  runtimeExecutions,
-  runtimeVms,
-  agentHosts,
-  organization,
-} from "@/db/schema";
-import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
-import { assertScenarioLaunchHostForUser, markRunVmsAbsentInDesiredState } from "@/lib/scenario-runs/start";
+import { agentHosts } from "@/db/schema";
 
-/**
- * Seed a live run that belongs to another user on `hostId`, holding the host's
- * memory and worst-case disk budget while leaving CPU far below the boot quota.
- */
-async function seedOtherUserActiveReservation(input: {
-  hostId: string;
-  executionId: string;
-  now: number;
-  memoryMib: number;
-  worstCaseDiskMib: number;
-}): Promise<void> {
-  const db = drizzle(env.DB);
-  await db
-    .insert(user)
-    .values({
-      id: "user-2",
-      name: "Other User",
-      email: "other-user@example.com",
-      emailVerified: true,
-      createdAt: new Date(input.now),
-      updatedAt: new Date(input.now),
-    })
-    .onConflictDoNothing();
-  await db.insert(runtimeExecutions).values({
-    id: input.executionId,
-    userId: "user-2",
-    hostId: input.hostId,
-    domainKind: "scenario",
-    domainId: input.executionId,
-    generation: 1,
-    state: "provisioning",
-    createdAt: input.now,
-    updatedAt: input.now,
-  });
-  await db.insert(runtimeVms).values({
-    id: `${input.executionId}-vm`,
-    executionId: input.executionId,
-    vmId: "vm-1",
-    ordinal: 0,
-    runtimeVmName: "runtime-web",
-    imageKeyJson: {},
-    imageSha256: "2".repeat(64),
-    cpuMillis: 2_000,
-    memoryMib: input.memoryMib,
-    diskMib: input.worstCaseDiskMib,
-    createdAt: input.now,
-    updatedAt: input.now,
-  });
-  await db.insert(hostResourceReservations).values({
-    executionId: input.executionId,
-    hostId: input.hostId,
-    cpuMillis: 2_000,
-    memoryMib: input.memoryMib,
-    worstCaseDiskMib: input.worstCaseDiskMib,
-    state: "pending",
-    expiresAt: input.now + 60_000,
-    createdAt: input.now,
-    updatedAt: input.now,
-  });
-}
-
-/**
- * Seeds a committed host CPU reservation, the durable row the admission batch
- * writes for an admitted run. A committed row keeps its whole quota charged
- * until teardown, so it is the shape that makes a host look full to the next
- * admission without any legacy reservation endpoint.
- */
-async function seedCommittedCpuReservation(input: {
-  hostId: string;
-  runId: string;
-  cpuMillis: number;
-  now: number;
-}): Promise<void> {
-  await drizzle(env.DB).insert(hostCpuReservations).values({
-    runId: input.runId,
-    hostId: input.hostId,
-    cpuMillis: input.cpuMillis,
-    state: "committed",
-    expiresAt: null,
-    createdAt: input.now,
-    updatedAt: input.now,
-  });
-}
-
-describe("HostRuntimeDO scheduling and capacity", () => {
+describe("HostRuntimeDO desired-state re-push", () => {
   beforeEach(resetHostRuntimeTestDatabase);
-
-  it("hides a personal host from another user before checking readiness", async () => {
-    await seedHost("private-host");
-    await drizzle(env.DB).update(agentHosts).set({ scope: "personal" }).where(eq(agentHosts.id, "private-host"));
-    await drizzle(env.DB).update(user).set({ metalPlacement: "personal" }).where(eq(user.id, "user-1"));
-    await expect(
-      assertScenarioLaunchHostForUser("private-host", "user-2", []),
-    ).rejects.toMatchObject({ code: "scenario_host_not_found" });
-    // The owner reaches the readiness check; the other user cannot see it.
-    await expect(
-      assertScenarioLaunchHostForUser("private-host", "user-1", []),
-    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
-  });
-
-  it("rejects an old organization host even for its recorded user", async () => {
-    await seedHost("old-org-host");
-    const db = drizzle(env.DB);
-    await db.insert(organization).values({
-      id: "old-org", name: "Old organization", slug: "old-org", createdAt: new Date(),
-    });
-    await db.update(agentHosts).set({ scope: null, credentialGeneration: 0 })
-      .where(eq(agentHosts.id, "old-org-host"));
-    await expect(
-      assertScenarioLaunchHostForUser("old-org-host", "user-1", []),
-    ).rejects.toMatchObject({ code: "scenario_host_not_found" });
-  });
-
-  it("keeps stale actual-state hosts out of automatic scenario scheduling", async () => {
-    const hostId = "host-degraded-scheduling";
-    const now = Date.now();
-    await seedHost(hostId);
-    const { ws } = await connectHost(hostId);
-    await seedEnabledScenario(drizzle(env.DB), now);
-
-    sendBridge(
-      ws,
-      stateReport(hostId, {
-        observedAt: now,
-        appliedDesiredVersion: 0,
-        cachedImages: [
-          {
-            image_key: testImageKey,
-            image_id: "2".repeat(64),
-            phase: "ready",
-            updated_at_unix_ms: now,
-          },
-        ],
-      }),
-    );
-    await waitForHostActualState(
-      drizzle(env.DB),
-      hostId,
-      (row) => row.observedAt === now,
-    );
-
-    // Health derives from the server-set receipt time, not the
-    // agent-reported observation clock; backdate it to simulate a host
-    // whose last report landed over 60s ago.
-    await drizzle(env.DB)
-      .update(hostActualState)
-      .set({ updatedAt: now - 60_001 })
-      .where(eq(hostActualState.hostId, hostId));
-
-    await expect(
-      startScenarioRunForUser({
-      idempotencyKey: "scheduling-start-1",
-        scenarioId: "broken-nginx",
-        userId: "user-1",
-      }),
-    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
-    ws.close();
-  });
-
-  it("refuses a pinned host whose committed CPU quota is full", async () => {
-    const hostId = "host-pinned-saturated";
-    const now = Date.now();
-    await seedHost(hostId);
-    const { ws } = await connectHost(hostId);
-    await seedEnabledScenario(drizzle(env.DB), now);
-    sendBridge(
-      ws,
-      stateReport(hostId, {
-        observedAt: now,
-        appliedDesiredVersion: 0,
-        schedulableCpuMillis: 2_000,
-        cachedImages: [
-          {
-            image_key: testImageKey,
-            image_id: "2".repeat(64),
-            phase: "ready",
-            updated_at_unix_ms: now,
-          },
-        ],
-      }),
-    );
-    await waitForHostActualState(
-      drizzle(env.DB),
-      hostId,
-      (row) => row.observedAt === now,
-    );
-    // Admission charges a committed CPU quota for every run it admits, so a
-    // host whose quota is fully committed has no room for another start. The
-    // reservation row is the same row the admission batch writes; there is no
-    // legacy reservation endpoint left to call.
-    await seedCommittedCpuReservation({
-      hostId,
-      runId: "capacity-fill",
-      cpuMillis: 2_000,
-      now,
-    });
-
-    await expect(
-      startScenarioRunForUser({
-      idempotencyKey: "scheduling-start-2",
-        scenarioId: "broken-nginx",
-        userId: "user-1",
-        hostId,
-      }),
-    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
-    ws.close();
-  });
-
-  it("starts a new foreground run while an accepted teardown remains in background", async () => {
-    const hostId = "host-overlap-capable";
-    const now = Date.now();
-    await seedHost(hostId);
-    const { ws } = await connectHost(hostId);
-    await seedEnabledScenario(drizzle(env.DB), now);
-    sendBridge(
-      ws,
-      stateReport(hostId, {
-        observedAt: now,
-        appliedDesiredVersion: 0,
-        schedulableCpuMillis: 6_000,
-        cachedImages: [
-          {
-            image_key: testImageKey,
-            image_id: "2".repeat(64),
-            phase: "ready",
-            updated_at_unix_ms: now,
-          },
-        ],
-      }),
-    );
-    await waitForHostActualState(
-      drizzle(env.DB),
-      hostId,
-      (row) => row.observedAt === now,
-    );
-
-    const first = await startScenarioRunForUser({
-      idempotencyKey: "scheduling-start-3",
-      scenarioId: "broken-nginx",
-      userId: "user-1",
-      hostId,
-    });
-    const ending = await destroyScenarioRunForUserWithDependencies(
-      { runId: first.runId, userId: "user-1" },
-      {
-        markVmsAbsent: markRunVmsAbsentInDesiredState,
-        revokeRoutes: async () => {},
-        wakeHostRuntime: async () => {},
-      },
-    );
-    const second = await startScenarioRunForUser({
-      idempotencyKey: "scheduling-start-4",
-      scenarioId: "broken-nginx",
-      userId: "user-1",
-      hostId,
-    });
-
-    expect(ending.run).toMatchObject({
-      id: first.runId,
-      activity: "background",
-    });
-    expect(second.run).toMatchObject({
-      id: second.runId,
-      activity: "foreground",
-    });
-    expect(second.runId).not.toBe(first.runId);
-    ws.close();
-  });
-
-  it("retries the next ranked host when the first CPU reservation is exhausted", async () => {
-    const now = Date.now();
-    const firstHostId = "host-ranked-first";
-    const secondHostId = "host-ranked-second";
-    await seedHost(firstHostId);
-    await seedHost(secondHostId);
-    await env.DB.prepare("UPDATE agent_hosts SET scope = 'platform'").run();
-    await env.DB.prepare("UPDATE user SET metal_placement = 'platform' WHERE id = 'user-1'").run();
-    const first = await connectHost(firstHostId);
-    const second = await connectHost(secondHostId);
-    await seedEnabledScenario(drizzle(env.DB), now);
-
-    sendBridge(
-      second.ws,
-      stateReport(secondHostId, {
-        observedAt: now,
-        appliedDesiredVersion: 0,
-        schedulableCpuMillis: 125,
-        cachedImages: [
-          {
-            image_key: testImageKey,
-            image_id: "2".repeat(64),
-            phase: "ready",
-            updated_at_unix_ms: now,
-          },
-        ],
-      }),
-    );
-    sendBridge(
-      first.ws,
-      stateReport(firstHostId, {
-        observedAt: now + 1,
-        appliedDesiredVersion: 0,
-        schedulableCpuMillis: 2_000,
-        cachedImages: [
-          {
-            image_key: testImageKey,
-            image_id: "2".repeat(64),
-            phase: "ready",
-            updated_at_unix_ms: now,
-          },
-        ],
-      }),
-    );
-    await Promise.all([
-      waitForHostActualState(
-        drizzle(env.DB),
-        firstHostId,
-        (row) => row.observedAt === now + 1,
-      ),
-      waitForHostActualState(
-        drizzle(env.DB),
-        secondHostId,
-        (row) => row.observedAt === now,
-      ),
-    ]);
-
-    // The first host carries a committed CPU quota equal to its whole
-    // schedulable CPU, so the ranked selection must move to the second host.
-    await seedCommittedCpuReservation({
-      hostId: firstHostId,
-      runId: "first-host-fill",
-      cpuMillis: 2_000,
-      now,
-    });
-
-    const started = await startScenarioRunForUser({
-      idempotencyKey: "scheduling-start-5",
-      scenarioId: "broken-nginx",
-      userId: "user-1",
-    });
-    expect(started.run).toMatchObject({
-      id: started.runId,
-      active: true,
-      activity: "foreground",
-      replayState: "not_started",
-    });
-    const [run] = await drizzle(env.DB)
-      .select({ hostId: scenarioRuns.hostId })
-      .from(scenarioRuns)
-      .where(eq(scenarioRuns.runId, started.runId));
-    expect(run?.hostId).toBe(secondHostId);
-    await destroyScenarioRunForUserWithDependencies(
-      { runId: started.runId, userId: "user-1" },
-      {
-        markVmsAbsent: markRunVmsAbsentInDesiredState,
-        revokeRoutes: async () => {},
-        wakeHostRuntime: async () => {},
-      },
-    );
-    const [reservationAfterAcceptance] = await drizzle(env.DB)
-      .select({ state: hostCpuReservations.state })
-      .from(hostCpuReservations)
-      .where(eq(hostCpuReservations.runId, started.runId));
-    expect(reservationAfterAcceptance?.state).toBe("committed");
-    await expect(
-      startScenarioRunForUser({
-      idempotencyKey: "scheduling-start-6",
-        scenarioId: "broken-nginx",
-        userId: "user-1",
-      }),
-    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
-
-    first.ws.close();
-    second.ws.close();
-  });
-
-  it("selects a fitting host while another user's reservations block saturated candidates", async () => {
-    const now = Date.now();
-    const reservedHostId = "host-reserved-memory";
-    const unrelatedHostId = "host-unrelated-memory";
-    const openHostId = "host-open-memory";
-    await seedHost(reservedHostId);
-    await seedHost(unrelatedHostId);
-    await seedHost(openHostId);
-    const reserved = await connectHost(reservedHostId);
-    const unrelated = await connectHost(unrelatedHostId);
-    const open = await connectHost(openHostId);
-    await seedEnabledScenario(drizzle(env.DB), now);
-
-    for (const [hostId, ws, observedAt] of [
-      [reservedHostId, reserved.ws, now],
-      [unrelatedHostId, unrelated.ws, now + 1],
-      [openHostId, open.ws, now + 2],
-    ] as const) {
-      sendBridge(
-        ws,
-        stateReport(hostId, {
-          observedAt,
-          appliedDesiredVersion: 0,
-          schedulableCpuMillis: 4_000,
-          cachedImages: [
-            {
-              image_key: testImageKey,
-              image_id: "2".repeat(64),
-              phase: "ready",
-              updated_at_unix_ms: now,
-            },
-          ],
-        }),
-      );
-    }
-    await Promise.all([
-      waitForHostActualState(drizzle(env.DB), reservedHostId, (row) => row.observedAt === now),
-      waitForHostActualState(drizzle(env.DB), unrelatedHostId, (row) => row.observedAt === now + 1),
-      waitForHostActualState(drizzle(env.DB), openHostId, (row) => row.observedAt === now + 2),
-    ]);
-
-    // Another user's live run consumes the whole memory and worst-case disk
-    // budget while leaving the CPU allowance far above the boot quota.
-    await seedOtherUserActiveReservation({
-      hostId: reservedHostId,
-      executionId: "exec-reserved-memory",
-      now,
-      memoryMib: 4_096,
-      worstCaseDiskMib: 80_000,
-    });
-    await seedOtherUserActiveReservation({
-      hostId: unrelatedHostId,
-      executionId: "exec-unrelated-memory",
-      now,
-      memoryMib: 4_096,
-      worstCaseDiskMib: 80_000,
-    });
-
-    await expect(
-      startScenarioRunForUser({
-      idempotencyKey: "scheduling-start-7",
-        scenarioId: "broken-nginx",
-        userId: "user-1",
-        hostId: reservedHostId,
-      }),
-    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
-
-    const started = await startScenarioRunForUser({
-      idempotencyKey: "scheduling-start-8",
-      scenarioId: "broken-nginx",
-      userId: "user-1",
-    });
-    const [run] = await drizzle(env.DB)
-      .select({ hostId: scenarioRuns.hostId })
-      .from(scenarioRuns)
-      .where(eq(scenarioRuns.runId, started.runId));
-    expect(run?.hostId).toBe(openHostId);
-
-    reserved.ws.close();
-    unrelated.ws.close();
-    open.ws.close();
-  });
+  afterEach(settleHostRuntimeSockets);
 
   it("re-pushes a lagging desired version from the alarm loop after the dispatch threshold", async () => {
     const { messages, stub, ws } = await connectLaggingHost("host-lag-repush");
@@ -515,7 +47,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     } finally {
       clock.mockRestore();
     }
-    expect(await waitForMessageCount(messages, isDesiredVersion1, 2, 2_000)).toBe(2);
+    expect(await waitForMessageCount(messages, isLaggingVersion, 2, 2_000)).toBe(2);
     ws.close();
   });
 
@@ -543,17 +75,19 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm()),
     ).toBe(lastDispatch + DESIRED_VERSION_LAG_REPUSH_AFTER_MS + 1);
     await runNextScheduledAlarm(stub);
-    expect(await waitForMessageCount(messages, isDesiredVersion1, 2, 2_000)).toBe(2);
+    expect(await waitForMessageCount(messages, isLaggingVersion, 2, 2_000)).toBe(2);
     ws.close();
   });
 });
 
-function isDesiredVersion1(message: BridgeMessageV8): boolean {
-  return message.type === "desired_state" && message.desired_state.version === 1;
+let laggingVersion = 0;
+
+function isLaggingVersion(message: BridgeMessageV9): boolean {
+  return message.type === "desired_state" && message.desired_state.version === laggingVersion;
 }
 
 /**
- * Connect a platform host, deliver desired version 1, and have the host report
+ * Connect a platform host, deliver a new desired version, and have the host report
  * version 0 applied, so the host runtime sees it lagging.
  */
 async function connectLaggingHost(hostId: string) {
@@ -565,19 +99,23 @@ async function connectLaggingHost(hostId: string) {
   const { messages, ws } = connection;
   await waitForBridgeMessage(messages, (message) => message.type === "server_hello");
 
-  await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
-    upsertDesiredCachedImage(draft, {
-      image_key: testImageKey,
-      image_id: "4".repeat(64),
-    });
+  await mutateDesiredState(db, hostId, Date.now(), (draft) => {
+    draft.cached_images = [testImageDigest];
   });
   sendBridge(ws, {
     type: "sync_request",
-    protocol_version: 8,
+    protocol_version: 9,
     host_id: hostId,
     reason: "operator_requested",
   });
-  await waitForBridgeMessage(messages, isDesiredVersion1);
+  // The reconcile that follows the change may publish a newer version still.
+  await waitForBridgeMessage(
+    messages,
+    (message) => message.type === "desired_state" && message.desired_state.version > 0,
+  );
+  await sleep(50);
+  laggingVersion = Math.max(...messages.flatMap((message) =>
+    message.type === "desired_state" ? [message.desired_state.version] : []));
 
   sendBridge(ws, stateReport(hostId, { observedAt: Date.now(), appliedDesiredVersion: 0 }));
   await waitForHostActualState(db, hostId, (row) => row.appliedDesiredVersion === 0);

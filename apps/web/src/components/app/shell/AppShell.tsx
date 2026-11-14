@@ -3,7 +3,6 @@ import { Outlet, useRouterState } from "@tanstack/react-router";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "./AppSidebar";
 import { AppBar } from "./AppBar";
-import { CutoverNotice } from "./CutoverNotice";
 import { PageChromeProvider, usePageChromeValue } from "./page-chrome";
 
 // The authenticated app surface. Theme follows the user's choice (or system
@@ -58,18 +57,7 @@ function AppShellContent() {
                 : "@container/panel min-w-0"
             }
           >
-            {fullscreenWorkspace ? null : (
-              <>
-                {/* On desktop the notice floats on the canvas above the
-                    panel, a card in the same 8px rhythm as the frame; the
-                    band covers the panel's side borders like the app bar's.
-                    On phones the panel is full-bleed, so the notice is too. */}
-                <div className="shrink-0 lg:-mx-px lg:bg-sidebar lg:pt-2">
-                  <CutoverNotice className="rounded-none border-x-0 border-t-0 pt-[max(0.75rem,env(safe-area-inset-top))] pr-[max(var(--page-inset),env(safe-area-inset-right))] pl-[max(var(--page-inset),env(safe-area-inset-left))] lg:rounded-xl lg:border lg:px-4 lg:pt-3" />
-                </div>
-                <AppBar />
-              </>
-            )}
+            {fullscreenWorkspace ? null : <AppBar />}
             <main
               id="main-content"
               tabIndex={-1}

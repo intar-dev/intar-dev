@@ -158,6 +158,8 @@ fn validate_sha256(value: &str) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(any(target_os = "linux", test))]
+mod machine_image;
 
 #[cfg(test)]
 mod tests;

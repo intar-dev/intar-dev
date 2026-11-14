@@ -1,0 +1,34 @@
+--- a/arch/x86/kernel/kvmclock.c
++++ b/arch/x86/kernel/kvmclock.c
+@@ -26,7 +26,8 @@
+ static int kvmclock_vsyscall __initdata = 1;
+ static int msr_kvm_system_time __ro_after_init;
+ static int msr_kvm_wall_clock __ro_after_init;
+-static u64 kvm_sched_clock_offset __ro_after_init;
++static u64 kvm_sched_clock_offset;	/* written again on resume */
++static u64 kvm_sched_clock_suspend;	/* sched_clock() when the processor state was saved */
+ 
+ static int __init parse_no_kvmclock(char *arg)
+ {
+@@ -179,11 +180,21 @@
+ 
+ static void kvm_save_sched_clock_state(void)
+ {
++	kvm_sched_clock_suspend = kvm_sched_clock_read();
+ }
+ 
+ static void kvm_restore_sched_clock_state(void)
+ {
+ 	kvm_register_clock("primary cpu clock, resume");
++	/*
++	 * The clock found on resume need not be the one the guest went to sleep
++	 * on: a new VM that wakes a suspended memory image starts its kvmclock
++	 * near zero. Forget the last value pvclock handed out, or every reader
++	 * gets that stale value until the new clock has caught up, and re-base
++	 * sched_clock() so that it continues from where it stopped.
++	 */
++	pvclock_resume();
++	kvm_sched_clock_offset = kvm_clock_read() - kvm_sched_clock_suspend;
+ }
+ 
+ #ifdef CONFIG_X86_LOCAL_APIC

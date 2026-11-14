@@ -1,0 +1,57 @@
+[server]
+bind = "127.0.0.1:8080"
+
+# intar-agent is unprivileged. Cloud Hypervisor v53.0 and its checksum are
+# configured only in the root-owned /etc/intar-jailerd/config.toml.
+[jailer]
+socket = "/run/intar-jailerd/control.sock"
+request_timeout_seconds = 10
+
+[bridge]
+enabled = false
+base_url = "https://intar.dev"
+credential_file = "/etc/intar-agent/credential.json"
+heartbeat_interval_seconds = 30
+
+[ssh_access]
+# Personal hosts use the outbound relay. Enable public ports only for platform hosts.
+enabled = false
+public_port_start = 22000
+public_port_end = 22999
+# Optional public hostname advertised to the control plane and used for SSH route targets.
+advertised_host = "host1.intar.app"
+
+[vm_defaults]
+# A naming hint sent to jailerd; the agent does not create TAP devices.
+tap = "tap"
+
+# Trusted agent-side source/cache root. Jailerd copies verified inputs into its
+# root-owned jail and grants only narrow ACL access to API/vsock/log paths.
+work_dir = "/var/cache/intar-agent"
+
+[vm_defaults.resources]
+# Fallback topology for local requests. Scenario catalog V4 manifests carry
+# exact cpu_millis resources for scheduled VMs.
+cpu_millis = 1000
+memory_mib = 512
+
+[vm_defaults.network]
+# Address pool and DNS topology sent to jailerd. Privileged bridge/TAP/route/
+# nftables changes happen only inside jailerd.
+guest_cidr = "10.77.0.0/16"
+dns = ["1.1.1.1", "8.8.8.8"]
+
+[image_registry]
+# The Worker index includes image_id, raw_chunks_v1 manifest metadata, the
+# pinned guest-tools disk, boot artifacts, and immutable download URLs.
+url = "https://intar.dev/agent/registry/images"
+refresh_interval_minutes = 15
+# Optional HTTP basic auth used for local/dev registries. Production agents use bridge JWT auth.
+# username = ""
+# password = ""
+
+[image_cache]
+# Maximum bytes for compressed chunks, manifests, guest tools, and direct-boot
+# artifacts. The default is 53687091200 (50 GiB). The agent does not keep a
+# full unprivileged raw image. Pinned entries are never deleted to reach it.
+# max_bytes = 53687091200

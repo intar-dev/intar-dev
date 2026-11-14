@@ -11,8 +11,7 @@ use super::{
 };
 use crate::config::AgentConfig;
 use intar_jailer_protocol::{
-    CLOUD_HYPERVISOR_SHA256, CLOUD_HYPERVISOR_VERSION, JailerCapabilities, PROTOCOL_VERSION,
-    RUN_GUEST_NETWORK_PREFIX,
+    CLOUD_HYPERVISOR_VERSION, JailerCapabilities, PROTOCOL_VERSION, RUN_GUEST_NETWORK_PREFIX,
 };
 
 #[cfg(unix)]
@@ -37,15 +36,15 @@ fn ready_capabilities(source_root: PathBuf) -> JailerCapabilities {
     JailerCapabilities {
         protocol_version: PROTOCOL_VERSION,
         cloud_hypervisor_version: CLOUD_HYPERVISOR_VERSION.to_owned(),
-        cloud_hypervisor_sha256: CLOUD_HYPERVISOR_SHA256.to_owned(),
+        cloud_hypervisor_sha256: "a".repeat(64),
         total_cpu_millis: 8_000,
         reserved_cpu_millis: 1_000,
         schedulable_cpu_millis: 7_000,
         committed_cpu_millis: 125,
-        supports_jailer_v2: true,
         supports_jailer_v3: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
+        supports_wake: false,
         supports_hard_cpu_quota: true,
         supports_landlock: true,
         supports_cgroup_v2: true,
@@ -255,7 +254,7 @@ fn rejects_unattested_jailerd_security_and_identity_state() {
     capabilities.runtime_statically_linked = false;
     capabilities.landlock_abi = Some(2);
     capabilities.kvm_accounting_proven = false;
-    capabilities.supports_jailer_v2 = false;
+    capabilities.supports_jailer_v3 = false;
     capabilities.supports_template_backed_launch = false;
     capabilities.fast_template_store = false;
     capabilities.supports_hard_cpu_quota = false;
@@ -289,7 +288,7 @@ fn rejects_unattested_jailerd_security_and_identity_state() {
         "Cloud Hypervisor static linkage",
         "Landlock ABI",
         "KVM helper accounting",
-        "jailer v2 isolation capability",
+        "jailer v3 isolation capability",
         "fast jail template store",
         "hard CPU quota capability",
     ] {
@@ -316,7 +315,7 @@ fn rejects_legacy_jailerd_protocol_v1() {
     assert!(report.checks.iter().any(|check| {
         check.name == "jailerd protocol"
             && check.status == PreflightStatus::Fail
-            && check.detail.contains("required version 4")
+            && check.detail.contains("required version 5")
     }));
 }
 

@@ -189,111 +189,48 @@ ON CONFLICT(id) DO UPDATE SET
     Ok(())
 }
 
-pub(super) fn touch_image_cache_entry(conn: &Connection, row: &ImageCacheAccessRow) -> Result<()> {
-    conn.execute(
-        r#"
-INSERT INTO image_cache_access (
-  image_sha256,
-  image_key,
-  kernel_sha256,
-  initrd_sha256,
-  raw_bytes,
-  last_accessed_at_ms
-) VALUES (
-  ?1, ?2, ?3, ?4, ?5, ?6
-)
-ON CONFLICT(image_sha256) DO UPDATE SET
-  image_key = excluded.image_key,
-  kernel_sha256 = excluded.kernel_sha256,
-  initrd_sha256 = excluded.initrd_sha256,
-  raw_bytes = excluded.raw_bytes,
-  last_accessed_at_ms = excluded.last_accessed_at_ms;
-"#,
-        params![
-            row.image_sha256,
-            row.image_key,
-            row.kernel_sha256,
-            row.initrd_sha256,
-            row.raw_bytes,
-            row.last_accessed_at_ms,
-        ],
-    )
-    .context("touch image cache entry")?;
-    Ok(())
-}
-
-#[cfg(test)]
-pub(super) fn load_image_cache_access(conn: &Connection) -> Result<Vec<ImageCacheAccessRow>> {
+pub(super) fn load_local_vm_digests(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn
         .prepare(
             r#"
-SELECT image_key, image_sha256, kernel_sha256, initrd_sha256, raw_bytes, last_accessed_at_ms
-FROM image_cache_access
-ORDER BY last_accessed_at_ms ASC, image_sha256 ASC;
+SELECT image FROM vms WHERE image IS NOT NULL
+UNION
+SELECT kino FROM vms WHERE kino IS NOT NULL;
 "#,
         )
-        .context("prepare load_image_cache_access")?;
+        .context("prepare load_local_vm_digests")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("query local VM digests")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect local VM digests")
+}
+
+pub(super) fn load_pending_teardowns(conn: &Connection) -> Result<Vec<PendingTeardownRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT vm_name, run_id, jail_generation FROM pending_teardown ORDER BY vm_name ASC;",
+        )
+        .context("prepare load_pending_teardowns")?;
     let rows = stmt
         .query_map([], |row| {
-            Ok(ImageCacheAccessRow {
-                image_key: row.get(0)?,
-                image_sha256: row.get(1)?,
-                kernel_sha256: row.get(2)?,
-                initrd_sha256: row.get(3)?,
-                raw_bytes: row.get(4)?,
-                last_accessed_at_ms: row.get(5)?,
+            Ok(PendingTeardownRow {
+                vm_name: row.get(0)?,
+                run_id: row.get(1)?,
+                jail_generation: row.get(2)?,
             })
         })
-        .context("query image_cache_access")?;
+        .context("query pending_teardown")?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("collect image_cache_access")
+        .context("collect pending_teardown")
 }
 
-pub(super) fn load_local_vm_image_shas(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-SELECT DISTINCT image_sha256
-FROM vms
-WHERE image_sha256 IS NOT NULL
-  AND image_sha256 <> ''
-ORDER BY image_sha256 ASC;
-"#,
-        )
-        .context("prepare load local vm image sha query")?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .context("query local vm image shas")?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("collect local vm image shas")
-}
-
-pub(super) fn load_local_vm_guest_tools_jsons(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn
-        .prepare(
-            r#"
-SELECT DISTINCT guest_tools_json
-FROM vms
-WHERE guest_tools_json IS NOT NULL
-  AND guest_tools_json <> ''
-ORDER BY guest_tools_json ASC;
-"#,
-        )
-        .context("prepare load local vm guest-tools query")?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .context("query local vm guest-tools")?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("collect local vm guest-tools")
-}
-
-#[cfg(test)]
-pub(super) fn delete_image_cache_access(conn: &Connection, image_sha256: &str) -> Result<()> {
+pub(super) fn delete_pending_teardown(conn: &Connection, vm_name: &str) -> Result<()> {
     conn.execute(
-        "DELETE FROM image_cache_access WHERE image_sha256 = ?1;",
-        params![image_sha256],
+        "DELETE FROM pending_teardown WHERE vm_name = ?1;",
+        params![vm_name],
     )
-    .context("delete image cache access")?;
+    .context("delete pending_teardown row")?;
     Ok(())
 }
 
@@ -366,9 +303,9 @@ CREATE TABLE IF NOT EXISTS vms (
   generation INTEGER NOT NULL CHECK (generation > 0),
   name TEXT PRIMARY KEY,
   state TEXT NOT NULL,
-  image_key TEXT,
-  image_sha256 TEXT,
-  guest_tools_json TEXT,
+  image TEXT,
+  kino TEXT,
+  boot_sha256 TEXT,
   created_at_s INTEGER NOT NULL,
   updated_at_s INTEGER NOT NULL,
   running_at_s INTEGER,
@@ -396,14 +333,15 @@ CREATE TABLE IF NOT EXISTS vms (
   jail_gid INTEGER,
   jail_netns_name TEXT,
   kino_vsock_cid INTEGER,
-  kino_vsock_port INTEGER,
   kino_vsock_path TEXT,
   ssh_host_keys_openssh_json TEXT,
   run_id TEXT,
   recording_disk_path TEXT,
   spool_dir TEXT,
   cpu_millis INTEGER,
-  ch_executable_sha256 TEXT
+  ch_executable_sha256 TEXT,
+  machine_name TEXT,
+  start_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_vms_lease
@@ -411,20 +349,14 @@ CREATE INDEX IF NOT EXISTS idx_vms_lease
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_guest_ip ON vms(guest_ip);
 
-CREATE TABLE IF NOT EXISTS vm_probe_state (
+CREATE TABLE IF NOT EXISTS vm_lab (
   vm_name TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
-  fingerprint TEXT NOT NULL,
-  collection_state TEXT NOT NULL,
-  collection_error TEXT,
-  summary_json TEXT NOT NULL,
-  snapshot_json TEXT NOT NULL,
-  generated_at_ms INTEGER NOT NULL,
+  jail_generation TEXT NOT NULL,
+  lab_json TEXT NOT NULL,
+  first_report_ms INTEGER,
   updated_at_ms INTEGER NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_vm_probe_state_run_id
-  ON vm_probe_state(run_id, updated_at_ms);
 
 CREATE TABLE IF NOT EXISTS archive_jobs (
   run_id TEXT NOT NULL,
@@ -455,16 +387,12 @@ CREATE TABLE IF NOT EXISTS desired_state (
   updated_at_ms INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS image_cache_access (
-  image_sha256 TEXT PRIMARY KEY,
-  image_key TEXT NOT NULL,
-  kernel_sha256 TEXT NOT NULL,
-  initrd_sha256 TEXT NOT NULL,
-  raw_bytes INTEGER NOT NULL,
-  last_accessed_at_ms INTEGER NOT NULL
+-- VMs of an older state schema that jailerd still has to destroy. A row
+-- leaves only once jailerd confirmed and the spool is gone.
+CREATE TABLE IF NOT EXISTS pending_teardown (
+  vm_name TEXT PRIMARY KEY,
+  run_id TEXT,
+  jail_generation TEXT
 );
-
-CREATE INDEX IF NOT EXISTS idx_image_cache_access_lru
-  ON image_cache_access(last_accessed_at_ms);
 
 "#;

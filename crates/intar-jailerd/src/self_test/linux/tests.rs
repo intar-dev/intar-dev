@@ -479,8 +479,9 @@ fn saturation_smoke_requests_have_unique_typed_topology() {
     let suffix = "0123456789abcdef0123456789abcdef";
     let image_sha256 = Sha256Digest::parse("b".repeat(64)).expect("image digest");
     let artifact_sha256 = Sha256Digest::parse(digest).expect("artifact digest");
-    let prepared_image = PreparedImageV2Result {
-        image_sha256: image_sha256.clone(),
+    let prepared_image = PreparedImageV3Result {
+        image_id: image_sha256.clone(),
+        chunk_manifest_sha256: Sha256Digest::parse("c".repeat(64)).expect("config digest"),
         virtual_size_bytes: 4 * 1024 * 1024 * 1024,
         root_disk: crate::template_artifact_source(
             &image_sha256,
@@ -496,6 +497,7 @@ fn saturation_smoke_requests_have_unique_typed_topology() {
         ),
         initrd: None,
         fast_template_store: true,
+        wake: None,
     };
     let requests = (0..=SELF_TEST_SATURATION_VM_COUNT)
         .map(|index| {
@@ -519,7 +521,7 @@ fn saturation_smoke_requests_have_unique_typed_topology() {
     assert!(
         requests
             .iter()
-            .all(|request| request.image_sha256 == image_sha256)
+            .all(|request| request.image_id == image_sha256)
     );
     assert_eq!(
         requests

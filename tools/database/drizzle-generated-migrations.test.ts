@@ -17,7 +17,6 @@ import {
   REMOVAL_MIGRATION_TAG,
   removalMigrationEntry,
 } from "./apply-removal-migration";
-import { rehearsalSeedStatements } from "./rehearse-removal-migration";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 const webRoot = join(repositoryRoot, "apps/web");
@@ -194,7 +193,7 @@ test("selects the removal migration by index when a later migration is appended"
         }
       })();
 
-      for (const statement of rehearsalSeedStatements()) {
+      for (const statement of providerRemovalSeedStatements()) {
         database.exec(statement.sql);
       }
 
@@ -749,4 +748,32 @@ function normalizedSnapshot(
     id: "<generated>",
     prevId: "<generated>",
   };
+}
+
+/** Scenario runtime rows at the provider removal's prefix, which it must keep. */
+function providerRemovalSeedStatements(): Array<{ sql: string }> {
+  const sha = (character: string) => character.repeat(64);
+  return [
+    {
+      sql: "INSERT INTO user (id, name, email) VALUES ('user-1', 'User', 'user@example.test')",
+    },
+    {
+      sql: "INSERT INTO organization (id, name, slug, created_at) VALUES ('org-1', 'Org', 'org', 1)",
+    },
+    {
+      sql: "INSERT INTO agent_hosts (id, user_id, name) VALUES ('host-1', 'user-1', 'Host')",
+    },
+    {
+      sql: "INSERT INTO scenario_runs (run_id, user_id, host_id, scenario_id, scenario_name, title, tagline, briefing_markdown, objectives_json, difficulty, estimated_minutes, tags_json, hints_json, solution_markdown, revealed_hints_json, solution_assisted, vm_count, state, state_rank, active_key, state_json, created_at, updated_at) VALUES ('run-1', 'user-1', 'host-1', 'broken-nginx', 'broken-nginx', 'Title', 'Tagline', 'Briefing', '[]', 'beginner', 30, '[]', '[]', 'Solution', '[]', 0, 1, 'provisioning', 1, 'user-1', '{}', 1, 1)",
+    },
+    {
+      sql: "INSERT INTO runtime_executions (id, user_id, host_id, domain_kind, domain_id, generation, state) VALUES ('run-1', 'user-1', 'host-1', 'scenario', 'run-1', 1, 'provisioning')",
+    },
+    {
+      sql: "INSERT INTO runtime_vms (id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json, image_sha256, cpu_millis, memory_mib, disk_mib) VALUES ('runtime-vm-1', 'run-1', 'vm-1', 0, 'server', '{}', '" + sha("a") + "', 1000, 1024, 4096)",
+    },
+    {
+      sql: "INSERT INTO runtime_artifacts (id, execution_id, runtime_vm_id, ordinal, kind, filename, content_type, size_bytes, sha256, r2_key, upload_status, uploaded_at) VALUES ('artifact-1', 'run-1', 'runtime-vm-1', 0, 'terminal_recording', 'recording.krec', 'application/octet-stream', 1, '" + sha("b") + "', 'runs/run-1/recording.krec', 'uploaded', 1)",
+    },
+  ];
 }

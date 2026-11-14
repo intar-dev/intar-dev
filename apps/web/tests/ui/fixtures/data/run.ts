@@ -5,7 +5,6 @@ import {
   minute,
   objectives,
   runLifecycle,
-  scenarioVm,
   sha,
 } from "./shared";
 
@@ -68,7 +67,7 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
 
   return {
     id: "run-active",
-    scenarioId: "repair-nginx",
+    scenarioId: "intar/repair-nginx",
     organizationId: null,
     courseScopeKey: "public",
     courseId: "operations",
@@ -247,7 +246,6 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
         vmCreatedAt: FIXED_NOW - 33 * minute,
         provisioning: {
           image: "debian-13",
-          imageKey: scenarioVm.imageKey,
           imageSha256: sha,
           resources: { cpuMillis: 2000, memoryMib: 2048, diskMib: 8192 },
           leaseDurationSeconds: 7200,

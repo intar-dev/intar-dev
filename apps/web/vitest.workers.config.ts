@@ -19,13 +19,13 @@ export default defineConfig({
           BETTER_AUTH_URL: "http://localhost",
           GITHUB_CLIENT_ID: "test-client-id",
           GITHUB_CLIENT_SECRET: "test-client-secret",
-          PLATFORM_BASE_IMAGES_SHA256:
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          // The Kino artifact revision-runs.workers.test.ts stores; without
+          // it in the registry the pin reads as unset.
+          KINO_PINS_JSON:
+            '{"3":{"current":"sha256:ba84da6c273cceb718a63a6374ceeebc4ad862fd4098e570ed71937fe01b4639","previous":null}}',
           GITHUB_APP_WEBHOOK_SECRET: "test-github-webhook-secret",
           REGISTRY_PUBLISH_TOKEN: "test-publish-token",
           SCENARIO_RUN_KEY_ENCRYPTION_SECRET: "test-run-key-secret",
-          SCENARIO_GUEST_TOOLS_STATIC_PIN_JSON:
-            '{"schema_version":1,"bootstrap_abi":2,"tools_disk_sha256":"1111111111111111111111111111111111111111111111111111111111111111","tools_disk_size_bytes":67108864,"compressed_disk_sha256":"3333333333333333333333333333333333333333333333333333333333333333","compressed_disk_size_bytes":1,"kino_sha256":"2222222222222222222222222222222222222222222222222222222222222222","kino_size_bytes":1}',
           STARGATE_ADMIN_AUTH_AUDIENCE: "stargate-admin",
           STARGATE_ADMIN_AUTH_HEADER: "cf-access-jwt-assertion",
           STARGATE_ADMIN_AUTH_ISSUER: "intar.dev",
@@ -74,6 +74,10 @@ export default defineConfig({
   },
   test: {
     include: ["src/**/*.workers.test.ts"],
-    setupFiles: ["./src/test/worker-setup.ts"],
+    // With the file system module cache, the pool inlines every cached module
+    // of a warm-module reply into one WebSocket message. For the auth module
+    // graph that message grows past workerd's 32 MiB limit, the runner socket
+    // closes with 1009 and the test file never starts.
+    fsModuleCache: false,
   },
 });

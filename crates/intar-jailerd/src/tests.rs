@@ -2,6 +2,9 @@ use super::*;
 use intar_jailer_protocol::{ArtifactAccess, ArtifactSource, SourceArtifacts};
 use std::sync::Condvar;
 
+const TEST_RUNTIME_SHA256: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
 #[cfg(target_os = "linux")]
 mod staging;
 mod templates;
@@ -51,7 +54,7 @@ impl HostBackend for FakeBackend {
                 pid_start_time_ticks: Some(7),
                 netns_inode: Some(17),
                 jail_root_inode: None,
-                executable_sha256: Some(CLOUD_HYPERVISOR_SHA256.to_owned()),
+                executable_sha256: Some(TEST_RUNTIME_SHA256.to_owned()),
                 health: SandboxHealth::Healthy,
                 cpu_stat: None,
                 seccomp_enabled: true,
@@ -407,7 +410,7 @@ impl JailPreparer for FakePreparer {
             spec_path: root.join("../jail-spec-v1.json"),
             jail_root_inode: None,
             vmm_executable_identity: None,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
         })
     }
     fn destroy(&mut self, _config: &JailerdConfig, _generation: &ValidatedId) -> Result<bool> {
@@ -473,51 +476,15 @@ impl JailPreparer for RevokedFastTemplatePreparer {
 #[derive(Clone, Copy, Default)]
 struct FakeTemplatePreparer;
 
-fn fake_prepared_image(request: &PrepareImageV2Request) -> PreparedImageV2Result {
-    PreparedImageV2Result {
-        image_sha256: request.image_sha256.clone(),
-        virtual_size_bytes: request.virtual_size_bytes,
-        root_disk: template_artifact_source(
-            &request.image_sha256,
-            "root.raw",
-            request.root_disk.sha256.as_ref().expect("root digest"),
-            ArtifactAccess::ReadWrite,
-        ),
-        kernel: template_artifact_source(
-            &request.image_sha256,
-            "kernel",
-            request.kernel.sha256.as_ref().expect("kernel digest"),
-            ArtifactAccess::ReadOnly,
-        ),
-        initrd: request.initrd.as_ref().map(|source| {
-            template_artifact_source(
-                &request.image_sha256,
-                "initrd",
-                source.sha256.as_ref().expect("initrd digest"),
-                ArtifactAccess::ReadOnly,
-            )
-        }),
-        fast_template_store: true,
-    }
-}
-
 impl JailPreparer for FakeTemplatePreparer {
     fn fast_template_store(&mut self, _config: &JailerdConfig) -> bool {
         true
     }
 
-    fn prepare_image_v2(
+    fn validate_prepared_launch_v3(
         &mut self,
         _config: &JailerdConfig,
-        request: &PrepareImageV2Request,
-    ) -> Result<PreparedImageV2Result> {
-        Ok(fake_prepared_image(request))
-    }
-
-    fn validate_prepared_launch(
-        &mut self,
-        _config: &JailerdConfig,
-        request: &LaunchVmV2Request,
+        request: &LaunchVmV3Request,
     ) -> Result<()> {
         request.validate().map(|_| ()).map_err(Into::into)
     }
@@ -539,7 +506,7 @@ impl JailPreparer for FakeTemplatePreparer {
             spec_path: root.join("../jail-spec-v1.json"),
             jail_root_inode: None,
             vmm_executable_identity: None,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
         })
     }
 
@@ -577,18 +544,10 @@ impl JailPreparer for TrackingPreparer {
         true
     }
 
-    fn prepare_image_v2(
+    fn validate_prepared_launch_v3(
         &mut self,
         _config: &JailerdConfig,
-        request: &PrepareImageV2Request,
-    ) -> Result<PreparedImageV2Result> {
-        Ok(fake_prepared_image(request))
-    }
-
-    fn validate_prepared_launch(
-        &mut self,
-        _config: &JailerdConfig,
-        request: &LaunchVmV2Request,
+        request: &LaunchVmV3Request,
     ) -> Result<()> {
         request.validate().map(|_| ()).map_err(Into::into)
     }
@@ -610,7 +569,7 @@ impl JailPreparer for TrackingPreparer {
             spec_path: root.join("../jail-spec-v1.json"),
             jail_root_inode: None,
             vmm_executable_identity: None,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
         })
     }
 
@@ -818,77 +777,48 @@ fn launch(index: u32, cpu_millis: u32) -> VmLaunchRequest {
         guest_ip_cidr: format!("10.77.0.{}/28", index + 2),
         ssh_public_port: Some(22_000_u16 + u16::try_from(index).expect("small fixture")),
         vsock_cid: 3 + index,
+        egress: false,
         artifacts: SourceArtifacts {
             kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
             initrd: None,
             root_disk: source("/trusted/root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: source("/trusted/runtime.raw", ArtifactAccess::ReadOnly),
             recording_disk: source("/trusted/recordings.vfat", ArtifactAccess::ReadWrite),
-            tools_disk: None,
+            wake: None,
         },
     }
 }
 
-fn launch_v2(index: u32, cpu_millis: u32) -> LaunchVmV2Request {
-    let image_sha256 = Sha256Digest::parse("d".repeat(64)).expect("image digest");
+fn launch_v3(index: u32, cpu_millis: u32) -> LaunchVmV3Request {
+    let image_id = Sha256Digest::parse("d".repeat(64)).expect("image digest");
     let artifact_sha256 = Sha256Digest::parse("e".repeat(64)).expect("artifact digest");
     let mut launch = launch(index, cpu_millis);
     launch.artifacts.root_disk = template_artifact_source(
-        &image_sha256,
+        &image_id,
         "root.raw",
         &artifact_sha256,
         ArtifactAccess::ReadWrite,
     );
     launch.artifacts.kernel = template_artifact_source(
-        &image_sha256,
+        &image_id,
         "kernel",
         &artifact_sha256,
         ArtifactAccess::ReadOnly,
     );
-    LaunchVmV2Request {
-        image_sha256,
+    LaunchVmV3Request {
+        image_id,
+        chunk_manifest_sha256: Sha256Digest::parse("f".repeat(64)).expect("manifest digest"),
         virtual_size_bytes: 4 * 1024 * 1024 * 1024,
         launch,
     }
 }
 
-fn prepare_launch_v2<P: JailPreparer>(
-    core: &mut JailerdCore<FakeBackend, P>,
-    index: u32,
-    cpu_millis: u32,
-) -> LaunchVmV2Request {
-    let image_sha256 = Sha256Digest::parse("d".repeat(64)).expect("image digest");
-    let prepare = PrepareImageV2Request {
-        image_sha256,
-        virtual_size_bytes: 4 * 1024 * 1024 * 1024,
-        root_disk: source("/trusted/root.raw", ArtifactAccess::ReadOnly),
-        kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
-        initrd: None,
-        request_class: RequestClass::Foreground,
-    };
-    let prepared = match core.handle(Request::PrepareImageV2(Box::new(prepare))) {
-        Response::PrepareImageV2(prepared) => prepared,
-        other => panic!("unexpected prepared-image response: {other:?}"),
-    };
-    let mut launch = launch(index, cpu_millis);
-    launch.root_disk_size_bytes = prepared.virtual_size_bytes;
-    launch.artifacts.root_disk = prepared.root_disk;
-    launch.artifacts.kernel = prepared.kernel;
-    launch.artifacts.initrd = prepared.initrd;
-    LaunchVmV2Request {
-        image_sha256: prepared.image_sha256,
-        virtual_size_bytes: prepared.virtual_size_bytes,
-        launch,
-    }
-}
-
-fn launch_prepared_v2<P: JailPreparer>(
+fn launch_prepared_v3<P: JailPreparer>(
     core: &mut JailerdCore<FakeBackend, P>,
     index: u32,
     cpu_millis: u32,
 ) -> Response {
-    let request = prepare_launch_v2(core, index, cpu_millis);
-    core.handle(Request::LaunchVmV2(Box::new(request)))
+    core.handle(Request::LaunchVmV3(Box::new(launch_v3(index, cpu_millis))))
 }
 
 fn recovered_record(config: &JailerdConfig) -> VmRecord {
@@ -923,7 +853,7 @@ fn recovered_record(config: &JailerdConfig) -> VmRecord {
         quota,
         quota_attestation: None,
         ssh_forward_active: true,
-        paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+        paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
         cgroup_path: Some(
             format!("/intar.slice/intar-vms.slice/intar-vm-{generation}.service").into(),
         ),
@@ -931,7 +861,7 @@ fn recovered_record(config: &JailerdConfig) -> VmRecord {
         host_boot_id: current_host_boot_id(),
         pid_start_time_ticks: None,
         jail_root_inode: None,
-        cloud_hypervisor_sha256: CLOUD_HYPERVISOR_SHA256.to_owned(),
+        cloud_hypervisor_sha256: TEST_RUNTIME_SHA256.to_owned(),
         request,
     }
 }
@@ -962,4 +892,42 @@ fn source(path: &str, access: ArtifactAccess) -> ArtifactSource {
             .then(|| Sha256Digest::parse("a".repeat(64)).expect("digest")),
         access,
     }
+}
+
+#[test]
+fn the_installer_leaves_configs_this_parser_loads() {
+    let example = include_str!("../deploy/config.example.toml");
+    let config: JailerdConfig = toml::from_str(example).expect("example config");
+    config.validate().expect("valid example");
+    // The retired key now stops jailerd, so install.sh drops it
+    // (deploy/migrate-epoch-config.py; tests/test_epoch_config_migration.py
+    // checks these files are its output for the previous release's example
+    // and for a host config). install.sh then pins the runtime lines.
+    let retired = format!("{example}\nlegacy_template_retention_seconds = 604800\n");
+    assert!(toml::from_str::<JailerdConfig>(&retired).is_err());
+    for migrated in [
+        include_str!("../tests/fixtures/config-migration/jailerd.main.migrated.toml"),
+        include_str!("../tests/fixtures/config-migration/jailerd.host.migrated.toml"),
+    ] {
+        let installed = std::iter::once(
+            "cloud_hypervisor_binary = \"/usr/lib/intar/cloud-hypervisor-v55.0.0\"",
+        )
+        .chain(
+            migrated
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("cloud_hypervisor_binary")),
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+        let config: JailerdConfig = toml::from_str(&installed).expect("migrated config");
+        config.validate().expect("valid migrated config");
+    }
+    let host: JailerdConfig = toml::from_str(include_str!(
+        "../tests/fixtures/config-migration/jailerd.host.migrated.toml"
+    ))
+    .expect("host config");
+    assert_eq!((host.agent_uid, host.agent_gid), (1002, 1003));
+    assert_eq!((host.uid_gid_start, host.uid_gid_end), (300_000, 365_535));
+    assert_eq!(host.template_budget_bytes, 32_212_254_720);
+    assert_eq!(host.vmm_file_size_limit_bytes, Some(137_438_953_472));
 }

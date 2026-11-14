@@ -10,9 +10,8 @@ import { updatePersonalServer, listPersonalServers } from "@/lib/personal-server
 import { createHostEnrollment, claimHostEnrollment, randomHostSecret } from "@/lib/host-enrollment";
 import { ensureFixtureMember, revokeFixtureAccount } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
-import fixture from "@/generated/fixtures/bridge/host-state-report-v2.json";
-import type { HostStateReportV2 } from "@/generated/bridge";
-import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
+import type { HostStateReportV3 } from "@/generated/contracts/bridge-message-v9";
+import { actualVm, stateReport } from "@/control-plane/host-runtime-do/test-fixtures";
 let context: UserContext;
 const now = Date.now();
 let reportSequence = now;
@@ -28,11 +27,11 @@ beforeEach(async () => {
 async function host(id = "host", scope: "personal" | "platform" = "personal") {
   await drizzle(env.DB).insert(agentHosts).values({ id, userId: "owner", name: id, scope, credentialGeneration: 1, connected: true, activeSessionId: "session", lastHeartbeatAt: now });
 }
-function report(id = "host"): HostStateReportV2 {
-  return { ...structuredClone(fixture), observed_at_unix_ms: ++reportSequence, schema_version: HOST_STATE_REPORT_SCHEMA_VERSION, relay_connected: true, host_id: id, vms: [], builds: [] } as HostStateReportV2;
+function report(id = "host"): HostStateReportV3 {
+  return stateReport(id, { observedAt: ++reportSequence, appliedDesiredVersion: 0 }).report;
 }
 function ready(id = "host", snapshot = report(id), sessionId = "session") {
-  return persistHostReport({ d1: env.DB, hostId: id, sessionId, credentialGeneration: 1, report: snapshot, now, requireRunCli: false });
+  return persistHostReport({ d1: env.DB, hostId: id, sessionId, credentialGeneration: 1, report: snapshot, now });
 }
 function remove(hostId = "host", confirmReturnToCloud = true) {
   return retirePersonalHost({ d1: env.DB, hostId, userId: context.userId, confirmReturnToCloud });
@@ -44,7 +43,7 @@ it("changes placement only when a current personal server is Ready", async () =>
   await host();
   expect(await ready("host", report(), "old-session")).toBe(false);
   expect(await placement()).toEqual({ mode: "platform" });
-  const broken = report(); broken.capabilities.supports_kvm = false;
+  const broken = report(); broken.hardware.kvm = false;
   await ready("host", broken);
   expect(await placement()).toEqual({ mode: "platform" });
   await ready();
@@ -106,19 +105,19 @@ it("rejects missing or wrong workload identity before saving a host report", asy
   const db = drizzle(env.DB);
   await db.insert(runtimeExecutions).values({ id: "execution", userId: "owner", hostId: "host", domainKind: "scenario", domainId: "run", generation: 1 });
   await db.insert(runtimeVms).values({ id: "runtime-vm", executionId: "execution", vmId: "web", ordinal: 0,
-    runtimeVmName: "runtime-web", imageKeyJson: {}, imageSha256: "a".repeat(64), cpuMillis: 500, memoryMib: 512, diskMib: 1024 });
+    runtimeVmName: "web-run", imageDigest: `sha256:${"2".repeat(64)}`, specDigest: `sha256:${"3".repeat(64)}`, kinoDigest: `sha256:${"4".repeat(64)}`, cpuMillis: 500, memoryMib: 512, diskMib: 1024 });
   const snapshot = report();
-  const valid = { ...structuredClone(fixture.vms[0]!), owner_user_id: "owner", runtime_execution_id: "execution", generation: 1, run_id: "run", vm_name: "runtime-web" };
+  const valid = { ...actualVm("run", "web", now), owner_user_id: "owner", runtime_execution_id: "execution" };
   for (const invalid of [
     { ...valid, owner_user_id: "other" }, { ...valid, generation: 2 },
     { ...valid, runtime_execution_id: "missing" }, { ...valid, run_id: "other-run" },
   ]) {
-    snapshot.vms = [invalid as HostStateReportV2["vms"][number]];
+    snapshot.vms = [invalid as HostStateReportV3["vms"][number]];
     expect(await ready("host", snapshot)).toBe(false);
     expect(await placement()).toEqual({ mode: "platform" });
     expect(await env.DB.prepare("SELECT host_id FROM host_actual_state").first()).toBeNull();
   }
-  snapshot.vms = [valid as HostStateReportV2["vms"][number]];
+  snapshot.vms = [valid as HostStateReportV3["vms"][number]];
   expect(await ready("host", snapshot)).toBe(true);
 });
 

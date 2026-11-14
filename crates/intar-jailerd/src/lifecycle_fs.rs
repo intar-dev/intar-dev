@@ -145,8 +145,7 @@ pub(super) fn create_exclusive_file(path: &Path, mode: u32) -> Result<()> {
     set_mode(path, mode)
 }
 
-pub(super) fn jail_paths(root: &Path, has_initrd: bool) -> JailPathMap {
-    let has_tools = root.join("disks/tools.ext4").is_file();
+pub(super) fn jail_paths(root: &Path, has_initrd: bool, has_wake: bool) -> JailPathMap {
     JailPathMap {
         host_jail_root: root.to_path_buf(),
         host_api_socket: root.join("run/cloud-hypervisor.sock"),
@@ -156,7 +155,6 @@ pub(super) fn jail_paths(root: &Path, has_initrd: bool) -> JailPathMap {
         host_root_disk: root.join("disks/root.raw"),
         host_runtime_disk: root.join("disks/runtime.raw"),
         host_recording_disk: root.join("disks/recordings.vfat"),
-        host_tools_disk: has_tools.then(|| root.join("disks/tools.ext4")),
         jailed_api_socket: PathBuf::from("/run/cloud-hypervisor.sock"),
         jailed_vsock_socket: PathBuf::from("/run/kino.vsock"),
         jailed_kernel: PathBuf::from("/boot/kernel"),
@@ -164,12 +162,19 @@ pub(super) fn jail_paths(root: &Path, has_initrd: bool) -> JailPathMap {
         jailed_root_disk: PathBuf::from("/disks/root.raw"),
         jailed_runtime_disk: PathBuf::from("/disks/runtime.raw"),
         jailed_recording_disk: PathBuf::from("/disks/recordings.vfat"),
-        jailed_tools_disk: has_tools.then(|| PathBuf::from("/disks/tools.ext4")),
         host_serial_log: root.join("logs/serial.log"),
         host_console_log: root.join("logs/console.log"),
         host_stderr_log: root.join("logs/cloud-hypervisor.stderr.log"),
         jailed_serial_log: PathBuf::from("/logs/serial.log"),
         jailed_console_log: PathBuf::from("/logs/console.log"),
+        wake: has_wake.then(|| JailWakePaths {
+            host_ram: root.join("disks/wake.ram"),
+            host_stub: root.join("boot/wake-stub"),
+            host_cpu_profile: root.join("boot/cpu-profile.json"),
+            jailed_ram: PathBuf::from("/disks/wake.ram"),
+            jailed_stub: PathBuf::from("/boot/wake-stub"),
+            jailed_cpu_profile: PathBuf::from("/boot/cpu-profile.json"),
+        }),
     }
 }
 

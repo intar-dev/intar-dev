@@ -16,13 +16,13 @@ export {
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
-  imageBuildBundles,
-  imageBuildCoordinationLocks,
-  imageBuilds,
   imageRegistryAdmission,
   imageRegistryGcRuns,
   imageRegistryOperationWriters,
   imageRegistryUploadSessions,
+  machineBuilds,
+  registryManifestBlobs,
+  registryManifests,
   runtimeOperationGates,
 } from "./schema/platform";
 export {
@@ -40,20 +40,18 @@ export {
   courseUnitCompletions,
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
-  scenarioRunProbeSnapshots,
   scenarioRuns,
   scenarioRunSessionTranscripts,
   scenarioRunSshKeys,
 } from "./schema/runs";
 export {
-  scenarioCatalogCandidates,
-  scenarioCatalogSnapshots,
+  bundles,
+  organizationEntitlements,
+  scenarioRevisions,
+  scenarios,
   courseCatalogs,
   scenarioSourceCommits,
   scenarioSources,
-  vmScenarioProbes,
-  vmScenarios,
-  vmScenarioVms,
 } from "./schema/scenarios";
 export {
   oauthAccessToken,
@@ -74,9 +72,6 @@ export type { AccessEventType } from "./schema/application";
 export type {
   AgentHostRole,
   HostCpuReservationState,
-  ImageBuildBundleMeta,
-  ImageBuildStatus,
-  ImageBuildTimings,
   ImageRegistryEnforcementMode,
   ImageRegistryGateState,
   ImageRegistryGcRunState,
@@ -89,6 +84,8 @@ export type {
   CourseCatalogSnapshotV2,
   ScenarioRunHintSnapshot,
 } from "./schema/shared";
+export type { MachineBuildState } from "./schema/platform";
+export type { ScenarioRevisionState } from "./schema/scenarios";
 export type {
   HostResourceReservationState,
   RuntimeDomainKind,

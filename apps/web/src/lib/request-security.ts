@@ -21,7 +21,6 @@ type SensitiveRateLimitAction =
   | "support-write"
   | "scenario-start"
   | "ssh-issuance"
-  | "build-retry"
   | "scenario-source"
   | "run-share";
 
@@ -237,7 +236,7 @@ export function sensitiveRateLimitActionFor(
   if (isBetterAuthStartPath(pathname)) return "auth-start";
   if (pathname === "/api/organization-sign-in/start") return "auth-start";
   if (pathname === "/api/account-links/sso/start") return "sso-link";
-  if (/^\/api\/scenarios\/[^/]+\/start$/u.test(pathname)) {
+  if (/^\/api\/scenarios\/[^/]+\/[^/]+\/start$/u.test(pathname)) {
     return "scenario-start";
   }
   if (/^\/api\/scenarios\/runs\/[^/]+\/ssh$/u.test(pathname)) {
@@ -246,13 +245,9 @@ export function sensitiveRateLimitActionFor(
   if (/^\/api\/scenarios\/runs\/[^/]+\/share$/u.test(pathname)) {
     return "run-share";
   }
-  if (/^\/api\/admin\/builds\/[^/]+\/retry$/u.test(pathname)) {
-    return "build-retry";
-  }
   if (
     /^\/api\/organizations\/[^/]+\/scenario-source$/u.test(pathname) ||
-    pathname === "/api/admin/scenario-source" ||
-    pathname === "/api/admin/image-promotion"
+    pathname === "/api/admin/scenario-source"
   ) {
     return "scenario-source";
   }
