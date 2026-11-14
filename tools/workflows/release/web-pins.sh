@@ -23,11 +23,22 @@ published() {
     return 1
   }
 }
+# A tag is pinned only when its source speaks the contract HEAD's does: a
+# release from before a contract change stays unpinned until its successor is
+# published. Reads one constant from <rev>:<path>; empty when either is absent.
+contract_const() {
+  git show "$1:$2" 2>/dev/null | sed -n "$3" || true
+}
+compiler_sed='s/^pub const SOURCE_COMPILER_VERSION_V2: &str = "\([^"]*\)";$/\1/p'
+guest_sed='s/^pub const GUEST_CONTRACT: u32 = \([1-9][0-9]*\);$/\1/p'
 changes=()
 
 version="$(manifest_version crates/intar-image-cli/Cargo.toml)"
 tag="image-cli/v${version}"
-if published "${tag}"; then
+compiler="$(contract_const HEAD crates/intar-contracts/src/source.rs "${compiler_sed}")"
+if [ -z "${compiler}" ] || [ "$(contract_const "${tag}" crates/intar-contracts/src/source.rs "${compiler_sed}")" != "${compiler}" ]; then
+  echo "${tag} does not compile ${compiler:-the current source format}; the website keeps its compiler pin."
+elif published "${tag}"; then
   sums="$(mktemp -d)/checksums.txt"
   gh release download "${tag}" --pattern "intar-image-cli_${version}_checksums.txt" --output "${sums}"
   VERSION="${version}" SUMS="${sums}" python3 - <<'PY'
@@ -78,16 +89,16 @@ fi
 # the one the tag's source was built for.
 kino_version="$(manifest_version crates/kino/Cargo.toml)"
 kino_tag="kino/v${kino_version}"
-if published "${kino_tag}"; then
+contract="$(contract_const HEAD crates/intar-contracts/src/guest.rs "${guest_sed}")"
+if [ -z "${contract}" ] || [ "$(contract_const "${kino_tag}" crates/intar-contracts/src/guest.rs "${guest_sed}")" != "${contract}" ]; then
+  echo "${kino_tag} is not built for guest contract ${contract:-of HEAD}; the website keeps its Kino pin."
+elif published "${kino_tag}"; then
   kino_dir="$(mktemp -d)"
   gh release download "${kino_tag}" --dir "${kino_dir}" \
     --pattern "kino_${kino_version}_linux_amd64.tar.gz" \
     --pattern "kino_${kino_version}_checksums.txt"
   (cd "${kino_dir}" && sha256sum --check --strict --ignore-missing "kino_${kino_version}_checksums.txt")
   tar -xzf "${kino_dir}/kino_${kino_version}_linux_amd64.tar.gz" -C "${kino_dir}" ./kino
-  contract="$(git show "${kino_tag}:crates/intar-contracts/src/guest.rs" \
-    | sed -n 's/^pub const GUEST_CONTRACT: u32 = \([1-9][0-9]*\);$/\1/p')"
-  [ -n "${contract}" ] || { echo "${kino_tag} names no guest contract" >&2; exit 1; }
   digest="$(bun tools/deploy/kino-artifact.ts build --binary "${kino_dir}/kino" \
     --version "${kino_version}" --guest-contract "${contract}" --out "${kino_dir}/artifact" | jq -er .digest)"
   bun tools/deploy/kino-artifact.ts pin --file tools/deploy/kino-pin.json \
