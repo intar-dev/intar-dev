@@ -13,9 +13,7 @@
 #   * the collector's own status says what D1 upload admission enforcement is.
 # A hold or release that finds the lane's own maintenance version serving takes
 # the recovery path below instead of calling the fenced gate.
-# An unreadable answer of either kind stops the deployment. Nothing here reads
-# LEARNER_RUN_CLI_V1_ENFORCEMENT: that variable controls the learner-run CLI
-# rollout and has nothing to do with registry admission.
+# An unreadable answer of either kind stops the deployment.
 set -euo pipefail
 
 if [ "$#" -ne 3 ]; then

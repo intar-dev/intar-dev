@@ -17,9 +17,6 @@
     // Planned control-plane maintenance generates a temporary maintenance-on
     // version; committed steady state is open.
     "CONTROL_PLANE_MAINTENANCE": "off",
-    // Keep host capability selection open while CLI-ready images and agents
-    // roll out. Set this to "on" only in the final rollout deployment.
-    "LEARNER_RUN_CLI_V1_ENFORCEMENT": "off",
     "AGENT_JWT_ISSUER": "intar-agent-bridge",
     "AGENT_JWT_AUDIENCE": "agent-connect",
     "STARGATE_ROUTE_TTL_SECONDS": "14400",
@@ -29,9 +26,6 @@
     // The GitHub App client fails closed while this or the
     // GITHUB_APP_PRIVATE_KEY secret is empty.
     "GITHUB_APP_CLIENT_ID": "Iv23lifjtuTYzowesJsG",
-    // sha256 of the released base-images.hcl. It feeds the platform compile
-    // digest; while it is empty no builder takes a `git-` image build.
-    "PLATFORM_BASE_IMAGES_SHA256": "f23d63aa99d7dc99b4acd7d6063e0b606a4d94c778b433cd3ecf5d46184162c6",
     // The App's URL name, for the scenario source card's install link.
     "GITHUB_APP_SLUG": "intar-dev-image-builder",
     // The only GitHub repository id the public scope may bind. Empty: none.

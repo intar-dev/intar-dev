@@ -55,7 +55,6 @@ interface RunOptions {
   deploySucceeds?: boolean;
   liveChildMode?: string;
   /** Present only when a test drives the unrelated learner-run CLI flag. */
-  parentLearnerFlag?: string;
   admissionEnforcement?: string | null;
   admissionSessionRequired?: boolean;
   admissionOk?: boolean;
@@ -87,11 +86,7 @@ function fakeBunx(): string {
     "    else",
     "        b='[]'",
     "    fi",
-    '    extra="[]"',
-    '    if [ -n "$MOCK_PARENT_LEARNER_FLAG" ]; then',
-    '      extra="[{\\"type\\":\\"plain_text\\",\\"name\\":\\"LEARNER_RUN_CLI_V1_ENFORCEMENT\\",\\"text\\":\\"$MOCK_PARENT_LEARNER_FLAG\\"}]"',
-    '    fi',
-    '    jq -cn --arg id "$3" --arg tag "$MOCK_PARENT_TAG" --argjson b "$b" --argjson extra "$extra" \'{id:$id,annotations:{"workers/tag":$tag},resources:{bindings:($b + $extra)}}\'',
+    '    jq -cn --arg id "$3" --arg tag "$MOCK_PARENT_TAG" --argjson b "$b" \'{id:$id,annotations:{"workers/tag":$tag},resources:{bindings:$b}}\'',
     "    exit 0",
     "  fi",
     '  if [ "$3" = "$DEPLOYED_VERSION_ID" ]; then mode="$MOCK_DEPLOYED_MODE"; else mode="$MOCK_LIVE_CHILD_MODE"; fi',
@@ -306,7 +301,6 @@ function runDeployment(options: RunOptions = {}) {
         MOCK_PARENT_TAG:
           options.parentTag ?? "web-" + sourceSha.slice(0, 12) + "-standard",
         MOCK_PARENT_BINDING: String(options.parentBinding ?? true),
-        MOCK_PARENT_LEARNER_FLAG: options.parentLearnerFlag ?? "",
         MOCK_DEPLOYED_BUCKET: options.deployedBucket ?? bucketName,
         MOCK_VERSION_TAG:
           options.versionTag ??
@@ -623,10 +617,9 @@ describe("image registry cleanup deployment", () => {
     }
   });
 
-  it("deploys delete mode when the learner-run CLI flag is off and D1 admission enforces", () => {
-    // The learner-run CLI rollout variable is unrelated to registry admission.
+  it("deploys delete mode when D1 admission enforces", () => {
     // Only the shared D1 admission row decides whether a delete pass may run.
-    const run = runDeployment({ mode: "delete", parentLearnerFlag: "off" });
+    const run = runDeployment({ mode: "delete" });
     try {
       expect(run.result.status, run.result.stderr).toBe(0);
       expect(run.evidence).toMatchObject({
@@ -640,10 +633,9 @@ describe("image registry cleanup deployment", () => {
     }
   }, DEPLOY_LIVENESS_TIMEOUT_MS);
 
-  it("refuses delete mode when the learner-run CLI flag is on but D1 admission is report_only", () => {
+  it("refuses delete mode when D1 admission is report_only", () => {
     const run = runDeployment({
       mode: "delete",
-      parentLearnerFlag: "on",
       admissionEnforcement: "report_only",
       admissionSessionRequired: false,
     });
@@ -660,8 +652,7 @@ describe("image registry cleanup deployment", () => {
     }
   });
 
-  it("never reads the learner-run CLI rollout variable", () => {
-    expect(script).not.toContain("LEARNER_RUN_CLI_V1_ENFORCEMENT");
+  it("reads the D1 admission enforcement", () => {
     expect(script).toContain("image_registry_admission.enforcement");
   });
 
