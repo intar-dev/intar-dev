@@ -757,10 +757,6 @@ pub(super) async fn activate_kino_ready_socket(path: &Path, jail_uid: u32) -> Re
 }
 
 /// Past the ready commit: running with a steady, attested CPU quota.
-#[cfg_attr(
-    not(target_os = "linux"),
-    allow(dead_code, reason = "guest reports arrive on Linux only")
-)]
 pub(super) fn ready_committed(vm: &VmStatusResponse) -> bool {
     vm.state == VmLifecycleState::Running
         && vm.details.as_ref().is_some_and(|details| {
@@ -789,6 +785,17 @@ pub(super) fn newest_report<'a>(
             && kept.received_at_ms >= ready.received_at_ms
     })
     .unwrap_or(ready)
+}
+
+/// The report whose lab the ready commit writes, if any. A VM recovered as
+/// already committed persisted every report since through the committed
+/// path, so the waiter's older `ready` must not overwrite it.
+pub(super) fn ready_lab<'a>(
+    already_committed: bool,
+    ready: &'a GuestUpdate,
+    kept: Option<&'a GuestUpdate>,
+) -> Option<&'a GuestUpdate> {
+    (!already_committed).then(|| newest_report(ready, kept))
 }
 
 pub(super) fn lab_row(update: &GuestUpdate) -> Result<VmLabRow> {

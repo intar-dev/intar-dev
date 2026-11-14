@@ -28,6 +28,7 @@ pub(super) async fn remove_matching_tracked_vm_state(
         remove_matching_vm_state(&mut states, expected)
     };
     if removed {
+        forget_kept_report(&inner.uncommitted_reports, &expected.name);
         publish_inventory_update(inner);
     }
     removed
@@ -138,6 +139,17 @@ pub(super) async fn local_cleanup_tracked_vm(
 
     info!(vm = vm.name, "cleaned up tracked vm");
     Ok(())
+}
+
+/// After the VM state is gone no report of it is kept again (keeping needs
+/// the current state), so this removal is the entry's last.
+pub(super) fn forget_kept_report(
+    reports: &std::sync::Mutex<BTreeMap<String, GuestUpdate>>,
+    name: &str,
+) {
+    if let Ok(mut reports) = reports.lock() {
+        reports.remove(name);
+    }
 }
 
 pub(super) fn is_create_in_progress_state(state: VmLifecycleState) -> bool {

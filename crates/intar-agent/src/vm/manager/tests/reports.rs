@@ -190,3 +190,34 @@ fn a_report_after_the_ready_commit_takes_the_committed_path() {
     // After it, the report is persisted and projected on its own, not kept.
     assert!(ready_committed(&vm));
 }
+
+#[test]
+fn a_recovered_committed_vm_keeps_the_lab_its_reports_persisted() {
+    let ready = report_at(10, "generation-1", CheckStatus::Pending);
+    let newer = report_at(12, "generation-1", CheckStatus::Fail);
+    // A fresh launch writes the newest lab.
+    assert_eq!(
+        ready_lab(false, &ready, Some(&newer)).map(|update| &update.lab),
+        Some(&newer.lab)
+    );
+    // A VM restored as running already persisted its reports: no lab.
+    assert!(ready_lab(true, &ready, Some(&newer)).is_none());
+    assert!(ready_lab(true, &ready, None).is_none());
+}
+
+#[test]
+fn a_cleaned_up_vm_leaves_no_kept_report() {
+    let reports = std::sync::Mutex::new(BTreeMap::from([
+        (
+            "web".to_owned(),
+            report_at(1, "generation-1", CheckStatus::Pending),
+        ),
+        (
+            "db".to_owned(),
+            report_at(1, "generation-1", CheckStatus::Pending),
+        ),
+    ]));
+    forget_kept_report(&reports, "web");
+    let left = reports.lock().expect("lock");
+    assert_eq!(left.keys().collect::<Vec<_>>(), ["db"]);
+}

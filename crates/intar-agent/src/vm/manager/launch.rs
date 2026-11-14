@@ -492,10 +492,12 @@ pub(super) async fn commit_ready_vm(
         .lock()
         .ok()
         .and_then(|mut reports| reports.remove(name));
-    let lab_row = lab_row(newest_report(ready, kept.as_ref()))?;
     let current = states
         .get_mut(name)
         .ok_or_else(|| anyhow::anyhow!("VM state disappeared during ready commit"))?;
+    let lab_row = ready_lab(ready_committed(current), ready, kept.as_ref())
+        .map(lab_row)
+        .transpose()?;
     let mut committed = current.clone();
     let details = committed
         .details
@@ -547,11 +549,18 @@ pub(super) async fn commit_ready_vm(
         );
     }
 
-    inner
-        .db
-        .upsert_vm_and_lab(committed.to_db_row(), lab_row)
-        .await
-        .context("atomically persist running VM and its lab")?;
+    match lab_row {
+        Some(lab_row) => inner
+            .db
+            .upsert_vm_and_lab(committed.to_db_row(), lab_row)
+            .await
+            .context("atomically persist running VM and its lab")?,
+        None => inner
+            .db
+            .upsert_vm(committed.to_db_row())
+            .await
+            .context("persist the recovered running VM")?,
+    }
     *current = committed;
     drop(states);
     // Running remains internal until the generation-fenced terminal state is
