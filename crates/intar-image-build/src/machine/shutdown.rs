@@ -33,8 +33,6 @@ pub(crate) fn allocate_ssh_host_port() -> Result<u16> {
 
 pub struct DirectQemuShutdownInput<'a> {
     pub qmp_socket_path: &'a Path,
-    pub serial_log_path: &'a Path,
-    pub build_log_path: &'a Path,
     pub timeout_seconds: u64,
 }
 
@@ -64,9 +62,7 @@ pub fn acknowledged_qmp_shutdown_with_cancel(
     }
     if let Some(status) = poll_qemu_or_cleanup(qemu)? {
         bail!(
-            "QEMU exited with status {status} before the host requested acknowledged QMP powerdown; serial log: {}; build log: {}",
-            input.serial_log_path.display(),
-            input.build_log_path.display()
+            "QEMU exited with status {status} before the host requested acknowledged QMP powerdown; see the serial and build logs",
         );
     }
 
@@ -76,9 +72,7 @@ pub fn acknowledged_qmp_shutdown_with_cancel(
         return Err(qemu_failure_after_cleanup(
             qemu,
             anyhow!(
-                "failed to complete QMP guest powerdown handshake after provisioning; serial log: {}; build log: {}: {error:#}",
-                input.serial_log_path.display(),
-                input.build_log_path.display()
+                "failed to complete QMP guest powerdown handshake after provisioning: {error:#}; see the serial and build logs",
             ),
         ));
     }
@@ -90,7 +84,7 @@ pub fn acknowledged_qmp_shutdown_with_cancel(
             ));
         }
         if let Some(status) = poll_qemu_or_cleanup(qemu)? {
-            return qemu_status_to_result(status, input);
+            return qemu_status_to_result(status);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -100,28 +94,22 @@ pub fn acknowledged_qmp_shutdown_with_cancel(
     }
 
     if let Some(status) = poll_qemu_or_cleanup(qemu)? {
-        return qemu_status_to_result(status, input);
+        return qemu_status_to_result(status);
     }
 
     Err(qemu_failure_after_cleanup(
         qemu,
         anyhow!(
-            "timed out waiting {qemu_exit_timeout_seconds}s for QEMU to exit after a guest-originated QMP shutdown event; serial log: {}; build log: {}",
-            input.serial_log_path.display(),
-            input.build_log_path.display(),
+            "timed out waiting {qemu_exit_timeout_seconds}s for QEMU to exit after a guest-originated QMP shutdown event; see the serial and build logs",
         ),
     ))
 }
 
-fn qemu_status_to_result(status: ExitStatus, input: &DirectQemuShutdownInput<'_>) -> Result<()> {
+fn qemu_status_to_result(status: ExitStatus) -> Result<()> {
     if status.success() {
         return Ok(());
     }
-    bail!(
-        "QEMU exited with status {status}; serial log: {}; build log: {}",
-        input.serial_log_path.display(),
-        input.build_log_path.display()
-    )
+    bail!("QEMU exited with status {status}; see the serial and build logs",)
 }
 
 fn request_qemu_powerdown(

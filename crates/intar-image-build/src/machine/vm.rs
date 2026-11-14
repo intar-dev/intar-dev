@@ -226,8 +226,6 @@ pub(crate) fn build_disk(
         &mut guest.child,
         &DirectQemuShutdownInput {
             qmp_socket_path: &vm.qmp,
-            serial_log_path: &vm.files.serial,
-            build_log_path: &vm.log,
             timeout_seconds: config.qemu_exit_timeout_seconds,
         },
     )?;
@@ -493,10 +491,7 @@ rm -f {UPLOAD_PATH}
         let mut last_error = None;
         loop {
             if let Some(status) = guest.child.try_wait()? {
-                bail!(
-                    "the build VM exited with {status}; serial log: {}",
-                    self.files.serial.display()
-                );
+                bail!("the build VM exited with {status}; see the serial log");
             }
             let Ok(remaining) = remaining_until(self.deadline, "SSH") else {
                 break;
@@ -521,10 +516,7 @@ rm -f {UPLOAD_PATH}
             }
             std::thread::sleep(SSH_POLL_INTERVAL);
         }
-        bail!(
-            "no SSH to the build VM: {last_error:?}; serial log: {}",
-            self.files.serial.display()
-        )
+        bail!("no SSH to the build VM: {last_error:?}; see the serial log")
     }
 
     /// Pause, save memory and freeze the disk, publish both, and continue.

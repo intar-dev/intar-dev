@@ -13,7 +13,8 @@ use tokio::sync::mpsc;
 
 use super::{
     LOG_UPLOAD_ERROR_BYTES, LOG_UPLOAD_TAIL_BYTES, WAKE_SERIAL_UPLOAD_TAIL_BYTES, attempt_dirs,
-    checked_target, decode_bundle, is_current, publish, push_verified, read_log_tail,
+    checked_target, decode_bundle, failure_message, is_current, publish, push_verified,
+    read_log_tail,
 };
 use crate::db::{self, BuilderDb};
 
@@ -209,4 +210,16 @@ fn the_wake_serial_log_sits_beside_the_build_log_and_every_tail_fits_one_upload(
         + LOG_UPLOAD_ERROR_BYTES as u64
         + 4096;
     assert!(total < 9 * 1024 * 1024);
+}
+
+#[test]
+fn a_failure_names_the_attempt_its_logs_were_uploaded_with_not_a_path() {
+    let error =
+        anyhow::anyhow!("the wake VM failed (exit status: 1)").context("build the wake image");
+    let message = failure_message(&error, 2);
+    assert_eq!(
+        message,
+        "build the wake image: the wake VM failed (exit status: 1) (the logs are uploaded with attempt 2)"
+    );
+    assert!(!message.contains('/'));
 }

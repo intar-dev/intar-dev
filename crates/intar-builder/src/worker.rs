@@ -98,7 +98,7 @@ async fn run_build(
             None
         }
         Err(error) => {
-            let message = format!("{error:#}");
+            let message = failure_message(&error, build.attempt);
             warn!(build_id = %build.build_id, error = %message, "build failed");
             report.error = Some(message.clone());
             Some(message)
@@ -321,6 +321,12 @@ pub(crate) fn is_current(state_db: &Path, build: &DesiredBuildV2) -> bool {
 }
 
 /// PUT the end of the build, serial and wake serial logs, best effort.
+/// A build's error text. Its files go when the attempt ends, so it names no
+/// path: the logs are in the upload of this attempt.
+fn failure_message(error: &anyhow::Error, attempt: u32) -> String {
+    format!("{error:#} (the logs are uploaded with attempt {attempt})")
+}
+
 async fn upload_log(
     cfg: &BuilderConfig,
     build: &DesiredBuildV2,

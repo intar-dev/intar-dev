@@ -26,8 +26,6 @@ struct Rendered {
 struct Paths {
     work_root: PathBuf,
     qmp_socket_path: PathBuf,
-    serial_log_path: PathBuf,
-    build_log_path: PathBuf,
 }
 
 fn render_test_direct_build(directory: &TempDir, config: QemuBuildConfig) -> Rendered {
@@ -43,8 +41,6 @@ fn render_test_direct_build_in_work_root(
     Rendered {
         paths: Paths {
             qmp_socket_path: work_root.join("qmp.sock"),
-            serial_log_path: work_root.join("serial.log"),
-            build_log_path: work_root.join("build.log"),
             work_root,
         },
         config,
@@ -56,8 +52,6 @@ fn wait_for_qemu_shutdown(qemu: &mut Child, rendered: &Rendered) -> Result<()> {
         qemu,
         &DirectQemuShutdownInput {
             qmp_socket_path: &rendered.paths.qmp_socket_path,
-            serial_log_path: &rendered.paths.serial_log_path,
-            build_log_path: &rendered.paths.build_log_path,
             timeout_seconds: rendered.config.qemu_exit_timeout_seconds,
         },
     )
@@ -89,8 +83,6 @@ fn cancellation_kills_and_reaps_qemu_before_returning() {
         &mut qemu,
         &DirectQemuShutdownInput {
             qmp_socket_path: &directory.path().join("missing-qmp.sock"),
-            serial_log_path: &directory.path().join("serial.log"),
-            build_log_path: &directory.path().join("build.log"),
             timeout_seconds: 300,
         },
         || true,

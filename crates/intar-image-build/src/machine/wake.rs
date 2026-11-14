@@ -482,10 +482,7 @@ impl Steps<'_> {
                 let pid = rustix::process::Pid::from_child(&child);
                 let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
                 let _ = child.wait();
-                bail!(
-                    "the wake VM did not finish in time; see {}",
-                    self.log.display()
-                );
+                bail!("the wake VM did not finish in time; see the build and wake serial logs");
             }
             std::thread::sleep(Duration::from_millis(200));
         };
@@ -494,9 +491,7 @@ impl Steps<'_> {
         }
         ensure!(
             status.success(),
-            "the wake VM failed ({status}); see {} and {}",
-            self.log.display(),
-            job.serial
+            "the wake VM failed ({status}); see the build and wake serial logs"
         );
         let result: ChildResult = serde_json::from_slice(&fs::read(&job.result)?)
             .context("the wake VM left no result")?;
