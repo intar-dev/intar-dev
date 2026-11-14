@@ -248,7 +248,7 @@ function runDeployment(options: RunOptions = {}) {
           enforcement: options.admissionEnforcement ?? "enforce",
           sessionRequired: options.admissionSessionRequired ?? true,
         },
-        inventory: { ok: true, status: "report-only", candidates: 5, scanned_objects: 42 },
+        inventory: { ok: true, status: "report-only", candidates: 5, listed_objects: 42 },
       }),
     );
   }
