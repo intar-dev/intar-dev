@@ -185,6 +185,7 @@ const ROOTS: Array<[string, () => Promise<{ keep: string[]; pins?: string }>]> =
     const [current, previous] = [await kino(), await kino()];
     return { keep: [...await closure(current), ...await closure(previous)], pins: JSON.stringify({ 3: { current, previous } }) };
   }],
+  ["an old Kino artifact that no pin names", async () => ({ keep: await closure(await kino()) })],
 ];
 
 describe("the OCI sweep", () => {
@@ -347,6 +348,34 @@ describe("the OCI sweep", () => {
     expect(report.unrecognizedObjects).toBe(1);
     expect(report.candidateSample).toEqual([]);
     expect(await present([...outside, malformed])).toBe(true);
+  });
+
+  it("plans the whole store over successive windows, each key once, and writes nothing", async () => {
+    const keys = (await Promise.all([image(), image(), image()].map(async (digest) => closure(await digest)))).flat();
+    const options = { listPages: 1, listPageLimit: 4 };
+
+    const seen: string[] = [];
+    let listed = 0;
+    let startAfter: string | null = "";
+    let windows = 0;
+    while (startAfter !== null && windows < 20) {
+      const report = await runOciSweep(env, { mode: "report-only", nowMs: later(), kinoPinsJson: "", startAfter }, options);
+      expect(report.faults).toEqual([]);
+      expect(report.listedObjects).toBeLessThanOrEqual(4);
+      listed += report.listedObjects;
+      seen.push(...report.candidateSample);
+      startAfter = report.nextStartAfter;
+      windows += 1;
+    }
+
+    expect(windows).toBe(Math.ceil(keys.length / 4));
+    expect(listed).toBe(keys.length);
+    expect(seen.length).toBe(keys.length);
+    expect([...seen].sort()).toEqual([...keys].sort());
+    expect(await present(keys)).toBe(true);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM image_registry_gc_runs").first("n")).toBe(0);
+    const bad = await runOciSweep(env, { mode: "report-only", nowMs: later(), kinoPinsJson: "", startAfter: "oci/../x" });
+    expect(bad.faults.map((fault) => fault.code)).toEqual(["invalid_start_after"]);
   });
 
   it("finishes over resumed passes without deleting twice or skipping", async () => {

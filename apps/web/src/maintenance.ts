@@ -132,6 +132,7 @@ export async function handleRegistryCleanupGateRequest(
     reason?: unknown;
     wait_ms?: unknown;
     plan_only?: unknown;
+    oci_start_after?: unknown;
   } | null;
   const suppliedSecret = typeof body?.secret === "string" ? body.secret : "";
   // Authorization settles before any child access, so an unauthenticated caller
@@ -170,7 +171,10 @@ export async function handleRegistryCleanupGateRequest(
       });
     }
     if (action === "plan" || action === "run") {
-      const input: CleanupRunRequest = { planOnly: body?.plan_only === true };
+      const input: CleanupRunRequest = {
+        planOnly: body?.plan_only === true,
+        ...(typeof body?.oci_start_after === "string" ? { ociStartAfter: body.oci_start_after } : {}),
+      };
       return registryCleanupGateResponse(200, {
         action,
         result:

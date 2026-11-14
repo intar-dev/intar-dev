@@ -1,6 +1,7 @@
 import { HEX_RE, DIGEST_RE, OCI_PREFIX } from "@/control-plane/image-registry/push";
-import { ACTIVE_RUNTIME_EXECUTION_STATES } from "@/db/schema";
+import { KINO_ARTIFACT_TYPE } from "@/generated/constants";
 import { HOST_DESIRED_STATE_SCHEMA_VERSION_V3 } from "@/lib/desired-state-store";
+import { ACTIVE_EXECUTIONS, KEPT_REVISIONS_CTE } from "@/lib/kept-revisions";
 import {
   acquireRegistrySweep,
   assertRegistrySweepDeletable,
@@ -24,7 +25,7 @@ import {
  *   - every bridge 9 desired state: VM images, specs and Kino, cached images,
  *     the Kino pin
  *   - unexpired personal image preparations
- *   - every Kino pin, current and previous
+ *   - every Kino pin, current and previous, and every Kino artifact
  *   - manifests indexed within the age guard, so a push that has not posted
  *     its result yet keeps its blobs
  * A manifest root is closed over `registry_manifest_blobs` (config and
@@ -44,8 +45,6 @@ import {
 export const OCI_SWEEP_OWNER = "oci-registry-sweep";
 /** Nothing younger is deleted: a blob lands before its manifest, a spec before its revision. */
 export const OCI_SWEEP_AGE_GUARD_MS = 24 * 60 * 60 * 1000;
-/** How many verified revisions of a scenario stay rollback targets. */
-export const KEPT_VERIFIED_REVISIONS = 3;
 
 export interface OciSweepOptions {
   /** R2 list pages per pass. */
@@ -115,32 +114,20 @@ export interface OciSweepInput {
   nowMs: number;
   /** `KINO_PINS_JSON` of the serving control plane; null when it could not be read. */
   kinoPinsJson: string | null;
+  /**
+   * Report-only: the hex to plan after, "" for the start. Absent, a plan
+   * covers the window the next delete pass would, from the saved cursor.
+   */
+  startAfter?: string;
 }
 
 /** `sha256:` and 64 lowercase hex; D1 refuses a GLOB pattern that spells out 64 classes. */
 const validDigest = (column: string) =>
   `(typeof(${column}) = 'text' AND length(${column}) = 71 AND substr(${column}, 1, 7) = 'sha256:'
     AND substr(${column}, 8) NOT GLOB '*[^0-9a-f]*')`;
-const ACTIVE_EXECUTIONS = ACTIVE_RUNTIME_EXECUTION_STATES.map((state) => `'${state}'`).join(", ");
-
-/** Revisions that may still be used. Shared by the mark and the revision GC. */
-const KEPT_REVISIONS_SQL = `kept_revisions AS (
-  SELECT revision.scenario_id, revision.rev, revision.doc_json
-    FROM scenario_revisions revision
-    JOIN scenarios scenario ON scenario.id = revision.scenario_id
-   WHERE revision.rev = scenario.live_rev OR revision.rev = scenario.candidate_rev
-      OR revision.state = 'building'
-      OR (revision.state = 'verified' AND (SELECT COUNT(*) FROM scenario_revisions newer
-            WHERE newer.scenario_id = revision.scenario_id AND newer.state = 'verified'
-              AND (newer.created_at > revision.created_at
-                OR (newer.created_at = revision.created_at AND newer.rev > revision.rev))) < ${KEPT_VERIFIED_REVISIONS})
-      OR EXISTS (SELECT 1 FROM scenario_runs run
-            WHERE run.scenario_id = revision.scenario_id AND run.scenario_rev = revision.rev
-              AND (run.active_key IS NOT NULL OR EXISTS (SELECT 1 FROM runtime_executions execution
-                WHERE execution.id = run.runtime_execution_id AND execution.state IN (${ACTIVE_EXECUTIONS})))))`;
 
 /** `roots(kind, digest, source)`. ?1 is the age-guard cutoff, ?2 the Kino pins as a JSON array. */
-const ROOTS_SQL = `WITH ${KEPT_REVISIONS_SQL},
+const ROOTS_SQL = `WITH ${KEPT_REVISIONS_CTE},
 machines AS (
   SELECT revision.scenario_id || '@' || revision.rev AS source, machine.value AS m
     FROM kept_revisions revision, json_each(revision.doc_json, '$.machines') machine),
@@ -177,6 +164,9 @@ desired_roots(kind, digest, source) AS (
   UNION ALL SELECT 'manifest', json_extract(doc_json, '$.kino_pin'), 'desired ' || host_id FROM desired),
 pin_roots(kind, digest, source) AS (
   SELECT 'manifest', pin.value, 'kino pin' FROM json_each(?2) pin
+  -- Every Kino artifact: an artifact can be pinned long after its push, and a
+  -- re-push keeps its first created_at. They are few and small.
+  UNION ALL SELECT 'manifest', digest, 'kino artifact' FROM registry_manifests WHERE artifact_type = '${KINO_ARTIFACT_TYPE}'
   UNION ALL SELECT 'manifest', digest, 'young manifest' FROM registry_manifests WHERE created_at >= ?1),
 -- D1 allows five terms per compound SELECT, hence the four parts.
 roots(kind, digest, source) AS (
@@ -356,7 +346,15 @@ async function plan(
   }
   if (report.faults.length) return null;
 
-  report.startAfter = await readCursor(env);
+  if (input.mode !== "delete" && input.startAfter !== undefined) {
+    if (input.startAfter !== "" && !HEX_RE.test(input.startAfter)) {
+      report.faults.push({ code: "invalid_start_after", detail: "a plan starts after 64 lowercase hex or from the start" });
+      return null;
+    }
+    report.startAfter = input.startAfter || null;
+  } else {
+    report.startAfter = await readCursor(env);
+  }
   const listing = await listWindow(env.VM_IMAGE_REGISTRY_BUCKET, report.startAfter, settings);
   if (listing.truncated) {
     report.faults.push({ code: "listing_truncated", detail: "the bucket listing stopped before its last page" });
@@ -451,7 +449,7 @@ async function deleteBatch(
 }
 
 async function countUnkeptRevisions(env: OciSweepEnv, nowMs: number, limit: number): Promise<number> {
-  const row = await env.DB.prepare(`WITH ${KEPT_REVISIONS_SQL} SELECT COUNT(*) AS count FROM (${UNKEPT_REVISIONS_SQL} LIMIT ?2)`)
+  const row = await env.DB.prepare(`WITH ${KEPT_REVISIONS_CTE} SELECT COUNT(*) AS count FROM (${UNKEPT_REVISIONS_SQL} LIMIT ?2)`)
     .bind(nowMs - OCI_SWEEP_AGE_GUARD_MS, limit).first<{ count: number }>();
   return row?.count ?? 0;
 }
@@ -459,7 +457,7 @@ async function countUnkeptRevisions(env: OciSweepEnv, nowMs: number, limit: numb
 /** One statement, so a revision a pointer moves to in the meantime is never removed. */
 async function deleteUnkeptRevisions(env: OciSweepEnv, nowMs: number, limit: number): Promise<number> {
   const { results } = await env.DB.prepare(
-    `WITH ${KEPT_REVISIONS_SQL} DELETE FROM scenario_revisions WHERE rowid IN (${UNKEPT_REVISIONS_SQL} LIMIT ?2) RETURNING rev`,
+    `WITH ${KEPT_REVISIONS_CTE} DELETE FROM scenario_revisions WHERE rowid IN (${UNKEPT_REVISIONS_SQL} LIMIT ?2) RETURNING rev`,
   ).bind(nowMs - OCI_SWEEP_AGE_GUARD_MS, limit).all();
   return results.length;
 }

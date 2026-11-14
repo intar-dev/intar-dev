@@ -223,7 +223,7 @@ export async function awaitRegistryIdle(
  */
 export async function runCleanup(
   env: CleanupEnv,
-  request: { source: "scheduled" | "rpc"; planOnly?: boolean },
+  request: { source: "scheduled" | "rpc"; planOnly?: boolean; ociStartAfter?: string },
 ): Promise<CleanupEnvelope> {
   const legacy = await runLegacyCleanup(env, request);
   // The OCI store's sweep runs after the old registry's, behind the same fence
@@ -241,6 +241,7 @@ export async function runCleanup(
       mode: request.planOnly === true || mode.mode !== "delete" ? "report-only" : "delete",
       nowMs: Date.now(),
       kinoPinsJson: maintenance.kinoPinsJson,
+      ...(request.ociStartAfter === undefined ? {} : { startAfter: request.ociStartAfter }),
     });
   } catch (error) {
     // The sweep reports its own failures; a throw here deleted nothing.

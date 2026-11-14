@@ -52,6 +52,12 @@ export interface CleanupEnvelope {
 export interface CleanupRunRequest {
   /** List the candidates and stop, even in delete mode. */
   planOnly?: boolean;
+  /**
+   * A plan of the OCI store starts after this hex, "" for the start; its
+   * report's `nextStartAfter` names the next window, null after the last.
+   * Absent, it plans the window the next delete pass would.
+   */
+  ociStartAfter?: string;
 }
 
 export interface CleanupPauseRequest {
