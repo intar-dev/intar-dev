@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 pub const RUNTIME_DISK_LABEL: [u8; 11] = *b"INTARRUN   ";
 pub const RECORDING_DISK_LABEL: [u8; 11] = *b"INTARREC   ";
-pub const TOOLS_DISK_LABEL: &str = "INTARTOOLS";
 pub const RUNTIME_ENV_FILENAME: &str = "runtime.env";
 pub const RUNTIME_AUTHORIZED_KEYS_FILENAME: &str = "authorized_keys";
 pub const GUEST_USERNAME: &str = "user";

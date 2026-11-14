@@ -269,14 +269,6 @@ describe("image registry admission", () => {
     expect(pointer.lease.sessionId).toBeNull();
     await pointer.lease.complete("ok");
 
-    const guestTools = await admitRegistryOperation(
-      writeRequest(),
-      env,
-      { operation: "guest_tools" },
-    );
-    expect(guestTools.ok).toBe(true);
-    if (guestTools.ok) await guestTools.lease.complete("ok");
-
     // The object-creating upload path still demands a session.
     const upload = await admitRegistryOperation(
       writeRequest(),

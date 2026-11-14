@@ -133,7 +133,6 @@ export const scenarioVm = {
   ordinal: 0,
   name: "web",
   image: "debian-13",
-  imageKey: { scenario: "repair-nginx", vm: "web", arch: "x86_64" },
   imageSha256: sha,
   imageFormat: "raw_zstd",
   imageVirtualSizeBytes: 8 * 1024 * 1024 * 1024,

@@ -151,7 +151,7 @@ impl BridgeConfig {
         let identity: HostCredential = serde_json::from_reader(file)
             .map_err(|_| anyhow::anyhow!("invalid host credential file"))?;
         anyhow::ensure!(
-            is_safe_image_key(&identity.host_id)
+            is_safe_identifier(&identity.host_id)
                 && !identity.host_id.is_empty()
                 && !identity.owner_user_id.trim().is_empty()
                 && identity.owner_user_id.trim() == identity.owner_user_id
@@ -407,7 +407,7 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
                 "config value bridge.host_id must not be empty when bridge.enabled is true\n\nExample config:\n{EXAMPLE_TOML}"
             );
         }
-        if !is_safe_image_key(&cfg.bridge.host_id) {
+        if !is_safe_identifier(&cfg.bridge.host_id) {
             anyhow::bail!(
                 "config value bridge.host_id must match [A-Za-z0-9_-]+\n\nExample config:\n{EXAMPLE_TOML}"
             );
@@ -518,7 +518,7 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
     Ok(cfg)
 }
 
-fn is_safe_image_key(s: &str) -> bool {
+fn is_safe_identifier(s: &str) -> bool {
     s.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }

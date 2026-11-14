@@ -116,7 +116,7 @@ _intar_complete() {
 complete -F _intar_complete intar
 "#;
 
-/// The packages of the base: those of `content/scenarios/base-images.hcl`.
+/// The packages of the platform base image.
 const PACKAGES: &[&str] = &[
     "acpid",
     "openssh-server",

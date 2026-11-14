@@ -688,8 +688,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
   }
 
   /**
-   * Stores a bridge 9 state report as the host's actual state, under the
-   * same session fence and VM ownership check as bridge 8.
+   * Stores a bridge 9 state report as the host's actual state, fenced on the
+   * session and the VM's ownership.
    */
   private async applyBridgeStateReportV3(
     hostId: string,

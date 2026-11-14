@@ -260,9 +260,7 @@ export function registryAdmissionBlockedReason(
 export function operationNeedsSession(
   operation: ImageRegistryOperationKind,
 ): boolean {
-  return (
-    operation !== "pointer_mutation" && operation !== "guest_tools"
-  );
+  return operation !== "pointer_mutation";
 }
 
 /**

@@ -46,7 +46,6 @@ export type ImageRegistryOperationKind =
   | "bundle_put"
   | "publish"
   | "pointer_mutation"
-  | "guest_tools"
   /**
    * An internal parent-Worker window: a learner run start registers it before
    * it reads a scenario image reference and releases it after its admission
