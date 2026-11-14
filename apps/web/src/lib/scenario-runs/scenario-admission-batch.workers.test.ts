@@ -346,7 +346,6 @@ function admissionVm(): RunVmStateDocument {
     provisioning: {
       ...vm.provisioning,
       image: "ghcr.io/intar/scenario@sha256:fixture",
-      imageKey: { scenario: ADMISSION_SCENARIO_ID, vm: "web", arch: "x86_64" },
       imageSha256: "2".repeat(64),
       resources: {
         cpuMillis: 1_000,

@@ -97,13 +97,6 @@ export async function seedScenarioRow(
   }).onConflictDoNothing();
 }
 
-/** The run-state image key a seeded run records. */
-export const testImageKey = {
-  scenario: "broken-nginx",
-  vm: "webserver",
-  arch: "x86_64",
-} as const;
-
 /** The machine image, spec and Kino digests a seeded VM runs. */
 export const testImageDigest = `sha256:${"2".repeat(64)}`;
 export const testSpecDigest = `sha256:${"3".repeat(64)}`;
@@ -466,7 +459,6 @@ export async function seedRun(input: {
       phase: "booting",
       provisioning: {
         image: `broken-nginx-${vm.scenarioVmName}-x86_64`,
-        imageKey: testImageKey,
         imageSha256: "2".repeat(64),
         resources: {
           cpuMillis: 1_000,

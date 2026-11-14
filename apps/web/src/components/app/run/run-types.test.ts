@@ -214,7 +214,6 @@ function runRecord(): ScenarioRunRecord {
         sessionTimeline: null,
         provisioning: {
           image: null,
-          imageKey: null,
           imageSha256: null,
           resources: null,
           leaseDurationSeconds: null,

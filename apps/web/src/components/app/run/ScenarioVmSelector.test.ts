@@ -80,7 +80,6 @@ function vm(
     sessionTimeline: null,
     provisioning: {
       image: null,
-      imageKey: null,
       imageSha256: null,
       resources: {
         cpuMillis: 1_000,

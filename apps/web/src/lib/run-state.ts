@@ -1,5 +1,4 @@
 import type { ScenarioLaunchSummary } from "@/lib/scenario-model";
-import type { ImageKey } from "@/generated/catalog";
 import type { VmResourceStateV3 } from "@/generated/bridge";
 import type { CheckStatus, LabState, VmVerifyV1 } from "@/generated/contracts/bridge-message-v9";
 import { GUEST_USERNAME } from "@/generated/constants";
@@ -94,7 +93,6 @@ export interface RuntimeConstraintsEvidence {
 
 export interface RunVmProvisioningSpec {
   image: string | null;
-  imageKey: ImageKey | null;
   imageSha256: string | null;
   resources: {
     cpuMillis: number;
@@ -276,7 +274,6 @@ export function buildInitialVmState(input: {
     vmCreatedAt: null,
     provisioning: {
       image: null,
-      imageKey: null,
       imageSha256: null,
       resources: null,
       leaseDurationSeconds: null,
