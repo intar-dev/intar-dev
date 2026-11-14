@@ -354,6 +354,40 @@ mod tests {
         hook[at..end].to_owned()
     }
 
+    /// Everything the builder bakes into the platform base, by digest: its
+    /// Debian side, both hooks (the loader and the units among them), the
+    /// kernel profile and the S3 table. The wire build key, also computed by the
+    /// Worker, cannot see any of it, so a test pins this next to [`IMAGE_FORMAT`].
+    fn baked_platform_digest() -> String {
+        let config = QemuBuildConfig::default();
+        sha256_bytes_hex(
+            [
+                platform_base_spec().content_identity(),
+                config.layered.debian_image,
+                render_essential_hook(),
+                render_platform_customize_hook(),
+                crate::kernel::kernel_profile_digest(),
+                sha256_bytes_hex(&crate::wake::ssdt_initrd_prefix()),
+            ]
+            .join("\n--\n")
+            .as_bytes(),
+        )
+    }
+
+    #[test]
+    fn the_baked_platform_is_pinned_to_the_image_format() {
+        const PINNED: (&str, &str) = (
+            "intar-image-3",
+            "29d4bf9839e7e7613f816cf07a6340898d104d50e15aa8c57bac078339ca15e2",
+        );
+        assert_eq!(
+            (IMAGE_FORMAT, baked_platform_digest().as_str()),
+            PINNED,
+            "the baked guest platform changed: bump IMAGE_FORMAT (and the TypeScript constant) \
+             or, if images stay compatible, update this digest deliberately"
+        );
+    }
+
     #[test]
     fn the_unit_and_the_loader_are_309s() {
         let hook = hook();

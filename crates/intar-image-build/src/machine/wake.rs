@@ -575,16 +575,13 @@ impl Steps<'_> {
             cmdline,
             ..ChildJob::default()
         })?;
-        Ok(crate::sha256::sha256_bytes_hex(
-            format!(
-                "{}\n{}\n{}\n{}\n{BARS_SCRIPT}\n{SUSPEND_SCRIPT}",
-                plan.build_key.as_str(),
-                sha256_file_hex(&self.wake.cpu_profile)?,
-                self.wake.vmm_sha256,
-                serde_json::to_string(&vm)?,
-            )
-            .as_bytes(),
-        ))
+        Ok(base_recipe(&[
+            plan.build_key.as_str(),
+            &self.base.definition_hash,
+            &sha256_file_hex(&self.wake.cpu_profile)?,
+            &self.wake.vmm_sha256,
+            &serde_json::to_string(&vm)?,
+        ]))
     }
 
     /// The image of the cached base: the same bytes, so the same manifest.
@@ -1325,8 +1322,33 @@ async fn quiet(pid: u32) -> Result<bool> {
     Ok(false)
 }
 
+/// The cache name of a suspended base. The build key holds no text baked
+/// into the platform base (loader, units, kernel), so the base rootfs's
+/// definition hash, which does, is among `parts`.
+fn base_recipe(parts: &[&str]) -> String {
+    crate::sha256::sha256_bytes_hex(
+        format!("{}\n{BARS_SCRIPT}\n{SUSPEND_SCRIPT}", parts.join("\n")).as_bytes(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_changed_platform_base_is_another_cached_base() {
+        let platform = |hook: &str| {
+            crate::oci::layered_definition_hash(
+                &crate::platform::platform_base_spec(),
+                "essential",
+                hook,
+                &crate::config::QemuBuildConfig::default(),
+            )
+        };
+        let recipe =
+            |hook: &str| super::base_recipe(&["sha256:key", &platform(hook), "cpu", "vmm"]);
+        assert_ne!(recipe("loader one"), recipe("loader two"));
+        assert_eq!(recipe("loader one"), recipe("loader one"));
+    }
+
     #[test]
     fn the_delta_is_written_in_parts_and_capped() {
         let dir = tempfile::tempdir().expect("dir");
