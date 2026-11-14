@@ -52,14 +52,11 @@ pub(crate) async fn bring_up(
     report: &watch::Sender<Report>,
 ) -> Result<(), String> {
     let ssh = boot.ssh.enabled;
-    let (renewed, network, prepared, recording) = tokio::join!(
-        async {
-            if woken {
-                renew_machine_id(boot_sha256, report).await
-            } else {
-                Ok(())
-            }
-        },
+    // First and alone: nothing the run sets up may race the restarts.
+    if woken {
+        renew_machine_id(boot_sha256, report).await?;
+    }
+    let (network, prepared, recording) = tokio::join!(
         network(boot, woken),
         async {
             if ssh {
@@ -70,7 +67,6 @@ pub(crate) async fn bring_up(
         },
         async { if ssh { recording_disk().await } else { Ok(()) } },
     );
-    renewed?;
     network?;
     prepared?;
     recording?;
@@ -108,15 +104,19 @@ pub(crate) async fn release_lab(spec: &MachineSpecV1, report: &watch::Sender<Rep
 
 const MACHINE_ID: &str = "/etc/machine-id";
 const DBUS_MACHINE_ID: &str = "/var/lib/dbus/machine-id";
-/// The daemons of the base that read the machine id once, at their start, in
-/// the order they restart: the journal first, the bus before its clients.
-/// Only the active ones restart; content's own units are not among them.
+/// The bind source systemd mounts read-only over [`MACHINE_ID`] when it
+/// could not write that file at boot.
+const RUN_MACHINE_ID: &str = "/run/machine-id";
+/// The daemons that read the machine id once, at their start, and are safe
+/// to restart; only the active ones restart. Left running with the image's
+/// id: the system bus (a restart is unsupported and cuts every client), and
+/// logind and networkd, which use it for nothing a run sees (networkd only
+/// for a DHCPv6 DUID; this guest's address is static) and whose restart
+/// risks sessions or the routes Kino sets.
 const MACHINE_ID_READERS: &[&str] = &[
+    // Stamps `_MACHINE_ID` on every entry and names its directory by it.
     "systemd-journald.service",
-    "dbus.service",
-    "dbus-broker.service",
-    "systemd-logind.service",
-    "systemd-networkd.service",
+    // What `hostnamectl` shows; it holds no state and starts on demand.
     "systemd-hostnamed.service",
 ];
 
@@ -177,13 +177,11 @@ async fn renew_machine_id(boot_sha256: &str, report: &watch::Sender<Report>) -> 
     let dbus_file = std::fs::symlink_metadata(DBUS_MACHINE_ID).is_ok_and(|meta| meta.is_file());
     for step in machine_id_steps(dbus_file) {
         match step {
-            IdStep::Write(path) => replace(path, &format!("{id}\n"))?,
+            IdStep::Write(path) => write_id(path, &id)?,
             IdStep::Reexec => run("systemctl", &["daemon-reexec"]).await?,
             IdStep::RestartIfActive(unit) => {
-                if run("systemctl", &["is-active", "--quiet", unit])
-                    .await
-                    .is_ok()
-                {
+                let code = exit_code("systemctl", &["is-active", "--quiet", unit]).await?;
+                if is_active(unit, code)? {
                     run("systemctl", &["restart", unit]).await?;
                 }
             }
@@ -210,14 +208,50 @@ fn prune_journals(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Write `path` whole through a rename, mode 0444 as systemd makes it.
-fn replace(path: &str, content: &str) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let next = format!("{path}.intar-new");
-    std::fs::write(&next, content)
-        .and_then(|()| std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o444)))
-        .and_then(|()| std::fs::rename(&next, path))
-        .map_err(|error| format!("{path}: {error}"))
+/// `systemctl is-active`: 0 active, 3 inactive, 4 no such unit. Any other
+/// answer means the manager could not tell, and the renewal fails.
+pub(crate) fn is_active(unit: &str, code: Option<i32>) -> Result<bool, String> {
+    match code {
+        Some(0) => Ok(true),
+        Some(3 | 4) => Ok(false),
+        other => Err(format!("systemctl is-active {unit}: {other:?}")),
+    }
+}
+
+async fn exit_code(program: &str, args: &[&str]) -> Result<Option<i32>, String> {
+    let status = Command::new(program)
+        .args(args)
+        .status()
+        .await
+        .map_err(|error| format!("{program}: {error}"))?;
+    Ok(status.code())
+}
+
+/// Write the id into `path` in place, as systemd does: a file of the root, or
+/// a mount over it. systemd's transient id is a read-only bind of
+/// [`RUN_MACHINE_ID`]; then that file takes the id, and readers of `path`
+/// see it while the file below stays empty.
+fn write_id(path: &str, id: &str) -> Result<(), String> {
+    match write_in_place(path, id) {
+        Err(error) if error.raw_os_error() == Some(30) && path == MACHINE_ID => {
+            write_in_place(RUN_MACHINE_ID, id).map_err(|error| format!("{RUN_MACHINE_ID}: {error}"))
+        }
+        written => written.map_err(|error| format!("{path}: {error}")),
+    }
+}
+
+/// Truncate and write `path`, created 0444 if missing, and sync it.
+pub(crate) fn write_in_place(path: &str, id: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .mode(0o444)
+        .open(path)?;
+    file.write_all(format!("{id}\n").as_bytes())?;
+    file.sync_all()
 }
 
 async fn network(boot: &GuestBootV3, woken: bool) -> Result<(), String> {

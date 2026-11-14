@@ -333,10 +333,6 @@ fn the_machine_id_steps_write_then_reexec_then_restart_the_readers() {
             IdStep::Write("/var/lib/dbus/machine-id"),
             IdStep::Reexec,
             IdStep::RestartIfActive("systemd-journald.service"),
-            IdStep::RestartIfActive("dbus.service"),
-            IdStep::RestartIfActive("dbus-broker.service"),
-            IdStep::RestartIfActive("systemd-logind.service"),
-            IdStep::RestartIfActive("systemd-networkd.service"),
             IdStep::RestartIfActive("systemd-hostnamed.service"),
             IdStep::PruneJournals,
         ]
@@ -348,4 +344,45 @@ fn the_machine_id_steps_write_then_reexec_then_restart_the_readers() {
         [IdStep::Write("/etc/machine-id"), IdStep::Reexec]
     );
     assert_eq!(steps.last(), Some(&IdStep::PruneJournals));
+}
+
+#[test]
+fn the_machine_id_is_written_in_place_and_synced() {
+    use std::os::unix::fs::MetadataExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("machine-id");
+    std::fs::write(&path, "").expect("the image's empty file");
+    let inode = std::fs::metadata(&path).expect("metadata").ino();
+    let path = path.to_str().expect("utf-8");
+    super::boot::write_in_place(path, "0123456789abcdef0123456789abcdef").expect("written");
+    // The same file, not a renamed one: a mount over the path stays usable.
+    assert_eq!(std::fs::metadata(path).expect("metadata").ino(), inode);
+    assert_eq!(
+        std::fs::read_to_string(path).expect("read"),
+        "0123456789abcdef0123456789abcdef\n"
+    );
+    // A missing file is created as systemd creates it.
+    let created = dir.path().join("new");
+    let created = created.to_str().expect("utf-8");
+    super::boot::write_in_place(created, "ab").expect("created");
+    use std::os::unix::fs::PermissionsExt as _;
+    assert_eq!(
+        std::fs::metadata(created)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o444
+    );
+}
+
+#[test]
+fn only_an_inactive_or_unknown_unit_skips_its_restart() {
+    use super::boot::is_active;
+    assert_eq!(is_active("u", Some(0)), Ok(true));
+    assert_eq!(is_active("u", Some(3)), Ok(false));
+    assert_eq!(is_active("u", Some(4)), Ok(false));
+    // An unreachable manager, or a signal, fails the renewal.
+    assert!(is_active("u", Some(1)).is_err());
+    assert!(is_active("u", None).is_err());
 }

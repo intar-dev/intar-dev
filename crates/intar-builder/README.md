@@ -54,21 +54,22 @@ empties it, and removes the suspended-base cache of earlier releases
 `wake.booted_at_unix_ms` is its own boot, and run hosts stop waking guests
 booted 330 days ago, so an image that old must be rebuilt.
 
-A woken guest starts with the image's machine id, so before it reports
-`SSH_READY` Kino gives the run its own, as it gives it its own host key: it
-writes `/etc/machine-id` (and `/var/lib/dbus/machine-id` when that is a file),
-re-executes PID 1, restarts those of journald, D-Bus, logind, networkd and
-hostnamed that are running, and removes every other id's volatile journal
-(a woken guest's file is empty, so the old id is known only by its journal).
-The id
-is 128 bits of the guest's RNG, which the kernel reseeds on the resume, hashed
-with the run's `boot.json` digest. A cold boot keeps the id systemd generates.
-Anything else that read the id before the suspend keeps the image's: that
-includes the `defer` units, which the build's lab release starts. A service
-that must see the run's id has to read it again or be restarted by the
-scenario. The kernel's `boot_id` is the build boot's in every run woken
-from one image; the kernel sets it once per boot and offers no way to change
-it.
+A woken guest starts with the image's machine id, so before anything of the
+run starts Kino gives the run its own, as it gives it its own host key. It
+writes `/etc/machine-id` in place (and `/var/lib/dbus/machine-id` when that is
+a file), re-executes PID 1, restarts journald and hostnamed when they run, and
+removes every other id's volatile journal (a woken guest's file is empty, so
+the old id is known only by its journal). The id is 128 bits of the guest's
+RNG, which the kernel reseeds on the resume, hashed with the run's `boot.json`
+digest. A cold boot keeps the id systemd generates.
+
+Anything else that read the id before the suspend keeps the image's until it
+restarts. That includes the system bus (its own `GetMachineId` answer; a bus
+restart is unsupported), logind, networkd (its DHCPv6 DUID) and the `defer`
+units, which the build's lab release starts. A service that must see the
+run's id has to read it again or be restarted by the scenario. The kernel's
+`boot_id` is the build boot's in every run woken from one image; the kernel
+sets it once per boot and offers no way to change it.
 
 A guest that must keep its address across wakes cannot use the run's address:
 every run gets a new one. k3s, for example, should be pinned to a fixed node
