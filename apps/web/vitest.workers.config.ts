@@ -74,5 +74,10 @@ export default defineConfig({
   },
   test: {
     include: ["src/**/*.workers.test.ts"],
+    // With the file system module cache, the pool inlines every cached module
+    // of a warm-module reply into one WebSocket message. For the auth module
+    // graph that message grows past workerd's 32 MiB limit, the runner socket
+    // closes with 1009 and the test file never starts.
+    fsModuleCache: false,
   },
 });
