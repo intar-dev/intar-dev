@@ -91,6 +91,7 @@ impl VmManager {
             guest_reports_tx,
             lab_updates_tx,
             vmm_started_at: std::sync::Mutex::default(),
+            uncommitted_reports: std::sync::Mutex::default(),
             run_cli_access_token: Mutex::new(RunCliAccessTokenCache::default()),
             run_cli_access_token_refresh: Mutex::new(()),
             run_cli_broker_tasks: Mutex::new(BTreeMap::new()),

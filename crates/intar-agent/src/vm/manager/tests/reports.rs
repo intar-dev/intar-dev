@@ -141,3 +141,52 @@ fn the_persisted_lab_is_the_reported_lab_as_strict_json() -> Result<()> {
     assert_eq!(lab.tasks[0].passed_at_unix_ms, Some(7));
     Ok(())
 }
+
+fn report_at(received_at_ms: i64, generation: &str, task: CheckStatus) -> GuestUpdate {
+    let mut update = read(&frame(Phase::Ready, BOOT, GUEST_CONTRACT))
+        .unwrap_or_else(|| panic!("a report of this boot.json"));
+    update.received_at_ms = received_at_ms;
+    generation.clone_into(&mut update.jail_generation);
+    for state in &mut update.lab.tasks {
+        state.status = task;
+    }
+    update
+}
+
+#[test]
+fn the_ready_commit_persists_the_newest_report_of_its_generation() {
+    let ready = report_at(10, "generation-1", CheckStatus::Pending);
+    let newer = report_at(12, "generation-1", CheckStatus::Fail);
+    // A report kept while the commit waited wins over the waiter's older one.
+    assert_eq!(newest_report(&ready, Some(&newer)).lab, newer.lab);
+    assert_eq!(newest_report(&ready, Some(&ready)).lab, ready.lab);
+    // Nothing newer kept: the waiter's report.
+    assert_eq!(newest_report(&ready, None).lab, ready.lab);
+    // One of another generation, or older than the waiter's, is not this lab.
+    let other = report_at(12, "generation-2", CheckStatus::Fail);
+    assert_eq!(newest_report(&ready, Some(&other)).lab, ready.lab);
+    let older = report_at(9, "generation-1", CheckStatus::Fail);
+    assert_eq!(newest_report(&ready, Some(&older)).lab, ready.lab);
+}
+
+#[test]
+fn a_report_after_the_ready_commit_takes_the_committed_path() {
+    let mut vm = test_vm_status("web", Some("run-1"));
+    // Before the commit the report is kept for it.
+    assert!(!ready_committed(&vm));
+    vm.state = VmLifecycleState::Running;
+    let quota = CpuQuota::from_millis(500).expect("quota");
+    let details = vm.details.as_mut().expect("details");
+    details.cpu_millis = Some(500);
+    details.cpu_runtime = Some(VmCpuRuntimeState {
+        quota,
+        attestation: Some(CpuQuotaAttestation {
+            quota,
+            cpu_max: quota.cpu_max(),
+            cpu_max_burst: 0,
+            verified_at_unix_ms: 1,
+        }),
+    });
+    // After it, the report is persisted and projected on its own, not kept.
+    assert!(ready_committed(&vm));
+}

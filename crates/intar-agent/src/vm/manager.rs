@@ -774,6 +774,11 @@ struct Inner {
     /// control plane only after the ready boundary is durably committed.
     guest_reports_tx: broadcast::Sender<GuestUpdate>,
     lab_updates_tx: broadcast::Sender<GuestUpdate>,
+    /// Each VM's newest report before its ready commit, which persists that
+    /// lab instead of the older one its waiter saw.
+    // ponytail: an entry of a VM that never commits stays until its name
+    // reports again; drop it with the VM if names stop being reused.
+    uncommitted_reports: std::sync::Mutex<BTreeMap<String, GuestUpdate>>,
     /// When each VM's VMM was asked to boot, for `VmStartV1.first_report_ms`.
     vmm_started_at: std::sync::Mutex<BTreeMap<String, Instant>>,
     run_cli_access_token: Mutex<RunCliAccessTokenCache>,

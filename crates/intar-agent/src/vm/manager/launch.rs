@@ -477,7 +477,6 @@ pub(super) async fn commit_ready_vm(
         ready.ssh_ready && ready.failed.is_none(),
         "guest report is not a ready one"
     );
-    let lab_row = lab_row(ready)?;
     let now_s = now_unix_s();
     let observed_at = now_unix_ms();
 
@@ -485,6 +484,15 @@ pub(super) async fn commit_ready_vm(
     // This prevents a delete/recreate from being overwritten by a stale ready
     // commit while keeping external publication strictly after durability.
     let mut states = inner.states.write().await;
+    // Under the write fence no report is between being kept and being seen
+    // by the committed path below, so none is lost or persisted twice over a
+    // newer one.
+    let kept = inner
+        .uncommitted_reports
+        .lock()
+        .ok()
+        .and_then(|mut reports| reports.remove(name));
+    let lab_row = lab_row(newest_report(ready, kept.as_ref()))?;
     let current = states
         .get_mut(name)
         .ok_or_else(|| anyhow::anyhow!("VM state disappeared during ready commit"))?;

@@ -203,6 +203,18 @@ pub(super) async fn apply_guest_update(inner: &Arc<Inner>, update: GuestUpdate) 
         )
         .await;
     }
+    // Keep the newest report of a VM short of its ready commit, before the
+    // waiter can see it: the commit, which takes the write fence, persists it
+    // even when this report reached the waiter too late to be its `ready`.
+    {
+        let states = inner.states.read().await;
+        if is_current(&states)
+            && !states.get(vm_name).is_some_and(ready_committed)
+            && let Ok(mut reports) = inner.uncommitted_reports.lock()
+        {
+            reports.insert(vm_name.to_owned(), update.clone());
+        }
+    }
     // Always wake the generation-fenced launch waiter internally. Projection
     // is permitted only for an already committed steady VM; the first ready
     // report is published through the atomic ready transaction instead.
@@ -216,18 +228,7 @@ pub(super) async fn apply_guest_update(inner: &Arc<Inner>, update: GuestUpdate) 
         let Some(vm) = states.get(vm_name) else {
             return Ok(());
         };
-        let committed = vm.state == VmLifecycleState::Running
-            && vm.details.as_ref().is_some_and(|details| {
-                details.cpu_runtime.as_ref().is_some_and(|runtime| {
-                    Some(runtime.quota.cpu_millis) == details.cpu_millis
-                        && runtime.attestation.as_ref().is_some_and(|proof| {
-                            proof.quota == runtime.quota
-                                && proof.cpu_max == runtime.quota.cpu_max()
-                                && proof.cpu_max_burst == 0
-                                && proof.verified_at_unix_ms > 0
-                        })
-                })
-            });
+        let committed = ready_committed(vm);
         // Hold the read fence while persisting, so a concurrent generation
         // replacement cannot be overwritten by this lab. A pre-ready lab is
         // persisted by the ready transaction itself.
@@ -753,6 +754,41 @@ pub(super) async fn activate_kino_ready_socket(path: &Path, jail_uid: u32) -> Re
         "Kino readiness socket ACL mask or other-user permissions are unsafe"
     );
     Ok(())
+}
+
+/// Past the ready commit: running with a steady, attested CPU quota.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "guest reports arrive on Linux only")
+)]
+pub(super) fn ready_committed(vm: &VmStatusResponse) -> bool {
+    vm.state == VmLifecycleState::Running
+        && vm.details.as_ref().is_some_and(|details| {
+            details.cpu_runtime.as_ref().is_some_and(|runtime| {
+                Some(runtime.quota.cpu_millis) == details.cpu_millis
+                    && runtime.attestation.as_ref().is_some_and(|proof| {
+                        proof.quota == runtime.quota
+                            && proof.cpu_max == runtime.quota.cpu_max()
+                            && proof.cpu_max_burst == 0
+                            && proof.verified_at_unix_ms > 0
+                    })
+            })
+        })
+}
+
+/// The report whose lab the ready commit persists: the waiter's `ready`, or
+/// a report of the same run and generation kept since, which is newer.
+pub(super) fn newest_report<'a>(
+    ready: &'a GuestUpdate,
+    kept: Option<&'a GuestUpdate>,
+) -> &'a GuestUpdate {
+    kept.filter(|kept| {
+        kept.vm_name == ready.vm_name
+            && kept.run_id == ready.run_id
+            && kept.jail_generation == ready.jail_generation
+            && kept.received_at_ms >= ready.received_at_ms
+    })
+    .unwrap_or(ready)
 }
 
 pub(super) fn lab_row(update: &GuestUpdate) -> Result<VmLabRow> {
