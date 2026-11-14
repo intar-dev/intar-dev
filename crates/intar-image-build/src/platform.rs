@@ -46,7 +46,8 @@ i=0; while [ ! -b /dev/vdb ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
 # a build VM boots this base with the INTARBUILD seed at vdb: not a run boot, nothing to do
 [ "$(blkid -p -s LABEL -o value /dev/vdb 2>/dev/null)" = INTARRUN ] || exit 0
 mkdir -p /run/intar/run
-mount -t vfat -o ro,nosuid,nodev,fmask=0022,dmask=0022 /dev/vdb /run/intar/run
+# vfat gives every file one mode: 0711 lets `user` execute Kino but read neither it nor boot.json
+mount -t vfat -o ro,nosuid,nodev,fmask=0066,dmask=0022 /dev/vdb /run/intar/run
 exec /run/intar/run/kino init
 "#;
 
@@ -364,6 +365,10 @@ mod tests {
             "[ \"$(blkid -p -s LABEL -o value /dev/vdb 2>/dev/null)\" = INTARRUN ] || exit 0\n"
         ));
         assert!(GUEST_LOADER.ends_with("exec /run/intar/run/kino init\n"));
+        // The run disk holds boot.json, which only root may read.
+        assert!(GUEST_LOADER.contains(
+            "mount -t vfat -o ro,nosuid,nodev,fmask=0066,dmask=0022 /dev/vdb /run/intar/run\n"
+        ));
         assert!(hook.contains("systemctl --root=\"$root\" enable intar.service"));
         assert_eq!(
             written(&hook, "/etc/systemd/system/intar-lab.target"),
