@@ -349,4 +349,28 @@ kino = "/usr/lib/intar-builder/kino"
         assert_eq!(wake.max_cached_bases, 4);
         assert_eq!(wake.kino, PathBuf::from("/usr/lib/intar-builder/kino"));
     }
+
+    /// The builder rollout drops the retired keys with the agent package's
+    /// `deploy/migrate-epoch-config.py`; these files are its output for the
+    /// previous release's example and for a host config.
+    #[test]
+    fn parses_configs_the_rollout_migrated() {
+        let previous =
+            include_str!("../../intar-jailerd/tests/fixtures/config-migration/builder.main.toml");
+        assert!(parse(previous).is_err());
+        let example = parse(include_str!(
+            "../../intar-jailerd/tests/fixtures/config-migration/builder.main.migrated.toml"
+        ))
+        .unwrap();
+        assert_eq!(example.jobs.max_concurrent_builds, 2);
+        let host = parse(include_str!(
+            "../../intar-jailerd/tests/fixtures/config-migration/builder.host.migrated.toml"
+        ))
+        .unwrap();
+        assert_eq!(host.bridge.host_id, "builder-host-id");
+        assert_eq!(host.qemu.provision_timeout_seconds, 3600);
+        assert_eq!(host.qemu.build_memory_mb, 8192);
+        assert!(!host.qemu.layered.use_cache);
+        assert_eq!(host.jobs.max_concurrent_builds, 1);
+    }
 }

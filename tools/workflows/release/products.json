@@ -35,6 +35,7 @@
       "crates/intar-image-build/**",
       "crates/intar-image-scenario/**",
       "crates/intar-image-upload/**",
+      "crates/intar-jailerd/deploy/migrate-epoch-config.py",
       "crates/intar-kino-proto/**",
       "crates/intar-observability/**",
       "crates/intar-snapdelta/**",

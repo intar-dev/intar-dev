@@ -55,7 +55,7 @@ build_archive() {
   local archive="${BINARY}_${VERSION}_linux_${arch}"
   local target_dir="${PWD}/target/${target}"
   # Kino runs inside guest VMs, so its release is the size-optimised guest
-  # build that the guest-tools disk ships.
+  # build that run hosts put on each VM's run disk.
   local profile=release
   if [ "${PACKAGE}" = "kino" ]; then
     profile=guest
@@ -70,6 +70,8 @@ build_archive() {
   chmod +x "${workdir}/${BINARY}"
   if [ "${PACKAGE}" = "intar-builder" ]; then
     build_cloud_hypervisor "${target}" "${target_dir}" "${workdir}"
+    # The builder rollout drops retired keys from the host's config with it.
+    cp crates/intar-jailerd/deploy/migrate-epoch-config.py "${workdir}/deploy/migrate-epoch-config.py"
   fi
   if [ "${PACKAGE}" = "intar-builder" ] || [ "${PACKAGE}" = "intar-image-cli" ]; then
     dynamic_section="$(readelf -d "${binary}" 2>/dev/null)"

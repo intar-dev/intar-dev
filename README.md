@@ -150,11 +150,16 @@ before the workflow attested them have no attestation. Then:
   the drain and again before a rollback; after each
   `swamp workflow approve agent-rollout <step>`,
   `swamp workflow resume agent-rollout` continues the run.
-- **Builder:** on the builder host, run the new binary's
-  `sudo ./intar-builder doctor --config /etc/intar-builder/config.toml`. Wait
+- **Builder:** on the builder host, write the config the new binary reads with
+  `python3 deploy/migrate-epoch-config.py builder --print > config.toml` from
+  the unpacked archive (it drops the keys the release retired) and run the new
+  binary's `sudo ./intar-builder doctor --config config.toml`. Wait
   until the host is idle: the latest `applied builder desired state` journal line
   shows `"desired_builds":0`, and nothing matches `pgrep -f '^/usr/bin/qemu'`.
-  Then `systemctl stop intar-builder`, keep the old binary as
+  Then `systemctl stop intar-builder`, run
+  `sudo python3 deploy/migrate-epoch-config.py builder` (it keeps the previous
+  file as `/etc/intar-builder/config.toml.pre-epoch`, and the previous binary
+  reads the result too), keep the old binary as
   `/usr/local/bin/intar-builder.pre-vX.Y.Z`, `install -m 0755` the new one,
   start the service, and check the journal for the handshake and the desired
   state with no warnings. The binary has no `--version`; tell releases apart by

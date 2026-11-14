@@ -78,9 +78,10 @@ jobs:
             mode: "0600"
       - name: stage
         description: >-
-          Unpack the binary into /var/tmp/intar-builder-vX.Y.Z, check its
-          SHA-256, run its read-only doctor, and print the installed binary's
-          SHA-256
+          Unpack the binary and the config migration into
+          /var/tmp/intar-builder-vX.Y.Z, check the binary's SHA-256, run its
+          read-only doctor on the migrated config, and print the installed
+          binary's SHA-256
         dependsOn:
           - step: upload
             condition:
@@ -98,10 +99,15 @@ jobs:
               a='/tmp/intar-builder_${{ inputs.version }}_linux_amd64.tar.gz'
               d='/var/tmp/intar-builder-v${{ inputs.version }}'
               install -d -o root -g root -m 0700 "$d"
-              tar -xzf "$a" -C "$d" ./intar-builder
+              tar -xzf "$a" -C "$d" ./intar-builder ./deploy/migrate-epoch-config.py
               rm -f "$a"
               echo '${{ data.latest("builder-release", "result").attributes.stdout }}  '"$d/intar-builder" | sha256sum --quiet --check --strict
-              "$d/intar-builder" doctor --config /etc/intar-builder/config.toml
+              python3 -c 'import tomllib'
+              # The new binary refuses retired keys: its doctor reads the
+              # config as the install step will leave it.
+              (umask 077 && python3 "$d/deploy/migrate-epoch-config.py" builder --print > "$d/config.toml")
+              "$d/intar-builder" doctor --config "$d/config.toml"
+              rm -f "$d/config.toml"
               echo "installed: $(sha256sum /usr/local/bin/intar-builder | cut -d' ' -f1)"
     dependsOn: []
   - name: deploy
@@ -121,7 +127,8 @@ jobs:
       - name: install
         description: >-
           Wait up to 30 minutes for no desired build and no qemu, keep the old
-          binary as intar-builder.pre-vX.Y.Z, install the new one, and check
+          binary as intar-builder.pre-vX.Y.Z, drop retired config keys
+          (keeping config.toml.pre-epoch), install the new binary, and check
           its SHA-256, the bridge handshake and the desired state
         dependsOn:
           - step: approve
@@ -155,6 +162,8 @@ jobs:
               done
               [ -e "$pre" ] || cp -p /usr/local/bin/intar-builder "$pre"
               systemctl stop intar-builder
+              # Only drops keys, so the previous binary also reads the result.
+              python3 '/var/tmp/intar-builder-v${{ inputs.version }}/deploy/migrate-epoch-config.py' builder
               install -m 0755 "$new" /usr/local/bin/intar-builder
               since="@$(date +%s)"
               systemctl start intar-builder
