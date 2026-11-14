@@ -49,6 +49,12 @@ use crate::wake::{
     find_wake_vector, parse_bar_table, patch_stub, save_acpi_tables, stub_template, wake_cmdline,
 };
 
+/// The wake VM's serial console log of the build whose log is `log`.
+#[must_use]
+pub fn wake_serial_log_path(log: &Path) -> PathBuf {
+    log.with_extension("wake.serial.log")
+}
+
 /// The hidden first argument of the namespace child.
 pub const WAKE_CHILD_ARG: &str = "__intar-wake-child";
 
@@ -223,6 +229,7 @@ struct ChildJob {
     recording_disk: String,
     serial: String,
     console: String,
+    vmm_log: PathBuf,
     vsock: String,
     api: String,
     ram: String,
@@ -425,8 +432,10 @@ impl Steps<'_> {
             disk: text(disk.to_path_buf()),
             run_disk: text(run_disk.clone()),
             recording_disk: text(recording_disk.clone()),
-            serial: text(dir.join("serial.log")),
-            console: text(dir.join("console.log")),
+            // Beside the build log, so a failed build keeps them.
+            serial: text(wake_serial_log_path(self.log)),
+            console: text(self.log.with_extension("wake.console.log")),
+            vmm_log: self.log.with_extension("wake.vmm.log"),
             vsock: text(dir.join("v.sock")),
             api: text(dir.join("api.sock")),
             ram: text(ram.to_path_buf()),
@@ -487,7 +496,7 @@ impl Steps<'_> {
             status.success(),
             "the wake VM failed ({status}); see {} and {}",
             self.log.display(),
-            dir.join("serial.log").display()
+            job.serial
         );
         let result: ChildResult = serde_json::from_slice(&fs::read(&job.result)?)
             .context("the wake VM left no result")?;
@@ -582,7 +591,7 @@ async fn logs_over_limit(job: &ChildJob) -> anyhow::Error {
     let logs = [
         PathBuf::from(&job.serial),
         PathBuf::from(&job.console),
-        Path::new(&job.serial).with_file_name("vmm.log"),
+        job.vmm_log.clone(),
     ];
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -656,7 +665,7 @@ async fn child(job: &ChildJob) -> Result<ChildResult> {
     ip(&["addr", "add", HOST_CIDR, "dev", TAP])?;
     ip(&["link", "set", TAP, "up"])?;
     let listener = tokio::net::UnixListener::bind(format!("{}_{REPORT_PORT}", job.vsock))?;
-    let vmm_log = fs::File::create(Path::new(&job.serial).with_file_name("vmm.log"))?;
+    let vmm_log = fs::File::create(&job.vmm_log)?;
     let mut vmm = tokio::process::Command::new(&job.vmm)
         .args([
             "--api-socket",

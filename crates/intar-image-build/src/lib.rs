@@ -39,7 +39,7 @@ pub use machine::{
     BuildPlan, BuildTarget, MachineBuildOutput, MachineBuildRequest, MachineImage, PlannedNode,
     PlannedStage, VerifiedMachineImage, WAKE_CHILD_ARG, build_machine_image,
     machine_build_log_path, plan_build, reconstruct_machine_disk, run_wake_child,
-    verify_machine_image, wake_unavailable, write_machine_image,
+    verify_machine_image, wake_serial_log_path, wake_unavailable, write_machine_image,
 };
 pub use platform::{PLATFORM_BASE_DISK_BYTES, ensure_platform_base, render_platform_rootfs_plan};
 pub use rootfs::{BaseRootfsArtifact, RootfsBuildPaths, RootfsBuildPlan};

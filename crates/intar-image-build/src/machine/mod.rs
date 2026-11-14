@@ -26,7 +26,7 @@ pub use output::{
     write_machine_image,
 };
 pub use plan::{BuildPlan, BuildTarget, PlannedNode, PlannedStage, plan_build};
-pub use wake::{WAKE_CHILD_ARG, run_wake_child, wake_unavailable};
+pub use wake::{WAKE_CHILD_ARG, run_wake_child, wake_serial_log_path, wake_unavailable};
 
 /// One build: a target of a bundle, the key the caller expects, and where
 /// the image goes.
