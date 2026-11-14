@@ -340,7 +340,7 @@ pub fn render_kernel_build_script(config: &QemuBuildConfig) -> String {
 /// Digest of every input that changes the compiled kernel.
 ///
 /// The OCI base-image cache key includes this value, so a changed pin, config,
-/// toolchain, or init script always invalidates the cached base image.
+/// toolchain, build script, or init script always invalidates the cached base image.
 #[must_use]
 pub fn kernel_profile_digest() -> String {
     let mut identity = String::new();
@@ -371,6 +371,8 @@ pub fn kernel_profile_digest() -> String {
     identity.push_str("--wake-stub--\n");
     identity.push_str(WAKE_STUB_SOURCE);
     identity.push_str(WAKE_STUB_LINKER_SCRIPT);
+    identity.push_str("--build-script--\n");
+    identity.push_str(KERNEL_BUILD_SCRIPT_SOURCE);
     crate::sha256::sha256_bytes_hex(identity.as_bytes())
 }
 

@@ -356,18 +356,20 @@ mod tests {
 
     /// Everything the builder bakes into the platform base, by digest: its
     /// Debian side, both hooks (the loader and the units among them), the
-    /// kernel profile and the S3 table. The wire build key, also computed by the
+    /// kernel profile, the S3 table and the Dockerfile steps. The wire build key, also computed by the
     /// Worker, cannot see any of it, so a test pins this next to [`IMAGE_FORMAT`].
     fn baked_platform_digest() -> String {
         let config = QemuBuildConfig::default();
         sha256_bytes_hex(
             [
                 platform_base_spec().content_identity(),
-                config.layered.debian_image,
+                config.layered.debian_image.clone(),
                 render_essential_hook(),
                 render_platform_customize_hook(),
                 crate::kernel::kernel_profile_digest(),
                 sha256_bytes_hex(&crate::wake::ssdt_initrd_prefix()),
+                crate::oci::render_oci_dockerfile(&platform_base_spec(), &config)
+                    .expect("the default config renders the platform Dockerfile"),
             ]
             .join("\n--\n")
             .as_bytes(),
@@ -378,7 +380,7 @@ mod tests {
     fn the_baked_platform_is_pinned_to_the_image_format() {
         const PINNED: (&str, &str) = (
             "intar-image-3",
-            "29d4bf9839e7e7613f816cf07a6340898d104d50e15aa8c57bac078339ca15e2",
+            "93f6fc00fb09a5b10ace2c3fb00076f1596b633657633a6dce1cc02ca1eaa155",
         );
         assert_eq!(
             (IMAGE_FORMAT, baked_platform_digest().as_str()),

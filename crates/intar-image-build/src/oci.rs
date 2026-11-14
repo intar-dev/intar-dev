@@ -116,7 +116,11 @@ pub(crate) fn layered_definition_hash(
         crate::kernel::kernel_profile_digest(),
         sha256_bytes_hex(&crate::wake::ssdt_initrd_prefix()),
     );
-    sha256_bytes_hex(identity.as_bytes())
+    // An input the Dockerfile refuses fails the build itself, so its error
+    // stands in for the steps here.
+    let dockerfile = render_oci_dockerfile(base, config)
+        .unwrap_or_else(|error| format!("unrenderable: {error:#}"));
+    sha256_bytes_hex(format!("{identity}\n--dockerfile--\n{dockerfile}").as_bytes())
 }
 
 /// Build or reuse the layered OCI rootfs for one base-image definition.
@@ -627,7 +631,10 @@ fn write_oci_build_context(
     Ok(())
 }
 
-fn render_oci_dockerfile(base: &BaseImageSpec, config: &QemuBuildConfig) -> Result<String> {
+pub(crate) fn render_oci_dockerfile(
+    base: &BaseImageSpec,
+    config: &QemuBuildConfig,
+) -> Result<String> {
     validate_layered_inputs(base, config)?;
     let debian_image = &config.layered.debian_image;
     let release = crate::kernel::kernel_release();
@@ -1618,6 +1625,18 @@ mod tests {
         assert_ne!(
             original,
             layered_definition_hash(&base, "essential", "customize", &changed_mke2fs)
+        );
+        let mut changed_packages = base.clone();
+        changed_packages.packages.push("zstd".to_owned());
+        assert_ne!(
+            original,
+            layered_definition_hash(&changed_packages, "essential", "customize", &config)
+        );
+        assert!(
+            render_oci_dockerfile(&base, &config)
+                .unwrap()
+                .contains(super::KERNEL_BUILD_SCRIPT_PATH),
+            "the hashed Dockerfile runs the kernel build script"
         );
     }
 
