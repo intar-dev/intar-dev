@@ -126,7 +126,10 @@ git config user.name "${bot}"
 git config user.email "${bot_id}+${bot}@users.noreply.github.com"
 gh auth setup-git --hostname github.com
 git checkout -B "${branch}"
-git add -- apps/web/wrangler.jsonc apps/web/worker-configuration.d.ts tools/deploy/kino-pin.json
+git add -- apps/web/wrangler.jsonc apps/web/worker-configuration.d.ts
+if [ -e tools/deploy/kino-pin.json ]; then
+  git add -- tools/deploy/kino-pin.json
+fi
 git commit --quiet -m "${title}"
 tools/workflows/release/push-bot-branch.sh "${branch}"
 body="The website deploy picks up $(printf '%s; ' "${changes[@]}")a Kino pin counts only once image-ops kino-promote stored that artifact."
