@@ -374,3 +374,53 @@ it("breaks glass with a build whose own lane jobs passed in a run that failed el
   expect(findBuilds({ BREAK_GLASS: "true" }, noSmoke, list).output).toBe(web(3, 77) + docsBuild(1, 76));
   expect(findBuilds({}, runs, list).output).toBe(web(2, 76) + docsBuild(1, 76));
 });
+
+// Runs the pre-migration evidence step against a fake D1 API that answers the
+// drain audit with `drain` and records every query it was sent.
+function captureEvidence(applied: number, drain: Record<string, unknown>) {
+  const root = mkdtempSync(join(tmpdir(), "intar-pre-migration-"));
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(root, "production-d1-plan.json"), JSON.stringify({ appliedMigrationCount: applied }));
+  writeFileSync(join(root, "drain.json"), JSON.stringify(drain));
+  writeFileSync(join(bin, "curl"), `#!/usr/bin/env bash
+data=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in --data-binary) data="\${2#@}"; shift 2 ;; --request|--header) shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac
+done
+case "$url" in
+  */time_travel/bookmark) echo '{"success":true,"result":{"bookmark":"00000000-00000000-00000000-00000000000000000000000000000000"}}' ;;
+  */query)
+    jq -r .sql "$data" >> "${root}/queries.sql"
+    if jq -e '.sql | contains("runtime_vm_count")' "$data" >/dev/null; then
+      jq -c '{success: true, result: [{success: true, results: [.]}]}' "${root}/drain.json"
+    else echo '{"success":true,"result":[{"success":true,"results":[]}]}'; fi ;;
+  *) echo '{"success":true,"result":{"uuid":"db","name":"intar","version":"production"}}' ;;
+esac
+`);
+  chmodSync(join(bin, "curl"), 0o755);
+  try {
+    const run = spawnSync("bash", ["tools/workflows/website/capture-pre-migration-d1-evidence.sh"], {
+      encoding: "utf8",
+      env: { PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: root, DATABASE_ID: "db", CLOUDFLARE_ACCOUNT_ID: "a", CLOUDFLARE_API_TOKEN: "t" },
+    });
+    return { status: run.status, stderr: run.stderr, queries: readFileSync(join(root, "queries.sql"), "utf8") };
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+}
+
+it("captures enabled scenarios from the scenarios table and stops before maintenance on an unwiped runtime", () => {
+  const drained = { active_scenario_run_count: 0, non_uploaded_run_artifact_count: 0, enabled_agent_host_count: 1 };
+  const wiped = { ...drained, runtime_execution_count: 0, runtime_vm_count: 0, cutover_gate_state: "wiped" };
+  const ok = captureEvidence(46, wiped);
+  expect(ok.status, ok.stderr).toBe(0);
+  expect(ok.queries).toContain("FROM scenarios\n  WHERE enabled = 1");
+  expect(ok.queries).not.toContain("vm_scenarios");
+  // While the runtime_vms rebuild is pending, leftover runtime rows or an open gate stop the deploy.
+  for (const leftover of [{ runtime_execution_count: 1 }, { runtime_vm_count: 1 }, { cutover_gate_state: "drained" }]) {
+    expect(captureEvidence(46, { ...wiped, ...leftover }).status).not.toBe(0);
+  }
+  // Once it applied, runtime rows are ordinary again.
+  expect(captureEvidence(47, { ...wiped, runtime_vm_count: 3, cutover_gate_state: "open" }).status).toBe(0);
+});
