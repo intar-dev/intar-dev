@@ -114,6 +114,15 @@ async fn run(config_path: &Path) -> Result<()> {
             "requeued the builds a stopped builder left running"
         );
     }
+    match remove_stale_wake_dirs(&cfg.builder.cache_root) {
+        Ok(removed) if !removed.is_empty() => {
+            info!(?removed, "removed wake build directories no build uses");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(error = %format!("{error:#}"), "failed to remove stale wake build directories")
+        }
+    }
     let (report_tx, report_rx) = mpsc::channel(128);
     let (ready_tx, ready_rx) = watch::channel(0_u64);
     for worker_id in 0..cfg.jobs.max_concurrent_builds {
@@ -151,6 +160,23 @@ async fn run(config_path: &Path) -> Result<()> {
     .await
 }
 
+/// Before any worker starts: the suspended-base cache of earlier releases
+/// (`wake-bases`), and what killed wake builds left in `wake`.
+fn remove_stale_wake_dirs(cache_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    for name in ["wake-bases", "wake"] {
+        let dir = cache_root.join(name);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => removed.push(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("remove {}", dir.display()));
+            }
+        }
+    }
+    Ok(removed)
+}
+
 /// The running binary, so a compile child always matches the compile digest
 /// this process advertises. On Linux `/proc/self/exe` still names it after an
 /// upgrade replaced the file on disk.
@@ -159,4 +185,25 @@ fn builder_binary() -> Result<PathBuf> {
         return Ok(PathBuf::from("/proc/self/exe"));
     }
     std::env::current_exe().context("failed to locate the intar-builder binary")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_wake_dirs_go_and_nothing_else() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        assert!(remove_stale_wake_dirs(cache.path())?.is_empty());
+        for dir in ["wake-bases/abc", "wake/.wake-x", "outputs/y"] {
+            std::fs::create_dir_all(cache.path().join(dir))?;
+        }
+        assert_eq!(
+            remove_stale_wake_dirs(cache.path())?,
+            [cache.path().join("wake-bases"), cache.path().join("wake")]
+        );
+        assert!(cache.path().join("outputs/y").exists());
+        assert!(remove_stale_wake_dirs(cache.path())?.is_empty());
+        Ok(())
+    }
 }

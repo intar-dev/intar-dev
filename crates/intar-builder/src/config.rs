@@ -158,9 +158,6 @@ pub struct WakeConfig {
     pub vmm_version: String,
     pub cpu_profile: PathBuf,
     pub kino: PathBuf,
-    /// Ignored: wake builds keep no suspended bases any more. Accepted so a
-    /// config that still sets it loads.
-    pub max_cached_bases: Option<usize>,
 }
 
 impl Default for WakeConfig {
@@ -172,7 +169,6 @@ impl Default for WakeConfig {
             vmm_version: String::new(),
             cpu_profile: PathBuf::new(),
             kino: PathBuf::new(),
-            max_cached_bases: None,
         }
     }
 }
@@ -341,7 +337,6 @@ vmm_sha256 = "00"
 vmm_version = "v55.0.0"
 cpu_profile = "/etc/intar-builder/cpu-profile.json"
 kino = "/usr/lib/intar-builder/kino"
-max_cached_bases = 4
 "#,
         )
         .unwrap();

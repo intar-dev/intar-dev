@@ -38,6 +38,13 @@ class EpochConfigurationMigration(unittest.TestCase):
             'max_attempts = 1\n[jobs]\nmax_concurrent_builds = 2\n[other]\nmax_attempts = 4\n',
         )
 
+    def test_the_builder_wake_base_cache_size_goes(self):
+        source = '[wake]\nenabled = true\nmax_cached_bases = 4\nkino = "/k"\n'
+        self.assertEqual(
+            module.migrate(source, "builder"),
+            '[wake]\nenabled = true\nkino = "/k"\n',
+        )
+
     def test_a_spelling_it_does_not_edit_is_refused(self):
         for source in [
             'jobs.max_attempts = 3\n',

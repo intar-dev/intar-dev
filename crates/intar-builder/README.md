@@ -48,7 +48,9 @@ fails with the reason until it is fixed; plain targets still build. With
 `enabled = false`, wake targets build as plain images and their logs say so.
 
 The VMM runs in a directory under `cache_root/wake`, whose path is short
-enough for its sockets. Nothing is kept there between builds: an image's
+enough for its sockets. Nothing is kept there between builds; the builder
+empties it, and removes the suspended-base cache of earlier releases
+(`cache_root/wake-bases`), when it starts. A wake image's
 `wake.booted_at_unix_ms` is its own boot, and run hosts stop waking guests
 booted 330 days ago, so an image that old must be rebuilt.
 

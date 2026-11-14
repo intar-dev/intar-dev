@@ -195,8 +195,8 @@ pub(crate) fn build_wake_target(
     // The VMM binds its sockets in this directory, and a socket path must
     // fit in SUN_LEN. The build's work directory is too deep for that under
     // the builder service; the wake work directory is not.
-    // ponytail: a killed build leaves its `.wake-` directory behind; sweep
-    // them at service start if that ever fills the cache disk.
+    // A killed build leaves its `.wake-` directory; the builder removes the
+    // work directory when it starts.
     fs::create_dir_all(&wake.work_dir)?;
     let dir = tempfile::Builder::new()
         .prefix(".wake-")
