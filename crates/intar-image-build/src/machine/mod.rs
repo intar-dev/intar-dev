@@ -85,7 +85,7 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
     let started = Instant::now();
     fs::create_dir_all(&request.output_dir)?;
     if plan.wake.is_some() && builds_wake(&request.config, &log_path)? {
-        let image = wake::build_wake_target(request, &plan, &base, work.path(), &log_path)?;
+        let image = wake::build_wake_target(request, &plan, &base, &log_path)?;
         return Ok(MachineBuildOutput {
             plan,
             image,

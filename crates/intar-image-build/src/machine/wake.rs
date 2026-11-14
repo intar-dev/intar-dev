@@ -187,7 +187,6 @@ pub(crate) fn build_wake_target(
     request: &MachineBuildRequest,
     plan: &BuildPlan,
     base: &BaseRootfsArtifact,
-    work: &Path,
     log: &Path,
 ) -> Result<MachineImage> {
     let wake = request.config.wake.as_ref().context("wake is off")?;
@@ -208,10 +207,19 @@ pub(crate) fn build_wake_target(
         }
         Some(WakeRole::Pack { base: name }) => {
             let cached = steps.cached_base(request, name, None)?;
+            // The VMM binds its sockets in this directory, and a socket path
+            // must fit in SUN_LEN. The build's work directory is too deep
+            // for that under the builder service; the base cache, where the
+            // base step runs for the same reason, is not.
+            // ponytail: a killed build leaves its `.pack-` directory behind;
+            // sweep them at service start if that ever fills the cache disk.
+            let pack = tempfile::Builder::new()
+                .prefix(".pack-")
+                .tempdir_in(&steps.wake.base_cache)?;
             steps.pack(
                 plan,
                 &(cached.dir.clone(), cached.record.clone()),
-                &work.join("pack"),
+                pack.path(),
                 &request.output_dir,
             )
         }
