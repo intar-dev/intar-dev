@@ -13,6 +13,12 @@ inputs:
     rollback_version:
       type: string
       description: The release the host runs now, X.Y.Z; the rollback target
+    gate_open:
+      type: boolean
+      default: true
+      description: >-
+        Open the run gate after a successful install. False leaves it drained,
+        for a rollout that a later step opens.
   required: [version, rollback_version]
 jobs:
   - name: prepare
@@ -118,7 +124,7 @@ jobs:
               echo 'agent/v${{ inputs.rollback_version }} is installed; both releases are unpacked and checked'
     dependsOn: []
   - name: deploy
-    description: Approve, drain, install and verify, then open the gate
+    description: Approve, drain, install and verify, then open the gate unless gate_open is false
     dependsOn:
       - job: prepare
         condition:
@@ -233,6 +239,7 @@ jobs:
               done
               echo 'agent/v${{ inputs.rollback_version }} is back; open the gate with: gh workflow run image-ops.yml --ref main -f operation=gate-open'
       - name: gate-open
+        description: Dispatch image-ops gate-open, unless gate_open is false
         dependsOn:
           - step: install
             condition:
@@ -244,5 +251,10 @@ jobs:
           methodName: execute
           inputs:
             timeout: 1800000
-            run: sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=gate-open
+            run: |
+              if [ '${{ inputs.gate_open }}' = false ]; then
+                echo 'gate_open is false: the run gate stays drained. Open it with: gh workflow run image-ops.yml --ref main -f operation=gate-open'
+              else
+                sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=gate-open
+              fi
 version: 1

@@ -137,7 +137,7 @@ before the workflow attested them have no attestation. Then:
      `systemctl start intar-agent`.
   5. Check that the installed binaries match the release and that the journal
      shows `bridge v9 handshake complete` with no warnings. Then dispatch
-     image-ops `gate-open`, after any Kino rollout that shares the drain.
+     image-ops `gate-open`, unless a later step of a larger rollout opens it.
 
   If a check fails, stop the agent and run `install.sh` from the rollback
   release's directory instead. `install.sh` sets the Cloud Hypervisor path and
@@ -147,7 +147,8 @@ before the workflow attested them have no attestation. Then:
 
   `swamp workflow run agent-rollout --input version=X.Y.Z --input
   rollback_version=<running X.Y.Z>`, run from the repository root after
-  `swamp extension install`, runs these steps. It stops for approval before
+  `swamp extension install`, runs these steps; `--input gate_open=false`
+  leaves the gate drained at the end. It stops for approval before
   the drain and again before a rollback; after each
   `swamp workflow approve agent-rollout <step>`,
   `swamp workflow resume agent-rollout` continues the run.
