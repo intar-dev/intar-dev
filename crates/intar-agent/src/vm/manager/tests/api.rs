@@ -352,6 +352,29 @@ fn terminal_state_reports_failed_with_vm_error() {
 }
 
 #[test]
+fn a_launch_waits_at_least_as_long_as_any_background_prepare() {
+    // The launch waits for the cache pass's background import, so its wait
+    // must cover the budget that import gets for every admitted size, and
+    // must stay finite.
+    let wait = image_prepare_wait();
+    let max = intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES;
+    for gib in [1, 4, 16, 64] {
+        for wake in [None, Some(gib << 30), Some(u64::MAX)] {
+            let budget = jailer_prepare_timeout(RequestClass::Background, gib << 30, wake);
+            assert!(
+                wait >= budget,
+                "{gib} GiB, wake {wake:?}: {wait:?} < {budget:?}"
+            );
+        }
+    }
+    assert!(wait >= jailer_prepare_timeout(RequestClass::Background, max, Some(u64::MAX)));
+    assert!(
+        wait < Duration::from_secs(24 * 60 * 60),
+        "the wait must stay bounded: {wait:?}"
+    );
+}
+
+#[test]
 fn a_foreground_prepare_keeps_the_fixed_budget() {
     // A foreground import resolves from a ready descriptor before this path,
     // so the fixed budget stays whatever the size is.

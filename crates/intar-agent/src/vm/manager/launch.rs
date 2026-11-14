@@ -808,10 +808,46 @@ pub(super) fn boot_phase_millis(start: Instant, ends: [Instant; 10]) -> [u128; 1
     })
 }
 
+/// Wake the cache pass and wait until it has prepared the launch's image,
+/// for at most [`image_prepare_wait`] or until the VM is deleted.
+async fn wait_for_prepared_image(
+    inner: &Arc<Inner>,
+    cache_root: &Path,
+    req: &RunCreateInput<'_>,
+) -> Result<image_cache::ReadyImage> {
+    image_cache::wake_cache_refresh();
+    debug!(
+        vm = req.name,
+        "requested image preparation for an unready launch descriptor"
+    );
+    let budget = image_prepare_wait();
+    let deadline = Instant::now() + budget;
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        ensure_create_not_deleted(inner, req.name).await?;
+        match image_cache::require_ready_image(cache_root, req.image).await {
+            Ok(ready) => return Ok(ready),
+            Err(error) if Instant::now() < deadline => {
+                debug!(vm = req.name, error = %error, "waiting for event-driven image preparation");
+            }
+            Err(error) => {
+                return Err(match image_cache::image_failure(req.image) {
+                    Some(failure) => error.context(failure),
+                    None => error,
+                })
+                .context(format!(
+                    "image was not prepared within {} seconds",
+                    budget.as_secs()
+                ));
+            }
+        }
+    }
+}
+
 pub(super) async fn run_create(
     inner: &Arc<Inner>,
     req: RunCreateInput<'_>,
-    boot_guard: image_cache::BootCriticalGuard,
+    mut boot_guard: image_cache::BootCriticalGuard,
 ) -> Result<()> {
     let create_started_at = Instant::now();
     set_state(inner, req.name, VmLifecycleState::CachingImage).await;
@@ -830,29 +866,15 @@ pub(super) async fn run_create(
         ensure_jailed_run_network(&network_inner, &network_run_id, &network_config).await
     });
     let _network_abort = AbortTaskOnDrop(network_task.abort_handle());
-    let image_prepare_deadline = Instant::now() + Duration::from_secs(60);
-    let mut descriptor_refresh_requested = false;
-    let ready_image = loop {
-        match image_cache::require_ready_image(&cache_root, req.image).await {
-            Ok(ready) => break ready,
-            Err(error) if Instant::now() < image_prepare_deadline => {
-                if !std::mem::replace(&mut descriptor_refresh_requested, true) {
-                    image_cache::wake_cache_refresh();
-                    debug!(
-                        vm = req.name,
-                        "requested image preparation for an unready launch descriptor"
-                    );
-                }
-                debug!(vm = req.name, error = %error, "waiting for event-driven image preparation");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(error) => {
-                return Err(match image_cache::image_failure(req.image) {
-                    Some(failure) => error.context(failure),
-                    None => error,
-                })
-                .context("image was not prepared within 60 seconds");
-            }
+    let ready_image = match image_cache::require_ready_image(&cache_root, req.image).await {
+        Ok(ready) => ready,
+        Err(_) => {
+            // The cache pass parks while any boot window is live, so a launch
+            // that held its window here would wait on work it holds back.
+            drop(boot_guard);
+            let ready = wait_for_prepared_image(inner, &cache_root, &req).await?;
+            boot_guard = image_cache::begin_vm_boot_critical();
+            ready
         }
     };
     let image_ready_at = Instant::now();

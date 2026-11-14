@@ -550,6 +550,17 @@ fn jailer_prepare_timeout(
         });
     JAILER_PREPARE_IMAGE_TIMEOUT.max(Duration::from_secs(seconds))
 }
+
+/// Longest a launch waits for the cache pass to prepare its image.
+///
+/// The launch cannot know the image's size before the pass has pulled it, so
+/// it takes the budget the pass gives the largest import the contract admits,
+/// suspended guest included. The wait is never shorter than that import and
+/// stays finite; a delete request, which the lease's end also sends, ends it
+/// sooner.
+fn image_prepare_wait() -> Duration {
+    jailer_prepare_timeout(RequestClass::Background, u64::MAX, Some(u64::MAX))
+}
 const SCENARIO_READY_PROCESS_POLL_INTERVAL_MILLIS: u64 = 500;
 const SCENARIO_READY_API_POLL_INTERVAL_SECONDS: u64 = 3;
 const SCENARIO_READY_API_PROBE_TIMEOUT_SECONDS: u64 = 2;
