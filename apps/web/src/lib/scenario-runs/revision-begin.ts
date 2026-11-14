@@ -15,7 +15,7 @@ import type {
   HostStateReportV3,
 } from "@/generated/contracts/bridge-message-v9";
 import type { ScenarioRevisionV1 } from "@/generated/contracts/scenario-revision-v1";
-import { appError } from "@/lib/app-error";
+import { AppError, appError } from "@/lib/app-error";
 import type { assertCourseScenarioStartAllowed } from "@/lib/course-catalogs";
 import {
   checkedHostDesiredStateV3,
@@ -65,6 +65,7 @@ import {
   commitAdmissionBatch,
   deliveryHint,
   loadRunByIdempotencyKey,
+  openRunStartRegistryGuard,
   scenarioSourceChanged,
   type AdmissionHostAllocation,
   type BeginScenarioRunInput,
@@ -72,9 +73,54 @@ import {
 } from "./begin";
 import { HOST_HEARTBEAT_TTL_MS, scenarioRuntimeReservationResources } from "./start";
 import { activeKeyFor } from "./storage";
+import { VALIDATION_USER_ID } from "./content-access";
 
-/** A run's VMs live this long unless the run renews them. */
+/** A run's VMs live this long unless the run renews them; a verify run's never renew. */
 const REVISION_RUN_LEASE_MS = 3_600_000;
+/** Verify runs one scope may have at once. */
+export const VERIFY_RUN_QUOTA = 2;
+
+/** The active key of a verify run: one per scenario revision, scoped for the quota. */
+export function verifyActiveKey(scopeKey: string, rev: string, scenarioId: string): string {
+  return `verify:${scopeKey}:${rev}:${scenarioId}`;
+}
+
+/** Holds while scope ?N has fewer than VERIFY_RUN_QUOTA active verify runs. */
+function verifyQuotaCondition(scopeParam: number): string {
+  // ';' sorts right after ':', so the range is the scope's keys and uses the index.
+  return `(SELECT count(*) FROM scenario_runs verifying
+      WHERE verifying.active_key > 'verify:' || ?${scopeParam} || ':'
+        AND verifying.active_key < 'verify:' || ?${scopeParam} || ';') < ${VERIFY_RUN_QUOTA}`;
+}
+
+/**
+ * The commit anchor of a verify run: the revision is still its enabled
+ * scenario's ready candidate in scope ?scope, and the scope has a free verify
+ * slot. One run per revision is the active key's unique index.
+ */
+export function verifyAnchorCondition(scenarioParam: number, revParam: number, scopeParam: number): string {
+  return `EXISTS (SELECT 1 FROM scenarios verify_scenario
+      JOIN scenario_revisions verify_revision ON verify_revision.scenario_id = verify_scenario.id
+    WHERE verify_scenario.id = ?${scenarioParam} AND verify_scenario.enabled = 1
+      AND verify_scenario.scope_key = ?${scopeParam} AND verify_scenario.candidate_rev = ?${revParam}
+      AND verify_revision.rev = ?${revParam} AND verify_revision.state = 'ready')
+    AND ${verifyQuotaCondition(scopeParam)}`;
+}
+
+/** Why a verify run of `rev` may not start now, or null. */
+export async function verifyRefusal(d1: D1Database, scenarioId: string, rev: string, scopeKey: string) {
+  const row = await d1.prepare(
+    `SELECT EXISTS (SELECT 1 FROM scenario_runs WHERE active_key = ?4) AS running,
+        ${verifyQuotaCondition(3)} AS quota, ${verifyAnchorCondition(1, 2, 3)} AS anchored`,
+  ).bind(scenarioId, rev, scopeKey, verifyActiveKey(scopeKey, rev, scenarioId))
+    .first<{ running: number; quota: number; anchored: number }>();
+  if (row?.running) return appError(409, "verify_run_active", "a verify run of this revision is already running");
+  if (!row?.quota) {
+    return appError(409, "verify_quota_exhausted", `this scope already has ${VERIFY_RUN_QUOTA} verify runs; wait for one to end`);
+  }
+  if (!row.anchored) return appError(409, "verify_revision_not_candidate", "only a ready candidate revision can be verified");
+  return null;
+}
 
 export interface LiveScenarioRevision {
   scenarioId: string;
@@ -151,11 +197,15 @@ export async function admitRevisionRun(context: {
   input: BeginScenarioRunInput;
   revision: LiveScenarioRevision;
   organizationId: string | null;
-  courseLecture: Awaited<ReturnType<typeof assertCourseScenarioStartAllowed>>;
+  /** Null only for a verify run. */
+  courseLecture: Awaited<ReturnType<typeof assertCourseScenarioStartAllowed>> | null;
   idempotencyKey: string;
   scope: ScenarioStartRequestScope;
+  /** A verify run of the revision, taking this scope's verify quota. */
+  verifyScopeKey?: string;
 }): Promise<BeginScenarioRunResult> {
   const { input, revision, organizationId, courseLecture } = context;
+  const verifyScopeKey = context.verifyScopeKey ?? null;
   const doc = revision.doc;
   if (!doc.machines.length || doc.machines.some((machine) => !machine.image_digest)) {
     throw appError(409, "image_not_ready", "scenario images are not built yet");
@@ -210,7 +260,7 @@ export async function admitRevisionRun(context: {
     vmId,
     ordinal,
     runtimeVmName,
-    imageKey: { build_key: machine.build_key, spec: machine.spec, kino: pin.current },
+    imageKey: { build_key: machine.build_key, spec: verifyScopeKey ? machine.verify_spec : machine.spec, kino: pin.current },
     imageSha256: image,
     cpuMillis: machine.cpu_millis,
     memoryMib: machine.memory_mib,
@@ -243,8 +293,8 @@ export async function admitRevisionRun(context: {
     lease_expires_at_unix_ms: leaseExpiresAt,
     image,
     kino: pin.current,
-    spec: machine.spec,
-    mode: "learn",
+    spec: verifyScopeKey ? machine.verify_spec : machine.spec,
+    mode: verifyScopeKey ? "verify" : "learn",
     cpu_millis: machine.cpu_millis,
     memory_mib: machine.memory_mib,
     disk_mib: machine.disk_mib,
@@ -264,7 +314,7 @@ export async function admitRevisionRun(context: {
       id: hint.id, title: hint.title ?? null, bodyMarkdown: hint.body,
     }))),
   ];
-  const lecture = courseLecture.lecture;
+  const lecture = courseLecture?.lecture;
   const run = {
     runId,
     userId: input.userId,
@@ -275,21 +325,21 @@ export async function admitRevisionRun(context: {
     scenarioName: revision.scenarioId,
     scenarioRev: revision.rev,
     tasksJson: doc.tasks,
-    launchSource: "course" as const,
-    courseScopeKey: courseLecture.courseScopeKey,
-    courseId: courseLecture.courseId,
-    courseTitle: courseLecture.courseTitle,
-    lectureId: courseLecture.lectureId,
-    lectureTitle: courseLecture.lectureTitle,
-    lectureSummary: courseLecture.lectureSummary,
-    lectureBodyMarkdown: courseLecture.lectureBodyMarkdown,
-    lectureOrdinal: courseLecture.lectureOrdinal,
-    lectureCount: courseLecture.lectureCount,
-    title: lecture.title || doc.title,
-    tagline: lecture.summary || doc.summary,
+    launchSource: verifyScopeKey ? "verify" as const : "course" as const,
+    courseScopeKey: courseLecture?.courseScopeKey ?? null,
+    courseId: courseLecture?.courseId ?? null,
+    courseTitle: courseLecture?.courseTitle ?? null,
+    lectureId: courseLecture?.lectureId ?? null,
+    lectureTitle: courseLecture?.lectureTitle ?? null,
+    lectureSummary: courseLecture?.lectureSummary ?? null,
+    lectureBodyMarkdown: courseLecture?.lectureBodyMarkdown ?? null,
+    lectureOrdinal: courseLecture?.lectureOrdinal ?? null,
+    lectureCount: courseLecture?.lectureCount ?? null,
+    title: lecture?.title || doc.title,
+    tagline: lecture?.summary || doc.summary,
     briefingMarkdown: doc.briefing,
     objectivesJson: "[]",
-    difficulty: lecture.difficulty ?? doc.difficulty,
+    difficulty: lecture?.difficulty ?? doc.difficulty,
     estimatedMinutes: doc.minutes,
     tagsJson: doc.tags,
     hintsJson: hints,
@@ -300,7 +350,7 @@ export async function admitRevisionRun(context: {
     vmCount: vms.length,
     state: state.phase,
     stateRank: RUN_PHASE_ORDER[state.phase],
-    activeKey: activeKeyFor(input.userId),
+    activeKey: verifyScopeKey ? verifyActiveKey(verifyScopeKey, revision.rev, revision.scenarioId) : activeKeyFor(input.userId),
     requestIdempotencyKey: context.idempotencyKey,
     requestScopeJson: context.scope,
     stateJson: JSON.stringify(state),
@@ -318,11 +368,13 @@ export async function admitRevisionRun(context: {
     userId: input.userId,
     organizationId,
     scenarioId: revision.scenarioId,
-    courseScopeKey: courseLecture.courseScopeKey,
-    courseId: courseLecture.courseId,
-    lectureId: courseLecture.lectureId,
+    courseScopeKey: courseLecture?.courseScopeKey ?? null,
+    courseId: courseLecture?.courseId ?? null,
+    lectureId: courseLecture?.lectureId ?? null,
     allowSequenceBypass: input.allowSequenceBypass === true,
     requiresAdmin: input.allowDrainedAdminProof === true || input.allowSequenceBypass === true,
+    launchSource: run.launchSource,
+    scenarioRev: revision.rev,
   };
   const images = [...new Set(machines.map((machine) => machine.image))].sort();
   for (let attempt = 1; attempt <= ADMISSION_CAS_ATTEMPTS; attempt += 1) {
@@ -333,6 +385,7 @@ export async function admitRevisionRun(context: {
       guestContract: revision.guestContract,
       kino: pin.current,
       ...(input.hostId ? { requestedHostId: input.hostId } : {}),
+      platformOnly: verifyScopeKey !== null,
       now,
     });
     await prepareRevisionImages({ access, requestKey: context.idempotencyKey, candidates, images, now });
@@ -350,7 +403,8 @@ export async function admitRevisionRun(context: {
       leaseExpiresAt,
       candidateProof: null,
       sourceAnchor: null,
-      revisionAnchor: revision.rev,
+      revisionAnchor: verifyScopeKey ? null : revision.rev,
+      verifyScopeKey,
       ...(input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
       now: Date.now(),
     });
@@ -385,15 +439,75 @@ export async function admitRevisionRun(context: {
         deliveryHint: deliveryHint(raced.hostId),
       };
     }
-    if (outcome.reason === "error") throw outcome.error;
+    if (outcome.reason === "error") {
+      // The active key is per revision for a verify run, not per account.
+      if (verifyScopeKey && outcome.error instanceof AppError && outcome.error.code === "scenario_run_active_conflict") {
+        throw appError(409, "verify_run_active", "a verify run of this revision is already running");
+      }
+      throw outcome.error;
+    }
     await assertAdmissionRefusalPriority({
       userId: input.userId,
       ...(input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
     });
-    if (!(await liveRevisionHolds(env.DB, revision.scenarioId, revision.rev))) throw scenarioSourceChanged();
+    if (verifyScopeKey) {
+      const refusal = await verifyRefusal(env.DB, revision.scenarioId, revision.rev, verifyScopeKey);
+      if (refusal) throw refusal;
+    } else if (!(await liveRevisionHolds(env.DB, revision.scenarioId, revision.rev))) {
+      throw scenarioSourceChanged();
+    }
     await assertCurrentContentAccess({ ...run, hostId: allocated.hostId }, input.allowDrainedAdminProof);
   }
   throw appError(409, "scenario_host_capacity_contended", "scenario capacity changed during admission; retry the start");
+}
+
+/**
+ * Starts a verify run of a scenario's ready candidate revision `rev`, as the
+ * validation account, on a platform host, under the operator drain too. The
+ * caller has checked that its actor administers the scenario's scope.
+ */
+export async function beginVerifyRun(input: { scenarioId: string; rev: string }): Promise<BeginScenarioRunResult> {
+  const row = await env.DB.prepare(
+    `SELECT scenario.scope_key, revision.guest_contract, revision.doc_json FROM scenarios scenario
+       JOIN scenario_revisions revision ON revision.scenario_id = scenario.id AND revision.rev = ?2
+      WHERE scenario.id = ?1`,
+  ).bind(input.scenarioId, input.rev).first<{ scope_key: string; guest_contract: number; doc_json: string }>();
+  if (!row) throw appError(404, "scenario_revision_not_found", "scenario revision not found");
+  const refusal = await verifyRefusal(env.DB, input.scenarioId, input.rev, row.scope_key);
+  if (refusal) throw refusal;
+  await env.DB.prepare(
+    `INSERT INTO user (id, name, email, email_verified, metal_placement) VALUES (?1, 'Scenario validation', ?2, 1, 'platform')
+      ON CONFLICT (id) DO NOTHING`,
+  ).bind(VALIDATION_USER_ID, `${VALIDATION_USER_ID}@users.invalid`).run();
+  const idempotencyKey = createAppId();
+  const runInput: BeginScenarioRunInput = {
+    scenarioId: input.scenarioId,
+    userId: VALIDATION_USER_ID,
+    idempotencyKey,
+    organizationId: null,
+    allowDrainedAdminProof: true,
+  };
+  await assertAgentKvmRunsOpen(env.DB, { allowDrainedAdminProof: true });
+  const registryGuard = await openRunStartRegistryGuard(VALIDATION_USER_ID);
+  let outcome: "ok" | "error" = "error";
+  try {
+    const result = await admitRevisionRun({
+      input: runInput,
+      revision: { scenarioId: input.scenarioId, rev: input.rev, guestContract: row.guest_contract, doc: JSON.parse(row.doc_json) },
+      organizationId: null,
+      courseLecture: null,
+      idempotencyKey,
+      scope: {
+        scenarioId: input.scenarioId, organizationId: null, hostId: null, candidateRevision: null,
+        candidateBuildId: null, allowDrainedAdminProof: true, allowSequenceBypass: false,
+      },
+      verifyScopeKey: row.scope_key,
+    });
+    outcome = "ok";
+    return result;
+  } finally {
+    await registryGuard.complete(outcome);
+  }
 }
 
 interface RevisionHostCandidate {
@@ -418,6 +532,8 @@ async function eligibleRevisionHosts(input: {
   guestContract: number;
   kino: string;
   requestedHostId?: string;
+  /** Platform hosts only: a verify run never runs on a host a user controls. */
+  platformOnly?: boolean;
   now: number;
 }): Promise<RevisionHostCandidate[]> {
   const db = drizzle(env.DB);
@@ -440,6 +556,7 @@ async function eligibleRevisionHosts(input: {
       eq(agentHosts.scenarioEnabled, true),
       eq(agentHosts.connected, true),
       input.requestedHostId ? eq(agentHosts.id, input.requestedHostId) : undefined,
+      input.platformOnly ? eq(agentHosts.scope, "platform") : undefined,
       metalPlacementForUser(input.userId, input.organizationId),
     ))
     .orderBy(desc(agentHosts.updatedAt));

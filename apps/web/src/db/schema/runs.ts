@@ -54,7 +54,7 @@ export const scenarioRuns = sqliteTable(
       "course" | "play" | "assignment" | "verify"
     >(),
     ref: text("ref"),
-    endReason: text("end_reason").$type<"lab_failed">(),
+    endReason: text("end_reason").$type<"lab_failed" | "verify_timeout">(),
     // Immutable course/lecture context. Old runs remain readable with nulls.
     courseScopeKey: text("course_scope_key"),
     courseId: text("course_id"),

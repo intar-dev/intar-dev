@@ -1,7 +1,7 @@
 import type { ScenarioLaunchSummary } from "@/lib/scenario-model";
 import type { ImageKey } from "@/generated/catalog";
 import type { VmResourceStateV3 } from "@/generated/bridge";
-import type { CheckStatus, LabState } from "@/generated/contracts/bridge-message-v9";
+import type { CheckStatus, LabState, VmVerifyV1 } from "@/generated/contracts/bridge-message-v9";
 import { GUEST_USERNAME } from "@/generated/constants";
 import { tasksSolved, type RunTaskState } from "@/lib/run-tasks";
 import { isVerificationPassed } from "@/lib/verification-copy";
@@ -159,6 +159,8 @@ export interface RunVmLabState {
   state: LabState;
   ready: Array<{ name: string; status: CheckStatus }>;
   failure: string | null;
+  /** A verify run's last verify report from this machine; admin-only. */
+  verify?: VmVerifyV1;
 }
 
 /** Immutable origin for an administrator-started staged-image proof run. */

@@ -1,3 +1,4 @@
+import { settleVerifyRun } from "@/lib/scenario-revisions";
 import { GUEST_USERNAME } from "@/generated/constants";
 import { loadStargateSshTransport } from "@/lib/stargate-relay";
 import { env } from "cloudflare:workers";
@@ -440,6 +441,8 @@ export async function expireOverdueRunLeases(
       if (revision !== null) {
         updatedRunRevisions.push({ runId: row.runId, revision });
       }
+      // A verify run without an outcome by now timed out.
+      await settleVerifyRun(row.runId, { hostId, leaseEnded: true });
     }
 
     // Clear the expired VMs from the desired doc even when the run row is

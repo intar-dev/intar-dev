@@ -393,6 +393,7 @@ function scenarioRunRuntimeProjectionStatements(
          WHERE run.run_id = ?1
            AND run.active_key IS NOT NULL
            AND run.runtime_execution_id IS NOT NULL
+           AND run.launch_source IS NOT 'verify'
            AND EXISTS (SELECT 1 FROM runtime_executions execution
              WHERE execution.id = run.runtime_execution_id AND execution.state <> 'archived')
            AND NOT EXISTS (

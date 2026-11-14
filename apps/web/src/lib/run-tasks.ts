@@ -36,9 +36,11 @@ export const LAB_FAILED_TEXT =
 
 const MAX_TASK_MESSAGE_CHARS = 512;
 
-/** A VM's lab as a learner may see it: the guest's failure text is admin-only. */
-export function learnerLab<T extends { failure: string | null }>(lab: T | null | undefined): T | null {
-  return lab ? { ...lab, failure: null } : null;
+/** A VM's lab as a learner may see it: the guest's failure text and verify report are admin-only. */
+export function learnerLab<T extends { failure: string | null; verify?: unknown }>(lab: T | null | undefined): T | null {
+  if (!lab) return null;
+  const { verify: _verify, ...rest } = lab;
+  return { ...rest, failure: null } as T;
 }
 
 export function initialRunTasks(tasks: readonly RevisionTaskV1[]): RunTaskState[] {
@@ -119,4 +121,25 @@ export function taskViews(tasks: readonly RunTaskState[]): RunTaskView[] {
 export function tasksSolved(tasks: readonly RunTaskState[]): boolean {
   const required = taskViews(tasks).filter((task) => !task.optional);
   return required.length > 0 && required.every((task) => task.complete);
+}
+
+export type VerifyOutcome = "passed" | "failed" | "verify_timeout";
+
+/**
+ * A verify run's outcome from its machines' last reports, or null while it
+ * is still running. It passes when every machine finished verify and passed;
+ * it fails when any machine finished and did not pass, any lab failed, or
+ * the run failed otherwise; it times out when its lease ended first.
+ */
+export function verifyOutcome(
+  run: { phase: string; vms: ReadonlyArray<{ lab?: { state: string; verify?: { done: boolean; passed: boolean } } | null }> },
+  leaseEnded = false,
+): VerifyOutcome | null {
+  const verifies = run.vms.map((vm) => vm.lab?.verify);
+  if (run.vms.some((vm) => vm.lab?.state === "failed") || verifies.some((verify) => verify?.done && !verify.passed)) {
+    return "failed";
+  }
+  if (run.vms.length > 0 && verifies.every((verify) => verify?.done && verify.passed)) return "passed";
+  if (leaseEnded) return "verify_timeout";
+  return run.phase === "failed" ? "failed" : null;
 }

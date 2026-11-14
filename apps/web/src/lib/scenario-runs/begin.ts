@@ -14,6 +14,8 @@ import {
   liveRevisionAnchorCondition,
   liveRevisionHolds,
   liveScenarioRevision,
+  verifyAnchorCondition,
+  verifyRefusal,
 } from "./revision-begin";
 import {
   admissionCpuQuotaStatement,
@@ -278,7 +280,7 @@ export async function beginScenarioRun(
  * retryable: the gate is closed only while a collector sweep runs or while the
  * registry is paused, and the caller's idempotency key makes the retry safe.
  */
-async function openRunStartRegistryGuard(
+export async function openRunStartRegistryGuard(
   userId: string,
 ): Promise<RegistryOperationLease> {
   const admitted = await admitInternalRegistryOperation(env, {
@@ -1416,6 +1418,8 @@ export interface AdmissionCommitInput {
   sourceAnchor?: LiveSourceFingerprint | null;
   /** The live revision a revision-model start read, if any. */
   revisionAnchor?: string | null;
+  /** The scope whose verify quota a verify run takes, if it is one. */
+  verifyScopeKey?: string | null;
   now: number;
 }
 
@@ -1505,6 +1509,10 @@ async function admissionRefusal(input: AdmissionCommitInput) {
   if (input.revisionAnchor && !(await liveRevisionHolds(env.DB, input.run.scenarioId, input.revisionAnchor))) {
     throw scenarioSourceChanged();
   }
+  if (input.verifyScopeKey) {
+    const refusal = await verifyRefusal(env.DB, input.run.scenarioId, input.run.scenarioRev ?? "", input.verifyScopeKey);
+    if (refusal) throw refusal;
+  }
   await assertAdmissionRefusalPriority({
     userId: input.run.userId,
     ...(input.allowDrainedAdminProof
@@ -1530,6 +1538,8 @@ function admissionContentAccess(
     requiresAdmin: allowDrainedAdminProof ||
       run.requestScopeJson?.allowDrainedAdminProof === true ||
       run.requestScopeJson?.allowSequenceBypass === true,
+    launchSource: run.launchSource ?? null,
+    scenarioRev: run.scenarioRev ?? null,
   };
 }
 
@@ -1891,8 +1901,13 @@ function insertRunStatement(
   const candidateProof = input.candidateProof;
   const sourceAnchor = input.sourceAnchor ?? null;
   const revisionAnchor = input.revisionAnchor ?? null;
+  const verifyScopeKey = input.verifyScopeKey ?? null;
   const anchorCondition = candidateProof
     ? candidateAnchorCondition(candidateParam)
+    : verifyScopeKey
+      // host_id takes no bound value, so a later column's index is its parameter number.
+      ? verifyAnchorCondition(RUN_INSERT_COLUMNS.indexOf("scenario_id"),
+        RUN_INSERT_COLUMNS.indexOf("scenario_rev"), candidateParam) + " AND host.scope = 'platform'"
     : revisionAnchor
       ? liveRevisionAnchorCondition(RUN_INSERT_COLUMNS.indexOf("scenario_id") + 1, candidateParam)
     : sourceAnchor
@@ -1915,6 +1930,8 @@ function insertRunStatement(
         candidateProof.buildId,
         candidateProof.manifestText,
       ]
+    : verifyScopeKey
+      ? [verifyScopeKey]
     : revisionAnchor
       ? [revisionAnchor]
     : sourceAnchor
@@ -2196,12 +2213,15 @@ function activeSlotStatement(
   run: typeof scenarioRuns.$inferInsert & { hostId: string },
 ): D1PreparedStatement {
   // No conflict handler is intentional: a slot owned by another runtime
-  // aborts the whole batch, exactly like the previous projection.
+  // aborts the whole batch, exactly like the previous projection. Verify
+  // runs share one account and hold no slot: their own active keys bound
+  // them.
   return env.DB.prepare(
     "INSERT INTO active_runtime_slots (user_id, execution_id, acquired_at)" +
       " SELECT run.user_id, run.runtime_execution_id, run.created_at" +
       " FROM scenario_runs run" +
       " WHERE run.run_id = ?1 AND run.active_key IS NOT NULL" +
-      " AND run.runtime_execution_id IS NOT NULL",
+      " AND run.runtime_execution_id IS NOT NULL" +
+      " AND run.launch_source IS NOT 'verify'",
   ).bind(run.runId);
 }

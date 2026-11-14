@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "8d3d0d33-d6b9-4efb-9e6f-895c16d72a7a",
-  "prevId": "6a50f60a-ce76-4af6-94bb-31ec196963f1",
+  "id": "50a21c91-9af3-4bda-8623-e6f4d10b8c32",
+  "prevId": "8d3d0d33-d6b9-4efb-9e6f-895c16d72a7a",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -5898,6 +5898,13 @@
         "verify_report_json": {
           "name": "verify_report_json",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "live_at": {
+          "name": "live_at",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

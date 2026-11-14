@@ -11,6 +11,7 @@ import {
   mergeReportedTasks,
   taskViews,
   tasksSolved,
+  verifyOutcome,
 } from "@/lib/run-tasks";
 
 function task(id: string, machine: string, extra: Partial<RevisionTaskV1> = {}): RevisionTaskV1 {
@@ -164,4 +165,22 @@ it("fits the longest machine name and a run id in a jailer id", () => {
   const id = revisionVmId("a".repeat(MAX_MACHINE_NAME_LEN), createAppId());
   expect(id.length).toBeLessThanOrEqual(64);
   expect(id).toMatch(/^[A-Za-z0-9_-]+$/);
+});
+
+describe("verifyOutcome", () => {
+  const vm = (state: string, verify?: { done: boolean; passed: boolean }) => ({ lab: { state, ...(verify ? { verify } : {}) } });
+  const run = (...vms: Array<ReturnType<typeof vm>>) => ({ phase: "running", vms });
+
+  it("passes only when every machine finished and passed", () => {
+    expect(verifyOutcome(run(vm("ready", { done: true, passed: true }), vm("ready", { done: true, passed: true })))).toBe("passed");
+    expect(verifyOutcome(run(vm("ready", { done: true, passed: true }), vm("ready", { done: false, passed: false })))).toBeNull();
+    expect(verifyOutcome(run(vm("ready", { done: true, passed: true }), vm("ready")))).toBeNull();
+  });
+
+  it("fails on a failed check or lab, and times out only while undecided", () => {
+    expect(verifyOutcome(run(vm("ready", { done: true, passed: false }), vm("ready")))).toBe("failed");
+    expect(verifyOutcome(run(vm("failed")), true)).toBe("failed");
+    expect(verifyOutcome(run(vm("ready", { done: false, passed: false })), true)).toBe("verify_timeout");
+    expect(verifyOutcome({ phase: "failed", vms: [] })).toBe("failed");
+  });
 });

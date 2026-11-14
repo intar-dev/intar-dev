@@ -158,6 +158,7 @@ export function applyVmStateV3ToRunState(input: {
           state: applied.lab?.state === "failed" ? "failed" as const : lab.state,
           ready: lab.ready.slice(0, 64).map(({ name, status }) => ({ name, status })),
           failure: lab.failure?.slice(0, 4096) ?? applied.lab?.failure ?? null,
+          ...(lab.verify ? { verify: lab.verify } : {}),
         }
       : (applied.lab ?? null);
     if (labState?.state !== "failed") return { ...applied, lab: labState };

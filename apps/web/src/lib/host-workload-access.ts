@@ -20,7 +20,8 @@ export async function enforceHostWorkloadAccess<T extends StoredHostDesiredState
 ): Promise<T> {
   const { results } = await env.DB.prepare(`WITH permitted_runs AS MATERIALIZED (
     SELECT run.run_id, run.user_id, run.runtime_execution_id, run.organization_id,
-      run.scenario_id, run.course_scope_key, run.course_id, run.lecture_id, run.request_scope_json
+      run.scenario_id, run.course_scope_key, run.course_id, run.lecture_id, run.request_scope_json,
+      run.launch_source, run.scenario_rev
     FROM scenario_runs run JOIN user owner ON owner.id = run.user_id
     WHERE ?2 = 1 AND run.host_id = ?1 AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
       AND run.delete_requested_at IS NULL AND run.route_cleanup_id IS NULL AND run.failed_at IS NULL AND run.completed_at IS NULL

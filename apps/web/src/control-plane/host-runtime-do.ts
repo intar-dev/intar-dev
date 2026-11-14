@@ -48,6 +48,7 @@ import {
 } from "@/lib/run-lifecycle";
 import type { RunStateDocument } from "@/lib/run-state";
 import { liveRevisionImages } from "@/lib/scenario-runs/revision-begin";
+import { settleVerifyRun } from "@/lib/scenario-revisions";
 import {
   HOST_DESIRED_STATE_SCHEMA_VERSION_V3,
   loadOrCreateHostDesiredState,
@@ -780,6 +781,8 @@ export class HostRuntimeDO extends HostRuntimeBase {
         attachment.credentialGeneration,
         (latest) => applyVmStateV3ToRunState({ runId: vm.run_id, current: latest, vm }),
       );
+      // Only this host's own projection reaches the stored state it reads.
+      await settleVerifyRun(vm.run_id, { hostId, wake: () => this.scheduleAlarmNoLaterThan(Date.now()) });
       await this.scheduleAlarmNoLaterThan(Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
     } else if (message.type === "sync_request") {
       await this.dispatchBridgeDesiredStateIfNeeded(hostId, ws, { force: true });
