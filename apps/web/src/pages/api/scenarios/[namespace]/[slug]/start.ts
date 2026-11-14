@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { toErrorResponse } from "@/lib/app-error";
-import { isRevisionScenarioId, isSafeScenarioId } from "@/lib/scenario-id";
+import { isRevisionScenarioId } from "@/lib/scenario-id";
 import {
   courseLocationFromRunSnapshot,
   startScenarioRunForUser,
@@ -37,12 +37,10 @@ export const POST: APIRoute = async ({ request, params, locals }) => {
     return jsonResponse(body, { status });
   }
 
-  // A revision-model id carries one encoded slash.
-  const scenarioId = (params.scenarioId?.trim() ?? "").replace(/%2F/giu, "/");
-  if (!scenarioId) {
-    return jsonResponse({ error: "scenarioId is required" }, { status: 400 });
-  }
-  if (!isSafeScenarioId(scenarioId) && !isRevisionScenarioId(scenarioId)) {
+  // `<namespace>/<slug>` as two plain path segments: the Worker refuses an
+  // encoded path, so the id's slash is never escaped.
+  const scenarioId = `${params.namespace ?? ""}/${params.slug ?? ""}`;
+  if (!isRevisionScenarioId(scenarioId)) {
     return jsonResponse({ error: "invalid scenarioId" }, { status: 400 });
   }
 

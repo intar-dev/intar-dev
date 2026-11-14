@@ -358,7 +358,7 @@ function observeScenarioStart(
   scenarioId: string,
   deadlineUnixMs: number,
 ) {
-  const targetPath = `/api/scenarios/${encodeURIComponent(scenarioId)}/start`;
+  const targetPath = `/api/scenarios/${scenarioId.split("/").map(encodeURIComponent).join("/")}/start`;
   let attempts = 0;
   let settled = false;
   // The attempt starts before the click, so the run's own acceptance time

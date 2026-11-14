@@ -236,7 +236,7 @@ export function sensitiveRateLimitActionFor(
   if (isBetterAuthStartPath(pathname)) return "auth-start";
   if (pathname === "/api/organization-sign-in/start") return "auth-start";
   if (pathname === "/api/account-links/sso/start") return "sso-link";
-  if (/^\/api\/scenarios\/[^/]+\/start$/u.test(pathname)) {
+  if (/^\/api\/scenarios\/[^/]+\/[^/]+\/start$/u.test(pathname)) {
     return "scenario-start";
   }
   if (/^\/api\/scenarios\/runs\/[^/]+\/ssh$/u.test(pathname)) {

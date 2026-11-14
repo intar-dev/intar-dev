@@ -14,7 +14,7 @@ async function getJson<T>(url: string, fallback: string): Promise<T> {
   return body as T;
 }
 
-const scenarioUrl = (scenarioId: string) =>
+export const scenarioUrl = (scenarioId: string) =>
   `/api/admin/scenario-revisions/${scenarioId.split("/").map(encodeURIComponent).join("/")}`;
 
 export function useAdministeredScenarios() {
@@ -67,7 +67,9 @@ export function useMachineBuilds() {
   });
 }
 
-export const machineBuildLogUrl = (buildKey: string) => `/api/admin/machine-builds/${encodeURIComponent(buildKey)}/log`;
+// A build key is `sha256:<hex>`; the colon stays as is, since the Worker refuses
+// an encoded path.
+export const machineBuildLogUrl = (buildKey: string) => `/api/admin/machine-builds/${buildKey}/log`;
 
 export const REVISION_STATES: Record<ScenarioRevisionSummary["state"], { word: string; tone: StatusTone }> = {
   building: { word: "Building", tone: "pending" },

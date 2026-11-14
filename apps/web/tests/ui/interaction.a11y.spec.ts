@@ -743,7 +743,7 @@ test("the startup rail carries on from the start screen instead of loading again
   const startGate = new Promise<void>((resolve) => {
     releaseStart = resolve;
   });
-  await page.route("**/api/scenarios/*/start", async (route) => {
+  await page.route("**/api/scenarios/*/*/start", async (route) => {
     await startGate;
     ui.server.setRunState("launching");
     await route.fulfill({
@@ -1037,7 +1037,7 @@ test.describe("lecture reading flow", () => {
     const startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
-    await page.route("**/api/scenarios/*/start", async (route) => {
+    await page.route("**/api/scenarios/*/*/start", async (route) => {
       await startGate;
       ui.server.setRunState("launching");
       await route.fulfill({

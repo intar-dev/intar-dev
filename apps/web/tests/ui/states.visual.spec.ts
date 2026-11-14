@@ -212,7 +212,7 @@ test.describe("focused visual states", () => {
     const startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
-    await page.route("**/api/scenarios/*/start", async (route) => {
+    await page.route("**/api/scenarios/*/*/start", async (route) => {
       await startGate;
       ui.server.setRunState("launching");
       await route.fulfill({

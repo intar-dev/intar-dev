@@ -14,7 +14,7 @@ import {
   seedScenario, specBlob, store,
 } from "@/lib/scenario-runs/revision-test-fixtures";
 import { GET as readPlay } from "@/pages/api/play/[namespace]/[slug]";
-import { POST as start } from "@/pages/api/scenarios/[scenarioId]/start";
+import { POST as start } from "@/pages/api/scenarios/[namespace]/[slug]/start";
 
 const mocks = vi.hoisted(() => ({ auth: vi.fn() }));
 vi.mock("@/lib/agent-bridge", async (importOriginal) => ({
@@ -33,10 +33,10 @@ const as = (userId: string) => mocks.auth.mockResolvedValue({
 const play = (namespace: string, slug: string) =>
   readPlay({ request: new Request(`https://intar.test/api/play/${namespace}/${slug}`), params: { namespace, slug } } as never);
 const startPlay = (scenarioId: string, body: unknown, key = "play-key-1") => start({
-  request: new Request(`https://intar.test/api/scenarios/${encodeURIComponent(scenarioId)}/start`, {
+  request: new Request(`https://intar.test/api/scenarios/${scenarioId}/start`, {
     method: "POST", headers: { "content-type": "application/json", "idempotency-key": key }, body: JSON.stringify(body),
   }),
-  params: { scenarioId: encodeURIComponent(scenarioId) },
+  params: { namespace: scenarioId.split("/")[0], slug: scenarioId.split("/")[1] },
   locals: { cfContext: { waitUntil: () => undefined } },
 } as never);
 

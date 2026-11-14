@@ -17,7 +17,7 @@ vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
 vi.mock("@/lib/scenario-runs", () => scenarioRunsMock);
 vi.mock("@/lib/organizations", () => organizationsMock);
 
-import { POST } from "@/pages/api/scenarios/[scenarioId]/start";
+import { POST } from "@/pages/api/scenarios/[namespace]/[slug]/start";
 import { appError } from "@/lib/app-error";
 
 describe("scenario start route", () => {
@@ -34,7 +34,7 @@ describe("scenario start route", () => {
     scenarioRunsMock.startScenarioRunForUser.mockResolvedValue({
       accepted: true,
       runId: "run-1",
-      scenarioId: "pair-ping",
+      scenarioId: "intar/pair-ping",
       acceptedAt: 1,
       reused: false,
       run: { id: "run-1" },
@@ -54,7 +54,7 @@ describe("scenario start route", () => {
       run: { id: "run-1" },
     });
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
-      scenarioId: "pair-ping",
+      scenarioId: "intar/pair-ping",
       userId: "user-1",
       idempotencyKey: "route-test-key-0001",
     });
@@ -65,7 +65,7 @@ describe("scenario start route", () => {
 
     expect(response.status).toBe(202);
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
-      scenarioId: "pair-ping",
+      scenarioId: "intar/pair-ping",
       userId: "user-1",
       idempotencyKey: "route-test-key-0002",
     });
@@ -107,7 +107,7 @@ describe("scenario start route", () => {
 
     expect(response.status).toBe(202);
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
-      scenarioId: "pair-ping",
+      scenarioId: "intar/pair-ping",
       userId: "user-1",
       organizationId: "org-id",
       idempotencyKey: "route-test-key-0001",
@@ -127,7 +127,7 @@ describe("scenario start route", () => {
 
     expect(response.status).toBe(202);
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
-      scenarioId: "pair-ping",
+      scenarioId: "intar/pair-ping",
       userId: "admin-1",
       hostId: "agent-01",
       allowDrainedAdminProof: true,
@@ -209,7 +209,7 @@ describe("scenario start route", () => {
 
 async function startRequest(
   body: unknown = {},
-  scenarioId = "pair-ping",
+  scenarioId = "intar/pair-ping",
 ): Promise<Response> {
   const request = new Request(
     `https://intar.test/api/scenarios/${scenarioId}/start`,
@@ -224,18 +224,18 @@ async function startRequest(
   );
   return POST({
     request,
-    params: { scenarioId },
+    params: { namespace: scenarioId.split("/")[0], slug: scenarioId.split("/")[1] },
     locals: { cfContext: { waitUntil: () => undefined } },
   } as never);
 }
 
 async function bodylessStartRequest(): Promise<Response> {
   return POST({
-    request: new Request("https://intar.test/api/scenarios/pair-ping/start", {
+    request: new Request("https://intar.test/api/scenarios/intar/pair-ping/start", {
       method: "POST",
       headers: { "idempotency-key": "route-test-key-0002" },
     }),
-    params: { scenarioId: "pair-ping" },
+    params: { namespace: "intar", slug: "pair-ping" },
     locals: { cfContext: { waitUntil: () => undefined } },
   } as never);
 }

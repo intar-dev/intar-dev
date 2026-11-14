@@ -1,5 +1,14 @@
 import type { ScenarioRunRecord } from "@/lib/scenario-runs";
 
+/**
+ * `/api/scenarios/<namespace>/<slug>/start`. The id's slash stays a path
+ * separator, since the Worker refuses an encoded path; a scenario id's
+ * namespace and slug need no escaping.
+ */
+export function scenarioStartPath(scenarioId: string): string {
+  return `/api/scenarios/${scenarioId.split("/").map(encodeURIComponent).join("/")}/start`;
+}
+
 export interface ScenarioStartAcceptedResponse {
   accepted: true;
   runId: string;
@@ -197,7 +206,7 @@ async function requestScenarioStart(
   let response: Response;
   try {
     response = await fetch(
-      `/api/scenarios/${encodeURIComponent(scenarioId)}/start`,
+      scenarioStartPath(scenarioId),
       {
         method: "POST",
         credentials: "include",
