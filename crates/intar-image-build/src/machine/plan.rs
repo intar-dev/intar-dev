@@ -388,7 +388,6 @@ mod tests {
         });
         let machine = machine_mut(&mut bundle, "webserver");
         machine.from = "web".to_owned();
-        machine.setup.retain(|stage| stage.name != "packages");
         let plan = plan_build(&bundle, &webserver(), None).expect("plan");
         assert!(plan.wake);
         // The image's setup and the machine's run in one cold build, as a
@@ -398,7 +397,7 @@ mod tests {
             .iter()
             .map(|stage| stage.name.as_str())
             .collect();
-        assert_eq!(names, ["install", "break-nginx"]);
+        assert_eq!(names, ["install", "packages", "break-nginx"]);
         let image =
             plan_build(&bundle, &BuildTarget::Image("web".to_owned()), None).expect("image");
         assert!(image.wake);

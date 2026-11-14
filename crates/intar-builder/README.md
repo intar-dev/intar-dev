@@ -15,8 +15,7 @@ line, devices, memory layout and CPU profile), waits for Kino's READY and a
 quiet guest, and suspends it. So setup that takes effect only at boot (a unit
 it disabled, an fstab, a service reading its config at start) has taken
 effect in the suspended guest, as on a cold boot. The image carries its whole
-RAM; a pack is no delta to another image's. A pack's machine may not use
-`packages`.
+RAM; a pack is no delta to another image's.
 
 ```toml
 [wake]

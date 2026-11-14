@@ -419,20 +419,6 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
             )),
             Some(_) => {}
         }
-        let from_wake = images
-            .iter()
-            .any(|image| image.wake && image.name == machine.from);
-        if from_wake
-            && machine
-                .setup
-                .first()
-                .is_some_and(|stage| stage.name == "packages")
-        {
-            problem(format!(
-                "machine `{name}`: a machine from the wake image `{}` installs no packages; move them into the image",
-                machine.from
-            ));
-        }
         if machine.disk_mib > MAX_DISK_MIB {
             problem(format!(
                 "machine `{name}`: disk is over the {MAX_DISK_MIB} MiB limit"
@@ -773,7 +759,7 @@ mod tests {
     #[test]
     fn each_rule_is_enforced() {
         type Break = fn(&mut ScenarioV1, &mut Vec<ImageV1>);
-        let broken: [(&str, Break); 18] = [
+        let broken: [(&str, Break); 17] = [
             ("not a valid ID", |s, _| s.slug = "Ab".to_owned()),
             ("1 to 8 machines", |s, _| s.machines.clear()),
             ("declared twice", |s, _| {
@@ -814,10 +800,6 @@ mod tests {
             ("disk is over the 65536 MiB limit", |_, i| {
                 i[0].disk_mib = Some(MAX_DISK_MIB + 1)
             }),
-            ("installs no packages; move them into the image", |s, i| {
-                i[0].wake = true;
-                s.machines[0].setup = vec![script("packages")];
-            }),
             ("only a machine can start from a wake image", |_, i| {
                 i[0].wake = true;
                 let mut child = i[0].clone();
@@ -836,6 +818,14 @@ mod tests {
                 "expected `{expected}` in `{found}`"
             );
         }
+    }
+
+    #[test]
+    fn a_machine_from_a_wake_image_may_install_packages() {
+        let (mut scenario, mut images) = (scenario(), images());
+        images[0].wake = true;
+        scenario.machines[0].setup = vec![script("packages")];
+        assert_eq!(problems(&scenario, &images), "");
     }
 
     #[test]

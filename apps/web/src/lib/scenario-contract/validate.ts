@@ -175,12 +175,6 @@ export function validate(scenario: ScenarioV1, images: ImageV1[]): string[] {
     } else if (machine.disk_mib < minimum) {
       problem(`machine \`${name}\`: disk is smaller than its image's ${minimum} MiB`);
     }
-    const fromWake = images.some((image) => image.wake === true && image.name === machine.from);
-    if (fromWake && machine.setup[0]?.name === "packages") {
-      problem(
-        `machine \`${name}\`: a machine from the wake image \`${machine.from}\` installs no packages; move them into the image`,
-      );
-    }
     if (machine.disk_mib > MAX_DISK_MIB) {
       problem(`machine \`${name}\`: disk is over the ${MAX_DISK_MIB} MiB limit`);
     }

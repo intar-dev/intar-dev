@@ -484,12 +484,6 @@ fn refusal_cases() -> Vec<(&'static str, Mutation)> {
         ("image-cycle", |b| {
             b.images = vec![image("one", "two", None), image("two", "one", None)];
         }),
-        ("wake-packages", |b| {
-            let mut base = image("web-base", "trixie", Some(4096));
-            base.wake = true;
-            b.images.push(base);
-            b.scenarios[0].machines[0].from = "web-base".to_owned();
-        }),
         ("wake-chain", |b| {
             let mut base = image("web-base", "trixie", Some(4096));
             base.wake = true;
