@@ -26,6 +26,24 @@ import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake"
 import { canonicalJson, sha256Digest } from "@/lib/scenario-contract/canonical-json";
 
 export const MAX_MACHINE_BUILD_ATTEMPTS = 3;
+
+/** The log of one attempt of a build: `builds/logs/<hex>.<attempt>.log`. */
+export function machineBuildLogKey(buildKey: string, attempt: number): string {
+  return `builds/logs/${buildKey.replace(/^sha256:/, "")}.${attempt}.log`;
+}
+
+/** The attempt a build's `log_key` names; 0 for none, or a log of one key per build. */
+export function logKeyAttempt(logKey: string | null): number {
+  const match = /\.([1-9][0-9]*)\.log$/.exec(logKey ?? "");
+  return match ? Number(match[1]) : 0;
+}
+
+/** Every log object a build may have: its `log_key` and each attempt's, by key, not by listing. */
+export function machineBuildLogKeys(buildKey: string, attempt: number, logKey: string | null): string[] {
+  const keys = new Set<string>(logKey ? [logKey] : []);
+  for (let n = 1; n <= Math.max(attempt, logKeyAttempt(logKey)); n += 1) keys.add(machineBuildLogKey(buildKey, n));
+  return [...keys];
+}
 /** A build or compile whose builder stayed away this long is taken back. */
 export const BUILDER_REASSIGN_AFTER_MS = 10 * 60 * 1000;
 const BUILD_REPORT_STALE_AFTER_MS = 30 * 60 * 1000;
@@ -156,7 +174,7 @@ export async function assignQueuedMachineBuilds(env: Env, now: number): Promise<
     if (!builder) break;
     const claimed = await env.DB.prepare(
       `UPDATE machine_builds SET state = 'assigned', host_id = ?2, attempt = attempt + 1, phase = NULL,
-          error = NULL, log_key = NULL, assigned_at = ?3, updated_at = ?3
+          error = NULL, assigned_at = ?3, updated_at = ?3
         WHERE build_key = ?1 AND state = 'queued'
           AND (SELECT count(*) FROM machine_builds slot
             WHERE slot.host_id = ?2 AND slot.state IN ('assigned', 'building')) < ?4
@@ -192,7 +210,6 @@ export async function expireMachineBuildLeases(env: Env, now: number): Promise<s
     const state = build.image_digest ? "succeeded" : build.attempt >= MAX_MACHINE_BUILD_ATTEMPTS ? "failed" : "queued";
     const moved = await env.DB.prepare(
       `UPDATE machine_builds SET state = ?4, host_id = CASE WHEN ?4 = 'queued' THEN NULL ELSE host_id END,
-          log_key = CASE WHEN ?4 = 'queued' THEN NULL ELSE log_key END,
           error = CASE ?4 WHEN 'succeeded' THEN error ELSE ?5 END, updated_at = ?6
         WHERE build_key = ?1 AND host_id IS ?2 AND attempt = ?3 AND state IN ('assigned', 'building')
         RETURNING build_key`,

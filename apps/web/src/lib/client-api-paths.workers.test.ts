@@ -12,6 +12,7 @@ const paths = [
   scenarioStartPath(scenarioId),
   scenarioUrl(scenarioId),
   machineBuildLogUrl(buildKey),
+  machineBuildLogUrl(buildKey, 2),
   courseLecturePath({ scope: "public", courseId: "linux-basics", organizationId: null } as never, "01-intro.v2"),
 ];
 

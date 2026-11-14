@@ -308,12 +308,12 @@ describe("machine builds over bridge 9", () => {
     await maintainMachineBuilds(env, null, Date.now());
     expect(await build()).toMatchObject({ state: "assigned", attempt: 2, host_id: "builder-1" });
 
-    // The next attempt never shows the log of the one before.
+    // The next attempt keeps the log of the one before.
     await setLog();
     ws.send(report(key, 2, "failed", { error: "qemu exited" }));
     await until(build, (row) => row?.attempt === 3);
     expect(await build()).toMatchObject({ state: "assigned", attempt: 3, host_id: "builder-1" });
-    expect(await logKey()).toBeNull();
+    expect(await logKey()).toBe("builds/logs/old.log");
     expect(await revision(1)).toMatchObject({ state: "building" });
     // The superseded attempt can no longer record an image.
     expect((await postResult(key, 2, await pushImage(key))).status).toBe(409);
@@ -385,13 +385,56 @@ describe("machine builds over bridge 9", () => {
     expect(await logKey()).toBeNull();
   });
 
-  it("drops the log of a silent attempt it queues again", async () => {
+  it("keeps the log of a silent attempt it queues again", async () => {
     await ingest(1);
     await env.DB.prepare("UPDATE machine_builds SET state = 'building', host_id = 'builder-1', attempt = 1, updated_at = 0").run();
     await setLog();
     await expireMachineBuildLeases(env, Date.now());
     expect(await build()).toMatchObject({ state: "queued", host_id: null });
+    expect(await logKey()).toBe("builds/logs/old.log");
+  });
+
+  async function uploadLog(key: string, text: string) {
+    const body = new TextEncoder().encode(text);
+    const response = await handleImageRegistryRequest(new Request(`https://intar.test/agent/builds/${key.slice(7)}/log`, {
+      method: "PUT", body,
+      headers: { authorization: `Bearer ${token}`, "content-type": "text/plain", "content-length": String(body.length) },
+    }), env);
+    return response!.status;
+  }
+  const stored = async (key: string, attempt: number) =>
+    (await env.VM_IMAGE_REGISTRY_BUCKET.get(`builds/logs/${key.slice(7)}.${attempt}.log`))?.text() ?? null;
+
+  it("keeps each attempt's log through a retry and its success, and drops them for the next bundle", async () => {
+    await ingest(1);
+    const { ws } = await connectBuilder();
+    await until(build, (row) => row?.state === "assigned");
+    const key = (await build())!.build_key;
+
+    // A failure, then the retry runs: log_key still names attempt 1.
+    expect(await uploadLog(key, "attempt one")).toBe(200);
+    ws.send(report(key, 1, "failed", { error: "qemu exited" }));
+    await until(build, (row) => row?.attempt === 2);
+    expect(await logKey()).toBe(`builds/logs/${key.slice(7)}.1.log`);
+    expect(await stored(key, 1)).toBe("attempt one");
+
+    // The retry succeeds: both attempts' logs stay, log_key names the newest.
+    expect(await uploadLog(key, "attempt two")).toBe(200);
+    const image = await pushImage(key);
+    expect((await postResult(key, 2, image)).status).toBe(201);
+    ws.send(report(key, 2, "succeeded", { image_digest: image }));
+    await until(build, (row) => row?.state === "succeeded");
+    expect(await logKey()).toBe(`builds/logs/${key.slice(7)}.2.log`);
+    expect([await stored(key, 1), await stored(key, 2)]).toEqual(["attempt one", "attempt two"]);
+
+    // Requeued under another bundle, its earlier logs are gone and unnamed.
+    await env.DB.prepare("UPDATE machine_builds SET state = 'failed', image_digest = NULL").run();
+    await ingest(2);
+    // The connected builder takes it at once, as the new bundle's attempt 1.
+    expect(await build()).toMatchObject({ state: "assigned", attempt: 1 });
     expect(await logKey()).toBeNull();
+    expect([await stored(key, 1), await stored(key, 2)]).toEqual([null, null]);
+    ws.close();
   });
 
   it("verifies an equal revision by carry-forward only from a verified twin of the same guest contract", async () => {

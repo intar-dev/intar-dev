@@ -107,4 +107,39 @@ describe("machine build routes", () => {
     expect(await keys()).toEqual([]);
     expect((await call(buildLog, { buildKey: "sha256:a" })).status).toBe(404);
   });
+
+  it("serve each attempt's log up to the newest uploaded one", async () => {
+    const attemptLog = (attempt: string | null) => buildLog({
+      request: new Request(`https://intar.test/api/admin/machine-builds/sha256:p/log${attempt === null ? "" : `?attempt=${attempt}`}`),
+      params: { buildKey: "sha256:p" },
+    } as never);
+    const listed = async () => ((await (await call(builds)).json()) as {
+      builds: Array<{ buildKey: string; logAttempts: number[] }>;
+    }).builds.find((build) => build.buildKey === "sha256:p")!.logAttempts;
+    as("admin");
+    for (const n of [1, 2]) await env.VM_IMAGE_REGISTRY_BUCKET.put(`builds/logs/p.${n}.log`, `log ${n}`);
+
+    // Attempt 1 failed and attempt 2 runs: the link serves attempt 1.
+    await env.DB.prepare("UPDATE machine_builds SET state = 'building', attempt = 2, log_key = 'builds/logs/p.1.log' WHERE build_key = 'sha256:p'").run();
+    expect(await (await attemptLog(null)).text()).toBe("log 1");
+    expect(await (await attemptLog("1")).text()).toBe("log 1");
+    expect((await attemptLog("2")).status).toBe(404);
+    expect(await listed()).toEqual([1]);
+
+    // Attempt 2 succeeded: both attempts are readable.
+    await env.DB.prepare("UPDATE machine_builds SET state = 'succeeded', log_key = 'builds/logs/p.2.log' WHERE build_key = 'sha256:p'").run();
+    expect(await (await attemptLog(null)).text()).toBe("log 2");
+    expect(await (await attemptLog("1")).text()).toBe("log 1");
+    expect(await (await attemptLog("2")).text()).toBe("log 2");
+    expect(await listed()).toEqual([1, 2]);
+    expect((await attemptLog("0")).status).toBe(400);
+    expect((await attemptLog("x")).status).toBe(400);
+
+    // Requeued for another bundle: no earlier attempt is served, even if an
+    // object outlived its delete.
+    await env.DB.prepare("UPDATE machine_builds SET state = 'queued', attempt = 0, log_key = NULL WHERE build_key = 'sha256:p'").run();
+    expect((await attemptLog("1")).status).toBe(404);
+    expect((await attemptLog(null)).status).toBe(404);
+    expect(await listed()).toEqual([]);
+  });
 });

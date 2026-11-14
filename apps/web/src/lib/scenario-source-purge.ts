@@ -5,7 +5,7 @@
 import { env } from "cloudflare:workers";
 import { ACTIVE_RUNTIME_EXECUTION_STATES } from "@/db/schema";
 import { appError } from "@/lib/app-error";
-import { settleScenarioRevisions } from "@/lib/machine-builds";
+import { machineBuildLogKeys, settleScenarioRevisions } from "@/lib/machine-builds";
 import { deleteFinishedScenarioRunForAdmin } from "@/lib/scenario-runs/lifecycle";
 
 // ponytail: runs are deleted one by one through the run delete path, so one
@@ -101,14 +101,18 @@ export async function purgeScenarioSource(input: {
   // The objects go before the rows that name them, so a purge cut off in
   // between reads the same keys again. R2 deletes take at most 1000 keys.
   // The marker is still set, so no reconnect writes under these keys.
-  const { results: keys } = await bind(
-    `SELECT r2_key AS key FROM bundles WHERE scope_key = ?1 AND organization_id = ?2
-      UNION ALL SELECT log_key FROM machine_builds WHERE log_key IS NOT NULL AND ${SCOPE_BUILDS}`,
-  ).all<{ key: string }>();
+  const [bundleKeys, builds] = await d1.batch([
+    bind(`SELECT r2_key AS key FROM bundles WHERE scope_key = ?1 AND organization_id = ?2`),
+    bind(`SELECT build_key, attempt, log_key FROM machine_builds WHERE ${SCOPE_BUILDS}`),
+  ]);
+  // Every attempt's log, derived from the build: no R2 listing.
+  const keys = [
+    ...(bundleKeys!.results as Array<{ key: string }>).map((row) => row.key),
+    ...(builds!.results as Array<{ build_key: string; attempt: number; log_key: string | null }>)
+      .flatMap((build) => machineBuildLogKeys(build.build_key, build.attempt, build.log_key)),
+  ];
   for (let offset = 0; offset < keys.length; offset += 1000) {
-    await env.VM_IMAGE_REGISTRY_BUCKET.delete(
-      keys.slice(offset, offset + 1000).map((row) => row.key),
-    );
+    await env.VM_IMAGE_REGISTRY_BUCKET.delete(keys.slice(offset, offset + 1000));
   }
   // The assignment delete reads the scenarios, so it runs before them; their
   // revisions cascade with them, and the commits with the binding. The

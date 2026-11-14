@@ -220,13 +220,16 @@ describe("purging a disconnected scope", () => {
   it("deletes the logs and rows of the scope's builds that no other scope needs", async () => {
     const shared = `sha256:${"d".repeat(64)}`;
     const own = `sha256:${"e".repeat(64)}`;
+    // Three attempts each, the newest named by log_key, and a log of one
+    // key per build from before attempts had their own.
+    const logs = (key: string) => [1, 2, 3].map((n) => `builds/logs/${key.slice(7)}.${n}.log`)
+      .concat(`builds/logs/${key.slice(7)}.log`);
     for (const key of [shared, own]) {
-      const logKey = `builds/logs/${key.slice(7)}.log`;
       await env.DB.prepare(
-        `INSERT INTO machine_builds (build_key, image_format, bundle_rev, target_json, state, log_key)
-         VALUES (?1, 'raw', ?2, '{}', 'succeeded', ?3)`,
-      ).bind(key, REV, logKey).run();
-      await env.VM_IMAGE_REGISTRY_BUCKET.put(logKey, "log");
+        `INSERT INTO machine_builds (build_key, image_format, bundle_rev, target_json, state, attempt, log_key)
+         VALUES (?1, 'raw', ?2, '{}', 'succeeded', 3, ?3)`,
+      ).bind(key, REV, `builds/logs/${key.slice(7)}.3.log`).run();
+      for (const log of logs(key)) await env.VM_IMAGE_REGISTRY_BUCKET.put(log, "log");
     }
     await env.DB.prepare(
       `INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state)
@@ -236,8 +239,9 @@ describe("purging a disconnected scope", () => {
     await expect(purge()).resolves.toBeNull();
     expect(await env.DB.prepare("SELECT build_key FROM machine_builds").all().then((r) => r.results))
       .toEqual([{ build_key: shared }]);
-    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(`builds/logs/${"e".repeat(64)}.log`)).toBeNull();
-    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(`builds/logs/${"d".repeat(64)}.log`)).not.toBeNull();
+    // Every attempt's log goes; the legacy one too once log_key names it.
+    for (const log of logs(own).slice(0, 3)) expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(log)).toBeNull();
+    for (const log of logs(shared)) expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(log)).not.toBeNull();
   });
 
   it("resumes a purge that was cut off", async () => {

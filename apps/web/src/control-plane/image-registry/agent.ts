@@ -1,4 +1,5 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
+import { machineBuildLogKey } from "@/lib/machine-builds";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
@@ -387,8 +388,8 @@ async function putMachineBuildLog(
 ): Promise<Response> {
   const buildKey = `sha256:${hex}`;
   const assigned = await env.DB.prepare(
-    "SELECT 1 FROM machine_builds WHERE build_key = ?1 AND host_id = ?2",
-  ).bind(buildKey, hostId).first();
+    "SELECT attempt FROM machine_builds WHERE build_key = ?1 AND host_id = ?2",
+  ).bind(buildKey, hostId).first<{ attempt: number }>();
   if (!assigned) return jsonResponse({ error: "build is not assigned to this builder" }, 409);
   const length = Number(request.headers.get("content-length") ?? "NaN");
   if (!Number.isSafeInteger(length) || length > MAX_MACHINE_BUILD_LOG_BYTES) {
@@ -396,14 +397,15 @@ async function putMachineBuildLog(
   }
   const payload = await request.arrayBuffer();
   if (payload.byteLength > MAX_MACHINE_BUILD_LOG_BYTES) return jsonResponse({ error: "the log is too large" }, 413);
-  const objectKey = `builds/logs/${hex}.log`;
+  // One object per attempt, so a retry keeps the failed attempts' logs.
+  const objectKey = machineBuildLogKey(buildKey, assigned.attempt);
   await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
     httpMetadata: { contentType: "text/plain; charset=utf-8" },
     customMetadata: { build_id: hex, host_id: hostId },
   });
   await env.DB.prepare(
-    "UPDATE machine_builds SET log_key = ?3 WHERE build_key = ?1 AND host_id = ?2",
-  ).bind(buildKey, hostId, objectKey).run();
+    "UPDATE machine_builds SET log_key = ?3 WHERE build_key = ?1 AND host_id = ?2 AND attempt = ?4",
+  ).bind(buildKey, hostId, objectKey, assigned.attempt).run();
   return jsonResponse({ ok: true, build_id: hex, log_key: objectKey });
 }
 

@@ -118,6 +118,16 @@ function BuildRow({ build }: { build: MachineBuildSummary }) {
             <AlertDescription>{build.error}</AlertDescription>
           </Alert>
         ) : null}
+        {build.logAttempts.length > 1 ? (
+          <p className="text-metadata">
+            <span className="text-label">Logs</span>{" "}
+            {build.logAttempts.map((attempt) => (
+              <a key={attempt} className="mr-2 underline" href={machineBuildLogUrl(build.buildKey, attempt)} target="_blank" rel="noreferrer">
+                Attempt {attempt}
+              </a>
+            ))}
+          </p>
+        ) : null}
       </div>
       <div className="flex flex-wrap items-center gap-2 lg:flex-col lg:items-stretch">
         <Button

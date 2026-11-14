@@ -68,8 +68,9 @@ export function useMachineBuilds() {
 }
 
 // A build key is `sha256:<hex>`; the colon stays as is, since the Worker refuses
-// an encoded path.
-export const machineBuildLogUrl = (buildKey: string) => `/api/admin/machine-builds/${buildKey}/log`;
+// an encoded path. Without an attempt, the newest uploaded attempt's log.
+export const machineBuildLogUrl = (buildKey: string, attempt?: number) =>
+  `/api/admin/machine-builds/${buildKey}/log${attempt === undefined ? "" : `?attempt=${attempt}`}`;
 
 export const REVISION_STATES: Record<ScenarioRevisionSummary["state"], { word: string; tone: StatusTone }> = {
   building: { word: "Building", tone: "pending" },

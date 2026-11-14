@@ -18,6 +18,7 @@ import { courseCatalogScopeKey } from "@/lib/course-catalogs";
 import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
 import { admitInternalRegistryOperation } from "@/lib/image-registry-admission";
 import { KEPT_REVISIONS_CTE, revisionImagesPresentSql } from "@/lib/kept-revisions";
+import { logKeyAttempt, machineBuildLogKey } from "@/lib/machine-builds";
 import { platformHasRevisionImagesSql, readyPlatformImagesCtes } from "@/lib/scenario-runs/image-readiness";
 import { verifyOutcome, type VerifyOutcome } from "@/lib/run-tasks";
 import type { RunStateDocument } from "@/lib/run-state";
@@ -391,6 +392,8 @@ export interface MachineBuildSummary {
   attempt: number;
   error: string | null;
   hasLog: boolean;
+  /** The attempts whose log can be asked for, oldest first: those up to the newest uploaded one. */
+  logAttempts: number[];
   createdAt: number;
   updatedAt: number;
 }
@@ -408,17 +411,18 @@ function buildReaderSql(actor: number): string {
 export async function listAdministeredMachineBuilds(actorUserId: string): Promise<MachineBuildSummary[]> {
   const { results } = await env.DB.prepare(
     `SELECT build.build_key, build.bundle_rev, bundle.organization_id, build.target_json, build.state, build.phase,
-        build.attempt, build.error, build.log_key IS NOT NULL AS has_log, build.created_at, build.updated_at
+        build.attempt, build.error, build.log_key, build.created_at, build.updated_at
       FROM machine_builds build LEFT JOIN bundles bundle ON bundle.rev = build.bundle_rev
       WHERE ${buildReaderSql(1)} ORDER BY build.updated_at DESC LIMIT 200`,
   ).bind(actorUserId).all<{
     build_key: string; bundle_rev: string; organization_id: string | null; target_json: string; state: string;
-    phase: string | null; attempt: number; error: string | null; has_log: number; created_at: number; updated_at: number;
+    phase: string | null; attempt: number; error: string | null; log_key: string | null; created_at: number; updated_at: number;
   }>();
   return results.map((row) => ({
     buildKey: row.build_key, bundleRev: row.bundle_rev, organizationId: row.organization_id,
     target: buildTargetLabel(row.target_json), state: row.state, phase: row.phase, attempt: row.attempt,
-    error: row.error, hasLog: row.has_log === 1, createdAt: row.created_at, updatedAt: row.updated_at,
+    error: row.error, hasLog: row.log_key !== null,
+    logAttempts: Array.from({ length: logKeyAttempt(row.log_key) }, (_, index) => index + 1), createdAt: row.created_at, updatedAt: row.updated_at,
   }));
 }
 
@@ -428,10 +432,22 @@ function buildTargetLabel(targetJson: string): string {
   return target.kind === "machine" ? `${target.scenario}/${target.machine}` : target.name;
 }
 
-/** The build log of `buildKey` when `actorUserId` may read that build, else null. */
-export async function readAdministeredMachineBuildLog(actorUserId: string, buildKey: string): Promise<R2ObjectBody | null> {
+/**
+ * The log of `buildKey`'s newest uploaded attempt, or of `attempt`, when
+ * `actorUserId` may read that build, else null. Only an attempt up to the one
+ * `log_key` names is served: a build requeued for another bundle has none
+ * until its own first upload, so no log of the previous bundle is reachable.
+ */
+export async function readAdministeredMachineBuildLog(
+  actorUserId: string,
+  buildKey: string,
+  attempt?: number,
+): Promise<R2ObjectBody | null> {
   const row = await env.DB.prepare(
     `SELECT build.log_key FROM machine_builds build WHERE build.build_key = ?2 AND ${buildReaderSql(1)}`,
   ).bind(actorUserId, buildKey).first<{ log_key: string | null }>();
-  return row?.log_key ? env.VM_IMAGE_REGISTRY_BUCKET.get(row.log_key) : null;
+  if (!row?.log_key) return null;
+  if (attempt === undefined) return env.VM_IMAGE_REGISTRY_BUCKET.get(row.log_key);
+  if (attempt < 1 || attempt > logKeyAttempt(row.log_key)) return null;
+  return env.VM_IMAGE_REGISTRY_BUCKET.get(machineBuildLogKey(buildKey, attempt));
 }

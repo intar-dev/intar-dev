@@ -15,7 +15,7 @@ import { baseKey, buildKeys } from "@/lib/scenario-contract/build-key";
 import { canonicalJson } from "@/lib/scenario-contract/canonical-json";
 import { machineSpec, scenarioRevision, specBlob } from "@/lib/scenario-contract/machine-spec";
 import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
-import { maintainMachineBuilds, settleScenarioRevisions } from "@/lib/machine-builds";
+import { machineBuildLogKeys, maintainMachineBuilds, settleScenarioRevisions } from "@/lib/machine-builds";
 import { isScenarioNamespace, PUBLIC_NAMESPACE } from "@/lib/organization-slugs";
 
 
@@ -147,7 +147,14 @@ export async function ingestSourceBundle(
   // One transaction, one statement per revision so no bound value carries
   // more than one document. `WHERE true` keeps SQLite from reading ON
   // CONFLICT as a join constraint of the SELECT.
-  await env.DB.batch([
+  const buildsJson = JSON.stringify(Object.fromEntries([...builds].map(([key, target]) => [key, JSON.stringify(target)])));
+  const [requeued] = await env.DB.batch([
+    // The failed builds the upsert below takes over, read in its transaction:
+    // their logs belong to the previous bundle's owner.
+    env.DB.prepare(
+      `SELECT build_key, attempt, log_key FROM machine_builds
+        WHERE state = 'failed' AND build_key IN (SELECT key FROM json_each(?1))`,
+    ).bind(buildsJson),
     env.DB.prepare(
       `INSERT INTO bundles (rev, scope_key, organization_id, compiler_version, r2_key, created_at)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (rev) DO NOTHING`,
@@ -182,12 +189,18 @@ export async function ingestSourceBundle(
           updated_at = excluded.updated_at
         WHERE machine_builds.state = 'failed'`,
     ).bind(
-      JSON.stringify(Object.fromEntries([...builds].map(([key, target]) => [key, JSON.stringify(target)]))),
+      buildsJson,
       IMAGE_FORMAT,
       rev,
       now,
     ),
   ]);
+  // Before the requeued builds can be assigned and upload under the same keys.
+  const staleLogs = (requeued!.results as Array<{ build_key: string; attempt: number; log_key: string | null }>)
+    .flatMap((build) => machineBuildLogKeys(build.build_key, build.attempt, build.log_key));
+  for (let offset = 0; offset < staleLogs.length; offset += 1000) {
+    await bucket.delete(staleLogs.slice(offset, offset + 1000));
+  }
   // A revision whose images all exist is ready now; the rest wait for the
   // builds just queued.
   await settleScenarioRevisions(env, { rev });
