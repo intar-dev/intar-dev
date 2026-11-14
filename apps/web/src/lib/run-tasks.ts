@@ -5,6 +5,8 @@ import type { RevisionTaskV1 } from "@/generated/contracts/scenario-revision-v1"
 export interface RunTaskState {
   id: string;
   title: string;
+  /** The author's description of the task, Markdown. */
+  body: string | null;
   machine: string;
   needs: string[];
   optional: boolean;
@@ -19,6 +21,7 @@ export interface RunTaskState {
 export interface RunTaskView {
   id: string;
   title: string;
+  body: string | null;
   machine: string;
   optional: boolean;
   status: CheckStatus;
@@ -42,6 +45,7 @@ export function initialRunTasks(tasks: readonly RevisionTaskV1[]): RunTaskState[
   return tasks.map((task) => ({
     id: task.id,
     title: task.title,
+    body: task.body ?? null,
     machine: task.machine,
     needs: [...task.needs],
     optional: task.optional,
@@ -101,6 +105,7 @@ export function taskViews(tasks: readonly RunTaskState[]): RunTaskView[] {
     .map((task) => ({
       id: task.id,
       title: task.title,
+      body: task.body ?? null,
       machine: task.machine,
       optional: task.optional,
       status: task.passedAt !== null ? "pass" : task.status,

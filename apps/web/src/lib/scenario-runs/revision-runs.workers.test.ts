@@ -35,6 +35,7 @@ const HOST = "host-1";
 const OTHER_HOST = "host-2";
 const SOLUTION = "SOLUTION-TEXT run nginx -t";
 const HINT_BODY = "HINT-BODY check the port";
+const TASK_BODY = "TASK-BODY get **nginx** serving on port 80";
 const HARDWARE = {
   cloud_hypervisor_sha256: "4".repeat(64), kvm: true, vsock: true, reflink: true, landlock: true, cgroup_v2: true,
   hard_cpu_quota: true,
@@ -76,7 +77,7 @@ function revisionDoc(images: Record<string, string>, specs: Record<string, strin
     tags: [], solution: SOLUTION, hints: [{ id: "start", title: "Start", body: "Look around." }],
     machines: [machine("web"), machine("client")],
     tasks: [
-      { id: "serve", title: "Serve", machine: "web", needs: [], optional: false, ordinal: 0,
+      { id: "serve", title: "Serve", body: TASK_BODY, machine: "web", needs: [], optional: false, ordinal: 0,
         hints: [{ id: "port", title: "Port", body: HINT_BODY }] },
       { id: "fetch", title: "Fetch", machine: "client", needs: ["serve"], optional: false, ordinal: 1, hints: [] },
     ],
@@ -317,7 +318,7 @@ describe("runs of a live scenario revision", () => {
     for (const secret of ["setup.sh", SOLUTION, HINT_BODY, "PRIVATE KEY", "verify_spec", "needs"]) {
       expect(text).not.toContain(secret);
     }
-    expect(status.tasks?.map((task) => task.id)).toEqual(["serve", "fetch"]);
+    expect(status.tasks?.map((task) => [task.id, task.body])).toEqual([["serve", TASK_BODY], ["fetch", null]]);
   });
 
   it("takes back a run whose owner was banned inside the commit", async () => {

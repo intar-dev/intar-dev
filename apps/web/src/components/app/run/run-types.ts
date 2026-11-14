@@ -174,7 +174,7 @@ export function runTaskChecks(run: ScenarioRunRecord, vmName: string | null): {
       })),
     objectives: run.tasks.map((task) => ({
       probeName: task.id, vmName: task.machine, label: task.title, title: task.title,
-      bodyMarkdown: null,
+      bodyMarkdown: task.body,
       hintCount: run.hints.filter((hint) => hint.probeName === task.id).length,
     })),
   };
