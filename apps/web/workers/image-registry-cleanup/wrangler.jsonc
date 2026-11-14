@@ -10,8 +10,9 @@
   "preview_urls": false,
   "vars": {
     // The live mode, deployed as committed on every release. "report-only"
-    // lists candidates and writes no delete.
-    "REGISTRY_CLEANUP_MODE": "delete"
+    // lists candidates and writes no delete. The OCI store's sweep starts in
+    // report-only; commit "delete" once its reports list the expected set.
+    "REGISTRY_CLEANUP_MODE": "report-only"
   },
   "triggers": {
     // Every six hours at minute 17 UTC: 00:17, 06:17, 12:17, 18:17. A publish
