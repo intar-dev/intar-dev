@@ -49,6 +49,7 @@ import {
 import type { RunStateDocument } from "@/lib/run-state";
 import { liveRevisionImages } from "@/lib/scenario-runs/revision-begin";
 import { settleVerifyRun } from "@/lib/scenario-revisions";
+import { VALIDATION_USER_ID } from "@/lib/scenario-runs/content-access";
 import {
   HOST_DESIRED_STATE_SCHEMA_VERSION_V3,
   loadOrCreateHostDesiredState,
@@ -870,6 +871,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
       });
       if (outcome.kind === "updated") {
         this.scheduleRunStatusInvalidation({ runId: run.runId, hostId, revision: outcome.revision });
+      }
+      // A verify outcome can arrive in a state report alone.
+      if (run.userId === VALIDATION_USER_ID) {
+        await settleVerifyRun(run.runId, { hostId, wake: () => this.scheduleAlarmNoLaterThan(Date.now()) });
       }
     }
   }

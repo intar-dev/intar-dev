@@ -22,7 +22,7 @@ import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
 import { VALIDATION_USER_ID } from "@/lib/scenario-runs/content-access";
 import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
 import { markRunVmsAbsentInDesiredState, revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
-import { countUnitGuardRuns } from "@/lib/scenario-sources";
+import { countUnitGuardRuns, unitGuardRunsSql } from "@/lib/scenario-sources";
 
 /**
  * Holds while the account bound at ?{actor} administers the scope of the
@@ -150,9 +150,10 @@ export async function assertScenarioAdmin(actorUserId: string, scenarioId: strin
 /**
  * Moves `live_rev` from `liveRev` to `rev`: a promotion of the candidate, or
  * a rollback to a revision that was live before. Either needs a verified
- * revision of the current guest contract, and the scope's course catalog
- * from that revision's bundle, with each lecture's scenario namespaced,
- * must not take content from an active run. The operator drain does not
+ * revision of the current guest contract. A promotion whose bundle is newer
+ * than the scope catalog's applies that bundle's catalog, with each
+ * lecture's scenario namespaced, and must not take content from an active
+ * run; a rollback never touches the catalog. The operator drain does not
  * hold it. Platform hosts then cache the new live images.
  */
 export async function moveLiveRevision(input: {
@@ -188,19 +189,20 @@ export async function moveLiveRevision(input: {
   if (row.guest_contract !== GUEST_CONTRACT) {
     throw appError(409, "guest_contract_mismatch", "this revision was built for another guest contract");
   }
-  const catalog = await namespacedCatalog(row.r2_key, row.namespace);
   const scopeKey = courseCatalogScopeKey(row.organization_id);
-  const current = await env.DB.prepare("SELECT catalog_json FROM course_catalogs WHERE scope_key = ?1")
-    .bind(scopeKey).first<{ catalog_json: string }>();
-  const catalogJson = JSON.stringify(catalog);
-  if (current?.catalog_json !== catalogJson && (await countUnitGuardRuns(env.DB, row.organization_id, catalog))) {
-    throw appError(409, "active_runs_would_lose_access", "active runs would lose their course unit; try again when they end");
+  // Only a promotion of a newer bundle moves the scope's catalog; a rollback
+  // or a lagging candidate leaves it, so the catalog never goes backwards.
+  const forward = kind === "promote" && (await env.DB.prepare(`SELECT ${catalogForwardSql(1, 2)} AS forward`)
+    .bind(rev, scopeKey).first<{ forward: number }>())?.forward === 1;
+  const catalogJson = forward ? JSON.stringify(await namespacedCatalog(row.r2_key, row.namespace)) : null;
+  if (catalogJson !== null && (await countUnitGuardRuns(env.DB, row.organization_id, JSON.parse(catalogJson)))) {
+    throw activeRunsWouldLoseAccess();
   }
 
   const now = Date.now();
   // The marker the dependent writes check: this move's own row write.
   const moved = `EXISTS (SELECT 1 FROM scenarios WHERE id = ?1 AND live_rev = ?2 AND updated_at = ?3)`;
-  const [changed] = await env.DB.batch([
+  const statements = [
     env.DB.prepare(
       `UPDATE scenarios SET live_rev = ?2, updated_at = ?3
         WHERE id = ?1 AND live_rev IS ?4 AND enabled = 1
@@ -209,22 +211,51 @@ export async function moveLiveRevision(input: {
             AND revision.state = 'verified' AND revision.guest_contract = ?6
             AND (?5 = 'promote' OR revision.live_at IS NOT NULL))
           AND EXISTS (SELECT 1 FROM scenarios scenario WHERE scenario.id = ?1 AND ${scopeAdminSql(7)})
+          -- The unit guard holds in this statement, so a run admitted after
+          -- the check above cannot lose its unit to the catalog below.
+          AND (?10 IS NULL OR NOT ${catalogForwardSql(2, 9)} OR NOT EXISTS (SELECT 1 ${unitGuardRunsSql(8, 9, 10)}))
         RETURNING id`,
-    ).bind(scenarioId, rev, now, liveRev, kind, GUEST_CONTRACT, actorUserId),
+    ).bind(scenarioId, rev, now, liveRev, kind, GUEST_CONTRACT, actorUserId, row.organization_id, scopeKey, catalogJson),
     env.DB.prepare(
       `UPDATE scenario_revisions SET live_at = coalesce(live_at, ?3) WHERE scenario_id = ?1 AND rev = ?2 AND ${moved}`,
     ).bind(scenarioId, rev, now),
-    env.DB.prepare(
+  ];
+  if (catalogJson !== null) {
+    statements.push(env.DB.prepare(
       `INSERT INTO course_catalogs (scope_key, organization_id, catalog_json, source_revision, created_at, updated_at)
-        SELECT ?4, ?5, ?6, ?2, ?3, ?3 WHERE ${moved}
+        SELECT ?4, ?5, ?6, ?2, ?3, ?3 WHERE ${moved} AND ${catalogForwardSql(2, 4)}
         ON CONFLICT (scope_key) DO UPDATE SET catalog_json = excluded.catalog_json,
           source_revision = excluded.source_revision, updated_at = max(course_catalogs.updated_at + 1, excluded.updated_at)`,
-    ).bind(scenarioId, rev, now, scopeKey, row.organization_id, catalogJson),
-  ]);
-  if (!changed?.results.length) throw appError(409, "live_revision_changed", "the scenario changed; reload and try again");
+    ).bind(scenarioId, rev, now, scopeKey, row.organization_id, catalogJson));
+  }
+  const [changed] = await env.DB.batch(statements);
+  if (!changed?.results.length) {
+    if (catalogJson !== null && (await countUnitGuardRuns(env.DB, row.organization_id, JSON.parse(catalogJson)))) {
+      throw activeRunsWouldLoseAccess();
+    }
+    throw appError(409, "live_revision_changed", "the scenario changed; reload and try again");
+  }
   console.info(JSON.stringify({ event: "scenario_live_revision", scenarioId, kind, from: liveRev, to: rev, actorUserId }));
   await wakePlatformAgents();
   return { liveRev: rev };
+}
+
+const activeRunsWouldLoseAccess = () =>
+  appError(409, "active_runs_would_lose_access", "active runs would lose their course unit; try again when they end");
+
+/**
+ * Holds while bundle ?{rev} is newer than the bundle scope ?{scopeKey}'s
+ * catalog comes from, by ingest time and then rev. No catalog, or one from
+ * outside the bundles table, is older.
+ */
+function catalogForwardSql(rev: number, scopeKey: number): string {
+  return `(EXISTS (SELECT 1 FROM bundles promoted_bundle WHERE promoted_bundle.rev = ?${rev})
+    AND NOT EXISTS (SELECT 1 FROM course_catalogs current_catalog
+      JOIN bundles current_bundle ON current_bundle.rev = current_catalog.source_revision
+      JOIN bundles promoted_bundle ON promoted_bundle.rev = ?${rev}
+      WHERE current_catalog.scope_key = ?${scopeKey}
+        AND (current_bundle.created_at > promoted_bundle.created_at
+          OR (current_bundle.created_at = promoted_bundle.created_at AND current_bundle.rev >= promoted_bundle.rev))))`;
 }
 
 /** The bundle's course catalog with each lecture's scenario as `<namespace>/<slug>`. */
@@ -256,17 +287,20 @@ async function wakePlatformAgents(): Promise<void> {
  * host session writes; `hostId`, when given, must be that host. Passed makes
  * the revision verified; failed or timed out leaves it ready. Either way the
  * revision records the run and its report. A run with an outcome is torn
- * down; `wake` delivers that to its host. True when the outcome was new.
+ * down; `wake` delivers that to its host. Every report of the run calls this
+ * again, so a teardown that failed is retried until the run is going away.
+ * True when the outcome was new.
  */
 export async function settleVerifyRun(
   runId: string,
   options: { hostId?: string; leaseEnded?: boolean; wake?: (hostId: string) => Promise<void> } = {},
 ): Promise<boolean> {
   const run = await env.DB.prepare(
-    `SELECT scenario_id, scenario_rev, host_id, state_json FROM scenario_runs
+    `SELECT scenario_id, scenario_rev, host_id, state_json, delete_requested_at FROM scenario_runs
       WHERE run_id = ?1 AND launch_source = 'verify' AND user_id = ?2 AND (?3 IS NULL OR host_id = ?3)`,
-  ).bind(runId, VALIDATION_USER_ID, options.hostId ?? null)
-    .first<{ scenario_id: string; scenario_rev: string | null; host_id: string; state_json: string }>();
+  ).bind(runId, VALIDATION_USER_ID, options.hostId ?? null).first<{
+    scenario_id: string; scenario_rev: string | null; host_id: string; state_json: string; delete_requested_at: number | null;
+  }>();
   if (!run?.scenario_rev) return false;
   const state = JSON.parse(run.state_json) as RunStateDocument;
   const outcome = verifyOutcome(state, options.leaseEnded);
@@ -289,9 +323,12 @@ export async function settleVerifyRun(
         WHERE run_id = ?1 AND ?2 = 'verify_timeout'`,
     ).bind(runId, outcome),
   ]);
-  if (!settled?.results.length) return false;
-  console.info(JSON.stringify({ event: "scenario_verify_run", runId, scenarioId: run.scenario_id, rev: run.scenario_rev, outcome }));
-  if (outcome !== "verify_timeout") {
+  const fresh = Boolean(settled?.results.length);
+  if (fresh) {
+    console.info(JSON.stringify({ event: "scenario_verify_run", runId, scenarioId: run.scenario_id, rev: run.scenario_rev, outcome }));
+  }
+  // An expired lease ends the run itself; any other outcome tears it down.
+  if (outcome !== "verify_timeout" && run.delete_requested_at === null) {
     try {
       await destroyScenarioRunForUserWithDependencies({ runId, userId: VALIDATION_USER_ID }, {
         markVmsAbsent: markRunVmsAbsentInDesiredState,
@@ -299,12 +336,12 @@ export async function settleVerifyRun(
         wakeHostRuntime: options.wake ?? tryWakeHostRuntime,
       });
     } catch (error) {
-      // The run's lease still ends it.
+      // The run's next report retries; its lease ends it at the latest.
       console.warn(JSON.stringify({ event: "scenario_verify_run_teardown_failed", runId,
         error: error instanceof Error ? error.message : String(error) }));
     }
   }
-  return true;
+  return fresh;
 }
 
 export interface MachineBuildSummary {

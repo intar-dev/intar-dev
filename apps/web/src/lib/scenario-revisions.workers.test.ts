@@ -27,7 +27,7 @@ import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  KINO, connect, desiredDoc, enrollHost, labState, machineImage, registryToken, sendVm, store, until, v2, vmState,
+  KINO, connect, desiredDoc, enrollHost, labState, machineImage, registryToken, sendState, sendVm, store, until, v2, vmState,
 } from "./scenario-runs/revision-test-fixtures";
 
 const candidateOf = (id: string) => env.DB.prepare("SELECT candidate_rev FROM scenarios WHERE id = ?1").bind(id).first("candidate_rev");
@@ -104,6 +104,14 @@ const promote = (at: string, liveRev: string | null, actorUserId = ADMIN, scenar
   moveLiveRevision({ scenarioId, rev: at, liveRev, kind: "promote", actorUserId });
 const rollback = (at: string, liveRev: string | null, actorUserId = ADMIN) =>
   moveLiveRevision({ scenarioId: PUBLIC_ID, rev: at, liveRev, kind: "rollback", actorUserId });
+const catalogRow = () => env.DB.prepare("SELECT source_revision, catalog_json FROM course_catalogs WHERE scope_key = 'public'")
+  .first<{ source_revision: string; catalog_json: string }>();
+/** The fixture bundle with another course title, so its catalog differs. */
+const retitled = (title: string) => {
+  const bundle = structuredClone(bundleFixture);
+  bundle.course_catalog.courses[0]!.title = title;
+  return bundle;
+};
 const drain = () => env.DB.prepare(
   "INSERT INTO runtime_operation_gates (key, state, updated_at) VALUES ('image_cutover', 'drained', 1)",
 ).run();
@@ -238,6 +246,26 @@ describe("promotion, rollback and verify runs", () => {
       expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("b"));
     });
 
+    it("holds the unit guard in the move itself, against a start that commits after the check", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      const dropped = structuredClone(bundleFixture);
+      dropped.course_catalog.courses[0]!.lectures.splice(1, 1);
+      await publish(rev("b"), image, null, dropped);
+      // A learner start commits between the check and the move's own write.
+      const batch = env.DB.batch.bind(env.DB);
+      let started = "";
+      vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
+        started = (await learnerStart(LEARNER)).runId;
+        return batch(statements);
+      });
+      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ status: 409, code: "active_runs_would_lose_access" });
+      expect(started).not.toBe("");
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("a"));
+      expect((await catalogRow())?.source_revision).toBe(rev("a"));
+      expect((await revisionRow(PUBLIC_ID, rev("b")))?.live_at).toBeNull();
+    });
+
     it("starts learners on the new live revision while an older run keeps its snapshot", async () => {
       await markVerified(PUBLIC_ID, rev("a"));
       await promote(rev("a"), null);
@@ -266,6 +294,30 @@ describe("promotion, rollback and verify runs", () => {
       await drain();
       expect(await rollback(rev("a"), rev("b"))).toEqual({ liveRev: rev("a") });
       expect(await scenarioRow(PUBLIC_ID)).toEqual({ live_rev: rev("a"), candidate_rev: rev("b") });
+    });
+  });
+
+  describe("course catalog", () => {
+    it("moves only forward: a lagging promotion and a rollback leave the newer catalog", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      expect((await catalogRow())?.source_revision).toBe(rev("a"));
+      // A newer bundle moves the catalog forward.
+      await publish(rev("b"), image, null, retitled("Linux operations, second edition"));
+      await promote(rev("b"), rev("a"));
+      const newer = await catalogRow();
+      expect(newer?.source_revision).toBe(rev("b"));
+      expect(newer?.catalog_json).toContain("second edition");
+      // A rollback to the older bundle keeps the catalog.
+      await rollback(rev("a"), rev("b"));
+      expect(await catalogRow()).toEqual(newer);
+      // So does a promotion of a candidate from the older bundle.
+      await promote(rev("b"), rev("a"));
+      await env.DB.prepare("UPDATE scenarios SET candidate_rev = ?1 WHERE id = ?2").bind(rev("a"), PUBLIC_ID).run();
+      await env.DB.prepare("UPDATE scenario_revisions SET live_at = NULL WHERE rev = ?1").bind(rev("a")).run();
+      await promote(rev("a"), rev("b"));
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("a"));
+      expect(await catalogRow()).toEqual(newer);
     });
   });
 
@@ -301,7 +353,9 @@ describe("promotion, rollback and verify runs", () => {
         SELECT ?1, rev, guest_contract, doc_json, content_digest, state, created_at FROM scenario_revisions WHERE scenario_id = ?2`)
         .bind(id, PUBLIC_ID).run();
     }
-    const verify = (scenarioId = PUBLIC_ID, at = rev("a")) => beginVerifyRun({ scenarioId, rev: at });
+    // A platform admin's start, which passes the operator drain.
+    const verify = (scenarioId = PUBLIC_ID, at = rev("a")) =>
+      beginVerifyRun({ scenarioId, rev: at, allowDrainedAdminProof: true });
 
     it("runs as the validation account on a platform host, in verify mode with the verify spec", async () => {
       await enrollHost("personal-1", LEARNER);
@@ -322,6 +376,16 @@ describe("promotion, rollback and verify runs", () => {
       } satisfies Partial<DesiredVmV3>)]);
       expect(machine.verify_spec).not.toBe(machine.spec);
       expect((await desiredDoc("personal-1"))!.vms).toEqual([]);
+    });
+
+    it("passes the operator drain only for a platform admin", async () => {
+      await publish(rev("c"), image, "org-a");
+      await drain();
+      // An organization admin's start: no drain bypass.
+      await expect(beginVerifyRun({ scenarioId: ORG_ID, rev: rev("c") }))
+        .rejects.toMatchObject({ status: 503, code: "runtime_cutover_drained" });
+      expect(await env.DB.prepare("SELECT count(*) AS n FROM scenario_runs").first("n")).toBe(0);
+      await expect(verify()).resolves.toMatchObject({ hostId: PLATFORM });
     });
 
     it("finds no host when only hosts that users control are up", async () => {
@@ -384,6 +448,26 @@ describe("promotion, rollback and verify runs", () => {
       await expect(getScenarioRunStatusForUser({ runId, userId: LEARNER })).rejects.toMatchObject({ status: 404 });
       // Promotable now.
       await promote(rev("a"), null);
+    });
+
+    it("settles from a state report too", async () => {
+      const { runId } = await verify();
+      sendState(ws, PLATFORM, [verifyVm(runId, verifyLab({ steps: [], done: true, passed: true, pre_done: true }))]);
+      expect(await until(() => revisionRow(PUBLIC_ID, rev("a")), (row) => row?.state === "verified"))
+        .toMatchObject({ state: "verified", verify_run_id: runId });
+      expect((await until(() => runOf(runId), (run) => run?.delete_requested_at !== null))?.delete_requested_at).not.toBeNull();
+    });
+
+    it("retries the teardown of a settled run on its next report", async () => {
+      const { runId } = await verify();
+      const passed = verifyVm(runId, verifyLab({ steps: [], done: true, passed: true, pre_done: true }));
+      sendVm(ws, PLATFORM, passed);
+      await until(() => runOf(runId), (run) => run?.delete_requested_at !== null);
+      // As a teardown that did not land leaves it: settled, not going away.
+      await env.DB.prepare("UPDATE scenario_runs SET delete_requested_at = NULL WHERE run_id = ?1").bind(runId).run();
+      sendVm(ws, PLATFORM, { ...passed, updated_at_unix_ms: Date.now() + 1 });
+      expect((await until(() => runOf(runId), (run) => run?.delete_requested_at !== null))?.delete_requested_at).not.toBeNull();
+      expect((await revisionRow(PUBLIC_ID, rev("a")))?.verify_run_id).toBe(runId);
     });
 
     it("leaves the revision ready with the admin detail when verify or the lab fails", async () => {

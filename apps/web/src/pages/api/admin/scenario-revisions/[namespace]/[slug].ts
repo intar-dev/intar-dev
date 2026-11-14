@@ -43,7 +43,8 @@ export const POST: APIRoute = async ({ request, params }) => {
     const rev = typeof body?.rev === "string" ? body.rev : "";
     if (!rev) throw appError(400, "invalid_request", "rev is required");
     if (body?.action === "verify") {
-      const run = await beginVerifyRun({ scenarioId, rev });
+      // Only a platform admin's verify run passes the operator drain.
+      const run = await beginVerifyRun({ scenarioId, rev, allowDrainedAdminProof: authz.context.isAdmin });
       return jsonResponse({ runId: run.runId, scenario: await readScenario(authz.context.userId, scenarioId) }, { status: 202 });
     }
     if (body?.action !== "promote" && body?.action !== "rollback") {

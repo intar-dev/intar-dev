@@ -123,13 +123,7 @@ export async function connect(hostId: string): Promise<WebSocket> {
   ws.send(JSON.stringify({ type: "client_hello", protocol_version: 9, host_id: hostId, agent_version: "1.0.0", role: "agent",
     guest_contract: 3, hardware: HARDWARE }));
   await until(() => desiredDoc(hostId), (doc) => doc?.kino_pin === KINO);
-  ws.send(JSON.stringify({ type: "state_report", protocol_version: 9, host_id: hostId, report: {
-    schema_version: 8, host_id: hostId, observed_at_unix_ms: Date.now(), applied_desired_version: 0, relay_connected: true,
-    guest_contract: 3, hardware: HARDWARE, cached_images: [], vms: [],
-    capacity: { total_cpu_millis: 8000, reserved_cpu_millis: 0, schedulable_cpu_millis: 8000, committed_cpu_millis: 0,
-      memory_total_mib: 16384, memory_available_mib: 16384, disk_probe_path: "/var/lib", disk_total_mib: 100_000,
-      disk_available_mib: 100_000 },
-  } }));
+  sendState(ws, hostId, []);
   await until(() => env.DB.prepare("SELECT json_extract(report_json, '$.schema_version') AS schema FROM host_actual_state WHERE host_id = ?1")
     .bind(hostId).first("schema"), (schema) => schema === 8);
   return ws;
@@ -166,6 +160,17 @@ export function vmState(runId: string, name: string, lab: VmLabV1, at = Date.now
     archive: { phase: "none", artifact_count: 0 },
     lab,
   } as VmStateV3;
+}
+
+/** A full state report of `hostId` with `vms`. */
+export function sendState(ws: WebSocket, hostId: string, vms: VmStateV3[]) {
+  ws.send(JSON.stringify({ type: "state_report", protocol_version: 9, host_id: hostId, report: {
+    schema_version: 8, host_id: hostId, observed_at_unix_ms: Date.now(), applied_desired_version: 0, relay_connected: true,
+    guest_contract: 3, hardware: HARDWARE, cached_images: [], vms,
+    capacity: { total_cpu_millis: 8000, reserved_cpu_millis: 0, schedulable_cpu_millis: 8000, committed_cpu_millis: 0,
+      memory_total_mib: 16384, memory_available_mib: 16384, disk_probe_path: "/var/lib", disk_total_mib: 100_000,
+      disk_available_mib: 100_000 },
+  } }));
 }
 
 export function sendVm(ws: WebSocket, hostId: string, vm: VmStateV3) {

@@ -82,6 +82,16 @@ describe("scenario revision routes", () => {
   });
 });
 
+describe("verify runs under the operator drain", () => {
+  it("are held for an organization admin", async () => {
+    await env.DB.prepare("INSERT INTO runtime_operation_gates (key, state, updated_at) VALUES ('image_cutover', 'drained', 1)").run();
+    as("owner");
+    const response = await call(change, { namespace: "acme", slug: "web" }, { action: "verify", rev: "r1" });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "runtime_cutover_drained" });
+  });
+});
+
 describe("machine build routes", () => {
   it("show platform admins every build and organization admins their bundles' builds", async () => {
     const keys = async () => ((await (await call(builds)).json()) as { builds: Array<{ buildKey: string; target: string }> }).builds;

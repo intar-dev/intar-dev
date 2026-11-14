@@ -168,30 +168,38 @@ export async function countUnitGuardRuns(
   organizationId: string | null,
   snapshot: CourseCatalogSnapshotV2,
 ): Promise<number> {
+  const row = await d1
+    .prepare(`SELECT COUNT(*) AS runs ${unitGuardRunsSql(1, 2, 3)}`)
+    .bind(organizationId, courseCatalogScopeKey(organizationId), JSON.stringify(snapshot))
+    .first<{ runs: number }>();
+  return row?.runs ?? 0;
+}
+
+/**
+ * `FROM … WHERE` of the active runs that would lose access if the catalog
+ * of scope ?{scopeKey} (organization ?{organization}) became the JSON
+ * snapshot ?{snapshot}; see countUnitGuardRuns. A write can embed it as
+ * `NOT EXISTS (SELECT 1 …)` to hold the guard in its own statement.
+ */
+export function unitGuardRunsSql(organization: number, scopeKey: number, snapshot: number): string {
   const access = currentScenarioRunContentAccessCondition();
-  const scope = organizationId === null ? "" : "run.organization_id = ?1 AND ";
   // The CTE shadows course_catalogs for the proposed check only; the other
   // scopes' catalogs are read from the table itself.
-  const row = await d1
-    .prepare(
-      `SELECT COUNT(*) AS runs FROM scenario_runs AS run
-        WHERE ${scope}run.state NOT IN ('completed', 'failed')
+  return `FROM scenario_runs AS run
+        WHERE (?${organization} IS NULL OR run.organization_id = ?${organization})
+          AND run.state NOT IN ('completed', 'failed')
           AND (${access})
           AND (run.scenario_id IN (SELECT scenario_id FROM vm_scenarios
-                WHERE organization_id IS ?1 AND enabled = 1
+                WHERE organization_id IS ?${organization} AND enabled = 1
                   AND scenario_id NOT IN (SELECT json_extract(lecture.value, '$.scenarioId')
-                    FROM json_each(?3, '$.courses') AS course,
+                    FROM json_each(?${snapshot}, '$.courses') AS course,
                       json_each(course.value, '$.lectures') AS lecture
                     WHERE json_extract(lecture.value, '$.scenarioId') IS NOT NULL))
             OR NOT (WITH course_catalogs AS (
                 SELECT scope_key, organization_id, catalog_json FROM main.course_catalogs
-                  WHERE scope_key <> ?2
-                UNION ALL SELECT ?2, ?1, ?3)
-              SELECT ${access}))`,
-    )
-    .bind(organizationId, courseCatalogScopeKey(organizationId), JSON.stringify(snapshot))
-    .first<{ runs: number }>();
-  return row?.runs ?? 0;
+                  WHERE scope_key <> ?${scopeKey}
+                UNION ALL SELECT ?${scopeKey}, ?${organization}, ?${snapshot})
+              SELECT ${access}))`;
 }
 
 /**

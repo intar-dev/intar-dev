@@ -463,10 +463,16 @@ export async function admitRevisionRun(context: {
 
 /**
  * Starts a verify run of a scenario's ready candidate revision `rev`, as the
- * validation account, on a platform host, under the operator drain too. The
- * caller has checked that its actor administers the scenario's scope.
+ * validation account, on a platform host. The caller has checked that its
+ * actor administers the scenario's scope; only a platform admin's start
+ * (`allowDrainedAdminProof`) passes the operator drain.
  */
-export async function beginVerifyRun(input: { scenarioId: string; rev: string }): Promise<BeginScenarioRunResult> {
+export async function beginVerifyRun(input: {
+  scenarioId: string;
+  rev: string;
+  allowDrainedAdminProof?: boolean;
+}): Promise<BeginScenarioRunResult> {
+  const drained = input.allowDrainedAdminProof === true;
   const row = await env.DB.prepare(
     `SELECT scenario.scope_key, revision.guest_contract, revision.doc_json FROM scenarios scenario
        JOIN scenario_revisions revision ON revision.scenario_id = scenario.id AND revision.rev = ?2
@@ -485,9 +491,9 @@ export async function beginVerifyRun(input: { scenarioId: string; rev: string })
     userId: VALIDATION_USER_ID,
     idempotencyKey,
     organizationId: null,
-    allowDrainedAdminProof: true,
+    ...(drained ? { allowDrainedAdminProof: true } : {}),
   };
-  await assertAgentKvmRunsOpen(env.DB, { allowDrainedAdminProof: true });
+  await assertAgentKvmRunsOpen(env.DB, drained ? { allowDrainedAdminProof: true } : {});
   const registryGuard = await openRunStartRegistryGuard(VALIDATION_USER_ID);
   let outcome: "ok" | "error" = "error";
   try {
@@ -499,7 +505,7 @@ export async function beginVerifyRun(input: { scenarioId: string; rev: string })
       idempotencyKey,
       scope: {
         scenarioId: input.scenarioId, organizationId: null, hostId: null, candidateRevision: null,
-        candidateBuildId: null, allowDrainedAdminProof: true, allowSequenceBypass: false,
+        candidateBuildId: null, allowDrainedAdminProof: drained, allowSequenceBypass: false,
       },
       verifyScopeKey: row.scope_key,
     });
