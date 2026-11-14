@@ -135,7 +135,7 @@ before the workflow attested them have no attestation. Then:
      boot, so starting the agent alone skips it), then
      `systemctl start intar-agent`.
   5. Check that the installed binaries match the release and that the journal
-     shows `bridge v8 handshake complete` with no warnings. Then dispatch
+     shows `bridge v9 handshake complete` with no warnings. Then dispatch
      image-ops `gate-open`, after any Kino rollout that shares the drain.
 
   If a check fails, stop the agent and run `install.sh` from the rollback
