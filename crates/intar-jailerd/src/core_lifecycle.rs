@@ -227,7 +227,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         failure: anyhow::Error,
     ) -> Result<T> {
         let mut cgroup_drain_proven = false;
-        match self.rollback_failed_launch(run_id, generation, unit_name, &mut cgroup_drain_proven) {
+        match self.rollback_failed_launch(
+            run_id,
+            generation,
+            unit_name,
+            None,
+            &mut cgroup_drain_proven,
+        ) {
             Ok(()) => {
                 self.pending_cpu_reservations.remove(generation);
                 self.unresolved_recoveries.remove(generation);
@@ -254,6 +260,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         run_id: &ValidatedId,
         generation: &ValidatedId,
         unit_name: &str,
+        export: Option<&VmRecord>,
         cgroup_drain_proven: &mut bool,
     ) -> Result<()> {
         // A failed launch is terminal for this generation. Release the
@@ -276,6 +283,17 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         };
         *cgroup_drain_proven = stop_proved_drain || destroy_proved_drain;
         if *cgroup_drain_proven {
+            // Keep the session recorded up to the failure. Best effort: the
+            // containment below must not depend on a disk the VMM left behind.
+            if let Some(record) = export
+                && let Err(error) = self.preparer.export_recording(&self.config, record)
+            {
+                tracing::warn!(
+                    %generation,
+                    error = %format!("{error:#}"),
+                    "failed to export the recording of a contained VM"
+                );
+            }
             if let Err(error) = self.backend.destroy_vm_network(run_id, generation) {
                 failures.push(format!(
                     "destroy VM network for generation {generation}: {error:#}"
@@ -426,6 +444,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             &record.request.run_id,
             &record.generation,
             &record.unit_name,
+            None,
             &mut cgroup_drain_proven,
         ) {
             Ok(()) => {
@@ -451,13 +470,15 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             || inspection.health != SandboxHealth::Healthy
             || live_api_ping(&record.paths.host_api_socket);
         if let Some(reason) = inspect_failure(identity_matches, api_answered) {
-            // Stop, unit, network and files, each tried; on success the
-            // generation is gone, so a later stop or destroy finds nothing.
+            // Stop, unit, recording export, network and files, each tried;
+            // on success the generation is gone, so a later stop or destroy
+            // finds nothing.
             let mut drained = false;
             return match self.rollback_failed_launch(
                 &record.request.run_id,
                 &record.generation,
                 &record.unit_name,
+                Some(&record),
                 &mut drained,
             ) {
                 Ok(()) => {

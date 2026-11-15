@@ -529,6 +529,8 @@ impl JailPreparer for FakeTemplatePreparer {
 #[derive(Default)]
 struct TrackingPreparer {
     quarantined: Vec<ValidatedId>,
+    exported: Vec<ValidatedId>,
+    fail_export: bool,
     persist_calls: usize,
     runtime_access_calls: usize,
     fail_persist_call: Option<usize>,
@@ -601,6 +603,17 @@ impl JailPreparer for TrackingPreparer {
         if self.fail_persist_call == Some(self.persist_calls) {
             bail!("injected jail metadata persistence failure")
         }
+        Ok(())
+    }
+
+    fn export_recording(&mut self, _config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+        if self.quarantined.contains(&record.generation) {
+            bail!("recording exported after its jail was quarantined")
+        }
+        if self.fail_export {
+            bail!("injected recording export failure")
+        }
+        self.exported.push(record.generation.clone());
         Ok(())
     }
 }

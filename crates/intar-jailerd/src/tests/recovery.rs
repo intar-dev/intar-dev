@@ -194,6 +194,85 @@ fn idempotent_launch_still_rejects_a_changed_live_process_identity() {
     assert!(core.preparer.quarantined.contains(&launched.generation));
 }
 
+/// Launch one VM with a tracking preparer and make its live process identity
+/// differ from the persisted one, as an abnormal VMM exit does.
+fn launch_then_mismatch(
+    preparer: TrackingPreparer,
+) -> (JailerdCore<FakeBackend, TrackingPreparer>, VmLaunchResult) {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        preparer,
+        1_000,
+        ready_readiness(),
+    )
+    .expect("core");
+    ensure_test_network(&mut core);
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 125)))) {
+        Response::LaunchVmV3(value) => value,
+        other => panic!("unexpected launch response {other:?}"),
+    };
+    core.backend
+        .units
+        .get_mut(&launched.unit_name)
+        .expect("fake unit")
+        .pid_start_time_ticks = Some(8);
+    (core, launched)
+}
+
+#[test]
+fn inspect_containment_exports_the_recording_before_quarantine() {
+    let (mut core, launched) = launch_then_mismatch(TrackingPreparer::default());
+
+    let response = core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+        launched.generation.clone(),
+    )));
+    assert!(matches!(
+        response,
+        Response::Error(ProtocolError { ref message, .. }) if message.contains("stopped and quarantined")
+    ));
+    // The fake preparer refuses an export after quarantine, so this also
+    // proves the order.
+    assert_eq!(
+        core.preparer.exported,
+        std::slice::from_ref(&launched.generation)
+    );
+    assert!(core.backend.stopped_units.contains(&launched.unit_name));
+    assert!(core.preparer.quarantined.contains(&launched.generation));
+    assert!(core.records.is_empty());
+    // The agent reads this as "jailerd no longer tracks the generation".
+    assert!(matches!(
+        core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+            launched.generation,
+        ))),
+        Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
+    ));
+}
+
+#[test]
+fn inspect_containment_completes_when_the_recording_export_fails() {
+    let (mut core, launched) = launch_then_mismatch(TrackingPreparer {
+        fail_export: true,
+        ..TrackingPreparer::default()
+    });
+
+    let response = core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+        launched.generation.clone(),
+    )));
+    assert!(matches!(
+        response,
+        Response::Error(ProtocolError { ref message, .. })
+            if message.contains("stopped and quarantined") && !message.contains("incomplete")
+    ));
+    assert!(core.preparer.exported.is_empty());
+    assert!(core.backend.destroyed_units.contains(&launched.unit_name));
+    assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
+    assert!(core.preparer.quarantined.contains(&launched.generation));
+    assert!(core.records.is_empty());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn inspect_healthy_vm_still_requires_a_live_api_ping() {
