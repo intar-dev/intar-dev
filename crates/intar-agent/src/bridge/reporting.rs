@@ -263,7 +263,12 @@ pub(super) async fn build_host_state_report(
             .and_then(|details| details.jail_generation.as_deref());
         let inspection = match (inspect_runtime, generation) {
             (true, Some(generation)) => match vm.inspect_jailed_vm(generation).await {
-                Ok(inspection) => inspection,
+                Ok(Some(inspection)) => Some(inspection),
+                Ok(None) => {
+                    vm.fail_running_vm_with_untracked_jail(&status.name, generation)
+                        .await;
+                    None
+                }
                 Err(error) => {
                     warn!(vm = status.name, generation, error = %error, "failed to inspect jailed VM for host report");
                     None

@@ -245,6 +245,33 @@ impl VmManager {
         jailer_identity_request(&self.inner, generation, JailerIdentityOperation::Inspect).await
     }
 
+    /// Fail a running VM whose jail generation jailerd no longer tracks:
+    /// jailerd contained it after its VMM exited, so the run must end.
+    pub async fn fail_running_vm_with_untracked_jail(&self, name: &str, generation: &str) {
+        // ponytail: checked before mark_vm_failed takes the lock again; a
+        // delete starting in between only sees its state shown as failed.
+        let running = self
+            .inner
+            .states
+            .read()
+            .await
+            .get(name)
+            .is_some_and(|vm| is_running_with_jail_generation(vm, generation));
+        if !running {
+            return;
+        }
+        warn!(
+            vm = name,
+            generation, "jailerd no longer tracks the running VM's jail; marking it failed"
+        );
+        mark_vm_failed(
+            &self.inner,
+            name,
+            format!("the VMM exited and jailerd contained jail generation {generation}"),
+        )
+        .await;
+    }
+
     /// Tear down the VMs an older state schema tracked: jailerd destroys
     /// each one, and its agent-owned directories go. A row that fails stays
     /// for the next start; nothing here fails the agent.

@@ -730,18 +730,57 @@ pub(super) fn handle_vm_log_source_open_error(
     ))
 }
 
-pub(super) fn recording_export_path_for_cleanup(details: &VmDetails) -> Result<Option<&Path>> {
+pub(super) async fn recording_export_path_for_cleanup<'a>(
+    inner: &Inner,
+    vm_name: &str,
+    details: &'a VmDetails,
+) -> Result<Option<&'a Path>> {
     let Some(recording_disk_path) = details.recording_disk_path.as_deref() else {
         return Ok(None);
     };
     let recording_disk_path = Path::new(recording_disk_path);
-    if details.jail_generation.is_some() && !recording_disk_path.is_file() {
+    let Some(generation) = details.jail_generation.as_deref() else {
+        return Ok(Some(recording_disk_path));
+    };
+    if recording_disk_path.is_file() {
+        return Ok(Some(recording_disk_path));
+    }
+    let inspect = || jailer_identity_request(inner, generation, JailerIdentityOperation::Inspect);
+    let generation_tracked = match inspect().await {
+        Ok(inspection) => inspection.is_some(),
+        // An inspection that contains the VM answers with an error and
+        // forgets the generation, so the second answer is the settled one.
+        Err(_) => inspect().await?.is_some(),
+    };
+    // A containment exports the recording before it forgets the generation.
+    if recording_disk_path.is_file() {
+        return Ok(Some(recording_disk_path));
+    }
+    missing_recording_export(vm_name, generation, recording_disk_path, generation_tracked)
+}
+
+/// A jailed VM's recording export is missing. While jailerd tracks the
+/// generation a later StopVm can still publish it, so the delete must wait;
+/// once it does not, nothing will, and the VM goes without its recording.
+pub(super) fn missing_recording_export<'a>(
+    vm_name: &str,
+    generation: &str,
+    recording_disk_path: &Path,
+    generation_tracked: bool,
+) -> Result<Option<&'a Path>> {
+    if generation_tracked {
         anyhow::bail!(
             "jailerd did not publish the drained recording export at {}",
             recording_disk_path.display()
         );
     }
-    Ok(Some(recording_disk_path))
+    warn!(
+        vm = vm_name,
+        generation,
+        path = %recording_disk_path.display(),
+        "jailerd no longer tracks the jail generation and published no recording export; deleting the VM without its recording"
+    );
+    Ok(None)
 }
 
 pub(super) async fn extract_recordings_to_spool(

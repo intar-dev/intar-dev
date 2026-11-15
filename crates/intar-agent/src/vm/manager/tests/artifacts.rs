@@ -218,19 +218,60 @@ async fn recording_extraction_atomically_publishes_krec_and_retries_after_source
 }
 
 #[test]
-fn missing_jailed_recording_export_remains_fatal() {
+fn missing_recording_export_stays_fatal_while_jailerd_tracks_the_generation() {
     let temp = tempdir().expect("temp dir");
     let missing_export = temp.path().join("recordings.vfat");
-    let mut vm = test_vm_status("vm", Some("run"));
-    let details = vm.details.as_mut().expect("details");
-    details.jail_generation = Some("generation".to_string());
-    details.recording_disk_path = Some(missing_export.display().to_string());
 
-    let error = recording_export_path_for_cleanup(details)
+    // A tracked generation can still publish its export on a later StopVm:
+    // the delete must not go on and lose it.
+    let error = missing_recording_export("vm", "generation", &missing_export, true)
         .expect_err("missing jailerd recording export must remain fatal");
     assert!(
         error
             .to_string()
             .contains("jailerd did not publish the drained recording export")
     );
+}
+
+#[test]
+fn missing_recording_export_is_skipped_once_jailerd_forgot_the_generation() {
+    let temp = tempdir().expect("temp dir");
+    let missing_export = temp.path().join("recordings.vfat");
+
+    // Contained or destroyed: nothing will publish it, so the delete goes on.
+    assert_eq!(
+        missing_recording_export("vm", "generation", &missing_export, false)
+            .expect("an untracked generation must not block the delete"),
+        None
+    );
+}
+
+#[test]
+fn startup_reconcile_archives_a_vm_stuck_on_a_missing_export() {
+    // A row left by the earlier fatal path: on restart it goes through the
+    // archive delete again, which now asks jailerd whether the export can
+    // still appear.
+    let mut vm = test_vm_status("vm", Some("run"));
+    vm.state = VmLifecycleState::DeleteFailed;
+    vm.error = Some("jailerd did not publish the drained recording export at /x".to_string());
+    assert_eq!(startup_cleanup_mode(&vm), StartupCleanupMode::Archive);
+}
+
+#[test]
+fn only_a_running_vm_on_the_lost_generation_is_failed() {
+    let mut vm = test_vm_status("vm", Some("run"));
+    vm.state = VmLifecycleState::Running;
+    vm.details.as_mut().expect("details").jail_generation = Some("generation".to_string());
+    assert!(is_running_with_jail_generation(&vm, "generation"));
+    assert!(!is_running_with_jail_generation(&vm, "other"));
+    for state in [
+        VmLifecycleState::BootingVm,
+        VmLifecycleState::DeletingVm,
+        VmLifecycleState::ArchivingArtifacts,
+        VmLifecycleState::DeleteFailed,
+        VmLifecycleState::Failed,
+    ] {
+        vm.state = state;
+        assert!(!is_running_with_jail_generation(&vm, "generation"));
+    }
 }

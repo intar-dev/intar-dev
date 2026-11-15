@@ -49,6 +49,17 @@ pub(super) async fn set_state(inner: &Inner, name: &str, state: VmLifecycleState
     }
 }
 
+/// Only a running VM still on this jail generation is failed by its loss; a
+/// booting VM fails through its boot, and a deleting one lost it on purpose.
+pub(super) fn is_running_with_jail_generation(vm: &VmStatusResponse, generation: &str) -> bool {
+    vm.state == VmLifecycleState::Running
+        && vm
+            .details
+            .as_ref()
+            .and_then(|details| details.jail_generation.as_deref())
+            == Some(generation)
+}
+
 pub(super) async fn mark_vm_failed(inner: &Inner, name: &str, message: String) {
     let now_s = now_unix_s();
     let updated_at = format_rfc3339_s(now_s);

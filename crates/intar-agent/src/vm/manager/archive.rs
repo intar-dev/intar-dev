@@ -546,7 +546,9 @@ pub(super) async fn prepare_vm_for_delete(
     )
     .await?;
 
-    if let Some(recording_disk_path) = recording_export_path_for_cleanup(details)? {
+    if let Some(recording_disk_path) =
+        recording_export_path_for_cleanup(inner, &vm.name, details).await?
+    {
         extract_recordings_to_spool(recording_disk_path, &artifacts_dir).await?;
     }
 
