@@ -850,6 +850,7 @@ use probes::*;
 mod run_cli;
 use run_cli::*;
 mod jailer_network;
+pub(crate) use jailer_network::jail_vm_exited;
 use jailer_network::*;
 mod network_allocation;
 use network_allocation::*;

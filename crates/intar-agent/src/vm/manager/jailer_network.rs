@@ -45,6 +45,19 @@ impl std::fmt::Display for JailerdError {
 
 impl std::error::Error for JailerdError {}
 
+/// The code of a jailerd error answer, when the error is one.
+pub(super) fn jailerd_error_code(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<JailerdError>()
+        .map(|error| error.0.code.as_str())
+}
+
+/// jailerd answered that the VM's VMM exited and it keeps the jail only to
+/// export the recording: the VM is dead.
+pub(crate) fn jail_vm_exited(error: &anyhow::Error) -> bool {
+    jailerd_error_code(error) == Some("vm_exited")
+}
+
 pub(super) fn classify_jailer_identity_response(
     operation: JailerIdentityOperation,
     response: JailerResponse,

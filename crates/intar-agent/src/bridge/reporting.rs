@@ -261,12 +261,25 @@ pub(super) async fn build_host_state_report(
             .details
             .as_ref()
             .and_then(|details| details.jail_generation.as_deref());
-        let inspection = match (inspect_runtime, generation) {
+        let inspection = match (inspect_runtime && report_inspects_jail(status.state), generation) {
             (true, Some(generation)) => match vm.inspect_jailed_vm(generation).await {
                 Ok(Some(inspection)) => Some(inspection),
                 Ok(None) => {
-                    vm.fail_running_vm_with_untracked_jail(&status.name, generation)
-                        .await;
+                    vm.fail_running_vm_with_dead_jail(
+                        &status.name,
+                        generation,
+                        "jailerd no longer tracks the jail generation",
+                    )
+                    .await;
+                    None
+                }
+                Err(error) if crate::vm::jail_vm_exited(&error) => {
+                    vm.fail_running_vm_with_dead_jail(
+                        &status.name,
+                        generation,
+                        "the VMM exited; jailerd keeps the jail until its recording is exported",
+                    )
+                    .await;
                     None
                 }
                 Err(error) => {
@@ -625,6 +638,17 @@ pub(super) fn terminal_state_from_manager(state: &VmTerminalState) -> VmTerminal
 
 /// Ready means SSH is up in the guest (the readiness gate committed the VM
 /// only after Kino said so) and the SSH forward is published.
+/// A VM being deleted is released by its own DestroyVm: an inspection from
+/// the report must not release its jail before the delete copied its logs.
+pub(super) fn report_inspects_jail(state: VmLifecycleState) -> bool {
+    !matches!(
+        state,
+        VmLifecycleState::DeletingVm
+            | VmLifecycleState::ArchivingArtifacts
+            | VmLifecycleState::DeleteFailed
+    )
+}
+
 pub(super) fn vm_phase_from_status(status: &VmStatusResponse) -> VmPhaseV2 {
     match status.state {
         VmLifecycleState::Queued => VmPhaseV2::Pending,

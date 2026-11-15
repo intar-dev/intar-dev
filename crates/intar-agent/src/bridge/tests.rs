@@ -977,3 +977,24 @@ async fn access_refresh_timeout_reaches_the_control_connection() {
     let error = result.err().expect("timeout must exit the control loop");
     assert!(error.to_string().contains("refresh timed out"));
 }
+
+#[test]
+fn the_report_leaves_a_deleting_vm_to_its_delete() {
+    // Its DestroyVm releases the jail after the logs are copied; an
+    // inspection could release it first.
+    for state in [
+        VmLifecycleState::DeletingVm,
+        VmLifecycleState::ArchivingArtifacts,
+        VmLifecycleState::DeleteFailed,
+    ] {
+        assert!(!report_inspects_jail(state));
+    }
+    for state in [
+        VmLifecycleState::CreatingVm,
+        VmLifecycleState::BootingVm,
+        VmLifecycleState::Running,
+        VmLifecycleState::Failed,
+    ] {
+        assert!(report_inspects_jail(state));
+    }
+}

@@ -245,9 +245,9 @@ impl VmManager {
         jailer_identity_request(&self.inner, generation, JailerIdentityOperation::Inspect).await
     }
 
-    /// Fail a running VM whose jail generation jailerd no longer tracks:
-    /// jailerd contained it after its VMM exited, so the run must end.
-    pub async fn fail_running_vm_with_untracked_jail(&self, name: &str, generation: &str) {
+    /// Fail a running VM whose jail is gone: jailerd forgot its generation,
+    /// or keeps it only to export the recording of a VMM that exited.
+    pub async fn fail_running_vm_with_dead_jail(&self, name: &str, generation: &str, reason: &str) {
         // ponytail: checked before mark_vm_failed takes the lock again; a
         // delete starting in between only sees its state shown as failed.
         let running = self
@@ -262,12 +262,12 @@ impl VmManager {
         }
         warn!(
             vm = name,
-            generation, "jailerd no longer tracks the running VM's jail; marking it failed"
+            generation, reason, "the running VM's jail is gone; marking it failed"
         );
         mark_vm_failed(
             &self.inner,
             name,
-            format!("the VMM exited and jailerd contained jail generation {generation}"),
+            format!("jail generation {generation}: {reason}"),
         )
         .await;
     }

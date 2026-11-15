@@ -665,6 +665,27 @@ fn an_untracked_run_network_is_not_a_repair_failure() {
 }
 
 #[test]
+fn a_kept_exited_jail_is_read_as_a_dead_vm() {
+    // jailerd keeps the record of an exited VMM to export its recording;
+    // the report and startup reconcile must still treat the VM as dead.
+    let answer = |code: &str| {
+        classify_jailer_identity_response(
+            JailerIdentityOperation::Inspect,
+            JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+                code,
+                "the VMM exited; the VM is kept until its recording is exported",
+            )),
+        )
+        .expect_err("an error answer")
+    };
+    assert!(jail_vm_exited(&answer("vm_exited")));
+    assert!(!jail_vm_exited(&answer("host_operation_failed")));
+    assert!(!jail_vm_exited(&anyhow::anyhow!(
+        "connect to intar-jailerd"
+    )));
+}
+
+#[test]
 fn only_vms_that_can_be_live_have_a_run_network_to_repair() {
     for state in [
         VmLifecycleState::CreatingVm,

@@ -764,11 +764,10 @@ pub(super) async fn recording_export_path_for_cleanup<'a>(
         let probe = MissingExportProbe::Stop {
             attempt,
             succeeded: stopped.is_ok(),
-            storage_exhausted: stopped.as_ref().err().is_some_and(|error| {
-                error
-                    .downcast_ref::<JailerdError>()
-                    .is_some_and(|error| error.0.code == "storage_exhausted")
-            }),
+            storage_exhausted: stopped
+                .as_ref()
+                .err()
+                .is_some_and(|error| jailerd_error_code(error) == Some("storage_exhausted")),
         };
         match missing_export_step(probe, recording_disk_path.is_file()) {
             MissingExportStep::StopAgain => {
