@@ -223,14 +223,17 @@ fn a_published_export_is_archived_whatever_jailerd_answered() {
         MissingExportProbe::Stop {
             attempt: 1,
             succeeded: false,
+            storage_exhausted: false,
         },
         MissingExportProbe::Stop {
             attempt: 1,
             succeeded: true,
+            storage_exhausted: false,
         },
         MissingExportProbe::Stop {
             attempt: STOP_EXPORT_ATTEMPTS,
             succeeded: false,
+            storage_exhausted: false,
         },
         MissingExportProbe::Inspect { tracked: true },
         MissingExportProbe::Inspect { tracked: false },
@@ -249,7 +252,8 @@ fn a_failing_stop_export_is_retried_before_the_destructive_inspect() {
             missing_export_step(
                 MissingExportProbe::Stop {
                     attempt,
-                    succeeded: false
+                    succeeded: false,
+                    storage_exhausted: false,
                 },
                 false
             ),
@@ -261,11 +265,49 @@ fn a_failing_stop_export_is_retried_before_the_destructive_inspect() {
             MissingExportProbe::Stop {
                 attempt: STOP_EXPORT_ATTEMPTS,
                 succeeded: false,
+                storage_exhausted: false,
             },
             false
         ),
         MissingExportStep::Inspect
     );
+}
+
+#[test]
+fn an_export_out_of_space_fails_the_delete_and_never_inspects() {
+    // A nearly full spool clears once space is freed: the delete fails with
+    // the generation still tracked, however often it repeats, and never
+    // triggers the containment that would forget the recording.
+    for attempt in 1..=STOP_EXPORT_ATTEMPTS + 5 {
+        assert_eq!(
+            missing_export_step(
+                MissingExportProbe::Stop {
+                    attempt,
+                    succeeded: false,
+                    storage_exhausted: true,
+                },
+                false
+            ),
+            MissingExportStep::Fail
+        );
+    }
+}
+
+#[test]
+fn a_storage_exhausted_jailerd_answer_is_recognised_by_its_code() {
+    let response = JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+        "storage_exhausted",
+        "copy drained recording export: No space left on device (os error 28)",
+    ));
+    let error = classify_jailer_identity_response(JailerIdentityOperation::Stop, response)
+        .expect_err("a failed export is an error");
+    assert_eq!(
+        error
+            .downcast_ref::<JailerdError>()
+            .map(|error| error.0.code.as_str()),
+        Some("storage_exhausted")
+    );
+    assert!(error.to_string().starts_with("jailerd storage_exhausted: "));
 }
 
 #[test]
@@ -275,7 +317,8 @@ fn a_stop_that_succeeds_without_an_export_means_the_generation_is_gone() {
         missing_export_step(
             MissingExportProbe::Stop {
                 attempt: 1,
-                succeeded: true
+                succeeded: true,
+                storage_exhausted: false,
             },
             false
         ),

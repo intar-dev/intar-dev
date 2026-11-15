@@ -33,6 +33,18 @@ pub(super) async fn jailer_vm_selector_request(
     classify_jailer_identity_response(operation, request_jailerd(inner, request).await?)
 }
 
+/// A jailerd error answer, kept typed so a caller can act on its code.
+#[derive(Debug)]
+pub(super) struct JailerdError(pub(super) intar_jailer_protocol::ProtocolError);
+
+impl std::fmt::Display for JailerdError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "jailerd {}: {}", self.0.code, self.0.message)
+    }
+}
+
+impl std::error::Error for JailerdError {}
+
 pub(super) fn classify_jailer_identity_response(
     operation: JailerIdentityOperation,
     response: JailerResponse,
@@ -52,9 +64,7 @@ pub(super) fn classify_jailer_identity_response(
             JailerIdentityOperation::Stop | JailerIdentityOperation::Destroy,
             JailerResponse::Error(error),
         ) if error.code == "not_found" => Ok(None),
-        (_, JailerResponse::Error(error)) => {
-            anyhow::bail!("jailerd {}: {}", error.code, error.message)
-        }
+        (_, JailerResponse::Error(error)) => Err(JailerdError(error).into()),
         (_, response) => {
             anyhow::bail!("jailerd returned unexpected response to {operation:?}: {response:?}")
         }

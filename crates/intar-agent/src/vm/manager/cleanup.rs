@@ -764,6 +764,11 @@ pub(super) async fn recording_export_path_for_cleanup<'a>(
         let probe = MissingExportProbe::Stop {
             attempt,
             succeeded: stopped.is_ok(),
+            storage_exhausted: stopped.as_ref().err().is_some_and(|error| {
+                error
+                    .downcast_ref::<JailerdError>()
+                    .is_some_and(|error| error.0.code == "storage_exhausted")
+            }),
         };
         match missing_export_step(probe, recording_disk_path.is_file()) {
             MissingExportStep::StopAgain => {
@@ -817,8 +822,16 @@ pub(super) const STOP_EXPORT_ATTEMPTS: u32 = 3;
 /// What the delete last learned about a jailed VM's missing recording export.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MissingExportProbe {
-    Stop { attempt: u32, succeeded: bool },
-    Inspect { tracked: bool },
+    Stop {
+        attempt: u32,
+        succeeded: bool,
+        /// The export ran out of space or quota: it clears once space is
+        /// freed, so the delete fails and a later one sends StopVm again.
+        storage_exhausted: bool,
+    },
+    Inspect {
+        tracked: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -843,6 +856,10 @@ pub(super) fn missing_export_step(probe: MissingExportProbe, published: bool) ->
         } => MissingExportStep::Skip(
             "jailerd stopped the VM without publishing an export, so it no longer tracks the jail generation",
         ),
+        MissingExportProbe::Stop {
+            storage_exhausted: true,
+            ..
+        } => MissingExportStep::Fail,
         MissingExportProbe::Stop { attempt, .. } if attempt < STOP_EXPORT_ATTEMPTS => {
             MissingExportStep::StopAgain
         }
