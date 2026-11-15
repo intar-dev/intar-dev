@@ -249,6 +249,10 @@ impl JailPreparer for FileSystemJailPreparer {
         export_recording_disk(config, record)
     }
 
+    fn export_logs(&mut self, config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+        export_vm_logs(config, record)
+    }
+
     fn reserve_identity(
         &mut self,
         config: &JailerdConfig,

@@ -148,3 +148,65 @@ fn drained_recording_export_does_not_fallback_after_an_unexpected_clone_error() 
             .contains("exact-reflink drained recording export")
     );
 }
+
+#[test]
+fn contained_vm_logs_are_published_bounded_and_only_from_regular_files() {
+    let jail = tempfile::tempdir().expect("jail root");
+    let cache = tempfile::tempdir().expect("artifact cache");
+    let mut config = lifecycle_test_config(jail.path());
+    config.allowed_source_roots = vec![cache.path().to_path_buf()];
+    config.agent_uid = unsafe_test_uid();
+    config.agent_gid = unsafe_test_gid();
+    let mut record = recovered_record(&config);
+    record.uid = config.agent_uid;
+    record.gid = config.agent_gid;
+    record.request.artifacts.recording_disk = ArtifactSource {
+        source_root: 0,
+        relative_path: PathBuf::from("spool/recordings.vfat"),
+        sha256: None,
+        access: ArtifactAccess::ReadWrite,
+    };
+    let artifacts = cache.path().join("spool/artifacts");
+    std::fs::create_dir_all(&artifacts).expect("create artifacts directory");
+    let logs = record
+        .paths
+        .host_console_log
+        .parent()
+        .expect("log directory");
+    std::fs::create_dir_all(logs).expect("create log directory");
+    // A flooded console: only its last bytes are published.
+    let limit = usize::try_from(CONTAINED_VM_LOG_EXPORT_BYTES).expect("limit");
+    let mut console = vec![b'x'; limit + 7];
+    console[..7].copy_from_slice(b"dropped");
+    console[limit..].copy_from_slice(b"the end");
+    std::fs::write(&record.paths.host_console_log, &console).expect("write console log");
+    // No serial log at all, and a FIFO in place of the stderr log.
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &record.paths.host_stderr_log,
+        rustix::fs::FileType::Fifo,
+        Mode::RUSR | Mode::WUSR,
+        0,
+    )
+    .expect("create FIFO");
+
+    let error = export_vm_logs(&config, &record).expect_err("FIFO refused");
+
+    assert!(
+        format!("{error:#}").contains("cloud-hypervisor.stderr.log"),
+        "{error:#}"
+    );
+    let published = std::fs::read(artifacts.join("console.log")).expect("published console");
+    assert_eq!(published.len(), limit);
+    assert!(published.ends_with(b"the end") && !published.starts_with(b"dropped"));
+    let metadata = std::fs::metadata(artifacts.join("console.log")).expect("metadata");
+    assert_eq!(metadata.mode() & 0o777, 0o600);
+    assert_eq!(metadata.uid(), config.agent_uid);
+    assert!(!artifacts.join("serial.log").exists());
+    assert!(!artifacts.join("cloud-hypervisor.stderr.log").exists());
+    assert_eq!(
+        std::fs::read_dir(&artifacts).expect("artifacts").count(),
+        1,
+        "no temporary survives"
+    );
+}

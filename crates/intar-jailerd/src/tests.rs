@@ -532,8 +532,10 @@ impl JailPreparer for FakeTemplatePreparer {
 struct TrackingPreparer {
     quarantined: Vec<ValidatedId>,
     exported: Vec<ValidatedId>,
+    exported_logs: Vec<ValidatedId>,
     destroyed: Vec<ValidatedId>,
     fail_export: bool,
+    fail_export_logs: bool,
     export_error: Option<fn() -> anyhow::Error>,
     persist_calls: usize,
     runtime_access_calls: usize,
@@ -624,6 +626,17 @@ impl JailPreparer for TrackingPreparer {
         self.exported.push(record.generation.clone());
         Ok(())
     }
+
+    fn export_logs(&mut self, _config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+        if self.quarantined.contains(&record.generation) {
+            bail!("logs exported after their jail was quarantined")
+        }
+        if self.fail_export_logs {
+            bail!("injected log export failure")
+        }
+        self.exported_logs.push(record.generation.clone());
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -631,6 +644,7 @@ struct RecoverPreparer {
     records: Vec<VmRecord>,
     quarantined: Vec<ValidatedId>,
     exported: Vec<ValidatedId>,
+    exported_logs: Vec<ValidatedId>,
     reserved: Vec<(ValidatedId, u32, u32)>,
 }
 
@@ -675,6 +689,14 @@ impl JailPreparer for RecoverPreparer {
             bail!("recording exported after its jail was quarantined")
         }
         self.exported.push(record.generation.clone());
+        Ok(())
+    }
+
+    fn export_logs(&mut self, _config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+        if self.quarantined.contains(&record.generation) {
+            bail!("logs exported after their jail was quarantined")
+        }
+        self.exported_logs.push(record.generation.clone());
         Ok(())
     }
 

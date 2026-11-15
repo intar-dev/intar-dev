@@ -94,6 +94,15 @@ pub(super) fn attempt_recovered_containment<B: HostBackend, P: JailPreparer>(
                 "failed to export the recording of a recovered VM being contained"
             );
         }
+        if let Some(record) = export
+            && let Err(error) = preparer.export_logs(config, record)
+        {
+            tracing::warn!(
+                generation = %recovery.generation,
+                error = %format!("{error:#}"),
+                "failed to export the logs of a recovered VM being contained"
+            );
+        }
         if let Err(error) = backend.destroy_vm_network(&recovery.run_id, &recovery.generation) {
             outcome.failures.push(format!(
                 "destroy recovered VM network for {}: {error:#}",

@@ -294,6 +294,15 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     "failed to export the recording of a contained VM"
                 );
             }
+            if let Some(record) = export
+                && let Err(error) = self.preparer.export_logs(&self.config, record)
+            {
+                tracing::warn!(
+                    %generation,
+                    error = %format!("{error:#}"),
+                    "failed to export the logs of a contained VM"
+                );
+            }
             if let Err(error) = self.backend.destroy_vm_network(run_id, generation) {
                 failures.push(format!(
                     "destroy VM network for generation {generation}: {error:#}"

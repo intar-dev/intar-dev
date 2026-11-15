@@ -284,6 +284,9 @@ pub trait JailPreparer: Send {
     fn export_recording(&mut self, _config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
         Ok(())
     }
+    fn export_logs(&mut self, _config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
+        Ok(())
+    }
     fn reserve_identity(
         &mut self,
         _config: &JailerdConfig,

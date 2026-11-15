@@ -239,6 +239,10 @@ fn inspect_containment_exports_the_recording_before_quarantine() {
         core.preparer.exported,
         std::slice::from_ref(&launched.generation)
     );
+    assert_eq!(
+        core.preparer.exported_logs,
+        std::slice::from_ref(&launched.generation)
+    );
     assert!(core.backend.stopped_units.contains(&launched.unit_name));
     assert!(core.preparer.quarantined.contains(&launched.generation));
     assert!(core.records.is_empty());
@@ -411,6 +415,30 @@ fn inspect_containment_completes_when_the_recording_export_fails() {
     ));
     assert!(core.preparer.exported.is_empty());
     assert!(core.backend.destroyed_units.contains(&launched.unit_name));
+    assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
+    assert!(core.preparer.quarantined.contains(&launched.generation));
+    assert!(core.records.is_empty());
+}
+
+#[test]
+fn inspect_containment_completes_when_the_log_export_fails() {
+    let (mut core, launched) = launch_then_mismatch(TrackingPreparer {
+        fail_export_logs: true,
+        ..TrackingPreparer::default()
+    });
+
+    let response = core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+        launched.generation.clone(),
+    )));
+    assert!(matches!(
+        response,
+        Response::Error(ProtocolError { ref message, .. })
+            if message.contains("stopped and quarantined") && !message.contains("incomplete")
+    ));
+    assert_eq!(
+        core.preparer.exported,
+        std::slice::from_ref(&launched.generation)
+    );
     assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
     assert!(core.preparer.quarantined.contains(&launched.generation));
     assert!(core.records.is_empty());
@@ -839,6 +867,10 @@ fn recovery_containment_exports_a_validated_record_before_quarantine() {
         core.preparer.exported,
         std::slice::from_ref(&record.generation)
     );
+    assert_eq!(
+        core.preparer.exported_logs,
+        std::slice::from_ref(&record.generation)
+    );
     assert_eq!(core.preparer.quarantined, vec![record.generation]);
 }
 
@@ -861,6 +893,7 @@ fn recovery_containment_never_exports_an_unvalidated_record() {
     .expect("contain unvalidated record");
 
     assert!(core.preparer.exported.is_empty());
+    assert!(core.preparer.exported_logs.is_empty());
     assert_eq!(core.preparer.quarantined, vec![record.generation]);
 }
 

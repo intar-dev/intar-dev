@@ -274,10 +274,13 @@ pub(super) fn stage_artifacts(
     Ok(())
 }
 
+/// Open the agent's spool directory that receives the recording export,
+/// beneath its trusted source root, and name the export within it.
 #[cfg(target_os = "linux")]
-pub(super) fn export_recording_disk(config: &JailerdConfig, record: &VmRecord) -> Result<()> {
-    use std::os::unix::fs::MetadataExt as _;
-
+fn open_recording_export_parent<'a>(
+    config: &JailerdConfig,
+    record: &'a VmRecord,
+) -> Result<(rustix::fd::OwnedFd, &'a std::ffi::OsStr)> {
     let export = &record.request.artifacts.recording_disk;
     export
         .validate()
@@ -311,6 +314,14 @@ pub(super) fn export_recording_disk(config: &JailerdConfig, record: &VmRecord) -
             | ResolveFlags::NO_XDEV,
     )
     .context("open recording export directory beneath trusted root")?;
+    Ok((parent_fd, file_name))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn export_recording_disk(config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let (parent_fd, file_name) = open_recording_export_parent(config, record)?;
     let source_fd = open(
         &record.paths.host_recording_disk,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
@@ -458,6 +469,118 @@ fn reflink_route_is_unavailable(error: rustix::io::Errno) -> bool {
 #[cfg(not(target_os = "linux"))]
 pub(super) fn export_recording_disk(_config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
     bail!("recording export is supported only on Linux")
+}
+
+/// Longest tail of each VMM log published when a VM is contained. The guest
+/// drives the console and serial logs, so root copies only this much of each,
+/// under the core lock; the end holds why the guest or the VMM stopped.
+#[cfg(target_os = "linux")]
+pub(super) const CONTAINED_VM_LOG_EXPORT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Publish the logs of a contained VM into its spool's `artifacts`
+/// directory, where the agent's delete finds them already published. The
+/// quarantined jail keeps the originals.
+#[cfg(target_os = "linux")]
+pub(super) fn export_vm_logs(config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+    let (parent_fd, _) = open_recording_export_parent(config, record)?;
+    let artifacts_fd = openat2(
+        &parent_fd,
+        "artifacts",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH
+            | ResolveFlags::NO_MAGICLINKS
+            | ResolveFlags::NO_SYMLINKS
+            | ResolveFlags::NO_XDEV,
+    )
+    .context("open VM log export directory beneath trusted root")?;
+    let mut failures = Vec::new();
+    for (name, source) in [
+        ("console.log", &record.paths.host_console_log),
+        ("serial.log", &record.paths.host_serial_log),
+        ("cloud-hypervisor.stderr.log", &record.paths.host_stderr_log),
+    ] {
+        if let Err(error) = export_vm_log(config, record, &artifacts_fd, name, source) {
+            failures.push(format!("{name}: {error:#}"));
+        }
+    }
+    if !failures.is_empty() {
+        bail!("{}", failures.join("; "))
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn export_vm_log(
+    config: &JailerdConfig,
+    record: &VmRecord,
+    artifacts_fd: &rustix::fd::OwnedFd,
+    name: &str,
+    source: &Path,
+) -> Result<()> {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    // NONBLOCK: a FIFO in the VM-owned log directory must not hang root.
+    let source_fd = match open(
+        source,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(error).context("open VM log"),
+    };
+    let mut source = File::from(source_fd);
+    let metadata = source.metadata()?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != record.uid
+        || metadata.gid() != record.gid
+    {
+        bail!("VM log is not a regular file owned by the VM")
+    }
+    source.seek(SeekFrom::Start(
+        metadata.len().saturating_sub(CONTAINED_VM_LOG_EXPORT_BYTES),
+    ))?;
+    // The agent's own temporary name, so its delete clears one left behind.
+    let temporary = format!(".{name}.part.{}", Uuid::new_v4().simple());
+    let operation = (|| -> Result<()> {
+        let output_fd = rustix::fs::openat(
+            artifacts_fd,
+            temporary.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::RUSR | Mode::WUSR,
+        )?;
+        let mut output = File::from(output_fd);
+        std::io::copy(
+            &mut (&mut source).take(CONTAINED_VM_LOG_EXPORT_BYTES),
+            &mut output,
+        )?;
+        rustix::fs::fchmod(&output, Mode::RUSR | Mode::WUSR)?;
+        rustix::fs::fchown(
+            &output,
+            Some(rustix::process::Uid::from_raw(config.agent_uid)),
+            Some(rustix::process::Gid::from_raw(config.agent_gid)),
+        )?;
+        output.sync_all()?;
+        rustix::fs::renameat(artifacts_fd, temporary.as_str(), artifacts_fd, name)?;
+        rustix::fs::fsync(artifacts_fd)?;
+        Ok(())
+    })();
+    if operation.is_err() {
+        let _ = rustix::fs::unlinkat(
+            artifacts_fd,
+            temporary.as_str(),
+            rustix::fs::AtFlags::empty(),
+        );
+    }
+    operation
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn export_vm_logs(_config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
+    bail!("VM log export is supported only on Linux")
 }
 
 pub(super) fn stage_source(
