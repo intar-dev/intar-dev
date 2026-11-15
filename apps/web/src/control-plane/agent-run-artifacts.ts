@@ -547,11 +547,13 @@ async function handleMultipartPart(
     etag: uploadedPart.etag,
   });
 
+  let advanced: boolean;
   try {
-    await advanceArtifactUpload({
+    advanced = await advanceArtifactUpload({
       db,
       runVm,
       artifact,
+      r2UploadId: upload.r2UploadId,
       uploadedParts,
       nextExpectedPart: partNumber + 1,
       updatedAt: Date.now(),
@@ -560,6 +562,10 @@ async function handleMultipartPart(
     if (error instanceof ArtifactWriteFenced)
       await multipart.abort().catch(() => {});
     throw error;
+  }
+  if (!advanced) {
+    // A replayed part of an upload that has since been restarted.
+    return jsonResponse({ error: "multipart upload was restarted" }, 409);
   }
 
   return jsonResponse({ ok: true, nextExpectedPart: partNumber + 1 });
@@ -685,7 +691,9 @@ async function handleArtifactComplete(
 /** The store refused the parts as laid out (one below the minimum part size,
  * error 10011): a fresh upload of full-size parts cures it. */
 function completionRefusedForPartLayout(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("(10011)");
+  if (!(error instanceof Error)) return false;
+  const { code } = error as Error & { code?: unknown };
+  return code === 10011 || error.message.includes("(10011)");
 }
 
 /**
@@ -701,15 +709,15 @@ async function restartArtifactUpload(
   r2UploadId: string,
   options: { reason: "parts_refused" | "size_mismatch"; deleteObject: boolean },
 ): Promise<Response> {
-  // An upload the store no longer knows (completed, aborted, expired) is fine.
-  await env.VM_RUN_ARTIFACTS_BUCKET.resumeMultipartUpload(artifact.r2Key, r2UploadId)
-    .abort()
-    .catch(() => {});
+  // Forget the upload first: a failed write leaves it whole for a retry. Only
+  // the reset that cleared it touches the store, since a later upload may
+  // already own the key. An upload whose abort fails expires in the store.
   const cleared = await clearArtifactUpload({ db, runVm, artifact, r2UploadId });
-  // Only the reset that cleared this upload may remove its object: a later
-  // upload may already have stored the right one under the same key.
-  if (cleared && options.deleteObject) {
-    await env.VM_RUN_ARTIFACTS_BUCKET.delete(artifact.r2Key);
+  if (cleared) {
+    await env.VM_RUN_ARTIFACTS_BUCKET.resumeMultipartUpload(artifact.r2Key, r2UploadId)
+      .abort()
+      .catch(() => {});
+    if (options.deleteObject) await env.VM_RUN_ARTIFACTS_BUCKET.delete(artifact.r2Key);
   }
   console.warn(
     JSON.stringify({

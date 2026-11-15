@@ -622,8 +622,139 @@ describe("agent run artifact sealing", () => {
       expect(artifacts).toMatchObject([{ upload_status: "pending" }]);
       expect(runtimeUploads).toHaveLength(0);
       expect(scenarioUploads).toHaveLength(0);
+
+      // A second complete for the reset upload deletes nothing.
+      expect((await completeArtifact(token, bucket))?.status).toBe(409);
+      expect(remove).toHaveBeenCalledOnce();
     },
   );
+
+  it("restarts an upload the local store refuses for a short part", async () => {
+    const token = await seedRun("failed", "failed");
+    await beginManifest(token, "ssh_recording_raw");
+    const send = async (suffix: string, method: "POST" | "PUT", body?: string) =>
+      handleAgentRunArtifactRequest(
+        new Request(
+          `http://localhost/agent/runs/run-1/vms/vm-runtime/artifacts/1/${suffix}`,
+          {
+            method,
+            headers: { authorization: `Bearer ${token}` },
+            ...(body === undefined ? {} : { body }),
+          },
+        ),
+        env,
+      );
+    expect((await send("multipart-begin", "POST"))?.status).toBe(200);
+    expect((await send("parts/1", "PUT", "01234"))?.status).toBe(200);
+    expect((await send("parts/2", "PUT", "56789"))?.status).toBe(200);
+
+    const refused = await send("complete", "POST");
+    expect(await refused?.json()).toMatchObject({ code: "artifact_upload_restarted" });
+
+    expect(await (await send("multipart-begin", "POST"))?.json()).toEqual({
+      done: false,
+      nextExpectedPart: 1,
+    });
+    expect((await send("parts/1", "PUT", "0123456789"))?.status).toBe(200);
+    expect(await (await send("complete", "POST"))?.json()).toEqual({
+      ok: true,
+      uploaded: true,
+    });
+  });
+
+  it("leaves the upload whole when clearing it fails, so a later attempt resets it", async () => {
+    const { token } = await pendingMultipartFixture();
+    const abort = vi.fn(async () => {});
+    const remove = vi.fn(async () => {});
+    const refused = {
+      head: vi.fn(async () => null),
+      delete: remove,
+      resumeMultipartUpload: () => ({
+        abort,
+        complete: async () => {
+          throw Object.assign(new Error("completeMultipartUpload: too small"), {
+            code: 10011,
+          });
+        },
+      }),
+    } as unknown as R2Bucket;
+    const before = await uploadLedgerSnapshot();
+    const originalBatch = env.DB.batch.bind(env.DB);
+    const batch = vi.spyOn(env.DB, "batch").mockImplementation(async (statements) => {
+      if (statements.length > 1) throw new Error("injected D1 failure");
+      return originalBatch(statements);
+    });
+
+    await expect(completeArtifact(token, refused)).rejects.toThrow("injected D1 failure");
+    expect(abort).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(await uploadLedgerSnapshot()).toEqual(before);
+
+    batch.mockRestore();
+    const retry = await completeArtifact(token, refused);
+    expect(await retry?.json()).toMatchObject({ code: "artifact_upload_restarted" });
+    expect(abort).toHaveBeenCalledOnce();
+  });
+
+  it("answers 409 to a part of an upload that was restarted meanwhile", async () => {
+    const { token } = await pendingMultipartFixture();
+    const bucket = {
+      resumeMultipartUpload: () => ({
+        uploadPart: async () => {
+          // A reset and a new begin land while this stale part is in flight.
+          await env.DB.batch([
+            env.DB.prepare("UPDATE runtime_artifact_uploads SET r2_upload_id = 'upload-2'"),
+            env.DB.prepare("UPDATE scenario_run_artifact_uploads SET r2_upload_id = 'upload-2'"),
+          ]);
+          return { partNumber: 2, etag: "stale" };
+        },
+        abort: vi.fn(async () => {}),
+      }),
+    } as unknown as R2Bucket;
+    const response = await handleAgentRunArtifactRequest(
+      new Request(
+        "http://localhost/agent/runs/run-1/vms/vm-runtime/artifacts/1/parts/2",
+        {
+          method: "PUT",
+          headers: { authorization: `Bearer ${token}` },
+          body: "part",
+        },
+      ),
+      { ...env, VM_RUN_ARTIFACTS_BUCKET: bucket },
+    );
+    expect(response?.status).toBe(409);
+    for (const table of ["runtime_artifact_uploads", "scenario_run_artifact_uploads"]) {
+      expect(
+        await env.DB.prepare(
+          `SELECT r2_upload_id,uploaded_parts_json,next_expected_part FROM ${table}`,
+        ).first(),
+      ).toEqual({
+        r2_upload_id: "upload-2",
+        uploaded_parts_json: '[{"partNumber":1,"etag":"part"}]',
+        next_expected_part: 2,
+      });
+    }
+  });
+
+  it("never touches the object of an uploaded artifact", async () => {
+    const { token } = await pendingMultipartFixture();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE runtime_artifacts SET upload_status = 'uploaded', uploaded_at = 1"),
+      env.DB.prepare("UPDATE scenario_run_artifacts SET upload_status = 'uploaded', uploaded_at = 1"),
+    ]);
+    const head = vi.fn();
+    const remove = vi.fn();
+    const resume = vi.fn();
+    const response = await completeArtifact(token, {
+      head,
+      delete: remove,
+      resumeMultipartUpload: resume,
+    } as unknown as R2Bucket);
+    expect(await response?.json()).toEqual({ ok: true, uploaded: true });
+    expect(head).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+  });
 
   it("resumes an interrupted healthy upload at its next part", async () => {
     const { token } = await pendingMultipartFixture();
