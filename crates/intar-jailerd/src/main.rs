@@ -184,17 +184,18 @@ fn run_server(config_path: &Path) -> Result<()> {
     let _maintenance_lock = acquire_maintenance_lock(rustix::fs::FlockOperation::LockShared)
         .context("acquire daemon maintenance lock")?;
     let config = load_config(config_path)?;
-    // Absence leaves the host deliberately unschedulable, and so does an
-    // attestation whose only mismatch is that it was written before this
-    // boot: a reboot must not stop jailerd from serving recovery.  A present
-    // but malformed, stale, or tampered attestation is a startup error,
+    // Absence leaves the host deliberately unschedulable, and so does a
+    // trusted attestation of an earlier boot, whatever else changed since: a
+    // reboot must not stop jailerd from serving recovery.  A malformed or
+    // tampered attestation, or a stale one of this boot, is a startup error,
     // rather than being silently treated like an operator who has not run
     // the proof yet.
     let verified_self_test = match self_test::load(&config)
         .context("verify privileged self-test attestation")?
     {
-        self_test::AttestationStatus::PreviousBoot => {
+        self_test::AttestationStatus::PreviousBoot { stale } => {
             warn!(
+                stale_field = stale.unwrap_or("none"),
                 "self-test attestation belongs to a previous boot; starting unschedulable until the self-test passes on this boot"
             );
             None

@@ -95,7 +95,45 @@ fn current_attestation() -> SelfTestAttestationV3 {
 }
 
 #[test]
-fn only_a_boot_mismatch_is_classified_as_a_previous_boot() {
+fn another_boot_is_a_previous_boot_whatever_else_is_stale() {
+    let attestation = current_attestation();
+    let previous =
+        |kernel, systemd, now| match previous_boot(&attestation, "next-boot", kernel, systemd, now)
+        {
+            Some(AttestationStatus::PreviousBoot { stale }) => stale,
+            other => panic!("expected a previous boot, got {other:?}"),
+        };
+    assert_eq!(previous(Some("kernel"), Some("systemd"), Some(100)), None);
+    assert_eq!(
+        previous(Some("other-kernel"), Some("other-systemd"), Some(100)),
+        Some("kernel_version")
+    );
+    assert_eq!(
+        previous(Some("kernel"), Some("other-systemd"), Some(100)),
+        Some("systemd_version")
+    );
+    // The previous boot's clock ran ahead of this early-boot clock.
+    let mut ahead = current_attestation();
+    ahead.passed_at_unix_s = 1_000;
+    assert!(matches!(
+        previous_boot(
+            &ahead,
+            "next-boot",
+            Some("kernel"),
+            Some("systemd"),
+            Some(100)
+        ),
+        Some(AttestationStatus::PreviousBoot {
+            stale: Some("passed_at_unix_s")
+        })
+    ));
+    // Unreadable platform values never turn a previous boot into an error.
+    assert_eq!(previous(None, None, None), None);
+    assert!(previous_boot(&attestation, "boot", None, None, None).is_none());
+}
+
+#[test]
+fn a_stale_attestation_of_this_boot_is_an_error() {
     let fingerprint = "a".repeat(64);
     let runtime = "b".repeat(64);
     let jailerd = "c".repeat(64);
@@ -105,60 +143,44 @@ fn only_a_boot_mismatch_is_classified_as_a_previous_boot() {
         intar_jailerd_sha256: &jailerd,
         intar_jailer_sha256: &jailer,
         config_runtime_fingerprint_sha256: &fingerprint,
-        boot_id: "boot",
         kernel_version: "kernel",
         systemd_version: "systemd",
         now_unix_s: 100,
     };
-    assert!(matches!(
-        classify(current_attestation(), &host),
-        Ok(AttestationStatus::Verified(_))
-    ));
-    let rebooted = CurrentHost {
-        boot_id: "next-boot",
-        ..host
-    };
-    let status = classify(current_attestation(), &rebooted).expect("previous boot");
-    assert!(matches!(status, AttestationStatus::PreviousBoot));
-    assert!(status.verified().is_none());
+    let status = classify(current_attestation(), &host).expect("verified");
+    assert!(status.verified().is_some());
 
     let other = "e".repeat(64);
     let stale = [
         CurrentHost {
             cloud_hypervisor_sha256: &other,
-            ..rebooted
+            ..host
         },
         CurrentHost {
             intar_jailerd_sha256: &other,
-            ..rebooted
+            ..host
         },
         CurrentHost {
             intar_jailer_sha256: &other,
-            ..rebooted
+            ..host
         },
         CurrentHost {
             config_runtime_fingerprint_sha256: &other,
-            ..rebooted
+            ..host
         },
         CurrentHost {
             kernel_version: "other-kernel",
-            ..rebooted
+            ..host
         },
         CurrentHost {
             systemd_version: "other-systemd",
-            ..rebooted
+            ..host
         },
     ];
-    for host in &stale {
-        assert!(classify(current_attestation(), host).is_err());
+    for stale in &stale {
+        assert!(classify(current_attestation(), stale).is_err());
     }
-    // The same staleness stays an error on the boot that wrote it, too.
-    let same_boot_kernel = CurrentHost {
-        kernel_version: "other-kernel",
-        ..host
-    };
-    assert!(classify(current_attestation(), &same_boot_kernel).is_err());
     let mut future = current_attestation();
     future.passed_at_unix_s = 1_000;
-    assert!(classify(future, &rebooted).is_err());
+    assert!(classify(future, &host).is_err());
 }

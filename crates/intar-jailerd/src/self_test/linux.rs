@@ -393,6 +393,27 @@ pub(super) fn load(config: &JailerdConfig) -> Result<super::AttestationStatus> {
         serde_json::from_slice(&bytes).context("parse self-test attestation")?;
     validate_attestation(&attestation)?;
 
+    // Decide a previous boot before hashing anything: no installed byte may
+    // turn a rebooted host's leftover attestation into a startup error.
+    let boot_id = read_trimmed("/proc/sys/kernel/random/boot_id")?;
+    let kernel_version = read_trimmed("/proc/sys/kernel/osrelease");
+    let systemd_version = read_systemd_version();
+    let now_unix_s = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs());
+    if let Some(status) = super::previous_boot(
+        &attestation,
+        &boot_id,
+        kernel_version.as_deref().ok(),
+        systemd_version.as_deref().ok(),
+        now_unix_s.ok(),
+    ) {
+        return Ok(status);
+    }
+    let kernel_version = kernel_version?;
+    let systemd_version = systemd_version?;
+    let now_unix_s = now_unix_s.context("system clock predates Unix epoch")?;
+
     let actual_runtime_sha256 = trusted_executable_sha256(&config.cloud_hypervisor_binary)?;
     let current_exe = trusted_current_exe()?;
     let intar_jailerd_sha256 = current_exe.sha256;
@@ -407,13 +428,6 @@ pub(super) fn load(config: &JailerdConfig) -> Result<super::AttestationStatus> {
         &intar_jailerd_sha256,
         &intar_jailer_sha256,
     )?;
-    let boot_id = read_trimmed("/proc/sys/kernel/random/boot_id")?;
-    let kernel_version = read_trimmed("/proc/sys/kernel/osrelease")?;
-    let systemd_version = read_systemd_version()?;
-    let now_unix_s = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock predates Unix epoch")?
-        .as_secs();
     super::classify(
         attestation,
         &super::CurrentHost {
@@ -421,7 +435,6 @@ pub(super) fn load(config: &JailerdConfig) -> Result<super::AttestationStatus> {
             intar_jailerd_sha256: &intar_jailerd_sha256,
             intar_jailer_sha256: &intar_jailer_sha256,
             config_runtime_fingerprint_sha256: &fingerprint,
-            boot_id: &boot_id,
             kernel_version: &kernel_version,
             systemd_version: &systemd_version,
             now_unix_s,

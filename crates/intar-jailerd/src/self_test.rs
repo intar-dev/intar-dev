@@ -115,16 +115,21 @@ pub fn run(config: &JailerdConfig, artifacts: &SelfTestArtifacts) -> Result<Self
 pub enum AttestationStatus {
     Verified(SelfTestAttestationV3),
     Absent,
-    /// Trusted and current in every respect except that it was written
-    /// during an earlier boot. Readiness treats it exactly like `Absent`.
-    PreviousBoot,
+    /// Trusted, but written during an earlier boot. Readiness treats it
+    /// exactly like `Absent`, whatever else changed since: a reboot is when a
+    /// kernel or systemd upgrade lands, and when the clock may still lag.
+    /// `stale` names the first platform field that no longer matches, for
+    /// the log only.
+    PreviousBoot {
+        stale: Option<&'static str>,
+    },
 }
 
 impl AttestationStatus {
     pub fn verified(self) -> Option<SelfTestAttestationV3> {
         match self {
             Self::Verified(attestation) => Some(attestation),
-            Self::Absent | Self::PreviousBoot => None,
+            Self::Absent | Self::PreviousBoot { .. } => None,
         }
     }
 }
@@ -135,14 +140,37 @@ struct CurrentHost<'a> {
     intar_jailerd_sha256: &'a str,
     intar_jailer_sha256: &'a str,
     config_runtime_fingerprint_sha256: &'a str,
-    boot_id: &'a str,
     kernel_version: &'a str,
     systemd_version: &'a str,
     now_unix_s: u64,
 }
 
-/// Every mismatch is an error except the boot id alone, which is only checked
-/// once everything else has matched.
+/// `Some(PreviousBoot)` for an attestation of another boot, decided before
+/// anything else is compared. The platform values are best-effort and only
+/// feed the diagnostic.
+fn previous_boot(
+    attestation: &SelfTestAttestationV3,
+    current_boot_id: &str,
+    kernel_version: Option<&str>,
+    systemd_version: Option<&str>,
+    now_unix_s: Option<u64>,
+) -> Option<AttestationStatus> {
+    if attestation.boot_id == current_boot_id {
+        return None;
+    }
+    let stale = if kernel_version.is_some_and(|value| value != attestation.kernel_version) {
+        Some("kernel_version")
+    } else if systemd_version.is_some_and(|value| value != attestation.systemd_version) {
+        Some("systemd_version")
+    } else if now_unix_s.is_some_and(|now| attestation.passed_at_unix_s > now.saturating_add(60)) {
+        Some("passed_at_unix_s")
+    } else {
+        None
+    };
+    Some(AttestationStatus::PreviousBoot { stale })
+}
+
+/// For an attestation of the current boot, every mismatch is an error.
 fn classify(
     attestation: SelfTestAttestationV3,
     current: &CurrentHost<'_>,
@@ -175,9 +203,6 @@ fn classify(
         attestation.passed_at_unix_s <= current.now_unix_s.saturating_add(60),
         "self-test attestation time is in the future"
     );
-    if attestation.boot_id != current.boot_id {
-        return Ok(AttestationStatus::PreviousBoot);
-    }
     Ok(AttestationStatus::Verified(attestation))
 }
 
