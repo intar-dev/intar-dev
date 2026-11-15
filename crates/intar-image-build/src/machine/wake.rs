@@ -92,14 +92,14 @@ const BARS_SCRIPT: &str = r#"for d in /sys/bus/pci/devices/*; do
 done
 "#;
 
-/// The suspend, as a transient unit so no SSH session holds it: drop the
-/// page cache, take the random device and the NIC off the bus, suspend to
-/// RAM (the `\_S3_` table makes that the VMM's exit), and after a wake
-/// rescan. The rescan probes the NIC again, so a woken guest takes its VM's
+/// The suspend, as a transient unit so no SSH session holds it: flush
+/// dirty pages but keep the page cache (a woken guest then finds its files
+/// warm, where a dropped cache costs it a disk read each), take the random
+/// device and the NIC off the bus, suspend to RAM (the `\_S3_` table makes
+/// that the VMM's exit), and after a wake rescan. The rescan probes the NIC again, so a woken guest takes its VM's
 /// MAC, not the build's: two woken VMs on one bridge never share one.
 const SUSPEND_SCRIPT: &str = r"echo deep >/sys/power/mem_sleep
 sync
-echo 3 >/proc/sys/vm/drop_caches
 for d in /sys/bus/pci/devices/*; do
   case $(cat $d/vendor):$(cat $d/device) in
   0x1af4:0x1041|0x1af4:0x1044) echo 1 >$d/remove ;;
@@ -966,5 +966,11 @@ mod tests {
             .read_to_string(&mut content)
             .expect("read");
         assert_eq!(content, "{}");
+    }
+
+    #[test]
+    fn the_suspend_flushes_but_keeps_the_page_cache() {
+        assert!(SUSPEND_SCRIPT.lines().any(|line| line == "sync"));
+        assert!(!SUSPEND_SCRIPT.contains("drop_caches"));
     }
 }
