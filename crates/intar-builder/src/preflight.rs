@@ -127,7 +127,6 @@ pub fn collect_preflight_with_environment(
     }
     push_job_check(&mut checks, cfg);
     push_bridge_check(&mut checks, cfg);
-    push_wake_check(&mut checks, cfg);
 
     PreflightReport { checks }
 }
@@ -340,28 +339,6 @@ fn is_pinned_oci_image(image: &str) -> bool {
         && digest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
-/// Wake is optional: off, a wake target builds as a plain image; on but
-/// unusable, wake targets fail while plain ones still build, so it warns.
-fn push_wake_check(checks: &mut Vec<PreflightCheck>, cfg: &BuilderConfig) {
-    if !cfg.wake.enabled {
-        checks.push(pass(
-            "wake images",
-            "off; wake targets build as plain images",
-        ));
-        return;
-    }
-    match intar_image_build::wake_unavailable(&cfg.qemu_build_config()) {
-        None => checks.push(pass(
-            "wake images",
-            "the pinned VMM and the namespaces work",
-        )),
-        Some(reason) => checks.push(warn(
-            "wake images",
-            format!("unavailable ({reason}); wake targets fail until it is fixed"),
-        )),
-    }
 }
 
 fn push_job_check(checks: &mut Vec<PreflightCheck>, cfg: &BuilderConfig) {
@@ -757,20 +734,5 @@ mod tests {
         assert!(report.checks.iter().any(|check| {
             check.name == "qemu version" && check.status == PreflightStatus::Fail
         }));
-    }
-
-    #[test]
-    fn broken_wake_warns_that_wake_targets_fail() {
-        let mut cfg = BuilderConfig::default();
-        cfg.wake.enabled = true;
-        cfg.wake.vmm_binary = PathBuf::from("/nonexistent/cloud-hypervisor");
-        let mut checks = Vec::new();
-        super::push_wake_check(&mut checks, &cfg);
-        assert_eq!(checks[0].status, PreflightStatus::Warn);
-        assert!(
-            checks[0].detail.contains("wake targets fail"),
-            "{:?}",
-            checks[0]
-        );
     }
 }

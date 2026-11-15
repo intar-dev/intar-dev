@@ -4,10 +4,7 @@
 //! build_machine build <bundle.json.gz> <base | image:NAME | SCENARIO/MACHINE> <out dir> [qemu.json] [sha256:KEY]
 //! build_machine verify <out dir> <sha256:MANIFEST>
 //! build_machine reconstruct <out dir> <sha256:MANIFEST> <disk.raw>
-//! build_machine wake-ram <out dir> <sha256:MANIFEST> <ram>
 //! ```
-//!
-//! `wake-ram` writes the RAM file a wake image wakes from, out of its chunks.
 //!
 //! `qemu.json` is a `QemuBuildConfig`; make the bundle with `intar-image-cli bundle`.
 
@@ -18,15 +15,14 @@ use anyhow::{Context as _, Result, bail};
 use intar_contracts::oci::OciDigest;
 use intar_contracts::source::SourceBundleV2;
 use intar_image_build::{
-    BuildTarget, MachineBuildRequest, QemuBuildConfig, WAKE_CHILD_ARG, build_machine_image,
-    reconstruct_machine_disk, run_wake_child, verify_machine_image,
+    BuildTarget, MachineBuildRequest, QemuBuildConfig, build_machine_image,
+    reconstruct_machine_disk, verify_machine_image,
 };
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
-        [child, job] if *child == WAKE_CHILD_ARG => run_wake_child(Path::new(job)),
         ["build", source, target, out, rest @ ..] => {
             let config = match rest.first() {
                 Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
@@ -65,46 +61,18 @@ fn main() -> Result<()> {
         ["verify", out, manifest] => {
             let image = verify_machine_image(Path::new(out), &digest(manifest)?)?;
             println!(
-                "ok build_key={} chunks={} layers={} wake={}",
+                "ok build_key={} chunks={} layers={}",
                 image.config.build_key.as_str(),
                 image.config.disk.chunks.len(),
                 image.manifest.layers.len(),
-                image
-                    .config
-                    .wake
-                    .as_ref()
-                    .map_or("none".to_owned(), |wake| format!(
-                        "ram_chunks={}",
-                        wake.ram.chunks.len()
-                    ))
             );
             Ok(())
         }
         ["reconstruct", out, manifest, raw] => {
             reconstruct_machine_disk(Path::new(out), &digest(manifest)?, Path::new(raw))
         }
-        ["wake-ram", out, manifest, ram] => {
-            wake_ram(Path::new(out), &digest(manifest)?, Path::new(ram))
-        }
         _ => bail!("usage: see the header of examples/build_machine.rs"),
     }
-}
-
-fn wake_ram(out: &Path, manifest: &OciDigest, ram: &Path) -> Result<()> {
-    use std::io::{Seek as _, SeekFrom, Write as _};
-    let image = verify_machine_image(out, manifest)?;
-    let wake = image.config.wake.context("not a wake image")?;
-    let blob = |index: u32| -> Result<Vec<u8>> {
-        let layer = &image.manifest.layers[index as usize];
-        Ok(std::fs::read(out.join("sha256").join(layer.digest.hex()))?)
-    };
-    let mut file = std::fs::File::create(ram)?;
-    file.set_len(wake.ram.size_bytes)?;
-    for (index, layer, _) in &wake.ram.chunks {
-        file.seek(SeekFrom::Start(index * wake.ram.chunk_size))?;
-        file.write_all(&zstd::stream::decode_all(blob(*layer)?.as_slice())?)?;
-    }
-    Ok(())
 }
 
 fn digest(text: &str) -> Result<OciDigest> {

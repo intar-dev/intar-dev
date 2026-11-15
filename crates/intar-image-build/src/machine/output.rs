@@ -15,7 +15,6 @@ use intar_contracts::oci::{
     DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE,
     MACHINE_ARTIFACT_TYPE, MACHINE_CONFIG_MEDIA_TYPE, MachineBootV1, MachineConfigV1,
     MachineDiskV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1, Sha256Hex,
-    WAKE_CPU_PROFILE_MEDIA_TYPE, WAKE_RAM_CHUNK_MEDIA_TYPE, WAKE_STUB_MEDIA_TYPE,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -59,14 +58,12 @@ pub fn write_machine_image(
             cmdline: PUBLISHED_BOOT_CMDLINE.to_owned(),
         },
         disk: disk.disk,
-        wake: None,
     })
 }
 
 /// A file's chunks as a config names them.
 pub(crate) struct WrittenChunks {
     pub disk: MachineDiskV1,
-    pub count: usize,
 }
 
 /// The layers of one image as they are written to `output/sha256`.
@@ -98,12 +95,6 @@ impl ImageWriter {
 
     pub(crate) fn file(&mut self, path: &Path, media_type: &str) -> Result<OciDescriptorV1> {
         let descriptor = blob_file(path, &self.blobs, media_type)?;
-        self.layers.push(descriptor.clone());
-        Ok(descriptor)
-    }
-
-    pub(crate) fn bytes(&mut self, bytes: &[u8], media_type: &str) -> Result<OciDescriptorV1> {
-        let descriptor = blob_bytes(bytes, &self.blobs, media_type)?;
         self.layers.push(descriptor.clone());
         Ok(descriptor)
     }
@@ -157,7 +148,6 @@ impl ImageWriter {
             self.disk_bytes = scan.virtual_size_bytes;
         }
         Ok(WrittenChunks {
-            count: chunks.len(),
             disk: MachineDiskV1 {
                 size_bytes: scan.virtual_size_bytes,
                 chunk_size: u64::from(IMAGE_CHUNK_SIZE_BYTES),
@@ -264,19 +254,10 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
     )
     .map_err(anyhow::Error::msg)?;
 
-    let ram_chunks = verified
-        .wake
-        .as_ref()
-        .map_or(&[][..], |wake| wake.ram_chunks.as_slice());
     for layer in &manifest.layers {
         let chunks = match layer.media_type.as_str() {
             DISK_CHUNK_MEDIA_TYPE => &verified.chunks[..],
-            WAKE_RAM_CHUNK_MEDIA_TYPE => ram_chunks,
             KERNEL_MEDIA_TYPE | INITRD_MEDIA_TYPE => {
-                read_blob(&blobs, &layer.digest, Some(layer.size))?;
-                continue;
-            }
-            WAKE_STUB_MEDIA_TYPE | WAKE_CPU_PROFILE_MEDIA_TYPE if config.wake.is_some() => {
                 read_blob(&blobs, &layer.digest, Some(layer.size))?;
                 continue;
             }
@@ -290,7 +271,7 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
             layer.digest.as_str()
         );
     }
-    for chunk in verified.chunks.iter().chain(ram_chunks) {
+    for chunk in &verified.chunks {
         let index = chunk.index;
         let encoded = read_blob(
             &blobs,
@@ -309,12 +290,6 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
             "image chunk {index} is not its raw SHA-256"
         );
     }
-    if let Some(wake) = &verified.wake {
-        ensure!(
-            ram_sha256(&blobs, wake)? == wake.ram_sha256,
-            "the wake RAM is not its SHA-256"
-        );
-    }
     let path = |hex: String| blobs.join(hex);
     Ok(VerifiedMachineImage {
         kernel: kernel.map(path).context("kernel")?,
@@ -322,32 +297,6 @@ pub fn verify_machine_image(dir: &Path, digest: &OciDigest) -> Result<VerifiedMa
         manifest,
         config,
     })
-}
-
-/// SHA-256 of the RAM file a verified wake's chunks assemble: zero holes
-/// between them.
-fn ram_sha256(blobs: &Path, wake: &intar_contracts::oci::verify::VerifiedWake) -> Result<String> {
-    let chunk_size = u64::from(IMAGE_CHUNK_SIZE_BYTES);
-    let zeros = vec![0_u8; IMAGE_CHUNK_SIZE_BYTES as usize];
-    let mut hasher = Sha256::new();
-    let mut at = 0_u64;
-    for chunk in &wake.ram_chunks {
-        let start = u64::from(chunk.index) * chunk_size;
-        while at < start {
-            hasher.update(&zeros);
-            at += chunk_size;
-        }
-        let encoded = fs::read(blobs.join(&chunk.encoded_sha256))?;
-        let raw = zstd::stream::decode_all(encoded.as_slice())?;
-        hasher.update(&raw);
-        at += raw.len() as u64;
-    }
-    while at < wake.ram_size_bytes {
-        let take = (wake.ram_size_bytes - at).min(chunk_size);
-        hasher.update(&zeros[..usize::try_from(take)?]);
-        at += take;
-    }
-    Ok(hex(&hasher.finalize()))
 }
 
 /// Write the raw disk of a verified image to `target`, sparse where the image
@@ -459,13 +408,13 @@ mod tests {
             verified.config.build_key,
             intar_contracts::scenario::base_key()
         );
-        // The config is compact JSON without `wake`.
+        // The config is compact JSON.
         let config = fs::read_to_string(
             out.join("sha256")
                 .join(verified.manifest.config.digest.hex()),
         )
         .expect("config");
-        assert!(!config.contains("wake") && !config.contains('\n'));
+        assert!(!config.contains('\n'));
         // Exactly the blobs the manifest names, plus itself.
         let names = fs::read_dir(out.join("sha256")).expect("blobs").count();
         assert_eq!(names, verified.manifest.layers.len() + 2);

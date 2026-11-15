@@ -644,17 +644,3 @@ fn quiet_greps_are_warned_at_their_block() {
         "{found:?}"
     );
 }
-
-#[test]
-fn a_wake_image_loads_and_its_machines_may_install_packages() {
-    let (_temp, loaded) = repository(|root| {
-        edit(
-            root,
-            "images/base-web.hcl",
-            "from = \"trixie\"",
-            "from = \"trixie\"\n  wake = true",
-        );
-    });
-    let repository = loaded.unwrap_or_else(|problems| panic!("{problems:?}"));
-    assert!(repository.images[0].wake);
-}

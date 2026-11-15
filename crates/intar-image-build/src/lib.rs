@@ -17,14 +17,13 @@ mod rootfs;
 mod seed;
 mod sha256;
 mod ssh;
-pub mod wake;
 
 pub use chunked::{
     ChunkedImageArtifact, EncodedImageChunkArtifact, ReusedEncodedImageChunk, ScannedChunkedImage,
     ScannedImageChunk, reconstruct_chunked_image, scan_raw_image_chunks,
     write_chunked_image_artifact, write_scanned_chunked_image_artifact,
 };
-pub use config::{LayeredBuildConfig, QemuBuildConfig, WakeBuildConfig};
+pub use config::{LayeredBuildConfig, QemuBuildConfig};
 pub use kernel::{
     KERNEL_APT_SNAPSHOT, KERNEL_APT_SNAPSHOT_URL, KERNEL_BUILD_HOST, KERNEL_BUILD_SCRIPT_SOURCE,
     KERNEL_BUILD_USER, KERNEL_BUSYBOX_STATIC_VERSION, KERNEL_CONFIG_FRAGMENT,
@@ -37,9 +36,8 @@ pub use kernel::{
 #[cfg(unix)]
 pub use machine::{
     BuildPlan, BuildTarget, MachineBuildOutput, MachineBuildRequest, MachineImage, PlannedNode,
-    PlannedStage, VerifiedMachineImage, WAKE_CHILD_ARG, build_machine_image,
-    machine_build_log_path, plan_build, reconstruct_machine_disk, run_wake_child,
-    verify_machine_image, wake_serial_log_path, wake_unavailable, write_machine_image,
+    PlannedStage, VerifiedMachineImage, build_machine_image, machine_build_log_path, plan_build,
+    reconstruct_machine_disk, verify_machine_image, write_machine_image,
 };
 pub use platform::{PLATFORM_BASE_DISK_BYTES, ensure_platform_base, render_platform_rootfs_plan};
 pub use rootfs::{BaseRootfsArtifact, RootfsBuildPaths, RootfsBuildPlan};

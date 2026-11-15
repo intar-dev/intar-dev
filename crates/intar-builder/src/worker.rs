@@ -33,9 +33,6 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 // Two log tails plus the error stay under the Worker's 9 MiB log cap.
 const LOG_UPLOAD_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const LOG_UPLOAD_ERROR_BYTES: usize = 64 * 1024;
-/// The wake VM's serial log gets less, so all three tails stay under the
-/// Worker's 9 MiB.
-const WAKE_SERIAL_UPLOAD_TAIL_BYTES: u64 = 512 * 1024;
 
 /// Runs queued builds once the bridge applied a live desired state.
 pub async fn worker_loop(
@@ -320,7 +317,7 @@ pub(crate) fn is_current(state_db: &Path, build: &DesiredBuildV2) -> bool {
         })
 }
 
-/// PUT the end of the build, serial and wake serial logs, best effort.
+/// PUT the end of the build and serial logs, best effort.
 /// A build's error text. Its files go when the attempt ends, so it names no
 /// path: the logs are in the upload of this attempt.
 fn failure_message(error: &anyhow::Error, attempt: u32) -> String {
@@ -335,7 +332,6 @@ async fn upload_log(
 ) {
     let log_path = intar_image_build::machine_build_log_path(work_root, &build.build_key);
     let serial_path = log_path.with_extension("serial.log");
-    let wake_serial_path = intar_image_build::wake_serial_log_path(&log_path);
     let mut log = String::new();
     if let Some(error) = error {
         let error = str_tail(error, LOG_UPLOAD_ERROR_BYTES);
@@ -344,11 +340,6 @@ async fn upload_log(
     for (title, path, limit) in [
         ("build log", &log_path, LOG_UPLOAD_TAIL_BYTES),
         ("serial log", &serial_path, LOG_UPLOAD_TAIL_BYTES),
-        (
-            "wake serial log",
-            &wake_serial_path,
-            WAKE_SERIAL_UPLOAD_TAIL_BYTES,
-        ),
     ] {
         append_log(&mut log, title, path, limit).await;
     }

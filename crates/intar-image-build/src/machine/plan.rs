@@ -60,9 +60,6 @@ pub struct BuildPlan {
     /// The union of the chain's and the target's `defer`.
     pub defer: BTreeSet<String>,
     pub disk_bytes: u64,
-    /// The target is a wake image or a machine from one: built as usual,
-    /// then cold-booted and suspended (#348 §3).
-    pub wake: bool,
 }
 
 /// Validate `bundle` strictly, recompute the target's key and its chain's
@@ -162,12 +159,6 @@ pub fn plan_build(
             });
         }
     }
-    let wake_image = |name: &str| images.get(name).is_some_and(|image| image.wake);
-    let wake = match (target, own) {
-        (BuildTarget::Image(name), _) => wake_image(name),
-        (_, Some(machine)) => wake_image(&machine.from),
-        _ => false,
-    };
     let disk_bytes = disk_mib.map_or(PLATFORM_BASE_DISK_BYTES, |mib| u64::from(mib) * MIB);
     ensure!(
         disk_bytes >= PLATFORM_BASE_DISK_BYTES,
@@ -180,7 +171,6 @@ pub fn plan_build(
         stages,
         defer,
         disk_bytes,
-        wake,
     })
 }
 
@@ -347,7 +337,6 @@ mod tests {
                 name: "install".to_owned(),
                 script: "apt-get install -y nginx\n".to_owned(),
             }],
-            wake: false,
         });
         let machine = machine_mut(&mut bundle, "webserver");
         machine.from = "web".to_owned();
@@ -370,42 +359,6 @@ mod tests {
             plan_build(&bundle, &BuildTarget::Image("web".to_owned()), None).expect("image");
         assert_eq!(image.stages.len(), 1);
         assert_eq!(image.build_key, plan.chain[0].key);
-    }
-
-    #[test]
-    fn a_machine_from_a_wake_image_builds_all_its_setup_then_wakes() {
-        let mut bundle = bundle();
-        bundle.images.push(ImageV1 {
-            name: "web".to_owned(),
-            from: PLATFORM_BASE_IMAGE.to_owned(),
-            disk_mib: Some(3072),
-            defer: Vec::new(),
-            setup: vec![ScriptV1 {
-                name: "install".to_owned(),
-                script: "true\n".to_owned(),
-            }],
-            wake: true,
-        });
-        let machine = machine_mut(&mut bundle, "webserver");
-        machine.from = "web".to_owned();
-        let plan = plan_build(&bundle, &webserver(), None).expect("plan");
-        assert!(plan.wake);
-        // The image's setup and the machine's run in one cold build, as a
-        // plain image's do; the wake step boots the result.
-        let names: Vec<&str> = plan
-            .stages
-            .iter()
-            .map(|stage| stage.name.as_str())
-            .collect();
-        assert_eq!(names, ["install", "packages", "break-nginx"]);
-        let image =
-            plan_build(&bundle, &BuildTarget::Image("web".to_owned()), None).expect("image");
-        assert!(image.wake);
-        assert!(
-            !plan_build(&bundle, &BuildTarget::Base, None)
-                .expect("base")
-                .wake
-        );
     }
 
     #[test]

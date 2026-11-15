@@ -3,7 +3,7 @@
 set -euo pipefail
 dist_dir="${PWD}/dist"
 mkdir -p "${dist_dir}"
-# Cloud Hypervisor for the agent's jails and the builder's wake steps:
+# Cloud Hypervisor for the agent's jails:
 # build_cloud_hypervisor <target> <target dir> <archive dir>.
 build_cloud_hypervisor() {
   local target="$1"
@@ -69,7 +69,7 @@ build_archive() {
   cp "${binary}" "${workdir}/${BINARY}"
   chmod +x "${workdir}/${BINARY}"
   if [ "${PACKAGE}" = "intar-builder" ]; then
-    build_cloud_hypervisor "${target}" "${target_dir}" "${workdir}"
+    mkdir -p "${workdir}/deploy"
     # The builder rollout drops retired keys from the host's config with it.
     cp crates/intar-jailerd/deploy/migrate-epoch-config.py "${workdir}/deploy/migrate-epoch-config.py"
   fi

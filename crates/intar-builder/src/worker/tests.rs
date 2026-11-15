@@ -12,9 +12,8 @@ use intar_contracts::bridge_v9::BuildPhaseV2;
 use tokio::sync::mpsc;
 
 use super::{
-    LOG_UPLOAD_ERROR_BYTES, LOG_UPLOAD_TAIL_BYTES, WAKE_SERIAL_UPLOAD_TAIL_BYTES, attempt_dirs,
-    checked_target, decode_bundle, failure_message, is_current, publish, push_verified,
-    read_log_tail,
+    LOG_UPLOAD_ERROR_BYTES, LOG_UPLOAD_TAIL_BYTES, attempt_dirs, checked_target, decode_bundle,
+    failure_message, is_current, publish, push_verified, read_log_tail,
 };
 use crate::db::{self, BuilderDb};
 
@@ -198,28 +197,19 @@ async fn an_image_that_fails_verification_is_not_pushed() {
 }
 
 #[test]
-fn the_wake_serial_log_sits_beside_the_build_log_and_every_tail_fits_one_upload() {
-    let log = Path::new("/work/machine-ab.build.log");
-    assert_eq!(
-        intar_image_build::wake_serial_log_path(log),
-        Path::new("/work/machine-ab.build.wake.serial.log")
-    );
+fn every_tail_fits_one_upload() {
     // The Worker refuses a build log over 9 MiB; headers take a few bytes.
-    let total = 2 * LOG_UPLOAD_TAIL_BYTES
-        + WAKE_SERIAL_UPLOAD_TAIL_BYTES
-        + LOG_UPLOAD_ERROR_BYTES as u64
-        + 4096;
+    let total = 2 * LOG_UPLOAD_TAIL_BYTES + LOG_UPLOAD_ERROR_BYTES as u64 + 4096;
     assert!(total < 9 * 1024 * 1024);
 }
 
 #[test]
 fn a_failure_names_the_attempt_its_logs_were_uploaded_with_not_a_path() {
-    let error =
-        anyhow::anyhow!("the wake VM failed (exit status: 1)").context("build the wake image");
+    let error = anyhow::anyhow!("the build VM failed (exit status: 1)").context("build the image");
     let message = failure_message(&error, 2);
     assert_eq!(
         message,
-        "build the wake image: the wake VM failed (exit status: 1) (the logs are uploaded with attempt 2)"
+        "build the image: the build VM failed (exit status: 1) (the logs are uploaded with attempt 2)"
     );
     assert!(!message.contains('/'));
 }

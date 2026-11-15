@@ -102,11 +102,6 @@ impl BuildSshSession {
             .map(drop)
     }
 
-    /// Run `command` and return the last 64 KiB of its output.
-    pub async fn run_output(&mut self, command: &str) -> Result<Vec<u8>> {
-        self.exec_with_optional_input(command, None, None).await
-    }
-
     /// Run `command` with its output appended to `log_path`, never to this
     /// process's own output.
     pub async fn run_logged(&mut self, command: &str, log_path: &Path) -> Result<()> {
