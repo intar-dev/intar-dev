@@ -406,7 +406,7 @@ pub(super) fn load(config: &JailerdConfig) -> Result<super::AttestationStatus> {
         &boot_id,
         kernel_version.as_deref().ok(),
         systemd_version.as_deref().ok(),
-        now_unix_s.ok(),
+        now_unix_s.as_ref().ok().copied(),
     ) {
         return Ok(status);
     }
