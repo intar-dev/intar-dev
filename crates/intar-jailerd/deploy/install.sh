@@ -346,6 +346,7 @@ install -d -o root -g root -m 0755 /run/netns
 
 publish_file "${archive_dir}/deploy/intar-jailerd.service" /etc/systemd/system/intar-jailerd.service 0644
 publish_file "${archive_dir}/deploy/intar-jailerd.socket" /etc/systemd/system/intar-jailerd.socket 0644
+publish_file "${archive_dir}/deploy/intar-jailerd-boot-check.service" /etc/systemd/system/intar-jailerd-boot-check.service 0644
 publish_file "${archive_dir}/deploy/intar-vms.slice" /etc/systemd/system/intar-vms.slice 0644
 publish_file "${archive_dir}/deploy/intar-agent.service" /etc/systemd/system/intar-agent.service 0644
 publish_file "${archive_dir}/deploy/intar-jailerd.tmpfiles" /etc/tmpfiles.d/intar-jailerd.conf 0644
@@ -371,6 +372,12 @@ done
 sysctl -p /etc/sysctl.d/90-intar-jailerd.conf >/dev/null
 [ "$(sysctl -n net.ipv4.ip_forward)" = 1 ] || die "IPv4 forwarding remains disabled"
 systemctl daemon-reload
+# Started at the next boot, before jailerd and the agent; not now.
+systemctl enable intar-jailerd-boot-check.service
+if unit_loaded intar-platform-check.service; then
+  systemctl disable intar-platform-check.service
+  echo "Disabled intar-platform-check.service (kept on disk): intar-jailerd-boot-check.service now runs the self-test at every boot."
+fi
 systemctl enable --now intar-jailerd.socket
 [ "$(active_state intar-jailerd.socket)" = active ] || die "jailerd socket did not activate"
 

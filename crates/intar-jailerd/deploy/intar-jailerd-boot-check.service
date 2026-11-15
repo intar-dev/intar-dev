@@ -1,0 +1,19 @@
+[Unit]
+Description=Intar jailerd self-test at boot
+# Each boot re-runs the privileged self-test from the cached assets before
+# jailerd and the agent start, so a rebooted host returns to service by
+# itself. jailerd only Wants= this unit: when the check fails, jailerd still
+# starts, unschedulable, and contains the VMs of the previous boot.
+After=systemd-udevd.service
+Before=intar-jailerd.socket intar-jailerd.service intar-agent.service
+RequiresMountsFor=/var/lib/intar/self-test-assets /var/lib/intar/jails /var/cache/intar-agent /run/netns
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=900
+UMask=0077
+ExecStart=/usr/lib/intar/intar-jailerd-self-test --boot
+
+[Install]
+WantedBy=multi-user.target

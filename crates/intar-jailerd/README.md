@@ -107,6 +107,20 @@ busy cgroups during one 30-second window, and exhaustively removes them.
 Only that complete artifact-backed run writes the boot-bound readiness
 attestation.
 
+Every later boot re-runs the proof through `intar-jailerd-boot-check.service`,
+which the installer enables: `intar-jailerd-self-test --boot` runs before the
+jailerd socket, jailerd and the agent start, refuses if any of them is active,
+stops and restores nothing, and uses only the cached assets (implying
+`--offline`). jailerd only `Wants=` it. When the check fails, jailerd still
+starts and contains the previous boot's VMs, but stays unschedulable: an
+attestation whose only mismatch is the boot ID counts as absent, while any
+other stale attestation is still a startup error. A recovery whose unclean
+records all belong to a known earlier boot, and were all fully contained,
+keeps the readiness the boot check proved; every other unclean recovery
+withdraws it. `journalctl -u intar-jailerd-boot-check.service` shows the
+result. The installer disables (and keeps) a hand-written
+`intar-platform-check.service`, since it would run the proof a second time.
+
 Install or upgrade the package only while the agent is stopped and the host is
 fully drained. The installer rejects live VM units, populated Intar cgroups,
 and lingering VMM/helper processes, and leaves the agent stopped. Run the

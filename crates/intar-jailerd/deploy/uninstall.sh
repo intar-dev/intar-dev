@@ -149,11 +149,13 @@ mutated=true
 systemctl disable --now intar-agent.service
 systemctl disable --now intar-jailerd.socket
 systemctl disable --now intar-jailerd.service
+systemctl disable --now intar-jailerd-boot-check.service
 
 rm -f -- \
   /etc/systemd/system/intar-agent.service \
   /etc/systemd/system/intar-jailerd.socket \
   /etc/systemd/system/intar-jailerd.service \
+  /etc/systemd/system/intar-jailerd-boot-check.service \
   /etc/systemd/system/intar-vms.slice \
   /etc/tmpfiles.d/intar-jailerd.conf \
   /etc/sysctl.d/90-intar-jailerd.conf \
@@ -183,6 +185,7 @@ for path in \
   /etc/systemd/system/intar-agent.service \
   /etc/systemd/system/intar-jailerd.socket \
   /etc/systemd/system/intar-jailerd.service \
+  /etc/systemd/system/intar-jailerd-boot-check.service \
   /etc/systemd/system/intar-vms.slice \
   /etc/tmpfiles.d/intar-jailerd.conf \
   /etc/sysctl.d/90-intar-jailerd.conf \
@@ -201,7 +204,8 @@ for wants in /etc/systemd/system/*.wants /etc/systemd/system/*.requires; do
   for link in \
     "${wants}/intar-agent.service" \
     "${wants}/intar-jailerd.socket" \
-    "${wants}/intar-jailerd.service"; do
+    "${wants}/intar-jailerd.service" \
+    "${wants}/intar-jailerd-boot-check.service"; do
     if [ -e "${link}" ] || [ -L "${link}" ]; then
       die "systemd enablement link remains: ${link}"
     fi

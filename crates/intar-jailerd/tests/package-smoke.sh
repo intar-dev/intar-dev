@@ -55,6 +55,7 @@ for path in \
   /usr/local/bin/intar-agent \
   /etc/systemd/system/intar-jailerd.service \
   /etc/systemd/system/intar-jailerd.socket \
+  /etc/systemd/system/intar-jailerd-boot-check.service \
   /etc/systemd/system/intar-agent.service \
   /run/systemd/system/intar-agent.service.d \
   /etc/systemd/system/intar-vms.slice \
@@ -266,6 +267,7 @@ cleanup() {
     /etc/systemd/system/intar-agent.service \
     /etc/systemd/system/intar-jailerd.service \
     /etc/systemd/system/intar-jailerd.socket \
+    /etc/systemd/system/intar-jailerd-boot-check.service \
     /etc/systemd/system/intar-vms.slice \
     /run/systemd/system/intar-agent.service.d \
     /etc/tmpfiles.d/intar-jailerd.conf \
@@ -357,6 +359,7 @@ for relative in \
   deploy/intar-agent.config.example.toml \
   deploy/intar-jailerd.service \
   deploy/intar-jailerd.socket \
+  deploy/intar-jailerd-boot-check.service \
   deploy/intar-jailerd.sysctl.conf \
   deploy/intar-jailerd.tmpfiles \
   deploy/intar-vms.slice; do
@@ -569,6 +572,18 @@ self_test=/usr/lib/intar/intar-jailerd-self-test
 [ -x "${self_test}" ] || die "installed self-test wrapper is missing"
 help_output=$("${self_test}" --help 2>&1 || true)
 echo "${help_output}" | grep -q -- '--offline' || die "self-test wrapper lacks offline mode"
+echo "${help_output}" | grep -q -- '--boot' || die "self-test wrapper lacks boot mode"
+[ "$(systemctl is-enabled intar-jailerd-boot-check.service)" = enabled ] || \
+  die "installer did not enable intar-jailerd-boot-check.service"
+[ "$(systemctl show --property=ActiveState --value intar-jailerd-boot-check.service)" = inactive ] || \
+  die "installer started intar-jailerd-boot-check.service"
+# The installer left the socket listening, so the boot mode must refuse.
+if boot_output=$("${self_test}" --boot 2>&1); then
+  die "self-test --boot ran while intar-jailerd.socket was active"
+fi
+printf '%s\n' "${boot_output}" | grep -Fq -- "--boot runs only before intar-jailerd.socket starts" || \
+  die "self-test --boot refused for the wrong reason: ${boot_output}"
+systemctl is-active --quiet intar-jailerd.socket || die "self-test --boot stopped intar-jailerd.socket"
 "${self_test}"
 
 runuser --user intar-agent -- env \
