@@ -864,6 +864,123 @@ fn recovery_containment_never_exports_an_unvalidated_record() {
     assert_eq!(core.preparer.quarantined, vec![record.generation]);
 }
 
+fn destroy_run_network(core: &mut JailerdCore<FakeBackend, RecoverPreparer>) -> Response {
+    core.handle(Request::DestroyRunNetwork(DestroyRunNetworkRequest {
+        run_id: ValidatedId::parse("run").expect("run ID"),
+    }))
+}
+
+#[test]
+fn a_run_network_is_destroyed_after_recovery_contains_its_only_vm() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.host_boot_id = Some("an-earlier-boot".to_owned());
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("contain recovered record");
+    assert!(core.run_networks.is_empty());
+
+    assert!(matches!(
+        destroy_run_network(&mut core),
+        Response::DestroyRunNetwork(_)
+    ));
+    assert_eq!(
+        core.backend.destroyed_run_networks,
+        vec![record.request.run_id]
+    );
+}
+
+#[test]
+fn a_run_network_is_kept_while_a_healthy_vm_of_the_run_remains() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut contained = recovered_record(&config);
+    contained.host_boot_id = Some("an-earlier-boot".to_owned());
+    let mut healthy = recovered_record(&config);
+    healthy.generation = ValidatedId::parse("healthy-generation").expect("generation");
+    healthy.unit_name = format!("intar-vm-{}.service", healthy.generation);
+    healthy.cgroup_path = Some(
+        format!(
+            "/intar.slice/intar-vms.slice/intar-vm-{}.service",
+            healthy.generation
+        )
+        .into(),
+    );
+    healthy.uid += 1;
+    healthy.gid += 1;
+    healthy.request = launch(2, 125);
+    healthy.request_fingerprint = request_fingerprint(&healthy.request).expect("fingerprint");
+    healthy.paths = jail_paths(
+        &generation_directory(&config, &healthy.generation).join("root"),
+        healthy.request.artifacts.initrd.is_some(),
+    );
+    let mut backend = FakeBackend::default();
+    backend
+        .units
+        .insert(healthy.unit_name.clone(), recovered_inspection(&healthy));
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        backend,
+        RecoverPreparer {
+            records: vec![contained.clone(), healthy.clone()],
+            ..RecoverPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("recover core");
+    assert_eq!(core.preparer.quarantined, vec![contained.generation]);
+    assert!(core.records.contains_key(&healthy.generation));
+
+    assert!(matches!(
+        destroy_run_network(&mut core),
+        Response::Error(error) if error.message.contains("still has VM generations")
+    ));
+    assert!(core.backend.destroyed_run_networks.is_empty());
+}
+
+#[test]
+fn a_run_network_is_kept_while_a_contained_vm_may_still_run_in_it() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.host_boot_id = Some("an-earlier-boot".to_owned());
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend {
+            fail_stop_unit: true,
+            fail_destroy_unit: true,
+            ..FakeBackend::default()
+        },
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("retain recovered record");
+    assert!(
+        core.pending_cpu_reservations
+            .contains_key(&record.generation)
+    );
+
+    assert!(matches!(
+        destroy_run_network(&mut core),
+        Response::Error(error) if error.message.contains("still has VM generations")
+    ));
+    assert!(core.backend.destroyed_run_networks.is_empty());
+}
+
 #[test]
 fn recovery_reattaches_a_matching_drained_generation() {
     let mut config = test_config();

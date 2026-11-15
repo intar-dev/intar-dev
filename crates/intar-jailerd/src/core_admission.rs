@@ -395,6 +395,18 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     .records
                     .values()
                     .any(|record| record.request.run_id == request.run_id)
+                    || self
+                        .inflight_launches
+                        .values()
+                        .any(|launch| launch.request.run_id == request.run_id)
+                    // Until its cgroup is proven drained, a contained VM may
+                    // still run inside the run's namespace.
+                    || self.unresolved_recoveries.values().any(|recovery| {
+                        recovery.run_id == request.run_id
+                            && self
+                                .pending_cpu_reservations
+                                .contains_key(&recovery.generation)
+                    })
                 {
                     bail!("run network still has VM generations")
                 }

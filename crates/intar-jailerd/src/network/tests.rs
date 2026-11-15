@@ -128,7 +128,7 @@ fn repair_never_replaces_a_missing_tracked_namespace_identity() {
         guest_cidr: "10.77.0.0/28".to_owned(),
         gateway: "10.77.0.1".to_owned(),
     };
-    let (mut result, nft_table) = derived_topology(&request).unwrap();
+    let (mut result, nft_table) = derived_topology(&request.run_id).unwrap();
     result.namespace_inode = 17;
     let manager = NetworkManager {
         ip: PathBuf::from("/unreachable/ip"),
@@ -163,8 +163,8 @@ fn derived_interface_names_are_stable_distinct_and_fit_linux_limit() {
         guest_cidr: "10.77.0.0/24".to_owned(),
         gateway: "10.77.0.1".to_owned(),
     };
-    let (first, _) = derived_topology(&request).unwrap();
-    let (second, _) = derived_topology(&request).unwrap();
+    let (first, _) = derived_topology(&request.run_id).unwrap();
+    let (second, _) = derived_topology(&request.run_id).unwrap();
     assert_eq!(first, second);
     assert!(first.bridge_name.len() <= 15);
     assert!(first.host_veth_name.len() <= 15);
@@ -275,7 +275,7 @@ fn create_and_recovery_tap_commands_use_only_the_derived_host_mac() {
         guest_cidr: "10.77.0.0/24".to_owned(),
         gateway: "10.77.0.1".to_owned(),
     };
-    let (network, _) = derived_topology(&request).unwrap();
+    let (network, _) = derived_topology(&request.run_id).unwrap();
     let attachment = VmNetworkAttachment {
         generation: ValidatedId::parse("generation").unwrap(),
         vm_id: ValidatedId::parse("vm").unwrap(),
@@ -404,7 +404,7 @@ fn nft_policy_blocks_host_cross_run_private_and_metadata_destinations() {
         guest_cidr: "10.77.0.0/29".to_owned(),
         gateway: "10.77.0.1".to_owned(),
     };
-    let (result, nft_table) = derived_topology(&request).unwrap();
+    let (result, nft_table) = derived_topology(&request.run_id).unwrap();
     let mut attachments = BTreeMap::new();
     attachments.insert(
         ValidatedId::parse("generation").unwrap(),
@@ -604,4 +604,102 @@ fn a_missing_run_table_is_not_deleted_again() {
         "delete table inet intar_run_x\n"
     );
     assert_eq!(nft_table_delete(false, "intar_run_x"), "");
+}
+
+#[test]
+fn an_untracked_run_network_is_destroyed_by_its_derived_names_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("log");
+    let run = ValidatedId::parse("run-a").unwrap();
+    let other = ValidatedId::parse("run-b").unwrap();
+    let (result, nft_table) = derived_topology(&run).unwrap();
+    let (other_result, other_table) = derived_topology(&other).unwrap();
+    let script = |name: &str, body: String| {
+        let path = directory.path().join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho \"$*\" >> {}\n{body}", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    // Both runs' objects exist; only the destroyed run's may be touched.
+    let manager = NetworkManager {
+        nsenter: script("nsenter", "shift 2\nexec \"$@\"\n".to_owned()),
+        ip: script(
+            "ip",
+            format!(
+                "case \"$*\" in \"link show dev {}\"|\"link show dev {}\") exit 0;; \"link show\"*) exit 1;; esac\n",
+                result.host_veth_name, other_result.host_veth_name
+            ),
+        ),
+        nft: script(
+            "nft",
+            format!(
+                "case \"$*\" in \"list table inet {nft_table}\"|\"list table inet {other_table}\") exit 0;; \"list\"*) exit 1;; esac\nwhile read -r line; do echo \"stdin $line\" >> {}; done\n",
+                log.display()
+            ),
+        ),
+        netns_root: directory.path().to_path_buf(),
+        host_netns_root: directory.path().to_path_buf(),
+        policy: JailerdConfig::default(),
+        runs: BTreeMap::new(),
+    };
+
+    assert!(manager.destroy_untracked_run(&run).unwrap());
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        log.contains(&format!("link delete {}", result.host_veth_name)),
+        "{log}"
+    );
+    assert!(
+        log.contains(&format!("stdin delete table inet {nft_table}")),
+        "{log}"
+    );
+    let suffix = other_result.host_veth_name.trim_start_matches("ivh");
+    assert!(!log.contains(suffix), "{log}");
+}
+
+#[test]
+fn a_new_run_refuses_a_transit_network_held_by_an_untracked_run() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let request = EnsureRunNetworkRequest {
+        run_id: ValidatedId::parse("run-a").unwrap(),
+        guest_cidr: "10.77.0.0/28".to_owned(),
+        gateway: "10.77.0.1".to_owned(),
+    };
+    let (result, _) = derived_topology(&request.run_id).unwrap();
+    let script = |name: &str, body: String| {
+        let path = directory.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let mut manager = NetworkManager {
+        nsenter: script("nsenter", "shift 2\nexec \"$@\"\n".to_owned()),
+        ip: script(
+            "ip",
+            format!(
+                "echo \"9: ivh0123456789ab    inet {} scope global ivh0123456789ab\"\n",
+                result.host_transit_cidr
+            ),
+        ),
+        nft: script("nft", "exit 1\n".to_owned()),
+        netns_root: directory.path().to_path_buf(),
+        host_netns_root: directory.path().to_path_buf(),
+        policy: JailerdConfig::default(),
+        runs: BTreeMap::new(),
+    };
+
+    let error = manager.ensure_run(&request).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("held by a link of an untracked run"),
+        "{error:#}"
+    );
+    assert!(manager.runs.is_empty());
 }

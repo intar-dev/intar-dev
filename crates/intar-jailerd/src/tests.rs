@@ -23,6 +23,7 @@ struct FakeBackend {
     returned_unit_name: Option<String>,
     quota_verifications: Vec<(String, CpuQuota)>,
     run_network_repairs: Vec<ValidatedId>,
+    destroyed_run_networks: Vec<ValidatedId>,
     active_ssh_forwards: BTreeSet<(ValidatedId, ValidatedId)>,
     ssh_forward_updates: Vec<(ValidatedId, ValidatedId, bool)>,
     boundary_operations: Vec<String>,
@@ -210,7 +211,8 @@ impl HostBackend for FakeBackend {
         self.boundary_operations.push(format!("ssh:{active}"));
         Ok(changed)
     }
-    fn destroy_run_network(&mut self, _request: &DestroyRunNetworkRequest) -> Result<bool> {
+    fn destroy_run_network(&mut self, request: &DestroyRunNetworkRequest) -> Result<bool> {
+        self.destroyed_run_networks.push(request.run_id.clone());
         Ok(true)
     }
 }

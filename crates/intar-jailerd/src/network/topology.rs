@@ -1,9 +1,7 @@
 use super::*;
 
-pub(super) fn derived_topology(
-    request: &EnsureRunNetworkRequest,
-) -> Result<(RunNetworkResult, String)> {
-    let digest = Sha256::digest(request.run_id.as_str().as_bytes());
+pub(super) fn derived_topology(run_id: &ValidatedId) -> Result<(RunNetworkResult, String)> {
+    let digest = Sha256::digest(run_id.as_str().as_bytes());
     let mut suffix = String::with_capacity(12);
     for byte in &digest[..6] {
         use std::fmt::Write as _;
@@ -15,7 +13,7 @@ pub(super) fn derived_topology(
     let namespace = std::net::Ipv4Addr::from(base + 2);
     Ok((
         RunNetworkResult {
-            run_id: request.run_id.clone(),
+            run_id: run_id.clone(),
             namespace_name: format!("intar-ns-{suffix}"),
             namespace_inode: 0,
             bridge_name: format!("ibr{suffix}"),
