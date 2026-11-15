@@ -180,7 +180,7 @@ fn contained_vm_logs_are_published_bounded_and_only_from_regular_files() {
     console[..7].copy_from_slice(b"dropped");
     console[limit..].copy_from_slice(b"the end");
     std::fs::write(&record.paths.host_console_log, &console).expect("write console log");
-    // No serial log at all, and a FIFO in place of the stderr log.
+    // A FIFO in place of the stderr log.
     rustix::fs::mknodat(
         rustix::fs::CWD,
         &record.paths.host_stderr_log,
@@ -189,6 +189,10 @@ fn contained_vm_logs_are_published_bounded_and_only_from_regular_files() {
         0,
     )
     .expect("create FIFO");
+    // The agent already published the serial log: it stays as it is.
+    std::fs::write(&record.paths.host_serial_log, b"serial from the jail").expect("serial log");
+    std::fs::write(artifacts.join("serial.log"), b"published by the agent")
+        .expect("published serial log");
 
     let error = export_vm_logs(&config, &record).expect_err("FIFO refused");
 
@@ -202,11 +206,22 @@ fn contained_vm_logs_are_published_bounded_and_only_from_regular_files() {
     let metadata = std::fs::metadata(artifacts.join("console.log")).expect("metadata");
     assert_eq!(metadata.mode() & 0o777, 0o600);
     assert_eq!(metadata.uid(), config.agent_uid);
-    assert!(!artifacts.join("serial.log").exists());
+    assert!(!format!("{error:#}").contains("serial.log"), "{error:#}");
+    assert_eq!(
+        std::fs::read(artifacts.join("serial.log")).expect("serial log"),
+        b"published by the agent"
+    );
     assert!(!artifacts.join("cloud-hypervisor.stderr.log").exists());
     assert_eq!(
         std::fs::read_dir(&artifacts).expect("artifacts").count(),
-        1,
+        2,
         "no temporary survives"
     );
+
+    // A missing log is skipped without error.
+    std::fs::remove_file(&record.paths.host_serial_log).expect("remove serial source");
+    std::fs::remove_file(artifacts.join("serial.log")).expect("remove published serial");
+    let error = export_vm_logs(&config, &record).expect_err("FIFO still refused");
+    assert!(!format!("{error:#}").contains("serial.log"), "{error:#}");
+    assert!(!artifacts.join("serial.log").exists());
 }

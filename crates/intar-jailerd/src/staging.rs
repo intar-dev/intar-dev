@@ -564,8 +564,24 @@ fn export_vm_log(
             Some(rustix::process::Gid::from_raw(config.agent_gid)),
         )?;
         output.sync_all()?;
-        rustix::fs::renameat(artifacts_fd, temporary.as_str(), artifacts_fd, name)?;
-        rustix::fs::fsync(artifacts_fd)?;
+        // A log the agent already published wins: it may be the full copy.
+        match rustix::fs::renameat_with(
+            artifacts_fd,
+            temporary.as_str(),
+            artifacts_fd,
+            name,
+            rustix::fs::RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => rustix::fs::fsync(artifacts_fd)?,
+            Err(rustix::io::Errno::EXIST) => {
+                rustix::fs::unlinkat(
+                    artifacts_fd,
+                    temporary.as_str(),
+                    rustix::fs::AtFlags::empty(),
+                )?;
+            }
+            Err(error) => return Err(error).context("publish VM log without replacing"),
+        }
         Ok(())
     })();
     if operation.is_err() {
