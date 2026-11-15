@@ -433,3 +433,58 @@ fn only_a_running_vm_on_the_lost_generation_is_failed() {
         assert!(!is_running_with_jail_generation(&vm, "generation"));
     }
 }
+
+/// Returns at most three bytes per read, as a file read returns less than
+/// a part.
+struct ShortReads(std::io::Cursor<Vec<u8>>);
+
+impl tokio::io::AsyncRead for ShortReads {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let mut chunk = [0_u8; 3];
+        let take = buffer.remaining().min(chunk.len());
+        let read = std::io::Read::read(&mut self.0, &mut chunk[..take])?;
+        buffer.put_slice(&chunk[..read]);
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+async fn artifact_parts(data: &[u8], part_bytes: usize) -> Vec<Vec<u8>> {
+    let mut reader = ShortReads(std::io::Cursor::new(data.to_vec()));
+    let mut buffer = vec![0_u8; part_bytes];
+    let mut parts = Vec::new();
+    loop {
+        let read = read_artifact_part(&mut reader, &mut buffer)
+            .await
+            .expect("read part");
+        if read == 0 {
+            return parts;
+        }
+        parts.push(buffer[..read].to_vec());
+    }
+}
+
+#[tokio::test]
+async fn artifact_parts_are_full_except_the_last_despite_short_reads() {
+    let data = (0..=255_u8).cycle().take(8 * 3 + 5).collect::<Vec<_>>();
+    let parts = artifact_parts(&data, 8).await;
+    assert_eq!(
+        parts.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![8, 8, 8, 5]
+    );
+    assert_eq!(parts.concat(), data);
+
+    let exact = artifact_parts(&data[..8], 8).await;
+    assert_eq!(exact, vec![data[..8].to_vec()]);
+    assert!(artifact_parts(&[], 8).await.is_empty());
+}
+
+#[test]
+fn an_artifact_upload_resumes_after_its_full_parts() {
+    assert_eq!(artifact_part_offset(0), 0);
+    assert_eq!(artifact_part_offset(1), 0);
+    assert_eq!(artifact_part_offset(4), 3 * 16 * 1024 * 1024);
+}

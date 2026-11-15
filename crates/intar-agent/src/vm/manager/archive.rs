@@ -1658,8 +1658,7 @@ pub(super) async fn upload_single_artifact(
     let mut file = tokio::fs::File::open(&artifact.path)
         .await
         .with_context(|| format!("failed to open artifact {}", artifact.path.display()))?;
-    let start_offset = u64::from(begin_payload.next_expected_part.saturating_sub(1))
-        * ARTIFACT_UPLOAD_PART_BYTES as u64;
+    let start_offset = artifact_part_offset(begin_payload.next_expected_part);
     if start_offset > 0 {
         use tokio::io::AsyncSeekExt as _;
         file.seek(std::io::SeekFrom::Start(start_offset))
@@ -1670,15 +1669,13 @@ pub(super) async fn upload_single_artifact(
     let mut part_number = begin_payload.next_expected_part.max(1);
     let mut buffer = vec![0_u8; ARTIFACT_UPLOAD_PART_BYTES];
     loop {
-        use tokio::io::AsyncReadExt as _;
         // Archive work is the lowest priority on the host. At a part
         // boundary, before the next 16 MiB read, yield the host to a live VM
         // boot. A pause is not a cancel: the part cursor and the open file
         // handle survive, so the upload resumes at the same offset. The wait
         // holds no mutex and no lock that a launch needs.
         image_cache::wait_for_vm_boot_idle().await;
-        let read = file
-            .read(&mut buffer)
+        let read = read_artifact_part(&mut file, &mut buffer)
             .await
             .with_context(|| format!("failed to read artifact {}", artifact.path.display()))?;
         if read == 0 {
@@ -1723,6 +1720,33 @@ pub(super) async fn upload_single_artifact(
     }
 
     Ok(())
+}
+
+/// Where part `next_expected_part` starts: every part before it is full.
+pub(super) fn artifact_part_offset(next_expected_part: u32) -> u64 {
+    u64::from(next_expected_part.saturating_sub(1)) * ARTIFACT_UPLOAD_PART_BYTES as u64
+}
+
+/// Fill one part, short only at the end of the file. A single read returns
+/// far less than a part (tokio's file reads stop near 2 MiB), and the object
+/// store refuses non-final parts below its minimum.
+pub(super) async fn read_artifact_part<R>(
+    reader: &mut R,
+    buffer: &mut [u8],
+) -> std::io::Result<usize>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+    let mut filled = 0;
+    while filled < buffer.len() {
+        let read = reader.read(&mut buffer[filled..]).await?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    Ok(filled)
 }
 
 pub(super) fn encode_url_path_segment(input: &str) -> String {
