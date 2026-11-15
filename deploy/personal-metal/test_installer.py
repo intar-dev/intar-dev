@@ -392,6 +392,24 @@ class InstallerTests(unittest.TestCase):
             host.main()
         self.assertEqual(events, ['empty', ('/usr/lib/intar/intar-jailerd-self-test',), 'doctor'])
 
+    def test_personal_check_is_the_only_boot_self_test(self):
+        unit_root = self.root / 'units'
+        unit_root.mkdir()
+        with patch.object(host, 'UNITS', unit_root), patch.object(host, 'run'), patch.object(host, 'secure_path'):
+            host.boot_units()
+        dropin = unit_root / 'intar-jailerd-boot-check.service.d/personal.conf'
+        self.assertEqual(dropin.read_text(), f'[Unit]\nConditionPathExists=!{unit_root}/intar-personal-check.service\n')
+        self.assertIn('ExecStart=/usr/local/bin/intar-host verify-boot', (unit_root / 'intar-personal-check.service').read_text())
+        calls = []
+        def run(*args, **kwargs):
+            calls.append(args)
+            return 'loaded'
+        with patch.object(host, 'UNITS', unit_root), patch.object(host, 'run', side_effect=run), patch.object(host, 'no_vms'), patch.object(host, 'secure_path'):
+            host.remove_runtime()
+        self.assertFalse(dropin.exists())
+        self.assertFalse((unit_root / 'intar-personal-check.service').exists())
+        self.assertIn(('systemctl', 'disable', 'intar-jailerd-boot-check.service'), calls)
+
     def test_failed_boot_proof_never_runs_doctor(self):
         host.save({'storage': {'kind': 'directory'}})
         with patch.object(host.sys, 'argv', ['intar-host', 'verify-boot']), patch.object(host.os, 'geteuid', return_value=0), patch.object(host.resource, 'setrlimit'), patch.object(host, 'no_vms'), patch.object(host, 'run', side_effect=host.HostError('proof failed')), patch.object(host, 'doctor') as doctor:

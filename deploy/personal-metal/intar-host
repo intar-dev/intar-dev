@@ -650,6 +650,13 @@ ConditionPathExists=!{MAINTENANCE}
 [Service]
 LimitCORE=0
 ''', 0o644)
+    # intar-personal-check.service runs the boot self-test here; a host must
+    # never run two of them.
+    check_dropin = UNITS / 'intar-jailerd-boot-check.service.d'
+    mkdir(check_dropin, 0o755)
+    atomic(check_dropin / 'personal.conf', f'''[Unit]
+ConditionPathExists=!{UNITS / 'intar-personal-check.service'}
+''', 0o644)
     atomic(UNITS / 'intar-personal-check.service', '''[Unit]
 Description=Intar privileged boot proof and agent doctor
 Wants=network-online.target
@@ -846,15 +853,17 @@ def remove_data(state):
 
 def remove_runtime():
     units = ('intar-agent.service', 'intar-jailerd.socket', 'intar-jailerd.service',
-             'intar-personal-check.service', 'intar-vms.slice')
+             'intar-jailerd-boot-check.service', 'intar-personal-check.service', 'intar-vms.slice')
     for unit in units:
         if run('systemctl', 'show', '--property=LoadState', '--value', unit, capture=True) != 'not-found':
             run('systemctl', 'stop', unit)
-            if unit in ('intar-agent.service', 'intar-jailerd.socket', 'intar-jailerd.service'):
+            if unit in ('intar-agent.service', 'intar-jailerd.socket', 'intar-jailerd.service',
+                        'intar-jailerd-boot-check.service'):
                 run('systemctl', 'disable', unit)
     no_vms(include_services=True)
     paths = [*(UNITS / name for name in units),
              UNITS / 'intar-agent.service.d/personal.conf',
+             UNITS / 'intar-jailerd-boot-check.service.d/personal.conf',
              Path('/etc/tmpfiles.d/intar-jailerd.conf'), Path('/etc/sysctl.d/90-intar-jailerd.conf'),
              Path('/usr/local/bin/intar-agent'),
              *(Path('/usr/lib/intar') / name for name in (

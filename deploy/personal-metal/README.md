@@ -36,7 +36,7 @@ sudo intar-host uninstall
 
 `update --version VERSION` can replace a failed release download or dependency installation, including a version that does not exist. `update --cancel-update` clears that selection without resuming work or changing data, credentials, or the maintenance marker. Replacement and cancellation are refused once storage, configuration, or runtime installation has started; repeat `setup` to finish that release first. An ordinary setup retry keeps its selected release.
 
-`doctor` checks the release package, protected files, mounts, storage space, and agent readiness. It does not run a VM. The boot check runs the privileged VM self-test while the agent is stopped. A failed check leaves the agent stopped. Use `sudo journalctl -u intar-personal-check.service` to read the check result.
+`doctor` checks the release package, protected files, mounts, storage space, and agent readiness. It does not run a VM. The boot check runs the privileged VM self-test while the agent is stopped. A failed check leaves the agent stopped. Use `sudo journalctl -u intar-personal-check.service` to read the check result. Setup turns off the package's own `intar-jailerd-boot-check.service` with a drop-in, so each boot runs the self-test once.
 
 `uninstall` drains active runs, stops services, and removes the runtime binaries and service units. It **keeps data by default**: the storage file, mounts, jail data, cache, configuration, credential, release cache, and `intar-host` stay on disk. It does not delete local or server data. Remove the server in My servers to revoke the credential. Run `setup` to restore a host that was removed locally while its credential is still valid. To also delete the local data and credentials, use:
 
