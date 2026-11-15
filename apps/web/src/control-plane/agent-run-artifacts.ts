@@ -9,6 +9,7 @@ import {
   advanceArtifactUpload,
   artifactMetadataMatches,
   artifactWritesSealedResponse,
+  clearArtifactUpload,
   decodePathSegment,
   ensureArtifactStates,
   inspectExistingArtifactManifestRetry,
@@ -632,12 +633,34 @@ async function handleArtifactComplete(
     // assumed to remain usable. The D1 write still checks current access.
     let object = await env.VM_RUN_ARTIFACTS_BUCKET.head(artifact.r2Key);
     if (!object) {
-      await multipart.complete(uploadedParts);
+      try {
+        await multipart.complete(uploadedParts);
+      } catch (error) {
+        if (!completionRefusedForPartLayout(error)) throw error;
+        return await restartArtifactUpload(env, db, runVm, artifact, upload.r2UploadId, {
+          reason: "parts_refused",
+          deleteObject: false,
+        });
+      }
       // R2 completion can omit metadata. Validate the stored object instead.
       // https://github.com/cloudflare/developer-platform/issues/3
       object = await env.VM_RUN_ARTIFACTS_BUCKET.head(artifact.r2Key);
     }
     const metadata = artifactObjectMetadata(runVm, artifact);
+    if (
+      object &&
+      object.key === artifact.r2Key &&
+      object.size !== artifact.sizeBytes &&
+      object.httpMetadata?.contentType === artifact.contentType &&
+      Object.entries(metadata).every(([key, value]) => object?.customMetadata?.[key] === value)
+    ) {
+      // This artifact's own upload, assembled from parts that do not add up to
+      // its declared size. Anything else under the key stays a conflict.
+      return await restartArtifactUpload(env, db, runVm, artifact, upload.r2UploadId, {
+        reason: "size_mismatch",
+        deleteObject: true,
+      });
+    }
     if (!object || object.key !== artifact.r2Key || object.size !== artifact.sizeBytes ||
         object.httpMetadata?.contentType !== artifact.contentType ||
         !Object.entries(metadata).every(([key, value]) => object.customMetadata?.[key] === value)) {
@@ -657,6 +680,50 @@ async function handleArtifactComplete(
   }
 
   return jsonResponse({ ok: true, uploaded: true });
+}
+
+/** The store refused the parts as laid out (one below the minimum part size,
+ * error 10011): a fresh upload of full-size parts cures it. */
+function completionRefusedForPartLayout(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("(10011)");
+}
+
+/**
+ * Abort an upload that can never complete and forget it, so the agent's next
+ * begin starts again at part 1. The answer is a retryable error; the reason
+ * goes to the operator log only.
+ */
+async function restartArtifactUpload(
+  env: Cloudflare.Env,
+  db: ReturnType<typeof drizzle>,
+  runVm: ResolvedRunVm,
+  artifact: SourceArtifactState,
+  r2UploadId: string,
+  options: { reason: "parts_refused" | "size_mismatch"; deleteObject: boolean },
+): Promise<Response> {
+  // An upload the store no longer knows (completed, aborted, expired) is fine.
+  await env.VM_RUN_ARTIFACTS_BUCKET.resumeMultipartUpload(artifact.r2Key, r2UploadId)
+    .abort()
+    .catch(() => {});
+  const cleared = await clearArtifactUpload({ db, runVm, artifact, r2UploadId });
+  // Only the reset that cleared this upload may remove its object: a later
+  // upload may already have stored the right one under the same key.
+  if (cleared && options.deleteObject) {
+    await env.VM_RUN_ARTIFACTS_BUCKET.delete(artifact.r2Key);
+  }
+  console.warn(
+    JSON.stringify({
+      event: "scenario_run_artifact_upload_restarted",
+      runId: runVm.domainId,
+      artifactId: artifact.id,
+      reason: options.reason,
+      cleared,
+    }),
+  );
+  return jsonResponse(
+    { code: "artifact_upload_restarted", error: "Artifact upload must start again" },
+    409,
+  );
 }
 
 async function handleRunComplete(

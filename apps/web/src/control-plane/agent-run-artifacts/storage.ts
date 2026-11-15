@@ -1390,6 +1390,44 @@ export async function advanceArtifactUpload(input: {
   }
 }
 
+/**
+ * Forget one multipart upload so the next begin starts a fresh one at part 1.
+ * Only the named upload is cleared: a reset that lost a race to a newer
+ * upload changes nothing. Returns whether a row was cleared.
+ */
+export async function clearArtifactUpload(input: {
+  db: ReturnType<typeof drizzle>;
+  runVm: ResolvedRunVm;
+  artifact: SourceArtifactState;
+  r2UploadId: string;
+}): Promise<boolean> {
+  const runtimeDelete = input.db
+    .delete(runtimeArtifactUploads)
+    .where(
+      and(
+        eq(runtimeArtifactUploads.artifactId, input.artifact.id),
+        eq(runtimeArtifactUploads.r2UploadId, input.r2UploadId),
+      ),
+    );
+  const scenarioDelete = input.db
+    .delete(scenarioRunArtifactUploads)
+    .where(
+      and(
+        eq(scenarioRunArtifactUploads.artifactId, input.artifact.id),
+        eq(scenarioRunArtifactUploads.r2UploadId, input.r2UploadId),
+      ),
+    );
+  const deletes =
+    input.artifact.storageKind === "runtime" &&
+    input.runVm.domainKind === "scenario"
+      ? [runtimeDelete, scenarioDelete]
+      : input.artifact.storageKind === "runtime"
+        ? [runtimeDelete]
+        : [scenarioDelete];
+  const results = await artifactMutations(input.db, input.runVm, deletes);
+  return (results ?? []).some((result) => (result.meta?.changes ?? 0) > 0);
+}
+
 export async function transitionRunVmToArchiving(
   ...args: Parameters<typeof transitionRunVmToArchivingOnce>
 ): Promise<void> {

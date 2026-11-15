@@ -502,7 +502,7 @@ describe("agent run artifact sealing", () => {
 
   it.each(
     ["existing", "new"].flatMap((source) =>
-      ["ownerId", "executionGeneration", "sha256", "size", "contentType"].map(
+      ["ownerId", "executionGeneration", "sha256", "contentType"].map(
         (field) => ({ source, field }),
       ),
     ),
@@ -536,6 +536,106 @@ describe("agent run artifact sealing", () => {
       expect(await uploadLedgerSnapshot()).toEqual(before);
     },
   );
+
+  it("restarts an upload whose parts the store refuses and then completes it from part 1", async () => {
+    const { token } = await pendingMultipartFixture();
+    const abort = vi.fn(async () => {});
+    const remove = vi.fn(async () => {});
+    const refused = {
+      head: vi.fn(async () => null),
+      delete: remove,
+      resumeMultipartUpload: () => ({
+        abort,
+        complete: async () => {
+          throw new Error(
+            "completeMultipartUpload: Your proposed upload is smaller than the minimum allowed object size. (10011)",
+          );
+        },
+      }),
+    } as unknown as R2Bucket;
+
+    const response = await completeArtifact(token, refused);
+
+    expect(response?.status).toBe(409);
+    expect(await response?.json()).toEqual({
+      code: "artifact_upload_restarted",
+      error: "Artifact upload must start again",
+    });
+    expect(abort).toHaveBeenCalledOnce();
+    expect(remove).not.toHaveBeenCalled();
+    const [artifacts, , runtimeUploads, scenarioUploads] = await uploadLedgerSnapshot();
+    expect(artifacts).toMatchObject([{ upload_status: "pending" }]);
+    expect(runtimeUploads).toHaveLength(0);
+    expect(scenarioUploads).toHaveLength(0);
+
+    // A repeated refusal finds nothing left to reset.
+    const again = await completeArtifact(token, refused);
+    expect(again?.status).toBe(409);
+    expect(abort).toHaveBeenCalledOnce();
+
+    for (const [suffix, method, body, expected] of [
+      ["multipart-begin", "POST", undefined, { done: false, nextExpectedPart: 1 }],
+      ["parts/1", "PUT", "0123456789", { ok: true, nextExpectedPart: 2 }],
+      ["complete", "POST", undefined, { ok: true, uploaded: true }],
+    ] as const) {
+      const step = await handleAgentRunArtifactRequest(
+        new Request(
+          `http://localhost/agent/runs/run-1/vms/vm-runtime/artifacts/1/${suffix}`,
+          {
+            method,
+            headers: { authorization: `Bearer ${token}` },
+            ...(body === undefined ? {} : { body }),
+          },
+        ),
+        env,
+      );
+      expect(step?.status).toBe(200);
+      expect(await step?.json()).toEqual(expected);
+    }
+  });
+
+  it.each(["existing", "new"])(
+    "restarts an upload whose %s object has only the wrong size",
+    async (source) => {
+      const { token, object } = await pendingMultipartFixture();
+      const wrong = { ...object, size: object.size + 1 } as R2Object;
+      const head = vi.fn(async (): Promise<R2Object | null> => wrong);
+      if (source === "new") head.mockResolvedValueOnce(null);
+      const remove = vi.fn(async () => {});
+      const bucket = {
+        head,
+        delete: remove,
+        resumeMultipartUpload: () => ({
+          abort: vi.fn(async () => {}),
+          complete: vi.fn(async () => wrong),
+        }),
+      } as unknown as R2Bucket;
+
+      const response = await completeArtifact(token, bucket);
+
+      expect(response?.status).toBe(409);
+      expect(await response?.json()).toMatchObject({
+        code: "artifact_upload_restarted",
+      });
+      expect(remove).toHaveBeenCalledExactlyOnceWith(object.key);
+      const [artifacts, , runtimeUploads, scenarioUploads] = await uploadLedgerSnapshot();
+      expect(artifacts).toMatchObject([{ upload_status: "pending" }]);
+      expect(runtimeUploads).toHaveLength(0);
+      expect(scenarioUploads).toHaveLength(0);
+    },
+  );
+
+  it("resumes an interrupted healthy upload at its next part", async () => {
+    const { token } = await pendingMultipartFixture();
+    const response = await handleAgentRunArtifactRequest(
+      new Request(
+        "http://localhost/agent/runs/run-1/vms/vm-runtime/artifacts/1/multipart-begin",
+        { method: "POST", headers: { authorization: `Bearer ${token}` } },
+      ),
+      env,
+    );
+    expect(await response?.json()).toEqual({ done: false, nextExpectedPart: 2 });
+  });
 
   it("fences revocation during HEAD recovery even when the completed object matches", async () => {
     const { token, object } = await pendingMultipartFixture();
