@@ -198,7 +198,10 @@ pub(super) async fn prepare_warm_or_cold(
 ) -> Result<()> {
     if let Some(warm) = warm {
         match warm.await {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                ready::clear_wake_prepare_failure(image);
+                return Ok(());
+            }
             Err(error) if is_requeued(&error) => return Err(error),
             Err(error) => {
                 warn!(

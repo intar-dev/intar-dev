@@ -1013,3 +1013,16 @@ fn stopping_a_contained_generation_again_is_no_error() {
     );
     assert!(core.destroy_vm(stop).is_ok());
 }
+
+#[test]
+fn a_preparation_deferred_after_its_claim_is_requeued_not_failed() {
+    let code = |error: anyhow::Error| match prepare_error_response(error) {
+        Response::Error(error) => error.code,
+        other => panic!("unexpected response {other:?}"),
+    };
+    let mid_block = anyhow::Error::from(prepare_lane::PrepareDeferred)
+        .context("copy a chunk")
+        .context("prepare the wake RAM");
+    assert_eq!(code(mid_block), "image_prepare_requeued");
+    assert_eq!(code(anyhow::anyhow!("disk full")), "image_prepare_failed");
+}

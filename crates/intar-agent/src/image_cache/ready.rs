@@ -151,8 +151,8 @@ pub(crate) fn is_image_ready(cache_root: &Path, image: &OciDigest) -> bool {
 }
 
 /// Whether the cache pass has work for a pinned image: it is not ready, or
-/// this host wants its suspended guest, which was not prepared and has not
-/// failed to prepare since this agent started.
+/// this host wants its suspended guest, which was not prepared and no
+/// recorded failure holds off (`wake_failure_holds`).
 pub(super) fn needs_prepare(cache_root: &Path, image: &OciDigest, wake: &WakeConfig) -> bool {
     let ready = std::fs::read(descriptor_path(cache_root, image))
         .ok()
@@ -166,7 +166,7 @@ pub(super) fn needs_prepare(cache_root: &Path, image: &OciDigest, wake: &WakeCon
                 && ready
                     .wake
                     .is_some_and(|guest| wake.profiles.contains(&guest.cpu_profile))
-                && wake_prepare_failure(image).is_none()
+                && !wake_prepare_held(image)
         }
     }
 }
@@ -331,19 +331,63 @@ pub(crate) fn image_failure_state(image: &OciDigest) -> Option<(String, bool)> {
     Some((failure.message.clone(), failure.definitive))
 }
 
-fn wake_prepare_failures() -> &'static StdMutex<HashMap<OciDigest, String>> {
-    static FAILURES: OnceLock<StdMutex<HashMap<OciDigest, String>>> = OnceLock::new();
+/// Whether an image's suspended guest failed for good, and when it failed.
+/// The refresh pass logs why.
+struct WakeFailure {
+    definitive: bool,
+    at: Instant,
+}
+
+fn wake_prepare_failures() -> &'static StdMutex<HashMap<OciDigest, WakeFailure>> {
+    static FAILURES: OnceLock<StdMutex<HashMap<OciDigest, WakeFailure>>> = OnceLock::new();
     FAILURES.get_or_init(Default::default)
 }
 
-/// Keep why an image's suspended guest could not be prepared. The image
-/// was prepared without it; the pass does not try again until a restart.
+/// How long the pass leaves a suspended guest that failed for a reason a
+/// retry can fix: one scrub interval, so the next timed pass tries again.
+const WAKE_PREPARE_RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
+
+/// Keep that an image's suspended guest could not be prepared. The image
+/// was prepared without it. A definitive failure is not tried again until a
+/// restart; any other one after `WAKE_PREPARE_RETRY_AFTER`.
 pub(super) fn record_wake_prepare_failure(image: &OciDigest, error: &anyhow::Error) {
     if let Ok(mut failures) = wake_prepare_failures().lock() {
-        failures.insert(image.clone(), format!("{error:#}"));
+        failures.insert(
+            image.clone(),
+            WakeFailure {
+                definitive: is_definitive_failure(error),
+                at: Instant::now(),
+            },
+        );
     }
 }
 
-pub(super) fn wake_prepare_failure(image: &OciDigest) -> Option<String> {
-    wake_prepare_failures().lock().ok()?.get(image).cloned()
+/// Forget a suspended guest's failure once it is prepared.
+pub(super) fn clear_wake_prepare_failure(image: &OciDigest) {
+    if let Ok(mut failures) = wake_prepare_failures().lock() {
+        failures.remove(image);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn wake_prepare_recorded(image: &OciDigest) -> bool {
+    wake_prepare_failures()
+        .lock()
+        .is_ok_and(|failures| failures.contains_key(image))
+}
+
+/// Whether a recorded failure still holds the pass off the suspended guest.
+fn wake_prepare_held(image: &OciDigest) -> bool {
+    wake_prepare_failures()
+        .lock()
+        .ok()
+        .and_then(|failures| {
+            let failure = failures.get(image)?;
+            Some(wake_failure_holds(failure.definitive, failure.at.elapsed()))
+        })
+        .unwrap_or(false)
+}
+
+pub(super) fn wake_failure_holds(definitive: bool, age: Duration) -> bool {
+    definitive || age < WAKE_PREPARE_RETRY_AFTER
 }

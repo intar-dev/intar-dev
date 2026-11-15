@@ -48,7 +48,7 @@ async fn a_failed_wake_prepare_leaves_the_image_ready_for_cold_boots() -> Result
     // Prepared with the guest: no cold prepare.
     refresh::prepare_warm_or_cold(&image, Some(async { Ok(()) }), cold()).await?;
     assert_eq!(cold_runs.load(Ordering::SeqCst), 1);
-    assert!(ready::wake_prepare_failure(&image).is_none());
+    assert!(!ready::wake_prepare_recorded(&image));
 
     // A requeue is no failure: it stays queued and nothing falls back.
     let requeued = refresh::prepare_warm_or_cold(
@@ -65,7 +65,7 @@ async fn a_failed_wake_prepare_leaves_the_image_ready_for_cold_boots() -> Result
     assert!(requeued.is_err());
     assert_eq!(cold_runs.load(Ordering::SeqCst), 1);
 
-    // A failure prepares cold and is kept, so the pass does not retry it.
+    // A failure prepares cold and is kept, so the pass leaves it for now.
     refresh::prepare_warm_or_cold(
         &image,
         Some(async { Err(anyhow::anyhow!("jailerd wake_invalid")) }),
@@ -73,8 +73,20 @@ async fn a_failed_wake_prepare_leaves_the_image_ready_for_cold_boots() -> Result
     )
     .await?;
     assert_eq!(cold_runs.load(Ordering::SeqCst), 2);
-    assert!(ready::wake_prepare_failure(&image).is_some_and(|why| why.contains("wake_invalid")));
+    assert!(ready::wake_prepare_recorded(&image));
+
+    // Prepared with the guest later: the failure is gone.
+    refresh::prepare_warm_or_cold(&image, Some(async { Ok(()) }), cold()).await?;
+    assert!(!ready::wake_prepare_recorded(&image));
     Ok(())
+}
+
+#[test]
+fn only_a_definitive_wake_failure_holds_off_the_pass_for_good() {
+    let minute = Duration::from_secs(60);
+    assert!(ready::wake_failure_holds(false, minute));
+    assert!(!ready::wake_failure_holds(false, 15 * minute));
+    assert!(ready::wake_failure_holds(true, 24 * 60 * minute));
 }
 
 #[test]

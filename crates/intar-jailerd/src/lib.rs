@@ -713,11 +713,20 @@ pub fn prepare_chunked_image_v3_response(
     };
     match prepare_chunked_image_template(config, &request, &lane) {
         Ok(result) => Response::PrepareChunkedImageV3(result),
-        Err(error) => Response::Error(ProtocolError::new(
-            "image_prepare_failed",
-            format!("{error:#}"),
-        )),
+        Err(error) => prepare_error_response(error),
     }
+}
+
+/// A preparation's error: a boot that deferred it, at its claim or at any
+/// block after, is a requeue; anything else a failure.
+fn prepare_error_response(error: anyhow::Error) -> Response {
+    if error.downcast_ref::<PrepareDeferred>().is_some() {
+        return protocol_error_response(error);
+    }
+    Response::Error(ProtocolError::new(
+        "image_prepare_failed",
+        format!("{error:#}"),
+    ))
 }
 
 fn validate_protocol_request(request: &Request) -> Result<()> {
