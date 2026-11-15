@@ -1352,6 +1352,17 @@ impl StartBackend for LiveStart<'_> {
         ch.vm_boot()
             .await
             .context("cloud-hypervisor vm.boot failed")?;
+        if let Some((guest, _)) = guest {
+            let vcpus = vcpu_count(req.cpu_millis);
+            if vcpus > guest.shape.boot_vcpus {
+                ch.vm_resize(&cloud_hypervisor_client::VmResize {
+                    desired_vcpus: Some(vcpus),
+                    ..Default::default()
+                })
+                .await
+                .context("cloud-hypervisor vm.resize failed")?;
+            }
+        }
         ensure_create_not_deleted(inner, req.name).await?;
         self.attempt = Some(StartAttempt {
             ch,

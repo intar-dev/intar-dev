@@ -71,11 +71,8 @@ pub(super) fn decide_start(facts: &StartFacts<'_>) -> StartDecision {
     {
         return cold("the requested memory does not fit the suspended guest");
     }
-    // A vCPU added after a wake never reaches the guest (its hotplug
-    // interrupt is not delivered), so a run that needs more than the guest
-    // was suspended with boots cold.
-    if vcpu_count(facts.cpu_millis) > wake.shape.boot_vcpus {
-        return cold("the requested vCPUs exceed those of the suspended guest");
+    if vcpu_count(facts.cpu_millis) > wake.shape.max_vcpus {
+        return cold("the requested vCPUs do not fit the suspended guest");
     }
     if facts.fell_back_recently {
         return cold("the image fell back to a cold boot on this host within the hour");

@@ -161,7 +161,7 @@ its report says why: wake is enabled, the prepared image has wake artifacts,
 its profile is pinned here, jailerd reports `supports_wake`, the pinned
 cloud-hypervisor is at least `wake.vmm.min_version`, the guest was booted less
 than 330 days ago, the VM asks for at most the guest's memory (exactly it
-unless the guest has a balloon), its vCPU count is at most `boot_vcpus` (a vCPU added after a wake does not reach the guest), and the
+unless the guest has a balloon), its vCPU count is at most `max_vcpus`, and the
 image did not fall back on this host within the last hour.
 
 A woken VM must send Kino's first report within 10 s of `vm.boot`. If it does

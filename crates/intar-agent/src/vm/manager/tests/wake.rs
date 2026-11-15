@@ -17,7 +17,7 @@ fn guest() -> WakeV1 {
     let hex = "a".repeat(64);
     serde_json::from_value(json!({
         "ram": {"size_bytes": 2_u64 << 30, "chunk_size": 4 << 20, "chunks": [], "sha256": hex},
-        "shape": {"memory_bytes": 2_u64 << 30, "boot_vcpus": 2, "max_vcpus": 4, "balloon": true, "max_phys_bits": 36},
+        "shape": {"memory_bytes": 2_u64 << 30, "boot_vcpus": 1, "max_vcpus": 4, "balloon": true, "max_phys_bits": 36},
         "cpu_profile": profile().as_str(),
         "vmm": {"min_version": "v55.0", "built_with": "v55.0.0"},
         "booted_at_unix_ms": NOW_MS - DAY_MS,
@@ -134,12 +134,12 @@ fn a_vm_wakes_only_when_every_condition_holds() {
 
     cold_because(
         decide_start(&StartFacts {
-            cpu_millis: 2_001,
+            cpu_millis: 4_001,
             ..facts(&config, &wake)
         }),
         "vCPUs",
     );
-    for cpu_millis in [1, 1_000, 2_000] {
+    for cpu_millis in [1, 1_000, 4_000] {
         assert_eq!(
             decide_start(&StartFacts {
                 cpu_millis,
@@ -212,7 +212,7 @@ fn a_wake_config_is_the_cold_config_with_only_the_listed_differences() {
     let mut expected = cold_json;
     expected["payload"]["kernel"] = json!("/boot/wake-stub");
     expected["cpus"] = json!({
-        "boot_vcpus": 2, "max_vcpus": 4,
+        "boot_vcpus": 1, "max_vcpus": 4,
         "profile": {"File": "/boot/cpu-profile.json"},
         "max_phys_bits": 36,
     });
