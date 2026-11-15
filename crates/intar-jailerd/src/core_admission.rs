@@ -64,7 +64,17 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut unresolved_recoveries,
                 );
                 allocated_identities.insert(record.uid);
-                recovery_clean = false;
+                // A VM of a known earlier boot cannot have survived the
+                // reboot; once its containment is proven below, it says
+                // nothing about this host. A missing id on either side, or a
+                // mismatch within this boot, stays unclean.
+                let earlier_boot = matches!(
+                    (record.host_boot_id.as_deref(), current_boot_id.as_deref()),
+                    (Some(recorded), Some(current)) if recorded != current
+                );
+                if !earlier_boot {
+                    recovery_clean = false;
+                }
                 continue;
             }
             let inspection = match backend.inspect_unit(&record.unit_name) {
@@ -269,7 +279,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             allocated_identities.insert(record.uid);
             records.insert(record.generation.clone(), record);
         }
-        if !recovery_clean {
+        // While every other unclean path clears `recovery_clean`, only the
+        // records of an earlier boot can leave entries here with it still
+        // set, so empty maps prove each of them fully contained.
+        if !recovery_clean
+            || !unresolved_recoveries.is_empty()
+            || !pending_cpu_reservations.is_empty()
+        {
             readiness.privileged_self_test_passed = false;
             readiness.kvm_accounting_proven = false;
         }

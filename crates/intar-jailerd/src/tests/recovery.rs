@@ -1173,3 +1173,155 @@ fn transient_unit_properties_encode_hard_quota_and_safety() {
     assert_eq!(properties["RestrictRealtime"], "yes");
     assert!(!properties.contains_key("BindsTo"));
 }
+
+fn second_recovered_record(config: &JailerdConfig) -> VmRecord {
+    let mut record = recovered_record(config);
+    record.generation = ValidatedId::parse("second-generation").expect("generation");
+    record.unit_name = format!("intar-vm-{}.service", record.generation);
+    record.cgroup_path = Some(
+        format!(
+            "/intar.slice/intar-vms.slice/intar-vm-{}.service",
+            record.generation
+        )
+        .into(),
+    );
+    record.uid += 1;
+    record.gid += 1;
+    record.paths = jail_paths(
+        &generation_directory(config, &record.generation).join("root"),
+        record.request.artifacts.initrd.is_some(),
+    );
+    record
+}
+
+fn recover_with(
+    config: JailerdConfig,
+    backend: FakeBackend,
+    preparer: RecoverPreparer,
+) -> JailerdCore<FakeBackend, RecoverPreparer> {
+    JailerdCore::new_with_readiness(config, backend, preparer, 1_000, ready_readiness())
+        .expect("recover core")
+}
+
+fn self_test_flags_kept(core: &JailerdCore<FakeBackend, RecoverPreparer>) -> bool {
+    core.readiness.privileged_self_test_passed && core.readiness.kvm_accounting_proven
+}
+
+#[test]
+fn contained_records_of_an_earlier_boot_keep_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut first = recovered_record(&config);
+    first.host_boot_id = Some("an-earlier-boot".to_owned());
+    let mut second = second_recovered_record(&config);
+    second.host_boot_id = Some("another-earlier-boot".to_owned());
+    let core = recover_with(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![first.clone(), second.clone()],
+            ..RecoverPreparer::default()
+        },
+    );
+    assert_eq!(
+        core.preparer.quarantined,
+        vec![first.generation, second.generation]
+    );
+    assert!(core.pending_cpu_reservations.is_empty());
+    assert!(self_test_flags_kept(&core));
+}
+
+#[test]
+fn a_mismatch_within_this_boot_clears_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    // A record of this boot whose unit is gone: contained, but not clean.
+    let record = recovered_record(&config);
+    let core = recover_with(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+    );
+    assert_eq!(core.preparer.quarantined, vec![record.generation]);
+    assert!(!self_test_flags_kept(&core));
+}
+
+#[test]
+fn an_earlier_boot_record_whose_quarantine_fails_clears_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.host_boot_id = Some("an-earlier-boot".to_owned());
+    let core = recover_with(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record],
+            fail_quarantine: true,
+            ..RecoverPreparer::default()
+        },
+    );
+    assert!(!self_test_flags_kept(&core));
+}
+
+#[test]
+fn an_earlier_boot_record_with_an_unproven_drain_clears_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.host_boot_id = Some("an-earlier-boot".to_owned());
+    let core = recover_with(
+        config,
+        FakeBackend {
+            fail_stop_unit: true,
+            fail_destroy_unit: true,
+            ..FakeBackend::default()
+        },
+        RecoverPreparer {
+            records: vec![record],
+            ..RecoverPreparer::default()
+        },
+    );
+    assert!(!self_test_flags_kept(&core));
+}
+
+#[test]
+fn a_record_without_a_boot_id_clears_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.host_boot_id = None;
+    let core = recover_with(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+    );
+    assert_eq!(core.preparer.quarantined, vec![record.generation]);
+    assert!(!self_test_flags_kept(&core));
+}
+
+#[test]
+fn an_earlier_boot_record_mixed_with_another_unclean_record_clears_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut earlier = recovered_record(&config);
+    earlier.host_boot_id = Some("an-earlier-boot".to_owned());
+    let mut unknown = second_recovered_record(&config);
+    unknown.host_boot_id = None;
+    let core = recover_with(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![earlier, unknown],
+            ..RecoverPreparer::default()
+        },
+    );
+    assert_eq!(core.preparer.quarantined.len(), 2);
+    assert!(!self_test_flags_kept(&core));
+}

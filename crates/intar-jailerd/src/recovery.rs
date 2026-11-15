@@ -249,12 +249,22 @@ pub(super) fn validate_recovered_record(config: &JailerdConfig, record: &VmRecor
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(test)))]
 pub(super) fn current_host_boot_id() -> Option<String> {
     read_trimmed("/proc/sys/kernel/random/boot_id").ok()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(test)))]
 pub(super) fn current_host_boot_id() -> Option<String> {
     None
 }
+
+/// The same known boot on every platform, so core fakes can tell a record of
+/// an earlier boot from one without a boot id.
+#[cfg(test)]
+pub(super) fn current_host_boot_id() -> Option<String> {
+    Some(TEST_CURRENT_BOOT_ID.to_owned())
+}
+
+#[cfg(test)]
+pub(super) const TEST_CURRENT_BOOT_ID: &str = "current-test-boot";

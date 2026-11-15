@@ -646,6 +646,7 @@ struct RecoverPreparer {
     exported: Vec<ValidatedId>,
     exported_logs: Vec<ValidatedId>,
     reserved: Vec<(ValidatedId, u32, u32)>,
+    fail_quarantine: bool,
 }
 
 impl JailPreparer for RecoverPreparer {
@@ -666,6 +667,9 @@ impl JailPreparer for RecoverPreparer {
     }
 
     fn quarantine(&mut self, _config: &JailerdConfig, generation: &ValidatedId) -> Result<()> {
+        if self.fail_quarantine {
+            bail!("injected quarantine failure")
+        }
         self.quarantined.push(generation.clone());
         Ok(())
     }
