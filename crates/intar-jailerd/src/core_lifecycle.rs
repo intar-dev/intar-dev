@@ -446,17 +446,37 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             .context("unknown jail generation")?
             .clone();
         let inspection = self.backend.inspect_unit(&record.unit_name)?;
-        if !backend_identity_matches(&record, &inspection)
-            || (inspection.health == SandboxHealth::Healthy
-                && !live_api_ping(&record.paths.host_api_socket))
-        {
-            self.backend.stop_unit(&record.unit_name)?;
-            self.backend.destroy_unit(&record.unit_name)?;
-            let _ = self
-                .backend
-                .destroy_vm_network(&record.request.run_id, &record.generation);
-            self.preparer.quarantine(&self.config, &record.generation)?;
-            bail!("live VM identity does not match persisted sandbox metadata")
+        let identity_matches = backend_identity_matches(&record, &inspection);
+        let api_answered = !identity_matches
+            || inspection.health != SandboxHealth::Healthy
+            || live_api_ping(&record.paths.host_api_socket);
+        if let Some(reason) = inspect_failure(identity_matches, api_answered) {
+            // Stop, unit, network and files, each tried; on success the
+            // generation is gone, so a later stop or destroy finds nothing.
+            let mut drained = false;
+            return match self.rollback_failed_launch(
+                &record.request.run_id,
+                &record.generation,
+                &record.unit_name,
+                &mut drained,
+            ) {
+                Ok(()) => {
+                    self.records.remove(&record.generation);
+                    Err(anyhow::anyhow!(
+                        "{reason}; the VM was stopped and quarantined"
+                    ))
+                }
+                Err(containment) => {
+                    tracing::warn!(
+                        generation = %record.generation,
+                        error = %containment,
+                        "containment of an unanswering or mismatched VM was incomplete"
+                    );
+                    Err(anyhow::anyhow!(
+                        "{reason}; containment was incomplete: {containment:#}"
+                    ))
+                }
+            };
         }
         let cpu_runtime = record.cpu_runtime();
         Ok(VmInspection {
@@ -489,10 +509,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
 
     pub(super) fn stop_vm(&mut self, request: VmIdentityRequest) -> Result<bool> {
         let generation = self.resolve_generation(&request)?;
-        let record = self
-            .records
-            .get(&generation)
-            .context("unknown jail generation")?;
+        let Some(record) = self.records.get(&generation) else {
+            // Contained already (an inspection quarantined it), or never
+            // tracked: stopping its unit, if any is left, is all a stop is.
+            return self
+                .backend
+                .stop_unit(&format!("intar-vm-{generation}.service"));
+        };
         let changed = self.backend.stop_unit(&record.unit_name)?;
         self.preparer.export_recording(&self.config, record)?;
         Ok(changed)
@@ -575,5 +598,16 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             .find(|record| record.request.run_id == *run_id && record.request.vm_id == *vm_id)
             .map(|record| record.generation.clone())
             .context("unknown jail generation")
+    }
+}
+
+/// Why an inspected VM is contained, or `None` when it is sound.
+pub(super) fn inspect_failure(identity_matches: bool, api_answered: bool) -> Option<&'static str> {
+    if !identity_matches {
+        Some("live VM identity does not match persisted sandbox metadata")
+    } else if !api_answered {
+        Some("the VMM did not answer on its API socket")
+    } else {
+        None
     }
 }

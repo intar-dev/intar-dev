@@ -597,3 +597,12 @@ fn artifact(
         access,
     }
 }
+
+#[test]
+fn a_missing_run_table_is_not_deleted_again() {
+    assert_eq!(
+        nft_table_delete(true, "intar_run_x"),
+        "delete table inet intar_run_x\n"
+    );
+    assert_eq!(nft_table_delete(false, "intar_run_x"), "");
+}

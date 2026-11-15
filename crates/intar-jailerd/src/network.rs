@@ -786,10 +786,11 @@ impl NetworkManager {
             .runs
             .get(run_id)
             .context("run network state disappeared before nftables render")?;
+        // A table already gone is no error: nothing of it is left to replace.
+        let present =
+            state.installed && self.nft_succeeds(&["list", "table", "inet", &state.nft_table]);
         let mut transaction = String::new();
-        if state.installed {
-            transaction.push_str(&format!("delete table inet {}\n", state.nft_table));
-        }
+        transaction.push_str(&nft_table_delete(present, &state.nft_table));
         transaction.push_str(&render_nft_rules(state)?);
         self.nft_script(&transaction)
             .context("atomically install affected run nftables policy")?;
@@ -805,8 +806,11 @@ impl NetworkManager {
             .runs
             .get(removed)
             .context("removed run network state disappeared before nftables cleanup")?;
-        if state.installed {
-            self.nft_script(&format!("delete table inet {}\n", state.nft_table))
+        let present =
+            state.installed && self.nft_succeeds(&["list", "table", "inet", &state.nft_table]);
+        let delete = nft_table_delete(present, &state.nft_table);
+        if !delete.is_empty() {
+            self.nft_script(&delete)
                 .context("atomically remove affected run nftables policy")?;
         }
         Ok(())
@@ -988,5 +992,16 @@ fn validate_iproute2_netns_root(root: &Path) -> Result<()> {
 mod topology;
 use topology::*;
 pub(crate) use topology::{initial_mount_namespace_entry, validate_initial_network_namespace};
+
+/// The transaction line that removes a run's table: none when the table is
+/// not there, so a run torn down halfway tears down again.
+pub(crate) fn nft_table_delete(present: bool, table: &str) -> String {
+    if present {
+        format!("delete table inet {table}\n")
+    } else {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests;

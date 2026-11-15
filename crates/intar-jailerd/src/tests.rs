@@ -975,3 +975,41 @@ fn the_wake_ram_preread_walks_only_the_data_of_a_sparse_file() {
     );
     preread_wake_ram(&path, std::time::Duration::ZERO);
 }
+
+#[test]
+fn an_unanswering_vmm_is_told_apart_from_an_identity_mismatch() {
+    assert_eq!(
+        core_lifecycle::inspect_failure(false, true),
+        Some("live VM identity does not match persisted sandbox metadata")
+    );
+    assert_eq!(
+        core_lifecycle::inspect_failure(true, false),
+        Some("the VMM did not answer on its API socket")
+    );
+    assert_eq!(core_lifecycle::inspect_failure(true, true), None);
+}
+
+#[test]
+fn stopping_a_contained_generation_again_is_no_error() {
+    let mut core = JailerdCore::new_with_readiness(
+        test_config(),
+        FakeBackend::default(),
+        FakePreparer,
+        4_000,
+        ready_readiness(),
+    )
+    .expect("core");
+    let generation = ValidatedId::parse("contained").expect("generation");
+    let stop = VmIdentityRequest {
+        generation: Some(generation.clone()),
+        run_id: None,
+        vm_id: None,
+    };
+    // An inspection contained it and dropped its record: nothing is left.
+    assert!(!core.stop_vm(stop.clone()).expect("idempotent stop"));
+    assert_eq!(
+        core.backend.stopped_units,
+        vec!["intar-vm-contained.service".to_owned()]
+    );
+    assert!(core.destroy_vm(stop).is_ok());
+}
