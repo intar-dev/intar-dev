@@ -639,6 +639,17 @@ max_bytes = {20 * GIB}
     enroll(account.pw_gid)
 
 
+def suppress_boot_check():
+    # intar-personal-check.service runs the boot self-test here; a host must
+    # never run two of them. Written before install.sh enables the package's
+    # check, so no boot in between runs both.
+    check_dropin = UNITS / 'intar-jailerd-boot-check.service.d'
+    mkdir(check_dropin, 0o755)
+    atomic(check_dropin / 'personal.conf', f'''[Unit]
+ConditionPathExists=!{UNITS / 'intar-personal-check.service'}
+''', 0o644)
+
+
 def boot_units():
     dropin = UNITS / 'intar-agent.service.d'
     mkdir(dropin, 0o755)
@@ -649,13 +660,6 @@ ConditionPathExists=!{MAINTENANCE}
 
 [Service]
 LimitCORE=0
-''', 0o644)
-    # intar-personal-check.service runs the boot self-test here; a host must
-    # never run two of them.
-    check_dropin = UNITS / 'intar-jailerd-boot-check.service.d'
-    mkdir(check_dropin, 0o755)
-    atomic(check_dropin / 'personal.conf', f'''[Unit]
-ConditionPathExists=!{UNITS / 'intar-personal-check.service'}
 ''', 0o644)
     atomic(UNITS / 'intar-personal-check.service', '''[Unit]
 Description=Intar privileged boot proof and agent doctor
@@ -758,6 +762,7 @@ def setup(state, args):
     configure(package, account)
     state['phase'] = 'installing'
     save(state)
+    suppress_boot_check()
     run('sh', package / 'deploy/install.sh')
     # The shared package installer creates general-purpose 0755 config directories.
     secure_path(CONFIG.parent, directory=True)

@@ -396,6 +396,7 @@ class InstallerTests(unittest.TestCase):
         unit_root = self.root / 'units'
         unit_root.mkdir()
         with patch.object(host, 'UNITS', unit_root), patch.object(host, 'run'), patch.object(host, 'secure_path'):
+            host.suppress_boot_check()
             host.boot_units()
         dropin = unit_root / 'intar-jailerd-boot-check.service.d/personal.conf'
         self.assertEqual(dropin.read_text(), f'[Unit]\nConditionPathExists=!{unit_root}/intar-personal-check.service\n')
@@ -524,6 +525,7 @@ class InstallerTests(unittest.TestCase):
         with contextlib.ExitStack() as mocks:
             for name in ('preflight', 'no_vms', 'install_dependencies', 'storage', 'configure', 'boot_units'):
                 mocks.enter_context(patch.object(host, name))
+            mocks.enter_context(patch.object(host, 'suppress_boot_check', side_effect=lambda: calls.append('suppress_boot_check')))
             mocks.enter_context(patch.object(host, 'active', return_value=False))
             mocks.enter_context(patch.object(host, 'package_for', return_value=(package, '1.2.3')))
             mocks.enter_context(patch.object(host, 'ensure_user', return_value=types.SimpleNamespace(pw_gid=42)))
@@ -534,6 +536,8 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(host.MAINTENANCE.exists())
         self.assertEqual(host.load(host.STATE)['phase'], 'checking')
         self.assertNotIn(('systemctl', 'enable', '--now', 'intar-agent.service'), calls)
+        # The package's boot check is suppressed before install.sh enables it.
+        self.assertLess(calls.index('suppress_boot_check'), calls.index(('sh', package / 'deploy/install.sh')))
 
     def test_public_retry_keeps_pending_version(self):
         state = {'pendingVersion': '1.2.3'}
