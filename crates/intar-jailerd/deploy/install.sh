@@ -188,6 +188,25 @@ case "${agent_state}" in
   *) die "intar-agent.service must be stopped before install/upgrade (state ${agent_state})" ;;
 esac
 
+# A hand-written intar-platform-check.service would run a second, non-boot
+# self-test after the boot check, stopping jailerd in the middle of recovery.
+# Disabling removes only its [Install] links, so refuse while anything else
+# still pulls it in, before the host is otherwise changed.
+# INTAR_INSTALL_PLATFORM_CHECK_BEGIN
+if unit_loaded intar-platform-check.service; then
+  if [ "$(systemctl is-enabled intar-platform-check.service 2>/dev/null || true)" = enabled ]; then
+    systemctl disable --quiet intar-platform-check.service
+    echo "Disabled intar-platform-check.service (kept on disk): intar-jailerd-boot-check.service now runs the self-test at every boot."
+  fi
+  platform_check_pulled_by=$(systemctl show \
+    --property=WantedBy --property=RequiredBy --property=RequisiteOf --property=BoundBy \
+    --value intar-platform-check.service | awk 'NF { printf "%s%s", sep, $0; sep = " " }') || \
+    die "failed to query what pulls in intar-platform-check.service"
+  [ -z "${platform_check_pulled_by}" ] || \
+    die "intar-platform-check.service is still pulled in by: ${platform_check_pulled_by}. Remove those Wants=/Requires= drop-ins or .wants/.requires links (do not mask it), run systemctl daemon-reload, and rerun the installer; nothing else was changed (only its [Install] links may be gone)"
+fi
+# INTAR_INSTALL_PLATFORM_CHECK_END
+
 socket_was_active=false
 daemon_was_active=false
 if unit_loaded intar-jailerd.socket && [ "$(active_state intar-jailerd.socket)" = active ]; then
@@ -374,10 +393,6 @@ sysctl -p /etc/sysctl.d/90-intar-jailerd.conf >/dev/null
 systemctl daemon-reload
 # Started at the next boot, before jailerd and the agent; not now.
 systemctl enable intar-jailerd-boot-check.service
-if unit_loaded intar-platform-check.service; then
-  systemctl disable intar-platform-check.service
-  echo "Disabled intar-platform-check.service (kept on disk): intar-jailerd-boot-check.service now runs the self-test at every boot."
-fi
 systemctl enable --now intar-jailerd.socket
 [ "$(active_state intar-jailerd.socket)" = active ] || die "jailerd socket did not activate"
 
