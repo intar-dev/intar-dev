@@ -622,6 +622,7 @@ impl JailPreparer for TrackingPreparer {
 struct RecoverPreparer {
     records: Vec<VmRecord>,
     quarantined: Vec<ValidatedId>,
+    exported: Vec<ValidatedId>,
     reserved: Vec<(ValidatedId, u32, u32)>,
 }
 
@@ -659,6 +660,14 @@ impl JailPreparer for RecoverPreparer {
 
     fn recover(&mut self, _config: &JailerdConfig) -> Result<Vec<VmRecord>> {
         Ok(std::mem::take(&mut self.records))
+    }
+
+    fn export_recording(&mut self, _config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+        if self.quarantined.contains(&record.generation) {
+            bail!("recording exported after its jail was quarantined")
+        }
+        self.exported.push(record.generation.clone());
+        Ok(())
     }
 
     fn reserve_identity(

@@ -258,7 +258,8 @@ pub(super) fn execute_existing_launch<B: HostBackend, P: JailPreparer>(
             record.generation
         ));
     }
-    let recovery_containment = attempt_recovered_containment(config, backend, preparer, &recovery);
+    let recovery_containment =
+        attempt_recovered_containment(config, backend, preparer, &recovery, None);
     containment.cgroup_drain_proven = recovery_containment.cgroup_drain_proven;
     containment.failures.extend(recovery_containment.failures);
     DetachedExistingLaunchOutcome::IdentityMismatch {

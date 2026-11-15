@@ -672,6 +672,56 @@ fn recovery_contains_non_v2_metadata_without_restoring_ingress() {
 }
 
 #[test]
+fn recovery_containment_exports_a_validated_record_before_quarantine() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    // A host reboot: the record is sound, its VMM is gone.
+    record.host_boot_id = Some("an-earlier-boot".to_owned());
+    let core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("contain recovered record");
+
+    assert!(core.records.is_empty());
+    // The fake refuses an export after quarantine, so this proves the order.
+    assert_eq!(
+        core.preparer.exported,
+        std::slice::from_ref(&record.generation)
+    );
+    assert_eq!(core.preparer.quarantined, vec![record.generation]);
+}
+
+#[test]
+fn recovery_containment_never_exports_an_unvalidated_record() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.schema_version = VM_RECORD_METADATA_VERSION + 1;
+    let core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("contain unvalidated record");
+
+    assert!(core.preparer.exported.is_empty());
+    assert_eq!(core.preparer.quarantined, vec![record.generation]);
+}
+
+#[test]
 fn recovery_reattaches_a_matching_drained_generation() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;

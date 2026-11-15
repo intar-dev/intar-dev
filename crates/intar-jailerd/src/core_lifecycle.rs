@@ -385,6 +385,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 &mut self.backend,
                 &mut self.preparer,
                 &recovery,
+                None,
             );
             if outcome.cgroup_drain_proven {
                 self.pending_cpu_reservations.remove(&generation);

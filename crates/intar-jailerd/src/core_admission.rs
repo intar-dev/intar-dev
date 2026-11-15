@@ -44,6 +44,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    false,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -58,6 +59,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -74,6 +76,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                         &mut backend,
                         &mut preparer,
                         &record,
+                        true,
                         &mut pending_cpu_reservations,
                         &mut unresolved_recoveries,
                     );
@@ -95,6 +98,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -110,6 +114,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                         &mut backend,
                         &mut preparer,
                         &record,
+                        true,
                         &mut pending_cpu_reservations,
                         &mut unresolved_recoveries,
                     );
@@ -128,6 +133,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                                 &mut backend,
                                 &mut preparer,
                                 &record,
+                                true,
                                 &mut pending_cpu_reservations,
                                 &mut unresolved_recoveries,
                             );
@@ -143,6 +149,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                             &mut backend,
                             &mut preparer,
                             &record,
+                            true,
                             &mut pending_cpu_reservations,
                             &mut unresolved_recoveries,
                         );
@@ -160,6 +167,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -179,6 +187,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -194,6 +203,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -214,6 +224,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -232,6 +243,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -246,6 +258,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
