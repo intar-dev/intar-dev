@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use intar_jailer_protocol::JailerdConfig;
 use serde::{Deserialize, Serialize};
 
@@ -110,16 +110,93 @@ pub fn run(config: &JailerdConfig, artifacts: &SelfTestArtifacts) -> Result<Self
     }
 }
 
-/// Load an attestation only when it is trusted and still matches this boot,
-/// configuration, and the currently installed runtime bytes.
+/// How a stored attestation relates to the running host.
+#[derive(Debug)]
+pub enum AttestationStatus {
+    Verified(SelfTestAttestationV3),
+    Absent,
+    /// Trusted and current in every respect except that it was written
+    /// during an earlier boot. Readiness treats it exactly like `Absent`.
+    PreviousBoot,
+}
+
+impl AttestationStatus {
+    pub fn verified(self) -> Option<SelfTestAttestationV3> {
+        match self {
+            Self::Verified(attestation) => Some(attestation),
+            Self::Absent | Self::PreviousBoot => None,
+        }
+    }
+}
+
+/// The values a stored attestation must match on the running host.
+struct CurrentHost<'a> {
+    cloud_hypervisor_sha256: &'a str,
+    intar_jailerd_sha256: &'a str,
+    intar_jailer_sha256: &'a str,
+    config_runtime_fingerprint_sha256: &'a str,
+    boot_id: &'a str,
+    kernel_version: &'a str,
+    systemd_version: &'a str,
+    now_unix_s: u64,
+}
+
+/// Every mismatch is an error except the boot id alone, which is only checked
+/// once everything else has matched.
+fn classify(
+    attestation: SelfTestAttestationV3,
+    current: &CurrentHost<'_>,
+) -> Result<AttestationStatus> {
+    ensure!(
+        attestation.cloud_hypervisor_sha256 == current.cloud_hypervisor_sha256,
+        "self-test attestation runtime hash is stale"
+    );
+    ensure!(
+        attestation.intar_jailerd_sha256 == current.intar_jailerd_sha256,
+        "self-test attestation jailerd executable hash is stale"
+    );
+    ensure!(
+        attestation.intar_jailer_sha256 == current.intar_jailer_sha256,
+        "self-test attestation jailer executable hash is stale"
+    );
+    ensure!(
+        attestation.config_runtime_fingerprint_sha256 == current.config_runtime_fingerprint_sha256,
+        "self-test attestation configuration fingerprint is stale"
+    );
+    ensure!(
+        attestation.kernel_version == current.kernel_version,
+        "self-test attestation kernel version is stale"
+    );
+    ensure!(
+        attestation.systemd_version == current.systemd_version,
+        "self-test attestation systemd version is stale"
+    );
+    ensure!(
+        attestation.passed_at_unix_s <= current.now_unix_s.saturating_add(60),
+        "self-test attestation time is in the future"
+    );
+    if attestation.boot_id != current.boot_id {
+        return Ok(AttestationStatus::PreviousBoot);
+    }
+    Ok(AttestationStatus::Verified(attestation))
+}
+
+/// Load the attestation and classify it against this boot, configuration,
+/// and the currently installed runtime bytes.
 #[cfg(target_os = "linux")]
-pub fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV3>> {
-    linux::load_verified(config)
+pub fn load(config: &JailerdConfig) -> Result<AttestationStatus> {
+    linux::load(config)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn load_verified(_config: &JailerdConfig) -> Result<Option<SelfTestAttestationV3>> {
-    Ok(None)
+pub fn load(_config: &JailerdConfig) -> Result<AttestationStatus> {
+    Ok(AttestationStatus::Absent)
+}
+
+/// Load an attestation only when it is trusted and still matches this boot,
+/// configuration, and the currently installed runtime bytes.
+pub fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV3>> {
+    load(config).map(AttestationStatus::verified)
 }
 
 /// Entry point used only by the hidden systemd self-test worker command.

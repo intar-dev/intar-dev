@@ -184,12 +184,23 @@ fn run_server(config_path: &Path) -> Result<()> {
     let _maintenance_lock = acquire_maintenance_lock(rustix::fs::FlockOperation::LockShared)
         .context("acquire daemon maintenance lock")?;
     let config = load_config(config_path)?;
-    // Absence leaves the host deliberately unschedulable.  A present but
-    // malformed, stale, tampered, or wrong-boot attestation is a startup
-    // error, rather than being silently treated like an operator who has not
-    // run the proof yet.
-    let verified_self_test =
-        self_test::load_verified(&config).context("verify privileged self-test attestation")?;
+    // Absence leaves the host deliberately unschedulable, and so does an
+    // attestation whose only mismatch is that it was written before this
+    // boot: a reboot must not stop jailerd from serving recovery.  A present
+    // but malformed, stale, or tampered attestation is a startup error,
+    // rather than being silently treated like an operator who has not run
+    // the proof yet.
+    let verified_self_test = match self_test::load(&config)
+        .context("verify privileged self-test attestation")?
+    {
+        self_test::AttestationStatus::PreviousBoot => {
+            warn!(
+                "self-test attestation belongs to a previous boot; starting unschedulable until the self-test passes on this boot"
+            );
+            None
+        }
+        status => status.verified(),
+    };
     let listener = match activated_socket::take()? {
         Some(listener) => {
             info!("using systemd-activated control socket");
