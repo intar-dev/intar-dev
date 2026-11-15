@@ -931,3 +931,47 @@ fn the_installer_leaves_configs_this_parser_loads() {
     assert_eq!(host.template_budget_bytes, 32_212_254_720);
     assert_eq!(host.vmm_file_size_limit_bytes, Some(137_438_953_472));
 }
+
+#[test]
+fn the_wake_ram_preread_walks_only_the_data_of_a_sparse_file() {
+    use std::os::unix::fs::FileExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("wake.ram");
+    let file = std::fs::File::create(&path).expect("ram");
+    let mib = 1_u64 << 20;
+    file.set_len(64 * mib).expect("sparse length");
+    file.write_all_at(&[1; 4096], 0).expect("head");
+    file.write_all_at(&[2; 4096], 40 * mib).expect("middle");
+    file.sync_all().expect("sync");
+    let file = std::fs::File::open(&path).expect("open");
+
+    let extents = data_extents(&file).expect("extents");
+    let covers = |offset: u64| {
+        extents
+            .iter()
+            .any(|&(start, len)| start <= offset && offset < start + len)
+    };
+    assert!(covers(0) && covers(40 * mib), "{extents:?}");
+    // Sorted and disjoint, inside the file.
+    assert!(
+        extents
+            .windows(2)
+            .all(|pair| pair[0].0 + pair[0].1 <= pair[1].0),
+        "{extents:?}"
+    );
+    assert!(
+        extents
+            .iter()
+            .all(|&(start, len)| len > 0 && start + len <= 64 * mib)
+    );
+    // A file system with holes leaves the rest out.
+    let data: u64 = extents.iter().map(|&(_, len)| len).sum();
+    assert!(data < 64 * mib, "{extents:?}");
+
+    // Best effort: a missing file or a passed deadline is no error to the launch.
+    preread_wake_ram(
+        &dir.path().join("missing"),
+        std::time::Duration::from_secs(1),
+    );
+    preread_wake_ram(&path, std::time::Duration::ZERO);
+}

@@ -211,6 +211,7 @@ pub(super) fn stage_artifacts_v2(
             0o444,
         )?;
         set_owner(&root.join("disks/wake.ram"), uid, gid)?;
+        preread_wake_ram(&root.join("disks/wake.ram"), WAKE_RAM_PREREAD_BOUND);
     }
     // Runtime state remains per-VM and read-only, but the recording disk is a
     // preformatted root-owned blank. Its agent descriptor is retained solely
@@ -248,6 +249,80 @@ pub(super) fn stage_artifacts_v2(
     set_mode(&root.join("disks/runtime.raw"), 0o444)?;
     set_owner(&root.join("disks/runtime.raw"), 0, 0)?;
     Ok(())
+}
+
+/// About 240 MiB of data takes 55–60 ms on a run host; past this the VMM
+/// starts and faults the rest in.
+const WAKE_RAM_PREREAD_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Read the data of a woken guest's RAM clone into the page cache before
+/// its VMM starts: the clone is a new inode with a cold cache, so otherwise
+/// the guest's first seconds take major faults. A read, not
+/// `posix_fadvise(WILLNEED)`: the advice is asynchronous and may be dropped,
+/// and the cache must be warm when the VMM maps the file. Best effort: an
+/// error or the bound only ends the read.
+pub(super) fn preread_wake_ram(path: &Path, bound: std::time::Duration) {
+    let started = std::time::Instant::now();
+    match preread_data(path, started + bound) {
+        Ok(bytes) => tracing::info!(
+            path = %path.display(),
+            bytes,
+            elapsed_ms = started.elapsed().as_millis(),
+            "pre-read the wake RAM"
+        ),
+        Err(error) => tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "could not pre-read the wake RAM; the guest faults it in"
+        ),
+    }
+}
+
+/// The bytes read of `path`'s data extents, stopping at `deadline`.
+fn preread_data(path: &Path, deadline: std::time::Instant) -> std::io::Result<u64> {
+    use std::os::unix::fs::FileExt as _;
+    let file = std::fs::File::open(path)?;
+    let mut buffer = vec![0_u8; 1 << 20];
+    let mut read = 0_u64;
+    for (start, len) in data_extents(&file)? {
+        let mut at = start;
+        while at < start + len {
+            if std::time::Instant::now() >= deadline {
+                return Ok(read);
+            }
+            let want = usize::try_from((start + len - at).min(buffer.len() as u64))
+                .unwrap_or(buffer.len());
+            let got = file.read_at(&mut buffer[..want], at)?;
+            if got == 0 {
+                return Ok(read);
+            }
+            at += got as u64;
+            read += got as u64;
+        }
+    }
+    Ok(read)
+}
+
+/// The data extents of `file` as `(offset, length)`, by `SEEK_DATA` and
+/// `SEEK_HOLE`; a file system without holes reports one extent.
+pub(super) fn data_extents(file: &std::fs::File) -> std::io::Result<Vec<(u64, u64)>> {
+    let len = file.metadata()?.len();
+    let mut extents = Vec::new();
+    let mut at = 0;
+    while at < len {
+        let start = match rustix::fs::seek(file, rustix::fs::SeekFrom::Data(at)) {
+            Ok(start) => start,
+            Err(rustix::io::Errno::NXIO) => break,
+            Err(error) => return Err(error.into()),
+        };
+        let end = rustix::fs::seek(file, rustix::fs::SeekFrom::Hole(start))?;
+        if end <= start {
+            break;
+        }
+        extents.push((start, end - start));
+        at = end;
+    }
+    Ok(extents)
 }
 
 pub(super) fn stage_artifacts(
