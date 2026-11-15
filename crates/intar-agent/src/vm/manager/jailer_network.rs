@@ -140,7 +140,7 @@ pub(super) async fn repair_vm_networks(inner: &Inner) -> Result<()> {
                 continue;
             }
         };
-        match request_jailerd(
+        let response = request_jailerd(
             inner,
             JailerRequest::RepairRunNetwork(EnsureRunNetworkRequest {
                 run_id,
@@ -148,19 +148,17 @@ pub(super) async fn repair_vm_networks(inner: &Inner) -> Result<()> {
                 gateway: network.gateway.to_string(),
             }),
         )
-        .await
-        {
-            Ok(JailerResponse::RepairRunNetwork(_)) => {}
-            Ok(JailerResponse::Error(error)) => failures.push(format!(
-                "run {}: jailerd {}: {}",
-                network.run_id, error.code, error.message
-            )),
-            Ok(response) => failures.push(format!(
-                "run {}: jailerd returned unexpected response to repair_run_network: {response:?}",
-                network.run_id
-            )),
-            Err(error) => {
-                failures.push(format!("run {}: {error:#}", network.run_id));
+        .await;
+        match classify_run_network_repair(response) {
+            RunNetworkRepair::Repaired => {}
+            // jailerd forgot the run (a host reboot, a contained VM): its
+            // VMs are gone too, so reconcile and the report clean them up.
+            RunNetworkRepair::Untracked => warn!(
+                run_id = network.run_id,
+                "jailerd does not track the run network; leaving its VMs to cleanup"
+            ),
+            RunNetworkRepair::Failed(error) => {
+                failures.push(format!("run {}: {error}", network.run_id));
             }
         }
     }
@@ -177,6 +175,38 @@ pub(super) async fn repair_vm_networks(inner: &Inner) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RunNetworkRepair {
+    Repaired,
+    Untracked,
+    Failed(String),
+}
+
+pub(super) fn classify_run_network_repair(response: Result<JailerResponse>) -> RunNetworkRepair {
+    match response {
+        Ok(JailerResponse::RepairRunNetwork(_)) => RunNetworkRepair::Repaired,
+        Ok(JailerResponse::Error(error)) if error.code == "not_found" => {
+            RunNetworkRepair::Untracked
+        }
+        Ok(JailerResponse::Error(error)) => {
+            RunNetworkRepair::Failed(format!("jailerd {}: {}", error.code, error.message))
+        }
+        Ok(response) => RunNetworkRepair::Failed(format!(
+            "jailerd returned unexpected response to repair_run_network: {response:?}"
+        )),
+        Err(error) => RunNetworkRepair::Failed(format!("{error:#}")),
+    }
+}
+
+/// Only a VM that can be live needs its run network; one being deleted,
+/// failed to delete, or failed has none to repair.
+pub(super) fn needs_run_network_repair(state: VmLifecycleState) -> bool {
+    matches!(
+        state,
+        VmLifecycleState::CreatingVm | VmLifecycleState::BootingVm | VmLifecycleState::Running
+    )
+}
+
 pub(super) async fn collect_run_networks(inner: &Inner) -> Result<Vec<RunNftNetwork>> {
     let states = inner.states.read().await;
     let mut networks = BTreeMap::<String, RunNftNetwork>::new();
@@ -188,7 +218,7 @@ pub(super) async fn collect_run_networks(inner: &Inner) -> Result<Vec<RunNftNetw
         // Queued or failed-before-launch rows can carry provisional network
         // fields without ever having crossed the jailer generation boundary.
         // Repair is intentionally not an implicit ensure/create fallback.
-        if details.jail_generation.is_none() {
+        if details.jail_generation.is_none() || !needs_run_network_repair(vm.state) {
             continue;
         }
         let Some(run_id) = details.run_id.as_deref().filter(|value| !value.is_empty()) else {

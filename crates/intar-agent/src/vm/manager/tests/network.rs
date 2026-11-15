@@ -639,6 +639,54 @@ fn untracked_generation_answers_are_typed() {
 }
 
 #[test]
+fn an_untracked_run_network_is_not_a_repair_failure() {
+    // Startup repair fails only for genuine failures: a run jailerd no
+    // longer tracks must not stop the agent before reconcile cleans it up.
+    let error = |code: &str| {
+        Ok(JailerResponse::Error(
+            intar_jailer_protocol::ProtocolError::new(
+                code,
+                "cannot repair an untracked run network",
+            ),
+        ))
+    };
+    assert_eq!(
+        classify_run_network_repair(error("not_found")),
+        RunNetworkRepair::Untracked
+    );
+    assert!(matches!(
+        classify_run_network_repair(error("host_operation_failed")),
+        RunNetworkRepair::Failed(_)
+    ));
+    assert!(matches!(
+        classify_run_network_repair(Err(anyhow::anyhow!("connect to intar-jailerd"))),
+        RunNetworkRepair::Failed(_)
+    ));
+}
+
+#[test]
+fn only_vms_that_can_be_live_have_a_run_network_to_repair() {
+    for state in [
+        VmLifecycleState::CreatingVm,
+        VmLifecycleState::BootingVm,
+        VmLifecycleState::Running,
+    ] {
+        assert!(needs_run_network_repair(state));
+    }
+    for state in [
+        VmLifecycleState::Queued,
+        VmLifecycleState::CachingImage,
+        VmLifecycleState::PreparingDisks,
+        VmLifecycleState::DeletingVm,
+        VmLifecycleState::ArchivingArtifacts,
+        VmLifecycleState::DeleteFailed,
+        VmLifecycleState::Failed,
+    ] {
+        assert!(!needs_run_network_repair(state));
+    }
+}
+
+#[test]
 fn logical_cleanup_failure_is_not_misclassified_as_absence() {
     let response = JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
         "resource_busy",
