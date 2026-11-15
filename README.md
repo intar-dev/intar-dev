@@ -131,16 +131,20 @@ before the workflow attested them have no attestation. Then:
      `intar-vm-*.service` unit is left.
   3. `systemctl stop intar-agent`, then `sh deploy/install.sh` in the new
      release directory.
-  4. `systemctl restart intar-platform-check`, which re-runs the jailer
-     self-test and the agent doctor on the new binaries (it stays active after
-     boot, so starting the agent alone skips it), then
-     `systemctl start intar-agent`.
+  4. `/usr/lib/intar/intar-jailerd-self-test`, then the agent doctor as
+     `intar-agent` (the command `install.sh` prints), on the new binaries,
+     then `systemctl start intar-agent`. Later boots re-run the self-test by
+     themselves through `intar-jailerd-boot-check.service`, which `install.sh`
+     enables; it disables the older hand-written `intar-platform-check`.
   5. Check that the installed binaries match the release and that the journal
      shows `bridge v9 handshake complete` with no warnings. Then dispatch
      image-ops `gate-open`, unless a later step of a larger rollout opens it.
 
   If a check fails, stop the agent and run `install.sh` from the rollback
-  release's directory instead. `install.sh` sets the Cloud Hypervisor path and
+  release's directory instead. A rollback release without
+  `deploy/intar-jailerd-boot-check.service` also needs that unit disabled and
+  removed from `/etc/systemd/system`, and `intar-platform-check` enabled and
+  restarted in step 4's place. `install.sh` sets the Cloud Hypervisor path and
   hash in `/etc/intar-jailerd/config.toml` to its own release's; a rollback to
   a release that still pinned v53.0, whose installer leaves the config alone, also needs both
   lines set back by hand to that release's `deploy/config.example.toml`.

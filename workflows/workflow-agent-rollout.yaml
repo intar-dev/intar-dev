@@ -154,8 +154,9 @@ jobs:
             run: sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=gate-drained
       - name: install
         description: >-
-          Stop the agent, install the release, re-run the platform check, start
-          the agent, and check the installed binaries and the bridge handshake
+          Stop the agent, install the release, run the jailer self-test and the
+          agent doctor, start the agent, and check the installed binaries and
+          the bridge handshake
         dependsOn:
           - step: gate-drained
             condition:
@@ -176,7 +177,8 @@ jobs:
               fi
               systemctl stop intar-agent
               (cd "$d" && sh deploy/install.sh) >&2
-              systemctl restart intar-platform-check
+              /usr/lib/intar/intar-jailerd-self-test >&2
+              runuser -u intar-agent -- env XDG_CACHE_HOME=/var/cache/intar-agent XDG_STATE_HOME=/var/cache/intar-agent/state /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml >&2
               since="@$(date +%s)"
               systemctl start intar-agent
               for b in intar-agent:/usr/local/bin/intar-agent intar-jailer:/usr/lib/intar/intar-jailer intar-jailerd:/usr/lib/intar/intar-jailerd; do
@@ -225,7 +227,19 @@ jobs:
               d='/var/lib/intar/releases/agent-v${{ inputs.rollback_version }}'
               systemctl stop intar-agent
               (cd "$d" && sh deploy/install.sh) >&2
-              systemctl restart intar-platform-check
+              if [ -f "$d/deploy/intar-jailerd-boot-check.service" ]; then
+                /usr/lib/intar/intar-jailerd-self-test >&2
+                runuser -u intar-agent -- env XDG_CACHE_HOME=/var/cache/intar-agent XDG_STATE_HOME=/var/cache/intar-agent/state /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml >&2
+              else
+                # A release from before the boot check: its installer leaves
+                # the newer unit behind, which would order itself into a cycle
+                # with that release's socket, so restore the platform check.
+                systemctl disable intar-jailerd-boot-check.service
+                rm -f /etc/systemd/system/intar-jailerd-boot-check.service
+                systemctl daemon-reload
+                systemctl enable intar-platform-check
+                systemctl restart intar-platform-check
+              fi
               since="@$(date +%s)"
               systemctl start intar-agent
               i=0
