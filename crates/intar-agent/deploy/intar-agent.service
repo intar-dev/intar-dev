@@ -3,6 +3,7 @@ Description=intar-agent
 After=network-online.target intar-jailerd.socket
 Wants=network-online.target intar-jailerd.socket
 RequiresMountsFor=/var/cache/intar-agent /var/lib/intar/jails
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
