@@ -21,8 +21,9 @@ usage() {
 }
 
 # --boot is the mode of intar-jailerd-boot-check.service: systemd orders it
-# before the agent, the jailerd socket and jailerd, so it requires them all
-# inactive, stops and restores nothing, and uses only the cached assets.
+# before the agent and jailerd, so it requires both inactive, stops and
+# restores nothing, and uses only the cached assets. The socket may listen: a
+# connection only queues jailerd's start behind the check.
 offline=false
 boot=false
 case "$#:$*" in
@@ -42,7 +43,7 @@ done
 [ -x /usr/lib/intar/intar-jailerd ] || die "installed intar-jailerd is missing"
 [ -f /etc/intar-jailerd/config.toml ] || die "jailerd configuration is missing"
 if [ "${boot}" = true ]; then
-  for unit in intar-agent.service intar-jailerd.socket intar-jailerd.service; do
+  for unit in intar-agent.service intar-jailerd.service; do
     if systemctl is-active --quiet "${unit}"; then
       die "--boot runs only before ${unit} starts; it is active. Run the self-test without --boot."
     fi
@@ -57,10 +58,10 @@ fi
 
 socket_was_active=false
 daemon_was_active=false
-if systemctl is-active --quiet intar-jailerd.socket; then
+if [ "${boot}" = false ] && systemctl is-active --quiet intar-jailerd.socket; then
   socket_was_active=true
 fi
-if systemctl is-active --quiet intar-jailerd.service; then
+if [ "${boot}" = false ] && systemctl is-active --quiet intar-jailerd.service; then
   daemon_was_active=true
 fi
 run_root=
@@ -93,8 +94,8 @@ trap 'exit 130' HUP INT TERM
 
 # Freeze socket activation before the binary takes the maintenance lock. This
 # also makes self-test safe after an earlier doctor invocation activated the
-# persistent daemon. At boot both are already inactive, and a stop job would
-# cancel their queued start.
+# persistent daemon. At boot the daemon is not running yet, and a stop job
+# would cancel the queued start of the socket or the daemon.
 if [ "${boot}" = false ]; then
   systemctl stop intar-jailerd.socket
   systemctl stop intar-jailerd.service

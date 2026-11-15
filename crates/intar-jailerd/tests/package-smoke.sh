@@ -577,13 +577,6 @@ echo "${help_output}" | grep -q -- '--boot' || die "self-test wrapper lacks boot
   die "installer did not enable intar-jailerd-boot-check.service"
 [ "$(systemctl show --property=ActiveState --value intar-jailerd-boot-check.service)" = inactive ] || \
   die "installer started intar-jailerd-boot-check.service"
-# The installer left the socket listening, so the boot mode must refuse.
-if boot_output=$("${self_test}" --boot 2>&1); then
-  die "self-test --boot ran while intar-jailerd.socket was active"
-fi
-printf '%s\n' "${boot_output}" | grep -Fq -- "--boot runs only before intar-jailerd.socket starts" || \
-  die "self-test --boot refused for the wrong reason: ${boot_output}"
-systemctl is-active --quiet intar-jailerd.socket || die "self-test --boot stopped intar-jailerd.socket"
 "${self_test}"
 
 runuser --user intar-agent -- env \
@@ -594,6 +587,16 @@ systemctl is-active --quiet intar-jailerd.socket || \
   die "doctor left intar-jailerd.socket inactive"
 systemctl is-active --quiet intar-jailerd.service || \
   die "doctor left intar-jailerd.service inactive"
+# Starting jailerd outside a boot must not pull the boot check in.
+[ "$(systemctl show --property=ActiveState --value intar-jailerd-boot-check.service)" = inactive ] || \
+  die "starting jailerd ran intar-jailerd-boot-check.service outside a boot"
+# With the daemon running, the boot mode must refuse and leave it running.
+if boot_output=$("${self_test}" --boot 2>&1); then
+  die "self-test --boot ran while intar-jailerd.service was active"
+fi
+printf '%s\n' "${boot_output}" | grep -Fq -- "--boot runs only before intar-jailerd.service starts" || \
+  die "self-test --boot refused for the wrong reason: ${boot_output}"
+systemctl is-active --quiet intar-jailerd.service || die "self-test --boot stopped intar-jailerd.service"
 
 # Run openat2 and a jailed runtime-socket bind under the installed agent unit
 # itself, not merely as its Unix user. systemd 255's RestrictSUIDSGID filter

@@ -1,14 +1,6 @@
 [Unit]
 Description=Intar jailer control socket
-# The default Before=sockets.target would order this socket ahead of
-# basic.target, while intar-jailerd-boot-check.service, an ordinary service
-# after basic.target, must finish first: an ordering cycle. These are the
-# remaining default dependencies of a socket unit.
-DefaultDependencies=no
-Requires=sysinit.target
-After=sysinit.target systemd-tmpfiles-setup.service
-Before=shutdown.target
-Conflicts=shutdown.target
+After=systemd-tmpfiles-setup.service
 
 [Socket]
 ListenSequentialPacket=/run/intar-jailerd/control.sock

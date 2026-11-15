@@ -108,13 +108,16 @@ Only that complete artifact-backed run writes the boot-bound readiness
 attestation.
 
 Every later boot re-runs the proof through `intar-jailerd-boot-check.service`,
-which the installer enables: `intar-jailerd-self-test --boot` runs before the
-jailerd socket, jailerd and the agent start, refuses if any of them is active,
-stops and restores nothing, and uses only the cached assets (implying
-`--offline`). jailerd only `Wants=` it. When the check fails, jailerd still
+which the installer enables: `intar-jailerd-self-test --boot` runs before
+jailerd and the agent start, refuses if either is active, stops and restores
+nothing, and uses only the cached assets (implying `--offline`). The socket may
+already listen; an activation only queues jailerd behind the check. Only
+`multi-user.target` pulls the check in, and jailerd is just ordered after it,
+so later jailerd starts never re-run it. When the check fails, jailerd still
 starts and contains the previous boot's VMs, but stays unschedulable: an
-attestation whose only mismatch is the boot ID counts as absent, while any
-other stale attestation is still a startup error. A recovery whose unclean
+attestation of another boot counts as absent whatever else changed (a kernel
+upgrade, a lagging clock), while a stale attestation of this boot is still a
+startup error. A recovery whose unclean
 records all belong to a known earlier boot, and were all fully contained,
 keeps the readiness the boot check proved; every other unclean recovery
 withdraws it. `journalctl -u intar-jailerd-boot-check.service` shows the
