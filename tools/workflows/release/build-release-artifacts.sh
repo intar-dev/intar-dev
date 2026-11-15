@@ -12,8 +12,9 @@ build_cloud_hypervisor() {
   local ch_commit ch_name ch_source license_extract ch_toolchain
   mkdir -p "${workdir}/deploy"
   # Cloud Hypervisor is built static from one pinned commit of upstream's
-  # main branch: no release has file CPU profiles yet. Move the pin back to
-  # the release asset once one does. The same source supplies the license
+  # main branch. Nothing needs that commit any more (wake images did, for
+  # file CPU profiles), so the pin can move back to a release asset; that
+  # is its own change. The same source supplies the license
   # set. A source build has no fixed hash, so the hash of what was built
   # goes into the archive, where install.sh and jailerd's config take it
   # from.
