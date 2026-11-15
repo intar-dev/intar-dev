@@ -15,12 +15,9 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
-use intar_contracts::guest::{
-    APPLIED_BOOT_PATH, BOOT_JSON_FILENAME, GUEST_CONTRACT, GuestBootV3, RUN_DISK_MOUNT,
-};
+use intar_contracts::guest::{BOOT_JSON_FILENAME, GUEST_CONTRACT, GuestBootV3, RUN_DISK_MOUNT};
 use intar_contracts::scenario::{MachineSpecV1, ScriptV1, SpecMode, SpecTaskV1};
 use intar_kino_proto::kino_v2::{Phase, Ready, Report, Status, Task, Verify};
-use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
@@ -49,26 +46,13 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     });
     boot::mark(&report, Phase::Booting, "kino_started");
     tokio::spawn(wire::publish(changes));
-    #[cfg(target_os = "linux")]
-    resume_watch(report.clone());
 
-    let (boot, digest) = match read_boot() {
-        Ok(read) => read,
+    let boot = match read_boot() {
+        Ok(boot) => boot,
         Err(error) => return fail(&report, error).await,
     };
-    // A guest woken from an image holds the marker of the boot.json the
-    // build's Kino applied; a cold boot has none.
-    let woken = std::fs::read_to_string(APPLIED_BOOT_PATH).is_ok_and(|applied| applied != digest);
-    // The digest first: the host drops every report without it.
-    report.send_modify(|report| report.boot_sha256.clone_from(&digest));
-    if woken {
-        boot::mark(&report, Phase::Booting, "woken");
-    }
-    if let Err(error) = boot::bring_up(&boot, &digest, woken, &report).await {
+    if let Err(error) = boot::bring_up(&boot, &report).await {
         return fail(&report, error).await;
-    }
-    if let Err(error) = std::fs::write(APPLIED_BOOT_PATH, &digest) {
-        return fail(&report, format!("{APPLIED_BOOT_PATH}: {error}")).await;
     }
     boot::release_lab(&boot.spec, &report).await;
     run(
@@ -102,8 +86,8 @@ async fn fail(report: &watch::Sender<Report>, error: String) -> anyhow::Result<(
     anyhow::bail!("{error}")
 }
 
-/// `boot.json` and the SHA-256 of its bytes.
-fn read_boot() -> Result<(GuestBootV3, String), String> {
+/// `boot.json`.
+fn read_boot() -> Result<GuestBootV3, String> {
     let path = Path::new(RUN_DISK_MOUNT).join(BOOT_JSON_FILENAME);
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -115,11 +99,7 @@ fn read_boot() -> Result<(GuestBootV3, String), String> {
             boot.contract
         ));
     }
-    let digest = Sha256::digest(&bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    Ok((boot, digest))
+    Ok(boot)
 }
 
 pub(crate) async fn run(
@@ -276,92 +256,4 @@ pub(crate) fn tail(value: &str, limit: usize) -> &str {
         start += 1;
     }
     &value[start..]
-}
-
-/// Notice a resume from suspend at once. A `CLOCK_REALTIME` timerfd armed
-/// with `TFD_TIMER_CANCEL_ON_SET` is cancelled at every resume and at every
-/// wall-clock step. A resume shows as a jump of `CLOCK_BOOTTIME` against
-/// `CLOCK_MONOTONIC`; then the guest was woken from an image and this
-/// process is the build's Kino, so it hands over to the run's. A plain clock
-/// step only touches the report, so a dead connection is noticed now.
-#[cfg(target_os = "linux")]
-fn resume_watch(report: watch::Sender<Report>) {
-    use rustix::time::{
-        Itimerspec, TimerfdClockId, TimerfdFlags, TimerfdTimerFlags, Timespec, timerfd_create,
-        timerfd_settime,
-    };
-    let spawned = std::thread::Builder::new()
-        .name("resume-watch".into())
-        .spawn(move || {
-            let Ok(fd) = timerfd_create(TimerfdClockId::Realtime, TimerfdFlags::CLOEXEC) else {
-                return;
-            };
-            let never = Itimerspec {
-                it_interval: Timespec {
-                    tv_sec: 0,
-                    tv_nsec: 0,
-                },
-                it_value: Timespec {
-                    tv_sec: 7_258_118_400,
-                    tv_nsec: 0,
-                },
-            };
-            let mut buf = [0_u8; 8];
-            let mut last_gap = suspend_gap_ms();
-            loop {
-                let flags = TimerfdTimerFlags::ABSTIME | TimerfdTimerFlags::CANCEL_ON_SET;
-                if timerfd_settime(&fd, flags, &never).is_err() {
-                    return;
-                }
-                match rustix::io::read(&fd, &mut buf) {
-                    Err(rustix::io::Errno::CANCELED) => {
-                        let gap = suspend_gap_ms();
-                        if gap > last_gap + 100 {
-                            hand_over();
-                        }
-                        last_gap = gap;
-                        report.send_modify(|_| {});
-                    }
-                    Ok(_) | Err(rustix::io::Errno::INTR) => {}
-                    Err(_) => return,
-                }
-            }
-        });
-    if let Err(error) = spawned {
-        eprintln!("kino init: no resume watcher: {error}");
-    }
-}
-
-/// Milliseconds this guest has spent suspended: `CLOCK_BOOTTIME` counts
-/// them, `CLOCK_MONOTONIC` does not.
-#[cfg(target_os = "linux")]
-fn suspend_gap_ms() -> i64 {
-    use rustix::time::{ClockId, clock_gettime};
-    let boot = clock_gettime(ClockId::Boottime);
-    let mono = clock_gettime(ClockId::Monotonic);
-    (boot.tv_sec - mono.tv_sec) * 1000 + (boot.tv_nsec - mono.tv_nsec) / 1_000_000
-}
-
-/// The hand-over of guest contract 3 (`intar_contracts::guest`). After a
-/// wake the run disk and the recording disk are other files than the ones
-/// this guest was suspended with. Replace this process, drop both file
-/// systems and their cached blocks, and let the loader mount the run disk
-/// and execute the Kino on it. Returns only when the exec failed.
-#[cfg(target_os = "linux")]
-fn hand_over() {
-    use intar_contracts::guest::GUEST_LOADER_PATH;
-    use std::os::unix::process::CommandExt as _;
-    eprintln!("kino init: resumed from suspend; handing over to the run disk's Kino");
-    // A shell, because the mount is busy while this binary runs from it.
-    let script = format!(
-        "umount {recordings} 2>/dev/null; umount {RUN_DISK_MOUNT} || umount -l {RUN_DISK_MOUNT}; \
-         blockdev --flushbufs {run} {rec}; exec {GUEST_LOADER_PATH}",
-        recordings = boot::RECORDING_DIR,
-        run = boot::RUN_DEVICE,
-        rec = boot::RECORDING_DEVICE,
-    );
-    let error = std::process::Command::new("/bin/sh")
-        .args(["-c", &script])
-        .exec();
-    eprintln!("kino init: hand-over failed: {error}");
 }

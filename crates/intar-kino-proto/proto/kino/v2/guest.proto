@@ -18,11 +18,6 @@ message Report {
   repeated Task tasks = 8;
   Verify verify = 9;                      // set only in verify mode
   string failure = 10;                    // phase FAILED, admin-only, at most 1 KiB
-  // SHA-256 (hex) of the boot.json this Kino applied; empty until it has
-  // parsed one. A guest woken from an image first runs the build's Kino,
-  // so the host drops every report whose value is not that of the run
-  // disk it wrote.
-  string boot_sha256 = 11;
 }
 // A report shows the latest phase, and phases only advance, so a host may
 // never see SSH_READY itself: PREPARING and READY imply it. FAILED is a lab

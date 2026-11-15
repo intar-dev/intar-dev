@@ -305,93 +305,11 @@ async fn an_oversized_host_frame_ends_the_stream() {
     wire::read_host_frames(stream.as_slice()).await;
 }
 
-#[test]
-fn a_machine_id_is_a_v4_id_of_the_random_bytes_and_the_run() {
-    use super::boot::machine_id;
-    let id = machine_id(&[7; 32], "ab");
-    assert_eq!(id.len(), 32);
-    assert!(
-        id.bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    );
-    assert_eq!(&id[12..13], "4");
-    assert!(matches!(&id[16..17], "8" | "9" | "a" | "b"));
-    assert_eq!(id, machine_id(&[7; 32], "ab"));
-    // Either input alone makes another id: two runs from one image differ
-    // when the RNG does, and when their boot.json does.
-    assert_ne!(id, machine_id(&[8; 32], "ab"));
-    assert_ne!(id, machine_id(&[7; 32], "ac"));
-}
-
-#[test]
-fn the_machine_id_steps_write_then_reexec_then_restart_the_readers() {
-    use super::boot::{IdStep, machine_id_steps};
-    assert_eq!(
-        machine_id_steps(true),
-        vec![
-            IdStep::Write("/etc/machine-id"),
-            IdStep::Write("/var/lib/dbus/machine-id"),
-            IdStep::Reexec,
-            IdStep::RestartIfActive("systemd-journald.service"),
-            IdStep::RestartIfActive("systemd-hostnamed.service"),
-            IdStep::PruneJournals,
-        ]
-    );
-    // Debian's D-Bus file is a link to /etc/machine-id: nothing to write.
-    let steps = machine_id_steps(false);
-    assert_eq!(
-        steps[..2],
-        [IdStep::Write("/etc/machine-id"), IdStep::Reexec]
-    );
-    assert_eq!(steps.last(), Some(&IdStep::PruneJournals));
-}
-
-#[test]
-fn the_machine_id_is_written_in_place_and_synced() {
-    use std::os::unix::fs::MetadataExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("machine-id");
-    std::fs::write(&path, "").expect("the image's empty file");
-    let inode = std::fs::metadata(&path).expect("metadata").ino();
-    let path = path.to_str().expect("utf-8");
-    super::boot::write_in_place(path, "0123456789abcdef0123456789abcdef").expect("written");
-    // The same file, not a renamed one: a mount over the path stays usable.
-    assert_eq!(std::fs::metadata(path).expect("metadata").ino(), inode);
-    assert_eq!(
-        std::fs::read_to_string(path).expect("read"),
-        "0123456789abcdef0123456789abcdef\n"
-    );
-    // A missing file is created as systemd creates it.
-    let created = dir.path().join("new");
-    let created = created.to_str().expect("utf-8");
-    super::boot::write_in_place(created, "ab").expect("created");
-    use std::os::unix::fs::PermissionsExt as _;
-    assert_eq!(
-        std::fs::metadata(created)
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o444
-    );
-}
-
-#[test]
-fn only_an_inactive_or_unknown_unit_skips_its_restart() {
-    use super::boot::is_active;
-    assert_eq!(is_active("u", Some(0)), Ok(true));
-    assert_eq!(is_active("u", Some(3)), Ok(false));
-    assert_eq!(is_active("u", Some(4)), Ok(false));
-    // An unreachable manager, or a signal, fails the renewal.
-    assert!(is_active("u", Some(1)).is_err());
-    assert!(is_active("u", None).is_err());
-}
-
-/// Each literal program name a `run`, `exit_code` or `Command::new` call
+/// Each literal program name a `run` or `Command::new` call
 /// in `source` passes: a bare one is resolved through PATH.
 fn bare_programs(source: &str) -> Vec<String> {
     let mut bare = Vec::new();
-    for call in ["run(", "exit_code(", "Command::new("] {
+    for call in ["run(", "Command::new("] {
         for (at, _) in source.match_indices(call) {
             let rest = source[at + call.len()..].trim_start();
             if let Some(literal) = rest.strip_prefix('"') {

@@ -1,12 +1,9 @@
 //! Applying `boot.json` (§4.2 in #309): network, SSH, the recording disk and
-//! the lab release. The same steps run at a cold boot and after a wake,
-//! where the guest still has the build's values.
+//! the lab release.
 
 use super::{Phase, Report};
 use intar_contracts::guest::{GUEST_USERNAME, GuestBootV3, RUN_CLI_PORT};
 use intar_contracts::scenario::MachineSpecV1;
-use sha2::{Digest as _, Sha256};
-use std::io::Read as _;
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
@@ -17,13 +14,8 @@ const SSH_START_TIMEOUT: Duration = Duration::from_secs(30);
 const LAB_RELEASE_FALLBACK: Duration = Duration::from_secs(5);
 /// The disk order is fixed: root, run disk, recording disk.
 const ROOT_DEVICE: &str = "/dev/vda";
-#[cfg_attr(
-    not(target_os = "linux"),
-    allow(dead_code, reason = "used by the Linux guest only")
-)]
-pub(crate) const RUN_DEVICE: &str = "/dev/vdb";
-pub(crate) const RECORDING_DEVICE: &str = "/dev/vdc";
-pub(crate) const RECORDING_DIR: &str = "/var/lib/kino-recordings";
+const RECORDING_DEVICE: &str = "/dev/vdc";
+const RECORDING_DIR: &str = "/var/lib/kino-recordings";
 const RUN_CLI_BROKER: &str = "/run/intar/run-cli-broker";
 const HOST_KEY: &str = "/etc/ssh/ssh_host_ed25519_key";
 
@@ -67,24 +59,12 @@ pub(crate) fn mark(report: &watch::Sender<Report>, phase: Phase, timing: &str) {
 /// is the returned message.
 pub(crate) async fn bring_up(
     boot: &GuestBootV3,
-    boot_sha256: &str,
-    woken: bool,
     report: &watch::Sender<Report>,
 ) -> Result<(), String> {
     let ssh = boot.ssh.enabled;
-    // First and alone: nothing the run sets up may race the restarts.
-    if woken {
-        renew_machine_id(boot_sha256, report).await?;
-    }
     let (network, prepared, recording) = tokio::join!(
-        network(boot, woken),
-        async {
-            if ssh {
-                prepare_ssh(boot, woken).await
-            } else {
-                Ok(())
-            }
-        },
+        network(boot),
+        async { if ssh { prepare_ssh(boot).await } else { Ok(()) } },
         async { if ssh { recording_disk().await } else { Ok(()) } },
     );
     network?;
@@ -96,7 +76,7 @@ pub(crate) async fn bring_up(
     }
     write(RUN_CLI_BROKER, &format!("vsock://2:{RUN_CLI_PORT}\n"))?;
     if ssh {
-        start_sshd(woken).await?;
+        start_sshd().await?;
         let key = std::fs::read_to_string(format!("{HOST_KEY}.pub"))
             .map_err(|error| format!("host key: {error}"))?;
         report.send_modify(|report| report.ssh_host_keys_openssh = vec![key.trim().to_owned()]);
@@ -122,159 +102,7 @@ pub(crate) async fn release_lab(spec: &MachineSpecV1, report: &watch::Sender<Rep
     mark(report, Phase::Preparing, "lab_released");
 }
 
-const MACHINE_ID: &str = "/etc/machine-id";
-const DBUS_MACHINE_ID: &str = "/var/lib/dbus/machine-id";
-/// The bind source systemd mounts read-only over [`MACHINE_ID`] when it
-/// could not write that file at boot.
-const RUN_MACHINE_ID: &str = "/run/machine-id";
-/// The daemons that read the machine id once, at their start, and are safe
-/// to restart; only the active ones restart. Left running with the image's
-/// id: the system bus (a restart is unsupported and cuts every client), and
-/// logind and networkd, which use it for nothing a run sees (networkd only
-/// for a DHCPv6 DUID; this guest's address is static) and whose restart
-/// risks sessions or the routes Kino sets.
-const MACHINE_ID_READERS: &[&str] = &[
-    // Stamps `_MACHINE_ID` on every entry and names its directory by it.
-    "systemd-journald.service",
-    // What `hostnamectl` shows; it holds no state and starts on demand.
-    "systemd-hostnamed.service",
-];
-
-/// One step of [`machine_id_steps`].
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum IdStep {
-    Write(&'static str),
-    /// PID 1 caches the id; a re-executed manager reads the file again.
-    Reexec,
-    RestartIfActive(&'static str),
-    /// Remove every volatile journal but the new id's: the file of a woken
-    /// guest is empty, so the old id is known only by its directory.
-    PruneJournals,
-}
-
-/// The run's machine id: 128 bits of the kernel's RNG, which reseeds on the
-/// resume, hashed with the run's `boot.json` digest, shaped as a v4 UUID
-/// like the ids systemd generates.
-pub(crate) fn machine_id(random: &[u8; 32], boot_sha256: &str) -> String {
-    let mut hash = Sha256::new();
-    hash.update(b"intar machine-id\0");
-    hash.update(random);
-    hash.update(boot_sha256.as_bytes());
-    let mut id: [u8; 16] = [0; 16];
-    id.copy_from_slice(&hash.finalize()[..16]);
-    id[6] = (id[6] & 0x0f) | 0x40;
-    id[8] = (id[8] & 0x3f) | 0x80;
-    id.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// What makes a woken guest take a new id: the files, PID 1, the daemons
-/// that read it at start, and the journals of earlier ids.
-pub(crate) fn machine_id_steps(dbus_file: bool) -> Vec<IdStep> {
-    let mut steps = vec![IdStep::Write(MACHINE_ID)];
-    if dbus_file {
-        steps.push(IdStep::Write(DBUS_MACHINE_ID));
-    }
-    steps.push(IdStep::Reexec);
-    steps.extend(
-        MACHINE_ID_READERS
-            .iter()
-            .copied()
-            .map(IdStep::RestartIfActive),
-    );
-    steps.push(IdStep::PruneJournals);
-    steps
-}
-
-/// A woken guest holds the image's machine id, the same in every run woken
-/// from it: give this run its own, before anything of the run reads it.
-async fn renew_machine_id(boot_sha256: &str, report: &watch::Sender<Report>) -> Result<(), String> {
-    let mut random = [0_u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut urandom| urandom.read_exact(&mut random))
-        .map_err(|error| format!("/dev/urandom: {error}"))?;
-    let id = machine_id(&random, boot_sha256);
-    // A symlink (Debian's) points at /etc/machine-id already.
-    let dbus_file = std::fs::symlink_metadata(DBUS_MACHINE_ID).is_ok_and(|meta| meta.is_file());
-    for step in machine_id_steps(dbus_file) {
-        match step {
-            IdStep::Write(path) => write_id(path, &id)?,
-            IdStep::Reexec => run(SYSTEMCTL, &["daemon-reexec"]).await?,
-            IdStep::RestartIfActive(unit) => {
-                let code = exit_code(SYSTEMCTL, &["is-active", "--quiet", unit]).await?;
-                if is_active(unit, code)? {
-                    run(SYSTEMCTL, &["restart", unit]).await?;
-                }
-            }
-            IdStep::PruneJournals => prune_journals(&id)?,
-        }
-    }
-    mark(report, Phase::Booting, "machine_id_renewed");
-    Ok(())
-}
-
-fn prune_journals(id: &str) -> Result<(), String> {
-    const JOURNALS: &str = "/run/log/journal";
-    let entries = match std::fs::read_dir(JOURNALS) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        entries => entries.map_err(|error| format!("{JOURNALS}: {error}"))?,
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if entry.file_name() != id && path.is_dir() {
-            std::fs::remove_dir_all(&path)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
-        }
-    }
-    Ok(())
-}
-
-/// `systemctl is-active`: 0 active, 3 inactive, 4 no such unit. Any other
-/// answer means the manager could not tell, and the renewal fails.
-pub(crate) fn is_active(unit: &str, code: Option<i32>) -> Result<bool, String> {
-    match code {
-        Some(0) => Ok(true),
-        Some(3 | 4) => Ok(false),
-        other => Err(format!("systemctl is-active {unit}: {other:?}")),
-    }
-}
-
-async fn exit_code(program: &str, args: &[&str]) -> Result<Option<i32>, String> {
-    let status = Command::new(program)
-        .args(args)
-        .status()
-        .await
-        .map_err(|error| format!("{program}: {error}"))?;
-    Ok(status.code())
-}
-
-/// Write the id into `path` in place, as systemd does: a file of the root, or
-/// a mount over it. systemd's transient id is a read-only bind of
-/// [`RUN_MACHINE_ID`]; then that file takes the id, and readers of `path`
-/// see it while the file below stays empty.
-fn write_id(path: &str, id: &str) -> Result<(), String> {
-    match write_in_place(path, id) {
-        Err(error) if error.raw_os_error() == Some(30) && path == MACHINE_ID => {
-            write_in_place(RUN_MACHINE_ID, id).map_err(|error| format!("{RUN_MACHINE_ID}: {error}"))
-        }
-        written => written.map_err(|error| format!("{path}: {error}")),
-    }
-}
-
-/// Truncate and write `path`, created 0444 if missing, and sync it.
-pub(crate) fn write_in_place(path: &str, id: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .create(true)
-        .mode(0o444)
-        .open(path)?;
-    file.write_all(format!("{id}\n").as_bytes())?;
-    file.sync_all()
-}
-
-async fn network(boot: &GuestBootV3, woken: bool) -> Result<(), String> {
+async fn network(boot: &GuestBootV3) -> Result<(), String> {
     let (hostname, net) = (&boot.hostname, &boot.network);
     write("/etc/hostname", &format!("{hostname}\n"))?;
     let address = net.ip_cidr.split('/').next().unwrap_or_default();
@@ -299,10 +127,6 @@ async fn network(boot: &GuestBootV3, woken: bool) -> Result<(), String> {
         let attempt = async {
             let iface = interface().ok_or("no network interface")?;
             run(IP, &["link", "set", "dev", &iface, "up"]).await?;
-            if woken {
-                // The build's address is still on the interface.
-                run(IP, &["addr", "flush", "dev", &iface, "scope", "global"]).await?;
-            }
             run(IP, &["addr", "replace", &net.ip_cidr, "dev", &iface]).await?;
             run(
                 IP,
@@ -344,7 +168,7 @@ fn interface() -> Option<String> {
     nics.into_iter().next()
 }
 
-async fn prepare_ssh(boot: &GuestBootV3, woken: bool) -> Result<(), String> {
+async fn prepare_ssh(boot: &GuestBootV3) -> Result<(), String> {
     let ssh_dir = format!("/home/{GUEST_USERNAME}/.ssh");
     run(
         INSTALL,
@@ -371,11 +195,6 @@ async fn prepare_ssh(boot: &GuestBootV3, woken: bool) -> Result<(), String> {
     )
     .await?;
     run(CHMOD, &["0600", &keys_path]).await?;
-    if woken {
-        // Every run gets its own host key; this one is the image's.
-        let _ = std::fs::remove_file(HOST_KEY);
-        let _ = std::fs::remove_file(format!("{HOST_KEY}.pub"));
-    }
     if !Path::new(HOST_KEY).exists() {
         run(
             SSH_KEYGEN,
@@ -389,13 +208,11 @@ async fn prepare_ssh(boot: &GuestBootV3, woken: bool) -> Result<(), String> {
 /// The base's `ssh.service` starts only behind the gate marker, so a plain
 /// start could be skipped and still exit 0: check the config, set the
 /// marker, start, and require the unit to be active.
-async fn start_sshd(woken: bool) -> Result<(), String> {
+async fn start_sshd() -> Result<(), String> {
     std::fs::create_dir_all("/run/sshd").map_err(|error| format!("/run/sshd: {error}"))?;
     run(SSHD, &["-t"]).await?;
     write("/run/intar/ssh-ready", "")?;
-    // A woken guest's sshd runs with the image's host key.
-    let verb = if woken { "restart" } else { "start" };
-    tokio::time::timeout(SSH_START_TIMEOUT, run(SYSTEMCTL, &[verb, "ssh.service"]))
+    tokio::time::timeout(SSH_START_TIMEOUT, run(SYSTEMCTL, &["start", "ssh.service"]))
         .await
         .map_err(|_| "ssh.service did not start in time".to_owned())??;
     run(SYSTEMCTL, &["is-active", "--quiet", "ssh.service"]).await

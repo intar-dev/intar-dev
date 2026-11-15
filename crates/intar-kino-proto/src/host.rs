@@ -1,6 +1,5 @@
 //! The host's reading of a `kino.v2` report (#310 §5.2). A guest is not
-//! trusted: every string is cut again, every list is capped, and a report
-//! that is not for this run's `boot.json` is dropped.
+//! trusted: every string is cut again and every list is capped.
 
 use std::collections::BTreeMap;
 
@@ -36,14 +35,6 @@ pub struct GuestReport {
     pub lab: VmLabV1,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Decoded {
-    /// Not for this run's `boot.json`: a guest woken from an image first
-    /// runs the build's Kino. Dropped.
-    Stale,
-    Report(Box<GuestReport>),
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DecodeError {
     #[error("guest frame of {0} bytes is over the limit")]
@@ -55,9 +46,8 @@ pub enum DecodeError {
     ContractMismatch(u32),
 }
 
-/// Read one frame's body. `boot_sha256` is the SHA-256 (hex) of the
-/// `boot.json` the host wrote onto this VM's run disk.
-pub fn decode(body: &[u8], boot_sha256: &str) -> Result<Decoded, DecodeError> {
+/// Read one frame's body.
+pub fn decode(body: &[u8]) -> Result<GuestReport, DecodeError> {
     if body.len() > MAX_FRAME_BYTES {
         return Err(DecodeError::Oversized(body.len()));
     }
@@ -66,14 +56,10 @@ pub fn decode(body: &[u8], boot_sha256: &str) -> Result<Decoded, DecodeError> {
     let Some(guest_frame::Frame::Report(report)) = frame.frame else {
         return Err(DecodeError::Malformed("no report".to_owned()));
     };
-    // First: the build's Kino may speak another contract, and that is fine.
-    if report.boot_sha256 != boot_sha256 {
-        return Ok(Decoded::Stale);
-    }
     if report.contract != GUEST_CONTRACT {
         return Err(DecodeError::ContractMismatch(report.contract));
     }
-    Ok(Decoded::Report(Box::new(read(report))))
+    Ok(read(report))
 }
 
 fn read(report: Report) -> GuestReport {
@@ -200,8 +186,6 @@ mod tests {
     use super::*;
     use crate::kino_v2::{Ready, Step, Task, Verify};
 
-    const BOOT: &str = "b00t";
-
     fn frame(report: Report) -> Vec<u8> {
         GuestFrame {
             frame: Some(guest_frame::Frame::Report(report)),
@@ -212,47 +196,27 @@ mod tests {
     fn report(phase: Phase) -> Report {
         Report {
             contract: GUEST_CONTRACT,
-            boot_sha256: BOOT.to_owned(),
             phase: phase as i32,
             ..Report::default()
         }
     }
 
     fn decoded(report: Report) -> GuestReport {
-        match decode(&frame(report), BOOT) {
-            Ok(Decoded::Report(report)) => *report,
+        match decode(&frame(report)) {
+            Ok(report) => report,
             other => panic!("expected a report: {other:?}"),
         }
-    }
-
-    #[test]
-    fn a_report_for_another_boot_json_is_dropped_whatever_it_says() {
-        let mut build = report(Phase::Ready);
-        build.boot_sha256 = "the build's".to_owned();
-        build.contract = 2;
-        build.ssh_host_keys_openssh = vec!["the image's key".to_owned()];
-        assert_eq!(decode(&frame(build), BOOT), Ok(Decoded::Stale));
-        // Kino's first frames have no digest yet.
-        let mut early = report(Phase::Booting);
-        early.boot_sha256.clear();
-        assert_eq!(decode(&frame(early), BOOT), Ok(Decoded::Stale));
     }
 
     #[test]
     fn another_contract_fails_the_vm() {
         let mut other = report(Phase::Booting);
         other.contract = 4;
-        assert_eq!(
-            decode(&frame(other), BOOT),
-            Err(DecodeError::ContractMismatch(4))
-        );
-        assert!(matches!(
-            decode(&[0xff; 8], BOOT),
-            Err(DecodeError::Malformed(_))
-        ));
+        assert_eq!(decode(&frame(other)), Err(DecodeError::ContractMismatch(4)));
+        assert!(matches!(decode(&[0xff; 8]), Err(DecodeError::Malformed(_))));
         let huge = vec![0; MAX_FRAME_BYTES + 1];
         assert_eq!(
-            decode(&huge, BOOT),
+            decode(&huge),
             Err(DecodeError::Oversized(MAX_FRAME_BYTES + 1))
         );
     }
