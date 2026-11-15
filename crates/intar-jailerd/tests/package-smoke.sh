@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+CLOUD_HYPERVISOR_SHA256=f9ffb9646783233d1f0fb09e77db1fca66499d1041e63bc011b90683c0d49933
+
 die() {
   echo "intar package smoke: $*" >&2
   exit 1
@@ -339,14 +341,14 @@ for relative in \
   intar-agent \
   intar-jailer \
   intar-jailerd \
-  cloud-hypervisor-v55.0.0 \
+  cloud-hypervisor-v54.1 \
   deploy/SHA256SUMS \
   deploy/THIRD_PARTY_NOTICES.md \
   deploy/intar-rust-dependencies.json \
   deploy/cloud-hypervisor-LICENSES/Apache-2.0.txt \
   deploy/cloud-hypervisor-LICENSES/BSD-3-Clause.txt \
   deploy/cloud-hypervisor-LICENSES/CC-BY-4.0.txt \
-  deploy/cloud-hypervisor-v55.0.0.sha256 \
+  deploy/cloud-hypervisor-v54.1.sha256 \
   deploy/config.example.toml \
   deploy/install.sh \
   deploy/intar-jailerd-self-test.sh \
@@ -386,11 +388,11 @@ case " ${agent_read_write_paths} " in
 esac
 (cd "${package_root}" && sha256sum --check --strict deploy/SHA256SUMS)
 
-for binary in intar-agent intar-jailer intar-jailerd cloud-hypervisor-v55.0.0; do
+for binary in intar-agent intar-jailer intar-jailerd cloud-hypervisor-v54.1; do
   [ -x "${package_root}/${binary}" ] || die "archive binary is not executable: ${binary}"
 done
-cloud_hypervisor=${package_root}/cloud-hypervisor-v55.0.0
-(cd "${package_root}" && sha256sum --check --strict deploy/cloud-hypervisor-v55.0.0.sha256)
+cloud_hypervisor=${package_root}/cloud-hypervisor-v54.1
+echo "${CLOUD_HYPERVISOR_SHA256}  ${cloud_hypervisor}" | sha256sum --check --strict
 file_output=$(file --brief "${cloud_hypervisor}")
 case "${file_output}" in
   *ELF*64-bit*x86-64*statically\ linked*|*ELF*64-bit*x86-64*static-pie\ linked*) ;;
@@ -404,7 +406,7 @@ if readelf --dynamic "${cloud_hypervisor}" 2>/dev/null | grep -q '(NEEDED)'; the
 fi
 version_output=$("${cloud_hypervisor}" --version 2>&1)
 case "${version_output}" in
-  *cloud-hypervisor*v55.0.0*) ;;
+  *cloud-hypervisor*v54.1*) ;;
   *) die "unexpected Cloud Hypervisor version: ${version_output}" ;;
 esac
 
@@ -738,4 +740,4 @@ rm -rf -- "${agent_runtime_probe_root}"
 systemctl daemon-reload
 systemctl reset-failed intar-agent.service >/dev/null 2>&1 || true
 
-echo "intar package smoke: installed v55.0.0 jailed lifecycle, quota, agent runtime sandbox, and doctor passed"
+echo "intar package smoke: installed v54.1 jailed lifecycle, quota, agent runtime sandbox, and doctor passed"

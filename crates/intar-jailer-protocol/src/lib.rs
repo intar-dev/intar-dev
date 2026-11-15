@@ -50,14 +50,10 @@ pub const MAX_SSH_PUBLIC_PORT: u16 = 32_767;
 pub const BACKGROUND_PREPARE_BYTES_PER_SECOND: u64 = 16 * 1024 * 1024;
 
 /// Pinned Cloud Hypervisor release.
-/// The release builds this version from a pinned commit of upstream's main
-/// branch (`tools/workflows/release/build-release-artifacts.sh`). A source
-/// build has no fixed hash, so the release records the hash of what it built
-/// in `deploy/cloud-hypervisor-<version>.sha256`, and the installer writes it
-/// to `cloud_hypervisor_sha256` in jailerd's config.
-pub const CLOUD_HYPERVISOR_VERSION: &str = "v55.0.0";
-/// File name of the pinned runtime; jailerd's config must name it.
-pub const CLOUD_HYPERVISOR_BINARY_NAME: &str = "cloud-hypervisor-v55.0.0";
+pub const CLOUD_HYPERVISOR_VERSION: &str = "v54.1";
+/// SHA-256 of the upstream `cloud-hypervisor-static` v54.1 release asset.
+pub const CLOUD_HYPERVISOR_SHA256: &str =
+    "f9ffb9646783233d1f0fb09e77db1fca66499d1041e63bc011b90683c0d49933";
 
 /// Identifier accepted at the privileged boundary.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -826,9 +822,8 @@ impl Default for JailerdConfig {
     fn default() -> Self {
         Self {
             jail_root: PathBuf::from("/var/lib/intar/jails"),
-            cloud_hypervisor_binary: PathBuf::from("/usr/lib/intar")
-                .join(CLOUD_HYPERVISOR_BINARY_NAME),
-            cloud_hypervisor_sha256: Sha256Digest("0".repeat(64)),
+            cloud_hypervisor_binary: PathBuf::from("/usr/lib/intar/cloud-hypervisor-v54.1"),
+            cloud_hypervisor_sha256: Sha256Digest(CLOUD_HYPERVISOR_SHA256.to_owned()),
             jailer_binary: PathBuf::from("/usr/lib/intar/intar-jailer"),
             socket_path: PathBuf::from("/run/intar-jailerd/control.sock"),
             agent_uid: 0,
@@ -977,9 +972,7 @@ pub enum ValidationError {
     InvalidIdentityRange,
     #[error("configured agent UID/GID must be non-root")]
     RootAgentIdentity,
-    #[error(
-        "Cloud Hypervisor runtime path must name the pinned {CLOUD_HYPERVISOR_BINARY_NAME} binary"
-    )]
+    #[error("Cloud Hypervisor runtime hash must match the pinned v54.1 release")]
     UnpinnedRuntime,
     #[error("allowed source roots must be non-empty absolute paths")]
     InvalidSourceRoots,

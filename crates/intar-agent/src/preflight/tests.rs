@@ -11,7 +11,8 @@ use super::{
 };
 use crate::config::AgentConfig;
 use intar_jailer_protocol::{
-    CLOUD_HYPERVISOR_VERSION, JailerCapabilities, PROTOCOL_VERSION, RUN_GUEST_NETWORK_PREFIX,
+    CLOUD_HYPERVISOR_SHA256, CLOUD_HYPERVISOR_VERSION, JailerCapabilities, PROTOCOL_VERSION,
+    RUN_GUEST_NETWORK_PREFIX,
 };
 
 #[cfg(unix)]
@@ -36,7 +37,7 @@ fn ready_capabilities(source_root: PathBuf) -> JailerCapabilities {
     JailerCapabilities {
         protocol_version: PROTOCOL_VERSION,
         cloud_hypervisor_version: CLOUD_HYPERVISOR_VERSION.to_owned(),
-        cloud_hypervisor_sha256: "a".repeat(64),
+        cloud_hypervisor_sha256: CLOUD_HYPERVISOR_SHA256.to_owned(),
         total_cpu_millis: 8_000,
         reserved_cpu_millis: 1_000,
         schedulable_cpu_millis: 7_000,

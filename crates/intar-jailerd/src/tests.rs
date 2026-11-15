@@ -2,9 +2,6 @@ use super::*;
 use intar_jailer_protocol::{ArtifactAccess, ArtifactSource, SourceArtifacts};
 use std::sync::Condvar;
 
-const TEST_RUNTIME_SHA256: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
-
 #[cfg(target_os = "linux")]
 mod staging;
 mod templates;
@@ -54,7 +51,7 @@ impl HostBackend for FakeBackend {
                 pid_start_time_ticks: Some(7),
                 netns_inode: Some(17),
                 jail_root_inode: None,
-                executable_sha256: Some(TEST_RUNTIME_SHA256.to_owned()),
+                executable_sha256: Some(CLOUD_HYPERVISOR_SHA256.to_owned()),
                 health: SandboxHealth::Healthy,
                 cpu_stat: None,
                 seccomp_enabled: true,
@@ -860,7 +857,7 @@ fn recovered_record(config: &JailerdConfig) -> VmRecord {
         host_boot_id: current_host_boot_id(),
         pid_start_time_ticks: None,
         jail_root_inode: None,
-        cloud_hypervisor_sha256: TEST_RUNTIME_SHA256.to_owned(),
+        cloud_hypervisor_sha256: CLOUD_HYPERVISOR_SHA256.to_owned(),
         request,
     }
 }
@@ -908,16 +905,20 @@ fn the_installer_leaves_configs_this_parser_loads() {
         include_str!("../tests/fixtures/config-migration/jailerd.main.migrated.toml"),
         include_str!("../tests/fixtures/config-migration/jailerd.host.migrated.toml"),
     ] {
-        let installed = std::iter::once(
-            "cloud_hypervisor_binary = \"/usr/lib/intar/cloud-hypervisor-v55.0.0\"",
-        )
-        .chain(
-            migrated
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("cloud_hypervisor_binary")),
-        )
-        .collect::<Vec<_>>()
-        .join("\n");
+        let pinned = [
+            "cloud_hypervisor_binary = \"/usr/lib/intar/cloud-hypervisor-v54.1\"".to_owned(),
+            format!("cloud_hypervisor_sha256 = \"{CLOUD_HYPERVISOR_SHA256}\""),
+        ];
+        let installed = pinned
+            .into_iter()
+            .chain(
+                migrated
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("cloud_hypervisor_"))
+                    .map(str::to_owned),
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
         let config: JailerdConfig = toml::from_str(&installed).expect("migrated config");
         config.validate().expect("valid migrated config");
     }

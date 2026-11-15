@@ -140,7 +140,7 @@ format, keeps the manifest, config, kernel, initrd and disk chunks in a
 digest-addressed blob store, and passes them to jailerd, which builds the
 template. Desired-state changes wake the cache immediately; the 15-minute poll
 is only a repair scan. It does not keep a full unprivileged raw-image cache. The pinned
-Cloud Hypervisor v55.0.0 path and SHA-256 belong only in the root-owned
+Cloud Hypervisor v54.1 path and SHA-256 belong only in the root-owned
 `/etc/intar-jailerd/config.toml`.
 
 ## Scenario CPU resources

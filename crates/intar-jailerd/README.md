@@ -8,10 +8,9 @@ typed capability, run-network, launch, inspect, stop, and destroy operations;
 it accepts no arbitrary command, host path, cgroup file, or systemd property.
 
 The root-owned configuration lives at `/etc/intar-jailerd/config.toml`; start
-from `deploy/config.example.toml`. It pins Cloud Hypervisor v55.0.0 at
-`/usr/lib/intar/cloud-hypervisor-v55.0.0`, with the SHA-256 that the release
-recorded for its build of the runtime (`deploy/cloud-hypervisor-v55.0.0.sha256`;
-`install.sh` writes it into the config),
+from `deploy/config.example.toml`. It pins Cloud Hypervisor v54.1 at
+`/usr/lib/intar/cloud-hypervisor-v54.1` with SHA-256
+`f9ffb9646783233d1f0fb09e77db1fca66499d1041e63bc011b90683c0d49933`,
 reserves 1000 host millicores by default, and allocates per-generation
 identities from `200000..=265535`. Audit that range for local/directory identity
 collisions before deployment.
