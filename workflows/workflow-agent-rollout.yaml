@@ -227,18 +227,21 @@ jobs:
               d='/var/lib/intar/releases/agent-v${{ inputs.rollback_version }}'
               systemctl stop intar-agent
               (cd "$d" && sh deploy/install.sh) >&2
-              if [ -f "$d/deploy/intar-jailerd-boot-check.service" ]; then
-                /usr/lib/intar/intar-jailerd-self-test >&2
-                runuser -u intar-agent -- env XDG_CACHE_HOME=/var/cache/intar-agent XDG_STATE_HOME=/var/cache/intar-agent/state /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml >&2
-              else
+              if [ ! -f "$d/deploy/intar-jailerd-boot-check.service" ]; then
                 # A release from before the boot check: its installer leaves
-                # the newer unit behind, which would order itself into a cycle
-                # with that release's socket, so restore the platform check.
+                # the newer unit behind, and that release's jailerd is not
+                # ordered after it, so at boot the two would run concurrently.
                 systemctl disable intar-jailerd-boot-check.service
                 rm -f /etc/systemd/system/intar-jailerd-boot-check.service
                 systemctl daemon-reload
+              fi
+              if [ ! -f "$d/deploy/intar-jailerd-boot-check.service" ] && \
+                 [ "$(systemctl show --property=LoadState --value intar-platform-check.service)" = loaded ]; then
                 systemctl enable intar-platform-check
                 systemctl restart intar-platform-check
+              else
+                /usr/lib/intar/intar-jailerd-self-test >&2
+                runuser -u intar-agent -- env XDG_CACHE_HOME=/var/cache/intar-agent XDG_STATE_HOME=/var/cache/intar-agent/state /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml >&2
               fi
               since="@$(date +%s)"
               systemctl start intar-agent

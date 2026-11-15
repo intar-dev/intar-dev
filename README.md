@@ -143,8 +143,8 @@ before the workflow attested them have no attestation. Then:
   If a check fails, stop the agent and run `install.sh` from the rollback
   release's directory instead. A rollback release without
   `deploy/intar-jailerd-boot-check.service` also needs that unit disabled and
-  removed from `/etc/systemd/system`, and `intar-platform-check` enabled and
-  restarted in step 4's place. `install.sh` sets the Cloud Hypervisor path and
+  removed from `/etc/systemd/system`, and, where the host has the hand-written
+  `intar-platform-check`, that unit enabled and restarted in step 4's place. `install.sh` sets the Cloud Hypervisor path and
   hash in `/etc/intar-jailerd/config.toml` to its own release's; a rollback to
   a release that still pinned v53.0, whose installer leaves the config alone, also needs both
   lines set back by hand to that release's `deploy/config.example.toml`.
