@@ -502,12 +502,19 @@ impl NetworkManager {
         }) {
             bail!("untracked run network names collide with an active run")
         }
-        let mut changed = false;
+        // The table first: it carries the run's public SSH DNAT, and a
+        // namespace entry that fails its check must not keep it alive.
+        let mut removed = Vec::new();
+        if self.nft_succeeds(&["list", "table", "inet", &nft_table]) {
+            self.nft_script(&nft_table_delete(true, &nft_table))
+                .context("remove untracked run nftables policy")?;
+            removed.push("nftables table");
+        }
         if self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name]) {
             // Its connected transit route and the guest route via it go too.
             self.ip(&["link", "delete", &result.host_veth_name])
                 .context("delete untracked run veth")?;
-            changed = true;
+            removed.push("host veth");
         }
         if path_entry_exists(&self.host_netns_root.join(&result.namespace_name))? {
             self.verify_namespace_visibility(&result.namespace_name)?;
@@ -518,14 +525,12 @@ impl NetworkManager {
                 &result.namespace_name,
             )
             .context("delete untracked run network namespace")?;
-            changed = true;
+            removed.push("network namespace");
         }
-        if self.nft_succeeds(&["list", "table", "inet", &nft_table]) {
-            self.nft_script(&nft_table_delete(true, &nft_table))
-                .context("remove untracked run nftables policy")?;
-            changed = true;
+        if !removed.is_empty() {
+            tracing::info!(run_id = %run_id, removed = ?removed, "removed an untracked run network");
         }
-        Ok(changed)
+        Ok(!removed.is_empty())
     }
 
     fn destroy_run_physical(&self, result: &RunNetworkResult) -> Result<()> {

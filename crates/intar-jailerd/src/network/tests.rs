@@ -649,7 +649,10 @@ fn an_untracked_run_network_is_destroyed_by_its_derived_names_only() {
         runs: BTreeMap::new(),
     };
 
-    assert!(manager.destroy_untracked_run(&run).unwrap());
+    // An entry that is no network namespace fails its check, after the
+    // table and veth are already gone, and the error makes the agent retry.
+    std::fs::write(directory.path().join(&result.namespace_name), "").unwrap();
+    manager.destroy_untracked_run(&run).unwrap_err();
     let log = std::fs::read_to_string(&log).unwrap();
     assert!(
         log.contains(&format!("link delete {}", result.host_veth_name)),
