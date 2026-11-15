@@ -536,8 +536,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
     }
 
     /// A tracked VM whose unit systemd removed: its VMM exited cleanly, as
-    /// on a guest poweroff. Nothing about it is suspicious, so it is released
-    /// as a stop and destroy would, not quarantined. A record is tracked only
+    /// on a guest poweroff. Nothing about it is suspicious, so once its
+    /// recording is exported it is released as a stop and destroy would,
+    /// not quarantined. A record is tracked only
     /// once its unit was started, so a launch in flight cannot get here.
     fn release_exited_vm(
         &mut self,
@@ -549,14 +550,42 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         self.backend
             .stop_unit(&record.unit_name)
             .context("prove the exited VM's cgroup drained")?;
-        // Best effort, as for a contained VM: the release must not depend on
-        // the disk the VMM left behind.
+        // The release removes the jail, recording disk included, so it runs
+        // only once the export is published.
         if let Err(error) = self.preparer.export_recording(&self.config, record) {
             tracing::warn!(
                 generation = %record.generation,
                 error = %format!("{error:#}"),
                 "failed to export the recording of an exited VM"
             );
+            if storage_exhausted(&error) {
+                // Keep the record and its disk: StopVm or the next inspection
+                // exports it once space is freed. The agent still ends the
+                // run on vm_exited.
+                return Err(anyhow::Error::new(VmExitedError).context(format!(
+                    "{gone:#}; the recording export waits for space: {error:#}"
+                )));
+            }
+            // An export that will not work: contain, so quarantine keeps
+            // the disk instead of the release removing it.
+            let mut drained = false;
+            return match self.rollback_failed_launch(
+                &record.request.run_id,
+                &record.generation,
+                &record.unit_name,
+                None,
+                &mut drained,
+            ) {
+                Ok(()) => {
+                    self.records.remove(&record.generation);
+                    Err(gone.context(format!(
+                        "the recording export failed: {error:#}; the VM was stopped and quarantined"
+                    )))
+                }
+                Err(containment) => Err(gone.context(format!(
+                    "the recording export failed: {error:#}; containment was incomplete: {containment:#}"
+                ))),
+            };
         }
         self.destroy_vm(VmIdentityRequest::by_generation(record.generation.clone()))
             .context("release the exited VM")?;

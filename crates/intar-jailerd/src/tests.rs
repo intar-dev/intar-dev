@@ -530,6 +530,7 @@ impl JailPreparer for FakeTemplatePreparer {
 struct TrackingPreparer {
     quarantined: Vec<ValidatedId>,
     exported: Vec<ValidatedId>,
+    destroyed: Vec<ValidatedId>,
     fail_export: bool,
     export_error: Option<fn() -> anyhow::Error>,
     persist_calls: usize,
@@ -573,7 +574,8 @@ impl JailPreparer for TrackingPreparer {
         })
     }
 
-    fn destroy(&mut self, _config: &JailerdConfig, _generation: &ValidatedId) -> Result<bool> {
+    fn destroy(&mut self, _config: &JailerdConfig, generation: &ValidatedId) -> Result<bool> {
+        self.destroyed.push(generation.clone());
         Ok(true)
     }
 

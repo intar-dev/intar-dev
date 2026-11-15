@@ -354,6 +354,12 @@ struct CpuCapacityExhaustedError {
 #[error("systemd unit {0} no longer exists")]
 pub struct UnitGoneError(pub String);
 
+/// A tracked VM whose VMM exited, kept until its recording is exported:
+/// answered as `vm_exited`, so the agent ends the run meanwhile.
+#[derive(Debug, Error)]
+#[error("the VMM exited; the VM is kept until its recording is exported")]
+struct VmExitedError;
+
 /// A run network jailerd does not track: answered as `not_found`.
 #[derive(Debug, Error)]
 #[error("cannot repair an untracked run network")]
@@ -756,6 +762,8 @@ fn classify_protocol_error(error: &anyhow::Error, message: &str) -> &'static str
     } else if error.downcast_ref::<PrepareDeferred>().is_some() {
         // The coordinator requeues this work. It is not a failure.
         "image_prepare_requeued"
+    } else if error.downcast_ref::<VmExitedError>().is_some() {
+        "vm_exited"
     } else if error.downcast_ref::<UntrackedRunNetworkError>().is_some() {
         "not_found"
     } else if storage_exhausted(error) {

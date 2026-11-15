@@ -341,6 +341,10 @@ fn inspect_of_a_vm_whose_unit_is_gone_exports_then_releases_it() {
     );
     assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
     // Released like a destroy, not quarantined: nothing is kept forever.
+    assert_eq!(
+        core.preparer.destroyed,
+        std::slice::from_ref(&launched.generation)
+    );
     assert!(core.preparer.quarantined.is_empty());
     assert!(core.records.is_empty());
     assert_eq!(core.capabilities().committed_cpu_millis, 0);
@@ -350,6 +354,79 @@ fn inspect_of_a_vm_whose_unit_is_gone_exports_then_releases_it() {
         ))),
         Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
     ));
+}
+
+fn inspect_exited_vm_with_failing_export(
+    export_error: fn() -> anyhow::Error,
+) -> (
+    JailerdCore<FakeBackend, TrackingPreparer>,
+    VmLaunchResult,
+    ProtocolError,
+) {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        TrackingPreparer {
+            export_error: Some(export_error),
+            ..TrackingPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("core");
+    ensure_test_network(&mut core);
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 125)))) {
+        Response::LaunchVmV3(value) => value,
+        other => panic!("unexpected launch response {other:?}"),
+    };
+    core.backend.units.remove(&launched.unit_name);
+    let error = match core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+        launched.generation.clone(),
+    ))) {
+        Response::Error(error) => error,
+        other => panic!("unexpected inspect response {other:?}"),
+    };
+    (core, launched, error)
+}
+
+#[test]
+fn an_exited_vm_whose_export_lacks_space_keeps_its_record_and_disk() {
+    let (mut core, launched, error) = inspect_exited_vm_with_failing_export(|| {
+        anyhow::Error::from(rustix::io::Errno::NOSPC).context("copy drained recording export")
+    });
+    // The agent ends the run on vm_exited while jailerd keeps the disk.
+    assert_eq!(error.code, "vm_exited");
+    assert!(core.records.contains_key(&launched.generation));
+    assert!(core.preparer.destroyed.is_empty());
+    assert!(core.preparer.quarantined.is_empty());
+    assert!(core.backend.destroyed_vm_networks.is_empty());
+
+    // Space is freed: the agent's StopVm publishes the export.
+    core.preparer.export_error = None;
+    assert!(matches!(
+        core.handle(Request::StopVm(VmIdentityRequest::by_generation(
+            launched.generation.clone(),
+        ))),
+        Response::StopVm(_)
+    ));
+    assert_eq!(
+        core.preparer.exported,
+        std::slice::from_ref(&launched.generation)
+    );
+}
+
+#[test]
+fn an_exited_vm_whose_export_cannot_work_is_contained_not_destroyed() {
+    let (core, launched, error) = inspect_exited_vm_with_failing_export(|| {
+        anyhow::anyhow!("jailed recording disk ownership or mode changed")
+    });
+    assert!(error.message.contains("stopped and quarantined"));
+    // Quarantine keeps the disk; the release would have removed it.
+    assert!(core.preparer.destroyed.is_empty());
+    assert_eq!(core.preparer.quarantined, vec![launched.generation.clone()]);
+    assert!(core.records.is_empty());
 }
 
 #[test]
