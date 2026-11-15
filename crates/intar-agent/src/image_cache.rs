@@ -281,9 +281,8 @@ fn validate_prepared_source(
 
 mod ready;
 pub(crate) use ready::{
-    ReadyImage, check_machine_config, check_prepared_wake, image_failure, image_failure_state,
-    is_image_ready, mark_template_ready, record_image_failure, require_ready_image,
-    sweep_cache_layout,
+    ReadyImage, check_machine_config, image_failure, image_failure_state, is_image_ready,
+    mark_template_ready, record_image_failure, require_ready_image, sweep_cache_layout,
 };
 mod priority;
 pub(crate) use priority::{

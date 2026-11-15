@@ -1,7 +1,7 @@
 use super::*;
 
 #[cfg(any(test, target_os = "linux"))]
-use intar_kino_proto::host::{DecodeError, Decoded, decode};
+use intar_kino_proto::host::{DecodeError, decode};
 #[cfg(target_os = "linux")]
 use intar_kino_proto::kino_v2::MAX_FRAME_BYTES;
 
@@ -52,20 +52,16 @@ pub(super) struct ReportTarget {
     pub(super) vm_name: String,
     pub(super) run_id: String,
     pub(super) jail_generation: String,
-    /// SHA-256 (hex) of this run's `boot.json`.
-    #[cfg(any(test, target_os = "linux"))]
-    pub(super) boot_sha256: String,
 }
 
-/// One kino.v2 frame body, read for `target`. `None` is a stale report (a
-/// woken guest's build-time Kino), which is dropped. A Kino of another
-/// guest contract is a failure the VM never recovers from.
+/// One kino.v2 frame body, read for `target`. A Kino of another guest
+/// contract is a failure the VM never recovers from.
 #[cfg(any(test, target_os = "linux"))]
 pub(super) fn read_guest_frame(
     target: &ReportTarget,
     body: &[u8],
     first_report_ms: Option<u64>,
-) -> Result<Option<GuestUpdate>> {
+) -> Result<GuestUpdate> {
     let received_at_ms = now_unix_ms();
     let update = |ssh_ready, failed, ssh_host_keys_openssh, lab| GuestUpdate {
         vm_name: target.vm_name.clone(),
@@ -78,10 +74,8 @@ pub(super) fn read_guest_frame(
         first_report_ms,
         received_at_ms,
     };
-    match decode(body, &target.boot_sha256) {
-        Ok(Decoded::Stale) => Ok(None),
-        Ok(Decoded::Report(report)) => {
-            let report = *report;
+    match decode(body) {
+        Ok(report) => {
             // Host keys count only once SSH is up.
             let keys = if report.ssh_ready {
                 report.ssh_host_keys_openssh
@@ -89,19 +83,19 @@ pub(super) fn read_guest_frame(
                 Vec::new()
             };
             // The guest's failure text is admin-only: it stays in the lab.
-            Ok(Some(update(
+            Ok(update(
                 report.ssh_ready,
                 report.failed.map(|_| GUEST_FAILED_BEFORE_SSH.to_owned()),
                 keys,
                 report.lab,
-            )))
+            ))
         }
-        Err(error @ DecodeError::ContractMismatch(_)) => Ok(Some(update(
+        Err(error @ DecodeError::ContractMismatch(_)) => Ok(update(
             false,
             Some(error.to_string()),
             Vec::new(),
             contract_mismatch_lab(&error),
-        ))),
+        )),
         Err(error) => Err(error.into()),
     }
 }
@@ -148,10 +142,7 @@ pub(super) async fn handle_guest_report_stream(
             .await
             .context("failed to read a guest report frame")?;
         let first = first_report_ms.lock().map(|value| *value).unwrap_or(None);
-        let Some(mut update) = read_guest_frame(target, &frame, first)? else {
-            debug!(vm = target.vm_name, "dropped a stale guest report");
-            continue;
-        };
+        let mut update = read_guest_frame(target, &frame, first)?;
         if update.first_report_ms.is_none() {
             update.first_report_ms = ms_since_vmm_start(&inner, &target.vm_name);
             if let Ok(mut value) = first_report_ms.lock() {
@@ -331,11 +322,6 @@ pub(super) async fn start_probe_worker(
         vm_name: vm_name.to_owned(),
         run_id,
         jail_generation,
-        #[cfg(any(test, target_os = "linux"))]
-        boot_sha256: details
-            .boot_sha256
-            .clone()
-            .context("vm details missing the boot.json digest")?,
     };
     #[cfg(target_os = "linux")]
     let replay = details.ssh_host_keys_openssh.clone();

@@ -1,4 +1,4 @@
-//! Guest reports: kino.v2 frames read for one run's `boot.json`.
+//! Guest reports: kino.v2 frames read for one run's VM.
 
 use intar_contracts::bridge_v9::{CheckStatus, LabState};
 use intar_contracts::guest::GUEST_CONTRACT;
@@ -7,22 +7,18 @@ use prost::Message as _;
 
 use super::*;
 
-const BOOT: &str = "b00t";
-
 fn target() -> ReportTarget {
     ReportTarget {
         vm_name: "web".to_owned(),
         run_id: "run-1".to_owned(),
         jail_generation: "generation-1".to_owned(),
-        boot_sha256: BOOT.to_owned(),
     }
 }
 
-fn frame(phase: Phase, boot_sha256: &str, contract: u32) -> Vec<u8> {
+fn frame(phase: Phase, contract: u32) -> Vec<u8> {
     GuestFrame {
         frame: Some(guest_frame::Frame::Report(Report {
             contract,
-            boot_sha256: boot_sha256.to_owned(),
             phase: phase as i32,
             ssh_host_keys_openssh: vec!["ssh-ed25519 AAAAHOST web".to_owned()],
             tasks: vec![Task {
@@ -37,24 +33,13 @@ fn frame(phase: Phase, boot_sha256: &str, contract: u32) -> Vec<u8> {
     .encode_to_vec()
 }
 
-fn read(body: &[u8]) -> Option<GuestUpdate> {
+fn read(body: &[u8]) -> GuestUpdate {
     read_guest_frame(&target(), body, Some(11)).unwrap_or_else(|error| panic!("{error:#}"))
 }
 
 #[test]
-fn a_report_for_another_boot_json_is_dropped() {
-    assert_eq!(read(&frame(Phase::Ready, "other", GUEST_CONTRACT)), None);
-    // Even one of another contract: the build's Kino may speak one.
-    assert_eq!(
-        read(&frame(Phase::Ready, "other", GUEST_CONTRACT + 1)),
-        None
-    );
-}
-
-#[test]
 fn a_kino_of_another_contract_fails_the_vm() {
-    let update = read(&frame(Phase::Ready, BOOT, GUEST_CONTRACT + 1))
-        .unwrap_or_else(|| panic!("a mismatch is a failure, not a drop"));
+    let update = read(&frame(Phase::Ready, GUEST_CONTRACT + 1));
     let failed = update.failed.clone().unwrap_or_default();
     assert!(failed.starts_with("guest_contract_mismatch"), "{failed}");
     assert!(!update.ssh_ready && update.ssh_host_keys_openssh.is_empty());
@@ -68,12 +53,12 @@ fn a_kino_of_another_contract_fails_the_vm() {
 #[test]
 fn a_guest_failure_text_stays_out_of_the_vm_error() {
     let hostile = "<script>steal()</script> /etc/shadow";
-    let mut body = GuestFrame::decode(frame(Phase::Failed, BOOT, GUEST_CONTRACT).as_slice())
+    let mut body = GuestFrame::decode(frame(Phase::Failed, GUEST_CONTRACT).as_slice())
         .unwrap_or_else(|error| panic!("{error}"));
     if let Some(guest_frame::Frame::Report(report)) = body.frame.as_mut() {
         report.failure = hostile.to_owned();
     }
-    let update = read(&body.encode_to_vec()).unwrap_or_else(|| panic!("current report"));
+    let update = read(&body.encode_to_vec());
     assert_eq!(update.failed.as_deref(), Some(GUEST_FAILED_BEFORE_SSH));
     let ReadyGate::Failed(error) = ready_gate(&update, "web", "run-1", "generation-1") else {
         panic!("a guest failure fails the VM");
@@ -93,8 +78,7 @@ fn a_malformed_frame_is_an_error() {
 
 #[test]
 fn ready_waits_for_ssh_and_takes_host_keys_only_then() {
-    let booting = read(&frame(Phase::Booting, BOOT, GUEST_CONTRACT))
-        .unwrap_or_else(|| panic!("current report"));
+    let booting = read(&frame(Phase::Booting, GUEST_CONTRACT));
     assert!(!booting.ssh_ready && booting.failed.is_none());
     assert!(booting.ssh_host_keys_openssh.is_empty(), "keys before SSH");
     assert_eq!(booting.first_report_ms, Some(11));
@@ -103,8 +87,7 @@ fn ready_waits_for_ssh_and_takes_host_keys_only_then() {
         ReadyGate::Waiting
     );
 
-    let up = read(&frame(Phase::SshReady, BOOT, GUEST_CONTRACT))
-        .unwrap_or_else(|| panic!("current report"));
+    let up = read(&frame(Phase::SshReady, GUEST_CONTRACT));
     assert!(up.ssh_ready);
     assert_eq!(up.ssh_host_keys_openssh, vec!["ssh-ed25519 AAAAHOST web"]);
     assert_eq!(
@@ -123,8 +106,7 @@ fn ready_waits_for_ssh_and_takes_host_keys_only_then() {
 
 #[test]
 fn the_persisted_lab_is_the_reported_lab_as_strict_json() -> Result<()> {
-    let update = read(&frame(Phase::Ready, BOOT, GUEST_CONTRACT))
-        .unwrap_or_else(|| panic!("current report"));
+    let update = read(&frame(Phase::Ready, GUEST_CONTRACT));
     let row = lab_row(&update)?;
     assert_eq!(
         (
@@ -143,8 +125,7 @@ fn the_persisted_lab_is_the_reported_lab_as_strict_json() -> Result<()> {
 }
 
 fn report_at(received_at_ms: i64, generation: &str, task: CheckStatus) -> GuestUpdate {
-    let mut update = read(&frame(Phase::Ready, BOOT, GUEST_CONTRACT))
-        .unwrap_or_else(|| panic!("a report of this boot.json"));
+    let mut update = read(&frame(Phase::Ready, GUEST_CONTRACT));
     update.received_at_ms = received_at_ms;
     generation.clone_into(&mut update.jail_generation);
     for state in &mut update.lab.tasks {

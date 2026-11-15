@@ -15,18 +15,17 @@ use cloud_hypervisor_client::{Client as ChClient, VmConfig};
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use getrandom::fill as getrandom_fill;
 use intar_contracts::bridge::VmRuntimeConstraintsV2;
-use intar_contracts::bridge_v9::{VmLabV1, VmStartPath, VmStartV1};
+use intar_contracts::bridge_v9::VmLabV1;
 use intar_contracts::oci::OciDigest;
 use intar_contracts::scenario::SpecMode;
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, AsyncSeqpacketClient, BACKGROUND_PREPARE_BYTES_PER_SECOND,
-    CLOUD_HYPERVISOR_VERSION, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
-    FinalizeVmBootRequest, FinalizeVmBootResult, JailPathMap, JailerCapabilities,
-    LaunchVmV3Request, PREPARED_IMAGE_SOURCE_ROOT, PrepareChunkedImageV3Request,
-    PreparedImageV3Result, Request as JailerRequest, RequestClass, Response as JailerResponse,
-    RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts, TrustedDirectorySource,
-    ValidatedId, VmCpuRuntimeState, VmIdentityRequest, VmInspection, VmLaunchRequest,
-    VmLaunchResult,
+    DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest, FinalizeVmBootResult,
+    JailPathMap, JailerCapabilities, LaunchVmV3Request, PREPARED_IMAGE_SOURCE_ROOT,
+    PrepareChunkedImageV3Request, PreparedImageV3Result, Request as JailerRequest, RequestClass,
+    Response as JailerResponse, RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts,
+    TrustedDirectorySource, ValidatedId, VmCpuRuntimeState, VmIdentityRequest, VmInspection,
+    VmLaunchRequest, VmLaunchResult,
 };
 use reqwest::Client as HttpClient;
 use russh::{
@@ -151,9 +150,6 @@ pub struct VmDetails {
     pub image: Option<OciDigest>,
     #[serde(skip_serializing)]
     pub kino: Option<OciDigest>,
-    /// SHA-256 (hex) of the exact `boot.json` bytes on the run disk.
-    #[serde(skip_serializing)]
-    pub boot_sha256: Option<String>,
     /// The machine's name in its scenario: the guest's hostname and the
     /// name reported to the control plane. The VM's key is its `vm_id`.
     pub machine_name: Option<String>,
@@ -188,9 +184,6 @@ pub struct VmDetails {
     pub ssh_host_keys_openssh: Vec<String>,
     #[serde(skip_serializing)]
     pub cpu_runtime: Option<VmCpuRuntimeState>,
-    /// How the VM was started; `first_report_ms` is the lab's.
-    #[serde(skip_serializing)]
-    pub start: Option<intar_contracts::bridge_v9::VmStartV1>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,7 +263,6 @@ impl VmStatusResponse {
                 generation: 1,
                 image: None,
                 kino: None,
-                boot_sha256: None,
                 machine_name: None,
                 run_id: run_id.map(str::to_string),
                 root_disk_path: format!("/tmp/{name}/root.raw"),
@@ -302,7 +294,6 @@ impl VmStatusResponse {
                 kino_vsock_path: None,
                 ssh_host_keys_openssh: Vec::new(),
                 cpu_runtime: None,
-                start: None,
             }),
             error: None,
             lease_duration_seconds: None,
@@ -342,7 +333,6 @@ impl VmStatusResponse {
                 .details
                 .as_ref()
                 .and_then(|d| d.kino.as_ref().map(|digest| digest.as_str().to_owned())),
-            boot_sha256: self.details.as_ref().and_then(|d| d.boot_sha256.clone()),
             machine_name: self.details.as_ref().and_then(|d| d.machine_name.clone()),
             created_at_s: self.created_at_s,
             updated_at_s: self.updated_at_s,
@@ -430,11 +420,6 @@ impl VmStatusResponse {
                 .as_ref()
                 .and_then(|d| d.recording_disk_path.clone()),
             spool_dir: self.details.as_ref().and_then(|d| d.spool_dir.clone()),
-            start_json: self
-                .details
-                .as_ref()
-                .and_then(|d| d.start.as_ref())
-                .and_then(|start| serde_json::to_string(start).ok()),
         }
     }
 
@@ -520,21 +505,11 @@ const JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS: u64 = 300;
 /// contract maximum, so the result stays below
 /// `2 * MAX_CHUNKED_IMAGE_BYTES / BACKGROUND_PREPARE_BYTES_PER_SECOND + margin`.
 /// A foreground request keeps [`JAILER_PREPARE_IMAGE_TIMEOUT`].
-///
-/// A `prepare_wake` request also writes the suspended guest's RAM through
-/// the same lane: `wake_bytes` is its size, clamped the same way.
-fn jailer_prepare_timeout(
-    class: RequestClass,
-    virtual_size_bytes: u64,
-    wake_bytes: Option<u64>,
-) -> Duration {
+fn jailer_prepare_timeout(class: RequestClass, virtual_size_bytes: u64) -> Duration {
     if class == RequestClass::Foreground {
         return JAILER_PREPARE_IMAGE_TIMEOUT;
     }
-    let max = intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES;
-    let bytes = virtual_size_bytes
-        .min(max)
-        .saturating_add(wake_bytes.map_or(0, |bytes| bytes.min(max)));
+    let bytes = virtual_size_bytes.min(intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES);
     let seconds = bytes
         .div_ceil(BACKGROUND_PREPARE_BYTES_PER_SECOND)
         .saturating_mul(2)
@@ -545,12 +520,12 @@ fn jailer_prepare_timeout(
 /// Longest a launch waits for the cache pass to prepare its image.
 ///
 /// The launch cannot know the image's size before the pass has pulled it, so
-/// it takes the budget the pass gives the largest import the contract admits,
-/// suspended guest included. The wait is never shorter than that import and
+/// it takes the budget the pass gives the largest import the contract admits.
+/// The wait is never shorter than that import and
 /// stays finite; a delete request, which the lease's end also sends, ends it
 /// sooner.
 fn image_prepare_wait() -> Duration {
-    jailer_prepare_timeout(RequestClass::Background, u64::MAX, Some(u64::MAX))
+    jailer_prepare_timeout(RequestClass::Background, u64::MAX)
 }
 const SCENARIO_READY_PROCESS_POLL_INTERVAL_MILLIS: u64 = 500;
 const SCENARIO_READY_API_POLL_INTERVAL_SECONDS: u64 = 3;
@@ -805,11 +780,6 @@ struct Inner {
     /// A permit is retained when the archive worker is between waits, so a
     /// durable queue insertion never has to wait for the ten-second sweep.
     archive_jobs_notify: Notify,
-    /// The host's `[wake]` settings.
-    wake: crate::config::WakeConfig,
-    /// When an image last fell back from a wake to a cold boot on this host,
-    /// keyed by image digest. A fresh entry keeps its VMs cold for an hour.
-    wake_fallbacks: std::sync::Mutex<BTreeMap<String, Instant>>,
 }
 
 const RUN_CLI_ACCESS_TOKEN_CACHE_TTL: Duration = Duration::from_secs(90);
@@ -884,9 +854,7 @@ use jailer_network::*;
 mod network_allocation;
 use network_allocation::*;
 mod state;
-mod wake;
 pub(crate) use state::is_safe_key;
 use state::*;
-use wake::*;
 #[cfg(test)]
 mod tests;

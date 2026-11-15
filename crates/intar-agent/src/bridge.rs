@@ -24,7 +24,7 @@ use intar_contracts::bridge_v9::{
     HOST_STATE_REPORT_SCHEMA_VERSION_8 as HOST_STATE_REPORT_SCHEMA_VERSION, HostDesiredStateV3,
     HostHardwareV1, HostStateReportV3, StateReportV9, SyncRequestV9,
     VM_REPORT_SCHEMA_VERSION_7 as VM_REPORT_SCHEMA_VERSION, VmLabV1, VmPhaseV2, VmReportV3,
-    VmReportV9, VmStartPath, VmStartV1, VmStateV3,
+    VmReportV9, VmStartV1, VmStateV3,
 };
 use intar_contracts::catalog::Mib;
 use intar_contracts::guest::GUEST_CONTRACT;

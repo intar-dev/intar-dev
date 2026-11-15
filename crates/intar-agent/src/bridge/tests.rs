@@ -654,8 +654,6 @@ fn a_vm_report_is_ready_only_with_its_forward_and_starts_cold() {
     assert_eq!(
         report.vm.start,
         Some(VmStartV1 {
-            path: VmStartPath::Cold,
-            reason: None,
             first_report_ms: Some(1_234),
         })
     );

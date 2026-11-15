@@ -359,15 +359,10 @@ fn a_launch_waits_at_least_as_long_as_any_background_prepare() {
     let wait = image_prepare_wait();
     let max = intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES;
     for gib in [1, 4, 16, 64] {
-        for wake in [None, Some(gib << 30), Some(u64::MAX)] {
-            let budget = jailer_prepare_timeout(RequestClass::Background, gib << 30, wake);
-            assert!(
-                wait >= budget,
-                "{gib} GiB, wake {wake:?}: {wait:?} < {budget:?}"
-            );
-        }
+        let budget = jailer_prepare_timeout(RequestClass::Background, gib << 30);
+        assert!(wait >= budget, "{gib} GiB: {wait:?} < {budget:?}");
     }
-    assert!(wait >= jailer_prepare_timeout(RequestClass::Background, max, Some(u64::MAX)));
+    assert!(wait >= jailer_prepare_timeout(RequestClass::Background, max));
     assert!(
         wait < Duration::from_secs(24 * 60 * 60),
         "the wait must stay bounded: {wait:?}"
@@ -380,7 +375,7 @@ fn a_foreground_prepare_keeps_the_fixed_budget() {
     // so the fixed budget stays whatever the size is.
     for bytes in [0, 4 << 30, 64 << 30] {
         assert_eq!(
-            jailer_prepare_timeout(RequestClass::Foreground, bytes, None),
+            jailer_prepare_timeout(RequestClass::Foreground, bytes),
             JAILER_PREPARE_IMAGE_TIMEOUT
         );
     }
@@ -392,7 +387,7 @@ fn a_background_prepare_budget_covers_the_rate_limited_import() {
     // allowed to be slow, so the client budget must cover the physical
     // minimum. A fixed budget would abandon work that jailerd keeps running.
     let biggest = intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES;
-    let timeout = jailer_prepare_timeout(RequestClass::Background, biggest, None);
+    let timeout = jailer_prepare_timeout(RequestClass::Background, biggest);
     let physical_minimum =
         Duration::from_secs(biggest.div_ceil(BACKGROUND_PREPARE_BYTES_PER_SECOND));
     assert!(
@@ -410,7 +405,7 @@ fn a_small_background_prepare_keeps_the_foreground_budget() {
     // A catalog-sized image inside the fixed budget is unchanged.
     let four_gib = 4 * 1024 * 1024 * 1024;
     assert_eq!(
-        jailer_prepare_timeout(RequestClass::Background, four_gib, None),
+        jailer_prepare_timeout(RequestClass::Background, four_gib),
         JAILER_PREPARE_IMAGE_TIMEOUT
     );
     // The crossover is exactly where the rate-limited import meets the fixed
@@ -421,11 +416,11 @@ fn a_small_background_prepare_keeps_the_foreground_budget() {
         .saturating_mul(BACKGROUND_PREPARE_BYTES_PER_SECOND)
         / 2;
     assert_eq!(
-        jailer_prepare_timeout(RequestClass::Background, crossover, None),
+        jailer_prepare_timeout(RequestClass::Background, crossover),
         JAILER_PREPARE_IMAGE_TIMEOUT
     );
     assert!(
-        jailer_prepare_timeout(RequestClass::Background, crossover + 1, None)
+        jailer_prepare_timeout(RequestClass::Background, crossover + 1)
             > JAILER_PREPARE_IMAGE_TIMEOUT
     );
 }
@@ -434,7 +429,7 @@ fn a_small_background_prepare_keeps_the_foreground_budget() {
 fn the_background_prepare_budget_grows_with_the_image() {
     let mut previous = Duration::ZERO;
     for gib in 1..=64 {
-        let timeout = jailer_prepare_timeout(RequestClass::Background, gib << 30, None);
+        let timeout = jailer_prepare_timeout(RequestClass::Background, gib << 30);
         assert!(timeout >= previous, "the budget must not shrink with size");
         assert!(timeout >= JAILER_PREPARE_IMAGE_TIMEOUT);
         previous = timeout;
@@ -445,7 +440,7 @@ fn the_background_prepare_budget_grows_with_the_image() {
 fn the_background_budget_is_bounded_by_the_contract_maximum() {
     // The derivation is a bound, not an open wait: the size is clamped to the
     // contract maximum, so an unvalidated field cannot hold the socket open.
-    let over = jailer_prepare_timeout(RequestClass::Background, u64::MAX, None);
+    let over = jailer_prepare_timeout(RequestClass::Background, u64::MAX);
     let derived = Duration::from_secs(
         intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES
             .div_ceil(BACKGROUND_PREPARE_BYTES_PER_SECOND)
@@ -513,27 +508,6 @@ fn an_old_run_stays_queued_until_its_network_is_gone() {
     assert_eq!(
         previous_schema_teardowns_done(&outcomes, &BTreeSet::from(["run-a".to_string()])),
         vec!["a1".to_string(), "a2".to_string(), "loose".to_string()]
-    );
-}
-
-#[test]
-fn a_wake_prepare_budget_adds_its_ram() {
-    let rate = BACKGROUND_PREPARE_BYTES_PER_SECOND;
-    let (disk, wake) = (8_u64 << 30, 16_u64 << 30);
-    let expected = (disk + wake).div_ceil(rate) * 2 + JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS;
-    assert_eq!(
-        jailer_prepare_timeout(RequestClass::Background, disk, Some(wake)),
-        Duration::from_secs(expected)
-    );
-    // The wake bytes are clamped as the disk is.
-    let max = intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES;
-    assert_eq!(
-        jailer_prepare_timeout(RequestClass::Background, disk, Some(u64::MAX)),
-        jailer_prepare_timeout(RequestClass::Background, disk, Some(max))
-    );
-    assert_eq!(
-        jailer_prepare_timeout(RequestClass::Foreground, disk, Some(wake)),
-        JAILER_PREPARE_IMAGE_TIMEOUT
     );
 }
 

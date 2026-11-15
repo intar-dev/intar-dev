@@ -115,12 +115,6 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
     };
     let image = digest(&row.image, "image")?;
     let kino = digest(&row.kino, "kino")?;
-    if let Some(sha) = &row.boot_sha256 {
-        anyhow::ensure!(
-            intar_contracts::oci::Sha256Hex::try_from(sha.clone()).is_ok(),
-            "persisted VM boot.json digest is invalid"
-        );
-    }
 
     let details = match (&row.root_disk_path, &row.seed_disk_path, &row.mac) {
         (Some(root_disk_path), Some(seed_disk_path), Some(mac)) => Some(VmDetails {
@@ -130,7 +124,6 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
                 .context("invalid persisted execution generation")?,
             image,
             kino,
-            boot_sha256: row.boot_sha256.clone(),
             machine_name: row.machine_name.clone(),
             run_id: row.run_id.clone(),
             root_disk_path: root_disk_path.clone(),
@@ -168,11 +161,6 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
                 row.ssh_host_keys_openssh_json.as_deref(),
             ),
             cpu_runtime: None,
-            // Only a report reads it; an unreadable one is left out.
-            start: row
-                .start_json
-                .as_deref()
-                .and_then(|json| serde_json::from_str(json).ok()),
         }),
         _ => None,
     };

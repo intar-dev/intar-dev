@@ -19,9 +19,6 @@ pub struct VmRow {
     pub image: Option<String>,
     /// The Kino artifact digest (`sha256:<hex>`).
     pub kino: Option<String>,
-    /// SHA-256 (hex) of the exact `boot.json` bytes on the run disk; a
-    /// guest report for any other digest is stale.
-    pub boot_sha256: Option<String>,
     /// The machine's name in its scenario (`DesiredVmV3.name`): the guest's
     /// hostname. The row's `name` is the agent's key, `DesiredVmV3.vm_id`.
     pub machine_name: Option<String>,
@@ -59,8 +56,6 @@ pub struct VmRow {
     pub spool_dir: Option<String>,
     pub cpu_millis: Option<i64>,
     pub ch_executable_sha256: Option<String>,
-    /// How the VM was started (`VmStartV1` without its timing), as JSON.
-    pub start_json: Option<String>,
 }
 
 /// The latest lab a VM's Kino reported, as strict `VmLabV1` JSON.

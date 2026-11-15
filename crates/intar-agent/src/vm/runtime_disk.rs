@@ -14,7 +14,6 @@ use intar_contracts::guest::{
 };
 use intar_contracts::scenario::{MachineSpecV1, SpecMode};
 use russh::keys::PublicKey;
-use sha2::{Digest as _, Sha256};
 
 use super::manager::CreateVmNetwork;
 
@@ -34,14 +33,8 @@ pub struct BootJsonInput<'a> {
     pub spec: &'a [u8],
 }
 
-/// The exact `boot.json` bytes and their SHA-256 (hex), the digest every
-/// report of this run's Kino must carry.
-pub struct BootJson {
-    pub bytes: Vec<u8>,
-    pub sha256: String,
-}
-
-pub fn boot_json(input: &BootJsonInput<'_>) -> Result<BootJson> {
+/// The exact `boot.json` bytes.
+pub fn boot_json(input: &BootJsonInput<'_>) -> Result<Vec<u8>> {
     let spec: MachineSpecV1 =
         serde_json::from_slice(input.spec).context("the machine spec is not a MachineSpecV1")?;
     let boot = GuestBootV3 {
@@ -70,9 +63,7 @@ pub fn boot_json(input: &BootJsonInput<'_>) -> Result<BootJson> {
         mode: input.mode,
         spec,
     };
-    let bytes = serde_json::to_vec(&boot).context("serialize boot.json")?;
-    let sha256 = base16ct::lower::encode_string(&Sha256::digest(&bytes));
-    Ok(BootJson { bytes, sha256 })
+    serde_json::to_vec(&boot).context("serialize boot.json")
 }
 
 pub fn write_runtime_disk(path: &Path, boot_json: &[u8], kino: &[u8]) -> Result<()> {
@@ -161,7 +152,7 @@ mod tests {
         closed.ssh_enabled = false;
         for keys in [&[][..], &broken[..]] {
             closed.ssh_authorized_keys_openssh = keys;
-            let boot: GuestBootV3 = serde_json::from_slice(&boot_json(&closed)?.bytes)?;
+            let boot: GuestBootV3 = serde_json::from_slice(&boot_json(&closed)?)?;
             assert!(!boot.ssh.enabled && boot.ssh.authorized_keys.is_empty());
         }
         Ok(())
@@ -202,7 +193,7 @@ mod tests {
         let keys = vec![format!("  {KEY}  "), KEY.to_owned()];
 
         let closed = boot_json(&input(&network, &peers, &keys, &spec, false))?;
-        let boot: GuestBootV3 = serde_json::from_slice(&closed.bytes)?;
+        let boot: GuestBootV3 = serde_json::from_slice(&closed)?;
         assert_eq!(boot.contract, GUEST_CONTRACT);
         assert_eq!(boot.hostname, "web");
         assert_eq!(boot.network.ip_cidr, "10.200.0.2/28");
@@ -213,15 +204,10 @@ mod tests {
         assert!(boot.ssh.enabled && boot.root_resize);
         assert_eq!(boot.mode, SpecMode::Learn);
         assert_eq!(boot.spec.machine, "web");
-        assert_eq!(
-            closed.sha256,
-            base16ct::lower::encode_string(&Sha256::digest(&closed.bytes))
-        );
 
         let open = boot_json(&input(&network, &peers, &keys, &spec, true))?;
-        let boot: GuestBootV3 = serde_json::from_slice(&open.bytes)?;
+        let boot: GuestBootV3 = serde_json::from_slice(&open)?;
         assert_eq!(boot.network.dns, network.dns);
-        assert_ne!(open.sha256, closed.sha256);
         Ok(())
     }
 

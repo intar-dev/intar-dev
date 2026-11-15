@@ -17,9 +17,7 @@ fn test_vm_row() -> VmRow {
         state: "running".to_string(),
         image: Some(format!("sha256:{}", "1".repeat(64))),
         kino: Some(format!("sha256:{}", "2".repeat(64))),
-        boot_sha256: Some("3".repeat(64)),
         machine_name: Some("web".to_string()),
-        start_json: None,
         created_at_s: 100,
         updated_at_s: 200,
         running_at_s: Some(150),
@@ -115,7 +113,6 @@ fn upsert_vm_persists_row_with_ssh_public_port() {
     assert_eq!(rows[0].name, "vm-1");
     assert_eq!(rows[0].image, row.image);
     assert_eq!(rows[0].kino, row.kino);
-    assert_eq!(rows[0].boot_sha256, row.boot_sha256);
     assert_eq!(rows[0].ssh_public_port, Some(22001));
     assert_eq!(rows[0].guest_ip_cidr.as_deref(), Some("10.200.0.2/28"));
     assert_eq!(rows[0].gateway.as_deref(), Some("10.200.0.1"));
@@ -162,7 +159,7 @@ PRAGMA user_version = 8;
     assert_eq!(version, STATE_SCHEMA_VERSION);
     assert!(load_all_vms(&conn).expect("load vms").is_empty());
     assert!(!table_has_column(&conn, "image_cache_access", "image_key").expect("inspect"));
-    assert!(table_has_column(&conn, "vms", "boot_sha256").expect("inspect"));
+    assert!(table_has_column(&conn, "vms", "machine_name").expect("inspect"));
     assert_eq!(
         load_pending_teardowns(&conn).expect("queued teardowns"),
         vec![

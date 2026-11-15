@@ -137,15 +137,9 @@ pub(super) fn ensure_schema(conn: &mut Connection) -> Result<()> {
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .context("read sqlite schema marker")?;
     if version == STATE_SCHEMA_VERSION {
-        conn.execute_batch(&format!("{BASELINE_SCHEMA_SQL}{CACHE_STATE_SCHEMA_SQL}"))
-            .context("apply sqlite schema")?;
-        // Added within this version: a nullable column an older agent of
-        // the same version neither reads nor writes.
-        if !table_has_column(conn, "vms", "start_json")? {
-            conn.execute_batch("ALTER TABLE vms ADD COLUMN start_json TEXT;")
-                .context("add vms.start_json")?;
-        }
-        return Ok(());
+        return conn
+            .execute_batch(&format!("{BASELINE_SCHEMA_SQL}{CACHE_STATE_SCHEMA_SQL}"))
+            .context("apply sqlite schema");
     }
     let transaction = conn.transaction().context("begin sqlite schema reset")?;
     let legacy = legacy_vms(&transaction)?;
@@ -252,7 +246,6 @@ SELECT
   state,
   image,
   kino,
-  boot_sha256,
   created_at_s,
   updated_at_s,
   running_at_s,
@@ -290,8 +283,7 @@ SELECT
   owner_user_id,
   runtime_execution_id,
   generation,
-  machine_name,
-  start_json
+  machine_name
 FROM vms
 ORDER BY created_at_s ASC;
 "#,
@@ -305,46 +297,44 @@ ORDER BY created_at_s ASC;
                 state: row.get(1)?,
                 image: row.get(2)?,
                 kino: row.get(3)?,
-                boot_sha256: row.get(4)?,
-                created_at_s: row.get(5)?,
-                updated_at_s: row.get(6)?,
-                running_at_s: row.get(7)?,
-                error: row.get(8)?,
-                root_disk_path: row.get(9)?,
-                seed_disk_path: row.get(10)?,
-                mac: row.get(11)?,
-                lease_duration_seconds: row.get(12)?,
-                guest_ip: row.get(13)?,
-                guest_ip_cidr: row.get(14)?,
-                gateway: row.get(15)?,
-                bridge_name: row.get(16)?,
-                ssh_public_port: row.get(17)?,
-                tap_name: row.get(18)?,
-                ch_socket_path: row.get(19)?,
-                ch_pid: row.get(20)?,
-                ch_start_time_ticks: row.get(21)?,
-                host_boot_id: row.get(22)?,
-                jail_generation: row.get(23)?,
-                jail_unit_name: row.get(24)?,
-                jail_cgroup_path: row.get(25)?,
-                jail_root_path: row.get(26)?,
-                jail_root_inode: row.get(27)?,
-                jail_uid: row.get(28)?,
-                jail_gid: row.get(29)?,
-                jail_netns_name: row.get(30)?,
-                kino_vsock_cid: row.get(31)?,
-                kino_vsock_path: row.get(32)?,
-                ssh_host_keys_openssh_json: row.get(33)?,
-                run_id: row.get(34)?,
-                recording_disk_path: row.get(35)?,
-                spool_dir: row.get(36)?,
-                cpu_millis: row.get(37)?,
-                ch_executable_sha256: row.get(38)?,
-                owner_user_id: row.get(39)?,
-                runtime_execution_id: row.get(40)?,
-                generation: row.get(41)?,
-                machine_name: row.get(42)?,
-                start_json: row.get(43)?,
+                created_at_s: row.get(4)?,
+                updated_at_s: row.get(5)?,
+                running_at_s: row.get(6)?,
+                error: row.get(7)?,
+                root_disk_path: row.get(8)?,
+                seed_disk_path: row.get(9)?,
+                mac: row.get(10)?,
+                lease_duration_seconds: row.get(11)?,
+                guest_ip: row.get(12)?,
+                guest_ip_cidr: row.get(13)?,
+                gateway: row.get(14)?,
+                bridge_name: row.get(15)?,
+                ssh_public_port: row.get(16)?,
+                tap_name: row.get(17)?,
+                ch_socket_path: row.get(18)?,
+                ch_pid: row.get(19)?,
+                ch_start_time_ticks: row.get(20)?,
+                host_boot_id: row.get(21)?,
+                jail_generation: row.get(22)?,
+                jail_unit_name: row.get(23)?,
+                jail_cgroup_path: row.get(24)?,
+                jail_root_path: row.get(25)?,
+                jail_root_inode: row.get(26)?,
+                jail_uid: row.get(27)?,
+                jail_gid: row.get(28)?,
+                jail_netns_name: row.get(29)?,
+                kino_vsock_cid: row.get(30)?,
+                kino_vsock_path: row.get(31)?,
+                ssh_host_keys_openssh_json: row.get(32)?,
+                run_id: row.get(33)?,
+                recording_disk_path: row.get(34)?,
+                spool_dir: row.get(35)?,
+                cpu_millis: row.get(36)?,
+                ch_executable_sha256: row.get(37)?,
+                owner_user_id: row.get(38)?,
+                runtime_execution_id: row.get(39)?,
+                generation: row.get(40)?,
+                machine_name: row.get(41)?,
             })
         })
         .context("query load_all_vms")?;
@@ -361,7 +351,6 @@ INSERT INTO vms (
   state,
   image,
   kino,
-  boot_sha256,
   created_at_s,
   updated_at_s,
   running_at_s,
@@ -399,16 +388,14 @@ INSERT INTO vms (
   owner_user_id,
   runtime_execution_id,
   generation,
-  machine_name,
-  start_json
+  machine_name
 ) VALUES (
-  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42
 )
 ON CONFLICT(name) DO UPDATE SET
   state = excluded.state,
   image = excluded.image,
   kino = excluded.kino,
-  boot_sha256 = excluded.boot_sha256,
   created_at_s = excluded.created_at_s,
   updated_at_s = excluded.updated_at_s,
   running_at_s = excluded.running_at_s,
@@ -446,15 +433,13 @@ ON CONFLICT(name) DO UPDATE SET
   owner_user_id = excluded.owner_user_id,
   runtime_execution_id = excluded.runtime_execution_id,
   generation = excluded.generation,
-  machine_name = excluded.machine_name,
-  start_json = excluded.start_json;
+  machine_name = excluded.machine_name;
 "#,
         params![
             row.name,
             row.state,
             row.image,
             row.kino,
-            row.boot_sha256,
             row.created_at_s,
             row.updated_at_s,
             row.running_at_s,
@@ -493,7 +478,6 @@ ON CONFLICT(name) DO UPDATE SET
             row.runtime_execution_id,
             row.generation,
             row.machine_name,
-            row.start_json,
         ],
     )
     .context("upsert vms row")?;

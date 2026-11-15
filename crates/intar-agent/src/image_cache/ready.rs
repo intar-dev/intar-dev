@@ -5,10 +5,7 @@ use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 
 use intar_contracts::guest::GUEST_CONTRACT;
-use intar_contracts::oci::{IMAGE_FORMAT, MachineConfigV1, OciManifestV1, WakeV1};
-use intar_jailer_protocol::{WAKE_CPU_PROFILE_FILE, WAKE_RAM_FILE, WAKE_STUB_FILE, WakeArtifacts};
-
-use crate::config::WakeConfig;
+use intar_contracts::oci::{IMAGE_FORMAT, MachineConfigV1, OciManifestV1};
 
 use super::*;
 
@@ -32,9 +29,6 @@ struct ReadyDescriptorV2 {
     cmdline: String,
     disk_size_bytes: u64,
     prepared_image: PreparedImageV3Result,
-    /// The image's suspended guest, whether or not it was prepared.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    wake: Option<WakeV1>,
 }
 
 /// A prepared image a VM can launch from.
@@ -44,42 +38,6 @@ pub(crate) struct ReadyImage {
     pub(crate) cmdline: String,
     pub(crate) disk_size_bytes: u64,
     pub(crate) prepared_image: PreparedImageV3Result,
-    /// The machine config's `wake`; `prepared_image.wake` says whether its
-    /// files were prepared.
-    pub(crate) wake: Option<WakeV1>,
-}
-
-/// Whether this host wants an image's suspended guest prepared: wake is on
-/// and the image's CPU profile is one the operator pinned here.
-pub(super) fn wants_wake(wake: &WakeConfig, config: &MachineConfigV1) -> bool {
-    wake.enabled
-        && config
-            .wake
-            .as_ref()
-            .is_some_and(|image| wake.profiles.contains(&image.cpu_profile))
-}
-
-/// jailerd's wake descriptors of an image: its own template files, the RAM
-/// writable, each with a digest.
-pub(crate) fn check_prepared_wake(image_hex: &str, wake: &WakeArtifacts) -> Result<()> {
-    for (source, file_name, access) in [
-        (&wake.ram, WAKE_RAM_FILE, ArtifactAccess::ReadWrite),
-        (&wake.stub, WAKE_STUB_FILE, ArtifactAccess::ReadOnly),
-        (
-            &wake.cpu_profile,
-            WAKE_CPU_PROFILE_FILE,
-            ArtifactAccess::ReadOnly,
-        ),
-    ] {
-        anyhow::ensure!(
-            source.source_root == PREPARED_IMAGE_SOURCE_ROOT
-                && source.relative_path == PathBuf::from(image_hex).join(file_name)
-                && source.sha256.is_some()
-                && source.access == access,
-            "prepared wake {file_name} source mismatch"
-        );
-    }
-    Ok(())
 }
 
 fn descriptor_path(cache_root: &Path, image: &OciDigest) -> PathBuf {
@@ -117,7 +75,6 @@ pub(crate) async fn mark_template_ready(
         cmdline: pulled.config.boot.cmdline.clone(),
         disk_size_bytes: pulled.config.disk.size_bytes,
         prepared_image: prepared.clone(),
-        wake: pulled.config.wake.clone(),
     };
     validate_descriptor(&pulled.image, descriptor.clone())?;
     let path = descriptor_path(cache_root, &pulled.image);
@@ -148,27 +105,6 @@ pub(crate) fn is_image_ready(cache_root: &Path, image: &OciDigest) -> bool {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .is_some_and(|descriptor| validate_descriptor(image, descriptor).is_ok())
-}
-
-/// Whether the cache pass has work for a pinned image: it is not ready, or
-/// this host wants its suspended guest, which was not prepared and no
-/// recorded failure holds off (`wake_failure_holds`).
-pub(super) fn needs_prepare(cache_root: &Path, image: &OciDigest, wake: &WakeConfig) -> bool {
-    let ready = std::fs::read(descriptor_path(cache_root, image))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .and_then(|descriptor| validate_descriptor(image, descriptor).ok());
-    match ready {
-        None => true,
-        Some(ready) => {
-            ready.prepared_image.wake.is_none()
-                && wake.enabled
-                && ready
-                    .wake
-                    .is_some_and(|guest| wake.profiles.contains(&guest.cpu_profile))
-                && !wake_prepare_held(image)
-        }
-    }
 }
 
 fn validate_descriptor(image: &OciDigest, descriptor: ReadyDescriptorV2) -> Result<ReadyImage> {
@@ -210,19 +146,11 @@ fn validate_descriptor(image: &OciDigest, descriptor: ReadyDescriptorV2) -> Resu
         (None, None) => {}
         _ => anyhow::bail!("prepared image initrd shape mismatch"),
     }
-    if let Some(wake) = &prepared.wake {
-        anyhow::ensure!(
-            descriptor.wake.is_some(),
-            "prepared wake files of an image without a suspended guest"
-        );
-        check_prepared_wake(image.hex(), wake)?;
-    }
     Ok(ReadyImage {
         image: descriptor.image,
         cmdline: descriptor.cmdline,
         disk_size_bytes: descriptor.disk_size_bytes,
         prepared_image: descriptor.prepared_image,
-        wake: descriptor.wake,
     })
 }
 
@@ -329,65 +257,4 @@ pub(crate) fn image_failure_state(image: &OciDigest) -> Option<(String, bool)> {
     let failures = image_failures().lock().ok()?;
     let failure = failures.get(image)?;
     Some((failure.message.clone(), failure.definitive))
-}
-
-/// Whether an image's suspended guest failed for good, and when it failed.
-/// The refresh pass logs why.
-struct WakeFailure {
-    definitive: bool,
-    at: Instant,
-}
-
-fn wake_prepare_failures() -> &'static StdMutex<HashMap<OciDigest, WakeFailure>> {
-    static FAILURES: OnceLock<StdMutex<HashMap<OciDigest, WakeFailure>>> = OnceLock::new();
-    FAILURES.get_or_init(Default::default)
-}
-
-/// How long the pass leaves a suspended guest that failed for a reason a
-/// retry can fix: one scrub interval, so the next timed pass tries again.
-const WAKE_PREPARE_RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
-
-/// Keep that an image's suspended guest could not be prepared. The image
-/// was prepared without it. A definitive failure is not tried again until a
-/// restart; any other one after `WAKE_PREPARE_RETRY_AFTER`.
-pub(super) fn record_wake_prepare_failure(image: &OciDigest, error: &anyhow::Error) {
-    if let Ok(mut failures) = wake_prepare_failures().lock() {
-        failures.insert(
-            image.clone(),
-            WakeFailure {
-                definitive: is_definitive_failure(error),
-                at: Instant::now(),
-            },
-        );
-    }
-}
-
-/// Forget a suspended guest's failure once it is prepared.
-pub(super) fn clear_wake_prepare_failure(image: &OciDigest) {
-    if let Ok(mut failures) = wake_prepare_failures().lock() {
-        failures.remove(image);
-    }
-}
-
-#[cfg(test)]
-pub(super) fn wake_prepare_recorded(image: &OciDigest) -> bool {
-    wake_prepare_failures()
-        .lock()
-        .is_ok_and(|failures| failures.contains_key(image))
-}
-
-/// Whether a recorded failure still holds the pass off the suspended guest.
-fn wake_prepare_held(image: &OciDigest) -> bool {
-    wake_prepare_failures()
-        .lock()
-        .ok()
-        .and_then(|failures| {
-            let failure = failures.get(image)?;
-            Some(wake_failure_holds(failure.definitive, failure.at.elapsed()))
-        })
-        .unwrap_or(false)
-}
-
-pub(super) fn wake_failure_holds(definitive: bool, age: Duration) -> bool {
-    definitive || age < WAKE_PREPARE_RETRY_AFTER
 }
