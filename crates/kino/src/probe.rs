@@ -686,7 +686,7 @@ struct ServiceProbe {
 
 impl ServiceProbe {
     async fn run(&self) -> ProbeRunResult {
-        let mut command = Command::new("systemctl");
+        let mut command = Command::new("/usr/bin/systemctl");
         match self.state {
             ServiceState::Running | ServiceState::Stopped => {
                 command.args(["is-active", &self.service]);

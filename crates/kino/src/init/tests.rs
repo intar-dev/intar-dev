@@ -436,3 +436,42 @@ fn only_an_inactive_or_unknown_unit_skips_its_restart() {
     assert!(is_active("u", Some(1)).is_err());
     assert!(is_active("u", None).is_err());
 }
+
+/// Each literal program name a `run`, `exit_code` or `Command::new` call
+/// in `source` passes: a bare one is resolved through PATH.
+fn bare_programs(source: &str) -> Vec<String> {
+    let mut bare = Vec::new();
+    for call in ["run(", "exit_code(", "Command::new("] {
+        for (at, _) in source.match_indices(call) {
+            let rest = source[at + call.len()..].trim_start();
+            if let Some(literal) = rest.strip_prefix('"') {
+                let name = literal.split('"').next().unwrap_or_default();
+                if !name.starts_with('/') {
+                    bare.push(name.to_owned());
+                }
+            }
+        }
+    }
+    bare
+}
+
+#[test]
+fn pid_one_runs_every_system_program_by_absolute_path() {
+    for program in boot::PROGRAMS {
+        assert!(
+            program.starts_with("/usr/bin/") || program.starts_with("/usr/sbin/"),
+            "{program}"
+        );
+    }
+    for (file, source) in [
+        ("init/boot.rs", include_str!("boot.rs")),
+        ("init.rs", include_str!("../init.rs")),
+        ("probe.rs", include_str!("../probe.rs")),
+    ] {
+        assert_eq!(bare_programs(source), Vec::<String>::new(), "{file}");
+    }
+    assert_eq!(
+        bare_programs("run(\n    \"systemctl\", &[])"),
+        vec!["systemctl".to_owned()]
+    );
+}

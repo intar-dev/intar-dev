@@ -27,6 +27,26 @@ pub(crate) const RECORDING_DIR: &str = "/var/lib/kino-recordings";
 const RUN_CLI_BROKER: &str = "/run/intar/run-cli-broker";
 const HOST_KEY: &str = "/etc/ssh/ssh_host_ed25519_key";
 
+/// Every program PID 1 runs, by absolute path where usr-merged Debian
+/// installs it: PATH puts /usr/local first, so a bare name could run a
+/// binary the scenario's own content put there.
+pub(crate) const SYSTEMCTL: &str = "/usr/bin/systemctl";
+pub(crate) const IP: &str = "/usr/bin/ip";
+pub(crate) const HOSTNAME: &str = "/usr/bin/hostname";
+pub(crate) const INSTALL: &str = "/usr/bin/install";
+pub(crate) const CHOWN: &str = "/usr/bin/chown";
+pub(crate) const CHMOD: &str = "/usr/bin/chmod";
+pub(crate) const ID: &str = "/usr/bin/id";
+pub(crate) const SSH_KEYGEN: &str = "/usr/bin/ssh-keygen";
+pub(crate) const SSHD: &str = "/usr/sbin/sshd";
+pub(crate) const RESIZE2FS: &str = "/usr/sbin/resize2fs";
+pub(crate) const MOUNT: &str = "/usr/bin/mount";
+pub(crate) const SETPRIV: &str = "/usr/bin/setpriv";
+#[cfg(test)]
+pub(crate) const PROGRAMS: &[&str] = &[
+    SYSTEMCTL, IP, HOSTNAME, INSTALL, CHOWN, CHMOD, ID, SSH_KEYGEN, SSHD, RESIZE2FS, MOUNT, SETPRIV,
+];
+
 /// Uptime in ms, the guest-side clock for `timings_ms`.
 fn uptime_ms() -> u64 {
     std::fs::read_to_string("/proc/uptime")
@@ -72,7 +92,7 @@ pub(crate) async fn bring_up(
     recording?;
     mark(report, Phase::Booting, "network_ssh_prepared");
     if boot.root_resize {
-        run("resize2fs", &[ROOT_DEVICE]).await?;
+        run(RESIZE2FS, &[ROOT_DEVICE]).await?;
     }
     write(RUN_CLI_BROKER, &format!("vsock://2:{RUN_CLI_PORT}\n"))?;
     if ssh {
@@ -107,7 +127,7 @@ pub(crate) async fn release_lab(
     let (pid1, ()) = tokio::join!(pid1, fallback);
     pid1?;
     // Not waiting for the units: the ready scripts say when the lab is up.
-    if let Err(error) = run("systemctl", &["start", "--no-block", "intar-lab.target"]).await {
+    if let Err(error) = run(SYSTEMCTL, &["start", "--no-block", "intar-lab.target"]).await {
         eprintln!("kino init: lab release: {error}");
     }
     mark(report, Phase::Preparing, "lab_released");
@@ -122,7 +142,7 @@ pub(crate) const REEXEC_BOUND: Duration = Duration::from_secs(30);
 /// its `%m` and its `GetMachineId` are the image's. Run after `SSH_READY`, so
 /// the learner does not wait for it.
 pub(crate) async fn reexec_pid1(report: watch::Sender<Report>) -> Result<(), String> {
-    let done = tokio::time::timeout(REEXEC_BOUND, run("systemctl", &["daemon-reexec"]))
+    let done = tokio::time::timeout(REEXEC_BOUND, run(SYSTEMCTL, &["daemon-reexec"]))
         .await
         .ok();
     reexec_outcome(done)?;
@@ -221,9 +241,9 @@ async fn renew_machine_id(boot_sha256: &str, report: &watch::Sender<Report>) -> 
         match step {
             IdStep::Write(path) => write_id(path, &id)?,
             IdStep::RestartIfActive(unit) => {
-                let code = exit_code("systemctl", &["is-active", "--quiet", unit]).await?;
+                let code = exit_code(SYSTEMCTL, &["is-active", "--quiet", unit]).await?;
                 if is_active(unit, code)? {
-                    run("systemctl", &["restart", unit]).await?;
+                    run(SYSTEMCTL, &["restart", unit]).await?;
                 }
             }
             IdStep::PruneJournals => prune_journals(&id)?,
@@ -314,19 +334,19 @@ async fn network(boot: &GuestBootV3, woken: bool) -> Result<(), String> {
         .collect();
     let _ = std::fs::remove_file("/etc/resolv.conf");
     write("/etc/resolv.conf", &resolv)?;
-    run("hostname", &[hostname]).await?;
+    run(HOSTNAME, &[hostname]).await?;
     let deadline = tokio::time::Instant::now() + NETWORK_TIMEOUT;
     loop {
         let attempt = async {
             let iface = interface().ok_or("no network interface")?;
-            run("ip", &["link", "set", "dev", &iface, "up"]).await?;
+            run(IP, &["link", "set", "dev", &iface, "up"]).await?;
             if woken {
                 // The build's address is still on the interface.
-                run("ip", &["addr", "flush", "dev", &iface, "scope", "global"]).await?;
+                run(IP, &["addr", "flush", "dev", &iface, "scope", "global"]).await?;
             }
-            run("ip", &["addr", "replace", &net.ip_cidr, "dev", &iface]).await?;
+            run(IP, &["addr", "replace", &net.ip_cidr, "dev", &iface]).await?;
             run(
-                "ip",
+                IP,
                 &[
                     "route",
                     "replace",
@@ -368,7 +388,7 @@ fn interface() -> Option<String> {
 async fn prepare_ssh(boot: &GuestBootV3, woken: bool) -> Result<(), String> {
     let ssh_dir = format!("/home/{GUEST_USERNAME}/.ssh");
     run(
-        "install",
+        INSTALL,
         &[
             "-d",
             "-m",
@@ -387,11 +407,11 @@ async fn prepare_ssh(boot: &GuestBootV3, woken: bool) -> Result<(), String> {
         &format!("{}\n", boot.ssh.authorized_keys.join("\n")),
     )?;
     run(
-        "chown",
+        CHOWN,
         &[&format!("{GUEST_USERNAME}:{GUEST_USERNAME}"), &keys_path],
     )
     .await?;
-    run("chmod", &["0600", &keys_path]).await?;
+    run(CHMOD, &["0600", &keys_path]).await?;
     if woken {
         // Every run gets its own host key; this one is the image's.
         let _ = std::fs::remove_file(HOST_KEY);
@@ -399,7 +419,7 @@ async fn prepare_ssh(boot: &GuestBootV3, woken: bool) -> Result<(), String> {
     }
     if !Path::new(HOST_KEY).exists() {
         run(
-            "ssh-keygen",
+            SSH_KEYGEN,
             &["-q", "-t", "ed25519", "-N", "", "-f", HOST_KEY],
         )
         .await?;
@@ -412,14 +432,14 @@ async fn prepare_ssh(boot: &GuestBootV3, woken: bool) -> Result<(), String> {
 /// marker, start, and require the unit to be active.
 async fn start_sshd(woken: bool) -> Result<(), String> {
     std::fs::create_dir_all("/run/sshd").map_err(|error| format!("/run/sshd: {error}"))?;
-    run("/usr/sbin/sshd", &["-t"]).await?;
+    run(SSHD, &["-t"]).await?;
     write("/run/intar/ssh-ready", "")?;
     // A woken guest's sshd runs with the image's host key.
     let verb = if woken { "restart" } else { "start" };
-    tokio::time::timeout(SSH_START_TIMEOUT, run("systemctl", &[verb, "ssh.service"]))
+    tokio::time::timeout(SSH_START_TIMEOUT, run(SYSTEMCTL, &[verb, "ssh.service"]))
         .await
         .map_err(|_| "ssh.service did not start in time".to_owned())??;
-    run("systemctl", &["is-active", "--quiet", "ssh.service"]).await
+    run(SYSTEMCTL, &["is-active", "--quiet", "ssh.service"]).await
 }
 
 async fn recording_disk() -> Result<(), String> {
@@ -429,7 +449,7 @@ async fn recording_disk() -> Result<(), String> {
     let options =
         format!("rw,sync,dirsync,uid={uid},gid={gid},utf8=1,fmask=0117,dmask=0007,shortname=mixed");
     run(
-        "mount",
+        MOUNT,
         &[
             "-t",
             "vfat",
@@ -445,14 +465,14 @@ async fn recording_disk() -> Result<(), String> {
     );
     let (reuid, regid) = (format!("--reuid={uid}"), format!("--regid={gid}"));
     run(
-        "setpriv",
+        SETPRIV,
         &[&reuid, &regid, "--clear-groups", "/bin/sh", "-c", &canary],
     )
     .await
 }
 
 async fn id(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("id")
+    let output = Command::new(ID)
         .args(args)
         .output()
         .await
