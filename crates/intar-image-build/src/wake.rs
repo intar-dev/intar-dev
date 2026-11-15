@@ -13,7 +13,10 @@ use crate::qemu::PUBLISHED_BOOT_CMDLINE;
 
 /// One fixed shape for every base: what the guest is suspended with.
 pub const WAKE_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-pub const WAKE_BOOT_VCPUS: u32 = 2;
+/// One vCPU: a run's cgroup allows exactly the CPU it asked for, and a guest
+/// woken with more busy vCPUs than that is throttled. The agent adds vCPUs
+/// after the wake for a run that asks for more.
+pub const WAKE_BOOT_VCPUS: u32 = 1;
 pub const WAKE_MAX_VCPUS: u32 = 4;
 pub const WAKE_BALLOON: bool = true;
 /// The guest physical address width at build and wake.
