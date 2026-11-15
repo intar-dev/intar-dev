@@ -432,22 +432,9 @@ pub struct VmStateV3 {
     pub updated_at_unix_ms: i64,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VmStartPath {
-    Cold,
-    Wake,
-    /// A wake that did not report in time; the VM was cold-booted instead.
-    WakeFallback,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmStartV1 {
-    pub path: VmStartPath,
-    /// Why not a wake, or why the wake fell back; for operators.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
     /// From the VMM's start to Kino's first report for this run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_report_ms: Option<u64>,

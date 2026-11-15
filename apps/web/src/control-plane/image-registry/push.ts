@@ -7,9 +7,6 @@ import {
   KINO_ARTIFACT_TYPE,
   MACHINE_ARTIFACT_TYPE,
   MACHINE_CONFIG_MEDIA_TYPE,
-  WAKE_CPU_PROFILE_MEDIA_TYPE,
-  WAKE_RAM_CHUNK_MEDIA_TYPE,
-  WAKE_STUB_MEDIA_TYPE,
 } from "@/generated/constants";
 import validateManifest from "@/generated/contracts/oci-manifest-v1.validate";
 import validateMachineConfig from "@/generated/contracts/oci-machine-config-v1.validate";
@@ -44,9 +41,6 @@ const MACHINE_LAYER_MEDIA_TYPES = new Set([
   KERNEL_MEDIA_TYPE,
   INITRD_MEDIA_TYPE,
   DISK_CHUNK_MEDIA_TYPE,
-  WAKE_RAM_CHUNK_MEDIA_TYPE,
-  WAKE_STUB_MEDIA_TYPE,
-  WAKE_CPU_PROFILE_MEDIA_TYPE,
 ]);
 
 export function ociObjectKey(digest: string): string {

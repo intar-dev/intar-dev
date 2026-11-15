@@ -1313,22 +1313,6 @@
         "no_new_privs"
       ]
     },
-    "VmStartPath": {
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "cold",
-            "wake"
-          ]
-        },
-        {
-          "description": "A wake that did not report in time; the VM was cold-booted instead.",
-          "type": "string",
-          "const": "wake_fallback"
-        }
-      ]
-    },
     "VmStartV1": {
       "type": "object",
       "properties": {
@@ -1340,22 +1324,9 @@
           ],
           "format": "uint64",
           "minimum": 0
-        },
-        "path": {
-          "$ref": "#/$defs/VmStartPath"
-        },
-        "reason": {
-          "description": "Why not a wake, or why the wake fell back; for operators.",
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
-      "additionalProperties": false,
-      "required": [
-        "path"
-      ]
+      "additionalProperties": false
     },
     "VmStateV3": {
       "type": "object",

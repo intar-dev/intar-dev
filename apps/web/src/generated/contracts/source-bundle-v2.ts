@@ -61,10 +61,6 @@ export interface ImageV1 {
   from: string;
   name: string;
   setup: ScriptV1[];
-  /**
-   * Published with a suspended guest; a machine `from` it is a pack.
-   */
-  wake?: boolean;
 }
 /**
  * A named lowered bash script: a setup stage or a ready block.

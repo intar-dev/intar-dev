@@ -98,11 +98,6 @@ function imageGeometry(images: ImageV1[], problem: Problem): Map<string, number>
       problem(`image \`${name}\`: disk is over the ${MAX_DISK_MIB} MiB limit`);
     }
     checkScripts(`image \`${name}\` setup`, image.setup, problem);
-    if (images.some((parent) => parent.wake === true && parent.name === image.from)) {
-      problem(
-        `image \`${name}\`: from the wake image \`${image.from}\`; only a machine can start from a wake image`,
-      );
-    }
   }
   const edges = new Map([...byName].map(([name, image]) => [name, [image.from]]));
   const looped = cycleMember(edges);

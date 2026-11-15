@@ -3,11 +3,11 @@
 "use strict";
 export const validate = validate20;
 export default validate20;
-const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"BridgeMessageV9","oneOf":[{"type":"object","properties":{"agent_version":{"type":"string"},"builder":{"description":"What a builder builds and compiles for; absent on an agent.","anyOf":[{"$ref":"#/$defs/BuilderHelloV1"},{"type":"null"}]},"guest_contract":{"description":"Picks the host's Kino and gates placement.","type":"integer","minimum":0,"maximum":4294967295},"hardware":{"$ref":"#/$defs/HostHardwareV1"},"host_id":{"type":"string"},"last_applied_desired_version":{"type":["integer","null"],"minimum":0},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"role":{"$ref":"#/$defs/HostRoleV1"},"type":{"type":"string","const":"client_hello"}},"additionalProperties":false,"required":["type","protocol_version","host_id","agent_version","role","guest_contract","hardware"]},{"type":"object","properties":{"desired_version":{"type":"integer","minimum":0},"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"relay":{"anyOf":[{"$ref":"#/$defs/HostRelayCredentials"},{"type":"null"}]},"session_id":{"type":"string"},"type":{"type":"string","const":"server_hello"}},"additionalProperties":false,"required":["type","session_id","protocol_version","host_id","desired_version"]},{"type":"object","properties":{"desired_state":{"$ref":"#/$defs/HostDesiredStateV3"},"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"relay":{"anyOf":[{"$ref":"#/$defs/HostRelayCredentials"},{"type":"null"}]},"type":{"type":"string","const":"desired_state"}},"additionalProperties":false,"required":["type","protocol_version","host_id","desired_state"]},{"type":"object","properties":{"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"report":{"$ref":"#/$defs/HostStateReportV3"},"type":{"type":"string","const":"state_report"}},"additionalProperties":false,"required":["type","protocol_version","host_id","report"]},{"type":"object","properties":{"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"report":{"$ref":"#/$defs/VmReportV3"},"type":{"type":"string","const":"vm_report"}},"additionalProperties":false,"required":["type","protocol_version","host_id","report"]},{"type":"object","properties":{"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"report":{"$ref":"#/$defs/BuildReportV2"},"type":{"type":"string","const":"build_report"}},"additionalProperties":false,"required":["type","protocol_version","host_id","report"]},{"type":"object","properties":{"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"reason":{"$ref":"#/$defs/SyncRequestReason"},"type":{"type":"string","const":"sync_request"}},"additionalProperties":false,"required":["type","protocol_version","host_id","reason"]}],"$defs":{"BuildPhaseV2":{"type":"string","enum":["queued","fetching_sources","building","pushing","succeeded","failed"]},"BuildReportV2":{"description":"One build's state, sent as soon as it changes. `image_digest` is the\npushed manifest, present exactly when the build succeeded.","type":"object","properties":{"attempt":{"type":"integer","minimum":0,"maximum":4294967295},"build_id":{"type":"string"},"build_key":{"$ref":"#/$defs/OciDigest"},"error":{"type":["string","null"]},"finished_at_unix_ms":{"type":["integer","null"]},"image_digest":{"anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"observed_at_unix_ms":{"type":"integer"},"phase":{"$ref":"#/$defs/BuildPhaseV2"},"started_at_unix_ms":{"type":["integer","null"]}},"additionalProperties":false,"required":["build_id","build_key","attempt","phase","observed_at_unix_ms"]},"BuildTargetV1":{"description":"What a build builds: a repository image (`trixie` is the platform base)\nor a scenario's machine.","oneOf":[{"type":"object","properties":{"kind":{"type":"string","const":"image"},"name":{"type":"string"}},"additionalProperties":false,"required":["kind","name"]},{"type":"object","properties":{"kind":{"type":"string","const":"machine"},"machine":{"type":"string"},"scenario":{"type":"string"}},"additionalProperties":false,"required":["kind","scenario","machine"]}]},"BuilderHelloV1":{"description":"A builder is assigned only builds of its `image_format` and compiles of\nits `source_compile_digest`.","type":"object","properties":{"image_format":{"type":"string"},"source_compile_digest":{"description":"`source_compile_digest(image_format, compiler version)`.","type":"string"}},"additionalProperties":false,"required":["image_format","source_compile_digest"]},"CachedImageStateV2":{"type":"object","properties":{"bytes_on_disk":{"type":["integer","null"],"minimum":0},"error":{"type":["string","null"]},"image":{"$ref":"#/$defs/OciDigest"},"phase":{"$ref":"#/$defs/ImageCachePhase"},"updated_at_unix_ms":{"type":"integer"}},"additionalProperties":false,"required":["image","phase","updated_at_unix_ms"]},"CheckStatus":{"type":"string","enum":["pending","pass","fail","error"]},"DesiredBuildV2":{"description":"One image to build out of a stored bundle, and push.","type":"object","properties":{"attempt":{"type":"integer","minimum":1,"maximum":4294967295},"build_id":{"type":"string"},"build_key":{"description":"The key the builder recomputes from the bundle; a mismatch refuses\nthe build.","$ref":"#/$defs/OciDigest"},"bundle_rev":{"type":"string"},"target":{"$ref":"#/$defs/BuildTargetV1"}},"additionalProperties":false,"required":["build_id","build_key","bundle_rev","target","attempt"]},"DesiredSourceCompileV2":{"description":"One repository snapshot to compile into a bundle, or only validate.","type":"object","properties":{"attempt":{"type":"integer","minimum":1,"maximum":4294967295},"compile_id":{"type":"string"},"rev":{"type":"string"},"validate_only":{"type":"boolean"}},"additionalProperties":false,"required":["compile_id","attempt","rev","validate_only"]},"DesiredVmPhase":{"type":"string","enum":["running","absent"]},"DesiredVmV3":{"description":"One VM to run. It carries no address: the host allocates the run's\nnetwork.","type":"object","properties":{"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"desired_phase":{"$ref":"#/$defs/DesiredVmPhase"},"disk_mib":{"type":"integer","minimum":0,"maximum":4294967295},"egress":{"description":"Internet behind the floor; otherwise only the run's own network.","type":"boolean"},"generation":{"type":"integer","minimum":1},"image":{"description":"The machine image's manifest.","$ref":"#/$defs/OciDigest"},"kino":{"description":"The Kino manifest this run was pinned to at its start.","$ref":"#/$defs/OciDigest"},"lease_expires_at_unix_ms":{"type":"integer"},"memory_mib":{"type":"integer","minimum":0,"maximum":4294967295},"mode":{"$ref":"#/$defs/SpecMode"},"name":{"description":"The machine's name in its scenario.","type":"string"},"owner_user_id":{"type":"string"},"peers":{"description":"The run's other machines, by name.","type":"array","items":{"type":"string"}},"run_id":{"type":"string"},"runtime_execution_id":{"type":"string"},"spec":{"description":"The machine spec blob for `mode`.","$ref":"#/$defs/OciDigest"},"ssh_authorized_keys":{"type":"array","items":{"type":"string"}},"terminal":{"description":"False for a helper machine: no SSH, no recording disk.","type":"boolean"},"vm_id":{"type":"string"}},"additionalProperties":false,"required":["vm_id","name","run_id","runtime_execution_id","owner_user_id","generation","desired_phase","lease_expires_at_unix_ms","image","kino","spec","mode","cpu_millis","memory_mib","disk_mib","peers","ssh_authorized_keys","terminal","egress"]},"HostCapacityV2":{"type":"object","properties":{"committed_cpu_millis":{"type":"integer","minimum":0,"maximum":4294967295},"disk_available_mib":{"type":"integer","minimum":0,"maximum":4294967295},"disk_probe_path":{"description":"Filesystem the disk figures were probed on (the VM/image data root).","type":"string"},"disk_total_mib":{"type":"integer","minimum":0,"maximum":4294967295},"load_avg_15m":{"type":["number","null"]},"load_avg_1m":{"type":["number","null"]},"load_avg_5m":{"type":["number","null"]},"memory_available_mib":{"type":"integer","minimum":0,"maximum":4294967295},"memory_total_mib":{"type":"integer","minimum":0,"maximum":4294967295},"primary_ipv4":{"type":["string","null"]},"primary_ipv6":{"type":["string","null"]},"reserved_cpu_millis":{"type":"integer","minimum":0,"maximum":4294967295},"schedulable_cpu_millis":{"type":"integer","minimum":0,"maximum":4294967295},"total_cpu_millis":{"type":"integer","minimum":0,"maximum":4294967295}},"additionalProperties":false,"required":["total_cpu_millis","reserved_cpu_millis","schedulable_cpu_millis","committed_cpu_millis","memory_total_mib","memory_available_mib","disk_probe_path","disk_total_mib","disk_available_mib"]},"HostDesiredStateV3":{"type":"object","properties":{"builds":{"description":"Empty for an agent.","type":"array","items":{"$ref":"#/$defs/DesiredBuildV2"}},"cached_images":{"description":"Machine images to hold, by manifest digest.","type":"array","items":{"$ref":"#/$defs/OciDigest"}},"generated_at_unix_ms":{"type":"integer"},"host_id":{"type":"string"},"kino_pin":{"description":"The newest Kino of this host's guest contract; `None` when there is\nnone, and then the host is not placed.","anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"owner_user_id":{"type":"string"},"schema_version":{"type":"integer","maximum":7,"minimum":7},"scope":{"$ref":"#/$defs/HostScope"},"source_compiles":{"description":"Empty for an agent.","type":"array","items":{"$ref":"#/$defs/DesiredSourceCompileV2"}},"version":{"type":"integer","minimum":0},"vms":{"type":"array","items":{"$ref":"#/$defs/DesiredVmV3"}}},"additionalProperties":false,"required":["scope","owner_user_id","schema_version","host_id","version","generated_at_unix_ms","cached_images","vms","builds","source_compiles"]},"HostHardwareV1":{"description":"What the host can do. Facts only: no rollout switches.","type":"object","properties":{"cgroup_v2":{"type":"boolean"},"cloud_hypervisor_sha256":{"description":"Root-owned runtime identity. `None` means the host has no live\njailerd attestation and is never performance-ready.","type":["string","null"]},"hard_cpu_quota":{"type":"boolean"},"kvm":{"type":"boolean"},"landlock":{"type":"boolean"},"reflink":{"type":"boolean"},"vsock":{"type":"boolean"}},"additionalProperties":false,"required":["kvm","vsock","reflink","landlock","cgroup_v2","hard_cpu_quota"]},"HostRelayCredentials":{"type":"object","properties":{"expires_at_unix_ms":{"type":"integer"},"gateway_host_key_openssh":{"type":"string"},"identity":{"$ref":"#/$defs/HostRelayIdentity"},"token":{"type":"string"},"websocket_url":{"type":"string"}},"additionalProperties":false,"required":["websocket_url","token","gateway_host_key_openssh","identity","expires_at_unix_ms"]},"HostRelayIdentity":{"type":"object","properties":{"credential_generation":{"type":"integer","minimum":0},"host_id":{"type":"string"},"session_id":{"type":"string"}},"additionalProperties":false,"required":["host_id","session_id","credential_generation"]},"HostRoleV1":{"type":"string","enum":["agent","builder"]},"HostScope":{"type":"string","enum":["personal","platform","organization"]},"HostStateReportV3":{"type":"object","properties":{"applied_desired_version":{"type":"integer","minimum":0},"cached_images":{"type":"array","items":{"$ref":"#/$defs/CachedImageStateV2"}},"capacity":{"$ref":"#/$defs/HostCapacityV2"},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"hardware":{"$ref":"#/$defs/HostHardwareV1"},"host_id":{"type":"string"},"observed_at_unix_ms":{"type":"integer"},"relay_connected":{"type":"boolean"},"schema_version":{"type":"integer","maximum":8,"minimum":8},"vms":{"type":"array","items":{"$ref":"#/$defs/VmStateV3"}}},"additionalProperties":false,"required":["schema_version","host_id","observed_at_unix_ms","applied_desired_version","relay_connected","guest_contract","hardware","capacity","cached_images","vms"]},"ImageCachePhase":{"type":"string","enum":["missing","queued","downloading","ready","failed"]},"LabState":{"type":"string","enum":["preparing","ready","failed"]},"OciDigest":{"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"SpecMode":{"type":"string","enum":["learn","verify"]},"SyncRequestReason":{"type":"string","enum":["connect","reconnect","desired_version_lag","operator_requested"]},"VmArchivePhase":{"type":"string","enum":["none","pending","uploading","complete","failed"]},"VmArchiveStateV1":{"type":"object","properties":{"artifact_count":{"type":"integer","minimum":0,"maximum":4294967295},"error":{"type":["string","null"]},"phase":{"$ref":"#/$defs/VmArchivePhase"}},"additionalProperties":false,"required":["phase","artifact_count"]},"VmLabV1":{"description":"What Kino reported, re-truncated on the host. Only `tasks` is for\nlearners; tails and `failure` are for admins.","type":"object","properties":{"failure":{"type":["string","null"]},"kino_version":{"type":"string"},"ready":{"type":"array","items":{"$ref":"#/$defs/VmReadyV1"}},"state":{"$ref":"#/$defs/LabState"},"tasks":{"type":"array","items":{"$ref":"#/$defs/VmTaskV1"}},"timings_ms":{"description":"Guest uptime in ms at each step.","type":"object","additionalProperties":{"type":"integer","minimum":0}},"verify":{"anyOf":[{"$ref":"#/$defs/VmVerifyV1"},{"type":"null"}]}},"additionalProperties":false,"required":["state","kino_version","ready","tasks","timings_ms"]},"VmNetworkStateV1":{"type":"object","properties":{"bridge_name":{"type":"string"},"gateway":{"type":"string"},"guest_cidr":{"type":"string"},"guest_ip":{"type":"string"},"ssh_host":{"description":"Publicly routable address of the agent host's SSH forward for this VM\n(the agent's advertised host). The guest IP is only reachable within\nthe agent's internal VM network.","type":["string","null"]},"ssh_host_port":{"type":["integer","null"],"maximum":65535,"minimum":0}},"additionalProperties":false,"required":["bridge_name","guest_ip","guest_cidr","gateway"]},"VmPhaseV2":{"description":"`Ready` means SSH is up and a terminal can open; the lab's own state is\n`lab`. The host decides nothing about tasks.","type":"string","enum":["pending","pulling_image","creating_disks","booting","running","ready","stopping","stopped","failed","absent"]},"VmReadyV1":{"type":"object","properties":{"name":{"type":"string"},"status":{"$ref":"#/$defs/CheckStatus"},"tail":{"type":"string"}},"additionalProperties":false,"required":["name","status","tail"]},"VmReportV3":{"description":"A VM report is one VM's state, sent as soon as it changes.","type":"object","properties":{"host_id":{"type":"string"},"observed_at_unix_ms":{"type":"integer"},"schema_version":{"type":"integer","maximum":7,"minimum":7},"vm":{"$ref":"#/$defs/VmStateV3"}},"additionalProperties":false,"required":["schema_version","host_id","observed_at_unix_ms","vm"]},"VmResourceStateV3":{"type":"object","properties":{"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"cpu_nr_periods":{"type":"integer","minimum":0},"cpu_nr_throttled":{"type":"integer","minimum":0},"cpu_period_us":{"type":"integer","minimum":1},"cpu_quota_us":{"type":"integer","minimum":1},"cpu_system_usec":{"type":"integer","minimum":0},"cpu_throttled_usec":{"type":"integer","minimum":0},"cpu_usage_usec":{"type":"integer","minimum":0},"cpu_user_usec":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["cpu_millis","cpu_quota_us","cpu_period_us","cpu_usage_usec","cpu_user_usec","cpu_system_usec","cpu_nr_periods","cpu_nr_throttled","cpu_throttled_usec"]},"VmRuntimeConstraintsV2":{"type":"object","properties":{"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"generation":{"description":"Jailer-owned generation to which every quota and ingress attestation\nin this object applies. The breaking v2 contract never accepts\ngeneration-less quota evidence.","type":"string"},"quota_verified_at_unix_ms":{"description":"Timestamp of the authoritative live cgroup readback. Required by the\ncontrol plane before a verified runtime can expose a terminal.","type":["integer","null"]}},"additionalProperties":false,"required":["generation","cpu_millis"]},"VmSandboxStateV1":{"type":"object","properties":{"cgroup_path":{"type":"string"},"generation":{"type":"string"},"healthy":{"type":"boolean"},"landlock_enabled":{"type":"boolean"},"no_new_privs":{"type":"boolean"},"seccomp_enabled":{"type":"boolean"},"systemd_unit":{"type":"string"}},"additionalProperties":false,"required":["healthy","generation","systemd_unit","cgroup_path","seccomp_enabled","landlock_enabled","no_new_privs"]},"VmStartPath":{"oneOf":[{"type":"string","enum":["cold","wake"]},{"description":"A wake that did not report in time; the VM was cold-booted instead.","type":"string","const":"wake_fallback"}]},"VmStartV1":{"type":"object","properties":{"first_report_ms":{"description":"From the VMM's start to Kino's first report for this run.","type":["integer","null"],"minimum":0},"path":{"$ref":"#/$defs/VmStartPath"},"reason":{"description":"Why not a wake, or why the wake fell back; for operators.","type":["string","null"]}},"additionalProperties":false,"required":["path"]},"VmStateV3":{"type":"object","properties":{"archive":{"anyOf":[{"$ref":"#/$defs/VmArchiveStateV1"},{"type":"null"}]},"desired_version":{"type":["integer","null"],"minimum":0},"error":{"type":["string","null"]},"generation":{"type":"integer","minimum":1},"image":{"anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"kino":{"anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"lab":{"description":"Absent until Kino's first report for this run's `boot.json`.","anyOf":[{"$ref":"#/$defs/VmLabV1"},{"type":"null"}]},"name":{"type":"string"},"network":{"anyOf":[{"$ref":"#/$defs/VmNetworkStateV1"},{"type":"null"}]},"owner_user_id":{"type":"string"},"phase":{"$ref":"#/$defs/VmPhaseV2"},"resource_state":{"anyOf":[{"$ref":"#/$defs/VmResourceStateV3"},{"type":"null"}]},"run_id":{"type":"string"},"runtime_constraints":{"anyOf":[{"$ref":"#/$defs/VmRuntimeConstraintsV2"},{"type":"null"}]},"runtime_execution_id":{"type":"string"},"sandbox":{"anyOf":[{"$ref":"#/$defs/VmSandboxStateV1"},{"type":"null"}]},"ssh_host_keys_openssh":{"type":"array","items":{"type":"string"}},"start":{"description":"How the VM was started; absent until it was.","anyOf":[{"$ref":"#/$defs/VmStartV1"},{"type":"null"}]},"terminal":{"$ref":"#/$defs/VmTerminalStateV1"},"updated_at_unix_ms":{"type":"integer"}},"additionalProperties":false,"required":["owner_user_id","runtime_execution_id","generation","run_id","name","phase","terminal","ssh_host_keys_openssh","updated_at_unix_ms"]},"VmTaskV1":{"type":"object","properties":{"id":{"type":"string"},"message":{"type":"string"},"passed_at_unix_ms":{"type":["integer","null"],"minimum":0},"status":{"$ref":"#/$defs/CheckStatus"}},"additionalProperties":false,"required":["id","status","message"]},"VmTerminalStateKindV1":{"type":"string","enum":["pending","ready","failed"]},"VmTerminalStateV1":{"type":"object","properties":{"observed_at_unix_ms":{"type":"integer"},"reason":{"type":["string","null"]},"state":{"$ref":"#/$defs/VmTerminalStateKindV1"},"target":{"description":"Present only when `state` is `ready`.","anyOf":[{"$ref":"#/$defs/VmTerminalTargetV1"},{"type":"null"}]}},"additionalProperties":false,"required":["state","observed_at_unix_ms"]},"VmTerminalTargetV1":{"type":"object","properties":{"checked_at_unix_ms":{"type":"integer"},"host":{"type":"string"},"port":{"type":"integer","maximum":65535,"minimum":0},"username":{"type":"string"}},"additionalProperties":false,"required":["host","port","username","checked_at_unix_ms"]},"VmVerifyStepV1":{"type":"object","properties":{"duration_ms":{"type":"integer","minimum":0,"maximum":4294967295},"post":{"$ref":"#/$defs/CheckStatus"},"pre":{"$ref":"#/$defs/CheckStatus"},"solve_exit":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"tail":{"type":"string"},"task_id":{"type":"string"},"waiting_for":{"type":"array","items":{"type":"string"}}},"additionalProperties":false,"required":["task_id","pre","solve_exit","post","duration_ms","tail","waiting_for"]},"VmVerifyV1":{"type":"object","properties":{"done":{"type":"boolean"},"passed":{"type":"boolean"},"pre_done":{"type":"boolean"},"steps":{"type":"array","items":{"$ref":"#/$defs/VmVerifyStepV1"}}},"additionalProperties":false,"required":["steps","done","passed","pre_done"]}}};
+const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"BridgeMessageV9","oneOf":[{"type":"object","properties":{"agent_version":{"type":"string"},"builder":{"description":"What a builder builds and compiles for; absent on an agent.","anyOf":[{"$ref":"#/$defs/BuilderHelloV1"},{"type":"null"}]},"guest_contract":{"description":"Picks the host's Kino and gates placement.","type":"integer","minimum":0,"maximum":4294967295},"hardware":{"$ref":"#/$defs/HostHardwareV1"},"host_id":{"type":"string"},"last_applied_desired_version":{"type":["integer","null"],"minimum":0},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"role":{"$ref":"#/$defs/HostRoleV1"},"type":{"type":"string","const":"client_hello"}},"additionalProperties":false,"required":["type","protocol_version","host_id","agent_version","role","guest_contract","hardware"]},{"type":"object","properties":{"desired_version":{"type":"integer","minimum":0},"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"relay":{"anyOf":[{"$ref":"#/$defs/HostRelayCredentials"},{"type":"null"}]},"session_id":{"type":"string"},"type":{"type":"string","const":"server_hello"}},"additionalProperties":false,"required":["type","session_id","protocol_version","host_id","desired_version"]},{"type":"object","properties":{"desired_state":{"$ref":"#/$defs/HostDesiredStateV3"},"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"relay":{"anyOf":[{"$ref":"#/$defs/HostRelayCredentials"},{"type":"null"}]},"type":{"type":"string","const":"desired_state"}},"additionalProperties":false,"required":["type","protocol_version","host_id","desired_state"]},{"type":"object","properties":{"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"report":{"$ref":"#/$defs/HostStateReportV3"},"type":{"type":"string","const":"state_report"}},"additionalProperties":false,"required":["type","protocol_version","host_id","report"]},{"type":"object","properties":{"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"report":{"$ref":"#/$defs/VmReportV3"},"type":{"type":"string","const":"vm_report"}},"additionalProperties":false,"required":["type","protocol_version","host_id","report"]},{"type":"object","properties":{"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"report":{"$ref":"#/$defs/BuildReportV2"},"type":{"type":"string","const":"build_report"}},"additionalProperties":false,"required":["type","protocol_version","host_id","report"]},{"type":"object","properties":{"host_id":{"type":"string"},"protocol_version":{"type":"integer","maximum":9,"minimum":9},"reason":{"$ref":"#/$defs/SyncRequestReason"},"type":{"type":"string","const":"sync_request"}},"additionalProperties":false,"required":["type","protocol_version","host_id","reason"]}],"$defs":{"BuildPhaseV2":{"type":"string","enum":["queued","fetching_sources","building","pushing","succeeded","failed"]},"BuildReportV2":{"description":"One build's state, sent as soon as it changes. `image_digest` is the\npushed manifest, present exactly when the build succeeded.","type":"object","properties":{"attempt":{"type":"integer","minimum":0,"maximum":4294967295},"build_id":{"type":"string"},"build_key":{"$ref":"#/$defs/OciDigest"},"error":{"type":["string","null"]},"finished_at_unix_ms":{"type":["integer","null"]},"image_digest":{"anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"observed_at_unix_ms":{"type":"integer"},"phase":{"$ref":"#/$defs/BuildPhaseV2"},"started_at_unix_ms":{"type":["integer","null"]}},"additionalProperties":false,"required":["build_id","build_key","attempt","phase","observed_at_unix_ms"]},"BuildTargetV1":{"description":"What a build builds: a repository image (`trixie` is the platform base)\nor a scenario's machine.","oneOf":[{"type":"object","properties":{"kind":{"type":"string","const":"image"},"name":{"type":"string"}},"additionalProperties":false,"required":["kind","name"]},{"type":"object","properties":{"kind":{"type":"string","const":"machine"},"machine":{"type":"string"},"scenario":{"type":"string"}},"additionalProperties":false,"required":["kind","scenario","machine"]}]},"BuilderHelloV1":{"description":"A builder is assigned only builds of its `image_format` and compiles of\nits `source_compile_digest`.","type":"object","properties":{"image_format":{"type":"string"},"source_compile_digest":{"description":"`source_compile_digest(image_format, compiler version)`.","type":"string"}},"additionalProperties":false,"required":["image_format","source_compile_digest"]},"CachedImageStateV2":{"type":"object","properties":{"bytes_on_disk":{"type":["integer","null"],"minimum":0},"error":{"type":["string","null"]},"image":{"$ref":"#/$defs/OciDigest"},"phase":{"$ref":"#/$defs/ImageCachePhase"},"updated_at_unix_ms":{"type":"integer"}},"additionalProperties":false,"required":["image","phase","updated_at_unix_ms"]},"CheckStatus":{"type":"string","enum":["pending","pass","fail","error"]},"DesiredBuildV2":{"description":"One image to build out of a stored bundle, and push.","type":"object","properties":{"attempt":{"type":"integer","minimum":1,"maximum":4294967295},"build_id":{"type":"string"},"build_key":{"description":"The key the builder recomputes from the bundle; a mismatch refuses\nthe build.","$ref":"#/$defs/OciDigest"},"bundle_rev":{"type":"string"},"target":{"$ref":"#/$defs/BuildTargetV1"}},"additionalProperties":false,"required":["build_id","build_key","bundle_rev","target","attempt"]},"DesiredSourceCompileV2":{"description":"One repository snapshot to compile into a bundle, or only validate.","type":"object","properties":{"attempt":{"type":"integer","minimum":1,"maximum":4294967295},"compile_id":{"type":"string"},"rev":{"type":"string"},"validate_only":{"type":"boolean"}},"additionalProperties":false,"required":["compile_id","attempt","rev","validate_only"]},"DesiredVmPhase":{"type":"string","enum":["running","absent"]},"DesiredVmV3":{"description":"One VM to run. It carries no address: the host allocates the run's\nnetwork.","type":"object","properties":{"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"desired_phase":{"$ref":"#/$defs/DesiredVmPhase"},"disk_mib":{"type":"integer","minimum":0,"maximum":4294967295},"egress":{"description":"Internet behind the floor; otherwise only the run's own network.","type":"boolean"},"generation":{"type":"integer","minimum":1},"image":{"description":"The machine image's manifest.","$ref":"#/$defs/OciDigest"},"kino":{"description":"The Kino manifest this run was pinned to at its start.","$ref":"#/$defs/OciDigest"},"lease_expires_at_unix_ms":{"type":"integer"},"memory_mib":{"type":"integer","minimum":0,"maximum":4294967295},"mode":{"$ref":"#/$defs/SpecMode"},"name":{"description":"The machine's name in its scenario.","type":"string"},"owner_user_id":{"type":"string"},"peers":{"description":"The run's other machines, by name.","type":"array","items":{"type":"string"}},"run_id":{"type":"string"},"runtime_execution_id":{"type":"string"},"spec":{"description":"The machine spec blob for `mode`.","$ref":"#/$defs/OciDigest"},"ssh_authorized_keys":{"type":"array","items":{"type":"string"}},"terminal":{"description":"False for a helper machine: no SSH, no recording disk.","type":"boolean"},"vm_id":{"type":"string"}},"additionalProperties":false,"required":["vm_id","name","run_id","runtime_execution_id","owner_user_id","generation","desired_phase","lease_expires_at_unix_ms","image","kino","spec","mode","cpu_millis","memory_mib","disk_mib","peers","ssh_authorized_keys","terminal","egress"]},"HostCapacityV2":{"type":"object","properties":{"committed_cpu_millis":{"type":"integer","minimum":0,"maximum":4294967295},"disk_available_mib":{"type":"integer","minimum":0,"maximum":4294967295},"disk_probe_path":{"description":"Filesystem the disk figures were probed on (the VM/image data root).","type":"string"},"disk_total_mib":{"type":"integer","minimum":0,"maximum":4294967295},"load_avg_15m":{"type":["number","null"]},"load_avg_1m":{"type":["number","null"]},"load_avg_5m":{"type":["number","null"]},"memory_available_mib":{"type":"integer","minimum":0,"maximum":4294967295},"memory_total_mib":{"type":"integer","minimum":0,"maximum":4294967295},"primary_ipv4":{"type":["string","null"]},"primary_ipv6":{"type":["string","null"]},"reserved_cpu_millis":{"type":"integer","minimum":0,"maximum":4294967295},"schedulable_cpu_millis":{"type":"integer","minimum":0,"maximum":4294967295},"total_cpu_millis":{"type":"integer","minimum":0,"maximum":4294967295}},"additionalProperties":false,"required":["total_cpu_millis","reserved_cpu_millis","schedulable_cpu_millis","committed_cpu_millis","memory_total_mib","memory_available_mib","disk_probe_path","disk_total_mib","disk_available_mib"]},"HostDesiredStateV3":{"type":"object","properties":{"builds":{"description":"Empty for an agent.","type":"array","items":{"$ref":"#/$defs/DesiredBuildV2"}},"cached_images":{"description":"Machine images to hold, by manifest digest.","type":"array","items":{"$ref":"#/$defs/OciDigest"}},"generated_at_unix_ms":{"type":"integer"},"host_id":{"type":"string"},"kino_pin":{"description":"The newest Kino of this host's guest contract; `None` when there is\nnone, and then the host is not placed.","anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"owner_user_id":{"type":"string"},"schema_version":{"type":"integer","maximum":7,"minimum":7},"scope":{"$ref":"#/$defs/HostScope"},"source_compiles":{"description":"Empty for an agent.","type":"array","items":{"$ref":"#/$defs/DesiredSourceCompileV2"}},"version":{"type":"integer","minimum":0},"vms":{"type":"array","items":{"$ref":"#/$defs/DesiredVmV3"}}},"additionalProperties":false,"required":["scope","owner_user_id","schema_version","host_id","version","generated_at_unix_ms","cached_images","vms","builds","source_compiles"]},"HostHardwareV1":{"description":"What the host can do. Facts only: no rollout switches.","type":"object","properties":{"cgroup_v2":{"type":"boolean"},"cloud_hypervisor_sha256":{"description":"Root-owned runtime identity. `None` means the host has no live\njailerd attestation and is never performance-ready.","type":["string","null"]},"hard_cpu_quota":{"type":"boolean"},"kvm":{"type":"boolean"},"landlock":{"type":"boolean"},"reflink":{"type":"boolean"},"vsock":{"type":"boolean"}},"additionalProperties":false,"required":["kvm","vsock","reflink","landlock","cgroup_v2","hard_cpu_quota"]},"HostRelayCredentials":{"type":"object","properties":{"expires_at_unix_ms":{"type":"integer"},"gateway_host_key_openssh":{"type":"string"},"identity":{"$ref":"#/$defs/HostRelayIdentity"},"token":{"type":"string"},"websocket_url":{"type":"string"}},"additionalProperties":false,"required":["websocket_url","token","gateway_host_key_openssh","identity","expires_at_unix_ms"]},"HostRelayIdentity":{"type":"object","properties":{"credential_generation":{"type":"integer","minimum":0},"host_id":{"type":"string"},"session_id":{"type":"string"}},"additionalProperties":false,"required":["host_id","session_id","credential_generation"]},"HostRoleV1":{"type":"string","enum":["agent","builder"]},"HostScope":{"type":"string","enum":["personal","platform","organization"]},"HostStateReportV3":{"type":"object","properties":{"applied_desired_version":{"type":"integer","minimum":0},"cached_images":{"type":"array","items":{"$ref":"#/$defs/CachedImageStateV2"}},"capacity":{"$ref":"#/$defs/HostCapacityV2"},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"hardware":{"$ref":"#/$defs/HostHardwareV1"},"host_id":{"type":"string"},"observed_at_unix_ms":{"type":"integer"},"relay_connected":{"type":"boolean"},"schema_version":{"type":"integer","maximum":8,"minimum":8},"vms":{"type":"array","items":{"$ref":"#/$defs/VmStateV3"}}},"additionalProperties":false,"required":["schema_version","host_id","observed_at_unix_ms","applied_desired_version","relay_connected","guest_contract","hardware","capacity","cached_images","vms"]},"ImageCachePhase":{"type":"string","enum":["missing","queued","downloading","ready","failed"]},"LabState":{"type":"string","enum":["preparing","ready","failed"]},"OciDigest":{"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"SpecMode":{"type":"string","enum":["learn","verify"]},"SyncRequestReason":{"type":"string","enum":["connect","reconnect","desired_version_lag","operator_requested"]},"VmArchivePhase":{"type":"string","enum":["none","pending","uploading","complete","failed"]},"VmArchiveStateV1":{"type":"object","properties":{"artifact_count":{"type":"integer","minimum":0,"maximum":4294967295},"error":{"type":["string","null"]},"phase":{"$ref":"#/$defs/VmArchivePhase"}},"additionalProperties":false,"required":["phase","artifact_count"]},"VmLabV1":{"description":"What Kino reported, re-truncated on the host. Only `tasks` is for\nlearners; tails and `failure` are for admins.","type":"object","properties":{"failure":{"type":["string","null"]},"kino_version":{"type":"string"},"ready":{"type":"array","items":{"$ref":"#/$defs/VmReadyV1"}},"state":{"$ref":"#/$defs/LabState"},"tasks":{"type":"array","items":{"$ref":"#/$defs/VmTaskV1"}},"timings_ms":{"description":"Guest uptime in ms at each step.","type":"object","additionalProperties":{"type":"integer","minimum":0}},"verify":{"anyOf":[{"$ref":"#/$defs/VmVerifyV1"},{"type":"null"}]}},"additionalProperties":false,"required":["state","kino_version","ready","tasks","timings_ms"]},"VmNetworkStateV1":{"type":"object","properties":{"bridge_name":{"type":"string"},"gateway":{"type":"string"},"guest_cidr":{"type":"string"},"guest_ip":{"type":"string"},"ssh_host":{"description":"Publicly routable address of the agent host's SSH forward for this VM\n(the agent's advertised host). The guest IP is only reachable within\nthe agent's internal VM network.","type":["string","null"]},"ssh_host_port":{"type":["integer","null"],"maximum":65535,"minimum":0}},"additionalProperties":false,"required":["bridge_name","guest_ip","guest_cidr","gateway"]},"VmPhaseV2":{"description":"`Ready` means SSH is up and a terminal can open; the lab's own state is\n`lab`. The host decides nothing about tasks.","type":"string","enum":["pending","pulling_image","creating_disks","booting","running","ready","stopping","stopped","failed","absent"]},"VmReadyV1":{"type":"object","properties":{"name":{"type":"string"},"status":{"$ref":"#/$defs/CheckStatus"},"tail":{"type":"string"}},"additionalProperties":false,"required":["name","status","tail"]},"VmReportV3":{"description":"A VM report is one VM's state, sent as soon as it changes.","type":"object","properties":{"host_id":{"type":"string"},"observed_at_unix_ms":{"type":"integer"},"schema_version":{"type":"integer","maximum":7,"minimum":7},"vm":{"$ref":"#/$defs/VmStateV3"}},"additionalProperties":false,"required":["schema_version","host_id","observed_at_unix_ms","vm"]},"VmResourceStateV3":{"type":"object","properties":{"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"cpu_nr_periods":{"type":"integer","minimum":0},"cpu_nr_throttled":{"type":"integer","minimum":0},"cpu_period_us":{"type":"integer","minimum":1},"cpu_quota_us":{"type":"integer","minimum":1},"cpu_system_usec":{"type":"integer","minimum":0},"cpu_throttled_usec":{"type":"integer","minimum":0},"cpu_usage_usec":{"type":"integer","minimum":0},"cpu_user_usec":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["cpu_millis","cpu_quota_us","cpu_period_us","cpu_usage_usec","cpu_user_usec","cpu_system_usec","cpu_nr_periods","cpu_nr_throttled","cpu_throttled_usec"]},"VmRuntimeConstraintsV2":{"type":"object","properties":{"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"generation":{"description":"Jailer-owned generation to which every quota and ingress attestation\nin this object applies. The breaking v2 contract never accepts\ngeneration-less quota evidence.","type":"string"},"quota_verified_at_unix_ms":{"description":"Timestamp of the authoritative live cgroup readback. Required by the\ncontrol plane before a verified runtime can expose a terminal.","type":["integer","null"]}},"additionalProperties":false,"required":["generation","cpu_millis"]},"VmSandboxStateV1":{"type":"object","properties":{"cgroup_path":{"type":"string"},"generation":{"type":"string"},"healthy":{"type":"boolean"},"landlock_enabled":{"type":"boolean"},"no_new_privs":{"type":"boolean"},"seccomp_enabled":{"type":"boolean"},"systemd_unit":{"type":"string"}},"additionalProperties":false,"required":["healthy","generation","systemd_unit","cgroup_path","seccomp_enabled","landlock_enabled","no_new_privs"]},"VmStartV1":{"type":"object","properties":{"first_report_ms":{"description":"From the VMM's start to Kino's first report for this run.","type":["integer","null"],"minimum":0}},"additionalProperties":false},"VmStateV3":{"type":"object","properties":{"archive":{"anyOf":[{"$ref":"#/$defs/VmArchiveStateV1"},{"type":"null"}]},"desired_version":{"type":["integer","null"],"minimum":0},"error":{"type":["string","null"]},"generation":{"type":"integer","minimum":1},"image":{"anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"kino":{"anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"lab":{"description":"Absent until Kino's first report for this run's `boot.json`.","anyOf":[{"$ref":"#/$defs/VmLabV1"},{"type":"null"}]},"name":{"type":"string"},"network":{"anyOf":[{"$ref":"#/$defs/VmNetworkStateV1"},{"type":"null"}]},"owner_user_id":{"type":"string"},"phase":{"$ref":"#/$defs/VmPhaseV2"},"resource_state":{"anyOf":[{"$ref":"#/$defs/VmResourceStateV3"},{"type":"null"}]},"run_id":{"type":"string"},"runtime_constraints":{"anyOf":[{"$ref":"#/$defs/VmRuntimeConstraintsV2"},{"type":"null"}]},"runtime_execution_id":{"type":"string"},"sandbox":{"anyOf":[{"$ref":"#/$defs/VmSandboxStateV1"},{"type":"null"}]},"ssh_host_keys_openssh":{"type":"array","items":{"type":"string"}},"start":{"description":"How the VM was started; absent until it was.","anyOf":[{"$ref":"#/$defs/VmStartV1"},{"type":"null"}]},"terminal":{"$ref":"#/$defs/VmTerminalStateV1"},"updated_at_unix_ms":{"type":"integer"}},"additionalProperties":false,"required":["owner_user_id","runtime_execution_id","generation","run_id","name","phase","terminal","ssh_host_keys_openssh","updated_at_unix_ms"]},"VmTaskV1":{"type":"object","properties":{"id":{"type":"string"},"message":{"type":"string"},"passed_at_unix_ms":{"type":["integer","null"],"minimum":0},"status":{"$ref":"#/$defs/CheckStatus"}},"additionalProperties":false,"required":["id","status","message"]},"VmTerminalStateKindV1":{"type":"string","enum":["pending","ready","failed"]},"VmTerminalStateV1":{"type":"object","properties":{"observed_at_unix_ms":{"type":"integer"},"reason":{"type":["string","null"]},"state":{"$ref":"#/$defs/VmTerminalStateKindV1"},"target":{"description":"Present only when `state` is `ready`.","anyOf":[{"$ref":"#/$defs/VmTerminalTargetV1"},{"type":"null"}]}},"additionalProperties":false,"required":["state","observed_at_unix_ms"]},"VmTerminalTargetV1":{"type":"object","properties":{"checked_at_unix_ms":{"type":"integer"},"host":{"type":"string"},"port":{"type":"integer","maximum":65535,"minimum":0},"username":{"type":"string"}},"additionalProperties":false,"required":["host","port","username","checked_at_unix_ms"]},"VmVerifyStepV1":{"type":"object","properties":{"duration_ms":{"type":"integer","minimum":0,"maximum":4294967295},"post":{"$ref":"#/$defs/CheckStatus"},"pre":{"$ref":"#/$defs/CheckStatus"},"solve_exit":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"tail":{"type":"string"},"task_id":{"type":"string"},"waiting_for":{"type":"array","items":{"type":"string"}}},"additionalProperties":false,"required":["task_id","pre","solve_exit","post","duration_ms","tail","waiting_for"]},"VmVerifyV1":{"type":"object","properties":{"done":{"type":"boolean"},"passed":{"type":"boolean"},"pre_done":{"type":"boolean"},"steps":{"type":"array","items":{"$ref":"#/$defs/VmVerifyStepV1"}}},"additionalProperties":false,"required":["steps","done","passed","pre_done"]}}};
 const schema32 = {"description":"A builder is assigned only builds of its `image_format` and compiles of\nits `source_compile_digest`.","type":"object","properties":{"image_format":{"type":"string"},"source_compile_digest":{"description":"`source_compile_digest(image_format, compiler version)`.","type":"string"}},"additionalProperties":false,"required":["image_format","source_compile_digest"]};
 const schema33 = {"description":"What the host can do. Facts only: no rollout switches.","type":"object","properties":{"cgroup_v2":{"type":"boolean"},"cloud_hypervisor_sha256":{"description":"Root-owned runtime identity. `None` means the host has no live\njailerd attestation and is never performance-ready.","type":["string","null"]},"hard_cpu_quota":{"type":"boolean"},"kvm":{"type":"boolean"},"landlock":{"type":"boolean"},"reflink":{"type":"boolean"},"vsock":{"type":"boolean"}},"additionalProperties":false,"required":["kvm","vsock","reflink","landlock","cgroup_v2","hard_cpu_quota"]};
 const schema34 = {"type":"string","enum":["agent","builder"]};
-const schema87 = {"type":"string","enum":["connect","reconnect","desired_version_lag","operator_requested"]};
+const schema86 = {"type":"string","enum":["connect","reconnect","desired_version_lag","operator_requested"]};
 const func1 = Object.prototype.hasOwnProperty;
 const schema35 = {"type":"object","properties":{"expires_at_unix_ms":{"type":"integer"},"gateway_host_key_openssh":{"type":"string"},"identity":{"$ref":"#/$defs/HostRelayIdentity"},"token":{"type":"string"},"websocket_url":{"type":"string"}},"additionalProperties":false,"required":["websocket_url","token","gateway_host_key_openssh","identity","expires_at_unix_ms"]};
 const schema36 = {"type":"object","properties":{"credential_generation":{"type":"integer","minimum":0},"host_id":{"type":"string"},"session_id":{"type":"string"}},"additionalProperties":false,"required":["host_id","session_id","credential_generation"]};
@@ -1570,6 +1570,7 @@ const schema73 = {"description":"`Ready` means SSH is up and a terminal can open
 const schema74 = {"type":"object","properties":{"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"cpu_nr_periods":{"type":"integer","minimum":0},"cpu_nr_throttled":{"type":"integer","minimum":0},"cpu_period_us":{"type":"integer","minimum":1},"cpu_quota_us":{"type":"integer","minimum":1},"cpu_system_usec":{"type":"integer","minimum":0},"cpu_throttled_usec":{"type":"integer","minimum":0},"cpu_usage_usec":{"type":"integer","minimum":0},"cpu_user_usec":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["cpu_millis","cpu_quota_us","cpu_period_us","cpu_usage_usec","cpu_user_usec","cpu_system_usec","cpu_nr_periods","cpu_nr_throttled","cpu_throttled_usec"]};
 const schema75 = {"type":"object","properties":{"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"generation":{"description":"Jailer-owned generation to which every quota and ingress attestation\nin this object applies. The breaking v2 contract never accepts\ngeneration-less quota evidence.","type":"string"},"quota_verified_at_unix_ms":{"description":"Timestamp of the authoritative live cgroup readback. Required by the\ncontrol plane before a verified runtime can expose a terminal.","type":["integer","null"]}},"additionalProperties":false,"required":["generation","cpu_millis"]};
 const schema76 = {"type":"object","properties":{"cgroup_path":{"type":"string"},"generation":{"type":"string"},"healthy":{"type":"boolean"},"landlock_enabled":{"type":"boolean"},"no_new_privs":{"type":"boolean"},"seccomp_enabled":{"type":"boolean"},"systemd_unit":{"type":"string"}},"additionalProperties":false,"required":["healthy","generation","systemd_unit","cgroup_path","seccomp_enabled","landlock_enabled","no_new_privs"]};
+const schema77 = {"type":"object","properties":{"first_report_ms":{"description":"From the VMM's start to Kino's first report for this run.","type":["integer","null"],"minimum":0}},"additionalProperties":false};
 const schema58 = {"type":"object","properties":{"artifact_count":{"type":"integer","minimum":0,"maximum":4294967295},"error":{"type":["string","null"]},"phase":{"$ref":"#/$defs/VmArchivePhase"}},"additionalProperties":false,"required":["phase","artifact_count"]};
 const schema59 = {"type":"string","enum":["none","pending","uploading","complete","failed"]};
 
@@ -2402,8 +2403,9 @@ return errors === 0;
 }
 validate36.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
 
-const schema77 = {"type":"object","properties":{"first_report_ms":{"description":"From the VMM's start to Kino's first report for this run.","type":["integer","null"],"minimum":0},"path":{"$ref":"#/$defs/VmStartPath"},"reason":{"description":"Why not a wake, or why the wake fell back; for operators.","type":["string","null"]}},"additionalProperties":false,"required":["path"]};
-const schema78 = {"oneOf":[{"type":"string","enum":["cold","wake"]},{"description":"A wake that did not report in time; the VM was cold-booted instead.","type":"string","const":"wake_fallback"}]};
+const schema78 = {"type":"object","properties":{"observed_at_unix_ms":{"type":"integer"},"reason":{"type":["string","null"]},"state":{"$ref":"#/$defs/VmTerminalStateKindV1"},"target":{"description":"Present only when `state` is `ready`.","anyOf":[{"$ref":"#/$defs/VmTerminalTargetV1"},{"type":"null"}]}},"additionalProperties":false,"required":["state","observed_at_unix_ms"]};
+const schema79 = {"type":"string","enum":["pending","ready","failed"]};
+const schema80 = {"type":"object","properties":{"checked_at_unix_ms":{"type":"integer"},"host":{"type":"string"},"port":{"type":"integer","maximum":65535,"minimum":0},"username":{"type":"string"}},"additionalProperties":false,"required":["host","port","username","checked_at_unix_ms"]};
 
 function validate46(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
 let vErrors = null;
@@ -2418,187 +2420,15 @@ evaluated0.items = undefined;
 if(errors === 0){
 if(data && typeof data == "object" && !Array.isArray(data)){
 let missing0;
-if((data.path === undefined) && (missing0 = "path")){
+if(((data.state === undefined) && (missing0 = "state")) || ((data.observed_at_unix_ms === undefined) && (missing0 = "observed_at_unix_ms"))){
 validate46.errors = [{instancePath,schemaPath:"#/required",keyword:"required",params:{missingProperty: missing0},message:"must have required property '"+missing0+"'"}];
 return false;
 }
 else {
 const _errs1 = errors;
 for(const key0 in data){
-if(!(((key0 === "first_report_ms") || (key0 === "path")) || (key0 === "reason"))){
-validate46.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
-return false;
-break;
-}
-}
-if(_errs1 === errors){
-if(data.first_report_ms !== undefined){
-let data0 = data.first_report_ms;
-const _errs2 = errors;
-if((!(((typeof data0 == "number") && (!(data0 % 1) && !isNaN(data0))) && (isFinite(data0)))) && (data0 !== null)){
-validate46.errors = [{instancePath:instancePath+"/first_report_ms",schemaPath:"#/properties/first_report_ms/type",keyword:"type",params:{type: schema77.properties.first_report_ms.type},message:"must be integer,null"}];
-return false;
-}
-if(errors === _errs2){
-if((typeof data0 == "number") && (isFinite(data0))){
-if(data0 < 0 || isNaN(data0)){
-validate46.errors = [{instancePath:instancePath+"/first_report_ms",schemaPath:"#/properties/first_report_ms/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"}];
-return false;
-}
-}
-}
-var valid0 = _errs2 === errors;
-}
-else {
-var valid0 = true;
-}
-if(valid0){
-if(data.path !== undefined){
-let data1 = data.path;
-const _errs4 = errors;
-const _errs6 = errors;
-let valid2 = false;
-let passing0 = null;
-const _errs7 = errors;
-if(typeof data1 !== "string"){
-const err0 = {instancePath:instancePath+"/path",schemaPath:"#/$defs/VmStartPath/oneOf/0/type",keyword:"type",params:{type: "string"},message:"must be string"};
-if(vErrors === null){
-vErrors = [err0];
-}
-else {
-vErrors.push(err0);
-}
-errors++;
-}
-if(!((data1 === "cold") || (data1 === "wake"))){
-const err1 = {instancePath:instancePath+"/path",schemaPath:"#/$defs/VmStartPath/oneOf/0/enum",keyword:"enum",params:{allowedValues: schema78.oneOf[0].enum},message:"must be equal to one of the allowed values"};
-if(vErrors === null){
-vErrors = [err1];
-}
-else {
-vErrors.push(err1);
-}
-errors++;
-}
-var _valid0 = _errs7 === errors;
-if(_valid0){
-valid2 = true;
-passing0 = 0;
-}
-const _errs9 = errors;
-if(typeof data1 !== "string"){
-const err2 = {instancePath:instancePath+"/path",schemaPath:"#/$defs/VmStartPath/oneOf/1/type",keyword:"type",params:{type: "string"},message:"must be string"};
-if(vErrors === null){
-vErrors = [err2];
-}
-else {
-vErrors.push(err2);
-}
-errors++;
-}
-if("wake_fallback" !== data1){
-const err3 = {instancePath:instancePath+"/path",schemaPath:"#/$defs/VmStartPath/oneOf/1/const",keyword:"const",params:{allowedValue: "wake_fallback"},message:"must be equal to constant"};
-if(vErrors === null){
-vErrors = [err3];
-}
-else {
-vErrors.push(err3);
-}
-errors++;
-}
-var _valid0 = _errs9 === errors;
-if(_valid0 && valid2){
-valid2 = false;
-passing0 = [passing0, 1];
-}
-else {
-if(_valid0){
-valid2 = true;
-passing0 = 1;
-}
-}
-if(!valid2){
-const err4 = {instancePath:instancePath+"/path",schemaPath:"#/$defs/VmStartPath/oneOf",keyword:"oneOf",params:{passingSchemas: passing0},message:"must match exactly one schema in oneOf"};
-if(vErrors === null){
-vErrors = [err4];
-}
-else {
-vErrors.push(err4);
-}
-errors++;
-validate46.errors = vErrors;
-return false;
-}
-else {
-errors = _errs6;
-if(vErrors !== null){
-if(_errs6){
-vErrors.length = _errs6;
-}
-else {
-vErrors = null;
-}
-}
-}
-var valid0 = _errs4 === errors;
-}
-else {
-var valid0 = true;
-}
-if(valid0){
-if(data.reason !== undefined){
-let data2 = data.reason;
-const _errs11 = errors;
-if((typeof data2 !== "string") && (data2 !== null)){
-validate46.errors = [{instancePath:instancePath+"/reason",schemaPath:"#/properties/reason/type",keyword:"type",params:{type: schema77.properties.reason.type},message:"must be string,null"}];
-return false;
-}
-var valid0 = _errs11 === errors;
-}
-else {
-var valid0 = true;
-}
-}
-}
-}
-}
-}
-else {
-validate46.errors = [{instancePath,schemaPath:"#/type",keyword:"type",params:{type: "object"},message:"must be object"}];
-return false;
-}
-}
-validate46.errors = vErrors;
-return errors === 0;
-}
-validate46.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
-
-const schema79 = {"type":"object","properties":{"observed_at_unix_ms":{"type":"integer"},"reason":{"type":["string","null"]},"state":{"$ref":"#/$defs/VmTerminalStateKindV1"},"target":{"description":"Present only when `state` is `ready`.","anyOf":[{"$ref":"#/$defs/VmTerminalTargetV1"},{"type":"null"}]}},"additionalProperties":false,"required":["state","observed_at_unix_ms"]};
-const schema80 = {"type":"string","enum":["pending","ready","failed"]};
-const schema81 = {"type":"object","properties":{"checked_at_unix_ms":{"type":"integer"},"host":{"type":"string"},"port":{"type":"integer","maximum":65535,"minimum":0},"username":{"type":"string"}},"additionalProperties":false,"required":["host","port","username","checked_at_unix_ms"]};
-
-function validate48(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
-let vErrors = null;
-let errors = 0;
-const evaluated0 = validate48.evaluated;
-if(evaluated0.dynamicProps){
-evaluated0.props = undefined;
-}
-if(evaluated0.dynamicItems){
-evaluated0.items = undefined;
-}
-if(errors === 0){
-if(data && typeof data == "object" && !Array.isArray(data)){
-let missing0;
-if(((data.state === undefined) && (missing0 = "state")) || ((data.observed_at_unix_ms === undefined) && (missing0 = "observed_at_unix_ms"))){
-validate48.errors = [{instancePath,schemaPath:"#/required",keyword:"required",params:{missingProperty: missing0},message:"must have required property '"+missing0+"'"}];
-return false;
-}
-else {
-const _errs1 = errors;
-for(const key0 in data){
 if(!((((key0 === "observed_at_unix_ms") || (key0 === "reason")) || (key0 === "state")) || (key0 === "target"))){
-validate48.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
+validate46.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
 return false;
 break;
 }
@@ -2608,7 +2438,7 @@ if(data.observed_at_unix_ms !== undefined){
 let data0 = data.observed_at_unix_ms;
 const _errs2 = errors;
 if(!(((typeof data0 == "number") && (!(data0 % 1) && !isNaN(data0))) && (isFinite(data0)))){
-validate48.errors = [{instancePath:instancePath+"/observed_at_unix_ms",schemaPath:"#/properties/observed_at_unix_ms/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
+validate46.errors = [{instancePath:instancePath+"/observed_at_unix_ms",schemaPath:"#/properties/observed_at_unix_ms/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
 return false;
 }
 var valid0 = _errs2 === errors;
@@ -2621,7 +2451,7 @@ if(data.reason !== undefined){
 let data1 = data.reason;
 const _errs4 = errors;
 if((typeof data1 !== "string") && (data1 !== null)){
-validate48.errors = [{instancePath:instancePath+"/reason",schemaPath:"#/properties/reason/type",keyword:"type",params:{type: schema79.properties.reason.type},message:"must be string,null"}];
+validate46.errors = [{instancePath:instancePath+"/reason",schemaPath:"#/properties/reason/type",keyword:"type",params:{type: schema78.properties.reason.type},message:"must be string,null"}];
 return false;
 }
 var valid0 = _errs4 === errors;
@@ -2634,11 +2464,11 @@ if(data.state !== undefined){
 let data2 = data.state;
 const _errs6 = errors;
 if(typeof data2 !== "string"){
-validate48.errors = [{instancePath:instancePath+"/state",schemaPath:"#/$defs/VmTerminalStateKindV1/type",keyword:"type",params:{type: "string"},message:"must be string"}];
+validate46.errors = [{instancePath:instancePath+"/state",schemaPath:"#/$defs/VmTerminalStateKindV1/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
 if(!(((data2 === "pending") || (data2 === "ready")) || (data2 === "failed"))){
-validate48.errors = [{instancePath:instancePath+"/state",schemaPath:"#/$defs/VmTerminalStateKindV1/enum",keyword:"enum",params:{allowedValues: schema80.enum},message:"must be equal to one of the allowed values"}];
+validate46.errors = [{instancePath:instancePath+"/state",schemaPath:"#/$defs/VmTerminalStateKindV1/enum",keyword:"enum",params:{allowedValues: schema79.enum},message:"must be equal to one of the allowed values"}];
 return false;
 }
 var valid0 = _errs6 === errors;
@@ -2823,7 +2653,7 @@ else {
 vErrors.push(err10);
 }
 errors++;
-validate48.errors = vErrors;
+validate46.errors = vErrors;
 return false;
 }
 else {
@@ -2849,14 +2679,14 @@ var valid0 = true;
 }
 }
 else {
-validate48.errors = [{instancePath,schemaPath:"#/type",keyword:"type",params:{type: "object"},message:"must be object"}];
+validate46.errors = [{instancePath,schemaPath:"#/type",keyword:"type",params:{type: "object"},message:"must be object"}];
 return false;
 }
 }
-validate48.errors = vErrors;
+validate46.errors = vErrors;
 return errors === 0;
 }
-validate48.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
+validate46.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
 
 
 function validate33(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
@@ -4346,15 +4176,13 @@ const _errs129 = errors;
 const _errs130 = errors;
 let valid21 = false;
 const _errs131 = errors;
-if(!(validate46(data43, {instancePath:instancePath+"/start",parentData:data,parentDataProperty:"start",rootData,dynamicAnchors}))){
-vErrors = vErrors === null ? validate46.errors : vErrors.concat(validate46.errors);
-errors = vErrors.length;
-}
-var _valid8 = _errs131 === errors;
-valid21 = valid21 || _valid8;
 const _errs132 = errors;
-if(data43 !== null){
-const err71 = {instancePath:instancePath+"/start",schemaPath:"#/properties/start/anyOf/1/type",keyword:"type",params:{type: "null"},message:"must be null"};
+if(errors === _errs132){
+if(data43 && typeof data43 == "object" && !Array.isArray(data43)){
+const _errs134 = errors;
+for(const key5 in data43){
+if(!(key5 === "first_report_ms")){
+const err71 = {instancePath:instancePath+"/start",schemaPath:"#/$defs/VmStartV1/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key5},message:"must NOT have additional properties"};
 if(vErrors === null){
 vErrors = [err71];
 }
@@ -4362,16 +4190,73 @@ else {
 vErrors.push(err71);
 }
 errors++;
+break;
 }
-var _valid8 = _errs132 === errors;
-valid21 = valid21 || _valid8;
-if(!valid21){
-const err72 = {instancePath:instancePath+"/start",schemaPath:"#/properties/start/anyOf",keyword:"anyOf",params:{},message:"must match a schema in anyOf"};
+}
+if(_errs134 === errors){
+if(data43.first_report_ms !== undefined){
+let data44 = data43.first_report_ms;
+const _errs135 = errors;
+if((!(((typeof data44 == "number") && (!(data44 % 1) && !isNaN(data44))) && (isFinite(data44)))) && (data44 !== null)){
+const err72 = {instancePath:instancePath+"/start/first_report_ms",schemaPath:"#/$defs/VmStartV1/properties/first_report_ms/type",keyword:"type",params:{type: schema77.properties.first_report_ms.type},message:"must be integer,null"};
 if(vErrors === null){
 vErrors = [err72];
 }
 else {
 vErrors.push(err72);
+}
+errors++;
+}
+if(errors === _errs135){
+if((typeof data44 == "number") && (isFinite(data44))){
+if(data44 < 0 || isNaN(data44)){
+const err73 = {instancePath:instancePath+"/start/first_report_ms",schemaPath:"#/$defs/VmStartV1/properties/first_report_ms/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"};
+if(vErrors === null){
+vErrors = [err73];
+}
+else {
+vErrors.push(err73);
+}
+errors++;
+}
+}
+}
+}
+}
+}
+else {
+const err74 = {instancePath:instancePath+"/start",schemaPath:"#/$defs/VmStartV1/type",keyword:"type",params:{type: "object"},message:"must be object"};
+if(vErrors === null){
+vErrors = [err74];
+}
+else {
+vErrors.push(err74);
+}
+errors++;
+}
+}
+var _valid8 = _errs131 === errors;
+valid21 = valid21 || _valid8;
+const _errs137 = errors;
+if(data43 !== null){
+const err75 = {instancePath:instancePath+"/start",schemaPath:"#/properties/start/anyOf/1/type",keyword:"type",params:{type: "null"},message:"must be null"};
+if(vErrors === null){
+vErrors = [err75];
+}
+else {
+vErrors.push(err75);
+}
+errors++;
+}
+var _valid8 = _errs137 === errors;
+valid21 = valid21 || _valid8;
+if(!valid21){
+const err76 = {instancePath:instancePath+"/start",schemaPath:"#/properties/start/anyOf",keyword:"anyOf",params:{},message:"must match a schema in anyOf"};
+if(vErrors === null){
+vErrors = [err76];
+}
+else {
+vErrors.push(err76);
 }
 errors++;
 validate33.errors = vErrors;
@@ -4395,25 +4280,25 @@ var valid0 = true;
 }
 if(valid0){
 if(data.terminal !== undefined){
-const _errs134 = errors;
-if(!(validate48(data.terminal, {instancePath:instancePath+"/terminal",parentData:data,parentDataProperty:"terminal",rootData,dynamicAnchors}))){
-vErrors = vErrors === null ? validate48.errors : vErrors.concat(validate48.errors);
+const _errs139 = errors;
+if(!(validate46(data.terminal, {instancePath:instancePath+"/terminal",parentData:data,parentDataProperty:"terminal",rootData,dynamicAnchors}))){
+vErrors = vErrors === null ? validate46.errors : vErrors.concat(validate46.errors);
 errors = vErrors.length;
 }
-var valid0 = _errs134 === errors;
+var valid0 = _errs139 === errors;
 }
 else {
 var valid0 = true;
 }
 if(valid0){
 if(data.updated_at_unix_ms !== undefined){
-let data45 = data.updated_at_unix_ms;
-const _errs135 = errors;
-if(!(((typeof data45 == "number") && (!(data45 % 1) && !isNaN(data45))) && (isFinite(data45)))){
+let data46 = data.updated_at_unix_ms;
+const _errs140 = errors;
+if(!(((typeof data46 == "number") && (!(data46 % 1) && !isNaN(data46))) && (isFinite(data46)))){
 validate33.errors = [{instancePath:instancePath+"/updated_at_unix_ms",schemaPath:"#/properties/updated_at_unix_ms/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
 return false;
 }
-var valid0 = _errs135 === errors;
+var valid0 = _errs140 === errors;
 }
 else {
 var valid0 = true;
@@ -5136,12 +5021,12 @@ return errors === 0;
 }
 validate30.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
 
-const schema82 = {"description":"A VM report is one VM's state, sent as soon as it changes.","type":"object","properties":{"host_id":{"type":"string"},"observed_at_unix_ms":{"type":"integer"},"schema_version":{"type":"integer","maximum":7,"minimum":7},"vm":{"$ref":"#/$defs/VmStateV3"}},"additionalProperties":false,"required":["schema_version","host_id","observed_at_unix_ms","vm"]};
+const schema81 = {"description":"A VM report is one VM's state, sent as soon as it changes.","type":"object","properties":{"host_id":{"type":"string"},"observed_at_unix_ms":{"type":"integer"},"schema_version":{"type":"integer","maximum":7,"minimum":7},"vm":{"$ref":"#/$defs/VmStateV3"}},"additionalProperties":false,"required":["schema_version","host_id","observed_at_unix_ms","vm"]};
 
-function validate52(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
+function validate50(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
 let vErrors = null;
 let errors = 0;
-const evaluated0 = validate52.evaluated;
+const evaluated0 = validate50.evaluated;
 if(evaluated0.dynamicProps){
 evaluated0.props = undefined;
 }
@@ -5152,14 +5037,14 @@ if(errors === 0){
 if(data && typeof data == "object" && !Array.isArray(data)){
 let missing0;
 if(((((data.schema_version === undefined) && (missing0 = "schema_version")) || ((data.host_id === undefined) && (missing0 = "host_id"))) || ((data.observed_at_unix_ms === undefined) && (missing0 = "observed_at_unix_ms"))) || ((data.vm === undefined) && (missing0 = "vm"))){
-validate52.errors = [{instancePath,schemaPath:"#/required",keyword:"required",params:{missingProperty: missing0},message:"must have required property '"+missing0+"'"}];
+validate50.errors = [{instancePath,schemaPath:"#/required",keyword:"required",params:{missingProperty: missing0},message:"must have required property '"+missing0+"'"}];
 return false;
 }
 else {
 const _errs1 = errors;
 for(const key0 in data){
 if(!((((key0 === "host_id") || (key0 === "observed_at_unix_ms")) || (key0 === "schema_version")) || (key0 === "vm"))){
-validate52.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
+validate50.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
 return false;
 break;
 }
@@ -5168,7 +5053,7 @@ if(_errs1 === errors){
 if(data.host_id !== undefined){
 const _errs2 = errors;
 if(typeof data.host_id !== "string"){
-validate52.errors = [{instancePath:instancePath+"/host_id",schemaPath:"#/properties/host_id/type",keyword:"type",params:{type: "string"},message:"must be string"}];
+validate50.errors = [{instancePath:instancePath+"/host_id",schemaPath:"#/properties/host_id/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
 var valid0 = _errs2 === errors;
@@ -5181,7 +5066,7 @@ if(data.observed_at_unix_ms !== undefined){
 let data1 = data.observed_at_unix_ms;
 const _errs4 = errors;
 if(!(((typeof data1 == "number") && (!(data1 % 1) && !isNaN(data1))) && (isFinite(data1)))){
-validate52.errors = [{instancePath:instancePath+"/observed_at_unix_ms",schemaPath:"#/properties/observed_at_unix_ms/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
+validate50.errors = [{instancePath:instancePath+"/observed_at_unix_ms",schemaPath:"#/properties/observed_at_unix_ms/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
 return false;
 }
 var valid0 = _errs4 === errors;
@@ -5194,18 +5079,18 @@ if(data.schema_version !== undefined){
 let data2 = data.schema_version;
 const _errs6 = errors;
 if(!(((typeof data2 == "number") && (!(data2 % 1) && !isNaN(data2))) && (isFinite(data2)))){
-validate52.errors = [{instancePath:instancePath+"/schema_version",schemaPath:"#/properties/schema_version/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
+validate50.errors = [{instancePath:instancePath+"/schema_version",schemaPath:"#/properties/schema_version/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
 return false;
 }
 if(errors === _errs6){
 if((typeof data2 == "number") && (isFinite(data2))){
 if(data2 > 7 || isNaN(data2)){
-validate52.errors = [{instancePath:instancePath+"/schema_version",schemaPath:"#/properties/schema_version/maximum",keyword:"maximum",params:{comparison: "<=", limit: 7},message:"must be <= 7"}];
+validate50.errors = [{instancePath:instancePath+"/schema_version",schemaPath:"#/properties/schema_version/maximum",keyword:"maximum",params:{comparison: "<=", limit: 7},message:"must be <= 7"}];
 return false;
 }
 else {
 if(data2 < 7 || isNaN(data2)){
-validate52.errors = [{instancePath:instancePath+"/schema_version",schemaPath:"#/properties/schema_version/minimum",keyword:"minimum",params:{comparison: ">=", limit: 7},message:"must be >= 7"}];
+validate50.errors = [{instancePath:instancePath+"/schema_version",schemaPath:"#/properties/schema_version/minimum",keyword:"minimum",params:{comparison: ">=", limit: 7},message:"must be >= 7"}];
 return false;
 }
 }
@@ -5235,22 +5120,22 @@ var valid0 = true;
 }
 }
 else {
-validate52.errors = [{instancePath,schemaPath:"#/type",keyword:"type",params:{type: "object"},message:"must be object"}];
+validate50.errors = [{instancePath,schemaPath:"#/type",keyword:"type",params:{type: "object"},message:"must be object"}];
 return false;
 }
 }
-validate52.errors = vErrors;
+validate50.errors = vErrors;
 return errors === 0;
 }
-validate52.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
+validate50.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
 
-const schema83 = {"description":"One build's state, sent as soon as it changes. `image_digest` is the\npushed manifest, present exactly when the build succeeded.","type":"object","properties":{"attempt":{"type":"integer","minimum":0,"maximum":4294967295},"build_id":{"type":"string"},"build_key":{"$ref":"#/$defs/OciDigest"},"error":{"type":["string","null"]},"finished_at_unix_ms":{"type":["integer","null"]},"image_digest":{"anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"observed_at_unix_ms":{"type":"integer"},"phase":{"$ref":"#/$defs/BuildPhaseV2"},"started_at_unix_ms":{"type":["integer","null"]}},"additionalProperties":false,"required":["build_id","build_key","attempt","phase","observed_at_unix_ms"]};
-const schema86 = {"type":"string","enum":["queued","fetching_sources","building","pushing","succeeded","failed"]};
+const schema82 = {"description":"One build's state, sent as soon as it changes. `image_digest` is the\npushed manifest, present exactly when the build succeeded.","type":"object","properties":{"attempt":{"type":"integer","minimum":0,"maximum":4294967295},"build_id":{"type":"string"},"build_key":{"$ref":"#/$defs/OciDigest"},"error":{"type":["string","null"]},"finished_at_unix_ms":{"type":["integer","null"]},"image_digest":{"anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"observed_at_unix_ms":{"type":"integer"},"phase":{"$ref":"#/$defs/BuildPhaseV2"},"started_at_unix_ms":{"type":["integer","null"]}},"additionalProperties":false,"required":["build_id","build_key","attempt","phase","observed_at_unix_ms"]};
+const schema85 = {"type":"string","enum":["queued","fetching_sources","building","pushing","succeeded","failed"]};
 
-function validate55(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
+function validate53(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
 let vErrors = null;
 let errors = 0;
-const evaluated0 = validate55.evaluated;
+const evaluated0 = validate53.evaluated;
 if(evaluated0.dynamicProps){
 evaluated0.props = undefined;
 }
@@ -5261,14 +5146,14 @@ if(errors === 0){
 if(data && typeof data == "object" && !Array.isArray(data)){
 let missing0;
 if((((((data.build_id === undefined) && (missing0 = "build_id")) || ((data.build_key === undefined) && (missing0 = "build_key"))) || ((data.attempt === undefined) && (missing0 = "attempt"))) || ((data.phase === undefined) && (missing0 = "phase"))) || ((data.observed_at_unix_ms === undefined) && (missing0 = "observed_at_unix_ms"))){
-validate55.errors = [{instancePath,schemaPath:"#/required",keyword:"required",params:{missingProperty: missing0},message:"must have required property '"+missing0+"'"}];
+validate53.errors = [{instancePath,schemaPath:"#/required",keyword:"required",params:{missingProperty: missing0},message:"must have required property '"+missing0+"'"}];
 return false;
 }
 else {
 const _errs1 = errors;
 for(const key0 in data){
-if(!(func1.call(schema83.properties, key0))){
-validate55.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
+if(!(func1.call(schema82.properties, key0))){
+validate53.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
 return false;
 break;
 }
@@ -5278,18 +5163,18 @@ if(data.attempt !== undefined){
 let data0 = data.attempt;
 const _errs2 = errors;
 if(!(((typeof data0 == "number") && (!(data0 % 1) && !isNaN(data0))) && (isFinite(data0)))){
-validate55.errors = [{instancePath:instancePath+"/attempt",schemaPath:"#/properties/attempt/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
+validate53.errors = [{instancePath:instancePath+"/attempt",schemaPath:"#/properties/attempt/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
 return false;
 }
 if(errors === _errs2){
 if((typeof data0 == "number") && (isFinite(data0))){
 if(data0 > 4294967295 || isNaN(data0)){
-validate55.errors = [{instancePath:instancePath+"/attempt",schemaPath:"#/properties/attempt/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
+validate53.errors = [{instancePath:instancePath+"/attempt",schemaPath:"#/properties/attempt/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
 return false;
 }
 else {
 if(data0 < 0 || isNaN(data0)){
-validate55.errors = [{instancePath:instancePath+"/attempt",schemaPath:"#/properties/attempt/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"}];
+validate53.errors = [{instancePath:instancePath+"/attempt",schemaPath:"#/properties/attempt/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"}];
 return false;
 }
 }
@@ -5304,7 +5189,7 @@ if(valid0){
 if(data.build_id !== undefined){
 const _errs4 = errors;
 if(typeof data.build_id !== "string"){
-validate55.errors = [{instancePath:instancePath+"/build_id",schemaPath:"#/properties/build_id/type",keyword:"type",params:{type: "string"},message:"must be string"}];
+validate53.errors = [{instancePath:instancePath+"/build_id",schemaPath:"#/properties/build_id/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
 var valid0 = _errs4 === errors;
@@ -5320,12 +5205,12 @@ const _errs7 = errors;
 if(errors === _errs7){
 if(typeof data2 === "string"){
 if(!pattern4.test(data2)){
-validate55.errors = [{instancePath:instancePath+"/build_key",schemaPath:"#/$defs/OciDigest/pattern",keyword:"pattern",params:{pattern: "^sha256:[0-9a-f]{64}$"},message:"must match pattern \""+"^sha256:[0-9a-f]{64}$"+"\""}];
+validate53.errors = [{instancePath:instancePath+"/build_key",schemaPath:"#/$defs/OciDigest/pattern",keyword:"pattern",params:{pattern: "^sha256:[0-9a-f]{64}$"},message:"must match pattern \""+"^sha256:[0-9a-f]{64}$"+"\""}];
 return false;
 }
 }
 else {
-validate55.errors = [{instancePath:instancePath+"/build_key",schemaPath:"#/$defs/OciDigest/type",keyword:"type",params:{type: "string"},message:"must be string"}];
+validate53.errors = [{instancePath:instancePath+"/build_key",schemaPath:"#/$defs/OciDigest/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
 }
@@ -5339,7 +5224,7 @@ if(data.error !== undefined){
 let data3 = data.error;
 const _errs9 = errors;
 if((typeof data3 !== "string") && (data3 !== null)){
-validate55.errors = [{instancePath:instancePath+"/error",schemaPath:"#/properties/error/type",keyword:"type",params:{type: schema83.properties.error.type},message:"must be string,null"}];
+validate53.errors = [{instancePath:instancePath+"/error",schemaPath:"#/properties/error/type",keyword:"type",params:{type: schema82.properties.error.type},message:"must be string,null"}];
 return false;
 }
 var valid0 = _errs9 === errors;
@@ -5352,7 +5237,7 @@ if(data.finished_at_unix_ms !== undefined){
 let data4 = data.finished_at_unix_ms;
 const _errs11 = errors;
 if((!(((typeof data4 == "number") && (!(data4 % 1) && !isNaN(data4))) && (isFinite(data4)))) && (data4 !== null)){
-validate55.errors = [{instancePath:instancePath+"/finished_at_unix_ms",schemaPath:"#/properties/finished_at_unix_ms/type",keyword:"type",params:{type: schema83.properties.finished_at_unix_ms.type},message:"must be integer,null"}];
+validate53.errors = [{instancePath:instancePath+"/finished_at_unix_ms",schemaPath:"#/properties/finished_at_unix_ms/type",keyword:"type",params:{type: schema82.properties.finished_at_unix_ms.type},message:"must be integer,null"}];
 return false;
 }
 var valid0 = _errs11 === errors;
@@ -5416,7 +5301,7 @@ else {
 vErrors.push(err3);
 }
 errors++;
-validate55.errors = vErrors;
+validate53.errors = vErrors;
 return false;
 }
 else {
@@ -5440,7 +5325,7 @@ if(data.observed_at_unix_ms !== undefined){
 let data6 = data.observed_at_unix_ms;
 const _errs20 = errors;
 if(!(((typeof data6 == "number") && (!(data6 % 1) && !isNaN(data6))) && (isFinite(data6)))){
-validate55.errors = [{instancePath:instancePath+"/observed_at_unix_ms",schemaPath:"#/properties/observed_at_unix_ms/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
+validate53.errors = [{instancePath:instancePath+"/observed_at_unix_ms",schemaPath:"#/properties/observed_at_unix_ms/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
 return false;
 }
 var valid0 = _errs20 === errors;
@@ -5453,11 +5338,11 @@ if(data.phase !== undefined){
 let data7 = data.phase;
 const _errs22 = errors;
 if(typeof data7 !== "string"){
-validate55.errors = [{instancePath:instancePath+"/phase",schemaPath:"#/$defs/BuildPhaseV2/type",keyword:"type",params:{type: "string"},message:"must be string"}];
+validate53.errors = [{instancePath:instancePath+"/phase",schemaPath:"#/$defs/BuildPhaseV2/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
 if(!((((((data7 === "queued") || (data7 === "fetching_sources")) || (data7 === "building")) || (data7 === "pushing")) || (data7 === "succeeded")) || (data7 === "failed"))){
-validate55.errors = [{instancePath:instancePath+"/phase",schemaPath:"#/$defs/BuildPhaseV2/enum",keyword:"enum",params:{allowedValues: schema86.enum},message:"must be equal to one of the allowed values"}];
+validate53.errors = [{instancePath:instancePath+"/phase",schemaPath:"#/$defs/BuildPhaseV2/enum",keyword:"enum",params:{allowedValues: schema85.enum},message:"must be equal to one of the allowed values"}];
 return false;
 }
 var valid0 = _errs22 === errors;
@@ -5470,7 +5355,7 @@ if(data.started_at_unix_ms !== undefined){
 let data8 = data.started_at_unix_ms;
 const _errs25 = errors;
 if((!(((typeof data8 == "number") && (!(data8 % 1) && !isNaN(data8))) && (isFinite(data8)))) && (data8 !== null)){
-validate55.errors = [{instancePath:instancePath+"/started_at_unix_ms",schemaPath:"#/properties/started_at_unix_ms/type",keyword:"type",params:{type: schema83.properties.started_at_unix_ms.type},message:"must be integer,null"}];
+validate53.errors = [{instancePath:instancePath+"/started_at_unix_ms",schemaPath:"#/properties/started_at_unix_ms/type",keyword:"type",params:{type: schema82.properties.started_at_unix_ms.type},message:"must be integer,null"}];
 return false;
 }
 var valid0 = _errs25 === errors;
@@ -5490,14 +5375,14 @@ var valid0 = true;
 }
 }
 else {
-validate55.errors = [{instancePath,schemaPath:"#/type",keyword:"type",params:{type: "object"},message:"must be object"}];
+validate53.errors = [{instancePath,schemaPath:"#/type",keyword:"type",params:{type: "object"},message:"must be object"}];
 return false;
 }
 }
-validate55.errors = vErrors;
+validate53.errors = vErrors;
 return errors === 0;
 }
-validate55.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
+validate53.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
 
 
 function validate20(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
@@ -6830,8 +6715,8 @@ var valid13 = true;
 if(valid13){
 if(data.report !== undefined){
 const _errs99 = errors;
-if(!(validate52(data.report, {instancePath:instancePath+"/report",parentData:data,parentDataProperty:"report",rootData,dynamicAnchors}))){
-vErrors = vErrors === null ? validate52.errors : vErrors.concat(validate52.errors);
+if(!(validate50(data.report, {instancePath:instancePath+"/report",parentData:data,parentDataProperty:"report",rootData,dynamicAnchors}))){
+vErrors = vErrors === null ? validate50.errors : vErrors.concat(validate50.errors);
 errors = vErrors.length;
 }
 var valid13 = _errs99 === errors;
@@ -6993,8 +6878,8 @@ var valid14 = true;
 if(valid14){
 if(data.report !== undefined){
 const _errs109 = errors;
-if(!(validate55(data.report, {instancePath:instancePath+"/report",parentData:data,parentDataProperty:"report",rootData,dynamicAnchors}))){
-vErrors = vErrors === null ? validate55.errors : vErrors.concat(validate55.errors);
+if(!(validate53(data.report, {instancePath:instancePath+"/report",parentData:data,parentDataProperty:"report",rootData,dynamicAnchors}))){
+vErrors = vErrors === null ? validate53.errors : vErrors.concat(validate53.errors);
 errors = vErrors.length;
 }
 var valid14 = _errs109 === errors;
@@ -7168,7 +7053,7 @@ vErrors.push(err92);
 errors++;
 }
 if(!((((data43 === "connect") || (data43 === "reconnect")) || (data43 === "desired_version_lag")) || (data43 === "operator_requested"))){
-const err93 = {instancePath:instancePath+"/reason",schemaPath:"#/$defs/SyncRequestReason/enum",keyword:"enum",params:{allowedValues: schema87.enum},message:"must be equal to one of the allowed values"};
+const err93 = {instancePath:instancePath+"/reason",schemaPath:"#/$defs/SyncRequestReason/enum",keyword:"enum",params:{allowedValues: schema86.enum},message:"must be equal to one of the allowed values"};
 if(vErrors === null){
 vErrors = [err93];
 }

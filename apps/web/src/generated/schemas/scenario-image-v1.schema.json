@@ -30,10 +30,6 @@
       "items": {
         "$ref": "#/$defs/ScriptV1"
       }
-    },
-    "wake": {
-      "description": "Published with a suspended guest; a machine `from` it is a pack.",
-      "type": "boolean"
     }
   },
   "additionalProperties": false,

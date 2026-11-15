@@ -367,7 +367,6 @@ fn refusal_cases() -> Vec<(&'static str, Mutation)> {
             disk_mib,
             defer: Vec::new(),
             setup: Vec::new(),
-            wake: false,
         }
     }
     fn script(name: &str, script: String) -> ScriptV1 {
@@ -484,11 +483,6 @@ fn refusal_cases() -> Vec<(&'static str, Mutation)> {
         ("image-cycle", |b| {
             b.images = vec![image("one", "two", None), image("two", "one", None)];
         }),
-        ("wake-chain", |b| {
-            let mut base = image("web-base", "trixie", Some(4096));
-            base.wake = true;
-            b.images = vec![base, image("child", "web-base", None)];
-        }),
         ("course-twice", |b| {
             let courses = &mut b.course_catalog.courses;
             courses.push(courses[0].clone());
@@ -581,9 +575,6 @@ export const INITRD_MEDIA_TYPE = "{}";
 export const DISK_CHUNK_MEDIA_TYPE = "{}";
 export const KINO_ARTIFACT_TYPE = "{}";
 export const MACHINE_SPEC_MEDIA_TYPE = "{}";
-export const WAKE_RAM_CHUNK_MEDIA_TYPE = "{}";
-export const WAKE_STUB_MEDIA_TYPE = "{}";
-export const WAKE_CPU_PROFILE_MEDIA_TYPE = "{}";
 export const PLATFORM_BASE_IMAGE = "{}";
 export const MAX_MACHINES = {};
 export const MAX_MACHINE_NAME_LEN = {};
@@ -639,9 +630,6 @@ export const runtimeEnvKeys = {{
         intar_contracts::oci::DISK_CHUNK_MEDIA_TYPE,
         intar_contracts::oci::KINO_ARTIFACT_TYPE,
         intar_contracts::oci::MACHINE_SPEC_MEDIA_TYPE,
-        intar_contracts::oci::WAKE_RAM_CHUNK_MEDIA_TYPE,
-        intar_contracts::oci::WAKE_STUB_MEDIA_TYPE,
-        intar_contracts::oci::WAKE_CPU_PROFILE_MEDIA_TYPE,
         intar_contracts::scenario::PLATFORM_BASE_IMAGE,
         intar_contracts::scenario::MAX_MACHINES,
         intar_contracts::scenario::MAX_MACHINE_NAME_LEN,

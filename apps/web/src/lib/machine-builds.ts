@@ -55,9 +55,8 @@ const MAX_BUILD_ERROR_CHARS = 4096;
 // The builder replays its reports on every heartbeat, so a build without a
 // report for BUILD_REPORT_STALE_AFTER_MS lost its builder. One attempt may
 // still not run forever: the builder's worst case is a fetch, the provision
-// boot (provision_timeout_seconds, 40 min by default), for a wake image a
-// second boot under the same timeout, a QEMU exit wait (5 min) after each,
-// and the push with 5 min per request. Three hours is above that sum.
+// boot (provision_timeout_seconds, 40 min by default), a QEMU exit wait
+// (5 min) and the push with 5 min per request. Three hours is above that sum.
 const MACHINE_BUILD_ATTEMPT_CEILING_MS = 3 * 60 * 60 * 1000;
 const ASSIGN_BATCH = 100;
 

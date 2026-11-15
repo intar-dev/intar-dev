@@ -17,10 +17,6 @@ export interface MachineConfigV1 {
   disk: MachineDiskV1;
   guest_contract: number;
   image_format: string;
-  /**
-   * Set when the manifest also carries a suspended guest.
-   */
-  wake?: WakeV1 | null;
 }
 export interface MachineBootV1 {
   cmdline: string;
@@ -33,67 +29,4 @@ export interface MachineDiskV1 {
    */
   chunks: [unknown, unknown, unknown][];
   size_bytes: number;
-}
-/**
- * The `wake` object of a machine config.
- */
-export interface WakeV1 {
-  /**
-   * When the image's guest was cold-booted before its suspend. Its
-   * certificates date from that boot.
-   */
-  booted_at_unix_ms: number;
-  /**
-   * An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex
-   * digits.
-   */
-  cpu_profile: string;
-  ram: WakeRamV1;
-  shape: WakeShapeV1;
-  vmm: WakeVmmV1;
-}
-/**
- * The guest's whole RAM file at its suspend.
- */
-export interface WakeRamV1 {
-  chunk_size: number;
-  /**
-   * `[chunk_index, layer_index, raw_sha256]`; absent indexes are zero
-   * holes.
-   */
-  chunks: [unknown, unknown, unknown][];
-  /**
-   * A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so
-   * nothing else parses.
-   */
-  sha256: string;
-  size_bytes: number;
-}
-/**
- * What the guest was suspended with. A VM's size is chosen at the wake,
- * by the balloon and by adding vCPUs, within this shape.
- */
-export interface WakeShapeV1 {
-  balloon: boolean;
-  boot_vcpus: number;
-  /**
-   * The guest's physical address width, the same at build and wake.
-   */
-  max_phys_bits: number;
-  max_vcpus: number;
-  memory_bytes: number;
-}
-/**
- * cloud-hypervisor versions as the VMM reports them (`v55.0.0`), compared
- * number by number.
- */
-export interface WakeVmmV1 {
-  /**
-   * The version that suspended it.
-   */
-  built_with: string;
-  /**
-   * The lowest version that can wake the image.
-   */
-  min_version: string;
 }

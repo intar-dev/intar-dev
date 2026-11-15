@@ -100,7 +100,6 @@ export type VmPhaseV2 =
   | "stopped"
   | "failed"
   | "absent";
-export type VmStartPath = ("cold" | "wake") | "wake_fallback";
 export type VmTerminalStateKindV1 = "pending" | "ready" | "failed";
 export type BuildPhaseV2 = "queued" | "fetching_sources" | "building" | "pushing" | "succeeded" | "failed";
 export type SyncRequestReason = "connect" | "reconnect" | "desired_version_lag" | "operator_requested";
@@ -409,11 +408,6 @@ export interface VmStartV1 {
    * From the VMM's start to Kino's first report for this run.
    */
   first_report_ms?: number | null;
-  path: VmStartPath;
-  /**
-   * Why not a wake, or why the wake fell back; for operators.
-   */
-  reason?: string | null;
 }
 export interface VmTerminalStateV1 {
   observed_at_unix_ms: number;

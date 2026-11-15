@@ -23,7 +23,6 @@ interface BuildRecord {
   env: MachineV1["env"] | null;
   stages: ScriptV1[];
   disk: number | null;
-  wake: boolean;
 }
 
 const encoder = new TextEncoder();
@@ -58,7 +57,6 @@ function key(record: BuildRecord): Promise<string> {
     put(stage.script);
   }
   put(record.disk === null ? "" : String(record.disk));
-  if (record.wake) put("wake");
 
   const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
   let offset = 0;
@@ -78,7 +76,6 @@ export function baseKey(): Promise<string> {
     env: null,
     stages: [],
     disk: null,
-    wake: false,
   });
 }
 
@@ -103,7 +100,6 @@ export async function imageKeys(images: ImageV1[]): Promise<Record<string, strin
       env: null,
       stages: image.setup,
       disk: image.from === PLATFORM_BASE_IMAGE ? (image.disk_mib ?? null) : null,
-      wake: image.wake === true,
     });
     keys.set(name, computed);
     return computed;
@@ -131,7 +127,6 @@ async function machineKey(
     env: builds ? machine.env : null,
     stages: machine.setup,
     disk: onBase && builds ? machine.disk_mib : null,
-    wake: false,
   });
 }
 

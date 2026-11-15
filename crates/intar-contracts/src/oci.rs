@@ -1,9 +1,4 @@
 //! Media types and config shapes of the artifacts in the registry.
-//!
-//! A wake image is a machine image whose manifest also carries a suspended
-//! guest: its whole RAM file, the stub that jumps to the guest's wake
-//! vector, and the CPU profile it was suspended under. A puller that cannot
-//! wake skips these layers and cold-boots.
 
 pub mod verify;
 
@@ -25,13 +20,6 @@ pub const DISK_CHUNK_MEDIA_TYPE: &str = "application/vnd.intar.disk.chunk.v1+zst
 pub const KINO_ARTIFACT_TYPE: &str = "application/vnd.intar.kino.v1";
 /// A machine spec, stored as a plain blob.
 pub const MACHINE_SPEC_MEDIA_TYPE: &str = "application/vnd.intar.machine.spec.v1+json";
-
-/// One zstd-compressed chunk of a wake image's RAM file.
-pub const WAKE_RAM_CHUNK_MEDIA_TYPE: &str = "application/vnd.intar.wake.ram.chunk.v1+zstd";
-/// The wake stub of a wake image, given to the VMM as the kernel.
-pub const WAKE_STUB_MEDIA_TYPE: &str = "application/vnd.intar.wake.stub.v1";
-/// The cloud-hypervisor CPU profile a wake image was suspended under.
-pub const WAKE_CPU_PROFILE_MEDIA_TYPE: &str = "application/vnd.intar.wake.cpu-profile.v1+json";
 
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64
@@ -149,9 +137,6 @@ pub struct MachineConfigV1 {
     pub build_key: OciDigest,
     pub boot: MachineBootV1,
     pub disk: MachineDiskV1,
-    /// Set when the manifest also carries a suspended guest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake: Option<WakeV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -178,109 +163,25 @@ pub struct KinoConfigV1 {
     pub version: String,
 }
 
-/// The `wake` object of a machine config.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WakeV1 {
-    /// The guest's whole RAM file at its suspend.
-    pub ram: WakeRamV1,
-    pub shape: WakeShapeV1,
-    /// The CPU profile layer. A host wakes the image only when it knows a
-    /// profile with this digest and its KVM offers what that profile needs.
-    pub cpu_profile: OciDigest,
-    pub vmm: WakeVmmV1,
-    /// When the image's guest was cold-booted before its suspend. Its
-    /// certificates date from that boot.
-    pub booted_at_unix_ms: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WakeRamV1 {
-    pub size_bytes: u64,
-    pub chunk_size: u64,
-    /// `[chunk_index, layer_index, raw_sha256]`; absent indexes are zero
-    /// holes.
-    pub chunks: Vec<(u64, u32, Sha256Hex)>,
-    /// SHA-256 of the assembled file, checked once per host.
-    pub sha256: Sha256Hex,
-}
-
-/// What the guest was suspended with. A VM's size is chosen at the wake,
-/// by the balloon and by adding vCPUs, within this shape.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WakeShapeV1 {
-    pub memory_bytes: u64,
-    pub boot_vcpus: u32,
-    pub max_vcpus: u32,
-    pub balloon: bool,
-    /// The guest's physical address width, the same at build and wake.
-    pub max_phys_bits: u8,
-}
-
-/// cloud-hypervisor versions as the VMM reports them (`v55.0.0`), compared
-/// number by number.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WakeVmmV1 {
-    /// The lowest version that can wake the image.
-    #[schemars(regex(pattern = r"^v[0-9]+(\.[0-9]+){1,2}$"))]
-    pub min_version: String,
-    /// The version that suspended it.
-    #[schemars(regex(pattern = r"^v[0-9]+(\.[0-9]+){1,2}$"))]
-    pub built_with: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn wake_json() -> serde_json::Value {
-        let hex = |digit: &str| digit.repeat(64);
-        serde_json::json!({
-            "ram": {"size_bytes": 4_294_967_296_u64, "chunk_size": 4_194_304, "chunks": [[0, 7, hex("b")]], "sha256": hex("c")},
-            "shape": {"memory_bytes": 4_294_967_296_u64, "boot_vcpus": 2, "max_vcpus": 4, "balloon": true, "max_phys_bits": 36},
-            "cpu_profile": format!("sha256:{}", hex("d")),
-            "vmm": {"min_version": "v55.0.0", "built_with": "v55.0.0"},
-            "booted_at_unix_ms": 1,
-        })
-    }
-
-    #[test]
-    fn wake_round_trips_and_refuses_unknown_fields() -> Result<(), serde_json::Error> {
-        let json = wake_json();
-        let wake: WakeV1 = serde_json::from_value(json.clone())?;
-        assert_eq!(serde_json::to_value(&wake)?, json);
-
-        let mut unknown = json.clone();
-        unknown["later"] = true.into();
-        assert!(serde_json::from_value::<WakeV1>(unknown).is_err());
-        // A delta against another image's RAM is no longer a wake.
-        let mut pack = json;
-        pack["pack"] = serde_json::json!({"base": format!("sha256:{}", "a".repeat(64)), "ram_sha256": "e".repeat(64)});
-        assert!(serde_json::from_value::<WakeV1>(pack).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn machine_config_of_the_design_parses() -> Result<(), serde_json::Error> {
+    fn machine_json() -> serde_json::Value {
         let hex = "a".repeat(64);
-        let json = serde_json::json!({
+        serde_json::json!({
             "guest_contract": 3, "image_format": IMAGE_FORMAT, "build_key": format!("sha256:{hex}"),
             "boot": {"cmdline": "console=hvc0 root=LABEL=INTARROOT"},
             "disk": {"size_bytes": 8_589_934_592_u64, "chunk_size": 4_194_304,
                      "chunks": [[0, 2, hex], [1, 3, hex], [5, 2, hex]]},
-        });
+        })
+    }
+
+    #[test]
+    fn machine_config_of_the_design_parses() -> Result<(), serde_json::Error> {
+        let json = machine_json();
         let config: MachineConfigV1 = serde_json::from_value(json.clone())?;
         assert_eq!(serde_json::to_value(&config)?, json);
-        let mut with_wake = json;
-        with_wake["wake"] = wake_json();
-        assert!(
-            serde_json::from_value::<MachineConfigV1>(with_wake)?
-                .wake
-                .is_some()
-        );
         Ok(())
     }
 
@@ -308,14 +209,21 @@ mod tests {
     #[test]
     fn digests_refuse_anything_but_lowercase_hex() {
         for bad in ["../x", "sha256:../x", &"A".repeat(64), &"a".repeat(63)] {
-            let mut json = wake_json();
-            json["ram"]["sha256"] = bad.into();
-            assert!(serde_json::from_value::<WakeV1>(json).is_err(), "{bad}");
-            let mut json = wake_json();
-            json["cpu_profile"] = bad.into();
-            assert!(serde_json::from_value::<WakeV1>(json).is_err(), "{bad}");
+            let mut json = machine_json();
+            json["disk"]["chunks"][0][2] = bad.into();
+            assert!(
+                serde_json::from_value::<MachineConfigV1>(json).is_err(),
+                "{bad}"
+            );
+            let mut json = machine_json();
+            json["build_key"] = bad.into();
+            assert!(
+                serde_json::from_value::<MachineConfigV1>(json).is_err(),
+                "{bad}"
+            );
         }
-        let schema = serde_json::to_value(schemars::schema_for!(WakeV1)).unwrap_or_default();
+        let schema =
+            serde_json::to_value(schemars::schema_for!(MachineConfigV1)).unwrap_or_default();
         assert_eq!(schema["$defs"]["Sha256Hex"]["pattern"], "^[0-9a-f]{64}$");
         assert_eq!(
             schema["$defs"]["OciDigest"]["pattern"],
