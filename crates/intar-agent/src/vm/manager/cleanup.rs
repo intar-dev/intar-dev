@@ -745,42 +745,113 @@ pub(super) async fn recording_export_path_for_cleanup<'a>(
     if recording_disk_path.is_file() {
         return Ok(Some(recording_disk_path));
     }
-    let inspect = || jailer_identity_request(inner, generation, JailerIdentityOperation::Inspect);
-    let generation_tracked = match inspect().await {
-        Ok(inspection) => inspection.is_some(),
-        // An inspection that contains the VM answers with an error and
-        // forgets the generation, so the second answer is the settled one.
-        Err(_) => inspect().await?.is_some(),
+    // StopVm again first: for a tracked generation it answers Ok only once
+    // the export is published, and unlike InspectVm it never contains the VM.
+    let mut attempt = 0;
+    let mut step = loop {
+        attempt += 1;
+        let stopped =
+            jailer_identity_request(inner, generation, JailerIdentityOperation::Stop).await;
+        if let Err(error) = &stopped {
+            warn!(
+                error = %error,
+                vm = vm_name,
+                generation,
+                attempt,
+                "jailerd StopVm did not publish the recording export"
+            );
+        }
+        let probe = MissingExportProbe::Stop {
+            attempt,
+            succeeded: stopped.is_ok(),
+        };
+        match missing_export_step(probe, recording_disk_path.is_file()) {
+            MissingExportStep::StopAgain => {
+                tokio::time::sleep(Duration::from_secs(2 * u64::from(attempt))).await;
+            }
+            step => break step,
+        }
     };
-    // A containment exports the recording before it forgets the generation.
-    if recording_disk_path.is_file() {
-        return Ok(Some(recording_disk_path));
-    }
-    missing_recording_export(vm_name, generation, recording_disk_path, generation_tracked)
-}
-
-/// A jailed VM's recording export is missing. While jailerd tracks the
-/// generation a later StopVm can still publish it, so the delete must wait;
-/// once it does not, nothing will, and the VM goes without its recording.
-pub(super) fn missing_recording_export<'a>(
-    vm_name: &str,
-    generation: &str,
-    recording_disk_path: &Path,
-    generation_tracked: bool,
-) -> Result<Option<&'a Path>> {
-    if generation_tracked {
-        anyhow::bail!(
-            "jailerd did not publish the drained recording export at {}",
-            recording_disk_path.display()
+    if step == MissingExportStep::Inspect {
+        // Last resort, and destructive: an unsound VM is contained here,
+        // with one more best-effort export, so the delete cannot stay stuck.
+        let inspect =
+            || jailer_identity_request(inner, generation, JailerIdentityOperation::Inspect);
+        let tracked = match inspect().await {
+            Ok(inspection) => inspection.is_some(),
+            // An inspection that contains the VM answers with an error and
+            // forgets the generation, so the second answer is the settled one.
+            Err(_) => inspect().await?.is_some(),
+        };
+        step = missing_export_step(
+            MissingExportProbe::Inspect { tracked },
+            recording_disk_path.is_file(),
         );
     }
-    warn!(
-        vm = vm_name,
-        generation,
-        path = %recording_disk_path.display(),
-        "jailerd no longer tracks the jail generation and published no recording export; deleting the VM without its recording"
-    );
-    Ok(None)
+    match step {
+        MissingExportStep::Archive => Ok(Some(recording_disk_path)),
+        MissingExportStep::Skip(reason) => {
+            warn!(
+                vm = vm_name,
+                generation,
+                path = %recording_disk_path.display(),
+                reason,
+                "deleting the VM without its recording"
+            );
+            Ok(None)
+        }
+        MissingExportStep::Fail | MissingExportStep::StopAgain | MissingExportStep::Inspect => {
+            anyhow::bail!(
+                "jailerd did not publish the drained recording export at {}",
+                recording_disk_path.display()
+            )
+        }
+    }
+}
+
+/// StopVm attempts in one delete before the destructive InspectVm. The
+/// counter lives in the attempt: the row has no retry state, and an
+/// agent restart, which resets anything in memory, may be the only retry.
+pub(super) const STOP_EXPORT_ATTEMPTS: u32 = 3;
+
+/// What the delete last learned about a jailed VM's missing recording export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MissingExportProbe {
+    Stop { attempt: u32, succeeded: bool },
+    Inspect { tracked: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MissingExportStep {
+    Archive,
+    StopAgain,
+    Inspect,
+    /// jailerd still tracks the generation: a later delete can publish it.
+    Fail,
+    /// Nothing will publish it; the reason goes into the WARN.
+    Skip(&'static str),
+}
+
+pub(super) fn missing_export_step(probe: MissingExportProbe, published: bool) -> MissingExportStep {
+    if published {
+        return MissingExportStep::Archive;
+    }
+    match probe {
+        // A tracked StopVm succeeds only after publishing the export.
+        MissingExportProbe::Stop {
+            succeeded: true, ..
+        } => MissingExportStep::Skip(
+            "jailerd stopped the VM without publishing an export, so it no longer tracks the jail generation",
+        ),
+        MissingExportProbe::Stop { attempt, .. } if attempt < STOP_EXPORT_ATTEMPTS => {
+            MissingExportStep::StopAgain
+        }
+        MissingExportProbe::Stop { .. } => MissingExportStep::Inspect,
+        MissingExportProbe::Inspect { tracked: true } => MissingExportStep::Fail,
+        MissingExportProbe::Inspect { tracked: false } => MissingExportStep::Skip(
+            "jailerd contained the VM or no longer tracks the jail generation",
+        ),
+    }
 }
 
 pub(super) async fn extract_recordings_to_spool(

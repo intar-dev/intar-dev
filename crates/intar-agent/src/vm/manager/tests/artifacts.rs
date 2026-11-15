@@ -218,43 +218,83 @@ async fn recording_extraction_atomically_publishes_krec_and_retries_after_source
 }
 
 #[test]
-fn missing_recording_export_stays_fatal_while_jailerd_tracks_the_generation() {
-    let temp = tempdir().expect("temp dir");
-    let missing_export = temp.path().join("recordings.vfat");
-
-    // A tracked generation can still publish its export on a later StopVm:
-    // the delete must not go on and lose it.
-    let error = missing_recording_export("vm", "generation", &missing_export, true)
-        .expect_err("missing jailerd recording export must remain fatal");
-    assert!(
-        error
-            .to_string()
-            .contains("jailerd did not publish the drained recording export")
-    );
+fn a_published_export_is_archived_whatever_jailerd_answered() {
+    for probe in [
+        MissingExportProbe::Stop {
+            attempt: 1,
+            succeeded: false,
+        },
+        MissingExportProbe::Stop {
+            attempt: 1,
+            succeeded: true,
+        },
+        MissingExportProbe::Stop {
+            attempt: STOP_EXPORT_ATTEMPTS,
+            succeeded: false,
+        },
+        MissingExportProbe::Inspect { tracked: true },
+        MissingExportProbe::Inspect { tracked: false },
+    ] {
+        assert_eq!(missing_export_step(probe, true), MissingExportStep::Archive);
+    }
 }
 
 #[test]
-fn missing_recording_export_is_skipped_once_jailerd_forgot_the_generation() {
-    let temp = tempdir().expect("temp dir");
-    let missing_export = temp.path().join("recordings.vfat");
-
-    // Contained or destroyed: nothing will publish it, so the delete goes on.
+fn a_failing_stop_export_is_retried_before_the_destructive_inspect() {
+    // A transient export failure on a tracked generation must not lose the
+    // recording: StopVm is sent again, and only after the bound does the
+    // delete fall back to InspectVm, which may contain the VM.
+    for attempt in 1..STOP_EXPORT_ATTEMPTS {
+        assert_eq!(
+            missing_export_step(
+                MissingExportProbe::Stop {
+                    attempt,
+                    succeeded: false
+                },
+                false
+            ),
+            MissingExportStep::StopAgain
+        );
+    }
     assert_eq!(
-        missing_recording_export("vm", "generation", &missing_export, false)
-            .expect("an untracked generation must not block the delete"),
-        None
+        missing_export_step(
+            MissingExportProbe::Stop {
+                attempt: STOP_EXPORT_ATTEMPTS,
+                succeeded: false,
+            },
+            false
+        ),
+        MissingExportStep::Inspect
     );
 }
 
 #[test]
-fn startup_reconcile_archives_a_vm_stuck_on_a_missing_export() {
-    // A row left by the earlier fatal path: on restart it goes through the
-    // archive delete again, which now asks jailerd whether the export can
-    // still appear.
-    let mut vm = test_vm_status("vm", Some("run"));
-    vm.state = VmLifecycleState::DeleteFailed;
-    vm.error = Some("jailerd did not publish the drained recording export at /x".to_string());
-    assert_eq!(startup_cleanup_mode(&vm), StartupCleanupMode::Archive);
+fn a_stop_that_succeeds_without_an_export_means_the_generation_is_gone() {
+    // A tracked StopVm answers Ok only after publishing the export.
+    assert!(matches!(
+        missing_export_step(
+            MissingExportProbe::Stop {
+                attempt: 1,
+                succeeded: true
+            },
+            false
+        ),
+        MissingExportStep::Skip(_)
+    ));
+}
+
+#[test]
+fn missing_export_stays_fatal_while_jailerd_still_tracks_the_generation() {
+    // The case the old pinned test guarded: never lose a recording while
+    // jailerd can still publish it.
+    assert_eq!(
+        missing_export_step(MissingExportProbe::Inspect { tracked: true }, false),
+        MissingExportStep::Fail
+    );
+    assert!(matches!(
+        missing_export_step(MissingExportProbe::Inspect { tracked: false }, false),
+        MissingExportStep::Skip(_)
+    ));
 }
 
 #[test]

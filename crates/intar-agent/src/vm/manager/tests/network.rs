@@ -606,6 +606,39 @@ fn logical_cleanup_treats_not_found_stop_and_destroy_as_idempotent_success() {
 }
 
 #[test]
+fn untracked_generation_answers_are_typed() {
+    // The report path and the delete's last resort read InspectVm's
+    // not_found as "jailerd no longer tracks the generation".
+    let not_found = || {
+        JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+            "not_found",
+            "unknown jail generation",
+        ))
+    };
+    assert!(
+        classify_jailer_identity_response(JailerIdentityOperation::Inspect, not_found())
+            .expect("not_found inspection is an answer")
+            .is_none()
+    );
+    // A failed StopVm export stays an error, so the delete sends it again.
+    let export_failed = JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+        "host_operation_failed",
+        "export recording",
+    ));
+    assert!(
+        classify_jailer_identity_response(JailerIdentityOperation::Stop, export_failed).is_err()
+    );
+    // A contained VM's inspection is an error, never "tracked".
+    let contained = JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+        "host_operation_failed",
+        "the VM was stopped and quarantined",
+    ));
+    assert!(
+        classify_jailer_identity_response(JailerIdentityOperation::Inspect, contained).is_err()
+    );
+}
+
+#[test]
 fn logical_cleanup_failure_is_not_misclassified_as_absence() {
     let response = JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
         "resource_busy",
