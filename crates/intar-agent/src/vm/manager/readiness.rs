@@ -668,9 +668,15 @@ pub(super) async fn detect_tracked_vm_runtime(
         return Ok(TrackedVmRuntimeStatus::Dead);
     };
 
-    let Some(inspection) =
-        jailer_identity_request(inner, generation, JailerIdentityOperation::Inspect).await?
-    else {
+    let inspect = || jailer_identity_request(inner, generation, JailerIdentityOperation::Inspect);
+    let inspection = match inspect().await {
+        Ok(inspection) => inspection,
+        Err(error) if jail_vm_exited(&error) => return Ok(TrackedVmRuntimeStatus::Dead),
+        // An inspection that contains or releases the VM answers with an
+        // error and forgets the generation, so the second answer is settled.
+        Err(_) => inspect().await?,
+    };
+    let Some(inspection) = inspection else {
         return Ok(TrackedVmRuntimeStatus::Dead);
     };
 
