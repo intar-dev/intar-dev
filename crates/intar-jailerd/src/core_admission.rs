@@ -369,7 +369,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     .run_networks
                     .get(&request.run_id)
                     .cloned()
-                    .context("cannot repair an untracked run network")?;
+                    .ok_or(UntrackedRunNetworkError)?;
                 if record.request != request {
                     bail!("run network repair topology differs from durable state")
                 }

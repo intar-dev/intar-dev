@@ -306,6 +306,108 @@ fn stop_export_failures_the_vm_caused_are_not_storage_exhausted() {
 }
 
 #[test]
+fn inspect_of_a_vm_whose_unit_is_gone_exports_then_releases_it() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        TrackingPreparer::default(),
+        1_000,
+        ready_readiness(),
+    )
+    .expect("core");
+    ensure_test_network(&mut core);
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 125)))) {
+        Response::LaunchVmV3(value) => value,
+        other => panic!("unexpected launch response {other:?}"),
+    };
+    // A guest poweroff: the VMM exits cleanly and systemd removes the unit.
+    core.backend.units.remove(&launched.unit_name);
+
+    assert!(matches!(
+        core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+            launched.generation.clone(),
+        ))),
+        Response::Error(ProtocolError { ref message, .. })
+            if message.contains("the VM was released")
+    ));
+    // The drain was proven by stop before the export, and the export came
+    // before the release.
+    assert!(core.backend.stopped_units.contains(&launched.unit_name));
+    assert_eq!(
+        core.preparer.exported,
+        std::slice::from_ref(&launched.generation)
+    );
+    assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
+    // Released like a destroy, not quarantined: nothing is kept forever.
+    assert!(core.preparer.quarantined.is_empty());
+    assert!(core.records.is_empty());
+    assert_eq!(core.capabilities().committed_cpu_millis, 0);
+    assert!(matches!(
+        core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+            launched.generation,
+        ))),
+        Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
+    ));
+}
+
+#[test]
+fn inspect_keeps_an_exited_vm_whose_drain_cannot_be_proven() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        TrackingPreparer::default(),
+        1_000,
+        ready_readiness(),
+    )
+    .expect("core");
+    ensure_test_network(&mut core);
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 125)))) {
+        Response::LaunchVmV3(value) => value,
+        other => panic!("unexpected launch response {other:?}"),
+    };
+    core.backend.units.remove(&launched.unit_name);
+    core.backend.fail_stop_unit = true;
+
+    assert!(matches!(
+        core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+            launched.generation.clone(),
+        ))),
+        Response::Error(_)
+    ));
+    assert!(core.preparer.exported.is_empty());
+    assert!(core.records.contains_key(&launched.generation));
+}
+
+#[test]
+fn inspect_of_a_launch_in_flight_contains_nothing() {
+    // A generation is tracked only after its unit started; before that an
+    // inspection finds no record and touches nothing.
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        TrackingPreparer::default(),
+        1_000,
+        ready_readiness(),
+    )
+    .expect("core");
+    ensure_test_network(&mut core);
+    let generation = ValidatedId::parse(uuid::Uuid::new_v4().to_string()).expect("generation");
+    assert!(matches!(
+        core.handle(Request::InspectVm(VmIdentityRequest::by_generation(generation))),
+        Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
+    ));
+    assert!(core.backend.stopped_units.is_empty());
+    assert!(core.backend.destroyed_vm_networks.is_empty());
+    assert!(core.preparer.exported.is_empty());
+}
+
+#[test]
 fn inspect_containment_completes_when_the_recording_export_fails() {
     let (mut core, launched) = launch_then_mismatch(TrackingPreparer {
         fail_export: true,

@@ -465,7 +465,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             .get(&generation)
             .context("unknown jail generation")?
             .clone();
-        let inspection = self.backend.inspect_unit(&record.unit_name)?;
+        let inspection = match self.backend.inspect_unit(&record.unit_name) {
+            Ok(inspection) => inspection,
+            Err(error) if error.downcast_ref::<UnitGoneError>().is_some() => {
+                return self.release_exited_vm(&record, error);
+            }
+            Err(error) => return Err(error),
+        };
         let identity_matches = backend_identity_matches(&record, &inspection);
         let api_answered = !identity_matches
             || inspection.health != SandboxHealth::Healthy
@@ -527,6 +533,34 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             capabilities_empty: inspection.capabilities_empty,
             paths: record.paths,
         })
+    }
+
+    /// A tracked VM whose unit systemd removed: its VMM exited cleanly, as
+    /// on a guest poweroff. Nothing about it is suspicious, so it is released
+    /// as a stop and destroy would, not quarantined. A record is tracked only
+    /// once its unit was started, so a launch in flight cannot get here.
+    fn release_exited_vm(
+        &mut self,
+        record: &VmRecord,
+        gone: anyhow::Error,
+    ) -> Result<VmInspection> {
+        // An absent unit has no cgroup; stop proves that, as a containment
+        // does, and a failure keeps the record for the next inspection.
+        self.backend
+            .stop_unit(&record.unit_name)
+            .context("prove the exited VM's cgroup drained")?;
+        // Best effort, as for a contained VM: the release must not depend on
+        // the disk the VMM left behind.
+        if let Err(error) = self.preparer.export_recording(&self.config, record) {
+            tracing::warn!(
+                generation = %record.generation,
+                error = %format!("{error:#}"),
+                "failed to export the recording of an exited VM"
+            );
+        }
+        self.destroy_vm(VmIdentityRequest::by_generation(record.generation.clone()))
+            .context("release the exited VM")?;
+        Err(gone.context("the VMM exited; the VM was released"))
     }
 
     pub(super) fn stop_vm(&mut self, request: VmIdentityRequest) -> Result<bool> {

@@ -349,6 +349,16 @@ struct CpuCapacityExhaustedError {
     schedulable: u64,
 }
 
+/// `inspect_unit` found no unit: systemd removed it after its VMM exited.
+#[derive(Debug, Error)]
+#[error("systemd unit {0} no longer exists")]
+pub struct UnitGoneError(pub String);
+
+/// A run network jailerd does not track: answered as `not_found`.
+#[derive(Debug, Error)]
+#[error("cannot repair an untracked run network")]
+struct UntrackedRunNetworkError;
+
 impl VmRecord {
     fn cpu_runtime(&self) -> VmCpuRuntimeState {
         VmCpuRuntimeState {
@@ -746,6 +756,8 @@ fn classify_protocol_error(error: &anyhow::Error, message: &str) -> &'static str
     } else if error.downcast_ref::<PrepareDeferred>().is_some() {
         // The coordinator requeues this work. It is not a failure.
         "image_prepare_requeued"
+    } else if error.downcast_ref::<UntrackedRunNetworkError>().is_some() {
+        "not_found"
     } else if storage_exhausted(error) {
         // The agent retries a StopVm export that failed this way instead of
         // giving the recording up: it clears once space is freed.

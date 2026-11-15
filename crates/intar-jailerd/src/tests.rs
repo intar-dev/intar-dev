@@ -79,7 +79,7 @@ impl HostBackend for FakeBackend {
         self.units
             .get(unit_name)
             .cloned()
-            .context("missing fake unit")
+            .ok_or_else(|| UnitGoneError(unit_name.to_owned()).into())
     }
     fn verify_unit_cpu_quota(
         &mut self,
@@ -751,9 +751,11 @@ fn typed_run_network_repair_requires_and_preserves_durable_identity() {
         gateway: "10.77.0.1".to_owned(),
     };
 
+    // An untracked run answers not_found, which the agent reads as "no
+    // network to repair", never as a repair failure.
     assert!(matches!(
         core.handle(Request::RepairRunNetwork(request.clone())),
-        Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
+        Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
     ));
     assert!(core.backend.run_network_repairs.is_empty());
 
