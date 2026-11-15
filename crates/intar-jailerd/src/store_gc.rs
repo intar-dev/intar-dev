@@ -7,7 +7,6 @@ use std::os::unix::fs::MetadataExt as _;
 pub struct StoreGcReport {
     pub templates_removed: usize,
     pub chunks_removed: usize,
-    pub ram_files_removed: usize,
     pub estimated_bytes_after: u64,
     pub filesystem_free_bytes_after: u64,
 }
@@ -30,12 +29,12 @@ pub fn gc_root_stores(
     let (mut templates, stale) = load_templates(&templates_root)?;
     templates.sort_by_key(|entry| entry.last_used);
     let mut remove = HashSet::new();
-    let current_store_bytes = estimated_store_bytes(&templates, &remove, &config.jail_root)?;
+    let current_store_bytes = estimated_store_bytes(&templates, &remove, &chunks_root)?;
     let current_free_bytes = fs2::available_space(&config.jail_root)
         .with_context(|| format!("read free space for {}", config.jail_root.display()))?;
 
     loop {
-        let retained_store_bytes = estimated_store_bytes(&templates, &remove, &config.jail_root)?;
+        let retained_store_bytes = estimated_store_bytes(&templates, &remove, &chunks_root)?;
         let projected_free_bytes = current_free_bytes
             .saturating_add(current_store_bytes.saturating_sub(retained_store_bytes));
         if retention_pressure_satisfied(
@@ -89,15 +88,7 @@ pub fn gc_root_stores(
         now,
         grace,
     )?;
-    // A RAM store file stays while any template was made from it.
-    report.ram_files_removed = prune_unreferenced(
-        &config.jail_root.join("ram"),
-        ".ram",
-        &referenced_ram(&retained),
-        now,
-        grace,
-    )?;
-    report.estimated_bytes_after = estimated_store_bytes(&templates, &remove, &config.jail_root)?;
+    report.estimated_bytes_after = estimated_store_bytes(&templates, &remove, &chunks_root)?;
     report.filesystem_free_bytes_after = fs2::available_space(&config.jail_root)?;
     Ok(report)
 }
@@ -107,14 +98,6 @@ fn referenced_chunks(retained: &[&TemplateGcEntry]) -> HashSet<String> {
         .iter()
         .flat_map(|entry| entry.metadata.chunk_raw_sha256s.iter())
         .map(|sha| sha.as_str().to_owned())
-        .collect()
-}
-
-fn referenced_ram(retained: &[&TemplateGcEntry]) -> HashSet<String> {
-    retained
-        .iter()
-        .filter_map(|entry| entry.metadata.wake.as_ref())
-        .map(|wake| wake.ram_store_sha256.as_str().to_owned())
         .collect()
 }
 
@@ -240,43 +223,28 @@ fn load_templates(root: &Path) -> Result<(Vec<TemplateGcEntry>, StaleTemplates)>
 fn estimated_store_bytes(
     templates: &[TemplateGcEntry],
     removed: &HashSet<String>,
-    jail_root: &Path,
+    chunks_root: &Path,
 ) -> Result<u64> {
     let retained = templates
         .iter()
         .filter(|entry| !removed.contains(&entry.image_id))
         .collect::<Vec<_>>();
-    let store_files = referenced_chunks(&retained)
-        .into_iter()
-        .map(|sha| jail_root.join("chunks").join(format!("{sha}.raw")))
-        .chain(
-            referenced_ram(&retained)
-                .into_iter()
-                .map(|sha| jail_root.join("ram").join(format!("{sha}.ram"))),
-        );
-    let template_files = retained.iter().flat_map(|entry| {
-        // A base's `ram` shares its store file's extents; a pack's is its own.
-        let own_ram = entry
-            .metadata
-            .wake
-            .as_ref()
-            .is_some_and(|wake| wake.ram.sha256 != wake.ram_store_sha256);
-        [
-            "kernel",
-            "initrd",
-            "metadata-v2.json",
-            "last-used",
-            "stub",
-            "cpu-profile.json",
-        ]
-        .into_iter()
-        .chain(own_ram.then_some("ram"))
-        .map(|name| entry.path.join(name))
-    });
+    let referenced_chunks = retained
+        .iter()
+        .flat_map(|entry| entry.metadata.chunk_raw_sha256s.iter())
+        .map(|sha| sha.as_str())
+        .collect::<HashSet<_>>();
     let mut bytes = 0_u64;
-    for path in store_files.chain(template_files) {
-        if let Ok(metadata) = std::fs::metadata(path) {
+    for sha in referenced_chunks {
+        if let Ok(metadata) = std::fs::metadata(chunks_root.join(format!("{sha}.raw"))) {
             bytes = bytes.saturating_add(allocated_bytes(&metadata));
+        }
+    }
+    for entry in retained {
+        for name in ["kernel", "initrd", "metadata-v2.json", "last-used"] {
+            if let Ok(metadata) = std::fs::metadata(entry.path.join(name)) {
+                bytes = bytes.saturating_add(allocated_bytes(&metadata));
+            }
         }
     }
     Ok(bytes)
@@ -317,63 +285,6 @@ mod tests {
         assert!(!templates.join(&old).exists() && !templates.join(&unreadable).exists());
         assert!(templates.join(&held).exists(), "a live VM's template stays");
         assert!(templates.join(".staging").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn a_ram_store_file_stays_while_a_template_was_made_from_it() -> Result<()> {
-        let root = tempfile::tempdir()?;
-        let config = JailerdConfig {
-            jail_root: root.path().to_owned(),
-            store_gc_grace_seconds: 60,
-            ..JailerdConfig::default()
-        };
-        let digest = |digit: &str| Sha256Digest::parse(digit.repeat(64));
-        let artifact = ImageTemplateArtifactV2 {
-            sha256: digest("a")?,
-            bytes: 1,
-            device: 1,
-            inode: 1,
-        };
-        let metadata = ImageTemplateMetadataV2 {
-            schema_version: IMAGE_TEMPLATE_METADATA_V3,
-            image_sha256: digest("d")?,
-            chunk_manifest_sha256: Some(digest("d")?),
-            chunk_raw_sha256s: Vec::new(),
-            virtual_size_bytes: 1,
-            root_disk: artifact.clone(),
-            kernel: artifact.clone(),
-            initrd: None,
-            wake: Some(ImageTemplateWakeV1 {
-                ram_store_sha256: digest("a")?,
-                ram: artifact.clone(),
-                stub: artifact.clone(),
-                cpu_profile: artifact,
-            }),
-        };
-        let template = root.path().join("templates").join("d".repeat(64));
-        std::fs::create_dir_all(&template)?;
-        std::fs::write(
-            template.join("metadata-v2.json"),
-            serde_json::to_vec(&metadata)?,
-        )?;
-        let ram = root.path().join("ram");
-        std::fs::create_dir_all(&ram)?;
-        let (used, unused) = (
-            ram.join(format!("{}.ram", "a".repeat(64))),
-            ram.join(format!("{}.ram", "b".repeat(64))),
-        );
-        for path in [&used, &unused] {
-            File::create(path)?.set_modified(UNIX_EPOCH + Duration::from_secs(1_000))?;
-        }
-
-        let report = gc_root_stores(&config, &HashSet::new())?;
-
-        assert!(used.exists(), "a referenced RAM store file stays");
-        // Only root-owned files go, so only a root test run sees one go.
-        let as_root = rustix::process::geteuid().is_root();
-        assert_eq!(report.ram_files_removed, usize::from(as_root));
-        assert_eq!(unused.exists(), !as_root);
         Ok(())
     }
 

@@ -648,7 +648,6 @@ pub(super) fn prepare_smoke_image(
         // the same lane a learner launch uses, so the smoke covers the
         // foreground admission path.
         request_class: RequestClass::Foreground,
-        prepare_wake: false,
     };
     match core.handle(Request::PrepareChunkedImageV3(Box::new(request))) {
         Response::PrepareChunkedImageV3(prepared) if prepared.fast_template_store => Ok(prepared),
@@ -679,8 +678,6 @@ pub(super) fn protocol_artifacts(
             &artifacts.recording_disk,
             ArtifactAccess::ReadWrite,
         )?,
-        // The self-test does not cover a wake.
-        wake: None,
     })
 }
 
@@ -733,7 +730,6 @@ pub(super) fn smoke_vm_config(
         cpus: None,
         memory: Some(MemoryConfig {
             size: i64::from(SELF_TEST_VM_MEMORY_MIB) * 1024 * 1024,
-            zones: None,
         }),
         payload: PayloadConfig {
             kernel: Some(path_utf8(&launch.paths.jailed_kernel)?),
@@ -769,7 +765,8 @@ pub(super) fn smoke_vm_config(
         net: Some(vec![NetConfig {
             tap: request.tap_name.clone(),
             mac: Some(request.mac_address.clone()),
-            ..NetConfig::default()
+            ip: None,
+            mask: None,
         }]),
         serial: Some(SerialConfig {
             file: Some(path_utf8(&launch.paths.jailed_serial_log)?),
@@ -793,7 +790,6 @@ pub(super) fn smoke_vm_config(
             pci_segment: None,
             id: Some("selftest-kino-vsock".to_owned()),
         }),
-        balloon: None,
         landlock_enable: Some(true),
     })
 }

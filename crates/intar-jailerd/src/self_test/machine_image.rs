@@ -109,7 +109,6 @@ pub(crate) fn build_machine_image(
             chunk_size: u64::from(IMAGE_CHUNK_SIZE_BYTES),
             chunks,
         },
-        wake: None,
     };
     let (config_sha256, config_bytes) = put_blob(blobs, &serde_json::to_vec(&config)?)?;
     let manifest = OciManifestV1 {

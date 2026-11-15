@@ -60,13 +60,11 @@ impl VmLaunchRequest {
             Some(&self.artifacts.kernel),
             self.artifacts.initrd.as_ref(),
         ];
-        // A suspended guest exists only as prepared template files.
         if !allow_prepared_boot_artifacts
-            && (self.artifacts.wake.is_some()
-                || boot_artifacts
-                    .into_iter()
-                    .flatten()
-                    .any(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT))
+            && boot_artifacts
+                .into_iter()
+                .flatten()
+                .any(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT)
         {
             return Err(ValidationError::TemplateLaunchRequiresV2);
         }

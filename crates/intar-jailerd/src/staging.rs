@@ -139,11 +139,7 @@ pub(super) fn prepare_jail_files(
             spec_path,
             jail_root_inode: Some(root_stat.st_ino),
             vmm_executable_identity,
-            paths: jail_paths(
-                &root,
-                request.artifacts.initrd.is_some(),
-                request.artifacts.wake.is_some(),
-            ),
+            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
         })
     })();
     match operation {
@@ -198,21 +194,6 @@ pub(super) fn stage_artifacts_v2(
             .set_len(root_disk_size_bytes)
             .context("expand cloned generation root disk")?;
     }
-    // The suspended guest: the generation's own clone of the RAM file, which
-    // the VM writes as its root disk is written, and the stub and CPU
-    // profile read-only, as the kernel is.
-    if let Some(wake) = &artifacts.wake {
-        stage_source(config, &wake.ram, &root.join("disks/wake.ram"), 0o600)?;
-        stage_source(config, &wake.stub, &root.join("boot/wake-stub"), 0o444)?;
-        stage_source(
-            config,
-            &wake.cpu_profile,
-            &root.join("boot/cpu-profile.json"),
-            0o444,
-        )?;
-        set_owner(&root.join("disks/wake.ram"), uid, gid)?;
-        preread_wake_ram(&root.join("disks/wake.ram"), WAKE_RAM_PREREAD_BOUND);
-    }
     // Runtime state remains per-VM and read-only, but the recording disk is a
     // preformatted root-owned blank. Its agent descriptor is retained solely
     // as the trusted export destination after the cgroup drains.
@@ -251,80 +232,6 @@ pub(super) fn stage_artifacts_v2(
     Ok(())
 }
 
-/// About 240 MiB of data takes 55–60 ms on a run host; past this the VMM
-/// starts and faults the rest in.
-const WAKE_RAM_PREREAD_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Read the data of a woken guest's RAM clone into the page cache before
-/// its VMM starts: the clone is a new inode with a cold cache, so otherwise
-/// the guest's first seconds take major faults. A read, not
-/// `posix_fadvise(WILLNEED)`: the advice is asynchronous and may be dropped,
-/// and the cache must be warm when the VMM maps the file. Best effort: an
-/// error or the bound only ends the read.
-pub(super) fn preread_wake_ram(path: &Path, bound: std::time::Duration) {
-    let started = std::time::Instant::now();
-    match preread_data(path, started + bound) {
-        Ok(bytes) => tracing::info!(
-            path = %path.display(),
-            bytes,
-            elapsed_ms = started.elapsed().as_millis(),
-            "pre-read the wake RAM"
-        ),
-        Err(error) => tracing::warn!(
-            path = %path.display(),
-            error = %error,
-            "could not pre-read the wake RAM; the guest faults it in"
-        ),
-    }
-}
-
-/// The bytes read of `path`'s data extents, stopping at `deadline`.
-fn preread_data(path: &Path, deadline: std::time::Instant) -> std::io::Result<u64> {
-    use std::os::unix::fs::FileExt as _;
-    let file = std::fs::File::open(path)?;
-    let mut buffer = vec![0_u8; 1 << 20];
-    let mut read = 0_u64;
-    for (start, len) in data_extents(&file)? {
-        let mut at = start;
-        while at < start + len {
-            if std::time::Instant::now() >= deadline {
-                return Ok(read);
-            }
-            let want = usize::try_from((start + len - at).min(buffer.len() as u64))
-                .unwrap_or(buffer.len());
-            let got = file.read_at(&mut buffer[..want], at)?;
-            if got == 0 {
-                return Ok(read);
-            }
-            at += got as u64;
-            read += got as u64;
-        }
-    }
-    Ok(read)
-}
-
-/// The data extents of `file` as `(offset, length)`, by `SEEK_DATA` and
-/// `SEEK_HOLE`; a file system without holes reports one extent.
-pub(super) fn data_extents(file: &std::fs::File) -> std::io::Result<Vec<(u64, u64)>> {
-    let len = file.metadata()?.len();
-    let mut extents = Vec::new();
-    let mut at = 0;
-    while at < len {
-        let start = match rustix::fs::seek(file, rustix::fs::SeekFrom::Data(at)) {
-            Ok(start) => start,
-            Err(rustix::io::Errno::NXIO) => break,
-            Err(error) => return Err(error.into()),
-        };
-        let end = rustix::fs::seek(file, rustix::fs::SeekFrom::Hole(start))?;
-        if end <= start {
-            break;
-        }
-        extents.push((start, end - start));
-        at = end;
-    }
-    Ok(extents)
-}
-
 pub(super) fn stage_artifacts(
     config: &JailerdConfig,
     artifacts: &SourceArtifacts,
@@ -333,10 +240,6 @@ pub(super) fn stage_artifacts(
     gid: u32,
 ) -> Result<()> {
     validate_template_launch_sources(artifacts)?;
-    ensure!(
-        artifacts.wake.is_none(),
-        "a suspended guest launches only from a prepared template"
-    );
     stage_source(config, &artifacts.kernel, &root.join("boot/kernel"), 0o444)?;
     if let Some(initrd) = &artifacts.initrd {
         stage_source(config, initrd, &root.join("boot/initrd"), 0o444)?;
@@ -552,53 +455,6 @@ fn reflink_route_is_unavailable(error: rustix::io::Errno) -> bool {
     )
 }
 
-/// Write the generation's kernel into its staged wake stub, so the VMM's
-/// next boot of the same path (a guest reboot) is a cold boot. The stub's
-/// own inode is rewritten, not replaced: the VMM's Landlock rule for its
-/// kernel holds that inode. The stub is the generation's own clone, root
-/// owned and read-only to the VM, as the kernel is; both keep their mode.
-pub(super) fn replace_wake_stub(record: &VmRecord) -> Result<bool> {
-    let wake = record.paths.wake.as_ref().context("the VM was not woken")?;
-    replace_stub_with_kernel(&record.paths.host_kernel, &wake.host_stub)
-}
-
-/// [`replace_wake_stub`] on paths; `false` when the stub already is the
-/// kernel.
-pub(super) fn replace_stub_with_kernel(host_kernel: &Path, stub: &Path) -> Result<bool> {
-    use std::io::{Read as _, Seek as _, Write as _};
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-
-    let no_follow = rustix::fs::OFlags::NOFOLLOW.bits() as i32;
-    let mut kernel = Vec::new();
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(no_follow)
-        .open(host_kernel)
-        .context("open the staged kernel")?
-        .read_to_end(&mut kernel)?;
-    let mut target = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(no_follow)
-        .open(stub)
-        .context("open the staged wake stub")?;
-    let metadata = target.metadata()?;
-    ensure!(
-        metadata.is_file() && metadata.nlink() == 1,
-        "the staged wake stub is not a private regular file"
-    );
-    let mut current = Vec::new();
-    target.read_to_end(&mut current)?;
-    if current == kernel {
-        return Ok(false);
-    }
-    target.rewind()?;
-    target.write_all(&kernel)?;
-    target.set_len(kernel.len() as u64)?;
-    target.sync_all()?;
-    Ok(true)
-}
-
 #[cfg(not(target_os = "linux"))]
 pub(super) fn export_recording_disk(_config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
     bail!("recording export is supported only on Linux")
@@ -644,16 +500,9 @@ pub(super) fn validate_template_launch_sources(artifacts: &SourceArtifacts) -> R
     let root_template = template_source_image(&artifacts.root_disk);
     let kernel_template = template_source_image(&artifacts.kernel);
     let initrd_template = artifacts.initrd.as_ref().and_then(template_source_image);
-    let wake_templates = artifacts
-        .wake
-        .iter()
-        .flat_map(|wake| [&wake.ram, &wake.stub, &wake.cpu_profile])
-        .map(template_source_image)
-        .collect::<Vec<_>>();
     let has_any_template = root_template.is_some()
         || kernel_template.is_some()
         || initrd_template.is_some()
-        || wake_templates.iter().any(Option::is_some)
         || artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
         || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT;
     if !has_any_template {
@@ -665,7 +514,6 @@ pub(super) fn validate_template_launch_sources(artifacts: &SourceArtifacts) -> R
             .initrd
             .as_ref()
             .is_some_and(|_| initrd_template != Some(image))
-        || wake_templates.iter().any(|wake| *wake != Some(image))
         || artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
         || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
     {
@@ -728,17 +576,6 @@ pub(super) fn open_prepared_template_source(
                 .context("prepared image does not contain an initrd")?,
             ArtifactAccess::ReadOnly,
         ),
-        "ram" | "stub" | "cpu-profile.json" => {
-            let wake = metadata
-                .wake
-                .as_ref()
-                .context("prepared image does not carry a suspended guest")?;
-            match file_name {
-                "ram" => (&wake.ram, ArtifactAccess::ReadWrite),
-                "stub" => (&wake.stub, ArtifactAccess::ReadOnly),
-                _ => (&wake.cpu_profile, ArtifactAccess::ReadOnly),
-            }
-        }
         _ => bail!("prepared template artifact name is not allowed"),
     };
     if source.access != expected_access || source.sha256.as_ref() != Some(&expected.sha256) {

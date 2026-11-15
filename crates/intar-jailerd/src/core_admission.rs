@@ -377,9 +377,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             Request::DestroyVm(request) => Ok(Response::DestroyVm(OperationResult {
                 changed: self.destroy_vm(request)?,
             })),
-            Request::ReplaceWakeStub(request) => Ok(Response::ReplaceWakeStub(OperationResult {
-                changed: self.replace_wake_stub(request)?,
-            })),
             Request::DestroyRunNetwork(request) => {
                 if self
                     .records
@@ -428,7 +425,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             supports_jailer_v3: ready && fast_template_store,
             supports_template_backed_launch: ready && fast_template_store,
             fast_template_store,
-            supports_wake: ready && fast_template_store,
             supports_hard_cpu_quota: ready,
             supports_landlock: ready,
             supports_cgroup_v2: self.readiness.supports_cgroup_v2,

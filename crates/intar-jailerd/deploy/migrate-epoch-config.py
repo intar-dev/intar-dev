@@ -35,7 +35,6 @@ RETIRED = {
             "raw_view_read_timeout_seconds",
         },
         "jobs": {"max_attempts"},
-        "wake": {"max_cached_bases"},
     },
 }
 PATHS = {

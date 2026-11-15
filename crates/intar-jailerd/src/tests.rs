@@ -410,7 +410,7 @@ impl JailPreparer for FakePreparer {
             spec_path: root.join("../jail-spec-v1.json"),
             jail_root_inode: None,
             vmm_executable_identity: None,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
+            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
         })
     }
     fn destroy(&mut self, _config: &JailerdConfig, _generation: &ValidatedId) -> Result<bool> {
@@ -506,7 +506,7 @@ impl JailPreparer for FakeTemplatePreparer {
             spec_path: root.join("../jail-spec-v1.json"),
             jail_root_inode: None,
             vmm_executable_identity: None,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
+            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
         })
     }
 
@@ -569,7 +569,7 @@ impl JailPreparer for TrackingPreparer {
             spec_path: root.join("../jail-spec-v1.json"),
             jail_root_inode: None,
             vmm_executable_identity: None,
-            paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
+            paths: jail_paths(&root, request.artifacts.initrd.is_some()),
         })
     }
 
@@ -784,7 +784,6 @@ fn launch(index: u32, cpu_millis: u32) -> VmLaunchRequest {
             root_disk: source("/trusted/root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: source("/trusted/runtime.raw", ArtifactAccess::ReadOnly),
             recording_disk: source("/trusted/recordings.vfat", ArtifactAccess::ReadWrite),
-            wake: None,
         },
     }
 }
@@ -853,7 +852,7 @@ fn recovered_record(config: &JailerdConfig) -> VmRecord {
         quota,
         quota_attestation: None,
         ssh_forward_active: true,
-        paths: jail_paths(&root, request.artifacts.initrd.is_some(), false),
+        paths: jail_paths(&root, request.artifacts.initrd.is_some()),
         cgroup_path: Some(
             format!("/intar.slice/intar-vms.slice/intar-vm-{generation}.service").into(),
         ),
@@ -933,50 +932,6 @@ fn the_installer_leaves_configs_this_parser_loads() {
 }
 
 #[test]
-fn the_wake_ram_preread_walks_only_the_data_of_a_sparse_file() {
-    use std::os::unix::fs::FileExt as _;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("wake.ram");
-    let file = std::fs::File::create(&path).expect("ram");
-    let mib = 1_u64 << 20;
-    file.set_len(64 * mib).expect("sparse length");
-    file.write_all_at(&[1; 4096], 0).expect("head");
-    file.write_all_at(&[2; 4096], 40 * mib).expect("middle");
-    file.sync_all().expect("sync");
-    let file = std::fs::File::open(&path).expect("open");
-
-    let extents = data_extents(&file).expect("extents");
-    let covers = |offset: u64| {
-        extents
-            .iter()
-            .any(|&(start, len)| start <= offset && offset < start + len)
-    };
-    assert!(covers(0) && covers(40 * mib), "{extents:?}");
-    // Sorted and disjoint, inside the file.
-    assert!(
-        extents
-            .windows(2)
-            .all(|pair| pair[0].0 + pair[0].1 <= pair[1].0),
-        "{extents:?}"
-    );
-    assert!(
-        extents
-            .iter()
-            .all(|&(start, len)| len > 0 && start + len <= 64 * mib)
-    );
-    // A file system with holes leaves the rest out.
-    let data: u64 = extents.iter().map(|&(_, len)| len).sum();
-    assert!(data < 64 * mib, "{extents:?}");
-
-    // Best effort: a missing file or a passed deadline is no error to the launch.
-    preread_wake_ram(
-        &dir.path().join("missing"),
-        std::time::Duration::from_secs(1),
-    );
-    preread_wake_ram(&path, std::time::Duration::ZERO);
-}
-
-#[test]
 fn an_unanswering_vmm_is_told_apart_from_an_identity_mismatch() {
     assert_eq!(
         core_lifecycle::inspect_failure(false, true),
@@ -1022,7 +977,7 @@ fn a_preparation_deferred_after_its_claim_is_requeued_not_failed() {
     };
     let mid_block = anyhow::Error::from(prepare_lane::PrepareDeferred)
         .context("copy a chunk")
-        .context("prepare the wake RAM");
+        .context("assemble the root disk");
     assert_eq!(code(mid_block), "image_prepare_requeued");
     assert_eq!(code(anyhow::anyhow!("disk full")), "image_prepare_failed");
 }

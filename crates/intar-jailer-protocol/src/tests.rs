@@ -132,7 +132,6 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_prepared_boot_artifacts() {
         kernel: readonly("artifacts/kernel", artifact_sha256.clone()),
         initrd: Some(readonly("artifacts/initrd", artifact_sha256.clone())),
         request_class: RequestClass::Foreground,
-        prepare_wake: false,
     };
     prepare.validate().expect("valid chunked prepare");
     let mut other_manifest = prepare.clone();
@@ -196,7 +195,6 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_prepared_boot_artifacts() {
             root_disk: prepared("root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: agent("runtime.raw", ArtifactAccess::ReadOnly, None),
             recording_disk: agent("recordings.vfat", ArtifactAccess::ReadWrite, None),
-            wake: None,
         },
     };
     let request = LaunchVmV3Request {
@@ -221,48 +219,6 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_prepared_boot_artifacts() {
         writable_runtime.validate(),
         Err(ValidationError::InvalidArtifactAccess)
     );
-
-    // A suspended guest: the launch's own template files, RAM writable.
-    let wake = WakeArtifacts {
-        ram: prepared("ram", ArtifactAccess::ReadWrite),
-        stub: prepared("stub", ArtifactAccess::ReadOnly),
-        cpu_profile: prepared("cpu-profile.json", ArtifactAccess::ReadOnly),
-    };
-    let mut waking = request;
-    waking.launch.artifacts.wake = Some(wake.clone());
-    waking.validate().expect("valid wake launch");
-    assert_eq!(
-        waking.launch.validate(),
-        Err(ValidationError::TemplateLaunchRequiresV2),
-        "a raw launch carries no suspended guest"
-    );
-    let broken: [fn(&mut WakeArtifacts); 5] = [
-        |wake| wake.ram.access = ArtifactAccess::ReadOnly,
-        |wake| wake.stub.access = ArtifactAccess::ReadWrite,
-        |wake| {
-            wake.cpu_profile.relative_path = PathBuf::from("b".repeat(64)).join("cpu-profile.json")
-        },
-        |wake| wake.stub.source_root = 0,
-        |wake| wake.ram.sha256 = None,
-    ];
-    for change in broken {
-        let mut broken = waking.clone();
-        if let Some(wake) = broken.launch.artifacts.wake.as_mut() {
-            change(wake);
-        }
-        assert_eq!(
-            broken.validate(),
-            Err(ValidationError::InvalidPreparedLaunchArtifact)
-        );
-    }
-    // An older peer's launch, without the field, still decodes.
-    let mut value = serde_json::to_value(&waking).expect("encode");
-    value["launch"]["artifacts"]
-        .as_object_mut()
-        .expect("artifacts")
-        .remove("wake");
-    let decoded: LaunchVmV3Request = serde_json::from_value(value).expect("decode");
-    assert!(decoded.launch.artifacts.wake.is_none());
 }
 
 #[test]
@@ -306,7 +262,6 @@ fn capabilities_require_every_fast_launch_attestation() {
         supports_jailer_v3: true,
         supports_template_backed_launch: true,
         fast_template_store: true,
-        supports_wake: false,
         supports_hard_cpu_quota: true,
         supports_landlock: true,
         supports_cgroup_v2: true,
@@ -333,17 +288,9 @@ fn capabilities_require_every_fast_launch_attestation() {
         ssh_public_port_end: DEFAULT_SSH_PUBLIC_PORT_END,
     };
     let encoded = serde_json::to_value(&capabilities).expect("serialize capabilities");
-    // A host without wake support says nothing of it, as an older one did.
-    assert!(encoded.get("supports_wake").is_none());
-    let waking = JailerCapabilities {
-        supports_wake: true,
-        ..capabilities
-    };
-    let waking_encoded = serde_json::to_value(&waking).expect("serialize capabilities");
-    assert_eq!(waking_encoded["supports_wake"], serde_json::json!(true));
     assert_eq!(
-        serde_json::from_value::<JailerCapabilities>(waking_encoded).expect("decode"),
-        waking
+        serde_json::from_value::<JailerCapabilities>(encoded.clone()).expect("decode"),
+        capabilities
     );
     for required in [
         "supports_jailer_v3",
@@ -413,7 +360,6 @@ fn guest_cpu_count_cannot_be_added_to_launch_request() {
             root_disk: source("/trusted/root", ArtifactAccess::ReadWrite),
             runtime_disk: source("/trusted/runtime", ArtifactAccess::ReadOnly),
             recording_disk: source("/trusted/recording", ArtifactAccess::ReadWrite),
-            wake: None,
         },
     };
     assert_eq!(
@@ -649,24 +595,4 @@ fn source(path: &str, access: ArtifactAccess) -> ArtifactSource {
         sha256: Some(Sha256Digest::for_bytes(b"fixture")),
         access,
     }
-}
-
-#[test]
-fn the_wake_stub_replacement_names_one_generation() {
-    let generation = ValidatedId::parse("generation-1").expect("generation");
-    let envelope = RequestEnvelope::new(
-        8,
-        Request::ReplaceWakeStub(VmIdentityRequest::by_generation(generation)),
-    );
-    let encoded = envelope.encode().expect("encode");
-    assert!(String::from_utf8_lossy(&encoded).contains(r#""operation":"replace_wake_stub""#));
-    assert_eq!(RequestEnvelope::decode(&encoded).expect("decode"), envelope);
-    let response = ResponseEnvelope::new(
-        8,
-        Response::ReplaceWakeStub(OperationResult { changed: true }),
-    );
-    assert_eq!(
-        ResponseEnvelope::decode(&response.encode().expect("encode")).expect("decode"),
-        response
-    );
 }

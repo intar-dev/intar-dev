@@ -249,27 +249,7 @@ pub struct SourceArtifacts {
     pub root_disk: ArtifactSource,
     pub runtime_disk: ArtifactSource,
     pub recording_disk: ArtifactSource,
-    /// The suspended guest of the launch's own image. Absent on a cold boot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake: Option<WakeArtifacts>,
 }
-
-/// The prepared files of an image's suspended guest, inside its template.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WakeArtifacts {
-    /// The guest's RAM file; a launch gets its own clone of it.
-    pub ram: ArtifactSource,
-    /// The wake stub, given to the VMM as the kernel.
-    pub stub: ArtifactSource,
-    /// The cloud-hypervisor CPU profile the guest was suspended under.
-    pub cpu_profile: ArtifactSource,
-}
-
-/// Template file names of [`WakeArtifacts`].
-pub const WAKE_RAM_FILE: &str = "ram";
-pub const WAKE_STUB_FILE: &str = "stub";
-pub const WAKE_CPU_PROFILE_FILE: &str = "cpu-profile.json";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -294,11 +274,6 @@ pub struct PrepareChunkedImageV3Request {
     /// learner-visible launch path and the default for older callers.
     #[serde(default)]
     pub request_class: RequestClass,
-    /// Also prepare the image's suspended guest; its layers must then be in
-    /// the blob cache. Without it the image's `wake` is ignored. An image
-    /// without `wake` cannot be prepared with it.
-    #[serde(default)]
-    pub prepare_wake: bool,
 }
 
 /// Work class of a preparation request. This is a scheduling hint from the
@@ -360,9 +335,6 @@ pub struct PreparedImageV3Result {
     pub kernel: ArtifactSource,
     pub initrd: Option<ArtifactSource>,
     pub fast_template_store: bool,
-    /// Set when the image carries a suspended guest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake: Option<WakeArtifacts>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -468,24 +440,6 @@ impl LaunchVmV3Request {
                 ArtifactAccess::ReadOnly,
             )?;
         }
-        if let Some(wake) = &self.launch.artifacts.wake {
-            for (source, file_name, expected_access) in [
-                (&wake.ram, WAKE_RAM_FILE, ArtifactAccess::ReadWrite),
-                (&wake.stub, WAKE_STUB_FILE, ArtifactAccess::ReadOnly),
-                (
-                    &wake.cpu_profile,
-                    WAKE_CPU_PROFILE_FILE,
-                    ArtifactAccess::ReadOnly,
-                ),
-            ] {
-                validate_prepared_launch_artifact(
-                    source,
-                    &self.image_id,
-                    file_name,
-                    expected_access,
-                )?;
-            }
-        }
         Ok(quota)
     }
 }
@@ -573,9 +527,6 @@ pub enum Request {
     StopVm(VmIdentityRequest),
     DestroyVm(VmIdentityRequest),
     DestroyRunNetwork(DestroyRunNetworkRequest),
-    /// After a woken VM's first report: its kernel takes the stub's place,
-    /// so a guest reboot cold-boots.
-    ReplaceWakeStub(VmIdentityRequest),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -617,10 +568,6 @@ pub struct JailerCapabilities {
     pub supports_jailer_v3: bool,
     pub supports_template_backed_launch: bool,
     pub fast_template_store: bool,
-    /// The host can prepare and launch an image's suspended guest: it is
-    /// ready for template launches. Left out when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub supports_wake: bool,
     pub supports_hard_cpu_quota: bool,
     pub supports_landlock: bool,
     pub supports_cgroup_v2: bool,
@@ -687,20 +634,6 @@ pub struct JailPathMap {
     pub host_stderr_log: PathBuf,
     pub jailed_serial_log: PathBuf,
     pub jailed_console_log: PathBuf,
-    /// Set when the launch carries a suspended guest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake: Option<JailWakePaths>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct JailWakePaths {
-    pub host_ram: PathBuf,
-    pub host_stub: PathBuf,
-    pub host_cpu_profile: PathBuf,
-    pub jailed_ram: PathBuf,
-    pub jailed_stub: PathBuf,
-    pub jailed_cpu_profile: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -816,7 +749,6 @@ pub enum Response {
     StopVm(OperationResult),
     DestroyVm(OperationResult),
     DestroyRunNetwork(OperationResult),
-    ReplaceWakeStub(OperationResult),
     Error(ProtocolError),
 }
 

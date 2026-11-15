@@ -10,9 +10,7 @@ use intar_jailer_protocol::TrustedDirectorySource;
 use reflink_copy::ReflinkBlockBuilder;
 
 const MAX_CHUNK_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
-pub(super) use intar_contracts::oci::verify::{
-    ImageChunk, VerifiedImage, VerifiedWake, WakeLayer, verified_image,
-};
+pub(super) use intar_contracts::oci::verify::{ImageChunk, VerifiedImage, verified_image};
 
 pub(super) fn prepare_chunked_image_template(
     config: &JailerdConfig,
@@ -22,12 +20,7 @@ pub(super) fn prepare_chunked_image_template(
     request
         .validate()
         .context("validate chunked image request")?;
-    // A template with its wake files satisfies a request with or without.
-    let satisfies =
-        |metadata: &ImageTemplateMetadataV2| !request.prepare_wake || metadata.wake.is_some();
-    if let Ok(metadata) = validate_existing_chunked_template(config, request)
-        && satisfies(&metadata)
-    {
+    if let Ok(metadata) = validate_existing_chunked_template(config, request) {
         return prepared_image_v3_result(&metadata);
     }
 
@@ -51,16 +44,7 @@ pub(super) fn prepare_chunked_image_template(
     validate_root_regular_file(&lock_fd, "chunked image single-flight lock")?;
     rustix::fs::flock(&lock_fd, rustix::fs::FlockOperation::LockExclusive)?;
     if let Ok(metadata) = validate_existing_chunked_template(config, request) {
-        if satisfies(&metadata) {
-            return prepared_image_v3_result(&metadata);
-        }
-        add_wake_to_template(config, request, &templates, metadata, lane)?;
-        let actual = validate_existing_chunked_template(config, request)?;
-        ensure!(
-            actual.wake.is_some(),
-            "chunked template lost its wake files"
-        );
-        return prepared_image_v3_result(&actual);
+        return prepared_image_v3_result(&metadata);
     }
     if rustix::fs::statat(
         &templates,
@@ -107,11 +91,6 @@ pub(super) fn prepare_chunked_image_template(
                 copy_template_source(config, source, &temporary.join("initrd"), None, None)
             })
             .transpose()?;
-        let wake = manifest
-            .wake
-            .as_ref()
-            .map(|wake| prepare_wake_files(config, wake, &chunk_cache, &temporary, lane))
-            .transpose()?;
         let metadata = ImageTemplateMetadataV2 {
             schema_version: IMAGE_TEMPLATE_METADATA_V3,
             image_sha256: request.image_id.clone(),
@@ -125,7 +104,6 @@ pub(super) fn prepare_chunked_image_template(
             root_disk,
             kernel,
             initrd,
-            wake,
         };
         write_template_metadata(&temporary.join("metadata-v2.json"), &metadata)?;
         rustix::fs::renameat(&templates, temporary_name.as_str(), &templates, &image_name)?;
@@ -161,58 +139,6 @@ fn write_template_metadata(path: &Path, metadata: &ImageTemplateMetadataV2) -> R
         Some(rustix::process::Gid::ROOT),
     )?;
     Ok(())
-}
-
-/// Give a published template without wake files its image's: prepared
-/// beside it, moved in, then the metadata replaced. The root disk, kernel
-/// and initrd stay as they are. The caller holds the template's lock.
-fn add_wake_to_template(
-    config: &JailerdConfig,
-    request: &PrepareChunkedImageV3Request,
-    templates: &OwnedFd,
-    mut metadata: ImageTemplateMetadataV2,
-    lane: &PrepareLane,
-) -> Result<()> {
-    let wake = read_verified_chunk_manifest(config, request)?
-        .wake
-        .context("machine image carries no suspended guest")?;
-    let chunk_cache = open_trusted_chunk_cache(config, &request.chunk_cache_root)?;
-    let image_name = CString::new(request.image_id.as_str()).expect("SHA-256 contains no NUL");
-    let image_directory =
-        open_lifecycle_entry_at(templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)?;
-    validate_root_directory(&image_directory, "chunked image template")?;
-    let temporary_name = format!(".wake-{}", Uuid::new_v4());
-    let temporary = config.jail_root.join("templates").join(&temporary_name);
-    rustix::fs::mkdirat(
-        templates,
-        temporary_name.as_str(),
-        Mode::RUSR | Mode::WUSR | Mode::XUSR,
-    )?;
-    let operation = (|| -> Result<()> {
-        metadata.wake = Some(prepare_wake_files(
-            config,
-            &wake,
-            &chunk_cache,
-            &temporary,
-            lane,
-        )?);
-        let staged = temporary.join("metadata-v2.json");
-        write_template_metadata(&staged, &metadata)?;
-        let directory = config
-            .jail_root
-            .join("templates")
-            .join(request.image_id.as_str());
-        // The files first, the metadata that names them last: until then the
-        // template is the one it was.
-        for name in ["ram", "stub", "cpu-profile.json", "metadata-v2.json"] {
-            std::fs::rename(temporary.join(name), directory.join(name))?;
-        }
-        #[cfg(target_os = "linux")]
-        rustix::fs::syncfs(&image_directory)?;
-        Ok(())
-    })();
-    let _ = std::fs::remove_dir_all(&temporary);
-    operation
 }
 
 pub(super) fn validate_existing_chunked_template(
@@ -256,9 +182,6 @@ pub(super) fn validate_existing_chunked_template(
         let file = open_lifecycle_entry_at(&image_directory, c"initrd", OFlags::RDONLY)?;
         validate_template_artifact_stat(&rustix::fs::fstat(&file)?, expected, "chunked initrd")?;
     }
-    if let Some(wake) = &metadata.wake {
-        validate_wake_template(&image_directory, wake)?;
-    }
     touch_chunked_template(config, &request.image_id)?;
     Ok(metadata)
 }
@@ -287,14 +210,7 @@ pub(super) fn validate_prepared_chunked_launch(
     ensure!(
         request.launch.artifacts.root_disk == expected.root_disk
             && request.launch.artifacts.kernel == expected.kernel
-            && request.launch.artifacts.initrd == expected.initrd
-            // A launch may cold-boot an image that carries a suspended guest.
-            && request
-                .launch
-                .artifacts
-                .wake
-                .as_ref()
-                .is_none_or(|wake| Some(wake) == expected.wake.as_ref()),
+            && request.launch.artifacts.initrd == expected.initrd,
         "prepared chunked launch descriptors do not match root-owned metadata"
     );
     Ok(())
@@ -347,12 +263,8 @@ fn read_verified_chunk_manifest(
         &request.chunk_manifest_sha256,
         "machine config",
     )?;
-    let mut machine: MachineConfigV1 =
+    let machine: MachineConfigV1 =
         serde_json::from_slice(&bytes).context("decode machine config")?;
-    if !request.prepare_wake {
-        // Ignored, not checked: a cold template needs nothing of it.
-        machine.wake = None;
-    }
     let image = verified_image(
         &manifest,
         &machine,
@@ -367,10 +279,6 @@ fn read_verified_chunk_manifest(
             .map(Sha256Digest::as_str),
     )
     .map_err(anyhow::Error::msg)?;
-    ensure!(
-        !request.prepare_wake || image.wake.is_some(),
-        "machine image carries no suspended guest"
-    );
     Ok(image)
 }
 
@@ -625,10 +533,6 @@ fn prepared_image_v3_result(metadata: &ImageTemplateMetadataV2) -> Result<Prepar
             )
         }),
         fast_template_store: true,
-        wake: metadata
-            .wake
-            .as_ref()
-            .map(|wake| wake_artifacts(&metadata.image_sha256, wake)),
     })
 }
 
