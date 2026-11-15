@@ -180,6 +180,46 @@ async fn existing_log_final_is_idempotent_after_its_source_is_removed() {
 }
 
 #[tokio::test]
+async fn a_contained_vm_archives_the_logs_jailerd_published_and_skips_missing_ones() {
+    let temp = tempdir().expect("temp dir");
+    let artifacts_dir = temp.path().join("artifacts");
+    tokio::fs::create_dir_all(&artifacts_dir)
+        .await
+        .expect("artifact dir");
+    // jailerd published the console log at containment; the jail is gone.
+    tokio::fs::write(artifacts_dir.join("console.log"), b"published by jailerd")
+        .await
+        .expect("published console log");
+    let mut vm = test_vm_status("vm", Some("run"));
+    vm.details.as_mut().expect("details").jail_root_path =
+        Some(temp.path().join("quarantined/root").display().to_string());
+
+    for name in [
+        "console.log",
+        "serial.log",
+        CLOUD_HYPERVISOR_STDERR_LOG_NAME,
+    ] {
+        copy_vm_log_to_spool(&vm, name, &artifacts_dir.join(name))
+            .await
+            .expect("a gone jail never fails the delete");
+    }
+
+    assert_eq!(
+        tokio::fs::read(artifacts_dir.join("console.log"))
+            .await
+            .expect("read console log"),
+        b"published by jailerd"
+    );
+    let kinds = collect_local_artifacts(&artifacts_dir)
+        .await
+        .expect("collect artifacts")
+        .into_iter()
+        .map(|artifact| artifact.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, vec!["console_log".to_string()]);
+}
+
+#[tokio::test]
 async fn recording_extraction_atomically_publishes_krec_and_retries_after_source_removal() {
     let temp = tempdir().expect("temp dir");
     let artifacts_dir = temp.path().join("artifacts");
