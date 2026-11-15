@@ -746,6 +746,10 @@ fn classify_protocol_error(error: &anyhow::Error, message: &str) -> &'static str
     } else if error.downcast_ref::<PrepareDeferred>().is_some() {
         // The coordinator requeues this work. It is not a failure.
         "image_prepare_requeued"
+    } else if storage_exhausted(error) {
+        // The agent retries a StopVm export that failed this way instead of
+        // giving the recording up: it clears once space is freed.
+        "storage_exhausted"
     } else if message.contains("unknown jail generation") {
         "not_found"
     } else if message.contains("readiness attestation") {
@@ -763,6 +767,23 @@ fn classify_protocol_error(error: &anyhow::Error, message: &str) -> &'static str
     } else {
         "host_operation_failed"
     }
+}
+
+/// Out of space or quota, from the errno at the source. EIO is left out: a
+/// failing device is not something a retry outlasts.
+fn storage_exhausted(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded
+            )
+        }) || cause
+            .downcast_ref::<rustix::io::Errno>()
+            .is_some_and(|errno| {
+                matches!(*errno, rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT)
+            })
+    })
 }
 
 pub fn host_cpu_capacity_millis() -> Result<u64> {

@@ -531,6 +531,7 @@ struct TrackingPreparer {
     quarantined: Vec<ValidatedId>,
     exported: Vec<ValidatedId>,
     fail_export: bool,
+    export_error: Option<fn() -> anyhow::Error>,
     persist_calls: usize,
     runtime_access_calls: usize,
     fail_persist_call: Option<usize>,
@@ -612,6 +613,9 @@ impl JailPreparer for TrackingPreparer {
         }
         if self.fail_export {
             bail!("injected recording export failure")
+        }
+        if let Some(error) = self.export_error {
+            return Err(error());
         }
         self.exported.push(record.generation.clone());
         Ok(())

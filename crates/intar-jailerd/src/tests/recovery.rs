@@ -251,6 +251,60 @@ fn inspect_containment_exports_the_recording_before_quarantine() {
     ));
 }
 
+fn stop_export_error_code(export_error: fn() -> anyhow::Error) -> (String, bool) {
+    let (mut core, launched) = launch_then_mismatch(TrackingPreparer {
+        export_error: Some(export_error),
+        ..TrackingPreparer::default()
+    });
+    let code = match core.handle(Request::StopVm(VmIdentityRequest::by_generation(
+        launched.generation.clone(),
+    ))) {
+        Response::Error(error) => error.code,
+        other => panic!("unexpected stop response {other:?}"),
+    };
+    (code, core.records.contains_key(&launched.generation))
+}
+
+#[test]
+fn stop_export_out_of_space_or_quota_is_storage_exhausted_and_stays_tracked() {
+    for export_error in [
+        // std::io::copy of the full-copy fallback.
+        (|| {
+            anyhow::Error::from(std::io::Error::from_raw_os_error(
+                rustix::io::Errno::NOSPC.raw_os_error(),
+            ))
+            .context("copy drained recording export")
+        }) as fn() -> anyhow::Error,
+        // A rustix call: openat, renameat, fsync.
+        || anyhow::Error::from(rustix::io::Errno::DQUOT).context("create recording export"),
+        || anyhow::Error::from(rustix::io::Errno::NOSPC),
+    ] {
+        assert_eq!(
+            stop_export_error_code(export_error),
+            ("storage_exhausted".to_owned(), true)
+        );
+    }
+}
+
+#[test]
+fn stop_export_failures_the_vm_caused_are_not_storage_exhausted() {
+    for export_error in [
+        (|| anyhow::anyhow!("jailed recording disk ownership or mode changed"))
+            as fn() -> anyhow::Error,
+        || anyhow::anyhow!("recording disk changed after VM cgroup drain"),
+        || anyhow::Error::from(rustix::io::Errno::IO).context("copy drained recording export"),
+        || {
+            anyhow::Error::from(rustix::io::Errno::PERM)
+                .context("exact-reflink drained recording export")
+        },
+    ] {
+        assert_eq!(
+            stop_export_error_code(export_error),
+            ("host_operation_failed".to_owned(), true)
+        );
+    }
+}
+
 #[test]
 fn inspect_containment_completes_when_the_recording_export_fails() {
     let (mut core, launched) = launch_then_mismatch(TrackingPreparer {
