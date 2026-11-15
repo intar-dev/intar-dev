@@ -54,7 +54,12 @@ fn startup_cleanup_mode_archives_delete_path_states() {
 
     let mut failed = test_vm_status("vm-failed", Some("run-1"));
     failed.state = VmLifecycleState::Failed;
+    failed.running_at_s = None;
     assert_eq!(startup_cleanup_mode(&failed), StartupCleanupMode::DropLocal);
+
+    // Failed after it ran (its jail was contained): the recording is kept.
+    failed.running_at_s = Some(42);
+    assert_eq!(startup_cleanup_mode(&failed), StartupCleanupMode::Archive);
 }
 
 #[test]

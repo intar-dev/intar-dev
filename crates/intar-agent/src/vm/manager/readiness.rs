@@ -646,8 +646,10 @@ pub(super) fn startup_cleanup_mode(vm: &VmStatusResponse) -> StartupCleanupMode 
         | VmLifecycleState::CachingImage
         | VmLifecycleState::PreparingDisks
         | VmLifecycleState::CreatingVm
-        | VmLifecycleState::BootingVm
-        | VmLifecycleState::Failed => StartupCleanupMode::DropLocal,
+        | VmLifecycleState::BootingVm => StartupCleanupMode::DropLocal,
+        // A VM that failed after it ran has a recording to keep.
+        VmLifecycleState::Failed if vm.running_at_s.is_some() => StartupCleanupMode::Archive,
+        VmLifecycleState::Failed => StartupCleanupMode::DropLocal,
     }
 }
 
