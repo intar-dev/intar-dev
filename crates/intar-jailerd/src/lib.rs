@@ -354,10 +354,10 @@ struct CpuCapacityExhaustedError {
 #[error("systemd unit {0} no longer exists")]
 pub struct UnitGoneError(pub String);
 
-/// A tracked VM whose VMM exited, kept until its recording is exported:
-/// answered as `vm_exited`, so the agent ends the run meanwhile.
+/// A tracked VM whose VMM exited and whose unit is gone, kept for its
+/// delete: answered as `vm_exited`, so the agent ends the run.
 #[derive(Debug, Error)]
-#[error("the VMM exited; the VM is kept until its recording is exported")]
+#[error("the VMM exited; the VM is kept until it is deleted")]
 struct VmExitedError;
 
 /// A run network jailerd does not track: answered as `not_found`.

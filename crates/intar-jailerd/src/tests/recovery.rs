@@ -306,7 +306,7 @@ fn stop_export_failures_the_vm_caused_are_not_storage_exhausted() {
 }
 
 #[test]
-fn inspect_of_a_vm_whose_unit_is_gone_exports_then_releases_it() {
+fn an_exited_vm_is_kept_for_its_delete_which_exports_and_releases_it() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
     let mut core = JailerdCore::new_with_readiness(
@@ -324,139 +324,49 @@ fn inspect_of_a_vm_whose_unit_is_gone_exports_then_releases_it() {
     };
     // A guest poweroff: the VMM exits cleanly and systemd removes the unit.
     core.backend.units.remove(&launched.unit_name);
+    let identity = || VmIdentityRequest::by_generation(launched.generation.clone());
 
-    assert!(matches!(
-        core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
-            launched.generation.clone(),
-        ))),
-        Response::Error(ProtocolError { ref message, .. })
-            if message.contains("the VM was released")
-    ));
-    // The drain was proven by stop before the export, and the export came
-    // before the release.
-    assert!(core.backend.stopped_units.contains(&launched.unit_name));
-    assert_eq!(
-        core.preparer.exported,
-        std::slice::from_ref(&launched.generation)
-    );
-    assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
-    // Released like a destroy, not quarantined: nothing is kept forever.
-    assert_eq!(
-        core.preparer.destroyed,
-        std::slice::from_ref(&launched.generation)
-    );
-    assert!(core.preparer.quarantined.is_empty());
-    assert!(core.records.is_empty());
-    assert_eq!(core.capabilities().committed_cpu_millis, 0);
-    assert!(matches!(
-        core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
-            launched.generation,
-        ))),
-        Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
-    ));
-}
-
-fn inspect_exited_vm_with_failing_export(
-    export_error: fn() -> anyhow::Error,
-) -> (
-    JailerdCore<FakeBackend, TrackingPreparer>,
-    VmLaunchResult,
-    ProtocolError,
-) {
-    let mut config = test_config();
-    config.cpu_reserved_millis = 0;
-    let mut core = JailerdCore::new_with_readiness(
-        config,
-        FakeBackend::default(),
-        TrackingPreparer {
-            export_error: Some(export_error),
-            ..TrackingPreparer::default()
-        },
-        1_000,
-        ready_readiness(),
-    )
-    .expect("core");
-    ensure_test_network(&mut core);
-    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 125)))) {
-        Response::LaunchVmV3(value) => value,
-        other => panic!("unexpected launch response {other:?}"),
-    };
-    core.backend.units.remove(&launched.unit_name);
-    let error = match core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
-        launched.generation.clone(),
-    ))) {
-        Response::Error(error) => error,
-        other => panic!("unexpected inspect response {other:?}"),
-    };
-    (core, launched, error)
-}
-
-#[test]
-fn an_exited_vm_whose_export_lacks_space_keeps_its_record_and_disk() {
-    let (mut core, launched, error) = inspect_exited_vm_with_failing_export(|| {
-        anyhow::Error::from(rustix::io::Errno::NOSPC).context("copy drained recording export")
-    });
-    // The agent ends the run on vm_exited while jailerd keeps the disk.
-    assert_eq!(error.code, "vm_exited");
+    // Inspect only answers: the logs, the disk and the network stay for the
+    // delete, and nothing is written.
+    for _ in 0..2 {
+        assert!(matches!(
+            core.handle(Request::InspectVm(identity())),
+            Response::Error(ProtocolError { ref code, .. }) if code == "vm_exited"
+        ));
+    }
     assert!(core.records.contains_key(&launched.generation));
+    assert!(core.backend.stopped_units.is_empty());
+    assert!(core.backend.destroyed_units.is_empty());
+    assert!(core.backend.destroyed_vm_networks.is_empty());
+    assert!(core.preparer.exported.is_empty());
     assert!(core.preparer.destroyed.is_empty());
     assert!(core.preparer.quarantined.is_empty());
-    assert!(core.backend.destroyed_vm_networks.is_empty());
 
-    // Space is freed: the agent's StopVm publishes the export.
-    core.preparer.export_error = None;
+    // The delete: StopVm exports, DestroyVm releases.
     assert!(matches!(
-        core.handle(Request::StopVm(VmIdentityRequest::by_generation(
-            launched.generation.clone(),
-        ))),
+        core.handle(Request::StopVm(identity())),
         Response::StopVm(_)
     ));
     assert_eq!(
         core.preparer.exported,
         std::slice::from_ref(&launched.generation)
     );
-}
-
-#[test]
-fn an_exited_vm_whose_export_cannot_work_is_contained_not_destroyed() {
-    let (core, launched, error) = inspect_exited_vm_with_failing_export(|| {
-        anyhow::anyhow!("jailed recording disk ownership or mode changed")
-    });
-    assert!(error.message.contains("stopped and quarantined"));
-    // Quarantine keeps the disk; the release would have removed it.
-    assert!(core.preparer.destroyed.is_empty());
-    assert_eq!(core.preparer.quarantined, vec![launched.generation.clone()]);
-    assert!(core.records.is_empty());
-}
-
-#[test]
-fn inspect_keeps_an_exited_vm_whose_drain_cannot_be_proven() {
-    let mut config = test_config();
-    config.cpu_reserved_millis = 0;
-    let mut core = JailerdCore::new_with_readiness(
-        config,
-        FakeBackend::default(),
-        TrackingPreparer::default(),
-        1_000,
-        ready_readiness(),
-    )
-    .expect("core");
-    ensure_test_network(&mut core);
-    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 125)))) {
-        Response::LaunchVmV3(value) => value,
-        other => panic!("unexpected launch response {other:?}"),
-    };
-    core.backend.units.remove(&launched.unit_name);
-    core.backend.fail_stop_unit = true;
-
     assert!(matches!(
-        core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
-            launched.generation.clone(),
-        ))),
-        Response::Error(_)
+        core.handle(Request::DestroyVm(identity())),
+        Response::DestroyVm(_)
     ));
-    assert!(core.preparer.exported.is_empty());
-    assert!(core.records.contains_key(&launched.generation));
+    assert_eq!(
+        core.preparer.destroyed,
+        std::slice::from_ref(&launched.generation)
+    );
+    assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
+    assert!(core.preparer.quarantined.is_empty());
+    assert!(core.records.is_empty());
+    assert_eq!(core.capabilities().committed_cpu_millis, 0);
+    assert!(matches!(
+        core.handle(Request::InspectVm(identity())),
+        Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
+    ));
 }
 
 #[test]
