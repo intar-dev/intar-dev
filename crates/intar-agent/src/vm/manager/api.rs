@@ -264,10 +264,11 @@ impl VmManager {
             vm = name,
             generation, reason, "the running VM's jail is gone; marking it failed"
         );
+        // The learner's run page shows this; the detail stays in the log above.
         mark_vm_failed(
             &self.inner,
             name,
-            format!("jail generation {generation}: {reason}"),
+            "The machine was shut down or stopped unexpectedly.".to_owned(),
         )
         .await;
     }
