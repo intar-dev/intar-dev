@@ -235,8 +235,14 @@ fn a_published_export_is_archived_whatever_jailerd_answered() {
             succeeded: false,
             storage_exhausted: false,
         },
-        MissingExportProbe::Inspect { tracked: true },
-        MissingExportProbe::Inspect { tracked: false },
+        MissingExportProbe::Inspect {
+            tracked: true,
+            exited: false,
+        },
+        MissingExportProbe::Inspect {
+            tracked: false,
+            exited: false,
+        },
     ] {
         assert_eq!(missing_export_step(probe, true), MissingExportStep::Archive);
     }
@@ -327,15 +333,44 @@ fn a_stop_that_succeeds_without_an_export_means_the_generation_is_gone() {
 }
 
 #[test]
+fn an_exited_vm_whose_export_keeps_failing_ends_the_delete() {
+    // jailerd keeps an exited VM without containing it, so after the StopVm
+    // bound nothing else will publish the export: the delete goes on
+    // instead of retrying forever. A lack of space never gets here.
+    assert!(matches!(
+        missing_export_step(
+            MissingExportProbe::Inspect {
+                tracked: true,
+                exited: true,
+            },
+            false
+        ),
+        MissingExportStep::Skip(_)
+    ));
+}
+
+#[test]
 fn missing_export_stays_fatal_while_jailerd_still_tracks_the_generation() {
     // The case the old pinned test guarded: never lose a recording while
     // jailerd can still publish it.
     assert_eq!(
-        missing_export_step(MissingExportProbe::Inspect { tracked: true }, false),
+        missing_export_step(
+            MissingExportProbe::Inspect {
+                tracked: true,
+                exited: false,
+            },
+            false
+        ),
         MissingExportStep::Fail
     );
     assert!(matches!(
-        missing_export_step(MissingExportProbe::Inspect { tracked: false }, false),
+        missing_export_step(
+            MissingExportProbe::Inspect {
+                tracked: false,
+                exited: false,
+            },
+            false
+        ),
         MissingExportStep::Skip(_)
     ));
 }

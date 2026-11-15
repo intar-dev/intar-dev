@@ -52,8 +52,8 @@ pub(super) fn jailerd_error_code(error: &anyhow::Error) -> Option<&str> {
         .map(|error| error.0.code.as_str())
 }
 
-/// jailerd answered that the VM's VMM exited and it keeps the jail only to
-/// export the recording: the VM is dead.
+/// jailerd answered that the VM's VMM exited (a guest poweroff) and it keeps
+/// the jail for the VM's delete: the VM is dead.
 pub(crate) fn jail_vm_exited(error: &anyhow::Error) -> bool {
     jailerd_error_code(error) == Some("vm_exited")
 }

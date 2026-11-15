@@ -778,19 +778,30 @@ pub(super) async fn recording_export_path_for_cleanup<'a>(
     };
     if step == MissingExportStep::Inspect {
         // Last resort, and destructive: an unsound VM is contained here,
-        // with one more best-effort export, so the delete cannot stay stuck.
+        // with one more best-effort export, and an exited one is given up,
+        // so the delete cannot stay stuck.
         let inspect =
             || jailer_identity_request(inner, generation, JailerIdentityOperation::Inspect);
-        let tracked = match inspect().await {
-            Ok(inspection) => inspection.is_some(),
-            // An inspection that contains the VM answers with an error and
-            // forgets the generation, so the second answer is the settled one.
-            Err(_) => inspect().await?.is_some(),
+        let answer = match inspect().await {
+            Err(error) if !jail_vm_exited(&error) => {
+                // An inspection that contains the VM answers with an error and
+                // forgets the generation, so the second answer is settled.
+                inspect().await
+            }
+            answer => answer,
         };
-        step = missing_export_step(
-            MissingExportProbe::Inspect { tracked },
-            recording_disk_path.is_file(),
-        );
+        let probe = match answer {
+            Ok(inspection) => MissingExportProbe::Inspect {
+                tracked: inspection.is_some(),
+                exited: false,
+            },
+            Err(error) if jail_vm_exited(&error) => MissingExportProbe::Inspect {
+                tracked: true,
+                exited: true,
+            },
+            Err(error) => return Err(error),
+        };
+        step = missing_export_step(probe, recording_disk_path.is_file());
     }
     match step {
         MissingExportStep::Archive => Ok(Some(recording_disk_path)),
@@ -830,6 +841,9 @@ pub(super) enum MissingExportProbe {
     },
     Inspect {
         tracked: bool,
+        /// jailerd keeps the record of a VMM that exited (vm_exited): no
+        /// containment happens, so nothing else will publish the export.
+        exited: bool,
     },
 }
 
@@ -863,8 +877,11 @@ pub(super) fn missing_export_step(probe: MissingExportProbe, published: bool) ->
             MissingExportStep::StopAgain
         }
         MissingExportProbe::Stop { .. } => MissingExportStep::Inspect,
-        MissingExportProbe::Inspect { tracked: true } => MissingExportStep::Fail,
-        MissingExportProbe::Inspect { tracked: false } => MissingExportStep::Skip(
+        MissingExportProbe::Inspect { exited: true, .. } => MissingExportStep::Skip(
+            "the VMM exited and its recording export keeps failing for a reason other than space",
+        ),
+        MissingExportProbe::Inspect { tracked: true, .. } => MissingExportStep::Fail,
+        MissingExportProbe::Inspect { tracked: false, .. } => MissingExportStep::Skip(
             "jailerd contained the VM or no longer tracks the jail generation",
         ),
     }

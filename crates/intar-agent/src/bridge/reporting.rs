@@ -277,7 +277,7 @@ pub(super) async fn build_host_state_report(
                     vm.fail_running_vm_with_dead_jail(
                         &status.name,
                         generation,
-                        "the VMM exited; jailerd keeps the jail until its recording is exported",
+                        "the VMM exited (a guest poweroff or a clean VMM exit); jailerd keeps the jail for the delete",
                     )
                     .await;
                     None

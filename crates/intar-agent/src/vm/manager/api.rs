@@ -246,7 +246,7 @@ impl VmManager {
     }
 
     /// Fail a running VM whose jail is gone: jailerd forgot its generation,
-    /// or keeps it only to export the recording of a VMM that exited.
+    /// or keeps the record of a VMM that exited for the VM's delete.
     pub async fn fail_running_vm_with_dead_jail(&self, name: &str, generation: &str, reason: &str) {
         // ponytail: checked before mark_vm_failed takes the lock again; a
         // delete starting in between only sees its state shown as failed.
