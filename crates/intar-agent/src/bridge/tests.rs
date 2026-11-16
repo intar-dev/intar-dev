@@ -998,3 +998,43 @@ fn the_report_leaves_a_deleting_vm_to_its_delete() {
         assert!(report_inspects_jail(state));
     }
 }
+
+#[test]
+fn a_vm_failed_after_a_restart_still_names_its_generation() {
+    // After a restart the VM's CPU record is gone but its generation is not.
+    let mut status = VmStatusResponse::test_status("web", Some("run-1"));
+    if let Some(details) = status.details.as_mut() {
+        details.jail_generation = Some("generation-1".to_string());
+        details.cpu_runtime = None;
+    }
+    status.state = VmLifecycleState::Failed;
+    let constraints = runtime_constraints_from_status(&status);
+    assert_eq!(
+        constraints.as_ref().map(|value| value.generation.as_str()),
+        Some("generation-1")
+    );
+    assert_eq!(
+        constraints.as_ref().map(|value| value.cpu_millis),
+        Some(125)
+    );
+    assert_eq!(
+        constraints.and_then(|value| value.quota_verified_at_unix_ms),
+        None
+    );
+
+    // Any other VM, a delete in flight included, claims no constraints
+    // without its CPU record, as before.
+    for state in [
+        VmLifecycleState::Running,
+        VmLifecycleState::CreatingVm,
+        VmLifecycleState::DeletingVm,
+        VmLifecycleState::ArchivingArtifacts,
+        VmLifecycleState::DeleteFailed,
+    ] {
+        status.state = state;
+        assert!(
+            runtime_constraints_from_status(&status).is_none(),
+            "{state:?}"
+        );
+    }
+}

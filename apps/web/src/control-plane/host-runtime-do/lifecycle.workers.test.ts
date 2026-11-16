@@ -592,6 +592,52 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     ws.close();
   });
 
+  it("fails a run from the first report of a new session that names its VM failed", async () => {
+    const hostId = "host-restart-dead-vm";
+    const runId = "run-restart-dead-vm";
+    const now = Date.now();
+    await seedHost(hostId);
+    const db = drizzle(env.DB);
+    const first = await connectHost(hostId);
+    await waitForBridgeMessage(first.messages, (message) => message.type === "server_hello");
+    await seedRun({ db, hostId, runId, now });
+    // A state report projects only into a run on the revision model.
+    await env.DB.prepare("UPDATE scenario_runs SET state_json = json_set(state_json, '$.tasks', json('[]')) WHERE run_id = ?1")
+      .bind(runId).run();
+    sendBridge(first.ws, vmReport(hostId, runId, "runtime-web", "ready", now + 10, 22_001, "10.77.0.2"));
+    await waitForRunState(db, runId, (state) => state.phase === "active_full");
+    first.ws.close();
+
+    // The agent restarted: its startup reconcile marked the dead VM failed,
+    // and the first full report of the new session carries it.
+    const second = await connectHost(hostId);
+    await waitForBridgeMessage(second.messages, (message) => message.type === "server_hello");
+    const lost = "The machine was shut down or stopped unexpectedly.";
+    const failedVm = {
+      ...actualVm(runId, "runtime-web", now + 1_000),
+      phase: "failed" as const,
+      terminal: { state: "failed" as const, reason: lost, observed_at_unix_ms: now + 1_000 },
+    };
+
+    // Without its runtime generation the report reads as older than the
+    // ready VM, which is what an agent that lost the VM's CPU record sent.
+    const { runtime_constraints: _generation, ...generationless } = failedVm;
+    sendBridge(second.ws, stateReport(hostId, { observedAt: now + 1_000, appliedDesiredVersion: 0, vms: [generationless] }));
+    await waitForHostActualState(db, hostId, (row) => row.observedAt === now + 1_000);
+    await sleep(30);
+    expect((await waitForRunState(db, runId, () => true)).phase).toBe("active_full");
+
+    // With its generation the same report ends the run failed.
+    sendBridge(second.ws, stateReport(hostId, {
+      observedAt: now + 1_001,
+      appliedDesiredVersion: 0,
+      vms: [{ ...failedVm, runtime_constraints: { generation: "generation-runtime-web", cpu_millis: 1_000 } }],
+    }));
+    const failed = await waitForRunState(db, runId, (state) => state.phase === "failed");
+    expect(failed).toMatchObject({ phaseDetail: lost, canOpenTerminal: false });
+    second.ws.close();
+  });
+
   it("re-pushes desired state after reconnect sync and persists applied version catch-up", async () => {
     const hostId = "host-reconnect-sync";
     await seedHost(hostId);
