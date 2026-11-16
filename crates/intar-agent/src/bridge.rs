@@ -8,7 +8,7 @@ use std::os::unix::fs::FileTypeExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use futures_util::{Sink, SinkExt, StreamExt, future::join_all};
@@ -147,6 +147,7 @@ pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: Path
     let mut state = ReconnectState {
         retry_ms: RETRY_MIN_MS,
         reconnect: false,
+        handshake_at: None,
     };
 
     loop {
@@ -166,6 +167,7 @@ pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: Path
                 state.reconnect = true;
             }
             Err(error) => {
+                state.connection_ended(Instant::now());
                 let upgrade_required = error.downcast_ref::<UpgradeRequired>().is_some();
                 let (wait_ms, next_ms) = retry_after_failure(state.retry_ms, upgrade_required);
                 if upgrade_required {
@@ -196,13 +198,26 @@ struct ReconnectState {
     retry_ms: u64,
     /// Not the agent's first connection.
     reconnect: bool,
+    /// When the current connection completed its handshake.
+    handshake_at: Option<Instant>,
 }
 
 impl ReconnectState {
-    /// A completed handshake starts the next outage's backoff over. A server
-    /// that accepts and drops before its hello does not reset it.
     fn handshake_completed(&mut self) {
-        self.retry_ms = RETRY_MIN_MS;
+        self.handshake_at = Some(Instant::now());
+    }
+
+    /// A session that stayed up for the backoff ceiling starts the next
+    /// outage's backoff over. One that dies sooner (dropped before its hello,
+    /// or kicked out right after it, as by a second agent with the same
+    /// credentials) keeps climbing.
+    fn connection_ended(&mut self, now: Instant) {
+        let lasted = self.handshake_at.take().is_some_and(|at| {
+            now.saturating_duration_since(at) >= Duration::from_millis(RETRY_MAX_MS)
+        });
+        if lasted {
+            self.retry_ms = RETRY_MIN_MS;
+        }
     }
 }
 

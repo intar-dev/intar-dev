@@ -137,15 +137,31 @@ fn a_refused_protocol_backs_off_long_without_resetting_the_backoff() {
 }
 
 #[test]
-fn a_completed_handshake_resets_the_backoff() {
+fn only_a_session_that_stayed_up_resets_the_backoff() {
+    let start = Instant::now();
     let mut state = ReconnectState {
         retry_ms: RETRY_MAX_MS,
         reconnect: true,
+        handshake_at: None,
     };
-    // Accepted and dropped before the hello: the long outage's backoff stands.
-    assert_eq!(retry_after_failure(state.retry_ms, false).0, RETRY_MAX_MS);
-    state.handshake_completed();
-    // A later cut of that session retries at once and backs off from there.
+    // Dropped before the hello: the long outage's backoff stands.
+    state.connection_ended(start);
+    assert_eq!(state.retry_ms, RETRY_MAX_MS);
+
+    // Kicked out soon after the hello, as by a second agent with the same
+    // credentials: still the ceiling.
+    state.retry_ms = 4 * RETRY_MIN_MS;
+    state.handshake_at = Some(start);
+    state.connection_ended(start + Duration::from_millis(RETRY_MAX_MS - 1));
+    assert_eq!(
+        retry_after_failure(state.retry_ms, false).0,
+        4 * RETRY_MIN_MS
+    );
+
+    // Up for the ceiling, then cut: retries at once and backs off from there.
+    state.retry_ms = RETRY_MAX_MS;
+    state.handshake_at = Some(start);
+    state.connection_ended(start + Duration::from_millis(RETRY_MAX_MS));
     assert_eq!(
         retry_after_failure(state.retry_ms, false),
         (RETRY_MIN_MS, 2 * RETRY_MIN_MS)
