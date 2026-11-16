@@ -594,7 +594,21 @@ pub(super) fn runtime_constraints_from_status(
 ) -> Option<VmRuntimeConstraintsV2> {
     let details = status.details.as_ref()?;
     let generation = details.jail_generation.clone()?;
-    let runtime = details.cpu_runtime.as_ref()?;
+    let Some(runtime) = details.cpu_runtime.as_ref() else {
+        // The CPU record is not persisted, so a VM that died while the agent
+        // was down has none after the restart. Its failure still names its
+        // generation, or the control plane takes it for an older report.
+        // A delete in flight keeps its reports as they were.
+        let failed = status.state == VmLifecycleState::Failed;
+        return details
+            .cpu_millis
+            .filter(|cpu_millis| failed && *cpu_millis > 0)
+            .map(|cpu_millis| VmRuntimeConstraintsV2 {
+                generation,
+                cpu_millis,
+                quota_verified_at_unix_ms: None,
+            });
+    };
     Some(VmRuntimeConstraintsV2 {
         generation,
         cpu_millis: runtime.quota.cpu_millis,
