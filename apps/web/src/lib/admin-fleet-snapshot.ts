@@ -1148,8 +1148,13 @@ function readString(value: unknown): string | null {
 
 /** The raw reason a run failed: learners see only allowlisted reasons. */
 function runFailureReason(state: RunStateDocument): string {
+  const failedVm = state.vms.find(
+    (vm) => vm.terminalPhase === "failed" || vm.phase === "failed",
+  );
   return (
-    state.vms.find((vm) => vm.terminalPhase === "failed" && vm.terminalReason)
-      ?.terminalReason ?? state.phaseDetail
+    failedVm?.terminalReason ||
+    failedVm?.provisioning.error ||
+    failedVm?.phaseDetail ||
+    state.phaseDetail
   );
 }

@@ -718,17 +718,15 @@ function describeRunPhase(
       // Archiving completes the failed VMs, so the run's own detail is the
       // reason after it. Only a reason written for learners is shown; the
       // VM keeps the raw one for operators.
-      const reason =
-        failedVm?.terminalReason ||
-        failedVm?.provisioning.error ||
-        failedVm?.phaseDetail ||
-        failedDetail;
+      const reason = [
+        failedVm?.terminalReason,
+        failedVm?.provisioning.error,
+        failedVm?.phaseDetail,
+        failedDetail,
+      ].find((candidate) => candidate && LEARNER_FAILURE_REASONS.has(candidate));
       return {
         title: "Failed",
-        detail:
-          reason && LEARNER_FAILURE_REASONS.has(reason)
-            ? reason
-            : "The run hit a terminal failure.",
+        detail: reason ?? "The run hit a terminal failure.",
         progressPercent: 100,
       };
     }
