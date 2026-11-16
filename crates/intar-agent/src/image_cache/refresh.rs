@@ -161,53 +161,121 @@ const _: () = assert!(
     TEMPLATE_CONFIRM_INTERVAL.as_secs() * 3 <= intar_jailer_protocol::MIN_STORE_GC_GRACE_SECONDS
 );
 
-/// How many confirmations are in flight at once. One whose template is gone
-/// prepares it in jailerd's background lane; the rest are metadata checks
-/// that do not wait for it.
+/// How many confirmations are in flight at once.
 const TEMPLATE_CONFIRMS_IN_FLIGHT: usize = 4;
+
+/// The longest one confirmation may take, its wait for boots to settle
+/// included. Jailerd answers from the template's metadata and never builds.
+const TEMPLATE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The longest a sweep runs; what it did not reach, the next one does.
+pub(super) const TEMPLATE_CONFIRM_SWEEP_BUDGET: Duration = Duration::from_secs(2 * 60);
+const _: () =
+    assert!(TEMPLATE_CONFIRM_SWEEP_BUDGET.as_secs() * 2 <= TEMPLATE_CONFIRM_INTERVAL.as_secs());
 
 /// Have jailerd confirm the template of every pinned image that is ready.
 ///
-/// This runs on its own cadence, beside the cache pass, so a long import
-/// never holds it back. Jailerd answers a template it holds from its
-/// metadata without its background lane; it prepares one that is gone. A
-/// requeue therefore means the template is gone and the lane is busy: the
-/// image's readiness is withdrawn and the cache pass, woken, prepares it.
-pub(super) async fn confirm_ready_templates(context: CacheRefreshContext<'_>) {
+/// This runs on its own cadence beside the cache pass, so a long import never
+/// holds it back, and it never builds: jailerd answers from the template's
+/// metadata, and a template it does not hold withdraws the image's readiness
+/// and wakes the cache pass, which prepares it with its own permit, pacing,
+/// and requeues. True when jailerd answered, or there was nothing to confirm.
+pub(super) async fn confirm_ready_templates(context: CacheRefreshContext<'_>) -> bool {
     let Some(desired) = crate::bridge::load_cached_desired_state(context.bridge, context.db).await
     else {
-        return;
+        return false;
     };
-    let pins = RequiredPins::from_desired_state(&desired);
-    let ready = pins
+    let ready = RequiredPins::from_desired_state(&desired)
         .images
-        .iter()
+        .into_iter()
         .filter(|image| ready::is_image_ready(context.cache_root, image))
         .collect::<Vec<_>>();
-    futures_util::stream::iter(ready)
-        .for_each_concurrent(TEMPLATE_CONFIRMS_IN_FLIGHT, |image| async move {
+    let still_pinned = |image: &OciDigest| {
+        let image = image.clone();
+        async move {
+            crate::bridge::load_cached_desired_state(context.bridge, context.db)
+                .await
+                .is_some_and(|desired| {
+                    RequiredPins::from_desired_state(&desired)
+                        .images
+                        .contains(&image)
+                })
+        }
+    };
+    let confirm = |image: &OciDigest| {
+        let image = image.clone();
+        async move {
+            // A confirmation never holds up a boot.
             wait_for_vm_boot_idle().await;
-            let outcome = prepare_one_image(image, context).await;
-            if template_lost(&outcome) {
-                info!(
-                    image = image.as_str(),
-                    "the image's template is gone; preparing it again"
-                );
-                if let Err(error) = ready::withdraw_ready_image(context.cache_root, image) {
-                    warn!(error = %error, image = image.as_str(), "failed to withdraw the image's readiness");
-                }
-                crate::image_cache::wake_cache_refresh();
-            } else if let Err(error) = outcome {
-                warn!(error = %format!("{error:#}"), image = image.as_str(), "jailerd did not confirm the image's template");
-            }
-        })
-        .await;
+            let ready = ready::require_ready_image(context.cache_root, &image).await?;
+            context.vm.confirm_image_template(&ready).await
+        }
+    };
+    confirm_sweep(
+        context.cache_root,
+        &ready,
+        still_pinned,
+        confirm,
+        crate::image_cache::wake_cache_refresh,
+    )
+    .await
 }
 
-/// Whether a confirmation found the template gone: jailerd requeues only a
-/// template it does not hold, since one it holds needs no lane.
-fn template_lost(outcome: &Result<()>) -> bool {
-    outcome.as_ref().is_err_and(is_requeued)
+/// One sweep over `images`, bounded by [`TEMPLATE_CONFIRM_SWEEP_BUDGET`]. An
+/// image no longer pinned is skipped. `confirm` is `Ok(true)` when jailerd
+/// holds the template and `Ok(false)` when it does not: the image's
+/// readiness is withdrawn and `wake` wakes the cache pass. An error, jailerd
+/// unreachable included, keeps readiness. True when jailerd answered once,
+/// or there was nothing to confirm.
+async fn confirm_sweep<P, PF, C, CF>(
+    cache_root: &Path,
+    images: &[OciDigest],
+    still_pinned: P,
+    confirm: C,
+    wake: impl Fn(),
+) -> bool
+where
+    P: Fn(&OciDigest) -> PF,
+    PF: std::future::Future<Output = bool>,
+    C: Fn(&OciDigest) -> CF,
+    CF: std::future::Future<Output = Result<bool>>,
+{
+    let answered = std::sync::atomic::AtomicBool::new(images.is_empty());
+    let sweep = futures_util::stream::iter(images).for_each_concurrent(
+        TEMPLATE_CONFIRMS_IN_FLIGHT,
+        |image| {
+            let (answered, still_pinned, confirm, wake) = (&answered, &still_pinned, &confirm, &wake);
+            async move {
+                if !still_pinned(image).await {
+                    return;
+                }
+                match tokio::time::timeout(TEMPLATE_CONFIRM_TIMEOUT, confirm(image)).await {
+                    Ok(Ok(true)) => answered.store(true, std::sync::atomic::Ordering::Relaxed),
+                    Ok(Ok(false)) => {
+                        answered.store(true, std::sync::atomic::Ordering::Relaxed);
+                        info!(image = image.as_str(), "jailerd no longer holds the image's template; preparing it again");
+                        if let Err(error) = ready::withdraw_ready_image(cache_root, image) {
+                            warn!(error = %error, image = image.as_str(), "failed to withdraw the image's readiness");
+                        }
+                        wake();
+                    }
+                    Ok(Err(error)) => {
+                        warn!(error = %format!("{error:#}"), image = image.as_str(), "the image's template was not confirmed");
+                    }
+                    Err(_) => {
+                        warn!(image = image.as_str(), "the image's template confirmation timed out");
+                    }
+                }
+            }
+        },
+    );
+    if tokio::time::timeout(TEMPLATE_CONFIRM_SWEEP_BUDGET, sweep)
+        .await
+        .is_err()
+    {
+        warn!("template confirmation sweep ran out of time; the next one continues");
+    }
+    answered.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether a prepare error is a jailerd requeue rather than a failure.
@@ -387,18 +455,127 @@ fn scrub_items(store: &BlobStore, pins: &RequiredPins) -> Vec<scheduler::ScrubIt
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use super::super::pins::tests::digest;
     use super::*;
 
-    #[test]
-    fn a_requeued_confirmation_means_the_template_is_gone() {
-        let requeued = anyhow::Error::from(crate::vm::ImagePrepareRequeued {
-            message: "a boot holds the lane".to_owned(),
-        })
-        .context("failed to prepare the root-owned jail image template");
-        assert!(template_lost(&Err(requeued)));
-        assert!(!template_lost(&Ok(())));
-        assert!(!template_lost(&Err(anyhow::anyhow!(
-            "jailerd host_not_ready: fast image template store is unavailable"
-        ))));
+    struct Sweep {
+        _root: tempfile::TempDir,
+        cache_root: PathBuf,
+        wakes: Cell<usize>,
+        confirmed: Cell<usize>,
+    }
+
+    impl Sweep {
+        fn with_ready(images: &[&OciDigest]) -> Result<Self> {
+            let root = tempfile::tempdir()?;
+            let cache_root = root.path().to_owned();
+            std::fs::create_dir_all(cache_root.join("launch"))?;
+            for image in images {
+                std::fs::write(Self::descriptor(&cache_root, image), b"{}")?;
+            }
+            Ok(Self {
+                _root: root,
+                cache_root,
+                wakes: Cell::new(0),
+                confirmed: Cell::new(0),
+            })
+        }
+
+        fn descriptor(cache_root: &Path, image: &OciDigest) -> PathBuf {
+            cache_root
+                .join("launch")
+                .join(format!("{}.ready.json", image.hex()))
+        }
+
+        fn ready(&self, image: &OciDigest) -> bool {
+            Self::descriptor(&self.cache_root, image).exists()
+        }
+
+        async fn run(
+            &self,
+            images: &[OciDigest],
+            pinned: impl Fn(&OciDigest) -> bool,
+            answer: impl Fn(&OciDigest) -> Option<Result<bool>>,
+        ) -> bool {
+            confirm_sweep(
+                &self.cache_root,
+                images,
+                |image| std::future::ready(pinned(image)),
+                |image| {
+                    self.confirmed.set(self.confirmed.get() + 1);
+                    let answer = answer(image);
+                    async move {
+                        match answer {
+                            Some(answer) => answer,
+                            None => std::future::pending().await,
+                        }
+                    }
+                },
+                || self.wakes.set(self.wakes.get() + 1),
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_held_template_stays_ready_and_a_gone_one_is_withdrawn() -> Result<()> {
+        let (held, gone) = (digest('a'), digest('b'));
+        let sweep = Sweep::with_ready(&[&held, &gone])?;
+        let answered = sweep
+            .run(
+                &[held.clone(), gone.clone()],
+                |_| true,
+                |image| Some(Ok(*image == held)),
+            )
+            .await;
+        assert!(answered);
+        assert!(sweep.ready(&held));
+        assert!(!sweep.ready(&gone), "the cache pass prepares it again");
+        assert_eq!(sweep.wakes.get(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_image_unpinned_mid_sweep_is_not_confirmed() -> Result<()> {
+        let image = digest('a');
+        let sweep = Sweep::with_ready(&[&image])?;
+        sweep
+            .run(std::slice::from_ref(&image), |_| false, |_| Some(Ok(false)))
+            .await;
+        assert_eq!(sweep.confirmed.get(), 0);
+        assert!(sweep.ready(&image));
+        assert_eq!(sweep.wakes.get(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_jailerd_keeps_readiness() -> Result<()> {
+        let image = digest('a');
+        let sweep = Sweep::with_ready(&[&image])?;
+        let answered = sweep
+            .run(
+                std::slice::from_ref(&image),
+                |_| true,
+                |_| Some(Err(anyhow::anyhow!("connect to intar-jailerd: refused"))),
+            )
+            .await;
+        assert!(!answered, "the first sweep is retried soon");
+        assert!(sweep.ready(&image));
+        assert_eq!(sweep.wakes.get(), 0);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sweep_is_bounded_whatever_jailerd_does() -> Result<()> {
+        let images = "0123456789abcdef".chars().map(digest).collect::<Vec<_>>();
+        let sweep = Sweep::with_ready(&images.iter().collect::<Vec<_>>())?;
+        let started = tokio::time::Instant::now();
+        let answered = sweep.run(&images, |_| true, |_| None).await;
+        assert!(!answered);
+        assert!(started.elapsed() <= TEMPLATE_CONFIRM_SWEEP_BUDGET);
+        assert!(images.iter().all(|image| sweep.ready(image)));
+        Ok(())
     }
 }

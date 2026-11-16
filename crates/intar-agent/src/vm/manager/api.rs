@@ -241,6 +241,15 @@ impl VmManager {
         ensure_jailer_image_template(&self.inner, image, RequestClass::Background).await
     }
 
+    /// Have jailerd confirm the template of a ready image, which marks it
+    /// used, without building one: false when jailerd does not hold it.
+    pub(crate) async fn confirm_image_template(
+        &self,
+        ready: &image_cache::ReadyImage,
+    ) -> Result<bool> {
+        confirm_jailer_image_template(&self.inner, ready).await
+    }
+
     pub async fn inspect_jailed_vm(&self, generation: &str) -> Result<Option<VmInspection>> {
         jailer_identity_request(&self.inner, generation, JailerIdentityOperation::Inspect).await
     }

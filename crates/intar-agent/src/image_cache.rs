@@ -259,7 +259,19 @@ pub fn spawn_warm_cache_with_bridge(
         // Beside the passes, from startup on: a long import never holds back
         // the confirmations that keep pinned templates from store GC.
         let confirmations = async move {
-            let mut interval = tokio::time::interval(refresh::TEMPLATE_CONFIRM_INTERVAL);
+            // Jailerd may not accept yet: retry the first sweep soon until
+            // one reaches it, then keep the cadence.
+            let mut retry = Duration::from_secs(5);
+            while !refresh::confirm_ready_templates(refresh_context).await {
+                tokio::time::sleep(retry).await;
+                retry = retry
+                    .saturating_mul(2)
+                    .min(refresh::TEMPLATE_CONFIRM_INTERVAL);
+            }
+            let mut interval = tokio::time::interval_at(
+                tokio::time::Instant::now() + refresh::TEMPLATE_CONFIRM_INTERVAL,
+                refresh::TEMPLATE_CONFIRM_INTERVAL,
+            );
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;

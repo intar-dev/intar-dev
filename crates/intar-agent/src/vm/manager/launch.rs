@@ -169,6 +169,65 @@ pub(super) async fn ensure_jailer_image_template(
     Ok(result)
 }
 
+/// How long jailerd may take to answer a confirmation: a metadata check.
+const TEMPLATE_CONFIRM_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Have jailerd confirm the template of a ready image from its metadata,
+/// which marks it used. Jailerd never builds for this request: `Ok(false)`
+/// means it does not hold the template.
+pub(super) async fn confirm_jailer_image_template(
+    inner: &Inner,
+    ready: &image_cache::ReadyImage,
+) -> Result<bool> {
+    let capabilities = cached_jailer_launch_capabilities(inner).await?;
+    let cache_root =
+        image_cache::default_cache_root().context("failed to determine image cache root")?;
+    let store = image_cache::BlobStore::new(&cache_root);
+    let roots = &capabilities.allowed_source_roots;
+    let blob = |digest: &OciDigest| {
+        artifact_source(
+            &store.path(digest),
+            roots,
+            Some(digest.hex()),
+            ArtifactAccess::ReadOnly,
+        )
+    };
+    let request = PrepareChunkedImageV3Request {
+        image_id: Sha256Digest::parse(ready.image.hex().to_owned())?,
+        chunk_manifest_sha256: Sha256Digest::parse(ready.config.hex().to_owned())?,
+        virtual_size_bytes: ready.disk_size_bytes,
+        image_manifest: blob(&ready.image)?,
+        manifest: blob(&ready.config)?,
+        chunk_cache_root: trusted_directory_source(store.directory(), roots)?,
+        kernel: blob(&ready.kernel)?,
+        initrd: ready.initrd.as_ref().map(blob).transpose()?,
+        request_class: RequestClass::Confirm,
+    };
+    request.validate()?;
+    match request_jailerd_with_timeout(
+        inner,
+        JailerRequest::PrepareChunkedImageV3(Box::new(request)),
+        TEMPLATE_CONFIRM_REQUEST_TIMEOUT,
+    )
+    .await?
+    {
+        JailerResponse::PrepareChunkedImageV3(result) => {
+            anyhow::ensure!(
+                result == ready.prepared_image,
+                "jailerd confirmed a template other than the launch descriptor's"
+            );
+            Ok(true)
+        }
+        JailerResponse::Error(error) if error.code == "image_template_missing" => Ok(false),
+        JailerResponse::Error(error) => {
+            anyhow::bail!("jailerd {}: {}", error.code, error.message)
+        }
+        response => anyhow::bail!(
+            "jailerd returned unexpected response to a template confirmation: {response:?}"
+        ),
+    }
+}
+
 fn validate_prepared_image_v3_result(
     request: &PrepareChunkedImageV3Request,
     result: &PreparedImageV3Result,

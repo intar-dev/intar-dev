@@ -35,6 +35,9 @@ struct ReadyDescriptorV2 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReadyImage {
     pub(crate) image: OciDigest,
+    pub(crate) config: OciDigest,
+    pub(crate) kernel: OciDigest,
+    pub(crate) initrd: Option<OciDigest>,
     pub(crate) cmdline: String,
     pub(crate) disk_size_bytes: u64,
     pub(crate) prepared_image: PreparedImageV3Result,
@@ -159,6 +162,9 @@ fn validate_descriptor(image: &OciDigest, descriptor: ReadyDescriptorV2) -> Resu
     }
     Ok(ReadyImage {
         image: descriptor.image,
+        config: descriptor.config,
+        kernel: descriptor.kernel,
+        initrd: descriptor.initrd,
         cmdline: descriptor.cmdline,
         disk_size_bytes: descriptor.disk_size_bytes,
         prepared_image: descriptor.prepared_image,
