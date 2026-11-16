@@ -234,3 +234,94 @@ fn chunked_template_metadata_is_bounded_separately_from_protocol_frames() {
             .contains("exceeds bounded size")
     );
 }
+
+fn is_template_missing(result: Result<()>) -> bool {
+    result.is_err_and(|error| error.downcast_ref::<PreparedTemplateMissing>().is_some())
+}
+
+#[test]
+fn a_launch_on_an_absent_template_directory_is_template_missing() -> Result<()> {
+    let store = tempfile::tempdir()?;
+    let templates = rustix::fs::open(
+        store.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let config = lifecycle_test_config(store.path());
+    assert!(is_template_missing(validate_prepared_chunked_launch_at(
+        &config,
+        &templates,
+        &launch_v3(1, 125),
+    )));
+    Ok(())
+}
+
+/// Needs root: the template store and its entries must be root-owned.
+#[test]
+fn a_launch_tells_a_gone_template_from_a_wrong_one() -> Result<()> {
+    if !rustix::process::geteuid().is_root() {
+        return Ok(());
+    }
+    let jail = tempfile::tempdir()?;
+    let config = lifecycle_test_config(jail.path());
+    let request = launch_v3(1, 125);
+    let image = jail
+        .path()
+        .join("templates")
+        .join(request.image_id.as_str());
+
+    // No template store, no image directory, no metadata: all gone.
+    assert!(is_template_missing(validate_prepared_chunked_launch(
+        &config, &request
+    )));
+    std::fs::create_dir_all(jail.path().join("templates"))?;
+    assert!(is_template_missing(validate_prepared_chunked_launch(
+        &config, &request
+    )));
+    std::fs::create_dir_all(&image)?;
+    assert!(is_template_missing(validate_prepared_chunked_launch(
+        &config, &request
+    )));
+
+    // Present but of another identity: a plain failure, never prepared again.
+    std::fs::write(
+        image.join("metadata-v2.json"),
+        serde_json::json!({
+            "schema_version": IMAGE_TEMPLATE_METADATA_V3,
+            "image_sha256": "a".repeat(64),
+            "chunk_manifest_sha256": "b".repeat(64),
+            "virtual_size_bytes": 1,
+            "root_disk": {"sha256": "a".repeat(64), "bytes": 1, "device": 1, "inode": 1},
+            "kernel": {"sha256": "c".repeat(64), "bytes": 1, "device": 1, "inode": 2},
+            "initrd": null,
+        })
+        .to_string(),
+    )?;
+    let wrong = validate_prepared_chunked_launch(&config, &request);
+    assert!(wrong.is_err() && !is_template_missing(wrong));
+    Ok(())
+}
+
+#[test]
+fn only_an_absent_file_makes_a_template_missing() {
+    for absent in [
+        anyhow::Error::from(rustix::io::Errno::NOENT).context("open root-owned image template"),
+        anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound)),
+    ] {
+        assert!(
+            template_missing_if_absent(absent)
+                .downcast_ref::<PreparedTemplateMissing>()
+                .is_some()
+        );
+    }
+    for other in [
+        anyhow::Error::from(rustix::io::Errno::ACCESS).context("open root-owned image template"),
+        anyhow::anyhow!("prepared image template metadata identity mismatch"),
+    ] {
+        assert!(
+            template_missing_if_absent(other)
+                .downcast_ref::<PreparedTemplateMissing>()
+                .is_none()
+        );
+    }
+}

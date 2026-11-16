@@ -843,7 +843,7 @@ fn launch(index: u32, cpu_millis: u32) -> VmLaunchRequest {
     }
 }
 
-fn launch_v3(index: u32, cpu_millis: u32) -> LaunchVmV3Request {
+pub(super) fn launch_v3(index: u32, cpu_millis: u32) -> LaunchVmV3Request {
     let image_id = Sha256Digest::parse("d".repeat(64)).expect("image digest");
     let artifact_sha256 = Sha256Digest::parse("e".repeat(64)).expect("artifact digest");
     let mut launch = launch(index, cpu_millis);

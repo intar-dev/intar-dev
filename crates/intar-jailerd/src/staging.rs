@@ -606,7 +606,10 @@ pub(super) fn stage_source(
     mode: u32,
 ) -> Result<()> {
     if source.source_root == PREPARED_IMAGE_SOURCE_ROOT {
-        let source_file = open_prepared_template_source(config, source)?;
+        // Store GC can remove the template between the launch's check and
+        // here; once open, the descriptor keeps its inode.
+        let source_file =
+            open_prepared_template_source(config, source).map_err(template_missing_if_absent)?;
         return stage_prepared_template_source_file(source_file, destination, mode);
     }
     let source_file = open_trusted_source(config, source.source_root, &source.relative_path)?;
@@ -693,7 +696,7 @@ pub(super) fn open_prepared_template_source(
         .context("prepared template artifact name is not UTF-8")?;
     let jail_root = trusted_jail_root_fd(config)?;
     let templates = open_optional_root_directory_at(&jail_root, c"templates")?
-        .context("prepared image template root is missing")?;
+        .ok_or(PreparedTemplateMissing)?;
     let image_name = CString::new(image_sha256.as_str()).expect("SHA-256 contains no NUL");
     let image_directory =
         open_lifecycle_entry_at(&templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)

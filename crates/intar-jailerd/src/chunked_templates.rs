@@ -193,23 +193,24 @@ pub(super) fn validate_prepared_chunked_launch(
     let jail_root = trusted_jail_root_fd(config)?;
     let templates = open_optional_root_directory_at(&jail_root, c"templates")?
         .ok_or(PreparedTemplateMissing)?;
+    validate_prepared_chunked_launch_at(config, &templates, request)
+}
+
+/// The launch check below the template store `templates`. A template that is
+/// absent, or removed under this launch by store GC, is
+/// [`PreparedTemplateMissing`], so the agent prepares it again; anything
+/// else that is wrong with it stays a plain failure.
+pub(super) fn validate_prepared_chunked_launch_at(
+    config: &JailerdConfig,
+    templates: &OwnedFd,
+    request: &intar_jailer_protocol::LaunchVmV3Request,
+) -> Result<()> {
     let image_name = CString::new(request.image_id.as_str()).expect("SHA-256 contains no NUL");
-    // Absent, or removed under this launch by store GC: the agent prepares
-    // it again. Anything else that is wrong with it stays a plain failure.
-    let missing = |error: anyhow::Error| {
-        if error.chain().any(|cause| {
-            cause.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT)
-        }) {
-            anyhow::Error::from(PreparedTemplateMissing)
-        } else {
-            error
-        }
-    };
     let image_directory =
-        open_lifecycle_entry_at(&templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)
-            .map_err(|error| missing(error.into()))?;
+        open_lifecycle_entry_at(templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)
+            .map_err(|error| template_missing_if_absent(error.into()))?;
     validate_root_directory(&image_directory, "chunked image template")?;
-    let metadata = open_template_metadata(&image_directory).map_err(missing)?;
+    let metadata = open_template_metadata(&image_directory).map_err(template_missing_if_absent)?;
     ensure!(
         metadata.schema_version == IMAGE_TEMPLATE_METADATA_V3
             && metadata.image_sha256 == request.image_id
@@ -515,7 +516,9 @@ fn open_verified_raw_chunk(
     Ok(file)
 }
 
-fn prepared_image_v3_result(metadata: &ImageTemplateMetadataV2) -> Result<PreparedImageV3Result> {
+pub(super) fn prepared_image_v3_result(
+    metadata: &ImageTemplateMetadataV2,
+) -> Result<PreparedImageV3Result> {
     let chunk_manifest_sha256 = metadata
         .chunk_manifest_sha256
         .clone()

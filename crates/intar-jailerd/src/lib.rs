@@ -375,6 +375,22 @@ struct UntrackedRunNetworkError;
 #[error("the prepared image template is missing")]
 struct PreparedTemplateMissing;
 
+/// `error` as [`PreparedTemplateMissing`] when an absent file or directory
+/// caused it; any other error unchanged.
+fn template_missing_if_absent(error: anyhow::Error) -> anyhow::Error {
+    let absent = error.chain().any(|cause| {
+        cause.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT)
+            || cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    });
+    if absent {
+        PreparedTemplateMissing.into()
+    } else {
+        error
+    }
+}
+
 impl VmRecord {
     fn cpu_runtime(&self) -> VmCpuRuntimeState {
         VmCpuRuntimeState {
@@ -726,6 +742,15 @@ pub fn prepare_chunked_image_v3_response(
             "host_not_ready",
             format!("host runtime template validation failed: {error:#}"),
         ));
+    }
+    // A template that is already published is confirmed from its metadata,
+    // which marks it used, without the lane: a confirmation never waits for
+    // or defers behind an import or a boot.
+    if let Ok(metadata) = validate_existing_chunked_template(config, &request) {
+        return match prepared_image_v3_result(&metadata) {
+            Ok(result) => Response::PrepareChunkedImageV3(result),
+            Err(error) => prepare_error_response(error),
+        };
     }
     // A background class yields between fixed blocks. The lane is a scheduling
     // hint only: every digest, ownership, and trust check below is unchanged.
