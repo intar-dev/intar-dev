@@ -40,7 +40,20 @@ describe("run recap model", () => {
     expect(getRunRecapState(run({ outcome: "failed", phase: "failed" }))).toMatchObject({
       kind: "could_not_finish",
       title: "Could not finish",
+      description: "This scenario did not reach its final checks.",
     });
+  });
+
+  it("tells the learner when the machine was lost, and nothing else about a failure", () => {
+    const lost = "The machine was shut down or stopped unexpectedly.";
+    expect(
+      getRunRecapState(run({ outcome: "failed", phase: "failed", phaseDetail: lost })),
+    ).toMatchObject({ kind: "could_not_finish", description: lost });
+    expect(
+      getRunRecapState(
+        run({ outcome: "failed", phase: "failed", phaseDetail: "The run hit a terminal failure." }),
+      ).description,
+    ).toBe("This scenario did not reach its final checks.");
   });
 
   it("maps only learner-safe save stages and keeps legacy runs coarse", () => {
