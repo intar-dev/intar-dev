@@ -433,6 +433,16 @@ fn refusal_cases() -> Vec<(&'static str, Mutation)> {
             let setup = &mut b.scenarios[0].machines[0].setup;
             setup.push(setup[1].clone());
         }),
+        ("machine-defer", |b| {
+            b.scenarios[0].machines[0].defer = ["kube.slice", "-x.service", "a@.service", "k3s"]
+                .map(str::to_owned)
+                .to_vec();
+        }),
+        ("image-defer", |b| {
+            let mut base = image("web-base", "trixie", Some(8192));
+            base.defer = vec!["var-lib.mount".to_owned(), "k3s.service".to_owned()];
+            b.images.push(base);
+        }),
         ("too-many-tasks", |b| {
             let task = b.scenarios[0].tasks[0].clone();
             b.scenarios[0].tasks = (0..=MAX_TASKS_PER_MACHINE)
