@@ -818,6 +818,11 @@ pub struct JailerdConfig {
     pub store_gc_grace_seconds: u64,
 }
 
+/// The shortest store GC grace jailerd accepts. The agent confirms the
+/// template of every pinned image, which marks it used, at a fixed cadence
+/// far below this, so store GC never takes a pinned template for idle.
+pub const MIN_STORE_GC_GRACE_SECONDS: u64 = 30 * 60;
+
 impl Default for JailerdConfig {
     fn default() -> Self {
         Self {
@@ -986,7 +991,9 @@ pub enum ValidationError {
     InvalidNofileLimit,
     #[error("configured RLIMIT_FSIZE must be positive")]
     InvalidFileSizeLimit,
-    #[error("template/chunk store garbage-collection limits must be positive")]
+    #[error(
+        "template/chunk store garbage-collection limits must be positive, and the grace at least 30 minutes"
+    )]
     InvalidStoreGcPolicy,
 }
 

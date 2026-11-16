@@ -434,6 +434,22 @@ fn jailerd_config_rejects_runtime_hash_overrides() {
 }
 
 #[test]
+fn jailerd_config_refuses_a_store_gc_grace_below_the_floor() {
+    let config = |store_gc_grace_seconds| JailerdConfig {
+        agent_uid: 991,
+        agent_gid: 991,
+        store_gc_grace_seconds,
+        ..JailerdConfig::default()
+    };
+    assert_eq!(config(3_600).validate(), Ok(()));
+    assert_eq!(config(MIN_STORE_GC_GRACE_SECONDS).validate(), Ok(()));
+    assert_eq!(
+        config(MIN_STORE_GC_GRACE_SECONDS - 1).validate(),
+        Err(ValidationError::InvalidStoreGcPolicy)
+    );
+}
+
+#[test]
 fn root_network_policy_rejects_route_hijacks_and_topology_drift() {
     let config = JailerdConfig {
         agent_uid: 991,
