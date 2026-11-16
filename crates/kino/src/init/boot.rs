@@ -18,6 +18,9 @@ const RECORDING_DEVICE: &str = "/dev/vdc";
 const RECORDING_DIR: &str = "/var/lib/kino-recordings";
 const RUN_CLI_BROKER: &str = "/run/intar/run-cli-broker";
 const HOST_KEY: &str = "/etc/ssh/ssh_host_ed25519_key";
+/// Where the build wires every deferred unit, the image chain's as well as
+/// the machine's: the spec lists only the machine's own `defer`.
+const LAB_TARGET_WANTS: &str = "/etc/systemd/system/intar-lab.target.wants";
 
 /// Every program PID 1 runs, by absolute path where usr-merged Debian
 /// installs it: PATH puts /usr/local first, so a bare name could run a
@@ -92,7 +95,7 @@ pub(crate) async fn bring_up(
 /// once the run CLI of guest contract 3 lands.
 pub(crate) async fn release_lab(spec: &MachineSpecV1, report: &watch::Sender<Report>) {
     mark(report, Phase::Preparing, "preparing");
-    if !spec.defer.is_empty() {
+    if has_deferred_units(spec, Path::new(LAB_TARGET_WANTS)) {
         tokio::time::sleep(LAB_RELEASE_FALLBACK).await;
     }
     // Not waiting for the units: the ready scripts say when the lab is up.
@@ -100,6 +103,13 @@ pub(crate) async fn release_lab(spec: &MachineSpecV1, report: &watch::Sender<Rep
         eprintln!("kino init: lab release: {error}");
     }
     mark(report, Phase::Preparing, "lab_released");
+}
+
+/// Whether the lab target starts any unit: one the machine defers, or one
+/// an image of its chain deferred, which the build wired to `wants`.
+fn has_deferred_units(spec: &MachineSpecV1, wants: &Path) -> bool {
+    !spec.defer.is_empty()
+        || std::fs::read_dir(wants).is_ok_and(|mut entries| entries.next().is_some())
 }
 
 async fn network(boot: &GuestBootV3) -> Result<(), String> {
@@ -282,4 +292,29 @@ fn write(path: &str, content: &str) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|error| format!("{path}: {error}"))?;
     }
     std::fs::write(path, content).map_err(|error| format!("{path}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_unit_an_image_deferred_counts_like_the_machines_own() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let wants = root.path().join("intar-lab.target.wants");
+        let bare = MachineSpecV1::default();
+        // No wants directory: the build deferred nothing.
+        assert!(!has_deferred_units(&bare, &wants));
+        std::fs::create_dir(&wants).expect("wants");
+        assert!(!has_deferred_units(&bare, &wants));
+        let own = MachineSpecV1 {
+            defer: vec!["nginx.service".to_owned()],
+            ..MachineSpecV1::default()
+        };
+        assert!(has_deferred_units(&own, &wants));
+        // An image's `defer = ["k3s.service"]`: the spec's list is empty.
+        std::os::unix::fs::symlink("/etc/systemd/system/k3s.service", wants.join("k3s.service"))
+            .expect("link");
+        assert!(has_deferred_units(&bare, &wants));
+    }
 }
