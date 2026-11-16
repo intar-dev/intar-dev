@@ -275,6 +275,11 @@ impl PrepareLane {
     }
 
     fn claim_in(budget: Arc<LaneBudget>, class: RequestClass) -> Result<Self> {
+        // A confirmation is answered before any lane and never builds.
+        anyhow::ensure!(
+            class != RequestClass::Confirm,
+            "a confirm request cannot take a prepare lane"
+        );
         if class != RequestClass::Background {
             return Ok(Self {
                 budget,
