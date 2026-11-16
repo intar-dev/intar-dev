@@ -23,6 +23,8 @@ import {
 } from "@/lib/scenario-run-cleanup";
 import {
   recomputeRunState,
+  RUN_LEASE_EXPIRED_DETAIL,
+  RUN_LEASE_EXPIRED_TEXT,
   runPhaseAcceptsTerminalSessions,
   runPhaseAcceptsBrowserTerminalSessions,
 } from "@/lib/run-state";
@@ -423,15 +425,15 @@ export async function expireOverdueRunLeases(
           recomputeRunState({
             ...current,
             phase: "failed",
-            phaseDetail: "The run lease expired before teardown completed.",
+            phaseDetail: RUN_LEASE_EXPIRED_DETAIL,
             vms: current.vms.map((vm) =>
               expiredVmNames.has(vm.runtimeVmName)
                 ? {
                     ...vm,
                     phase: "failed",
-                    phaseDetail: "The run lease expired.",
+                    phaseDetail: RUN_LEASE_EXPIRED_TEXT,
                     terminalPhase: "failed",
-                    terminalReason: "The run lease expired.",
+                    terminalReason: RUN_LEASE_EXPIRED_TEXT,
                   }
                 : vm,
             ),

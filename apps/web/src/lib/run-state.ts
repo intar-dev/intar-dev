@@ -1,8 +1,8 @@
 import type { ScenarioLaunchSummary } from "@/lib/scenario-model";
 import type { VmResourceStateV3 } from "@/generated/bridge";
 import type { CheckStatus, LabState, VmVerifyV1 } from "@/generated/contracts/bridge-message-v9";
-import { GUEST_USERNAME } from "@/generated/constants";
-import { tasksSolved, type RunTaskState } from "@/lib/run-tasks";
+import { GUEST_USERNAME, VM_LOST_REASON } from "@/generated/constants";
+import { LAB_FAILED_TEXT, tasksSolved, type RunTaskState } from "@/lib/run-tasks";
 import { isVerificationPassed } from "@/lib/verification-copy";
 
 export type RunPhase =
@@ -286,6 +286,21 @@ export function buildInitialVmState(input: {
   });
 }
 
+/** A run's lease ran out: the expired VMs' reason, and the run's. */
+export const RUN_LEASE_EXPIRED_TEXT = "The run lease expired.";
+export const RUN_LEASE_EXPIRED_DETAIL = "The run lease expired before teardown completed.";
+
+/**
+ * The failure reasons written for learners. A failed run keeps one of these
+ * once its VMs are archived; any other reason (host error text) is not kept.
+ */
+const LEARNER_FAILURE_REASONS: ReadonlySet<string> = new Set([
+  VM_LOST_REASON,
+  RUN_LEASE_EXPIRED_TEXT,
+  RUN_LEASE_EXPIRED_DETAIL,
+  LAB_FAILED_TEXT,
+]);
+
 export function recomputeRunState(current: RunStateDocument): RunStateDocument {
   const vms = current.vms.map((vm) => decorateVmState(vm));
   const bootProbes = vms.flatMap((vm) => vm.bootProbes);
@@ -300,7 +315,13 @@ export function recomputeRunState(current: RunStateDocument): RunStateDocument {
     null;
   const terminalTarget = terminalVm?.terminalTarget ?? defaultTerminalTarget();
   const phase = deriveRunPhase(vms, current.phase, current.tasks);
-  const descriptor = describeRunPhase(phase, vms, current.phaseDetail, current.tasks);
+  const descriptor = describeRunPhase(
+    phase,
+    vms,
+    current.phaseDetail,
+    current.tasks,
+    current.phase === "failed" ? current.phaseDetail : null,
+  );
 
   return {
     ...(current.tasks ? { tasks: current.tasks } : {}),
@@ -624,7 +645,9 @@ function describeRunPhase(
   phase: RunPhase,
   vms: RunVmStateDocument[],
   currentDetail: string,
-  tasks?: RunTaskState[],
+  tasks: RunTaskState[] | undefined,
+  /** The detail of a run that was already failed. */
+  failedDetail: string | null,
 ): {
   title: string;
   detail: string;
@@ -691,12 +714,19 @@ function describeRunPhase(
       };
     case "failed": {
       const failedVm = vms.find((vm) => vm.phase === "failed");
+      // Archiving completes the failed VMs, so the reason shown when the run
+      // failed is kept, if it was written for learners.
+      const keptDetail =
+        failedDetail !== null && LEARNER_FAILURE_REASONS.has(failedDetail)
+          ? failedDetail
+          : null;
       return {
         title: "Failed",
         detail:
           failedVm?.terminalReason ||
           failedVm?.provisioning.error ||
           failedVm?.phaseDetail ||
+          keptDetail ||
           "The run hit a terminal failure.",
         progressPercent: 100,
       };
