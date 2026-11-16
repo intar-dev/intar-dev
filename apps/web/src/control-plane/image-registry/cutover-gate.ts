@@ -1,6 +1,5 @@
 import { drizzle } from "drizzle-orm/d1";
 import { runtimeOperationGates } from "@/db/schema";
-import { sql } from "drizzle-orm";
 import {
   IMAGE_CUTOVER_GATE,
   IMAGE_CUTOVER_WIPED,
@@ -41,11 +40,9 @@ export async function handleImageCutoverGate(
       })
       .onConflictDoUpdate({
         target: runtimeOperationGates.key,
-        // A repeated drain keeps a wipe; only `open` ends it.
-        set: {
-          state: sql`CASE WHEN ${runtimeOperationGates.state} = ${IMAGE_CUTOVER_WIPED} AND excluded.state = 'drained' THEN ${IMAGE_CUTOVER_WIPED} ELSE excluded.state END`,
-          updatedAt: Date.now(),
-        },
+        // This Worker only runs on the migrated schema, so a drain ends the
+        // wipe hold: content can be synced and proven while learners wait.
+        set: { state: value.state, updatedAt: Date.now() },
       });
   }
   const gate = await env.DB.prepare(
