@@ -100,6 +100,17 @@ pub(crate) async fn require_ready_image(
     validate_descriptor(image, serde_json::from_slice(&bytes)?)
 }
 
+/// Withdraw an image's readiness: jailerd answered that its template is gone
+/// (its store GC removed it), so the next cache pass prepares it again and
+/// the host reports the image as not ready until then.
+pub(crate) fn withdraw_ready_image(cache_root: &Path, image: &OciDigest) -> Result<()> {
+    match std::fs::remove_file(descriptor_path(cache_root, image)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("withdraw the image's launch descriptor"),
+    }
+}
+
 pub(crate) fn is_image_ready(cache_root: &Path, image: &OciDigest) -> bool {
     std::fs::read(descriptor_path(cache_root, image))
         .ok()

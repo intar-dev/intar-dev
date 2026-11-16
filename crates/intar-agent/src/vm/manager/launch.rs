@@ -319,6 +319,12 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
             }
             .into())
         }
+        JailerResponse::Error(error) if error.code == "image_template_missing" => {
+            Err(ImageTemplateMissing {
+                message: error.message,
+            }
+            .into())
+        }
         JailerResponse::Error(error) => {
             anyhow::bail!("jailerd {}: {}", error.code, error.message)
         }
@@ -840,6 +846,23 @@ pub(super) fn prepare_wait_step<T>(
     })
 }
 
+/// Whether `error` is jailerd's answer that the image's template is gone. If
+/// it is, the image's readiness is withdrawn, so the cache pass prepares it
+/// again and the host stops reporting it ready.
+pub(super) fn withdraw_if_template_missing(
+    cache_root: &Path,
+    image: &OciDigest,
+    error: &anyhow::Error,
+) -> bool {
+    if error.downcast_ref::<ImageTemplateMissing>().is_none() {
+        return false;
+    }
+    if let Err(withdraw_error) = image_cache::withdraw_ready_image(cache_root, image) {
+        warn!(error = %withdraw_error, image = image.as_str(), "failed to withdraw the image's readiness");
+    }
+    true
+}
+
 pub(super) async fn run_create(
     inner: &Arc<Inner>,
     req: RunCreateInput<'_>,
@@ -862,7 +885,7 @@ pub(super) async fn run_create(
         ensure_jailed_run_network(&network_inner, &network_run_id, &network_config).await
     });
     let _network_abort = AbortTaskOnDrop(network_task.abort_handle());
-    let ready_image = match image_cache::require_ready_image(&cache_root, req.image).await {
+    let mut ready_image = match image_cache::require_ready_image(&cache_root, req.image).await {
         Ok(ready) => ready,
         Err(_) => {
             // The cache pass parks while any boot window is live, so a launch
@@ -942,9 +965,26 @@ pub(super) async fn run_create(
 
     let launch_deadline = Instant::now() + Duration::from_secs(SCENARIO_READY_MAX_TIMEOUT_SECONDS);
     let mut capacity_attempt = 0_u32;
+    let mut template_prepared_again = false;
     let launch = loop {
         match launch_jailed_cloud_hypervisor(inner, &req, &ready_image).await {
             Ok(result) => break result,
+            Err(error)
+                if !template_prepared_again
+                    && withdraw_if_template_missing(&cache_root, req.image, &error) =>
+            {
+                // Jailerd's store GC removed the template after it was marked
+                // ready. Wait for it to be prepared again, as a launch whose
+                // image is not ready does, and launch once more.
+                template_prepared_again = true;
+                warn!(vm = req.name, error = %error, "waiting for the image's template to be prepared again");
+                set_state(inner, req.name, VmLifecycleState::CachingImage).await;
+                drop(boot_guard);
+                ready_image = wait_for_prepared_image(inner, &cache_root, &req).await?;
+                boot_guard = image_cache::begin_vm_boot_critical();
+                ensure_create_not_deleted(inner, req.name).await?;
+                set_state(inner, req.name, VmLifecycleState::CreatingVm).await;
+            }
             Err(error) if error.downcast_ref::<CpuCapacityPending>().is_some() => {
                 ensure_create_not_deleted(inner, req.name).await?;
                 if Instant::now() >= launch_deadline {

@@ -545,6 +545,15 @@ struct CpuCapacityPending {
     message: String,
 }
 
+/// Jailerd no longer holds the template of an image this agent had marked
+/// ready: its store GC removed it. The launch waits for the image to be
+/// prepared again instead of failing the run.
+#[derive(Debug, thiserror::Error)]
+#[error("the image's template is gone from jailerd's store: {message}")]
+pub(crate) struct ImageTemplateMissing {
+    pub(crate) message: String,
+}
+
 /// Jailerd parked a background image import at a block boundary to keep a VM
 /// boot responsive. The work is requeued, never lost.
 #[derive(Debug, thiserror::Error)]

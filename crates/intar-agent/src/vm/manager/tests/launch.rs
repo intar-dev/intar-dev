@@ -86,3 +86,34 @@ fn ssh_readiness_rejects_missing_or_malformed_kino_host_keys() {
             .contains("invalid SSH host key at index 0")
     );
 }
+
+#[test]
+fn a_launch_on_a_template_jailerd_no_longer_holds_withdraws_the_images_readiness()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let image =
+        OciDigest::try_from(format!("sha256:{}", "a".repeat(64))).map_err(anyhow::Error::msg)?;
+    let descriptor = temp
+        .path()
+        .join("launch")
+        .join(format!("{}.ready.json", image.hex()));
+    std::fs::create_dir_all(temp.path().join("launch"))?;
+    std::fs::write(&descriptor, b"{}")?;
+
+    // Any other launch failure leaves readiness alone.
+    let other = anyhow::anyhow!("jailerd host_operation_failed: prepare jail filesystem");
+    assert!(!withdraw_if_template_missing(temp.path(), &image, &other));
+    assert!(descriptor.exists());
+
+    let missing = anyhow::Error::from(ImageTemplateMissing {
+        message: "the prepared image template is missing".to_owned(),
+    });
+    assert!(withdraw_if_template_missing(temp.path(), &image, &missing));
+    assert!(
+        !descriptor.exists(),
+        "the next cache pass prepares it again"
+    );
+    // Withdrawn already: still the same answer.
+    assert!(withdraw_if_template_missing(temp.path(), &image, &missing));
+    Ok(())
+}
