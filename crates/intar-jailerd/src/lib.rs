@@ -368,6 +368,13 @@ struct VmExitedError;
 #[error("cannot repair an untracked run network")]
 struct UntrackedRunNetworkError;
 
+/// The image template a launch names is gone from the store (store GC
+/// removed it) or was never published: answered as `image_template_missing`,
+/// so the agent prepares it again instead of failing the run.
+#[derive(Debug, Error)]
+#[error("the prepared image template is missing")]
+struct PreparedTemplateMissing;
+
 impl VmRecord {
     fn cpu_runtime(&self) -> VmCpuRuntimeState {
         VmCpuRuntimeState {
@@ -767,6 +774,8 @@ fn classify_protocol_error(error: &anyhow::Error, message: &str) -> &'static str
         "image_prepare_requeued"
     } else if error.downcast_ref::<VmExitedError>().is_some() {
         "vm_exited"
+    } else if error.downcast_ref::<PreparedTemplateMissing>().is_some() {
+        "image_template_missing"
     } else if error.downcast_ref::<UntrackedRunNetworkError>().is_some() {
         "not_found"
     } else if storage_exhausted(error) {

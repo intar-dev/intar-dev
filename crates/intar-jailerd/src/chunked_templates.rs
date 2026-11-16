@@ -192,12 +192,24 @@ pub(super) fn validate_prepared_chunked_launch(
 ) -> Result<()> {
     let jail_root = trusted_jail_root_fd(config)?;
     let templates = open_optional_root_directory_at(&jail_root, c"templates")?
-        .context("prepared image template root is missing")?;
+        .ok_or(PreparedTemplateMissing)?;
     let image_name = CString::new(request.image_id.as_str()).expect("SHA-256 contains no NUL");
+    // Absent, or removed under this launch by store GC: the agent prepares
+    // it again. Anything else that is wrong with it stays a plain failure.
+    let missing = |error: anyhow::Error| {
+        if error.chain().any(|cause| {
+            cause.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT)
+        }) {
+            anyhow::Error::from(PreparedTemplateMissing)
+        } else {
+            error
+        }
+    };
     let image_directory =
-        open_lifecycle_entry_at(&templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+        open_lifecycle_entry_at(&templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)
+            .map_err(|error| missing(error.into()))?;
     validate_root_directory(&image_directory, "chunked image template")?;
-    let metadata = open_template_metadata(&image_directory)?;
+    let metadata = open_template_metadata(&image_directory).map_err(missing)?;
     ensure!(
         metadata.schema_version == IMAGE_TEMPLATE_METADATA_V3
             && metadata.image_sha256 == request.image_id

@@ -572,3 +572,21 @@ fn failed_quota_readback_contains_vm_without_exposing_ssh() {
     assert!(core.preparer.quarantined.contains(&launched.generation));
     assert!(!core.capabilities().supports_hard_cpu_quota);
 }
+
+#[test]
+fn a_launch_whose_template_is_gone_is_answered_as_image_template_missing() {
+    let missing = anyhow::Error::from(PreparedTemplateMissing)
+        .context("validate root-owned prepared image template");
+    assert!(matches!(
+        protocol_error_response(missing),
+        Response::Error(ProtocolError { ref code, .. }) if code == "image_template_missing"
+    ));
+    // A template that is there but wrong is no reason to prepare it again.
+    let mismatch =
+        anyhow::anyhow!("prepared chunked launch identity does not match root-owned metadata")
+            .context("validate root-owned prepared image template");
+    assert!(matches!(
+        protocol_error_response(mismatch),
+        Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
+    ));
+}
