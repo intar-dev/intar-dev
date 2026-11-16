@@ -104,6 +104,14 @@ pub(crate) struct PulledMachine {
     pub(crate) initrd: Option<OciDigest>,
 }
 
+/// The stored bytes of `digest`, when they are there and hash to it: content
+/// a digest the control plane pinned names cannot be stale, so reading it
+/// needs no registry.
+async fn stored_verified(store: &BlobStore, digest: &OciDigest) -> Option<Vec<u8>> {
+    let bytes = tokio::fs::read(store.path(digest)).await.ok()?;
+    (sha256_hex(&bytes) == digest.hex()).then_some(bytes)
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     to_hex_lower(&Sha256::digest(bytes))
 }
@@ -364,11 +372,9 @@ impl OciRegistry {
         store: &BlobStore,
     ) -> Result<PulledMachine> {
         let repository = format!("machines/{}", image.hex());
-        // A stored manifest that is its digest is the manifest: a scrub that
-        // has jailerd confirm a ready image's template needs no registry.
-        let bytes = match tokio::fs::read(store.path(image)).await {
-            Ok(bytes) if sha256_hex(&bytes) == image.hex() => bytes,
-            _ => self.manifest(&repository, image).await?,
+        let bytes = match stored_verified(store, image).await {
+            Some(bytes) => bytes,
+            None => self.manifest(&repository, image).await?,
         };
         let manifest: OciManifestV1 = serde_json::from_slice(&bytes).with_context(|| {
             format!("unsupported_artifact: {image:?} is not a manifest this agent reads")
@@ -450,7 +456,10 @@ impl OciRegistry {
 
     /// The Kino binary of a pinned Kino manifest, in the store.
     pub(crate) async fn pull_kino(&self, kino: &OciDigest, store: &BlobStore) -> Result<PathBuf> {
-        let bytes = self.manifest("kino", kino).await?;
+        let bytes = match stored_verified(store, kino).await {
+            Some(bytes) => bytes,
+            None => self.manifest("kino", kino).await?,
+        };
         let manifest: OciManifestV1 =
             serde_json::from_slice(&bytes).context("unsupported_artifact: not a Kino manifest")?;
         let [binary] = manifest.layers.as_slice() else {
@@ -490,6 +499,17 @@ impl OciRegistry {
             binary.size <= MAX_KINO_BYTES,
             "the Kino binary is over the run disk's limit"
         );
+        if let Some(bytes) = stored_verified(store, &binary.digest).await {
+            return Ok(bytes);
+        }
+        // A stored binary of the right size that is not its digest: drop it,
+        // fetch it again, and check what came.
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("drop a corrupt Kino binary"),
+        }
+        let path = self.blob("kino", binary, store).await?;
         let bytes = tokio::fs::read(&path)
             .await
             .context("read the Kino binary")?;
@@ -500,8 +520,18 @@ impl OciRegistry {
         Ok(bytes)
     }
 
-    /// A machine spec blob: its bytes, verified.
-    pub(crate) async fn spec(&self, spec: &OciDigest) -> Result<Vec<u8>> {
+    /// A machine spec blob: its bytes, verified. A stored copy that is its
+    /// digest is used without the registry; a fetched one is stored.
+    pub(crate) async fn spec(&self, spec: &OciDigest, store: &BlobStore) -> Result<Vec<u8>> {
+        if let Some(bytes) = stored_verified(store, spec).await {
+            return Ok(bytes);
+        }
+        let body = self.fetch_spec(spec).await?;
+        self.store_bytes(store, spec, &body).await?;
+        Ok(body)
+    }
+
+    async fn fetch_spec(&self, spec: &OciDigest) -> Result<Vec<u8>> {
         let _transfer = acquire_transfer_slot().await?;
         let path = format!("/v2/specs/blobs/{}", spec.as_str());
         let mut body = Vec::new();

@@ -123,6 +123,17 @@ async fn protected_digests(db: &Db) -> HashSet<OciDigest> {
                     let pins = RequiredPins::from_desired_state(&desired);
                     protected.extend(pins.images);
                     protected.extend(pins.kino);
+                    // A running VM's machine spec, which a create reads from
+                    // the store.
+                    protected.extend(
+                        desired
+                            .vms
+                            .iter()
+                            .filter(|vm| {
+                                vm.desired_phase == intar_contracts::bridge::DesiredVmPhase::Running
+                            })
+                            .map(|vm| vm.spec.clone()),
+                    );
                 }
                 Err(error) => {
                     warn!(error = %error, "failed to parse desired state for cache protection")

@@ -379,7 +379,7 @@ async fn other_artifacts_are_named_not_dropped() -> Result<()> {
     assert!(client.pull_kino(&machine, &store).await.is_err());
 
     let spec = registry.put(b"{\"spec\":true}");
-    assert_eq!(client.spec(&spec).await?, b"{\"spec\":true}");
+    assert_eq!(client.spec(&spec, &store).await?, b"{\"spec\":true}");
     Ok(())
 }
 
@@ -440,5 +440,57 @@ async fn an_oversized_kino_is_refused_before_its_download() -> Result<()> {
         registry.requests_for(&binary.digest).is_empty(),
         "never fetched"
     );
+    Ok(())
+}
+
+/// A client of a registry that refuses every connection.
+fn unreachable() -> Result<OciRegistry> {
+    let client = crate::image_cache::registry_http_client()?;
+    let jwt: AgentJwt = Box::new(|| Box::pin(async { Ok("agent-jwt".to_owned()) }));
+    let origin = reqwest::Url::parse("http://127.0.0.1:9")?;
+    Ok(OciRegistry::new(origin, client, jwt))
+}
+
+#[tokio::test]
+async fn a_create_reads_a_stored_kino_and_spec_without_the_registry() -> Result<()> {
+    let (registry, client, _temp, store) = serve().await;
+    let binary = registry.descriptor("application/octet-stream", b"kino binary");
+    let kino = kino_manifest(&registry, binary.clone());
+    let spec = registry.put(b"{\"spec\":true}");
+    client.kino_binary(&kino, &store).await?;
+    client.spec(&spec, &store).await?;
+
+    let offline = unreachable()?;
+    assert_eq!(offline.kino_binary(&kino, &store).await?, b"kino binary");
+    assert_eq!(offline.spec(&spec, &store).await?, b"{\"spec\":true}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_kino_or_spec_that_is_not_its_digest_is_fetched_again() -> Result<()> {
+    let (registry, client, _temp, store) = serve().await;
+    let binary = registry.descriptor("application/octet-stream", b"kino binary");
+    let kino = kino_manifest(&registry, binary.clone());
+    let spec = registry.put(b"{\"spec\":true}");
+    client.kino_binary(&kino, &store).await?;
+    client.spec(&spec, &store).await?;
+    let before = registry.requests.lock().expect("requests").len();
+
+    // Same sizes, other bytes: only the digest tells them apart.
+    tokio::fs::write(store.path(&binary.digest), b"kino BINARY").await?;
+    tokio::fs::write(store.path(&spec), b"{\"spec\":TRUE}").await?;
+    assert_eq!(client.kino_binary(&kino, &store).await?, b"kino binary");
+    assert_eq!(client.spec(&spec, &store).await?, b"{\"spec\":true}");
+    assert_eq!(registry.requests_for(&binary.digest).len(), 2);
+    assert_eq!(registry.requests_for(&spec).len(), 2);
+    assert_eq!(
+        registry.requests.lock().expect("requests").len(),
+        before + 2
+    );
+
+    // And from then on the store answers.
+    let offline = unreachable()?;
+    assert_eq!(offline.kino_binary(&kino, &store).await?, b"kino binary");
+    assert_eq!(offline.spec(&spec, &store).await?, b"{\"spec\":true}");
     Ok(())
 }

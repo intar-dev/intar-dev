@@ -970,7 +970,7 @@ pub(super) async fn run_create(
         async {
             inner
                 .oci
-                .spec(req.spec)
+                .spec(req.spec, &store)
                 .await
                 .context("the VM's machine spec is unavailable")
         },
