@@ -22,16 +22,12 @@ test("landing sections keep 4rem between them", async ({ page, ui }) => {
   const rem = await page.evaluate(() =>
     Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
   );
+  // The sponsors sit beside the sign-in on the first page (#258), not
+  // between sections, so only the loop section keeps the gap.
   const loop = page.locator('section[aria-labelledby="landing-loop-heading"]');
-  const sponsors = page.locator('aside[aria-labelledby="landing-sponsors-heading"]');
   expect(
     await loop.evaluate((el) => Number.parseFloat(getComputedStyle(el).paddingTop)),
   ).toBe(4 * rem);
-  const sponsorPadding = await sponsors.evaluate((el) => {
-    const style = getComputedStyle(el);
-    return [style.paddingTop, style.paddingBottom].map(Number.parseFloat);
-  });
-  expect(sponsorPadding).toEqual([4 * rem, 4 * rem]);
 });
 
 test("organizations list is one divided card of link rows", async ({
