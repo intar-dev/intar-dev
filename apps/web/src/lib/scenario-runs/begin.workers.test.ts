@@ -403,6 +403,60 @@ describe("scenario admission batch", () => {
     await expect(admissionSnapshot()).resolves.toMatchObject({ runs: 1, activeSlots: 1, desiredVersion: 1 });
   });
 
+  describe("refuses by fleet shape", () => {
+    // jailerd without a self-test for this boot: connected, but no KVM and no
+    // hard CPU quota, so it cannot run anything.
+    const unable = "UPDATE host_actual_state SET report_json = json_set(report_json," +
+      " '$.hardware.kvm', json('false'), '$.hardware.hard_cpu_quota', json('false')) WHERE host_id = ?1";
+    const full = "UPDATE host_actual_state SET report_json = json_set(report_json," +
+      " '$.capacity.committed_cpu_millis', json_extract(report_json, '$.capacity.schedulable_cpu_millis')) WHERE host_id = ?1";
+    const automaticStart = async () => {
+      const fixture = await seedAdmissionFixture();
+      const input = fixture.input(RUNNER_USER_ID);
+      delete input.hostId;
+      return input;
+    };
+    const refusal = async (input: BeginScenarioRunInput) => {
+      const error = await beginScenarioRun(input).then(() => null, (caught: unknown) => caught);
+      await expect(admissionSnapshot()).resolves.toEqual(emptyAdmissionSnapshot());
+      return error;
+    };
+
+    it("says unavailable, without a retry, when the only host is unable", async () => {
+      const input = await automaticStart();
+      await env.DB.prepare(unable).bind(HOST_ID).run();
+      await expect(refusal(input)).resolves.toMatchObject({
+        status: 409, code: "scenario_host_unavailable", message: "no scenario host can run this scenario yet",
+      });
+    });
+
+    it("says contended when the only host is full", async () => {
+      const input = await automaticStart();
+      await env.DB.prepare(full).bind(HOST_ID).run();
+      await expect(refusal(input)).resolves.toMatchObject({ status: 409, code: "scenario_host_capacity_contended" });
+    });
+
+    it("says contended when one host is unable and another is full", async () => {
+      const input = await automaticStart();
+      await cloneHost(HOST_ID, "admission-full-runner");
+      await env.DB.prepare(unable).bind(HOST_ID).run();
+      await env.DB.prepare(full).bind("admission-full-runner").run();
+      await expect(refusal(input)).resolves.toMatchObject({ status: 409, code: "scenario_host_capacity_contended" });
+    });
+
+    it("says preparing when the able host has not cached the image", async () => {
+      const input = await automaticStart();
+      await env.DB.prepare("UPDATE host_actual_state SET report_json = json_set(report_json, '$.cached_images', json('[]'))").run();
+      await expect(refusal(input)).resolves.toMatchObject({ status: 409, code: "scenario_image_preparing" });
+    });
+
+    it("says unavailable when no host is connected", async () => {
+      const input = await automaticStart();
+      await env.DB.prepare("UPDATE agent_hosts SET connected = 0, active_session_id = NULL").run();
+      await expect(refusal(input)).resolves.toMatchObject({ status: 409, code: "scenario_host_unavailable" });
+    });
+  });
+
   it("admits a public live start without an organization membership", async () => {
     const fixture = await seedAdmissionFixture();
     await env.DB.prepare("DELETE FROM member").run();
@@ -1412,6 +1466,24 @@ function organizationCourseCatalog(): CourseCatalogSnapshotV2 {
       },
     ],
   };
+}
+
+/** Copies a seeded host, its report and its desired state under a new id. */
+async function cloneHost(source: string, id: string): Promise<void> {
+  for (const table of ["agent_hosts", "host_actual_state", "host_desired_state"]) {
+    const key = table === "agent_hosts" ? "id" : "host_id";
+    const { results } = await env.DB.prepare(`SELECT name FROM pragma_table_info('${table}')`).all<{ name: string }>();
+    const columns = results.map((column) => column.name);
+    const values = columns.map((column) => {
+      if (column === key) return "?2";
+      if (column === "report_json" || column === "doc_json") return `json_set(${column}, '$.host_id', ?2)`;
+      // Unique per host.
+      if (table === "agent_hosts" && column === "active_session_id") return "?2 || '-session'";
+      return column;
+    });
+    await env.DB.prepare(`INSERT INTO ${table} (${columns.join(", ")}) SELECT ${values.join(", ")} FROM ${table} WHERE ${key} = ?1`)
+      .bind(source, id).run();
+  }
 }
 
 function hostReport(input: {

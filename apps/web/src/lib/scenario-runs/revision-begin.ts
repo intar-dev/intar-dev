@@ -5,6 +5,7 @@ import {
   cpuReservationForVms,
   hostCpuReservationCapacityFromSnapshot,
   HOST_STATE_REPORT_SCHEMA_VERSION_V3,
+  strictCpuCapacity,
 } from "@/control-plane/host-cpu-reservations";
 import { readKinoPin } from "@/control-plane/image-registry/push";
 import { agentHosts, hostActualState, hostCpuReservations } from "@/db/schema";
@@ -560,7 +561,10 @@ interface RevisionHostCandidate {
  * Hosts this user may be placed on that run the revision's guest contract:
  * connected, fresh and healthy, reporting bridge 9 with strict CPU isolation
  * (and Ready, when not a platform host), and served a desired state that
- * carries the current Kino pin of that contract.
+ * carries the current Kino pin of that contract. A host that reports no
+ * strict CPU capacity at all (no KVM or hard CPU quota, as while jailerd has
+ * no self-test for this boot) cannot run anything: it is not a full host, so
+ * a fleet of only such hosts is unavailable rather than contended.
  */
 async function eligibleRevisionHosts(input: {
   userId: string;
@@ -606,6 +610,7 @@ async function eligibleRevisionHosts(input: {
       hostHealth(row.actualReportedAt, input.now) !== "healthy" ||
       report.schema_version !== HOST_STATE_REPORT_SCHEMA_VERSION_V3 ||
       report.guest_contract !== input.guestContract ||
+      !strictCpuCapacity(report) ||
       (row.scope !== "platform" && !hostReportV3Ready(report))
     ) continue;
     const desired = await loadStoredHostDesiredState(db, row.id, input.now);
