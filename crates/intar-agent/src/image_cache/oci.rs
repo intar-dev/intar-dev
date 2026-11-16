@@ -364,7 +364,12 @@ impl OciRegistry {
         store: &BlobStore,
     ) -> Result<PulledMachine> {
         let repository = format!("machines/{}", image.hex());
-        let bytes = self.manifest(&repository, image).await?;
+        // A stored manifest that is its digest is the manifest: a scrub that
+        // has jailerd confirm a ready image's template needs no registry.
+        let bytes = match tokio::fs::read(store.path(image)).await {
+            Ok(bytes) if sha256_hex(&bytes) == image.hex() => bytes,
+            _ => self.manifest(&repository, image).await?,
+        };
         let manifest: OciManifestV1 = serde_json::from_slice(&bytes).with_context(|| {
             format!("unsupported_artifact: {image:?} is not a manifest this agent reads")
         })?;

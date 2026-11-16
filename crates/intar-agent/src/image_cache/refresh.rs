@@ -5,8 +5,10 @@ use crate::db::CacheVerifyRow;
 /// What starts one cache pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CacheRefreshScope {
-    /// The 15-minute timer. The pass verifies retained content that is older
-    /// than the ok age, oldest content first, and repairs what it finds bad.
+    /// The 15-minute timer. The pass has jailerd confirm the template of
+    /// every pinned image, ready ones too, verifies retained content that is
+    /// older than the ok age, oldest content first, and repairs what it finds
+    /// bad.
     Scrub,
     /// A desired-state change or a launch that needs a missing descriptor.
     /// The pass only prepares the pinned entries that are not ready.
@@ -52,7 +54,7 @@ pub(super) async fn run_cache_refresh_cycle(
         // A VM cannot boot without its Kino. This runs in both scopes, so a
         // fresh host reaches a bootable Kino without waiting for a scrub.
         warm_required_kino(&pins, context).await;
-        prepare_missing_pinned_entries(&pins, context).await;
+        prepare_missing_pinned_entries(&pins, context, scope).await;
         if scope == CacheRefreshScope::Scrub
             && let Err(error) = scrub_retained_content(context, &pins).await
         {
@@ -83,7 +85,10 @@ const REQUEUE_RETRY_DELAY: Duration = Duration::from_secs(5);
 const REQUEUE_ROUNDS_PER_PASS: usize = 12;
 
 /// Prepare the pinned images that are not ready, one image at a time, the
-/// ones a launch waits on first.
+/// ones a launch waits on first. A scrub's first round sends the ready ones
+/// too: jailerd confirms a template it holds from its metadata, which also
+/// marks it used, so its store GC keeps it; one its GC removed, it prepares
+/// again.
 ///
 /// The pass holds the single image prepare job for the whole process, parks
 /// between two images while a boot is live, and sends each import to jailerd's
@@ -94,7 +99,11 @@ const REQUEUE_ROUNDS_PER_PASS: usize = 12;
 /// boundary when a boot needs the CPU, and the pass retries the same image
 /// after a short delay until the pinned entries are ready or the round budget
 /// is used up.
-async fn prepare_missing_pinned_entries(pins: &RequiredPins, context: CacheRefreshContext<'_>) {
+async fn prepare_missing_pinned_entries(
+    pins: &RequiredPins,
+    context: CacheRefreshContext<'_>,
+    scope: CacheRefreshScope,
+) {
     let _prepare = match budget::acquire_prepare_job().await {
         Ok(permit) => permit,
         Err(error) => {
@@ -105,11 +114,9 @@ async fn prepare_missing_pinned_entries(pins: &RequiredPins, context: CacheRefre
     let mut rounds = 0usize;
     loop {
         rounds = rounds.saturating_add(1);
-        let mut missing = pins
-            .images
-            .iter()
-            .filter(|image| !ready::is_image_ready(context.cache_root, image))
-            .collect::<Vec<_>>();
+        let mut missing = images_to_prepare(&pins.images, scope, rounds, |image| {
+            ready::is_image_ready(context.cache_root, image)
+        });
         if missing.is_empty() {
             return;
         }
@@ -147,6 +154,21 @@ async fn prepare_missing_pinned_entries(pins: &RequiredPins, context: CacheRefre
         // A boot is holding the lane. Keep the pin queued for the next round.
         tokio::time::sleep(REQUEUE_RETRY_DELAY).await;
     }
+}
+
+/// The pinned images a round of the pass sends to jailerd: those that are not
+/// ready, and on a scrub's first round every one.
+fn images_to_prepare<'a>(
+    images: impl IntoIterator<Item = &'a OciDigest>,
+    scope: CacheRefreshScope,
+    round: usize,
+    is_ready: impl Fn(&OciDigest) -> bool,
+) -> Vec<&'a OciDigest> {
+    let confirm_ready = scope == CacheRefreshScope::Scrub && round == 1;
+    images
+        .into_iter()
+        .filter(|image| confirm_ready || !is_ready(image))
+        .collect()
 }
 
 /// Whether a prepare error is a jailerd requeue rather than a failure.
@@ -322,4 +344,33 @@ fn scrub_items(store: &BlobStore, pins: &RequiredPins) -> Vec<scheduler::ScrubIt
         }
     }
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::pins::tests::digest;
+    use super::*;
+
+    #[test]
+    fn a_scrub_has_jailerd_confirm_the_templates_of_ready_images() {
+        let (ready, missing) = (digest('a'), digest('b'));
+        let images = [ready.clone(), missing.clone()];
+        let is_ready = |image: &OciDigest| *image == ready;
+
+        // A template jailerd's GC removed behind a ready descriptor is
+        // prepared again by the next scrub.
+        assert_eq!(
+            images_to_prepare(&images, CacheRefreshScope::Scrub, 1, is_ready),
+            vec![&ready, &missing]
+        );
+        // A requeue round and a wake-up prepare only what is not ready.
+        assert_eq!(
+            images_to_prepare(&images, CacheRefreshScope::Scrub, 2, is_ready),
+            vec![&missing]
+        );
+        assert_eq!(
+            images_to_prepare(&images, CacheRefreshScope::MissingOnly, 1, is_ready),
+            vec![&missing]
+        );
+    }
 }

@@ -200,8 +200,12 @@ async fn a_machine_image_is_pulled_once_into_the_store() -> Result<()> {
         "one token for the whole pull"
     );
 
-    // A second pull reads the manifest again and no blob.
+    // A second pull reads the stored manifest and asks the registry nothing.
     let before = registry.requests.lock().expect("requests").len();
+    client.pull_machine(&image, &store).await?;
+    assert_eq!(registry.requests.lock().expect("requests").len(), before);
+    // A stored manifest that is not its digest is fetched again.
+    tokio::fs::write(store.path(&image), b"{}").await?;
     client.pull_machine(&image, &store).await?;
     assert_eq!(
         registry.requests.lock().expect("requests").len(),
