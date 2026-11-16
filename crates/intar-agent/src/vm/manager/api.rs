@@ -265,12 +265,7 @@ impl VmManager {
             generation, reason, "the running VM's jail is gone; marking it failed"
         );
         // The learner's run page shows this; the detail stays in the log above.
-        mark_vm_failed(
-            &self.inner,
-            name,
-            "The machine was shut down or stopped unexpectedly.".to_owned(),
-        )
-        .await;
+        mark_vm_failed(&self.inner, name, LOST_MACHINE_REASON.to_owned()).await;
     }
 
     /// Tear down the VMs an older state schema tracked: jailerd destroys
@@ -352,6 +347,7 @@ impl VmManager {
         let mut archived_stale = 0usize;
         let mut dropped_stale = 0usize;
         let mut kept_inconclusive = 0usize;
+        let mut failed_dead = 0usize;
 
         for name in names {
             match reconcile_tracked_vm_on_startup(&self.inner, &name).await {
@@ -367,6 +363,9 @@ impl VmManager {
                 Ok(StartupReconcileOutcome::KeptInconclusive) => {
                     kept_inconclusive = kept_inconclusive.saturating_add(1);
                 }
+                Ok(StartupReconcileOutcome::FailedDead) => {
+                    failed_dead = failed_dead.saturating_add(1);
+                }
                 Err(error) => {
                     warn!(vm = name, error = %error, "failed to reconcile tracked vm on startup");
                 }
@@ -378,6 +377,7 @@ impl VmManager {
             archived_stale,
             dropped_stale,
             kept_inconclusive,
+            failed_dead,
             "reconciled tracked vm state on startup"
         );
 

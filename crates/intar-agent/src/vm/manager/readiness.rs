@@ -596,6 +596,12 @@ pub(super) async fn reconcile_tracked_vm_on_startup(
             }
         }
         TrackedVmRuntimeStatus::Dead => {
+            if startup_fails_dead_vm(&vm, inner.bridge.enabled) {
+                // The host went down under a running VM. Report it failed; the
+                // control plane then asks for the delete, which archives it.
+                mark_vm_failed(inner, &vm.name, LOST_MACHINE_REASON.to_owned()).await;
+                return Ok(StartupReconcileOutcome::FailedDead);
+            }
             let cleanup_mode = startup_cleanup_mode(&vm);
             match cleanup_mode {
                 StartupCleanupMode::Archive => {
@@ -634,6 +640,12 @@ pub(super) fn should_resume_live_vm_on_startup(state: VmLifecycleState) -> bool 
 
 pub(super) fn startup_resume_reenters_booting(state: VmLifecycleState) -> bool {
     matches!(state, VmLifecycleState::BootingVm)
+}
+
+/// A VM that was running when its host went down, with no delete of its
+/// own begun, failed rather than finished.
+pub(super) fn startup_fails_dead_vm(vm: &VmStatusResponse, bridge_enabled: bool) -> bool {
+    bridge_enabled && vm.state == VmLifecycleState::Running
 }
 
 pub(super) fn startup_cleanup_mode(vm: &VmStatusResponse) -> StartupCleanupMode {

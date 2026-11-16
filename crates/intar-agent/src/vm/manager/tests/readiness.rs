@@ -63,6 +63,29 @@ fn startup_cleanup_mode_archives_delete_path_states() {
 }
 
 #[test]
+fn startup_fails_only_a_dead_running_vm_without_a_delete() {
+    // Running when the host went down: reported failed before any archive.
+    let mut vm = test_vm_status("vm-1", Some("run-1"));
+    vm.state = VmLifecycleState::Running;
+    assert!(startup_fails_dead_vm(&vm, true));
+    // Without a control plane nothing would ask for the delete.
+    assert!(!startup_fails_dead_vm(&vm, false));
+
+    // A delete in flight, or a VM that already failed, archives as before.
+    for state in [
+        VmLifecycleState::DeletingVm,
+        VmLifecycleState::ArchivingArtifacts,
+        VmLifecycleState::DeleteFailed,
+        VmLifecycleState::Failed,
+    ] {
+        vm.state = state;
+        vm.running_at_s = Some(42);
+        assert!(!startup_fails_dead_vm(&vm, true), "{state:?}");
+        assert_eq!(startup_cleanup_mode(&vm), StartupCleanupMode::Archive);
+    }
+}
+
+#[test]
 fn vm_status_from_row_backfills_running_at_for_delete_path_states() {
     for state in [
         VmLifecycleState::DeletingVm,

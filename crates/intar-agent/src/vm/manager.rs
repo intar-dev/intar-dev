@@ -590,7 +590,11 @@ enum StartupReconcileOutcome {
     ArchivedStale,
     DroppedStale,
     KeptInconclusive,
+    FailedDead,
 }
+
+/// What the learner's run page shows for a VM whose machine went away.
+const LOST_MACHINE_REASON: &str = "The machine was shut down or stopped unexpectedly.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrackedVmRuntimeStatus {
