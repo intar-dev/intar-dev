@@ -5,7 +5,7 @@ mod host;
 mod output;
 pub(crate) mod plan;
 mod qmp;
-mod script;
+pub(crate) mod script;
 mod shutdown;
 mod vm;
 
