@@ -257,6 +257,8 @@ fn run_server(config_path: &Path) -> Result<()> {
     std::thread::Builder::new()
         .name("jailerd-store-gc".to_owned())
         .spawn(move || {
+            // Said when it starts and when it ends, not on every cycle.
+            let mut pressure_unmet = false;
             loop {
                 let protected = match gc_core.lock() {
                     Ok(core) => core.live_template_image_ids(),
@@ -280,15 +282,27 @@ fn run_server(config_path: &Path) -> Result<()> {
                     Err(error) => error!(?error, "root-owned template/chunk GC failed"),
                 }
                 if let Ok(report) = &result
-                    && report.pressure_unmet
+                    && report.pressure_unmet != pressure_unmet
                 {
-                    warn!(
-                        estimated_bytes = report.estimated_bytes_after,
-                        free_bytes = report.filesystem_free_bytes_after,
-                        budget_bytes = gc_config.template_budget_bytes,
-                        minimum_free_bytes = gc_config.minimum_free_space_bytes,
-                        "template store stays over its budget or under its free-space floor: every template left is in use or pinned"
-                    );
+                    pressure_unmet = report.pressure_unmet;
+                    if pressure_unmet {
+                        warn!(
+                            used_bytes = report.estimated_bytes_after,
+                            free_bytes = report.filesystem_free_bytes_after,
+                            budget_bytes = gc_config.template_budget_bytes,
+                            minimum_free_bytes = gc_config.minimum_free_space_bytes,
+                            templates_held_by_live_vms = report.templates_held,
+                            templates_within_grace = report.templates_in_grace,
+                            grace_seconds = gc_config.store_gc_grace_seconds,
+                            "template store stays over its budget or under its free-space floor: every template left is in use or within the grace period"
+                        );
+                    } else {
+                        info!(
+                            used_bytes = report.estimated_bytes_after,
+                            free_bytes = report.filesystem_free_bytes_after,
+                            "template store is within its budget and free-space floor again"
+                        );
+                    }
                 }
                 std::thread::park_timeout(STORE_GC_INTERVAL);
             }

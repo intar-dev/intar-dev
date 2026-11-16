@@ -9,10 +9,15 @@ pub struct StoreGcReport {
     pub chunks_removed: usize,
     pub estimated_bytes_after: u64,
     pub filesystem_free_bytes_after: u64,
-    /// The store stays over its budget or under its free-space floor: every
-    /// template left is held by a live VM or was used within the grace
-    /// period, as the agent's pinned images are.
+    /// The store holds templates and stays over its budget or under its
+    /// free-space floor: every template left is held by a live VM or was
+    /// used within the grace period, as the agent's pinned images are. An
+    /// empty store under the floor is not this: GC has nothing to free.
     pub pressure_unmet: bool,
+    /// Templates kept because a live VM boots from them.
+    pub templates_held: usize,
+    /// Templates kept because they were used within the grace period.
+    pub templates_in_grace: usize,
 }
 
 struct TemplateGcEntry {
@@ -57,14 +62,24 @@ pub fn gc_root_stores(
                     .duration_since(entry.last_used)
                     .is_ok_and(|age| age >= grace)
         }) else {
-            pressure_unmet = true;
+            pressure_unmet = retained_store_bytes > 0;
             break;
         };
         remove.insert(candidate.image_id.clone());
     }
 
+    let kept = templates
+        .iter()
+        .filter(|entry| !remove.contains(&entry.image_id))
+        .collect::<Vec<_>>();
+    let templates_held = kept
+        .iter()
+        .filter(|entry| protected_image_ids.contains(&entry.image_id))
+        .count();
     let mut report = StoreGcReport {
         pressure_unmet,
+        templates_held,
+        templates_in_grace: kept.len() - templates_held,
         ..StoreGcReport::default()
     };
     for entry in &templates {
@@ -329,6 +344,22 @@ mod tests {
         assert_eq!(report.templates_removed, 0);
         assert!(template.exists(), "a recently used template stays");
         assert!(report.pressure_unmet, "the unmet budget is reported");
+        assert_eq!((report.templates_held, report.templates_in_grace), (0, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_store_under_the_free_space_floor_is_not_unmet_pressure() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let config = JailerdConfig {
+            jail_root: root.path().to_owned(),
+            template_budget_bytes: 0,
+            minimum_free_space_bytes: u64::MAX,
+            ..JailerdConfig::default()
+        };
+        let report = gc_root_stores(&config, &HashSet::new())?;
+        assert!(!report.pressure_unmet, "GC has nothing it could free");
+        assert_eq!((report.templates_held, report.templates_in_grace), (0, 0));
         Ok(())
     }
 
