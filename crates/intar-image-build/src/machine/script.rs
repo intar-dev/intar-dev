@@ -45,10 +45,38 @@ pub(crate) fn stage_command(file: &str, env: &BTreeMap<String, String>) -> Strin
     )
 }
 
-/// Make the image a run image: `defer` units wait for `intar-lab.target`,
-/// and nothing of the build, no host key, no machine id and no cache stays.
+/// Stop a deferred unit and everything left in its control group: a unit
+/// with `KillMode=process` (k3s) leaves its children running after `stop`.
+/// The root is copied next, so nothing of the unit may write while it is.
+const QUIESCE_FUNCTION: &str = r#"quiesce() {
+  cgroup="$(systemctl show -P ControlGroup -- "$1")"
+  systemctl stop -- "$1" || { echo "deferred unit $1 did not stop" >&2; exit 1; }
+  dir="/sys/fs/cgroup$cgroup"
+  [ -n "$cgroup" ] && [ -e "$dir/cgroup.kill" ] || return 0
+  echo 1 > "$dir/cgroup.kill"
+  i=0
+  while grep -qs '^populated 1$' "$dir/cgroup.events"; do
+    if [ "$i" -ge 100 ]; then
+      echo "deferred unit $1: processes still run in $cgroup after stop and kill" >&2
+      exit 1
+    fi
+    i=$((i + 1))
+    sleep 0.1
+  done
+}
+"#;
+
+/// Make the image a run image: `defer` units are stopped with all their
+/// processes and wait for `intar-lab.target`, and nothing of the build, no
+/// host key, no machine id and no cache stays.
 pub(crate) fn finalize_script(defer: &BTreeSet<String>) -> String {
     let mut script = String::from("set -eu\n");
+    if !defer.is_empty() {
+        script.push_str(QUIESCE_FUNCTION);
+    }
+    for unit in defer {
+        script.push_str(&format!("quiesce {}\n", shell_quote(unit)));
+    }
     for unit in defer {
         let unit = shell_quote(unit);
         script.push_str(&format!(
@@ -148,7 +176,71 @@ mod tests {
         // The /boot check runs before the trim, which comes last.
         assert!(script.find("/boot") < script.find("fstrim"));
         assert!(script.ends_with("fstrim -v /\n"));
-        assert!(!finalize_script(&BTreeSet::new()).contains("add-wants"));
+        let empty = finalize_script(&BTreeSet::new());
+        assert!(!empty.contains("add-wants") && !empty.contains("quiesce"));
+    }
+
+    #[test]
+    fn finalize_stops_every_deferred_unit_and_its_cgroup_first() {
+        let defer = BTreeSet::from(["k3s.service".to_owned(), "b.timer".to_owned()]);
+        let script = finalize_script(&defer);
+        let stop = |unit: &str| script.find(&format!("quiesce '{unit}'\n"));
+        // Every unit stops before anything is disabled, cleaned or synced.
+        for unit in ["b.timer", "k3s.service"] {
+            assert!(
+                stop(unit) < script.find("systemctl disable 'b.timer'"),
+                "{unit}"
+            );
+        }
+        assert!(script.find("quiesce() {") < stop("b.timer"));
+        assert!(script.find("systemctl disable 'k3s.service'") < script.find("\nsync\n"));
+        // The leftovers of a `KillMode=process` unit go with its cgroup,
+        // and the build fails when they do not.
+        for part in [
+            "systemctl show -P ControlGroup -- \"$1\"",
+            "systemctl stop -- \"$1\" || {",
+            "echo 1 > \"$dir/cgroup.kill\"",
+            "grep -qs '^populated 1$' \"$dir/cgroup.events\"",
+            "processes still run in $cgroup after stop and kill",
+        ] {
+            assert!(script.contains(part), "{part}");
+        }
+    }
+
+    /// The function against a fake cgroup tree: a unit whose stop leaves
+    /// a process is killed through `cgroup.kill`; one that never empties
+    /// fails the build.
+    #[test]
+    fn quiesce_kills_the_cgroup_and_fails_when_it_stays_populated() {
+        let run = |stays: bool| {
+            let root = tempfile::tempdir().expect("tempdir");
+            let cgroup = root.path().join("system.slice/k3s.service");
+            std::fs::create_dir_all(&cgroup).expect("cgroup");
+            std::fs::write(cgroup.join("cgroup.events"), "populated 1\nfrozen 0\n")
+                .expect("events");
+            std::fs::write(cgroup.join("cgroup.kill"), "").expect("kill");
+            let empties = if stays {
+                ":"
+            } else {
+                "printf 'populated 0\\nfrozen 0\\n' > \"$dir/cgroup.events\""
+            };
+            let script = format!(
+                "set -eu\nsystemctl() {{ case \"$1\" in show) echo /system.slice/k3s.service ;; esac; }}\nsleep() {{ {empties}; }}\n{}quiesce k3s.service\necho done\n",
+                QUIESCE_FUNCTION.replace("/sys/fs/cgroup", &root.path().display().to_string())
+            );
+            let output = std::process::Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .expect("bash");
+            let killed = std::fs::read_to_string(cgroup.join("cgroup.kill")).expect("kill");
+            (output, killed)
+        };
+        let (output, killed) = run(false);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(killed, "1\n");
+        let (output, _) = run(true);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("processes still run"));
     }
 
     #[test]
