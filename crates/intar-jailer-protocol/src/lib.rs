@@ -284,6 +284,10 @@ pub enum RequestClass {
     /// Background cache maintenance. Jailerd admits at most one background
     /// preparation in the process and yields between fixed-size blocks.
     Background,
+    /// Confirm a published template, which marks it used, and never build
+    /// one: a template that is not there is answered as
+    /// `image_template_missing`.
+    Confirm,
 }
 
 impl PrepareChunkedImageV3Request {
