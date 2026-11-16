@@ -5,7 +5,7 @@ import {
   cpuReservationForVms,
   hostCpuReservationCapacityFromSnapshot,
   HOST_STATE_REPORT_SCHEMA_VERSION_V3,
-  strictCpuCapacity,
+  strictCpuHardware,
 } from "@/control-plane/host-cpu-reservations";
 import { readKinoPin } from "@/control-plane/image-registry/push";
 import { agentHosts, hostActualState, hostCpuReservations } from "@/db/schema";
@@ -610,7 +610,8 @@ async function eligibleRevisionHosts(input: {
       hostHealth(row.actualReportedAt, input.now) !== "healthy" ||
       report.schema_version !== HOST_STATE_REPORT_SCHEMA_VERSION_V3 ||
       report.guest_contract !== input.guestContract ||
-      !strictCpuCapacity(report) ||
+      // Load is the planner's to judge, so a busy host is contended, not unable.
+      !strictCpuHardware(report) ||
       (row.scope !== "platform" && !hostReportV3Ready(report))
     ) continue;
     const desired = await loadStoredHostDesiredState(db, row.id, input.now);

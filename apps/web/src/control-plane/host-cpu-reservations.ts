@@ -719,14 +719,9 @@ function reportedCpuMillisByRun(
 /** The schema of a bridge 9 host state report. */
 export const HOST_STATE_REPORT_SCHEMA_VERSION_V3 = 8;
 
-export function strictCpuCapacity(
-  report: unknown,
-): Pick<
-  HostCpuReservationCapacity,
-  "schedulableCpuMillis" | "reportedCommittedCpuMillis"
-> | null {
-  if (!isRecord(report)) return null;
-  const capacity = isRecord(report.capacity) ? report.capacity : null;
+/** The report's hardware facts allow an attested launch, whatever its load. */
+export function strictCpuHardware(report: unknown): boolean {
+  if (!isRecord(report)) return false;
   // A bridge 9 report states hardware facts; every launch path it has is
   // the attested one.
   const hardware = report.schema_version === HOST_STATE_REPORT_SCHEMA_VERSION_V3 && isRecord(report.hardware)
@@ -743,8 +738,7 @@ export function strictCpuCapacity(
     : report.schema_version === HOST_STATE_REPORT_SCHEMA_VERSION && isRecord(report.capabilities)
       ? report.capabilities
       : null;
-  if (
-    !capacity ||
+  return !(
     !capabilities ||
     capabilities.supports_kvm !== true ||
     capabilities.supports_vsock !== true ||
@@ -758,9 +752,18 @@ export function strictCpuCapacity(
     capabilities.supports_cgroup_v2 !== true ||
     typeof capabilities.cloud_hypervisor_sha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(capabilities.cloud_hypervisor_sha256)
-  ) {
-    return null;
-  }
+  );
+}
+
+export function strictCpuCapacity(
+  report: unknown,
+): Pick<
+  HostCpuReservationCapacity,
+  "schedulableCpuMillis" | "reportedCommittedCpuMillis"
+> | null {
+  if (!isRecord(report) || !strictCpuHardware(report)) return null;
+  const capacity = isRecord(report.capacity) ? report.capacity : null;
+  if (!capacity) return null;
   const schedulableCpuMillis = readNonNegativeInteger(
     capacity.schedulable_cpu_millis,
   );

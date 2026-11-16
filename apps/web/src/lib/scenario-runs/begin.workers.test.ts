@@ -436,6 +436,25 @@ describe("scenario admission batch", () => {
       await expect(refusal(input)).resolves.toMatchObject({ status: 409, code: "scenario_host_capacity_contended" });
     });
 
+    it("says contended when a busy host's report fell back to no schedulable CPU", async () => {
+      const input = await automaticStart();
+      // A lifecycle report whose jailer refresh timed out: hardware kept,
+      // all CPU reserved, and the running VMs' CPU still committed.
+      await env.DB.prepare("UPDATE host_actual_state SET report_json = json_set(report_json," +
+        " '$.capacity.reserved_cpu_millis', json_extract(report_json, '$.capacity.total_cpu_millis')," +
+        " '$.capacity.schedulable_cpu_millis', json('0'), '$.capacity.committed_cpu_millis', json('1000')) WHERE host_id = ?1")
+        .bind(HOST_ID).run();
+      await expect(refusal(input)).resolves.toMatchObject({ status: 409, code: "scenario_host_capacity_contended" });
+    });
+
+    it("says contended when the only host reports more CPU committed than schedulable", async () => {
+      const input = await automaticStart();
+      await env.DB.prepare("UPDATE host_actual_state SET report_json = json_set(report_json," +
+        " '$.capacity.committed_cpu_millis', json_extract(report_json, '$.capacity.schedulable_cpu_millis') + 1000)" +
+        " WHERE host_id = ?1").bind(HOST_ID).run();
+      await expect(refusal(input)).resolves.toMatchObject({ status: 409, code: "scenario_host_capacity_contended" });
+    });
+
     it("says contended when one host is unable and another is full", async () => {
       const input = await automaticStart();
       await cloneHost(HOST_ID, "admission-full-runner");
