@@ -52,8 +52,13 @@ const QUIESCE_FUNCTION: &str = r#"quiesce() {
   cgroup="$(systemctl show -P ControlGroup -- "$1")"
   systemctl stop -- "$1" || { echo "deferred unit $1 did not stop" >&2; exit 1; }
   dir="/sys/fs/cgroup$cgroup"
-  [ -n "$cgroup" ] && [ -e "$dir/cgroup.kill" ] || return 0
-  echo 1 > "$dir/cgroup.kill"
+  [ -n "$cgroup" ] || return 0
+  # The leftovers may exit after `stop` and systemd remove the cgroup.
+  if ! { echo 1 > "$dir/cgroup.kill"; } 2>/dev/null; then
+    [ ! -e "$dir" ] && return 0
+    echo "deferred unit $1: could not kill the processes in $cgroup" >&2
+    exit 1
+  fi
   i=0
   while grep -qs '^populated 1$' "$dir/cgroup.events"; do
     if [ "$i" -ge 100 ]; then
@@ -109,13 +114,23 @@ fstrim -v /
 
 /// Copy the finalized root into a fresh `INTARROOT` on [`REPACK_DEVICE`]
 /// inside the guest: the host never mounts what a setup script wrote. The
-/// bind mount shows `/` without `/proc`, `/sys`, `/dev` or `/run`.
+/// bind mount shows `/` without `/proc`, `/sys`, `/dev` or `/run`. The root
+/// is frozen for the copy, so what still runs (a pod's store) cannot change
+/// it halfway; a writer blocks until the thaw. Nothing between freeze and
+/// thaw writes to `/`, and the trap thaws on every way out; a copy that
+/// never ends hits the build deadline, which kills the VM.
 pub(crate) fn repack_script() -> String {
     format!(
         r"set -eu
+command -v fsfreeze >/dev/null || {{ echo 'fsfreeze is missing: the root cannot be frozen for the copy' >&2; exit 1; }}
 mkdir -p /run/intar/repack
 mount --bind / /run/intar/repack
+trap 'exit 1' HUP INT TERM
+fsfreeze -f /
+trap 'fsfreeze -u / 2>/dev/null' EXIT
 mke2fs -q -F -t ext4 -L {label} -d /run/intar/repack {REPACK_DEVICE}
+fsfreeze -u /
+trap - EXIT
 umount /run/intar/repack
 sync
 ",
@@ -243,6 +258,38 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stderr).contains("processes still run"));
     }
 
+    /// The leftovers exited after `stop` and systemd removed the cgroup:
+    /// nothing is left to kill. A cgroup that stays but takes no kill
+    /// fails the build.
+    #[test]
+    fn quiesce_tolerates_a_cgroup_that_vanished_but_not_one_that_stays() {
+        let run = |cgroup_kill_is_a_directory: bool| {
+            let root = tempfile::tempdir().expect("tempdir");
+            if cgroup_kill_is_a_directory {
+                std::fs::create_dir_all(root.path().join("system.slice/k3s.service/cgroup.kill"))
+                    .expect("cgroup");
+            }
+            let script = format!(
+                "set -eu\nsystemctl() {{ case \"$1\" in show) echo /system.slice/k3s.service ;; esac; }}\n{}quiesce k3s.service\necho done\n",
+                QUIESCE_FUNCTION.replace("/sys/fs/cgroup", &root.path().display().to_string())
+            );
+            std::process::Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .expect("bash")
+        };
+        let vanished = run(false);
+        assert!(vanished.status.success(), "{vanished:?}");
+        assert_eq!(String::from_utf8_lossy(&vanished.stdout), "done\n");
+        assert!(vanished.stderr.is_empty(), "{vanished:?}");
+        let stays = run(true);
+        assert!(!stays.status.success());
+        assert!(
+            String::from_utf8_lossy(&stays.stderr)
+                .contains("could not kill the processes in /system.slice/k3s.service")
+        );
+    }
+
     #[test]
     fn repack_writes_the_third_drive_in_the_guest() {
         let script = repack_script();
@@ -251,6 +298,65 @@ mod tests {
             script.contains("mke2fs -q -F -t ext4 -L INTARROOT -d /run/intar/repack /dev/vdc\n")
         );
         assert!(script.find("umount") > script.find("mke2fs"));
+        // Frozen around the copy only, with the thaw on every way out.
+        let at = |part: &str| script.find(part).unwrap_or_else(|| panic!("{part}"));
+        let order = [
+            "command -v fsfreeze",
+            "mount --bind",
+            "trap 'exit 1' HUP INT TERM\n",
+            "fsfreeze -f /\n",
+            "trap 'fsfreeze -u / 2>/dev/null' EXIT\n",
+            "mke2fs",
+            "fsfreeze -u /\n",
+            "trap - EXIT\n",
+            "umount",
+            "sync\n",
+        ];
+        for pair in order.windows(2) {
+            assert!(at(pair[0]) < at(pair[1]), "{pair:?}");
+        }
+    }
+
+    /// The script against stubs that log each call: the root is thawed
+    /// when the copy succeeds, when it fails, and the build fails clearly
+    /// without `fsfreeze`.
+    #[test]
+    fn repack_thaws_the_root_on_every_way_out() {
+        let run = |mke2fs: &str, with_fsfreeze: bool| {
+            let fsfreeze = if with_fsfreeze {
+                "fsfreeze() { echo \"fsfreeze $*\"; }\n"
+            } else {
+                ""
+            };
+            let script = format!(
+                "PATH=/nonexistent\nmkdir() {{ :; }}\nmount() {{ echo \"mount $*\"; }}\numount() {{ echo umount; }}\nsync() {{ echo sync; }}\nmke2fs() {{ echo mke2fs; {mke2fs}; }}\n{fsfreeze}{}",
+                repack_script()
+            );
+            let output = std::process::Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .expect("bash");
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        };
+        let (ok, calls, _) = run("true", true);
+        assert!(ok);
+        assert_eq!(
+            calls,
+            "mount --bind / /run/intar/repack\nfsfreeze -f /\nmke2fs\nfsfreeze -u /\numount\nsync\n"
+        );
+        let (ok, calls, _) = run("return 1", true);
+        assert!(!ok);
+        assert_eq!(
+            calls,
+            "mount --bind / /run/intar/repack\nfsfreeze -f /\nmke2fs\nfsfreeze -u /\n"
+        );
+        let (ok, calls, errors) = run("true", false);
+        assert!(!ok && calls.is_empty());
+        assert!(errors.contains("fsfreeze is missing"), "{errors}");
     }
 
     #[test]
