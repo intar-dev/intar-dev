@@ -31,6 +31,16 @@ type Problem = (text: string) => void;
 /** `^[a-z0-9][a-z0-9-]{2,62}$` */
 export const isId = (value: string) => /^[a-z0-9][a-z0-9-]{2,62}$/.test(value);
 
+/**
+ * A systemd unit name `defer` takes: `name.service` or
+ * `name@instance.service` of `[A-Za-z0-9:_.\\-]`, at most 255 characters, not
+ * starting with `-`, ending in `.service`, `.socket`, `.timer`, `.path` or
+ * `.target`.
+ */
+export const isDeferrableUnit = (value: string) =>
+  value.length <= 255 &&
+  /^(?!-)[A-Za-z0-9:_.\\-]+(@[A-Za-z0-9:_.\\-]+)?\.(service|socket|timer|path|target)$/.test(value);
+
 // What Rust's `str::trim` removes: Unicode White_Space, which differs from
 // JavaScript's `trim` at U+0085 and U+FEFF.
 const blank =
@@ -48,6 +58,14 @@ function cycleMember(edges: Map<string, string[]>): string | undefined {
     );
     if (free === undefined) return [...left][0];
     left.delete(free);
+  }
+}
+
+function checkDefer(context: string, defer: string[], problem: Problem) {
+  for (const unit of defer) {
+    if (!isDeferrableUnit(unit)) {
+      problem(`${context}: defer \`${unit}\` is not a service, socket, timer, path or target unit`);
+    }
   }
 }
 
@@ -97,6 +115,7 @@ function imageGeometry(images: ImageV1[], problem: Problem): Map<string, number>
     if (disk != null && disk > MAX_DISK_MIB) {
       problem(`image \`${name}\`: disk is over the ${MAX_DISK_MIB} MiB limit`);
     }
+    checkDefer(`image \`${name}\``, image.defer, problem);
     checkScripts(`image \`${name}\` setup`, image.setup, problem);
   }
   const edges = new Map([...byName].map(([name, image]) => [name, [image.from]]));
@@ -176,6 +195,7 @@ export function validate(scenario: ScenarioV1, images: ImageV1[]): string[] {
     if (machine.ready.length > MAX_READY_PER_MACHINE) {
       problem(`machine \`${name}\`: more than ${MAX_READY_PER_MACHINE} ready blocks`);
     }
+    checkDefer(`machine \`${name}\``, machine.defer, problem);
     checkScripts(`machine \`${name}\` setup`, machine.setup, problem);
     checkScripts(`machine \`${name}\` ready`, machine.ready, problem);
     if (scenario.tasks.filter((task) => task.machine === name).length > MAX_TASKS_PER_MACHINE) {

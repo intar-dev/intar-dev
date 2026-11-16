@@ -9,7 +9,7 @@ import stored from "@/generated/fixtures/scenario/broken-nginx-revision.json";
 import { baseKey, buildKeys } from "./build-key";
 import { byteOrder, canonicalJson, sha256Digest } from "./canonical-json";
 import { machineSpec, scenarioRevision, specBlob } from "./machine-spec";
-import { validateBundle } from "./validate";
+import { isDeferrableUnit, validateBundle } from "./validate";
 
 const fixture = (name: string) =>
   JSON.parse(
@@ -100,6 +100,18 @@ describe("bundle refusals", () => {
     // Only the rules refuse it: it is a well-formed bundle.
     expect(validateSourceBundle(entry.bundle)).toBe(true);
     expect(validateBundle(entry.bundle as SourceBundleV2)).toEqual(entry.problems);
+  });
+});
+
+describe("defer", () => {
+  it("takes the units a lab target starts, as in Rust", () => {
+    const long = `${"a".repeat(247)}.service`;
+    for (const unit of ["k3s.service", "docker.socket", "apt-daily.timer", "watch.path", "multi-user.target", "getty@tty1.service", "sys-x\\x2dy:z_1.service", long]) {
+      expect(isDeferrableUnit(unit), unit).toBe(true);
+    }
+    for (const unit of ["system.slice", "session-1.scope", "-.mount", "k3s", ".service", "-k3s.service", "getty@.service", "a@b@c.service", "k3s.service ", "k3s;reboot.service", "k\u00e9.service", "", `a${long}`]) {
+      expect(isDeferrableUnit(unit), unit).toBe(false);
+    }
   });
 });
 
