@@ -136,6 +136,7 @@ import { loadReplayTerminalFont } from "@/lib/replay/config";
 import { cn } from "@/lib/utils";
 import {
   isTransportReadyFor,
+  shouldMountTerminalTransport,
   shouldRevealTerminal,
   type TerminalTransportReport,
 } from "@/components/app/lib/scenario-terminal-readiness";
@@ -1206,11 +1207,12 @@ export function ScenarioRun() {
   });
   // The transport starts while the VM boots, hidden. It connects and waits for
   // its target, and reports readiness so the shell can be revealed at once.
-  const terminalTransportMounted = Boolean(
-    selectedVm &&
-      selectedVmSessionRequest &&
-      attemptData?.activity === "foreground",
-  );
+  const terminalTransportMounted = shouldMountTerminalTransport({
+    hasSessionRequest: Boolean(selectedVm && selectedVmSessionRequest),
+    runForeground: attemptData?.activity === "foreground",
+    transportReady,
+    machineUnreachable: attemptData?.machineUnreachable === true,
+  });
   // The shell arrives with a rise only when it becomes ready while the page
   // is open; reloading a run whose shell is ready shows it still.
   const terminalJustRevealed = useJustReached(

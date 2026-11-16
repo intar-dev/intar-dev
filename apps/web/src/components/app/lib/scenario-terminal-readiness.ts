@@ -55,6 +55,22 @@ export function shouldRevealTerminal(input: {
 }
 
 /**
+ * The transport stays mounted while it lives: a connected shell survives a
+ * machine the control plane cannot reach (on a platform host the relay can
+ * still carry it). While the machine is unreachable no new session is
+ * opened, so a transport that is not ready is unmounted.
+ */
+export function shouldMountTerminalTransport(input: {
+  hasSessionRequest: boolean;
+  runForeground: boolean;
+  transportReady: boolean;
+  machineUnreachable: boolean;
+}): boolean {
+  if (!input.hasSessionRequest || !input.runForeground) return false;
+  return input.transportReady || !input.machineUnreachable;
+}
+
+/**
  * The benchmark command proves a usable terminal, so it may only leave the
  * client when the gateway handshake is current AND the learner can see the
  * shell. Sending it while the container is hidden would record a success for

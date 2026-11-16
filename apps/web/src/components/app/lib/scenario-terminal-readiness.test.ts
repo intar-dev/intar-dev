@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isTransportReadyFor,
+  shouldMountTerminalTransport,
   shouldRevealTerminal,
   shouldSendBenchmarkCommand,
   type TerminalTransportReport,
@@ -140,5 +141,43 @@ describe("benchmark command gate", () => {
         commandAlreadySent: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe("terminal on an unreachable machine", () => {
+  // The page: the transport mounts per shouldMountTerminalTransport, and the
+  // shell status card shows whenever the terminal is not revealed. While the
+  // machine is unreachable the status withholds the projection (canOpenTerminal).
+  const page = (input: { transportReady: boolean; machineUnreachable: boolean }) => {
+    const mounted = shouldMountTerminalTransport({
+      hasSessionRequest: true,
+      runForeground: true,
+      ...input,
+    });
+    const revealed = shouldRevealTerminal({
+      transportReady: mounted && input.transportReady,
+      projectedReady: !input.machineUnreachable,
+      userWantsTerminal: true,
+      runForeground: true,
+    });
+    return { mounted, card: !revealed };
+  };
+
+  it("keeps a connected terminal mounted and shown through the flip and back", () => {
+    expect(page({ transportReady: true, machineUnreachable: false })).toEqual({ mounted: true, card: false });
+    expect(page({ transportReady: true, machineUnreachable: true })).toEqual({ mounted: true, card: false });
+    expect(page({ transportReady: true, machineUnreachable: false })).toEqual({ mounted: true, card: false });
+  });
+
+  it("opens no session and shows the card while there is none", () => {
+    expect(page({ transportReady: false, machineUnreachable: true })).toEqual({ mounted: false, card: true });
+  });
+
+  it("shows the card once the terminal's own connection drops", () => {
+    // Connected while unreachable, then the gateway connection ends.
+    expect(page({ transportReady: true, machineUnreachable: true }).mounted).toBe(true);
+    expect(page({ transportReady: false, machineUnreachable: true })).toEqual({ mounted: false, card: true });
+    // Reachable again: the transport mounts and opens a new session.
+    expect(page({ transportReady: false, machineUnreachable: false }).mounted).toBe(true);
   });
 });
