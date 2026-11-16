@@ -362,6 +362,34 @@ pub fn is_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
+/// The kinds of unit `defer` takes: ones `intar-lab.target` can start. A
+/// slice, scope or mount is not a unit a lab waits for.
+const DEFERRABLE_UNIT_SUFFIXES: [&str; 5] = [".service", ".socket", ".timer", ".path", ".target"];
+
+/// A systemd unit name (`name.service` or `name@instance.service`, at most
+/// 255 characters of `[A-Za-z0-9:_.\\-]`) of a kind `defer` takes, not
+/// starting with `-`, which a command would read as an option.
+#[must_use]
+pub fn is_deferrable_unit(value: &str) -> bool {
+    let Some(stem) = DEFERRABLE_UNIT_SUFFIXES
+        .iter()
+        .find_map(|suffix| value.strip_suffix(suffix))
+    else {
+        return false;
+    };
+    let (prefix, instance) = match stem.split_once('@') {
+        Some((prefix, instance)) => (prefix, Some(instance)),
+        None => (stem, None),
+    };
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b":_.\\-".contains(&byte))
+    };
+    value.len() <= 255 && !value.starts_with('-') && valid(prefix) && instance.is_none_or(valid)
+}
+
 /// Every rule a lowered scenario and its repository's images must keep. The
 /// loader, the Worker's ingest and the builder all run it; the result lists
 /// every problem found.
@@ -426,6 +454,7 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
                 "machine `{name}`: more than {MAX_READY_PER_MACHINE} ready blocks"
             ));
         }
+        check_defer(&format!("machine `{name}`"), &machine.defer, &mut problem);
         check_scripts(
             &format!("machine `{name}` setup"),
             &machine.setup,
@@ -554,6 +583,7 @@ fn image_geometry<'a>(
                 "image `{name}`: disk is over the {MAX_DISK_MIB} MiB limit"
             ));
         }
+        check_defer(&format!("image `{name}`"), &image.defer, problem);
         check_scripts(&format!("image `{name}` setup"), &image.setup, problem);
     }
     let edges = by_name
@@ -584,6 +614,14 @@ fn image_geometry<'a>(
         }
     }
     geometry
+}
+
+fn check_defer(context: &str, defer: &[String], problem: &mut impl FnMut(String)) {
+    for unit in defer.iter().filter(|unit| !is_deferrable_unit(unit)) {
+        problem(format!(
+            "{context}: defer `{unit}` is not a service, socket, timer, path or target unit"
+        ));
+    }
 }
 
 fn check_scripts(context: &str, scripts: &[ScriptV1], problem: &mut impl FnMut(String)) {
@@ -740,6 +778,50 @@ mod tests {
             scenario
                 .machine_spec("x", "nope", SpecMode::Learn)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn defer_takes_the_units_a_lab_target_starts() {
+        for unit in [
+            "k3s.service",
+            "docker.socket",
+            "apt-daily.timer",
+            "watch.path",
+            "multi-user.target",
+            "getty@tty1.service",
+            "sys-x\\x2dy:z_1.service",
+        ] {
+            assert!(is_deferrable_unit(unit), "{unit}");
+        }
+        let long = format!("{}.service", "a".repeat(247));
+        assert!(is_deferrable_unit(&long));
+        for unit in [
+            "system.slice",
+            "session-1.scope",
+            "-.mount",
+            "k3s",
+            ".service",
+            "-k3s.service",
+            "getty@.service",
+            "a@b@c.service",
+            "k3s.service ",
+            "k3s;reboot.service",
+            "k\u{e9}.service",
+            "",
+        ] {
+            assert!(!is_deferrable_unit(unit), "{unit}");
+        }
+        assert!(!is_deferrable_unit(&format!("a{long}")));
+
+        let mut scenario = scenario();
+        scenario.machines[0].defer = vec!["k3s.service".to_owned(), "kube.slice".to_owned()];
+        let mut images = images();
+        images[0].defer = vec!["k3s".to_owned()];
+        assert_eq!(
+            problems(&scenario, &images),
+            "image `k3s`: defer `k3s` is not a service, socket, timer, path or target unit\n\
+             machine `router-a`: defer `kube.slice` is not a service, socket, timer, path or target unit"
         );
     }
 
