@@ -4,12 +4,18 @@ import { expect, test } from "./fixtures/test";
 
 test.setTimeout(120_000);
 
-type DeferredModule = "terminal" | "nativeSsh" | "artifactViewer";
+type DeferredModule =
+  | "terminal"
+  | "nativeSsh"
+  | "artifactViewer"
+  | "replaySurface";
 
 const DEFERRED_MODULE_PATHS: Record<DeferredModule, string> = {
   terminal: "/src/components/remote-access/WebSshTerminal.tsx",
   nativeSsh: "/src/components/remote-access/NativeSshSheet.tsx",
   artifactViewer: "/src/components/app/RunArtifactViewer.tsx",
+  // The recap loads only the replay surface, not the whole artifact viewer.
+  replaySurface: "/src/components/app/RunArtifactViewerReplay.tsx",
 };
 
 function deferredModuleRequests(page: Page) {
@@ -173,15 +179,23 @@ test("admin uses a separate bounded archive API and keeps collapsed details out 
   await expect(archiveCards).toHaveCount(6);
   await expect(page.getByText("Milestones", { exact: true })).toHaveCount(0);
   await expect(page.getByText("run.log", { exact: true })).toHaveCount(0);
-  // Search and outcome controls add a small fixed cost; archive detail trees
-  // must still remain outside this bounded collapsed DOM.
-  expect(await page.locator("*").count()).toBeLessThan(550);
+  // Archive detail trees stay out of the DOM until a card opens: a collapsed
+  // card is about 50 elements, an open one with this fixture nearly 90. A
+  // page-wide count measured the app shell and live runs too.
+  const collapsedSizes = await archiveCards.evaluateAll((cards) =>
+    cards.map((card) => card.querySelectorAll("*").length),
+  );
+  expect(Math.max(...collapsedSizes)).toBeLessThan(60);
 
   const card = archiveCard(page);
   await expect(card).toHaveCount(1);
   await expect(card.getByText("@minalearns", { exact: true })).toBeVisible();
   await card.getByRole("button", { name: "Details" }).click();
   await expect(card.getByText("Milestones", { exact: true })).toBeVisible();
+  // The bound above tells an open card from a collapsed one.
+  expect(
+    await card.evaluate((element) => element.querySelectorAll("*").length),
+  ).toBeGreaterThanOrEqual(60);
   expect(
     requestCount(
       ui.server.requests,
@@ -322,10 +336,10 @@ test("settled run fetches the replay viewer only after Watch replay opens", asyn
 
     const recap = page.locator('section[aria-labelledby="run-recap-heading"]');
     await expect(recap.getByRole("button", { name: "Watch replay" })).toBeVisible();
-    expect(modules.count("artifactViewer")).toBe(0);
+    expect(modules.count("replaySurface")).toBe(0);
 
     await recap.getByRole("button", { name: "Watch replay" }).click();
-    await expect.poll(() => modules.count("artifactViewer")).toBeGreaterThan(0);
+    await expect.poll(() => modules.count("replaySurface")).toBeGreaterThan(0);
     await expect(recap.locator("[data-run-recap-replay-surface]")).toBeVisible();
   } finally {
     modules.dispose();
@@ -372,7 +386,7 @@ async function waitForRouteContent(
 ) {
   if (route.id === "courses") {
     await expect(
-      page.getByRole("textbox", { name: "Search courses and lectures" }),
+      page.getByRole("searchbox", { name: "Search courses and lectures" }),
     ).toBeVisible();
     return;
   }
@@ -401,7 +415,7 @@ async function prepareWarmNavigation(
   if (route.id === "admin") {
     await sidebarLink(page, "Courses").click();
     await expect(
-      page.getByRole("textbox", { name: "Search courses and lectures" }),
+      page.getByRole("searchbox", { name: "Search courses and lectures" }),
     ).toBeVisible();
     return;
   }
