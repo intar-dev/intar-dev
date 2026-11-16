@@ -23,6 +23,7 @@ use hcl::edit::Span as _;
 use hcl::edit::expr::{Expression, ObjectKey};
 use hcl::edit::structure::{Block, BlockLabel, Body, Structure};
 use hcl::edit::template::{Element, Template};
+use intar_contracts::scenario::is_deferrable_unit;
 use std::collections::BTreeMap;
 use std::fmt as text;
 use std::ops::Range;
@@ -453,6 +454,30 @@ impl<'a> Fields<'a> {
             .map(|(item, span)| match item {
                 Value::Text(text) => Ok(text),
                 _ => Err(self.error(span, format!("`{key}` takes a list of strings"))),
+            })
+            .collect()
+    }
+
+    /// `defer`: a list of the units a lab target starts, refused at the
+    /// entry that is not one; the contract's `validate` holds the rule.
+    fn deferred_units(&mut self) -> Loaded<Vec<String>> {
+        let Some((found, span)) = self.take("defer") else {
+            return Ok(Vec::new());
+        };
+        let Value::List(items) = found else {
+            return Err(self.error(span, "`defer` takes a list of strings"));
+        };
+        items
+            .into_iter()
+            .map(|(item, span)| match item {
+                Value::Text(unit) if is_deferrable_unit(&unit) => Ok(unit),
+                Value::Text(unit) => Err(self.error(
+                    span,
+                    format!(
+                        "`defer`: `{unit}` is not a service, socket, timer, path or target unit"
+                    ),
+                )),
+                _ => Err(self.error(span, "`defer` takes a list of strings")),
             })
             .collect()
     }

@@ -258,7 +258,7 @@ fn image(source: &Source, block: &Block, file_name: &str) -> Loaded<ImageV1> {
         name,
         from: fields.need("from", from)?,
         disk_mib: mib(&fields, "disk", disk)?,
-        defer: fields.strings("defer")?,
+        defer: fields.deferred_units()?,
         setup: stages(source, &mut fields)?,
     };
     fields.done()?;
@@ -317,7 +317,7 @@ fn machine(source: &Source, name: String, block: &Block) -> Loaded<MachineV1> {
         memory_mib: fields.need("memory", memory)?,
         disk_mib: fields.need("disk", disk)?,
         from: fields.need("from", from)?,
-        defer: fields.strings("defer")?,
+        defer: fields.deferred_units()?,
         terminal: fields.flag("terminal", true)?,
         egress: fields.flag("egress", false)?,
         env: fields.string_map("env")?,

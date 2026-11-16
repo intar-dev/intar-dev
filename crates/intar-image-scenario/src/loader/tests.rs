@@ -252,6 +252,45 @@ fn shell_quote_survives_hostile_input() {
 }
 
 #[test]
+fn defer_takes_only_units_a_lab_target_starts() {
+    assert_eq!(
+        edit_scenario("[\"nginx.service\"]", "[\"nginx.service\", \"kube.slice\"]"),
+        "scenarios/repair-nginx/scenario.hcl:22:34: `machine`: `defer`: `kube.slice` is not a service, socket, timer, path or target unit"
+    );
+    let image = problems(|root| {
+        edit(
+            root,
+            "images/base-web.hcl",
+            "  disk = \"8Gi\"\n",
+            "  disk = \"8Gi\"\n  defer = [\"k3s\"]\n",
+        );
+    });
+    // The image does not load, so the machine's `from` names none next.
+    assert_eq!(
+        image.lines().next().unwrap_or_default(),
+        "images/base-web.hcl:4:12: `image`: `defer`: `k3s` is not a service, socket, timer, path or target unit"
+    );
+    for unit in [
+        "docker.socket",
+        "apt-daily.timer",
+        "getty@tty1.service",
+        "multi-user.target",
+        "x.path",
+    ] {
+        let replaced = format!("[\"{unit}\"]");
+        let found = problems(|root| {
+            edit(
+                root,
+                "scenarios/repair-nginx/scenario.hcl",
+                "[\"nginx.service\"]",
+                &replaced,
+            );
+        });
+        assert_eq!(found, "", "{unit}");
+    }
+}
+
+#[test]
 fn problems_carry_their_place() {
     let at = "scenarios/repair-nginx/scenario.hcl";
     for (from, to, expected) in [
