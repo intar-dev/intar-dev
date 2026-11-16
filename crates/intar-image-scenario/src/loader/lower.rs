@@ -25,11 +25,14 @@ pub(super) fn checks(source: &super::Source, blocks: &[&Block]) -> Loaded<String
         let author = fields.text("fail")?;
         let (body, sugar) = check_body(&mut fields)?;
         fields.done()?;
-        source.record(
-            block.span(),
-            format!("`{}`", block.ident.as_str()),
-            &format!("{PRELUDE}{body}"),
-        );
+        // Only shell the author wrote is linted: a sugar's values are data.
+        if !sugar {
+            source.record(
+                block.span(),
+                format!("`{}`", block.ident.as_str()),
+                &format!("{PRELUDE}{body}"),
+            );
+        }
         // The first `FAIL:` line is the learner's message. A `run` script's
         // own line and a sugar's specific default come first and win; an
         // author's `fail` on a sugar replaces them, so they are silenced.
@@ -192,9 +195,9 @@ pub(super) fn packages(fields: &Fields, names: &[String]) -> Loaded<String> {
 pub(super) fn setup(source: &super::Source, block: &Block) -> Loaded<String> {
     let mut fields = Fields::of(source, block)?;
     let mut found = Vec::new();
-    if let Some(run) = fields.script("run")? {
-        found.push(run);
-    }
+    let run = fields.script("run")?;
+    let authored = run.is_some();
+    found.extend(run);
     if let Some(manifest) = fields.script("k8s_apply")? {
         found.push(format!(
             "printf '%s' {} | kubectl apply -f -\n",
@@ -247,7 +250,11 @@ pub(super) fn setup(source: &super::Source, block: &Block) -> Loaded<String> {
     let mut found = found.into_iter();
     match (found.next(), found.next()) {
         (Some(script), None) => {
-            source.record(span, "`setup`".to_owned(), &script);
+            // Only shell the author wrote is linted: a manifest or a file's
+            // content is data, quoted whole into fixed code.
+            if authored {
+                source.record(span, "`setup`".to_owned(), &script);
+            }
             Ok(script)
         }
         _ => Err(source.at(

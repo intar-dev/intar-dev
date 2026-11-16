@@ -661,6 +661,71 @@ fn the_example_content_validates_and_bundles() {
     assert_eq!(format_repository(temp.path(), false), Ok(Vec::new()));
 }
 
+/// Only shell an author wrote is linted: a manifest, a file's content and a
+/// check sugar's values are data, so a literal `$NAME` in them is no finding.
+#[test]
+fn data_is_not_linted_as_shell() {
+    let (_temp, loaded) = repository(|root| {
+        let at = "scenarios/repair-nginx/scenario.hcl";
+        edit(
+            root,
+            at,
+            "content = \"it's <up>\\n\"",
+            "content = \"echo $HOME\\n\"",
+        );
+        edit(
+            root,
+            at,
+            "    setup \"page\" {",
+            "    setup \"database\" {\n      k8s_apply = \"command: [\\\"sh\\\", \\\"-c\\\", \\\"echo $POSTGRES_USER\\\"]\\n\"\n    }\n    setup \"page\" {",
+        );
+        edit(root, at, "contains = \"up\"", "contains = \"$counter\"");
+        edit(
+            root,
+            at,
+            "check { port = 80 }",
+            "check { run = \"echo '$HOME'\" }",
+        );
+    });
+    let repository = loaded.unwrap_or_else(|problems| panic!("{problems:?}"));
+    let web = &repository.scenarios[0].machines[0];
+    assert!(
+        web.setup
+            .iter()
+            .any(|stage| stage.script.contains("echo $POSTGRES_USER"))
+    );
+    let linted: Vec<&str> = repository
+        .scripts
+        .iter()
+        .map(|lowered| lowered.script.as_str())
+        .collect();
+    assert!(
+        linted
+            .iter()
+            .all(|script| !script.contains("$POSTGRES_USER")
+                && !script.contains("echo $HOME")
+                && !script.contains("$counter")),
+        "{linted:?}"
+    );
+    assert!(linted.contains(&"systemctl disable --now nginx\necho \"${HOME}\"\n"));
+    let found: Vec<String> = warnings(&repository.scripts)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let sc2016: Vec<&String> = found
+        .iter()
+        .filter(|warning| warning.contains("SC2016"))
+        .collect();
+    if Command::new("shellcheck").arg("--version").output().is_ok() {
+        // The author's single-quoted `$HOME` in `run` is still warned, and
+        // nothing else is.
+        assert_eq!(sc2016.len(), 1, "{found:?}");
+        assert!(sc2016[0].contains("`check` lowered line 2"), "{found:?}");
+    } else {
+        assert!(sc2016.is_empty());
+    }
+}
+
 #[test]
 fn quiet_greps_are_warned_at_their_block() {
     let (_temp, loaded) = repository(|root| {
