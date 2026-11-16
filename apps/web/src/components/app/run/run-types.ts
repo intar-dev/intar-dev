@@ -131,6 +131,8 @@ export interface ScenarioRunRecord {
   progressPercent: number;
   terminalPhase: "pending" | "ready" | "failed";
   canOpenTerminal: boolean;
+  /** Set from live status: the run's machine is out of reach right now. */
+  machineUnreachable?: boolean;
   terminalTarget?: {
     host: string | null;
     port: number;
@@ -245,6 +247,7 @@ export function mergeScenarioRunStatus(
     canOpenTerminal: status.canOpenTerminal,
     canDestroy: status.canDestroy,
     terminalTarget: status.terminalTarget,
+    machineUnreachable: status.machineUnreachable,
     outcome: status.outcome,
     active: status.active,
     activity: status.activity,

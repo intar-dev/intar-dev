@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ScenarioStepScreen } from "./StatusScreens";
+import { ScenarioShellStatusCard, ScenarioStepScreen } from "./StatusScreens";
 
 describe("ScenarioStepScreen", () => {
   it("presents a finite process as one semantic stage tracker", () => {
@@ -72,5 +72,17 @@ describe("ScenarioStepScreen", () => {
     expect(markup.match(/data-open="true"/g)).toHaveLength(1);
     expect(markup.match(/data-run-sequence-detail/g)).toHaveLength(3);
     expect(markup).toContain("data-run-sequence-foot");
+  });
+});
+
+describe("ScenarioShellStatusCard", () => {
+  it("says the machine is not reachable instead of claiming a ready shell", () => {
+    const text = renderToStaticMarkup(
+      createElement(ScenarioShellStatusCard, { phase: "running", title: "Running", pending: true, unreachable: true }),
+    ).replace(/<[^>]+>/g, " ");
+
+    expect(text).toContain("Your machine is not reachable right now.");
+    expect(text).not.toContain("Running");
+    expect(text).not.toContain("will open when your workspace is ready");
   });
 });

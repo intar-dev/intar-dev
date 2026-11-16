@@ -1947,6 +1947,7 @@ export function ScenarioRun() {
                         !selectedVmShellReady &&
                         Boolean(selectedVm && selectedVm.phase !== "failed")
                       }
+                      unreachable={attemptData.machineUnreachable === true}
                     />
                   )}
                 </div>

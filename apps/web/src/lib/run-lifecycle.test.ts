@@ -11,6 +11,8 @@ import {
   type RunStateDocument,
   type RunVmStateDocument,
 } from "@/lib/run-state";
+import { deriveScenarioRunOutcome } from "@/lib/scenario-run-outcome";
+import { deriveScenarioRunReplayState } from "@/lib/scenario-runs/activity";
 
 describe("run lifecycle", () => {
   it("removes retired benchmark evidence from legacy run documents", () => {
@@ -514,6 +516,52 @@ describe("run lifecycle", () => {
     expect(next).toEqual(current);
   });
 
+  it("fails a run whose VM was lost with its host, and keeps its replay state", () => {
+    const lost = "The machine was shut down or stopped unexpectedly.";
+    const ready = readyRunWithRecording();
+    const failed = applyVmReportToRunState({
+      runId: "run-a",
+      current: ready,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "failed",
+        observedAt: 3_000,
+        error: lost,
+        // The agent's failed report keeps the VM's runtime generation.
+        runtimeConstraints: { generation: "generation-1", cpu_millis: 1_000 },
+      }),
+    });
+
+    expect(failed).toMatchObject({ phase: "failed", phaseDetail: lost, canOpenTerminal: false });
+    expect(
+      deriveScenarioRunOutcome({ phase: failed.phase, solvedAt: null, deleteRequestedAt: null, failedAt: 3_000 }),
+    ).toBe("failed");
+    // The replay is what the archive used to leave: the recorded sessions.
+    expect(deriveScenarioRunReplayState(failed)).toBe(
+      deriveScenarioRunReplayState({ ...ready, phase: "completed" }),
+    );
+  });
+
+  it("ends a run whose delete was already requested as a normal completion", () => {
+    const tearingDown = recomputeRunState({ ...readyRunWithRecording(), phase: "teardown_requested" });
+    const stopping = applyVmReportToRunState({
+      runId: "run-a",
+      current: tearingDown,
+      report: vmReport({ runId: "run-a", vmName: "webserver", phase: "stopping", observedAt: 3_000, runtimeConstraints: { generation: "generation-1", cpu_millis: 1_000 } }),
+    });
+    const absent = applyVmReportToRunState({
+      runId: "run-a",
+      current: stopping,
+      report: vmReport({ runId: "run-a", vmName: "webserver", phase: "absent", observedAt: 3_001, runtimeConstraints: { generation: "generation-1", cpu_millis: 1_000 } }),
+    });
+
+    expect(absent.phase).toBe("completed");
+    expect(
+      deriveScenarioRunOutcome({ phase: absent.phase, solvedAt: null, deleteRequestedAt: 2_500, failedAt: null }),
+    ).toBe("cancelled");
+  });
+
   it("derives solved from scenario probes even when the report phase is only running", () => {
     const baseVm = initialRunState().vms[0];
     if (!baseVm) {
@@ -596,6 +644,40 @@ function initialRunState(): RunStateDocument {
     };
   }
   return state;
+}
+
+/** A ready run whose one VM has a recorded shell session. */
+function readyRunWithRecording(): RunStateDocument {
+  const ready = applyVmReportToRunState({
+    runId: "run-a",
+    current: initialRunState(),
+    report: vmReport({
+      runId: "run-a",
+      vmName: "webserver",
+      phase: "ready",
+      observedAt: 2_000,
+      sshHostKeysOpenssh: ["ssh-ed25519 AAAAhostkey"],
+      ...readyTerminalEvidence({ host: "203.0.113.7", port: 2201, observedAt: 2_000 }),
+    }),
+  });
+  return recomputeRunState({
+    ...ready,
+    vms: ready.vms.map((vm) => ({
+      ...vm,
+      hasRecording: true,
+      sessionTimeline: [
+        {
+          index: 0,
+          startTimestampMs: 2_100,
+          durationMs: 500,
+          exitCode: 0,
+          castFilename: "session-0.cast",
+          castArtifactId: null,
+          transcriptTruncated: false,
+        },
+      ],
+    })),
+  });
 }
 
 /** Applies one bridge 9 VM state whose guest lab is ready. */

@@ -35,6 +35,8 @@ export interface CourseLocation {
 export interface ScenarioRunRecord extends Omit<RunStateDocument, "tasks"> {
   /** A revision-model run's tasks, as the learner may see them. */
   tasks?: RunTaskView[];
+  /** Set by live status only: the run's machine is out of reach right now. */
+  machineUnreachable?: boolean;
   id: string;
   scenarioId: string;
   organizationId: string | null;

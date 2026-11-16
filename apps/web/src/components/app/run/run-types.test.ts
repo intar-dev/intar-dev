@@ -8,6 +8,7 @@ import {
   type ScenarioRunRecord,
   type ScenarioRunStatus,
 } from "./run-types";
+import { hasUsableTerminalTarget } from "./run-support";
 
 describe("scenario run polling", () => {
   it("uses adaptive detail intervals and stops in terminal phases", () => {
@@ -117,6 +118,25 @@ describe("scenario run status merge", () => {
       progressPercent: 94,
       scenarioProbes: [{ id: "probe-1", status: "pass" }],
     });
+  });
+
+  it("withholds the shell while the machine is unreachable and restores it after", () => {
+    const unreachable = runStatus({
+      version: "100:unreachable",
+      machineUnreachable: true,
+      canOpenTerminal: false,
+      vms: [{ ...runStatus().vms[0]!, canOpenTerminal: false }],
+    });
+    const away = mergeScenarioRunStatus(runRecord(), unreachable);
+
+    expect(away).toMatchObject({ machineUnreachable: true, canOpenTerminal: false, phase: "running" });
+    expect(hasUsableTerminalTarget(away.vms[0]!)).toBe(false);
+    // Not a preparing machine: the boot sequence stays away.
+    expect(away.vms[0]?.phase).toBe("running");
+
+    const back = mergeScenarioRunStatus(away, runStatus());
+    expect(back).toMatchObject({ machineUnreachable: false, canOpenTerminal: true });
+    expect(hasUsableTerminalTarget(back.vms[0]!)).toBe(true);
   });
 
   it("keeps the cached record for an unchanged or older status", () => {
@@ -241,6 +261,7 @@ function runStatus(overrides: Partial<ScenarioRunStatus> = {}): ScenarioRunStatu
     canOpenTerminal: true,
     canDestroy: true,
     terminalTarget: terminalTarget(),
+    machineUnreachable: false,
     outcome: "in_progress",
     active: true,
     activity: "foreground",
