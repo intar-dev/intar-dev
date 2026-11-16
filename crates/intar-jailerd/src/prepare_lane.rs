@@ -554,6 +554,92 @@ mod tests {
         );
     }
 
+    fn prepare_request(request_class: RequestClass) -> PrepareChunkedImageV3Request {
+        let digest = Sha256Digest::parse("a".repeat(64)).expect("digest");
+        let source = |path: &str| ArtifactSource {
+            source_root: 0,
+            relative_path: PathBuf::from(path),
+            sha256: Some(digest.clone()),
+            access: ArtifactAccess::ReadOnly,
+        };
+        PrepareChunkedImageV3Request {
+            image_id: digest.clone(),
+            chunk_manifest_sha256: digest.clone(),
+            virtual_size_bytes: 1,
+            image_manifest: source("manifest"),
+            manifest: source("config"),
+            chunk_cache_root: intar_jailer_protocol::TrustedDirectorySource {
+                source_root: 0,
+                relative_path: PathBuf::from("blobs"),
+            },
+            kernel: source("kernel"),
+            initrd: None,
+            request_class,
+        }
+    }
+
+    fn held_template() -> ImageTemplateMetadataV2 {
+        let digest = Sha256Digest::parse("a".repeat(64)).expect("digest");
+        let artifact = ImageTemplateArtifactV2 {
+            sha256: digest.clone(),
+            bytes: 1,
+            device: 1,
+            inode: 1,
+        };
+        ImageTemplateMetadataV2 {
+            schema_version: crate::IMAGE_TEMPLATE_METADATA_V3,
+            image_sha256: digest.clone(),
+            chunk_manifest_sha256: Some(digest),
+            chunk_raw_sha256s: Vec::new(),
+            virtual_size_bytes: 1,
+            root_disk: artifact.clone(),
+            kernel: artifact,
+            initrd: None,
+        }
+    }
+
+    #[test]
+    fn a_held_template_is_confirmed_while_the_lane_is_taken_and_a_boot_is_live() {
+        let (budget, _clock) = budget();
+        let _import = background(&budget).expect("an import holds the lane");
+        budget.open_boot_window(&generation("booting"), Duration::from_secs(45));
+        for class in [RequestClass::Background, RequestClass::Confirm] {
+            let result = crate::prepare_or_confirm(
+                &prepare_request(class),
+                || Ok(held_template()),
+                || background(&budget),
+                |_| anyhow::bail!("a held template is never built"),
+            );
+            assert!(result.is_ok_and(|result| result.image_id == held_template().image_sha256));
+        }
+    }
+
+    #[test]
+    fn a_confirmation_of_a_missing_template_never_claims_or_builds() {
+        let (budget, _clock) = budget();
+        let result = crate::prepare_or_confirm(
+            &prepare_request(RequestClass::Confirm),
+            || Err(crate::PreparedTemplateMissing.into()),
+            || background(&budget),
+            |_| anyhow::bail!("a confirmation never builds"),
+        );
+        assert!(result.is_err_and(|error| {
+            error
+                .downcast_ref::<crate::PreparedTemplateMissing>()
+                .is_some()
+        }));
+        // The lane is still free: the confirmation never claimed it.
+        assert!(background(&budget).is_ok());
+        // A preparation of the same template does build.
+        let built = crate::prepare_or_confirm(
+            &prepare_request(RequestClass::Background),
+            || Err(crate::PreparedTemplateMissing.into()),
+            || background(&budget),
+            |_| crate::prepared_image_v3_result(&held_template()),
+        );
+        assert!(built.is_ok());
+    }
+
     #[test]
     fn the_default_class_is_foreground() {
         assert_eq!(RequestClass::default(), RequestClass::Foreground);

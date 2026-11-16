@@ -141,18 +141,39 @@ fn write_template_metadata(path: &Path, metadata: &ImageTemplateMetadataV2) -> R
     Ok(())
 }
 
+/// The root-owned directory of template `image_id` below the template store
+/// `templates`; an absent one is [`PreparedTemplateMissing`].
+pub(super) fn open_template_directory(
+    templates: &OwnedFd,
+    image_id: &Sha256Digest,
+) -> Result<OwnedFd> {
+    let image_name = CString::new(image_id.as_str()).expect("SHA-256 contains no NUL");
+    let image_directory =
+        open_lifecycle_entry_at(templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)
+            .map_err(|error| template_missing_if_absent(error.into()))?;
+    validate_root_directory(&image_directory, "chunked image template")?;
+    Ok(image_directory)
+}
+
+/// A file of a template directory; an absent one is
+/// [`PreparedTemplateMissing`].
+pub(super) fn open_template_entry(image_directory: &OwnedFd, name: &CStr) -> Result<OwnedFd> {
+    open_lifecycle_entry_at(image_directory, name, OFlags::RDONLY)
+        .map_err(|error| template_missing_if_absent(error.into()))
+}
+
+/// The metadata of a published template that matches `request`. A template
+/// that is not there is [`PreparedTemplateMissing`]; one that is there and
+/// valid stays so when marking it used fails, as on a full store.
 pub(super) fn validate_existing_chunked_template(
     config: &JailerdConfig,
     request: &PrepareChunkedImageV3Request,
 ) -> Result<ImageTemplateMetadataV2> {
     let jail_root = trusted_jail_root_fd(config)?;
     let templates = open_optional_root_directory_at(&jail_root, c"templates")?
-        .context("prepared image template root is missing")?;
-    let image_name = CString::new(request.image_id.as_str()).expect("SHA-256 contains no NUL");
-    let image_directory =
-        open_lifecycle_entry_at(&templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)?;
-    validate_root_directory(&image_directory, "chunked image template")?;
-    let metadata = open_template_metadata(&image_directory)?;
+        .ok_or(PreparedTemplateMissing)?;
+    let image_directory = open_template_directory(&templates, &request.image_id)?;
+    let metadata = open_template_metadata(&image_directory).map_err(template_missing_if_absent)?;
     ensure!(
         metadata.schema_version == IMAGE_TEMPLATE_METADATA_V3
             && metadata.image_sha256 == request.image_id
@@ -175,14 +196,16 @@ pub(super) fn validate_existing_chunked_template(
         ),
         (c"kernel" as &CStr, &metadata.kernel, "chunked kernel"),
     ] {
-        let file = open_lifecycle_entry_at(&image_directory, name, OFlags::RDONLY)?;
+        let file = open_template_entry(&image_directory, name)?;
         validate_template_artifact_stat(&rustix::fs::fstat(&file)?, expected, label)?;
     }
     if let Some(expected) = &metadata.initrd {
-        let file = open_lifecycle_entry_at(&image_directory, c"initrd", OFlags::RDONLY)?;
+        let file = open_template_entry(&image_directory, c"initrd")?;
         validate_template_artifact_stat(&rustix::fs::fstat(&file)?, expected, "chunked initrd")?;
     }
-    touch_chunked_template(config, &request.image_id)?;
+    if let Err(error) = touch_chunked_template(config, &request.image_id) {
+        tracing::warn!(error = %format!("{error:#}"), image = request.image_id.as_str(), "could not mark a held template used");
+    }
     Ok(metadata)
 }
 
@@ -205,11 +228,7 @@ pub(super) fn validate_prepared_chunked_launch_at(
     templates: &OwnedFd,
     request: &intar_jailer_protocol::LaunchVmV3Request,
 ) -> Result<()> {
-    let image_name = CString::new(request.image_id.as_str()).expect("SHA-256 contains no NUL");
-    let image_directory =
-        open_lifecycle_entry_at(templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)
-            .map_err(|error| template_missing_if_absent(error.into()))?;
-    validate_root_directory(&image_directory, "chunked image template")?;
+    let image_directory = open_template_directory(templates, &request.image_id)?;
     let metadata = open_template_metadata(&image_directory).map_err(template_missing_if_absent)?;
     ensure!(
         metadata.schema_version == IMAGE_TEMPLATE_METADATA_V3

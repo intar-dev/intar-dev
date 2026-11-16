@@ -256,12 +256,16 @@ fn a_launch_on_an_absent_template_directory_is_template_missing() -> Result<()> 
     Ok(())
 }
 
-/// Needs root: the template store and its entries must be root-owned.
+/// Needs root: the template store and its entries must be root-owned. No CI
+/// lane runs as root; run it on a Linux host with
+/// `sudo -E cargo test -p intar-jailerd --lib -- --ignored a_launch_tells_a_gone_template_from_a_wrong_one`.
 #[test]
+#[ignore = "needs root"]
 fn a_launch_tells_a_gone_template_from_a_wrong_one() -> Result<()> {
-    if !rustix::process::geteuid().is_root() {
-        return Ok(());
-    }
+    assert!(
+        rustix::process::geteuid().is_root(),
+        "run this test as root"
+    );
     let jail = tempfile::tempdir()?;
     let config = lifecycle_test_config(jail.path());
     let request = launch_v3(1, 125);
@@ -324,4 +328,34 @@ fn only_an_absent_file_makes_a_template_missing() {
                 .is_none()
         );
     }
+}
+
+#[test]
+fn staging_a_template_artifact_that_is_gone_is_template_missing() -> Result<()> {
+    let store = tempfile::tempdir()?;
+    let templates = rustix::fs::open(
+        store.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let request = launch_v3(1, 125);
+    let opened = open_prepared_template_file_at(
+        &templates,
+        &request.launch.artifacts.kernel,
+        &request.image_id,
+        "kernel",
+    );
+    assert!(opened.is_err_and(|error| error.downcast_ref::<PreparedTemplateMissing>().is_some()));
+    Ok(())
+}
+
+#[test]
+fn a_missing_jail_root_is_not_a_missing_template() {
+    let config = JailerdConfig {
+        jail_root: PathBuf::from("/nonexistent-jail-root-for-this-test"),
+        ..test_config()
+    };
+    let request = launch_v3(1, 125);
+    let opened = open_prepared_template_source(&config, &request.launch.artifacts.kernel);
+    assert!(opened.is_err_and(|error| error.downcast_ref::<PreparedTemplateMissing>().is_none()));
 }

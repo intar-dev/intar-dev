@@ -608,8 +608,7 @@ pub(super) fn stage_source(
     if source.source_root == PREPARED_IMAGE_SOURCE_ROOT {
         // Store GC can remove the template between the launch's check and
         // here; once open, the descriptor keeps its inode.
-        let source_file =
-            open_prepared_template_source(config, source).map_err(template_missing_if_absent)?;
+        let source_file = open_prepared_template_source(config, source)?;
         return stage_prepared_template_source_file(source_file, destination, mode);
     }
     let source_file = open_trusted_source(config, source.source_root, &source.relative_path)?;
@@ -697,14 +696,23 @@ pub(super) fn open_prepared_template_source(
     let jail_root = trusted_jail_root_fd(config)?;
     let templates = open_optional_root_directory_at(&jail_root, c"templates")?
         .ok_or(PreparedTemplateMissing)?;
-    let image_name = CString::new(image_sha256.as_str()).expect("SHA-256 contains no NUL");
-    let image_directory =
-        open_lifecycle_entry_at(&templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)
-            .context("open root-owned image template")?;
-    validate_root_directory(&image_directory, "root-owned image template")?;
-    let metadata = open_template_metadata(&image_directory)?;
+    open_prepared_template_file_at(&templates, source, &image_sha256, file_name)
+}
+
+/// One artifact of template `image_sha256` below the template store
+/// `templates`. Store GC can remove the template after the launch's check;
+/// a template gone by then is [`PreparedTemplateMissing`]. Once open, the
+/// descriptor keeps its inode.
+pub(super) fn open_prepared_template_file_at(
+    templates: &OwnedFd,
+    source: &ArtifactSource,
+    image_sha256: &Sha256Digest,
+    file_name: &str,
+) -> Result<File> {
+    let image_directory = open_template_directory(templates, image_sha256)?;
+    let metadata = open_template_metadata(&image_directory).map_err(template_missing_if_absent)?;
     if metadata.schema_version != IMAGE_TEMPLATE_METADATA_V3
-        || metadata.image_sha256 != image_sha256
+        || metadata.image_sha256 != *image_sha256
     {
         bail!("prepared image template metadata identity mismatch")
     }
@@ -724,8 +732,7 @@ pub(super) fn open_prepared_template_source(
         bail!("prepared template source access or digest does not match root-owned metadata")
     }
     let file_name = CString::new(file_name).expect("fixed artifact names contain no NUL");
-    let fd = open_lifecycle_entry_at(&image_directory, &file_name, OFlags::RDONLY)
-        .context("open root-owned template artifact")?;
+    let fd = open_template_entry(&image_directory, &file_name)?;
     validate_template_artifact_stat(
         &rustix::fs::fstat(&fd)?,
         expected,

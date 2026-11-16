@@ -743,31 +743,44 @@ pub fn prepare_chunked_image_v3_response(
             format!("host runtime template validation failed: {error:#}"),
         ));
     }
-    // A template that is already published is confirmed from its metadata,
-    // which marks it used, without the lane: a confirmation never waits for
-    // or defers behind an import or a boot.
-    if let Ok(metadata) = validate_existing_chunked_template(config, &request) {
-        return match prepared_image_v3_result(&metadata) {
-            Ok(result) => Response::PrepareChunkedImageV3(result),
-            Err(error) => prepare_error_response(error),
-        };
-    }
-    // A background class yields between fixed blocks. The lane is a scheduling
-    // hint only: every digest, ownership, and trust check below is unchanged.
-    let lane = match PrepareLane::claim(request.request_class) {
-        Ok(lane) => lane,
-        Err(error) => return protocol_error_response(error),
-    };
-    match prepare_chunked_image_template(config, &request, &lane) {
+    match prepare_or_confirm(
+        &request,
+        || validate_existing_chunked_template(config, &request),
+        || PrepareLane::claim(request.request_class),
+        |lane| prepare_chunked_image_template(config, &request, lane),
+    ) {
         Ok(result) => Response::PrepareChunkedImageV3(result),
         Err(error) => prepare_error_response(error),
     }
 }
 
+/// A preparation after the host checks. A template that is already published
+/// is confirmed from its metadata without the lane, so a confirmation never
+/// waits for or defers behind an import or a boot. A confirm-only request
+/// stops there; any other claims the lane and builds.
+fn prepare_or_confirm(
+    request: &PrepareChunkedImageV3Request,
+    existing: impl FnOnce() -> Result<ImageTemplateMetadataV2>,
+    claim: impl FnOnce() -> Result<PrepareLane>,
+    build: impl FnOnce(&PrepareLane) -> Result<PreparedImageV3Result>,
+) -> Result<PreparedImageV3Result> {
+    match existing() {
+        Ok(metadata) => return prepared_image_v3_result(&metadata),
+        Err(error) if request.request_class == RequestClass::Confirm => return Err(error),
+        Err(_) => {}
+    }
+    // A background class yields between fixed blocks. The lane is a scheduling
+    // hint only: every digest, ownership, and trust check below is unchanged.
+    build(&claim()?)
+}
+
 /// A preparation's error: a boot that deferred it, at its claim or at any
-/// block after, is a requeue; anything else a failure.
+/// block after, is a requeue; a template that is not there is
+/// `image_template_missing`; anything else a failure.
 fn prepare_error_response(error: anyhow::Error) -> Response {
-    if error.downcast_ref::<PrepareDeferred>().is_some() {
+    if error.downcast_ref::<PrepareDeferred>().is_some()
+        || error.downcast_ref::<PreparedTemplateMissing>().is_some()
+    {
         return protocol_error_response(error);
     }
     Response::Error(ProtocolError::new(
