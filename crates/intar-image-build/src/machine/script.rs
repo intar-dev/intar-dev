@@ -47,7 +47,8 @@ pub(crate) fn stage_command(file: &str, env: &BTreeMap<String, String>) -> Strin
 
 /// Stop a deferred unit and everything left in its control group: a unit
 /// with `KillMode=process` (k3s) leaves its children running after `stop`.
-/// The root is copied next, so nothing of the unit may write while it is.
+/// Processes the unit started in another control group (a pod's containers)
+/// keep running; the freeze in [`repack_script`] is what makes the copy whole.
 const QUIESCE_FUNCTION: &str = r#"quiesce() {
   cgroup="$(systemctl show -P ControlGroup -- "$1")"
   systemctl stop -- "$1" || { echo "deferred unit $1 did not stop" >&2; exit 1; }
@@ -79,7 +80,10 @@ pub(crate) fn finalize_script(defer: &BTreeSet<String>) -> String {
     if !defer.is_empty() {
         script.push_str(QUIESCE_FUNCTION);
     }
-    for unit in defer {
+    // What can start a service again (a socket, timer or path) stops first.
+    let (services, triggers): (Vec<_>, Vec<_>) =
+        defer.iter().partition(|unit| unit.ends_with(".service"));
+    for unit in triggers.into_iter().chain(services) {
         script.push_str(&format!("quiesce {}\n", shell_quote(unit)));
     }
     for unit in defer {
@@ -126,8 +130,8 @@ command -v fsfreeze >/dev/null || {{ echo 'fsfreeze is missing: the root cannot 
 mkdir -p /run/intar/repack
 mount --bind / /run/intar/repack
 trap 'exit 1' HUP INT TERM
-fsfreeze -f /
 trap 'fsfreeze -u / 2>/dev/null' EXIT
+fsfreeze -f /
 mke2fs -q -F -t ext4 -L {label} -d /run/intar/repack {REPACK_DEVICE}
 fsfreeze -u /
 trap - EXIT
@@ -304,8 +308,8 @@ mod tests {
             "command -v fsfreeze",
             "mount --bind",
             "trap 'exit 1' HUP INT TERM\n",
-            "fsfreeze -f /\n",
             "trap 'fsfreeze -u / 2>/dev/null' EXIT\n",
+            "fsfreeze -f /\n",
             "mke2fs",
             "fsfreeze -u /\n",
             "trap - EXIT\n",
@@ -315,6 +319,17 @@ mod tests {
         for pair in order.windows(2) {
             assert!(at(pair[0]) < at(pair[1]), "{pair:?}");
         }
+    }
+
+    #[test]
+    fn finalize_stops_what_can_restart_a_service_first() {
+        let defer = ["a.service", "a.socket", "b.timer"]
+            .map(String::from)
+            .into();
+        let script = finalize_script(&defer);
+        let at = |part: &str| script.find(part).unwrap_or_else(|| panic!("{part}"));
+        assert!(at("quiesce 'a.socket'\n") < at("quiesce 'a.service'\n"));
+        assert!(at("quiesce 'b.timer'\n") < at("quiesce 'a.service'\n"));
     }
 
     /// The script against stubs that log each call: the root is thawed
