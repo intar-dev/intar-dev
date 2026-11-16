@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   HOST_CPU_RESERVATION_TTL_MS,
   cpuReservationForVms,
+  hostCpuReservationCapacityFromSnapshot,
   loadHostCpuReservationCapacity,
   reconcileHostCpuReservations,
   strictCpuCapacity,
@@ -26,7 +27,7 @@ import {
 } from "@/lib/runtime-executions";
 import { resetD1Database } from "@/test/d1-migrations";
 import type { HostStateReportV3, VmStateV3 } from "@/generated/contracts/bridge-message-v9";
-import { desiredRunningVm, emptyDesiredState } from "@/control-plane/host-runtime-do/test-fixtures";
+import { actualVm, desiredRunningVm, emptyDesiredState, stateReport } from "@/control-plane/host-runtime-do/test-fixtures";
 
 describe("host CPU reservations", () => {
   beforeEach(async () => {
@@ -734,3 +735,32 @@ function quotaVmReport(input: {
     updated_at_unix_ms: input.updatedAt,
   };
 }
+
+describe("reported CPU of a failed VM", () => {
+  // jailerd counts 1 000 committed millis: the unreserved VM still deleting.
+  const report = (vm: VmStateV3) => {
+    const message = stateReport("host-1", { observedAt: 1, appliedDesiredVersion: 0, vms: [vm] });
+    if (message.type !== "state_report") throw new Error("expected a state report");
+    return { ...message.report, capacity: { ...message.report.capacity, committed_cpu_millis: 1_000 } };
+  };
+  const reserved = [{ runId: "run-a", cpuMillis: 1_000, state: "committed" as const }];
+
+  it("does not let a VM that died with the agent down hide unreserved load", () => {
+    // Reported only to name its generation: no verified quota, no unit.
+    const dead = { ...actualVm("run-a", "web", 1), phase: "failed" as const,
+      runtime_constraints: { generation: "generation-web", cpu_millis: 1_000 } };
+    expect(hostCpuReservationCapacityFromSnapshot(report(dead), reserved)).toMatchObject({
+      effectiveCommittedCpuMillis: 2_000,
+      availableCpuMillis: 4_000 - 2_000,
+    });
+  });
+
+  it("still counts a failed VM whose quota was verified exactly once", () => {
+    const live = { ...actualVm("run-a", "web", 1), phase: "failed" as const };
+    // Its 1 000 committed millis are its own, so nothing else is unreserved.
+    expect(hostCpuReservationCapacityFromSnapshot(report(live), reserved)).toMatchObject({
+      effectiveCommittedCpuMillis: 1_000,
+      availableCpuMillis: 4_000 - 1_000,
+    });
+  });
+});

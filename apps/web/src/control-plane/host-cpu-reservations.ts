@@ -676,6 +676,20 @@ export function hostCpuReservationCapacityFromSnapshot(
   };
 }
 
+/**
+ * Whether a reported VM's CPU is load jailerd still counts. An absent VM's
+ * is not, nor is a failed VM's without a verified quota: one that died while
+ * the agent was down reports its CPU only to name its generation. A failed
+ * VM whose unit still runs is then counted by its reservation and by
+ * jailerd's committed figure, so skipping it can only over-count.
+ */
+export function reportedVmHoldsCpu(vm: Record<string, unknown>): boolean {
+  if (vm.phase === "absent") return false;
+  if (vm.phase !== "failed") return true;
+  const constraints = isRecord(vm.runtime_constraints) ? vm.runtime_constraints : null;
+  return readPositiveInteger(constraints?.quota_verified_at_unix_ms) !== null;
+}
+
 function reportedCpuMillisByRun(
   report: unknown,
   runIds: ReadonlySet<string>,
@@ -689,7 +703,7 @@ function reportedCpuMillisByRun(
       !isRecord(vm) ||
       typeof vm.run_id !== "string" ||
       !runIds.has(vm.run_id) ||
-      vm.phase === "absent"
+      !reportedVmHoldsCpu(vm)
     ) {
       continue;
     }
