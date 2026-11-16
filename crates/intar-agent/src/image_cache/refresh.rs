@@ -205,8 +205,8 @@ pub(super) async fn confirm_ready_templates(context: CacheRefreshContext<'_>) ->
     let confirm = |image: &OciDigest| {
         let image = image.clone();
         async move {
-            // A confirmation never holds up a boot.
-            wait_for_vm_boot_idle().await;
+            // A few stats and one small write in jailerd: it does not wait for
+            // a boot, or a busy host would never confirm its last images.
             let ready = ready::require_ready_image(context.cache_root, &image).await?;
             context.vm.confirm_image_template(&ready).await
         }
