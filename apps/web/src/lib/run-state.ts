@@ -291,8 +291,9 @@ export const RUN_LEASE_EXPIRED_TEXT = "The run lease expired.";
 export const RUN_LEASE_EXPIRED_DETAIL = "The run lease expired before teardown completed.";
 
 /**
- * The failure reasons written for learners. A failed run keeps one of these
- * once its VMs are archived; any other reason (host error text) is not kept.
+ * The failure reasons written for learners. A failed run shows one of these,
+ * also once its VMs are archived; any other reason (host error text) shows
+ * as the generic sentence.
  */
 const LEARNER_FAILURE_REASONS: ReadonlySet<string> = new Set([
   VM_LOST_REASON,
@@ -714,20 +715,20 @@ function describeRunPhase(
       };
     case "failed": {
       const failedVm = vms.find((vm) => vm.phase === "failed");
-      // Archiving completes the failed VMs, so the reason shown when the run
-      // failed is kept, if it was written for learners.
-      const keptDetail =
-        failedDetail !== null && LEARNER_FAILURE_REASONS.has(failedDetail)
-          ? failedDetail
-          : null;
+      // Archiving completes the failed VMs, so the run's own detail is the
+      // reason after it. Only a reason written for learners is shown; the
+      // VM keeps the raw one for operators.
+      const reason =
+        failedVm?.terminalReason ||
+        failedVm?.provisioning.error ||
+        failedVm?.phaseDetail ||
+        failedDetail;
       return {
         title: "Failed",
         detail:
-          failedVm?.terminalReason ||
-          failedVm?.provisioning.error ||
-          failedVm?.phaseDetail ||
-          keptDetail ||
-          "The run hit a terminal failure.",
+          reason && LEARNER_FAILURE_REASONS.has(reason)
+            ? reason
+            : "The run hit a terminal failure.",
         progressPercent: 100,
       };
     }

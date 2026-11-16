@@ -361,6 +361,7 @@ describe("run lifecycle", () => {
 
     expect(failed.vms[0]).toMatchObject({
       terminalPhase: "failed",
+      terminalReason: "SSH host-key verification failed.",
       canOpenTerminal: false,
       terminalTarget: {
         host: null,
@@ -371,7 +372,8 @@ describe("run lifecycle", () => {
     });
     expect(failed).toMatchObject({
       phase: "failed",
-      phaseDetail: "SSH host-key verification failed.",
+      // Host text stays on the VM; the learner sees the generic sentence.
+      phaseDetail: "The run hit a terminal failure.",
       terminalPhase: "failed",
       canOpenTerminal: false,
       terminalTarget: { host: null, port: 22 },

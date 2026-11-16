@@ -36,17 +36,17 @@ describe("a failed run's reason after its VM is archived", () => {
     ["the expired lease", RUN_LEASE_EXPIRED_TEXT, RUN_LEASE_EXPIRED_TEXT, false],
     ["an internal error", "failed to stage queued VM: boom", GENERIC, false],
     ["a launch failure, deleted by the host", "vm create failed: no template", GENERIC, true],
-  ])("shows the reason for %s only if a learner may read it", async (_, reason, archived, deleting) => {
+  ])("shows the reason for %s only if a learner may read it", async (_, reason, shown, deleting) => {
     const db = drizzle(env.DB);
     const failed = await seedFailedRun(db, reason, 10_000, deleting);
-    expect(failed.phaseDetail).toBe(reason);
+    expect(failed.phaseDetail).toBe(shown);
     expect(failed.vms[0]?.terminalReason).toBe(reason);
     const runVm = await platformArtifactFixture(env.DB, "server-run-1");
 
     await transitionRunVmToCompleted(db, runVm, 10_001);
 
     const run = await loadStoredRunLifecycle(db, "run-1");
-    expect(run?.state).toMatchObject({ phase: "failed", phaseDetail: archived });
+    expect(run?.state).toMatchObject({ phase: "failed", phaseDetail: shown });
     expect(run?.state.vms.map((vm) => vm.phase)).toEqual(["completed"]);
     expect(run?.state.vms[0]?.terminalReason).toBe(reason);
     expect(
