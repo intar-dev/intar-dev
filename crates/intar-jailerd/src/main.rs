@@ -265,7 +265,8 @@ fn run_server(config_path: &Path) -> Result<()> {
                         return;
                     }
                 };
-                match intar_jailerd::gc_root_stores(&gc_config, &protected) {
+                let result = intar_jailerd::gc_root_stores(&gc_config, &protected);
+                match &result {
                     Ok(report) if report.templates_removed > 0 || report.chunks_removed > 0 => {
                         info!(
                             templates_removed = report.templates_removed,
@@ -277,6 +278,17 @@ fn run_server(config_path: &Path) -> Result<()> {
                     }
                     Ok(_) => {}
                     Err(error) => error!(?error, "root-owned template/chunk GC failed"),
+                }
+                if let Ok(report) = &result
+                    && report.pressure_unmet
+                {
+                    warn!(
+                        estimated_bytes = report.estimated_bytes_after,
+                        free_bytes = report.filesystem_free_bytes_after,
+                        budget_bytes = gc_config.template_budget_bytes,
+                        minimum_free_bytes = gc_config.minimum_free_space_bytes,
+                        "template store stays over its budget or under its free-space floor: every template left is in use or pinned"
+                    );
                 }
                 std::thread::park_timeout(STORE_GC_INTERVAL);
             }

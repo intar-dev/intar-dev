@@ -9,6 +9,10 @@ pub struct StoreGcReport {
     pub chunks_removed: usize,
     pub estimated_bytes_after: u64,
     pub filesystem_free_bytes_after: u64,
+    /// The store stays over its budget or under its free-space floor: every
+    /// template left is held by a live VM or was used within the grace
+    /// period, as the agent's pinned images are.
+    pub pressure_unmet: bool,
 }
 
 struct TemplateGcEntry {
@@ -29,6 +33,7 @@ pub fn gc_root_stores(
     let (mut templates, stale) = load_templates(&templates_root)?;
     templates.sort_by_key(|entry| entry.last_used);
     let mut remove = HashSet::new();
+    let mut pressure_unmet = false;
     let current_store_bytes = estimated_store_bytes(&templates, &remove, &chunks_root)?;
     let current_free_bytes = fs2::available_space(&config.jail_root)
         .with_context(|| format!("read free space for {}", config.jail_root.display()))?;
@@ -52,12 +57,16 @@ pub fn gc_root_stores(
                     .duration_since(entry.last_used)
                     .is_ok_and(|age| age >= grace)
         }) else {
+            pressure_unmet = true;
             break;
         };
         remove.insert(candidate.image_id.clone());
     }
 
-    let mut report = StoreGcReport::default();
+    let mut report = StoreGcReport {
+        pressure_unmet,
+        ..StoreGcReport::default()
+    };
     for entry in &templates {
         if remove.contains(&entry.image_id) {
             std::fs::remove_dir_all(&entry.path).with_context(|| {
@@ -285,6 +294,41 @@ mod tests {
         assert!(!templates.join(&old).exists() && !templates.join(&unreadable).exists());
         assert!(templates.join(&held).exists(), "a live VM's template stays");
         assert!(templates.join(".staging").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_template_used_within_the_grace_stays_and_unmet_pressure_is_reported() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let config = JailerdConfig {
+            jail_root: root.path().to_owned(),
+            template_budget_bytes: 0,
+            ..JailerdConfig::default()
+        };
+        let template = root.path().join("templates").join("a".repeat(64));
+        std::fs::create_dir_all(&template)?;
+        std::fs::write(
+            template.join("metadata-v2.json"),
+            serde_json::json!({
+                "schema_version": IMAGE_TEMPLATE_METADATA_V3,
+                "image_sha256": "a".repeat(64),
+                "chunk_manifest_sha256": "b".repeat(64),
+                "chunk_raw_sha256s": [],
+                "virtual_size_bytes": 1,
+                "root_disk": {"sha256": "a".repeat(64), "bytes": 1, "device": 1, "inode": 1},
+                "kernel": {"sha256": "c".repeat(64), "bytes": 1, "device": 1, "inode": 2},
+                "initrd": null,
+            })
+            .to_string(),
+        )?;
+        // The agent's pass confirms each pinned template, which marks it used.
+        std::fs::write(template.join("last-used"), b"0\n")?;
+
+        let report = gc_root_stores(&config, &HashSet::new())?;
+
+        assert_eq!(report.templates_removed, 0);
+        assert!(template.exists(), "a recently used template stays");
+        assert!(report.pressure_unmet, "the unmet budget is reported");
         Ok(())
     }
 
