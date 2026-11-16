@@ -1,14 +1,14 @@
 use super::*;
 
+use futures_util::StreamExt as _;
+
 use crate::db::CacheVerifyRow;
 
 /// What starts one cache pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CacheRefreshScope {
-    /// The 15-minute timer. The pass has jailerd confirm the template of
-    /// every pinned image, ready ones too, verifies retained content that is
-    /// older than the ok age, oldest content first, and repairs what it finds
-    /// bad.
+    /// The 15-minute timer. The pass verifies retained content that is older
+    /// than the ok age, oldest content first, and repairs what it finds bad.
     Scrub,
     /// A desired-state change or a launch that needs a missing descriptor.
     /// The pass only prepares the pinned entries that are not ready.
@@ -54,7 +54,7 @@ pub(super) async fn run_cache_refresh_cycle(
         // A VM cannot boot without its Kino. This runs in both scopes, so a
         // fresh host reaches a bootable Kino without waiting for a scrub.
         warm_required_kino(&pins, context).await;
-        prepare_missing_pinned_entries(&pins, context, scope).await;
+        prepare_missing_pinned_entries(&pins, context).await;
         if scope == CacheRefreshScope::Scrub
             && let Err(error) = scrub_retained_content(context, &pins).await
         {
@@ -85,10 +85,7 @@ const REQUEUE_RETRY_DELAY: Duration = Duration::from_secs(5);
 const REQUEUE_ROUNDS_PER_PASS: usize = 12;
 
 /// Prepare the pinned images that are not ready, one image at a time, the
-/// ones a launch waits on first. A scrub's first round sends the ready ones
-/// too: jailerd confirms a template it holds from its metadata, which also
-/// marks it used, so its store GC keeps it; one its GC removed, it prepares
-/// again.
+/// ones a launch waits on first.
 ///
 /// The pass holds the single image prepare job for the whole process, parks
 /// between two images while a boot is live, and sends each import to jailerd's
@@ -99,11 +96,7 @@ const REQUEUE_ROUNDS_PER_PASS: usize = 12;
 /// boundary when a boot needs the CPU, and the pass retries the same image
 /// after a short delay until the pinned entries are ready or the round budget
 /// is used up.
-async fn prepare_missing_pinned_entries(
-    pins: &RequiredPins,
-    context: CacheRefreshContext<'_>,
-    scope: CacheRefreshScope,
-) {
+async fn prepare_missing_pinned_entries(pins: &RequiredPins, context: CacheRefreshContext<'_>) {
     let _prepare = match budget::acquire_prepare_job().await {
         Ok(permit) => permit,
         Err(error) => {
@@ -114,9 +107,11 @@ async fn prepare_missing_pinned_entries(
     let mut rounds = 0usize;
     loop {
         rounds = rounds.saturating_add(1);
-        let mut missing = images_to_prepare(&pins.images, scope, rounds, |image| {
-            ready::is_image_ready(context.cache_root, image)
-        });
+        let mut missing = pins
+            .images
+            .iter()
+            .filter(|image| !ready::is_image_ready(context.cache_root, image))
+            .collect::<Vec<_>>();
         if missing.is_empty() {
             return;
         }
@@ -156,19 +151,63 @@ async fn prepare_missing_pinned_entries(
     }
 }
 
-/// The pinned images a round of the pass sends to jailerd: those that are not
-/// ready, and on a scrub's first round every one.
-fn images_to_prepare<'a>(
-    images: impl IntoIterator<Item = &'a OciDigest>,
-    scope: CacheRefreshScope,
-    round: usize,
-    is_ready: impl Fn(&OciDigest) -> bool,
-) -> Vec<&'a OciDigest> {
-    let confirm_ready = scope == CacheRefreshScope::Scrub && round == 1;
-    images
-        .into_iter()
-        .filter(|image| confirm_ready || !is_ready(image))
-        .collect()
+/// How often jailerd confirms the template of every ready pinned image. A
+/// confirmation marks the template used, so store GC, which takes only
+/// templates idle longer than its grace, keeps every pinned one. It is fixed,
+/// whatever the refresh interval, and well below the least grace jailerd
+/// accepts.
+pub(super) const TEMPLATE_CONFIRM_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const _: () = assert!(
+    TEMPLATE_CONFIRM_INTERVAL.as_secs() * 3 <= intar_jailer_protocol::MIN_STORE_GC_GRACE_SECONDS
+);
+
+/// How many confirmations are in flight at once. One whose template is gone
+/// prepares it in jailerd's background lane; the rest are metadata checks
+/// that do not wait for it.
+const TEMPLATE_CONFIRMS_IN_FLIGHT: usize = 4;
+
+/// Have jailerd confirm the template of every pinned image that is ready.
+///
+/// This runs on its own cadence, beside the cache pass, so a long import
+/// never holds it back. Jailerd answers a template it holds from its
+/// metadata without its background lane; it prepares one that is gone. A
+/// requeue therefore means the template is gone and the lane is busy: the
+/// image's readiness is withdrawn and the cache pass, woken, prepares it.
+pub(super) async fn confirm_ready_templates(context: CacheRefreshContext<'_>) {
+    let Some(desired) = crate::bridge::load_cached_desired_state(context.bridge, context.db).await
+    else {
+        return;
+    };
+    let pins = RequiredPins::from_desired_state(&desired);
+    let ready = pins
+        .images
+        .iter()
+        .filter(|image| ready::is_image_ready(context.cache_root, image))
+        .collect::<Vec<_>>();
+    futures_util::stream::iter(ready)
+        .for_each_concurrent(TEMPLATE_CONFIRMS_IN_FLIGHT, |image| async move {
+            wait_for_vm_boot_idle().await;
+            let outcome = prepare_one_image(image, context).await;
+            if template_lost(&outcome) {
+                info!(
+                    image = image.as_str(),
+                    "the image's template is gone; preparing it again"
+                );
+                if let Err(error) = ready::withdraw_ready_image(context.cache_root, image) {
+                    warn!(error = %error, image = image.as_str(), "failed to withdraw the image's readiness");
+                }
+                crate::image_cache::wake_cache_refresh();
+            } else if let Err(error) = outcome {
+                warn!(error = %format!("{error:#}"), image = image.as_str(), "jailerd did not confirm the image's template");
+            }
+        })
+        .await;
+}
+
+/// Whether a confirmation found the template gone: jailerd requeues only a
+/// template it does not hold, since one it holds needs no lane.
+fn template_lost(outcome: &Result<()>) -> bool {
+    outcome.as_ref().is_err_and(is_requeued)
 }
 
 /// Whether a prepare error is a jailerd requeue rather than a failure.
@@ -348,29 +387,18 @@ fn scrub_items(store: &BlobStore, pins: &RequiredPins) -> Vec<scheduler::ScrubIt
 
 #[cfg(test)]
 mod tests {
-    use super::super::pins::tests::digest;
     use super::*;
 
     #[test]
-    fn a_scrub_has_jailerd_confirm_the_templates_of_ready_images() {
-        let (ready, missing) = (digest('a'), digest('b'));
-        let images = [ready.clone(), missing.clone()];
-        let is_ready = |image: &OciDigest| *image == ready;
-
-        // A template jailerd's GC removed behind a ready descriptor is
-        // prepared again by the next scrub.
-        assert_eq!(
-            images_to_prepare(&images, CacheRefreshScope::Scrub, 1, is_ready),
-            vec![&ready, &missing]
-        );
-        // A requeue round and a wake-up prepare only what is not ready.
-        assert_eq!(
-            images_to_prepare(&images, CacheRefreshScope::Scrub, 2, is_ready),
-            vec![&missing]
-        );
-        assert_eq!(
-            images_to_prepare(&images, CacheRefreshScope::MissingOnly, 1, is_ready),
-            vec![&missing]
-        );
+    fn a_requeued_confirmation_means_the_template_is_gone() {
+        let requeued = anyhow::Error::from(crate::vm::ImagePrepareRequeued {
+            message: "a boot holds the lane".to_owned(),
+        })
+        .context("failed to prepare the root-owned jail image template");
+        assert!(template_lost(&Err(requeued)));
+        assert!(!template_lost(&Ok(())));
+        assert!(!template_lost(&Err(anyhow::anyhow!(
+            "jailerd host_not_ready: fast image template store is unavailable"
+        ))));
     }
 }

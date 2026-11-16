@@ -970,8 +970,8 @@ pub(super) async fn run_create(
         match launch_jailed_cloud_hypervisor(inner, &req, &ready_image).await {
             Ok(result) => break result,
             Err(error)
-                if !template_prepared_again
-                    && withdraw_if_template_missing(&cache_root, req.image, &error) =>
+                if withdraw_if_template_missing(&cache_root, req.image, &error)
+                    && !template_prepared_again =>
             {
                 // Jailerd's store GC removed the template after it was marked
                 // ready. Wait for it to be prepared again, as a launch whose

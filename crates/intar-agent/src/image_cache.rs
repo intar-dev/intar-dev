@@ -234,26 +234,39 @@ pub fn spawn_warm_cache_with_bridge(
             cache_root: &cache_root,
             vm: &vm,
         };
-        // Startup prepares the pinned entries that the agent already knows
-        // about. It never starts a full-cache repair: a pass covers only the
-        // pins, and the incremental scrub covers them over several bounded
-        // passes.
-        run_cache_refresh_cycle(refresh_context, refresh::CacheRefreshScope::MissingOnly).await;
+        let passes = async move {
+            // Startup prepares the pinned entries that the agent already knows
+            // about. It never starts a full-cache repair: a pass covers only the
+            // pins, and the incremental scrub covers them over several bounded
+            // passes.
+            run_cache_refresh_cycle(refresh_context, refresh::CacheRefreshScope::MissingOnly).await;
 
-        let mut interval = tokio::time::interval(Duration::from_secs(
-            registry.refresh_interval_minutes.saturating_mul(60),
-        ));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
-        loop {
-            let scope = tokio::select! {
-                _ = interval.tick() => refresh::CacheRefreshScope::Scrub,
-                () = CACHE_REFRESH_WAKE.get_or_init(Notify::new).notified() => {
-                    refresh::CacheRefreshScope::MissingOnly
-                }
-            };
-            run_cache_refresh_cycle(refresh_context, scope).await;
-        }
+            let mut interval = tokio::time::interval(Duration::from_secs(
+                registry.refresh_interval_minutes.saturating_mul(60),
+            ));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+            loop {
+                let scope = tokio::select! {
+                    _ = interval.tick() => refresh::CacheRefreshScope::Scrub,
+                    () = CACHE_REFRESH_WAKE.get_or_init(Notify::new).notified() => {
+                        refresh::CacheRefreshScope::MissingOnly
+                    }
+                };
+                run_cache_refresh_cycle(refresh_context, scope).await;
+            }
+        };
+        // Beside the passes, from startup on: a long import never holds back
+        // the confirmations that keep pinned templates from store GC.
+        let confirmations = async move {
+            let mut interval = tokio::time::interval(refresh::TEMPLATE_CONFIRM_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                refresh::confirm_ready_templates(refresh_context).await;
+            }
+        };
+        tokio::join!(passes, confirmations);
     });
 }
 
