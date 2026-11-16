@@ -755,12 +755,13 @@ describe("reported CPU of a failed VM", () => {
     });
   });
 
-  it("still counts a failed VM whose quota was verified exactly once", () => {
-    const live = { ...actualVm("run-a", "web", 1), phase: "failed" as const };
-    // Its 1 000 committed millis are its own, so nothing else is unreserved.
-    expect(hostCpuReservationCapacityFromSnapshot(report(live), reserved)).toMatchObject({
-      effectiveCommittedCpuMillis: 1_000,
-      availableCpuMillis: 4_000 - 1_000,
+  it("leaves out a failed VM that reports a verified quota too", () => {
+    // Its jail may be gone while the agent still holds its CPU record. If its
+    // unit still runs, this counts it twice, which only admits less.
+    const failed = { ...actualVm("run-a", "web", 1), phase: "failed" as const };
+    expect(hostCpuReservationCapacityFromSnapshot(report(failed), reserved)).toMatchObject({
+      effectiveCommittedCpuMillis: 2_000,
+      availableCpuMillis: 4_000 - 2_000,
     });
   });
 });

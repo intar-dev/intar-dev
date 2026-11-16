@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { reportedVmHoldsCpu, strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
+import { strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
 import type { HostStateReportV3, VmStateV3 } from "@/generated/contracts/bridge-message-v9";
 
 export const RUNTIME_PENDING_RESOURCE_RESERVATION_TTL_MS = 5 * 60_000;
@@ -120,7 +120,7 @@ export function availableRuntimeHostResources(input: {
     // A VM's host-local name is its machine name and run id.
     const key = `${vm.run_id}\0${vm.name}-${vm.run_id}`;
     const reservedVm = reservedVmByIdentity.get(key);
-    if (!reservedVm || (vm.phase === "failed" && !reportedVmHoldsCpu({ ...vm }))) continue;
+    if (!reservedVm || vm.phase === "failed") continue;
     const effectiveCpuMillis = reportedEffectiveCpuMillis(vm);
     if (effectiveCpuMillis !== null) {
       reportedCpuByExecution.set(
