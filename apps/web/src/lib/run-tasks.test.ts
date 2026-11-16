@@ -83,6 +83,18 @@ describe("task projection", () => {
     expect(tasksSolved(tasks)).toBe(solved);
   });
 
+  it("shows a pass only once every need is complete", () => {
+    const tasks = mergeReportedTasks(initialRunTasks(defs), "client", [report("probe", "pass")], 1);
+    const status = () => Object.fromEntries(taskViews(tasks).map((view) => [view.id, view.status]));
+    expect(status()).toMatchObject({ install: "pending", serve: "pending", probe: "pending" });
+    const failing = mergeReportedTasks(tasks, "web", [report("install", "pass"), report("serve", "fail")], 2);
+    expect(Object.fromEntries(taskViews(failing).map((view) => [view.id, view.status])))
+      .toMatchObject({ install: "pass", serve: "fail", probe: "pending" });
+    const passing = mergeReportedTasks(failing, "web", [report("serve", "pass")], 3);
+    expect(Object.fromEntries(taskViews(passing).map((view) => [view.id, view.status])))
+      .toMatchObject({ install: "pass", serve: "pass", probe: "pass" });
+  });
+
   it("never completes a cycle, and a run of optional tasks only is never solved", () => {
     const cycle = initialRunTasks([task("a", "m", { needs: ["b"] }), task("b", "m", { needs: ["a"] })]);
     const passed = mergeReportedTasks(cycle, "m", [report("a", "pass"), report("b", "pass")], 1);

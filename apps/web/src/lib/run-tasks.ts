@@ -84,7 +84,9 @@ export function mergeReportedTasks(
 /**
  * A task is available when every task it needs is complete, on any machine,
  * and complete when it is available and has passed. A need on an unknown
- * task or a cycle is never complete.
+ * task or a cycle is never complete. A learner sees a pass only on a complete
+ * task: one whose own check passed while a need is not complete is pending,
+ * and its latched pass shows once the needs complete.
  */
 export function taskViews(tasks: readonly RunTaskState[]): RunTaskView[] {
   const byId = new Map(tasks.map((task) => [task.id, task]));
@@ -110,7 +112,7 @@ export function taskViews(tasks: readonly RunTaskState[]): RunTaskView[] {
       body: task.body ?? null,
       machine: task.machine,
       optional: task.optional,
-      status: task.passedAt !== null ? "pass" : task.status,
+      status: isComplete(task.id) ? "pass" : task.passedAt !== null ? "pending" : task.status,
       message: task.message,
       available: available(task),
       complete: isComplete(task.id),
