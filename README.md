@@ -136,6 +136,9 @@ before the workflow attested them have no attestation. Then:
      then `systemctl start intar-agent`. Later boots re-run the self-test by
      themselves through `intar-jailerd-boot-check.service`, which `install.sh`
      enables; it disables the older hand-written `intar-platform-check`.
+     If that boot check failed, jailerd runs but admits nothing: fix the
+     cause, repeat this step, then `systemctl reset-failed
+     intar-jailerd-boot-check`.
   5. Check that the installed binaries match the release and that the journal
      shows `bridge v9 handshake complete` with no warnings. Then dispatch
      image-ops `gate-open`, unless a later step of a larger rollout opens it.
