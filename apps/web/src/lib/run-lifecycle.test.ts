@@ -543,6 +543,60 @@ describe("run lifecycle", () => {
     );
   });
 
+  it("keeps a failed VM's reason while the host deletes it", () => {
+    const lost = "The machine was shut down or stopped unexpectedly.";
+    const constraints = { generation: "generation-1", cpu_millis: 1_000 };
+    const failed = applyVmReportToRunState({
+      runId: "run-a",
+      current: readyRunWithRecording(),
+      report: vmReport({ runId: "run-a", vmName: "webserver", phase: "failed", observedAt: 3_000, error: lost, runtimeConstraints: constraints }),
+    });
+    // What the agent reports for a failed VM whose delete has started.
+    const deleting = applyVmReportToRunState({
+      runId: "run-a",
+      current: failed,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "stopping",
+        observedAt: 3_250,
+        error: lost,
+        terminal: { state: "pending", reason: "destroying", observed_at_unix_ms: 3_250 },
+        runtimeConstraints: constraints,
+      }),
+    });
+
+    expect(deleting).toMatchObject({ phase: "failed", phaseDetail: lost });
+    expect(deleting.vms[0]).toMatchObject({ phase: "failed", terminalPhase: "failed", terminalReason: lost });
+
+    // A delete that fails reports its own failure, which still counts.
+    const deleteFailed = applyVmReportToRunState({
+      runId: "run-a",
+      current: deleting,
+      report: vmReport({ runId: "run-a", vmName: "webserver", phase: "failed", observedAt: 3_500, error: "delete failed: boom", runtimeConstraints: constraints }),
+    });
+    expect(deleteFailed.vms[0]).toMatchObject({ phase: "failed", terminalReason: "delete failed: boom" });
+  });
+
+  it("shows a healthy VM's delete as teardown", () => {
+    const deleting = applyVmReportToRunState({
+      runId: "run-a",
+      current: recomputeRunState({ ...readyRunWithRecording(), phase: "teardown_requested" }),
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "stopping",
+        observedAt: 3_000,
+        terminal: { state: "pending", reason: "destroying", observed_at_unix_ms: 3_000 },
+        runtimeConstraints: { generation: "generation-1", cpu_millis: 1_000 },
+      }),
+    });
+
+    // As before: the VM tears down, and its accepted shell readiness stays.
+    expect(deleting.vms[0]).toMatchObject({ phase: "destroying", terminalPhase: "ready", terminalReason: null });
+    expect(deleting.phase).toBe("tearing_down");
+  });
+
   it("ends a run whose delete was already requested as a normal completion", () => {
     const tearingDown = recomputeRunState({ ...readyRunWithRecording(), phase: "teardown_requested" });
     const stopping = applyVmReportToRunState({

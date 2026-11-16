@@ -425,6 +425,12 @@ function projectTerminalReadiness(
     };
   }
 
+  // A failed VM keeps its failure reason; the host's teardown progress
+  // ("destroying") while it deletes the VM is not a terminal reason.
+  if (current.phase === "failed") {
+    return currentTerminalProjection(current);
+  }
+
   const expectedCpuMillis = current.provisioning.resources?.cpuMillis ?? null;
   const quotaReady =
     expectedCpuMillis !== null &&
