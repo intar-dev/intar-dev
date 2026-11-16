@@ -146,8 +146,49 @@ pub fn collect_preflight_with_environment(
     ));
     push_bridge_check(&mut checks, cfg);
     push_registry_check(&mut checks, cfg);
+    if let Ok(capabilities) = jailerd_capabilities
+        && !capabilities.privileged_self_test_passed
+    {
+        present_missing_self_test(&mut checks, capabilities);
+    }
 
     PreflightReport { checks }
+}
+
+/// The checks that fail whenever jailerd lacks this boot's privileged
+/// self-test, whatever else is true of the host.
+const SELF_TEST_CONSEQUENCES: [&str; 6] = [
+    "Landlock ABI",
+    "KVM helper accounting",
+    "jailer v3 isolation capability",
+    "hard CPU quota capability",
+    "fast jail template store",
+    "Landlock enforcement capability",
+];
+
+/// Presentation only: without this boot's self-test the one cause comes
+/// first, as the failure, and the checks that fail because of it are shown
+/// as its consequences. With the self-test in place every check reports as
+/// it always has.
+fn present_missing_self_test(checks: &mut Vec<PreflightCheck>, capabilities: &JailerCapabilities) {
+    // jailerd reports a Landlock ABI only from an attestation it verified for
+    // this boot, so one without the passed flag is a self-test that jailerd
+    // withdrew after containing a VM.
+    let cause = if capabilities.landlock_abi.is_some() {
+        "jailerd withdrew this boot's privileged self-test after it contained a VM it could not verify (see `journalctl -u intar-jailerd`); stop intar-agent, restart intar-jailerd, and run doctor again; if it stays withdrawn, run `sudo /usr/lib/intar/intar-jailerd-self-test`"
+    } else {
+        "jailerd has no privileged self-test for this boot (none, or one from a previous boot): the boot check failed or has not run (see `journalctl -u intar-jailerd-boot-check`); stop intar-agent, run `sudo /usr/lib/intar/intar-jailerd-self-test`, and run doctor again"
+    };
+    checks.retain(|check| check.name != "privileged self-test attestation");
+    for check in checks.iter_mut() {
+        if check.status == PreflightStatus::Fail
+            && SELF_TEST_CONSEQUENCES.contains(&check.name.as_str())
+        {
+            check.status = PreflightStatus::Warn;
+            check.detail = format!("depends on the privileged self-test: {}", check.detail);
+        }
+    }
+    checks.insert(0, fail("privileged self-test attestation", cause));
 }
 
 fn push_linux_check(checks: &mut Vec<PreflightCheck>, os: &str) {

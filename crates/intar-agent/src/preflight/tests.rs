@@ -396,3 +396,113 @@ fn minimally_ready_environment(temp: &TempDir) -> PreflightEnvironment {
         default_work_root: Ok(temp.path().join("work")),
     }
 }
+
+/// The doctor's lines, as `--doctor` prints them.
+fn rendered(capabilities: JailerCapabilities, temp: &TempDir) -> (Vec<String>, usize) {
+    let env = minimally_ready_environment(temp);
+    let report =
+        collect_preflight_with_environment(&AgentConfig::default(), &env, &Ok(capabilities));
+    let lines = report
+        .checks
+        .iter()
+        .map(|check| {
+            let status = match check.status {
+                PreflightStatus::Pass => "ok",
+                PreflightStatus::Warn => "warn",
+                PreflightStatus::Fail => "fail",
+            };
+            format!("[{status}] {}: {}", check.name, check.detail)
+        })
+        .collect();
+    (lines, report.failure_count())
+}
+
+/// jailerd as it reports itself without this boot's self-test.
+fn without_self_test(source_root: PathBuf) -> JailerCapabilities {
+    let mut capabilities = ready_capabilities(source_root);
+    capabilities.privileged_self_test_passed = false;
+    capabilities.kvm_accounting_proven = false;
+    capabilities.landlock_abi = None;
+    capabilities.supports_jailer_v3 = false;
+    capabilities.supports_hard_cpu_quota = false;
+    capabilities.supports_landlock = false;
+    capabilities
+}
+
+#[test]
+fn a_missing_self_test_is_the_one_failure_and_names_the_boot_check() {
+    let temp = TempDir::new().unwrap();
+    let (fine, fine_failures) = rendered(ready_capabilities(temp.path().to_path_buf()), &temp);
+    let (lines, failures) = rendered(without_self_test(temp.path().to_path_buf()), &temp);
+
+    assert!(lines[0].starts_with(
+        "[fail] privileged self-test attestation: jailerd has no privileged self-test for this boot"
+    ));
+    assert!(lines[0].contains("journalctl -u intar-jailerd-boot-check"));
+    assert!(
+        lines[0].contains("stop intar-agent, run `sudo /usr/lib/intar/intar-jailerd-self-test`")
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("privileged self-test attestation"))
+            .count(),
+        1
+    );
+    for name in [
+        "Landlock ABI",
+        "KVM helper accounting",
+        "jailer v3 isolation capability",
+        "hard CPU quota capability",
+        "fast jail template store",
+        "Landlock enforcement capability",
+    ] {
+        assert!(
+            lines.iter().any(|line| line.starts_with(&format!(
+                "[warn] {name}: depends on the privileged self-test: "
+            ))),
+            "{name} is not shown as a consequence: {lines:#?}"
+        );
+    }
+    // The cause is the one failure the missing self-test adds.
+    assert_eq!(failures, fine_failures + 1);
+    assert!(
+        fine.iter()
+            .all(|line| !line.contains("depends on the privileged self-test"))
+    );
+}
+
+#[test]
+fn a_withdrawn_self_test_of_this_boot_says_restart_jailerd() {
+    let temp = TempDir::new().unwrap();
+    let mut capabilities = without_self_test(temp.path().to_path_buf());
+    // jailerd verified this boot's attestation, then a containment cleared it.
+    capabilities.landlock_abi = Some(3);
+    let (lines, _) = rendered(capabilities, &temp);
+    assert!(lines[0].starts_with(
+        "[fail] privileged self-test attestation: jailerd withdrew this boot's privileged self-test"
+    ));
+    assert!(lines[0].contains("restart intar-jailerd"));
+}
+
+#[test]
+fn a_missing_capability_with_the_self_test_in_place_fails_as_before() {
+    let temp = TempDir::new().unwrap();
+    let (fine, fine_failures) = rendered(ready_capabilities(temp.path().to_path_buf()), &temp);
+    let mut capabilities = ready_capabilities(temp.path().to_path_buf());
+    capabilities.supports_hard_cpu_quota = false;
+    let (lines, failures) = rendered(capabilities, &temp);
+
+    assert_eq!(failures, fine_failures + 1);
+    assert_eq!(lines[0], fine[0]);
+    assert!(lines.contains(
+        &"[fail] hard CPU quota capability: jailerd does not advertise aggregate hard CPU quotas"
+            .to_string()
+    ));
+    assert!(lines.contains(&"[ok] privileged self-test attestation: jailerd reports a successful prior privileged self-test; doctor did not rerun it".to_string()));
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("depends on the privileged self-test"))
+    );
+}
