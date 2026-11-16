@@ -760,20 +760,25 @@ function scenarioRevisions() {
 }
 
 function machineBuilds() {
-  const build = (key: string, target: string, state: string, extra: Record<string, unknown> = {}) => ({
-    buildKey: `sha256:${key.repeat(64)}`,
-    bundleRev: rev("c"),
-    organizationId: null,
-    target,
-    state,
-    phase: null,
-    attempt: 1,
-    error: null,
-    hasLog: true,
-    createdAt: FIXED_NOW - 2 * 60 * minute,
-    updatedAt: FIXED_NOW - 90 * minute,
-    ...extra,
-  });
+  const build = (key: string, target: string, state: string, extra: Record<string, unknown> = {}) => {
+    const row = {
+      buildKey: `sha256:${key.repeat(64)}`,
+      bundleRev: rev("c"),
+      organizationId: null,
+      target,
+      state,
+      phase: null,
+      attempt: 1,
+      error: null,
+      hasLog: true,
+      createdAt: FIXED_NOW - 2 * 60 * minute,
+      updatedAt: FIXED_NOW - 90 * minute,
+      ...extra,
+    };
+    // As the API: every attempt up to the newest uploaded log.
+    const logAttempts = row.hasLog ? Array.from({ length: Number(row.attempt) }, (_, index) => index + 1) : [];
+    return { ...row, logAttempts };
+  };
   return [
     build("1", "repair-dns/resolver", "building", { phase: "converting", hasLog: false, updatedAt: FIXED_NOW - minute }),
     build("2", "repair-nginx/webserver", "failed", { attempt: 2, error: "machine build failed: apt-get exited with 100" }),
