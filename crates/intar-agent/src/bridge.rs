@@ -141,11 +141,13 @@ pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: Path
         }
     };
 
-    let mut retry_ms = RETRY_MIN_MS;
     let mut current_desired_state = load_cached_desired_state(&cfg, &db).await;
     // Cached identity is restart evidence, not permission to create new work.
     // Reconcile only after this control connection receives current desired state.
-    let mut reconnect = false;
+    let mut state = ReconnectState {
+        retry_ms: RETRY_MIN_MS,
+        reconnect: false,
+    };
 
     loop {
         match connect_once(
@@ -155,17 +157,17 @@ pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: Path
             &db,
             &disk_probe_path,
             &mut current_desired_state,
-            reconnect,
+            &mut state,
         )
         .await
         {
             Ok(()) => {
-                retry_ms = RETRY_MIN_MS;
-                reconnect = true;
+                state.retry_ms = RETRY_MIN_MS;
+                state.reconnect = true;
             }
             Err(error) => {
                 let upgrade_required = error.downcast_ref::<UpgradeRequired>().is_some();
-                let (wait_ms, next_ms) = retry_after_failure(retry_ms, upgrade_required);
+                let (wait_ms, next_ms) = retry_after_failure(state.retry_ms, upgrade_required);
                 if upgrade_required {
                     warn!(
                         error = %error,
@@ -177,8 +179,8 @@ pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: Path
                     warn!(error = %error, retry_ms = wait_ms, "bridge connection loop failed");
                 }
                 sleep(Duration::from_millis(wait_ms)).await;
-                retry_ms = next_ms;
-                reconnect = true;
+                state.retry_ms = next_ms;
+                state.reconnect = true;
             }
         }
     }
@@ -188,6 +190,21 @@ pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: Path
 #[derive(Debug, thiserror::Error)]
 #[error("the Worker refused bridge protocol {BRIDGE_PROTOCOL_VERSION}: upgrade required")]
 pub(crate) struct UpgradeRequired;
+
+/// The reconnect loop's backoff, shared with each connection attempt.
+struct ReconnectState {
+    retry_ms: u64,
+    /// Not the agent's first connection.
+    reconnect: bool,
+}
+
+impl ReconnectState {
+    /// A completed handshake starts the next outage's backoff over. A server
+    /// that accepts and drops before its hello does not reset it.
+    fn handshake_completed(&mut self) {
+        self.retry_ms = RETRY_MIN_MS;
+    }
+}
 
 /// How long to wait after a failed connection, and the backoff for the next
 /// one. An upgrade-required refusal waits long and keeps the backoff at its
@@ -227,8 +244,9 @@ async fn connect_once(
     db: &Db,
     disk_probe_path: &Path,
     current_desired_state: &mut Option<HostDesiredStateV3>,
-    reconnect: bool,
+    state: &mut ReconnectState,
 ) -> Result<()> {
+    let reconnect = state.reconnect;
     let bootstrap = bootstrap_agent_access(cfg, http).await?;
     vm.cache_run_cli_access_token(&bootstrap.access_token).await;
     crate::image_cache::cache_registry_access_token(&bootstrap.access_token).await;
@@ -307,6 +325,7 @@ async fn connect_once(
         desired_version = server_hello.desired_version,
         "bridge v9 handshake complete"
     );
+    state.handshake_completed();
 
     send_sync_request(
         &mut write,

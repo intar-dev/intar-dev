@@ -137,6 +137,22 @@ fn a_refused_protocol_backs_off_long_without_resetting_the_backoff() {
 }
 
 #[test]
+fn a_completed_handshake_resets_the_backoff() {
+    let mut state = ReconnectState {
+        retry_ms: RETRY_MAX_MS,
+        reconnect: true,
+    };
+    // Accepted and dropped before the hello: the long outage's backoff stands.
+    assert_eq!(retry_after_failure(state.retry_ms, false).0, RETRY_MAX_MS);
+    state.handshake_completed();
+    // A later cut of that session retries at once and backs off from there.
+    assert_eq!(
+        retry_after_failure(state.retry_ms, false),
+        (RETRY_MIN_MS, 2 * RETRY_MIN_MS)
+    );
+}
+
+#[test]
 fn close_4426_is_upgrade_required() {
     use tokio_tungstenite::tungstenite::protocol::CloseFrame;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
