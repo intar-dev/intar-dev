@@ -388,6 +388,9 @@ function scenarioRunStatus(run: FixtureRecord, revision: number) {
     savingStage: run.savingStage,
     replayState: run.replayState,
     hasReplay: run.hasReplay,
+    ...(run.machineUnreachable === undefined
+      ? {}
+      : { machineUnreachable: run.machineUnreachable }),
     vms,
   };
 }

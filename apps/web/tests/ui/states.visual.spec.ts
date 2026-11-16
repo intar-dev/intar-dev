@@ -1,8 +1,9 @@
 import { expect, test } from "./fixtures/test";
-import { makeMultiReplayRun } from "./fixtures/data";
+import { makeMultiReplayRun, markMachineUnreachable } from "./fixtures/data";
 import { routeCase } from "./routes";
 import { PLAY_PATH, mockPlayScenario } from "./support/play";
 import { expectRouteScreenshot } from "./support/screenshot";
+import { VM_LOST_REASON as LOST_REASON } from "@/generated/constants";
 
 async function expectRunTimer(
   page: Parameters<typeof expectRouteScreenshot>[0],
@@ -787,6 +788,41 @@ test.describe("focused mobile workspace", () => {
     );
     await expect(page.locator(".run-artifact-player .ap-player")).toBeVisible();
     await expectRouteScreenshot(page, "run-replay-carousel-dark-mobile");
+  });
+});
+
+test.describe("lost machine states", () => {
+  test("machine not reachable", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "light",
+      runState: "running",
+    });
+    markMachineUnreachable(ui.server.state.run);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expect(
+      page.getByText("Machine not reachable", { exact: true }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "run-machine-unreachable-light-desktop");
+  });
+
+  test("lost machine recap", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "failed",
+    });
+    ui.server.state.run.phaseDetail = LOST_REASON;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expect(
+      page.getByRole("heading", { name: "Could not finish", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText(LOST_REASON, { exact: true })).toBeVisible();
+    await expectRouteScreenshot(page, "run-lost-machine-recap-dark-desktop");
   });
 });
 

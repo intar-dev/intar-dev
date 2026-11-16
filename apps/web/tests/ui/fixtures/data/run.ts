@@ -315,3 +315,15 @@ export function makeMultiReplayRun(): Record<string, unknown> {
   run.vms = [workerVm, webVm];
   return run;
 }
+
+/**
+ * A run whose host stopped answering, as the status API shows it: the run
+ * says so and no new shell can open, on the run or any VM.
+ */
+export function markMachineUnreachable(run: Record<string, unknown>): void {
+  run.machineUnreachable = true;
+  run.canOpenTerminal = false;
+  for (const vm of run.vms as Array<Record<string, unknown>>) {
+    vm.canOpenTerminal = false;
+  }
+}

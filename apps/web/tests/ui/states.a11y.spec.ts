@@ -1,7 +1,8 @@
 import type { Locator, Page } from "@playwright/test";
+import { VM_LOST_REASON } from "@/generated/constants";
 import { buildTemporaryNativeSshCommand } from "@/lib/native-ssh";
 import { expect, test } from "./fixtures/test";
-import { makeMultiReplayRun } from "./fixtures/data";
+import { makeMultiReplayRun, markMachineUnreachable } from "./fixtures/data";
 import { routeCase } from "./routes";
 import { expectNoAxeViolations } from "./support/axe";
 import { expectNoHorizontalOverflow, setRootTextScale200 } from "./support/layout";
@@ -1541,6 +1542,47 @@ test.describe("focused mobile state accessibility", () => {
     await expect(progress.locator('[data-status="needs_repair"]')).toHaveCount(
       2,
     );
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("machine not reachable card is announced", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+    markMachineUnreachable(ui.server.state.run);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    const shell = page.getByRole("region", { name: "Shell" });
+    await expect(shell.getByText("Machine not reachable", { exact: true })).toBeVisible();
+    await expect(shell.getByRole("status")).toHaveText("Not reachable");
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("lost machine recap names the cause", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "light",
+      runState: "failed",
+    });
+    ui.server.state.run.phaseDetail = VM_LOST_REASON;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expect(
+      page.getByRole("heading", { name: "Could not finish", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText(VM_LOST_REASON, { exact: true })).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
