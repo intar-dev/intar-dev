@@ -594,7 +594,7 @@ enum StartupReconcileOutcome {
 }
 
 /// What the learner's run page shows for a VM whose machine went away.
-const LOST_MACHINE_REASON: &str = "The machine was shut down or stopped unexpectedly.";
+const LOST_MACHINE_REASON: &str = intar_contracts::bridge_v9::VM_LOST_REASON;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrackedVmRuntimeStatus {
