@@ -23,6 +23,10 @@ pub const HOST_DESIRED_STATE_SCHEMA_VERSION_7: u16 = 7;
 pub const HOST_STATE_REPORT_SCHEMA_VERSION_8: u16 = 8;
 pub const VM_REPORT_SCHEMA_VERSION_7: u16 = 7;
 
+/// The failure reason a host reports for a VM whose machine went away. The
+/// control plane shows it to the learner, also after the VM is archived.
+pub const VM_LOST_REASON: &str = "The machine was shut down or stopped unexpectedly.";
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(

@@ -564,6 +564,7 @@ export const SHARE_INGEST_CLOSE_ENDED = {};
 export const SHARE_INGEST_CLOSE_LIMIT = {};
 export const SHARE_INGEST_CLOSE_STOPPED = {};
 export const BRIDGE_PROTOCOL_VERSION_9 = {};
+export const VM_LOST_REASON = "{}";
 export const GUEST_CONTRACT = {};
 export const GUEST_REPORT_PORT = {};
 export const GUEST_RUN_CLI_PORT = {};
@@ -619,6 +620,7 @@ export const runtimeEnvKeys = {{
         SHARE_INGEST_CLOSE_LIMIT,
         SHARE_INGEST_CLOSE_STOPPED,
         intar_contracts::bridge_v9::BRIDGE_PROTOCOL_VERSION_9,
+        intar_contracts::bridge_v9::VM_LOST_REASON,
         intar_contracts::guest::GUEST_CONTRACT,
         intar_contracts::guest::REPORT_PORT,
         intar_contracts::guest::RUN_CLI_PORT,
