@@ -196,7 +196,12 @@ export class HostRuntimeDO extends HostRuntimeBase {
     const raw = parseJsonRecord(message);
     const helloVersion = raw?.type === "client_hello" ? raw.protocol_version : undefined;
     if (attachment.bridgeProtocol === "v9" || helloVersion === BRIDGE_PROTOCOL_VERSION_9) {
-      await traceOperation("host.bridge.message", () => this.handleBridgeMessageV9(ws, attachment, raw), { "intar.bridge.message_type": String(raw?.type) });
+      const startedAt = Date.now();
+      try {
+        await traceOperation("host.bridge.message", () => this.handleBridgeMessageV9(ws, attachment, raw), { "intar.bridge.message_type": String(raw?.type) });
+      } finally {
+        logHostMessageTiming(attachment.hostId, raw, startedAt);
+      }
       return;
     }
     // A hello of any other protocol is refused with the close code the
@@ -1778,6 +1783,29 @@ function jsonResponse(body: unknown, status = 200): Response {
       "content-type": "application/json; charset=utf-8",
     },
   });
+}
+
+/**
+ * One line per report from a host: how long after the host observed it the
+ * handler started (`lagMs`, the two clocks permitting) and how long the
+ * handler took. Temporary, to find where a VM's "lab ready" waits.
+ */
+function logHostMessageTiming(hostId: string, raw: Record<string, unknown> | null, startedAt: number): void {
+  if (raw?.type !== "vm_report" && raw?.type !== "state_report") return;
+  const report = raw.report as { observed_at_unix_ms?: unknown; vm?: { name?: unknown; phase?: unknown; lab?: { state?: unknown } | null }; vms?: unknown[] } | undefined;
+  const observedAt = typeof report?.observed_at_unix_ms === "number" ? report.observed_at_unix_ms : null;
+  console.info(JSON.stringify({
+    event: "host_message_timing",
+    hostId,
+    type: raw.type,
+    startedAt,
+    lagMs: observedAt === null ? null : startedAt - observedAt,
+    handlerMs: Date.now() - startedAt,
+    vm: typeof report?.vm?.name === "string" ? report.vm.name : null,
+    phase: typeof report?.vm?.phase === "string" ? report.vm.phase : null,
+    lab: typeof report?.vm?.lab?.state === "string" ? report.vm.lab.state : null,
+    vms: Array.isArray(report?.vms) ? report.vms.length : null,
+  }));
 }
 
 /**
