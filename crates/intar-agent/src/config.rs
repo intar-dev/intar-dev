@@ -21,6 +21,18 @@ pub struct AgentConfig {
     pub vm_defaults: VmDefaultsConfig,
     pub image_registry: ImageRegistryConfig,
     pub image_cache: ImageCacheConfig,
+    pub snapshots: SnapshotsConfig,
+}
+
+/// Starting single-VM runs from a snapshot this host took of their image
+/// (#348). Off unless set: every run cold-boots.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SnapshotsConfig {
+    pub enabled: bool,
+    /// A snapshot needs a TSC that is the same on every CPU and never
+    /// stops. Set only on a test host whose CPU does not report one.
+    pub allow_unstable_tsc: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

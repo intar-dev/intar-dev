@@ -7,6 +7,9 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
             self.preparer
                 .validate_prepared_launch_v3(&self.config, &self.prepared_request)
                 .context("validate root-owned prepared image template")?;
+            self.preparer
+                .validate_snapshot_launch(&self.config, &self.reservation.request)
+                .context("validate the launch's snapshot")?;
 
             progress.identity_reserved = true;
             self.preparer
@@ -78,6 +81,7 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
                 pid_start_time_ticks: None,
                 jail_root_inode: prepared.jail_root_inode,
                 cloud_hypervisor_sha256: self.config.cloud_hypervisor_sha256.as_str().to_owned(),
+                snapshot_links: prepared.snapshot_links.clone(),
             };
             self.preparer
                 .persist(&self.config, &record)

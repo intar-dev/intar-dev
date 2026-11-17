@@ -310,12 +310,28 @@ pub(super) fn open_lifecycle_object_at(
     open_lifecycle_entry_at(parent, name, OFlags::RDONLY)
 }
 
+/// Device and inode, as a VM record stores them.
+#[cfg(target_os = "linux")]
+pub(super) fn link_identity(stat: &rustix::fs::Stat) -> (u64, u64) {
+    (stat.st_dev, stat.st_ino)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn link_identity(stat: &rustix::fs::Stat) -> (u64, u64) {
+    (stat.st_dev as u64, stat.st_ino)
+}
+
 pub(super) fn remove_directory_contents_fd_relative(
     config: &JailerdConfig,
     directory: &impl std::os::fd::AsFd,
     lock_uid: u32,
     lock_gid: u32,
+    linked: &[(u64, u64)],
 ) -> Result<()> {
+    // A snapshot restore's two links into the store are the only entries
+    // that may have another link.
+    let single =
+        |stat: &rustix::fs::Stat| stat.st_nlink == 1 || linked.contains(&link_identity(stat));
     rustix::fs::fchown(
         directory,
         Some(rustix::process::Uid::from_raw(lock_uid)),
@@ -335,7 +351,7 @@ pub(super) fn remove_directory_contents_fd_relative(
         if !lifecycle_owner_allowed(config, before.st_uid, before.st_gid) {
             bail!("refusing to clean a jail entry with an unexpected owner")
         }
-        if file_type != rustix::fs::FileType::Directory && before.st_nlink != 1 {
+        if file_type != rustix::fs::FileType::Directory && !single(&before) {
             bail!("refusing to clean a hard-linked jail entry")
         }
 
@@ -347,7 +363,7 @@ pub(super) fn remove_directory_contents_fd_relative(
             if !same_lifecycle_object(&before, &opened) {
                 bail!("jail directory changed while being opened")
             }
-            remove_directory_contents_fd_relative(config, &child, lock_uid, lock_gid)?;
+            remove_directory_contents_fd_relative(config, &child, lock_uid, lock_gid, linked)?;
             let current =
                 rustix::fs::statat(directory, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
             if !same_lifecycle_object(&opened, &current) {
@@ -359,12 +375,12 @@ pub(super) fn remove_directory_contents_fd_relative(
             let entry = open_lifecycle_object_at(directory, &name)
                 .context("open jail object beneath its pinned parent")?;
             let opened = rustix::fs::fstat(&entry)?;
-            if !same_lifecycle_object(&before, &opened) || opened.st_nlink != 1 {
+            if !same_lifecycle_object(&before, &opened) || !single(&opened) {
                 bail!("jail object changed while being opened")
             }
             let current =
                 rustix::fs::statat(directory, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
-            if !same_lifecycle_object(&opened, &current) || current.st_nlink != 1 {
+            if !same_lifecycle_object(&opened, &current) || !single(&current) {
                 bail!("jail object changed before removal")
             }
             rustix::fs::unlinkat(directory, &name, rustix::fs::AtFlags::empty())
@@ -377,6 +393,7 @@ pub(super) fn remove_directory_contents_fd_relative(
 pub(super) fn remove_generation_tree(
     config: &JailerdConfig,
     generation: &ValidatedId,
+    linked: &[(u64, u64)],
 ) -> Result<bool> {
     let jail_root = trusted_jail_root_fd(config)?;
     let Some(parent) = open_optional_root_directory_at(&jail_root, c"cloud-hypervisor")? else {
@@ -390,7 +407,7 @@ pub(super) fn remove_generation_tree(
             Err(error) => return Err(error).context("open jail generation for cleanup"),
         };
     let opened = validate_root_directory(&generation_fd, "jail generation")?;
-    remove_directory_contents_fd_relative(config, &generation_fd, 0, 0)?;
+    remove_directory_contents_fd_relative(config, &generation_fd, 0, 0, linked)?;
     let current = rustix::fs::statat(&parent, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
     if !same_lifecycle_object(&opened, &current) {
         bail!("jail generation changed before final removal")

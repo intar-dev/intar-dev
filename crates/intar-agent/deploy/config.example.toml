@@ -55,3 +55,11 @@ refresh_interval_minutes = 15
 # The default is 53687091200 (50 GiB). The agent does not keep a full
 # unprivileged raw image. Pinned entries are never deleted to reach it.
 # max_bytes = 53687091200
+
+[snapshots]
+# Start single-VM runs from a snapshot this host took of their image and
+# shape; a run whose restore fails cold-boots. Off by default.
+# enabled = false
+# A snapshot needs a CPU that reports constant_tsc and nonstop_tsc. Set only
+# on a test host that does not.
+# allow_unstable_tsc = false

@@ -117,7 +117,10 @@ pub(super) async fn allocate_run_network(
     for offset in 0..pool_subnet_count {
         let index = ((start_index + u64::from(offset)) % u64::from(pool_subnet_count)) as u32;
         let subnet = pool_network.saturating_add(index.saturating_mul(subnet_size));
-        if used_run_subnets.contains(&subnet) {
+        // The capture network of snapshot starts is never a run's.
+        if used_run_subnets.contains(&subnet)
+            || snapshot::capture_subnet(pool_network, pool_subnet_count) == Some(subnet)
+        {
             continue;
         }
 

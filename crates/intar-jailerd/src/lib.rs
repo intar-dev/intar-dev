@@ -20,9 +20,10 @@ use intar_jailer_protocol::{
     CpuQuotaAttestation, DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest,
     FinalizeVmBootResult, JailPathMap, JailSpecV1, JailerCapabilities, JailerdConfig,
     LaunchVmV3Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT, PROTOCOL_VERSION,
-    PrepareChunkedImageV3Request, PreparedImageV3Result, ProtocolError, Request, RequestClass,
-    Response, RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId,
-    VmCpuRuntimeState, VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
+    PrepareChunkedImageV3Request, PreparedImageV3Result, ProtocolError, PublishSnapshotRequest,
+    Request, RequestClass, Response, RunNetworkResult, SandboxHealth, Sha256Digest, SnapshotInfo,
+    SnapshotLaunch, SourceArtifacts, ValidatedId, VmCpuRuntimeState, VmIdentityRequest,
+    VmInspection, VmLaunchRequest, VmLaunchResult,
 };
 use rustix::fs::{Mode, OFlags, open};
 #[cfg(target_os = "linux")]
@@ -218,6 +219,9 @@ pub struct PreparedJail {
     pub jail_root_inode: Option<u64>,
     pub vmm_executable_identity: Option<RuntimeFileIdentity>,
     pub paths: JailPathMap,
+    /// Hard links a snapshot restore staged into the jail: cleanup accepts
+    /// exactly these and refuses any other hard-linked entry.
+    pub snapshot_links: Vec<(u64, u64)>,
 }
 
 pub trait JailPreparer: Send {
@@ -267,6 +271,43 @@ pub trait JailPreparer: Send {
         self.prepare(config, request, run_network, generation, uid, gid)
     }
     fn destroy(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<bool>;
+    /// Destroy a jail that holds the hard links `linked` of a snapshot.
+    fn destroy_linked(
+        &mut self,
+        config: &JailerdConfig,
+        generation: &ValidatedId,
+        _linked: &[(u64, u64)],
+    ) -> Result<bool> {
+        self.destroy(config, generation)
+    }
+    fn publish_snapshot(
+        &mut self,
+        _config: &JailerdConfig,
+        _record: &VmRecord,
+        _key: &Sha256Digest,
+    ) -> Result<SnapshotInfo> {
+        bail!("snapshots are unavailable")
+    }
+    fn remove_snapshot(
+        &mut self,
+        _config: &JailerdConfig,
+        _image_id: &Sha256Digest,
+        _key: &Sha256Digest,
+    ) -> Result<bool> {
+        bail!("snapshots are unavailable")
+    }
+    fn list_snapshots(&mut self, _config: &JailerdConfig) -> Result<Vec<SnapshotInfo>> {
+        Ok(Vec::new())
+    }
+    /// Refuse a restore launch whose snapshot is missing, unusable or of
+    /// another shape, before the launch holds a UID or a jail.
+    fn validate_snapshot_launch(
+        &mut self,
+        _config: &JailerdConfig,
+        _request: &VmLaunchRequest,
+    ) -> Result<()> {
+        Ok(())
+    }
     fn quarantine(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<()>;
     fn grant_agent_runtime_access(
         &mut self,
@@ -340,6 +381,10 @@ pub struct VmRecord {
     pid_start_time_ticks: Option<u64>,
     jail_root_inode: Option<u64>,
     cloud_hypervisor_sha256: String,
+    /// Left out when empty, so a record without a restore reads back under
+    /// an older daemon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    snapshot_links: Vec<(u64, u64)>,
 }
 
 #[derive(Debug, Error)]
@@ -797,10 +842,15 @@ fn validate_protocol_request(request: &Request) -> Result<()> {
         }
         Request::LaunchVmV3(request) => request.validate().map(|_| ()).map_err(Into::into),
         Request::FinalizeVmBoot(_) => Ok(()),
-        Request::InspectVm(request) | Request::StopVm(request) | Request::DestroyVm(request) => {
-            request.validate().map_err(Into::into)
-        }
-        Request::Capabilities | Request::DestroyRunNetwork(_) => Ok(()),
+        Request::InspectVm(request)
+        | Request::StopVm(request)
+        | Request::DiscardVm(request)
+        | Request::DestroyVm(request) => request.validate().map_err(Into::into),
+        Request::Capabilities
+        | Request::DestroyRunNetwork(_)
+        | Request::PublishSnapshot(_)
+        | Request::RemoveSnapshot(_)
+        | Request::ListSnapshots => Ok(()),
     }
 }
 
@@ -964,6 +1014,8 @@ mod image_templates;
 use image_templates::*;
 mod staging;
 use staging::*;
+mod snapshots;
+use snapshots::*;
 mod lifecycle_fs;
 use lifecycle_fs::*;
 mod permissions;

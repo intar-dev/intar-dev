@@ -591,7 +591,7 @@ pub(super) async fn release_jailed_runtime(inner: &Inner, vm: &VmStatusResponse)
         // protocol's typed logical identity and drain it before considering
         // the shared run network. Historical generation-less rows do not
         // carry the V6 resource markers and deliberately stay local-only.
-        cleanup_jailed_vm_by_selector(inner, selector)
+        cleanup_jailed_vm_by_selector(inner, selector, JailerIdentityOperation::Stop)
             .await
             .context("destroy generation-less jailed launch")?;
     }

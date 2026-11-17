@@ -586,7 +586,17 @@ pub(super) async fn run_probe_worker_task(
         tokio::select! {
             accepted = listener.accept() => {
                 match accepted {
-                    Ok((stream, _)) => {
+                    Ok((mut stream, _)) => {
+                        // A VM restored from a snapshot holds a parked Kino
+                        // that starts the run only when a connection of its
+                        // probe loop is answered with Wake. Any other Kino
+                        // ignores the frame.
+                        if let Some(wake) = inner.snapshots.wake_for(&target.vm_name) {
+                            use tokio::io::AsyncWriteExt as _;
+                            if let Err(error) = stream.write_all(&wake).await {
+                                warn!(error = %error, vm = target.vm_name, "failed to send Wake");
+                            }
+                        }
                         // Kino keeps a single persistent report connection; a
                         // new connection supersedes the previous one.
                         if let Some(task) = connection_task.take() {

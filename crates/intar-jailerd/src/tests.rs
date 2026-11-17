@@ -410,6 +410,7 @@ impl JailPreparer for FakePreparer {
             jail_root_inode: None,
             vmm_executable_identity: None,
             paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            snapshot_links: Vec::new(),
         })
     }
     fn destroy(&mut self, _config: &JailerdConfig, _generation: &ValidatedId) -> Result<bool> {
@@ -506,6 +507,7 @@ impl JailPreparer for FakeTemplatePreparer {
             jail_root_inode: None,
             vmm_executable_identity: None,
             paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            snapshot_links: Vec::new(),
         })
     }
 
@@ -575,6 +577,7 @@ impl JailPreparer for TrackingPreparer {
             jail_root_inode: None,
             vmm_executable_identity: None,
             paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            snapshot_links: Vec::new(),
         })
     }
 
@@ -833,6 +836,7 @@ fn launch(index: u32, cpu_millis: u32) -> VmLaunchRequest {
         ssh_public_port: Some(22_000_u16 + u16::try_from(index).expect("small fixture")),
         vsock_cid: 3 + index,
         egress: false,
+        snapshot: None,
         artifacts: SourceArtifacts {
             kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
             initrd: None,
@@ -908,6 +912,7 @@ fn recovered_record(config: &JailerdConfig) -> VmRecord {
         quota_attestation: None,
         ssh_forward_active: true,
         paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+        snapshot_links: Vec::new(),
         cgroup_path: Some(
             format!("/intar.slice/intar-vms.slice/intar-vm-{generation}.service").into(),
         ),

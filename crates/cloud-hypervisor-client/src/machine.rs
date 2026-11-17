@@ -83,6 +83,7 @@ pub fn machine_vm_config(input: &MachineVmInput<'_>) -> VmConfig {
             id: Some(format!("{}-kino-vsock", input.name)),
         }),
         landlock_enable: Some(true),
+        landlock_rules: None,
     }
 }
 

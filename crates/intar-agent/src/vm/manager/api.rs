@@ -101,6 +101,7 @@ impl VmManager {
             terminal_updates_tx,
             inventory_updates_tx,
             kino_vsock_cid_lock: Mutex::new(()),
+            snapshots: snapshot::Snapshots::new(&cfg.snapshots),
             create_sem: Arc::new(Semaphore::new(8)),
             delete_requests: Mutex::new(BTreeSet::new()),
             cleanup_locks: Mutex::new(BTreeMap::new()),
@@ -298,7 +299,14 @@ impl VmManager {
         let mut outcomes = Vec::with_capacity(rows.len());
         for row in rows {
             let destroyed = match previous_schema_jail_selector(&row) {
-                Ok(Some(selector)) => cleanup_jailed_vm_by_selector(&self.inner, selector).await,
+                Ok(Some(selector)) => {
+                    cleanup_jailed_vm_by_selector(
+                        &self.inner,
+                        selector,
+                        JailerIdentityOperation::Stop,
+                    )
+                    .await
+                }
                 Ok(None) => {
                     warn!(
                         vm = row.vm_name,
@@ -347,6 +355,7 @@ impl VmManager {
     }
 
     pub async fn reconcile_tracked_vms(&self) -> Result<()> {
+        snapshot::clean_up_at_start(&self.inner).await;
         let names = {
             let states = self.inner.states.read().await;
             states.keys().cloned().collect::<Vec<_>>()
@@ -813,9 +822,41 @@ impl VmManager {
                 peer_guest_ips: &peer_guest_ips_for_task,
             };
 
-            let create_result = run_create(&inner, create_input, boot_guard)
-                .instrument(span)
+            let mut create_result = run_create(&inner, create_input, boot_guard, true)
+                .instrument(span.clone())
                 .await;
+            // A snapshot restore that did not get the guest up: throw that
+            // VM away, recording included, and cold-boot the run once.
+            if let Err(error) = &create_result
+                && let Some(abandoned) = error.downcast_ref::<snapshot::RestoreAbandoned>()
+                && ensure_create_not_deleted(&inner, &name_for_task)
+                    .await
+                    .is_ok()
+            {
+                snapshot::restore_failed(&inner, abandoned).await;
+                inner.snapshots.forget_vm(&name_for_task);
+                // Discard first: stopping the booting VM the usual way would
+                // export the abandoned guest's recording into the run.
+                let discarded = {
+                    let _run_cleanup_guard =
+                        acquire_run_cleanup_lock(&inner.run_cleanup_locks, &run_id).await;
+                    snapshot::discard_run_vm(&inner, &run_id, &name_for_task).await
+                };
+                stop_booting_vm(&inner, &name_for_task).await;
+                create_result = match discarded {
+                    Ok(()) => {
+                        run_create(
+                            &inner,
+                            create_input,
+                            image_cache::begin_vm_boot_critical(),
+                            false,
+                        )
+                        .instrument(span)
+                        .await
+                    }
+                    Err(error) => Err(error.context("discard the abandoned restore")),
+                };
+            }
             if take_delete_request(&inner, &name_for_task).await {
                 stop_booting_vm(&inner, &name_for_task).await;
                 match cleanup_tracked_vm(&inner, &name_for_task, false).await {

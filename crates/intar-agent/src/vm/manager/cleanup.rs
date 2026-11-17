@@ -74,6 +74,7 @@ pub(super) async fn local_cleanup_tracked_vm(
 ) -> Result<()> {
     clear_delete_request(inner, &vm.name).await;
     stop_terminal_worker(inner, &vm.name).await;
+    inner.snapshots.forget_vm(&vm.name);
 
     let mut filesystem_failures = Vec::new();
 

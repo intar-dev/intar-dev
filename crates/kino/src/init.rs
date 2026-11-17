@@ -9,6 +9,7 @@
 
 mod boot;
 mod exec;
+mod park;
 mod verify;
 mod wire;
 
@@ -45,7 +46,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         ..Report::default()
     });
     boot::mark(&report, Phase::Booting, "kino_started");
-    tokio::spawn(wire::publish(changes));
+    let publisher = tokio::spawn(wire::publish(changes));
 
     let boot = match read_boot() {
         Ok(boot) => boot,
@@ -63,6 +64,14 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         &report,
     )
     .await;
+    if Path::new(RUN_DISK_MOUNT).join(CAPTURE_FILENAME).exists() {
+        // The publisher would reconnect after a restore and repeat this
+        // boot's report into another run.
+        publisher.abort();
+        let _ = publisher.await;
+        let Err(error) = park::park(&boot).await;
+        anyhow::bail!("park: {error}");
+    }
     // The supervisor stays up after its work: the report stream is the VM's
     // heartbeat.
     std::future::pending::<()>().await;
@@ -73,6 +82,12 @@ pub(crate) async fn main() -> anyhow::Result<()> {
 fn peers_of(boot: &GuestBootV3) -> Vec<String> {
     boot.peers.keys().cloned().collect()
 }
+
+pub(crate) use park::parked;
+
+/// On the run disk of a capture boot: this guest is snapshotted once it is
+/// up and quiet, and every run of its image and shape starts from there.
+const CAPTURE_FILENAME: &str = "capture";
 
 /// A failure before `SSH_READY`: report it, then exit so the unit's
 /// `FailureAction` powers the guest off.
