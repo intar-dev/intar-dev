@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.20.0 (2026-11-17)
+
+### Breaking changes
+
+- **intar-contracts:** [**breaking**] Replace the scenario format, guest contract and registry storage (#351) (137144dc)
+
 ## agent/v0.19.2 (2026-10-28)
 
 ### Bug fixes

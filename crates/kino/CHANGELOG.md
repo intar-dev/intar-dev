@@ -1,5 +1,11 @@
 # Changelog
 
+## kino/v0.6.0 (2026-11-17)
+
+### Breaking changes
+
+- **intar-contracts:** [**breaking**] Replace the scenario format, guest contract and registry storage (#351) (137144dc)
+
 ## kino/v0.5.2 (2026-10-28)
 
 ### Bug fixes

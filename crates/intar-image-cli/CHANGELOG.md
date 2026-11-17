@@ -1,5 +1,11 @@
 # Changelog
 
+## image-cli/v0.11.0 (2026-11-17)
+
+### Breaking changes
+
+- **intar-contracts:** [**breaking**] Replace the scenario format, guest contract and registry storage (#351) (137144dc)
+
 ## image-cli/v0.10.3 (2026-10-28)
 
 ### Bug fixes
