@@ -1,5 +1,11 @@
 # Changelog
 
+## image-cli/v0.12.0 (2026-11-17)
+
+### Features
+
+- **intar-agent:** Let the site say which VMs may start from a snapshot (#369) (4a4eb4ce)
+
 ## image-cli/v0.11.0 (2026-11-17)
 
 ### Breaking changes
