@@ -335,6 +335,11 @@ mod linux {
         ] {
             push_jail_rule(&mut rules, &root, path, kind, access, uid, gid)?;
         }
+        // Cloud Hypervisor opens each path of its own Landlock domain read-only
+        // to anchor the rule and silently skips a rule it cannot anchor (see
+        // the /run note below). Without ReadFile here its domain has no rule
+        // for the logs, and the reopen at a guest reboot is denied: the VMM
+        // exits with "Error creating console devices".
         for path in [
             "logs/serial.log",
             "logs/console.log",
@@ -345,7 +350,7 @@ mod linux {
                 &root,
                 path,
                 RuleAnchorKind::VmFile,
-                make_bitflags!(AccessFs::{WriteFile | Truncate}),
+                make_bitflags!(AccessFs::{ReadFile | WriteFile | Truncate}),
                 uid,
                 gid,
             )?;
