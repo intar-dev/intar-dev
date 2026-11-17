@@ -119,5 +119,13 @@ async function connectLaggingHost(hostId: string) {
 
   sendBridge(ws, stateReport(hostId, { observedAt: Date.now(), appliedDesiredVersion: 0 }));
   await waitForHostActualState(db, hostId, (row) => row.appliedDesiredVersion === 0);
+  // The report's reconcile runs in the alarm it arms. Wait until that one
+  // has run and armed its fallback, so the tests drive a settled object.
+  const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const alarm = await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm());
+    if (alarm !== null && alarm > Date.now() + 1_000) break;
+    await sleep(20);
+  }
   return connection;
 }
