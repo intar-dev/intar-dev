@@ -217,6 +217,28 @@ async fn a_failed_ready_script_fails_the_lab_and_ends_verify() {
     assert!(verify.done && !verify.passed);
 }
 
+#[tokio::test]
+async fn a_ready_script_that_keeps_failing_the_same_way_reports_once() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = spec(r#"{"machine":"m","ready":[{"name":"lab","script":"exit 1"}]}"#);
+    let (report, mut changes) = watch::channel(Report {
+        ready: vec![Ready::default()],
+        ..Report::default()
+    });
+    let counter = tokio::spawn(async move {
+        let mut seen = 0;
+        while changes.changed().await.is_ok() {
+            seen += 1;
+        }
+        seen
+    });
+    assert!(!run_ready(&spec.ready, &no_env(), &temp.path().join("s"), &report).await);
+    drop(report);
+    // The first attempt and the one that runs out of time; the retries
+    // between them, every 250 ms for a second, say nothing new.
+    assert_eq!(counter.await.expect("counter"), 2);
+}
+
 /// The worst case the compiler allows: 32 tasks with full messages and step
 /// tails, 16 ready tails, a full failure text.
 fn worst_case(tail_bytes: usize) -> Report {
