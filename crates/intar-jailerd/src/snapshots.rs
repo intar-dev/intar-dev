@@ -287,7 +287,8 @@ pub(super) fn publish_snapshot(
             "the capture's root disk is not one regular file of the VM"
         );
         stage_prepared_template_source_file(root_disk, &temporary.join(ROOT_DISK_FILE), 0o444)?;
-        bytes_on_disk = bytes_on_disk.saturating_add(disk.blocks() * 512);
+        // Not counted in `bytes_on_disk`, as in store accounting: the clone
+        // shares nearly all of its blocks with the template.
 
         let snapshot = SnapshotInfo {
             image_id: image_id.clone(),
