@@ -1,5 +1,11 @@
 # Changelog
 
+## kino/v0.7.1 (2026-11-17)
+
+### Bug fixes
+
+- **kino:** Report a readiness script only when its result changes (#360) (65ed8e3f)
+
 ## kino/v0.7.0 (2026-11-17)
 
 ### Features
