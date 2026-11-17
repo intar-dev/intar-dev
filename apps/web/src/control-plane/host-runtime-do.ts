@@ -7,7 +7,6 @@ import { enforceHostWorkloadAccess } from "@/lib/host-workload-access";
 import { refreshStargateHostRelay, revokeStargateHostRelay, revokeStargateHostRelayCredentials } from "@/lib/stargate-relay";
 import { persistHostReport } from "@/lib/personal-host-readiness";
 import { notifyRunStatusListeners } from "./host-runtime-do/run-status-fanout";
-import { withQueryTiming } from "@/lib/query-timing";
 import { traceOperation } from "@/lib/tracing";
 import {
   DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
@@ -123,7 +122,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     }
 
     if (url.pathname === "/_internal/wake") {
-      return withQueryTiming("wake", () => traceOperation("host.handleWake", () => this.handleWake(request)));
+      return traceOperation("host.handleWake", () => this.handleWake(request));
     }
 
     if (url.pathname === "/_internal/retire") {
