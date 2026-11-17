@@ -1011,6 +1011,14 @@ pub(super) async fn run_create(
     .context("failed to build boot.json")?;
     ensure_create_not_deleted(inner, req.name).await?;
 
+    // A run that cold-boots after an abandoned snapshot restore comes
+    // through here a second time, after the first attempt removed its
+    // staging directory.
+    if let Some(vm_dir) = req.config_disk_path.parent() {
+        tokio::fs::create_dir_all(vm_dir)
+            .await
+            .with_context(|| format!("failed to create vm dir at {}", vm_dir.display()))?;
+    }
     info!(path = %req.config_disk_path.display(), "writing run disk");
     let config_disk_path = req.config_disk_path.to_path_buf();
     let runtime_disk_task = tokio::task::spawn_blocking(move || {
@@ -1151,9 +1159,7 @@ pub(super) async fn run_create(
         // The marker lets an agent that restarts in the middle of this find
         // the VM again as a restored one; the listener answers its
         // connections with Wake from here on.
-        if let Some(vm_dir) = req.config_disk_path.parent() {
-            let _ = tokio::fs::write(vm_dir.join(snapshot::RESTORED_MARKER), b"").await;
-        }
+        snapshot::write_restored_marker(&details).await;
         inner.snapshots.mark_restored(req.name);
         debug!("calling cloud-hypervisor vm.restore");
         snapshot::restore_vm(&ch)
@@ -1271,7 +1277,14 @@ pub(super) async fn run_create(
         restored = restore_key.is_some(),
         "vm booted"
     );
-    if restore_key.is_none() {
+    // Capture the shape after its first cold boot, and again when the
+    // snapshot this run started from nears its age limit. Only now: a
+    // refresh takes the old snapshot away, which must not race this run's
+    // own restore.
+    if restore_key
+        .as_ref()
+        .is_none_or(|key| snapshot::refresh_due(inner, key))
+    {
         snapshot::queue_capture(inner, &req, &ready_image).await;
     }
 

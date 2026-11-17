@@ -863,9 +863,7 @@ pub(super) async fn resume_tracked_vm_on_startup(
                 )
             })?;
 
-            if let Some(vm_dir) = Path::new(&details.seed_disk_path).parent() {
-                snapshot::recover_restored_vm(&inner_for_task, &vm_name, vm_dir, &ch).await;
-            }
+            snapshot::recover_restored_vm(&inner_for_task, &vm_name, &details, &ch).await;
             let readiness_updates = inner_for_task.guest_reports_tx.subscribe();
             start_probe_worker(&inner_for_task, &vm_name, &details)
                 .await

@@ -252,8 +252,11 @@ pub(super) fn publish_snapshot(
             (SNAPSHOT_CONFIG_FILE, CONFIG_LIMIT_BYTES),
         ] {
             let name_c = CString::new(name).context("snapshot file name")?;
-            let fd = open_lifecycle_entry_at(&directory, &name_c, OFlags::RDONLY)
-                .with_context(|| format!("open captured {name}"))?;
+            // Non-blocking: a FIFO planted under this name must not hang the
+            // daemon in open(2). The regular-file check follows.
+            let fd =
+                open_lifecycle_entry_at(&directory, &name_c, OFlags::RDONLY | OFlags::NONBLOCK)
+                    .with_context(|| format!("open captured {name}"))?;
             let stat = rustix::fs::fstat(&fd)?;
             if rustix::fs::FileType::from_raw_mode(stat.st_mode)
                 != rustix::fs::FileType::RegularFile

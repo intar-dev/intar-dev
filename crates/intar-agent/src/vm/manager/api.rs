@@ -355,6 +355,7 @@ impl VmManager {
     }
 
     pub async fn reconcile_tracked_vms(&self) -> Result<()> {
+        snapshot::clean_up_at_start(&self.inner).await;
         let names = {
             let states = self.inner.states.read().await;
             states.keys().cloned().collect::<Vec<_>>()
@@ -833,13 +834,15 @@ impl VmManager {
                     .is_ok()
             {
                 snapshot::restore_failed(&inner, abandoned).await;
-                stop_booting_vm(&inner, &name_for_task).await;
                 inner.snapshots.forget_vm(&name_for_task);
+                // Discard first: stopping the booting VM the usual way would
+                // export the abandoned guest's recording into the run.
                 let discarded = {
                     let _run_cleanup_guard =
                         acquire_run_cleanup_lock(&inner.run_cleanup_locks, &run_id).await;
                     snapshot::discard_run_vm(&inner, &run_id, &name_for_task).await
                 };
+                stop_booting_vm(&inner, &name_for_task).await;
                 create_result = match discarded {
                     Ok(()) => {
                         run_create(

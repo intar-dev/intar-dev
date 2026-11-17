@@ -54,8 +54,22 @@ const REFRESH_AGE: Duration = Duration::from_secs(20 * 60 * 60);
 const RESTORE_FAILURES_TO_REMOVE: u32 = 2;
 const CAPTURE_FAILURES_PER_DAY: u32 = 3;
 
-/// In a restored VM's directory, from just before the restore call.
-pub(super) const RESTORED_MARKER: &str = "restored-from-snapshot";
+/// In a restored VM's spool directory, from just before the restore call.
+/// The spool lives as long as the VM; its staging directory does not.
+const RESTORED_MARKER: &str = "restored-from-snapshot";
+
+fn restored_marker(details: &VmDetails) -> Option<PathBuf> {
+    Some(Path::new(details.spool_dir.as_deref()?).join(RESTORED_MARKER))
+}
+
+pub(super) async fn write_restored_marker(details: &VmDetails) {
+    let Some(marker) = restored_marker(details) else {
+        return;
+    };
+    if let Err(error) = tokio::fs::write(&marker, b"").await {
+        warn!(error = %error, path = %marker.display(), "failed to mark a VM as restored");
+    }
+}
 
 /// A restore that did not get its guest up. The run cold-boots instead.
 #[derive(Debug, thiserror::Error)]
@@ -148,6 +162,23 @@ impl Snapshots {
         getrandom_fill(&mut seed).ok()?;
         let now = u64::try_from(now_unix_ms()).ok()?;
         Some(intar_kino_proto::host::wake_frame(now, seed))
+    }
+
+    /// A failed capture, or a snapshot removed for failed restores: three a
+    /// day stop captures of the key until tomorrow.
+    fn count_capture_failure(&self, key: &str) {
+        if let Ok(mut counters) = self.counters.lock() {
+            let today = now_unix_s() / 86_400;
+            let entry = counters
+                .capture_failures
+                .entry(key.to_owned())
+                .or_insert((0, today));
+            *entry = if entry.1 == today {
+                (entry.0 + 1, today)
+            } else {
+                (1, today)
+            };
+        }
     }
 
     pub(super) fn restore_succeeded(&self, key: &Sha256Digest) {
@@ -345,10 +376,16 @@ pub(super) async fn restore_key(
         remove(inner, &snapshot).await;
         return None;
     }
-    if age >= REFRESH_AGE {
-        queue_capture(inner, req, ready).await;
-    }
     Some(key)
+}
+
+/// Whether the snapshot a run was restored from is due for its refresh.
+pub(super) fn refresh_due(inner: &Inner, key: &Sha256Digest) -> bool {
+    inner.snapshots.usable.lock().is_ok_and(|usable| {
+        usable
+            .get(key.as_str())
+            .is_some_and(|snapshot| age_of(snapshot) >= REFRESH_AGE)
+    })
 }
 
 /// The launch request's snapshot mode for a run.
@@ -382,10 +419,10 @@ pub(super) async fn discard_run_vm(inner: &Inner, run_id: &str, vm_name: &str) -
 pub(super) async fn recover_restored_vm(
     inner: &Inner,
     vm_name: &str,
-    vm_dir: &Path,
+    details: &VmDetails,
     ch: &ChClient,
 ) {
-    if !vm_dir.join(RESTORED_MARKER).exists() {
+    if !restored_marker(details).is_some_and(|marker| marker.exists()) {
         return;
     }
     inner.snapshots.mark_restored(vm_name);
@@ -396,6 +433,21 @@ pub(super) async fn recover_restored_vm(
 
 /// A restore was abandoned: after two in a row the snapshot goes.
 pub(super) async fn restore_failed(inner: &Inner, abandoned: &RestoreAbandoned) {
+    // A refresh that took the snapshot away under this restore is not the
+    // snapshot's failure.
+    let offered = inner
+        .snapshots
+        .usable
+        .lock()
+        .is_ok_and(|usable| usable.contains_key(&abandoned.key));
+    if !offered {
+        warn!(
+            key = abandoned.key,
+            reason = abandoned.reason,
+            "a snapshot restore was abandoned while its snapshot was replaced; the run cold-boots"
+        );
+        return;
+    }
     let failures = inner.snapshots.counters.lock().map_or(0, |mut counters| {
         let failures = counters
             .restore_failures
@@ -419,6 +471,9 @@ pub(super) async fn restore_failed(inner: &Inner, abandoned: &RestoreAbandoned) 
             .and_then(|usable| usable.get(&abandoned.key).cloned());
         if let Some(snapshot) = snapshot {
             remove(inner, &snapshot).await;
+            // A snapshot that passes its test restore but fails real ones
+            // would otherwise be captured and removed all day.
+            inner.snapshots.count_capture_failure(&abandoned.key);
         }
     }
 }
@@ -452,21 +507,27 @@ pub(super) async fn queue_capture(
     else {
         return;
     };
+    if failing {
+        return;
+    }
+    let Ok(cache_root) = image_cache::default_cache_root() else {
+        return;
+    };
+    let Ok(spec) = inner
+        .oci
+        .spec(req.spec, &image_cache::BlobStore::new(&cache_root))
+        .await
+    else {
+        return;
+    };
     let newly_queued = inner
         .snapshots
         .queued
         .lock()
         .is_ok_and(|mut queued| queued.insert(key.as_str().to_owned()));
-    if failing || !newly_queued {
+    if !newly_queued {
         return;
     }
-    let store = match image_cache::default_cache_root() {
-        Ok(root) => image_cache::BlobStore::new(&root),
-        Err(_) => return,
-    };
-    let Ok(spec) = inner.oci.spec(req.spec, &store).await else {
-        return;
-    };
     let job = CaptureJob {
         key,
         ready: ready.clone(),
@@ -515,27 +576,25 @@ pub(super) async fn queue_capture(
                 if let Ok(mut usable) = inner.snapshots.usable.lock() {
                     usable.insert(key.as_str().to_owned(), snapshot);
                 }
+                if let Ok(mut counters) = inner.snapshots.counters.lock() {
+                    counters.restore_failures.remove(key.as_str());
+                }
             }
             Ok(Err(error)) => {
-                warn!(error = %format!("{error:#}"), key = key.as_str(), "snapshot capture failed");
-                if let Ok(mut counters) = inner.snapshots.counters.lock() {
-                    let today = now_unix_s() / 86_400;
-                    let entry = counters
-                        .capture_failures
-                        .entry(key.as_str().to_owned())
-                        .or_insert((0, today));
-                    *entry = if entry.1 == today {
-                        (entry.0 + 1, today)
-                    } else {
-                        (1, today)
-                    };
+                // No CPU for the capture right now is not a failed capture.
+                let busy = error
+                    .downcast_ref::<JailerdError>()
+                    .is_some_and(|error| error.0.code == "cpu_capacity_exhausted");
+                warn!(error = %format!("{error:#}"), key = key.as_str(), busy, "snapshot capture failed");
+                if !busy {
+                    inner.snapshots.count_capture_failure(key.as_str());
                 }
-                clean_up(&inner).await;
+                clean_up_until_gone(&inner).await;
                 let _ = request_jailerd(&inner, unpublish).await;
             }
             // Aborted for a launch: not a failure.
             Err(_) => {
-                clean_up(&inner).await;
+                clean_up_until_gone(&inner).await;
                 let _ = request_jailerd(&inner, unpublish).await;
             }
         }
@@ -551,8 +610,56 @@ pub(super) fn yield_to_launch(inner: &Inner) {
     }
 }
 
-/// Destroy whatever the capture and the test restore left behind.
-async fn clean_up(inner: &Inner) {
+/// At agent start: an agent that stopped in the middle of a capture left its
+/// VM running and charged, and maybe a published snapshot that was never
+/// test-restored. Remove the VMs, and when there were any, every snapshot.
+pub(super) async fn clean_up_at_start(inner: &Inner) {
+    let mut interrupted = false;
+    for vm_id in [CAPTURE_VM_ID, CHECK_VM_ID] {
+        let (Ok(run_id), Ok(vm_id)) = (
+            ValidatedId::parse(CAPTURE_RUN_ID.to_owned()),
+            ValidatedId::parse(vm_id.to_owned()),
+        ) else {
+            continue;
+        };
+        let inspect = JailerRequest::InspectVm(VmIdentityRequest::by_logical_id(run_id, vm_id));
+        if matches!(
+            request_jailerd(inner, inspect).await,
+            Ok(JailerResponse::InspectVm(_))
+        ) {
+            interrupted = true;
+        }
+    }
+    if !interrupted {
+        return;
+    }
+    warn!("a snapshot capture was interrupted by an agent stop; removing what it left");
+    clean_up_until_gone(inner).await;
+    if let Ok(JailerResponse::ListSnapshots(listed)) =
+        jailer(inner, JailerRequest::ListSnapshots).await
+    {
+        for snapshot in listed {
+            remove(inner, &snapshot).await;
+        }
+    }
+}
+
+/// An aborted capture's launch can still be in flight in the daemon, which
+/// finishes it whatever the agent does. Until it has, the VM cannot be
+/// found, and the run network says it still has VMs.
+async fn clean_up_until_gone(inner: &Inner) {
+    for _ in 0..30 {
+        if clean_up(inner).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    warn!("a snapshot VM could not be removed; the next capture tries again");
+}
+
+/// Destroy whatever the capture and the test restore left behind. False
+/// when the run network still has a VM that could not be found yet.
+async fn clean_up(inner: &Inner) -> bool {
     for vm_id in [CAPTURE_VM_ID, CHECK_VM_ID] {
         let (Ok(run_id), Ok(vm_id)) = (
             ValidatedId::parse(CAPTURE_RUN_ID.to_owned()),
@@ -572,10 +679,17 @@ async fn clean_up(inner: &Inner) {
             JailerRequest::DestroyRunNetwork(intar_jailer_protocol::DestroyRunNetworkRequest {
                 run_id,
             });
-        if let Err(error) = request_jailerd(inner, request).await {
-            warn!(error = %error, "failed to remove the snapshot run network");
+        match request_jailerd(inner, request).await {
+            Ok(JailerResponse::Error(error))
+                if error.message.contains("still has VM generations") =>
+            {
+                return false;
+            }
+            Ok(_) => {}
+            Err(error) => warn!(error = %error, "failed to remove the snapshot run network"),
         }
     }
+    true
 }
 
 /// The capture network: the last /28 of the pool but one (the last is the
@@ -742,18 +856,31 @@ async fn read_frame(stream: &mut tokio::net::UnixStream) -> Result<Option<Vec<u8
 /// Capture, publish and test-restore one snapshot.
 #[cfg(target_os = "linux")]
 async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
-    clean_up(inner).await;
+    clean_up_until_gone(inner).await;
+    // Snapshots past their age go, whatever their key: after a Kino pin
+    // change or for a shape nobody runs any more, no run would ask for them.
+    let expired: Vec<SnapshotInfo> = inner.snapshots.usable.lock().map_or_else(
+        |_| Vec::new(),
+        |usable| {
+            usable
+                .values()
+                .filter(|snapshot| age_of(snapshot) >= MAX_AGE)
+                .cloned()
+                .collect()
+        },
+    );
+    for snapshot in &expired {
+        remove(inner, snapshot).await;
+    }
+    // A refresh: runs stop being offered the old snapshot now, and it leaves
+    // the store only just before the new one is published, since a key is
+    // published once. VMs restored from it keep their links and clones.
     let old = inner
         .snapshots
         .usable
         .lock()
         .ok()
-        .and_then(|usable| usable.get(job.key.as_str()).cloned());
-    if let Some(old) = old {
-        // A refresh: the old one goes first, since a key is published once.
-        // VMs restored from it keep their links and clones.
-        remove(inner, &old).await;
-    }
+        .and_then(|mut usable| usable.remove(job.key.as_str()));
 
     // Capture: boot with no scenario content until Kino reports PARKED.
     let (launched, _) = launch(
@@ -828,6 +955,9 @@ async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
     ch.vm_snapshot(&format!("file://{JAILED_SNAPSHOT_DIR}"))
         .await
         .context("capture vm.snapshot failed")?;
+    if let Some(old) = &old {
+        remove(inner, old).await;
+    }
     let snapshot = match jailer(
         inner,
         JailerRequest::PublishSnapshot(PublishSnapshotRequest {
@@ -845,7 +975,7 @@ async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
     // Test restore: the snapshot is used only once a restored guest woke up
     // and got to SSH_READY, and reported nothing before its Wake.
     let checked = check(inner, job).await;
-    clean_up(inner).await;
+    clean_up_until_gone(inner).await;
     if let Err(error) = checked {
         remove(inner, &snapshot).await;
         return Err(error.context("the snapshot's test restore failed"));
