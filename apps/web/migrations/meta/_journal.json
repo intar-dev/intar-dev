@@ -330,6 +330,13 @@
       "when": 1794624458026,
       "tag": "0046_yielding_smiling_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "6",
+      "when": 1794947993818,
+      "tag": "0047_slimy_proudstar",
+      "breakpoints": true
     }
   ]
 }

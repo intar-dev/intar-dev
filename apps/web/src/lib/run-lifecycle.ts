@@ -116,7 +116,11 @@ export function applyVmStateV3ToRunState(input: {
         : vm.lab?.state === "ready" &&
           (reported.runtime_constraints?.generation ?? null) === (vm.runtimeConstraints?.generation ?? null),
     });
+    // A report that was dropped (stale, or of a retired generation) changes
+    // nothing, `restored` included.
     if (applied === vm) return vm;
+    // Every accepted report says how the VM started; the latest one counts.
+    const restored = reported.start?.restored === true;
     if (lab && tasks) {
       tasks = mergeReportedTasks(tasks, vm.scenarioVmName, lab.tasks, reported.updated_at_unix_ms);
     }
@@ -129,9 +133,10 @@ export function applyVmStateV3ToRunState(input: {
           ...(lab.verify ? { verify: lab.verify } : {}),
         }
       : (applied.lab ?? null);
-    if (labState?.state !== "failed") return { ...applied, lab: labState };
+    if (labState?.state !== "failed") return { ...applied, lab: labState, restored };
     return decorateVmState({
       ...applied,
+      restored,
       lab: labState,
       phase: "failed",
       phaseDetail: LAB_FAILED_TEXT,

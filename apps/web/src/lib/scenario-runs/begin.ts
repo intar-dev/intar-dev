@@ -442,6 +442,8 @@ export interface AdmissionCommitInput {
   revisionAnchor?: string | null;
   /** The scope whose verify quota a verify run takes, if it is one. */
   verifyScopeKey?: string | null;
+  /** The verify run is a restore check of a verified revision. */
+  verifyRestoreCheck?: boolean;
   now: number;
 }
 
@@ -523,7 +525,8 @@ async function admissionRefusal(input: AdmissionCommitInput) {
     throw scenarioSourceChanged();
   }
   if (input.verifyScopeKey) {
-    const refusal = await verifyRefusal(env.DB, input.run.scenarioId, input.run.scenarioRev ?? "", input.verifyScopeKey);
+    const refusal = await verifyRefusal(env.DB, input.run.scenarioId, input.run.scenarioRev ?? "", input.verifyScopeKey,
+      input.verifyRestoreCheck === true);
     if (refusal) throw refusal;
   }
   await assertAdmissionRefusalPriority({
@@ -745,7 +748,7 @@ function insertRunStatement(
   const anchorCondition = verifyScopeKey
     // host_id takes no bound value, so a later column's index is its parameter number.
     ? verifyAnchorCondition(RUN_INSERT_COLUMNS.indexOf("scenario_id"),
-      RUN_INSERT_COLUMNS.indexOf("scenario_rev"), anchorParam) + " AND host.scope = 'platform'"
+      RUN_INSERT_COLUMNS.indexOf("scenario_rev"), anchorParam, input.verifyRestoreCheck === true) + " AND host.scope = 'platform'"
     : revisionAnchor
       ? liveRevisionAnchorCondition(RUN_INSERT_COLUMNS.indexOf("scenario_id") + 1, anchorParam)
       : null;

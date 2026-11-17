@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { appError, toErrorResponse } from "@/lib/app-error";
-import { assertScenarioAdmin, listAdministeredScenarios, moveLiveRevision } from "@/lib/scenario-revisions";
+import { assertScenarioAdmin, clearRestoreVerified, listAdministeredScenarios, moveLiveRevision } from "@/lib/scenario-revisions";
 import { beginVerifyRun } from "@/lib/scenario-runs/revision-begin";
 import { refuseScenarioSourceWrite } from "@/lib/scenario-sources";
 
@@ -28,6 +28,9 @@ export const GET: APIRoute = async ({ request, params }) => {
 
 /**
  * `{action: "verify", rev}` starts a verify run of the candidate;
+ * `{action: "verify_restore", rev}` starts a restore check of a verified
+ * revision, and `{action: "clear_restore_verified", rev}` withdraws its
+ * result;
  * `{action: "promote" | "rollback", rev, liveRev}` moves the live revision
  * from `liveRev`, the one the caller saw. Only the scenario's scope admins.
  */
@@ -47,8 +50,16 @@ export const POST: APIRoute = async ({ request, params }) => {
       const run = await beginVerifyRun({ scenarioId, rev, allowDrainedAdminProof: authz.context.isAdmin });
       return jsonResponse({ runId: run.runId, scenario: await readScenario(authz.context.userId, scenarioId) }, { status: 202 });
     }
+    if (body?.action === "verify_restore") {
+      const run = await beginVerifyRun({ scenarioId, rev, allowDrainedAdminProof: authz.context.isAdmin, restoreCheck: true });
+      return jsonResponse({ runId: run.runId, scenario: await readScenario(authz.context.userId, scenarioId) }, { status: 202 });
+    }
+    if (body?.action === "clear_restore_verified") {
+      await clearRestoreVerified(scenarioId, rev);
+      return jsonResponse({ scenario: await readScenario(authz.context.userId, scenarioId) });
+    }
     if (body?.action !== "promote" && body?.action !== "rollback") {
-      throw appError(400, "invalid_request", "action is verify, promote or rollback");
+      throw appError(400, "invalid_request", "action is verify, verify_restore, clear_restore_verified, promote or rollback");
     }
     if (body.liveRev !== null && typeof body.liveRev !== "string") {
       throw appError(400, "invalid_request", "liveRev is the live revision you saw, or null");
