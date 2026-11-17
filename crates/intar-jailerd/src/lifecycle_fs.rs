@@ -330,9 +330,8 @@ pub(super) fn remove_directory_contents_fd_relative(
 ) -> Result<()> {
     // A snapshot restore's two links into the store are the only entries
     // that may have another link.
-    let single = |stat: &rustix::fs::Stat| {
-        stat.st_nlink == 1 || linked.contains(&link_identity(stat))
-    };
+    let single =
+        |stat: &rustix::fs::Stat| stat.st_nlink == 1 || linked.contains(&link_identity(stat));
     rustix::fs::fchown(
         directory,
         Some(rustix::process::Uid::from_raw(lock_uid)),
