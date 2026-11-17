@@ -122,6 +122,7 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
           revision.failure_reason, revision.verify_run_id, revision.verify_report_json, revision.live_at,
           revision.restore_verified_at, revision.restore_verify_report_json,
           (revision.state = 'verified' AND revision.restore_verified_at IS NULL
+            AND revision.rev IN (scenario.live_rev, scenario.candidate_rev)
             AND json_array_length(revision.doc_json, '$.machines') = 1) AS can_verify_restore,
           revision.created_at, (revision.state = 'verified' AND revision.guest_contract = ?3
             AND EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = revision.scenario_id AND kept.rev = revision.rev)

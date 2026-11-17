@@ -24,7 +24,7 @@ import {
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
 import { VALIDATION_USER_ID } from "@/lib/scenario-runs/content-access";
 import { expireOverdueRunLeases } from "@/lib/scenario-runs/lifecycle";
-import { beginVerifyRun, liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
+import { agentReadsMayRestore, beginVerifyRun, liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
 import { getScenarioRunStatusForUser } from "@/lib/scenario-runs/status";
 import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { createFixtureMember } from "@/test/account-fixtures";
@@ -691,7 +691,8 @@ describe("promotion, rollback and verify runs", () => {
       await markVerified(PUBLIC_ID, rev("a"));
       await promote(rev("a"), null);
       const cold = await learnerStart(LEARNER);
-      expect(await vmOf(cold.hostId)).not.toHaveProperty("may_restore");
+      expect(cold.hostId).toBe(PLATFORM);
+      expect(await vmOf()).not.toHaveProperty("may_restore");
       // The restore check of the live revision.
       const { runId } = await check();
       sendVm(ws, PLATFORM, restoredVm(runId, true));
@@ -702,6 +703,31 @@ describe("promotion, rollback and verify runs", () => {
       // Withdrawn: the next learner cold-boots again.
       expect(await clearRestoreVerified(PUBLIC_ID, rev("a"))).toBe(true);
       expect((await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.revisions[0]).toMatchObject({ restoreVerifiedAt: null, canVerifyRestore: true });
+      await createFixtureMember({ d1: env.DB, userId: "learner-3" });
+      const after = await learnerStart("learner-3");
+      expect(await vmOf()).toMatchObject({ run_id: after.runId });
+      expect(await vmOf()).not.toHaveProperty("may_restore");
+    });
+
+    it("keeps what an accepted report said when a stale one arrives after it", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      const { runId } = await check();
+      const woke = { ...verifyVm(runId, verifyLab({ ...passed, done: false, passed: false })), start: { restored: true } };
+      sendVm(ws, PLATFORM, woke);
+      // Older than the report before it: dropped, and so is its `restored: false`.
+      sendVm(ws, PLATFORM, { ...verifyVm(runId, verifyLab({ ...passed, done: false, passed: false })), updated_at_unix_ms: woke.updated_at_unix_ms - 10_000 });
+      sendVm(ws, PLATFORM, { ...restoredVm(runId, true), updated_at_unix_ms: woke.updated_at_unix_ms + 1 });
+      expect(JSON.parse((await settled())!.restore_verify_report_json!) as RestoreVerifyReport).toMatchObject({ outcome: "passed", restored: true });
+    });
+
+    it("reads an agent's release strictly", () => {
+      const hello = (agent_version: unknown) => JSON.stringify({ agent_version });
+      for (const version of ["0.22.0", "0.22.1", "0.23.0", "1.0.0"]) expect(agentReadsMayRestore(hello(version)), version).toBe(true);
+      for (const version of ["0.21.9", "0.9.99", "0.22", "v0.22.0", "0.22.0-rc.1", "", 22]) {
+        expect(agentReadsMayRestore(hello(version)), String(version)).toBe(false);
+      }
+      expect(agentReadsMayRestore(null)).toBe(false);
+      expect(agentReadsMayRestore("not json")).toBe(false);
     });
 
     it("never tells a host with an older agent", async () => {

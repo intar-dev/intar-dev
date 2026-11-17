@@ -237,7 +237,9 @@ export async function admitRevisionRun(context: {
   const verifyRestoreCheck = verifyScopeKey !== null && context.verifyRestoreCheck === true;
   const doc = revision.doc;
   // A VM may start from its host's snapshot only in a restore check, or for
-  // a revision that passed one. A snapshot is of one machine.
+  // a revision that passed one. A snapshot is of one machine. The flag is
+  // read once here: a withdrawal that lands before this start commits can
+  // still let this one run restore.
   const mayRestore = doc.machines.length === 1 &&
     (verifyScopeKey ? verifyRestoreCheck : revision.restoreVerified === true);
   if (!doc.machines.length || doc.machines.some((machine) => !machine.image_digest)) {
