@@ -372,18 +372,19 @@ pub(super) async fn cleanup_jailed_vm_by_logical_id(
         ValidatedId::parse(run_id.to_owned()).context("validate logical cleanup run ID")?,
         ValidatedId::parse(vm_name.to_owned()).context("validate logical cleanup VM ID")?,
     );
-    cleanup_jailed_vm_by_selector(inner, selector).await
+    cleanup_jailed_vm_by_selector(inner, selector, JailerIdentityOperation::Stop).await
 }
 
+/// `stop` is `Stop`, or `Discard` to leave the recording unexported.
 pub(super) async fn cleanup_jailed_vm_by_selector(
     inner: &Inner,
     selector: VmIdentityRequest,
+    stop: JailerIdentityOperation,
 ) -> Result<()> {
-    let stop_error =
-        jailer_vm_selector_request(inner, selector.clone(), JailerIdentityOperation::Stop)
-            .await
-            .err()
-            .map(|error| format!("logical VM stop request failed: {error:#}"));
+    let stop_error = jailer_vm_selector_request(inner, selector.clone(), stop)
+        .await
+        .err()
+        .map(|error| format!("logical VM stop request failed: {error:#}"));
 
     // Always follow StopVm with DestroyVm, including after a not-found stop.
     // Both operations resolve the same typed (run_id, vm_id) selector, and a
@@ -862,6 +863,9 @@ pub(super) async fn resume_tracked_vm_on_startup(
                 )
             })?;
 
+            if let Some(vm_dir) = Path::new(&details.seed_disk_path).parent() {
+                snapshot::recover_restored_vm(&inner_for_task, &vm_name, vm_dir, &ch).await;
+            }
             let readiness_updates = inner_for_task.guest_reports_tx.subscribe();
             start_probe_worker(&inner_for_task, &vm_name, &details)
                 .await

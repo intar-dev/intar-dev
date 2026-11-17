@@ -781,6 +781,7 @@ struct Inner {
     /// periodic repair/report loop.
     inventory_updates_tx: watch::Sender<u64>,
     kino_vsock_cid_lock: Mutex<()>,
+    snapshots: snapshot::Snapshots,
     create_sem: Arc<Semaphore>,
     delete_requests: Mutex<BTreeSet<String>>,
     cleanup_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
@@ -867,6 +868,7 @@ pub(crate) use jailer_network::jail_vm_exited;
 use jailer_network::*;
 mod network_allocation;
 use network_allocation::*;
+mod snapshot;
 mod state;
 pub(crate) use state::is_safe_key;
 use state::*;

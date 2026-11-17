@@ -18,6 +18,8 @@ use russh::keys::PublicKey;
 use super::manager::CreateVmNetwork;
 
 const RUNTIME_DISK_BYTES: u64 = 16 * 1024 * 1024;
+/// Kino's `CAPTURE_FILENAME`.
+const CAPTURE_FILENAME: &str = "capture";
 
 pub struct BootJsonInput<'a> {
     pub hostname: &'a str,
@@ -67,6 +69,17 @@ pub fn boot_json(input: &BootJsonInput<'_>) -> Result<Vec<u8>> {
 }
 
 pub fn write_runtime_disk(path: &Path, boot_json: &[u8], kino: &[u8]) -> Result<()> {
+    write_runtime_disk_with(path, boot_json, kino, false)
+}
+
+/// A capture boot's run disk also holds an empty file `capture`: its Kino
+/// parks once the lab is up, for the host to snapshot it.
+pub fn write_runtime_disk_with(
+    path: &Path,
+    boot_json: &[u8],
+    kino: &[u8],
+    capture: bool,
+) -> Result<()> {
     let mut img = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -85,6 +98,9 @@ pub fn write_runtime_disk(path: &Path, boot_json: &[u8], kino: &[u8]) -> Result<
     let root = fs.root_dir();
     write_file(&root, BOOT_JSON_FILENAME, boot_json)?;
     write_file(&root, KINO_FILENAME, kino)?;
+    if capture {
+        write_file(&root, CAPTURE_FILENAME, b"")?;
+    }
     Ok(())
 }
 

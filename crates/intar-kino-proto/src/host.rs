@@ -62,6 +62,32 @@ pub fn decode(body: &[u8]) -> Result<GuestReport, DecodeError> {
     Ok(read(report))
 }
 
+/// The frame a host answers every connection of a VM restored from a
+/// snapshot with, length prefix included: a parked Kino takes its clock and
+/// a seed for its random pool from it, any other Kino ignores it.
+#[must_use]
+pub fn wake_frame(unix_ms: u64, seed: Vec<u8>) -> Vec<u8> {
+    use crate::kino_v2::{HostFrame, Wake, host_frame};
+    let body = HostFrame {
+        frame: Some(host_frame::Frame::Wake(Wake { unix_ms, seed })),
+    }
+    .encode_to_vec();
+    let length = u32::try_from(body.len()).unwrap_or(u32::MAX);
+    [length.to_be_bytes().as_slice(), &body].concat()
+}
+
+/// Whether a frame's body is the one report of a capture boot that parked.
+#[must_use]
+pub fn is_parked(body: &[u8]) -> bool {
+    body.len() <= MAX_FRAME_BYTES
+        && matches!(
+            GuestFrame::decode(body),
+            Ok(GuestFrame {
+                frame: Some(guest_frame::Frame::Report(report)),
+            }) if report.contract == GUEST_CONTRACT && report.phase() == Phase::Parked
+        )
+}
+
 fn read(report: Report) -> GuestReport {
     let phase = report.phase();
     let failure = (!report.failure.is_empty()).then(|| cut(&report.failure, FAILURE_BYTES));

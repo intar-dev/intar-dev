@@ -1,5 +1,6 @@
 use super::*;
 
+#[derive(Clone, Copy)]
 pub(super) struct RunCreateInput<'a> {
     pub(super) api_started_at: Instant,
     pub(super) name: &'a str,
@@ -316,6 +317,7 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
     inner: &Inner,
     req: &RunCreateInput<'_>,
     ready: &image_cache::ReadyImage,
+    snapshot: Option<intar_jailer_protocol::SnapshotLaunch>,
 ) -> Result<VmLaunchResult> {
     let prepared = &ready.prepared_image;
     let run_id = ValidatedId::parse(req.run_id.to_string()).context("validate jailer run ID")?;
@@ -357,7 +359,7 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
         ssh_public_port: req.ssh_public_port,
         vsock_cid: req.kino_vsock_cid,
         egress: req.egress,
-        snapshot: None,
+        snapshot,
         artifacts,
     };
     let launch_operation = build_jailer_launch_operation(request, prepared)?;
@@ -927,6 +929,7 @@ pub(super) async fn run_create(
     inner: &Arc<Inner>,
     req: RunCreateInput<'_>,
     mut boot_guard: image_cache::BootCriticalGuard,
+    allow_restore: bool,
 ) -> Result<()> {
     let create_started_at = Instant::now();
     set_state(inner, req.name, VmLifecycleState::CachingImage).await;
@@ -1026,8 +1029,22 @@ pub(super) async fn run_create(
     let launch_deadline = Instant::now() + Duration::from_secs(SCENARIO_READY_MAX_TIMEOUT_SECONDS);
     let mut capacity_attempt = 0_u32;
     let mut template_prepared_again = false;
+    // A single-VM run starts from this host's snapshot of its image and
+    // shape when there is one; any failure on that path cold-boots the run.
+    let restore_key = if allow_restore {
+        snapshot::restore_key(inner, &req, &ready_image).await
+    } else {
+        None
+    };
     let launch = loop {
-        match launch_jailed_cloud_hypervisor(inner, &req, &ready_image).await {
+        match launch_jailed_cloud_hypervisor(
+            inner,
+            &req,
+            &ready_image,
+            snapshot::restore_launch(restore_key.as_ref()),
+        )
+        .await
+        {
             Ok(result) => break result,
             Err(error)
                 if withdraw_if_template_missing(&cache_root, req.image, &error)
@@ -1050,6 +1067,8 @@ pub(super) async fn run_create(
                 if Instant::now() >= launch_deadline {
                     return Err(error).context("timed out waiting for jailerd CPU capacity");
                 }
+                // A background snapshot capture gives its CPU to a run.
+                snapshot::yield_to_launch(inner);
                 let delay = boot_capacity_retry_delay(capacity_attempt);
                 capacity_attempt = capacity_attempt.saturating_add(1);
                 debug!(
@@ -1060,7 +1079,12 @@ pub(super) async fn run_create(
                 );
                 tokio::time::sleep(delay).await;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(match &restore_key {
+                    Some(key) => snapshot::abandoned(key, &error),
+                    None => error,
+                });
+            }
         }
     };
     persist_jail_launch(inner, req.name, &launch, &run_network).await?;
@@ -1091,10 +1115,12 @@ pub(super) async fn run_create(
         .context("open jailerd-attested cloud-hypervisor API socket")?;
     let vmm_ready_at = Instant::now();
 
-    debug!("calling cloud-hypervisor vm.create");
-    ch.vm_create(&vm_cfg)
-        .await
-        .context("cloud-hypervisor vm.create failed")?;
+    if restore_key.is_none() {
+        debug!("calling cloud-hypervisor vm.create");
+        ch.vm_create(&vm_cfg)
+            .await
+            .context("cloud-hypervisor vm.create failed")?;
+    }
 
     set_state(inner, req.name, VmLifecycleState::BootingVm).await;
 
@@ -1120,17 +1146,48 @@ pub(super) async fn run_create(
         .await
         .context("failed to start vm run CLI broker")?;
 
-    debug!("calling cloud-hypervisor vm.boot");
     mark_vmm_started(inner, req.name);
-    ch.vm_boot()
-        .await
-        .context("cloud-hypervisor vm.boot failed")?;
+    if let Some(key) = &restore_key {
+        // The marker lets an agent that restarts in the middle of this find
+        // the VM again as a restored one; the listener answers its
+        // connections with Wake from here on.
+        if let Some(vm_dir) = req.config_disk_path.parent() {
+            let _ = tokio::fs::write(vm_dir.join(snapshot::RESTORED_MARKER), b"").await;
+        }
+        inner.snapshots.mark_restored(req.name);
+        debug!("calling cloud-hypervisor vm.restore");
+        snapshot::restore_vm(&ch)
+            .await
+            .map_err(|error| snapshot::abandoned(key, &error))?;
+    } else {
+        debug!("calling cloud-hypervisor vm.boot");
+        ch.vm_boot()
+            .await
+            .context("cloud-hypervisor vm.boot failed")?;
+    }
     ensure_create_not_deleted(inner, req.name).await?;
     let boot_accepted_at = Instant::now();
 
-    let ready = wait_for_scenario_runtime_ready(inner, req.name, &ch, &details, readiness_updates)
-        .await
-        .context("scenario runtime did not become ready")?;
+    let waiting =
+        wait_for_scenario_runtime_ready(inner, req.name, &ch, &details, readiness_updates);
+    let ready = match &restore_key {
+        Some(key) => match timeout(snapshot::RESTORE_TIMEOUT, waiting).await {
+            Ok(Ok(ready)) => {
+                inner.snapshots.restore_succeeded(key);
+                ready
+            }
+            Ok(Err(error)) => return Err(snapshot::abandoned(key, &error)),
+            Err(_) => {
+                return Err(snapshot::abandoned(
+                    key,
+                    &anyhow::anyhow!("the restored guest did not get to SSH_READY in time"),
+                ));
+            }
+        },
+        None => waiting
+            .await
+            .context("scenario runtime did not become ready")?,
+    };
     ensure_create_not_deleted(inner, req.name).await?;
     let guest_ready_at = Instant::now();
     seal_ready_vm_cpu(
@@ -1211,8 +1268,12 @@ pub(super) async fn run_create(
         total_ms = terminal_ready_at
             .duration_since(req.api_started_at)
             .as_millis(),
+        restored = restore_key.is_some(),
         "vm booted"
     );
+    if restore_key.is_none() {
+        snapshot::queue_capture(inner, &req, &ready_image).await;
+    }
 
     Ok(())
 }

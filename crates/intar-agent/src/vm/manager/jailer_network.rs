@@ -4,6 +4,8 @@ use super::*;
 pub(super) enum JailerIdentityOperation {
     Inspect,
     Stop,
+    /// Stop without exporting the recording.
+    Discard,
     Destroy,
 }
 
@@ -27,6 +29,7 @@ pub(super) async fn jailer_vm_selector_request(
     let request = match operation {
         JailerIdentityOperation::Inspect => JailerRequest::InspectVm(identity),
         JailerIdentityOperation::Stop => JailerRequest::StopVm(identity),
+        JailerIdentityOperation::Discard => JailerRequest::DiscardVm(identity),
         JailerIdentityOperation::Destroy => JailerRequest::DestroyVm(identity),
     };
 
@@ -67,6 +70,7 @@ pub(super) fn classify_jailer_identity_response(
             Ok(Some(inspection))
         }
         (JailerIdentityOperation::Stop, JailerResponse::StopVm(_))
+        | (JailerIdentityOperation::Discard, JailerResponse::DiscardVm(_))
         | (JailerIdentityOperation::Destroy, JailerResponse::DestroyVm(_)) => Ok(None),
         (JailerIdentityOperation::Inspect, JailerResponse::Error(error))
             if error.code == "not_found" =>
@@ -74,7 +78,9 @@ pub(super) fn classify_jailer_identity_response(
             Ok(None)
         }
         (
-            JailerIdentityOperation::Stop | JailerIdentityOperation::Destroy,
+            JailerIdentityOperation::Stop
+            | JailerIdentityOperation::Discard
+            | JailerIdentityOperation::Destroy,
             JailerResponse::Error(error),
         ) if error.code == "not_found" => Ok(None),
         (_, JailerResponse::Error(error)) => Err(JailerdError(error).into()),
