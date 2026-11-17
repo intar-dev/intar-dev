@@ -1,5 +1,11 @@
 # Changelog
 
+## stargate/v0.8.0 (2026-11-17)
+
+### Features
+
+- **intar-agent:** Let the site say which VMs may start from a snapshot (#369) (4a4eb4ce)
+
 ## stargate/v0.7.0 (2026-11-17)
 
 ### Breaking changes

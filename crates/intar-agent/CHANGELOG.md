@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.22.0 (2026-11-17)
+
+### Features
+
+- **intar-agent:** Let the site say which VMs may start from a snapshot (#369) (4a4eb4ce)
+
 ## agent/v0.21.0 (2026-11-17)
 
 ### Features
