@@ -97,6 +97,8 @@ type RuntimeVmReportContext = {
 
 export class HostRuntimeDO extends HostRuntimeBase {
   private cpuReservationQueue: Promise<void> = Promise.resolve();
+  /** Reconciles asked for by state reports; lets a running reconcile see one that arrived meanwhile. */
+  private reconcileRequests = 0;
   private desiredDispatchQueue: Promise<void> = Promise.resolve();
   private clientHelloQueue: Promise<void> = Promise.resolve();
   private readonly pendingClientHellos = new Set<WebSocket>();
@@ -617,7 +619,12 @@ export class HostRuntimeDO extends HostRuntimeBase {
     if (message.type === "state_report") {
       if (message.report.host_id !== hostId) return;
       await this.applyBridgeStateReportV3(hostId, message.report, attachment.sessionId, attachment.credentialGeneration);
-      await this.reconcileHost(hostId);
+      // The reconcile runs in the alarm, once for a burst of reports. Run
+      // inline it held this host's next message back for its whole length:
+      // a VM's "lab ready" waited seconds behind the inventory report sent
+      // just before it.
+      this.reconcileRequests += 1;
+      await this.scheduleAlarmNoLaterThan(Date.now());
     } else if (message.type === "build_report") {
       // recordMachineBuildReport takes reports only from the build's own
       // builder on its current session, so an agent's report is dropped. A
@@ -1219,6 +1226,21 @@ export class HostRuntimeDO extends HostRuntimeBase {
   ): Promise<void> {
     const now = Date.now();
     const db = drizzle(this.env.DB);
+    const requestsAtStart = this.reconcileRequests;
+    // What the host is waiting for goes out first: a new run's VM reaches
+    // it without sitting behind the housekeeping below. Whatever that
+    // changes is delivered by the second dispatch at the end.
+    try {
+      await this.dispatchDesiredStateToActiveSocket(hostId, now);
+    } catch (error) {
+      // The housekeeping below must still run: nothing else expires leases
+      // and reservations. The dispatch at the end tries again and throws.
+      console.error(JSON.stringify({
+        message: "early desired-state dispatch failed",
+        hostId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
     await maintainMachineBuilds(this.env, hostId, now);
     const expiredLeases = await expireOverdueRunLeases(hostId, now, { db, wakeHostRuntime: false });
     for (const expired of expiredLeases.updatedRunRevisions) {
@@ -1258,22 +1280,29 @@ export class HostRuntimeDO extends HostRuntimeBase {
       );
     }
 
-    const activeSocket = await this.findActiveSocket(hostId);
-    if (activeSocket?.attachment.bridgeProtocol) {
-      const lag = await this.loadDesiredVersionLag(hostId, now);
-      const shouldRepushLaggingVersion =
-        lag.lagging &&
-        (activeSocket.attachment.lastDesiredDispatchAtMs === null ||
-          now - activeSocket.attachment.lastDesiredDispatchAtMs >
-            DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
-      await this.dispatchBridgeDesiredStateIfNeeded(
-        hostId,
-        activeSocket.socket,
-        { force: shouldRepushLaggingVersion },
-      );
-    }
+    await this.dispatchDesiredStateToActiveSocket(hostId, now);
 
     await this.scheduleNextAlarm(hostId);
+    // A report that came in while this ran asked for a reconcile of its own;
+    // the alarm it set is already in the past and was just replaced.
+    if (this.reconcileRequests !== requestsAtStart) await this.scheduleAlarmNoLaterThan(Date.now());
+  }
+
+  /** Sends the host its desired state when it changed, or again when the host lags behind it. */
+  private async dispatchDesiredStateToActiveSocket(hostId: string, now: number): Promise<void> {
+    const activeSocket = await this.findActiveSocket(hostId);
+    if (!activeSocket?.attachment.bridgeProtocol) return;
+    const lag = await this.loadDesiredVersionLag(hostId, now);
+    const shouldRepushLaggingVersion =
+      lag.lagging &&
+      (activeSocket.attachment.lastDesiredDispatchAtMs === null ||
+        now - activeSocket.attachment.lastDesiredDispatchAtMs >
+          DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
+    await this.dispatchBridgeDesiredStateIfNeeded(
+      hostId,
+      activeSocket.socket,
+      { force: shouldRepushLaggingVersion },
+    );
   }
 
   private async dispatchBridgeDesiredStateIfNeeded(

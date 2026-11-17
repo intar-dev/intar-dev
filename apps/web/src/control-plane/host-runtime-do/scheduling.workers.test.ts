@@ -117,7 +117,22 @@ async function connectLaggingHost(hostId: string) {
   laggingVersion = Math.max(...messages.flatMap((message) =>
     message.type === "desired_state" ? [message.desired_state.version] : []));
 
+  const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+  const reconcileRequests = () => runInDurableObject(stub, (instance) =>
+    (instance as unknown as { reconcileRequests: number }).reconcileRequests);
+  const requestsBefore = await reconcileRequests();
   sendBridge(ws, stateReport(hostId, { observedAt: Date.now(), appliedDesiredVersion: 0 }));
   await waitForHostActualState(db, hostId, (row) => row.appliedDesiredVersion === 0);
+  // The report's reconcile runs in the alarm it arms. Wait until the report
+  // has asked for it, and then until that reconcile has replaced the
+  // deadline the report stored ("now") with its fallback ahead, so the
+  // tests drive a settled object.
+  let settled = false;
+  for (let attempt = 0; attempt < 250 && !settled; attempt += 1) {
+    const deadline = await runInDurableObject(stub, (_instance, state) => state.storage.get<number | null>(RUNTIME_ALARM_KEY));
+    settled = (await reconcileRequests()) > requestsBefore && typeof deadline === "number" && deadline > Date.now();
+    if (!settled) await sleep(20);
+  }
+  if (!settled) throw new Error("the state report's reconcile did not run");
   return connection;
 }
