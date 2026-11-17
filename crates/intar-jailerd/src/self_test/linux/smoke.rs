@@ -791,6 +791,7 @@ pub(super) fn smoke_vm_config(
             id: Some("selftest-kino-vsock".to_owned()),
         }),
         landlock_enable: Some(true),
+        landlock_rules: None,
     })
 }
 

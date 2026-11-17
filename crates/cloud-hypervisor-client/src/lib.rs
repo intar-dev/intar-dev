@@ -242,6 +242,41 @@ pub struct VmConfig {
     /// infrastructure threads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub landlock_enable: Option<bool>,
+    /// Extra paths for that domain. A snapshot directory has to be listed
+    /// here and has to exist before `vm.create`, or `vm.snapshot` is denied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub landlock_rules: Option<Vec<LandlockRuleConfig>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LandlockRuleConfig {
+    pub path: String,
+    /// `r`, `w` or `rw`.
+    pub access: String,
+}
+
+/// How a restored VM gets its memory.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum MemoryRestoreMode {
+    /// Read the whole memory file before the VM runs.
+    Copy,
+    /// Map the memory file privately: pages load on first touch and VMs
+    /// restored from one file share its page cache.
+    CopyOnWrite,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RestoreConfig {
+    /// `file://` and a directory as the VMM sees it.
+    pub source_url: String,
+    pub memory_restore_mode: MemoryRestoreMode,
+    /// Run the VM as soon as it is restored instead of leaving it paused.
+    pub resume: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SnapshotConfig<'a> {
+    destination_url: &'a str,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -486,6 +521,50 @@ impl Client {
         Ok(())
     }
 
+    /// PUT /api/v1/vm.pause
+    pub async fn vm_pause(&self) -> Result<(), Error> {
+        self.put("vm.pause", None::<&()>).await
+    }
+
+    /// PUT /api/v1/vm.resume
+    pub async fn vm_resume(&self) -> Result<(), Error> {
+        self.put("vm.resume", None::<&()>).await
+    }
+
+    /// PUT /api/v1/vm.snapshot of a paused VM into `destination_url`
+    /// (`file://` and a directory as the VMM sees it).
+    pub async fn vm_snapshot(&self, destination_url: &str) -> Result<(), Error> {
+        self.put("vm.snapshot", Some(&SnapshotConfig { destination_url }))
+            .await
+    }
+
+    /// PUT /api/v1/vm.restore on a VMM that has no VM yet.
+    pub async fn vm_restore(&self, cfg: &RestoreConfig) -> Result<(), Error> {
+        self.put("vm.restore", Some(cfg)).await
+    }
+
+    async fn put<T: Serialize + ?Sized>(
+        &self,
+        endpoint: &str,
+        body: Option<&T>,
+    ) -> Result<(), Error> {
+        let request = self.http.put(Self::api_url(endpoint));
+        let request = match body {
+            Some(body) => request.json(body),
+            None => request,
+        };
+        let resp = request.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::HttpStatus {
+                status: status.as_u16(),
+                body: body.trim().to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// PUT /api/v1/vm.delete
     pub async fn vm_delete(&self) -> Result<(), Error> {
         let url = Self::api_url("vm.delete");
@@ -675,6 +754,36 @@ mod tests {
             Some("/tmp/kino.vsock")
         );
         assert_eq!(vsock.get("id").and_then(|v| v.as_str()), Some("kino-vsock"));
+    }
+
+    #[test]
+    fn a_restore_serializes_as_the_vmm_reads_it() {
+        let value = serde_json::to_value(RestoreConfig {
+            source_url: "file:///run/snap".to_owned(),
+            memory_restore_mode: MemoryRestoreMode::CopyOnWrite,
+            resume: false,
+        })
+        .expect("serialize restore config");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "source_url": "file:///run/snap",
+                "memory_restore_mode": "CopyOnWrite",
+                "resume": false
+            })
+        );
+        let rules = serde_json::to_value(VmConfig {
+            landlock_rules: Some(vec![LandlockRuleConfig {
+                path: "/run/snap".to_owned(),
+                access: "rw".to_owned(),
+            }]),
+            ..VmConfig::default()
+        })
+        .expect("serialize vm config");
+        assert_eq!(
+            rules.get("landlock_rules"),
+            Some(&serde_json::json!([{"path": "/run/snap", "access": "rw"}]))
+        );
     }
 
     #[test]
