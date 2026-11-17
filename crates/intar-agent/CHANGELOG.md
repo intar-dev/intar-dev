@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.20.1 (2026-11-17)
+
+### Bug fixes
+
+- **intar-jailer:** Let a guest reboot reopen its log files (#363) (315c0683)
+
 ## agent/v0.20.0 (2026-11-17)
 
 ### Breaking changes
