@@ -100,7 +100,11 @@ schema.#Project & {
 
 		security: {
 			type: "group"
-			js: #Host & {command: "bun", args: ["audit", "--audit-level=moderate"]}
+			// Owner: Web. GHSA-fc5q-39xc-vjpf: picomatch <= 4.0.7 (ReDoS in a crafted
+			// glob), with no fixed release yet. It reaches the website only through
+			// build tools (vite, astro, vitest, tailwind), which match the
+			// repository's own globs. Review by 2026-12-01.
+			js: #Host & {command: "bun", args: ["audit", "--audit-level=moderate", "--ignore=GHSA-fc5q-39xc-vjpf"]}
 			rust: #Cargo & {args: ["audit", "--deny", "warnings"]}
 		}
 
