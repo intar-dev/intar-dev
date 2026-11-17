@@ -499,7 +499,10 @@ pub(super) fn vm_state_from_status(
         kino: details
             .and_then(|d| d.kino.clone())
             .or_else(|| desired_vm.map(|vm| vm.kino.clone())),
-        start: Some(VmStartV1 { first_report_ms }),
+        start: Some(VmStartV1 {
+            first_report_ms,
+            restored: status.restored_from_snapshot,
+        }),
         network: network_state_from_status(&status, ssh_host),
         terminal: terminal_state,
         runtime_constraints,
@@ -538,6 +541,7 @@ pub(super) fn failed_vm_report(
             kino: Some(vm.kino.clone()),
             start: Some(VmStartV1 {
                 first_report_ms: None,
+                restored: false,
             }),
             network: None,
             terminal: VmTerminalStateV1 {

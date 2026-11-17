@@ -641,6 +641,7 @@ async fn restart_requires_durable_execution_and_host_identity() {
             ssh_authorized_keys: vec!["ssh-ed25519 AAAATEST run".to_string()],
             terminal: true,
             egress: false,
+            may_restore: false,
         }],
         builds: Vec::new(),
         source_compiles: Vec::new(),

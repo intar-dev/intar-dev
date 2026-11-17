@@ -194,6 +194,7 @@ pub(super) fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
     let lease_expires_at = compute_lease_expires_at(running_at_s, lease_duration_seconds);
 
     Ok(VmStatusResponse {
+        restored_from_snapshot: false,
         name: row.name,
         state,
         created_at: format_rfc3339_s(row.created_at_s),

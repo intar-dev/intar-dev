@@ -459,6 +459,7 @@ impl VmManager {
             mode: req.mode,
             egress: req.egress,
             terminal: req.terminal,
+            may_restore: req.may_restore,
             requested_resources: req.resources,
             requested_hostname: req.hostname,
             lease_duration_seconds: req.lease_duration_seconds,
@@ -484,6 +485,7 @@ impl VmManager {
             mode,
             egress,
             terminal,
+            may_restore,
             requested_resources,
             requested_hostname,
             lease_duration_seconds,
@@ -711,6 +713,7 @@ impl VmManager {
         };
 
         let status = VmStatusResponse {
+            restored_from_snapshot: false,
             name: name.clone(),
             state: VmLifecycleState::Queued,
             created_at: created_at.clone(),
@@ -822,7 +825,7 @@ impl VmManager {
                 peer_guest_ips: &peer_guest_ips_for_task,
             };
 
-            let mut create_result = run_create(&inner, create_input, boot_guard, true)
+            let mut create_result = run_create(&inner, create_input, boot_guard, may_restore)
                 .instrument(span.clone())
                 .await;
             // A snapshot restore that did not get the guest up: throw that
@@ -834,7 +837,7 @@ impl VmManager {
                     .is_ok()
             {
                 snapshot::restore_failed(&inner, abandoned).await;
-                inner.snapshots.forget_vm(&name_for_task);
+                snapshot::forget_restore(&inner, &name_for_task).await;
                 // Discard first: stopping the booting VM the usual way would
                 // export the abandoned guest's recording into the run.
                 let discarded = {

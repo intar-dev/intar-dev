@@ -339,6 +339,11 @@ pub struct DesiredVmV3 {
     pub terminal: bool,
     /// Internet behind the floor; otherwise only the run's own network.
     pub egress: bool,
+    /// The host may start this VM from its snapshot of the image: set only
+    /// for a revision whose checks passed in a lab started that way. Left
+    /// out when false, so a host that predates it never sees it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub may_restore: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -442,6 +447,10 @@ pub struct VmStartV1 {
     /// From the VMM's start to Kino's first report for this run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_report_ms: Option<u64>,
+    /// The VM was started from a host snapshot and woke; false after a
+    /// fallback to a cold boot. Left out when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restored: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -553,6 +562,33 @@ mod tests {
         let mut path = json;
         path["image"] = "sha256:../x".into();
         assert!(serde_json::from_value::<DesiredVmV3>(path).is_err());
+        Ok(())
+    }
+
+    /// Both sides refuse unknown fields, so the snapshot fields are left
+    /// out unless set: a message that does not use them is the JSON it was.
+    #[test]
+    fn the_snapshot_fields_are_absent_unless_set() -> Result<(), serde_json::Error> {
+        let json = desired_vm();
+        let mut vm: DesiredVmV3 = serde_json::from_value(json.clone())?;
+        assert!(!vm.may_restore);
+        vm.may_restore = true;
+        let mut allowed = json;
+        allowed["may_restore"] = true.into();
+        assert_eq!(serde_json::to_value(&vm)?, allowed);
+        assert!(serde_json::from_value::<DesiredVmV3>(allowed)?.may_restore);
+
+        let cold: VmStartV1 = serde_json::from_value(serde_json::json!({}))?;
+        assert!(!cold.restored);
+        assert_eq!(serde_json::to_value(&cold)?, serde_json::json!({}));
+        let restored = VmStartV1 {
+            first_report_ms: None,
+            restored: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&restored)?,
+            serde_json::json!({"restored": true})
+        );
         Ok(())
     }
 

@@ -542,6 +542,10 @@
           "type": "integer",
           "format": "int64"
         },
+        "may_restore": {
+          "description": "The host may start this VM from its snapshot of the image: set only\nfor a revision whose checks passed in a lab started that way. Left\nout when false, so a host that predates it never sees it.",
+          "type": "boolean"
+        },
         "memory_mib": {
           "type": "integer",
           "format": "uint32",
@@ -1324,6 +1328,10 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "restored": {
+          "description": "The VM was started from a host snapshot and woke; false after a\nfallback to a cold boot. Left out when false.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false
