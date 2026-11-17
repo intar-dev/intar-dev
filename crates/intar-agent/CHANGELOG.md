@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.21.0 (2026-11-17)
+
+### Features
+
+- **intar-agent:** Start labs from a per-host snapshot (#365) (31d9b9d3)
+
 ## agent/v0.20.1 (2026-11-17)
 
 ### Bug fixes
