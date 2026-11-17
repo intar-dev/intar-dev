@@ -8,7 +8,6 @@ import {
 } from "@/lib/scenario-runs";
 import { requireIdempotencyKey } from "@/lib/idempotency-key";
 import { resolveOrganizationId } from "@/lib/organizations";
-import { withQueryTiming } from "@/lib/query-timing";
 
 export const prerender = false;
 
@@ -22,12 +21,7 @@ interface StartScenarioBody {
   ref?: unknown;
 }
 
-export const POST: APIRoute = (context) =>
-  withQueryTiming("start", async () => start(context), (log) => {
-    context.locals.cfContext?.waitUntil(new Promise<void>((resolve) => setTimeout(resolve, 3000)).then(log));
-  });
-
-const start = async ({ request, params, locals }: Parameters<APIRoute>[0]): Promise<Response> => {
+export const POST: APIRoute = async ({ request, params, locals }) => {
   const authz = await requireUserContext(request);
   if (!authz.ok) return authz.response;
 
