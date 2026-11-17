@@ -326,18 +326,38 @@ export async function readKinoPin(
   const { current, previous = null } = entry;
   const valid = (value: unknown): value is string => typeof value === "string" && DIGEST_RE.test(value);
   if (!valid(current) || (previous !== null && !valid(previous))) return null;
-  for (const digest of previous === null ? [current] : [current, previous]) {
+  // Every lab start and every dispatch to a host asks, so the digests are
+  // checked side by side.
+  const contracts = await Promise.all((previous === null ? [current] : [current, previous]).map(async (digest) => {
     const kino = await env.DB.prepare(
       `SELECT 1 AS present FROM registry_manifests WHERE digest = ?1 AND artifact_type = ?2`,
     ).bind(digest, KINO_ARTIFACT_TYPE).first();
-    const config = kino ? await readStoredConfig(env, digest) : null;
-    if (!validateKinoConfig(config) || config.guest_contract !== guestContract) {
+    return { digest, contract: kino ? await kinoGuestContract(env, digest) : null };
+  }));
+  for (const { digest, contract } of contracts) {
+    if (contract !== guestContract) {
       console.error(JSON.stringify({ event: "kino_pin_invalid", guest_contract: guestContract, digest }));
       return null;
     }
   }
   return { current, previous };
 }
+
+/**
+ * The guest contract a stored Kino artifact's config names, or null. A
+ * digest names its content, so what was read once from the bucket holds for
+ * as long as the manifest is stored, which the caller asks the database.
+ */
+async function kinoGuestContract(env: Cloudflare.Env, digest: string): Promise<number | null> {
+  const known = kinoGuestContracts.get(digest);
+  if (known !== undefined) return known;
+  const config = await readStoredConfig(env, digest);
+  if (!validateKinoConfig(config)) return null;
+  kinoGuestContracts.set(digest, config.guest_contract);
+  return config.guest_contract;
+}
+
+const kinoGuestContracts = new Map<string, number>();
 
 /** The parsed config blob of a stored manifest. */
 async function readStoredConfig(env: Cloudflare.Env, manifestDigest: string): Promise<unknown> {
