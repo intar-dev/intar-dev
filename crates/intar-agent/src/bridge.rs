@@ -824,6 +824,7 @@ async fn reconcile_desired_vm(
         mode: desired_vm.mode,
         egress: desired_vm.egress,
         terminal: desired_vm.terminal,
+        may_restore: desired_vm.may_restore,
         resources: Some(resources_from_desired(desired_vm)),
         hostname: Some(desired_vm.name.clone()),
         lease_duration_seconds: Some(lease_duration_seconds),

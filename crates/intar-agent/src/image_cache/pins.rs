@@ -71,6 +71,7 @@ pub(crate) mod tests {
             ssh_authorized_keys: Vec::new(),
             terminal: true,
             egress: false,
+            may_restore: false,
         }
     }
 

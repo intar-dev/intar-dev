@@ -1160,7 +1160,7 @@ pub(super) async fn run_create(
         // the VM again as a restored one; the listener answers its
         // connections with Wake from here on.
         snapshot::write_restored_marker(&details).await;
-        inner.snapshots.mark_restored(req.name);
+        snapshot::set_restored(inner, req.name, true).await;
         debug!("calling cloud-hypervisor vm.restore");
         snapshot::restore_vm(&ch)
             .await

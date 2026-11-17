@@ -216,6 +216,12 @@ export interface DesiredVmV3 {
    */
   kino: string;
   lease_expires_at_unix_ms: number;
+  /**
+   * The host may start this VM from its snapshot of the image: set only
+   * for a revision whose checks passed in a lab started that way. Left
+   * out when false, so a host that predates it never sees it.
+   */
+  may_restore?: boolean;
   memory_mib: number;
   mode: SpecMode;
   /**
@@ -408,6 +414,11 @@ export interface VmStartV1 {
    * From the VMM's start to Kino's first report for this run.
    */
   first_report_ms?: number | null;
+  /**
+   * The VM was started from a host snapshot and woke; false after a
+   * fallback to a cold boot. Left out when false.
+   */
+  restored?: boolean;
 }
 export interface VmTerminalStateV1 {
   observed_at_unix_ms: number;

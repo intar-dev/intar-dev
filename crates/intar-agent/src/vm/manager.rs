@@ -77,6 +77,9 @@ pub struct CreateScenarioVmRequest {
     pub egress: bool,
     /// SSH (and with it the terminal) is enabled in the guest.
     pub terminal: bool,
+    /// The site allows a start from this host's snapshot.
+    #[serde(default)]
+    pub may_restore: bool,
     pub resources: Option<CreateVmResources>,
     pub hostname: Option<String>,
     pub lease_duration_seconds: Option<u64>,
@@ -132,6 +135,10 @@ pub struct VmStatusResponse {
     pub error: Option<String>,
     pub lease_duration_seconds: Option<u64>,
     pub lease_expires_at: Option<String>,
+    /// Started from a host snapshot and not fallen back to a cold boot.
+    /// In memory only; a restart reads it back from the VM's spool.
+    #[serde(skip_serializing)]
+    pub restored_from_snapshot: bool,
     #[serde(skip_serializing)]
     created_at_s: i64,
     #[serde(skip_serializing)]
@@ -253,6 +260,7 @@ impl VmStatusResponse {
     /// A queued VM with details and nothing launched, for tests.
     pub(crate) fn test_status(name: &str, run_id: Option<&str>) -> Self {
         VmStatusResponse {
+            restored_from_snapshot: false,
             name: name.to_string(),
             state: VmLifecycleState::Queued,
             created_at: "1970-01-01T00:00:00Z".to_string(),
@@ -453,6 +461,7 @@ struct QueueVmCreateRequest {
     mode: SpecMode,
     egress: bool,
     terminal: bool,
+    may_restore: bool,
     requested_resources: Option<CreateVmResources>,
     requested_hostname: Option<String>,
     lease_duration_seconds: Option<u64>,

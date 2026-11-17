@@ -188,6 +188,19 @@ impl Snapshots {
     }
 }
 
+/// Record whether a VM runs from a snapshot: its connections are answered
+/// with `Wake`, and its report says so.
+pub(super) async fn set_restored(inner: &Inner, vm_name: &str, restored: bool) {
+    if restored {
+        inner.snapshots.mark_restored(vm_name);
+    } else {
+        inner.snapshots.forget_vm(vm_name);
+    }
+    if let Some(vm) = inner.states.write().await.get_mut(vm_name) {
+        vm.restored_from_snapshot = restored;
+    }
+}
+
 /// Whether this host's CPU keeps one TSC that never stops.
 fn stable_tsc() -> bool {
     std::fs::read_to_string("/proc/cpuinfo").is_ok_and(|cpuinfo| {
@@ -425,7 +438,7 @@ pub(super) async fn recover_restored_vm(
     if !restored_marker(details).is_some_and(|marker| marker.exists()) {
         return;
     }
-    inner.snapshots.mark_restored(vm_name);
+    set_restored(inner, vm_name, true).await;
     if let Err(error) = ch.vm_resume().await {
         debug!(error = %error, vm = vm_name, "a restored VM was not paused");
     }

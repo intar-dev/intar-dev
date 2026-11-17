@@ -32,6 +32,7 @@ fn desired_vm() -> DesiredVmV3 {
         ssh_authorized_keys: vec!["ssh-ed25519 AAAATEST run".to_string()],
         terminal: true,
         egress: false,
+        may_restore: false,
     }
 }
 
@@ -687,6 +688,7 @@ fn a_vm_report_is_ready_only_with_its_forward_and_starts_cold() {
         report.vm.start,
         Some(VmStartV1 {
             first_report_ms: Some(1_234),
+            restored: false,
         })
     );
     assert_eq!(report.vm.lab, Some(lab.lab));
