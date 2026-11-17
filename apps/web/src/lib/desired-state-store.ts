@@ -32,16 +32,22 @@ export async function mutateHostDesiredStateV3(
   nowUnixMs: number,
   mutator?: (draft: HostDesiredStateV3, host: { role: "agent" | "builder" }) => void,
 ): Promise<{ state: HostDesiredStateV3; role: "agent" | "builder" }> {
-  const [host] = await db.select({ scope: agentHosts.scope, ownerUserId: agentHosts.userId, organizationId: agentHosts.organizationId, role: agentHosts.role })
-    .from(agentHosts).where(eq(agentHosts.id, hostId)).limit(1);
+  const loadStored = () => db
+    .select({ version: hostDesiredState.version, docJson: sql<string>`${hostDesiredState.docJson}` })
+    .from(hostDesiredState)
+    .where(eq(hostDesiredState.hostId, hostId))
+    .limit(1);
+  // Both reads leave together: every lab start and every dispatch to a host
+  // waits for this function, and each read is a round trip.
+  const [[host], first] = await Promise.all([
+    db.select({ scope: agentHosts.scope, ownerUserId: agentHosts.userId, organizationId: agentHosts.organizationId, role: agentHosts.role })
+      .from(agentHosts).where(eq(agentHosts.id, hostId)).limit(1),
+    loadStored(),
+  ]);
   if (!host || !host.scope || !host.ownerUserId) throw new Error("host ownership is not enrolled");
   if (host.scope === "organization" && (!host.organizationId || host.role !== "agent")) throw new Error("invalid organization host");
   for (let attempt = 0; attempt < MUTATE_DESIRED_STATE_MAX_ATTEMPTS; attempt++) {
-    const [row] = await db
-      .select({ version: hostDesiredState.version, docJson: sql<string>`${hostDesiredState.docJson}` })
-      .from(hostDesiredState)
-      .where(eq(hostDesiredState.hostId, hostId))
-      .limit(1);
+    const [row] = attempt === 0 ? first : await loadStored();
     const stored = row ? (JSON.parse(row.docJson) as { schema_version?: unknown }) : null;
     const current: HostDesiredStateV3 | null =
       row && stored?.schema_version === HOST_DESIRED_STATE_SCHEMA_VERSION_V3

@@ -449,7 +449,7 @@ export async function admitRevisionRun(context: {
       await prepareRevisionImages({ access, requestKey: context.idempotencyKey, candidates: [chosen], images, now });
       if (!isReady(chosen)) throw scenarioImagePreparing();
       // The preparation moved the desired state; plan against the new version.
-      allocated = await planRevisionHost({ candidates: [chosen], desiredVms, cpuMillis, reservationResources, now });
+      allocated = await planRevisionHost({ candidates: [chosen], desiredVms, cpuMillis, reservationResources, now, reload: true });
     }
     await assertAgentKvmRunsOpen(env.DB, input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {});
     const outcome = await commitAdmissionBatch({
@@ -603,6 +603,8 @@ interface RevisionHostCandidate {
   report: HostStateReportV3;
   /** The host's agent reads `may_restore`; an older one refuses a desired state that holds it. */
   readsMayRestore: boolean;
+  /** The desired state the host was found eligible on. */
+  desired: HostDesiredStateV3;
 }
 
 /** The first agent release that reads `DesiredVmV3.may_restore`. */
@@ -696,6 +698,7 @@ async function eligibleRevisionHosts(input: {
       actualReportText: JSON.stringify(row.actualReportText),
       report,
       readsMayRestore: agentReadsMayRestore(row.helloJson),
+      desired,
     });
   }
   if (!candidates.length) throw noEligibleHost();
@@ -715,17 +718,23 @@ async function planRevisionHost(input: {
   cpuMillis: number;
   reservationResources: Parameters<typeof runtimeResourcesFit>[0];
   now: number;
+  /** The candidates' desired state moved since they were found: read it again. */
+  reload?: boolean;
 }): Promise<AdmissionHostAllocation> {
   const db = drizzle(env.DB);
   for (const candidate of input.candidates) {
-    const current = await loadStoredHostDesiredState(db, candidate.hostId, input.now);
-    const reservations = await db
-      .select({ runId: hostCpuReservations.runId, cpuMillis: hostCpuReservations.cpuMillis, state: hostCpuReservations.state })
-      .from(hostCpuReservations)
-      .where(eq(hostCpuReservations.hostId, candidate.hostId));
+    // The eligibility check read this version a moment ago, before any
+    // capacity, and the commit fails if it moved since.
+    const current = input.reload ? await loadStoredHostDesiredState(db, candidate.hostId, input.now) : candidate.desired;
+    const [reservations, snapshot] = await Promise.all([
+      db
+        .select({ runId: hostCpuReservations.runId, cpuMillis: hostCpuReservations.cpuMillis, state: hostCpuReservations.state })
+        .from(hostCpuReservations)
+        .where(eq(hostCpuReservations.hostId, candidate.hostId)),
+      loadActiveRuntimeResourceSnapshot(input.now, [candidate.hostId]),
+    ]);
     const capacity = hostCpuReservationCapacityFromSnapshot(candidate.report, reservations);
     if (!capacity || input.cpuMillis > capacity.availableCpuMillis) continue;
-    const snapshot = await loadActiveRuntimeResourceSnapshot(input.now, [candidate.hostId]);
     const available = availableRuntimeHostResources({
       hostId: candidate.hostId,
       report: candidate.report,
