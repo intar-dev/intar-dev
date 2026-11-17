@@ -992,9 +992,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
     mark("context");
     if (!execution || execution.domainId !== report.run_id || execution.userId !== report.owner_user_id ||
       execution.generation !== report.generation || execution.state === "archived") return;
-    const projectionOutcome = await this.withRunProjectionLock(
+    const projected = await this.withRunProjectionLock(
       report.run_id,
-      async (): Promise<RunProjectionOutcome> => {
+      async (): Promise<{ outcome: RunProjectionOutcome; mirror: Promise<void> }> => {
         mark("locked");
         const run = await this.loadRun(report.run_id);
         mark("loaded");
@@ -1020,8 +1020,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
         if (outcome.kind === "updated") {
           // The status route reads the durable projection. Begin this
-          // best-effort notification only after that write, without awaiting it
-          // under the ordering lock for the runtime mirror.
+          // best-effort notification only after that write, without awaiting it.
           this.scheduleRunStatusInvalidation({
             runId: report.run_id,
             hostId,
@@ -1029,35 +1028,46 @@ export class HostRuntimeDO extends HostRuntimeBase {
           });
         }
 
-        if (outcome.kind !== "stale_session") {
-          try {
-            await this.applyRuntimeVmActualState(
-              hostId,
-              runtimeActualStateFromReport(report),
-              report.observed_at_unix_ms,
-              expectedSessionId,
-              expectedCredentialGeneration,
-            );
-          } catch (error) {
-            // Scenario projection remains authoritative during the shared-runtime
-            // migration. A missing mirror credential must not regress its
-            // established lifecycle. Mirror errors are retried by the agent's next
-            // report.
-            console.error(
-              JSON.stringify({
-                message: "runtime VM report projection failed",
-                hostId,
-                executionId: report.run_id,
-                runtimeVmName: report.vm_name,
-                error: error instanceof Error ? error.message : String(error),
-              }),
-            );
-          }
-        }
-        mark("mirrored");
-        return outcome;
+        // The runtime mirror takes about ten database round trips. Held
+        // under this lock, each report of a starting lab kept the next one's
+        // projection waiting for them: "lab ready" reached the learner a
+        // second and a half late, behind the mirrors of the reports before
+        // it. The mirror has a queue of its own, joined here so it keeps the
+        // order of the projections.
+        const mirror = outcome.kind === "stale_session"
+          ? Promise.resolve()
+          : this.withRunProjectionLock(`mirror:${report.run_id}`, async () => {
+              try {
+                await this.applyRuntimeVmActualState(
+                  hostId,
+                  runtimeActualStateFromReport(report),
+                  report.observed_at_unix_ms,
+                  expectedSessionId,
+                  expectedCredentialGeneration,
+                );
+              } catch (error) {
+                // Scenario projection remains authoritative during the shared-runtime
+                // migration. A missing mirror credential must not regress its
+                // established lifecycle. Mirror errors are retried by the agent's next
+                // report.
+                console.error(
+                  JSON.stringify({
+                    message: "runtime VM report projection failed",
+                    hostId,
+                    executionId: report.run_id,
+                    runtimeVmName: report.vm_name,
+                    error: error instanceof Error ? error.message : String(error),
+                  }),
+                );
+              }
+            });
+        return { outcome, mirror };
       },
     );
+    mark("projected");
+    await projected.mirror;
+    mark("mirrored");
+    const projectionOutcome = projected.outcome;
 
     if (projectionOutcome.kind === "stale_session") {
       return;
@@ -1812,6 +1822,20 @@ function markStep(raw: object, label: string): void {
   messageMarks.set(raw, marks);
 }
 
+const lastVmReports = new Map<string, string>();
+
+/** Whether this VM report says what the last one for its VM said, timestamps aside. */
+function repeatsLastVmReport(hostId: string, vm: unknown): boolean | null {
+  const name = (vm as { name?: unknown } | undefined)?.name;
+  if (typeof name !== "string") return null;
+  const body = JSON.stringify(vm, (key, value: unknown) => (/_unix_ms$|_at$/.test(key) ? undefined : value));
+  const key = `${hostId}\0${name}`;
+  const same = lastVmReports.get(key) === body;
+  lastVmReports.set(key, body);
+  if (lastVmReports.size > 256) lastVmReports.clear();
+  return same;
+}
+
 function logHostMessageTiming(hostId: string, raw: Record<string, unknown> | null, startedAt: number): void {
   if (raw?.type !== "vm_report" && raw?.type !== "state_report") return;
   const report = raw.report as { observed_at_unix_ms?: unknown; vm?: { name?: unknown; phase?: unknown; lab?: { state?: unknown } | null }; vms?: unknown[] } | undefined;
@@ -1823,6 +1847,7 @@ function logHostMessageTiming(hostId: string, raw: Record<string, unknown> | nul
     startedAt,
     lagMs: observedAt === null ? null : startedAt - observedAt,
     handlerMs: Date.now() - startedAt,
+    repeat: raw.type === "vm_report" ? repeatsLastVmReport(hostId, report?.vm) : null,
     steps: (messageMarks.get(raw) ?? []).map(([label, at]) => [label, at - startedAt]),
     vm: typeof report?.vm?.name === "string" ? report.vm.name : null,
     phase: typeof report?.vm?.phase === "string" ? report.vm.phase : null,

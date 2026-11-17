@@ -465,6 +465,44 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     ws.close();
   });
 
+  it("projects a later report while an earlier report's runtime mirror is still writing", async () => {
+    const hostId = "host-slow-mirror";
+    const runId = "run-slow-mirror";
+    const now = Date.now();
+    await seedHost(hostId);
+    const { stub, ws } = await connectHost(hostId);
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const mirrored: number[] = [];
+    const spy = await runInDurableObject(stub, async instance => {
+      const runtime = instance as unknown as {
+        applyRuntimeVmActualState(hostId: string, report: unknown, observedAt: number, ...rest: unknown[]): Promise<void>;
+      };
+      const mirror = runtime.applyRuntimeVmActualState.bind(runtime);
+      return vi.spyOn(runtime, "applyRuntimeVmActualState").mockImplementation(async (...args) => {
+        if (!mirrored.length) await held;
+        mirrored.push(args[2]);
+        return mirror(...args);
+      });
+    });
+    try {
+      sendBridge(ws, vmReport(hostId, runId, "runtime-web", "booting", now + 90, 22001, "10.77.0.2"));
+      sendBridge(ws, vmReport(hostId, runId, "runtime-web", "ready", now + 110, 22001, "10.77.0.2"));
+      const state = await waitForRunState(db, runId, (state) => state.vms[0]?.runtimeObservedAt === now + 110);
+      expect(state.vms[0]).toMatchObject({ phase: "ready", runtimeState: "ready" });
+      // The first mirror has not written yet, and the second waits its turn.
+      expect(mirrored).toEqual([]);
+      release();
+      await vi.waitFor(() => expect(mirrored).toEqual([now + 90, now + 110]));
+    } finally {
+      release();
+      spy.mockRestore();
+    }
+    ws.close();
+  });
+
   it("keeps SSH closed until explicit ready and exact steady quota evidence arrive", async () => {
     const hostId = "host-explicit-terminal-ready";
     const runId = "run-explicit-terminal-ready";
