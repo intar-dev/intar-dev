@@ -1,5 +1,11 @@
 # Changelog
 
+## kino/v0.7.0 (2026-11-17)
+
+### Features
+
+- **kino:** Start the lab at once and check it more often (#357) (36357744)
+
 ## kino/v0.6.0 (2026-11-17)
 
 ### Breaking changes
