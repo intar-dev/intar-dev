@@ -1822,6 +1822,20 @@ function markStep(raw: object, label: string): void {
   messageMarks.set(raw, marks);
 }
 
+const lastVmReports = new Map<string, string>();
+
+/** Whether this VM report says what the last one for its VM said, timestamps aside. */
+function repeatsLastVmReport(hostId: string, vm: unknown): boolean | null {
+  const name = (vm as { name?: unknown } | undefined)?.name;
+  if (typeof name !== "string") return null;
+  const body = JSON.stringify(vm, (key, value: unknown) => (/_unix_ms$|_at$/.test(key) ? undefined : value));
+  const key = `${hostId}\0${name}`;
+  const same = lastVmReports.get(key) === body;
+  lastVmReports.set(key, body);
+  if (lastVmReports.size > 256) lastVmReports.clear();
+  return same;
+}
+
 function logHostMessageTiming(hostId: string, raw: Record<string, unknown> | null, startedAt: number): void {
   if (raw?.type !== "vm_report" && raw?.type !== "state_report") return;
   const report = raw.report as { observed_at_unix_ms?: unknown; vm?: { name?: unknown; phase?: unknown; lab?: { state?: unknown } | null }; vms?: unknown[] } | undefined;
@@ -1833,6 +1847,7 @@ function logHostMessageTiming(hostId: string, raw: Record<string, unknown> | nul
     startedAt,
     lagMs: observedAt === null ? null : startedAt - observedAt,
     handlerMs: Date.now() - startedAt,
+    repeat: raw.type === "vm_report" ? repeatsLastVmReport(hostId, report?.vm) : null,
     steps: (messageMarks.get(raw) ?? []).map(([label, at]) => [label, at - startedAt]),
     vm: typeof report?.vm?.name === "string" ? report.vm.name : null,
     phase: typeof report?.vm?.phase === "string" ? report.vm.phase : null,
