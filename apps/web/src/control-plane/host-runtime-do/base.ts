@@ -128,7 +128,6 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       deleteRequestedAt?: number | null;
       keepDeleteRequestedAt?: boolean;
       initialRow?: RunProjectionRow;
-      mark?: (label: string) => void;
       expectedExecution?: { id: string; ownerUserId: string; generation: number };
       expectedHostSession?: {
         hostId: string;
@@ -139,7 +138,6 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   ): Promise<RunProjectionOutcome> {
     const db = drizzle(this.env.DB);
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      options?.mark?.("attempt" + String(attempt));
       // The direct VM-report path already loaded this row for its ownership
       // check inside the per-run ordering domain. Reuse it for attempt zero;
       // a failed CAS still reloads authoritative state before retrying.
