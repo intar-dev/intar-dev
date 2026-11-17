@@ -353,8 +353,13 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       const stored = await storage.get<number | null>(RUNTIME_ALARM_KEY);
       let runtime = stored === undefined ? currentAlarm : stored;
       if (runtimeDeadline !== undefined) {
-        runtime = runtime !== null && runtime > Date.now()
-          ? Math.min(runtime, runtimeDeadline ?? Infinity)
+        // A stored deadline counts while it lies ahead, or while its alarm
+        // is still set: one armed for "now" has not run yet, and a later
+        // "no later than" must not push it back. Inside a running alarm no
+        // alarm is set, so a deadline that has been served is replaced.
+        const pending = runtime !== null && (runtime > Date.now() || currentAlarm !== null);
+        runtime = pending
+          ? Math.min(runtime as number, runtimeDeadline ?? Infinity)
           : runtimeDeadline;
       }
       if (stored !== runtime) await storage.put(RUNTIME_ALARM_KEY, runtime);

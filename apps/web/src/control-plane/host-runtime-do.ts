@@ -1230,7 +1230,17 @@ export class HostRuntimeDO extends HostRuntimeBase {
     // What the host is waiting for goes out first: a new run's VM reaches
     // it without sitting behind the housekeeping below. Whatever that
     // changes is delivered by the second dispatch at the end.
-    await this.dispatchDesiredStateToActiveSocket(hostId, now);
+    try {
+      await this.dispatchDesiredStateToActiveSocket(hostId, now);
+    } catch (error) {
+      // The housekeeping below must still run: nothing else expires leases
+      // and reservations. The dispatch at the end tries again and throws.
+      console.error(JSON.stringify({
+        message: "early desired-state dispatch failed",
+        hostId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
     await maintainMachineBuilds(this.env, hostId, now);
     const expiredLeases = await expireOverdueRunLeases(hostId, now, { db, wakeHostRuntime: false });
     for (const expired of expiredLeases.updatedRunRevisions) {
