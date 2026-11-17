@@ -60,8 +60,9 @@ describe("rehearsal entrypoint", () => {
         preservedRows: number;
       };
       expect(evidence.baselineTags).toHaveLength(46);
-      expect(evidence.appliedTags).toEqual(["0046_yielding_smiling_tiger"]);
-      expect(evidence.appliedMigrationCount).toBe(47);
+      // The removal migration, and the additive one committed after it.
+      expect(evidence.appliedTags).toEqual(["0046_yielding_smiling_tiger", "0047_slimy_proudstar"]);
+      expect(evidence.appliedMigrationCount).toBe(48);
       expect(evidence.committedMigrationCount).toBe(47);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(evidence.droppedTables).toContain("vm_scenarios");
