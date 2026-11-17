@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.16.0 (2026-11-17)
+
+### Breaking changes
+
+- **intar-contracts:** [**breaking**] Replace the scenario format, guest contract and registry storage (#351) (137144dc)
+
 ## builder/v0.15.3 (2026-10-28)
 
 ### Bug fixes
