@@ -182,10 +182,12 @@ async fn host() -> Option<tokio_vsock::VsockStream> {
     use intar_contracts::guest::REPORT_PORT;
     use tokio_vsock::{VMADDR_CID_HOST, VsockAddr, VsockStream};
     let connect = VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, REPORT_PORT));
-    tokio::time::timeout(Duration::from_millis(200), connect)
+    let stream = tokio::time::timeout(Duration::from_millis(200), connect)
         .await
         .ok()?
-        .ok()
+        .ok()?;
+    wire::close_on_exec(&stream);
+    Some(stream)
 }
 
 /// One `PARKED` report, then wait until the host closes the stream: it has

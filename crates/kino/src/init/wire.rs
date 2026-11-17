@@ -12,8 +12,18 @@ const KEEPALIVE: Duration = Duration::from_secs(10);
 const RECONNECT: Duration = Duration::from_millis(100);
 
 type Sink = Box<dyn AsyncWrite + Unpin + Send>;
-/// The write half and a signal that fires when the host closed the stream.
-type Link = (Sink, oneshot::Receiver<()>);
+/// The write half, a signal that fires when the host closed the stream, and
+/// the reader task. Dropping the link stops the reader, which closes the
+/// stream: a publisher that is aborted leaves no connection behind.
+type Link = (Sink, oneshot::Receiver<()>, Reader);
+
+struct Reader(tokio::task::JoinHandle<()>);
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// Send every report change, and the latest report every 10 s. A lost
 /// connection is opened again and the latest report resent, so the host
@@ -42,6 +52,16 @@ pub(crate) async fn publish(mut changes: watch::Receiver<Report>) {
     }
 }
 
+/// tokio-vsock opens its socket without close-on-exec: without this every
+/// script Kino runs, and the run started after a park, inherits the report
+/// connection.
+#[cfg(target_os = "linux")]
+pub(super) fn close_on_exec(stream: &tokio_vsock::VsockStream) {
+    if let Err(error) = rustix::io::fcntl_setfd(stream, rustix::io::FdFlags::CLOEXEC) {
+        eprintln!("kino init: close-on-exec on the report connection: {error}");
+    }
+}
+
 /// Retries until the host listens.
 #[cfg(target_os = "linux")]
 async fn connect() -> Link {
@@ -50,13 +70,14 @@ async fn connect() -> Link {
     loop {
         if let Ok(stream) = VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, REPORT_PORT)).await
         {
+            close_on_exec(&stream);
             let (read, write) = tokio::io::split(stream);
             let (done, closed) = oneshot::channel();
-            tokio::spawn(async move {
+            let reader = tokio::spawn(async move {
                 read_host_frames(read).await;
                 let _ = done.send(());
             });
-            return (Box::new(write), closed);
+            return (Box::new(write), closed, Reader(reader));
         }
         tokio::time::sleep(RECONNECT).await;
     }

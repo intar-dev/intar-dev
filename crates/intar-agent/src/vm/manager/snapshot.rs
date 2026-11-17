@@ -792,20 +792,33 @@ async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
         .await
         .context("capture vm.create failed")?;
     ch.vm_boot().await.context("capture vm.boot failed")?;
+    // Kino reports its boot on one connection and PARKED on another; the
+    // first may still be open when the second arrives.
+    let (parked_tx, mut parked_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let mut connections = tokio::task::JoinSet::new();
     let parked = timeout(PARKED_TIMEOUT, async {
         loop {
-            let (mut stream, _) = listener
-                .accept()
-                .await
-                .context("accept the capture's Kino")?;
-            while let Some(body) = read_frame(&mut stream).await? {
-                if intar_kino_proto::host::is_parked(&body) {
-                    return anyhow::Ok(());
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.context("accept the capture's Kino")?;
+                    let parked_tx = parked_tx.clone();
+                    connections.spawn(async move {
+                        while let Ok(Some(body)) = read_frame(&mut stream).await {
+                            if intar_kino_proto::host::is_parked(&body) {
+                                let _ = parked_tx.send(()).await;
+                                return;
+                            }
+                        }
+                    });
                 }
+                _ = parked_rx.recv() => return anyhow::Ok(()),
             }
         }
     })
     .await;
+    // Closes every connection: the parked guest takes the end of its PARKED
+    // connection as the host's acknowledgement.
+    connections.shutdown().await;
     // Nothing may listen from here on: a parked guest wakes on a connection
     // that gets a Wake, and tries until a restore gives it one.
     drop(listener);
@@ -862,27 +875,38 @@ async fn check(inner: &Inner, job: &CaptureJob) -> Result<()> {
         prepare_kino_ready_listener(&launched.paths.host_vsock_socket, launched.uid).await?;
     let ch = ChClient::new(launched.paths.host_api_socket.display().to_string())?;
     restore_vm(&ch).await?;
+    let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let mut connections = tokio::task::JoinSet::new();
     let woke = timeout(RESTORE_TIMEOUT, async {
         loop {
-            let (mut stream, _) = listener
-                .accept()
-                .await
-                .context("accept the restored Kino")?;
-            let mut seed = vec![0_u8; 32];
-            getrandom_fill(&mut seed).context("random seed")?;
-            let now = u64::try_from(now_unix_ms()).unwrap_or(0);
-            stream
-                .write_all(&intar_kino_proto::host::wake_frame(now, seed))
-                .await
-                .context("send Wake")?;
-            while let Some(body) = read_frame(&mut stream).await? {
-                if intar_kino_proto::host::decode(&body).is_ok_and(|report| report.ssh_ready) {
-                    return anyhow::Ok(());
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.context("accept the restored Kino")?;
+                    let mut seed = vec![0_u8; 32];
+                    getrandom_fill(&mut seed).context("random seed")?;
+                    let now = u64::try_from(now_unix_ms()).unwrap_or(0);
+                    let wake = intar_kino_proto::host::wake_frame(now, seed);
+                    let ready_tx = ready_tx.clone();
+                    connections.spawn(async move {
+                        if stream.write_all(&wake).await.is_err() {
+                            return;
+                        }
+                        while let Ok(Some(body)) = read_frame(&mut stream).await {
+                            if intar_kino_proto::host::decode(&body)
+                                .is_ok_and(|report| report.ssh_ready)
+                            {
+                                let _ = ready_tx.send(()).await;
+                                return;
+                            }
+                        }
+                    });
                 }
+                _ = ready_rx.recv() => return anyhow::Ok(()),
             }
         }
     })
     .await;
+    connections.shutdown().await;
     drop(listener);
     let _ = tokio::fs::remove_file(&socket_path).await;
     woke.context("the restored guest did not get to SSH_READY in time")?
