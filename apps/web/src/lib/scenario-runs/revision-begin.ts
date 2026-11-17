@@ -97,27 +97,40 @@ function verifyQuotaCondition(scopeParam: number): string {
  * scenario's ready candidate in scope ?scope, and the scope has a free verify
  * slot. One run per revision is the active key's unique index.
  */
-export function verifyAnchorCondition(scenarioParam: number, revParam: number, scopeParam: number): string {
+export function verifyAnchorCondition(scenarioParam: number, revParam: number, scopeParam: number, restoreCheck = false): string {
+  // A restore check runs a revision that is verified already, whether it is
+  // the candidate or live: one machine, and not restore-verified yet.
+  const revision = restoreCheck
+    ? `(verify_scenario.candidate_rev = ?${revParam} OR verify_scenario.live_rev = ?${revParam})
+      AND verify_revision.rev = ?${revParam} AND verify_revision.state = 'verified'
+      AND verify_revision.restore_verified_at IS NULL
+      AND json_array_length(verify_revision.doc_json, '$.machines') = 1`
+    : `verify_scenario.candidate_rev = ?${revParam}
+      AND verify_revision.rev = ?${revParam} AND verify_revision.state = 'ready'`;
   return `EXISTS (SELECT 1 FROM scenarios verify_scenario
       JOIN scenario_revisions verify_revision ON verify_revision.scenario_id = verify_scenario.id
     WHERE verify_scenario.id = ?${scenarioParam} AND verify_scenario.enabled = 1
-      AND verify_scenario.scope_key = ?${scopeParam} AND verify_scenario.candidate_rev = ?${revParam}
-      AND verify_revision.rev = ?${revParam} AND verify_revision.state = 'ready')
+      AND verify_scenario.scope_key = ?${scopeParam} AND ${revision})
     AND ${verifyQuotaCondition(scopeParam)}`;
 }
 
 /** Why a verify run of `rev` may not start now, or null. */
-export async function verifyRefusal(d1: D1Database, scenarioId: string, rev: string, scopeKey: string) {
+export async function verifyRefusal(d1: D1Database, scenarioId: string, rev: string, scopeKey: string, restoreCheck = false) {
   const row = await d1.prepare(
     `SELECT EXISTS (SELECT 1 FROM scenario_runs WHERE active_key = ?4) AS running,
-        ${verifyQuotaCondition(3)} AS quota, ${verifyAnchorCondition(1, 2, 3)} AS anchored`,
+        ${verifyQuotaCondition(3)} AS quota, ${verifyAnchorCondition(1, 2, 3, restoreCheck)} AS anchored`,
   ).bind(scenarioId, rev, scopeKey, verifyActiveKey(scopeKey, rev, scenarioId))
     .first<{ running: number; quota: number; anchored: number }>();
   if (row?.running) return appError(409, "verify_run_active", "a verify run of this revision is already running");
   if (!row?.quota) {
     return appError(409, "verify_quota_exhausted", `this scope already has ${VERIFY_RUN_QUOTA} verify runs; wait for one to end`);
   }
-  if (!row.anchored) return appError(409, "verify_revision_not_candidate", "only a ready candidate revision can be verified");
+  if (!row.anchored) {
+    return restoreCheck
+      ? appError(409, "restore_check_not_possible",
+        "a restore check needs a verified candidate or live revision with one machine that is not restore-verified yet")
+      : appError(409, "verify_revision_not_candidate", "only a ready candidate revision can be verified");
+  }
   return null;
 }
 
@@ -126,6 +139,8 @@ export interface LiveScenarioRevision {
   rev: string;
   guestContract: number;
   doc: ScenarioRevisionV1;
+  /** The revision's checks passed in a lab started from a host snapshot. */
+  restoreVerified?: boolean;
 }
 
 /**
@@ -140,7 +155,8 @@ export async function liveScenarioRevision(
   organizationId: string | null,
   options: { play?: boolean } = {},
 ): Promise<LiveScenarioRevision | null> {
-  const sql = `SELECT scenario.id, revision.rev, revision.guest_contract, revision.doc_json
+  const sql = `SELECT scenario.id, revision.rev, revision.guest_contract, revision.doc_json,
+         revision.restore_verified_at IS NOT NULL AS restore_verified
        FROM scenarios scenario
        JOIN scenario_revisions revision
          ON revision.scenario_id = scenario.id AND revision.rev = scenario.live_rev
@@ -149,9 +165,12 @@ export async function liveScenarioRevision(
         AND ${options.play ? playableScenarioCondition("scenario") : "(scenario.organization_id IS NULL OR scenario.organization_id = ?2)"}`;
   const statement = d1.prepare(sql);
   const row = await (options.play ? statement.bind(scenarioId) : statement.bind(scenarioId, organizationId))
-    .first<{ id: string; rev: string; guest_contract: number; doc_json: string }>();
+    .first<{ id: string; rev: string; guest_contract: number; doc_json: string; restore_verified: number }>();
   if (!row) return null;
-  return { scenarioId: row.id, rev: row.rev, guestContract: row.guest_contract, doc: JSON.parse(row.doc_json) };
+  return {
+    scenarioId: row.id, rev: row.rev, guestContract: row.guest_contract, doc: JSON.parse(row.doc_json),
+    restoreVerified: row.restore_verified === 1,
+  };
 }
 
 /**
@@ -210,10 +229,17 @@ export async function admitRevisionRun(context: {
   scope: ScenarioStartRequestScope;
   /** A verify run of the revision, taking this scope's verify quota. */
   verifyScopeKey?: string;
+  /** The verify run is a restore check: its VM may start from a host snapshot. */
+  verifyRestoreCheck?: boolean;
 }): Promise<BeginScenarioRunResult> {
   const { input, revision, organizationId, courseLecture } = context;
   const verifyScopeKey = context.verifyScopeKey ?? null;
+  const verifyRestoreCheck = verifyScopeKey !== null && context.verifyRestoreCheck === true;
   const doc = revision.doc;
+  // A VM may start from its host's snapshot only in a restore check, or for
+  // a revision that passed one. A snapshot is of one machine.
+  const mayRestore = doc.machines.length === 1 &&
+    (verifyScopeKey ? verifyRestoreCheck : revision.restoreVerified === true);
   if (!doc.machines.length || doc.machines.some((machine) => !machine.image_digest)) {
     throw appError(409, "image_not_ready", "scenario images are not built yet");
   }
@@ -408,7 +434,7 @@ export async function admitRevisionRun(context: {
     if (candidates[0]!.scope === "platform") {
       // Platform hosts cache every live and candidate image on their own.
       if (!ready.length) throw scenarioImagePreparing();
-      allocated = await planRevisionHost({ candidates: ready, desiredVms, cpuMillis, reservationResources, now });
+      allocated = await planRevisionHost({ candidates: ready, desiredVms, mayRestore, cpuMillis, reservationResources, now });
     } else {
       // The learner's own servers: the host with room, ready ones first, is
       // told to cache the images. Until it reports them ready the start is
@@ -436,6 +462,7 @@ export async function admitRevisionRun(context: {
       leaseExpiresAt,
       revisionAnchor: verifyScopeKey ? null : revision.rev,
       verifyScopeKey,
+      ...(verifyRestoreCheck ? { verifyRestoreCheck: true } : {}),
       ...(input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
       now: Date.now(),
     });
@@ -482,7 +509,7 @@ export async function admitRevisionRun(context: {
       ...(input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
     });
     if (verifyScopeKey) {
-      const refusal = await verifyRefusal(env.DB, revision.scenarioId, revision.rev, verifyScopeKey);
+      const refusal = await verifyRefusal(env.DB, revision.scenarioId, revision.rev, verifyScopeKey, verifyRestoreCheck);
       if (refusal) throw refusal;
     } else if (!(await liveRevisionHolds(env.DB, revision.scenarioId, revision.rev))) {
       throw scenarioSourceChanged();
@@ -502,15 +529,22 @@ export async function beginVerifyRun(input: {
   scenarioId: string;
   rev: string;
   allowDrainedAdminProof?: boolean;
+  /**
+   * A restore check of a revision that is verified already: the same verify
+   * run, with a VM that may start from its host's snapshot. The revision
+   * names the run, which is how its outcome is told from a verify run's.
+   */
+  restoreCheck?: boolean;
 }): Promise<BeginScenarioRunResult> {
   const drained = input.allowDrainedAdminProof === true;
+  const restoreCheck = input.restoreCheck === true;
   const row = await env.DB.prepare(
     `SELECT scenario.scope_key, revision.guest_contract, revision.doc_json FROM scenarios scenario
        JOIN scenario_revisions revision ON revision.scenario_id = scenario.id AND revision.rev = ?2
       WHERE scenario.id = ?1`,
   ).bind(input.scenarioId, input.rev).first<{ scope_key: string; guest_contract: number; doc_json: string }>();
   if (!row) throw appError(404, "scenario_revision_not_found", "scenario revision not found");
-  const refusal = await verifyRefusal(env.DB, input.scenarioId, input.rev, row.scope_key);
+  const refusal = await verifyRefusal(env.DB, input.scenarioId, input.rev, row.scope_key, restoreCheck);
   if (refusal) throw refusal;
   await env.DB.prepare(
     `INSERT INTO user (id, name, email, email_verified, metal_placement) VALUES (?1, 'Scenario validation', ?2, 1, 'platform')
@@ -539,7 +573,15 @@ export async function beginVerifyRun(input: {
         candidateBuildId: null, allowDrainedAdminProof: drained, allowSequenceBypass: false,
       },
       verifyScopeKey: row.scope_key,
+      ...(restoreCheck ? { verifyRestoreCheck: true } : {}),
     });
+    if (restoreCheck) {
+      // Before the VM can report: its boot takes longer than this write.
+      await env.DB.prepare(
+        `UPDATE scenario_revisions SET restore_verify_run_id = ?3, restore_verify_report_json = NULL
+          WHERE scenario_id = ?1 AND rev = ?2`,
+      ).bind(input.scenarioId, input.rev, result.runId).run();
+    }
     outcome = "ok";
     return result;
   } finally {
@@ -555,6 +597,30 @@ interface RevisionHostCandidate {
   actualReportedAt: number;
   actualReportText: string;
   report: HostStateReportV3;
+  /** The host's agent reads `may_restore`; an older one refuses a desired state that holds it. */
+  readsMayRestore: boolean;
+}
+
+/** The first agent release that reads `DesiredVmV3.may_restore`. */
+const MAY_RESTORE_AGENT_VERSION = [0, 22, 0] as const;
+
+/** Whether the agent of a stored client hello is at least that release. */
+export function agentReadsMayRestore(helloJson: string | null): boolean {
+  if (!helloJson) return false;
+  let version: unknown;
+  try {
+    version = (JSON.parse(helloJson) as { agent_version?: unknown }).agent_version;
+  } catch {
+    return false;
+  }
+  const match = typeof version === "string" ? /^(\d+)\.(\d+)\.(\d+)$/.exec(version) : null;
+  if (!match) return false;
+  const parts = match.slice(1).map(Number);
+  for (const [index, least] of MAY_RESTORE_AGENT_VERSION.entries()) {
+    const part = parts[index] ?? 0;
+    if (part !== least) return part > least;
+  }
+  return true;
 }
 
 /**
@@ -587,6 +653,7 @@ async function eligibleRevisionHosts(input: {
       activeSessionId: agentHosts.activeSessionId,
       actualReportedAt: hostActualState.updatedAt,
       actualReportText: hostActualState.reportJson,
+      helloJson: agentHosts.helloJson,
     })
     .from(agentHosts)
     .innerJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
@@ -624,6 +691,7 @@ async function eligibleRevisionHosts(input: {
       actualReportedAt: row.actualReportedAt,
       actualReportText: JSON.stringify(row.actualReportText),
       report,
+      readsMayRestore: agentReadsMayRestore(row.helloJson),
     });
   }
   if (!candidates.length) throw noEligibleHost();
@@ -638,6 +706,8 @@ async function eligibleRevisionHosts(input: {
 async function planRevisionHost(input: {
   candidates: readonly RevisionHostCandidate[];
   desiredVms: readonly DesiredVmV3[];
+  /** The run's VM may start from a snapshot, on a host that takes that word. */
+  mayRestore?: boolean;
   cpuMillis: number;
   reservationResources: Parameters<typeof runtimeResourcesFit>[0];
   now: number;
@@ -663,7 +733,11 @@ async function planRevisionHost(input: {
         ...current,
         version: current.version + 1,
         generated_at_unix_ms: input.now,
-        vms: [...current.vms, ...input.desiredVms],
+        // Only a platform host, and only one whose agent reads the field:
+        // any other would refuse the whole desired state.
+        vms: [...current.vms, ...(input.mayRestore && candidate.scope === "platform" && candidate.readsMayRestore
+          ? input.desiredVms.map((vm) => ({ ...vm, may_restore: true }))
+          : input.desiredVms)],
       } satisfies HostDesiredStateV3,
       candidate.hostId,
       current.version + 1,

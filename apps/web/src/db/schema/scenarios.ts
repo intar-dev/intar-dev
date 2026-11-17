@@ -215,6 +215,12 @@ export const scenarioRevisions = sqliteTable(
     // When the revision first went live; only such a revision is a rollback
     // target.
     liveAt: integer("live_at"),
+    // When the revision's checks passed in a lab that a host started from
+    // its snapshot. Only then may a run of the revision start that way.
+    restoreVerifiedAt: integer("restore_verified_at"),
+    // The last restore check: its verify run, and what came of it.
+    restoreVerifyRunId: text("restore_verify_run_id"),
+    restoreVerifyReportJson: text("restore_verify_report_json"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
   },
   (table) => [

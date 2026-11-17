@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "333a5d3b-5b3d-4349-91ce-527b4eba2b4b",
-  "prevId": "fa88c152-95a1-4ae9-9362-8861f1bbf4f8",
+  "id": "ecdb4d8c-3b36-451f-950b-0ac03966525b",
+  "prevId": "333a5d3b-5b3d-4349-91ce-527b4eba2b4b",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -5419,6 +5419,27 @@
         "live_at": {
           "name": "live_at",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "restore_verified_at": {
+          "name": "restore_verified_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "restore_verify_run_id": {
+          "name": "restore_verify_run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "restore_verify_report_json": {
+          "name": "restore_verify_report_json",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
