@@ -1,5 +1,11 @@
 # Changelog
 
+## kino/v0.8.0 (2026-11-17)
+
+### Features
+
+- **intar-agent:** Start labs from a per-host snapshot (#365) (31d9b9d3)
+
 ## kino/v0.7.1 (2026-11-17)
 
 ### Bug fixes
