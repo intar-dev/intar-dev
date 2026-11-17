@@ -65,7 +65,14 @@ pub(super) fn prepare_jail_files(
                     gid,
                     metadata,
                 )?;
-                *snapshot_links.borrow_mut() = stage_snapshot(config, request, &root, uid, gid)?;
+                stage_snapshot(
+                    config,
+                    request,
+                    &root,
+                    uid,
+                    gid,
+                    &mut snapshot_links.borrow_mut(),
+                )?;
                 Some(runtime_file_identity(&std::fs::metadata(
                     root.join("cloud-hypervisor"),
                 )?))

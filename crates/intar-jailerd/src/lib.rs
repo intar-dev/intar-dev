@@ -299,6 +299,15 @@ pub trait JailPreparer: Send {
     fn list_snapshots(&mut self, _config: &JailerdConfig) -> Result<Vec<SnapshotInfo>> {
         Ok(Vec::new())
     }
+    /// Refuse a restore launch whose snapshot is missing, unusable or of
+    /// another shape, before the launch holds a UID or a jail.
+    fn validate_snapshot_launch(
+        &mut self,
+        _config: &JailerdConfig,
+        _request: &VmLaunchRequest,
+    ) -> Result<()> {
+        Ok(())
+    }
     fn quarantine(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<()>;
     fn grant_agent_runtime_access(
         &mut self,

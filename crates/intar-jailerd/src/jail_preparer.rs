@@ -125,6 +125,14 @@ impl JailPreparer for FileSystemJailPreparer {
         list_snapshots(config)
     }
 
+    fn validate_snapshot_launch(
+        &mut self,
+        config: &JailerdConfig,
+        request: &VmLaunchRequest,
+    ) -> Result<()> {
+        restore_source(config, request).map(|_| ())
+    }
+
     fn quarantine(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<()> {
         quarantine_generation(config, generation)
     }

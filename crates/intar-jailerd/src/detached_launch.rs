@@ -7,6 +7,9 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
             self.preparer
                 .validate_prepared_launch_v3(&self.config, &self.prepared_request)
                 .context("validate root-owned prepared image template")?;
+            self.preparer
+                .validate_snapshot_launch(&self.config, &self.reservation.request)
+                .context("validate the launch's snapshot")?;
 
             progress.identity_reserved = true;
             self.preparer

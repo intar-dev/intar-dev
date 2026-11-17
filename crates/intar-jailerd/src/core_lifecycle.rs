@@ -8,6 +8,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         self.preparer
             .validate_prepared_launch_v3(&self.config, &request)
             .context("validate root-owned chunked image template")?;
+        self.preparer
+            .validate_snapshot_launch(&self.config, &request.launch)
+            .context("validate the launch's snapshot")?;
         self.launch_vm_validated(request.launch, quota)
     }
 

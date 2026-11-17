@@ -97,35 +97,58 @@ fn read_metadata(directory: &Path) -> Result<SnapshotInfo> {
     Ok(metadata.snapshot)
 }
 
+/// What a restore launch stages from: the snapshot's directory and the VM
+/// config with the launch's TAP name. A capture or a cold boot has none.
+///
+/// A launch is checked with this before it is given a UID and a jail: a
+/// launch refused only while its jail is staged is quarantined and keeps
+/// its UID.
+pub(super) fn restore_source(
+    config: &JailerdConfig,
+    request: &VmLaunchRequest,
+) -> Result<Option<(PathBuf, Vec<u8>)>> {
+    let Some(SnapshotLaunch::Restore { key }) = &request.snapshot else {
+        return Ok(None);
+    };
+    let image_id = launch_image(request)?;
+    let source = snapshot_directory(config, &image_id, key);
+    let snapshot = read_metadata(&source).context("the snapshot is not in the store")?;
+    ensure!(
+        snapshot.image_id == image_id
+            && snapshot.key == *key
+            && snapshot.cpu_millis == request.cpu_millis
+            && snapshot.memory_mib == request.memory_mib
+            && snapshot.root_disk_size_bytes == request.root_disk_size_bytes,
+        "the launch does not have the shape of its snapshot"
+    );
+    let config_json = rewrite_tap(
+        &read_bounded(&source.join(SNAPSHOT_CONFIG_FILE), CONFIG_LIMIT_BYTES)?,
+        &request.tap_name,
+    )?;
+    Ok(Some((source, config_json)))
+}
+
 /// The jail side of a snapshot launch, after the cold-boot artifacts are
-/// staged. Returns the identities of the hard links a restore holds.
+/// staged. Each hard link a restore makes is added to `links` as it is
+/// made, so a staging that fails later can still be cleaned up.
 pub(super) fn stage_snapshot(
     config: &JailerdConfig,
     request: &VmLaunchRequest,
     root: &Path,
     uid: u32,
     gid: u32,
-) -> Result<Vec<LinkIdentity>> {
+    links: &mut Vec<LinkIdentity>,
+) -> Result<()> {
     let snap = root.join("run/snap");
     match &request.snapshot {
-        None => Ok(Vec::new()),
+        None => Ok(()),
         Some(SnapshotLaunch::Capture) => {
             ensure_directory(&snap, 0o700)?;
-            set_owner(&snap, uid, gid)?;
-            Ok(Vec::new())
+            set_owner(&snap, uid, gid)
         }
-        Some(SnapshotLaunch::Restore { key }) => {
-            let image_id = launch_image(request)?;
-            let source = snapshot_directory(config, &image_id, key);
-            let snapshot = read_metadata(&source)?;
-            ensure!(
-                snapshot.image_id == image_id
-                    && snapshot.key == *key
-                    && snapshot.cpu_millis == request.cpu_millis
-                    && snapshot.memory_mib == request.memory_mib
-                    && snapshot.root_disk_size_bytes == request.root_disk_size_bytes,
-                "the launch does not have the shape of its snapshot"
-            );
+        Some(SnapshotLaunch::Restore { .. }) => {
+            let (source, config_json) =
+                restore_source(config, request)?.context("a restore launch has a snapshot")?;
             // The disk as the guest last wrote it, not the template's.
             let root_disk = root.join("disks/root.raw");
             std::fs::remove_file(&root_disk).context("drop the staged template root disk")?;
@@ -137,7 +160,6 @@ pub(super) fn stage_snapshot(
             set_owner(&root_disk, uid, gid)?;
 
             ensure_directory(&snap, 0o755)?;
-            let mut links = Vec::new();
             for name in [SNAPSHOT_MEMORY_FILE, SNAPSHOT_STATE_FILE] {
                 let stored = open_store_file(&source.join(name))?.metadata()?;
                 let link = snap.join(name);
@@ -150,18 +172,16 @@ pub(super) fn stage_snapshot(
                 );
                 links.push((linked.dev(), linked.ino()));
             }
-            let config_json = rewrite_tap(
-                &read_bounded(&source.join(SNAPSHOT_CONFIG_FILE), CONFIG_LIMIT_BYTES)?,
-                &request.tap_name,
-            )?;
+            let config_path = snap.join(SNAPSHOT_CONFIG_FILE);
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o444)
-                .open(snap.join(SNAPSHOT_CONFIG_FILE))
+                .open(&config_path)
                 .context("create the restore VM config")?;
             file.write_all(&config_json)?;
-            Ok(links)
+            // The daemon's umask is 0077: without this the VM cannot read it.
+            set_mode(&config_path, 0o444)
         }
     }
 }
@@ -293,6 +313,13 @@ pub(super) fn publish_snapshot(
             },
         )?;
         metadata.sync_all()?;
+        set_mode(&temporary.join(METADATA_FILE), 0o444)?;
+        // A config no restore could use must not become a snapshot.
+        rewrite_tap(
+            &read_bounded(&temporary.join(SNAPSHOT_CONFIG_FILE), CONFIG_LIMIT_BYTES)?,
+            &record.request.tap_name,
+        )
+        .context("the captured VM config is unusable")?;
         set_mode(&temporary, 0o755)?;
         std::fs::rename(&temporary, &published).context("publish the snapshot")?;
         Ok(snapshot)
@@ -356,7 +383,10 @@ pub(super) fn list_snapshots(config: &JailerdConfig) -> Result<Vec<SnapshotInfo>
     Ok(snapshots)
 }
 
-/// What a template's snapshots hold on disk, for store accounting.
+/// What a template's snapshots hold on disk, for store accounting. The
+/// root disk is left out: it is a clone that shares nearly all of its
+/// blocks with the template's chunks, which are counted already (measured:
+/// 4.7 GB apparent, a few hundred MB its own).
 pub(super) fn template_snapshot_bytes(template: &Path) -> u64 {
     let Ok(snapshots) = std::fs::read_dir(template.join(SNAPSHOTS_DIRECTORY)) else {
         return 0;
@@ -366,6 +396,7 @@ pub(super) fn template_snapshot_bytes(template: &Path) -> u64 {
         .filter_map(|snapshot| std::fs::read_dir(snapshot.path()).ok())
         .flatten()
         .filter_map(Result::ok)
+        .filter(|file| file.file_name() != ROOT_DISK_FILE)
         .filter_map(|file| file.metadata().ok())
         .map(|metadata| metadata.blocks().saturating_mul(512))
         .sum()
