@@ -31,6 +31,7 @@ import {
   assertCourseScenarioStartAllowed,
 } from "@/lib/course-catalogs";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { markTiming } from "@/lib/query-timing";
 import { requireIdempotencyKey } from "@/lib/idempotency-key";
 import {
   admitInternalRegistryOperation,
@@ -392,7 +393,9 @@ function scenarioStartAccessRevoked() {
  */
 export async function deliveryHint(hostId: string): Promise<void> {
   try {
+    markTiming("wake begins");
     await tryWakeHostRuntime(hostId);
+    markTiming("wake done");
   } catch {
     console.warn(
       JSON.stringify({ event: "scenario_start_delivery_hint_failed" }),
