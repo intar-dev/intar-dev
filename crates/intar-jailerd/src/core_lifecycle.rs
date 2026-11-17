@@ -122,6 +122,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             pid_start_time_ticks: None,
             jail_root_inode: prepared.jail_root_inode,
             cloud_hypervisor_sha256: self.config.cloud_hypervisor_sha256.as_str().to_owned(),
+            snapshot_links: prepared.snapshot_links.clone(),
         };
         if let Err(error) = self.preparer.persist(&self.config, &record) {
             let _ = self
@@ -560,8 +561,36 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 .stop_unit(&format!("intar-vm-{generation}.service"));
         };
         let changed = self.backend.stop_unit(&record.unit_name)?;
-        self.preparer.export_recording(&self.config, record)?;
+        // A capture VM records nothing and has no spool to export to.
+        if record.request.snapshot != Some(SnapshotLaunch::Capture) {
+            self.preparer.export_recording(&self.config, record)?;
+        }
         Ok(changed)
+    }
+
+    /// Stop without exporting the recording.
+    pub(super) fn discard_vm(&mut self, request: VmIdentityRequest) -> Result<bool> {
+        let generation = self.resolve_generation(&request)?;
+        let unit_name = self.records.get(&generation).map_or_else(
+            || format!("intar-vm-{generation}.service"),
+            |record| record.unit_name.clone(),
+        );
+        self.backend.stop_unit(&unit_name)
+    }
+
+    /// Publish what a capture VM left behind. The unit is stopped first, so
+    /// nothing of the VM's UID can touch the files while they move.
+    pub(super) fn publish_snapshot(
+        &mut self,
+        request: &PublishSnapshotRequest,
+    ) -> Result<SnapshotInfo> {
+        let record = self
+            .records
+            .get(&request.generation)
+            .context("unknown jail generation")?;
+        self.backend.stop_unit(&record.unit_name)?;
+        self.preparer
+            .publish_snapshot(&self.config, record, &request.key)
     }
 
     pub(super) fn destroy_vm(&mut self, request: VmIdentityRequest) -> Result<bool> {
@@ -584,7 +613,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let network_changed = self
             .backend
             .destroy_vm_network(&record.request.run_id, &generation)?;
-        let files_changed = self.preparer.destroy(&self.config, &generation)?;
+        let files_changed =
+            self.preparer
+                .destroy_linked(&self.config, &generation, &record.snapshot_links)?;
         self.records.remove(&generation);
         self.preparer
             .release_identity_reservation(&self.config, &generation)?;

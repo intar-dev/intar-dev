@@ -244,8 +244,14 @@ fn fd_relative_cleanup_rejects_symlinks_without_touching_targets() {
     .expect("open jail fixture");
     let config = lifecycle_test_config(directory.path());
     assert!(
-        remove_directory_contents_fd_relative(&config, &fd, config.agent_uid, config.agent_gid,)
-            .is_err()
+        remove_directory_contents_fd_relative(
+            &config,
+            &fd,
+            config.agent_uid,
+            config.agent_gid,
+            &[]
+        )
+        .is_err()
     );
     assert_eq!(
         std::fs::read(&outside).expect("valid CPU test fixture"),
@@ -269,8 +275,14 @@ fn fd_relative_cleanup_rejects_hardlinked_files() {
     .expect("open jail fixture");
     let config = lifecycle_test_config(directory.path());
     assert!(
-        remove_directory_contents_fd_relative(&config, &fd, config.agent_uid, config.agent_gid,)
-            .is_err()
+        remove_directory_contents_fd_relative(
+            &config,
+            &fd,
+            config.agent_uid,
+            config.agent_gid,
+            &[]
+        )
+        .is_err()
     );
     assert_eq!(
         std::fs::read(&outside).expect("valid CPU test fixture"),
@@ -296,7 +308,7 @@ fn fd_relative_cleanup_stays_on_the_pinned_directory_after_name_swap() {
     std::fs::create_dir(&original).expect("create replacement generation");
     std::fs::write(original.join("replacement"), b"keep").expect("write replacement entry");
     let config = lifecycle_test_config(directory.path());
-    remove_directory_contents_fd_relative(&config, &fd, config.agent_uid, config.agent_gid)
+    remove_directory_contents_fd_relative(&config, &fd, config.agent_uid, config.agent_gid, &[])
         .expect("clean pinned generation");
     assert!(!moved.join("old").exists());
     assert_eq!(

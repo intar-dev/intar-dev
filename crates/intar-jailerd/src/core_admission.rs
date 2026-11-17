@@ -403,9 +403,25 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             Request::StopVm(request) => Ok(Response::StopVm(OperationResult {
                 changed: self.stop_vm(request)?,
             })),
+            Request::DiscardVm(request) => Ok(Response::DiscardVm(OperationResult {
+                changed: self.discard_vm(request)?,
+            })),
             Request::DestroyVm(request) => Ok(Response::DestroyVm(OperationResult {
                 changed: self.destroy_vm(request)?,
             })),
+            Request::PublishSnapshot(request) => {
+                Ok(Response::PublishSnapshot(self.publish_snapshot(&request)?))
+            }
+            Request::RemoveSnapshot(request) => Ok(Response::RemoveSnapshot(OperationResult {
+                changed: self.preparer.remove_snapshot(
+                    &self.config,
+                    &request.image_id,
+                    &request.key,
+                )?,
+            })),
+            Request::ListSnapshots => Ok(Response::ListSnapshots(
+                self.preparer.list_snapshots(&self.config)?,
+            )),
             Request::DestroyRunNetwork(request) => {
                 if self
                     .records

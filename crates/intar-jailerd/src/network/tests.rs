@@ -377,6 +377,7 @@ fn guest_address_rejects_gateway_network_broadcast_and_prefix_drift() {
         ssh_public_port: None,
         vsock_cid: 3,
         egress: true,
+        snapshot: None,
         artifacts: intar_jailer_protocol::SourceArtifacts {
             kernel: artifact("kernel", intar_jailer_protocol::ArtifactAccess::ReadOnly),
             initrd: None,

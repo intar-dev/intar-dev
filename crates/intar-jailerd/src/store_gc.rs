@@ -270,6 +270,7 @@ fn estimated_store_bytes(
                 bytes = bytes.saturating_add(allocated_bytes(&metadata));
             }
         }
+        bytes = bytes.saturating_add(super::template_snapshot_bytes(&entry.path));
     }
     Ok(bytes)
 }

@@ -41,6 +41,8 @@ pub(super) fn prepare_jail_files(
         ensure_directory(&generation_dir.join(relative), mode)?;
     }
 
+    // Filled as the links are made, so a failed staging can still be cleaned.
+    let snapshot_links = std::cell::RefCell::new(Vec::new());
     let operation = (|| -> Result<PreparedJail> {
         let vmm_executable_identity = match host_template {
             Some(metadata) => {
@@ -63,6 +65,7 @@ pub(super) fn prepare_jail_files(
                     gid,
                     metadata,
                 )?;
+                *snapshot_links.borrow_mut() = stage_snapshot(config, request, &root, uid, gid)?;
                 Some(runtime_file_identity(&std::fs::metadata(
                     root.join("cloud-hypervisor"),
                 )?))
@@ -80,6 +83,10 @@ pub(super) fn prepare_jail_files(
                     None,
                     0o555,
                 )?;
+                ensure!(
+                    request.snapshot.is_none(),
+                    "a snapshot launch needs the host runtime template"
+                );
                 stage_artifacts(config, &request.artifacts, &root, uid, gid)?;
                 None
             }
@@ -140,11 +147,12 @@ pub(super) fn prepare_jail_files(
             jail_root_inode: Some(root_stat.st_ino),
             vmm_executable_identity,
             paths: jail_paths(&root, request.artifacts.initrd.is_some()),
+            snapshot_links: snapshot_links.borrow().clone(),
         })
     })();
     match operation {
         Ok(prepared) => Ok(prepared),
-        Err(error) => match remove_generation_tree(config, generation) {
+        Err(error) => match remove_generation_tree(config, generation, &snapshot_links.borrow()) {
             Ok(_) => Err(error),
             Err(cleanup_error) => {
                 quarantine_generation(config, generation).with_context(|| {

@@ -78,6 +78,7 @@ impl<B: HostBackend, P: JailPreparer> DetachedLaunchTask<B, P> {
                 pid_start_time_ticks: None,
                 jail_root_inode: prepared.jail_root_inode,
                 cloud_hypervisor_sha256: self.config.cloud_hypervisor_sha256.as_str().to_owned(),
+                snapshot_links: prepared.snapshot_links.clone(),
             };
             self.preparer
                 .persist(&self.config, &record)

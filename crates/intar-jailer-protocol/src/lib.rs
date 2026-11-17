@@ -21,7 +21,7 @@ use thiserror::Error;
 use tokio::io::unix::AsyncFd;
 
 /// Current on-wire protocol version.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 /// Maximum request or response packet, including its JSON envelope.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Reserved source-root selector for artifacts in jailerd's root-owned image
@@ -397,7 +397,60 @@ pub struct VmLaunchRequest {
     /// the egress floor. Without it the VM reaches only its run.
     pub egress: bool,
     pub artifacts: SourceArtifacts,
+    /// Absent for a cold boot. Left out of the JSON then, so the records of
+    /// VMs launched before protocol 6 read back and fingerprint as they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotLaunch>,
 }
+
+/// The snapshot directory as the VMM sees it, for a capture and a restore.
+pub const JAILED_SNAPSHOT_DIR: &str = "/run/snap";
+/// Guest memory, VM state and VM config, as Cloud Hypervisor names them.
+pub const SNAPSHOT_MEMORY_FILE: &str = "memory-ranges";
+pub const SNAPSHOT_STATE_FILE: &str = "state.json";
+pub const SNAPSHOT_CONFIG_FILE: &str = "config.json";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, tag = "mode", rename_all = "snake_case")]
+pub enum SnapshotLaunch {
+    /// The jail gets an empty snapshot directory the VMM can write. The VM's
+    /// stop never exports a recording.
+    Capture,
+    /// The root disk and the snapshot directory come from the published
+    /// snapshot `key` of the launch's image.
+    Restore { key: Sha256Digest },
+}
+
+/// Publish the snapshot a stopped capture VM left in its jail.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishSnapshotRequest {
+    pub generation: ValidatedId,
+    pub key: Sha256Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveSnapshotRequest {
+    pub image_id: Sha256Digest,
+    pub key: Sha256Digest,
+}
+
+/// One published snapshot of the root-owned store.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotInfo {
+    pub image_id: Sha256Digest,
+    pub key: Sha256Digest,
+    pub cpu_millis: u32,
+    pub memory_mib: u32,
+    pub root_disk_size_bytes: u64,
+    pub captured_at_unix_ms: u64,
+    pub bytes_on_disk: u64,
+}
+
+/// A listing never exceeds one frame: more snapshots than this are an error.
+pub const MAX_LISTED_SNAPSHOTS: usize = 128;
 
 mod request_validation;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -525,8 +578,14 @@ pub enum Request {
     FinalizeVmBoot(FinalizeVmBootRequest),
     InspectVm(VmIdentityRequest),
     StopVm(VmIdentityRequest),
+    /// Stop without exporting the recording: a capture VM, or a restore that
+    /// is abandoned for a cold boot.
+    DiscardVm(VmIdentityRequest),
     DestroyVm(VmIdentityRequest),
     DestroyRunNetwork(DestroyRunNetworkRequest),
+    PublishSnapshot(PublishSnapshotRequest),
+    RemoveSnapshot(RemoveSnapshotRequest),
+    ListSnapshots,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -747,8 +806,12 @@ pub enum Response {
     FinalizeVmBoot(FinalizeVmBootResult),
     InspectVm(VmInspection),
     StopVm(OperationResult),
+    DiscardVm(OperationResult),
     DestroyVm(OperationResult),
     DestroyRunNetwork(OperationResult),
+    PublishSnapshot(SnapshotInfo),
+    RemoveSnapshot(OperationResult),
+    ListSnapshots(Vec<SnapshotInfo>),
     Error(ProtocolError),
 }
 

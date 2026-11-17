@@ -22,7 +22,7 @@ fn template_capabilities_require_fast_template_store() {
     )
     .expect("core");
     let capabilities = available.capabilities();
-    assert_eq!(capabilities.protocol_version, 5);
+    assert_eq!(capabilities.protocol_version, 6);
     assert!(capabilities.supports_jailer_v3);
     assert!(capabilities.supports_template_backed_launch);
     assert!(capabilities.fast_template_store);

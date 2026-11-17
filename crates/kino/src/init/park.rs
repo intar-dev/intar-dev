@@ -12,7 +12,7 @@
     )
 )]
 
-use super::boot::{self, IP};
+use super::boot::{self, IP, SYSTEMCTL};
 use super::{GUEST_CONTRACT, Phase, Report, wire};
 use intar_contracts::guest::{GUEST_LOADER_PATH, GuestBootV3, RUN_DISK_MOUNT};
 use intar_kino_proto::kino_v2::Wake;
@@ -24,10 +24,20 @@ pub(crate) const BLOCKDEV: &str = "/usr/sbin/blockdev";
 const RUN_DEVICE: &str = "/dev/vdb";
 const RECORDING_DEVICE: &str = "/dev/vdc";
 
-/// Quiet is at most a quarter of one CPU busy, for five seconds in a row.
+pub(crate) const PERL: &str = "/usr/bin/perl";
+/// `RNDRESEEDCRNG` on `/dev/urandom`. Without it the kernel keeps handing
+/// out the snapshot's random stream for up to a minute, and two restores
+/// made the same SSH host key (measured in #348). perl-base is essential in
+/// Debian, and the workspace forbids the `unsafe` a direct ioctl needs.
+const RESEED: &str =
+    r#"open(my $pool, ">", "/dev/urandom") or die; ioctl($pool, 0x5207, 0) or die"#;
+
+/// Settled is no unit starting or waiting to restart, and at most a quarter
+/// of one CPU busy, for ten seconds in a row. Quiet alone is not enough: a
+/// service between two restarts is quiet too.
 const QUIET_BUSY_CPUS: f64 = 0.25;
-const QUIET_SECONDS: u32 = 5;
-/// A lab that never gets quiet is parked as it is.
+const QUIET_SECONDS: u32 = 10;
+/// A lab that never settles is parked as it is.
 const QUIET_LIMIT: Duration = Duration::from_secs(90);
 const PARKED_LIMIT: Duration = Duration::from_secs(120);
 const PROBE_INTERVAL: Duration = Duration::from_millis(25);
@@ -49,13 +59,27 @@ async fn quiet() {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let after = std::fs::read_to_string("/proc/stat").unwrap_or_default();
         let busy = busy_cpus(&before, &after);
-        quiet_for = if busy.is_some_and(|busy| busy <= QUIET_BUSY_CPUS) {
+        quiet_for = if busy.is_some_and(|busy| busy <= QUIET_BUSY_CPUS) && units_settled().await {
             quiet_for + 1
         } else {
             0
         };
         before = after;
     }
+}
+
+/// No unit is starting, reloading or waiting for its restart.
+async fn units_settled() -> bool {
+    tokio::process::Command::new(SYSTEMCTL)
+        .args([
+            "list-units",
+            "--state=activating,reloading",
+            "--no-legend",
+            "--plain",
+        ])
+        .output()
+        .await
+        .is_ok_and(|output| output.status.success() && output.stdout.trim_ascii().is_empty())
 }
 
 /// How many CPUs were busy between two readings of `/proc/stat`.
@@ -135,6 +159,7 @@ pub(crate) async fn parked() -> anyhow::Result<()> {
         .map_err(|_| step("the host did not take PARKED".to_owned()))?;
     let wake = wait_for_wake().await;
     apply(&wake);
+    boot::run(PERL, &["-e", RESEED]).await.map_err(step)?;
     // The run disk under the device is another one now.
     flush_disks().await.map_err(step)?;
     let error = std::process::Command::new(GUEST_LOADER_PATH).exec();

@@ -48,6 +48,7 @@ pub(crate) const PROGRAMS: &[&str] = &[
     SETPRIV,
     super::park::UMOUNT,
     super::park::BLOCKDEV,
+    super::park::PERL,
 ];
 
 /// Uptime in ms, the guest-side clock for `timings_ms`.

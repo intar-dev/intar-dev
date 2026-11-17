@@ -189,6 +189,7 @@ fn chunked_v3_uses_a_bounded_manifest_root_and_prepared_boot_artifacts() {
         ssh_public_port: Some(22_000),
         vsock_cid: 3,
         egress: false,
+        snapshot: None,
         artifacts: SourceArtifacts {
             kernel: prepared("kernel", ArtifactAccess::ReadOnly),
             initrd: Some(prepared("initrd", ArtifactAccess::ReadOnly)),
@@ -241,7 +242,7 @@ fn unknown_envelope_fields_are_rejected() {
 
 #[test]
 fn protocol_v5_rejects_legacy_handshake_authority() {
-    assert_eq!(PROTOCOL_VERSION, 5);
+    assert_eq!(PROTOCOL_VERSION, 6);
     let legacy = RequestEnvelope::decode(
         br#"{"version":1,"request_id":1,"request":{"operation":"capabilities"}}"#,
     )
@@ -354,6 +355,7 @@ fn guest_cpu_count_cannot_be_added_to_launch_request() {
         ssh_public_port: Some(22000),
         vsock_cid: 3,
         egress: false,
+        snapshot: None,
         artifacts: SourceArtifacts {
             kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
             initrd: None,

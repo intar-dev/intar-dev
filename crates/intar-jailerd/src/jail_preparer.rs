@@ -91,7 +91,38 @@ impl JailPreparer for FileSystemJailPreparer {
     }
 
     fn destroy(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<bool> {
-        remove_generation_tree(config, generation)
+        remove_generation_tree(config, generation, &[])
+    }
+
+    fn destroy_linked(
+        &mut self,
+        config: &JailerdConfig,
+        generation: &ValidatedId,
+        linked: &[(u64, u64)],
+    ) -> Result<bool> {
+        remove_generation_tree(config, generation, linked)
+    }
+
+    fn publish_snapshot(
+        &mut self,
+        config: &JailerdConfig,
+        record: &VmRecord,
+        key: &Sha256Digest,
+    ) -> Result<SnapshotInfo> {
+        publish_snapshot(config, record, key)
+    }
+
+    fn remove_snapshot(
+        &mut self,
+        config: &JailerdConfig,
+        image_id: &Sha256Digest,
+        key: &Sha256Digest,
+    ) -> Result<bool> {
+        remove_snapshot(config, image_id, key)
+    }
+
+    fn list_snapshots(&mut self, config: &JailerdConfig) -> Result<Vec<SnapshotInfo>> {
+        list_snapshots(config)
     }
 
     fn quarantine(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<()> {

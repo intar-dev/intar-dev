@@ -357,6 +357,7 @@ pub(super) async fn launch_jailed_cloud_hypervisor(
         ssh_public_port: req.ssh_public_port,
         vsock_cid: req.kino_vsock_cid,
         egress: req.egress,
+        snapshot: None,
         artifacts,
     };
     let launch_operation = build_jailer_launch_operation(request, prepared)?;

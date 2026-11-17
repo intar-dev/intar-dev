@@ -582,6 +582,7 @@ pub(super) fn smoke_launch_request(
             ssh_public_port: None,
             vsock_cid: 4_294_000_001_u32.saturating_add(u32::from(index)),
             egress: false,
+            snapshot: None,
             artifacts: protocol_artifacts(config, artifacts, prepared_image)?,
         },
     })
