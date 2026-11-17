@@ -34,7 +34,20 @@ pub(crate) const MOUNT: &str = "/usr/bin/mount";
 pub(crate) const SETPRIV: &str = "/usr/bin/setpriv";
 #[cfg(test)]
 pub(crate) const PROGRAMS: &[&str] = &[
-    SYSTEMCTL, IP, HOSTNAME, INSTALL, CHOWN, CHMOD, ID, SSH_KEYGEN, SSHD, RESIZE2FS, MOUNT, SETPRIV,
+    SYSTEMCTL,
+    IP,
+    HOSTNAME,
+    INSTALL,
+    CHOWN,
+    CHMOD,
+    ID,
+    SSH_KEYGEN,
+    SSHD,
+    RESIZE2FS,
+    MOUNT,
+    SETPRIV,
+    super::park::UMOUNT,
+    super::park::BLOCKDEV,
 ];
 
 /// Uptime in ms, the guest-side clock for `timings_ms`.
@@ -146,7 +159,7 @@ async fn network(boot: &GuestBootV3) -> Result<(), String> {
 
 /// The NIC is the entry with a `device` link and ARP type 1; `sit0` and `lo`
 /// have neither. Sorted, so the choice does not depend on kernfs hash order.
-fn interface() -> Option<String> {
+pub(super) fn interface() -> Option<String> {
     let mut nics: Vec<String> = std::fs::read_dir("/sys/class/net")
         .ok()?
         .filter_map(Result::ok)
@@ -251,7 +264,7 @@ async fn id(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-async fn run(program: &str, args: &[&str]) -> Result<(), String> {
+pub(super) async fn run(program: &str, args: &[&str]) -> Result<(), String> {
     let output = Command::new(program)
         .args(args)
         .output()

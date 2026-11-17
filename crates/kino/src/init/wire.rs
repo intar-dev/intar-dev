@@ -94,7 +94,10 @@ pub(crate) async fn read_host_frames(mut read: impl AsyncRead + Unpin) {
             }) => {
                 verify::set_peers(peers);
             }
-            Ok(HostFrame { frame: None }) => {}
+            // `Wake` is for a parked Kino only.
+            Ok(HostFrame {
+                frame: None | Some(host_frame::Frame::Wake(_)),
+            }) => {}
             Err(error) => {
                 eprintln!("kino init: host frame refused: {error}");
                 return;

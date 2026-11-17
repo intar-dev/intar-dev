@@ -69,14 +69,16 @@ fn read(report: Report) -> GuestReport {
     let ssh_ready = match phase {
         Phase::SshReady | Phase::Preparing | Phase::Ready => true,
         Phase::Failed => report.timings_ms.contains_key(SSH_READY_TIMING),
-        Phase::Unspecified | Phase::Booting => false,
+        Phase::Unspecified | Phase::Booting | Phase::Parked => false,
     };
     let state = match phase {
         Phase::Ready => LabState::Ready,
         Phase::Failed => LabState::Failed,
-        Phase::Unspecified | Phase::Booting | Phase::SshReady | Phase::Preparing => {
-            LabState::Preparing
-        }
+        Phase::Unspecified
+        | Phase::Booting
+        | Phase::SshReady
+        | Phase::Preparing
+        | Phase::Parked => LabState::Preparing,
     };
     let timings_ms: BTreeMap<String, u64> = report
         .timings_ms

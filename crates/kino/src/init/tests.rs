@@ -355,6 +355,7 @@ fn pid_one_runs_every_system_program_by_absolute_path() {
     }
     for (file, source) in [
         ("init/boot.rs", include_str!("boot.rs")),
+        ("init/park.rs", include_str!("park.rs")),
         ("init.rs", include_str!("../init.rs")),
         ("probe.rs", include_str!("../probe.rs")),
     ] {
@@ -364,4 +365,41 @@ fn pid_one_runs_every_system_program_by_absolute_path() {
         bare_programs("run(\n    \"systemctl\", &[])"),
         vec!["systemctl".to_owned()]
     );
+}
+
+#[test]
+fn busy_cpus_counts_what_is_neither_idle_nor_waiting_for_io() {
+    let before = "cpu  100 0 100 800 0 0 0 0 0 0\ncpu0 0 0 0 0\ncpu1 0 0 0 0\n";
+    // 200 ticks later: 150 idle, 10 iowait, 40 busy, on two CPUs.
+    let after = "cpu  120 0 120 950 10 0 0 0 0 0\ncpu0 0 0 0 0\ncpu1 0 0 0 0\n";
+    let busy = park::busy_cpus(before, after).expect("two readings");
+    assert!((busy - 0.4).abs() < 1e-9, "{busy}");
+    assert_eq!(park::busy_cpus(before, before), None);
+    assert_eq!(park::busy_cpus("", after), None);
+}
+
+#[tokio::test]
+async fn a_parked_guest_wakes_on_a_wake_frame_only() {
+    use intar_kino_proto::kino_v2::{HostFrame, PeerTasks, Wake, host_frame};
+    let stream = |frame: Option<host_frame::Frame>| {
+        let body = HostFrame { frame }.encode_to_vec();
+        let mut stream = u32::try_from(body.len())
+            .expect("small")
+            .to_be_bytes()
+            .to_vec();
+        stream.extend(body);
+        stream
+    };
+    let wake = Wake {
+        unix_ms: 1_800_000_000_000,
+        seed: vec![7; 32],
+    };
+    let woken = stream(Some(host_frame::Frame::Wake(wake.clone())));
+    assert_eq!(park::read_wake(woken.as_slice()).await, Some(wake));
+    let peers = stream(Some(host_frame::Frame::PeerTasks(PeerTasks::default())));
+    assert_eq!(park::read_wake(peers.as_slice()).await, None);
+    assert_eq!(park::read_wake(stream(None).as_slice()).await, None);
+    assert_eq!(park::read_wake([0_u8, 0].as_slice()).await, None);
+    // A running Kino ignores it.
+    wire::read_host_frames(woken.as_slice()).await;
 }

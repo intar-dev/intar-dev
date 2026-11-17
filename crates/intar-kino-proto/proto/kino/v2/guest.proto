@@ -5,7 +5,7 @@ package kino.v2;
 // Each frame is a 4-byte big-endian length and that many bytes, at most
 // 256 KiB. Kino sends GuestFrame, the host sends HostFrame.
 message GuestFrame { oneof frame { Report report = 1; } }
-message HostFrame  { oneof frame { PeerTasks peer_tasks = 1; } }
+message HostFrame  { oneof frame { PeerTasks peer_tasks = 1; Wake wake = 2; } }
 
 message Report {
   uint32 contract = 1;                    // the guest contract; the host fails the VM on a mismatch
@@ -22,7 +22,10 @@ message Report {
 // A report shows the latest phase, and phases only advance, so a host may
 // never see SSH_READY itself: PREPARING and READY imply it. FAILED is a lab
 // failure, with SSH still up, when timings_ms holds "ssh_ready".
-enum Phase  { PHASE_UNSPECIFIED = 0; BOOTING = 1; SSH_READY = 2; PREPARING = 3; READY = 4; FAILED = 5; }
+// PARKED is sent once, by a capture boot (the run disk holds `capture`): the
+// guest is quiet, has dropped its run identity and waits for Wake. It is not
+// SSH-ready.
+enum Phase  { PHASE_UNSPECIFIED = 0; BOOTING = 1; SSH_READY = 2; PREPARING = 3; READY = 4; FAILED = 5; PARKED = 6; }
 enum Status { STATUS_UNSPECIFIED = 0; PENDING = 1; PASS = 2; FAIL = 3; ERROR = 4; }
 message Ready { string name = 1; Status status = 2; string tail = 3; }   // tail at most 2 KiB, admin-only
 message Task  { string id = 1; Status status = 2; string message = 3; uint64 passed_at_unix_ms = 4; } // message at most 512 B, learner-safe
@@ -40,3 +43,7 @@ message PeerTasks {                                                      // same
   repeated string failed = 3;                                            // machines whose Verify is done and not passed
 }
 message TaskIds { repeated string ids = 1; }
+// Sent first on every connection of a VM restored from a snapshot. A parked
+// Kino steps its clock forward to `unix_ms`, mixes `seed` into the kernel's
+// random pool and starts the run on the run disk; any other Kino ignores it.
+message Wake { uint64 unix_ms = 1; bytes seed = 2; }

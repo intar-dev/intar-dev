@@ -52,6 +52,9 @@ impl From<ShellStartupModeArg> for recording::ShellStartupMode {
 enum CliCommand {
     /// The guest supervisor of guest contract 3.
     Init,
+    /// A capture boot after its park: waits for the host's `Wake`.
+    #[command(hide = true)]
+    Parked,
     RecordSsh {
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
@@ -165,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(CliCommand::Init) => init::main().await,
+        Some(CliCommand::Parked) => init::parked().await,
         Some(CliCommand::RecordSsh {
             config,
             recording,
