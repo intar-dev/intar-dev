@@ -4,4 +4,6 @@ ignore = [
     "RUSTSEC-2023-0071",
     # Owner: Stargate. crypto-bigint 0.5.5, transitive through jsonwebtoken 11.1.0 (latest, stargate-gateway) via elliptic-curve 0.13; the fix is only in 0.7.6+. Review by 2026-11-23.
     "RUSTSEC-2026-0387",
+    # Owner: Agent. chrono 0.4.45 is flagged unmaintained, not vulnerable; it comes only through fatfs 0.3.6's default feature, which stamps FAT entries with the local time. Drop the feature in a rehearsed change. Review by 2026-12-01.
+    "RUSTSEC-2026-0543",
 ]
