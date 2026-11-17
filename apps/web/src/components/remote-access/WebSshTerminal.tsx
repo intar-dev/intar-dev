@@ -191,6 +191,13 @@ export function WebSshTerminal({
   const targetStateRef = useRef<TerminalTargetState>("pending");
 
   const [status, setStatus] = useState<SessionStatus>("idle");
+  // The gateway holds the socket until the lab's start-up checks have passed.
+  // That wait is the lab starting, not a slow connection, so it gets its own words.
+  const [labStarting, setLabStarting] = useState(false);
+  const statusWords =
+    status === "connecting" && labStarting
+      ? "Starting the lab. The terminal opens when it is ready…"
+      : STATUS_WORDS[status];
   const [error, setError] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(true);
   // Ctrl on the key row is read by the input path below, which is why it is
@@ -406,6 +413,7 @@ export function WebSshTerminal({
     benchmarkAttemptRef.current = null;
     reportTransport(connectionGeneration, false);
     setError(null);
+    setLabStarting(false);
     setStatus("connecting");
 
     try {
@@ -473,6 +481,7 @@ export function WebSshTerminal({
         onTargetState: (state) => {
           if (connectionGenerationRef.current !== connectionGeneration) return;
           targetStateRef.current = state;
+          setLabStarting(state === "pending");
           if (state === "ready") {
             markTerminalStage("terminal-target-ready");
           }
@@ -661,7 +670,7 @@ export function WebSshTerminal({
                 status === "connected" ? "sr-only" : "text-xs text-terminal-muted"
               }
             >
-              Terminal status: {STATUS_WORDS[status]}
+              Terminal status: {statusWords}
             </p>
           </div>
           {showCloseButton ? (
@@ -744,7 +753,7 @@ export function WebSshTerminal({
                   : "text-xs text-muted-foreground"
               }
             >
-              Terminal status: {STATUS_WORDS[status]}
+              Terminal status: {statusWords}
             </SheetDescription>
           </div>
           <div className="flex items-center gap-2">
@@ -971,6 +980,7 @@ async function connectBrowserTerminal(input: {
               // The route has no target yet and the gateway holds the open
               // frame. Nothing is written to the terminal and no input is
               // sent until the ready frame arrives.
+              input.onTargetState("pending");
               return;
             case "ready":
               input.onTargetState("ready");
