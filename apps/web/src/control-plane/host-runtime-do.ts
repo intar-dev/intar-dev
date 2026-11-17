@@ -621,9 +621,12 @@ export class HostRuntimeDO extends HostRuntimeBase {
     }
 
     const hostId = attachment.hostId;
+    const mark = (label: string): void => markStep(message, label);
+    mark("admitted");
     if (message.type === "state_report") {
       if (message.report.host_id !== hostId) return;
       await this.applyBridgeStateReportV3(hostId, message.report, attachment.sessionId, attachment.credentialGeneration);
+      mark("applied");
       // The reconcile runs in the alarm, once for a burst of reports. Run
       // inline it held this host's next message back for its whole length:
       // a VM's "lab ready" waited seconds behind the inventory report sent
@@ -648,10 +651,14 @@ export class HostRuntimeDO extends HostRuntimeBase {
         attachment.sessionId,
         attachment.credentialGeneration,
         (latest) => applyVmStateV3ToRunState({ runId: vm.run_id, current: latest, vm }),
+        mark,
       );
+      mark("applied");
       // Only this host's own projection reaches the stored state it reads.
       await settleVerifyRun(vm.run_id, { hostId, wake: () => this.scheduleAlarmNoLaterThan(Date.now()) });
+      mark("settled");
       await this.scheduleAlarmNoLaterThan(Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
+      mark("armed");
     } else if (message.type === "sync_request") {
       await this.dispatchBridgeDesiredStateIfNeeded(hostId, ws, { force: true });
       await this.reconcileHost(hostId);
@@ -979,14 +986,18 @@ export class HostRuntimeDO extends HostRuntimeBase {
     expectedSessionId: string,
     expectedCredentialGeneration: number,
     project: (latest: RunStateDocument) => RunStateDocument,
+    mark: (label: string) => void = () => {},
   ): Promise<void> {
     const execution = await this.loadRuntimeVmReportContext(hostId, report.runtime_execution_id, report.vm_name);
+    mark("context");
     if (!execution || execution.domainId !== report.run_id || execution.userId !== report.owner_user_id ||
       execution.generation !== report.generation || execution.state === "archived") return;
     const projectionOutcome = await this.withRunProjectionLock(
       report.run_id,
       async (): Promise<RunProjectionOutcome> => {
+        mark("locked");
         const run = await this.loadRun(report.run_id);
+        mark("loaded");
         const outcome =
           run?.hostId === hostId
             ? await this.persistRunState(
@@ -995,6 +1006,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
                 {
                   keepDeleteRequestedAt: true,
                   initialRow: run,
+                  mark,
                   expectedExecution: { id: report.runtime_execution_id, ownerUserId: report.owner_user_id, generation: report.generation },
                   expectedHostSession: {
                     hostId,
@@ -1004,6 +1016,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
                 },
               )
             : ({ kind: "unchanged" } satisfies RunProjectionOutcome);
+        mark("persisted:" + outcome.kind);
 
         if (outcome.kind === "updated") {
           // The status route reads the durable projection. Begin this
@@ -1041,6 +1054,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
             );
           }
         }
+        mark("mirrored");
         return outcome;
       },
     );
@@ -1790,6 +1804,14 @@ function jsonResponse(body: unknown, status = 200): Response {
  * handler started (`lagMs`, the two clocks permitting) and how long the
  * handler took. Temporary, to find where a VM's "lab ready" waits.
  */
+const messageMarks = new WeakMap<object, Array<[string, number]>>();
+
+function markStep(raw: object, label: string): void {
+  const marks = messageMarks.get(raw) ?? [];
+  marks.push([label, Date.now()]);
+  messageMarks.set(raw, marks);
+}
+
 function logHostMessageTiming(hostId: string, raw: Record<string, unknown> | null, startedAt: number): void {
   if (raw?.type !== "vm_report" && raw?.type !== "state_report") return;
   const report = raw.report as { observed_at_unix_ms?: unknown; vm?: { name?: unknown; phase?: unknown; lab?: { state?: unknown } | null }; vms?: unknown[] } | undefined;
@@ -1801,6 +1823,7 @@ function logHostMessageTiming(hostId: string, raw: Record<string, unknown> | nul
     startedAt,
     lagMs: observedAt === null ? null : startedAt - observedAt,
     handlerMs: Date.now() - startedAt,
+    steps: (messageMarks.get(raw) ?? []).map(([label, at]) => [label, at - startedAt]),
     vm: typeof report?.vm?.name === "string" ? report.vm.name : null,
     phase: typeof report?.vm?.phase === "string" ? report.vm.phase : null,
     lab: typeof report?.vm?.lab?.state === "string" ? report.vm.lab.state : null,
