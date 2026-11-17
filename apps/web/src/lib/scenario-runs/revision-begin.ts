@@ -578,10 +578,12 @@ export async function beginVerifyRun(input: {
       ...(restoreCheck ? { verifyRestoreCheck: true } : {}),
     });
     if (restoreCheck) {
-      // Before the VM can report: its boot takes longer than this write.
+      // The run is already on its way to the host. Should a report settle
+      // it before this write, the settlement names the run itself, and this
+      // must not wipe what it recorded.
       await env.DB.prepare(
         `UPDATE scenario_revisions SET restore_verify_run_id = ?3, restore_verify_report_json = NULL
-          WHERE scenario_id = ?1 AND rev = ?2`,
+          WHERE scenario_id = ?1 AND rev = ?2 AND restore_verify_run_id IS NOT ?3`,
       ).bind(input.scenarioId, input.rev, result.runId).run();
     }
     outcome = "ok";

@@ -720,6 +720,24 @@ describe("promotion, rollback and verify runs", () => {
       expect(JSON.parse((await settled())!.restore_verify_report_json!) as RestoreVerifyReport).toMatchObject({ outcome: "passed", restored: true });
     });
 
+    it("records the outcome of a check whose report arrives before the revision names its run", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      const { runId } = await check();
+      // As if the first report had overtaken the write that names the run.
+      await env.DB.prepare("UPDATE scenario_revisions SET restore_verify_run_id = NULL WHERE scenario_id = ?1").bind(PUBLIC_ID).run();
+      sendVm(ws, PLATFORM, restoredVm(runId, true));
+      const row = await settled();
+      expect(row).toMatchObject({ state: "verified", verify_run_id: null, restore_verify_run_id: runId });
+      expect(row!.restore_verified_at).not.toBeNull();
+      // A late report of that run, after a second check began, leaves the second one alone.
+      await clearRestoreVerified(PUBLIC_ID, rev("a"));
+      await until(() => runOf(runId), (run) => run?.active_key === null);
+      const second = await check();
+      sendVm(ws, PLATFORM, { ...restoredVm(runId, true), updated_at_unix_ms: Date.now() + 5 });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(await restoreRow()).toMatchObject({ restore_verify_run_id: second.runId, restore_verify_report_json: null, restore_verified_at: null });
+    });
+
     it("reads an agent's release strictly", () => {
       const hello = (agent_version: unknown) => JSON.stringify({ agent_version });
       for (const version of ["0.22.0", "0.22.1", "0.23.0", "1.0.0"]) expect(agentReadsMayRestore(hello(version)), version).toBe(true);

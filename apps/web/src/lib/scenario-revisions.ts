@@ -356,11 +356,16 @@ export async function settleVerifyRun(
   runId: string,
   options: { hostId?: string; leaseEnded?: boolean; wake?: (hostId: string) => Promise<void> } = {},
 ): Promise<boolean> {
-  // A restore check is a verify run too; the revision names it.
+  // A restore check is a verify run too. The revision names it; and since
+  // that name is written after the run is admitted, a report can get here
+  // first. Until the run is being torn down, a verify run of a revision
+  // that is verified already, and not by this run, can only be one.
   const run = await env.DB.prepare(
     `SELECT run.scenario_id, run.scenario_rev, run.host_id, run.state_json, run.delete_requested_at,
         EXISTS (SELECT 1 FROM scenario_revisions revision WHERE revision.scenario_id = run.scenario_id
-          AND revision.rev = run.scenario_rev AND revision.restore_verify_run_id = run.run_id) AS restore_check,
+          AND revision.rev = run.scenario_rev AND (revision.restore_verify_run_id = run.run_id
+            OR (run.delete_requested_at IS NULL AND revision.state = 'verified'
+              AND revision.verify_run_id IS NOT run.run_id))) AS restore_check,
         (SELECT vm.kino_digest FROM runtime_vms vm WHERE vm.execution_id = run.run_id LIMIT 1) AS kino
        FROM scenario_runs run
       WHERE run.run_id = ?1 AND run.launch_source = 'verify' AND run.user_id = ?2 AND (?3 IS NULL OR run.host_id = ?3)`,
@@ -386,12 +391,14 @@ export async function settleVerifyRun(
   const [settled] = await env.DB.batch([
     run.restore_check
       ? env.DB.prepare(
-        `UPDATE scenario_revisions SET restore_verify_report_json = ?5,
+        `UPDATE scenario_revisions SET restore_verify_run_id = ?3, restore_verify_report_json = ?5,
             restore_verified_at = CASE WHEN ?4 = 1 THEN ?6 ELSE restore_verified_at END
-          WHERE scenario_id = ?1 AND rev = ?2 AND restore_verify_run_id = ?3 AND restore_verify_report_json IS NULL
+          WHERE scenario_id = ?1 AND rev = ?2 AND state = 'verified'
+            AND ((restore_verify_run_id = ?3 AND restore_verify_report_json IS NULL)
+              OR (restore_verify_run_id IS NOT ?3 AND ?7 = 1))
           RETURNING rev`,
       ).bind(run.scenario_id, run.scenario_rev, runId, outcome === "passed" && restored ? 1 : 0,
-        JSON.stringify(restoreReport), report.at)
+        JSON.stringify(restoreReport), report.at, run.delete_requested_at === null ? 1 : 0)
       : env.DB.prepare(
         `UPDATE scenario_revisions SET state = CASE WHEN ?4 = 'passed' THEN 'verified' ELSE state END,
             verify_run_id = ?3, verify_report_json = ?5
