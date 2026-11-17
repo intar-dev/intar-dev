@@ -80,7 +80,6 @@ function vm(
     sessionTimeline: null,
     provisioning: {
       image: null,
-      imageKey: null,
       imageSha256: null,
       resources: {
         cpuMillis: 1_000,
@@ -97,7 +96,7 @@ function vm(
     terminalTarget: {
       host: null,
       port: 22,
-      username: "ubuntu",
+      username: "user",
       hostKeyOpenssh: null,
       checkedAt: null,
     },

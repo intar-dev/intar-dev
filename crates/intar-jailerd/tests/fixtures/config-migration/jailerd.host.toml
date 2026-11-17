@@ -1,0 +1,27 @@
+# A host config as an operator keeps it: its own identities, budgets and
+# limits, and the retired key spelled without spaces.
+agent_uid = 1002
+agent_gid = 1003
+allow_uid_gid_collisions = true
+
+jail_root = "/srv/intar/jails"
+cloud_hypervisor_binary = "/usr/lib/intar/cloud-hypervisor-v53.0"
+cloud_hypervisor_sha256 = "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+jailer_binary = "/usr/lib/intar/intar-jailer"
+socket_path = "/run/intar-jailerd/control.sock"
+netns_root = "/run/netns"
+guest_network_pool = "10.77.0.0/16"
+ssh_public_port_start = 23000
+ssh_public_port_end = 23499
+template_budget_bytes = 32212254720
+minimum_free_space_bytes = 21474836480
+store_gc_grace_seconds = 7200
+legacy_template_retention_seconds=86400 # one day here
+cpu_reserved_millis = 2000
+vmm_file_size_limit_bytes = 137438953472
+uid_gid_start = 300000
+uid_gid_end = 365535
+allowed_source_roots = [
+  "/var/cache/intar-agent",
+  "/srv/intar/cache",
+]

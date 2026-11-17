@@ -33,7 +33,7 @@ describe("buildTar", () => {
   it("produces readable ustar entries with valid checksums", () => {
     const encoder = new TextEncoder();
     const tar = buildTar([
-      { path: "base-images.hcl", bytes: encoder.encode("base") },
+      { path: "intar.hcl", bytes: encoder.encode("base") },
       {
         path: "scenarios/demo/scenario.hcl",
         bytes: encoder.encode("scenario body that is longer than one word"),
@@ -42,7 +42,7 @@ describe("buildTar", () => {
     expect(tar.length % 512).toBe(0);
     const entries = parseHeaders(tar);
     expect(entries).toEqual([
-      { path: "base-images.hcl", size: 4 },
+      { path: "intar.hcl", size: 4 },
       { path: "scenarios/demo/scenario.hcl", size: 42 },
     ]);
   });

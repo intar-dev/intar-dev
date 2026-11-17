@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-CLOUD_HYPERVISOR_SHA256=448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc
+CLOUD_HYPERVISOR_SHA256=f9ffb9646783233d1f0fb09e77db1fca66499d1041e63bc011b90683c0d49933
 
 die() {
   echo "intar package smoke: $*" >&2
@@ -55,6 +55,7 @@ for path in \
   /usr/local/bin/intar-agent \
   /etc/systemd/system/intar-jailerd.service \
   /etc/systemd/system/intar-jailerd.socket \
+  /etc/systemd/system/intar-jailerd-boot-check.service \
   /etc/systemd/system/intar-agent.service \
   /run/systemd/system/intar-agent.service.d \
   /etc/systemd/system/intar-vms.slice \
@@ -266,6 +267,7 @@ cleanup() {
     /etc/systemd/system/intar-agent.service \
     /etc/systemd/system/intar-jailerd.service \
     /etc/systemd/system/intar-jailerd.socket \
+    /etc/systemd/system/intar-jailerd-boot-check.service \
     /etc/systemd/system/intar-vms.slice \
     /run/systemd/system/intar-agent.service.d \
     /etc/tmpfiles.d/intar-jailerd.conf \
@@ -284,7 +286,7 @@ cleanup() {
 trap cleanup 0
 trap 'exit 130' HUP INT TERM
 
-# The v2 package deliberately has no copy fallback: the root-owned template
+# The package deliberately has no copy fallback: the root-owned template
 # store and jail-generation store must share a filesystem that accepts an
 # exact FICLONE. Docker's overlay filesystem does not provide that invariant,
 # so the disposable privileged smoke provisions the same XFS reflink topology
@@ -341,14 +343,14 @@ for relative in \
   intar-agent \
   intar-jailer \
   intar-jailerd \
-  cloud-hypervisor-v53.0 \
+  cloud-hypervisor-v54.1 \
   deploy/SHA256SUMS \
   deploy/THIRD_PARTY_NOTICES.md \
   deploy/intar-rust-dependencies.json \
   deploy/cloud-hypervisor-LICENSES/Apache-2.0.txt \
   deploy/cloud-hypervisor-LICENSES/BSD-3-Clause.txt \
   deploy/cloud-hypervisor-LICENSES/CC-BY-4.0.txt \
-  deploy/cloud-hypervisor-v53.0.sha256 \
+  deploy/cloud-hypervisor-v54.1.sha256 \
   deploy/config.example.toml \
   deploy/install.sh \
   deploy/intar-jailerd-self-test.sh \
@@ -357,6 +359,7 @@ for relative in \
   deploy/intar-agent.config.example.toml \
   deploy/intar-jailerd.service \
   deploy/intar-jailerd.socket \
+  deploy/intar-jailerd-boot-check.service \
   deploy/intar-jailerd.sysctl.conf \
   deploy/intar-jailerd.tmpfiles \
   deploy/intar-vms.slice; do
@@ -388,10 +391,10 @@ case " ${agent_read_write_paths} " in
 esac
 (cd "${package_root}" && sha256sum --check --strict deploy/SHA256SUMS)
 
-for binary in intar-agent intar-jailer intar-jailerd cloud-hypervisor-v53.0; do
+for binary in intar-agent intar-jailer intar-jailerd cloud-hypervisor-v54.1; do
   [ -x "${package_root}/${binary}" ] || die "archive binary is not executable: ${binary}"
 done
-cloud_hypervisor=${package_root}/cloud-hypervisor-v53.0
+cloud_hypervisor=${package_root}/cloud-hypervisor-v54.1
 echo "${CLOUD_HYPERVISOR_SHA256}  ${cloud_hypervisor}" | sha256sum --check --strict
 file_output=$(file --brief "${cloud_hypervisor}")
 case "${file_output}" in
@@ -406,7 +409,7 @@ if readelf --dynamic "${cloud_hypervisor}" 2>/dev/null | grep -q '(NEEDED)'; the
 fi
 version_output=$("${cloud_hypervisor}" --version 2>&1)
 case "${version_output}" in
-  *cloud-hypervisor*v53.0*) ;;
+  *cloud-hypervisor*v54.1*) ;;
   *) die "unexpected Cloud Hypervisor version: ${version_output}" ;;
 esac
 
@@ -569,6 +572,11 @@ self_test=/usr/lib/intar/intar-jailerd-self-test
 [ -x "${self_test}" ] || die "installed self-test wrapper is missing"
 help_output=$("${self_test}" --help 2>&1 || true)
 echo "${help_output}" | grep -q -- '--offline' || die "self-test wrapper lacks offline mode"
+echo "${help_output}" | grep -q -- '--boot' || die "self-test wrapper lacks boot mode"
+[ "$(systemctl is-enabled intar-jailerd-boot-check.service)" = enabled ] || \
+  die "installer did not enable intar-jailerd-boot-check.service"
+[ "$(systemctl show --property=ActiveState --value intar-jailerd-boot-check.service)" = inactive ] || \
+  die "installer started intar-jailerd-boot-check.service"
 "${self_test}"
 
 runuser --user intar-agent -- env \
@@ -579,6 +587,16 @@ systemctl is-active --quiet intar-jailerd.socket || \
   die "doctor left intar-jailerd.socket inactive"
 systemctl is-active --quiet intar-jailerd.service || \
   die "doctor left intar-jailerd.service inactive"
+# Starting jailerd outside a boot must not pull the boot check in.
+[ "$(systemctl show --property=ActiveState --value intar-jailerd-boot-check.service)" = inactive ] || \
+  die "starting jailerd ran intar-jailerd-boot-check.service outside a boot"
+# With the daemon running, the boot mode must refuse and leave it running.
+if boot_output=$("${self_test}" --boot 2>&1); then
+  die "self-test --boot ran while intar-jailerd.service was active"
+fi
+printf '%s\n' "${boot_output}" | grep -Fq -- "--boot runs only before intar-jailerd.service starts" || \
+  die "self-test --boot refused for the wrong reason: ${boot_output}"
+systemctl is-active --quiet intar-jailerd.service || die "self-test --boot stopped intar-jailerd.service"
 
 # Run openat2 and a jailed runtime-socket bind under the installed agent unit
 # itself, not merely as its Unix user. systemd 255's RestrictSUIDSGID filter
@@ -740,4 +758,4 @@ rm -rf -- "${agent_runtime_probe_root}"
 systemctl daemon-reload
 systemctl reset-failed intar-agent.service >/dev/null 2>&1 || true
 
-echo "intar package smoke: installed v53.0 jailed lifecycle, quota, agent runtime sandbox, and doctor passed"
+echo "intar package smoke: installed v54.1 jailed lifecycle, quota, agent runtime sandbox, and doctor passed"

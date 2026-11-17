@@ -2,7 +2,6 @@
 // never disconnects, pauses or resumes a binding, and never names a tenant.
 // The per-binding Durable Object re-reads GitHub through its own token mint,
 // so a replayed or reordered delivery can only cause a re-read.
-import { hexToBytes } from "@/control-plane/image-registry/chunks";
 import {
   textEncoder,
   timingSafeHashEqual,
@@ -154,4 +153,12 @@ function answer(status: number): Response {
     status,
     headers: { "cache-control": "no-store" },
   });
+}
+
+function hexToBytes(value: string): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(32);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
 }

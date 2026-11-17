@@ -1,6 +1,5 @@
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import type { AdmissionContentAccess } from "@/lib/scenario-runs/admission-guards";
-import type { RequiredScenarioImage } from "@/lib/scenario-host-readiness";
 import { user } from "./core";
 import { agentHosts } from "./platform";
 import { jsonText } from "./shared";
@@ -12,6 +11,7 @@ export const personalImagePreparations = sqliteTable("personal_image_preparation
   credentialGeneration: integer("credential_generation").notNull(),
   requestKey: text("request_key").notNull(),
   accessJson: jsonText<AdmissionContentAccess>("access_json").notNull(),
-  imagesJson: jsonText<RequiredScenarioImage[]>("images_json").notNull(),
+  /** Machine image manifest digests. */
+  imagesJson: jsonText<string[]>("images_json").notNull(),
   expiresAt: integer("expires_at").notNull(),
 });

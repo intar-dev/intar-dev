@@ -261,7 +261,7 @@ function courseCatalogPath(organizationId: string | null): string {
     : "/api/courses";
 }
 
-function courseLecturePath(route: CourseRouteRef, lectureId: string): string {
+export function courseLecturePath(route: CourseRouteRef, lectureId: string): string {
   const base = route.organizationId
     ? `/api/organizations/${encodeURIComponent(route.organizationId)}/courses`
     : "/api/courses";

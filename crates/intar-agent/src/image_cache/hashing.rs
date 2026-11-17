@@ -506,7 +506,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let background_path = dir.path().join("background.bin").clone();
         let foreground_path = dir.path().join("foreground.bin").clone();
-        let background_bytes = vec![3_u8; 8 * 1024 * 1024];
+        // Four blocks: at the pace, the read cannot end before the guard below.
+        let background_bytes = vec![3_u8; 4 * HASH_BLOCK_BYTES];
         std::fs::write(&background_path, &background_bytes)?;
         std::fs::write(&foreground_path, b"intar launch check")?;
 

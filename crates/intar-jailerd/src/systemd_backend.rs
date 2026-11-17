@@ -140,7 +140,7 @@ impl SystemdHostBackend {
         let connection = &self.system_bus;
         let manager = Self::manager(connection)?;
         let path = Self::get_unit_path(&manager, unit_name)?
-            .with_context(|| format!("systemd unit {unit_name} no longer exists"))?;
+            .ok_or_else(|| UnitGoneError(unit_name.to_owned()))?;
         let unit = zbus::block_on(zbus::Proxy::new(
             connection,
             "org.freedesktop.systemd1",

@@ -3,7 +3,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import {
   desiredRunningVm, drizzle, env, eq, hostDesiredState,
-  mutateStoredHostDesiredState, resetHostRuntimeTestDatabase,
+  mutateDesiredState, resetHostRuntimeTestDatabase,
   seedHost, seedRun, upsertDesiredVm,
 } from "@/control-plane/host-runtime-do/test-fixtures";
 import { hostResourceReservations, runtimeExecutions } from "@/db/schema";
@@ -41,7 +41,7 @@ beforeEach(async () => {
     executionId: runId, hostId, cpuMillis: 1_000, memoryMib: 512,
     worstCaseDiskMib: 4_096, state: "committed", createdAt: now, updatedAt: now,
   });
-  await mutateStoredHostDesiredState(db, hostId, now, (draft) => {
+  await mutateDesiredState(db, hostId, now, (draft) => {
     upsertDesiredVm(draft, {
       ...desiredRunningVm(runId, "runtime-web", now),
       desired_phase: "absent", lease_expires_at_unix_ms: now,

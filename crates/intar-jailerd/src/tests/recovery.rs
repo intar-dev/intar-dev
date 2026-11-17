@@ -14,8 +14,8 @@ fn launch_grants_mknod_only_for_the_jail_devices() {
     .expect("core");
     ensure_test_network(&mut core);
     assert!(matches!(
-        launch_prepared_v2(&mut core, 0, 125),
-        Response::LaunchVmV2(_)
+        launch_prepared_v3(&mut core, 0, 125),
+        Response::LaunchVmV3(_)
     ));
     assert_eq!(core.backend.started_specs.len(), 1);
     assert_eq!(
@@ -42,8 +42,8 @@ fn reservation_is_held_until_destroy_after_exit() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match launch_prepared_v2(&mut core, 1, 125) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match launch_prepared_v3(&mut core, 1, 125) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected response {other:?}"),
     };
     assert_eq!(core.capabilities().committed_cpu_millis, 125);
@@ -73,8 +73,8 @@ fn destroy_continues_after_systemd_garbage_collects_a_drained_unit() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match launch_prepared_v2(&mut core, 1, 125) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match launch_prepared_v3(&mut core, 1, 125) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected response {other:?}"),
     };
     let identity = VmIdentityRequest::by_generation(launched.generation.clone());
@@ -111,8 +111,8 @@ fn destroy_refuses_a_populated_unit() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match launch_prepared_v2(&mut core, 1, 125) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match launch_prepared_v3(&mut core, 1, 125) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected response {other:?}"),
     };
 
@@ -139,13 +139,13 @@ fn logical_vm_launch_is_idempotent_and_conflicts_on_changed_resources() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let request = prepare_launch_v2(&mut core, 1, 125);
-    let first = match core.handle(Request::LaunchVmV2(Box::new(request.clone()))) {
-        Response::LaunchVmV2(value) => value,
+    let request = launch_v3(1, 125);
+    let first = match core.handle(Request::LaunchVmV3(Box::new(request.clone()))) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected first launch response {other:?}"),
     };
-    let second = match core.handle(Request::LaunchVmV2(Box::new(request.clone()))) {
-        Response::LaunchVmV2(value) => value,
+    let second = match core.handle(Request::LaunchVmV3(Box::new(request.clone()))) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected idempotent launch response {other:?}"),
     };
     assert_eq!(first.generation, second.generation);
@@ -153,7 +153,7 @@ fn logical_vm_launch_is_idempotent_and_conflicts_on_changed_resources() {
 
     let mut changed = request;
     changed.launch.cpu_millis = 126;
-    let response = core.handle(Request::LaunchVmV2(Box::new(changed)));
+    let response = core.handle(Request::LaunchVmV3(Box::new(changed)));
     assert!(matches!(
         response,
         Response::Error(ProtocolError { ref code, .. }) if code == "conflict"
@@ -173,9 +173,9 @@ fn idempotent_launch_still_rejects_a_changed_live_process_identity() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let request = prepare_launch_v2(&mut core, 1, 125);
-    let launched = match core.handle(Request::LaunchVmV2(Box::new(request.clone()))) {
-        Response::LaunchVmV2(value) => value,
+    let request = launch_v3(1, 125);
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(request.clone()))) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected first launch response {other:?}"),
     };
     core.backend
@@ -184,7 +184,7 @@ fn idempotent_launch_still_rejects_a_changed_live_process_identity() {
         .expect("fake unit")
         .pid_start_time_ticks = Some(8);
 
-    let response = core.handle(Request::LaunchVmV2(Box::new(request)));
+    let response = core.handle(Request::LaunchVmV3(Box::new(request)));
     assert!(matches!(
         response,
         Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
@@ -192,6 +192,256 @@ fn idempotent_launch_still_rejects_a_changed_live_process_identity() {
     assert!(core.backend.stopped_units.contains(&launched.unit_name));
     assert!(core.backend.destroyed_units.contains(&launched.unit_name));
     assert!(core.preparer.quarantined.contains(&launched.generation));
+}
+
+/// Launch one VM with a tracking preparer and make its live process identity
+/// differ from the persisted one, as an abnormal VMM exit does.
+fn launch_then_mismatch(
+    preparer: TrackingPreparer,
+) -> (JailerdCore<FakeBackend, TrackingPreparer>, VmLaunchResult) {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        preparer,
+        1_000,
+        ready_readiness(),
+    )
+    .expect("core");
+    ensure_test_network(&mut core);
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 125)))) {
+        Response::LaunchVmV3(value) => value,
+        other => panic!("unexpected launch response {other:?}"),
+    };
+    core.backend
+        .units
+        .get_mut(&launched.unit_name)
+        .expect("fake unit")
+        .pid_start_time_ticks = Some(8);
+    (core, launched)
+}
+
+#[test]
+fn inspect_containment_exports_the_recording_before_quarantine() {
+    let (mut core, launched) = launch_then_mismatch(TrackingPreparer::default());
+
+    let response = core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+        launched.generation.clone(),
+    )));
+    assert!(matches!(
+        response,
+        Response::Error(ProtocolError { ref message, .. }) if message.contains("stopped and quarantined")
+    ));
+    // The fake preparer refuses an export after quarantine, so this also
+    // proves the order.
+    assert_eq!(
+        core.preparer.exported,
+        std::slice::from_ref(&launched.generation)
+    );
+    assert_eq!(
+        core.preparer.exported_logs,
+        std::slice::from_ref(&launched.generation)
+    );
+    assert!(core.backend.stopped_units.contains(&launched.unit_name));
+    assert!(core.preparer.quarantined.contains(&launched.generation));
+    assert!(core.records.is_empty());
+    // The agent reads this as "jailerd no longer tracks the generation".
+    assert!(matches!(
+        core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+            launched.generation,
+        ))),
+        Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
+    ));
+}
+
+fn stop_export_error_code(export_error: fn() -> anyhow::Error) -> (String, bool) {
+    let (mut core, launched) = launch_then_mismatch(TrackingPreparer {
+        export_error: Some(export_error),
+        ..TrackingPreparer::default()
+    });
+    let code = match core.handle(Request::StopVm(VmIdentityRequest::by_generation(
+        launched.generation.clone(),
+    ))) {
+        Response::Error(error) => error.code,
+        other => panic!("unexpected stop response {other:?}"),
+    };
+    (code, core.records.contains_key(&launched.generation))
+}
+
+#[test]
+fn stop_export_out_of_space_or_quota_is_storage_exhausted_and_stays_tracked() {
+    for export_error in [
+        // std::io::copy of the full-copy fallback.
+        (|| {
+            anyhow::Error::from(std::io::Error::from_raw_os_error(
+                rustix::io::Errno::NOSPC.raw_os_error(),
+            ))
+            .context("copy drained recording export")
+        }) as fn() -> anyhow::Error,
+        // A rustix call: openat, renameat, fsync.
+        || anyhow::Error::from(rustix::io::Errno::DQUOT).context("create recording export"),
+        || anyhow::Error::from(rustix::io::Errno::NOSPC),
+    ] {
+        assert_eq!(
+            stop_export_error_code(export_error),
+            ("storage_exhausted".to_owned(), true)
+        );
+    }
+}
+
+#[test]
+fn stop_export_failures_the_vm_caused_are_not_storage_exhausted() {
+    for export_error in [
+        (|| anyhow::anyhow!("jailed recording disk ownership or mode changed"))
+            as fn() -> anyhow::Error,
+        || anyhow::anyhow!("recording disk changed after VM cgroup drain"),
+        || anyhow::Error::from(rustix::io::Errno::IO).context("copy drained recording export"),
+        || {
+            anyhow::Error::from(rustix::io::Errno::PERM)
+                .context("exact-reflink drained recording export")
+        },
+    ] {
+        assert_eq!(
+            stop_export_error_code(export_error),
+            ("host_operation_failed".to_owned(), true)
+        );
+    }
+}
+
+#[test]
+fn an_exited_vm_is_kept_for_its_delete_which_exports_and_releases_it() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        TrackingPreparer::default(),
+        1_000,
+        ready_readiness(),
+    )
+    .expect("core");
+    ensure_test_network(&mut core);
+    let launched = match core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 125)))) {
+        Response::LaunchVmV3(value) => value,
+        other => panic!("unexpected launch response {other:?}"),
+    };
+    // A guest poweroff: the VMM exits cleanly and systemd removes the unit.
+    core.backend.units.remove(&launched.unit_name);
+    let identity = || VmIdentityRequest::by_generation(launched.generation.clone());
+
+    // Inspect only answers: the logs, the disk and the network stay for the
+    // delete, and nothing is written.
+    for _ in 0..2 {
+        assert!(matches!(
+            core.handle(Request::InspectVm(identity())),
+            Response::Error(ProtocolError { ref code, .. }) if code == "vm_exited"
+        ));
+    }
+    assert!(core.records.contains_key(&launched.generation));
+    assert!(core.backend.stopped_units.is_empty());
+    assert!(core.backend.destroyed_units.is_empty());
+    assert!(core.backend.destroyed_vm_networks.is_empty());
+    assert!(core.preparer.exported.is_empty());
+    assert!(core.preparer.destroyed.is_empty());
+    assert!(core.preparer.quarantined.is_empty());
+
+    // The delete: StopVm exports, DestroyVm releases.
+    assert!(matches!(
+        core.handle(Request::StopVm(identity())),
+        Response::StopVm(_)
+    ));
+    assert_eq!(
+        core.preparer.exported,
+        std::slice::from_ref(&launched.generation)
+    );
+    assert!(matches!(
+        core.handle(Request::DestroyVm(identity())),
+        Response::DestroyVm(_)
+    ));
+    assert_eq!(
+        core.preparer.destroyed,
+        std::slice::from_ref(&launched.generation)
+    );
+    assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
+    assert!(core.preparer.quarantined.is_empty());
+    assert!(core.records.is_empty());
+    assert_eq!(core.capabilities().committed_cpu_millis, 0);
+    assert!(matches!(
+        core.handle(Request::InspectVm(identity())),
+        Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
+    ));
+}
+
+#[test]
+fn inspect_of_a_launch_in_flight_contains_nothing() {
+    // A generation is tracked only after its unit started; before that an
+    // inspection finds no record and touches nothing.
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        TrackingPreparer::default(),
+        1_000,
+        ready_readiness(),
+    )
+    .expect("core");
+    ensure_test_network(&mut core);
+    let generation = ValidatedId::parse(uuid::Uuid::new_v4().to_string()).expect("generation");
+    assert!(matches!(
+        core.handle(Request::InspectVm(VmIdentityRequest::by_generation(generation))),
+        Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
+    ));
+    assert!(core.backend.stopped_units.is_empty());
+    assert!(core.backend.destroyed_vm_networks.is_empty());
+    assert!(core.preparer.exported.is_empty());
+}
+
+#[test]
+fn inspect_containment_completes_when_the_recording_export_fails() {
+    let (mut core, launched) = launch_then_mismatch(TrackingPreparer {
+        fail_export: true,
+        ..TrackingPreparer::default()
+    });
+
+    let response = core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+        launched.generation.clone(),
+    )));
+    assert!(matches!(
+        response,
+        Response::Error(ProtocolError { ref message, .. })
+            if message.contains("stopped and quarantined") && !message.contains("incomplete")
+    ));
+    assert!(core.preparer.exported.is_empty());
+    assert!(core.backend.destroyed_units.contains(&launched.unit_name));
+    assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
+    assert!(core.preparer.quarantined.contains(&launched.generation));
+    assert!(core.records.is_empty());
+}
+
+#[test]
+fn inspect_containment_completes_when_the_log_export_fails() {
+    let (mut core, launched) = launch_then_mismatch(TrackingPreparer {
+        fail_export_logs: true,
+        ..TrackingPreparer::default()
+    });
+
+    let response = core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+        launched.generation.clone(),
+    )));
+    assert!(matches!(
+        response,
+        Response::Error(ProtocolError { ref message, .. })
+            if message.contains("stopped and quarantined") && !message.contains("incomplete")
+    ));
+    assert_eq!(
+        core.preparer.exported,
+        std::slice::from_ref(&launched.generation)
+    );
+    assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
+    assert!(core.preparer.quarantined.contains(&launched.generation));
+    assert!(core.records.is_empty());
 }
 
 #[cfg(target_os = "linux")]
@@ -208,8 +458,8 @@ fn inspect_healthy_vm_still_requires_a_live_api_ping() {
     )
     .expect("core");
     ensure_test_network(&mut core);
-    let launched = match launch_prepared_v2(&mut core, 1, 125) {
-        Response::LaunchVmV2(value) => value,
+    let launched = match launch_prepared_v3(&mut core, 1, 125) {
+        Response::LaunchVmV3(value) => value,
         other => panic!("unexpected launch response {other:?}"),
     };
 
@@ -242,7 +492,7 @@ fn network_setup_failure_revokes_partial_network_and_quarantines_generation() {
     ensure_test_network(&mut core);
 
     assert!(matches!(
-        launch_prepared_v2(&mut core, 1, 125),
+        launch_prepared_v3(&mut core, 1, 125),
         Response::Error(_)
     ));
     assert!(core.records.is_empty());
@@ -274,7 +524,7 @@ fn partial_start_failure_stops_then_destroys_the_transient_unit() {
     .expect("core");
     ensure_test_network(&mut core);
 
-    let response = launch_prepared_v2(&mut core, 1, 125);
+    let response = launch_prepared_v3(&mut core, 1, 125);
     assert!(matches!(response, Response::Error(_)));
     assert!(core.records.is_empty());
     let generation = core
@@ -314,7 +564,7 @@ fn post_start_persistence_failure_rolls_back_the_transient_unit() {
     .expect("core");
     ensure_test_network(&mut core);
 
-    let response = launch_prepared_v2(&mut core, 1, 125);
+    let response = launch_prepared_v3(&mut core, 1, 125);
     assert!(matches!(response, Response::Error(_)));
     assert!(core.records.is_empty());
     let generation = core
@@ -349,7 +599,7 @@ fn runtime_socket_acl_failure_rolls_back_the_transient_unit() {
     .expect("core");
     ensure_test_network(&mut core);
 
-    let Response::Error(error) = launch_prepared_v2(&mut core, 1, 125) else {
+    let Response::Error(error) = launch_prepared_v3(&mut core, 1, 125) else {
         panic!("runtime socket ACL failure unexpectedly succeeded")
     };
     assert!(
@@ -396,7 +646,7 @@ fn failed_launch_reports_every_rollback_failure() {
     .expect("core");
     ensure_test_network(&mut core);
 
-    let Response::Error(error) = core.handle(Request::LaunchVmV2(Box::new(launch_v2(1, 1_000))))
+    let Response::Error(error) = core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 1_000))))
     else {
         panic!("failed launch unexpectedly succeeded")
     };
@@ -451,7 +701,7 @@ fn drained_failed_launch_reports_network_and_quarantine_failures() {
     .expect("core");
     ensure_test_network(&mut core);
 
-    let Response::Error(error) = core.handle(Request::LaunchVmV2(Box::new(launch_v2(1, 1_000))))
+    let Response::Error(error) = core.handle(Request::LaunchVmV3(Box::new(launch_v3(1, 1_000))))
     else {
         panic!("failed launch unexpectedly succeeded")
     };
@@ -486,7 +736,7 @@ fn mismatched_started_unit_never_controls_the_returned_unit_name() {
     ensure_test_network(&mut core);
 
     assert!(matches!(
-        launch_prepared_v2(&mut core, 1, 125),
+        launch_prepared_v3(&mut core, 1, 125),
         Response::Error(_)
     ));
     assert!(core.records.is_empty());
@@ -593,6 +843,178 @@ fn recovery_contains_non_v2_metadata_without_restoring_ingress() {
 }
 
 #[test]
+fn recovery_containment_exports_a_validated_record_before_quarantine() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    // A host reboot: the record is sound, its VMM is gone.
+    record.host_boot_id = Some("an-earlier-boot".to_owned());
+    let core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("contain recovered record");
+
+    assert!(core.records.is_empty());
+    // The fake refuses an export after quarantine, so this proves the order.
+    assert_eq!(
+        core.preparer.exported,
+        std::slice::from_ref(&record.generation)
+    );
+    assert_eq!(
+        core.preparer.exported_logs,
+        std::slice::from_ref(&record.generation)
+    );
+    assert_eq!(core.preparer.quarantined, vec![record.generation]);
+}
+
+#[test]
+fn recovery_containment_never_exports_an_unvalidated_record() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.schema_version = VM_RECORD_METADATA_VERSION + 1;
+    let core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("contain unvalidated record");
+
+    assert!(core.preparer.exported.is_empty());
+    assert!(core.preparer.exported_logs.is_empty());
+    assert_eq!(core.preparer.quarantined, vec![record.generation]);
+}
+
+fn destroy_run_network(core: &mut JailerdCore<FakeBackend, RecoverPreparer>) -> Response {
+    core.handle(Request::DestroyRunNetwork(DestroyRunNetworkRequest {
+        run_id: ValidatedId::parse("run").expect("run ID"),
+    }))
+}
+
+#[test]
+fn a_run_network_is_destroyed_after_recovery_contains_its_only_vm() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.host_boot_id = Some("an-earlier-boot".to_owned());
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("contain recovered record");
+    assert!(core.run_networks.is_empty());
+
+    assert!(matches!(
+        destroy_run_network(&mut core),
+        Response::DestroyRunNetwork(_)
+    ));
+    assert_eq!(
+        core.backend.destroyed_run_networks,
+        vec![record.request.run_id]
+    );
+}
+
+#[test]
+fn a_run_network_is_kept_while_a_healthy_vm_of_the_run_remains() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut contained = recovered_record(&config);
+    contained.host_boot_id = Some("an-earlier-boot".to_owned());
+    let mut healthy = recovered_record(&config);
+    healthy.generation = ValidatedId::parse("healthy-generation").expect("generation");
+    healthy.unit_name = format!("intar-vm-{}.service", healthy.generation);
+    healthy.cgroup_path = Some(
+        format!(
+            "/intar.slice/intar-vms.slice/intar-vm-{}.service",
+            healthy.generation
+        )
+        .into(),
+    );
+    healthy.uid += 1;
+    healthy.gid += 1;
+    healthy.request = launch(2, 125);
+    healthy.request_fingerprint = request_fingerprint(&healthy.request).expect("fingerprint");
+    healthy.paths = jail_paths(
+        &generation_directory(&config, &healthy.generation).join("root"),
+        healthy.request.artifacts.initrd.is_some(),
+    );
+    let mut backend = FakeBackend::default();
+    backend
+        .units
+        .insert(healthy.unit_name.clone(), recovered_inspection(&healthy));
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        backend,
+        RecoverPreparer {
+            records: vec![contained.clone(), healthy.clone()],
+            ..RecoverPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("recover core");
+    assert_eq!(core.preparer.quarantined, vec![contained.generation]);
+    assert!(core.records.contains_key(&healthy.generation));
+
+    assert!(matches!(
+        destroy_run_network(&mut core),
+        Response::Error(error) if error.message.contains("still has VM generations")
+    ));
+    assert!(core.backend.destroyed_run_networks.is_empty());
+}
+
+#[test]
+fn a_run_network_is_kept_while_a_contained_vm_may_still_run_in_it() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.host_boot_id = Some("an-earlier-boot".to_owned());
+    let mut core = JailerdCore::new_with_readiness(
+        config,
+        FakeBackend {
+            fail_stop_unit: true,
+            fail_destroy_unit: true,
+            ..FakeBackend::default()
+        },
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+        1_000,
+        ready_readiness(),
+    )
+    .expect("retain recovered record");
+    assert!(
+        core.pending_cpu_reservations
+            .contains_key(&record.generation)
+    );
+
+    assert!(matches!(
+        destroy_run_network(&mut core),
+        Response::Error(error) if error.message.contains("still has VM generations")
+    ));
+    assert!(core.backend.destroyed_run_networks.is_empty());
+}
+
+#[test]
 fn recovery_reattaches_a_matching_drained_generation() {
     let mut config = test_config();
     config.cpu_reserved_millis = 0;
@@ -619,7 +1041,7 @@ fn recovery_reattaches_a_matching_drained_generation() {
 
 #[test]
 fn recovery_accepts_persisted_v2_and_v3_template_launches() {
-    for with_tools in [false, true] {
+    {
         let directory = tempfile::tempdir().expect("recovery directory");
         let mut config = test_config();
         config.jail_root = directory.path().to_path_buf();
@@ -630,14 +1052,6 @@ fn recovery_accepts_persisted_v2_and_v3_template_launches() {
             template_artifact_source(&image, "root.raw", &image, ArtifactAccess::ReadWrite);
         record.request.artifacts.kernel =
             template_artifact_source(&image, "kernel", &image, ArtifactAccess::ReadOnly);
-        if with_tools {
-            let root = generation_directory(&config, &record.generation).join("root");
-            std::fs::create_dir_all(root.join("disks")).expect("tools directory");
-            std::fs::write(root.join("disks/tools.ext4"), b"tools").expect("tools fixture");
-            record.request.artifacts.tools_disk =
-                Some(source("tools.ext4", ArtifactAccess::ReadOnly));
-            record.paths = jail_paths(&root, record.request.artifacts.initrd.is_some());
-        }
         record.request_fingerprint = request_fingerprint(&record.request).expect("fingerprint");
         let record = decode_vm_record_v2(&serde_json::to_vec(&record).expect("persist record"))
             .expect("decode persisted template launch");
@@ -758,4 +1172,156 @@ fn transient_unit_properties_encode_hard_quota_and_safety() {
     assert_eq!(properties["KillMode"], "control-group");
     assert_eq!(properties["RestrictRealtime"], "yes");
     assert!(!properties.contains_key("BindsTo"));
+}
+
+fn second_recovered_record(config: &JailerdConfig) -> VmRecord {
+    let mut record = recovered_record(config);
+    record.generation = ValidatedId::parse("second-generation").expect("generation");
+    record.unit_name = format!("intar-vm-{}.service", record.generation);
+    record.cgroup_path = Some(
+        format!(
+            "/intar.slice/intar-vms.slice/intar-vm-{}.service",
+            record.generation
+        )
+        .into(),
+    );
+    record.uid += 1;
+    record.gid += 1;
+    record.paths = jail_paths(
+        &generation_directory(config, &record.generation).join("root"),
+        record.request.artifacts.initrd.is_some(),
+    );
+    record
+}
+
+fn recover_with(
+    config: JailerdConfig,
+    backend: FakeBackend,
+    preparer: RecoverPreparer,
+) -> JailerdCore<FakeBackend, RecoverPreparer> {
+    JailerdCore::new_with_readiness(config, backend, preparer, 1_000, ready_readiness())
+        .expect("recover core")
+}
+
+fn self_test_flags_kept(core: &JailerdCore<FakeBackend, RecoverPreparer>) -> bool {
+    core.readiness.privileged_self_test_passed && core.readiness.kvm_accounting_proven
+}
+
+#[test]
+fn contained_records_of_an_earlier_boot_keep_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut first = recovered_record(&config);
+    first.host_boot_id = Some("an-earlier-boot".to_owned());
+    let mut second = second_recovered_record(&config);
+    second.host_boot_id = Some("another-earlier-boot".to_owned());
+    let core = recover_with(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![first.clone(), second.clone()],
+            ..RecoverPreparer::default()
+        },
+    );
+    assert_eq!(
+        core.preparer.quarantined,
+        vec![first.generation, second.generation]
+    );
+    assert!(core.pending_cpu_reservations.is_empty());
+    assert!(self_test_flags_kept(&core));
+}
+
+#[test]
+fn a_mismatch_within_this_boot_clears_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    // A record of this boot whose unit is gone: contained, but not clean.
+    let record = recovered_record(&config);
+    let core = recover_with(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+    );
+    assert_eq!(core.preparer.quarantined, vec![record.generation]);
+    assert!(!self_test_flags_kept(&core));
+}
+
+#[test]
+fn an_earlier_boot_record_whose_quarantine_fails_clears_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.host_boot_id = Some("an-earlier-boot".to_owned());
+    let core = recover_with(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record],
+            fail_quarantine: true,
+            ..RecoverPreparer::default()
+        },
+    );
+    assert!(!self_test_flags_kept(&core));
+}
+
+#[test]
+fn an_earlier_boot_record_with_an_unproven_drain_clears_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.host_boot_id = Some("an-earlier-boot".to_owned());
+    let core = recover_with(
+        config,
+        FakeBackend {
+            fail_stop_unit: true,
+            fail_destroy_unit: true,
+            ..FakeBackend::default()
+        },
+        RecoverPreparer {
+            records: vec![record],
+            ..RecoverPreparer::default()
+        },
+    );
+    assert!(!self_test_flags_kept(&core));
+}
+
+#[test]
+fn a_record_without_a_boot_id_clears_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut record = recovered_record(&config);
+    record.host_boot_id = None;
+    let core = recover_with(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![record.clone()],
+            ..RecoverPreparer::default()
+        },
+    );
+    assert_eq!(core.preparer.quarantined, vec![record.generation]);
+    assert!(!self_test_flags_kept(&core));
+}
+
+#[test]
+fn an_earlier_boot_record_mixed_with_another_unclean_record_clears_the_self_test_flags() {
+    let mut config = test_config();
+    config.cpu_reserved_millis = 0;
+    let mut earlier = recovered_record(&config);
+    earlier.host_boot_id = Some("an-earlier-boot".to_owned());
+    let mut unknown = second_recovered_record(&config);
+    unknown.host_boot_id = None;
+    let core = recover_with(
+        config,
+        FakeBackend::default(),
+        RecoverPreparer {
+            records: vec![earlier, unknown],
+            ..RecoverPreparer::default()
+        },
+    );
+    assert_eq!(core.preparer.quarantined.len(), 2);
+    assert!(!self_test_flags_kept(&core));
 }

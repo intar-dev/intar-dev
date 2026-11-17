@@ -1,9 +1,12 @@
 import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { agentHosts, courseCatalogs, hostActualState, member, vmScenarios } from "@/db/schema";
-import { stateReport } from "@/control-plane/host-runtime-do/test-fixtures";
+import { agentHosts, courseCatalogs, hostActualState, member } from "@/db/schema";
+import { seedScenarioRow, stateReport } from "@/control-plane/host-runtime-do/test-fixtures";
 import type { AdmissionHostReadiness } from "./admission-guards";
+
+/** The scenario the admission fixture links and its runs start. */
+export const ADMISSION_SCENARIO_ID = "intar/scenario-one";
 
 /** Current access and readiness for tests that invoke the batch directly. */
 export async function seedAdmissionGuardFixture(input: {
@@ -17,8 +20,7 @@ export async function seedAdmissionGuardFixture(input: {
     observedAt: now,
     appliedDesiredVersion: 0,
     cachedImages: [{
-      image_key: { scenario: "scenario-one", vm: "web", arch: "x86_64" },
-      image_id: "2".repeat(64),
+      image: `sha256:${"2".repeat(64)}`,
       phase: "ready",
       updated_at_unix_ms: now,
     }],
@@ -44,20 +46,7 @@ export async function seedAdmissionGuardFixture(input: {
     role: "member",
     createdAt: new Date(now),
   });
-  await db.insert(vmScenarios).values({
-    scenarioId: "scenario-one",
-    organizationId: input.organizationId,
-    title: "Scenario one",
-    description: "Scenario one",
-    difficulty: "beginner",
-    estimatedMinutes: 30,
-    tagsJson: [],
-    hintsJson: [],
-    briefingMarkdown: "Briefing",
-    solutionMarkdown: "Solution",
-    enabled: true,
-    enabledAt: now,
-  });
+  await seedScenarioRow(db, ADMISSION_SCENARIO_ID, input.organizationId);
   await db.insert(courseCatalogs).values({
     scopeKey: "organization:" + input.organizationId,
     organizationId: input.organizationId,
@@ -78,7 +67,7 @@ export async function seedAdmissionGuardFixture(input: {
           category: "linux",
           tags: [],
           estimatedMinutes: 30,
-          scenarioId: "scenario-one",
+          scenarioId: ADMISSION_SCENARIO_ID,
         }],
       }],
     },

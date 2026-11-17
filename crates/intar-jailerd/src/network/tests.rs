@@ -128,7 +128,7 @@ fn repair_never_replaces_a_missing_tracked_namespace_identity() {
         guest_cidr: "10.77.0.0/28".to_owned(),
         gateway: "10.77.0.1".to_owned(),
     };
-    let (mut result, nft_table) = derived_topology(&request).unwrap();
+    let (mut result, nft_table) = derived_topology(&request.run_id).unwrap();
     result.namespace_inode = 17;
     let manager = NetworkManager {
         ip: PathBuf::from("/unreachable/ip"),
@@ -163,8 +163,8 @@ fn derived_interface_names_are_stable_distinct_and_fit_linux_limit() {
         guest_cidr: "10.77.0.0/24".to_owned(),
         gateway: "10.77.0.1".to_owned(),
     };
-    let (first, _) = derived_topology(&request).unwrap();
-    let (second, _) = derived_topology(&request).unwrap();
+    let (first, _) = derived_topology(&request.run_id).unwrap();
+    let (second, _) = derived_topology(&request.run_id).unwrap();
     assert_eq!(first, second);
     assert!(first.bridge_name.len() <= 15);
     assert!(first.host_veth_name.len() <= 15);
@@ -239,6 +239,7 @@ fn attachment_collision_checks_cover_guest_tap_cross_class_and_bridge_domains() 
         ssh_public_port: None,
         ssh_forward_active: false,
         vsock_cid: 3,
+        egress: true,
         uid: 200_000,
         gid: 200_000,
     };
@@ -274,7 +275,7 @@ fn create_and_recovery_tap_commands_use_only_the_derived_host_mac() {
         guest_cidr: "10.77.0.0/24".to_owned(),
         gateway: "10.77.0.1".to_owned(),
     };
-    let (network, _) = derived_topology(&request).unwrap();
+    let (network, _) = derived_topology(&request.run_id).unwrap();
     let attachment = VmNetworkAttachment {
         generation: ValidatedId::parse("generation").unwrap(),
         vm_id: ValidatedId::parse("vm").unwrap(),
@@ -285,6 +286,7 @@ fn create_and_recovery_tap_commands_use_only_the_derived_host_mac() {
         ssh_public_port: None,
         ssh_forward_active: false,
         vsock_cid: 3,
+        egress: true,
         uid: 200_000,
         gid: 200_000,
     };
@@ -374,6 +376,7 @@ fn guest_address_rejects_gateway_network_broadcast_and_prefix_drift() {
         guest_ip_cidr: address.to_owned(),
         ssh_public_port: None,
         vsock_cid: 3,
+        egress: true,
         artifacts: intar_jailer_protocol::SourceArtifacts {
             kernel: artifact("kernel", intar_jailer_protocol::ArtifactAccess::ReadOnly),
             initrd: None,
@@ -386,7 +389,6 @@ fn guest_address_rejects_gateway_network_broadcast_and_prefix_drift() {
                 "recording.raw",
                 intar_jailer_protocol::ArtifactAccess::ReadWrite,
             ),
-            tools_disk: None,
         },
     };
     assert!(validate_guest_address(&run, &request("10.7.0.2/29")).is_ok());
@@ -402,7 +404,7 @@ fn nft_policy_blocks_host_cross_run_private_and_metadata_destinations() {
         guest_cidr: "10.77.0.0/29".to_owned(),
         gateway: "10.77.0.1".to_owned(),
     };
-    let (result, nft_table) = derived_topology(&request).unwrap();
+    let (result, nft_table) = derived_topology(&request.run_id).unwrap();
     let mut attachments = BTreeMap::new();
     attachments.insert(
         ValidatedId::parse("generation").unwrap(),
@@ -416,6 +418,7 @@ fn nft_policy_blocks_host_cross_run_private_and_metadata_destinations() {
             ssh_public_port: Some(22_001),
             ssh_forward_active: true,
             vsock_cid: 3,
+            egress: true,
             uid: 200_000,
             gid: 200_000,
         },
@@ -490,7 +493,10 @@ fn nft_policy_blocks_host_cross_run_private_and_metadata_destinations() {
         rules.find(&source_guard).unwrap() < rules.find(&established_accept).unwrap(),
         "source anti-spoofing must run before the established-flow fast path"
     );
-    let forward_accept = format!("iifname \"{}\" accept", state.result.host_veth_name);
+    let forward_accept = format!(
+        "iifname \"{}\" ip saddr 10.77.0.2 accept",
+        state.result.host_veth_name
+    );
     let ssh_dnat = format!(
         "iifname != \"{}\" fib daddr type local tcp dport 22001 dnat ip to 10.77.0.2:22",
         state.result.host_veth_name
@@ -524,6 +530,59 @@ fn nft_policy_blocks_host_cross_run_private_and_metadata_destinations() {
         !rules.contains("ip daddr 10.77.0.0/29 drop"),
         "same-run L2 range must not be blocked by the host policy"
     );
+
+    // The egress floor (T5 (a), #291) sits between the anti-spoofing guard
+    // and the established fast path, so it bounds tracked flows too.
+    let veth = &state.result.host_veth_name;
+    let floor = [
+        format!("iifname \"{veth}\" tcp dport {{ 25, 465, 587 }} drop"),
+        format!("iifname \"{veth}\" limit rate over 20000/second burst 5000 packets drop"),
+        format!("iifname \"{veth}\" limit rate over 12 mbytes/second burst 24 mbytes drop"),
+        format!("iifname \"{veth}\" ct state new limit rate over 30/second burst 120 packets drop"),
+    ];
+    let mut previous = rules.find(&source_guard).unwrap();
+    for rule in &floor {
+        let position = rules
+            .find(rule.as_str())
+            .unwrap_or_else(|| panic!("missing egress floor rule: {rule}"));
+        assert!(previous < position, "egress floor out of order at: {rule}");
+        previous = position;
+    }
+    assert!(
+        previous < rules.find(&established_accept).unwrap(),
+        "the egress floor must run before the established-flow fast path"
+    );
+
+    // Egress is per VM and closed by default: the VM launched with it is
+    // accepted by address after every guard, and the run's last rule drops
+    // the rest, also an address no VM holds.
+    let last_drop = format!("iifname \"{veth}\" counter drop\n  }}\n  chain prerouting");
+    assert!(
+        rules.find("ip daddr 224.0.0.0/4 drop").unwrap() < rules.find(&forward_accept).unwrap()
+            && rules.find(&forward_accept).unwrap() < rules.find(&last_drop).unwrap(),
+        "the per-VM accept sits between the destination guards and the final drop"
+    );
+    let mut closed = state.clone();
+    closed
+        .attachments
+        .values_mut()
+        .next()
+        .expect("attachment")
+        .egress = false;
+    let closed_rules = render_nft_rules(&closed).unwrap();
+    assert!(
+        !closed_rules.contains("ip saddr 10.77.0.2 accept") && closed_rules.contains(&last_drop),
+        "a VM without egress gets no accept rule"
+    );
+    assert!(
+        closed_rules.contains("dnat ip to 10.77.0.2:22")
+            && closed_rules.contains(&established_accept),
+        "SSH to a VM without egress still works: DNAT in, established replies out"
+    );
+    assert!(
+        !rules.contains(&format!("iifname \"{veth}\" accept\n")),
+        "no blanket accept for the run"
+    );
 }
 
 fn artifact(
@@ -536,4 +595,114 @@ fn artifact(
         sha256: None,
         access,
     }
+}
+
+#[test]
+fn a_missing_run_table_is_not_deleted_again() {
+    assert_eq!(
+        nft_table_delete(true, "intar_run_x"),
+        "delete table inet intar_run_x\n"
+    );
+    assert_eq!(nft_table_delete(false, "intar_run_x"), "");
+}
+
+#[test]
+fn an_untracked_run_network_is_destroyed_by_its_derived_names_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("log");
+    let run = ValidatedId::parse("run-a").unwrap();
+    let other = ValidatedId::parse("run-b").unwrap();
+    let (result, nft_table) = derived_topology(&run).unwrap();
+    let (other_result, other_table) = derived_topology(&other).unwrap();
+    let script = |name: &str, body: String| {
+        let path = directory.path().join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho \"$*\" >> {}\n{body}", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    // Both runs' objects exist; only the destroyed run's may be touched.
+    let manager = NetworkManager {
+        nsenter: script("nsenter", "shift 2\nexec \"$@\"\n".to_owned()),
+        ip: script(
+            "ip",
+            format!(
+                "case \"$*\" in \"link show dev {}\"|\"link show dev {}\") exit 0;; \"link show\"*) exit 1;; esac\n",
+                result.host_veth_name, other_result.host_veth_name
+            ),
+        ),
+        nft: script(
+            "nft",
+            format!(
+                "case \"$*\" in \"list table inet {nft_table}\"|\"list table inet {other_table}\") exit 0;; \"list\"*) exit 1;; esac\nwhile read -r line; do echo \"stdin $line\" >> {}; done\n",
+                log.display()
+            ),
+        ),
+        netns_root: directory.path().to_path_buf(),
+        host_netns_root: directory.path().to_path_buf(),
+        policy: JailerdConfig::default(),
+        runs: BTreeMap::new(),
+    };
+
+    // An entry that is no network namespace fails its check, after the
+    // table and veth are already gone, and the error makes the agent retry.
+    std::fs::write(directory.path().join(&result.namespace_name), "").unwrap();
+    manager.destroy_untracked_run(&run).unwrap_err();
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        log.contains(&format!("link delete {}", result.host_veth_name)),
+        "{log}"
+    );
+    assert!(
+        log.contains(&format!("stdin delete table inet {nft_table}")),
+        "{log}"
+    );
+    let suffix = other_result.host_veth_name.trim_start_matches("ivh");
+    assert!(!log.contains(suffix), "{log}");
+}
+
+#[test]
+fn a_new_run_refuses_a_transit_network_held_by_an_untracked_run() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let request = EnsureRunNetworkRequest {
+        run_id: ValidatedId::parse("run-a").unwrap(),
+        guest_cidr: "10.77.0.0/28".to_owned(),
+        gateway: "10.77.0.1".to_owned(),
+    };
+    let (result, _) = derived_topology(&request.run_id).unwrap();
+    let script = |name: &str, body: String| {
+        let path = directory.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let mut manager = NetworkManager {
+        nsenter: script("nsenter", "shift 2\nexec \"$@\"\n".to_owned()),
+        ip: script(
+            "ip",
+            format!(
+                "echo \"9: ivh0123456789ab    inet {} scope global ivh0123456789ab\"\n",
+                result.host_transit_cidr
+            ),
+        ),
+        nft: script("nft", "exit 1\n".to_owned()),
+        netns_root: directory.path().to_path_buf(),
+        host_netns_root: directory.path().to_path_buf(),
+        policy: JailerdConfig::default(),
+        runs: BTreeMap::new(),
+    };
+
+    let error = manager.ensure_run(&request).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("held by a link of an untracked run"),
+        "{error:#}"
+    );
+    assert!(manager.runs.is_empty());
 }

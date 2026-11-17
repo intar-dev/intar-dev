@@ -1,8 +1,8 @@
-import { and, eq, exists, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, exists, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   agentBootstrapTokens, agentHosts,
-  imageBuilds, runtimeExecutions, user,
+  runtimeExecutions, user,
 } from "@/db/schema";
 
 /** Invalidate a platform host even if its creator or control socket is gone. */
@@ -45,13 +45,6 @@ export async function revokePlatformHost(input: {
     db.update(agentBootstrapTokens).set({ revokedAt: now }).where(and(
       eq(agentBootstrapTokens.hostId, input.hostId),
       isNull(agentBootstrapTokens.revokedAt),
-      revokedHost,
-    )),
-    db.update(imageBuilds).set({
-      status: "failed", phase: "failed", error: "Platform host access was revoked.", updatedAt: now,
-    }).where(and(
-      eq(imageBuilds.hostId, input.hostId),
-      inArray(imageBuilds.status, ["assigned", "building"]),
       revokedHost,
     )),
     // An execution not yet issued a workload lease needs no grace period.

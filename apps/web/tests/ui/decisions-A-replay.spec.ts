@@ -244,7 +244,7 @@ test.describe("replay check markers", () => {
 });
 
 test.describe("replay screen", () => {
-  test("insets the player 14px by 16px and fades the top edge", async ({
+  test("insets the player 14px by 16px and leaves the first line unshaded", async ({
     page,
     ui,
   }) => {
@@ -254,9 +254,10 @@ test.describe("replay screen", () => {
 
     await expect(screen).toHaveCSS("padding", "14px 16px");
     await expect(screen).toHaveCSS("box-sizing", "content-box");
+    // No top fade: it shaded the first replay line (#251).
     await expect(replay.locator(".replay-custom")).toHaveCSS(
       "mask-image",
-      /linear-gradient/,
+      "none",
     );
 
     // The inset sits outside the player: the screen's content box keeps the

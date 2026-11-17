@@ -1,5 +1,4 @@
 use super::*;
-use std::os::unix::fs::MetadataExt as _;
 
 pub(super) fn prepare_jail_files(
     config: &JailerdConfig,
@@ -216,10 +215,6 @@ pub(super) fn stage_artifacts_v2(
     // Clone its extents exactly instead of copying and syncing 16 MiB on every
     // launch; a cross-filesystem host is not fast-launch eligible and fails.
     stage_prepared_template_source_file(runtime_source, &root.join("disks/runtime.raw"), 0o444)?;
-    if let Some(tools_disk) = &artifacts.tools_disk {
-        let tools_source = open_or_import_tools_disk(config, tools_disk)?;
-        stage_prepared_template_source_file(tools_source, &root.join("disks/tools.ext4"), 0o444)?;
-    }
     stage_prepared_template_source_file(
         open_host_template_artifact(config, host_template, c"recordings.vfat")?,
         &root.join("disks/recordings.vfat"),
@@ -234,55 +229,7 @@ pub(super) fn stage_artifacts_v2(
     }
     set_mode(&root.join("disks/runtime.raw"), 0o444)?;
     set_owner(&root.join("disks/runtime.raw"), 0, 0)?;
-    if artifacts.tools_disk.is_some() {
-        set_mode(&root.join("disks/tools.ext4"), 0o444)?;
-        set_owner(&root.join("disks/tools.ext4"), 0, 0)?;
-    }
     Ok(())
-}
-
-fn open_or_import_tools_disk(config: &JailerdConfig, source: &ArtifactSource) -> Result<File> {
-    let sha256 = source
-        .sha256
-        .as_ref()
-        .context("tools disk source is missing SHA-256")?;
-    let jail_root = trusted_jail_root_fd(config)?;
-    let store = ensure_root_directory_at(&jail_root, c"tools")?;
-    let name = format!("{}.ext4", sha256.as_str());
-    let lock_name = format!(".lock-{}", sha256.as_str());
-    let lock = rustix::fs::openat(
-        &store,
-        &lock_name,
-        OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::RUSR | Mode::WUSR,
-    )?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
-    let open_existing = || -> Result<File> {
-        let fd = rustix::fs::openat(
-            &store,
-            &name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )?;
-        let file = File::from(fd);
-        let metadata = file.metadata()?;
-        ensure!(
-            metadata.is_file()
-                && metadata.len() == 64 * 1024 * 1024
-                && metadata.nlink() == 1
-                && metadata.uid() == 0
-                && metadata.gid() == 0
-                && metadata.mode() & 0o777 == 0o400,
-            "root-owned tools disk metadata is invalid"
-        );
-        Ok(file)
-    };
-    if let Ok(file) = open_existing() {
-        return Ok(file);
-    }
-    let destination = config.jail_root.join("tools").join(&name);
-    copy_template_source(config, source, &destination, Some(64 * 1024 * 1024), None)?;
-    open_existing()
 }
 
 pub(super) fn stage_artifacts(
@@ -315,9 +262,6 @@ pub(super) fn stage_artifacts(
         &root.join("disks/recordings.vfat"),
         0o600,
     )?;
-    if let Some(tools_disk) = &artifacts.tools_disk {
-        stage_source(config, tools_disk, &root.join("disks/tools.ext4"), 0o444)?;
-    }
     for path in [
         root.join("disks/root.raw"),
         root.join("disks/recordings.vfat"),
@@ -327,17 +271,16 @@ pub(super) fn stage_artifacts(
     }
     set_mode(&root.join("disks/runtime.raw"), 0o444)?;
     set_owner(&root.join("disks/runtime.raw"), 0, 0)?;
-    if artifacts.tools_disk.is_some() {
-        set_mode(&root.join("disks/tools.ext4"), 0o444)?;
-        set_owner(&root.join("disks/tools.ext4"), 0, 0)?;
-    }
     Ok(())
 }
 
+/// Open the agent's spool directory that receives the recording export,
+/// beneath its trusted source root, and name the export within it.
 #[cfg(target_os = "linux")]
-pub(super) fn export_recording_disk(config: &JailerdConfig, record: &VmRecord) -> Result<()> {
-    use std::os::unix::fs::MetadataExt as _;
-
+fn open_recording_export_parent<'a>(
+    config: &JailerdConfig,
+    record: &'a VmRecord,
+) -> Result<(rustix::fd::OwnedFd, &'a std::ffi::OsStr)> {
     let export = &record.request.artifacts.recording_disk;
     export
         .validate()
@@ -371,6 +314,14 @@ pub(super) fn export_recording_disk(config: &JailerdConfig, record: &VmRecord) -
             | ResolveFlags::NO_XDEV,
     )
     .context("open recording export directory beneath trusted root")?;
+    Ok((parent_fd, file_name))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn export_recording_disk(config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let (parent_fd, file_name) = open_recording_export_parent(config, record)?;
     let source_fd = open(
         &record.paths.host_recording_disk,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
@@ -520,6 +471,134 @@ pub(super) fn export_recording_disk(_config: &JailerdConfig, _record: &VmRecord)
     bail!("recording export is supported only on Linux")
 }
 
+/// Longest tail of each VMM log published when a VM is contained. The guest
+/// drives the console and serial logs, so root copies only this much of each,
+/// under the core lock; the end holds why the guest or the VMM stopped.
+#[cfg(target_os = "linux")]
+pub(super) const CONTAINED_VM_LOG_EXPORT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Publish the logs of a contained VM into its spool's `artifacts`
+/// directory, where the agent's delete finds them already published. The
+/// quarantined jail keeps the originals.
+#[cfg(target_os = "linux")]
+pub(super) fn export_vm_logs(config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+    let (parent_fd, _) = open_recording_export_parent(config, record)?;
+    let artifacts_fd = openat2(
+        &parent_fd,
+        "artifacts",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH
+            | ResolveFlags::NO_MAGICLINKS
+            | ResolveFlags::NO_SYMLINKS
+            | ResolveFlags::NO_XDEV,
+    )
+    .context("open VM log export directory beneath trusted root")?;
+    let mut failures = Vec::new();
+    for (name, source) in [
+        ("console.log", &record.paths.host_console_log),
+        ("serial.log", &record.paths.host_serial_log),
+        ("cloud-hypervisor.stderr.log", &record.paths.host_stderr_log),
+    ] {
+        if let Err(error) = export_vm_log(config, record, &artifacts_fd, name, source) {
+            failures.push(format!("{name}: {error:#}"));
+        }
+    }
+    if !failures.is_empty() {
+        bail!("{}", failures.join("; "))
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn export_vm_log(
+    config: &JailerdConfig,
+    record: &VmRecord,
+    artifacts_fd: &rustix::fd::OwnedFd,
+    name: &str,
+    source: &Path,
+) -> Result<()> {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    // NONBLOCK: a FIFO in the VM-owned log directory must not hang root.
+    let source_fd = match open(
+        source,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(error).context("open VM log"),
+    };
+    let mut source = File::from(source_fd);
+    let metadata = source.metadata()?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != record.uid
+        || metadata.gid() != record.gid
+    {
+        bail!("VM log is not a regular file owned by the VM")
+    }
+    source.seek(SeekFrom::Start(
+        metadata.len().saturating_sub(CONTAINED_VM_LOG_EXPORT_BYTES),
+    ))?;
+    // The agent's own temporary name, so its delete clears one left behind.
+    let temporary = format!(".{name}.part.{}", Uuid::new_v4().simple());
+    let operation = (|| -> Result<()> {
+        let output_fd = rustix::fs::openat(
+            artifacts_fd,
+            temporary.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::RUSR | Mode::WUSR,
+        )?;
+        let mut output = File::from(output_fd);
+        std::io::copy(
+            &mut (&mut source).take(CONTAINED_VM_LOG_EXPORT_BYTES),
+            &mut output,
+        )?;
+        rustix::fs::fchmod(&output, Mode::RUSR | Mode::WUSR)?;
+        rustix::fs::fchown(
+            &output,
+            Some(rustix::process::Uid::from_raw(config.agent_uid)),
+            Some(rustix::process::Gid::from_raw(config.agent_gid)),
+        )?;
+        output.sync_all()?;
+        // A log the agent already published wins: it may be the full copy.
+        match rustix::fs::renameat_with(
+            artifacts_fd,
+            temporary.as_str(),
+            artifacts_fd,
+            name,
+            rustix::fs::RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => rustix::fs::fsync(artifacts_fd)?,
+            Err(rustix::io::Errno::EXIST) => {
+                rustix::fs::unlinkat(
+                    artifacts_fd,
+                    temporary.as_str(),
+                    rustix::fs::AtFlags::empty(),
+                )?;
+            }
+            Err(error) => return Err(error).context("publish VM log without replacing"),
+        }
+        Ok(())
+    })();
+    if operation.is_err() {
+        let _ = rustix::fs::unlinkat(
+            artifacts_fd,
+            temporary.as_str(),
+            rustix::fs::AtFlags::empty(),
+        );
+    }
+    operation
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn export_vm_logs(_config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
+    bail!("VM log export is supported only on Linux")
+}
+
 pub(super) fn stage_source(
     config: &JailerdConfig,
     source: &intar_jailer_protocol::ArtifactSource,
@@ -527,6 +606,8 @@ pub(super) fn stage_source(
     mode: u32,
 ) -> Result<()> {
     if source.source_root == PREPARED_IMAGE_SOURCE_ROOT {
+        // Store GC can remove the template between the launch's check and
+        // here; once open, the descriptor keeps its inode.
         let source_file = open_prepared_template_source(config, source)?;
         return stage_prepared_template_source_file(source_file, destination, mode);
     }
@@ -564,11 +645,7 @@ pub(super) fn validate_template_launch_sources(artifacts: &SourceArtifacts) -> R
         || kernel_template.is_some()
         || initrd_template.is_some()
         || artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-        || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-        || artifacts
-            .tools_disk
-            .as_ref()
-            .is_some_and(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT);
+        || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT;
     if !has_any_template {
         return Ok(());
     }
@@ -580,10 +657,6 @@ pub(super) fn validate_template_launch_sources(artifacts: &SourceArtifacts) -> R
             .is_some_and(|_| initrd_template != Some(image))
         || artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
         || artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-        || artifacts
-            .tools_disk
-            .as_ref()
-            .is_some_and(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT)
     {
         bail!(
             "template-backed launch must use one prepared boot bundle and agent-owned runtime disks"
@@ -622,17 +695,24 @@ pub(super) fn open_prepared_template_source(
         .context("prepared template artifact name is not UTF-8")?;
     let jail_root = trusted_jail_root_fd(config)?;
     let templates = open_optional_root_directory_at(&jail_root, c"templates")?
-        .context("prepared image template root is missing")?;
-    let image_name = CString::new(image_sha256.as_str()).expect("SHA-256 contains no NUL");
-    let image_directory =
-        open_lifecycle_entry_at(&templates, &image_name, OFlags::RDONLY | OFlags::DIRECTORY)
-            .context("open root-owned image template")?;
-    validate_root_directory(&image_directory, "root-owned image template")?;
-    let metadata = open_template_metadata(&image_directory)?;
-    if !matches!(
-        metadata.schema_version,
-        IMAGE_TEMPLATE_METADATA_V2 | IMAGE_TEMPLATE_METADATA_V3
-    ) || metadata.image_sha256 != image_sha256
+        .ok_or(PreparedTemplateMissing)?;
+    open_prepared_template_file_at(&templates, source, &image_sha256, file_name)
+}
+
+/// One artifact of template `image_sha256` below the template store
+/// `templates`. Store GC can remove the template after the launch's check;
+/// a template gone by then is [`PreparedTemplateMissing`]. Once open, the
+/// descriptor keeps its inode.
+pub(super) fn open_prepared_template_file_at(
+    templates: &OwnedFd,
+    source: &ArtifactSource,
+    image_sha256: &Sha256Digest,
+    file_name: &str,
+) -> Result<File> {
+    let image_directory = open_template_directory(templates, image_sha256)?;
+    let metadata = open_template_metadata(&image_directory).map_err(template_missing_if_absent)?;
+    if metadata.schema_version != IMAGE_TEMPLATE_METADATA_V3
+        || metadata.image_sha256 != *image_sha256
     {
         bail!("prepared image template metadata identity mismatch")
     }
@@ -652,8 +732,7 @@ pub(super) fn open_prepared_template_source(
         bail!("prepared template source access or digest does not match root-owned metadata")
     }
     let file_name = CString::new(file_name).expect("fixed artifact names contain no NUL");
-    let fd = open_lifecycle_entry_at(&image_directory, &file_name, OFlags::RDONLY)
-        .context("open root-owned template artifact")?;
+    let fd = open_template_entry(&image_directory, &file_name)?;
     validate_template_artifact_stat(
         &rustix::fs::fstat(&fd)?,
         expected,

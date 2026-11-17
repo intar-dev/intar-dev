@@ -7,7 +7,7 @@ import {
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   agentHosts,
-  imageBuilds,
+  machineBuilds,
   scenarioRuns,
 } from "@/db/schema";
 
@@ -19,7 +19,7 @@ export async function deleteAgentHostPreservingHistory(
   // SQL errors, but a guarded DELETE that changes zero rows still commits.
   const eligibilityGuards = () => [
     noRunHistory(db, input.hostId),
-    noActiveImageBuilds(db, input.hostId),
+    noActiveMachineBuilds(db, input.hostId),
   ];
 
   // The FK stays RESTRICT so unsupported deletion paths fail closed. This
@@ -47,15 +47,15 @@ function noRunHistory(db: DrizzleD1Database, hostId: string) {
   );
 }
 
-function noActiveImageBuilds(db: DrizzleD1Database, hostId: string) {
+function noActiveMachineBuilds(db: DrizzleD1Database, hostId: string) {
   return notExists(
     db
-      .select({ buildId: imageBuilds.id })
-      .from(imageBuilds)
+      .select({ buildKey: machineBuilds.buildKey })
+      .from(machineBuilds)
       .where(
         and(
-          eq(imageBuilds.hostId, hostId),
-          inArray(imageBuilds.status, ["assigned", "building"]),
+          eq(machineBuilds.hostId, hostId),
+          inArray(machineBuilds.state, ["assigned", "building"]),
         ),
       ),
   );

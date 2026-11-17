@@ -25,10 +25,10 @@ runs:
       env:
         TARGETS: ${{ inputs.targets }}
       run: |
-        rustup toolchain install 1.99.1 --profile minimal
-        rustup component add --toolchain 1.99.1 rustfmt clippy
+        rustup toolchain install 1.100.0 --profile minimal
+        rustup component add --toolchain 1.100.0 rustfmt clippy
         # TARGETS is word-split on purpose: one argument per target.
-        rustup target add --toolchain 1.99.1 x86_64-unknown-linux-musl ${TARGETS}
+        rustup target add --toolchain 1.100.0 x86_64-unknown-linux-musl ${TARGETS}
         rustup show active-toolchain
 
     - name: Set up Namespace caches

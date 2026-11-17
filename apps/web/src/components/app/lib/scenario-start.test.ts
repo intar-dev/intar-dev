@@ -279,52 +279,6 @@ describe("scenario capacity waiting", () => {
     expect(onCapacityWait).not.toHaveBeenCalled();
   });
 
-  it("sends an administrator-selected candidate revision", async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(accepted());
-    vi.stubGlobal("fetch", fetchMock);
-
-    await requestScenarioStartWithCapacityWait("pair-ping", {
-      signal: new AbortController().signal,
-      onCapacityWait: vi.fn(),
-      candidateRevision: "image-build-v12-proof",
-      candidateBuildId: "candidate-build-1",
-    });
-
-    const [, request] = fetchMock.mock.calls[0] ?? [];
-    expect(request?.body).toBe(
-      JSON.stringify({
-        candidateRevision: "image-build-v12-proof",
-        candidateBuildId: "candidate-build-1",
-      }),
-    );
-  });
-
-  it("does not drop a partial candidate proof identity into a live start", async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      Response.json(
-        {
-          error: "candidateRevision and candidateBuildId are required",
-          code: "candidate_proof_identity_incomplete",
-        },
-        { status: 400 },
-      ),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(
-      requestScenarioStartWithCapacityWait("pair-ping", {
-        signal: new AbortController().signal,
-        onCapacityWait: vi.fn(),
-        candidateRevision: "image-build-v12-proof",
-      }),
-    ).rejects.toThrow("candidateRevision and candidateBuildId are required");
-
-    const [, request] = fetchMock.mock.calls[0] ?? [];
-    expect(request?.body).toBe(
-      JSON.stringify({ candidateRevision: "image-build-v12-proof" }),
-    );
-  });
-
   it("turns connectivity failures into a bounded same-key retry", async () => {
     vi.useFakeTimers();
     const randomUuid = vi.spyOn(crypto, "randomUUID");

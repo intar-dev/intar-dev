@@ -16,14 +16,20 @@ die() {
 }
 
 usage() {
-  echo "usage: $0 [--offline]" >&2
+  echo "usage: $0 [--offline | --boot]" >&2
   exit 2
 }
 
+# --boot is the mode of intar-jailerd-boot-check.service: systemd orders it
+# before the agent and jailerd, so it requires both inactive, stops and
+# restores nothing, and uses only the cached assets. The socket may listen: a
+# connection only queues jailerd's start behind the check.
 offline=false
+boot=false
 case "$#:$*" in
   0:) ;;
   1:--offline) offline=true ;;
+  1:--boot) offline=true; boot=true ;;
   *) usage ;;
 esac
 
@@ -36,16 +42,26 @@ for command in awk curl flock install mkfs.ext4 mkfs.vfat mktemp sha256sum stat 
 done
 [ -x /usr/lib/intar/intar-jailerd ] || die "installed intar-jailerd is missing"
 [ -f /etc/intar-jailerd/config.toml ] || die "jailerd configuration is missing"
-if systemctl is-active --quiet intar-agent.service; then
+if [ "${boot}" = true ]; then
+  for unit in intar-agent.service intar-jailerd.service; do
+    if systemctl is-active --quiet "${unit}"; then
+      die "--boot runs only before ${unit} starts; it is active. Run the self-test without --boot."
+    fi
+  done
+  for asset in downloads/vmlinux-x86_64 downloads/alpine-minirootfs.tar.gz; do
+    [ -f "${CACHE_ROOT}/${asset}" ] || \
+      die "--boot needs the cached self-test assets, and ${CACHE_ROOT}/${asset} is missing. Run the self-test once without --boot to download them."
+  done
+elif systemctl is-active --quiet intar-agent.service; then
   die "intar-agent.service must be stopped before the privileged self-test"
 fi
 
 socket_was_active=false
 daemon_was_active=false
-if systemctl is-active --quiet intar-jailerd.socket; then
+if [ "${boot}" = false ] && systemctl is-active --quiet intar-jailerd.socket; then
   socket_was_active=true
 fi
-if systemctl is-active --quiet intar-jailerd.service; then
+if [ "${boot}" = false ] && systemctl is-active --quiet intar-jailerd.service; then
   daemon_was_active=true
 fi
 run_root=
@@ -78,12 +94,15 @@ trap 'exit 130' HUP INT TERM
 
 # Freeze socket activation before the binary takes the maintenance lock. This
 # also makes self-test safe after an earlier doctor invocation activated the
-# persistent daemon.
-systemctl stop intar-jailerd.socket
-systemctl stop intar-jailerd.service
-if systemctl is-active --quiet intar-jailerd.socket || \
-   systemctl is-active --quiet intar-jailerd.service; then
-  die "could not stop the jailerd socket/service boundary"
+# persistent daemon. At boot the daemon is not running yet, and a stop job
+# would cancel the queued start of the socket or the daemon.
+if [ "${boot}" = false ]; then
+  systemctl stop intar-jailerd.socket
+  systemctl stop intar-jailerd.service
+  if systemctl is-active --quiet intar-jailerd.socket || \
+     systemctl is-active --quiet intar-jailerd.service; then
+    die "could not stop the jailerd socket/service boundary"
+  fi
 fi
 
 umask 077

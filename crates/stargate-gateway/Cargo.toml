@@ -31,7 +31,6 @@ serde_json.workspace = true
 sha2.workspace = true
 rusqlite.workspace = true
 stargate-core = { path = "../stargate-core" }
-tempfile.workspace = true
 time.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
@@ -43,6 +42,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 tracing-subscriber.workspace = true
 # Paused time, so a test can wait out the writer's send timeout at once.

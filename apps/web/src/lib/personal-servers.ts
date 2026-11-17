@@ -2,14 +2,13 @@ import { env } from "cloudflare:workers";
 import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { agentHosts, hostActualState, scenarioRuns, user } from "@/db/schema";
-import type { HostStateReportV2 } from "@/generated/bridge";
+import type { HostStateReportV3 } from "@/generated/contracts/bridge-message-v9";
 import type { UserContext } from "@/lib/agent-bridge";
 import { appError } from "@/lib/app-error";
 import { hostHealth, HOST_DEGRADED_AFTER_MS } from "@/lib/host-health";
-import { personalHostReportReady } from "@/lib/personal-host-readiness";
+import { hostReportV3Ready } from "@/lib/personal-host-readiness";
 import { currentPersonalOwnerSql } from "@/lib/personal-host-retirement";
 import { availableRuntimeHostResources, loadActiveRuntimeResourceSnapshot, type ActiveRuntimeResourceSnapshot } from "@/lib/runtime-capacity";
-import { learnerRunCliV1EnforcementEnabled } from "@/lib/run-cli-rollout";
 import { isFreshHostHeartbeat } from "@/lib/scenario-hosts";
 
 export async function listPersonalServers(context: UserContext) {
@@ -41,14 +40,14 @@ export async function listPersonalServers(context: UserContext) {
 
 /** Keep personal and shared server status, capacity, and repair guidance identical. */
 export function serializeManagedServer(
-  { host, report, reportedAt }: { host: typeof agentHosts.$inferSelect; report: HostStateReportV2 | null; reportedAt: number | null },
+  { host, report, reportedAt }: { host: typeof agentHosts.$inferSelect; report: HostStateReportV3 | null; reportedAt: number | null },
   now: number,
   reservations: ActiveRuntimeResourceSnapshot,
   activeRuns: number,
 ) {
   const connected = !host.disabled && host.connected && isFreshHostHeartbeat(host.lastHeartbeatAt, now, 90_000);
   const fresh = connected && hostHealth(reportedAt, now) === "healthy";
-  const ready = fresh && personalHostReportReady(report, learnerRunCliV1EnforcementEnabled(env));
+  const ready = fresh && hostReportV3Ready(report);
   const resources = ready && report ? availableRuntimeHostResources({ hostId: host.id, report, snapshot: reservations }) : null;
   const status = host.disabled ? host.ownerRemovalId ? "removing" : "revoked"
     : !host.scenarioEnabled ? "paused" : !host.lastHeartbeatAt ? "setting_up" : !fresh ? "offline" : ready ? "ready" : "needs_attention";
@@ -65,11 +64,19 @@ export function serializeManagedServer(
       : "Ready for your runs. Only your workloads can use this server.";
   return {
     id: host.id, name: host.name, status, message,
-    repairAction: status === "offline" || status === "needs_attention" || status === "setting_up" ? "Run sudo intar-host doctor on this server." : null,
+    repairAction: status === "offline" || status === "needs_attention" || status === "setting_up"
+      ? refusedSinceLastHello(host) ? "Agent too old: run sudo intar-host update." : "Run sudo intar-host doctor on this server."
+      : null,
     connected, createdAt: host.createdAt, lastSeenAt: host.lastHeartbeatAt,
     capacity: ready && report && resources ? { total: report.capacity.schedulable_cpu_millis / 1000, available: resources.cpuMillis / 1000 } : null,
     activeRuns,
   };
+}
+
+/** The Worker refused this host's agent as too old, and it has not connected since. */
+function refusedSinceLastHello(host: typeof agentHosts.$inferSelect): boolean {
+  return host.lastRefusalCode === "upgrade_required" && host.lastRefusalAt !== null &&
+    host.lastRefusalAt > (host.lastClientHelloAt ?? 0);
 }
 
 export async function updatePersonalServer(d1: D1Database, context: UserContext, hostId: string, input: Record<string, unknown>) {
@@ -92,7 +99,7 @@ export async function updatePersonalServer(d1: D1Database, context: UserContext,
       rename ? (input.name as string).trim() : input.paused ? 0 : 1, now,
       ...(snapshot ? [snapshot.sessionId, snapshot.generation, JSON.stringify(snapshot.report), snapshot.reportedAt] : []))];
   if (resume) {
-    if (snapshot && personalHostReportReady(snapshot.report, learnerRunCliV1EnforcementEnabled(env))) {
+    if (snapshot && hostReportV3Ready(snapshot.report)) {
       statements.push(d1.prepare(`UPDATE user SET metal_placement = 'personal'
         WHERE id = ?1 AND metal_placement = 'platform' AND ${currentPersonalOwnerSql}
           AND EXISTS (SELECT 1 FROM agent_hosts host JOIN host_actual_state actual ON actual.host_id = host.id

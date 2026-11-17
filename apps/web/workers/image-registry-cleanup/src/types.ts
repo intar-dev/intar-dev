@@ -1,15 +1,12 @@
-import type {
-  ImageRegistryCleanupPlan,
-  ImageRegistryCleanupRunResult,
-} from "@/lib/image-registry-cleanup";
 import type { ImageRegistryEnforcementMode } from "@/db/schema";
+import type { OciSweepReport } from "@/lib/oci-registry-sweep";
 
 /**
  * Request and response contract of the image registry cleanup worker.
  *
  * The parent control plane imports these types through the REGISTRY_CLEANUP
- * service binding, so this module stays runtime-free. The plan and the result
- * are the sweep core's own types: the collector adds no second copy of them.
+ * service binding, so this module stays runtime-free. The result is the OCI
+ * sweep's own report: the collector adds no second copy of it.
  */
 
 /** The collector changes nothing until an operator turns deletes on. */
@@ -25,9 +22,6 @@ export type CleanupStatus =
   | "pending"
   | "core-failed";
 
-export type CleanupPlan = ImageRegistryCleanupPlan;
-export type CleanupResult = ImageRegistryCleanupRunResult;
-
 export interface CleanupEnvelope {
   schemaVersion: number;
   status: CleanupStatus;
@@ -38,14 +32,23 @@ export interface CleanupEnvelope {
   source: "scheduled" | "rpc";
   startedAtMs: number;
   finishedAtMs: number;
-  plan: CleanupPlan | null;
-  result: CleanupResult | null;
+  /**
+   * The OCI sweep's report, a plan or a delete pass by its `mode`. Null when
+   * the fence, the hold or another sweep stopped the invocation before it.
+   */
+  result: OciSweepReport | null;
   error: string | null;
 }
 
 export interface CleanupRunRequest {
   /** List the candidates and stop, even in delete mode. */
   planOnly?: boolean;
+  /**
+   * A plan of the OCI store starts after this hex, "" for the start; its
+   * report's `nextStartAfter` names the next window, null after the last.
+   * Absent, it plans the window the next delete pass would.
+   */
+  ociStartAfter?: string;
 }
 
 export interface CleanupPauseRequest {

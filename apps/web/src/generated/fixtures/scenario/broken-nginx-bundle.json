@@ -1,0 +1,134 @@
+{
+  "compiler": "intar-source-compiler-v2",
+  "image_format": "intar-image-3",
+  "scenarios": [
+    {
+      "slug": "broken-nginx",
+      "title": "Fix the broken web server",
+      "summary": "nginx is down and the default site is gone. Bring the website back.",
+      "difficulty": "easy",
+      "minutes": 10,
+      "tags": [
+        "linux",
+        "nginx",
+        "systemd"
+      ],
+      "play": false,
+      "briefing": "Visitors get nothing from this server. Find out why and bring the site back.\n",
+      "solution": "```bash\nsudo systemctl enable --now nginx\nsudo ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default\nsudo systemctl reload nginx\n```\n",
+      "hints": [],
+      "machines": [
+        {
+          "name": "webserver",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {},
+          "setup": [
+            {
+              "name": "packages",
+              "script": "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends 'nginx'\n"
+            },
+            {
+              "name": "break-nginx",
+              "script": "systemctl disable nginx\nrm /etc/nginx/sites-enabled/default\n"
+            }
+          ],
+          "ready": []
+        }
+      ],
+      "tasks": [
+        {
+          "id": "nginx-running",
+          "title": "Start the web server",
+          "body": "Get the web server running so people can use the website again.",
+          "machine": "webserver",
+          "needs": [],
+          "optional": false,
+          "check": "fail() { echo \"FAIL: $*\"; exit 1; }\nbash -euo pipefail -c 'fail() { echo \"FAIL: $*\"; exit 1; }\nu='\\''nginx'\\''\nsystemctl is-active --quiet -- \"$u\" || fail \"$u is not running.\"\n' || fail 'Not done yet.'\nbash -euo pipefail -c 'fail() { echo \"FAIL: $*\"; exit 1; }\nu='\\''nginx'\\''\n[ \"$(systemctl is-enabled -- \"$u\" 2>/dev/null)\" = enabled ] || fail \"$u is not enabled.\"\n' >/dev/null || fail 'nginx runs now, but it will not come back after a reboot.'\n",
+          "solve": "fail() { echo \"FAIL: $*\"; exit 1; }\nsystemctl enable --now nginx",
+          "hints": [
+            {
+              "id": "status",
+              "body": "`systemctl status nginx` shows whether nginx is active and why it failed."
+            }
+          ]
+        },
+        {
+          "id": "default-site-enabled",
+          "title": "Restore the default site",
+          "machine": "webserver",
+          "needs": [],
+          "optional": false,
+          "check": "fail() { echo \"FAIL: $*\"; exit 1; }\nbash -euo pipefail -c 'fail() { echo \"FAIL: $*\"; exit 1; }\nf='\\''/etc/nginx/sites-enabled/default'\\''\ntest -e \"$f\" || fail \"$f does not exist.\"\n' || fail 'Not done yet.'\n",
+          "solve": "fail() { echo \"FAIL: $*\"; exit 1; }\nln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default\nsystemctl reload nginx\n",
+          "hints": [
+            {
+              "id": "symlink",
+              "body": "Compare `/etc/nginx/sites-available/` with `/etc/nginx/sites-enabled/`."
+            }
+          ]
+        },
+        {
+          "id": "site-reachable",
+          "title": "Make the site reachable",
+          "machine": "webserver",
+          "needs": [
+            "nginx-running",
+            "default-site-enabled"
+          ],
+          "optional": false,
+          "check": "fail() { echo \"FAIL: $*\"; exit 1; }\nbash -euo pipefail -c 'fail() { echo \"FAIL: $*\"; exit 1; }\nu='\\''http://127.0.0.1/'\\''; want=200\nb=$(mktemp)\ncode=$(curl -sS --max-time 2 -o \"$b\" -w '\\''%{http_code}'\\'' --url \"$u\" 2>/dev/null) || fail \"$u is not reachable.\"\n[ \"$code\" = \"$want\" ] || fail \"$u answered $code.\"\nc='\\''Welcome to nginx'\\''\ngrep -Fq -- \"$c\" \"$b\" || fail \"$u answered without the expected text.\"\n' || fail 'Not done yet.'\n",
+          "hints": []
+        }
+      ]
+    }
+  ],
+  "images": [],
+  "course_catalog": {
+    "version": 2,
+    "courses": [
+      {
+        "course_id": "linux-operations",
+        "title": "Linux operations",
+        "summary": "Practice diagnosing and repairing common Linux service failures.",
+        "body_markdown": "\nLinux services depend on clear checks and safe repairs. This course teaches a\nrepeatable method: understand the service, inspect its state, make the needed\nchange, and verify the result.\n",
+        "sequential": true,
+        "lectures": [
+          {
+            "lecture_id": "00-operating-model",
+            "title": "Operate before you repair",
+            "summary": "Use a safe, repeatable method before you change a Linux service.",
+            "body_markdown": "\nReliable repairs start with evidence. Before you change a service, establish\nwhat should happen, what is happening now, and what changed. This method makes\nrepairs safer and makes the result easier to verify.\n\n## Observe the service\n\nStart with the user-visible symptom. Then inspect the service state, recent\nlogs, and relevant configuration. Commands such as `systemctl status`,\n`journalctl -u <service>`, and `ss -ltnp` help you identify whether the issue\nis a stopped service, a bad configuration, or a missing network listener.\n\n## Change one thing at a time\n\nChoose the smallest change that addresses the evidence. Keep the previous\nstate clear so you can reverse the change if it does not work. Do not restart a\nservice repeatedly without checking its status and logs after each change.\n\n## Verify the repair\n\nCheck both the service and the result that users need. A running service alone\nis not enough. For a website, confirm that it listens on the expected port and\nreturns a successful HTTP response. Record what you changed and why.\n\nComplete this lecture to unlock the repair exercise. Use this operating model\nwhile you diagnose the next unit.\n",
+            "category": "linux",
+            "tags": [
+              "linux",
+              "operations",
+              "troubleshooting"
+            ],
+            "estimated_minutes": 8
+          },
+          {
+            "lecture_id": "01-broken-nginx",
+            "title": "Broken Nginx",
+            "summary": "Bring a stopped website back online.",
+            "body_markdown": "\nNginx is a web server. It accepts HTTP requests and returns website content.\nFor a website to work, the Nginx service must run and an enabled site\nconfiguration must be valid.\n\n## Service state\n\nOn a systemd system, a service can be enabled, running, both, or neither.\nEnabled means systemd starts it during boot. Running means it is active now.\nCheck the service state before you change configuration files. This tells you\nwhether the problem is with the service, its configuration, or both.\n\n## Nginx site configuration\n\nDebian stores available Nginx site configurations in\n`/etc/nginx/sites-available/`. It uses\n`/etc/nginx/sites-enabled/` to select the configurations Nginx loads. The\nstandard default website needs a valid enabled entry. After you repair a site,\nverify that Nginx can accept connections on HTTP port 80.\n\n## Task\n\nA routine change left the website down. Find what is wrong and get the default\nwebsite working again. Verify that the web server runs, the site is reachable,\nand the default configuration is enabled.\n",
+            "category": "web",
+            "tags": [
+              "nginx",
+              "systemd",
+              "linux"
+            ],
+            "difficulty": "easy",
+            "estimated_minutes": 15,
+            "scenario_id": "broken-nginx"
+          }
+        ]
+      }
+    ]
+  }
+}

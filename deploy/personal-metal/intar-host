@@ -639,6 +639,17 @@ max_bytes = {20 * GIB}
     enroll(account.pw_gid)
 
 
+def suppress_boot_check():
+    # intar-personal-check.service runs the boot self-test here; a host must
+    # never run two of them. Written before install.sh enables the package's
+    # check, so no boot in between runs both.
+    check_dropin = UNITS / 'intar-jailerd-boot-check.service.d'
+    mkdir(check_dropin, 0o755)
+    atomic(check_dropin / 'personal.conf', f'''[Unit]
+ConditionPathExists=!{UNITS / 'intar-personal-check.service'}
+''', 0o644)
+
+
 def boot_units():
     dropin = UNITS / 'intar-agent.service.d'
     mkdir(dropin, 0o755)
@@ -676,7 +687,7 @@ def doctor():
         'intar-agent': '/usr/local/bin/intar-agent',
         'intar-jailerd': '/usr/lib/intar/intar-jailerd',
         'intar-jailer': '/usr/lib/intar/intar-jailer',
-        'cloud-hypervisor-v53.0': '/usr/lib/intar/cloud-hypervisor-v53.0',
+        'cloud-hypervisor-v54.1': '/usr/lib/intar/cloud-hypervisor-v54.1',
     }.items():
         secure_path(target)
         require(digest(package / source) == digest(target), f'Installed binary differs from release: {target}')
@@ -751,6 +762,7 @@ def setup(state, args):
     configure(package, account)
     state['phase'] = 'installing'
     save(state)
+    suppress_boot_check()
     run('sh', package / 'deploy/install.sh')
     # The shared package installer creates general-purpose 0755 config directories.
     secure_path(CONFIG.parent, directory=True)
@@ -846,19 +858,22 @@ def remove_data(state):
 
 def remove_runtime():
     units = ('intar-agent.service', 'intar-jailerd.socket', 'intar-jailerd.service',
-             'intar-personal-check.service', 'intar-vms.slice')
+             'intar-jailerd-boot-check.service', 'intar-personal-check.service', 'intar-vms.slice')
     for unit in units:
         if run('systemctl', 'show', '--property=LoadState', '--value', unit, capture=True) != 'not-found':
             run('systemctl', 'stop', unit)
-            if unit in ('intar-agent.service', 'intar-jailerd.socket', 'intar-jailerd.service'):
+            if unit in ('intar-agent.service', 'intar-jailerd.socket', 'intar-jailerd.service',
+                        'intar-jailerd-boot-check.service'):
                 run('systemctl', 'disable', unit)
     no_vms(include_services=True)
     paths = [*(UNITS / name for name in units),
              UNITS / 'intar-agent.service.d/personal.conf',
+             UNITS / 'intar-jailerd-boot-check.service.d/personal.conf',
              Path('/etc/tmpfiles.d/intar-jailerd.conf'), Path('/etc/sysctl.d/90-intar-jailerd.conf'),
              Path('/usr/local/bin/intar-agent'),
              *(Path('/usr/lib/intar') / name for name in (
                  'intar-jailerd', 'intar-jailer', 'intar-jailerd-self-test',
+                 'cloud-hypervisor-v54.1', 'cloud-hypervisor-v54.1.sha256',
                  'cloud-hypervisor-v53.0', 'cloud-hypervisor-v53.0.sha256'))]
     for path in paths:
         if path.exists() or path.is_symlink():

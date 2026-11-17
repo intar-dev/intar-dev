@@ -56,6 +56,7 @@ pub(super) fn attempt_recovered_containment<B: HostBackend, P: JailPreparer>(
     backend: &mut B,
     preparer: &mut P,
     recovery: &UnresolvedRecovery,
+    export: Option<&VmRecord>,
 ) -> RecoveryContainmentOutcome {
     let mut outcome = RecoveryContainmentOutcome::default();
     if recovery.uid == recovery.gid
@@ -82,6 +83,26 @@ pub(super) fn attempt_recovered_containment<B: HostBackend, P: JailPreparer>(
         )),
     }
     if outcome.cgroup_drain_proven {
+        // Keep the session recorded up to the failure, as InspectVm's
+        // containment does. Best effort: it must not hold back containment.
+        if let Some(record) = export
+            && let Err(error) = preparer.export_recording(config, record)
+        {
+            tracing::warn!(
+                generation = %recovery.generation,
+                error = %format!("{error:#}"),
+                "failed to export the recording of a recovered VM being contained"
+            );
+        }
+        if let Some(record) = export
+            && let Err(error) = preparer.export_logs(config, record)
+        {
+            tracing::warn!(
+                generation = %recovery.generation,
+                error = %format!("{error:#}"),
+                "failed to export the logs of a recovered VM being contained"
+            );
+        }
         if let Err(error) = backend.destroy_vm_network(&recovery.run_id, &recovery.generation) {
             outcome.failures.push(format!(
                 "destroy recovered VM network for {}: {error:#}",
@@ -112,6 +133,9 @@ pub(super) fn contain_or_retain_recovered_record<B: HostBackend, P: JailPreparer
     backend: &mut B,
     preparer: &mut P,
     record: &VmRecord,
+    // Only a record that passed `validate_recovered_record`: an unvalidated
+    // one names untrusted paths.
+    export_recording: bool,
     pending_cpu_reservations: &mut BTreeMap<ValidatedId, CpuQuota>,
     unresolved_recoveries: &mut BTreeMap<ValidatedId, UnresolvedRecovery>,
 ) {
@@ -130,7 +154,13 @@ pub(super) fn contain_or_retain_recovered_record<B: HostBackend, P: JailPreparer
     };
     pending_cpu_reservations.insert(record.generation.clone(), conservative_quota);
     unresolved_recoveries.insert(record.generation.clone(), recovery.clone());
-    let outcome = attempt_recovered_containment(config, backend, preparer, &recovery);
+    let outcome = attempt_recovered_containment(
+        config,
+        backend,
+        preparer,
+        &recovery,
+        export_recording.then_some(record),
+    );
     if outcome.cgroup_drain_proven {
         pending_cpu_reservations.remove(&record.generation);
     }
@@ -219,12 +249,22 @@ pub(super) fn validate_recovered_record(config: &JailerdConfig, record: &VmRecor
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(test)))]
 pub(super) fn current_host_boot_id() -> Option<String> {
     read_trimmed("/proc/sys/kernel/random/boot_id").ok()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(test)))]
 pub(super) fn current_host_boot_id() -> Option<String> {
     None
 }
+
+/// The same known boot on every platform, so core fakes can tell a record of
+/// an earlier boot from one without a boot id.
+#[cfg(test)]
+pub(super) fn current_host_boot_id() -> Option<String> {
+    Some(TEST_CURRENT_BOOT_ID.to_owned())
+}
+
+#[cfg(test)]
+pub(super) const TEST_CURRENT_BOOT_ID: &str = "current-test-boot";

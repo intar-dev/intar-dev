@@ -96,7 +96,8 @@ pub(super) async fn start_smoke_vm(
         .or(ping.version.as_deref())
         .unwrap_or_default();
     ensure!(
-        reported_version.contains("53.0"),
+        reported_version
+            .contains(intar_jailer_protocol::CLOUD_HYPERVISOR_VERSION.trim_start_matches('v')),
         "jailed runtime reported unexpected version {reported_version:?}"
     );
     client.vm_create(config).await.context("create smoke VM")?;
@@ -852,7 +853,8 @@ pub(super) async fn prove_cloud_hypervisor_landlock(client: &CloudHypervisorClie
         .or(ping.version.as_deref())
         .unwrap_or_default();
     ensure!(
-        reported_version.contains("53.0"),
+        reported_version
+            .contains(intar_jailer_protocol::CLOUD_HYPERVISOR_VERSION.trim_start_matches('v')),
         "VMM reported unexpected version after Landlock denial: {reported_version:?}"
     );
     let after = tokio::time::timeout(CLOUD_HYPERVISOR_API_CALL_TIMEOUT, client.vm_info())

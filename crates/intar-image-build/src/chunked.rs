@@ -10,8 +10,8 @@ use intar_contracts::catalog::{
     ImageChunkManifestV1, ImageChunkV1, MAX_CHUNKED_IMAGE_BYTES,
 };
 
-use crate::artifact::sha256_file_hex;
 use crate::sha256::sha256_bytes_hex;
+use crate::sha256::sha256_file_hex;
 
 const CHUNK_COMPRESSION_LEVEL: i32 = 6;
 const CHUNK_COMPRESSION_WORKERS: usize = 4;
@@ -722,7 +722,7 @@ impl<W> HashingWriter<W> {
     fn finish(self) -> (W, String, u64) {
         (
             self.inner,
-            intar_image_scenario::hex_digest(self.hasher.finish()),
+            crate::sha256::hex_digest(self.hasher.finish()),
             self.bytes,
         )
     }

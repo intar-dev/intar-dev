@@ -65,8 +65,11 @@ export class RegistryCleanup extends WorkerEntrypoint<CleanupEnv> {
 
   async plan(input?: CleanupRunRequest): Promise<CleanupEnvelope> {
     // A plan request always plans, whatever the caller passes.
-    void input;
-    return runCleanup(this.env, { source: "rpc", planOnly: true });
+    return runCleanup(this.env, {
+      source: "rpc",
+      planOnly: true,
+      ...(typeof input?.ociStartAfter === "string" ? { ociStartAfter: input.ociStartAfter } : {}),
+    });
   }
 
   async run(input?: CleanupRunRequest): Promise<CleanupEnvelope> {

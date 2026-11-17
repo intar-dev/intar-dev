@@ -17,11 +17,11 @@ import {
   resetHostRuntimeTestDatabase,
   seedHost,
   stateReport,
-  type HostStateReportV2,
+  type HostStateReportV3,
 } from "@/control-plane/host-runtime-do/test-fixtures";
 
 /** Host state report fixture with an explicit schedulable CPU allowance. */
-function hostReport(hostId: string, now: number, schedulableCpuMillis: number): HostStateReportV2 {
+function hostReport(hostId: string, now: number, schedulableCpuMillis: number): HostStateReportV3 {
   const message = stateReport(hostId, {
     observedAt: now,
     appliedDesiredVersion: 0,
@@ -70,8 +70,8 @@ async function seedReservation(input: {
     vmId: "vm-1",
     ordinal: 0,
     runtimeVmName: input.runtimeVmName ?? "runtime-web",
-    imageKeyJson: {},
-    imageSha256: "2".repeat(64),
+    imageDigest: `sha256:${"2".repeat(64)}`,
+    specDigest: `sha256:${"3".repeat(64)}`, kinoDigest: `sha256:${"4".repeat(64)}`,
     cpuMillis,
     memoryMib,
     diskMib: worstCaseDiskMib,

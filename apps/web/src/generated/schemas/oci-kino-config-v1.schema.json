@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KinoConfigV1",
+  "description": "The config blob of a Kino manifest.",
+  "type": "object",
+  "properties": {
+    "guest_contract": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "guest_contract",
+    "version"
+  ]
+}

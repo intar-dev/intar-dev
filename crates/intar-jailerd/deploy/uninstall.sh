@@ -149,17 +149,21 @@ mutated=true
 systemctl disable --now intar-agent.service
 systemctl disable --now intar-jailerd.socket
 systemctl disable --now intar-jailerd.service
+systemctl disable --now intar-jailerd-boot-check.service
 
 rm -f -- \
   /etc/systemd/system/intar-agent.service \
   /etc/systemd/system/intar-jailerd.socket \
   /etc/systemd/system/intar-jailerd.service \
+  /etc/systemd/system/intar-jailerd-boot-check.service \
   /etc/systemd/system/intar-vms.slice \
   /etc/tmpfiles.d/intar-jailerd.conf \
   /etc/sysctl.d/90-intar-jailerd.conf \
   /usr/lib/intar/intar-jailerd \
   /usr/lib/intar/intar-jailer \
   /usr/lib/intar/intar-jailerd-self-test \
+  /usr/lib/intar/cloud-hypervisor-v54.1 \
+  /usr/lib/intar/cloud-hypervisor-v54.1.sha256 \
   /usr/lib/intar/cloud-hypervisor-v53.0 \
   /usr/lib/intar/cloud-hypervisor-v53.0.sha256 \
   /usr/local/bin/intar-agent \
@@ -181,13 +185,14 @@ for path in \
   /etc/systemd/system/intar-agent.service \
   /etc/systemd/system/intar-jailerd.socket \
   /etc/systemd/system/intar-jailerd.service \
+  /etc/systemd/system/intar-jailerd-boot-check.service \
   /etc/systemd/system/intar-vms.slice \
   /etc/tmpfiles.d/intar-jailerd.conf \
   /etc/sysctl.d/90-intar-jailerd.conf \
   /usr/lib/intar/intar-jailerd \
   /usr/lib/intar/intar-jailer \
   /usr/lib/intar/intar-jailerd-self-test \
-  /usr/lib/intar/cloud-hypervisor-v53.0 \
+  /usr/lib/intar/cloud-hypervisor-v54.1 \
   /usr/local/bin/intar-agent; do
   if [ -e "${path}" ] || [ -L "${path}" ]; then
     die "installed path remains: ${path}"
@@ -199,7 +204,8 @@ for wants in /etc/systemd/system/*.wants /etc/systemd/system/*.requires; do
   for link in \
     "${wants}/intar-agent.service" \
     "${wants}/intar-jailerd.socket" \
-    "${wants}/intar-jailerd.service"; do
+    "${wants}/intar-jailerd.service" \
+    "${wants}/intar-jailerd-boot-check.service"; do
     if [ -e "${link}" ] || [ -L "${link}" ]; then
       die "systemd enablement link remains: ${link}"
     fi

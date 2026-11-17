@@ -74,6 +74,45 @@ describe("admin fleet snapshot", () => {
     expect(detail?.events).toHaveLength(3);
   });
 
+  it("shows operators a failed run's raw reason after the archive", async () => {
+    const raw = "vm create failed: validate root-owned prepared image template";
+    await seedOwnerAndHosts(1);
+    await seedArchivedRuns(1, { hostIndex: 0 });
+    const initial = buildInitialRunState({
+      vms: [
+        {
+          id: "vm-1",
+          ordinal: 0,
+          scenarioVmId: "scenario-vm-1",
+          scenarioVmName: "server",
+          runtimeVmName: "server-fleet-run-0",
+          hostname: "server",
+          launchSummary: { scenarioVmName: "server", hostname: "server", probePhaseMap: {}, probeDescriptors: [] },
+        },
+      ],
+    });
+    // The archive completed the failed VM; learners see the generic sentence.
+    const state = recomputeRunState({
+      ...initial,
+      phase: "failed",
+      vms: initial.vms.map((vm) => ({ ...vm, phase: "completed", terminalPhase: "failed", terminalReason: raw })),
+    });
+    expect(state.phaseDetail).toBe("The run hit a terminal failure.");
+    await env.DB.prepare(
+      "UPDATE scenario_runs SET state = 'failed', state_rank = ?, state_json = ? WHERE run_id = 'fleet-run-0'",
+    )
+      .bind(RUN_PHASE_ORDER.failed, JSON.stringify(state))
+      .run();
+
+    const detail = await loadAdminFleetArchivedRunDetail({
+      userId: "fleet-owner",
+      hostId: "fleet-host-0",
+      runId: "fleet-run-0",
+    });
+    expect(detail?.uploadError).toBe(raw);
+    expect(detail?.events.find((event) => event.kind === "scenario.run.failed")?.message).toBe(raw);
+  });
+
   it("keeps archive counts but omits summaries from the live fleet poll", async () => {
     await seedOwnerAndHosts(1);
     await seedArchivedRuns(1, { hostIndex: 0 });

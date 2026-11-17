@@ -1,0 +1,2 @@
+ALTER TABLE `organization` ADD `previous_slug` text;--> statement-breakpoint
+CREATE UNIQUE INDEX `organization_previous_slug_uidx` ON `organization` (`previous_slug`) WHERE "organization"."previous_slug" IS NOT NULL;

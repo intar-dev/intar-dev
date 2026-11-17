@@ -392,6 +392,25 @@ class InstallerTests(unittest.TestCase):
             host.main()
         self.assertEqual(events, ['empty', ('/usr/lib/intar/intar-jailerd-self-test',), 'doctor'])
 
+    def test_personal_check_is_the_only_boot_self_test(self):
+        unit_root = self.root / 'units'
+        unit_root.mkdir()
+        with patch.object(host, 'UNITS', unit_root), patch.object(host, 'run'), patch.object(host, 'secure_path'):
+            host.suppress_boot_check()
+            host.boot_units()
+        dropin = unit_root / 'intar-jailerd-boot-check.service.d/personal.conf'
+        self.assertEqual(dropin.read_text(), f'[Unit]\nConditionPathExists=!{unit_root}/intar-personal-check.service\n')
+        self.assertIn('ExecStart=/usr/local/bin/intar-host verify-boot', (unit_root / 'intar-personal-check.service').read_text())
+        calls = []
+        def run(*args, **kwargs):
+            calls.append(args)
+            return 'loaded'
+        with patch.object(host, 'UNITS', unit_root), patch.object(host, 'run', side_effect=run), patch.object(host, 'no_vms'), patch.object(host, 'secure_path'):
+            host.remove_runtime()
+        self.assertFalse(dropin.exists())
+        self.assertFalse((unit_root / 'intar-personal-check.service').exists())
+        self.assertIn(('systemctl', 'disable', 'intar-jailerd-boot-check.service'), calls)
+
     def test_failed_boot_proof_never_runs_doctor(self):
         host.save({'storage': {'kind': 'directory'}})
         with patch.object(host.sys, 'argv', ['intar-host', 'verify-boot']), patch.object(host.os, 'geteuid', return_value=0), patch.object(host.resource, 'setrlimit'), patch.object(host, 'no_vms'), patch.object(host, 'run', side_effect=host.HostError('proof failed')), patch.object(host, 'doctor') as doctor:
@@ -506,6 +525,7 @@ class InstallerTests(unittest.TestCase):
         with contextlib.ExitStack() as mocks:
             for name in ('preflight', 'no_vms', 'install_dependencies', 'storage', 'configure', 'boot_units'):
                 mocks.enter_context(patch.object(host, name))
+            mocks.enter_context(patch.object(host, 'suppress_boot_check', side_effect=lambda: calls.append('suppress_boot_check')))
             mocks.enter_context(patch.object(host, 'active', return_value=False))
             mocks.enter_context(patch.object(host, 'package_for', return_value=(package, '1.2.3')))
             mocks.enter_context(patch.object(host, 'ensure_user', return_value=types.SimpleNamespace(pw_gid=42)))
@@ -516,6 +536,8 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(host.MAINTENANCE.exists())
         self.assertEqual(host.load(host.STATE)['phase'], 'checking')
         self.assertNotIn(('systemctl', 'enable', '--now', 'intar-agent.service'), calls)
+        # The package's boot check is suppressed before install.sh enables it.
+        self.assertLess(calls.index('suppress_boot_check'), calls.index(('sh', package / 'deploy/install.sh')))
 
     def test_public_retry_keeps_pending_version(self):
         state = {'pendingVersion': '1.2.3'}

@@ -140,7 +140,7 @@ for the newer one, and a failed CI run deploys and publishes nothing.
   that changed them, or a dispatch, without a build fails. A re-run deploys
   only while its revision is main's tip.
   - `gh workflow run deploy.yml --ref main` deploys main's tip again, for
-    example after a guest-tools promotion.
+    example after a configuration change.
   - When the build has expired (14 days), `gh workflow run ci.yml --ref main`
     builds every lane again and deploys once it passes.
   - Break glass: when CI keeps failing outside a deploy's own lane, for
@@ -153,8 +153,10 @@ for the newer one, and a failed CI run deploys and publishes nothing.
   resumes the drafts. See "Releasing" in the root README. A build reruns the
   workspace gate only for a tag whose commit never passed CI in the merge
   queue or a dispatch from main.
-- **`image-ops.yml`** is dispatched by hand from main. No workflow rolls a
-  tool out to a host; see "Rolling out" in the root README.
+- **`image-ops.yml`** is dispatched by hand from main: the run gate, storing
+  a published Kino release in the registry (`kino-promote`), and the registry
+  cleanup. No workflow rolls a tool out to a host; see "Rolling out" in the
+  root README.
 
 Production jobs queue behind each other and are never cancelled halfway. The
 `production` and `release-pr` environments admit main only; that is a

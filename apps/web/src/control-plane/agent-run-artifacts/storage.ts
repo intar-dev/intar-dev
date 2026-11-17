@@ -1,3 +1,4 @@
+import { GUEST_USERNAME } from "@/generated/constants";
 import { currentRunHostScopeCondition } from "@/lib/metal-placement";
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -1348,14 +1349,17 @@ export async function initializeArtifactUpload(input: {
   }
 }
 
+/** Record one more uploaded part of the named upload. Returns false when that
+ * upload is no longer the artifact's, so the part was for an older upload. */
 export async function advanceArtifactUpload(input: {
   db: ReturnType<typeof drizzle>;
   runVm: ResolvedRunVm;
   artifact: SourceArtifactState;
+  r2UploadId: string;
   uploadedParts: UploadedPartRecord[];
   nextExpectedPart: number;
   updatedAt: number;
-}): Promise<void> {
+}): Promise<boolean> {
   const runtimeUpdate = input.db
     .update(runtimeArtifactUploads)
     .set({
@@ -1363,7 +1367,12 @@ export async function advanceArtifactUpload(input: {
       nextExpectedPart: input.nextExpectedPart,
       updatedAt: input.updatedAt,
     })
-    .where(eq(runtimeArtifactUploads.artifactId, input.artifact.id));
+    .where(
+      and(
+        eq(runtimeArtifactUploads.artifactId, input.artifact.id),
+        eq(runtimeArtifactUploads.r2UploadId, input.r2UploadId),
+      ),
+    );
   const scenarioUpdate = input.db
     .update(scenarioRunArtifactUploads)
     .set({
@@ -1371,22 +1380,78 @@ export async function advanceArtifactUpload(input: {
       nextExpectedPart: input.nextExpectedPart,
       updatedAt: input.updatedAt,
     })
-    .where(eq(scenarioRunArtifactUploads.artifactId, input.artifact.id));
-  if (
-    input.artifact.storageKind === "runtime" &&
-    input.runVm.domainKind === "scenario"
-  ) {
-    await artifactMutations(input.db, input.runVm, [
-      runtimeUpdate,
-      scenarioUpdate,
-    ]);
-    return;
-  }
-  if (input.artifact.storageKind === "runtime") {
-    await artifactMutations(input.db, input.runVm, [runtimeUpdate]);
-  } else {
-    await artifactMutations(input.db, input.runVm, [scenarioUpdate]);
-  }
+    .where(
+      and(
+        eq(scenarioRunArtifactUploads.artifactId, input.artifact.id),
+        eq(scenarioRunArtifactUploads.r2UploadId, input.r2UploadId),
+      ),
+    );
+  return uploadLedgerChanged(
+    input.db,
+    input.runVm,
+    ledgerStatements(input.artifact, input.runVm, runtimeUpdate, scenarioUpdate),
+  );
+}
+
+/**
+ * Forget one multipart upload so the next begin starts a fresh one at part 1.
+ * Only the named upload is cleared: a reset that lost a race to a newer
+ * upload changes nothing. Returns whether a row was cleared.
+ */
+export async function clearArtifactUpload(input: {
+  db: ReturnType<typeof drizzle>;
+  runVm: ResolvedRunVm;
+  artifact: SourceArtifactState;
+  r2UploadId: string;
+}): Promise<boolean> {
+  const runtimeDelete = input.db
+    .delete(runtimeArtifactUploads)
+    .where(
+      and(
+        eq(runtimeArtifactUploads.artifactId, input.artifact.id),
+        eq(runtimeArtifactUploads.r2UploadId, input.r2UploadId),
+      ),
+    );
+  const scenarioDelete = input.db
+    .delete(scenarioRunArtifactUploads)
+    .where(
+      and(
+        eq(scenarioRunArtifactUploads.artifactId, input.artifact.id),
+        eq(scenarioRunArtifactUploads.r2UploadId, input.r2UploadId),
+      ),
+    );
+  return uploadLedgerChanged(
+    input.db,
+    input.runVm,
+    ledgerStatements(input.artifact, input.runVm, runtimeDelete, scenarioDelete),
+  );
+}
+
+/** The runtime ledger, the scenario ledger, or both for a scenario's runtime
+ * artifact, as every upload ledger write chooses. */
+type LedgerQuery = { toSQL(): { sql: string; params: unknown[] } };
+
+function ledgerStatements(
+  artifact: SourceArtifactState,
+  runVm: ResolvedRunVm,
+  runtime: LedgerQuery,
+  scenario: LedgerQuery,
+): LedgerQuery[] {
+  if (artifact.storageKind === "runtime" && runVm.domainKind === "scenario")
+    return [runtime, scenario];
+  return artifact.storageKind === "runtime" ? [runtime] : [scenario];
+}
+
+async function uploadLedgerChanged(
+  db: ReturnType<typeof drizzle>,
+  runVm: ResolvedRunVm,
+  queries: LedgerQuery[],
+): Promise<boolean> {
+  const results = await artifactMutations(db, runVm, queries);
+  // The first result is the write guard's SELECT, not a ledger write.
+  return (results ?? [])
+    .slice(1)
+    .some((result) => (result.meta?.changes ?? 0) > 0);
 }
 
 export async function transitionRunVmToArchiving(
@@ -1960,7 +2025,7 @@ export function parseRunState(raw: string): RunStateDocument {
       terminalTarget: {
         host: null,
         port: 22,
-        username: "ubuntu",
+        username: GUEST_USERNAME,
         hostKeyOpenssh: null,
         checkedAt: null,
       },

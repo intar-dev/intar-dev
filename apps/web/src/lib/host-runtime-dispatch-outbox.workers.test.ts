@@ -11,6 +11,7 @@
  */
 
 import { env } from "cloudflare:workers";
+import { emptyDesiredState } from "@/control-plane/host-runtime-do/test-fixtures";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -19,7 +20,6 @@ import {
   hostDesiredState,
   user,
 } from "@/db/schema";
-import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
 import {
   HOST_DESIRED_DISPATCH_SWEEP_LIMIT,
@@ -335,7 +335,7 @@ async function seedHosts(seeds: HostSeed[]): Promise<void> {
         hostId: seed.hostId,
         version,
         docJson: {
-          ...createEmptyHostDesiredState({ ownerUserId: OWNER_USER_ID, scope: "platform", hostId: seed.hostId, nowUnixMs: now }),
+          ...emptyDesiredState({ ownerUserId: OWNER_USER_ID, scope: "platform", hostId: seed.hostId, nowUnixMs: now }),
           version,
         },
         createdAt: now,

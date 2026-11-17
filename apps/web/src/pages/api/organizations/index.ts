@@ -47,11 +47,13 @@ export const POST: APIRoute = async ({ request }) => {
   if (!authz.ok) return authz.response;
   const body = (await request.json().catch(() => null)) as {
     name?: unknown;
+    slug?: unknown;
   } | null;
 
   try {
     const organization = await createOrganization({
       name: typeof body?.name === "string" ? body.name : "",
+      slug: typeof body?.slug === "string" ? body.slug : "",
       ownerUserId: authz.context.userId,
     });
     return jsonResponse({ organization }, { status: 201 });

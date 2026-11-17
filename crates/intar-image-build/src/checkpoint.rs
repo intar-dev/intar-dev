@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::sha256::{hash_field, hex_digest, sha256_bytes_hex as sha256_bytes};
 use anyhow::{Context as _, Result, bail, ensure};
 use fs2::FileExt;
-use intar_image_scenario::{hash_field, hex_digest, sha256_bytes_hex as sha256_bytes};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};

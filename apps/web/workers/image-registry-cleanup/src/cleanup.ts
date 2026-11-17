@@ -4,10 +4,7 @@ import {
   readRegistryAdmissionState,
 } from "@/lib/image-registry-admission";
 import type { ImageRegistryEnforcementMode } from "@/db/schema";
-import {
-  createImageRegistryCleanupCore,
-  type ImageRegistryCleanupEnv,
-} from "@/lib/image-registry-cleanup";
+import { runOciSweep, type OciSweepEnv } from "@/lib/oci-registry-sweep";
 import type { CleanupLastRun } from "./types";
 import type {
   CleanupEnvelope,
@@ -16,26 +13,28 @@ import type {
 } from "./types";
 import { completionStatus } from "./completion";
 
-export const CLEANUP_SCHEMA_VERSION = 1;
+export const CLEANUP_SCHEMA_VERSION = 2;
 export const DEFAULT_CLEANUP_MODE: CleanupMode = "report-only";
 /** Marks the hold row as the collector's own deployment hold. */
 export const CLEANUP_PAUSE_REASON = "registry_cleanup_hold";
 const CLEANUP_IDLE_POLL_MS = 250;
 
 /** Everything the collector reads, plus the parent entrypoint binding. */
-export interface CleanupEnv extends ImageRegistryCleanupEnv {
+export interface CleanupEnv extends OciSweepEnv {
   REGISTRY_CLEANUP_MODE?: string;
   CONTROL_PLANE?: unknown;
 }
 
 /** The parent `MaintenanceState` entrypoint, bound as CONTROL_PLANE. */
 interface MaintenanceStateBinding {
-  state(): Promise<{ maintenance?: unknown }>;
+  state(): Promise<{ maintenance?: unknown; kinoPinsJson?: unknown }>;
 }
 
 export interface MaintenanceRead {
   maintenance: "on" | "off";
   source: "control-plane" | "unavailable";
+  /** The parent's Kino pins; null when they could not be read. */
+  kinoPinsJson: string | null;
 }
 
 export interface ModeRead {
@@ -71,19 +70,20 @@ export async function readMaintenance(
   const binding = env.CONTROL_PLANE as MaintenanceStateBinding | undefined;
   if (!binding || typeof binding.state !== "function") {
     log("registry_cleanup_maintenance_probe_missing");
-    return { maintenance: "on", source: "unavailable" };
+    return { maintenance: "on", source: "unavailable", kinoPinsJson: null };
   }
   try {
     const state = await binding.state();
     return {
       maintenance: state?.maintenance === "off" ? "off" : "on",
       source: "control-plane",
+      kinoPinsJson: typeof state?.kinoPinsJson === "string" ? state.kinoPinsJson : null,
     };
   } catch (error) {
     log("registry_cleanup_maintenance_probe_failed", {
       error: describeError(error),
     });
-    return { maintenance: "on", source: "unavailable" };
+    return { maintenance: "on", source: "unavailable", kinoPinsJson: null };
   }
 }
 
@@ -207,19 +207,13 @@ export async function awaitRegistryIdle(
  * One cleanup attempt.
  *
  * The order is deliberate: the maintenance fence and the shared admission gate
- * are read before the first bucket call, and a report-only collector stops
- * after the plan. The sweep core owns the exclusive lease and re-reads it under
- * that lease, so a race here can only add a redundant refusal.
- *
- * A delete pass calls the core's `run` directly and never pre-plans: the core
- * builds and verifies its plan inside the sweep lease, so a plan before it
- * would scan the whole bucket a second time for no gain. That single scan is
- * why the plan of a delete pass is not returned; the pass reports the counters
- * the core recorded while it ran.
+ * are read before the first bucket call, and a report-only collector only
+ * plans. The sweep owns the exclusive lease and re-reads the gate under that
+ * lease, so a race here can only add a redundant refusal.
  */
 export async function runCleanup(
   env: CleanupEnv,
-  request: { source: "scheduled" | "rpc"; planOnly?: boolean },
+  request: { source: "scheduled" | "rpc"; planOnly?: boolean; ociStartAfter?: string },
 ): Promise<CleanupEnvelope> {
   const startedAtMs = Date.now();
   const mode = readMode(env.REGISTRY_CLEANUP_MODE);
@@ -250,68 +244,37 @@ export async function runCleanup(
     return envelope(gateway, request, startedAtMs, { status: "busy" });
   }
 
-  const coreEnv: ImageRegistryCleanupEnv = {
-    DB: env.DB,
-    VM_IMAGE_REGISTRY_BUCKET: env.VM_IMAGE_REGISTRY_BUCKET,
-  };
-  // The core owns the exclusive sweep lease and re-reads it under that lease.
-  const core = createImageRegistryCleanupCore({});
-  const input = { mode: mode.mode, nowMs: startedAtMs };
-
   try {
-    const planOnly =
-      request.planOnly === true || mode.mode !== "delete";
-    if (planOnly) {
-      const plan = await core.plan(coreEnv, { ...input, mode: "report-only" });
-      const reported = envelope(gateway, request, startedAtMs, {
-        status: "report-only",
-        plan,
-      });
-      log("registry_cleanup_finished", {
-        source: request.source,
-        status: reported.status,
-        objectsScanned: plan.objectsScanned,
-        candidateObjects: plan.candidateObjects.length,
-        candidateTotal: plan.details.candidateTotal,
-        candidateBytes: plan.candidateBytes,
-        truncated: plan.truncated,
-        faults: plan.details.faults.length,
-        deletedObjects: 0,
-      });
-      return reported;
-    }
-
-    const result = await core.run(coreEnv, input);
-    // The canonical mapping decides completion. A pass that is not `ok` never
-    // claims success, whatever the core reported alongside it.
-    const status = completionStatus(result);
-    const finished = envelope(gateway, request, startedAtMs, {
-      status,
-      result,
-      error: status === "ok" ? null : (result.error ?? null),
+    const report = await runOciSweep(env, {
+      mode: request.planOnly === true || mode.mode !== "delete" ? "report-only" : "delete",
+      nowMs: startedAtMs,
+      kinoPinsJson: maintenance.kinoPinsJson,
+      ...(request.ociStartAfter === undefined ? {} : { startAfter: request.ociStartAfter }),
     });
+    // The canonical mapping decides completion. A pass that is not `ok` never
+    // claims success, whatever the sweep reported alongside it.
+    const status = completionStatus(report);
     log("registry_cleanup_finished", {
       source: request.source,
-      status: finished.status,
-      objectsScanned: result.planSummary?.objectsScanned ?? 0,
-      candidateTotal: result.planSummary?.candidateTotal ?? result.wouldDeleteObjects,
-      candidateBytes: result.planSummary?.candidateBytes ?? result.wouldDeleteBytes,
-      truncated: result.planSummary?.truncated ?? false,
-      completed: result.completed,
-      deletedObjects: result.deletedObjects,
-      deletedBytes: result.deletedBytes,
-      verifiedDeletedObjects: result.verifiedDeletedObjects,
-      failedObjects: result.failedObjects,
-      skippedObjects: result.skippedObjects,
-      unverifiedObjects: result.unverifiedObjects,
-      blockedObjects: result.blockedObjects,
-      resumeRequired: result.resumeRequired,
-      phases: result.phases,
-      error: result.error,
+      status,
+      mode: report.mode,
+      listedObjects: report.listedObjects,
+      candidateObjects: report.candidateObjects,
+      candidateBytes: report.candidateBytes,
+      deletedObjects: report.deletedObjects,
+      deletedBytes: report.deletedBytes,
+      deletedRevisions: report.deletedRevisions,
+      faults: report.faults.length,
+      nextStartAfter: report.nextStartAfter,
+      error: report.error,
     });
-    return finished;
+    return envelope(gateway, request, startedAtMs, {
+      status,
+      result: report,
+      error: status === "ok" || status === "report-only" ? null : report.error,
+    });
   } catch (error) {
-    // A failed plan must not delete: the delete path is unreachable without it.
+    // The sweep reports its own failures; a throw here deleted nothing.
     log("registry_cleanup_failed", {
       source: request.source,
       error: describeError(error),
@@ -338,7 +301,6 @@ function envelope(
     source: request.source,
     startedAtMs,
     finishedAtMs: Date.now(),
-    plan: null,
     result: null,
     error: null,
     ...fields,

@@ -33,8 +33,7 @@ use intar_jailer_protocol::{
 #[cfg(target_os = "linux")]
 use intar_jailerd::{
     FileSystemJailPreparer, HostReadiness, JailerdCore, SystemdHostBackend,
-    host_cpu_capacity_millis, launch_vm_v2_response, launch_vm_v3_response,
-    prepare_chunked_image_v3_response, prepare_image_v2_response, self_test,
+    host_cpu_capacity_millis, launch_vm_v3_response, prepare_chunked_image_v3_response, self_test,
 };
 #[cfg(target_os = "linux")]
 use rustix::net::{
@@ -185,12 +184,24 @@ fn run_server(config_path: &Path) -> Result<()> {
     let _maintenance_lock = acquire_maintenance_lock(rustix::fs::FlockOperation::LockShared)
         .context("acquire daemon maintenance lock")?;
     let config = load_config(config_path)?;
-    // Absence leaves the host deliberately unschedulable.  A present but
-    // malformed, stale, tampered, or wrong-boot attestation is a startup
-    // error, rather than being silently treated like an operator who has not
-    // run the proof yet.
-    let verified_self_test =
-        self_test::load_verified(&config).context("verify privileged self-test attestation")?;
+    // Absence leaves the host deliberately unschedulable, and so does a
+    // trusted attestation of an earlier boot, whatever else changed since: a
+    // reboot must not stop jailerd from serving recovery.  A malformed or
+    // tampered attestation, or a stale one of this boot, is a startup error,
+    // rather than being silently treated like an operator who has not run
+    // the proof yet.
+    let verified_self_test = match self_test::load(&config)
+        .context("verify privileged self-test attestation")?
+    {
+        self_test::AttestationStatus::PreviousBoot { stale } => {
+            warn!(
+                stale_field = stale.unwrap_or("none"),
+                "self-test attestation belongs to a previous boot; starting unschedulable until the self-test passes on this boot"
+            );
+            None
+        }
+        status => status.verified(),
+    };
     let listener = match activated_socket::take()? {
         Some(listener) => {
             info!("using systemd-activated control socket");
@@ -246,6 +257,8 @@ fn run_server(config_path: &Path) -> Result<()> {
     std::thread::Builder::new()
         .name("jailerd-store-gc".to_owned())
         .spawn(move || {
+            // Said when it starts and when it ends, not on every cycle.
+            let mut pressure_unmet = false;
             loop {
                 let protected = match gc_core.lock() {
                     Ok(core) => core.live_template_image_ids(),
@@ -254,7 +267,8 @@ fn run_server(config_path: &Path) -> Result<()> {
                         return;
                     }
                 };
-                match intar_jailerd::gc_root_stores(&gc_config, &protected) {
+                let result = intar_jailerd::gc_root_stores(&gc_config, &protected);
+                match &result {
                     Ok(report) if report.templates_removed > 0 || report.chunks_removed > 0 => {
                         info!(
                             templates_removed = report.templates_removed,
@@ -266,6 +280,29 @@ fn run_server(config_path: &Path) -> Result<()> {
                     }
                     Ok(_) => {}
                     Err(error) => error!(?error, "root-owned template/chunk GC failed"),
+                }
+                if let Ok(report) = &result
+                    && report.pressure_unmet != pressure_unmet
+                {
+                    pressure_unmet = report.pressure_unmet;
+                    if pressure_unmet {
+                        warn!(
+                            used_bytes = report.estimated_bytes_after,
+                            free_bytes = report.filesystem_free_bytes_after,
+                            budget_bytes = gc_config.template_budget_bytes,
+                            minimum_free_bytes = gc_config.minimum_free_space_bytes,
+                            templates_held_by_live_vms = report.templates_held,
+                            templates_within_grace = report.templates_in_grace,
+                            grace_seconds = gc_config.store_gc_grace_seconds,
+                            "template store stays over its budget or under its free-space floor: every template left is in use or within the grace period"
+                        );
+                    } else {
+                        info!(
+                            used_bytes = report.estimated_bytes_after,
+                            free_bytes = report.filesystem_free_bytes_after,
+                            "template store is within its budget and free-space floor again"
+                        );
+                    }
                 }
                 std::thread::park_timeout(STORE_GC_INTERVAL);
             }
@@ -369,25 +406,6 @@ fn serve_connection(
             match RequestEnvelope::decode(&buffer[..length]) {
                 Ok(envelope) if envelope.version == PROTOCOL_VERSION => {
                     let response = match envelope.request {
-                        Request::PrepareImageV2(request) => {
-                            // Importing and hashing a raw image can take many
-                            // seconds. Snapshot the root-owned policy under the
-                            // lifecycle lock, then release it so the boot-lease
-                            // watchdog and VM finalization remain responsive.
-                            let config = core
-                                .lock()
-                                .map_err(|_| anyhow::anyhow!("jailerd state lock poisoned"))?
-                                .template_prepare_config();
-                            config.map_or_else(
-                                || {
-                                    Response::Error(ProtocolError::new(
-                                        "host_not_ready",
-                                        "host readiness attestation does not permit template-backed image preparation",
-                                    ))
-                                },
-                                |config| prepare_image_v2_response(&config, *request),
-                            )
-                        }
                         Request::PrepareChunkedImageV3(request) => {
                             let config = core
                                 .lock()
@@ -403,7 +421,6 @@ fn serve_connection(
                                 |config| prepare_chunked_image_v3_response(&config, *request),
                             )
                         }
-                        Request::LaunchVmV2(request) => launch_vm_v2_response(core, *request),
                         Request::LaunchVmV3(request) => launch_vm_v3_response(core, *request),
                         request => core
                             .lock()

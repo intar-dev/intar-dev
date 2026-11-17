@@ -40,8 +40,7 @@ impl JailerdConfig {
         validate_ssh_public_port_range(self.ssh_public_port_start, self.ssh_public_port_end)?;
         if self.template_budget_bytes == 0
             || self.minimum_free_space_bytes == 0
-            || self.store_gc_grace_seconds == 0
-            || self.legacy_template_retention_seconds < 7 * 24 * 60 * 60
+            || self.store_gc_grace_seconds < MIN_STORE_GC_GRACE_SECONDS
         {
             return Err(ValidationError::InvalidStoreGcPolicy);
         }

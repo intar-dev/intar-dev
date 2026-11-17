@@ -634,13 +634,15 @@ function LinkedLectureAction({
       className="w-full [@media(pointer:coarse)]:min-h-11 sm:w-auto"
       render={
         <Link
-          to="/runs/start/$scenarioId"
-          params={{ scenarioId: lecture.scenarioId }}
+          to="/runs/start/$"
+          params={{ _splat: lecture.scenarioId }}
           search={{
             scope: route.scope,
             organizationId: route.organizationId ?? undefined,
             courseId: route.courseId,
             lectureId: lecture.lectureId,
+            source: undefined,
+            ref: undefined,
           }}
           onClick={(event) => {
             if (

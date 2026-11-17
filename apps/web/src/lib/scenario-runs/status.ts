@@ -10,9 +10,11 @@ import {
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
-import { runtimeVms, scenarioRuns } from "@/db/schema";
+import { agentHosts, runtimeVms, scenarioRuns } from "@/db/schema";
+import { isHostUnreachable } from "@/lib/scenario-hosts";
 import {
   redactProbeResults,
+  runPhaseAcceptsTerminalSessions,
   type RunPhase,
   type RunStateDocument,
 } from "@/lib/run-state";
@@ -32,6 +34,9 @@ import {
   type ScenarioRunSavingStage,
 } from "./saving-stage";
 import { parseRunState } from "./storage";
+import type { LabState } from "@/generated/contracts/bridge-message-v9";
+import { taskViews, type RunTaskView } from "@/lib/run-tasks";
+import { HOST_HEARTBEAT_TTL_MS } from "./start";
 
 /**
  * The small, mutable portion of a scenario run. The full run view is loaded
@@ -49,6 +54,8 @@ export interface ScenarioRunStatus {
   canOpenTerminal: boolean;
   canDestroy: boolean;
   terminalTarget: RunStateDocument["terminalTarget"];
+  /** A live run whose host is out of reach past the grace; no terminal then. */
+  machineUnreachable: boolean;
   outcome: ScenarioRunOutcome;
   active: boolean;
   activity: ScenarioRunActivity;
@@ -58,6 +65,8 @@ export interface ScenarioRunStatus {
   savingStage: ScenarioRunSavingStage | null;
   replayState: ScenarioRunReplayState;
   hasReplay: boolean;
+  /** A revision-model run's tasks; absent on probe runs. */
+  tasks?: RunTaskView[];
   vms: Array<{
     id: string;
     phase: RunStateDocument["vms"][number]["phase"];
@@ -71,6 +80,7 @@ export interface ScenarioRunStatus {
     scenarioProbes: RunStateDocument["vms"][number]["scenarioProbes"];
     sessionTimeline: RunStateDocument["vms"][number]["sessionTimeline"];
     hasRecording?: boolean;
+    lab?: { state: LabState } | null;
   }>;
 }
 
@@ -128,8 +138,12 @@ export async function getScenarioRunStatusForUser(input: {
       failedAt: scenarioRuns.failedAt,
       createdAt: scenarioRuns.createdAt,
       updatedAt: scenarioRuns.updatedAt,
+      hostConnected: agentHosts.connected,
+      hostDisconnectedAt: agentHosts.disconnectedAt,
+      hostLastHeartbeatAt: agentHosts.lastHeartbeatAt,
     })
     .from(scenarioRuns)
+    .leftJoin(agentHosts, eq(agentHosts.id, scenarioRuns.hostId))
     .where(
       and(
         eq(scenarioRuns.runId, input.runId),
@@ -152,18 +166,33 @@ export async function getScenarioRunStatusForUser(input: {
     phase: state.phase,
   });
   const replayState = deriveScenarioRunReplayState(state);
+  // Read-time only: a reconnect restores the stored state as it was.
+  const machineUnreachable =
+    runPhaseAcceptsTerminalSessions(state.phase) &&
+    row.hostConnected !== null &&
+    isHostUnreachable(
+      {
+        connected: row.hostConnected,
+        disconnectedAt: row.hostDisconnectedAt,
+        lastHeartbeatAt: row.hostLastHeartbeatAt,
+      },
+      Date.now(),
+      HOST_HEARTBEAT_TTL_MS,
+    );
+  const version = buildScenarioRunStatusVersion(row.updatedAt, archive.version);
 
   return {
-    version: buildScenarioRunStatusVersion(row.updatedAt, archive.version),
+    version: machineUnreachable ? `${version}:unreachable` : version,
     updatedAt: row.updatedAt,
     phase: state.phase,
     phaseTitle: state.phaseTitle,
     phaseDetail: state.phaseDetail,
     progressPercent: state.progressPercent,
     terminalPhase: state.terminalPhase,
-    canOpenTerminal: state.canOpenTerminal,
+    canOpenTerminal: state.canOpenTerminal && !machineUnreachable,
     canDestroy: state.canDestroy,
     terminalTarget: state.terminalTarget,
+    machineUnreachable,
     outcome: deriveScenarioRunOutcome({
       phase: state.phase,
       solvedAt: row.solvedAt,
@@ -184,6 +213,7 @@ export async function getScenarioRunStatusForUser(input: {
     }),
     replayState,
     hasReplay: replayState === "ready",
+    ...(state.tasks ? { tasks: taskViews(state.tasks) } : {}),
     vms: state.vms.map((vm) => ({
       id: vm.id,
       phase: vm.phase,
@@ -191,7 +221,7 @@ export async function getScenarioRunStatusForUser(input: {
       phaseDetail: vm.phaseDetail,
       progressPercent: vm.progressPercent,
       terminalPhase: vm.terminalPhase,
-      canOpenTerminal: vm.canOpenTerminal,
+      canOpenTerminal: vm.canOpenTerminal && !machineUnreachable,
       terminalTarget: vm.terminalTarget,
       bootProbes: redactProbeResults(vm.bootProbes),
       scenarioProbes: redactProbeResults(vm.scenarioProbes),
@@ -199,6 +229,7 @@ export async function getScenarioRunStatusForUser(input: {
       ...(vm.hasRecording === undefined
         ? {}
         : { hasRecording: vm.hasRecording }),
+      ...(vm.lab === undefined ? {} : { lab: vm.lab ? { state: vm.lab.state } : null }),
     })),
   };
 }

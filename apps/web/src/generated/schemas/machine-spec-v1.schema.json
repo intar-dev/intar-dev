@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MachineSpecV1",
+  "description": "What one machine's Kino runs. A learn spec holds no solve script and no\nother machine's scripts.",
+  "type": "object",
+  "properties": {
+    "defer": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "machine": {
+      "type": "string"
+    },
+    "ready": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ScriptV1"
+      }
+    },
+    "scenario_id": {
+      "description": "`<org-slug>/<scenario-slug>`; empty on a build boot.",
+      "type": "string"
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SpecTaskV1"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "scenario_id",
+    "machine",
+    "env",
+    "defer",
+    "ready",
+    "tasks"
+  ],
+  "$defs": {
+    "ScriptV1": {
+      "description": "A named lowered bash script: a setup stage or a ready block.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "script"
+      ]
+    },
+    "SpecTaskV1": {
+      "type": "object",
+      "properties": {
+        "check": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "needs": {
+          "description": "A need on another machine is `<machine>/<task-id>`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "solve": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "check",
+        "needs"
+      ]
+    }
+  }
+}

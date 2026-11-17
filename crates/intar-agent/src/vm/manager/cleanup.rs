@@ -28,6 +28,7 @@ pub(super) async fn remove_matching_tracked_vm_state(
         remove_matching_vm_state(&mut states, expected)
     };
     if removed {
+        forget_kept_report(&inner.uncommitted_reports, &expected.name);
         publish_inventory_update(inner);
     }
     removed
@@ -140,6 +141,17 @@ pub(super) async fn local_cleanup_tracked_vm(
     Ok(())
 }
 
+/// After the VM state is gone no report of it is kept again (keeping needs
+/// the current state), so this removal is the entry's last.
+pub(super) fn forget_kept_report(
+    reports: &std::sync::Mutex<BTreeMap<String, GuestUpdate>>,
+    name: &str,
+) {
+    if let Ok(mut reports) = reports.lock() {
+        reports.remove(name);
+    }
+}
+
 pub(super) fn is_create_in_progress_state(state: VmLifecycleState) -> bool {
     matches!(
         state,
@@ -231,7 +243,7 @@ pub(super) async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm
                 .await
                 {
                     Ok(Ok(())) => {
-                        // Pinned Cloud Hypervisor v53 returns from vm.shutdown
+                        // The pinned Cloud Hypervisor returns from vm.shutdown
                         // only after it has dropped the running VM and retained
                         // the reusable configuration. vm.info=Created is the
                         // proof for that exact state. A missing VM is also
@@ -250,11 +262,11 @@ pub(super) async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm
                                 let shutdown_proven =
                                     post_shutdown_vm_info_proves_stopped(probe_result);
                                 match probe_result {
-                                    Ok(info) if v53_post_shutdown_state_is_proven(info) => {
+                                    Ok(info) if post_shutdown_state_is_proven(info) => {
                                         info!(
                                             vm = vm_name,
                                             socket = ch_socket_path,
-                                            "cloud-hypervisor shutdown was proven by pinned-v53 vm.info"
+                                            "cloud-hypervisor shutdown was proven by vm.info"
                                         );
                                     }
                                     Err(error) if vm_info_confirms_vm_absent(error) => {
@@ -269,7 +281,7 @@ pub(super) async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm
                                             vm = vm_name,
                                             socket = ch_socket_path,
                                             state = ?info.state,
-                                            "cloud-hypervisor vm.info did not prove pinned-v53 shutdown; preserving grace period"
+                                            "cloud-hypervisor vm.info did not prove shutdown; preserving grace period"
                                         );
                                     }
                                     Err(error) => {
@@ -338,7 +350,7 @@ pub(super) async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm
 }
 
 /// Wait until the supplied post-response deadline unless the `vm.info`
-/// response proves that pinned Cloud Hypervisor v53 has stopped the VM. The
+/// response proves that the pinned Cloud Hypervisor has stopped the VM. The
 /// deadline is a Tokio instant so the timer and its timeout use the same clock.
 pub(super) async fn wait_for_post_shutdown_probe_grace<Probe, IsProven>(
     grace_deadline: tokio::time::Instant,
@@ -368,16 +380,16 @@ pub(super) fn post_shutdown_vm_info_proves_stopped(
     >,
 ) -> bool {
     match probe_result {
-        Ok(info) => v53_post_shutdown_state_is_proven(info),
+        Ok(info) => post_shutdown_state_is_proven(info),
         Err(error) => vm_info_confirms_vm_absent(error),
     }
 }
 
-/// Pinned Cloud Hypervisor v53 returns `Created` after a successful
+/// The pinned Cloud Hypervisor returns `Created` after a successful
 /// `vm.shutdown`: it has synchronously dropped the running VM while retaining
 /// only the reusable configuration. Do not accept other states here; they do
 /// not prove that the VM has stopped.
-pub(super) fn v53_post_shutdown_state_is_proven(info: &cloud_hypervisor_client::VmInfo) -> bool {
+pub(super) fn post_shutdown_state_is_proven(info: &cloud_hypervisor_client::VmInfo) -> bool {
     matches!(info.state, cloud_hypervisor_client::VmState::Created)
 }
 
@@ -718,18 +730,161 @@ pub(super) fn handle_vm_log_source_open_error(
     ))
 }
 
-pub(super) fn recording_export_path_for_cleanup(details: &VmDetails) -> Result<Option<&Path>> {
+pub(super) async fn recording_export_path_for_cleanup<'a>(
+    inner: &Inner,
+    vm_name: &str,
+    details: &'a VmDetails,
+) -> Result<Option<&'a Path>> {
     let Some(recording_disk_path) = details.recording_disk_path.as_deref() else {
         return Ok(None);
     };
     let recording_disk_path = Path::new(recording_disk_path);
-    if details.jail_generation.is_some() && !recording_disk_path.is_file() {
-        anyhow::bail!(
-            "jailerd did not publish the drained recording export at {}",
-            recording_disk_path.display()
-        );
+    let Some(generation) = details.jail_generation.as_deref() else {
+        return Ok(Some(recording_disk_path));
+    };
+    if recording_disk_path.is_file() {
+        return Ok(Some(recording_disk_path));
     }
-    Ok(Some(recording_disk_path))
+    // StopVm again first: for a tracked generation it answers Ok only once
+    // the export is published, and unlike InspectVm it never contains the VM.
+    let mut attempt = 0;
+    let mut step = loop {
+        attempt += 1;
+        let stopped =
+            jailer_identity_request(inner, generation, JailerIdentityOperation::Stop).await;
+        if let Err(error) = &stopped {
+            warn!(
+                error = %error,
+                vm = vm_name,
+                generation,
+                attempt,
+                "jailerd StopVm did not publish the recording export"
+            );
+        }
+        let probe = MissingExportProbe::Stop {
+            attempt,
+            succeeded: stopped.is_ok(),
+            storage_exhausted: stopped
+                .as_ref()
+                .err()
+                .is_some_and(|error| jailerd_error_code(error) == Some("storage_exhausted")),
+        };
+        match missing_export_step(probe, recording_disk_path.is_file()) {
+            MissingExportStep::StopAgain => {
+                tokio::time::sleep(Duration::from_secs(2 * u64::from(attempt))).await;
+            }
+            step => break step,
+        }
+    };
+    if step == MissingExportStep::Inspect {
+        // Last resort, and destructive: an unsound VM is contained here,
+        // with one more best-effort export, and an exited one is given up,
+        // so the delete cannot stay stuck.
+        let inspect =
+            || jailer_identity_request(inner, generation, JailerIdentityOperation::Inspect);
+        let answer = match inspect().await {
+            Err(error) if !jail_vm_exited(&error) => {
+                // An inspection that contains the VM answers with an error and
+                // forgets the generation, so the second answer is settled.
+                inspect().await
+            }
+            answer => answer,
+        };
+        let probe = match answer {
+            Ok(inspection) => MissingExportProbe::Inspect {
+                tracked: inspection.is_some(),
+                exited: false,
+            },
+            Err(error) if jail_vm_exited(&error) => MissingExportProbe::Inspect {
+                tracked: true,
+                exited: true,
+            },
+            Err(error) => return Err(error),
+        };
+        step = missing_export_step(probe, recording_disk_path.is_file());
+    }
+    match step {
+        MissingExportStep::Archive => Ok(Some(recording_disk_path)),
+        MissingExportStep::Skip(reason) => {
+            warn!(
+                vm = vm_name,
+                generation,
+                path = %recording_disk_path.display(),
+                reason,
+                "deleting the VM without its recording"
+            );
+            Ok(None)
+        }
+        MissingExportStep::Fail | MissingExportStep::StopAgain | MissingExportStep::Inspect => {
+            anyhow::bail!(
+                "jailerd did not publish the drained recording export at {}",
+                recording_disk_path.display()
+            )
+        }
+    }
+}
+
+/// StopVm attempts in one delete before the destructive InspectVm. The
+/// counter lives in the attempt: the row has no retry state, and an
+/// agent restart, which resets anything in memory, may be the only retry.
+pub(super) const STOP_EXPORT_ATTEMPTS: u32 = 3;
+
+/// What the delete last learned about a jailed VM's missing recording export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MissingExportProbe {
+    Stop {
+        attempt: u32,
+        succeeded: bool,
+        /// The export ran out of space or quota: it clears once space is
+        /// freed, so the delete fails and a later one sends StopVm again.
+        storage_exhausted: bool,
+    },
+    Inspect {
+        tracked: bool,
+        /// jailerd keeps the record of a VMM that exited (vm_exited): no
+        /// containment happens, so nothing else will publish the export.
+        exited: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MissingExportStep {
+    Archive,
+    StopAgain,
+    Inspect,
+    /// jailerd still tracks the generation: a later delete can publish it.
+    Fail,
+    /// Nothing will publish it; the reason goes into the WARN.
+    Skip(&'static str),
+}
+
+pub(super) fn missing_export_step(probe: MissingExportProbe, published: bool) -> MissingExportStep {
+    if published {
+        return MissingExportStep::Archive;
+    }
+    match probe {
+        // A tracked StopVm succeeds only after publishing the export.
+        MissingExportProbe::Stop {
+            succeeded: true, ..
+        } => MissingExportStep::Skip(
+            "jailerd stopped the VM without publishing an export, so it no longer tracks the jail generation",
+        ),
+        MissingExportProbe::Stop {
+            storage_exhausted: true,
+            ..
+        } => MissingExportStep::Fail,
+        MissingExportProbe::Stop { attempt, .. } if attempt < STOP_EXPORT_ATTEMPTS => {
+            MissingExportStep::StopAgain
+        }
+        MissingExportProbe::Stop { .. } => MissingExportStep::Inspect,
+        MissingExportProbe::Inspect { exited: true, .. } => MissingExportStep::Skip(
+            "the VMM exited and its recording export keeps failing for a reason other than space",
+        ),
+        MissingExportProbe::Inspect { tracked: true, .. } => MissingExportStep::Fail,
+        MissingExportProbe::Inspect { tracked: false, .. } => MissingExportStep::Skip(
+            "jailerd contained the VM or no longer tracks the jail generation",
+        ),
+    }
 }
 
 pub(super) async fn extract_recordings_to_spool(

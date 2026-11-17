@@ -43,8 +43,9 @@ sharedInputs: [
 
 lanes: {
 	rust: {
-		setup: [gha.#SetupRust]
-		steps: ["installer-tests", "verify", "check-generated-contracts"]
+		// The generated contracts include validators a Bun script emits.
+		setup: [gha.#SetupRust, gha.#SetupRuntime]
+		steps: ["installer-tests", "verify", "install-js", "check-generated-contracts"]
 		timeout: 45
 		inputs: [
 			"Cargo.toml",
@@ -61,11 +62,14 @@ lanes: {
 			"tools/workflows/release/**",
 			"package.json",
 			"bun.lock",
-			"content/scenarios/base-images.hcl",
+			// The loader and CLI tests and the release smoke read the example.
+			"content/**",
 			"crates/**",
 			"deploy/personal-metal/**",
 			"apps/web/public/install.sh",
 			"apps/web/src/generated/**",
+			"apps/web/scripts/generate-contract-validators.ts",
+			".github/actions/setup-runtime/**",
 		]
 	}
 
@@ -102,7 +106,7 @@ lanes: {
 
 	images: {
 		setup: [gha.#SetupRust]
-		steps: ["validate-images", "render-images"]
+		steps: ["validate-images"]
 		timeout: 30
 		inputs: [
 			"Cargo.toml",
@@ -114,16 +118,12 @@ lanes: {
 			"crates/intar-contracts/**",
 			"crates/intar-contracts-typegen/**",
 			"crates/intar-image-*/**",
-			"content/scenarios/base-images.hcl",
-			"builder.*.hcl",
-			"content/courses/**",
+			"content/**",
 			"apps/web/migrations/**",
 			"apps/web/src/control-plane/auth.ts",
-			"apps/web/src/control-plane/bridge-v8.ts",
 			"apps/web/src/control-plane/host-runtime-do.ts",
 			"apps/web/src/control-plane/image-registry.ts",
 			"apps/web/src/generated/**",
-			"apps/web/src/lib/build-scheduler*.ts",
 			"apps/web/src/lib/desired-state*.ts",
 			"apps/web/src/lib/host-runtime-wake.ts",
 			"apps/web/src/lib/scenario-hosts.ts",

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OciManifestV1",
+  "description": "A stored OCI image manifest, exactly as the builder writes it: no\nannotations, no subject. Its digest is the artifact's identity.",
+  "type": "object",
+  "properties": {
+    "artifactType": {
+      "type": "string"
+    },
+    "config": {
+      "$ref": "#/$defs/OciDescriptorV1"
+    },
+    "layers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OciDescriptorV1"
+      }
+    },
+    "mediaType": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 2,
+      "minimum": 2
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "mediaType",
+    "artifactType",
+    "config",
+    "layers"
+  ],
+  "$defs": {
+    "OciDescriptorV1": {
+      "type": "object",
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/OciDigest"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mediaType",
+        "digest",
+        "size"
+      ]
+    },
+    "OciDigest": {
+      "description": "An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

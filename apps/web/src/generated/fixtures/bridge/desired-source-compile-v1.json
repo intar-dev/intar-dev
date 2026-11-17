@@ -1,7 +1,0 @@
-{
-  "compile_id": "compile-acme-x1y2z3-001",
-  "attempt": 1,
-  "rev": "git-123456-0123456789abcdef0123456789abcdef01234567-pe845f1ac",
-  "validate_only": false,
-  "arch": "x86_64"
-}

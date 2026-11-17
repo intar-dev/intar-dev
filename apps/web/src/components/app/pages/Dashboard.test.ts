@@ -24,9 +24,9 @@ vi.mock("@/components/remote-access/WebSshTerminal", () => {
   return { WebSshTerminal: () => null };
 });
 
-vi.mock("@/components/app/admin/hosts/useAdminScenarios", () => ({
-  useAdminScenarios: () => ({
-    data: { scenarios: [] },
+vi.mock("@/components/app/admin/scenario-revisions", () => ({
+  useAdministeredScenarios: () => ({
+    data: [],
     error: null,
   }),
 }));

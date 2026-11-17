@@ -1,3 +1,4 @@
+import { GUEST_USERNAME } from "@/generated/constants";
 import { lazy, Suspense, useRef, useState } from "react";
 import { ChevronDown, CircleHelpIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -44,7 +45,7 @@ export function LiveScenarioRunCard(props: {
         : "The terminal target is only prepared when the VM is running.",
     host: null,
     port: 22,
-    username: "ubuntu",
+    username: GUEST_USERNAME,
   };
 
   return (

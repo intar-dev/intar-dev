@@ -1,16 +1,6 @@
 use super::*;
 
 impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
-    pub(super) fn launch_vm_v2(&mut self, request: LaunchVmV2Request) -> Result<VmLaunchResult> {
-        let quota = request
-            .validate()
-            .context("validate template-backed VM launch request")?;
-        self.preparer
-            .validate_prepared_launch(&self.config, &request)
-            .context("validate root-owned prepared image template")?;
-        self.launch_vm_validated(request.launch, quota, false)
-    }
-
     pub(super) fn launch_vm_v3(&mut self, request: LaunchVmV3Request) -> Result<VmLaunchResult> {
         let quota = request
             .validate()
@@ -18,14 +8,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         self.preparer
             .validate_prepared_launch_v3(&self.config, &request)
             .context("validate root-owned chunked image template")?;
-        self.launch_vm_validated(request.launch, quota, true)
+        self.launch_vm_validated(request.launch, quota)
     }
 
     pub(super) fn launch_vm_validated(
         &mut self,
         request: VmLaunchRequest,
         quota: CpuQuota,
-        use_v3: bool,
     ) -> Result<VmLaunchResult> {
         self.config
             .validate_ssh_public_port(request.ssh_public_port)
@@ -68,25 +57,14 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let identity = self.allocate_identity()?;
         self.preparer
             .reserve_identity(&self.config, &generation, identity, identity)?;
-        let prepare_result = if use_v3 {
-            self.preparer.prepare_v3(
-                &self.config,
-                &request,
-                &run_network.result,
-                &generation,
-                identity,
-                identity,
-            )
-        } else {
-            self.preparer.prepare_v2(
-                &self.config,
-                &request,
-                &run_network.result,
-                &generation,
-                identity,
-                identity,
-            )
-        };
+        let prepare_result = self.preparer.prepare_v3(
+            &self.config,
+            &request,
+            &run_network.result,
+            &generation,
+            identity,
+            identity,
+        );
         let prepared = match prepare_result {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -249,7 +227,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         failure: anyhow::Error,
     ) -> Result<T> {
         let mut cgroup_drain_proven = false;
-        match self.rollback_failed_launch(run_id, generation, unit_name, &mut cgroup_drain_proven) {
+        match self.rollback_failed_launch(
+            run_id,
+            generation,
+            unit_name,
+            None,
+            &mut cgroup_drain_proven,
+        ) {
             Ok(()) => {
                 self.pending_cpu_reservations.remove(generation);
                 self.unresolved_recoveries.remove(generation);
@@ -276,6 +260,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         run_id: &ValidatedId,
         generation: &ValidatedId,
         unit_name: &str,
+        export: Option<&VmRecord>,
         cgroup_drain_proven: &mut bool,
     ) -> Result<()> {
         // A failed launch is terminal for this generation. Release the
@@ -298,6 +283,26 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         };
         *cgroup_drain_proven = stop_proved_drain || destroy_proved_drain;
         if *cgroup_drain_proven {
+            // Keep the session recorded up to the failure. Best effort: the
+            // containment below must not depend on a disk the VMM left behind.
+            if let Some(record) = export
+                && let Err(error) = self.preparer.export_recording(&self.config, record)
+            {
+                tracing::warn!(
+                    %generation,
+                    error = %format!("{error:#}"),
+                    "failed to export the recording of a contained VM"
+                );
+            }
+            if let Some(record) = export
+                && let Err(error) = self.preparer.export_logs(&self.config, record)
+            {
+                tracing::warn!(
+                    %generation,
+                    error = %format!("{error:#}"),
+                    "failed to export the logs of a contained VM"
+                );
+            }
             if let Err(error) = self.backend.destroy_vm_network(run_id, generation) {
                 failures.push(format!(
                     "destroy VM network for generation {generation}: {error:#}"
@@ -389,6 +394,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 &mut self.backend,
                 &mut self.preparer,
                 &recovery,
+                None,
             );
             if outcome.cgroup_drain_proven {
                 self.pending_cpu_reservations.remove(&generation);
@@ -448,6 +454,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             &record.request.run_id,
             &record.generation,
             &record.unit_name,
+            None,
             &mut cgroup_drain_proven,
         ) {
             Ok(()) => {
@@ -467,18 +474,52 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             .get(&generation)
             .context("unknown jail generation")?
             .clone();
-        let inspection = self.backend.inspect_unit(&record.unit_name)?;
-        if !backend_identity_matches(&record, &inspection)
-            || (inspection.health == SandboxHealth::Healthy
-                && !live_api_ping(&record.paths.host_api_socket))
-        {
-            self.backend.stop_unit(&record.unit_name)?;
-            self.backend.destroy_unit(&record.unit_name)?;
-            let _ = self
-                .backend
-                .destroy_vm_network(&record.request.run_id, &record.generation);
-            self.preparer.quarantine(&self.config, &record.generation)?;
-            bail!("live VM identity does not match persisted sandbox metadata")
+        let inspection = match self.backend.inspect_unit(&record.unit_name) {
+            Ok(inspection) => inspection,
+            // The VMM exited and systemd removed its unit, as on a guest
+            // poweroff. Keep everything: the agent ends the run on
+            // vm_exited, and its delete stops, exports, copies the logs
+            // and destroys the VM as for any stopped VM. A record is
+            // tracked only once its unit started, so a launch in flight
+            // cannot get here.
+            Err(error) if error.downcast_ref::<UnitGoneError>().is_some() => {
+                return Err(error.context(VmExitedError));
+            }
+            Err(error) => return Err(error),
+        };
+        let identity_matches = backend_identity_matches(&record, &inspection);
+        let api_answered = !identity_matches
+            || inspection.health != SandboxHealth::Healthy
+            || live_api_ping(&record.paths.host_api_socket);
+        if let Some(reason) = inspect_failure(identity_matches, api_answered) {
+            // Stop, unit, recording export, network and files, each tried;
+            // on success the generation is gone, so a later stop or destroy
+            // finds nothing.
+            let mut drained = false;
+            return match self.rollback_failed_launch(
+                &record.request.run_id,
+                &record.generation,
+                &record.unit_name,
+                Some(&record),
+                &mut drained,
+            ) {
+                Ok(()) => {
+                    self.records.remove(&record.generation);
+                    Err(anyhow::anyhow!(
+                        "{reason}; the VM was stopped and quarantined"
+                    ))
+                }
+                Err(containment) => {
+                    tracing::warn!(
+                        generation = %record.generation,
+                        error = %containment,
+                        "containment of an unanswering or mismatched VM was incomplete"
+                    );
+                    Err(anyhow::anyhow!(
+                        "{reason}; containment was incomplete: {containment:#}"
+                    ))
+                }
+            };
         }
         let cpu_runtime = record.cpu_runtime();
         Ok(VmInspection {
@@ -511,10 +552,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
 
     pub(super) fn stop_vm(&mut self, request: VmIdentityRequest) -> Result<bool> {
         let generation = self.resolve_generation(&request)?;
-        let record = self
-            .records
-            .get(&generation)
-            .context("unknown jail generation")?;
+        let Some(record) = self.records.get(&generation) else {
+            // Contained already (an inspection quarantined it), or never
+            // tracked: stopping its unit, if any is left, is all a stop is.
+            return self
+                .backend
+                .stop_unit(&format!("intar-vm-{generation}.service"));
+        };
         let changed = self.backend.stop_unit(&record.unit_name)?;
         self.preparer.export_recording(&self.config, record)?;
         Ok(changed)
@@ -584,5 +628,16 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             .find(|record| record.request.run_id == *run_id && record.request.vm_id == *vm_id)
             .map(|record| record.generation.clone())
             .context("unknown jail generation")
+    }
+}
+
+/// Why an inspected VM is contained, or `None` when it is sound.
+pub(super) fn inspect_failure(identity_matches: bool, api_answered: bool) -> Option<&'static str> {
+    if !identity_matches {
+        Some("live VM identity does not match persisted sandbox metadata")
+    } else if !api_answered {
+        Some("the VMM did not answer on its API socket")
+    } else {
+        None
     }
 }

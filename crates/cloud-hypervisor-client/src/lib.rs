@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod machine;
+
 use std::fmt;
 use std::io;
 use std::os::unix::net::UnixStream;

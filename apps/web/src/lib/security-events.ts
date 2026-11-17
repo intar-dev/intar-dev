@@ -20,6 +20,8 @@ export function securityRoute(path: string): string {
   if (path.includes("%")) return "invalid-path";
   if (/^\/(?:api\/)?agent\/bootstrap$/u.test(path)) return "agent/bootstrap";
   if (/^\/(?:api\/)?agent\/connect$/u.test(path)) return "agent/connect";
+  if (path === "/v2/token") return "registry/token";
+  if (path === "/v2" || path.startsWith("/v2/")) return "registry/oci";
   if (path.startsWith("/api/auth/")) {
     for (const operation of [
       "sign-in/social", "sign-in/sso", "link-social", "sign-out", "get-session",
@@ -91,7 +93,7 @@ export function recordSecurityResponse(request: Request, response: Response): vo
     : response.status >= 400 || authRedirectError ? "rejected" : "accepted";
   const event = route.startsWith("auth/") && route !== "auth/get-session"
     ? "security.auth_request"
-    : route === "agent/bootstrap" || route === "agent/connect"
+    : route === "agent/bootstrap" || route === "agent/connect" || route === "registry/token"
     ? "security.agent_auth"
     : [401, 403, 429].includes(response.status) ? "security.request_rejected" : null;
   if (event) recordSecurityEvent(request, { event, outcome, status: response.status });

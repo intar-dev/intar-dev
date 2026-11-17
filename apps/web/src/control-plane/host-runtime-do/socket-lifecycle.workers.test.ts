@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   HOST_HELLO_TIMEOUT_MS, MAX_PENDING_HOST_SOCKETS, MAX_STATUS_SOCKETS,
   MAX_STATUS_SOCKETS_PER_USER, STATUS_SOCKET_LIFETIME_MS,
@@ -9,7 +9,7 @@ import {
 } from "./base";
 import {
   clientHello, connectHost, drizzle, env,
-  resetHostRuntimeTestDatabase, seedHost, seedRun, waitForBridgeMessage,
+  resetHostRuntimeTestDatabase, seedHost, seedRun, settleHostRuntimeSockets, waitForBridgeMessage,
 } from "./test-fixtures";
 
 function deferred() {
@@ -59,6 +59,7 @@ vi.setConfig({ testTimeout: 20_000 });
 
 describe("HostRuntimeDO socket lifecycle", () => {
   beforeEach(resetHostRuntimeTestDatabase);
+  afterEach(settleHostRuntimeSockets);
 
   it("preserves Pause written after hello reads the host", async () => {
     const hostId = "pause-during-hello";
@@ -303,8 +304,11 @@ describe("HostRuntimeDO socket lifecycle", () => {
     await runInDurableObject(stub, async (_instance, state) => {
       const attachment = state.getWebSockets("run-status")[0]!.deserializeAttachment() as RunStatusSocketAttachment;
       // Seed other users' accepted sockets to exercise the host-wide limit without 511 D1 fixtures.
+      // The client ends are kept: a collected one closes its accepted socket and lowers the count.
+      const clients: WebSocket[] = [];
       for (let i = 1; i < MAX_STATUS_SOCKETS; i++) {
         const pair = new WebSocketPair();
+        clients.push(pair[0]);
         state.acceptWebSocket(pair[1], ["run-status"]);
         pair[1].serializeAttachment({ ...attachment, userId: `other-${i}` });
       }
@@ -314,6 +318,7 @@ describe("HostRuntimeDO socket lifecycle", () => {
       const host = accept(await (await pendingHostRequest("full"))());
       host.close();
       for (const ws of state.getWebSockets("run-status")) ws.close();
+      expect(clients).toHaveLength(MAX_STATUS_SOCKETS - 1);
     });
     first.close();
   });

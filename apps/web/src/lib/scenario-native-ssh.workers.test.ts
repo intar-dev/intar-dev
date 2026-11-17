@@ -111,7 +111,7 @@ describe("scenario native SSH authorization", () => {
         routeUsername: "route-native_profile_keys",
         mode: "native",
         target: expect.objectContaining({
-          username: "ubuntu",
+          username: "user",
           transport: {kind:"direct", host:"10.0.0.10",port:22},
           authorizedClientPublicKeysOpenssh: [
             "ssh-ed25519 PROFILE profile@example.test",
@@ -406,7 +406,7 @@ function readyRunRow() {
   vm.terminalTarget = {
     host: "10.0.0.10",
     port: 22,
-    username: "ubuntu",
+    username: "user",
     hostKeyOpenssh: "ssh-ed25519 HOST host@example.test",
     checkedAt: null,
   };

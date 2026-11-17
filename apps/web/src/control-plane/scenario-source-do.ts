@@ -1,35 +1,24 @@
 // One Durable Object per scenario source binding, named by its scope key.
 // Its alarm observes the repository, pauses a binding whose binder lost the
-// scope, delivers a pull binding's head to a platform builder, ingests the
-// head commit's staged bundle, fails or heals the target's builds, and
-// promotes the target as a whole: images, then catalog, then `live`. A public
-// commit that replaces a live image applies its catalog and leaves its images
-// to Intar's image promotion. The head commit's state shows as a GitHub check
-// run. Every head comparison runs in SQL against the stored head, so a push
-// claim that moves the head mid-alarm is never overwritten.
+// scope, delivers a pull binding's head to a platform builder, and ingests the
+// head commit's staged bundle into scenario revisions and queued machine
+// builds; the alarm does not follow those builds. The head commit's state
+// shows as a GitHub check run. Every head comparison runs in SQL against the
+// stored head, so a push claim that moves the head mid-alarm is never
+// overwritten.
 import { DurableObject } from "cloudflare:workers";
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, isNull, lt, not, sql } from "drizzle-orm";
-import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
+import { drizzle } from "drizzle-orm/d1";
 import {
-  imageBuildBundles,
-  imageBuilds,
-  organization,
-  scenarioCatalogCandidates,
   scenarioSources,
 } from "@/db/schema";
 import type { ScenarioSourceCommitState } from "@/db/schema/scenarios";
-import { AppError } from "@/lib/app-error";
-import { linkedScenarioIds, syncCourseCatalogSnapshot } from "@/lib/course-catalogs";
-import {
-  freeSourceCompileBuilders,
-  reconcileHostSourceCompiles,
-} from "@/lib/build-scheduler";
 import {
   BUILDER_REASSIGN_AFTER_MS,
-  SUPERSEDED_BUILD_ERROR_PREFIX,
-  type BuilderCandidate,
-} from "@/lib/build-scheduler-core";
+  freeSourceCompileBuilders,
+  syncBuilderDesiredState,
+} from "@/lib/machine-builds";
 import {
   createCheckRun,
   fetchTarball,
@@ -41,16 +30,13 @@ import {
 } from "@/lib/github-app";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { createAppId } from "@/lib/id";
-import { platformCompileDigest } from "@/lib/image-build-format";
+import { ingestSourceBundle, sourceBundleObjectKey } from "@/lib/scenario-bundles";
+import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
   admitInternalRegistryOperation,
-  createRegistryWriterGuard,
 } from "@/lib/image-registry-admission";
-import { CUTOVER_WIPED_SQL, runsHeldCondition } from "@/lib/run-admission-gate";
-import { promotionHolding } from "./image-promotion";
-import { isCandidateSourceLocked } from "@/lib/scenario-catalog-candidates";
+import { CUTOVER_WIPED_SQL } from "@/lib/run-admission-gate";
 import {
-  countUnitGuardRuns,
   endSourceCompiles,
   MAX_COMPILE_ATTEMPTS,
   parseDiagnostics,
@@ -63,43 +49,22 @@ import {
   controlPlaneMaintenanceEnabled,
   maintenanceJsonResponse,
 } from "@/maintenance";
-import {
-  ingestScenarioBundle,
-  readBundleMeta,
-  readGzipBundleArchive,
-  readTarFile,
-  ScenarioBundleIngestError,
-  validateBundleArchivePayload,
-  type ParsedBundleMeta,
-} from "./image-registry/bundle";
-import {
-  incomingFamilyImages,
-  loadFamilyImageIdsMap,
-  outgoingFamilyImageIds,
-  promoteCandidateRevision,
-  type CandidatePromotionRefusal,
-  type CandidatePromotionResult,
-} from "./image-registry/catalog-promotion";
-import { isRecord } from "./image-registry/shared";
 
 const SCOPE_PATTERN = /^(?:public|organization:[^/?#]+)$/;
 const SCOPE_STORAGE_KEY = "scope";
 const RETRIES_STORAGE_KEY = "retries";
 const RETRY_BASE_MS = 30_000;
 const RETRY_MAX_MS = 10 * 60_000;
-/** The fourth fetch, ingest or heal try of one row attempt ends it. */
+/** The fourth fetch or ingest try of one row attempt ends it. */
 const MAX_TRIES = 3;
 const POLL_INTERVAL_MS = 10 * 60_000;
 const MAX_POLLS_PER_TICK = 5;
 const PRUNE_AFTER_MS = 10 * 60_000;
-// The same caps compile_bundle applies, so `validate` reports them first.
-const MAX_META_BYTES = 1_500_000;
+/** The cap compile_bundle applies. */
 const MAX_BUNDLE_BYTES = 2 * 1024 * 1024;
-const MAX_EXPANDED_BUNDLE_BYTES = 4 * 1024 * 1024;
-const MAX_SCENARIOS = 100;
 const MAX_DETAIL_CHARS = 4096;
-const STAGED_FILES = ["bundle.tar.gz", "meta.json", "source.tar.gz"];
-const REV_SCOPE_CONFLICT = "rev_scope_conflict: this commit is owned by another scope";
+const SOURCE_BUNDLE_STAGED_FILE = "bundle.json.gz";
+const STAGED_FILES = ["bundle.tar.gz", "meta.json", "source.tar.gz", SOURCE_BUNDLE_STAGED_FILE];
 /** A pull binding fetches or starts a compile at most once a minute. */
 const DELIVERY_FLOOR_MS = 60_000;
 const DELIVERED_AT_STORAGE_KEY = "delivered_at";
@@ -136,10 +101,6 @@ type Settled = { state: "invalid" | "superseded"; detail: string };
 type WriteOutcome = "done" | "retry" | Settled;
 
 const invalid = (detail: string): Settled => ({ state: "invalid", detail });
-
-/** D1 allows 100 bound parameters, so a commit's hashes travel as one JSON array. */
-const hashIn = (hashes: string[]) =>
-  sql`${imageBuilds.contentHash} IN (SELECT value FROM json_each(${JSON.stringify(hashes)}))`;
 
 /** The head rev, as SQL over the stored head sha. */
 const headRev = (scope: string, digest: string) =>
@@ -238,14 +199,8 @@ async function tickScenarioSource(
 
   await dropInactive(env, scopeKey);
 
-  // A started promotion finishes even while the binding is paused, the digest
-  // is unset or the fleet is drained, and it is the alarm's only promotion.
-  const promoting = await finishPromotion(env, scopeKey, organizationId);
-
-  // Without a digest there is no head rev, so rows stay as they are rather
-  // than be compared against NULL.
-  const digest = await platformCompileDigest(env.PLATFORM_BASE_IMAGES_SHA256);
-  if (digest === null) return again || promoting === true;
+  // Every head compiles on the source compiler and is followed on its digest.
+  const digest = await sourceCompileDigest();
   await supersede(env, scopeKey, digest);
 
   const [active] = await db
@@ -258,21 +213,14 @@ async function tickScenarioSource(
     .from(scenarioSources)
     .where(and(eq(scenarioSources.scopeKey, scopeKey), scenarioSourceBindingPredicate()))
     .limit(1);
-  if (!active) return again || promoting === true;
+  if (!active) return again;
   const step = { env, storage, scopeKey, organizationId, digest };
   const ingestAgain = await ingest(step);
   // After ingest, so a re-run failed row that ingest finds without its
   // staged objects is delivered again in the same pass.
   if (active.mode === "pull") await deliver(step, active);
-  await retargetLiveRev(step);
-  const heal = await failOrHeal(step);
-  let applyAgain = promoting === true;
-  if (heal === "ready") {
-    // One promotion per alarm: a finished one leaves the target to the next.
-    applyAgain = promoting === null ? await promoteTarget(step) : true;
-  }
   const checkAgain = await syncDeployCheckRun(step, active);
-  return again || ingestAgain || heal === "again" || applyAgain || checkAgain;
+  return again || ingestAgain || checkAgain;
 }
 
 // Reads the repository through a token minted for the bound id. The mint is
@@ -427,7 +375,7 @@ async function deliver(step: Step, binding: ActiveBinding): Promise<void> {
     return;
   }
   // Waiting for a compiler: nothing is fetched or claimed.
-  let builders = await freeSourceCompileBuilders(db, now, digest);
+  let builders = await freeSourceCompileBuilders(env, now, digest);
   if (!builders.length) return;
   await storage.put(DELIVERED_AT_STORAGE_KEY, now);
   const row =
@@ -441,7 +389,7 @@ async function deliver(step: Step, binding: ActiveBinding): Promise<void> {
     if (fetched === "retry") await armAt(storage, now + DELIVERY_FLOOR_MS);
     if (fetched !== "stored") return;
     // A builder can drop off, be disabled or roll during the download.
-    builders = await freeSourceCompileBuilders(db, Date.now(), digest);
+    builders = await freeSourceCompileBuilders(env, Date.now(), digest);
   }
   for (const builder of builders) {
     if (await assign(step, row, builder, now)) return;
@@ -558,21 +506,21 @@ async function fetchSource(
 async function assign(
   step: Step,
   row: CommitRow,
-  builder: BuilderCandidate,
+  hostId: string,
   now: number,
 ): Promise<boolean> {
   const db = drizzle(step.env.DB);
   const assigned = await db.get<{ attempt: number }>(sql`UPDATE scenario_source_commits
-    SET state = 'compiling', attempt = attempt + 1, compile_host_id = ${builder.hostId},
+    SET state = 'compiling', attempt = attempt + 1, compile_host_id = ${hostId},
       compile_assigned_at = ${now}, detail = NULL, updated_at = ${now}
     WHERE id = ${row.id} AND attempt = ${row.attempt} AND state = 'fetching'
       AND rev = ${pullHeadRev(step.scopeKey, step.digest)}
       AND NOT EXISTS (SELECT 1 FROM scenario_source_commits AS busy
-        WHERE busy.compile_host_id = ${builder.hostId} AND busy.state = 'compiling')
+        WHERE busy.compile_host_id = ${hostId} AND busy.state = 'compiling')
     RETURNING attempt`);
   if (!assigned) return false;
-  if (await reconcileHostSourceCompiles(db, builder.hostId, now)) {
-    await tryWakeHostRuntimeViaNamespace(step.env.HOST_RUNTIME, builder.hostId);
+  if (await syncBuilderDesiredState(step.env, hostId, now)) {
+    await tryWakeHostRuntimeViaNamespace(step.env.HOST_RUNTIME, hostId);
   }
   return true;
 }
@@ -594,7 +542,7 @@ async function ingest(step: Step): Promise<boolean> {
     await step.storage.delete(key);
     return false;
   }
-  const outcome = await ingestRow(step, row.rev);
+  const outcome = await ingestSourceBundleRow(step, row.rev);
   if (outcome === "retry") {
     await step.storage.put(key, tries - 1);
     return true;
@@ -626,114 +574,26 @@ async function ingest(step: Step): Promise<boolean> {
   return false;
 }
 
-async function ingestRow(step: Step, rev: string): Promise<WriteOutcome> {
-  const [bundle] = await drizzle(step.env.DB)
-    .select({
-      organizationId: imageBuildBundles.organizationId,
-      metaJson: imageBuildBundles.metaJson,
-    })
-    .from(imageBuildBundles)
-    .where(eq(imageBuildBundles.rev, rev))
-    .limit(1);
-  if (bundle) {
-    if (bundle.organizationId !== step.organizationId) return invalid(REV_SCOPE_CONFLICT);
-    // A re-run, or a retry after a try that wrote the bundle row: requeue
-    // from the stored meta, with no archive check.
-    return writeBundle(step, rev, bundle.metaJson as ParsedBundleMeta);
-  }
-  const staged = await readStagedCommit(step, rev);
-  return "state" in staged ? staged : writeBundle(step, rev, staged.meta, staged.payload);
-}
-
-// The content checks on the staged objects. They fail closed.
-async function readStagedCommit(
-  step: Step,
-  rev: string,
-): Promise<Settled | { meta: ParsedBundleMeta; payload: ArrayBuffer }> {
+// The stored bundle once this scope owns the rev, so its rows keep
+// describing the first bytes and a staged re-upload is discarded; else the
+// staged gzip. The writes run under an internal registry writer, since spec
+// blobs land in the registry's keyspace.
+async function ingestSourceBundleRow(step: Step, rev: string): Promise<WriteOutcome> {
   const bucket = step.env.VM_IMAGE_REGISTRY_BUCKET;
-  const prefix = stagedSourceObjectPrefix(step.scopeKey, rev, "deploy");
-  const [metaObject, bundleObject] = await Promise.all([
-    bucket.get(`${prefix}meta.json`),
-    bucket.get(`${prefix}bundle.tar.gz`),
-  ]);
-  // The producer delivers the commit again.
-  if (!metaObject || !bundleObject) {
-    return { state: "superseded", detail: "the staged bundle is gone" };
+  const owned = await step.env.DB.prepare("SELECT 1 FROM bundles WHERE rev = ?1 AND scope_key = ?2")
+    .bind(rev, step.scopeKey)
+    .first();
+  const stored = owned ? await bucket.get(sourceBundleObjectKey(rev)) : null;
+  const staged = owned
+    ? null
+    : await bucket.get(`${stagedSourceObjectPrefix(step.scopeKey, rev, "deploy")}${SOURCE_BUNDLE_STAGED_FILE}`);
+  const object = stored ?? staged;
+  if (!object) return { state: "superseded", detail: "the staged bundle is gone" };
+  if (object.size > MAX_BUNDLE_BYTES) {
+    await object.body.cancel();
+    return invalid("the bundle is over 2 MiB compressed");
   }
-  if (metaObject.size > MAX_META_BYTES) return invalid("bundle meta is over 1.5 MB");
-  if (bundleObject.size > MAX_BUNDLE_BYTES) {
-    return invalid("bundle archive is over 2 MiB compressed");
-  }
-  const metaText = await metaObject.text();
-  const parsed = await readBundleMeta(metaText);
-  if (!parsed.ok) return invalid(await refusalText(parsed.response));
-  const meta = parsed.value.bundleMeta;
-  if (parsed.value.rev !== rev) return invalid("meta.rev is not this commit's rev");
-  const label = await scopeLabel(step);
-  if (!isRecord(meta.source) || meta.source.scope !== label) {
-    return invalid("the intar.yaml scope does not match this binding");
-  }
-  // Entries, not ids: every later step reads one build per entry.
-  if (meta.scenarios.length > MAX_SCENARIOS) {
-    return invalid(`${meta.scenarios.length} scenario builds exceed the limit of ${MAX_SCENARIOS}`);
-  }
-  const ids = [...new Set(meta.scenarios.map((scenario) => scenario.scenarioId))];
-  const namespace = await namespaceRefusal(step, ids, step.organizationId === null ? null : label);
-  if (namespace) return invalid(namespace);
-
-  const payload = await bundleObject.arrayBuffer();
-  const archiveError = await validateBundleArchivePayload(
-    payload,
-    meta,
-    MAX_EXPANDED_BUNDLE_BYTES,
-  );
-  if (archiveError) return invalid(await refusalText(archiveError));
-  const archive = await readGzipBundleArchive(payload, MAX_EXPANDED_BUNDLE_BYTES);
-  const catalog = archive.ok ? readTarFile(archive.bytes, "curriculum/catalog.json") : null;
-  const wire = parseJson(metaText) as { course_catalog?: unknown } | undefined;
-  if (!catalog || !isDeepStrictEqual(parseJson(catalog), wire?.course_catalog)) {
-    return invalid("meta.course_catalog differs from curriculum/catalog.json");
-  }
-  return { meta, payload };
-}
-
-// The longest organization slug that prefixes an id must be this scope's,
-// and for `public` none may. Ids the scope already owns are grandfathered.
-async function namespaceRefusal(
-  step: Step,
-  ids: string[],
-  slug: string | null | undefined,
-): Promise<string | null> {
-  const { results } = await step.env.DB.prepare(
-    `SELECT ids.value AS id,
-        (SELECT o.slug FROM organization AS o
-          WHERE lower(substr(ids.value, 1, length(o.slug) + 1)) = lower(o.slug) || '-'
-          ORDER BY length(o.slug) DESC LIMIT 1) AS slug,
-        EXISTS (SELECT 1 FROM vm_scenarios AS v
-          WHERE v.scenario_id = ids.value AND v.organization_id IS ?2) AS owned
-      FROM json_each(?1) AS ids`,
-  )
-    .bind(JSON.stringify(ids), step.organizationId)
-    .all<{ id: string; slug: string | null; owned: number }>();
-  for (const row of results) {
-    if (row.id.toLowerCase().startsWith("workshop-")) {
-      return `${row.id}: the workshop- prefix is reserved`;
-    }
-    if (!row.owned && row.slug !== slug) return `${row.id} is outside your namespace`;
-  }
-  return null;
-}
-
-// Writes under an internal registry writer. A refused writer and a locked
-// candidate source are settled and retried. A throw before the first write
-// settles the writer; any other stays an `unknown` hold for the operator reap.
-// Every throw counts as a try.
-async function writeBundle(
-  step: Step,
-  rev: string,
-  meta: ParsedBundleMeta,
-  payload?: ArrayBuffer,
-): Promise<WriteOutcome> {
+  const gzip = new Uint8Array(await object.arrayBuffer());
   const admitted = await admitInternalRegistryOperation(step.env, {
     operation: "bundle_put",
     owner: { kind: "system", id: `source:${step.scopeKey}` },
@@ -741,406 +601,17 @@ async function writeBundle(
   if (!admitted.ok) return "retry";
   let outcome: "ok" | "error" | "unknown" = "unknown";
   try {
-    const ingested = await ingestScenarioBundle(step.env, drizzle(step.env.DB), {
-      rev,
-      payload,
-      meta,
+    const refused = await ingestSourceBundle(step.env, {
       organizationId: step.organizationId,
-      applyCatalog: false,
+      rev,
+      gzip,
+      stored: stored !== null,
     });
-    if (!ingested.ok) {
-      outcome = "error";
-      return invalid(
-        "course catalog references unavailable scenarios: " +
-          ingested.invalidScenarioIds.join(", "),
-      );
-    }
-    outcome = "ok";
-    return "done";
-  } catch (error) {
-    if (isCandidateSourceLocked(error)) {
-      outcome = "error";
-      return "retry";
-    }
-    if (error instanceof AppError && error.code === "rev_scope_conflict") {
-      outcome = "error";
-      return invalid(REV_SCOPE_CONFLICT);
-    }
-    if (
-      error instanceof ScenarioBundleIngestError &&
-      ["validate_catalog_references", "check_rev_scope"].includes(error.stage)
-    ) {
-      outcome = "error";
-    }
-    throw error;
+    outcome = refused === null ? "ok" : "error";
+    return refused === null ? "done" : invalid(refused);
   } finally {
     await admitted.lease.complete(outcome);
   }
-}
-
-// A public head back at live_rev while another rev's catalog is applied: that
-// rev took the catalog-first route and was abandoned by a force-push or a
-// reset, and nothing else would restore live_rev. live_rev becomes the target
-// again, so heal restages it and apply promotes it once more, which restores
-// its catalog and re-enables what the other catalog disabled. The drain hold
-// and the unit guard hold it like any target. Supersede skips live_rev's row,
-// so a restore the head moved on from returns that row to `live`.
-async function retargetLiveRev(step: Step): Promise<void> {
-  if (step.organizationId !== null) return;
-  const abandoned = `SELECT live_rev FROM scenario_sources WHERE scope_key = ?1
-      AND live_rev = ${headRev("?1", "?2")}
-      AND live_rev IS NOT (SELECT source_revision FROM course_catalogs WHERE scope_key = 'public')
-      AND NOT EXISTS (SELECT 1 FROM scenario_source_commits
-        WHERE scope_key = ?1 AND purpose = 'deploy' AND state = 'promoting')`;
-  const now = Date.now();
-  await step.env.DB.batch([
-    step.env.DB.prepare(
-      `UPDATE scenario_sources SET target_rev = live_rev, updated_at = ?3
-        WHERE scope_key = ?1 AND target_rev IS NOT live_rev AND live_rev IN (${abandoned})`,
-    ).bind(step.scopeKey, step.digest, now),
-    step.env.DB.prepare(
-      `UPDATE scenario_source_commits SET state = 'building', detail = NULL, updated_at = ?3
-        WHERE scope_key = ?1 AND purpose = 'deploy' AND state = 'live' AND rev IN (${abandoned})`,
-    ).bind(step.scopeKey, step.digest, now),
-    step.env.DB.prepare(
-      `UPDATE scenario_source_commits SET state = 'live', detail = NULL, updated_at = ?3
-        WHERE scope_key = ?1 AND purpose = 'deploy' AND state IN ('building', 'waiting', 'failed')
-          AND rev = (SELECT live_rev FROM scenario_sources WHERE scope_key = ?1)
-          AND rev IS NOT ${headRev("?1", "?2")}`,
-    ).bind(step.scopeKey, step.digest, now),
-  ]);
-}
-
-// While the target is not live: an exact build that failed or went silent
-// fails the row, and nothing retries it, so a build that hangs every time
-// cannot loop. One superseded or retired is requeued, and reusable candidates
-// the target lacks are restaged, under the same try cap. That covers a build
-// deduplicated onto an older rev's and a candidate row the collector retired.
-// `ready` means every exact build succeeded and its candidate is staged. A
-// finished heal answers `again`: nothing else pokes a target it made ready.
-async function failOrHeal(step: Step): Promise<"again" | "ready" | "idle"> {
-  const target = await step.env.DB.prepare(
-    `SELECT c.id, c.rev, c.attempt, c.state FROM scenario_source_commits AS c
-      JOIN scenario_sources AS s ON s.scope_key = c.scope_key
-      WHERE c.scope_key = ?1 AND c.purpose = 'deploy' AND c.rev = s.target_rev
-        AND c.state IN ('building', 'waiting', 'awaiting_promote')`,
-  )
-    .bind(step.scopeKey)
-    .first<CommitRow>();
-  if (!target) return "idle";
-  const db = drizzle(step.env.DB);
-  const [bundle] = await db
-    .select({ metaJson: imageBuildBundles.metaJson })
-    .from(imageBuildBundles)
-    .where(eq(imageBuildBundles.rev, target.rev))
-    .limit(1);
-  if (!bundle) return "idle";
-  const meta = bundle.metaJson as ParsedBundleMeta;
-  const hashes = [...new Set(meta.scenarios.map((scenario) => scenario.contentHash))];
-  const builds = hashes.length
-    ? await db
-        .select({
-          scenarioId: imageBuilds.scenarioId,
-          arch: imageBuilds.arch,
-          contentHash: imageBuilds.contentHash,
-          status: imageBuilds.status,
-          error: imageBuilds.error,
-          artifactsRetiredAt: imageBuilds.artifactsRetiredAt,
-          published: sql<number>`${imageBuilds.publishedManifestJson} IS NOT NULL`,
-        })
-        .from(imageBuilds)
-        .where(hashIn(hashes))
-    : [];
-  const staged = new Set(
-    (
-      await db
-        .select({ scenarioId: scenarioCatalogCandidates.scenarioId })
-        .from(scenarioCatalogCandidates)
-        .where(
-          and(
-            eq(scenarioCatalogCandidates.revision, target.rev),
-            sql`${scenarioCatalogCandidates.organizationId} IS ${step.organizationId}`,
-          ),
-        )
-    ).map((row) => row.scenarioId),
-  );
-  let heal = false;
-  let ready = true;
-  for (const scenario of meta.scenarios) {
-    const build = builds.find(
-      (candidate) =>
-        candidate.scenarioId === scenario.scenarioId &&
-        candidate.arch === scenario.arch &&
-        candidate.contentHash === scenario.contentHash,
-    );
-    const superseded =
-      build?.status === "stale" &&
-      Boolean(build.error?.startsWith(SUPERSEDED_BUILD_ERROR_PREFIX));
-    if (build?.status === "failed" || (build?.status === "stale" && !superseded)) {
-      await settle(step, target, {
-        state: "failed",
-        detail:
-          `image build ${scenario.scenarioId} (${scenario.arch}) ${build.status}: ` +
-          (build.error ?? "no error"),
-      });
-      return "idle";
-    }
-    const unstaged =
-      build?.status === "succeeded" &&
-      Boolean(build.published) &&
-      !staged.has(scenario.scenarioId);
-    heal ||= !build || superseded || build.artifactsRetiredAt !== null || unstaged;
-    ready &&= build?.status === "succeeded" && staged.has(scenario.scenarioId);
-  }
-  if (!heal) return ready ? "ready" : "idle";
-
-  const key = tryKey(target, "heal");
-  const tries = ((await step.storage.get<number>(key)) ?? 0) + 1;
-  await step.storage.put(key, tries);
-  if (tries > MAX_TRIES) {
-    await settle(step, target, { state: "failed", detail: "heal did not finish" });
-    await step.storage.delete(key);
-    return "idle";
-  }
-  const outcome = await writeBundle(step, target.rev, meta);
-  if (outcome === "retry") {
-    await step.storage.put(key, tries - 1);
-    return "again";
-  }
-  await step.storage.delete(key);
-  if (outcome === "done") return "again";
-  await settle(step, target, outcome);
-  return "idle";
-}
-
-interface Promotion {
-  env: Cloudflare.Env;
-  scopeKey: string;
-  organizationId: string | null;
-}
-
-const REFUSAL_STATES = {
-  incomplete_builds: "building",
-  incomplete_catalog: "building",
-  image_in_use: "waiting",
-  ownership_conflict: "invalid",
-  // Only Intar's image promotion asks; the DO never does.
-  not_promotable: "waiting",
-  // Only Intar's image promotion passes a fence; the DO never does.
-  fenced: "waiting",
-} as const satisfies Record<CandidatePromotionRefusal["kind"], ScenarioSourceCommitState>;
-
-// An operator's image release or Intar's own promotion hold.
-const fleetDrained = sql.raw(runsHeldCondition());
-
-/**
- * The target may start to apply: it is still the head, the binding may write,
- * and for `public` no drain holds the fleet.
- */
-const mayApply = (step: Step, rev: string) => sql`EXISTS (SELECT 1 FROM scenario_sources
-  WHERE scope_key = ${step.scopeKey} AND target_rev = ${rev}
-    AND target_rev = 'git-' || github_repository_id || '-' || head_sha || '-' || ${step.digest}
-    AND ${scenarioSourceBindingPredicate()}
-    AND (organization_id IS NOT NULL OR NOT ${fleetDrained}))`;
-
-// Promotes a ready target that is still the head. The unit guard holds it in
-// `waiting` while a run with access would lose it, and for `public` so does a
-// fleet drain. `promoting` is written only while the target may
-// apply, so a pause or a drain during this alarm stops it here. A public
-// commit that replaces a live image takes the catalog-first route instead.
-async function promoteTarget(step: Step): Promise<boolean> {
-  const target = await step.env.DB.prepare(
-    `SELECT c.id, c.rev, c.attempt, c.state FROM scenario_source_commits AS c
-      JOIN scenario_sources AS s ON s.scope_key = c.scope_key
-      WHERE c.scope_key = ?1 AND c.purpose = 'deploy' AND c.rev = s.target_rev
-        AND c.state IN ('building', 'waiting')`,
-  )
-    .bind(step.scopeKey)
-    .first<CommitRow>();
-  if (!target) return false;
-  const bundle = await loadBundle(step.env, target.rev);
-  if (
-    !bundle ||
-    bundle.organizationId !== step.organizationId ||
-    !isRecord(bundle.meta.source) ||
-    bundle.meta.source.scope !== (await scopeLabel(step))
-  ) {
-    await settle(step, target, invalid("the bundle does not belong to this binding"));
-    return false;
-  }
-  const db = drizzle(step.env.DB);
-  if (
-    step.organizationId === null &&
-    (await db.get<{ drained: number }>(sql`SELECT ${fleetDrained} AS drained`))?.drained
-  ) {
-    await settle(step, target, { state: "waiting", detail: "the fleet is drained for an image swap" });
-    return false;
-  }
-  if (await countUnitGuardRuns(step.env.DB, step.organizationId, bundle.meta.courseCatalog)) {
-    await settle(step, target, { state: "waiting", detail: "active runs would lose access" });
-    return false;
-  }
-  if (step.organizationId === null && (await replacesLiveImages(db, bundle.meta))) {
-    return applyCatalogFirst(step, target, bundle.meta);
-  }
-  const written = await db.run(sql`UPDATE scenario_source_commits
-    SET state = 'promoting', detail = NULL, updated_at = ${Date.now()}
-    WHERE id = ${target.id} AND attempt = ${target.attempt} AND state = ${target.state}
-      AND ${mayApply(step, target.rev)}`);
-  if (!written.meta.changes) return false;
-  return promote(step, { ...target, state: "promoting" });
-}
-
-/** Whether promoting `meta` replaces a live image, by the core's own measure. */
-async function replacesLiveImages(
-  db: DrizzleD1Database,
-  meta: ParsedBundleMeta,
-): Promise<boolean> {
-  const hashes = [...new Set(meta.scenarios.map((scenario) => scenario.contentHash))];
-  if (!hashes.length) return false;
-  const builds = await db
-    .select({
-      scenarioId: imageBuilds.scenarioId,
-      arch: imageBuilds.arch,
-      contentHash: imageBuilds.contentHash,
-      manifest: imageBuilds.publishedManifestJson,
-    })
-    .from(imageBuilds)
-    .where(hashIn(hashes));
-  const incoming = incomingFamilyImages(
-    meta.scenarios,
-    meta.scenarios.map((item) =>
-      builds.find(
-        (build) =>
-          build.scenarioId === item.scenarioId &&
-          build.arch === item.arch &&
-          build.contentHash === item.contentHash,
-      ),
-    ),
-  );
-  const live = await loadFamilyImageIdsMap(db, incoming);
-  return outgoingFamilyImageIds(incoming, live).length > 0;
-}
-
-// A public commit that replaces a live image: its catalog applies here, and
-// its images go live only through Intar's image promotion. The re-read before
-// the sync stops an alarm whose binding was paused, or whose fleet was
-// drained, since it began. `awaiting_promote` needs the complete candidate
-// set; a candidate the collector retired meanwhile is heal's to restage.
-async function applyCatalogFirst(
-  step: Step,
-  target: CommitRow,
-  meta: ParsedBundleMeta,
-): Promise<boolean> {
-  const db = drizzle(step.env.DB);
-  if (!(await db.get(sql`SELECT 1 AS open WHERE ${mayApply(step, target.rev)}`))) {
-    return false;
-  }
-  await syncCourseCatalogSnapshot(db, {
-    snapshot: meta.courseCatalog,
-    sourceRevision: target.rev,
-    organizationId: null,
-    nowUnixMs: Date.now(),
-  });
-  const ids = [...new Set(meta.scenarios.map((scenario) => scenario.scenarioId))];
-  const entered = await db.run(sql`UPDATE scenario_source_commits
-    SET state = 'awaiting_promote', detail = NULL, updated_at = ${Date.now()}
-    WHERE id = ${target.id} AND attempt = ${target.attempt} AND state = ${target.state}
-      AND NOT EXISTS (SELECT 1 FROM json_each(${JSON.stringify(ids)}) AS expected
-        WHERE expected.value NOT IN (SELECT scenario_id FROM scenario_catalog_candidates
-          WHERE revision = ${target.rev} AND organization_id IS NULL))`);
-  return !entered.meta.changes;
-}
-
-/** Finishes a `promoting` row. Null when there is none, else whether to re-arm. */
-async function finishPromotion(
-  env: Cloudflare.Env,
-  scopeKey: string,
-  organizationId: string | null,
-): Promise<boolean | null> {
-  const row = await env.DB.prepare(
-    `SELECT id, rev, attempt, state FROM scenario_source_commits
-      WHERE scope_key = ?1 AND purpose = 'deploy' AND state = 'promoting'`,
-  )
-    .bind(scopeKey)
-    .first<CommitRow>();
-  return row ? promote({ env, scopeKey, organizationId }, row) : null;
-}
-
-// Runs the promotion core under a pointer_mutation writer, then the catalog,
-// then one batch that makes the row live. The core is idempotent through
-// `alreadyPromoted`, so a refused writer or a throw keeps `promoting` and a
-// later alarm finishes it. A refusal from the core has written nothing.
-async function promote(step: Promotion, row: CommitRow): Promise<boolean> {
-  const bundle = await loadBundle(step.env, row.rev);
-  if (!bundle) throw new Error(`promoting rev ${row.rev} has no bundle`);
-  const admitted = await admitInternalRegistryOperation(step.env, {
-    operation: "pointer_mutation",
-    owner: { kind: "system", id: `source:${step.scopeKey}` },
-  });
-  if (!admitted.ok) return true;
-  const db = drizzle(step.env.DB);
-  const writer = createRegistryWriterGuard(admitted.lease);
-  let result: CandidatePromotionResult;
-  try {
-    result = await promoteCandidateRevision(step.env, db, writer, {
-      revision: row.rev,
-      bundle,
-      nowUnixMs: Date.now(),
-    });
-    if (result.ok) await writer.release("ok");
-  } finally {
-    await writer.finish();
-  }
-  if (!result.ok) {
-    await settle(step, row, { state: REFUSAL_STATES[result.kind], detail: result.error });
-    return false;
-  }
-  // Committed, including a host reconcile that failed: the host alarms finish
-  // it. There is no second unit guard.
-  await syncCourseCatalogSnapshot(db, {
-    snapshot: bundle.meta.courseCatalog,
-    sourceRevision: row.rev,
-    organizationId: step.organizationId,
-    nowUnixMs: Date.now(),
-  });
-  const now = Date.now();
-  // Only a retarget promotes live_rev again. Its catalog went live with every
-  // linked scenario enabled; the core re-enables the bundled ones, and this
-  // the others that the abandoned catalog disabled.
-  const linked = JSON.stringify(linkedScenarioIds(bundle.meta.courseCatalog));
-  await db.run(sql`UPDATE vm_scenarios SET enabled = 1, enabled_at = ${now}, updated_at = ${now}
-    WHERE organization_id IS ${step.organizationId} AND enabled = 0
-      AND scenario_id IN (SELECT value FROM json_each(${linked}))
-      AND EXISTS (SELECT 1 FROM scenario_sources WHERE scope_key = ${step.scopeKey} AND live_rev = ${row.rev})`);
-  // One transaction: the live commit moves with its row, and the previous
-  // live row is superseded, so its rev can be delivered again.
-  const promoting = `EXISTS (SELECT 1 FROM scenario_source_commits
-    WHERE id = ?1 AND attempt = ?2 AND state = 'promoting')`;
-  const statements = [
-    `UPDATE scenario_sources SET live_rev = ?3, live_at = ?5, updated_at = ?5,
-        live_sha = (SELECT sha FROM scenario_source_commits WHERE id = ?1)
-      WHERE scope_key = ?4 AND ${promoting}`,
-    `UPDATE scenario_source_commits SET state = 'superseded', updated_at = ?5
-      WHERE scope_key = ?4 AND purpose = 'deploy' AND state = 'live' AND ${promoting}`,
-    `UPDATE scenario_source_commits SET state = 'live', detail = NULL, updated_at = ?5
-      WHERE id = ?1 AND attempt = ?2 AND state = 'promoting'`,
-  ];
-  await step.env.DB.batch(
-    statements.map((statement) =>
-      step.env.DB.prepare(statement).bind(row.id, row.attempt, row.rev, step.scopeKey, now),
-    ),
-  );
-  return false;
-}
-
-async function loadBundle(env: Cloudflare.Env, rev: string) {
-  const [bundle] = await drizzle(env.DB)
-    .select({ organizationId: imageBuildBundles.organizationId, meta: imageBuildBundles.metaJson })
-    .from(imageBuildBundles)
-    .where(eq(imageBuildBundles.rev, rev))
-    .limit(1);
-  return bundle && { organizationId: bundle.organizationId, meta: bundle.meta as ParsedBundleMeta };
 }
 
 /** The last check state sent, and the row and check run it was sent for. */
@@ -1166,8 +637,7 @@ const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_r
   FROM scenario_source_commits WHERE scope_key = ?1 AND purpose = 'deploy'`;
 
 // A superseded head row waits to be delivered again, so it shows as queued.
-// The summary says what a row waits for. A catalog-first row waits for Intar's
-// image promotion, which runs at the next idle moment.
+// The summary says what a row waits for.
 const DEPLOY_CHECKS = {
   fetching: { status: "queued", title: "Queued" },
   ingesting: { status: "queued", title: "Queued" },
@@ -1216,36 +686,18 @@ async function syncDeployCheckRun(step: Step, binding: ActiveBinding): Promise<b
 // The tenant projection: the row's own builds by phase, with every error,
 // detail and diagnostic redacted, and no host, fleet or run data.
 async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<CheckRunState> {
-  const bundle = await loadBundle(step.env, row.rev);
-  // A rev another scope owns never shows that scope's bundle.
-  const scenarios = bundle?.organizationId === step.organizationId ? bundle.meta.scenarios : [];
-  const hashes = [...new Set(scenarios.map((scenario) => scenario.contentHash))];
-  const builds = hashes.length
-    ? await drizzle(step.env.DB)
-        .select({
-          scenarioId: imageBuilds.scenarioId,
-          arch: imageBuilds.arch,
-          contentHash: imageBuilds.contentHash,
-          status: imageBuilds.status,
-          phase: imageBuilds.phase,
-          error: imageBuilds.error,
-        })
-        .from(imageBuilds)
-        .where(
-          and(hashIn(hashes), sql`${imageBuilds.organizationId} IS ${step.organizationId}`),
-        )
-    : [];
+  // One revision per scenario; its state, and a failure's learner-safe
+  // reason, is the progress. A rev another scope owns shows nothing.
+  const revisions = (await step.env.DB.prepare(
+    `SELECT revision.scenario_id, revision.state, revision.failure_reason FROM scenario_revisions revision
+      JOIN bundles bundle ON bundle.rev = revision.rev AND bundle.scope_key = ?2
+      WHERE revision.rev = ?1 ORDER BY revision.scenario_id`,
+  ).bind(row.rev, step.scopeKey).all<{ scenario_id: string; state: string; failure_reason: string | null }>()).results;
   let built = 0;
-  const lines = scenarios.map(({ scenarioId, arch, contentHash }) => {
-    const build = builds.find(
-      (candidate) =>
-        candidate.scenarioId === scenarioId &&
-        candidate.arch === arch &&
-        candidate.contentHash === contentHash,
-    );
-    if (build?.status === "succeeded") built += 1;
-    const error = build?.error ? `: ${redactHostPaths(build.error)}` : "";
-    return `- ${scenarioId} (${arch}): ${build ? `${build.status}, ${build.phase}${error}` : "queued"}`;
+  const total = revisions.length;
+  const revisionLines = revisions.map(({ scenario_id: scenarioId, state, failure_reason: reason }) => {
+    if (state === "ready" || state === "verified") built += 1;
+    return `- ${scenarioId}: ${state}${reason ? `: ${reason}` : ""}`;
   });
   const diagnostics = parseDiagnostics(row.diagnostics_json).map(({ path, line, message }) => {
     const at = path === undefined ? "" : line === undefined ? `${path}: ` : `${path}:${line}: `;
@@ -1261,15 +713,13 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
     row.is_live_rev && check.status !== "completed"
       ? "Restoring"
       : state === "building"
-        ? `Building ${built}/${scenarios.length}`
-        : state === "awaiting_promote" && (await promotionHolding(drizzle(step.env.DB), row.rev))
-          ? "Promoting images"
-          : check.title;
+        ? `Building ${built}/${total}`
+        : check.title;
   // GitHub renders the summary as Markdown and drops tags such as `<path>`.
   const summary = [
     ...(row.detail === null ? [] : [redactHostPaths(row.detail)]),
     ...diagnostics,
-    ...lines,
+    ...revisionLines,
   ]
     .join("\n")
     .replaceAll("&", "&amp;")
@@ -1320,20 +770,9 @@ async function sendCheck(
   return sent;
 }
 
-/** The scope `intar.yaml` must name: `public` or the organization's slug. */
-async function scopeLabel(step: Pick<Step, "env" | "organizationId">) {
-  if (step.organizationId === null) return "public";
-  const [owner] = await drizzle(step.env.DB)
-    .select({ slug: organization.slug })
-    .from(organization)
-    .where(eq(organization.id, step.organizationId))
-    .limit(1);
-  return owner?.slug;
-}
-
 // ponytail: a counter of a row that observe supersedes mid-try stays in DO
 // storage; clear them by prefix if a binding ever holds many.
-function tryKey(row: CommitRow, step: "fetch" | "ingest" | "heal"): string {
+function tryKey(row: CommitRow, step: "fetch" | "ingest"): string {
   return `try:${row.id}:${row.attempt}:${step}`;
 }
 
@@ -1370,19 +809,6 @@ async function deleteStagedObjects(
     STAGED_FILES.map((file) => `${stagedSourceObjectPrefix(scopeKey, rev, purpose)}${file}`),
   );
   if (keys.length) await env.VM_IMAGE_REGISTRY_BUCKET.delete(keys);
-}
-
-async function refusalText(response: Response): Promise<string> {
-  const body = (await response.json().catch(() => null)) as { error?: unknown } | null;
-  return typeof body?.error === "string" ? body.error : `refused with ${response.status}`;
-}
-
-function parseJson(value: string | Uint8Array): unknown {
-  try {
-    return JSON.parse(typeof value === "string" ? value : new TextDecoder().decode(value));
-  } catch {
-    return undefined;
-  }
 }
 
 /**

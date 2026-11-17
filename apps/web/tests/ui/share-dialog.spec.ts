@@ -295,7 +295,7 @@ test.describe("sharing a run", () => {
 
     // The start's response is the record without the answer; the run page
     // asks for the full record once and then offers Share.
-    await page.goto("/runs/start/repair-nginx", { waitUntil: "domcontentloaded" });
+    await page.goto("/runs/start/intar/repair-nginx", { waitUntil: "domcontentloaded" });
     await expect(page).toHaveURL("/runs/run-active");
     await expect(
       actions(page).getByRole("button", { name: "Share" }),

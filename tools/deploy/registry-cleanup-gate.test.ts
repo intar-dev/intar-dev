@@ -24,7 +24,6 @@ const gateUrl = "https://intar.dev/api/maintenance/registry-cleanup";
 // Every test here spawns the gate, which itself spawns wrangler and curl, so
 // the default timeout is too tight when the whole suite runs in parallel.
 const SPAWN_TIMEOUT_MS = 30_000;
-const scannedDigest = "1".repeat(64);
 // A healthy hop, and the answer a traced 502 is measured against. Real curl
 // writes CRLF line endings, so this block carries them and the parser must
 // strip them.
@@ -47,36 +46,29 @@ function nestedEnvelope(action: string, result: unknown): Record<string, unknown
   return { action, result };
 }
 
-/** The run result the collector nests inside its envelope. */
-function innerResult(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+/** The OCI sweep report the collector nests inside its envelope. */
+function sweepReport(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-      completed: true,
-      deletedObjects: 5,
-      deletedBytes: 500,
-      failedObjects: 0,
-      skippedObjects: 0,
-      wouldDeleteObjects: 5,
-      wouldDeleteBytes: 500,
-      blockedObjects: 0,
-      planSummary: { details: { candidateTotal: 5 } },
-      postState: {
-        scanned: { objects: 7, bytes: 700, digest: scannedDigest },
-        expected: { objects: 7, bytes: 700, digest: scannedDigest },
-        unchanged: true,
-        truncated: false,
-        unrecognizedObjects: 0,
-      },
-      verifiedDeletedObjects: 5,
-      verifiedDeletedBytes: 500,
-      unverifiedObjects: 0,
-      unverifiedKeys: [],
-      deletedKeys: ["image-chunks/v1/zstd6/aa"],
-      deletedKeysTruncated: false,
-      deletedKeysDigest: "2".repeat(64),
-      resumeRequired: false,
-      phases: {},
-      error: null,
-      ...overrides,
+    mode: "delete",
+    completed: true,
+    resumeRequired: false,
+    faults: [],
+    startAfter: null,
+    nextStartAfter: null,
+    listedObjects: 7,
+    listedBytes: 700,
+    unrecognizedObjects: 0,
+    markedObjects: 2,
+    youngObjects: 0,
+    candidateObjects: 5,
+    candidateBytes: 500,
+    candidateSample: ["oci/sha256/" + "a".repeat(64)],
+    deletedObjects: 5,
+    deletedBytes: 500,
+    revisionCandidates: 0,
+    deletedRevisions: 0,
+    error: null,
+    ...overrides,
   };
 }
 
@@ -86,14 +78,14 @@ function runEnvelope(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
+    schemaVersion: 2,
     status,
     mode: "delete",
     maintenance: "off",
     maintenanceSource: "control-plane",
     source: "rpc",
-    plan: null,
     error: (overrides.error as string | null) ?? null,
-    result: innerResult(overrides),
+    result: sweepReport(overrides),
   };
 }
 
@@ -107,7 +99,7 @@ function reportEnvelope(overrides: {
   maintenance?: string | null;
   maintenanceSource?: string | null;
   status?: string;
-  plan?: unknown;
+  result?: unknown;
 } = {}): string {
   const base = zeroCandidateReport();
   return JSON.stringify(
@@ -120,37 +112,31 @@ function reportEnvelope(overrides: {
         overrides.maintenanceSource === undefined
           ? "control-plane"
           : overrides.maintenanceSource,
-      plan: overrides.plan === undefined ? base.plan : overrides.plan,
+      result: overrides.result === undefined ? base.result : overrides.result,
     }),
   );
 }
 
+/** A report-only plan of the whole store, in one window, with no candidate. */
 function zeroCandidateReport(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    schemaVersion: 2,
     status: "report-only",
     mode: "delete",
     maintenance: "off",
     maintenanceSource: "control-plane",
     source: "rpc",
     error: null,
-    result: null,
-    plan: {
-      candidateObjects: [],
-      objectsScanned: 7,
-      retainedObjects: 7,
-      truncated: false,
-      details: {
-        faults: [],
-        deleteAllowedByReferences: true,
-        candidateTotal: 0,
-        keysets: {
-          scanned: { objects: 7, bytes: 700, digest: scannedDigest },
-          retained: { objects: 7, bytes: 700, digest: scannedDigest },
-          candidates: { objects: 0, bytes: 0, digest: "3".repeat(64) },
-        },
-      },
+    result: sweepReport({
+      mode: "report-only",
+      completed: false,
+      candidateObjects: 0,
+      candidateBytes: 0,
+      candidateSample: [],
+      deletedObjects: 0,
+      deletedBytes: 0,
       ...overrides,
-    },
+    }),
   };
 }
 
@@ -170,6 +156,10 @@ interface RunOptions {
   statusBody?: string;
   statusStatus?: string;
   planBody?: string;
+  /** One body per plan call, in order and then again from the first. */
+  planBodies?: string[];
+  /** The most report windows one plan walk asks for. */
+  planWindows?: number;
   planStatus?: string;
   /** The answer to a resume, which only a hold that finds a leftover sends. */
   resumeBody?: string;
@@ -276,7 +266,14 @@ function fakeCurl(): string {
     '        ;;',
     '      plan)',
     '        write_headers "$MOCK_HEADERS"',
-    '        printf "%s" "$MOCK_PLAN_BODY" > "$output"',
+    '        if [ -n "$MOCK_PLAN_BODIES" ]; then',
+    '          index="$(cat "$MOCK_PLAN_COUNTER" 2>/dev/null || echo 0)"',
+    '          printf "%s" "$(( index + 1 ))" > "$MOCK_PLAN_COUNTER"',
+    '          count="$(jq -r "length" "$MOCK_PLAN_BODIES")"',
+    '          jq -jr ".[$(( index % count ))]" "$MOCK_PLAN_BODIES" > "$output"',
+    '        else',
+    '          printf "%s" "$MOCK_PLAN_BODY" > "$output"',
+    '        fi',
     '        printf "%s" "$MOCK_PLAN_STATUS"',
     '        ;;',
     '      resume)',
@@ -345,6 +342,10 @@ function runGate(options: RunOptions = {}) {
   const runStatuses = join(root, "run-statuses.json");
   const runHeaders = join(root, "run-headers.json");
   const runCounter = join(root, "run-counter");
+  const planBodies = join(root, "plan-bodies.json");
+  if (options.planBodies !== undefined) {
+    writeFileSync(planBodies, JSON.stringify(options.planBodies));
+  }
   mkdirSync(bin, { recursive: true });
   mkdirSync(runnerTemp, { recursive: true });
   const bunx = join(bin, "bunx");
@@ -425,9 +426,14 @@ function runGate(options: RunOptions = {}) {
     MOCK_PLAN_STATUS: options.planStatus ?? "200",
     MOCK_PLAN_BODY:
       options.planBody ??
-      // The shape the core builds: a complete, unfaulted plan that allows
-      // deletes by reference.
-      '{"action":"plan","status":"report-only","plan":{"candidateObjects":[{"key":"image-chunks/v1/zstd6/aa"}],"objectsScanned":42,"truncated":false,"details":{"faults":[],"deleteAllowedByReferences":true,"candidateTotal":1}}}',
+      // A clean report of the whole store in one window, with one candidate.
+      JSON.stringify(
+        nestedEnvelope("plan", zeroCandidateReport({
+          candidateObjects: 1,
+          candidateBytes: 100,
+          candidateSample: ["oci/sha256/" + "a".repeat(64)],
+        })),
+      ),
     // A release is a resume too, so without its own answer a resume gets the
     // gate answer every other action gets.
     MOCK_RESUME_STATUS: options.resumeStatus ?? options.status ?? "200",
@@ -439,7 +445,10 @@ function runGate(options: RunOptions = {}) {
     // The wrapper applies the Linux argument limit and then runs the real jq.
     MOCK_REAL_JQ: realJq,
     MOCK_RUN_COUNTER: runCounter,
+    MOCK_PLAN_BODIES: options.planBodies === undefined ? "" : planBodies,
+    MOCK_PLAN_COUNTER: join(root, "plan-counter"),
     REGISTRY_CLEANUP_RUN_PASSES: String(options.runPasses ?? 64),
+    REGISTRY_CLEANUP_PLAN_WINDOWS: String(options.planWindows ?? 64),
     REGISTRY_CLEANUP_RUN_SLEEP_S: "0",
     MOCK_CURL_ARGS: curlArgs,
     MOCK_CURL_STDIN: curlStdin,
@@ -546,17 +555,14 @@ describe("registry cleanup delete campaign", () => {
           reason: null,
           passes: 3,
           deleted_objects_total: 15,
-          verified_deleted_objects_total: 15,
-          post_state_digest: scannedDigest,
+          deleted_bytes_total: 1500,
           final_report: {
             ok: true,
-            candidate_total: 0,
-            candidate_objects: 0,
+            reason: null,
+            windows: 1,
+            candidates: 0,
             faults: 0,
-            truncated: false,
-            delete_allowed_by_references: true,
-            post_digest_match: true,
-            expected_scanned_digest: scannedDigest,
+            complete: true,
           },
         },
       });
@@ -570,10 +576,9 @@ describe("registry cleanup delete campaign", () => {
     }
   });
 
-  it("records claimed and verified bytes per pass and as a campaign total", () => {
-    // Reclaimed bytes are the operator's number, and the core reports both the
-    // bytes the delete calls claimed and the bytes a re-read proved absent.
-    // Two passes with different values prove the per-pass fields and the sum.
+  it("records deleted bytes and revisions per pass and as a campaign total", () => {
+    // Reclaimed bytes are the operator's number. Two passes with different
+    // values prove the per-pass fields and the sum.
     const run = runGate({
       action: "run",
       targetMode: "delete",
@@ -584,19 +589,18 @@ describe("registry cleanup delete campaign", () => {
           runEnvelope("pending", {
             completed: false,
             resumeRequired: true,
+            nextStartAfter: "b".repeat(64),
             deletedObjects: 3,
             deletedBytes: 300,
-            verifiedDeletedObjects: 2,
-            verifiedDeletedBytes: 200,
+            deletedRevisions: 1,
           }),
         ),
         nestedEnvelope(
           "run",
           runEnvelope("ok", {
+            startAfter: "b".repeat(64),
             deletedObjects: 4,
             deletedBytes: 450,
-            verifiedDeletedObjects: 4,
-            verifiedDeletedBytes: 450,
           }),
         ),
       ],
@@ -609,9 +613,9 @@ describe("registry cleanup delete campaign", () => {
       expect(campaign).toHaveLength(2);
       expect(campaign).toMatchObject([
         { pass: 1, status: "pending", deleted_objects: 3, deleted_bytes: 300,
-          verified_deleted_objects: 2, verified_deleted_bytes: 200 },
+          deleted_revisions: 1, next_start_after: "b".repeat(64), resume_required: true },
         { pass: 2, status: "ok", completed: true, deleted_objects: 4, deleted_bytes: 450,
-          verified_deleted_objects: 4, verified_deleted_bytes: 450 },
+          start_after: "b".repeat(64), next_start_after: null },
       ]);
       expect(run.evidence).toMatchObject({
         run: {
@@ -619,8 +623,7 @@ describe("registry cleanup delete campaign", () => {
           passes: 2,
           deleted_objects_total: 7,
           deleted_bytes_total: 750,
-          verified_deleted_objects_total: 6,
-          verified_deleted_bytes_total: 650,
+          deleted_revisions_total: 1,
         },
       });
     } finally {
@@ -701,81 +704,50 @@ describe("registry cleanup delete campaign", () => {
       targetMode: "delete",
       liveMode: "delete",
       runBodies: [nestedEnvelope("run", runEnvelope("ok"))],
+      // The preflight and the final report read the same answer, so the
+      // preflight passes with candidates and the final report refuses them.
       planBody: JSON.stringify(
-        nestedEnvelope("plan", {
-          ...zeroCandidateReport(),
-          plan: {
-            ...(zeroCandidateReport().plan as Record<string, unknown>),
-            candidateObjects: [{ key: "image-chunks/v1/zstd6/left-behind" }],
-            details: {
-              faults: [],
-              deleteAllowedByReferences: true,
-              candidateTotal: 3,
-              keysets: {
-                scanned: { objects: 7, bytes: 700, digest: scannedDigest },
-                retained: { objects: 4, bytes: 400, digest: "4".repeat(64) },
-                candidates: { objects: 3, bytes: 300, digest: "5".repeat(64) },
-              },
-            },
-          },
-        }),
+        nestedEnvelope("plan", zeroCandidateReport({
+          candidateObjects: 3,
+          candidateSample: ["oci/sha256/" + "c".repeat(64)],
+        })),
       ),
     });
     try {
       expect(run.result.status).not.toBe(0);
       expect(run.evidence).toMatchObject({
-        run: { ok: false, passes: 1, final_report: { ok: false, candidate_total: 3, candidate_objects: 1 } },
+        run: { ok: false, passes: 1, final_report: { ok: false, candidates: 3 } },
       });
+      expect(String((run.evidence as { run: { final_report: { reason: string } } }).run.final_report.reason))
+        .toContain("still lists 3 candidate(s)");
     } finally {
       run.cleanup();
     }
   });
 
-  it("refuses a campaign whose final report keyset moved", () => {
-    const moved = zeroCandidateReport();
-    const movedPlan = moved.plan as Record<string, unknown>;
-    const movedDetails = movedPlan.details as Record<string, unknown>;
-    movedDetails.keysets = {
-      scanned: { objects: 7, bytes: 700, digest: "6".repeat(64) },
-      retained: { objects: 7, bytes: 700, digest: "6".repeat(64) },
-      candidates: { objects: 0, bytes: 0, digest: "3".repeat(64) },
-    };
+  it("walks every window of the store for the final report", () => {
+    // Each window names the next one; the walk asks for each in turn and
+    // the proof covers them all.
     const run = runGate({
       action: "run",
       targetMode: "delete",
       liveMode: "delete",
       runBodies: [nestedEnvelope("run", runEnvelope("ok"))],
-      planBody: JSON.stringify(nestedEnvelope("plan", moved)),
-    });
-    try {
-      expect(run.result.status).not.toBe(0);
-      expect(run.evidence).toMatchObject({
-        run: { ok: false, final_report: { ok: false, post_digest_match: false } },
-      });
-    } finally {
-      run.cleanup();
-    }
-  });
-
-  it("records the delete set under the evidence key cap", () => {
-    const keys = ["image-chunks/v1/zstd6/aa", "image-chunks/v1/zstd6/bb"];
-    const run = runGate({
-      action: "run",
-      targetMode: "delete",
-      liveMode: "delete",
-      runBodies: [nestedEnvelope("run", runEnvelope("ok", { deletedKeys: keys }))],
-      planBody: JSON.stringify(nestedEnvelope("plan", zeroCandidateReport())),
+      planBodies: [
+        JSON.stringify(nestedEnvelope("plan", zeroCandidateReport({ nextStartAfter: "d".repeat(64) }))),
+        JSON.stringify(nestedEnvelope("plan", zeroCandidateReport({ startAfter: "d".repeat(64) }))),
+      ],
     });
     try {
       expect(run.result.status, run.result.stderr).toBe(0);
-      const campaign = (run.evidence as { run: { campaign: Record<string, unknown>[] } })
-        .run.campaign;
-      expect(campaign[0]).toMatchObject({
-        deleted_keys: keys,
-        deleted_keys_retained: 2,
-        deleted_keys_truncated: false,
+      expect(run.evidence).toMatchObject({
+        run: {
+          ok: true,
+          preflight: { inventory: { ok: true, windows: 2, complete: true } },
+          final_report: { ok: true, windows: 2, candidates: 0 },
+        },
       });
-      expect(script).toContain("max_evidence_keys=5000");
+      expect(run.request).toContain('"oci_start_after":"' + "d".repeat(64) + '"');
     } finally {
       run.cleanup();
     }
@@ -799,7 +771,7 @@ describe("registry cleanup delete campaign", () => {
           ok: true,
           preflight: {
             admission: { ok: true, enforcement: "enforce", sessionRequired: true },
-            inventory: { ok: true, truncated: false, faults: 0, delete_allowed_by_references: true },
+            inventory: { ok: true, complete: true, faults: 0, windows: 1 },
           },
         },
       });
@@ -835,13 +807,15 @@ describe("registry cleanup delete campaign", () => {
     }
   });
 
-  it("refuses a campaign whose preflight inventory is truncated", () => {
+  it("refuses a campaign whose preflight inventory is faulted", () => {
     const run = runGate({
       action: "run",
       targetMode: "delete",
       liveMode: "delete",
-      planBody:
-        '{"action":"plan","status":"report-only","plan":{"candidateObjects":[{"key":"aa"}],"objectsScanned":42,"truncated":true,"details":{"faults":[{"code":"listing_truncated"}],"deleteAllowedByReferences":false}}}',
+      planBody: JSON.stringify(nestedEnvelope("plan", {
+        ...zeroCandidateReport({ faults: [{ code: "listing_failed", detail: "list" }] }),
+        status: "core-failed",
+      })),
     });
     try {
       expect(run.result.status).not.toBe(0);
@@ -849,35 +823,9 @@ describe("registry cleanup delete campaign", () => {
         "the delete campaign needs a completed, fault-free report inventory",
       );
       expect(String((run.evidence as { run: { reason: string } }).run.reason)).toContain(
-        "the bucket listing was truncated",
+        "the plan carries 1 fault(s): listing_failed",
       );
       expect(run.request).not.toContain('"action":"run"');
-    } finally {
-      run.cleanup();
-    }
-  });
-
-  it("records the delete set under the evidence key cap", () => {
-    const keys = ["image-chunks/v1/zstd6/aa", "image-chunks/v1/zstd6/bb"];
-    const run = runGate({
-      action: "run",
-      targetMode: "delete",
-      liveMode: "delete",
-      runBodies: [
-        nestedEnvelope("run", runEnvelope("ok", { deletedKeys: keys })),
-      ],
-      planBody: JSON.stringify(nestedEnvelope("plan", zeroCandidateReport())),
-    });
-    try {
-      expect(run.result.status, run.result.stderr).toBe(0);
-      const campaign = (run.evidence as { run: { campaign: Record<string, unknown>[] } })
-        .run.campaign;
-      expect(campaign[0]).toMatchObject({
-        deleted_keys: keys,
-        deleted_keys_retained: 2,
-        deleted_keys_truncated: false,
-      });
-      expect(script).toContain("max_evidence_keys=5000");
     } finally {
       run.cleanup();
     }
@@ -1075,9 +1023,8 @@ describe("registry cleanup deployment gate", () => {
           status: "report-only",
           plan_present: true,
           candidates: 1,
-          scanned_objects: 42,
-          truncated: false,
-          delete_allowed_by_references: true,
+          windows: 1,
+          complete: true,
           faults: 0,
           fault_codes: [],
         },
@@ -1244,18 +1191,22 @@ describe("registry cleanup deployment gate", () => {
     }
   });
 
-  it("refuses a truncated report inventory", () => {
-    // A bounded listing proves nothing about the delete set, so the authority
-    // to delete stays off even though the envelope is otherwise healthy.
+  it("refuses a report inventory that never reaches the end of the store", () => {
+    // A walk that stops before the last window proves nothing about the rest
+    // of the store, so the authority to delete stays off.
     const run = runGate({
       targetMode: "delete",
       liveMode: "report-only",
-      planBody:
-        '{"action":"plan","status":"report-only","plan":{"candidateObjects":[{"key":"aa"}],"objectsScanned":42,"truncated":true,"details":{"faults":[{"code":"listing_truncated"}],"deleteAllowedByReferences":false}}}',
+      planBody: JSON.stringify(
+        nestedEnvelope("plan", zeroCandidateReport({ nextStartAfter: "e".repeat(64) })),
+      ),
+      planWindows: 3,
     });
     try {
       expect(run.result.status).not.toBe(0);
-      expect(run.result.stderr).toContain("the bucket listing was truncated");
+      expect(run.result.stderr).toContain(
+        "the plan walk stopped after 3 window(s), before the end of the store",
+      );
       expect(run.result.stderr).toContain("deletes stay off");
       expect(run.request).not.toContain('"action":"pause"');
       expect(run.evidence).toBeNull();
@@ -1268,42 +1219,33 @@ describe("registry cleanup deployment gate", () => {
     const run = runGate({
       targetMode: "delete",
       liveMode: "report-only",
-      planBody:
-        '{"action":"plan","status":"report-only","plan":{"candidateObjects":[],"objectsScanned":42,"truncated":false,"details":{"faults":[{"code":"retention_projection_failed"}],"deleteAllowedByReferences":false}}}',
+      planBody: JSON.stringify(
+        nestedEnvelope("plan", {
+          ...zeroCandidateReport({ faults: [{ code: "listing_failed", detail: "list" }] }),
+          status: "core-failed",
+        }),
+      ),
     });
     try {
       expect(run.result.status).not.toBe(0);
-      expect(run.result.stderr).toContain(
-        "the plan carries 1 fault(s): retention_projection_failed",
-      );
+      expect(run.result.stderr).toContain("the plan carries 1 fault(s): listing_failed");
     } finally {
       run.cleanup();
     }
   });
 
-  it("refuses an inventory that withheld deletes by reference", () => {
+  it("refuses an inventory whose report carries no fault list", () => {
+    // A report without its fault list proves nothing, so a missing field
+    // refuses instead of being read as consent.
     const run = runGate({
       targetMode: "delete",
       liveMode: "report-only",
-      planBody:
-        '{"action":"plan","status":"report-only","plan":{"candidateObjects":[],"objectsScanned":42,"truncated":false,"details":{"faults":[],"deleteAllowedByReferences":false}}}',
-    });
-    try {
-      expect(run.result.status).not.toBe(0);
-      expect(run.result.stderr).toContain("the plan withheld deletes by reference");
-    } finally {
-      run.cleanup();
-    }
-  });
-
-  it("refuses an inventory whose plan carries no completeness flags", () => {
-    // A plan without the completeness fields proves nothing, so a missing
-    // field refuses instead of being read as consent.
-    const run = runGate({
-      targetMode: "delete",
-      liveMode: "report-only",
-      planBody:
-        '{"action":"plan","status":"report-only","plan":{"candidateObjects":[],"truncated":false}}',
+      planBody: JSON.stringify(
+        nestedEnvelope("plan", {
+          ...zeroCandidateReport(),
+          result: { mode: "report-only", candidateObjects: 0, nextStartAfter: null },
+        }),
+      ),
     });
     try {
       expect(run.result.status).not.toBe(0);
@@ -2088,18 +2030,13 @@ describe("registry cleanup request ceiling", () => {
 }, SPAWN_TIMEOUT_MS);
 
 describe("registry cleanup campaign at the real key volume", () => {
-  // One pass at the real cap: 5000 keys with their byte counts is far past the
-  // 128 KiB a Linux argument holds. Run 34852054022 recorded two such passes in
-  // a shell variable, read a 502 on the third, and lost everything but the 502
-  // body. The fake jq in this harness applies that argument limit on every host,
-  // so a lane that puts pass data on an argument list fails here.
-  const passKeys = (prefix: string): Record<string, unknown>[] =>
-    Array.from({ length: 5000 }, (_, index) => ({
-      key: `image-chunks/v1/zstd6/${prefix}${String(index).padStart(60, "0")}`,
-      bytes: 882495,
-      category: "chunk",
-      image_key: null,
-    }));
+  // Two passes whose samples hold 5000 keys each are far past the 128 KiB a
+  // Linux argument holds. The fake jq in this harness applies that argument
+  // limit on every host, so a lane that puts pass data on an argument list
+  // fails here.
+  const passKeys = (prefix: string): string[] =>
+    Array.from({ length: 5000 }, (_, index) =>
+      `oci/sha256/${prefix}${String(index).padStart(62, "0")}`);
 
   it("keeps two served passes and the 502 that followed them", () => {
     const firstKeys = passKeys("0a");
@@ -2117,9 +2054,7 @@ describe("registry cleanup campaign at the real key volume", () => {
             completed: false,
             deletedObjects: 5000,
             deletedBytes: 6384903433,
-            verifiedDeletedObjects: 5000,
-            verifiedDeletedBytes: 6384903433,
-            deletedKeys: firstKeys,
+            candidateSample: firstKeys,
           }),
         ),
         nestedEnvelope(
@@ -2128,9 +2063,7 @@ describe("registry cleanup campaign at the real key volume", () => {
             completed: false,
             deletedObjects: 5000,
             deletedBytes: 6293164547,
-            verifiedDeletedObjects: 5000,
-            verifiedDeletedBytes: 6293164547,
-            deletedKeys: secondKeys,
+            candidateSample: secondKeys,
           }),
         ),
         // A gateway body, not JSON: this arrives as the raw bytes of the answer.
@@ -2152,12 +2085,11 @@ describe("registry cleanup campaign at the real key volume", () => {
           ok: false,
           passes: 3,
           deleted_objects_total: 10000,
-          verified_deleted_objects_total: 10000,
-          verified_deleted_bytes_total: 12678067980,
+          deleted_bytes_total: 12678067980,
         },
       });
 
-      // Both served passes keep every key, as the CI artifact must.
+      // Both served passes keep their whole sample.
       const [first, second, failed] = record.campaign;
       expect(first).toMatchObject({
         pass: 1,
@@ -2165,21 +2097,16 @@ describe("registry cleanup campaign at the real key volume", () => {
         status: "pending",
         completed: false,
         deleted_objects: 5000,
-        verified_deleted_objects: 5000,
-        verified_deleted_bytes: 6384903433,
-        deleted_keys_retained: 5000,
-        deleted_keys_truncated: false,
+        deleted_bytes: 6384903433,
       });
-      expect((first.deleted_keys as unknown[]).length).toBe(5000);
-      expect((first.deleted_keys as Record<string, unknown>[])[4999]).toMatchObject({
-        key: firstKeys[4999].key,
-      });
+      expect((first.candidate_sample as unknown[]).length).toBe(5000);
+      expect((first.candidate_sample as string[])[4999]).toBe(firstKeys[4999]);
       expect(second).toMatchObject({
         pass: 2,
         gate_class: "ok",
-        verified_deleted_bytes: 6293164547,
+        deleted_bytes: 6293164547,
       });
-      expect((second.deleted_keys as unknown[]).length).toBe(5000);
+      expect((second.candidate_sample as unknown[]).length).toBe(5000);
       // The failed pass records the class that answered, not a served body.
       expect(failed).toMatchObject({
         pass: 3,
@@ -2214,7 +2141,7 @@ describe("registry cleanup campaign at the real key volume", () => {
       ) as Record<string, unknown>[];
       expect(journal).toHaveLength(3);
       expect(journal.map((row) => row.pass)).toEqual([1, 2, 3]);
-      expect((journal[0].deleted_keys as unknown[]).length).toBe(5000);
+      expect((journal[0].candidate_sample as unknown[]).length).toBe(5000);
       // One status call, one plan call, then exactly three passes: the lane
       // stops at the 502 with no retry of it and no fourth pass, and it asks
       // for no final report because the campaign never finished.
@@ -2301,7 +2228,7 @@ describe("registry cleanup report preview", () => {
           maintenance_source_control_plane: true,
           problem: null,
           ok: true,
-          inventory: { ok: true, truncated: false, faults: 0, delete_allowed_by_references: true },
+          inventory: { ok: true, complete: true, faults: 0, windows: 1 },
         },
       });
       // One plan call, one bucket scan: the envelope in hand is evaluated, not
@@ -2348,7 +2275,7 @@ describe("registry cleanup report preview", () => {
         maintenance: "on",
         maintenanceSource: "unavailable",
         status: "fenced",
-        plan: null,
+        result: null,
       }),
     });
     try {
@@ -2362,23 +2289,23 @@ describe("registry cleanup report preview", () => {
     }
   });
 
-  it("refuses a faulted, truncated, or absent plan", () => {
-    const faulted = zeroCandidateReport();
-    (faulted.plan as Record<string, unknown>).details = {
-      faults: [{ code: "retention_projection_failed" }],
-      deleteAllowedByReferences: false,
-      candidateTotal: 0,
-      keysets: {},
-    };
-    const truncated = zeroCandidateReport();
-    (truncated.plan as Record<string, unknown>).truncated = true;
+  it("refuses a faulted, incomplete, or absent plan", () => {
+    const base = zeroCandidateReport().result as Record<string, unknown>;
     for (const testCase of [
-      { label: "faulted", plan: faulted.plan, expected: "the plan carries 1 fault(s)" },
-      { label: "truncated", plan: truncated.plan, expected: "the bucket listing was truncated" },
-      { label: "absent", plan: null, expected: "the collector listed no plan" },
+      {
+        label: "faulted",
+        result: { ...base, faults: [{ code: "listing_failed", detail: "list" }] },
+        expected: "the plan carries 1 fault(s)",
+      },
+      {
+        label: "incomplete",
+        result: { ...base, nextStartAfter: "f".repeat(64) },
+        expected: "the plan walk stopped after 2 window(s)",
+      },
+      { label: "absent", result: null, expected: "the collector listed no plan" },
       {
         label: "fenced",
-        plan: null,
+        result: null,
         status: "fenced",
         // The stderr line is JSON, so the quoted status arrives escaped.
         expected: "the collector status is",
@@ -2388,8 +2315,9 @@ describe("registry cleanup report preview", () => {
         action: "plan",
         targetMode: "report-only",
         liveMode: "report-only",
+        planWindows: 2,
         planBody: reportEnvelope({
-          plan: testCase.plan,
+          result: testCase.result,
           ...(testCase.status === undefined ? {} : { status: testCase.status }),
         }),
       });

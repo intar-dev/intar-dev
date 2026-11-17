@@ -8,13 +8,13 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import {
   agentHosts,
   hostDesiredState,
-  imageBuilds,
   member,
   organization,
   scenarioSourceCommits,
   scenarioSources,
 } from "@/db/schema";
-import { reconcileHostSourceCompiles } from "@/lib/build-scheduler";
+import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
+import { syncBuilderDesiredState } from "@/lib/machine-builds";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
 import {
   BIND_REFUSAL_MESSAGE,
@@ -377,18 +377,19 @@ describe("scenario source changes", () => {
       id: "builder-1", userId: OWNER, name: "builder-1", role: "builder", scope: "platform",
     });
     await db.insert(scenarioSourceCommits).values(
-      (["fetching", "compiling", "building", "live"] as const).map((state) => ({
+      (["fetching", "compiling", "building", "live"] as const).map((state, index) => ({
         id: state,
         scopeKey: ORG_SCOPE.key,
         purpose: "deploy" as const,
         sha: "a".repeat(40),
-        rev: `git-9-${state}`,
+        rev: `git-9-${"a".repeat(40)}-p0000000${index}`,
         via: "pull" as const,
         state,
-        ...(state === "compiling" ? { compileHostId: "builder-1" } : {}),
+        ...(state === "compiling" ? { compileHostId: "builder-1", attempt: 1 } : {}),
       })),
     );
-    await reconcileHostSourceCompiles(db, "builder-1", Date.now());
+    await mutateHostDesiredStateV3(db, "builder-1", Date.now(), () => {});
+    await syncBuilderDesiredState(env, "builder-1", Date.now());
     const compiles = async () =>
       (await db.select().from(hostDesiredState))[0]?.docJson.source_compiles;
     expect(await compiles()).toHaveLength(1);
@@ -396,7 +397,7 @@ describe("scenario source changes", () => {
     await change({ action: "mode", mode: "push" });
 
     // The builder kills the compile once its entry leaves.
-    expect(await compiles()).toBeUndefined();
+    expect(await compiles()).toEqual([]);
     const states = await db
       .select({ id: scenarioSourceCommits.id, state: scenarioSourceCommits.state })
       .from(scenarioSourceCommits)
@@ -489,25 +490,10 @@ describe("the tenant projection", () => {
     );
   });
 
-  it("redacts the commit detail, its diagnostics and build errors", async () => {
+  it("redacts the commit detail and its diagnostics", async () => {
     const rev = `git-42-${"a".repeat(40)}-digest`;
     await insertBinding();
-    await env.DB.prepare(
-      "INSERT INTO image_build_bundles (rev, organization_id, r2_key, meta_json) VALUES (?1, ?2, 'key', '{}')",
-    )
-      .bind(rev, ORG)
-      .run();
     const db = drizzle(env.DB);
-    await db.insert(imageBuilds).values({
-      id: "build",
-      organizationId: ORG,
-      scenarioId: "org-a-demo",
-      arch: "x86_64",
-      rev,
-      contentHash: "hash",
-      status: "failed",
-      error: "copy '/srv/cache/org-a/disk.qcow2' failed",
-    });
     await db.insert(scenarioSourceCommits).values({
       id: "commit",
       scopeKey: ORG_SCOPE.key,
@@ -529,9 +515,6 @@ describe("the tenant projection", () => {
           { path: "courses/a/b/scenario.hcl", line: 3, message: "open '<path>' failed" },
         ],
       },
-      builds: [
-        { scenarioId: "org-a-demo", status: "failed", error: "copy '<path>' failed" },
-      ],
     });
   });
 });

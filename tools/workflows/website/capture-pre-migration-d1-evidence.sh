@@ -3,6 +3,7 @@
 set -euo pipefail
 d1_info="${RUNNER_TEMP}/production-d1-info.json"
 bookmark="${RUNNER_TEMP}/production-d1-bookmark.json"
+plan="${RUNNER_TEMP}/production-d1-plan.json"
 run_drain_audit="${RUNNER_TEMP}/pre-migration-run-drain-audit.json"
 assignment_counts="${RUNNER_TEMP}/pre-migration-assignment-counts.json"
 enabled_scenarios="${RUNNER_TEMP}/pre-migration-enabled-scenarios.json"
@@ -52,9 +53,22 @@ d1_readonly_query() {
   ' "${evidence}" >/dev/null
 }
 
+# Migration 0046 (index 46) drops the old model's tables and rebuilds
+# runtime_vms, which must be empty when it runs: it holds only after the
+# cutover wipe. The deploy stops here, before maintenance, when that does not
+# hold.
+applied="$(jq -er '.appliedMigrationCount' "${plan}")"
+[[ "${applied}" =~ ^[1-9][0-9]*$ ]]
+if [ "${applied}" -le 46 ]; then
+  runtime_rebuild_pending=true
+else
+  runtime_rebuild_pending=false
+fi
+
 run_drain_sql="SELECT
-    -- The two zero counts are enforced. The enabled-host count and the
-    -- cutover gate state are evidence only.
+    -- The two zero counts are enforced. The enabled-host count is evidence
+    -- only; the runtime counts and the cutover gate state are enforced while
+    -- the runtime_vms rebuild is pending.
     (SELECT COUNT(*) FROM scenario_runs
       WHERE hidden_at IS NULL AND
         (active_key IS NOT NULL OR state NOT IN ('completed', 'failed')))
@@ -65,14 +79,21 @@ run_drain_sql="SELECT
     (SELECT COUNT(*) FROM agent_hosts
       WHERE role = 'agent' AND disabled = 0)
       AS enabled_agent_host_count,
+    (SELECT COUNT(*) FROM runtime_executions) AS runtime_execution_count,
+    (SELECT COUNT(*) FROM runtime_vms) AS runtime_vm_count,
     (SELECT state FROM runtime_operation_gates
       WHERE key = 'image_cutover')
       AS cutover_gate_state;"
 d1_readonly_query "${run_drain_sql}" "${run_drain_audit}"
-jq -e '
+jq -e --argjson rebuild "${runtime_rebuild_pending}" '
   (.result[0].results | length == 1) and
   .result[0].results[0].active_scenario_run_count == 0 and
-  .result[0].results[0].non_uploaded_run_artifact_count == 0
+  .result[0].results[0].non_uploaded_run_artifact_count == 0 and
+  (($rebuild | not) or (
+    .result[0].results[0].runtime_execution_count == 0 and
+    .result[0].results[0].runtime_vm_count == 0 and
+    .result[0].results[0].cutover_gate_state == "wiped"
+  ))
 ' "${run_drain_audit}" >/dev/null
 
 assignment_counts_sql='SELECT organization_id, scenario_id,
@@ -82,12 +103,30 @@ assignment_counts_sql='SELECT organization_id, scenario_id,
   ORDER BY organization_id, scenario_id;'
 d1_readonly_query "${assignment_counts_sql}" "${assignment_counts}"
 
-enabled_scenarios_sql="SELECT scenario_id,
+# The deploy that applies the removal migration also applies the one that
+# creates `scenarios`, so this runs while only `vm_scenarios` exists. While
+# both exist, `vm_scenarios` holds what the removal migration drops.
+scenario_tables="${RUNNER_TEMP}/pre-migration-scenario-tables.json"
+d1_readonly_query "SELECT name FROM sqlite_master
+  WHERE type = 'table' AND name IN ('vm_scenarios', 'scenarios')
+  ORDER BY name;" "${scenario_tables}"
+scenario_table="$(jq -er '
+  [.result[0].results[].name] |
+  if index("vm_scenarios") != null then "vm_scenarios"
+  elif index("scenarios") != null then "scenarios"
+  else error("neither scenario table exists") end
+' "${scenario_tables}")"
+if [ "${scenario_table}" = vm_scenarios ]; then
+  scenario_id=scenario_id
+else
+  scenario_id=id
+fi
+enabled_scenarios_sql="SELECT ${scenario_id} AS id,
     CASE
       WHEN organization_id IS NULL THEN 'public'
       ELSE 'organization:' || organization_id
     END AS scope_key
-  FROM vm_scenarios
+  FROM ${scenario_table}
   WHERE enabled = 1
-  ORDER BY scope_key, scenario_id;"
+  ORDER BY scope_key, id;"
 d1_readonly_query "${enabled_scenarios_sql}" "${enabled_scenarios}"

@@ -4,20 +4,19 @@ import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   account,
   agentHosts,
+  bundles,
   hostEnrollments,
-  imageBuildBundles,
-  imageBuilds,
   member,
   organization,
   organizationMemberRemovals,
   organizationMemberRemovedLogins,
   personalImagePreparations,
   scenarioRuns,
+  scenarios,
   scenarioSourceCommits,
   scenarioSources,
   ssoProvider,
   user,
-  vmScenarios,
 } from "@/db/schema";
 import { activeAdminSql } from "@/lib/account-access";
 import { signOutQueries } from "@/lib/account-sign-out";
@@ -33,6 +32,7 @@ import {
   isActiveAdmin,
 } from "@/lib/platform-admin-authority";
 import type { FeatureToggleService } from "@/lib/feature-toggles";
+import { chosenSlugRefusal, isScenarioNamespace } from "@/lib/organization-slugs";
 
 export type OrganizationRole = "owner" | "admin" | "member";
 
@@ -129,6 +129,7 @@ export async function resolveOrganizationId(
 
 export async function createOrganization(params: {
   name: string;
+  slug: string;
   ownerUserId: string;
   featureToggleService?: FeatureToggleService;
 }): Promise<OrganizationSummary> {
@@ -153,28 +154,25 @@ export async function createOrganization(params: {
   }
 
   const name = validateOrganizationName(params.name);
+  const slug = await validateChosenSlug(params.slug);
   const id = createAppId();
-  const baseSlug = slugifyOrganizationName(name) || "organization";
-  const slug = `${baseSlug}-${id.slice(0, 6)}`;
   const now = Date.now();
-  const db = drizzle(env.DB);
-
   try {
-    await db.batch([
-      db.insert(organization).values({
-        id,
-        name,
-        slug,
-        createdAt: new Date(now),
-      }),
-      db.insert(member).values({
-        id: createAppId(),
-        organizationId: id,
-        userId: params.ownerUserId,
-        role: "owner",
-        createdAt: new Date(now),
-      }),
+    // A slug another organization gave up stays reserved; the owner joins
+    // only the organization this batch inserted.
+    const [inserted] = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO organization (id, name, slug, created_at)
+         SELECT ?1, ?2, ?3, ?4
+          WHERE NOT EXISTS (SELECT 1 FROM organization WHERE previous_slug = ?3)`,
+      ).bind(id, name, slug, now),
+      env.DB.prepare(
+        `INSERT INTO member (id, organization_id, user_id, role, created_at)
+         SELECT ?1, ?2, ?3, 'owner', ?4
+          WHERE EXISTS (SELECT 1 FROM organization WHERE id = ?2)`,
+      ).bind(createAppId(), id, params.ownerUserId, now),
     ]);
+    if (inserted?.meta.changes !== 1) throw slugTakenError();
   } catch (error) {
     if (
       errorChainMatches(
@@ -187,6 +185,9 @@ export async function createOrganization(params: {
         "organization_limit_reached",
         "this account already owns an organization",
       );
+    }
+    if (errorChainMatches(error, /organization\.slug|organization_slug_uidx/i)) {
+      throw slugTakenError();
     }
     throw error;
   }
@@ -255,6 +256,8 @@ export async function getOrganizationDetail(params: {
   members: OrganizationMemberRecord[];
   /** Only organization admins see who was removed. */
   removedMembers: OrganizationRemovedMemberRecord[];
+  /** Only organization admins see the slug's state. */
+  slugState: OrganizationSlugState | null;
 }> {
   const organizationId = await resolveOrganizationId(params.organizationKey);
   if (!organizationId) {
@@ -290,6 +293,9 @@ export async function getOrganizationDetail(params: {
       ? listOrganizationRemovedMembers(organizationId)
       : Promise.resolve([]),
   ]);
+  const slugState = isOrganizationAdminRole(role)
+    ? await loadOrganizationSlugState(organizationId)
+    : null;
   const record = organizations[0];
   if (!record) {
     throw appError(404, "organization_not_found", "organization not found");
@@ -307,7 +313,122 @@ export async function getOrganizationDetail(params: {
       joinedAt: entry.joinedAt.getTime(),
     })),
     removedMembers,
+    slugState,
   };
+}
+
+export interface OrganizationSlugState {
+  /** Whether scenarios can be published under the slug as it is. */
+  scenarioNamespace: boolean;
+  /** When the one rename was used, or null. */
+  renamedAt: number | null;
+  /** The slug names something already, so it can no longer change. */
+  inUse: boolean;
+}
+
+/**
+ * Holds while something is keyed by the organization's slug: a scenario or
+ * bundle published under it, a scenario source binding, or an identity
+ * provider whose sign-in link names it.
+ */
+function organizationSlugInUse(organizationId: string | SQL): SQL {
+  return sql`(EXISTS (SELECT 1 FROM ${scenarios} WHERE ${scenarios.organizationId} = ${organizationId})
+    OR EXISTS (SELECT 1 FROM ${bundles} WHERE ${bundles.organizationId} = ${organizationId})
+    OR EXISTS (SELECT 1 FROM ${scenarioSources} WHERE ${scenarioSources.organizationId} = ${organizationId})
+    OR EXISTS (SELECT 1 FROM ${ssoProvider} WHERE ${ssoProvider.organizationId} = ${organizationId}))`;
+}
+
+async function loadOrganizationSlugState(organizationId: string): Promise<OrganizationSlugState | null> {
+  const [row] = await drizzle(env.DB)
+    .select({
+      slug: organization.slug,
+      renamedAt: organization.slugRenamedAt,
+      inUse: sql<number>`${organizationSlugInUse(organizationId)}`,
+    })
+    .from(organization)
+    .where(eq(organization.id, organizationId))
+    .limit(1);
+  if (!row) return null;
+  return {
+    scenarioNamespace: isScenarioNamespace(row.slug),
+    renamedAt: row.renamedAt,
+    inUse: Boolean(row.inUse),
+  };
+}
+
+/**
+ * Changes an organization's slug, once: an admin of the organization or a
+ * platform admin may do it while nothing is keyed by the slug yet, so a
+ * published scenario id never changes.
+ */
+export async function renameOrganizationSlug(params: {
+  organizationId: string;
+  actorUserId: string;
+  slug: string;
+}): Promise<{ id: string; slug: string }> {
+  const platformAdmin = await isActiveAdmin(params.actorUserId, env.DB);
+  if (!platformAdmin) {
+    await requireOrganizationRole({
+      organizationId: params.organizationId,
+      userId: params.actorUserId,
+      admin: true,
+    });
+  }
+  const slug = await validateChosenSlug(params.slug);
+  const db = drizzle(env.DB);
+  let renamed: Array<{ id: string }>;
+  try {
+    renamed = await db
+      .update(organization)
+      .set({ slug, slugRenamedAt: Date.now(), previousSlug: sql`${organization.slug}` })
+      .where(and(
+        eq(organization.id, params.organizationId),
+        isNull(organization.slugRenamedAt),
+        ne(organization.slug, slug),
+        sql`NOT ${slugGivenUp(slug)}`,
+        sql`NOT ${organizationSlugInUse(params.organizationId)}`,
+        or(
+          administersOrganization(params.organizationId, params.actorUserId),
+          activeAdministrator(params.actorUserId),
+        ),
+      ))
+      .returning({ id: organization.id });
+  } catch (error) {
+    if (errorChainMatches(error, /organization\.slug|organization_slug_uidx/i)) {
+      throw slugTakenError();
+    }
+    throw error;
+  }
+  if (renamed.length === 1) return { id: params.organizationId, slug };
+
+  // Refused: name why.
+  const [current] = await db
+    .select({ slug: organization.slug, renamedAt: organization.slugRenamedAt })
+    .from(organization)
+    .where(eq(organization.id, params.organizationId))
+    .limit(1);
+  if (!current) throw appError(404, "organization_not_found", "organization not found");
+  if (current.renamedAt !== null) {
+    throw appError(409, "organization_slug_rename_used", "this organization has already changed its slug once");
+  }
+  if (current.slug === slug) {
+    throw appError(400, "organization_slug_unchanged", "the organization already has this slug");
+  }
+  if (await env.DB.prepare("SELECT 1 FROM organization WHERE previous_slug = ?1").bind(slug).first()) {
+    throw slugTakenError();
+  }
+  if ((await loadOrganizationSlugState(params.organizationId))?.inUse) {
+    throw appError(
+      409,
+      "organization_slug_in_use",
+      "the slug can no longer change: scenarios, a scenario source, or single sign-on already use it",
+    );
+  }
+  throw appError(
+    409,
+    "organization_slug_rename_changed",
+    "the organization or your access changed while the slug was being renamed",
+  );
 }
 
 export async function updateOrganizationName(params: {
@@ -836,19 +957,14 @@ async function organizationHasOwnedResources(
       .where(eq(ssoProvider.organizationId, organizationId))
       .limit(1),
     db
-      .select({ id: vmScenarios.scenarioId })
-      .from(vmScenarios)
-      .where(eq(vmScenarios.organizationId, organizationId))
+      .select({ id: scenarios.id })
+      .from(scenarios)
+      .where(eq(scenarios.organizationId, organizationId))
       .limit(1),
     db
-      .select({ id: imageBuildBundles.rev })
-      .from(imageBuildBundles)
-      .where(eq(imageBuildBundles.organizationId, organizationId))
-      .limit(1),
-    db
-      .select({ id: imageBuilds.id })
-      .from(imageBuilds)
-      .where(eq(imageBuilds.organizationId, organizationId))
+      .select({ id: bundles.rev })
+      .from(bundles)
+      .where(eq(bundles.organizationId, organizationId))
       .limit(1),
     db
       .select({ id: scenarioRuns.runId })
@@ -905,10 +1021,34 @@ function validateOrganizationName(raw: string): string {
   return name;
 }
 
-function slugifyOrganizationName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
+/** A slug an organization may choose and no organization holds as its id. */
+async function validateChosenSlug(raw: string): Promise<string> {
+  const slug = raw.trim();
+  const refusal = chosenSlugRefusal(slug);
+  if (refusal === "organization_slug_reserved") {
+    throw appError(400, refusal, "this slug is reserved");
+  }
+  if (refusal) {
+    throw appError(
+      400,
+      refusal,
+      "a slug is 3 to 39 lowercase letters, digits, and single hyphens, starting and ending with a letter or digit",
+    );
+  }
+  const [taken] = await drizzle(env.DB)
+    .select({ id: organization.id })
+    .from(organization)
+    .where(eq(organization.id, slug))
+    .limit(1);
+  if (taken) throw slugTakenError();
+  return slug;
+}
+
+/** Holds while an organization gave up `slug` in its rename. */
+function slugGivenUp(slug: string): SQL {
+  return sql`EXISTS (SELECT 1 FROM organization given_up WHERE given_up.previous_slug = ${slug})`;
+}
+
+function slugTakenError() {
+  return appError(409, "organization_slug_taken", "another organization already uses this slug");
 }

@@ -1,3 +1,4 @@
+import { GUEST_USERNAME } from "@/generated/constants";
 import { loadStargateSshTransport } from "@/lib/stargate-relay";
 import { env } from "cloudflare:workers";
 import { issueAccountFencedRoute } from "@/lib/account-route-issuance";
@@ -126,7 +127,7 @@ export async function attachReadyScenarioTerminalTargets(input: {
     vmId: input.vmId,
     userId: input.expectedUserId,
     target: {
-      username: row.terminal_username?.trim() || "ubuntu",
+      username: row.terminal_username?.trim() || GUEST_USERNAME,
       transport: await loadStargateSshTransport({hostId: row.host_id, ownerId: row.user_id,
         executionId: row.execution_id, executionGeneration: row.generation, vmId: input.vmId,
         directHost: row.terminal_host, directPort: row.terminal_port}),

@@ -7,9 +7,8 @@ import { runtimeOperationGates } from "@/db/schema";
 import {
   assertAgentKvmRunsOpen,
   IMAGE_CUTOVER_GATE,
-  PROMOTION_HOLD_GATE,
-  promotionHoldActive,
 } from "@/lib/run-admission-gate";
+import { handleImageCutoverGate } from "@/control-plane/image-registry/cutover-gate";
 import { resetD1Database } from "@/test/d1-migrations";
 
 describe("agent-KVM run admission gate", () => {
@@ -33,20 +32,32 @@ describe("agent-KVM run admission gate", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("blocks admin proof runs too while Intar holds runs for a promotion", async () => {
+  it("lets a drain end the wipe hold, so an admin proof can run before learners", async () => {
     await drizzle(env.DB).insert(runtimeOperationGates).values({
-      key: PROMOTION_HOLD_GATE,
-      state: "drained",
+      key: IMAGE_CUTOVER_GATE,
+      state: "wiped",
       updatedAt: Date.now(),
     });
+    await expect(
+      assertAgentKvmRunsOpen(env.DB, { allowDrainedAdminProof: true }),
+    ).rejects.toMatchObject({ code: "runtime_cutover_drained" });
 
-    for (const options of [{}, { allowDrainedAdminProof: true }]) {
-      await expect(assertAgentKvmRunsOpen(env.DB, options)).rejects.toMatchObject({
-        status: 503,
-        code: "runtime_cutover_drained",
-      });
-    }
-    await expect(promotionHoldActive(env.DB)).resolves.toBe(true);
+    const response = await handleImageCutoverGate(
+      new Request("https://intar.test/gate", {
+        method: "POST",
+        headers: { authorization: "Bearer test-publish-token" },
+        body: JSON.stringify({ state: "drained" }),
+      }),
+      env,
+    );
+    expect(await response.json()).toMatchObject({ state: "drained", wiped: false });
+
+    await expect(
+      assertAgentKvmRunsOpen(env.DB, { allowDrainedAdminProof: true }),
+    ).resolves.toBeUndefined();
+    await expect(assertAgentKvmRunsOpen(env.DB)).rejects.toMatchObject({
+      code: "runtime_cutover_drained",
+    });
   });
 
   it("keeps normal and admin proof runs open when the gate is open", async () => {

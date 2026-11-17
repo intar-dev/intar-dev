@@ -59,42 +59,19 @@ export function isFreshHostHeartbeat(
 }
 
 /**
- * New learner KVM runs need the private run-CLI broker and its completion
- * protocol. Absence is false so a pre-rollout inventory cannot be selected
- * merely because its old schema omitted either capability.
+ * A host disconnect shorter than this is a blip the run page does not show.
+ * It matches the agent's reconnect backoff ceiling (`RETRY_MAX_MS`).
  */
-export function hostSupportsRunCliV1(
-  report:
-    | {
-        capabilities?: {
-          supports_run_cli_v1?: unknown;
-          supports_run_cli_completion_v1?: unknown;
-        };
-      }
-    | null
-    | undefined,
-): boolean {
-  return (
-    report?.capabilities?.supports_run_cli_v1 === true &&
-    report?.capabilities?.supports_run_cli_completion_v1 === true
-  );
-}
+export const HOST_UNREACHABLE_GRACE_MS = 30_000;
 
-export function hostSupportsSpeedRedesign(
-  report:
-    | {
-        capabilities?: {
-          supports_raw_chunks_v1?: unknown;
-          supports_scenario_guest_tools_v1?: unknown;
-          supports_jailer_v3?: unknown;
-        };
-      }
-    | null
-    | undefined,
+/** The host is gone past the grace, or its socket stopped reporting. */
+export function isHostUnreachable(
+  host: { connected: boolean; disconnectedAt: number | null; lastHeartbeatAt: number | null },
+  nowUnixMs: number,
+  heartbeatTtlMs: number,
 ): boolean {
-  return (
-    report?.capabilities?.supports_raw_chunks_v1 === true &&
-    report.capabilities.supports_scenario_guest_tools_v1 === true &&
-    report.capabilities.supports_jailer_v3 === true
-  );
+  if (!host.connected) {
+    return host.disconnectedAt === null || nowUnixMs - host.disconnectedAt >= HOST_UNREACHABLE_GRACE_MS;
+  }
+  return !isFreshHostHeartbeat(host.lastHeartbeatAt, nowUnixMs, heartbeatTtlMs);
 }

@@ -9,11 +9,10 @@ use std::time::Duration;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use intar_contracts::bridge::{
-    DesiredSourceCompileV1, SourceCompileErrorV1, SourceCompileFailureV1,
-};
-use intar_contracts::catalog::ImageArchitecture;
-use intar_contracts::source::SourceCompileErrorCode;
+use intar_contracts::bridge::{SourceCompileErrorV1, SourceCompileFailureV1};
+use intar_contracts::bridge_v9::DesiredSourceCompileV2;
+use intar_contracts::source::{SourceBundleMetaV2, SourceCompileErrorCode};
+use intar_image_scenario::loader::{compile as cli_compile, encode_bundle};
 use tokio::sync::watch;
 
 use super::{CompileSourceCommand, compile_source, run_supervisor, unpack_snapshot};
@@ -22,8 +21,13 @@ use clap::Parser as _;
 
 const TOP: &str = "acme-scenarios-0123456789abcdef0123456789abcdef01234567";
 const REV: &str = "git-1-0123456789abcdef0123456789abcdef01234567-p00000000";
-const MANIFEST: &[u8] = b"version: 1\nscope: public\n";
+const MANIFEST: &[u8] = b"repository {}\n";
 const CHILD_ARGS_ENV: &str = "INTAR_BUILDER_TEST_COMPILE_SOURCE_ARGS";
+
+/// The repository's own content: what `intar-image-cli bundle` compiles.
+fn content() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content")
+}
 
 /// A repository archive laid out like GitHub's: every entry sits below one
 /// top-level directory.
@@ -73,14 +77,18 @@ impl Snapshot {
         self.entry(path, tar::EntryType::Directory, b"")
     }
 
-    /// The release smoke course, which compiles against the platform catalog.
-    fn course(&mut self) -> &mut Self {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../intar-image-build/fixtures/release-smoke/courses");
+    /// The repository's `content/`, with a file the loader never reads.
+    fn content(&mut self) -> &mut Self {
+        let root = content();
         self.0
-            .append_dir_all(format!("{TOP}/courses"), fixture)
+            .append_path_with_name(root.join("intar.hcl"), format!("{TOP}/intar.hcl"))
             .unwrap();
-        self
+        for dir in ["scenarios", "courses"] {
+            self.0
+                .append_dir_all(format!("{TOP}/{dir}"), root.join(dir))
+                .unwrap();
+        }
+        self.file("README.md", b"readme")
     }
 
     fn write(self, path: &Path) {
@@ -104,31 +112,36 @@ fn refusal(result: Result<(), super::SourceCompileError>) -> (SourceCompileError
 }
 
 #[test]
-fn unpacks_only_the_manifest_gitmodules_and_courses_below_the_top_level() {
+fn unpacks_only_what_the_loader_reads_below_the_top_level() {
     for mut snapshot in [Snapshot::codeload(), Snapshot::new()] {
         snapshot
             .file(".github/workflows/intar.yml", b"on: push\n")
-            .file(".gitmodules", b"[submodule \"docs\"]\n\tpath = docs\n")
             .dir("courses")
-            .dir("courses/linux")
-            .file("courses/linux/course.md", b"course")
+            .file("courses/course.md", b"course")
+            .dir("images")
+            .file("images/k3s.hcl", b"image")
+            .dir("scenarios")
+            .dir("scenarios/web")
+            .file("scenarios/web/scenario.hcl", b"scenario")
             .dir("docs")
-            .file("intar.yaml", MANIFEST)
+            .file("intar.hcl", MANIFEST)
             .file("README.md", b"readme");
         let (temp, result) = unpack(snapshot);
         result.unwrap();
 
-        let tree = temp.path().join("tree");
-        let mut kept = walk(&tree);
+        let mut kept = walk(&temp.path().join("tree"));
         kept.sort();
         assert_eq!(
             kept,
             [
-                ".gitmodules",
                 "courses",
-                "courses/linux",
-                "courses/linux/course.md",
-                "intar.yaml",
+                "courses/course.md",
+                "images",
+                "images/k3s.hcl",
+                "intar.hcl",
+                "scenarios",
+                "scenarios/web",
+                "scenarios/web/scenario.hcl",
             ]
         );
     }
@@ -138,12 +151,12 @@ fn unpacks_only_the_manifest_gitmodules_and_courses_below_the_top_level() {
 fn a_pax_path_longer_than_100_characters_unpacks_in_full() {
     let long = format!("courses/{}/course.md", "a".repeat(120));
     let mut snapshot = Snapshot::codeload();
-    snapshot.file("intar.yaml", MANIFEST);
+    snapshot.file("intar.hcl", MANIFEST);
     snapshot
         .0
         .append_pax_extensions([("path", format!("{TOP}/{long}").as_bytes())])
         .unwrap();
-    // The pax path replaces this name, which is outside the courses root.
+    // The pax path replaces this name, which is not kept.
     let mut header = tar::Header::new_ustar();
     header.set_path(format!("{TOP}/README.md")).unwrap();
     header.set_size(6);
@@ -161,35 +174,7 @@ fn a_pax_path_longer_than_100_characters_unpacks_in_full() {
 }
 
 #[test]
-fn reads_intar_yaml_before_it_unpacks_anything() {
-    // The manifest comes last, as in git's tree order, and still decides
-    // what is kept.
-    let mut snapshot = Snapshot::new();
-    snapshot
-        .dir("courses")
-        .file("courses/course.md", b"skipped")
-        .dir("lessons")
-        .file("lessons/course.md", b"kept")
-        .file(
-            "intar.yaml",
-            b"version: 1\nscope: public\ncourses_root: lessons\n",
-        );
-    let (temp, result) = unpack(snapshot);
-    result.unwrap();
-    assert!(temp.path().join("tree/lessons/course.md").is_file());
-    assert!(!temp.path().join("tree/courses").exists());
-
-    for courses_root in ["/etc", "../x"] {
-        let mut snapshot = Snapshot::new();
-        snapshot.dir("x").file("x/course.md", b"x").file(
-            "intar.yaml",
-            format!("version: 1\nscope: public\ncourses_root: {courses_root}\n").as_bytes(),
-        );
-        let (temp, result) = unpack(snapshot);
-        assert_eq!(refusal(result).0, SourceCompileErrorCode::ManifestInvalid);
-        assert!(!temp.path().join("tree").exists());
-    }
-
+fn a_snapshot_without_intar_hcl_is_refused() {
     let mut snapshot = Snapshot::new();
     snapshot.dir("courses").file("courses/course.md", b"x");
     assert_eq!(
@@ -209,7 +194,7 @@ fn rejects_links_and_devices_it_would_keep() {
     ] {
         let mut snapshot = Snapshot::new();
         snapshot
-            .file("intar.yaml", MANIFEST)
+            .file("intar.hcl", MANIFEST)
             .dir("courses")
             .entry("courses/course.md", kind, b"");
         let (code, message) = refusal(unpack(snapshot).1);
@@ -223,7 +208,7 @@ fn rejects_links_and_devices_it_would_keep() {
     // Outside the kept paths a link is never written, so it is ignored.
     let mut snapshot = Snapshot::new();
     snapshot
-        .file("intar.yaml", MANIFEST)
+        .file("intar.hcl", MANIFEST)
         .entry("README.md", tar::EntryType::Symlink, b"");
     unpack(snapshot).1.unwrap();
 }
@@ -236,7 +221,7 @@ fn holds_the_expanded_size_limit_on_kept_entries() {
     let fits = half.len() - 5 * 512;
     let mut snapshot = Snapshot::new();
     snapshot
-        .file("intar.yaml", MANIFEST)
+        .file("intar.hcl", MANIFEST)
         .file("assets/big.bin", &half)
         .file("assets/bigger.bin", &half)
         .dir("courses")
@@ -246,7 +231,7 @@ fn holds_the_expanded_size_limit_on_kept_entries() {
 
     let mut snapshot = Snapshot::new();
     snapshot
-        .file("intar.yaml", MANIFEST)
+        .file("intar.hcl", MANIFEST)
         .dir("courses")
         .file("courses/a.md", &half)
         .file("courses/b.md", &half[..fits + 1]);
@@ -254,15 +239,6 @@ fn holds_the_expanded_size_limit_on_kept_entries() {
         refusal(unpack(snapshot).1).0,
         SourceCompileErrorCode::BundleTooLarge
     );
-
-    let mut snapshot = Snapshot::new();
-    snapshot.file("intar.yaml", MANIFEST).dir("courses");
-    for index in 0..8192 {
-        snapshot.file(&format!("courses/{index}.md"), b"");
-    }
-    let (temp, result) = unpack(snapshot);
-    assert_eq!(refusal(result).0, SourceCompileErrorCode::BundleTooLarge);
-    assert!(!temp.path().join("tree/courses/8191.md").exists());
 }
 
 /// Runs the child entry in this process and reads what it wrote.
@@ -276,7 +252,6 @@ fn compile_in_process(
         snapshot: archive,
         out: temp.path().to_path_buf(),
         rev: REV.to_owned(),
-        arch: "x86_64".to_owned(),
     })
     .unwrap();
     let errors = std::fs::read(temp.path().join("errors.json"))
@@ -286,27 +261,32 @@ fn compile_in_process(
 }
 
 #[test]
-fn the_child_entry_compiles_a_repository_snapshot() {
+fn a_snapshot_compiles_to_the_bytes_the_cli_uploads() {
     let mut snapshot = Snapshot::codeload();
-    snapshot.file("intar.yaml", MANIFEST).course();
+    snapshot.content();
     let (temp, errors) = compile_in_process(snapshot);
-
     assert!(errors.is_none(), "{errors:?}");
-    let meta: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(temp.path().join("meta.json")).unwrap()).unwrap();
-    assert_eq!(meta["rev"], REV);
-    assert_eq!(meta["source"]["scope"], "public");
-    assert!(temp.path().join("bundle.tar.gz").is_file());
+
+    // `intar-image-cli bundle` on the same tree: compile, encode, meta.
+    let (bundle, _) = cli_compile(&content()).unwrap();
+    assert_eq!(
+        std::fs::read(temp.path().join("bundle.json.gz")).unwrap(),
+        encode_bundle(&bundle).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("meta.json")).unwrap(),
+        SourceBundleMetaV2 {
+            rev: REV.to_owned()
+        }
+        .field()
+    );
 }
 
 #[test]
-fn an_empty_directory_under_the_courses_root_is_a_submodule() {
+fn an_empty_directory_is_a_submodule() {
     // A gitlink shows up in an archive only as an empty directory entry.
     let mut snapshot = Snapshot::codeload();
-    snapshot
-        .file("intar.yaml", MANIFEST)
-        .course()
-        .dir("courses/vendored");
+    snapshot.content().dir("courses/vendored");
     let (_temp, errors) = compile_in_process(snapshot);
 
     let errors = errors.unwrap();
@@ -318,19 +298,19 @@ fn an_empty_directory_under_the_courses_root_is_a_submodule() {
 }
 
 #[test]
-fn diagnostics_carry_no_unpack_root() {
+fn diagnostics_name_repository_paths() {
     let mut snapshot = Snapshot::codeload();
-    snapshot
-        .file("intar.yaml", MANIFEST)
-        .dir("courses")
-        .dir("courses/linux")
-        .file("courses/linux/course.md", b"no frontmatter\n");
+    snapshot.content().file(
+        "scenarios/broken/scenario.hcl",
+        b"scenario \"broken\" {\n  nope = 1\n}\n",
+    );
     let (temp, errors) = compile_in_process(snapshot);
 
     let errors = errors.unwrap();
     assert_eq!(errors[0].code, SourceCompileErrorCode::CompileFailed);
-    assert!(
-        errors[0].message.contains("courses/linux/course.md"),
+    assert_eq!(
+        errors[0].path.as_deref(),
+        Some("scenarios/broken/scenario.hcl"),
         "{errors:?}"
     );
     let root = temp.path().display().to_string();
@@ -473,13 +453,13 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
 }
 
 /// A supervisor whose child is `script`, a shell script that gets the
-/// child's argv: `compile-source --snapshot <file> --out <dir> --rev=<rev>
-/// --arch <arch>`, so `$3` is the snapshot and `$5` the output directory.
+/// child's argv: `compile-source --snapshot <file> --out <dir> --rev=<rev>`,
+/// so `$3` is the snapshot and `$5` the output directory.
 struct Supervisor {
     temp: tempfile::TempDir,
     work_dir: PathBuf,
     worker: Worker,
-    desired: watch::Sender<Vec<DesiredSourceCompileV1>>,
+    desired: watch::Sender<Vec<DesiredSourceCompileV2>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -523,13 +503,12 @@ impl Supervisor {
     }
 }
 
-fn compile(compile_id: &str, validate_only: bool) -> DesiredSourceCompileV1 {
-    DesiredSourceCompileV1 {
+fn compile(compile_id: &str, validate_only: bool) -> DesiredSourceCompileV2 {
+    DesiredSourceCompileV2 {
         compile_id: compile_id.to_owned(),
         attempt: 3,
         rev: REV.to_owned(),
         validate_only,
-        arch: ImageArchitecture::X86_64,
     }
 }
 
@@ -554,9 +533,9 @@ fn alive(pid: &str) -> bool {
 
 const COMPILED: &str = r#"mkdir -p "$5/tree"
 printf '{"snapshot_bytes":%s}' "$(wc -c < "$3" | tr -d ' ')" > "$5/meta.json"
-printf 'archive' > "$5/bundle.tar.gz""#;
+printf 'archive' > "$5/bundle.json.gz""#;
 const REFUSED: &str = r#"mkdir -p "$5/tree"
-printf '[{"code":"manifest_missing","message":"intar.yaml is missing"}]' > "$5/errors.json""#;
+printf '[{"code":"manifest_missing","message":"intar.hcl is missing"}]' > "$5/errors.json""#;
 const HANGS: &str = r#"mkdir -p "$5/tree"
 echo $$ >> "$PIDS"
 exec sleep 30"#;
@@ -605,7 +584,7 @@ async fn posts_a_compiled_result_as_multipart_with_a_content_length() {
         ),
         "{body}"
     );
-    assert!(body.contains(&format!("Content-Disposition: form-data; name=\"bundle\"; filename=\"{REV}.tar.gz\"\r\nContent-Type: application/gzip\r\n\r\narchive\r\n")), "{body}");
+    assert!(body.contains(&format!("Content-Disposition: form-data; name=\"bundle\"; filename=\"{REV}.json.gz\"\r\nContent-Type: application/gzip\r\n\r\narchive\r\n")), "{body}");
     assert!(!supervisor.task.is_finished());
 }
 
@@ -795,7 +774,7 @@ async fn starting_removes_what_a_killed_builder_left() {
 async fn the_child_keeps_its_temporary_files_in_the_work_directory() {
     let supervisor = Supervisor::start(
         r#"printf '{"tmpdir":"%s"}' "$TMPDIR" > "$5/meta.json"
-printf 'archive' > "$5/bundle.tar.gz""#,
+printf 'archive' > "$5/bundle.json.gz""#,
         Worker::serve(b"snapshot".to_vec(), Vec::new()),
     );
     supervisor
@@ -844,10 +823,9 @@ async fn a_stack_overflow_in_the_compiler_is_a_compile_failure() {
         "]".repeat(100_000)
     );
     let mut snapshot = Snapshot::codeload();
-    snapshot.file("intar.yaml", MANIFEST).course().file(
-        "courses/release-smoke/01-broken-nginx/scenario.hcl",
-        deep.as_bytes(),
-    );
+    snapshot
+        .content()
+        .file("scenarios/deep/scenario.hcl", deep.as_bytes());
     let temp = tempfile::tempdir().unwrap();
     snapshot.write(&temp.path().join("snapshot.tar.gz"));
     let script = format!(

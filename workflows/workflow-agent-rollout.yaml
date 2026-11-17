@@ -13,6 +13,12 @@ inputs:
     rollback_version:
       type: string
       description: The release the host runs now, X.Y.Z; the rollback target
+    gate_open:
+      type: boolean
+      default: true
+      description: >-
+        Open the run gate after a successful install. False leaves it drained,
+        for a rollout that a later step opens.
   required: [version, rollback_version]
 jobs:
   - name: prepare
@@ -118,7 +124,7 @@ jobs:
               echo 'agent/v${{ inputs.rollback_version }} is installed; both releases are unpacked and checked'
     dependsOn: []
   - name: deploy
-    description: Approve, drain, install and verify, then open the gate
+    description: Approve, drain, install and verify, then open the gate unless gate_open is false
     dependsOn:
       - job: prepare
         condition:
@@ -148,8 +154,9 @@ jobs:
             run: sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=gate-drained
       - name: install
         description: >-
-          Stop the agent, install the release, re-run the platform check, start
-          the agent, and check the installed binaries and the bridge handshake
+          Stop the agent, install the release, run the jailer self-test and the
+          agent doctor, start the agent, and check the installed binaries and
+          the bridge handshake
         dependsOn:
           - step: gate-drained
             condition:
@@ -170,7 +177,8 @@ jobs:
               fi
               systemctl stop intar-agent
               (cd "$d" && sh deploy/install.sh) >&2
-              systemctl restart intar-platform-check
+              /usr/lib/intar/intar-jailerd-self-test >&2
+              runuser -u intar-agent -- env XDG_CACHE_HOME=/var/cache/intar-agent XDG_STATE_HOME=/var/cache/intar-agent/state /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml >&2
               since="@$(date +%s)"
               systemctl start intar-agent
               for b in intar-agent:/usr/local/bin/intar-agent intar-jailer:/usr/lib/intar/intar-jailer intar-jailerd:/usr/lib/intar/intar-jailerd; do
@@ -219,7 +227,22 @@ jobs:
               d='/var/lib/intar/releases/agent-v${{ inputs.rollback_version }}'
               systemctl stop intar-agent
               (cd "$d" && sh deploy/install.sh) >&2
-              systemctl restart intar-platform-check
+              if [ ! -f "$d/deploy/intar-jailerd-boot-check.service" ]; then
+                # A release from before the boot check: its installer leaves
+                # the newer unit behind, and that release's jailerd is not
+                # ordered after it, so at boot the two would run concurrently.
+                systemctl disable intar-jailerd-boot-check.service
+                rm -f /etc/systemd/system/intar-jailerd-boot-check.service
+                systemctl daemon-reload
+              fi
+              if [ ! -f "$d/deploy/intar-jailerd-boot-check.service" ] && \
+                 [ "$(systemctl show --property=LoadState --value intar-platform-check.service)" = loaded ]; then
+                systemctl enable intar-platform-check
+                systemctl restart intar-platform-check
+              else
+                /usr/lib/intar/intar-jailerd-self-test >&2
+                runuser -u intar-agent -- env XDG_CACHE_HOME=/var/cache/intar-agent XDG_STATE_HOME=/var/cache/intar-agent/state /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml >&2
+              fi
               since="@$(date +%s)"
               systemctl start intar-agent
               i=0
@@ -233,6 +256,7 @@ jobs:
               done
               echo 'agent/v${{ inputs.rollback_version }} is back; open the gate with: gh workflow run image-ops.yml --ref main -f operation=gate-open'
       - name: gate-open
+        description: Dispatch image-ops gate-open, unless gate_open is false
         dependsOn:
           - step: install
             condition:
@@ -244,5 +268,10 @@ jobs:
           methodName: execute
           inputs:
             timeout: 1800000
-            run: sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=gate-open
+            run: |
+              if [ '${{ inputs.gate_open }}' = false ]; then
+                echo 'gate_open is false: the run gate stays drained. Open it with: gh workflow run image-ops.yml --ref main -f operation=gate-open'
+              else
+                sh tools/swamp/dispatch-workflow.sh image-ops.yml -f operation=gate-open
+              fi
 version: 1

@@ -8,7 +8,7 @@ import {
   type ProgressStatus,
   type RunFacts,
 } from "@/lib/progress-status";
-import { listEnabledScenariosForUser } from "@/lib/scenario-runs";
+import { listEnabledScenarioTitles } from "@/lib/scenario-runs";
 import { requireOrganizationRole } from "@/lib/organizations";
 
 export type { ProgressStatus };
@@ -61,7 +61,7 @@ export async function getOrganizationProgress(params: {
       .innerJoin(user, eq(member.userId, user.id))
       .where(eq(member.organizationId, params.organizationId))
       .orderBy(member.createdAt),
-    listEnabledScenariosForUser({ organizationId: params.organizationId }),
+    listEnabledScenarioTitles(params.organizationId),
   ]);
 
   const titles = new Map(

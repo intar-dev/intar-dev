@@ -21,7 +21,7 @@ use thiserror::Error;
 use tokio::io::unix::AsyncFd;
 
 /// Current on-wire protocol version.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 /// Maximum request or response packet, including its JSON envelope.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Reserved source-root selector for artifacts in jailerd's root-owned image
@@ -50,10 +50,10 @@ pub const MAX_SSH_PUBLIC_PORT: u16 = 32_767;
 pub const BACKGROUND_PREPARE_BYTES_PER_SECOND: u64 = 16 * 1024 * 1024;
 
 /// Pinned Cloud Hypervisor release.
-pub const CLOUD_HYPERVISOR_VERSION: &str = "v53.0";
-/// SHA-256 of the upstream `cloud-hypervisor-static` v53.0 release asset.
+pub const CLOUD_HYPERVISOR_VERSION: &str = "v54.1";
+/// SHA-256 of the upstream `cloud-hypervisor-static` v54.1 release asset.
 pub const CLOUD_HYPERVISOR_SHA256: &str =
-    "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc";
+    "f9ffb9646783233d1f0fb09e77db1fca66499d1041e63bc011b90683c0d49933";
 
 /// Identifier accepted at the privileged boundary.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -245,77 +245,24 @@ pub struct SourceArtifacts {
     pub root_disk: ArtifactSource,
     pub runtime_disk: ArtifactSource,
     pub recording_disk: ArtifactSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools_disk: Option<ArtifactSource>,
-}
-
-/// Import a verified agent-cache boot bundle into jailerd's root-owned,
-/// content-addressed template store.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PrepareImageV2Request {
-    /// Registry image identity. The raw disk has its own digest because the
-    /// registry identity covers the compressed image payload.
-    pub image_sha256: Sha256Digest,
-    pub virtual_size_bytes: u64,
-    pub root_disk: ArtifactSource,
-    pub kernel: ArtifactSource,
-    pub initrd: Option<ArtifactSource>,
-    /// Coordinator hint that classifies the request. Foreground is the
-    /// learner-visible launch path and the default for older callers.
-    #[serde(default)]
-    pub request_class: RequestClass,
-}
-
-impl PrepareImageV2Request {
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.virtual_size_bytes == 0 {
-            return Err(ValidationError::ZeroImageSize);
-        }
-        for source in [
-            Some(&self.root_disk),
-            Some(&self.kernel),
-            self.initrd.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            source.validate()?;
-            if source.source_root == PREPARED_IMAGE_SOURCE_ROOT {
-                return Err(ValidationError::InvalidTemplateSource);
-            }
-            if source.access != ArtifactAccess::ReadOnly {
-                return Err(ValidationError::InvalidTemplateArtifactAccess);
-            }
-            if source.sha256.is_none() {
-                return Err(ValidationError::MissingTemplateArtifactHash);
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Root-owned sources returned by `PrepareImageV2`. These descriptors are
-/// accepted only through `LaunchVmV2Request`; jailerd resolves the reserved
-/// source root without exposing its filesystem path to the agent.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreparedImageV2Result {
-    pub image_sha256: Sha256Digest,
-    pub virtual_size_bytes: u64,
-    pub root_disk: ArtifactSource,
-    pub kernel: ArtifactSource,
-    pub initrd: Option<ArtifactSource>,
-    pub fast_template_store: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareChunkedImageV3Request {
+    /// The digest of the machine image's OCI manifest: the image's identity
+    /// and the template's name.
     pub image_id: Sha256Digest,
+    /// The digest of the machine config, the blob that maps chunks to
+    /// layers.
     pub chunk_manifest_sha256: Sha256Digest,
     pub virtual_size_bytes: u64,
+    /// The OCI manifest; its SHA-256 is `image_id`.
+    pub image_manifest: ArtifactSource,
+    /// The machine config; its SHA-256 is `chunk_manifest_sha256`.
     pub manifest: ArtifactSource,
+    /// The blob cache: every chunk layer is a file named by its digest's
+    /// hex.
     pub chunk_cache_root: TrustedDirectorySource,
     pub kernel: ArtifactSource,
     pub initrd: Option<ArtifactSource>,
@@ -337,6 +284,10 @@ pub enum RequestClass {
     /// Background cache maintenance. Jailerd admits at most one background
     /// preparation in the process and yields between fixed-size blocks.
     Background,
+    /// Confirm a published template, which marks it used, and never build
+    /// one: a template that is not there is answered as
+    /// `image_template_missing`.
+    Confirm,
 }
 
 impl PrepareChunkedImageV3Request {
@@ -346,6 +297,7 @@ impl PrepareChunkedImageV3Request {
         }
         self.chunk_cache_root.validate()?;
         for source in [
+            Some(&self.image_manifest),
             Some(&self.manifest),
             Some(&self.kernel),
             self.initrd.as_ref(),
@@ -364,7 +316,9 @@ impl PrepareChunkedImageV3Request {
                 return Err(ValidationError::MissingTemplateArtifactHash);
             }
         }
-        if self.manifest.sha256.as_ref() != Some(&self.chunk_manifest_sha256) {
+        if self.manifest.sha256.as_ref() != Some(&self.chunk_manifest_sha256)
+            || self.image_manifest.sha256.as_ref() != Some(&self.image_id)
+        {
             return Err(ValidationError::InvalidChunkManifestSource);
         }
         Ok(())
@@ -430,8 +384,8 @@ pub struct VmLaunchRequest {
     pub vm_id: ValidatedId,
     pub cpu_millis: u32,
     pub memory_mib: u32,
-    /// Exact size of the mutable generation root disk. For V2 launches this
-    /// may exceed the immutable prepared image size, but it may never shrink
+    /// Exact size of the mutable generation root disk. For template launches
+    /// this may exceed the immutable prepared image size, but it may never shrink
     /// the prepared filesystem image.
     pub root_disk_size_bytes: u64,
     pub tap_name: String,
@@ -439,21 +393,13 @@ pub struct VmLaunchRequest {
     pub guest_ip_cidr: String,
     pub ssh_public_port: Option<u16>,
     pub vsock_cid: u32,
+    /// Whether the VM may open connections out of its run's network, behind
+    /// the egress floor. Without it the VM reaches only its run.
+    pub egress: bool,
     pub artifacts: SourceArtifacts,
 }
 
 mod request_validation;
-/// Capability-gated template-backed launch. The image identity and size bind
-/// the prepared boot descriptors to one root-owned template generation; the
-/// mutable/runtime artifacts remain in the regular launch request.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LaunchVmV2Request {
-    pub image_sha256: Sha256Digest,
-    pub virtual_size_bytes: u64,
-    pub launch: VmLaunchRequest,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchVmV3Request {
@@ -470,19 +416,6 @@ impl LaunchVmV3Request {
         }
         if self.launch.root_disk_size_bytes < self.virtual_size_bytes {
             return Err(ValidationError::RootDiskSmallerThanTemplate);
-        }
-        let tools_disk = self
-            .launch
-            .artifacts
-            .tools_disk
-            .as_ref()
-            .ok_or(ValidationError::InvalidToolsDisk)?;
-        tools_disk.validate()?;
-        if tools_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
-            || tools_disk.access != ArtifactAccess::ReadOnly
-            || tools_disk.sha256.is_none()
-        {
-            return Err(ValidationError::InvalidToolsDisk);
         }
         let quota = self.launch.validate_inner(true)?;
         for (source, file_name, expected_access) in [
@@ -503,49 +436,6 @@ impl LaunchVmV3Request {
             validate_prepared_launch_artifact(
                 initrd,
                 &self.image_id,
-                "initrd",
-                ArtifactAccess::ReadOnly,
-            )?;
-        }
-        Ok(quota)
-    }
-}
-
-impl LaunchVmV2Request {
-    pub fn validate(&self) -> Result<CpuQuota, ValidationError> {
-        if self.virtual_size_bytes == 0 {
-            return Err(ValidationError::ZeroImageSize);
-        }
-        if self.launch.root_disk_size_bytes < self.virtual_size_bytes {
-            return Err(ValidationError::RootDiskSmallerThanTemplate);
-        }
-        if self.launch.artifacts.tools_disk.is_some() {
-            return Err(ValidationError::InvalidToolsDisk);
-        }
-        let quota = self.launch.validate_inner(true)?;
-        for (source, file_name, expected_access) in [
-            (
-                &self.launch.artifacts.root_disk,
-                "root.raw",
-                ArtifactAccess::ReadWrite,
-            ),
-            (
-                &self.launch.artifacts.kernel,
-                "kernel",
-                ArtifactAccess::ReadOnly,
-            ),
-        ] {
-            validate_prepared_launch_artifact(
-                source,
-                &self.image_sha256,
-                file_name,
-                expected_access,
-            )?;
-        }
-        if let Some(initrd) = &self.launch.artifacts.initrd {
-            validate_prepared_launch_artifact(
-                initrd,
-                &self.image_sha256,
                 "initrd",
                 ArtifactAccess::ReadOnly,
             )?;
@@ -628,11 +518,9 @@ pub struct DestroyRunNetworkRequest {
 )]
 pub enum Request {
     Capabilities,
-    PrepareImageV2(Box<PrepareImageV2Request>),
     PrepareChunkedImageV3(Box<PrepareChunkedImageV3Request>),
     EnsureRunNetwork(EnsureRunNetworkRequest),
     RepairRunNetwork(EnsureRunNetworkRequest),
-    LaunchVmV2(Box<LaunchVmV2Request>),
     LaunchVmV3(Box<LaunchVmV3Request>),
     FinalizeVmBoot(FinalizeVmBootRequest),
     InspectVm(VmIdentityRequest),
@@ -677,10 +565,6 @@ pub struct JailerCapabilities {
     pub reserved_cpu_millis: u64,
     pub schedulable_cpu_millis: u64,
     pub committed_cpu_millis: u64,
-    /// Breaking v2 launch and readiness contract. These attestations are
-    /// required on the v2 wire; an old daemon cannot decode as performance
-    /// ready by omission.
-    pub supports_jailer_v2: bool,
     pub supports_jailer_v3: bool,
     pub supports_template_backed_launch: bool,
     pub fast_template_store: bool,
@@ -738,8 +622,6 @@ pub struct JailPathMap {
     pub host_root_disk: PathBuf,
     pub host_runtime_disk: PathBuf,
     pub host_recording_disk: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_tools_disk: Option<PathBuf>,
     pub jailed_api_socket: PathBuf,
     pub jailed_vsock_socket: PathBuf,
     pub jailed_kernel: PathBuf,
@@ -747,8 +629,6 @@ pub struct JailPathMap {
     pub jailed_root_disk: PathBuf,
     pub jailed_runtime_disk: PathBuf,
     pub jailed_recording_disk: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jailed_tools_disk: Option<PathBuf>,
     pub host_serial_log: PathBuf,
     pub host_console_log: PathBuf,
     pub host_stderr_log: PathBuf,
@@ -860,11 +740,9 @@ pub struct OperationResult {
 )]
 pub enum Response {
     Capabilities(JailerCapabilities),
-    PrepareImageV2(PreparedImageV2Result),
     PrepareChunkedImageV3(PreparedImageV3Result),
     EnsureRunNetwork(RunNetworkResult),
     RepairRunNetwork(RunNetworkResult),
-    LaunchVmV2(VmLaunchResult),
     LaunchVmV3(VmLaunchResult),
     FinalizeVmBoot(FinalizeVmBootResult),
     InspectVm(VmInspection),
@@ -942,14 +820,18 @@ pub struct JailerdConfig {
     pub template_budget_bytes: u64,
     pub minimum_free_space_bytes: u64,
     pub store_gc_grace_seconds: u64,
-    pub legacy_template_retention_seconds: u64,
 }
+
+/// The shortest store GC grace jailerd accepts. The agent confirms the
+/// template of every pinned image, which marks it used, at a fixed cadence
+/// far below this, so store GC never takes a pinned template for idle.
+pub const MIN_STORE_GC_GRACE_SECONDS: u64 = 30 * 60;
 
 impl Default for JailerdConfig {
     fn default() -> Self {
         Self {
             jail_root: PathBuf::from("/var/lib/intar/jails"),
-            cloud_hypervisor_binary: PathBuf::from("/usr/lib/intar/cloud-hypervisor-v53.0"),
+            cloud_hypervisor_binary: PathBuf::from("/usr/lib/intar/cloud-hypervisor-v54.1"),
             cloud_hypervisor_sha256: Sha256Digest(CLOUD_HYPERVISOR_SHA256.to_owned()),
             jailer_binary: PathBuf::from("/usr/lib/intar/intar-jailer"),
             socket_path: PathBuf::from("/run/intar-jailerd/control.sock"),
@@ -968,7 +850,6 @@ impl Default for JailerdConfig {
             template_budget_bytes: 96 * 1024 * 1024 * 1024,
             minimum_free_space_bytes: 128 * 1024 * 1024 * 1024,
             store_gc_grace_seconds: 60 * 60,
-            legacy_template_retention_seconds: 7 * 24 * 60 * 60,
         }
     }
 }
@@ -1080,18 +961,16 @@ pub enum ValidationError {
     InvalidTemplateArtifactAccess,
     #[error("image preparation artifacts require SHA-256 digests")]
     MissingTemplateArtifactHash,
-    #[error("root-owned prepared boot artifacts require launch_vm_v2")]
+    #[error("root-owned prepared boot artifacts require launch_vm_v3")]
     TemplateLaunchRequiresV2,
     #[error("runtime and recording artifacts cannot reference the root-owned template store")]
     InvalidTemplateRuntimeSource,
-    #[error("launch_vm_v2 boot descriptors must exactly reference one prepared image template")]
+    #[error("launch_vm_v3 boot descriptors must exactly reference one prepared image template")]
     InvalidPreparedLaunchArtifact,
     #[error("chunk-cache root must be a trusted non-template relative directory")]
     InvalidChunkCacheRoot,
     #[error("chunk manifest source must match the requested manifest digest")]
     InvalidChunkManifestSource,
-    #[error("launch_vm_v3 requires one verified read-only tools disk")]
-    InvalidToolsDisk,
     #[error("VM selector must contain either a generation or a run/VM logical ID")]
     InvalidVmSelector,
     #[error("path must be absolute: {0}")]
@@ -1102,7 +981,7 @@ pub enum ValidationError {
     InvalidIdentityRange,
     #[error("configured agent UID/GID must be non-root")]
     RootAgentIdentity,
-    #[error("Cloud Hypervisor runtime hash must match the pinned v53.0 release")]
+    #[error("Cloud Hypervisor runtime hash must match the pinned v54.1 release")]
     UnpinnedRuntime,
     #[error("allowed source roots must be non-empty absolute paths")]
     InvalidSourceRoots,
@@ -1116,7 +995,9 @@ pub enum ValidationError {
     InvalidNofileLimit,
     #[error("configured RLIMIT_FSIZE must be positive")]
     InvalidFileSizeLimit,
-    #[error("template/chunk store garbage-collection limits must be positive")]
+    #[error(
+        "template/chunk store garbage-collection limits must be positive, and the grace at least 30 minutes"
+    )]
     InvalidStoreGcPolicy,
 }
 

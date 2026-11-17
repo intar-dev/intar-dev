@@ -48,14 +48,12 @@ fn create_scenario_vm_request_accepts_runtime() {
         "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
-        "image": "broken-nginx-webserver-amd64",
-        "image_sha256": "a".repeat(64),
-        "guest_tools": {
-            "tools_disk_sha256": "b".repeat(64),
-            "tools_disk_size_bytes": 67108864,
-            "kino_sha256": "c".repeat(64),
-            "bootstrap_abi": GUEST_BOOTSTRAP_ABI_V2
-        },
+        "image": format!("sha256:{}", "a".repeat(64)),
+        "kino": format!("sha256:{}", "b".repeat(64)),
+        "spec": format!("sha256:{}", "c".repeat(64)),
+        "mode": "learn",
+        "egress": false,
+        "terminal": true,
         "runtime": {
             "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"],
             "network": {
@@ -64,8 +62,7 @@ fn create_scenario_vm_request_accepts_runtime() {
                 "dns": ["1.1.1.1", "8.8.8.8"]
             },
             "kino": {
-                "vsock_cid": 10044,
-                "vsock_port": 19090
+                "vsock_cid": 10044
             }
         },
         "lease_duration_seconds": 300
@@ -73,7 +70,9 @@ fn create_scenario_vm_request_accepts_runtime() {
     .expect("request should parse");
 
     assert_eq!(req.lease_duration_seconds, Some(300));
-    assert_eq!(req.image_sha256, "a".repeat(64));
+    assert_eq!(req.image.hex(), "a".repeat(64));
+    assert_eq!(req.mode, SpecMode::Learn);
+    assert!(req.terminal && !req.egress);
     assert!(req.runtime.peer_vm_names.is_empty());
     assert!(req.runtime.peer_vm_aliases.is_empty());
     assert_eq!(
@@ -93,8 +92,8 @@ fn create_scenario_vm_request_accepts_runtime() {
             .kino
             .as_ref()
             .expect("kino override should parse")
-            .vsock_port,
-        Some(19090)
+            .vsock_cid,
+        10044
     );
 }
 
@@ -106,14 +105,12 @@ fn create_scenario_vm_request_rejects_missing_runtime() {
         "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
-        "image": "broken-nginx-webserver-amd64",
-        "image_sha256": "a".repeat(64),
-        "guest_tools": {
-            "tools_disk_sha256": "b".repeat(64),
-            "tools_disk_size_bytes": 67108864,
-            "kino_sha256": "c".repeat(64),
-            "bootstrap_abi": 1
-        }
+        "image": format!("sha256:{}", "a".repeat(64)),
+        "kino": format!("sha256:{}", "b".repeat(64)),
+        "spec": format!("sha256:{}", "c".repeat(64)),
+        "mode": "learn",
+        "egress": false,
+        "terminal": true
     }))
     .expect_err("missing runtime field should be rejected");
 
@@ -133,12 +130,17 @@ fn create_scenario_vm_request_rejects_missing_image_digest() {
         "name": "demo",
         "run_id": "abc123demo",
         "image": "broken-nginx-webserver-amd64",
+        "kino": format!("sha256:{}", "b".repeat(64)),
+        "spec": format!("sha256:{}", "c".repeat(64)),
+        "mode": "learn",
+        "egress": false,
+        "terminal": true,
         "runtime": {
             "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"]
         }
     }))
-    .expect_err("the v2 launch descriptor digest must be explicit");
-    assert!(error.to_string().contains("image_sha256"));
+    .expect_err("an image is named by its manifest digest");
+    assert!(error.to_string().contains("sha256"), "{error}");
 }
 
 #[test]
@@ -149,8 +151,12 @@ fn create_scenario_vm_request_rejects_unknown_field() {
         "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
-        "image": "broken-nginx-webserver-amd64",
-        "image_sha256": "a".repeat(64),
+        "image": format!("sha256:{}", "a".repeat(64)),
+        "kino": format!("sha256:{}", "b".repeat(64)),
+        "spec": format!("sha256:{}", "c".repeat(64)),
+        "mode": "learn",
+        "egress": false,
+        "terminal": true,
         "runtime": {
             "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"]
         },
@@ -173,8 +179,12 @@ fn create_scenario_vm_request_rejects_legacy_network_field() {
         "generation": 1,
         "name": "demo",
         "run_id": "abc123demo",
-        "image": "broken-nginx-webserver-amd64",
-        "image_sha256": "a".repeat(64),
+        "image": format!("sha256:{}", "a".repeat(64)),
+        "kino": format!("sha256:{}", "b".repeat(64)),
+        "spec": format!("sha256:{}", "c".repeat(64)),
+        "mode": "learn",
+        "egress": false,
+        "terminal": true,
         "runtime": {
             "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"]
         },
@@ -245,7 +255,7 @@ fn terminal_state_reports_ready_when_running_and_ssh_is_ready() {
         Some(VmTerminalTarget {
             host: Some("bridge.example.test".to_string()),
             port: 2222,
-            username: "ubuntu".to_string(),
+            username: "user".to_string(),
             checked_at: 1234,
         })
     );
@@ -342,6 +352,24 @@ fn terminal_state_reports_failed_with_vm_error() {
 }
 
 #[test]
+fn a_launch_waits_at_least_as_long_as_any_background_prepare() {
+    // The launch waits for the cache pass's background import, so its wait
+    // must cover the budget that import gets for every admitted size, and
+    // must stay finite.
+    let wait = image_prepare_wait();
+    let max = intar_contracts::catalog::MAX_CHUNKED_IMAGE_BYTES;
+    for gib in [1, 4, 16, 64] {
+        let budget = jailer_prepare_timeout(RequestClass::Background, gib << 30);
+        assert!(wait >= budget, "{gib} GiB: {wait:?} < {budget:?}");
+    }
+    assert!(wait >= jailer_prepare_timeout(RequestClass::Background, max));
+    assert!(
+        wait < Duration::from_secs(24 * 60 * 60),
+        "the wait must stay bounded: {wait:?}"
+    );
+}
+
+#[test]
 fn a_foreground_prepare_keeps_the_fixed_budget() {
     // A foreground import resolves from a ready descriptor before this path,
     // so the fixed budget stays whatever the size is.
@@ -420,4 +448,116 @@ fn the_background_budget_is_bounded_by_the_contract_maximum() {
             .saturating_add(JAILER_BACKGROUND_PREPARE_MARGIN_SECONDS),
     );
     assert_eq!(over, derived.max(JAILER_PREPARE_IMAGE_TIMEOUT));
+}
+
+#[test]
+fn an_old_vm_is_found_by_its_generation_else_by_run_and_name() {
+    let row = |run_id: Option<&str>, generation: Option<&str>| crate::db::PendingTeardownRow {
+        vm_name: "web".to_string(),
+        run_id: run_id.map(str::to_string),
+        jail_generation: generation.map(str::to_string),
+    };
+    let by_generation = previous_schema_jail_selector(&row(Some("run-1"), Some("gen-1")))
+        .expect("valid ids")
+        .expect("a selector");
+    assert_eq!(
+        by_generation.generation.map(|g| g.to_string()),
+        Some("gen-1".to_string())
+    );
+    let by_name = previous_schema_jail_selector(&row(Some("run-1"), None))
+        .expect("valid ids")
+        .expect("a selector");
+    assert_eq!(
+        by_name.run_id.map(|id| id.to_string()),
+        Some("run-1".to_string())
+    );
+    assert_eq!(
+        by_name.vm_id.map(|id| id.to_string()),
+        Some("web".to_string())
+    );
+    assert!(
+        previous_schema_jail_selector(&row(None, None))
+            .expect("no ids")
+            .is_none()
+    );
+}
+
+#[test]
+fn an_old_run_stays_queued_until_its_network_is_gone() {
+    let row = |vm: &str, run_id: Option<&str>| crate::db::PendingTeardownRow {
+        vm_name: vm.to_string(),
+        run_id: run_id.map(str::to_string),
+        jail_generation: None,
+    };
+    let outcomes = vec![
+        (row("a1", Some("run-a")), true),
+        (row("a2", Some("run-a")), true),
+        (row("b1", Some("run-b")), true),
+        (row("b2", Some("run-b")), false),
+        (row("loose", None), true),
+    ];
+    assert_eq!(
+        previous_schema_runs_to_release(&outcomes),
+        vec!["run-a".to_string()]
+    );
+    // run-a's network destroy failed: its rows stay queued for the next start.
+    assert_eq!(
+        previous_schema_teardowns_done(&outcomes, &BTreeSet::new()),
+        vec!["loose".to_string()]
+    );
+    assert_eq!(
+        previous_schema_teardowns_done(&outcomes, &BTreeSet::from(["run-a".to_string()])),
+        vec!["a1".to_string(), "a2".to_string(), "loose".to_string()]
+    );
+}
+
+#[test]
+fn a_launch_wait_stops_on_a_definitive_failure_and_waits_through_a_transient_one() {
+    let unready = || {
+        Err::<(), _>(anyhow::anyhow!(
+            "the image's launch descriptor is unavailable"
+        ))
+    };
+    let definitive = || Some(("image_not_found: gone".to_owned(), true));
+    let transient = || Some(("GET x failed with HTTP 503".to_owned(), false));
+
+    assert!(matches!(
+        prepare_wait_step(Ok(()), false, None, false),
+        Some(Ok(()))
+    ));
+    assert!(matches!(
+        prepare_wait_step(Ok(()), false, definitive(), true),
+        Some(Ok(()))
+    ));
+    assert!(prepare_wait_step(unready(), false, None, false).is_none());
+    assert!(prepare_wait_step(unready(), false, transient(), false).is_none());
+
+    let stopped = prepare_wait_step(unready(), false, definitive(), false);
+    let error = format!(
+        "{:#}",
+        stopped
+            .and_then(Result::err)
+            .expect("a definitive failure stops")
+    );
+    assert!(error.contains("image_not_found: gone"), "{error}");
+
+    for ready in [Ok(()), unready()] {
+        let stopped = prepare_wait_step(ready, true, transient(), false);
+        assert!(
+            matches!(stopped, Some(Err(_))),
+            "a delete request stops the wait"
+        );
+    }
+
+    let expired = prepare_wait_step(unready(), false, transient(), true);
+    let error = format!(
+        "{:#}",
+        expired
+            .and_then(Result::err)
+            .expect("the budget ends a wait")
+    );
+    assert!(
+        error.contains("HTTP 503") && error.contains("not prepared within"),
+        "{error}"
+    );
 }

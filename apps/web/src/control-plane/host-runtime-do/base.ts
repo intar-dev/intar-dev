@@ -11,7 +11,6 @@ import {
   recomputeRunState,
   type RunStateDocument,
 } from "@/lib/run-state";
-import { recordProbeTransitions } from "@/lib/run-probe-history";
 import { RUN_STATUS_PING, RUN_STATUS_PONG } from "@/lib/run-status-heartbeat";
 import { nextSolvedAt } from "@/lib/scenario-run-outcome";
 import {
@@ -20,11 +19,9 @@ import {
 } from "@/lib/runtime-executions";
 import { recordLinkedCourseUnitCompletionForRun } from "@/lib/course-catalogs";
 import {
-  loadOrCreateHostDesiredState,
-  mutateStoredHostDesiredState,
+  loadStoredHostDesiredState,
 } from "@/lib/desired-state-store";
-import { removeDesiredBuild } from "@/lib/desired-state";
-import type { HostDesiredStateV2 } from "@/generated/bridge";
+import type { HostDesiredStateV3 } from "@/generated/contracts/bridge-message-v9";
 
 export const HOST_BUILD_MAINTENANCE_INTERVAL_MS = 60_000;
 export const DESIRED_VERSION_LAG_REPUSH_AFTER_MS = 10_000;
@@ -41,12 +38,14 @@ export interface SocketAttachment {
   hostId: string;
   credentialGeneration: number;
   /** Host scope admitted at connect; every later admission check requires the host to still have it. */
-  scope: HostDesiredStateV2["scope"];
+  scope: HostDesiredStateV3["scope"];
   organizationId?: string | null;
   sessionId: string | null;
   connectedAt: number;
   helloReceived: boolean;
-  bridgeProtocol: "v6" | null;
+  bridgeProtocol: "v9" | null;
+  /** The guest contract a bridge 9 hello stated. */
+  guestContract?: number | null;
   lastDesiredVersionSent: number | null;
   lastDesiredDispatchAtMs: number | null;
 }
@@ -215,6 +214,10 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
           solvedAt,
           completedAt,
           failedAt,
+          // A run ends `lab_failed` when it fails because a guest's lab did.
+          ...(merged.phase === "failed" && merged.vms.some((vm) => vm.lab?.state === "failed")
+            ? { endReason: sql<"lab_failed">`coalesce(${scenarioRuns.endReason}, 'lab_failed')` }
+            : {}),
           archiveEnteredAt: ["archiving", "completed", "failed"].includes(
             merged.phase,
           )
@@ -301,12 +304,6 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         });
       }
 
-      await recordProbeTransitions(db, {
-        runId,
-        current,
-        next: merged,
-        observedAt: now,
-      });
       if (!current.canOpenTerminal && merged.canOpenTerminal) {
         logLifecycleTiming({
           metric: "accepted_to_terminal_ready",
@@ -330,27 +327,6 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       return { kind: "updated", revision: now };
     }
     throw new Error(`run projection CAS did not converge for ${runId}`);
-  }
-
-  protected async removeTerminalBuildsFromDesiredState(
-    hostId: string,
-    buildIds: string[],
-    nowUnixMs: number,
-  ): Promise<void> {
-    if (!buildIds.length) {
-      return;
-    }
-
-    await mutateStoredHostDesiredState(
-      drizzle(this.env.DB),
-      hostId,
-      nowUnixMs,
-      (draft) => {
-        for (const buildId of buildIds) {
-          removeDesiredBuild(draft, { buildId });
-        }
-      },
-    );
   }
 
   protected async scheduleNextAlarm(hostId: string): Promise<void> {
@@ -423,7 +399,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   protected async computeNextAlarm(hostId: string): Promise<number | null> {
     const now = Date.now();
     const activeSocket = await this.findActiveSocket(hostId);
-    const desiredState = await loadOrCreateHostDesiredState(
+    const desiredState = await loadStoredHostDesiredState(
       drizzle(this.env.DB),
       hostId,
       now,
@@ -432,7 +408,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
     const undeliveredDesired = activeSocket
       ? activeSocket.attachment.lastDesiredVersionSent !== desiredState.version
       : false;
-    const nextLeaseExpiry = desiredState.vms
+    const nextLeaseExpiry = (desiredState.vms as Array<{ desired_phase: string; lease_expires_at_unix_ms: number }>)
       .filter((vm) => vm.desired_phase === "running")
       .map((vm) => vm.lease_expires_at_unix_ms)
       .sort((left, right) => left - right)[0];
@@ -649,7 +625,8 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
             ? Math.floor(parsed.connectedAt)
             : 0,
         helloReceived: Boolean(parsed.helloReceived),
-        bridgeProtocol: parsed.bridgeProtocol === "v6" ? "v6" : null,
+        bridgeProtocol: parsed.bridgeProtocol === "v9" ? "v9" : null,
+        guestContract: typeof parsed.guestContract === "number" && Number.isSafeInteger(parsed.guestContract) ? parsed.guestContract : null,
         lastDesiredVersionSent:
           typeof parsed.lastDesiredVersionSent === "number" &&
           Number.isFinite(parsed.lastDesiredVersionSent) &&
@@ -703,7 +680,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
   protected async loadDesiredVersionLag(
     hostId: string,
     nowUnixMs: number,
-    desiredState?: HostDesiredStateV2,
+    desiredState?: HostDesiredStateV3,
   ): Promise<{
     lagging: boolean;
     desiredVersion: number;
@@ -712,7 +689,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
     const db = drizzle(this.env.DB);
     const desired =
       desiredState ??
-      (await loadOrCreateHostDesiredState(db, hostId, nowUnixMs));
+      (await loadStoredHostDesiredState(db, hostId, nowUnixMs));
     const rows = await db
       .select({
         appliedDesiredVersion: hostActualState.appliedDesiredVersion,

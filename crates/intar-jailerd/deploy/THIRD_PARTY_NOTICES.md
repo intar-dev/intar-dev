@@ -1,16 +1,16 @@
 # Third-party notices
 
-## Cloud Hypervisor v53.0
+## Cloud Hypervisor v54.1
 
 The scenario-host archive redistributes the unmodified static Cloud Hypervisor
-v53.0 executable published by the Cloud Hypervisor project.
+v54.1 executable published by the Cloud Hypervisor project.
 
 - Project and source: <https://github.com/cloud-hypervisor/cloud-hypervisor>
-- Release: <https://github.com/cloud-hypervisor/cloud-hypervisor/releases/tag/v53.0>
-- Source commit: `9ed824d6d08df3e96f7d5f50795d9449ac99f431`
-- Executable SHA-256: `448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc`
+- Release: <https://github.com/cloud-hypervisor/cloud-hypervisor/releases/tag/v54.1>
+- Source commit: `74aeae19cb1ee2c44d33796b0e4e95e1a68e94dd`
+- Executable SHA-256: `f9ffb9646783233d1f0fb09e77db1fca66499d1041e63bc011b90683c0d49933`
 
-The archive includes the upstream v53.0 `LICENSES` directory verbatim under
+The archive includes the upstream v54.1 `LICENSES` directory verbatim under
 `deploy/cloud-hypervisor-LICENSES/`.
 
 ## Statically linked Rust dependencies

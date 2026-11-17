@@ -1,484 +1,150 @@
-import { type ReactNode, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
+import { ArrowRight, HardDriveDownload, Search } from "lucide-react";
 import {
-  ArrowRight,
-  CircleCheckBig,
-  CircleOff,
-  HardDriveDownload,
-  Search,
-} from "lucide-react";
-import { apiErrorMessage } from "@/components/app/lib/api-errors";
-import { HttpResponseError } from "@/components/app/lib/http-response-error";
-import { PageShell } from "@/components/app/patterns/PageShell";
+  type AdministeredScenario,
+  REVISION_STATES,
+  shortRev,
+  useAdministeredScenarios,
+} from "@/components/app/admin/scenario-revisions";
+import { useSession } from "@/components/app/hooks/useSession";
 import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
 } from "@/components/app/patterns/CollectionPagination";
+import { FilterBar } from "@/components/app/patterns/FilterBar";
+import { MetaLine } from "@/components/app/patterns/MetaLine";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
-import {
-  MetaDifficulty,
-  MetaLine,
-  SCENARIO_DIFFICULTIES,
-  type ScenarioDifficulty,
-} from "@/components/app/patterns/MetaLine";
-import {
-  FilterBar,
-  FilterChip,
-  FilterChipGroup,
-} from "@/components/app/patterns/FilterBar";
-import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { TableSkeleton } from "@/components/app/patterns/Skeletons";
 import { EmptyState, ErrorState } from "@/components/app/patterns/StateCard";
-import { formatRelativeTime } from "@/components/app/lib/format";
-import { Button } from "@/components/ui/button";
-import type { AdminScenarioSummary } from "@/components/app/admin/hosts/types";
-import { useAdminScenarios } from "@/components/app/admin/hosts/useAdminScenarios";
+import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { ScenarioSourceSection } from "@/components/app/pages/organization-detail/scenario-source";
-import { ImagePromotionSection } from "@/components/app/pages/admin/ImagePromotion";
-import { cn } from "@/lib/utils";
-
-type StateFilter = "enabled" | "disabled" | null;
-
-type ScenarioBuildStatus =
-  | "queued"
-  | "assigned"
-  | "building"
-  | "succeeded"
-  | "failed"
-  | "stale";
-
-interface ScenarioBuildSummary {
-  scenarioId: string;
-  status: ScenarioBuildStatus;
-  updatedAt: number;
-}
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { isAdminUser } from "@/lib/authz";
 
 export function ScenarioRegistry() {
-  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
-  const [stateFilter, setStateFilter] = useState<StateFilter>(null);
-  const [difficulty, setDifficulty] = useState<ScenarioDifficulty | null>(null);
-  const [category, setCategory] = useState<string | null>(null);
-
-  const scenarios = useAdminScenarios();
-  const builds = useQuery({
-    queryKey: ["admin-builds"],
-    queryFn: fetchScenarioBuilds,
-    staleTime: 2_000,
-  });
-
-  const setEnabled = useMutation({
-    mutationFn: async (params: { scenarioId: string; enabled: boolean }) => {
-      const response = await fetch(
-        `/api/admin/scenarios/${encodeURIComponent(params.scenarioId)}/enabled`,
-        {
-          method: params.enabled ? "POST" : "DELETE",
-          credentials: "include",
-        },
-      );
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw HttpResponseError.fromBody(
-          response.status,
-          body,
-          `Failed to ${params.enabled ? "enable" : "disable"} scenario`,
-        );
-      }
-    },
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["admin-scenarios"] }),
-        queryClient.invalidateQueries({ queryKey: ["scenarios"] }),
-      ]);
-    },
-  });
-
-  const scenarioList = scenarios.data?.scenarios ?? [];
-  const enabledCount = scenarioList.filter(
-    (scenario) => scenario.enabled,
-  ).length;
-  const categories = useMemo(
-    () =>
-      [
-        ...new Set(
-          scenarioList
-            .map((scenario) => scenario.category)
-            .filter((value) => value.trim()),
-        ),
-      ].sort(),
-    [scenarioList],
-  );
-  const latestBuildByScenarioId = useMemo(() => {
-    const latestBuilds = new Map<string, ScenarioBuildSummary>();
-    for (const build of builds.data?.builds ?? []) {
-      const current = latestBuilds.get(build.scenarioId);
-      if (!current || build.updatedAt > current.updatedAt) {
-        latestBuilds.set(build.scenarioId, build);
-      }
-    }
-    return latestBuilds;
-  }, [builds.data]);
-  const filteredScenarios = useMemo(() => {
+  const scenarios = useAdministeredScenarios();
+  const platformAdmin = isAdminUser(useSession().data?.user);
+  const list = scenarios.data ?? [];
+  const shown = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return scenarioList
-      .filter((scenario) => {
-        if (stateFilter === "enabled" && !scenario.enabled) return false;
-        if (stateFilter === "disabled" && scenario.enabled) return false;
-        if (difficulty && scenario.difficulty !== difficulty) return false;
-        if (category && scenario.category !== category) return false;
-        if (!needle) return true;
-        return (
-          scenario.title.toLowerCase().includes(needle) ||
-          scenario.scenarioId.toLowerCase().includes(needle) ||
-          scenario.category.toLowerCase().includes(needle) ||
-          scenario.tags.some((tag) => tag.toLowerCase().includes(needle))
-        );
-      })
-      .sort((left, right) => left.title.localeCompare(right.title));
-  }, [category, difficulty, scenarioList, search, stateFilter]);
-  const filtersActive = Boolean(
-    search.trim() || stateFilter || difficulty || category,
-  );
-
-  const clearFilters = () => {
-    setSearch("");
-    setStateFilter(null);
-    setDifficulty(null);
-    setCategory(null);
-  };
+    return needle
+      ? list.filter((scenario) => scenario.id.includes(needle) || (scenario.title ?? "").toLowerCase().includes(needle))
+      : list;
+  }, [list, search]);
 
   return (
     <PageShell variant="workspace" density="compact">
-      <ScenarioSourceSection endpoint="/api/admin/scenario-source" scope="public" />
-      <ImagePromotionSection />
+      {platformAdmin ? <ScenarioSourceSection endpoint="/api/admin/scenario-source" scope="public" /> : null}
       {scenarios.error ? (
         <ErrorState
           title="Could not load scenarios"
-          description={
-            scenarios.error instanceof Error
-              ? scenarios.error.message
-              : "Failed to load scenarios"
-          }
+          description={scenarios.error instanceof Error ? scenarios.error.message : "Failed to load scenarios"}
           onRetry={() => void scenarios.refetch()}
         />
       ) : scenarios.isPending ? (
         <TableSkeleton />
-      ) : !scenarioList.length ? (
+      ) : !list.length ? (
         <EmptyState
           icon={<HardDriveDownload />}
-          title="No scenarios uploaded"
-          description="Upload a scenario bundle through the external pipeline. Published scenarios appear here with their VM inventory, checks, and learner availability."
+          title="No scenarios yet"
+          description="Scenarios appear here once a connected repository publishes them. Each one shows its revisions, which one learners start, and which one is next."
         />
       ) : (
-        <>
-          <dl className="grid grid-cols-3 gap-3 border-b pb-4 sm:gap-4">
-            <div className="min-w-0">
-              <dt className="text-label">Total scenarios</dt>
-              <dd className="mt-1 text-section-title tabular-nums">
-                {scenarioList.length}
-              </dd>
-            </div>
-            <div className="min-w-0">
-              <dt className="text-label">Enabled for learners</dt>
-              <dd className="mt-1 text-section-title text-success tabular-nums">
-                {enabledCount}
-              </dd>
-            </div>
-            <div className="min-w-0">
-              <dt className="text-label">Unavailable</dt>
-              <dd className="mt-1 text-section-title tabular-nums">
-                {scenarioList.length - enabledCount}
-              </dd>
-            </div>
-          </dl>
-          <Section
-            density="compact"
-            title="Registry"
-            description="Each scenario is keyed by its stable scenario ID; new uploads replace the stored scenario for that ID."
-            bodyClassName="space-y-4"
-          >
+        <Section
+          density="compact"
+          title="Registry"
+          description="Learners start a scenario's live revision. A new revision becomes the candidate once it builds; verify it, then promote it."
+          bodyClassName="space-y-4"
+        >
           <FilterBar
             search={search}
             onSearchChange={setSearch}
             searchPlaceholder="Search scenarios…"
             searchLabel="Search scenarios"
-            filtersActive={filtersActive}
-            onClear={clearFilters}
-            shown={filteredScenarios.length}
-            total={scenarioList.length}
+            filtersActive={Boolean(search.trim())}
+            onClear={() => setSearch("")}
+            shown={shown.length}
+            total={list.length}
             noun="scenarios"
-          >
-            <FilterChipGroup label="Availability">
-              <FilterChip
-                active={stateFilter === "enabled"}
-                onClick={() =>
-                  setStateFilter((current) =>
-                    current === "enabled" ? null : "enabled",
-                  )
-                }
-              >
-                Enabled
-              </FilterChip>
-              <FilterChip
-                active={stateFilter === "disabled"}
-                onClick={() =>
-                  setStateFilter((current) =>
-                    current === "disabled" ? null : "disabled",
-                  )
-                }
-              >
-                Disabled
-              </FilterChip>
-            </FilterChipGroup>
-            <FilterChipGroup label="Difficulty">
-              {SCENARIO_DIFFICULTIES.map((level) => (
-                <FilterChip
-                  key={level}
-                  active={difficulty === level}
-                  onClick={() =>
-                    setDifficulty((current) =>
-                      current === level ? null : level,
-                    )
-                  }
-                >
-                  {level}
-                </FilterChip>
-              ))}
-            </FilterChipGroup>
-            {categories.length > 1 ? (
-              <FilterChipGroup label="Category">
-                {categories.map((entry) => (
-                  <FilterChip
-                    key={entry}
-                    active={category === entry}
-                    onClick={() =>
-                      setCategory((current) =>
-                        current === entry ? null : entry,
-                      )
-                    }
-                    className="normal-case"
-                  >
-                    {entry}
-                  </FilterChip>
-                ))}
-              </FilterChipGroup>
-            ) : null}
-          </FilterBar>
-
-          {!filteredScenarios.length ? (
+          />
+          {!shown.length ? (
             <EmptyState
               icon={<Search />}
-              title="No scenarios match your filters"
-              description="Clear the filters or try a different search term."
+              title="No scenarios match your search"
+              description="Clear the search or try a different term."
               headingLevel={3}
-              action={
-                <Button variant="outline" onClick={clearFilters}>
-                  Clear filters
-                </Button>
-              }
+              action={<Button variant="outline" onClick={() => setSearch("")}>Clear search</Button>}
             />
           ) : (
-              <PaginatedCollection
-                items={filteredScenarios}
-                pageSize={COLLECTION_PAGE_SIZE.dense}
-                itemLabel="scenarios"
-                resetKey={`${search}|${stateFilter ?? ""}|${difficulty ?? ""}|${category ?? ""}`}
-              >
-                {(visibleScenarios) => (
-                  <div className="divide-y">
-                    {visibleScenarios.map((scenario) => (
-                      <ScenarioRegistryRow
-                        key={scenario.scenarioId}
-                        scenario={scenario}
-                        latestBuild={
-                          latestBuildByScenarioId.get(scenario.scenarioId) ??
-                          null
-                        }
-                        buildLoading={builds.isLoading}
-                        buildUnavailable={Boolean(builds.error && !builds.data)}
-                        pending={
-                          setEnabled.isPending &&
-                          setEnabled.variables?.scenarioId ===
-                            scenario.scenarioId
-                        }
-                        disabled={setEnabled.isPending}
-                        error={
-                          setEnabled.error &&
-                          setEnabled.variables?.scenarioId ===
-                            scenario.scenarioId
-                            ? `Could not ${setEnabled.variables.enabled ? "enable" : "disable"} ${scenario.title}: ${
-                                apiErrorMessage(
-                                  setEnabled.error,
-                                  "Try again.",
-                                ) ?? "Try again."
-                              }`
-                            : null
-                        }
-                        onToggle={() =>
-                          setEnabled.mutate({
-                            scenarioId: scenario.scenarioId,
-                            enabled: !scenario.enabled,
-                          })
-                        }
-                      />
-                    ))}
-                  </div>
-                )}
-              </PaginatedCollection>
+            <PaginatedCollection items={shown} pageSize={COLLECTION_PAGE_SIZE.dense} itemLabel="scenarios" resetKey={search}>
+              {(visible) => (
+                <div className="divide-y">
+                  {visible.map((scenario) => <ScenarioRegistryRow key={scenario.id} scenario={scenario} />)}
+                </div>
+              )}
+            </PaginatedCollection>
           )}
-          </Section>
-        </>
+        </Section>
       )}
     </PageShell>
   );
 }
 
-function ScenarioRegistryRow({
-  scenario,
-  latestBuild,
-  buildLoading,
-  buildUnavailable,
-  pending,
-  disabled,
-  error,
-  onToggle,
-}: {
-  scenario: AdminScenarioSummary;
-  latestBuild: ScenarioBuildSummary | null;
-  buildLoading: boolean;
-  buildUnavailable: boolean;
-  pending: boolean;
-  disabled: boolean;
-  /** The row's own failed toggle, named after the scenario. */
-  error: string | null;
-  onToggle: () => void;
-}) {
-  const buildValue = buildLoading
-    ? "Checking builds…"
-    : buildUnavailable
-      ? "Status unavailable"
-      : latestBuild
-        ? BUILD_STATUS_LABELS[latestBuild.status]
-        : "No build";
-
+function ScenarioRegistryRow({ scenario }: { scenario: AdministeredScenario }) {
+  const [namespace, slug] = scenario.id.split("/") as [string, string];
+  const candidate = scenario.revisions.find((revision) => revision.rev === scenario.candidateRev) ?? null;
+  const pending = candidate && candidate.rev !== scenario.liveRev ? REVISION_STATES[candidate.state] : null;
+  const verifying = Object.keys(scenario.verifyRuns).length > 0;
   return (
-    <div className="grid gap-4 py-3 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
-      <div className="min-w-0 space-y-3">
+    <div className="grid gap-3 py-3 first:pt-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+      <div className="min-w-0 space-y-1.5">
         <h3>
           <Link
-            to="/admin/scenarios/$scenarioId"
-            params={{ scenarioId: scenario.scenarioId }}
+            to="/admin/scenarios/$namespace/$slug"
+            params={{ namespace, slug }}
             className="inline-flex items-center text-sm font-semibold hover:underline pointer-coarse:min-h-11"
           >
-            {scenario.title}
+            {scenario.title ?? scenario.id}
           </Link>
         </h3>
         <MetaLine
           items={[
-            <code key="id">{scenario.scenarioId}</code>,
-            <MetaDifficulty
-              key="difficulty"
-              difficulty={scenario.difficulty}
-            />,
-            scenario.category,
-            scenario.tags.length ? scenario.tags.join(", ") : null,
+            <code key="id">{scenario.id}</code>,
+            scenario.liveRev ? <span key="live">Live <code>{shortRev(scenario.liveRev)}</code></span> : "Not live",
+            `${scenario.revisions.length} ${scenario.revisions.length === 1 ? "revision" : "revisions"}`,
+            scenario.enabled ? null : "Disabled",
           ]}
         />
-
-        <dl
-          className="grid grid-cols-2 gap-x-4 gap-y-3 border-t pt-3 text-sm lg:grid-cols-4 lg:gap-x-6"
-          aria-label={`${scenario.title} details`}
-        >
-          <RegistryFact
-            label="Availability"
-            value={scenario.enabled ? "Enabled for learners" : "Disabled"}
-            tone={scenario.enabled ? "success" : "muted"}
-          />
-          <RegistryFact
-            label="Latest build"
-            value={buildValue}
-            tone={buildTone(
-              latestBuild?.status,
-              buildLoading || buildUnavailable,
-            )}
-          />
-          <RegistryFact
-            label="Updated"
-            value={formatRelativeTime(scenario.updatedAt)}
-            tone="muted"
-          />
-          <RegistryFact
-            label="Inventory"
-            value={`${scenario.vmCount} ${scenario.vmCount === 1 ? "VM" : "VMs"} · ${scenario.probeCount} ${scenario.probeCount === 1 ? "probe" : "probes"}`}
-          />
-          <RegistryFact
-            label="Guidance"
-            value={`${scenario.scenarioHintCount} ${scenario.scenarioHintCount === 1 ? "hint" : "hints"} · ~${scenario.estimatedMinutes} min`}
-          />
-          <RegistryFact
-            className="col-span-2"
-            label="Resources"
-            value={
-              <span className="flex flex-wrap gap-x-3 gap-y-1 tabular-nums">
-                {formatScenarioResourceItems(scenario.requiredResources).map(
-                  (resource) => (
-                    <span key={resource}>{resource}</span>
-                  ),
-                )}
-              </span>
-            }
-          />
-        </dl>
       </div>
-
-      <div className="flex shrink-0 flex-wrap items-center gap-2 lg:w-40 lg:flex-col lg:items-stretch">
-        <Button
-          size="sm"
-          variant="outline"
-          className="lg:w-full"
-          disabled={disabled}
-          onClick={onToggle}
-        >
-          {scenario.enabled ? <CircleOff /> : <CircleCheckBig />}
-          {pending
-            ? scenario.enabled
-              ? "Disabling…"
-              : "Enabling…"
-            : scenario.enabled
-              ? "Disable scenario"
-              : "Enable scenario"}
-        </Button>
+      <div className="flex flex-wrap items-center gap-3">
+        {verifying ? (
+          <StatusToken tone="live" word="Verifying" />
+        ) : pending ? (
+          <span className="inline-flex items-center gap-2">
+            <Badge variant="outline">Candidate</Badge>
+            <StatusToken tone={pending.tone} word={pending.word} />
+          </span>
+        ) : null}
         <Button
           size="sm"
           variant="ghost"
-          className="lg:w-full"
-          aria-label={`Inspect ${scenario.title}`}
-          render={
-            <Link
-              to="/admin/scenarios/$scenarioId"
-              params={{ scenarioId: scenario.scenarioId }}
-            />
-          }
+          aria-label={`Inspect ${scenario.title ?? scenario.id}`}
+          render={<Link to="/admin/scenarios/$namespace/$slug" params={{ namespace, slug }} />}
         >
           Inspect
           <ArrowRight />
         </Button>
       </div>
-      {error ? (
-        <InlineFeedback tone="error" className="lg:col-span-2">
-          {error}
-        </InlineFeedback>
-      ) : null}
     </div>
   );
 }
 
 export function formatScenarioResourceItems(
-  resources: AdminScenarioSummary["requiredResources"],
+  resources: { cpuMillis: number; memoryMib: number; diskMib: number },
 ): string[] {
   return [
     `${formatCpu(resources.cpuMillis)} CPU`,
@@ -501,66 +167,3 @@ function formatMibResource(value: number, label: string): string {
   return `${formatted} GiB ${label}`;
 }
 
-const BUILD_STATUS_LABELS: Record<ScenarioBuildStatus, string> = {
-  queued: "Queued",
-  assigned: "Assigned",
-  building: "Building",
-  succeeded: "Succeeded",
-  failed: "Failed",
-  stale: "Stale",
-};
-
-type FactTone = "default" | "muted" | "success" | "warning" | "error";
-
-function RegistryFact({
-  label,
-  value,
-  tone,
-  className,
-}: {
-  label: string;
-  value: ReactNode;
-  tone?: FactTone;
-  className?: string;
-}) {
-  return (
-    <div className={cn("min-w-0", className)}>
-      <dt className="text-label">{label}</dt>
-      <dd
-        className={cn(
-          "mt-1 text-sm font-medium break-words",
-          tone === "muted" && "text-muted-foreground",
-          tone === "success" && "text-success",
-          tone === "warning" && "text-warning",
-          tone === "error" && "text-destructive",
-        )}
-      >
-        {value}
-      </dd>
-    </div>
-  );
-}
-
-function buildTone(
-  status: ScenarioBuildStatus | undefined,
-  unavailable: boolean,
-): FactTone {
-  if (unavailable || !status) return "muted";
-  if (status === "succeeded") return "success";
-  if (status === "failed") return "error";
-  if (status === "building" || status === "stale") return "warning";
-  return "default";
-}
-
-async function fetchScenarioBuilds(): Promise<{
-  builds: ScenarioBuildSummary[];
-}> {
-  const response = await fetch("/api/admin/builds", {
-    method: "GET",
-    credentials: "include",
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to load build status (${response.status})`);
-  }
-  return (await response.json()) as { builds: ScenarioBuildSummary[] };
-}

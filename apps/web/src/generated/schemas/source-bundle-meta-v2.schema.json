@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SourceBundleMetaV2",
+  "description": "The `meta` field of a [`SourceBundleV2`] upload.",
+  "type": "object",
+  "properties": {
+    "rev": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "rev"
+  ]
+}

@@ -7,7 +7,7 @@
 //! parser crash ends only that compile.
 
 use std::fs;
-use std::io::{self, Read as _};
+use std::io;
 use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -16,16 +16,13 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Parser;
 use flate2::read::GzDecoder;
-use intar_contracts::bridge::{
-    DesiredSourceCompileV1, SourceCompileErrorV1, SourceCompileFailureV1,
-};
+use intar_contracts::bridge::{SourceCompileErrorV1, SourceCompileFailureV1};
+use intar_contracts::bridge_v9::DesiredSourceCompileV2;
 use intar_contracts::source::{
-    AGENT_SOURCES_PATH, SOURCE_BUNDLE_FIELD, SOURCE_META_FIELD, SourceCompileErrorCode,
-    SourceRefusalV1,
+    AGENT_SOURCES_PATH, SOURCE_BUNDLE_FIELD, SOURCE_BUNDLE_MIME, SOURCE_META_FIELD,
+    SourceBundleMetaV2, SourceCompileErrorCode, SourceRefusalV1,
 };
-use intar_image_build::source_bundle::{
-    IntarManifestV1, SourceCompileError, compile_source_tree, parse_intar_manifest,
-};
+use intar_image_scenario::loader::{compile, encode_bundle};
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
 use reqwest::multipart::{Form, Part};
@@ -34,7 +31,6 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::bridge::bootstrap_builder_access_token;
-use crate::bundle::{agent_http_client, builder_arch};
 use crate::config::BridgeConfig;
 
 const COMPILE_TIMEOUT: Duration = if cfg!(test) {
@@ -49,20 +45,30 @@ const RETRY_DELAY: Duration = if cfg!(test) {
 };
 /// The maintenance fence answers 503 without `Retry-After`.
 const UNAVAILABLE_RETRY_DELAY: Duration = Duration::from_secs(60);
-/// The kept entries' size as a tar archive, the source bundle's own cap.
+/// The kept entries' size as a tar archive.
 const MAX_KEPT_BYTES: u64 = 4 * 1024 * 1024;
 const TAR_BLOCK_SIZE: u64 = 512;
-const MANIFEST_PATH: &str = "intar.yaml";
-const GITMODULES_PATH: &str = ".gitmodules";
+const MANIFEST_PATH: &str = "intar.hcl";
+/// What the loader reads: the manifest and these directories.
+const KEPT_DIRS: [&str; 3] = ["images", "scenarios", "courses"];
 const SNAPSHOT_FILE: &str = "source.tar.gz";
 const TREE_DIR: &str = "tree";
 const META_FILE: &str = "meta.json";
-const BUNDLE_FILE: &str = "bundle.tar.gz";
+const BUNDLE_FILE: &str = "bundle.json.gz";
 const ERRORS_FILE: &str = "errors.json";
+const HTTP_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Why a snapshot compiles to nothing, as the Worker sees it.
+#[derive(Debug)]
+pub(crate) struct SourceCompileError {
+    pub(crate) code: SourceCompileErrorCode,
+    pub(crate) error: anyhow::Error,
+}
 
 /// The hidden child entry: unpacks one repository snapshot into `<out>/tree`
-/// and compiles it. It writes `meta.json` and `bundle.tar.gz`, or the
-/// refusal as `errors.json`, to `<out>`.
+/// and compiles it as `intar-image-cli bundle` does. It writes `meta.json`
+/// and `bundle.json.gz`, the CLI's upload fields, or the refusal as
+/// `errors.json`, to `<out>`.
 #[derive(Debug, Parser)]
 pub(crate) struct CompileSourceCommand {
     #[arg(long, value_name = "PATH")]
@@ -71,60 +77,115 @@ pub(crate) struct CompileSourceCommand {
     out: PathBuf,
     #[arg(long)]
     rev: String,
-    #[arg(long)]
-    arch: String,
 }
 
 pub(crate) fn compile_source(args: &CompileSourceCommand) -> Result<()> {
     let root = args.out.join(TREE_DIR);
-    match unpack_snapshot(&args.snapshot, &root)
-        .and_then(|()| compile_source_tree(&root, &args.rev, &args.arch))
-    {
-        Ok(compiled) => {
-            fs::write(
-                args.out.join(META_FILE),
-                serde_json::to_vec(&compiled.meta)?,
-            )
-            .context("failed to write the bundle meta")?;
-            fs::write(args.out.join(BUNDLE_FILE), &compiled.archive)
-                .context("failed to write the bundle archive")?;
+    let compiled = unpack_snapshot(&args.snapshot, &root)
+        .map_err(Vec::from)
+        .and_then(|()| compile_tree(&root));
+    let errors = match compiled {
+        Ok(bundle) => {
+            let meta = SourceBundleMetaV2 {
+                rev: args.rev.clone(),
+            };
+            fs::write(args.out.join(META_FILE), meta.field())
+                .context("failed to write the bundle meta")?;
+            fs::write(args.out.join(BUNDLE_FILE), bundle).context("failed to write the bundle")?;
+            return Ok(());
         }
-        Err(error) => {
-            // Diagnostics name repository paths, never this builder's.
-            let root = root.display().to_string();
-            let message = format!("{:#}", error.error)
+        Err(errors) => errors,
+    };
+    // Diagnostics name repository paths, never this builder's.
+    let root = root.display().to_string();
+    let errors: Vec<SourceCompileErrorV1> = errors
+        .into_iter()
+        .map(|mut error| {
+            error.message = error
+                .message
                 .replace(&format!("{root}/"), "")
                 .replace(&root, ".");
-            let errors = [SourceCompileErrorV1 {
-                path: None,
-                line: None,
-                code: error.code,
-                message,
-            }];
-            fs::write(args.out.join(ERRORS_FILE), serde_json::to_vec(&errors)?)
-                .context("failed to write the compile errors")?;
-        }
-    }
+            error
+        })
+        .collect();
+    fs::write(args.out.join(ERRORS_FILE), serde_json::to_vec(&errors)?)
+        .context("failed to write the compile errors")?;
     Ok(())
 }
 
-/// Unpacks `intar.yaml`, `.gitmodules` and the courses root of a GitHub
+impl From<SourceCompileError> for Vec<SourceCompileErrorV1> {
+    fn from(error: SourceCompileError) -> Self {
+        vec![SourceCompileErrorV1 {
+            path: None,
+            line: None,
+            code: error.code,
+            message: format!("{:#}", error.error),
+        }]
+    }
+}
+
+/// The unpacked tree compiled and encoded exactly as the CLI's `bundle`.
+fn compile_tree(root: &Path) -> Result<Vec<u8>, Vec<SourceCompileErrorV1>> {
+    if let Some(empty) = first_empty_dir(root) {
+        return Err(SourceCompileError {
+            code: SourceCompileErrorCode::SubmoduleUnsupported,
+            error: anyhow!("'{empty}' is empty: submodules are not supported"),
+        }
+        .into());
+    }
+    let (bundle, _) = compile(root).map_err(|problems| {
+        problems
+            .into_iter()
+            .map(|problem| SourceCompileErrorV1 {
+                path: Some(problem.path.display().to_string()),
+                line: u32::try_from(problem.line).ok().filter(|line| *line > 0),
+                code: SourceCompileErrorCode::CompileFailed,
+                message: problem.to_string(),
+            })
+            .collect::<Vec<_>>()
+    })?;
+    encode_bundle(&bundle).map_err(|message| {
+        vec![SourceCompileErrorV1 {
+            path: None,
+            line: None,
+            code: SourceCompileErrorCode::BundleTooLarge,
+            message,
+        }]
+    })
+}
+
+/// An empty directory is how an archive shows a submodule; its files would
+/// silently be missing from the bundle.
+fn first_empty_dir(root: &Path) -> Option<String> {
+    let mut pending = vec![root.to_owned()];
+    while let Some(dir) = pending.pop() {
+        let mut entries = fs::read_dir(&dir).ok()?.flatten().peekable();
+        if entries.peek().is_none() && dir != root {
+            return Some(dir.strip_prefix(root).ok()?.display().to_string());
+        }
+        pending.extend(
+            entries
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .map(|entry| entry.path()),
+        );
+    }
+    None
+}
+
+/// Unpacks `intar.hcl` and the directories the loader reads of a GitHub
 /// repository archive into `root`, below the archive's top-level directory.
 fn unpack_snapshot(snapshot: &Path, root: &Path) -> Result<(), SourceCompileError> {
     let failed = |error| SourceCompileError {
         code: SourceCompileErrorCode::CompileFailed,
         error,
     };
-    let manifest = read_snapshot_manifest(snapshot)?;
-    let courses_root = Path::new(&manifest.courses_root);
     let mut kept_bytes = 0_u64;
+    let mut manifest = false;
     for_each_snapshot_entry(snapshot, |path, entry| {
-        if path != Path::new(MANIFEST_PATH)
-            && path != Path::new(GITMODULES_PATH)
-            && !path.starts_with(courses_root)
-        {
+        if path != Path::new(MANIFEST_PATH) && !KEPT_DIRS.iter().any(|dir| path.starts_with(dir)) {
             return Ok(ControlFlow::Continue(()));
         }
+        manifest |= path == Path::new(MANIFEST_PATH);
         let output = root.join(path);
         let entry_type = entry.header().entry_type();
         if !entry_type.is_dir() && !entry_type.is_file() {
@@ -133,8 +194,8 @@ fn unpack_snapshot(snapshot: &Path, root: &Path) -> Result<(), SourceCompileErro
                 path.display()
             )));
         }
-        // Charged as the bundle archive charges a file: a header block and
-        // the content in whole blocks, so empty entries count too.
+        // Charged as a tar archive charges a file: a header block and the
+        // content in whole blocks, so empty entries count too.
         kept_bytes = kept_bytes.saturating_add(
             entry
                 .size()
@@ -146,14 +207,12 @@ fn unpack_snapshot(snapshot: &Path, root: &Path) -> Result<(), SourceCompileErro
             return Err(SourceCompileError {
                 code: SourceCompileErrorCode::BundleTooLarge,
                 error: anyhow!(
-                    "the course files expand beyond the {MAX_KEPT_BYTES} byte limit at '{}'",
+                    "the repository files expand beyond the {MAX_KEPT_BYTES} byte limit at '{}'",
                     path.display()
                 ),
             });
         }
         if entry_type.is_dir() {
-            // An empty directory is how an archive shows a submodule, so
-            // the compile must see every one.
             fs::create_dir_all(&output)
                 .with_context(|| format!("failed to create '{}'", path.display()))
                 .map_err(failed)?;
@@ -169,40 +228,14 @@ fn unpack_snapshot(snapshot: &Path, root: &Path) -> Result<(), SourceCompileErro
             .with_context(|| format!("failed to unpack '{}'", path.display()))
             .map_err(failed)?;
         Ok(ControlFlow::Continue(()))
-    })
-}
-
-/// Reads and checks `intar.yaml` before anything is unpacked, so the courses
-/// root decides what the archive may write.
-fn read_snapshot_manifest(snapshot: &Path) -> Result<IntarManifestV1, SourceCompileError> {
-    let invalid = |error| SourceCompileError {
-        code: SourceCompileErrorCode::ManifestInvalid,
-        error,
-    };
-    let mut yaml = None;
-    for_each_snapshot_entry(snapshot, |path, entry| {
-        if path != Path::new(MANIFEST_PATH) {
-            return Ok(ControlFlow::Continue(()));
-        }
-        if !entry.header().entry_type().is_file() {
-            return Err(invalid(anyhow!("{MANIFEST_PATH} must be a regular file")));
-        }
-        let mut bytes = Vec::new();
-        entry
-            .take(MAX_KEPT_BYTES)
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("failed to read {MANIFEST_PATH}"))
-            .map_err(invalid)?;
-        yaml = Some(bytes);
-        Ok(ControlFlow::Break(()))
     })?;
-    let yaml = yaml.ok_or_else(|| SourceCompileError {
-        code: SourceCompileErrorCode::ManifestMissing,
-        error: anyhow!("{MANIFEST_PATH} is missing from the repository root"),
-    })?;
-    let yaml = String::from_utf8(yaml)
-        .map_err(|_| invalid(anyhow!("{MANIFEST_PATH} is not valid UTF-8")))?;
-    parse_intar_manifest(&yaml)
+    if !manifest {
+        return Err(SourceCompileError {
+            code: SourceCompileErrorCode::ManifestMissing,
+            error: anyhow!("{MANIFEST_PATH} is missing from the repository root"),
+        });
+    }
+    Ok(())
 }
 
 type SnapshotEntry<'a> = tar::Entry<'a, GzDecoder<fs::File>>;
@@ -276,12 +309,12 @@ pub(crate) async fn run_supervisor(
     bridge: BridgeConfig,
     work_dir: PathBuf,
     program: PathBuf,
-    mut desired: watch::Receiver<Vec<DesiredSourceCompileV1>>,
+    mut desired: watch::Receiver<Vec<DesiredSourceCompileV2>>,
 ) {
     // A builder killed mid-compile left that compile's snapshot behind.
     remove_work_dir(&work_dir).await;
     // Compiles that ended on this host; skipped while they stay desired.
-    let mut finished: Vec<DesiredSourceCompileV1> = Vec::new();
+    let mut finished: Vec<DesiredSourceCompileV2> = Vec::new();
     loop {
         let next = {
             let current = desired.borrow_and_update();
@@ -329,8 +362,8 @@ async fn run_compile(
     bridge: &BridgeConfig,
     work_dir: &Path,
     program: &Path,
-    compile: &DesiredSourceCompileV1,
-    desired: &mut watch::Receiver<Vec<DesiredSourceCompileV1>>,
+    compile: &DesiredSourceCompileV2,
+    desired: &mut watch::Receiver<Vec<DesiredSourceCompileV2>>,
 ) -> Result<()> {
     if let Err(error) = tokio::fs::remove_dir_all(work_dir).await
         && error.kind() != io::ErrorKind::NotFound
@@ -360,7 +393,6 @@ async fn run_compile(
         .arg("--out")
         .arg(work_dir)
         .arg(format!("--rev={}", compile.rev))
-        .args(["--arch", builder_arch(&compile.arch)])
         // The child's temporary directories go where a kill still removes them.
         .env("TMPDIR", work_dir)
         .stdin(Stdio::null())
@@ -393,8 +425,8 @@ async fn run_compile(
 
 /// Resolves once `compile` is no longer desired; never when the channel closes.
 async fn left_desired_state(
-    desired: &mut watch::Receiver<Vec<DesiredSourceCompileV1>>,
-    compile: &DesiredSourceCompileV1,
+    desired: &mut watch::Receiver<Vec<DesiredSourceCompileV2>>,
+    compile: &DesiredSourceCompileV2,
 ) {
     while desired.borrow_and_update().contains(compile) {
         if desired.changed().await.is_err() {
@@ -405,7 +437,7 @@ async fn left_desired_state(
 
 async fn fetch_snapshot(bridge: &BridgeConfig, url: &str, snapshot: &Path) -> Result<()> {
     let token = bootstrap_builder_access_token(bridge).await?;
-    let response = agent_http_client()?
+    let response = http_client()?
         .get(url)
         .bearer_auth(token.trim())
         .send()
@@ -473,7 +505,7 @@ fn read_compile_result(work_dir: &Path, exit: Option<ExitStatus>) -> Result<Comp
 async fn post_result(
     bridge: &BridgeConfig,
     url: &str,
-    compile: &DesiredSourceCompileV1,
+    compile: &DesiredSourceCompileV2,
     result: &CompileResult,
 ) {
     loop {
@@ -519,11 +551,11 @@ async fn post_result(
 async fn send_result(
     bridge: &BridgeConfig,
     url: &str,
-    compile: &DesiredSourceCompileV1,
+    compile: &DesiredSourceCompileV2,
     result: &CompileResult,
 ) -> Result<reqwest::Response> {
     let token = bootstrap_builder_access_token(bridge).await?;
-    let request = agent_http_client()?.post(url).bearer_auth(token.trim());
+    let request = http_client()?.post(url).bearer_auth(token.trim());
     let request = match result {
         CompileResult::Compiled { meta, bundle } => {
             let mut form = Form::new().text(SOURCE_META_FIELD, meta.clone());
@@ -532,8 +564,13 @@ async fn send_result(
                 form = form.part(
                     SOURCE_BUNDLE_FIELD,
                     Part::bytes(bundle.clone())
-                        .file_name(format!("{}.tar.gz", compile.rev))
-                        .mime_str("application/gzip")?,
+                        .file_name(
+                            SourceBundleMetaV2 {
+                                rev: compile.rev.clone(),
+                            }
+                            .bundle_file_name(),
+                        )
+                        .mime_str(SOURCE_BUNDLE_MIME)?,
                 );
             }
             request.multipart(form)
@@ -552,6 +589,13 @@ async fn send_result(
         .send()
         .await
         .context("failed to post the source compile result")
+}
+
+fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .context("failed to initialize the builder http client")
 }
 
 #[cfg(test)]

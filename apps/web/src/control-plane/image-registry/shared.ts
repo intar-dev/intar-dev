@@ -1,14 +1,6 @@
-import {
-  type ImageArchitecture,
-  type ImageKey,
-  type ScenarioManifestV5,
-} from "@/generated/catalog";
-
 export const textEncoder = new TextEncoder();
 
 export const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
-
-export const IMAGE_KEY_RE = /^[A-Za-z0-9._-]+$/;
 
 export const BUILD_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -62,90 +54,16 @@ export function isSafeBuildId(value: string): boolean {
   return value !== "." && value !== ".." && BUILD_ID_RE.test(value);
 }
 
-export function artifactFilenameMatches(
-  filename: string,
-  sha256: string,
-): boolean {
-  return filename === sha256 || filename === `${sha256}.artifact`;
-}
-
-export function bootArtifactSha256s(manifest: ScenarioManifestV5): string[] {
-  const values = new Set<string>();
-  for (const vm of manifest.vms) {
-    const kernelSha256 = normalizeSha256(vm.boot.kernel_sha256);
-    const initrdSha256 = normalizeSha256(vm.boot.initrd_sha256);
-    if (kernelSha256) values.add(kernelSha256);
-    if (initrdSha256) values.add(initrdSha256);
-  }
-  return [...values].sort();
-}
-
-export function isImageKey(value: unknown): value is ImageKey {
-  const maybe = value as Partial<ImageKey> | null;
-  return Boolean(
-    maybe &&
-    typeof maybe.scenario === "string" &&
-    typeof maybe.vm === "string" &&
-    isImageArchitecture(maybe.arch),
-  );
-}
-
-export function isImageArchitecture(
-  value: unknown,
-): value is ImageArchitecture {
-  return value === "x86_64" || value === "aarch64";
-}
-
 export function isScenarioDifficulty(value: unknown): boolean {
   return value === "easy" || value === "medium" || value === "hard";
-}
-
-export function isProbePhase(value: unknown): boolean {
-  return value === "boot" || value === "scenario";
 }
 
 export function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
-export function isPositiveU16(value: unknown): boolean {
-  return isPositiveInteger(value) && value <= 0xffff;
-}
-
 export function isPositiveU32(value: unknown): boolean {
   return isPositiveInteger(value) && value <= 0xffff_ffff;
-}
-
-export function isOptionalString(value: unknown): boolean {
-  return value === undefined || value === null || typeof value === "string";
-}
-
-export function registryImageKey(imageKey: ImageKey): string {
-  return `${safeSlug(imageKey.scenario)}-${safeSlug(imageKey.vm)}-${imageKey.arch}`;
-}
-
-export function safeSlug(value: string): string {
-  return value
-    .trim()
-    .replaceAll(/[^A-Za-z0-9._-]+/g, "-")
-    .replaceAll(/^-+|-+$/g, "");
-}
-
-export function imageObjectKey(imageKey: string, sha256: string): string {
-  return `images/${imageKey}/${sha256}.raw.zst`;
-}
-
-export function artifactObjectKey(sha256: string): string {
-  return `artifacts/${sha256}`;
-}
-
-export function bundleObjectKey(rev: string): string {
-  return `builds/bundles/${rev}.tar.gz`;
-}
-
-export function normalizeSha256(value: string): string | null {
-  const normalized = value.trim().toLowerCase();
-  return SHA256_HEX_RE.test(normalized) ? normalized : null;
 }
 
 export async function sha256Hex(value: ArrayBuffer): Promise<string> {
@@ -167,10 +85,6 @@ export function isSafeBundleRev(value: string): boolean {
   return (
     value !== "." && value !== ".." && /^[A-Za-z0-9._-]{1,128}$/.test(value)
   );
-}
-
-export function isSafeRegistrySlug(value: string): boolean {
-  return isSafeBundleRev(value);
 }
 
 export function jsonResponse(body: unknown, status = 200): Response {

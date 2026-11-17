@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { HostDesiredStateV2 } from "@/generated/bridge";
+import type { DesiredVmV3 } from "@/generated/contracts/bridge-message-v9";
 import { selectOverdueRunLeases } from "@/lib/scenario-run-leases";
 
 describe("selectOverdueRunLeases", () => {
@@ -7,12 +7,13 @@ describe("selectOverdueRunLeases", () => {
     expect(
       selectOverdueRunLeases(
         { owner_user_id: "user-1", scope: "platform",
-          schema_version: 6,
+          schema_version: 7,
           host_id: "host-alpha",
           version: 1,
           generated_at_unix_ms: 1_000,
           cached_images: [],
           builds: [],
+          source_compiles: [],
           vms: [
             desiredVm("run-b", "db", 999, "running"),
             desiredVm("run-a", "web", 900, "running"),
@@ -34,25 +35,11 @@ function desiredVm(
   vmName: string,
   leaseExpiresAt: number,
   desiredPhase: "running" | "absent",
-): HostDesiredStateV2["vms"][number] {
-  return { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1, vm_id: vmName,
-    run_id: runId,
-    vm_name: vmName,
-    desired_phase: desiredPhase,
-    image_key: { scenario: "scenario", vm: vmName, arch: "x86_64" },
-    image_id: "a".repeat(64),
-    guest_tools: {
-      tools_disk_sha256: "1".repeat(64),
-      tools_disk_size_bytes: 64 * 1024 * 1024,
-      kino_sha256: "2".repeat(64),
-      bootstrap_abi: 2,
-    },
-    resources: {
-      cpu_millis: 1_000,
-      memory_mib: 512,
-      disk_mib: 4,
-    },
-    ssh_authorized_keys_openssh: ["ssh-ed25519 AAAATEST"],
-    lease_expires_at_unix_ms: leaseExpiresAt,
+): DesiredVmV3 {
+  return {
+    owner_user_id: "user-1", runtime_execution_id: runId, generation: 1, vm_id: vmName, run_id: runId, name: vmName,
+    desired_phase: desiredPhase, image: `sha256:${"a".repeat(64)}`, spec: `sha256:${"b".repeat(64)}`,
+    kino: `sha256:${"c".repeat(64)}`, mode: "learn", cpu_millis: 1_000, memory_mib: 512, disk_mib: 4, egress: false,
+    terminal: true, peers: [], ssh_authorized_keys: ["ssh-ed25519 AAAATEST"], lease_expires_at_unix_ms: leaseExpiresAt,
   };
 }

@@ -23,6 +23,7 @@ struct FakeBackend {
     returned_unit_name: Option<String>,
     quota_verifications: Vec<(String, CpuQuota)>,
     run_network_repairs: Vec<ValidatedId>,
+    destroyed_run_networks: Vec<ValidatedId>,
     active_ssh_forwards: BTreeSet<(ValidatedId, ValidatedId)>,
     ssh_forward_updates: Vec<(ValidatedId, ValidatedId, bool)>,
     boundary_operations: Vec<String>,
@@ -79,7 +80,7 @@ impl HostBackend for FakeBackend {
         self.units
             .get(unit_name)
             .cloned()
-            .context("missing fake unit")
+            .ok_or_else(|| UnitGoneError(unit_name.to_owned()).into())
     }
     fn verify_unit_cpu_quota(
         &mut self,
@@ -210,7 +211,8 @@ impl HostBackend for FakeBackend {
         self.boundary_operations.push(format!("ssh:{active}"));
         Ok(changed)
     }
-    fn destroy_run_network(&mut self, _request: &DestroyRunNetworkRequest) -> Result<bool> {
+    fn destroy_run_network(&mut self, request: &DestroyRunNetworkRequest) -> Result<bool> {
+        self.destroyed_run_networks.push(request.run_id.clone());
         Ok(true)
     }
 }
@@ -473,51 +475,15 @@ impl JailPreparer for RevokedFastTemplatePreparer {
 #[derive(Clone, Copy, Default)]
 struct FakeTemplatePreparer;
 
-fn fake_prepared_image(request: &PrepareImageV2Request) -> PreparedImageV2Result {
-    PreparedImageV2Result {
-        image_sha256: request.image_sha256.clone(),
-        virtual_size_bytes: request.virtual_size_bytes,
-        root_disk: template_artifact_source(
-            &request.image_sha256,
-            "root.raw",
-            request.root_disk.sha256.as_ref().expect("root digest"),
-            ArtifactAccess::ReadWrite,
-        ),
-        kernel: template_artifact_source(
-            &request.image_sha256,
-            "kernel",
-            request.kernel.sha256.as_ref().expect("kernel digest"),
-            ArtifactAccess::ReadOnly,
-        ),
-        initrd: request.initrd.as_ref().map(|source| {
-            template_artifact_source(
-                &request.image_sha256,
-                "initrd",
-                source.sha256.as_ref().expect("initrd digest"),
-                ArtifactAccess::ReadOnly,
-            )
-        }),
-        fast_template_store: true,
-    }
-}
-
 impl JailPreparer for FakeTemplatePreparer {
     fn fast_template_store(&mut self, _config: &JailerdConfig) -> bool {
         true
     }
 
-    fn prepare_image_v2(
+    fn validate_prepared_launch_v3(
         &mut self,
         _config: &JailerdConfig,
-        request: &PrepareImageV2Request,
-    ) -> Result<PreparedImageV2Result> {
-        Ok(fake_prepared_image(request))
-    }
-
-    fn validate_prepared_launch(
-        &mut self,
-        _config: &JailerdConfig,
-        request: &LaunchVmV2Request,
+        request: &LaunchVmV3Request,
     ) -> Result<()> {
         request.validate().map(|_| ()).map_err(Into::into)
     }
@@ -565,6 +531,12 @@ impl JailPreparer for FakeTemplatePreparer {
 #[derive(Default)]
 struct TrackingPreparer {
     quarantined: Vec<ValidatedId>,
+    exported: Vec<ValidatedId>,
+    exported_logs: Vec<ValidatedId>,
+    destroyed: Vec<ValidatedId>,
+    fail_export: bool,
+    fail_export_logs: bool,
+    export_error: Option<fn() -> anyhow::Error>,
     persist_calls: usize,
     runtime_access_calls: usize,
     fail_persist_call: Option<usize>,
@@ -577,18 +549,10 @@ impl JailPreparer for TrackingPreparer {
         true
     }
 
-    fn prepare_image_v2(
+    fn validate_prepared_launch_v3(
         &mut self,
         _config: &JailerdConfig,
-        request: &PrepareImageV2Request,
-    ) -> Result<PreparedImageV2Result> {
-        Ok(fake_prepared_image(request))
-    }
-
-    fn validate_prepared_launch(
-        &mut self,
-        _config: &JailerdConfig,
-        request: &LaunchVmV2Request,
+        request: &LaunchVmV3Request,
     ) -> Result<()> {
         request.validate().map(|_| ()).map_err(Into::into)
     }
@@ -614,7 +578,8 @@ impl JailPreparer for TrackingPreparer {
         })
     }
 
-    fn destroy(&mut self, _config: &JailerdConfig, _generation: &ValidatedId) -> Result<bool> {
+    fn destroy(&mut self, _config: &JailerdConfig, generation: &ValidatedId) -> Result<bool> {
+        self.destroyed.push(generation.clone());
         Ok(true)
     }
 
@@ -647,13 +612,41 @@ impl JailPreparer for TrackingPreparer {
         }
         Ok(())
     }
+
+    fn export_recording(&mut self, _config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+        if self.quarantined.contains(&record.generation) {
+            bail!("recording exported after its jail was quarantined")
+        }
+        if self.fail_export {
+            bail!("injected recording export failure")
+        }
+        if let Some(error) = self.export_error {
+            return Err(error());
+        }
+        self.exported.push(record.generation.clone());
+        Ok(())
+    }
+
+    fn export_logs(&mut self, _config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+        if self.quarantined.contains(&record.generation) {
+            bail!("logs exported after their jail was quarantined")
+        }
+        if self.fail_export_logs {
+            bail!("injected log export failure")
+        }
+        self.exported_logs.push(record.generation.clone());
+        Ok(())
+    }
 }
 
 #[derive(Default)]
 struct RecoverPreparer {
     records: Vec<VmRecord>,
     quarantined: Vec<ValidatedId>,
+    exported: Vec<ValidatedId>,
+    exported_logs: Vec<ValidatedId>,
     reserved: Vec<(ValidatedId, u32, u32)>,
+    fail_quarantine: bool,
 }
 
 impl JailPreparer for RecoverPreparer {
@@ -674,6 +667,9 @@ impl JailPreparer for RecoverPreparer {
     }
 
     fn quarantine(&mut self, _config: &JailerdConfig, generation: &ValidatedId) -> Result<()> {
+        if self.fail_quarantine {
+            bail!("injected quarantine failure")
+        }
         self.quarantined.push(generation.clone());
         Ok(())
     }
@@ -690,6 +686,22 @@ impl JailPreparer for RecoverPreparer {
 
     fn recover(&mut self, _config: &JailerdConfig) -> Result<Vec<VmRecord>> {
         Ok(std::mem::take(&mut self.records))
+    }
+
+    fn export_recording(&mut self, _config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+        if self.quarantined.contains(&record.generation) {
+            bail!("recording exported after its jail was quarantined")
+        }
+        self.exported.push(record.generation.clone());
+        Ok(())
+    }
+
+    fn export_logs(&mut self, _config: &JailerdConfig, record: &VmRecord) -> Result<()> {
+        if self.quarantined.contains(&record.generation) {
+            bail!("logs exported after their jail was quarantined")
+        }
+        self.exported_logs.push(record.generation.clone());
+        Ok(())
     }
 
     fn reserve_identity(
@@ -769,9 +781,11 @@ fn typed_run_network_repair_requires_and_preserves_durable_identity() {
         gateway: "10.77.0.1".to_owned(),
     };
 
+    // An untracked run answers not_found, which the agent reads as "no
+    // network to repair", never as a repair failure.
     assert!(matches!(
         core.handle(Request::RepairRunNetwork(request.clone())),
-        Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
+        Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
     ));
     assert!(core.backend.run_network_repairs.is_empty());
 
@@ -818,77 +832,47 @@ fn launch(index: u32, cpu_millis: u32) -> VmLaunchRequest {
         guest_ip_cidr: format!("10.77.0.{}/28", index + 2),
         ssh_public_port: Some(22_000_u16 + u16::try_from(index).expect("small fixture")),
         vsock_cid: 3 + index,
+        egress: false,
         artifacts: SourceArtifacts {
             kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
             initrd: None,
             root_disk: source("/trusted/root.raw", ArtifactAccess::ReadWrite),
             runtime_disk: source("/trusted/runtime.raw", ArtifactAccess::ReadOnly),
             recording_disk: source("/trusted/recordings.vfat", ArtifactAccess::ReadWrite),
-            tools_disk: None,
         },
     }
 }
 
-fn launch_v2(index: u32, cpu_millis: u32) -> LaunchVmV2Request {
-    let image_sha256 = Sha256Digest::parse("d".repeat(64)).expect("image digest");
+pub(super) fn launch_v3(index: u32, cpu_millis: u32) -> LaunchVmV3Request {
+    let image_id = Sha256Digest::parse("d".repeat(64)).expect("image digest");
     let artifact_sha256 = Sha256Digest::parse("e".repeat(64)).expect("artifact digest");
     let mut launch = launch(index, cpu_millis);
     launch.artifacts.root_disk = template_artifact_source(
-        &image_sha256,
+        &image_id,
         "root.raw",
         &artifact_sha256,
         ArtifactAccess::ReadWrite,
     );
     launch.artifacts.kernel = template_artifact_source(
-        &image_sha256,
+        &image_id,
         "kernel",
         &artifact_sha256,
         ArtifactAccess::ReadOnly,
     );
-    LaunchVmV2Request {
-        image_sha256,
+    LaunchVmV3Request {
+        image_id,
+        chunk_manifest_sha256: Sha256Digest::parse("f".repeat(64)).expect("manifest digest"),
         virtual_size_bytes: 4 * 1024 * 1024 * 1024,
         launch,
     }
 }
 
-fn prepare_launch_v2<P: JailPreparer>(
-    core: &mut JailerdCore<FakeBackend, P>,
-    index: u32,
-    cpu_millis: u32,
-) -> LaunchVmV2Request {
-    let image_sha256 = Sha256Digest::parse("d".repeat(64)).expect("image digest");
-    let prepare = PrepareImageV2Request {
-        image_sha256,
-        virtual_size_bytes: 4 * 1024 * 1024 * 1024,
-        root_disk: source("/trusted/root.raw", ArtifactAccess::ReadOnly),
-        kernel: source("/trusted/kernel", ArtifactAccess::ReadOnly),
-        initrd: None,
-        request_class: RequestClass::Foreground,
-    };
-    let prepared = match core.handle(Request::PrepareImageV2(Box::new(prepare))) {
-        Response::PrepareImageV2(prepared) => prepared,
-        other => panic!("unexpected prepared-image response: {other:?}"),
-    };
-    let mut launch = launch(index, cpu_millis);
-    launch.root_disk_size_bytes = prepared.virtual_size_bytes;
-    launch.artifacts.root_disk = prepared.root_disk;
-    launch.artifacts.kernel = prepared.kernel;
-    launch.artifacts.initrd = prepared.initrd;
-    LaunchVmV2Request {
-        image_sha256: prepared.image_sha256,
-        virtual_size_bytes: prepared.virtual_size_bytes,
-        launch,
-    }
-}
-
-fn launch_prepared_v2<P: JailPreparer>(
+fn launch_prepared_v3<P: JailPreparer>(
     core: &mut JailerdCore<FakeBackend, P>,
     index: u32,
     cpu_millis: u32,
 ) -> Response {
-    let request = prepare_launch_v2(core, index, cpu_millis);
-    core.handle(Request::LaunchVmV2(Box::new(request)))
+    core.handle(Request::LaunchVmV3(Box::new(launch_v3(index, cpu_millis))))
 }
 
 fn recovered_record(config: &JailerdConfig) -> VmRecord {
@@ -962,4 +946,97 @@ fn source(path: &str, access: ArtifactAccess) -> ArtifactSource {
             .then(|| Sha256Digest::parse("a".repeat(64)).expect("digest")),
         access,
     }
+}
+
+#[test]
+fn the_installer_leaves_configs_this_parser_loads() {
+    let example = include_str!("../deploy/config.example.toml");
+    let config: JailerdConfig = toml::from_str(example).expect("example config");
+    config.validate().expect("valid example");
+    // The retired key now stops jailerd, so install.sh drops it
+    // (deploy/migrate-epoch-config.py; tests/test_epoch_config_migration.py
+    // checks these files are its output for the previous release's example
+    // and for a host config). install.sh then pins the runtime lines.
+    let retired = format!("{example}\nlegacy_template_retention_seconds = 604800\n");
+    assert!(toml::from_str::<JailerdConfig>(&retired).is_err());
+    for migrated in [
+        include_str!("../tests/fixtures/config-migration/jailerd.main.migrated.toml"),
+        include_str!("../tests/fixtures/config-migration/jailerd.host.migrated.toml"),
+    ] {
+        let pinned = [
+            "cloud_hypervisor_binary = \"/usr/lib/intar/cloud-hypervisor-v54.1\"".to_owned(),
+            format!("cloud_hypervisor_sha256 = \"{CLOUD_HYPERVISOR_SHA256}\""),
+        ];
+        let installed = pinned
+            .into_iter()
+            .chain(
+                migrated
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("cloud_hypervisor_"))
+                    .map(str::to_owned),
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        let config: JailerdConfig = toml::from_str(&installed).expect("migrated config");
+        config.validate().expect("valid migrated config");
+    }
+    let host: JailerdConfig = toml::from_str(include_str!(
+        "../tests/fixtures/config-migration/jailerd.host.migrated.toml"
+    ))
+    .expect("host config");
+    assert_eq!((host.agent_uid, host.agent_gid), (1002, 1003));
+    assert_eq!((host.uid_gid_start, host.uid_gid_end), (300_000, 365_535));
+    assert_eq!(host.template_budget_bytes, 32_212_254_720);
+    assert_eq!(host.vmm_file_size_limit_bytes, Some(137_438_953_472));
+}
+
+#[test]
+fn an_unanswering_vmm_is_told_apart_from_an_identity_mismatch() {
+    assert_eq!(
+        core_lifecycle::inspect_failure(false, true),
+        Some("live VM identity does not match persisted sandbox metadata")
+    );
+    assert_eq!(
+        core_lifecycle::inspect_failure(true, false),
+        Some("the VMM did not answer on its API socket")
+    );
+    assert_eq!(core_lifecycle::inspect_failure(true, true), None);
+}
+
+#[test]
+fn stopping_a_contained_generation_again_is_no_error() {
+    let mut core = JailerdCore::new_with_readiness(
+        test_config(),
+        FakeBackend::default(),
+        FakePreparer,
+        4_000,
+        ready_readiness(),
+    )
+    .expect("core");
+    let generation = ValidatedId::parse("contained").expect("generation");
+    let stop = VmIdentityRequest {
+        generation: Some(generation.clone()),
+        run_id: None,
+        vm_id: None,
+    };
+    // An inspection contained it and dropped its record: nothing is left.
+    assert!(!core.stop_vm(stop.clone()).expect("idempotent stop"));
+    assert_eq!(
+        core.backend.stopped_units,
+        vec!["intar-vm-contained.service".to_owned()]
+    );
+    assert!(core.destroy_vm(stop).is_ok());
+}
+
+#[test]
+fn a_preparation_deferred_after_its_claim_is_requeued_not_failed() {
+    let code = |error: anyhow::Error| match prepare_error_response(error) {
+        Response::Error(error) => error.code,
+        other => panic!("unexpected response {other:?}"),
+    };
+    let mid_block = anyhow::Error::from(prepare_lane::PrepareDeferred)
+        .context("copy a chunk")
+        .context("assemble the root disk");
+    assert_eq!(code(mid_block), "image_prepare_requeued");
+    assert_eq!(code(anyhow::anyhow!("disk full")), "image_prepare_failed");
 }

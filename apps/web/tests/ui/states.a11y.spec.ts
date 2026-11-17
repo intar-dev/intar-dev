@@ -1,10 +1,12 @@
 import type { Locator, Page } from "@playwright/test";
+import { VM_LOST_REASON } from "@/generated/constants";
 import { buildTemporaryNativeSshCommand } from "@/lib/native-ssh";
 import { expect, test } from "./fixtures/test";
-import { makeMultiReplayRun } from "./fixtures/data";
+import { makeMultiReplayRun, markMachineUnreachable } from "./fixtures/data";
 import { routeCase } from "./routes";
 import { expectNoAxeViolations } from "./support/axe";
 import { expectNoHorizontalOverflow, setRootTextScale200 } from "./support/layout";
+import { PLAY_PATH, mockPlayScenario } from "./support/play";
 
 const TEMPORARY_RUN_SSH_COMMAND = buildTemporaryNativeSshCommand({
   username: "route-test-only",
@@ -690,24 +692,24 @@ test.describe("focused state accessibility", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("build details", async ({ page, ui }, testInfo) => {
+  test("build queue", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("admin-builds"), theme: "dark" });
-    const supersededBuild = page.locator('[data-build-id="build-4"]');
-
-    await expect(
-      supersededBuild.getByText("Superseded", { exact: true }),
-    ).toBeVisible();
-    await expect(
-      supersededBuild.getByRole("button", { name: "Retry" }),
-    ).toBeDisabled();
     const queuePosture = page
       .getByRole("heading", { name: "Queue posture" })
       .locator("../../..");
     await expect(queuePosture).toContainText(/Active\s*1/);
-    await expect(queuePosture).toContainText(/Needs attention\s*1/);
-    await page.getByRole("button", { name: "Details" }).first().click();
+    await expect(queuePosture).toContainText(/Failed\s*1/);
+    await expect(page.getByText("apt-get exited with 100")).toBeVisible();
+    // A build without a log yet offers none.
+    await expect(page.getByRole("button", { name: "Log" }).first()).toBeDisabled();
+    await expect(page.getByRole("link", { name: "Log" })).toHaveCount(2);
+    await expectNoAxeViolations(page, testInfo);
+  });
 
-    await expect(page.getByText("Content hash").first()).toBeVisible();
+  test("scenario verify report", async ({ page, ui }, testInfo) => {
+    await ui.open({ ...routeCase("admin-scenario-detail"), theme: "dark" });
+    await page.getByRole("button", { name: /Last verify run: Failed/ }).click();
+    await expect(page.getByText("solve.sh: nginx: [emerg] unknown directive")).toBeVisible();
     await expectNoAxeViolations(page, testInfo);
   });
 
@@ -1544,6 +1546,47 @@ test.describe("focused mobile state accessibility", () => {
     await expectNoAxeViolations(page, testInfo);
   });
 
+  test("machine not reachable card is announced", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "running",
+    });
+    markMachineUnreachable(ui.server.state.run);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    const shell = page.getByRole("region", { name: "Shell" });
+    await expect(shell.getByText("Machine not reachable", { exact: true })).toBeVisible();
+    await expect(shell.getByRole("status")).toHaveText("Not reachable");
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("lost machine recap names the cause", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "light",
+      runState: "failed",
+    });
+    ui.server.state.run.phaseDetail = VM_LOST_REASON;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expect(
+      page.getByRole("heading", { name: "Could not finish", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText(VM_LOST_REASON, { exact: true })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
   test("saving progress stays visible on mobile", async ({
     page,
     ui,
@@ -2318,4 +2361,21 @@ test.describe("small-screen access management", () => {
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
+});
+
+test.describe("play page", () => {
+  for (const signedIn of [false, true]) {
+    test(`${signedIn ? "signed in" : "signed out"}`, async ({ page, ui }, testInfo) => {
+      await mockPlayScenario(page, signedIn);
+      await ui.open({ path: PLAY_PATH, sessionRole: signedIn ? "learner" : "anonymous", theme: signedIn ? "dark" : "light" });
+      await expect(page.getByRole("heading", { level: 1, name: "Repair the nginx front door" })).toBeVisible();
+      if (signedIn) {
+        await expect(page.getByRole("link", { name: "Start scenario" })).toBeVisible();
+      } else {
+        await expect(page.getByText("The front door returns")).toHaveCount(0);
+      }
+      await expectNoHorizontalOverflow(page);
+      await expectNoAxeViolations(page, testInfo);
+    });
+  }
 });

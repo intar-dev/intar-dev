@@ -22,16 +22,12 @@ test("landing sections keep 4rem between them", async ({ page, ui }) => {
   const rem = await page.evaluate(() =>
     Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
   );
+  // The sponsors sit beside the sign-in on the first page (#258), not
+  // between sections, so only the loop section keeps the gap.
   const loop = page.locator('section[aria-labelledby="landing-loop-heading"]');
-  const sponsors = page.locator('aside[aria-labelledby="landing-sponsors-heading"]');
   expect(
     await loop.evaluate((el) => Number.parseFloat(getComputedStyle(el).paddingTop)),
   ).toBe(4 * rem);
-  const sponsorPadding = await sponsors.evaluate((el) => {
-    const style = getComputedStyle(el);
-    return [style.paddingTop, style.paddingBottom].map(Number.parseFloat);
-  });
-  expect(sponsorPadding).toEqual([4 * rem, 4 * rem]);
 });
 
 test("organizations list is one divided card of link rows", async ({
@@ -98,32 +94,27 @@ test("admin tab panels stay mounted so work survives a tab switch", async ({
   );
 });
 
-test("a failed scenario toggle reports inside its row, named after it", async ({
+test("a refused promotion reports inside its revision row", async ({
   page,
   ui,
 }) => {
-  await ui.open({ ...routeCase("admin-scenarios"), theme: "light" });
-  await page.route("**/api/admin/scenarios/repair-dns/enabled", (route) => {
-    ui.server.expectedUnavailable += 1;
+  await ui.open({ ...routeCase("admin-scenario-detail"), theme: "light" });
+  await page.route("**/api/admin/scenario-revisions/intar/repair-nginx", (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    ui.server.expectedConflicts += 1;
     return route.fulfill({
-      status: 503,
-      json: { error: "The registry is read-only right now." },
+      status: 409,
+      json: { error: "The live revision changed; reload and try again.", code: "live_revision_changed" },
     });
   });
 
-  const row = page
-    .locator("div.py-3")
-    .filter({ hasText: "Trace an intermittent DNS failure" })
-    .filter({ has: page.getByRole("button", { name: /(En|Dis)able scenario/ }) });
-  await row.getByRole("button", { name: "Enable scenario" }).click();
+  await page.getByRole("button", { name: "Promote" }).click();
 
-  const alert = row.getByRole("alert");
-  await expect(alert).toContainText(
-    "Could not enable Trace an intermittent DNS failure",
-  );
-  await expect(alert).toContainText("The registry is read-only right now.");
-  // Only that row shows it.
-  await expect(page.getByRole("alert")).toHaveCount(1);
+  const alert = page.getByRole("alert");
+  await expect(alert).toHaveCount(1);
+  await expect(alert).toContainText("The live revision changed; reload and try again.");
+  // The row of the revision that was refused shows it.
+  await expect(page.locator("div.py-3", { has: alert }).getByRole("button", { name: "Promote" })).toBeVisible();
 });
 
 test("a failed host refresh reports inside its host row", async ({ page, ui }) => {

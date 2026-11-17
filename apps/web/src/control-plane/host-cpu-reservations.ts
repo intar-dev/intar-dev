@@ -423,15 +423,15 @@ function pendingRunHasDurableDesiredVms(input: {
   const desiredNames = new Set<string>();
   for (const vm of desiredVms) {
     if (
-      !projectedNames.has(vm.vm_name) ||
-      desiredNames.has(vm.vm_name) ||
-      !Number.isSafeInteger(vm.resources.cpu_millis) ||
-      vm.resources.cpu_millis <= 0
+      !projectedNames.has(vm.vm_id) ||
+      desiredNames.has(vm.vm_id) ||
+      !Number.isSafeInteger(vm.cpu_millis) ||
+      vm.cpu_millis <= 0
     ) {
       return false;
     }
-    desiredNames.add(vm.vm_name);
-    cpuMillis += vm.resources.cpu_millis;
+    desiredNames.add(vm.vm_id);
+    cpuMillis += vm.cpu_millis;
     if (!Number.isSafeInteger(cpuMillis)) return false;
   }
   return cpuMillis === input.reservation.cpuMillis;
@@ -676,6 +676,17 @@ export function hostCpuReservationCapacityFromSnapshot(
   };
 }
 
+/**
+ * Whether a reported VM's CPU is load jailerd still counts. An absent VM's is
+ * not, and a failed VM's may not be: its jail can be gone while the report
+ * still names its CPU. A failed VM whose unit still runs is counted by its
+ * reservation and by jailerd's committed figure, so leaving it out can only
+ * over-count.
+ */
+export function reportedVmHoldsCpu(vm: Record<string, unknown>): boolean {
+  return vm.phase !== "absent" && vm.phase !== "failed";
+}
+
 function reportedCpuMillisByRun(
   report: unknown,
   runIds: ReadonlySet<string>,
@@ -689,7 +700,7 @@ function reportedCpuMillisByRun(
       !isRecord(vm) ||
       typeof vm.run_id !== "string" ||
       !runIds.has(vm.run_id) ||
-      vm.phase === "absent"
+      !reportedVmHoldsCpu(vm)
     ) {
       continue;
     }
@@ -716,21 +727,29 @@ function reportedCpuMillisByRun(
   return byRun;
 }
 
-export function strictCpuCapacity(
-  report: unknown,
-): Pick<
-  HostCpuReservationCapacity,
-  "schedulableCpuMillis" | "reportedCommittedCpuMillis"
-> | null {
-  if (!isRecord(report) || report.schema_version !== HOST_STATE_REPORT_SCHEMA_VERSION) {
-    return null;
-  }
-  const capacity = isRecord(report.capacity) ? report.capacity : null;
-  const capabilities = isRecord(report.capabilities)
-    ? report.capabilities
+/** The schema of a bridge 9 host state report. */
+export const HOST_STATE_REPORT_SCHEMA_VERSION_V3 = 8;
+
+/** The report's hardware facts allow an attested launch, whatever its load. */
+export function strictCpuHardware(report: unknown): boolean {
+  if (!isRecord(report)) return false;
+  // A bridge 9 report states hardware facts; every launch path it has is
+  // the attested one.
+  const hardware = report.schema_version === HOST_STATE_REPORT_SCHEMA_VERSION_V3 && isRecord(report.hardware)
+    ? report.hardware
     : null;
-  if (
-    !capacity ||
+  const capabilities = hardware
+    ? {
+        supports_kvm: hardware.kvm, supports_vsock: hardware.vsock, supports_reflink: hardware.reflink,
+        supports_nftables: true, supports_jailer_v3: true, supports_template_backed_launch: true,
+        fast_template_store: true, supports_hard_cpu_quota: hardware.hard_cpu_quota,
+        supports_landlock: hardware.landlock, supports_cgroup_v2: hardware.cgroup_v2,
+        cloud_hypervisor_sha256: hardware.cloud_hypervisor_sha256,
+      }
+    : report.schema_version === HOST_STATE_REPORT_SCHEMA_VERSION && isRecord(report.capabilities)
+      ? report.capabilities
+      : null;
+  return !(
     !capabilities ||
     capabilities.supports_kvm !== true ||
     capabilities.supports_vsock !== true ||
@@ -744,9 +763,18 @@ export function strictCpuCapacity(
     capabilities.supports_cgroup_v2 !== true ||
     typeof capabilities.cloud_hypervisor_sha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(capabilities.cloud_hypervisor_sha256)
-  ) {
-    return null;
-  }
+  );
+}
+
+export function strictCpuCapacity(
+  report: unknown,
+): Pick<
+  HostCpuReservationCapacity,
+  "schedulableCpuMillis" | "reportedCommittedCpuMillis"
+> | null {
+  if (!isRecord(report) || !strictCpuHardware(report)) return null;
+  const capacity = isRecord(report.capacity) ? report.capacity : null;
+  if (!capacity) return null;
   const schedulableCpuMillis = readNonNegativeInteger(
     capacity.schedulable_cpu_millis,
   );

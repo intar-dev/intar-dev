@@ -153,32 +153,6 @@ export interface HostRunsResponse {
   archivedRuns: AgentVmRunRecord[];
 }
 
-export interface AdminScenarioSummary {
-  scenarioId: string;
-  title: string;
-  category: string;
-  description: string;
-  difficulty: "easy" | "medium" | "hard";
-  estimatedMinutes: number;
-  tags: string[];
-  scenarioHintCount: number;
-  probeCount: number;
-  vmCount: number;
-  requiredResources: {
-    cpuMillis: number;
-    memoryMib: number;
-    diskMib: number;
-  };
-  enabled: boolean;
-  enabledAt: number | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface AdminScenarioListResponse {
-  scenarios: AdminScenarioSummary[];
-}
-
 export interface HostRecord {
   host: AgentHostApi;
   hostVms: VmStatus[];

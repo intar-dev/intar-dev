@@ -366,7 +366,7 @@ function runState(input: {
     terminalTarget: {
       host: null,
       port: 0,
-      username: "ubuntu",
+      username: "user",
       hostKeyOpenssh: null,
       checkedAt: null,
     },

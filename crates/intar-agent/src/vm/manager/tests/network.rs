@@ -231,13 +231,13 @@ fn vm_info_status_classification() {
 }
 
 #[test]
-fn pinned_v53_shutdown_proof_requires_created_or_definitively_absent_vm() {
+fn shutdown_proof_requires_created_or_definitively_absent_vm() {
     let created = cloud_hypervisor_client::VmInfo {
         config: cloud_hypervisor_client::VmConfig::default(),
         state: cloud_hypervisor_client::VmState::Created,
         memory_actual_size: None,
     };
-    assert!(v53_post_shutdown_state_is_proven(&created));
+    assert!(post_shutdown_state_is_proven(&created));
 
     for state in [
         cloud_hypervisor_client::VmState::Running,
@@ -245,11 +245,21 @@ fn pinned_v53_shutdown_proof_requires_created_or_definitively_absent_vm() {
         cloud_hypervisor_client::VmState::Shutdown,
     ] {
         assert!(
-            !v53_post_shutdown_state_is_proven(&cloud_hypervisor_client::VmInfo {
+            !post_shutdown_state_is_proven(&cloud_hypervisor_client::VmInfo {
                 state,
                 ..created.clone()
             }),
-            "only pinned-v53 Created proves a completed shutdown"
+            "only Created proves a completed shutdown"
+        );
+    }
+
+    // The VMM version is pinned elsewhere; a version named in this code goes
+    // stale on the next bump.
+    let cleanup = include_str!("../cleanup.rs");
+    for stale in ["pinned-v", "Hypervisor v", "v53"] {
+        assert!(
+            !cleanup.contains(stale),
+            "cleanup.rs names a VMM version: {stale}"
         );
     }
 
@@ -267,7 +277,7 @@ fn pinned_v53_shutdown_proof_requires_created_or_definitively_absent_vm() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn post_shutdown_grace_only_skips_the_two_definitive_v53_proofs() {
+async fn post_shutdown_grace_only_skips_the_two_definitive_proofs() {
     let grace = Duration::from_secs(DELETE_SHUTDOWN_GRACE_SECONDS);
     let created = cloud_hypervisor_client::VmInfo {
         config: cloud_hypervisor_client::VmConfig::default(),
@@ -592,6 +602,108 @@ fn logical_cleanup_treats_not_found_stop_and_destroy_as_idempotent_success() {
                 .expect("not-found cleanup is successful")
                 .is_none()
         );
+    }
+}
+
+#[test]
+fn untracked_generation_answers_are_typed() {
+    // The report path and the delete's last resort read InspectVm's
+    // not_found as "jailerd no longer tracks the generation".
+    let not_found = || {
+        JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+            "not_found",
+            "unknown jail generation",
+        ))
+    };
+    assert!(
+        classify_jailer_identity_response(JailerIdentityOperation::Inspect, not_found())
+            .expect("not_found inspection is an answer")
+            .is_none()
+    );
+    // A failed StopVm export stays an error, so the delete sends it again.
+    let export_failed = JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+        "host_operation_failed",
+        "export recording",
+    ));
+    assert!(
+        classify_jailer_identity_response(JailerIdentityOperation::Stop, export_failed).is_err()
+    );
+    // A contained VM's inspection is an error, never "tracked".
+    let contained = JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+        "host_operation_failed",
+        "the VM was stopped and quarantined",
+    ));
+    assert!(
+        classify_jailer_identity_response(JailerIdentityOperation::Inspect, contained).is_err()
+    );
+}
+
+#[test]
+fn an_untracked_run_network_is_not_a_repair_failure() {
+    // Startup repair fails only for genuine failures: a run jailerd no
+    // longer tracks must not stop the agent before reconcile cleans it up.
+    let error = |code: &str| {
+        Ok(JailerResponse::Error(
+            intar_jailer_protocol::ProtocolError::new(
+                code,
+                "cannot repair an untracked run network",
+            ),
+        ))
+    };
+    assert_eq!(
+        classify_run_network_repair(error("not_found")),
+        RunNetworkRepair::Untracked
+    );
+    assert!(matches!(
+        classify_run_network_repair(error("host_operation_failed")),
+        RunNetworkRepair::Failed(_)
+    ));
+    assert!(matches!(
+        classify_run_network_repair(Err(anyhow::anyhow!("connect to intar-jailerd"))),
+        RunNetworkRepair::Failed(_)
+    ));
+}
+
+#[test]
+fn a_kept_exited_jail_is_read_as_a_dead_vm() {
+    // jailerd keeps the record of an exited VMM to export its recording;
+    // the report and startup reconcile must still treat the VM as dead.
+    let answer = |code: &str| {
+        classify_jailer_identity_response(
+            JailerIdentityOperation::Inspect,
+            JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+                code,
+                "the VMM exited; the VM is kept until its recording is exported",
+            )),
+        )
+        .expect_err("an error answer")
+    };
+    assert!(jail_vm_exited(&answer("vm_exited")));
+    assert!(!jail_vm_exited(&answer("host_operation_failed")));
+    assert!(!jail_vm_exited(&anyhow::anyhow!(
+        "connect to intar-jailerd"
+    )));
+}
+
+#[test]
+fn only_vms_that_can_be_live_have_a_run_network_to_repair() {
+    for state in [
+        VmLifecycleState::CreatingVm,
+        VmLifecycleState::BootingVm,
+        VmLifecycleState::Running,
+    ] {
+        assert!(needs_run_network_repair(state));
+    }
+    for state in [
+        VmLifecycleState::Queued,
+        VmLifecycleState::CachingImage,
+        VmLifecycleState::PreparingDisks,
+        VmLifecycleState::DeletingVm,
+        VmLifecycleState::ArchivingArtifacts,
+        VmLifecycleState::DeleteFailed,
+        VmLifecycleState::Failed,
+    ] {
+        assert!(!needs_run_network_repair(state));
     }
 }
 

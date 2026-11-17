@@ -335,8 +335,12 @@ export function ScenarioShellStatusCard(props: {
   phase: ScenarioRunRecord["phase"];
   title: string;
   pending?: boolean;
+  /** The machine is out of reach; the card says so instead. */
+  unreachable?: boolean;
 }) {
+  const title = props.unreachable ? "Not reachable" : props.title;
   const isTransient =
+    props.unreachable === true ||
     props.pending === true ||
     props.phase === "deleting" ||
     props.phase === "archiving";
@@ -347,7 +351,7 @@ export function ScenarioShellStatusCard(props: {
         <CardTitle as="h2" id="scenario-shell-title">
           Shell
         </CardTitle>
-        <CardDescription>{props.title}</CardDescription>
+        <CardDescription>{title}</CardDescription>
       </CardHeader>
       <CardContent className="flex min-h-[20rem] flex-col items-center justify-center gap-4 text-center">
         <p
@@ -356,21 +360,25 @@ export function ScenarioShellStatusCard(props: {
           aria-atomic="true"
           className="sr-only"
         >
-          {props.title}
+          {title}
         </p>
         {isTransient ? (
           <LoaderCircle className="size-8 text-primary motion-safe:animate-spin" />
         ) : null}
         <div className="space-y-1">
           <p className="text-support font-medium text-foreground">
-            {props.phase === "failed"
-              ? "Scenario run stopped"
-              : "Shell unavailable"}
+            {props.unreachable
+              ? "Machine not reachable"
+              : props.phase === "failed"
+                ? "Scenario run stopped"
+                : "Shell unavailable"}
           </p>
           <p className="text-support text-muted-foreground">
-            {props.phase === "failed"
-              ? "This scenario stopped before the browser terminal opened. End the run and try again."
-              : "The browser terminal will open when your workspace is ready."}
+            {props.unreachable
+              ? "Your machine is not reachable right now. The shell comes back here when it is."
+              : props.phase === "failed"
+                ? "This scenario stopped before the browser terminal opened. End the run and try again."
+                : "The browser terminal will open when your workspace is ready."}
           </p>
         </div>
       </CardContent>

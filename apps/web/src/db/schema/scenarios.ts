@@ -2,16 +2,13 @@ import {
   check,
   index,
   integer,
+  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
-import type {
-  ImageKey,
-  ScenarioHintManifestV3,
-  ScenarioManifestV5,
-} from "@/generated/catalog";
+import type { ScenarioRevisionV1 } from "@/generated/contracts/scenario-revision-v1";
 import { organization, user } from "./core";
 import { agentHosts } from "./platform";
 import {
@@ -164,135 +161,99 @@ export const scenarioSourceCommits = sqliteTable(
   ],
 );
 
-export const vmScenarios = sqliteTable(
-  "vm_scenarios",
+export type ScenarioRevisionState = "building" | "ready" | "verified" | "failed";
+
+/**
+ * One row per published scenario, keyed by its global ID
+ * `<namespace>/<slug>`. The namespace comes from the source binding: `intar`
+ * for the public scope, else the organization's slug. Rows are never deleted,
+ * so an ID is never reused.
+ */
+export const scenarios = sqliteTable(
+  "scenarios",
   {
-    scenarioId: text("scenario_id").primaryKey(),
+    id: text("id").primaryKey(),
+    namespace: text("namespace").notNull(),
+    slug: text("slug").notNull(),
     organizationId: text("organization_id").references(() => organization.id, {
       onDelete: "restrict",
     }),
-    sourceRevision: text("source_revision"),
-    title: text("title").notNull(),
-    category: text("category").default("").notNull(),
-    description: text("description").notNull(),
-    difficulty: text("difficulty").notNull(),
-    estimatedMinutes: integer("estimated_minutes").notNull(),
-    tagsJson: jsonText<string[]>("tags_json").notNull(),
-    briefingMarkdown: text("briefing_markdown").notNull(),
-    solutionMarkdown: text("solution_markdown").notNull(),
-    hintsJson: jsonText<ScenarioHintManifestV3[]>("hints_json").notNull(),
-    enabled: integer("enabled", { mode: "boolean" }).default(false).notNull(),
-    enabledAt: integer("enabled_at"),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    scopeKey: text("scope_key").notNull(),
+    enabled: integer("enabled", { mode: "boolean" }).notNull(),
+    play: integer("play", { mode: "boolean" }).notNull(),
+    liveRev: text("live_rev"),
+    candidateRev: text("candidate_rev"),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
   (table) => [
-    index("vm_scenarios_enabled_idx").on(table.enabled, table.enabledAt),
-    index("vm_scenarios_organization_enabled_idx").on(
-      table.organizationId,
-      table.enabled,
-      table.enabledAt,
+    uniqueIndex("scenarios_namespace_slug_uidx").on(table.namespace, table.slug),
+    index("scenarios_organization_idx").on(table.organizationId),
+    check(
+      "scenarios_id_check",
+      sql`${table.id} = ${table.namespace} || '/' || ${table.slug}`,
     ),
   ],
 );
 
-export const scenarioCatalogCandidates = sqliteTable(
-  "scenario_catalog_candidates",
+/** A scenario as one bundle revision compiled it; immutable once ready. */
+export const scenarioRevisions = sqliteTable(
+  "scenario_revisions",
   {
-    id: text("id").primaryKey(),
-    revision: text("revision").notNull(),
-    organizationId: text("organization_id").references(() => organization.id, {
-      onDelete: "cascade",
-    }),
-    scenarioId: text("scenario_id").notNull(),
-    buildId: text("build_id").notNull(),
-    manifestJson: jsonText<ScenarioManifestV5>("manifest_json").notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [index("scenario_catalog_candidates_revision_idx").on(table.revision)],
-);
-
-export const scenarioCatalogSnapshots = sqliteTable(
-  "scenario_catalog_snapshots",
-  {
-    id: text("id").primaryKey(),
-    revision: text("revision").notNull(),
-    organizationId: text("organization_id").references(() => organization.id, {
-      onDelete: "cascade",
-    }),
-    snapshotJson: jsonText<Record<string, unknown>>("snapshot_json").notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [index("scenario_catalog_snapshots_created_idx").on(table.createdAt)],
-);
-
-export const vmScenarioVms = sqliteTable(
-  "vm_scenario_vms",
-  {
-    id: text("id").primaryKey(),
     scenarioId: text("scenario_id")
       .notNull()
-      .references(() => vmScenarios.scenarioId, { onDelete: "cascade" }),
-    ordinal: integer("ordinal").notNull(),
-    vmName: text("vm_name").notNull(),
-    image: text("image").notNull(),
-    imageKeyJson: jsonText<ImageKey>("image_key_json"),
-    imageSha256: text("image_sha256"),
-    imageFormat: text("image_format").notNull(),
-    imageVirtualSizeBytes: integer("image_virtual_size_bytes").notNull(),
-    chunkManifestSha256: text("chunk_manifest_sha256"),
-    guestBootstrapAbi: integer("guest_bootstrap_abi"),
-    kernelSha256: text("kernel_sha256").notNull(),
-    initrdSha256: text("initrd_sha256").notNull(),
-    bootCmdline: text("boot_cmdline").notNull(),
-    cpuMillis: integer("cpu_millis").default(1_000).notNull(),
-    memoryMib: integer("memory_mib").notNull(),
-    diskMib: integer("disk_mib").notNull(),
+      .references(() => scenarios.id, { onDelete: "cascade" }),
+    rev: text("rev").notNull(),
+    guestContract: integer("guest_contract").notNull(),
+    docJson: jsonText<ScenarioRevisionV1>("doc_json").notNull(),
+    // sha256 of the canonical `doc_json`, set when the revision is ready.
+    contentDigest: text("content_digest"),
+    state: text("state").$type<ScenarioRevisionState>().notNull(),
+    // Why a failed revision failed, in words a learner may read.
+    failureReason: text("failure_reason"),
+    verifyRunId: text("verify_run_id"),
+    verifyReportJson: text("verify_report_json"),
+    // When the revision first went live; only such a revision is a rollback
+    // target.
+    liveAt: integer("live_at"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
   },
   (table) => [
-    uniqueIndex("vm_scenario_vms_scenario_ordinal_uidx").on(
-      table.scenarioId,
-      table.ordinal,
+    primaryKey({ columns: [table.scenarioId, table.rev] }),
+    check(
+      "scenario_revisions_state_check",
+      sql`${table.state} IN ('building', 'ready', 'verified', 'failed')`,
     ),
-    uniqueIndex("vm_scenario_vms_scenario_name_uidx").on(
-      table.scenarioId,
-      table.vmName,
+    check(
+      "scenario_revisions_doc_json_check",
+      sql`json_valid(${table.docJson})`,
     ),
-    index("vm_scenario_vms_scenario_idx").on(table.scenarioId, table.ordinal),
   ],
 );
 
-export const vmScenarioProbes = sqliteTable(
-  "vm_scenario_probes",
+/** One uploaded source bundle, stored at `r2_key`. */
+export const bundles = sqliteTable(
+  "bundles",
   {
-    id: text("id").primaryKey(),
-    scenarioId: text("scenario_id")
-      .notNull()
-      .references(() => vmScenarios.scenarioId, { onDelete: "cascade" }),
-    scenarioVmId: text("scenario_vm_id")
-      .notNull()
-      .references(() => vmScenarioVms.id, { onDelete: "cascade" }),
-    ordinal: integer("ordinal").notNull(),
-    name: text("name").notNull(),
-    description: text("description").notNull(),
-    title: text("title"),
-    bodyMarkdown: text("body_markdown"),
-    hintsJson: jsonText<ScenarioHintManifestV3[]>("hints_json").notNull(),
-    phase: text("phase").default("scenario").notNull(),
-    // Probe kind from the manifest (file_exists, port_open, service, …) —
-    // drives the per-kind "why is this failing" rendering on the run page.
-    kind: text("kind").default("probe").notNull(),
+    rev: text("rev").primaryKey(),
+    scopeKey: text("scope_key").notNull(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "restrict",
+    }),
+    compilerVersion: text("compiler_version").notNull(),
+    r2Key: text("r2_key").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
   },
-  (table) => [
-    uniqueIndex("vm_scenario_probes_vm_ordinal_uidx").on(
-      table.scenarioVmId,
-      table.ordinal,
-    ),
-    index("vm_scenario_probes_scenario_idx").on(
-      table.scenarioId,
-      table.scenarioVmId,
-      table.ordinal,
-    ),
-  ],
+  (table) => [index("bundles_organization_idx").on(table.organizationId)],
+);
+
+/** What a platform admin has granted an organization. */
+export const organizationEntitlements = sqliteTable(
+  "organization_entitlements",
+  {
+    organizationId: text("organization_id")
+      .primaryKey()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    publicPlayGrantedAt: integer("public_play_granted_at"),
+    grantedBy: text("granted_by"),
+  },
 );

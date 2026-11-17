@@ -347,18 +347,12 @@ function ConnectedSource({
         </div>
       </dl>
       {commit?.detail ? <p className="text-muted-foreground">{commit.detail}</p> : null}
-      {commit?.diagnostics.length || source.builds.length ? (
+      {commit?.diagnostics.length ? (
         <ul className="space-y-1 font-mono text-xs">
           {commit?.diagnostics.map((entry, index) => (
             <li key={`diagnostic-${index}`} className="break-words">
               {entry.path ? `${entry.path}${entry.line ? `:${entry.line}` : ""}: ` : ""}
               {entry.message}
-            </li>
-          ))}
-          {source.builds.map((build) => (
-            <li key={`${build.scenarioId}-${build.arch}`} className="break-words">
-              {build.scenarioId} ({build.arch}): {build.status}, {build.phase}
-              {build.error ? ` — ${build.error}` : ""}
             </li>
           ))}
         </ul>

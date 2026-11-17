@@ -47,6 +47,9 @@ export function Organizations() {
   const [createOpen, setCreateOpen] = useState(false);
   const nameInput = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
+  // The slug follows the name until the person edits it.
+  const [slug, setSlug] = useState<string | null>(null);
+  const chosenSlug = slug ?? slugFromName(name);
   // A refused submit (too short) says why at the field and nudges it.
   const [nameProblem, setNameProblem] = useState<string | null>(null);
 
@@ -73,7 +76,7 @@ export function Organizations() {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: name.trim() }),
+        body: JSON.stringify({ name: name.trim(), slug: chosenSlug }),
       });
       const body = (await response.json().catch(() => null)) as {
         organization?: OrganizationSummary;
@@ -91,6 +94,7 @@ export function Organizations() {
     onSuccess: async (organization) => {
       setCreateOpen(false);
       setName("");
+      setSlug(null);
       await queryClient.invalidateQueries({ queryKey: ["organizations"] });
       void navigate({
         to: "/organizations/$orgId",
@@ -99,14 +103,16 @@ export function Organizations() {
     },
   });
 
-  const createFailure = describeApiError<"name">(createOrganization.error, {
+  const createFailure = describeApiError<"name" | "slug">(createOrganization.error, {
     fallback: "The organization couldn't be created. Try again.",
+    fields: { slug: /slug/i },
     defaultField: "name",
   });
   const creation = organizations.data?.creation;
   const openCreate = useCallback(() => {
     if (!creation?.enabled) return;
     setName("");
+    setSlug(null);
     setNameProblem(null);
     createOrganization.reset();
     setCreateOpen(true);
@@ -170,6 +176,7 @@ export function Organizations() {
       >
         <form
           id="create-organization-form"
+          className="space-y-4"
           noValidate
           onSubmit={(event) => {
             event.preventDefault();
@@ -203,6 +210,23 @@ export function Organizations() {
                 maxLength={ORGANIZATION_NAME_MAX}
                 autoComplete="off"
                 ref={nameInput}
+              />
+            )}
+          </Field>
+          <Field
+            label="Slug"
+            hint="Names the organization in addresses and scenario ids. You can change it once, before anything is published under it."
+            error={createFailure?.field === "slug" ? createFailure.message : null}
+          >
+            {(control) => (
+              <Input
+                {...control}
+                value={chosenSlug}
+                onChange={(event) => setSlug(event.target.value.toLowerCase())}
+                placeholder="platform-team"
+                maxLength={39}
+                autoComplete="off"
+                spellCheck={false}
               />
             )}
           </Field>
@@ -316,4 +340,14 @@ export function Organizations() {
       )}
     </PageShell>
   );
+}
+
+/** A slug suggestion from an organization name. */
+function slugFromName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 39)
+    .replace(/-+$/g, "");
 }

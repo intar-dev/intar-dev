@@ -782,7 +782,7 @@ function buildArchivedRunSummary(
     uploadCompletedAt,
     uploadError:
       run.stateDocument.phase === "failed"
-        ? run.stateDocument.phaseDetail
+        ? runFailureReason(run.stateDocument)
         : null,
     deleteBlockedReason: archivedRunDeleteBlockedReason(run, aggregate),
     createdAt: run.createdAt,
@@ -967,7 +967,7 @@ function buildArchivedRunEvents(
     events.push({
       id: `${run.runId}:failed`,
       kind: "scenario.run.failed",
-      message: run.stateDocument.phaseDetail,
+      message: runFailureReason(run.stateDocument),
       createdAt: run.updatedAt,
     });
   }
@@ -1144,4 +1144,17 @@ function numberOrZero(value: unknown): number {
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** The raw reason a run failed: learners see only allowlisted reasons. */
+function runFailureReason(state: RunStateDocument): string {
+  const failedVm = state.vms.find(
+    (vm) => vm.terminalPhase === "failed" || vm.phase === "failed",
+  );
+  return (
+    failedVm?.terminalReason ||
+    failedVm?.provisioning.error ||
+    failedVm?.phaseDetail ||
+    state.phaseDetail
+  );
 }

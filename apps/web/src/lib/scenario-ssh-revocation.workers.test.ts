@@ -2,7 +2,7 @@
 
 import { beforeEach, expect, it, vi } from "vitest";
 import {
-  drizzle, env, resetHostRuntimeTestDatabase, seedHost, seedRun, testImageKey,
+  drizzle, env, resetHostRuntimeTestDatabase, seedHost, seedRun,
 } from "@/control-plane/host-runtime-do/test-fixtures";
 import { runtimeVms } from "@/db/schema";
 import { createScenarioSshSessionForUser } from "./scenario-runs/lifecycle";
@@ -50,14 +50,14 @@ beforeEach(async () => {
       phase: "active_full",
       vms: current.vms.map((vm) => ({
         ...vm, phase: "ready", terminalPhase: "ready",
-        terminalTarget: { host: "10.0.0.10", port: 22, username: "ubuntu", hostKeyOpenssh: "ssh-ed25519 HOST", checkedAt: now },
+        terminalTarget: { host: "10.0.0.10", port: 22, username: "user", hostKeyOpenssh: "ssh-ed25519 HOST", checkedAt: now },
       })),
     }),
   });
   await db.insert(runtimeVms).values({
     id: "runtime-vm", executionId: runId, vmId, ordinal: 0,
-    runtimeVmName: "runtime-web", imageKeyJson: testImageKey,
-    imageSha256: "2".repeat(64), cpuMillis: 1_000, memoryMib: 512, diskMib: 4096,
+    runtimeVmName: "runtime-web", imageDigest: `sha256:${"2".repeat(64)}`,
+    specDigest: `sha256:${"3".repeat(64)}`, kinoDigest: `sha256:${"4".repeat(64)}`, cpuMillis: 1_000, memoryMib: 512, diskMib: 4096,
   });
 });
 

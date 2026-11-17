@@ -5,7 +5,6 @@ import {
   minute,
   objectives,
   runLifecycle,
-  scenarioVm,
   sha,
 } from "./shared";
 
@@ -68,7 +67,7 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
 
   return {
     id: "run-active",
-    scenarioId: "repair-nginx",
+    scenarioId: "intar/repair-nginx",
     organizationId: null,
     courseScopeKey: "public",
     courseId: "operations",
@@ -247,7 +246,6 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
         vmCreatedAt: FIXED_NOW - 33 * minute,
         provisioning: {
           image: "debian-13",
-          imageKey: scenarioVm.imageKey,
           imageSha256: sha,
           resources: { cpuMillis: 2000, memoryMib: 2048, diskMib: 8192 },
           leaseDurationSeconds: 7200,
@@ -316,4 +314,16 @@ export function makeMultiReplayRun(): Record<string, unknown> {
   // use VM ordinal and session index: web parts 1-2, then worker part 3.
   run.vms = [workerVm, webVm];
   return run;
+}
+
+/**
+ * A run whose host stopped answering, as the status API shows it: the run
+ * says so and no new shell can open, on the run or any VM.
+ */
+export function markMachineUnreachable(run: Record<string, unknown>): void {
+  run.machineUnreachable = true;
+  run.canOpenTerminal = false;
+  for (const vm of run.vms as Array<Record<string, unknown>>) {
+    vm.canOpenTerminal = false;
+  }
 }

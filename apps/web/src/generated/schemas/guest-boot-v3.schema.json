@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GuestBootV3",
+  "description": "`boot.json`: everything one VM's Kino is told. The host writes it onto\nthe read-only run disk.",
+  "type": "object",
+  "properties": {
+    "contract": {
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 3,
+      "minimum": 3
+    },
+    "hostname": {
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/SpecMode"
+    },
+    "network": {
+      "$ref": "#/$defs/GuestNetworkV3"
+    },
+    "peers": {
+      "description": "Machine name to address, for `/etc/hosts`.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "root_resize": {
+      "type": "boolean"
+    },
+    "spec": {
+      "$ref": "#/$defs/MachineSpecV1"
+    },
+    "ssh": {
+      "$ref": "#/$defs/GuestSshV3"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "hostname",
+    "network",
+    "peers",
+    "ssh",
+    "root_resize",
+    "mode",
+    "spec"
+  ],
+  "$defs": {
+    "GuestNetworkV3": {
+      "type": "object",
+      "properties": {
+        "dns": {
+          "description": "Empty unless the machine has egress; peers resolve from `/etc/hosts`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "ip_cidr": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ip_cidr",
+        "gateway",
+        "dns"
+      ]
+    },
+    "GuestSshV3": {
+      "type": "object",
+      "properties": {
+        "authorized_keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "authorized_keys"
+      ]
+    },
+    "MachineSpecV1": {
+      "description": "What one machine's Kino runs. A learn spec holds no solve script and no\nother machine's scripts.",
+      "type": "object",
+      "properties": {
+        "defer": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "machine": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScriptV1"
+          }
+        },
+        "scenario_id": {
+          "description": "`<org-slug>/<scenario-slug>`; empty on a build boot.",
+          "type": "string"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SpecTaskV1"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "scenario_id",
+        "machine",
+        "env",
+        "defer",
+        "ready",
+        "tasks"
+      ]
+    },
+    "ScriptV1": {
+      "description": "A named lowered bash script: a setup stage or a ready block.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "script"
+      ]
+    },
+    "SpecMode": {
+      "type": "string",
+      "enum": [
+        "learn",
+        "verify"
+      ]
+    },
+    "SpecTaskV1": {
+      "type": "object",
+      "properties": {
+        "check": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "needs": {
+          "description": "A need on another machine is `<machine>/<task-id>`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "solve": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "check",
+        "needs"
+      ]
+    }
+  }
+}

@@ -18,7 +18,7 @@ const PINNED_TAIKI_TOOLS = new Map([
 const RENDERED_HEADER = "# Generated from ci/workflows/";
 const SHA = /^[0-9a-f]{40}$/u;
 const EXACT_VERSION = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
-const RUST_TOOLCHAIN = "1.99.1";
+const RUST_TOOLCHAIN = "1.100.0";
 const NODE_VERSION = "24.22.1";
 const BUN_VERSION = "1.4.4";
 // Miniflare 5.20260820.0-alpha is the newest published runtime on 2026-08-23

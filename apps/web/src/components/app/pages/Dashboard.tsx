@@ -42,7 +42,7 @@ import { Input } from "@/components/ui/input";
 import { parseTimestamp } from "@/components/app/admin/hosts/format";
 import { LiveScenarioRunCard } from "@/components/app/admin/hosts/LiveScenarioRunCard";
 import { ScenarioRunArchiveCard } from "@/components/app/admin/hosts/ScenarioRunArchiveCard";
-import { useAdminScenarios } from "@/components/app/admin/hosts/useAdminScenarios";
+import { useAdministeredScenarios } from "@/components/app/admin/scenario-revisions";
 import { useAdminRunArchive } from "@/components/app/admin/hosts/useAdminRunArchive";
 import { useHostFleet } from "@/components/app/admin/hosts/useHostFleet";
 import type {
@@ -143,8 +143,8 @@ export function Dashboard() {
     loadRunDetail: loadArchivedRunDetail,
     forgetRun: forgetArchivedRun,
   } = useAdminRunArchive();
-  const scenarios = useAdminScenarios();
-  const launchableScenarios = scenarios.data?.scenarios ?? [];
+  const scenarios = useAdministeredScenarios();
+  const launchableScenarios = scenarios.data ?? [];
 
   useEffect(() => {
     return () => {
@@ -519,7 +519,7 @@ export function Dashboard() {
   );
   const archivedRunCount = archiveTotalCount ?? archivedScenarioRuns.length;
   const enabledScenarioCount = launchableScenarios.filter(
-    (scenario) => scenario.enabled,
+    (scenario) => scenario.enabled && scenario.liveRev !== null,
   ).length;
   const attentionHostCount = hostRecords.filter(
     ({ host }) =>

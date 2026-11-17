@@ -12,12 +12,12 @@ import {
   env,
   eq,
   hostDesiredState,
-  mutateStoredHostDesiredState,
+  mutateDesiredState,
   resetHostRuntimeTestDatabase,
   scenarioRuns,
   seedHost,
   seedRun,
-  testImageKey,
+  desiredRunningVm,
   upsertDesiredVm,
 } from "@/control-plane/host-runtime-do/test-fixtures";
 
@@ -246,26 +246,7 @@ async function seedDestroyableRun(runId: string, now: number) {
     runtimeVmName: "runtime-a",
     now,
   });
-  await mutateStoredHostDesiredState(db, "host-1", now, (draft) => {
-    upsertDesiredVm(draft, { owner_user_id: "user-1", runtime_execution_id: runId, generation: 1, vm_id: "runtime-a",
-      run_id: runId,
-      vm_name: "runtime-a",
-      desired_phase: "running",
-      image_key: testImageKey,
-      image_id: "2".repeat(64),
-      guest_tools: {
-        tools_disk_sha256: "1".repeat(64),
-        tools_disk_size_bytes: 64 * 1024 * 1024,
-        kino_sha256: "2".repeat(64),
-        bootstrap_abi: 2,
-      },
-      resources: {
-        cpu_millis: 1_000,
-        memory_mib: 512,
-        disk_mib: 4_096,
-      },
-      ssh_authorized_keys_openssh: [],
-      lease_expires_at_unix_ms: now + 60_000,
-    });
+  await mutateDesiredState(db, "host-1", now, (draft) => {
+    upsertDesiredVm(draft, desiredRunningVm(runId, "runtime-a", now));
   });
 }

@@ -1,4 +1,5 @@
 import type { ReplayCheck } from "@/components/app/RunArtifactViewerModel";
+import { VM_LOST_REASON } from "@/generated/constants";
 import {
   isVerificationPassed,
   repairObjectiveTitle,
@@ -69,7 +70,9 @@ export type RunReplayAvailability =
 
 /**
  * Learner-facing terminal state. This purposefully ignores phase/detail copy:
- * those strings describe infrastructure, not the learner's work.
+ * those strings describe infrastructure, not the learner's work. The one
+ * exception is a lost machine, which the learner should not take for their
+ * own doing.
  */
 export function getRunRecapState(run: ScenarioRunRecord): RunRecapState {
   if (run.activity !== "settled") {
@@ -92,7 +95,10 @@ export function getRunRecapState(run: ScenarioRunRecord): RunRecapState {
     return {
       kind: "could_not_finish",
       title: "Could not finish",
-      description: "This scenario did not reach its final checks.",
+      description:
+        run.phaseDetail === VM_LOST_REASON
+          ? VM_LOST_REASON
+          : "This scenario did not reach its final checks.",
     };
   }
 

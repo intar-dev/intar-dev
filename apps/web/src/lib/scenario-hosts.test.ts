@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  hostSupportsRunCliV1,
   isAvailableScenarioLaunchHost,
+  HOST_UNREACHABLE_GRACE_MS,
   isFreshHostHeartbeat,
+  isHostUnreachable,
   isReportedHostRoleAllowed,
   isScenarioLaunchHost,
   resolveRequestedHostRole,
@@ -89,26 +90,27 @@ describe("scenario host launch eligibility", () => {
   it("treats missing heartbeats as stale", () => {
     expect(isFreshHostHeartbeat(null, 1_762_041_660_000, 90_000)).toBe(false);
   });
+});
 
-  it("requires both learner CLI capabilities", () => {
-    expect(hostSupportsRunCliV1(null)).toBe(false);
+describe("host reachability for a live run", () => {
+  const now = 1_000_000;
+  const ttl = 90_000;
+
+  it("lets a disconnect inside the grace pass and shows one beyond it", () => {
+    const connected = { connected: true, disconnectedAt: null, lastHeartbeatAt: now - 20_000 };
+    expect(isHostUnreachable(connected, now, ttl)).toBe(false);
+    const blip = { connected: false, disconnectedAt: now - 5_000, lastHeartbeatAt: now - 20_000 };
+    expect(isHostUnreachable(blip, now, ttl)).toBe(false);
+    const gone = { ...blip, disconnectedAt: now - HOST_UNREACHABLE_GRACE_MS };
+    expect(isHostUnreachable(gone, now, ttl)).toBe(true);
+    expect(isHostUnreachable({ ...blip, disconnectedAt: null }, now, ttl)).toBe(true);
+    // Reconnected: the hello clears disconnectedAt and a report refreshes the heartbeat.
+    expect(isHostUnreachable({ connected: true, disconnectedAt: null, lastHeartbeatAt: now }, now, ttl)).toBe(false);
+  });
+
+  it("treats a connected host that stopped reporting as unreachable", () => {
     expect(
-      hostSupportsRunCliV1({
-        capabilities: {},
-      }),
-    ).toBe(false);
-    expect(
-      hostSupportsRunCliV1({
-        capabilities: { supports_run_cli_v1: true },
-      }),
-    ).toBe(false);
-    expect(
-      hostSupportsRunCliV1({
-        capabilities: {
-          supports_run_cli_v1: true,
-          supports_run_cli_completion_v1: true,
-        },
-      }),
+      isHostUnreachable({ connected: true, disconnectedAt: null, lastHeartbeatAt: now - ttl - 1 }, now, ttl),
     ).toBe(true);
   });
 });

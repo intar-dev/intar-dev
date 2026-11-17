@@ -74,7 +74,6 @@ jobs:
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      BUCKET: intar-dev-vm-image-registry-20260709
     environment:
       name: production
       url: https://intar.dev
@@ -109,8 +108,8 @@ jobs:
       - name: Pin and verify production configuration
         working-directory: .
         run: cuenv task -p ci --package ci website-pin-production-config
-      - name: Resolve and inject the verified guest-tools pin
-        run: cuenv task -p ci --package ci website-pin-guest-tools
+      - name: Inject the Kino pin
+        run: cuenv task -p ci --package ci website-pin-kino
       - name: Plan production D1 migrations
         id: migrations
         run: cuenv task -p ci --package ci website-plan-d1-migrations

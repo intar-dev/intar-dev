@@ -49,15 +49,11 @@ async function responseBody(
 
 const BODYLESS_CUSTOM_MUTATIONS = [
   ["DELETE", "/api/admin/runs/run-1"],
-  ["POST", "/api/admin/builds/build-1/retry"],
-  ["POST", "/api/admin/scenarios/demo/enabled"],
-  ["DELETE", "/api/admin/scenarios/demo/enabled"],
   ["POST", "/api/admin/hosts/host-1/revoke"],
   ["DELETE", "/api/organizations/org/assignments/assignment-1"],
   ["DELETE", "/api/organizations/org"],
   ["POST", "/api/organizations/org/leave"],
   ["DELETE", "/api/organizations/org/members/member-1"],
-  ["DELETE", "/api/organizations/org/scenarios/demo"],
   ["DELETE", "/api/organizations/org/sso"],
   ["POST", "/api/organizations/org/sso/verification"],
   ["POST", "/api/organizations/org/sso/verify"],
@@ -102,7 +98,7 @@ describe("worker API request security", () => {
   });
 
   it("accepts exact-origin bodyless custom mutations", async () => {
-    const nullBodyRequest = customMutation("/api/scenarios/demo/start", {
+    const nullBodyRequest = customMutation("/api/scenarios/intar/demo/start", {
       headers: {
         "content-length": "0",
         "content-type": "application/json",
@@ -119,7 +115,7 @@ describe("worker API request security", () => {
     expect(nullBody.request.headers.get("content-type")).toBeNull();
 
     const streamedEmptyRequest = customMutation(
-      "/api/scenarios/demo/start",
+      "/api/scenarios/intar/demo/start",
       {
         headers: {
           "content-length": "0",
@@ -155,7 +151,7 @@ describe("worker API request security", () => {
   );
 
   it("rate-limits sensitive requests before reading their bodies", async () => {
-    const request = customMutation("/api/scenarios/demo/start", {
+    const request = customMutation("/api/scenarios/intar/demo/start", {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ payload: "x".repeat(1024 * 1024 - 32) }),
     });
@@ -175,7 +171,7 @@ describe("worker API request security", () => {
 
   it("accepts absent fetch metadata but rejects missing, sibling, and cross-site origins", async () => {
     const missingMetadata = await guardCustomApiMutation(
-      new Request("https://intar.dev/api/scenarios/demo/start", {
+      new Request("https://intar.dev/api/scenarios/intar/demo/start", {
         method: "POST",
         headers: { origin: "https://intar.dev" },
       }),
@@ -185,31 +181,31 @@ describe("worker API request security", () => {
 
     const rejectedRequests = [
       [
-        new Request("https://intar.dev/api/scenarios/demo/start", {
+        new Request("https://intar.dev/api/scenarios/intar/demo/start", {
           method: "POST",
         }),
         "invalid_origin",
       ],
       [
-        customMutation("/api/scenarios/demo/start", {
+        customMutation("/api/scenarios/intar/demo/start", {
           headers: { origin: "https://admin.intar.dev" },
         }),
         "invalid_origin",
       ],
       [
-        customMutation("/api/scenarios/demo/start", {
+        customMutation("/api/scenarios/intar/demo/start", {
           headers: { origin: "https://intar.dev/" },
         }),
         "invalid_origin",
       ],
       [
-        customMutation("/api/scenarios/demo/start", {
+        customMutation("/api/scenarios/intar/demo/start", {
           headers: { "sec-fetch-site": "same-site" },
         }),
         "cross_site_request",
       ],
       [
-        customMutation("/api/scenarios/demo/start", {
+        customMutation("/api/scenarios/intar/demo/start", {
           headers: { "sec-fetch-site": "cross-site" },
         }),
         "cross_site_request",
@@ -226,7 +222,7 @@ describe("worker API request security", () => {
       payload: "x".repeat(MAX_API_JSON_BODY_BYTES),
     });
     const oversized = await guardCustomApiMutation(
-      customMutation("/api/scenarios/demo/start", {
+      customMutation("/api/scenarios/intar/demo/start", {
         headers: { "content-type": "application/json" },
         body: oversizedBody,
       }),
@@ -238,7 +234,7 @@ describe("worker API request security", () => {
 
     const body = JSON.stringify({ hostId: "host-1" });
     const allowed = await guardCustomApiMutation(
-      customMutation("/api/scenarios/demo/start", {
+      customMutation("/api/scenarios/intar/demo/start", {
         headers: { "content-type": "application/json" },
         body,
       }),
@@ -253,7 +249,7 @@ describe("worker API request security", () => {
     );
 
     const jsonp = await guardCustomApiMutation(
-      customMutation("/api/scenarios/demo/start", {
+      customMutation("/api/scenarios/intar/demo/start", {
         headers: { "content-type": "application/jsonp" },
         body: "{}",
       }),
@@ -270,7 +266,7 @@ describe("worker API request security", () => {
       ["0", "{}"],
     ] as const) {
       const custom = await guardCustomApiMutation(
-        customMutation("/api/scenarios/demo/start", {
+        customMutation("/api/scenarios/intar/demo/start", {
           headers: {
             "content-length": declaredLength,
             "content-type": "application/json",
@@ -414,18 +410,13 @@ describe("worker API request security", () => {
     }
     expect(sensitiveRateLimitActionFor(new Request("https://intar.dev/api/support/topics"))).toBeNull();
     expect(
-      sensitiveRateLimitActionFor(customMutation("/api/scenarios/demo/start")),
+      sensitiveRateLimitActionFor(customMutation("/api/scenarios/intar/demo/start")),
     ).toBe("scenario-start");
     expect(
       sensitiveRateLimitActionFor(
         customMutation("/api/scenarios/runs/run-1/ssh"),
       ),
     ).toBe("ssh-issuance");
-    expect(
-      sensitiveRateLimitActionFor(
-        customMutation("/api/admin/builds/build-1/retry"),
-      ),
-    ).toBe("build-retry");
     expect(
       sensitiveRateLimitActionFor(customMutation("/api/auth/sign-in/social")),
     ).toBe("auth-start");
@@ -451,7 +442,6 @@ describe("worker API request security", () => {
     for (const path of [
       "/api/organizations/org/scenario-source",
       "/api/admin/scenario-source",
-      "/api/admin/image-promotion",
     ]) {
       expect(sensitiveRateLimitActionFor(customMutation(path))).toBe(
         "scenario-source",
@@ -510,7 +500,7 @@ describe("worker API request security", () => {
 
   it("fails closed when the shared rate limiter rejects or is unavailable", async () => {
     const rejected = await secureApplicationApiRequest(
-      customMutation("/api/scenarios/demo/start"),
+      customMutation("/api/scenarios/intar/demo/start"),
       securityEnv(async () => ({ success: false })),
     );
     expect(rejected.ok).toBe(false);
@@ -523,7 +513,7 @@ describe("worker API request security", () => {
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
     const unavailable = await secureApplicationApiRequest(
-      customMutation("/api/scenarios/demo/start"),
+      customMutation("/api/scenarios/intar/demo/start"),
       securityEnv(async () => {
         throw new Error("rate limit unavailable");
       }),

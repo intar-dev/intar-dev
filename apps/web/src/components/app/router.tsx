@@ -96,6 +96,23 @@ const organizationDirectSignInRoute = createRoute({
   ),
 });
 
+// A scenario open to play: public, and its Start needs sign-in.
+const playRoute = createRoute({
+  getParentRoute: () => marketingLayoutRoute,
+  path: "play/$namespace/$slug",
+  validateSearch: (search: Record<string, unknown>): { ref?: string } =>
+    typeof search.ref === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(search.ref)
+      ? { ref: search.ref }
+      : {},
+  head: () =>
+    routeHead(
+      "Repair scenario",
+      "Start a systems repair scenario and fix a live system in your browser.",
+    ),
+  pendingComponent: FullPageRoutePending,
+  component: lazyRouteComponent(() => import("./pages/Play"), "Play"),
+});
+
 /* -------------------------------------------------------------------------- */
 /* Shared run (public, no sign-in). Its own page, outside both layouts.       */
 /* -------------------------------------------------------------------------- */
@@ -198,7 +215,8 @@ const courseLectureRoute = createRoute({
 
 const scenarioRunStartRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "runs/start/$scenarioId",
+  // A splat, so a namespaced id keeps its slash: /runs/start/intar/<slug>.
+  path: "runs/start/$",
   validateSearch: validateScenarioRunStartSearch,
   head: () =>
     routeHead(
@@ -376,7 +394,7 @@ const adminBuildsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin/builds",
   head: () =>
-    routeHead("Builds", "Monitor scenario image builds, logs, and retries."),
+    routeHead("Builds", "Monitor scenario machine builds and their logs."),
   // Organization owners and admins see their own builds here too; the API
   // decides what each caller may read.
   component: lazyRouteComponent(
@@ -391,9 +409,10 @@ const adminScenariosRoute = createRoute({
   head: () =>
     routeHead(
       "Scenario registry",
-      "Manage learner availability and scenario records.",
+      "Verify, promote, and roll back scenario revisions.",
     ),
-  beforeLoad: requireAdminRoute,
+  // Organization owners and admins manage their own scenarios here too; the
+  // API decides what each caller may read and change.
   component: lazyRouteComponent(
     () => import("./pages/admin/ScenarioRegistry"),
     "ScenarioRegistry",
@@ -402,13 +421,12 @@ const adminScenariosRoute = createRoute({
 
 const adminScenarioDetailsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "admin/scenarios/$scenarioId",
+  path: "admin/scenarios/$namespace/$slug",
   head: () =>
     routeHead(
       "Scenario record",
-      "Inspect scenario configuration, checks, hints, and machine definitions.",
+      "Inspect a scenario's revisions and their verify runs.",
     ),
-  beforeLoad: requireAdminRoute,
   component: lazyRouteComponent(
     () => import("./pages/admin/ScenarioDetails"),
     "ScenarioDetails",
@@ -452,6 +470,7 @@ const routeTree = rootRoute.addChildren([
     oauthConsentRoute,
     organizationSignInRoute,
     organizationDirectSignInRoute,
+    playRoute,
   ]),
   appLayoutRoute.addChildren([
     supportForumRoute,
@@ -523,6 +542,8 @@ function validateScenarioRunStartSearch(search: Record<string, unknown>) {
     organizationId: text(search.organizationId),
     courseId: text(search.courseId),
     lectureId: text(search.lectureId),
+    source: search.source === "play" ? ("play" as const) : undefined,
+    ref: text(search.ref),
   };
 }
 

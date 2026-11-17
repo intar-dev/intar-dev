@@ -17,6 +17,9 @@ export interface AdmissionContentAccess {
   lectureId: string | null;
   allowSequenceBypass: boolean;
   requiresAdmin: boolean;
+  /** `verify` grants a verify run its revision's access instead of a course's. */
+  launchSource?: string | null;
+  scenarioRev?: string | null;
 }
 
 /** The snapshot was validated after reading the desired-state CAS version. */

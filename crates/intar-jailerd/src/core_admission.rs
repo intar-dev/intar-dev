@@ -44,6 +44,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    false,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -58,11 +59,22 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
                 allocated_identities.insert(record.uid);
-                recovery_clean = false;
+                // A VM of a known earlier boot cannot have survived the
+                // reboot; once its containment is proven below, it says
+                // nothing about this host. A missing id on either side, or a
+                // mismatch within this boot, stays unclean.
+                let earlier_boot = matches!(
+                    (record.host_boot_id.as_deref(), current_boot_id.as_deref()),
+                    (Some(recorded), Some(current)) if recorded != current
+                );
+                if !earlier_boot {
+                    recovery_clean = false;
+                }
                 continue;
             }
             let inspection = match backend.inspect_unit(&record.unit_name) {
@@ -74,6 +86,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                         &mut backend,
                         &mut preparer,
                         &record,
+                        true,
                         &mut pending_cpu_reservations,
                         &mut unresolved_recoveries,
                     );
@@ -95,6 +108,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -110,6 +124,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                         &mut backend,
                         &mut preparer,
                         &record,
+                        true,
                         &mut pending_cpu_reservations,
                         &mut unresolved_recoveries,
                     );
@@ -128,6 +143,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                                 &mut backend,
                                 &mut preparer,
                                 &record,
+                                true,
                                 &mut pending_cpu_reservations,
                                 &mut unresolved_recoveries,
                             );
@@ -143,6 +159,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                             &mut backend,
                             &mut preparer,
                             &record,
+                            true,
                             &mut pending_cpu_reservations,
                             &mut unresolved_recoveries,
                         );
@@ -160,6 +177,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -179,6 +197,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -194,6 +213,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -214,6 +234,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -232,6 +253,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -246,6 +268,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     &mut backend,
                     &mut preparer,
                     &record,
+                    true,
                     &mut pending_cpu_reservations,
                     &mut unresolved_recoveries,
                 );
@@ -256,7 +279,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             allocated_identities.insert(record.uid);
             records.insert(record.generation.clone(), record);
         }
-        if !recovery_clean {
+        // While every other unclean path clears `recovery_clean`, only the
+        // records of an earlier boot can leave entries here with it still
+        // set, so empty maps prove each of them fully contained.
+        if !recovery_clean
+            || !unresolved_recoveries.is_empty()
+            || !pending_cpu_reservations.is_empty()
+        {
             readiness.privileged_self_test_passed = false;
             readiness.kvm_accounting_proven = false;
         }
@@ -284,9 +313,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             Request::EnsureRunNetwork(request) | Request::RepairRunNetwork(request) => {
                 self.config.validate_run_network_request(request)
             }
-            Request::LaunchVmV2(request) => self
-                .config
-                .validate_ssh_public_port(request.launch.ssh_public_port),
             Request::LaunchVmV3(request) => self
                 .config
                 .validate_ssh_public_port(request.launch.ssh_public_port),
@@ -294,18 +320,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         };
         if let Err(error) = policy_validation {
             return Response::Error(ProtocolError::new("invalid_request", error.to_string()));
-        }
-        if matches!(request, Request::LaunchVmV2(_)) {
-            let capabilities = self.capabilities();
-            if !(capabilities.supports_jailer_v2
-                && capabilities.supports_template_backed_launch
-                && capabilities.fast_template_store)
-            {
-                return Response::Error(ProtocolError::new(
-                    "host_not_ready",
-                    "host readiness attestation does not permit template-backed VM launches",
-                ));
-            }
         }
         if matches!(request, Request::LaunchVmV3(_)) {
             let capabilities = self.capabilities();
@@ -318,13 +332,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     "host readiness attestation does not permit v3 chunked VM launches",
                 ));
             }
-        }
-        if matches!(request, Request::PrepareImageV2(_)) && !self.capabilities().supports_jailer_v2
-        {
-            return Response::Error(ProtocolError::new(
-                "host_not_ready",
-                "host readiness attestation does not permit template-backed image preparation",
-            ));
         }
         if matches!(request, Request::PrepareChunkedImageV3(_))
             && !self.capabilities().supports_jailer_v3
@@ -349,9 +356,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
     pub(super) fn try_handle(&mut self, request: Request) -> Result<Response> {
         match request {
             Request::Capabilities => Ok(Response::Capabilities(self.capabilities())),
-            Request::PrepareImageV2(request) => Ok(Response::PrepareImageV2(
-                self.preparer.prepare_image_v2(&self.config, &request)?,
-            )),
             Request::PrepareChunkedImageV3(request) => Ok(Response::PrepareChunkedImageV3(
                 self.preparer.prepare_image_v3(&self.config, &request)?,
             )),
@@ -381,7 +385,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     .run_networks
                     .get(&request.run_id)
                     .cloned()
-                    .context("cannot repair an untracked run network")?;
+                    .ok_or(UntrackedRunNetworkError)?;
                 if record.request != request {
                     bail!("run network repair topology differs from durable state")
                 }
@@ -391,7 +395,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 }
                 Ok(Response::RepairRunNetwork(result))
             }
-            Request::LaunchVmV2(request) => Ok(Response::LaunchVmV2(self.launch_vm_v2(*request)?)),
             Request::LaunchVmV3(request) => Ok(Response::LaunchVmV3(self.launch_vm_v3(*request)?)),
             Request::FinalizeVmBoot(request) => {
                 Ok(Response::FinalizeVmBoot(self.finalize_vm_boot(request)?))
@@ -408,6 +411,18 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                     .records
                     .values()
                     .any(|record| record.request.run_id == request.run_id)
+                    || self
+                        .inflight_launches
+                        .values()
+                        .any(|launch| launch.request.run_id == request.run_id)
+                    // Until its cgroup is proven drained, a contained VM may
+                    // still run inside the run's namespace.
+                    || self.unresolved_recoveries.values().any(|recovery| {
+                        recovery.run_id == request.run_id
+                            && self
+                                .pending_cpu_reservations
+                                .contains_key(&recovery.generation)
+                    })
                 {
                     bail!("run network still has VM generations")
                 }
@@ -448,7 +463,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             reserved_cpu_millis: self.config.cpu_reserved_millis,
             schedulable_cpu_millis,
             committed_cpu_millis,
-            supports_jailer_v2: ready && fast_template_store,
             supports_jailer_v3: ready && fast_template_store,
             supports_template_backed_launch: ready && fast_template_store,
             fast_template_store,
@@ -514,17 +528,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             .collect()
     }
 
-    pub(super) fn begin_detached_launch_vm_v2(
-        &mut self,
-        request: LaunchVmV2Request,
-    ) -> Result<DetachedLaunchAdmission<B, P>>
-    where
-        B: Clone,
-        P: Clone,
-    {
-        self.begin_detached_launch(PreparedLaunchRequest::V2(request))
-    }
-
     pub(super) fn begin_detached_launch_vm_v3(
         &mut self,
         request: LaunchVmV3Request,
@@ -533,12 +536,12 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         B: Clone,
         P: Clone,
     {
-        self.begin_detached_launch(PreparedLaunchRequest::V3(request))
+        self.begin_detached_launch(request)
     }
 
     fn begin_detached_launch(
         &mut self,
-        request: PreparedLaunchRequest,
+        request: LaunchVmV3Request,
     ) -> Result<DetachedLaunchAdmission<B, P>>
     where
         B: Clone,
@@ -547,7 +550,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let quota = request
             .validate()
             .context("validate template-backed VM launch request")?;
-        let launch = request.launch();
+        let launch = &request.launch;
         self.config
             .validate_ssh_public_port(launch.ssh_public_port)
             .context("validate root-owned SSH public port policy")?;
@@ -650,7 +653,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         )))
     }
 
-    pub(super) fn complete_detached_launch_vm_v2(
+    pub(super) fn complete_detached_launch_vm_v3(
         &mut self,
         outcome: DetachedLaunchOutcome,
     ) -> Result<VmLaunchResult> {
@@ -665,7 +668,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             self.readiness.privileged_self_test_passed = false;
             self.readiness.kvm_accounting_proven = false;
             bail!(
-                "generation-fenced V2 launch commit rejected for {}",
+                "generation-fenced launch commit rejected for {}",
                 reservation.generation
             )
         }
@@ -675,7 +678,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 ensure!(
                     success.record.generation == success.reservation.generation
                         && success.result.generation == success.reservation.generation,
-                    "detached V2 launch returned a mismatched generation"
+                    "detached launch returned a mismatched generation"
                 );
                 ensure!(
                     !self.records.values().any(|record| {
@@ -726,13 +729,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 }
             }
         }
-    }
-
-    pub(super) fn complete_detached_launch_vm_v3(
-        &mut self,
-        outcome: DetachedLaunchOutcome,
-    ) -> Result<VmLaunchResult> {
-        self.complete_detached_launch_vm_v2(outcome)
     }
 
     pub(super) fn complete_detached_existing_launch(

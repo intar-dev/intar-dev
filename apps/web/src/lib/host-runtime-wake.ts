@@ -14,6 +14,14 @@ export async function tryWakeHostRuntime(hostId: string): Promise<void> {
   await tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId);
 }
 
+/** Each connected platform agent rebuilds its desired state, whose `cached_images` follow the live and candidate revisions. */
+export async function wakePlatformAgents(): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT id FROM agent_hosts WHERE scope = 'platform' AND role = 'agent' AND disabled = 0 AND connected = 1`,
+  ).all<{ id: string }>();
+  await Promise.all(results.map((host) => tryWakeHostRuntime(host.id)));
+}
+
 export async function retireHostRuntime(hostId: string): Promise<void> {
   const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
   const response = await withTimeout(

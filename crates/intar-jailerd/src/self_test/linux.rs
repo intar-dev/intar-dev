@@ -18,9 +18,10 @@ use cloud_hypervisor_client::{
 };
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
-    FinalizeVmBootRequest, JailerdConfig, LaunchVmV2Request, PrepareImageV2Request,
-    PreparedImageV2Result, Request, RequestClass, Response, SandboxHealth, Sha256Digest,
-    SourceArtifacts, ValidatedId, VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
+    FinalizeVmBootRequest, JailerdConfig, LaunchVmV3Request, PrepareChunkedImageV3Request,
+    PreparedImageV3Result, Request, RequestClass, Response, SandboxHealth, Sha256Digest,
+    SourceArtifacts, TrustedDirectorySource, ValidatedId, VmIdentityRequest, VmInspection,
+    VmLaunchRequest, VmLaunchResult,
 };
 use kvm_ioctls::Kvm;
 use landlock::{
@@ -364,14 +365,14 @@ fn run_inner(
     Ok(attestation)
 }
 
-pub(super) fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV3>> {
+pub(super) fn load(config: &JailerdConfig) -> Result<super::AttestationStatus> {
     config
         .validate()
         .context("validate jailerd configuration")?;
     let root = open_trusted_attestation_root(config)?;
     let file = match open_attestation_file(&root)? {
         Some(file) => file,
-        None => return Ok(None),
+        None => return Ok(super::AttestationStatus::Absent),
     };
     let metadata = file
         .metadata()
@@ -392,57 +393,53 @@ pub(super) fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAtt
         serde_json::from_slice(&bytes).context("parse self-test attestation")?;
     validate_attestation(&attestation)?;
 
+    // Decide a previous boot before hashing anything: no installed byte may
+    // turn a rebooted host's leftover attestation into a startup error.
+    let boot_id = read_trimmed("/proc/sys/kernel/random/boot_id")?;
+    let kernel_version = read_trimmed("/proc/sys/kernel/osrelease");
+    let systemd_version = read_systemd_version();
+    let now_unix_s = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs());
+    if let Some(status) = super::previous_boot(
+        &attestation,
+        &boot_id,
+        kernel_version.as_deref().ok(),
+        systemd_version.as_deref().ok(),
+        now_unix_s.as_ref().ok().copied(),
+    ) {
+        return Ok(status);
+    }
+    let kernel_version = kernel_version?;
+    let systemd_version = systemd_version?;
+    let now_unix_s = now_unix_s.context("system clock predates Unix epoch")?;
+
     let actual_runtime_sha256 = trusted_executable_sha256(&config.cloud_hypervisor_binary)?;
     let current_exe = trusted_current_exe()?;
     let intar_jailerd_sha256 = current_exe.sha256;
     let intar_jailer_sha256 = trusted_executable_sha256(&config.jailer_binary)?;
     ensure!(
-        attestation.cloud_hypervisor_sha256 == actual_runtime_sha256,
-        "self-test attestation runtime hash is stale"
-    );
-    ensure!(
-        attestation.intar_jailerd_sha256 == intar_jailerd_sha256,
-        "self-test attestation jailerd executable hash is stale"
-    );
-    ensure!(
-        attestation.intar_jailer_sha256 == intar_jailer_sha256,
-        "self-test attestation jailer executable hash is stale"
-    );
-    ensure!(
         actual_runtime_sha256 == config.cloud_hypervisor_sha256.as_str(),
         "configured runtime hash does not match installed bytes"
     );
-    ensure!(
-        attestation.config_runtime_fingerprint_sha256
-            == config_runtime_fingerprint(
-                config,
-                &actual_runtime_sha256,
-                &intar_jailerd_sha256,
-                &intar_jailer_sha256,
-            )?,
-        "self-test attestation configuration fingerprint is stale"
-    );
-    ensure!(
-        attestation.boot_id == read_trimmed("/proc/sys/kernel/random/boot_id")?,
-        "self-test attestation belongs to a previous boot"
-    );
-    ensure!(
-        attestation.kernel_version == read_trimmed("/proc/sys/kernel/osrelease")?,
-        "self-test attestation kernel version is stale"
-    );
-    ensure!(
-        attestation.systemd_version == read_systemd_version()?,
-        "self-test attestation systemd version is stale"
-    );
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock predates Unix epoch")?
-        .as_secs();
-    ensure!(
-        attestation.passed_at_unix_s <= now.saturating_add(60),
-        "self-test attestation time is in the future"
-    );
-    Ok(Some(attestation))
+    let fingerprint = config_runtime_fingerprint(
+        config,
+        &actual_runtime_sha256,
+        &intar_jailerd_sha256,
+        &intar_jailer_sha256,
+    )?;
+    super::classify(
+        attestation,
+        &super::CurrentHost {
+            cloud_hypervisor_sha256: &actual_runtime_sha256,
+            intar_jailerd_sha256: &intar_jailerd_sha256,
+            intar_jailer_sha256: &intar_jailer_sha256,
+            config_runtime_fingerprint_sha256: &fingerprint,
+            kernel_version: &kernel_version,
+            systemd_version: &systemd_version,
+            now_unix_s,
+        },
+    )
 }
 
 pub(super) fn worker(report: &Path, allowed_dir: &Path, denied_path: &Path) -> Result<()> {

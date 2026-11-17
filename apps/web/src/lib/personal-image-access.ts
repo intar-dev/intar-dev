@@ -1,5 +1,7 @@
-import { sql } from "drizzle-orm";
-import { vmScenarios, vmScenarioVms } from "@/db/schema";
+import { playableScenarioCondition } from "@/lib/scenario-runs/content-access";
+
+/** How long a personal or organization host keeps a start's image grant. */
+export const PERSONAL_IMAGE_PREPARATION_TTL_MS = 15 * 60_000;
 
 // SQL identifiers here are fixed server text. Use the same live access fence
 // for issuing a grant, reconciling its cache, and reading registry content.
@@ -10,15 +12,8 @@ export function preparationAuthoritySql(): string {
     json_each(hidden_course.value, '$.lectures') hidden_lecture
     WHERE hidden.organization_id = ${field("organizationId")}
       AND json_extract(hidden_lecture.value, '$.scenarioId') = ${scenario})`;
-  // Small grouped predicates keep this correlated query below D1's expression
-  // depth limit when image, manifest, and artifact routes add their own fences.
-  return `EXISTS (SELECT 1 FROM agent_hosts host
-    JOIN user owner ON owner.id = prep.user_id
-    JOIN vm_scenarios scenario ON scenario.scenario_id = ${field("scenarioId")}
-    JOIN course_catalogs catalog ON catalog.scope_key = ${field("courseScopeKey")}
-    JOIN json_each(catalog.catalog_json, '$.courses') course
-    JOIN json_each(course.value, '$.lectures') lecture
-    WHERE (host.id, host.role, host.disabled, host.scenario_enabled,
+  // The host, its owner and the preparation itself, for every launch source.
+  const hostAndOwner = `(host.id, host.role, host.disabled, host.scenario_enabled,
         host.credential_generation) = (prep.host_id, 'agent', 0, 1, prep.credential_generation)
       AND ((host.scope = 'personal' AND host.user_id = prep.user_id AND owner.metal_placement = 'personal')
         OR (host.scope = 'organization' AND host.organization_id = ${field("organizationId")}
@@ -29,11 +24,26 @@ export function preparationAuthoritySql(): string {
       AND NOT EXISTS (SELECT 1 FROM scenario_runs active
         WHERE active.active_key = prep.user_id OR (active.user_id = prep.user_id AND active.request_idempotency_key = prep.request_key))
       AND (${field("requiresAdmin")} = 0 OR
-        instr(',' || replace(lower(coalesce(owner.role, '')), ' ', '') || ',', ',admin,') > 0)
+        instr(',' || replace(lower(coalesce(owner.role, '')), ' ', '') || ',', ',admin,') > 0)`;
+  // A play start: personal, of a scenario still open to play.
+  const play = `EXISTS (SELECT 1 FROM agent_hosts host
+    JOIN user owner ON owner.id = prep.user_id
+    JOIN scenarios played ON played.id = ${field("scenarioId")}
+    WHERE ${hostAndOwner}
+      AND ${field("organizationId")} IS NULL AND ${playableScenarioCondition("played")})`;
+  // Small grouped predicates keep this correlated query below D1's expression
+  // depth limit when image, manifest, and artifact routes add their own fences.
+  return `CASE WHEN ${field("launchSource")} = 'play' THEN ${play} ELSE EXISTS (SELECT 1 FROM agent_hosts host
+    JOIN user owner ON owner.id = prep.user_id
+    JOIN (SELECT id AS scenario_id, organization_id FROM scenarios
+        WHERE enabled = 1 AND live_rev IS NOT NULL) scenario ON scenario.scenario_id = ${field("scenarioId")}
+    JOIN course_catalogs catalog ON catalog.scope_key = ${field("courseScopeKey")}
+    JOIN json_each(catalog.catalog_json, '$.courses') course
+    JOIN json_each(course.value, '$.lectures') lecture
+    WHERE ${hostAndOwner}
       AND (${field("organizationId")} IS NULL OR EXISTS (SELECT 1 FROM member membership
         WHERE membership.user_id = prep.user_id AND membership.organization_id = ${field("organizationId")}))
-      AND (scenario.enabled = 1 AND scenario.enabled_at IS NOT NULL
-        AND (scenario.organization_id IS NULL OR scenario.organization_id = ${field("organizationId")}))
+      AND (scenario.organization_id IS NULL OR scenario.organization_id = ${field("organizationId")})
       AND (catalog.organization_id IS NULL OR catalog.organization_id = ${field("organizationId")})
       AND (json_extract(catalog.catalog_json, '$.version'), json_extract(course.value, '$.courseId'),
         json_extract(lecture.value, '$.lectureId'), json_extract(lecture.value, '$.scenarioId')) =
@@ -47,25 +57,5 @@ export function preparationAuthoritySql(): string {
             AND (catalog.organization_id IS NOT NULL OR NOT ${shadowed("json_extract(prior.value, '$.scenarioId')")})
             AND NOT EXISTS (SELECT 1 FROM course_unit_completions done WHERE done.user_id = prep.user_id
               AND (done.scope_key, done.course_id, done.lecture_id) =
-                (catalog.scope_key, ${field("courseId")}, json_extract(prior.value, '$.lectureId'))))))`;
-}
-
-/** Correlated with vmScenarios/vmScenarioVms, just like the workload grant. */
-export function personalPreparationImageAccess(hostId: string) {
-  return sql`EXISTS (SELECT 1 FROM personal_image_preparations prep
-    JOIN agent_hosts host ON host.id = prep.host_id
-    JOIN json_each(prep.images_json) image
-    JOIN host_desired_state desired ON desired.host_id = prep.host_id
-    JOIN json_each(desired.doc_json, '$.cached_images') intent
-    WHERE prep.host_id = ${hostId} AND ${sql.raw(preparationAuthoritySql())}
-      AND (json_extract(desired.doc_json, '$.scope'), json_extract(desired.doc_json, '$.owner_user_id')) = (host.scope, host.user_id)
-      AND json_extract(prep.access_json, '$.scenarioId') = ${vmScenarios.scenarioId}
-      AND (json_extract(image.value, '$.imageSha256'), json_extract(image.value, '$.imageKey.scenario'),
-        json_extract(image.value, '$.imageKey.vm'), json_extract(image.value, '$.imageKey.arch')) =
-        (${vmScenarioVms.imageSha256}, json_extract(${vmScenarioVms.imageKeyJson}, '$.scenario'),
-          json_extract(${vmScenarioVms.imageKeyJson}, '$.vm'), json_extract(${vmScenarioVms.imageKeyJson}, '$.arch'))
-      AND (json_extract(intent.value, '$.image_id'), json_extract(intent.value, '$.image_key.scenario'),
-        json_extract(intent.value, '$.image_key.vm'), json_extract(intent.value, '$.image_key.arch')) =
-        (json_extract(image.value, '$.imageSha256'), json_extract(image.value, '$.imageKey.scenario'),
-          json_extract(image.value, '$.imageKey.vm'), json_extract(image.value, '$.imageKey.arch')))`;
+                (catalog.scope_key, ${field("courseId")}, json_extract(prior.value, '$.lectureId')))))) END`;
 }

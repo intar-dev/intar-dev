@@ -7,14 +7,16 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-hcl-edit = "=0.9.8"
+flate2.workspace = true
 hcl-rs.workspace = true
-jsonpath-rust.workspace = true
-regex.workspace = true
+intar-contracts = { path = "../intar-contracts" }
+pulldown-cmark.workspace = true
 serde.workspace = true
+serde-saphyr.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

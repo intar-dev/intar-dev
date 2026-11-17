@@ -19,11 +19,10 @@ use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, CLOUD_HYPERVISOR_SHA256, CLOUD_HYPERVISOR_VERSION, CpuQuota,
     CpuQuotaAttestation, DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest,
     FinalizeVmBootResult, JailPathMap, JailSpecV1, JailerCapabilities, JailerdConfig,
-    LaunchVmV2Request, LaunchVmV3Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT,
-    PROTOCOL_VERSION, PrepareChunkedImageV3Request, PrepareImageV2Request, PreparedImageV2Result,
-    PreparedImageV3Result, ProtocolError, Request, RequestClass, Response, RunNetworkResult,
-    SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuRuntimeState,
-    VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
+    LaunchVmV3Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT, PROTOCOL_VERSION,
+    PrepareChunkedImageV3Request, PreparedImageV3Result, ProtocolError, Request, RequestClass,
+    Response, RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId,
+    VmCpuRuntimeState, VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
 };
 use rustix::fs::{Mode, OFlags, open};
 #[cfg(target_os = "linux")]
@@ -233,26 +232,12 @@ pub trait JailPreparer: Send {
     fn fast_template_store_ready(&self, _config: &JailerdConfig) -> bool {
         true
     }
-    fn prepare_image_v2(
-        &mut self,
-        _config: &JailerdConfig,
-        _request: &PrepareImageV2Request,
-    ) -> Result<PreparedImageV2Result> {
-        bail!("template-backed image preparation is unavailable")
-    }
     fn prepare_image_v3(
         &mut self,
         _config: &JailerdConfig,
         _request: &PrepareChunkedImageV3Request,
     ) -> Result<PreparedImageV3Result> {
         bail!("chunked image preparation is unavailable")
-    }
-    fn validate_prepared_launch(
-        &mut self,
-        _config: &JailerdConfig,
-        _request: &LaunchVmV2Request,
-    ) -> Result<()> {
-        bail!("template-backed VM launch is unavailable")
     }
     fn validate_prepared_launch_v3(
         &mut self,
@@ -270,17 +255,6 @@ pub trait JailPreparer: Send {
         uid: u32,
         gid: u32,
     ) -> Result<PreparedJail>;
-    fn prepare_v2(
-        &mut self,
-        config: &JailerdConfig,
-        request: &VmLaunchRequest,
-        run_network: &RunNetworkResult,
-        generation: &ValidatedId,
-        uid: u32,
-        gid: u32,
-    ) -> Result<PreparedJail> {
-        self.prepare(config, request, run_network, generation, uid, gid)
-    }
     fn prepare_v3(
         &mut self,
         config: &JailerdConfig,
@@ -290,7 +264,7 @@ pub trait JailPreparer: Send {
         uid: u32,
         gid: u32,
     ) -> Result<PreparedJail> {
-        self.prepare_v2(config, request, run_network, generation, uid, gid)
+        self.prepare(config, request, run_network, generation, uid, gid)
     }
     fn destroy(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<bool>;
     fn quarantine(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<()>;
@@ -308,6 +282,9 @@ pub trait JailPreparer: Send {
         Ok(Vec::new())
     }
     fn export_recording(&mut self, _config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
+        Ok(())
+    }
+    fn export_logs(&mut self, _config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
         Ok(())
     }
     fn reserve_identity(
@@ -373,6 +350,45 @@ struct CpuCapacityExhaustedError {
     committed: u64,
     requested: u32,
     schedulable: u64,
+}
+
+/// `inspect_unit` found no unit: systemd removed it after its VMM exited.
+#[derive(Debug, Error)]
+#[error("systemd unit {0} no longer exists")]
+pub struct UnitGoneError(pub String);
+
+/// A tracked VM whose VMM exited and whose unit is gone, kept for its
+/// delete: answered as `vm_exited`, so the agent ends the run.
+#[derive(Debug, Error)]
+#[error("the VMM exited; the VM is kept until it is deleted")]
+struct VmExitedError;
+
+/// A run network jailerd does not track: answered as `not_found`.
+#[derive(Debug, Error)]
+#[error("cannot repair an untracked run network")]
+struct UntrackedRunNetworkError;
+
+/// The image template a launch names is gone from the store (store GC
+/// removed it) or was never published: answered as `image_template_missing`,
+/// so the agent prepares it again instead of failing the run.
+#[derive(Debug, Error)]
+#[error("the prepared image template is missing")]
+struct PreparedTemplateMissing;
+
+/// `error` as [`PreparedTemplateMissing`] when an absent file or directory
+/// caused it; any other error unchanged.
+fn template_missing_if_absent(error: anyhow::Error) -> anyhow::Error {
+    let absent = error.chain().any(|cause| {
+        cause.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT)
+            || cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    });
+    if absent {
+        PreparedTemplateMissing.into()
+    } else {
+        error
+    }
 }
 
 impl VmRecord {
@@ -494,29 +510,7 @@ struct DetachedLaunchTask<B, P> {
     backend: B,
     preparer: P,
     reservation: LaunchReservation,
-    prepared_request: PreparedLaunchRequest,
-}
-
-#[derive(Clone)]
-enum PreparedLaunchRequest {
-    V2(LaunchVmV2Request),
-    V3(LaunchVmV3Request),
-}
-
-impl PreparedLaunchRequest {
-    fn launch(&self) -> &VmLaunchRequest {
-        match self {
-            Self::V2(request) => &request.launch,
-            Self::V3(request) => &request.launch,
-        }
-    }
-
-    fn validate(&self) -> Result<CpuQuota> {
-        match self {
-            Self::V2(request) => request.validate().map_err(Into::into),
-            Self::V3(request) => request.validate().map_err(Into::into),
-        }
-    }
+    prepared_request: LaunchVmV3Request,
 }
 
 struct DetachedLaunchSuccess {
@@ -618,98 +612,6 @@ use detached_launch::*;
 mod core_admission;
 mod core_lifecycle;
 
-/// Execute a V2 launch without holding the lifecycle-state mutex across
-/// template validation, generation staging, networking, systemd activation,
-/// or VMM readiness polling. Admission and completion remain short,
-/// generation-fenced critical sections, and the declared quota is charged for the
-/// entire unlocked interval.
-#[tracing::instrument(name = "vm.launch_v2", skip_all)]
-pub fn launch_vm_v2_response<B, P>(
-    core: &Arc<Mutex<JailerdCore<B, P>>>,
-    request: LaunchVmV2Request,
-) -> Response
-where
-    B: HostBackend + Clone,
-    P: JailPreparer + Clone,
-{
-    if let Err(error) = request.validate() {
-        return Response::Error(ProtocolError::new("invalid_request", error.to_string()));
-    }
-
-    let admission = {
-        let mut core = match core.lock() {
-            Ok(core) => core,
-            Err(_) => {
-                return Response::Error(ProtocolError::new(
-                    "host_operation_failed",
-                    "jailerd lifecycle state lock poisoned",
-                ));
-            }
-        };
-        if let Err(error) = core
-            .config
-            .validate_ssh_public_port(request.launch.ssh_public_port)
-        {
-            return Response::Error(ProtocolError::new("invalid_request", error.to_string()));
-        }
-        let capabilities = core.capabilities();
-        if !(capabilities.supports_jailer_v2
-            && capabilities.supports_template_backed_launch
-            && capabilities.fast_template_store)
-        {
-            return Response::Error(ProtocolError::new(
-                "host_not_ready",
-                "host readiness attestation does not permit template-backed VM launches",
-            ));
-        }
-        match core.begin_detached_launch_vm_v2(request) {
-            Ok(admission) => admission,
-            Err(error) => return protocol_error_response(error),
-        }
-    };
-
-    match admission {
-        DetachedLaunchAdmission::Existing(task) => {
-            let DetachedExistingLaunchTask {
-                config,
-                mut backend,
-                mut preparer,
-                record,
-            } = *task;
-            let outcome = execute_existing_launch(&config, &mut backend, &mut preparer, record);
-            let result = match core.lock() {
-                Ok(mut core) => core.complete_detached_existing_launch(outcome),
-                Err(_) => {
-                    return Response::Error(ProtocolError::new(
-                        "host_operation_failed",
-                        "jailerd lifecycle state lock poisoned during idempotent launch commit",
-                    ));
-                }
-            };
-            match result {
-                Ok(result) => Response::LaunchVmV2(result),
-                Err(error) => protocol_error_response(error),
-            }
-        }
-        DetachedLaunchAdmission::Reserved(task) => {
-            let outcome = task.execute();
-            let result = match core.lock() {
-                Ok(mut core) => core.complete_detached_launch_vm_v2(outcome),
-                Err(_) => {
-                    return Response::Error(ProtocolError::new(
-                        "host_operation_failed",
-                        "jailerd lifecycle state lock poisoned during launch commit",
-                    ));
-                }
-            };
-            match result {
-                Ok(result) => Response::LaunchVmV2(result),
-                Err(error) => protocol_error_response(error),
-            }
-        }
-    }
-}
-
 /// Execute a V3 chunked-image launch without holding the lifecycle mutex over
 /// template validation, staging, networking, or VMM readiness.
 #[tracing::instrument(name = "vm.launch_v3", skip_all)]
@@ -806,58 +708,6 @@ fn protocol_error_response(error: anyhow::Error) -> Response {
     ))
 }
 
-/// Execute the long-running, stateless template import after production
-/// dispatch has released `JailerdCore`'s lifecycle mutex.
-#[tracing::instrument(name = "image.prepare_v2", skip_all)]
-pub fn prepare_image_v2_response(
-    config: &JailerdConfig,
-    request: PrepareImageV2Request,
-) -> Response {
-    if let Err(error) = request.validate() {
-        return Response::Error(ProtocolError::new("invalid_request", error.to_string()));
-    }
-    if let Err(error) = probe_fast_template_store(config) {
-        return Response::Error(ProtocolError::new(
-            "host_not_ready",
-            format!("fast image template store is unavailable: {error:#}"),
-        ));
-    }
-    let host_template = match read_optional_host_template_metadata(config) {
-        Ok(Some(metadata)) => metadata,
-        Ok(None) => {
-            return Response::Error(ProtocolError::new(
-                "host_not_ready",
-                "root-owned host runtime template is unavailable",
-            ));
-        }
-        Err(error) => {
-            return Response::Error(ProtocolError::new(
-                "host_not_ready",
-                format!("host runtime template metadata is unavailable: {error:#}"),
-            ));
-        }
-    };
-    if let Err(error) = validate_host_template(config, &host_template) {
-        return Response::Error(ProtocolError::new(
-            "host_not_ready",
-            format!("host runtime template validation failed: {error:#}"),
-        ));
-    }
-    // A background class yields between fixed blocks. The lane is a scheduling
-    // hint only: every digest, ownership, and trust check below is unchanged.
-    let lane = match PrepareLane::claim(request.request_class) {
-        Ok(lane) => lane,
-        Err(error) => return protocol_error_response(error),
-    };
-    match prepare_image_template(config, &request, &lane) {
-        Ok(result) => Response::PrepareImageV2(result),
-        Err(error) => Response::Error(ProtocolError::new(
-            "image_prepare_failed",
-            format!("{error:#}"),
-        )),
-    }
-}
-
 #[tracing::instrument(name = "image.prepare_v3", skip_all)]
 pub fn prepare_chunked_image_v3_response(
     config: &JailerdConfig,
@@ -893,29 +743,58 @@ pub fn prepare_chunked_image_v3_response(
             format!("host runtime template validation failed: {error:#}"),
         ));
     }
+    match prepare_or_confirm(
+        &request,
+        || validate_existing_chunked_template(config, &request),
+        || PrepareLane::claim(request.request_class),
+        |lane| prepare_chunked_image_template(config, &request, lane),
+    ) {
+        Ok(result) => Response::PrepareChunkedImageV3(result),
+        Err(error) => prepare_error_response(error),
+    }
+}
+
+/// A preparation after the host checks. A template that is already published
+/// is confirmed from its metadata without the lane, so a confirmation never
+/// waits for or defers behind an import or a boot. A confirm-only request
+/// stops there; any other claims the lane and builds.
+fn prepare_or_confirm(
+    request: &PrepareChunkedImageV3Request,
+    existing: impl FnOnce() -> Result<ImageTemplateMetadataV2>,
+    claim: impl FnOnce() -> Result<PrepareLane>,
+    build: impl FnOnce(&PrepareLane) -> Result<PreparedImageV3Result>,
+) -> Result<PreparedImageV3Result> {
+    match existing() {
+        Ok(metadata) => return prepared_image_v3_result(&metadata),
+        Err(error) if request.request_class == RequestClass::Confirm => return Err(error),
+        Err(_) => {}
+    }
     // A background class yields between fixed blocks. The lane is a scheduling
     // hint only: every digest, ownership, and trust check below is unchanged.
-    let lane = match PrepareLane::claim(request.request_class) {
-        Ok(lane) => lane,
-        Err(error) => return protocol_error_response(error),
-    };
-    match prepare_chunked_image_template(config, &request, &lane) {
-        Ok(result) => Response::PrepareChunkedImageV3(result),
-        Err(error) => Response::Error(ProtocolError::new(
-            "image_prepare_failed",
-            format!("{error:#}"),
-        )),
+    build(&claim()?)
+}
+
+/// A preparation's error: a boot that deferred it, at its claim or at any
+/// block after, is a requeue; a template that is not there is
+/// `image_template_missing`; anything else a failure.
+fn prepare_error_response(error: anyhow::Error) -> Response {
+    if error.downcast_ref::<PrepareDeferred>().is_some()
+        || error.downcast_ref::<PreparedTemplateMissing>().is_some()
+    {
+        return protocol_error_response(error);
     }
+    Response::Error(ProtocolError::new(
+        "image_prepare_failed",
+        format!("{error:#}"),
+    ))
 }
 
 fn validate_protocol_request(request: &Request) -> Result<()> {
     match request {
-        Request::PrepareImageV2(request) => request.validate().map_err(Into::into),
         Request::PrepareChunkedImageV3(request) => request.validate().map_err(Into::into),
         Request::EnsureRunNetwork(request) | Request::RepairRunNetwork(request) => {
             request.validate().map_err(Into::into)
         }
-        Request::LaunchVmV2(request) => request.validate().map(|_| ()).map_err(Into::into),
         Request::LaunchVmV3(request) => request.validate().map(|_| ()).map_err(Into::into),
         Request::FinalizeVmBoot(_) => Ok(()),
         Request::InspectVm(request) | Request::StopVm(request) | Request::DestroyVm(request) => {
@@ -931,6 +810,16 @@ fn classify_protocol_error(error: &anyhow::Error, message: &str) -> &'static str
     } else if error.downcast_ref::<PrepareDeferred>().is_some() {
         // The coordinator requeues this work. It is not a failure.
         "image_prepare_requeued"
+    } else if error.downcast_ref::<VmExitedError>().is_some() {
+        "vm_exited"
+    } else if error.downcast_ref::<PreparedTemplateMissing>().is_some() {
+        "image_template_missing"
+    } else if error.downcast_ref::<UntrackedRunNetworkError>().is_some() {
+        "not_found"
+    } else if storage_exhausted(error) {
+        // The agent retries a StopVm export that failed this way instead of
+        // giving the recording up: it clears once space is freed.
+        "storage_exhausted"
     } else if message.contains("unknown jail generation") {
         "not_found"
     } else if message.contains("readiness attestation") {
@@ -950,6 +839,23 @@ fn classify_protocol_error(error: &anyhow::Error, message: &str) -> &'static str
     }
 }
 
+/// Out of space or quota, from the errno at the source. EIO is left out: a
+/// failing device is not something a retry outlasts.
+fn storage_exhausted(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded
+            )
+        }) || cause
+            .downcast_ref::<rustix::io::Errno>()
+            .is_some_and(|errno| {
+                matches!(*errno, rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT)
+            })
+    })
+}
+
 pub fn host_cpu_capacity_millis() -> Result<u64> {
     let cpus = std::thread::available_parallelism().context("detect host CPU count")?;
     u64::try_from(cpus.get())
@@ -966,7 +872,6 @@ mod prepare_lane;
 use prepare_lane::*;
 mod store_gc;
 pub use store_gc::{StoreGcReport, gc_root_stores};
-const IMAGE_TEMPLATE_METADATA_V2: u16 = 2;
 const IMAGE_TEMPLATE_METADATA_V3: u16 = 3;
 const HOST_TEMPLATE_METADATA_VERSION: u16 = 2;
 const HOST_TEMPLATE_POINTER: &str = "host-v2-current.json";

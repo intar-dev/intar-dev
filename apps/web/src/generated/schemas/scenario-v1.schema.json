@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScenarioV1",
+  "type": "object",
+  "properties": {
+    "briefing": {
+      "type": "string"
+    },
+    "credit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "difficulty": {
+      "$ref": "#/$defs/Difficulty"
+    },
+    "hints": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/HintV1"
+      }
+    },
+    "machines": {
+      "description": "File order is the terminal tab order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MachineV1"
+      }
+    },
+    "minutes": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "play": {
+      "type": "boolean"
+    },
+    "slug": {
+      "type": "string"
+    },
+    "solution": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tasks": {
+      "description": "File order is the order learners see.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TaskV1"
+      }
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "slug",
+    "title",
+    "summary",
+    "difficulty",
+    "minutes",
+    "tags",
+    "play",
+    "briefing",
+    "solution",
+    "hints",
+    "machines",
+    "tasks"
+  ],
+  "$defs": {
+    "Difficulty": {
+      "type": "string",
+      "enum": [
+        "easy",
+        "medium",
+        "hard"
+      ]
+    },
+    "HintV1": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "body"
+      ]
+    },
+    "MachineV1": {
+      "type": "object",
+      "properties": {
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "defer": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "disk_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "egress": {
+          "type": "boolean"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "from": {
+          "description": "`trixie` or the name of an image.",
+          "type": "string"
+        },
+        "memory_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScriptV1"
+          }
+        },
+        "setup": {
+          "description": "Build-time stages in run order; `packages` is lowered to the first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScriptV1"
+          }
+        },
+        "terminal": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "cpu_millis",
+        "memory_mib",
+        "disk_mib",
+        "from",
+        "defer",
+        "terminal",
+        "egress",
+        "env",
+        "setup",
+        "ready"
+      ]
+    },
+    "ScriptV1": {
+      "description": "A named lowered bash script: a setup stage or a ready block.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "script"
+      ]
+    },
+    "TaskV1": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "check": {
+          "description": "The task's check bodies lowered into one script.",
+          "type": "string"
+        },
+        "hints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HintV1"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "needs": {
+          "description": "Bare task IDs, on any machine.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "optional": {
+          "type": "boolean"
+        },
+        "solve": {
+          "description": "Absent on an implied task: it must pass once its needs pass.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "machine",
+        "needs",
+        "optional",
+        "check",
+        "hints"
+      ]
+    }
+  }
+}

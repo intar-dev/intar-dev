@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScenarioRevisionV1",
+  "description": "What the Worker stores for one revision of a scenario: what learners see,\nthe tasks, and per machine its resources, build key and spec digests. No\nscript text: setup stays in the bundle, and scripts reach the guest\nthrough the spec blobs.",
+  "type": "object",
+  "properties": {
+    "briefing": {
+      "type": "string"
+    },
+    "credit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "difficulty": {
+      "$ref": "#/$defs/Difficulty"
+    },
+    "hints": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/HintV1"
+      }
+    },
+    "machines": {
+      "description": "In the scenario's order, which is the terminal tab order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RevisionMachineV1"
+      }
+    },
+    "minutes": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "play": {
+      "type": "boolean"
+    },
+    "solution": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tasks": {
+      "description": "In the scenario's order, which is the order learners see.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RevisionTaskV1"
+      }
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "summary",
+    "difficulty",
+    "minutes",
+    "tags",
+    "play",
+    "briefing",
+    "solution",
+    "hints",
+    "tasks",
+    "machines"
+  ],
+  "$defs": {
+    "Difficulty": {
+      "type": "string",
+      "enum": [
+        "easy",
+        "medium",
+        "hard"
+      ]
+    },
+    "HintV1": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "body"
+      ]
+    },
+    "OciDigest": {
+      "description": "An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "RevisionMachineV1": {
+      "type": "object",
+      "properties": {
+        "build_key": {
+          "$ref": "#/$defs/OciDigest"
+        },
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "disk_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "egress": {
+          "type": "boolean"
+        },
+        "image_digest": {
+          "description": "The built image, set once its build has succeeded.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OciDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "spec": {
+          "description": "Digest of the learn spec blob.",
+          "$ref": "#/$defs/OciDigest"
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "verify_spec": {
+          "description": "Digest of the verify spec blob.",
+          "$ref": "#/$defs/OciDigest"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "cpu_millis",
+        "memory_mib",
+        "disk_mib",
+        "terminal",
+        "egress",
+        "build_key",
+        "spec",
+        "verify_spec"
+      ]
+    },
+    "RevisionTaskV1": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HintV1"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "needs": {
+          "description": "Bare task IDs, on any machine.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "optional": {
+          "type": "boolean"
+        },
+        "ordinal": {
+          "description": "The task's 0-based position in the scenario.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "machine",
+        "needs",
+        "optional",
+        "ordinal",
+        "hints"
+      ]
+    }
+  }
+}

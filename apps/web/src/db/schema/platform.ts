@@ -3,26 +3,16 @@ import {
   check,
   index,
   integer,
+  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
-import type {
-  BuildPhase,
-  HostDesiredStateV2,
-  HostStateReportV2,
-} from "@/generated/bridge";
-import type {
-  ImageArchitecture,
-  ScenarioManifestV5,
-} from "@/generated/catalog";
+import type { BuildPhaseV2, BuildTargetV1, HostDesiredStateV3, HostStateReportV3 } from "@/generated/contracts/bridge-message-v9";
 import { organization, user } from "./core";
 import {
   type AgentHostRole,
   type HostCpuReservationState,
-  type ImageBuildBundleMeta,
-  type ImageBuildStatus,
-  type ImageBuildTimings,
   type ImageRegistryEnforcementMode,
   type ImageRegistryGateState,
   type ImageRegistryGcRunState,
@@ -63,6 +53,13 @@ export const agentHosts = sqliteTable(
     lastClientHelloAt: integer("last_client_hello_at"),
     lastServerHelloAt: integer("last_server_hello_at"),
     agentVersion: text("agent_version"),
+    // The last time the Worker refused this host's agent as too old.
+    lastRefusalCode: text("last_refusal_code"),
+    lastRefusalAt: integer("last_refusal_at"),
+    lastRefusedAgentVersion: text("last_refused_agent_version"),
+    // The validated bridge 9 client hello of the current connection; null
+    // for an older protocol.
+    helloJson: text("hello_json"),
     inventoryJson: text("inventory_json"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
@@ -75,99 +72,6 @@ export const agentHosts = sqliteTable(
     index("agent_hosts_organization_idx").on(table.organizationId),
     index("agent_hosts_role_idx").on(table.role, table.connected),
     index("agent_hosts_connected_idx").on(table.connected, table.updatedAt),
-  ],
-);
-
-export const imageBuildBundles = sqliteTable(
-  "image_build_bundles",
-  {
-    rev: text("rev").primaryKey(),
-    organizationId: text("organization_id").references(() => organization.id, {
-      onDelete: "restrict",
-    }),
-    r2Key: text("r2_key").notNull(),
-    metaJson: jsonText<ImageBuildBundleMeta>("meta_json").notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    index("image_build_bundles_organization_idx").on(
-      table.organizationId,
-      table.updatedAt,
-    ),
-  ],
-);
-
-export const imageBuilds = sqliteTable(
-  "image_builds",
-  {
-    id: text("id").primaryKey(),
-    organizationId: text("organization_id").references(() => organization.id, {
-      onDelete: "restrict",
-    }),
-    scenarioId: text("scenario_id").notNull(),
-    arch: text("arch").$type<ImageArchitecture>().notNull(),
-    rev: text("rev")
-      .notNull()
-      .references(() => imageBuildBundles.rev, { onDelete: "cascade" }),
-    contentHash: text("content_hash").notNull(),
-    catalogChannel: text("catalog_channel")
-      .$type<"candidate" | "live">()
-      .default("live")
-      .notNull(),
-    hostId: text("host_id").references(() => agentHosts.id, {
-      onDelete: "set null",
-    }),
-    status: text("status")
-      .$type<ImageBuildStatus>()
-      .default("queued")
-      .notNull(),
-    phase: text("phase").$type<BuildPhase>().default("queued").notNull(),
-    attempt: integer("attempt").default(0).notNull(),
-    error: text("error"),
-    logR2Key: text("log_r2_key"),
-    publishedManifestJson: jsonText<ScenarioManifestV5>(
-      "published_manifest_json",
-    ),
-    /**
-     * Set when the catalog policy retires this build's objects. A build whose
-     * artifacts are retired is no longer a reason to keep its R2 objects.
-     */
-    artifactsRetiredAt: integer("artifacts_retired_at"),
-    timingsJson: jsonText<ImageBuildTimings>("timings_json")
-      .default({})
-      .notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("image_builds_scenario_arch_hash_uidx").on(
-      table.scenarioId,
-      table.arch,
-      table.contentHash,
-    ),
-    index("image_builds_status_idx").on(table.status, table.updatedAt),
-    index("image_builds_organization_idx").on(
-      table.organizationId,
-      table.status,
-      table.updatedAt,
-    ),
-    index("image_builds_host_idx").on(table.hostId, table.status),
-    index("image_builds_rev_idx").on(table.rev),
-  ],
-);
-
-export const imageBuildCoordinationLocks = sqliteTable(
-  "image_build_coordination_locks",
-  {
-    key: text("key").primaryKey(),
-    ownerToken: text("owner_token").notNull(),
-    expiresAt: integer("expires_at").notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    index("image_build_coordination_locks_expiry_idx").on(table.expiresAt),
   ],
 );
 
@@ -185,7 +89,7 @@ export const hostDesiredState = sqliteTable(
       .primaryKey()
       .references(() => agentHosts.id, { onDelete: "cascade" }),
     version: integer("version").notNull(),
-    docJson: jsonText<HostDesiredStateV2>("doc_json").notNull(),
+    docJson: jsonText<HostDesiredStateV3>("doc_json").notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
@@ -200,7 +104,7 @@ export const hostActualState = sqliteTable(
       .references(() => agentHosts.id, { onDelete: "cascade" }),
     appliedDesiredVersion: integer("applied_desired_version").notNull(),
     observedAt: integer("observed_at").notNull(),
-    reportJson: jsonText<HostStateReportV2>("report_json").notNull(),
+    reportJson: jsonText<HostStateReportV3>("report_json").notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
@@ -411,5 +315,73 @@ export const imageRegistryGcRuns = sqliteTable(
   (table) => [
     uniqueIndex("image_registry_gc_runs_sweep_uidx").on(table.sweepToken),
     index("image_registry_gc_runs_state_idx").on(table.state, table.startedAt),
+  ],
+);
+
+export type MachineBuildState =
+  | "queued"
+  | "assigned"
+  | "building"
+  | "succeeded"
+  | "failed";
+
+/**
+ * One machine image per build key. Images are platform content shared by
+ * every scope, so a build has no organization. `image_digest` is written
+ * once, by the build's result.
+ */
+export const machineBuilds = sqliteTable(
+  "machine_builds",
+  {
+    buildKey: text("build_key").primaryKey(),
+    imageFormat: text("image_format").notNull(),
+    bundleRev: text("bundle_rev").notNull(),
+    // What the builder builds from `bundle_rev` to get `build_key`.
+    targetJson: jsonText<BuildTargetV1>("target_json"),
+    state: text("state").$type<MachineBuildState>().default("queued").notNull(),
+    // The last phase the builder reported for the current attempt.
+    phase: text("phase").$type<BuildPhaseV2>(),
+    imageDigest: text("image_digest"),
+    attempt: integer("attempt").default(0).notNull(),
+    hostId: text("host_id").references(() => agentHosts.id, {
+      onDelete: "set null",
+    }),
+    logKey: text("log_key"),
+    error: text("error"),
+    // When the current attempt was assigned; `updated_at` is the builder's
+    // last report on it.
+    assignedAt: integer("assigned_at"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    index("machine_builds_state_idx").on(table.state, table.updatedAt),
+    check(
+      "machine_builds_state_check",
+      sql`${table.state} IN ('queued', 'assigned', 'building', 'succeeded', 'failed')`,
+    ),
+  ],
+);
+
+/** Every manifest stored under `oci/sha256/<hex>`, written once at its PUT. */
+export const registryManifests = sqliteTable("registry_manifests", {
+  digest: text("digest").primaryKey(),
+  mediaType: text("media_type").notNull(),
+  artifactType: text("artifact_type").notNull(),
+  size: integer("size").notNull(),
+  createdAt: integer("created_at").default(nowMsDefault).notNull(),
+});
+
+/** The blobs a manifest references: its config and its layers. */
+export const registryManifestBlobs = sqliteTable(
+  "registry_manifest_blobs",
+  {
+    manifestDigest: text("manifest_digest")
+      .notNull()
+      .references(() => registryManifests.digest, { onDelete: "cascade" }),
+    blobDigest: text("blob_digest").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.manifestDigest, table.blobDigest] }),
   ],
 );

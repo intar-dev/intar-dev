@@ -39,9 +39,14 @@ describe("safe dynamic app-bar labels", () => {
     expect(safeDynamicPageLabel("/organizations/aB3dE5fG7hJ9kL")).toBe(
       "Organization",
     );
-    expect(safeDynamicPageLabel("/admin/scenarios/scn_technical_id")).toBe(
+    expect(safeDynamicPageLabel("/admin/scenarios/acme/scn_technical_id")).toBe(
       "Scenario",
     );
+    // The namespace is part of the scenario's id, not a crumb of its own.
+    expect(buildCrumbs("/admin/scenarios/acme/scn_technical_id", new Map())).toEqual([
+      { label: "Scenarios", to: "/admin/scenarios" },
+      { label: "Scenario" },
+    ]);
     expect(safeDynamicPageLabel("/courses/linux-operations")).toBe("Course");
     expect(
       safeDynamicPageLabel("/organizations/acme/courses/private/linux-ops"),

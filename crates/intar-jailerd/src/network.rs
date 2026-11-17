@@ -47,6 +47,7 @@ pub(crate) struct VmNetworkAttachment {
     pub ssh_public_port: Option<u16>,
     pub ssh_forward_active: bool,
     pub vsock_cid: u32,
+    pub egress: bool,
     pub uid: u32,
     pub gid: u32,
 }
@@ -134,7 +135,7 @@ impl NetworkManager {
             return Ok(existing.result.clone());
         }
 
-        let (mut result, nft_table) = derived_topology(request)?;
+        let (mut result, nft_table) = derived_topology(&request.run_id)?;
         if ipv4_cidrs_overlap(&request.guest_cidr, "198.18.0.0/15")? {
             bail!("run guest network overlaps jailerd's transit allocation")
         }
@@ -158,6 +159,16 @@ impl NetworkManager {
                 })
         }) {
             bail!("derived run bridge MAC collides with an active network identity")
+        }
+        // A network left by an untracked run keeps its transit address; a
+        // second link in that /30 would make both runs' routing ambiguous.
+        let transit =
+            self.ip_output(&["-4", "-o", "addr", "show", "to", &result.host_transit_cidr])?;
+        if transit
+            .lines()
+            .any(|line| line.split_whitespace().nth(1) != Some(result.host_veth_name.as_str()))
+        {
+            bail!("derived transit network is held by a link of an untracked run")
         }
         let installed = self.nft_succeeds(&["list", "table", "inet", &nft_table]);
         let mut state = RunState {
@@ -274,6 +285,7 @@ impl NetworkManager {
             ssh_public_port: request.ssh_public_port,
             ssh_forward_active: false,
             vsock_cid: request.vsock_cid,
+            egress: request.egress,
             uid,
             gid,
         };
@@ -338,6 +350,7 @@ impl NetworkManager {
             ssh_public_port: request.ssh_public_port,
             ssh_forward_active: false,
             vsock_cid: request.vsock_cid,
+            egress: request.egress,
             uid,
             gid,
         };
@@ -464,7 +477,7 @@ impl NetworkManager {
 
     pub(crate) fn destroy_run(&mut self, run_id: &ValidatedId) -> Result<bool> {
         let Some(state) = self.runs.get(run_id).cloned() else {
-            return Ok(false);
+            return self.destroy_untracked_run(run_id);
         };
         if self
             .runs
@@ -477,6 +490,47 @@ impl NetworkManager {
         self.render_without_run(run_id)?;
         self.runs.remove(run_id);
         Ok(true)
+    }
+
+    /// Recovery that contains a run's VMs does not track the run's network, so
+    /// its objects are removed by the names derived from the run id alone. The
+    /// caller refuses while any generation of the run is still known.
+    fn destroy_untracked_run(&self, run_id: &ValidatedId) -> Result<bool> {
+        let (result, nft_table) = derived_topology(run_id)?;
+        if self.runs.values().any(|state| {
+            state.result.namespace_name == result.namespace_name || state.nft_table == nft_table
+        }) {
+            bail!("untracked run network names collide with an active run")
+        }
+        // The table first: it carries the run's public SSH DNAT, and a
+        // namespace entry that fails its check must not keep it alive.
+        let mut removed = Vec::new();
+        if self.nft_succeeds(&["list", "table", "inet", &nft_table]) {
+            self.nft_script(&nft_table_delete(true, &nft_table))
+                .context("remove untracked run nftables policy")?;
+            removed.push("nftables table");
+        }
+        if self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name]) {
+            // Its connected transit route and the guest route via it go too.
+            self.ip(&["link", "delete", &result.host_veth_name])
+                .context("delete untracked run veth")?;
+            removed.push("host veth");
+        }
+        if path_entry_exists(&self.host_netns_root.join(&result.namespace_name))? {
+            self.verify_namespace_visibility(&result.namespace_name)?;
+            delete_host_visible_namespace(
+                &self.nsenter,
+                &self.ip,
+                &self.netns_root,
+                &result.namespace_name,
+            )
+            .context("delete untracked run network namespace")?;
+            removed.push("network namespace");
+        }
+        if !removed.is_empty() {
+            tracing::info!(run_id = %run_id, removed = ?removed, "removed an untracked run network");
+        }
+        Ok(!removed.is_empty())
     }
 
     fn destroy_run_physical(&self, result: &RunNetworkResult) -> Result<()> {
@@ -783,10 +837,11 @@ impl NetworkManager {
             .runs
             .get(run_id)
             .context("run network state disappeared before nftables render")?;
+        // A table already gone is no error: nothing of it is left to replace.
+        let present =
+            state.installed && self.nft_succeeds(&["list", "table", "inet", &state.nft_table]);
         let mut transaction = String::new();
-        if state.installed {
-            transaction.push_str(&format!("delete table inet {}\n", state.nft_table));
-        }
+        transaction.push_str(&nft_table_delete(present, &state.nft_table));
         transaction.push_str(&render_nft_rules(state)?);
         self.nft_script(&transaction)
             .context("atomically install affected run nftables policy")?;
@@ -802,8 +857,11 @@ impl NetworkManager {
             .runs
             .get(removed)
             .context("removed run network state disappeared before nftables cleanup")?;
-        if state.installed {
-            self.nft_script(&format!("delete table inet {}\n", state.nft_table))
+        let present =
+            state.installed && self.nft_succeeds(&["list", "table", "inet", &state.nft_table]);
+        let delete = nft_table_delete(present, &state.nft_table);
+        if !delete.is_empty() {
+            self.nft_script(&delete)
                 .context("atomically remove affected run nftables policy")?;
         }
         Ok(())
@@ -985,5 +1043,16 @@ fn validate_iproute2_netns_root(root: &Path) -> Result<()> {
 mod topology;
 use topology::*;
 pub(crate) use topology::{initial_mount_namespace_entry, validate_initial_network_namespace};
+
+/// The transaction line that removes a run's table: none when the table is
+/// not there, so a run torn down halfway tears down again.
+pub(crate) fn nft_table_delete(present: bool, table: &str) -> String {
+    if present {
+        format!("delete table inet {table}\n")
+    } else {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests;

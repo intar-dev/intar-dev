@@ -1,18 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// The sweep core and the shared admission gate belong to the retention and
-// admission work. This file proves the collector's own gates and the order in
-// which it applies them.
-const core = vi.hoisted(() => ({
-  create: vi.fn(),
-  plan: vi.fn(),
-  run: vi.fn(),
-}));
+// The sweep and the shared admission gate have their own tests. This file
+// proves the collector's own gates and the order in which it applies them.
+const sweep = vi.hoisted(() => ({ run: vi.fn() }));
 const admission = vi.hoisted(() => ({ read: vi.fn() }));
 
-vi.mock("@/lib/image-registry-cleanup", () => ({
-  createImageRegistryCleanupCore: core.create,
-}));
+vi.mock("@/lib/oci-registry-sweep", () => ({ runOciSweep: sweep.run }));
 
 vi.mock("@/lib/image-registry-admission", () => ({
   REGISTRY_ADMISSION_KEY: "image_registry_admission",
@@ -24,43 +17,32 @@ import {
   runCleanup,
   type CleanupEnv,
 } from "../../workers/image-registry-cleanup/src/cleanup";
+import type { OciSweepReport } from "@/lib/oci-registry-sweep";
 
-const PLAN = {
-  schemaVersion: 1,
-  generatedAtMs: 1_700_000_000_000,
-  mode: "report-only",
-  objectsScanned: 3,
-  retainedObjects: 1,
-  candidateObjects: [
-    { key: "image-chunks/v1/zstd6/aa", bytes: 10, category: "image_chunk" },
-  ],
-  candidateBytes: 10,
-  truncated: false,
-  details: { faults: [], candidateTotal: 1 },
-};
-
-const RESULT = {
-  deletedObjects: 4,
-  deletedBytes: 40,
-  failedObjects: 0,
-  skippedObjects: 2,
-  wouldDeleteObjects: 0,
-  wouldDeleteBytes: 0,
-  blockedObjects: 0,
-  completed: true,
-  planSummary: null,
-  postState: null,
-  verifiedDeletedObjects: 4,
-  verifiedDeletedBytes: 40,
-  unverifiedObjects: 0,
-  unverifiedKeys: [],
-  deletedKeys: [],
-  deletedKeysTruncated: false,
-  deletedKeysDigest: "0".repeat(64),
-  resumeRequired: false,
-  phases: {},
-  error: null,
-};
+function report(overrides: Partial<OciSweepReport> = {}): OciSweepReport {
+  return {
+    mode: "delete",
+    completed: true,
+    resumeRequired: false,
+    faults: [],
+    startAfter: null,
+    nextStartAfter: null,
+    listedObjects: 6,
+    listedBytes: 60,
+    unrecognizedObjects: 0,
+    markedObjects: 0,
+    youngObjects: 0,
+    candidateObjects: 4,
+    candidateBytes: 40,
+    candidateSample: [],
+    deletedObjects: 4,
+    deletedBytes: 40,
+    revisionCandidates: 0,
+    deletedRevisions: 0,
+    error: null,
+    ...overrides,
+  };
+}
 
 function admissionState(overrides: Record<string, unknown> = {}) {
   return {
@@ -102,9 +84,8 @@ function childEnv(overrides: Partial<CleanupEnv> = {}): CleanupEnv {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  core.plan.mockResolvedValue(PLAN);
-  core.run.mockResolvedValue(RESULT);
-  core.create.mockReturnValue({ plan: core.plan, run: core.run });
+  sweep.run.mockImplementation(async (_env: unknown, input: { mode: OciSweepReport["mode"] }) =>
+    report({ mode: input.mode, completed: input.mode === "delete", deletedObjects: input.mode === "delete" ? 4 : 0 }));
   admission.read.mockResolvedValue(admissionState());
 });
 
@@ -114,38 +95,48 @@ describe("image registry cleanup runner", () => {
 
     expect(result.status).toBe("report-only");
     expect(result.mode).toBe("report-only");
-    expect(result.plan).toEqual(PLAN);
-    expect(result.result).toBeNull();
-    expect(core.plan).toHaveBeenCalledTimes(1);
-    expect(core.run).not.toHaveBeenCalled();
+    expect(result.result?.mode).toBe("report-only");
+    expect(result.result?.deletedObjects).toBe(0);
+    expect(sweep.run).toHaveBeenCalledTimes(1);
+    expect(sweep.run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ mode: "report-only" }),
+    );
   });
 
-  it("runs the core, which owns the exclusive sweep lease, in delete mode", async () => {
+  it("runs the sweep, which owns the exclusive lease, in delete mode", async () => {
     const result = await runCleanup(
       childEnv({ REGISTRY_CLEANUP_MODE: "delete" }),
       { source: "rpc" },
     );
 
     expect(result.status).toBe("ok");
-    expect(result.result).toEqual(RESULT);
-    // The core takes the sweep lease itself; the collector injects no second gate.
-    expect(core.create).toHaveBeenCalledWith({});
-    // One scan, not two: a delete pass must not pre-plan before the core plans
-    // and verifies its own plan inside the sweep lease.
-    expect(core.plan).not.toHaveBeenCalled();
-    expect(core.run).toHaveBeenCalledWith(
+    expect(result.result?.deletedObjects).toBe(4);
+    expect(result.error).toBeNull();
+    // One sweep call: a delete pass does not plan first.
+    expect(sweep.run).toHaveBeenCalledTimes(1);
+    expect(sweep.run).toHaveBeenCalledWith(
       expect.objectContaining({ DB: expect.anything() }),
       expect.objectContaining({ mode: "delete" }),
     );
   });
 
-  it("reports pending, never ok, when the core withheld its completion proof", async () => {
-    core.run.mockResolvedValue({
-      ...RESULT,
-      failedObjects: 0,
-      completed: false,
-      resumeRequired: true,
-    });
+  it("passes the parent's Kino pins and the plan window to the sweep", async () => {
+    await runCleanup(
+      childEnv({
+        CONTROL_PLANE: { state: async () => ({ maintenance: "off", kinoPinsJson: "[]" }) },
+      }),
+      { source: "rpc", planOnly: true, ociStartAfter: "c".repeat(64) },
+    );
+
+    expect(sweep.run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ kinoPinsJson: "[]", startAfter: "c".repeat(64) }),
+    );
+  });
+
+  it("reports pending, never ok, when the sweep withheld completion", async () => {
+    sweep.run.mockResolvedValue(report({ completed: false, resumeRequired: true }));
 
     const result = await runCleanup(
       childEnv({ REGISTRY_CLEANUP_MODE: "delete" }),
@@ -156,17 +147,10 @@ describe("image registry cleanup runner", () => {
     expect(result.error).toBeNull();
   });
 
-  it("reports busy when the core refused the sweep", async () => {
-    core.run.mockResolvedValue({
-      ...RESULT,
-      failedObjects: 0,
-      completed: false,
-      resumeRequired: true,
-      deletedObjects: 0,
-      deletedBytes: 0,
-      wouldDeleteObjects: 12,
-      error: "registry admission is busy",
-    });
+  it("reports busy when the sweep was refused", async () => {
+    sweep.run.mockResolvedValue(
+      report({ completed: false, deletedObjects: 0, error: "registry admission is busy" }),
+    );
 
     const result = await runCleanup(
       childEnv({ REGISTRY_CLEANUP_MODE: "delete" }),
@@ -178,16 +162,15 @@ describe("image registry cleanup runner", () => {
     expect(result.result?.deletedObjects).toBe(0);
   });
 
-  it("reports core-failed when the core stopped on a retention fault", async () => {
-    core.run.mockResolvedValue({
-      ...RESULT,
-      failedObjects: 0,
-      deletedObjects: 0,
-      completed: false,
-      resumeRequired: true,
-      error:
-        "reference verification stopped the sweep: retained_manifest_missing",
-    });
+  it("reports core-failed when the sweep faulted", async () => {
+    sweep.run.mockResolvedValue(
+      report({
+        completed: false,
+        deletedObjects: 0,
+        faults: [{ code: "listing_failed", detail: "list" }],
+        error: "listing_failed: list",
+      }),
+    );
 
     const result = await runCleanup(
       childEnv({ REGISTRY_CLEANUP_MODE: "delete" }),
@@ -195,7 +178,7 @@ describe("image registry cleanup runner", () => {
     );
 
     expect(result.status).toBe("core-failed");
-    expect(result.error).toContain("retained_manifest_missing");
+    expect(result.error).toContain("listing_failed");
   });
 
   it("honours planOnly in delete mode", async () => {
@@ -205,7 +188,10 @@ describe("image registry cleanup runner", () => {
     );
 
     expect(result.status).toBe("report-only");
-    expect(core.run).not.toHaveBeenCalled();
+    expect(sweep.run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ mode: "report-only" }),
+    );
   });
 
   it("fences the run before it reads the admission gate", async () => {
@@ -216,9 +202,9 @@ describe("image registry cleanup runner", () => {
 
     expect(result.status).toBe("fenced");
     expect(result.maintenance).toBe("on");
+    expect(result.result).toBeNull();
     expect(admission.read).not.toHaveBeenCalled();
-    expect(core.plan).not.toHaveBeenCalled();
-    expect(core.run).not.toHaveBeenCalled();
+    expect(sweep.run).not.toHaveBeenCalled();
   });
 
   it("treats an unreachable control plane as maintenance", async () => {
@@ -235,7 +221,7 @@ describe("image registry cleanup runner", () => {
 
     expect(result.status).toBe("fenced");
     expect(result.maintenanceSource).toBe("unavailable");
-    expect(core.plan).not.toHaveBeenCalled();
+    expect(sweep.run).not.toHaveBeenCalled();
   });
 
   it("treats a deployment hold as paused and does not scan", async () => {
@@ -246,7 +232,7 @@ describe("image registry cleanup runner", () => {
     const result = await runCleanup(childEnv(), { source: "scheduled" });
 
     expect(result.status).toBe("paused");
-    expect(core.plan).not.toHaveBeenCalled();
+    expect(sweep.run).not.toHaveBeenCalled();
   });
 
   it("treats a sweep of another isolate as busy", async () => {
@@ -259,33 +245,17 @@ describe("image registry cleanup runner", () => {
     const result = await runCleanup(childEnv(), { source: "scheduled" });
 
     expect(result.status).toBe("busy");
-    expect(core.plan).not.toHaveBeenCalled();
+    expect(sweep.run).not.toHaveBeenCalled();
   });
 
-  it("reports core-failed when the plan fails, without deleting", async () => {
-    core.plan.mockRejectedValue(new Error("scan failed"));
+  it("reports core-failed when the sweep throws", async () => {
+    sweep.run.mockRejectedValue(new Error("scan failed"));
 
-    const result = await runCleanup(
-      childEnv({ REGISTRY_CLEANUP_MODE: "report-only" }),
-      { source: "scheduled" },
-    );
+    const result = await runCleanup(childEnv(), { source: "scheduled" });
 
     expect(result.status).toBe("core-failed");
     expect(result.error).toBe("scan failed");
-    expect(core.run).not.toHaveBeenCalled();
-  });
-
-  it("reports core-failed when a delete fails, without a second plan", async () => {
-    core.run.mockRejectedValue(new Error("delete failed"));
-
-    const result = await runCleanup(
-      childEnv({ REGISTRY_CLEANUP_MODE: "delete" }),
-      { source: "rpc" },
-    );
-
-    expect(result.status).toBe("core-failed");
-    // A delete pass never plans first, so a failed run is the only scan.
-    expect(core.plan).not.toHaveBeenCalled();
+    expect(result.result).toBeNull();
   });
 
   it("fails closed on an unreadable mode", async () => {
@@ -296,6 +266,9 @@ describe("image registry cleanup runner", () => {
 
     expect(result.mode).toBe("report-only");
     expect(result.modeValid).toBe(false);
-    expect(core.run).not.toHaveBeenCalled();
+    expect(sweep.run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ mode: "report-only" }),
+    );
   });
 });

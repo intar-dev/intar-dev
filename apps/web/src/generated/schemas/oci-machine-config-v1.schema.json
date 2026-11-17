@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MachineConfigV1",
+  "description": "The config blob of a machine image. The image's identity is its\nmanifest's digest.",
+  "type": "object",
+  "properties": {
+    "boot": {
+      "$ref": "#/$defs/MachineBootV1"
+    },
+    "build_key": {
+      "$ref": "#/$defs/OciDigest"
+    },
+    "disk": {
+      "$ref": "#/$defs/MachineDiskV1"
+    },
+    "guest_contract": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "image_format": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "guest_contract",
+    "image_format",
+    "build_key",
+    "boot",
+    "disk"
+  ],
+  "$defs": {
+    "MachineBootV1": {
+      "type": "object",
+      "properties": {
+        "cmdline": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmdline"
+      ]
+    },
+    "MachineDiskV1": {
+      "type": "object",
+      "properties": {
+        "chunk_size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "chunks": {
+          "description": "`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              {
+                "$ref": "#/$defs/Sha256Hex"
+              }
+            ]
+          }
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "size_bytes",
+        "chunk_size",
+        "chunks"
+      ]
+    },
+    "OciDigest": {
+      "description": "An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "Sha256Hex": {
+      "description": "A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

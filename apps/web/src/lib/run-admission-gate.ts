@@ -3,9 +3,6 @@ import { appError } from "@/lib/app-error";
 /** The operators' drain: image-ops owns it. */
 export const IMAGE_CUTOVER_GATE = "image_cutover";
 
-/** Intar's own hold while it promotes an image catalog. Only Intar writes it. */
-export const PROMOTION_HOLD_GATE = "image_promotion";
-
 /**
  * The cutover's last gate state: the operators' drain after every scenario
  * row was wiped. It holds everything `drained` holds, and also refuses
@@ -30,10 +27,9 @@ export function isCutoverDrained(state: string | null | undefined): boolean {
 }
 
 /**
- * SQL that holds while new runs must not start: an operator drain or Intar's
- * promotion hold. An administrative proof start may run under an operator
- * drain, never under the promotion hold or after the cutover wipe, so no
- * admin run can stall a swap or refill the wiped tables.
+ * SQL that holds while new runs must not start: an operator drain. An
+ * administrative proof start may run under an operator drain, never after the
+ * cutover wipe, so no admin run can refill the wiped tables.
  */
 export function runsHeldCondition(allowDrainedAdminProof?: boolean): string {
   const cutoverHeld = allowDrainedAdminProof
@@ -41,8 +37,7 @@ export function runsHeldCondition(allowDrainedAdminProof?: boolean): string {
     : cutoverDrainedSql("gate");
   return (
     "EXISTS (SELECT 1 FROM runtime_operation_gates gate WHERE" +
-    ` (gate.key = '${PROMOTION_HOLD_GATE}' AND gate.state = 'drained')` +
-    ` OR (gate.key = '${IMAGE_CUTOVER_GATE}' AND ${cutoverHeld}))`
+    ` gate.key = '${IMAGE_CUTOVER_GATE}' AND ${cutoverHeld})`
   );
 }
 
@@ -60,15 +55,6 @@ export async function assertAgentKvmRunsOpen(
       "new VM runs are paused for a short runtime update",
     );
   }
-}
-
-/** Whether Intar holds new runs for an image promotion. */
-export async function promotionHoldActive(database: D1Database): Promise<boolean> {
-  const gate = await database
-    .prepare("SELECT state FROM runtime_operation_gates WHERE key = ?")
-    .bind(PROMOTION_HOLD_GATE)
-    .first<{ state: string }>();
-  return gate?.state === "drained";
 }
 
 /** Refuses a write that would add scenario data after the cutover wipe. */

@@ -115,6 +115,7 @@ import {
 } from "@/components/app/run/run-support";
 import {
   mergeScenarioRunStatus,
+  runTaskChecks,
   scenarioRunStatusRefetchInterval,
   type ScenarioRunStatus,
   type ScenarioRunResponse,
@@ -135,6 +136,7 @@ import { loadReplayTerminalFont } from "@/lib/replay/config";
 import { cn } from "@/lib/utils";
 import {
   isTransportReadyFor,
+  shouldMountTerminalTransport,
   shouldRevealTerminal,
   type TerminalTransportReport,
 } from "@/components/app/lib/scenario-terminal-readiness";
@@ -178,9 +180,11 @@ interface ScenarioRunStatusPollResult {
 export function ScenarioRunStart() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { scenarioId } = useParams({ from: "/app/runs/start/$scenarioId" });
-  const search = useSearch({ from: "/app/runs/start/$scenarioId" });
-  const organizationId = search.organizationId ?? null;
+  const { _splat: scenarioId = "" } = useParams({ from: "/app/runs/start/$" });
+  const search = useSearch({ from: "/app/runs/start/$" });
+  const play = search.source === "play";
+  const playRef = search.ref;
+  const organizationId = play ? null : (search.organizationId ?? null);
   const abortRef = useRef<AbortController | null>(null);
   const [startState, setStartState] = useState<
     "requesting" | "waiting" | "failed"
@@ -211,7 +215,9 @@ export function ScenarioRunStart() {
     lectureDetail?.lecture.title ??
     findStartLectureTitle(courseCatalog.data, search) ??
     "Scenario run";
-  const returnTarget = getStartReturnTarget(search);
+  const returnTarget = play
+    ? { href: `/play/${scenarioId}`, label: "Back to scenario", text: "Scenario" }
+    : getStartReturnTarget(search);
   const startGuidanceProps: RunLearningPanelProps = {
     briefingMarkdown: "",
     lectureMarkdown: lectureDetail?.lecture.bodyMarkdown ?? null,
@@ -247,6 +253,8 @@ export function ScenarioRunStart() {
     void requestScenarioStartWithCapacityWait(scenarioId, {
       signal: controller.signal,
       organizationId,
+      ...(play ? { launchSource: "play" as const } : {}),
+      ...(play && playRef ? { ref: playRef } : {}),
       onCapacityWait: (contention) => {
         setStartContention(contention);
         setStartState("waiting");
@@ -292,7 +300,7 @@ export function ScenarioRunStart() {
             : "Could not start the scenario.",
         );
       });
-  }, [navigate, organizationId, queryClient, scenarioId]);
+  }, [navigate, organizationId, play, playRef, queryClient, scenarioId]);
 
   useEffect(() => {
     startScenario();
@@ -1136,7 +1144,10 @@ export function ScenarioRun() {
           attemptData.vms.map((vm) => vm.provisioning?.leaseDurationSeconds),
         )
       : null;
-  const selectedProbes = selectedVm?.scenarioProbes ?? [];
+  const taskChecks = attemptData
+    ? runTaskChecks(attemptData, selectedVm?.scenarioVmName ?? null)
+    : null;
+  const selectedProbes = taskChecks?.probes ?? selectedVm?.scenarioProbes ?? [];
   // Sharing is offered to a run that is active, and a shared run can always be
   // stopped, even after it has finished. Only the run view answers whether it
   // may be offered; a record from a hint or the start does not. The last
@@ -1196,11 +1207,12 @@ export function ScenarioRun() {
   });
   // The transport starts while the VM boots, hidden. It connects and waits for
   // its target, and reports readiness so the shell can be revealed at once.
-  const terminalTransportMounted = Boolean(
-    selectedVm &&
-      selectedVmSessionRequest &&
-      attemptData?.activity === "foreground",
-  );
+  const terminalTransportMounted = shouldMountTerminalTransport({
+    hasSessionRequest: Boolean(selectedVm && selectedVmSessionRequest),
+    runForeground: attemptData?.activity === "foreground",
+    transportReady,
+    machineUnreachable: attemptData?.machineUnreachable === true,
+  });
   // The shell arrives with a rise only when it becomes ready while the page
   // is open; reloading a run whose shell is ready shows it still.
   const terminalJustRevealed = useJustReached(
@@ -1692,7 +1704,7 @@ export function ScenarioRun() {
     runSolved: attemptData.phase === "solved" || attemptData.solvedAt !== null,
     probes: selectedProbes,
     vmName: selectedVm?.scenarioVmName ?? null,
-    objectives: attemptData.objectives,
+    objectives: taskChecks?.objectives ?? attemptData.objectives,
     hints: attemptData.hints,
     solution: attemptData.solution,
     onRevealHint: (hintKey: string) => revealHint.mutate(hintKey),
@@ -1937,6 +1949,7 @@ export function ScenarioRun() {
                         !selectedVmShellReady &&
                         Boolean(selectedVm && selectedVm.phase !== "failed")
                       }
+                      unreachable={attemptData.machineUnreachable === true}
                     />
                   )}
                 </div>
