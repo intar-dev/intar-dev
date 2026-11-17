@@ -26,10 +26,10 @@ use tokio::sync::watch;
 /// Root-only, on tmpfs: the run disk is noexec.
 const SCRIPT_DIR: &str = "/run/intar/scripts";
 
-const READY_INTERVAL: Duration = Duration::from_secs(2);
+const READY_INTERVAL: Duration = Duration::from_millis(250);
 /// One second under test, where a failing script should not take 300.
 const READY_TOTAL: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 300 });
-const TASK_INTERVAL: Duration = Duration::from_secs(5);
+const TASK_INTERVAL: Duration = Duration::from_secs(2);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a failure report gets to reach the host before the guest powers
 /// off.
@@ -54,7 +54,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     if let Err(error) = boot::bring_up(&boot, &report).await {
         return fail(&report, error).await;
     }
-    boot::release_lab(&boot.spec, &report).await;
+    boot::release_lab(&report).await;
     run(
         &boot.spec,
         boot.mode,
@@ -148,7 +148,7 @@ pub(crate) async fn run(
     }
 }
 
-/// Each script every 2 s until it exits 0, all within 300 s.
+/// Each script every 250 ms until it exits 0, all within 300 s.
 async fn run_ready(
     scripts: &[ScriptV1],
     env: &BTreeMap<String, String>,
@@ -187,11 +187,8 @@ async fn run_ready(
     true
 }
 
-/// Run each unlatched task every 5 s; the first pass latches it. Returns once
-/// every task is latched.
-///
-/// ponytail: tasks run one after another, so many slow checks stretch the 5 s
-/// round; run them concurrently if a scenario needs that.
+/// Run the unlatched tasks together every 2 s; the first pass latches a
+/// task. Returns once every task is latched.
 async fn run_tasks(
     tasks: &[SpecTaskV1],
     env: &BTreeMap<String, String>,
@@ -200,21 +197,19 @@ async fn run_tasks(
 ) {
     let mut latched = vec![false; tasks.len()];
     while latched.contains(&false) {
-        for (index, task) in tasks.iter().enumerate() {
-            if latched[index] {
-                continue;
-            }
-            let outcome = exec::run(
-                dir,
-                &format!("task-{index}"),
-                &task.check,
-                env,
-                CHECK_TIMEOUT,
-            )
-            .await;
+        let round = tasks
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !latched[*index])
+            .map(|(index, task)| async move {
+                let name = format!("task-{index}");
+                let outcome = exec::run(dir, &name, &task.check, env, CHECK_TIMEOUT).await;
+                (index, outcome)
+            });
+        for (index, outcome) in futures_util::future::join_all(round).await {
             latched[index] = outcome.status == Status::Pass;
             let mut next = Task {
-                id: task.id.clone(),
+                id: tasks[index].id.clone(),
                 message: outcome.message,
                 passed_at_unix_ms: if latched[index] { unix_ms() } else { 0 },
                 ..Task::default()
