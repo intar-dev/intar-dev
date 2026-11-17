@@ -90,6 +90,8 @@ function pointerSummary(scenario: AdministeredScenario): string {
 
 const PENDING_WORDS: Record<RevisionAction["action"], string> = {
   verify: "Starting…",
+  verify_restore: "Starting…",
+  clear_restore_verified: "Withdrawing…",
   promote: "Promoting…",
   rollback: "Rolling back…",
 };
@@ -117,12 +119,21 @@ function RevisionRow({
   const actions = !scenario.canManage || live
     ? null
     : candidate && revision.state === "ready" && !verifying
-      ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ?? (revision.imagesReady ? "Verify" : "Preparing")}</Button>
+      ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
       : candidate && revision.canGoLive
         ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
         : revision.canGoLive && revision.liveAt !== null
           ? <Button size="sm" variant="outline" disabled={busy} onClick={() => move("rollback")}>{pending ? PENDING_WORDS[pending] : "Roll back"}</Button>
           : null;
+  // A restore check is for any verified revision, the live one included: it
+  // decides whether labs of the revision may start from a host snapshot.
+  const restoreAction = !scenario.canManage || verifying
+    ? null
+    : revision.canVerifyRestore
+      ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify_restore", rev: revision.rev })}>{pending === "verify_restore" ? PENDING_WORDS[pending] : "Check snapshot start"}</Button>
+      : revision.restoreVerifiedAt !== null
+        ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => onAction({ action: "clear_restore_verified", rev: revision.rev })}>{pending === "clear_restore_verified" ? PENDING_WORDS[pending] : "Withdraw snapshot start"}</Button>
+        : null;
   return (
     <div className="space-y-2 py-3 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -137,16 +148,24 @@ function RevisionRow({
               `Guest contract ${revision.guestContract}`,
               `Built ${formatRelativeTime(revision.createdAt)}`,
               revision.liveAt ? `First live ${formatTimestamp(revision.liveAt)}` : null,
+              revision.restoreVerifiedAt ? `Starts from a snapshot since ${formatTimestamp(revision.restoreVerifiedAt)}` : null,
             ]}
           />
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {verifying ? <StatusToken tone="live" word="Verifying" pulse /> : <StatusToken tone={state.tone} word={state.word} />}
           {actions}
+          {restoreAction}
         </div>
       </div>
       {revision.failureReason ? <InlineFeedback tone="error" announce={false}>{revision.failureReason}</InlineFeedback> : null}
       {revision.verifyReport ? <VerifyReportRow report={revision.verifyReport} /> : null}
+      {revision.restoreVerifyReport ? (
+        <VerifyReportRow
+          report={revision.restoreVerifyReport}
+          title={`Last snapshot check: ${restoreCheckWords(revision.restoreVerifyReport)}`}
+        />
+      ) : null}
       {error ? <InlineFeedback tone="error">{error}</InlineFeedback> : null}
     </div>
   );
@@ -154,11 +173,17 @@ function RevisionRow({
 
 const OUTCOME_WORDS = { passed: "Passed", failed: "Failed", verify_timeout: "Timed out" } as const;
 
-function VerifyReportRow({ report }: { report: NonNullable<ScenarioRevisionSummary["verifyReport"]> }) {
+/** What a restore check showed; a lab that started cold showed nothing about a restore. */
+function restoreCheckWords(report: NonNullable<ScenarioRevisionSummary["restoreVerifyReport"]>): string {
+  if (!report.restored) return "the lab started cold, so nothing was checked; run it again";
+  return report.outcome === "passed" ? "Passed" : `${OUTCOME_WORDS[report.outcome]} after a snapshot start`;
+}
+
+function VerifyReportRow({ report, title }: { report: NonNullable<ScenarioRevisionSummary["verifyReport"]>; title?: string }) {
   return (
     <DisclosureRow
       density="compact"
-      title={`Last verify run: ${OUTCOME_WORDS[report.outcome]}`}
+      title={title ?? `Last verify run: ${OUTCOME_WORDS[report.outcome]}`}
       meta={formatRelativeTime(report.at)}
     >
       <div className="space-y-3 text-sm">

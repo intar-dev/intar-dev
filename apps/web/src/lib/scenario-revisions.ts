@@ -65,6 +65,20 @@ export interface ScenarioRevisionSummary {
   canGoLive: boolean;
   /** Whether a live platform host reports every image of the revision ready, as a verify run needs. */
   imagesReady: boolean;
+  /** When the revision's checks passed in a lab started from a host snapshot; only then may its runs start that way. */
+  restoreVerifiedAt: number | null;
+  /** The last restore check's outcome; admin-only. */
+  restoreVerifyReport: RestoreVerifyReport | null;
+  /** Whether a restore check may start now: verified, one machine, not yet restore-verified. */
+  canVerifyRestore: boolean;
+}
+
+/** A restore check: a verify run whose VM was allowed to start from a host snapshot. */
+export interface RestoreVerifyReport extends VerifyReport {
+  /** Whether every VM really started from a snapshot. A lab that started cold proves nothing about a restore. */
+  restored: boolean;
+  /** The Kino the lab ran. */
+  kino: string | null;
 }
 
 export interface VerifyReport {
@@ -106,6 +120,9 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
       `WITH ${KEPT_REVISIONS_CTE}, ${readyPlatformImagesCtes()}
       SELECT revision.scenario_id, revision.rev, revision.state, revision.guest_contract, revision.content_digest,
           revision.failure_reason, revision.verify_run_id, revision.verify_report_json, revision.live_at,
+          revision.restore_verified_at, revision.restore_verify_report_json,
+          (revision.state = 'verified' AND revision.restore_verified_at IS NULL
+            AND json_array_length(revision.doc_json, '$.machines') = 1) AS can_verify_restore,
           revision.created_at, (revision.state = 'verified' AND revision.guest_contract = ?3
             AND EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = revision.scenario_id AND kept.rev = revision.rev)
             AND ${revisionImagesPresentSql("revision.scenario_id", "revision.rev")}) AS can_go_live,
@@ -129,7 +146,8 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
     scenario_id: string; rev: string; state: ScenarioRevisionSummary["state"]; guest_contract: number;
     content_digest: string | null; failure_reason: string | null; verify_run_id: string | null;
     verify_report_json: string | null; live_at: number | null; created_at: number; can_go_live: number;
-    images_ready: number;
+    images_ready: number; restore_verified_at: number | null; restore_verify_report_json: string | null;
+    can_verify_restore: number;
   };
   const byScenario = new Map<string, AdministeredScenario>();
   for (const row of scenarios!.results as ScenarioRow[]) {
@@ -146,6 +164,10 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
       verifyReport: row.verify_report_json ? (JSON.parse(row.verify_report_json) as VerifyReport) : null,
       liveAt: row.live_at, createdAt: row.created_at, canGoLive: row.can_go_live === 1,
       imagesReady: row.images_ready === 1,
+      restoreVerifiedAt: row.restore_verified_at,
+      restoreVerifyReport: row.restore_verify_report_json
+        ? (JSON.parse(row.restore_verify_report_json) as RestoreVerifyReport) : null,
+      canVerifyRestore: row.can_verify_restore === 1,
     });
   }
   for (const row of runs!.results as Array<{ run_id: string; scenario_id: string; scenario_rev: string }>) {
@@ -333,11 +355,17 @@ export async function settleVerifyRun(
   runId: string,
   options: { hostId?: string; leaseEnded?: boolean; wake?: (hostId: string) => Promise<void> } = {},
 ): Promise<boolean> {
+  // A restore check is a verify run too; the revision names it.
   const run = await env.DB.prepare(
-    `SELECT scenario_id, scenario_rev, host_id, state_json, delete_requested_at FROM scenario_runs
-      WHERE run_id = ?1 AND launch_source = 'verify' AND user_id = ?2 AND (?3 IS NULL OR host_id = ?3)`,
+    `SELECT run.scenario_id, run.scenario_rev, run.host_id, run.state_json, run.delete_requested_at,
+        EXISTS (SELECT 1 FROM scenario_revisions revision WHERE revision.scenario_id = run.scenario_id
+          AND revision.rev = run.scenario_rev AND revision.restore_verify_run_id = run.run_id) AS restore_check,
+        (SELECT vm.kino_digest FROM runtime_vms vm WHERE vm.execution_id = run.run_id LIMIT 1) AS kino
+       FROM scenario_runs run
+      WHERE run.run_id = ?1 AND run.launch_source = 'verify' AND run.user_id = ?2 AND (?3 IS NULL OR run.host_id = ?3)`,
   ).bind(runId, VALIDATION_USER_ID, options.hostId ?? null).first<{
     scenario_id: string; scenario_rev: string | null; host_id: string; state_json: string; delete_requested_at: number | null;
+    restore_check: number; kino: string | null;
   }>();
   if (!run?.scenario_rev) return false;
   const state = JSON.parse(run.state_json) as RunStateDocument;
@@ -349,13 +377,26 @@ export async function settleVerifyRun(
     at: Date.now(),
     machines: state.vms.map((vm) => ({ name: vm.scenarioVmName, verify: vm.lab?.verify ?? null, failure: vm.lab?.failure ?? null })),
   };
+  // A restore check counts only when the lab really started from a
+  // snapshot, as its last report says, and then passed. Whatever else comes
+  // of it, the revision stays what it was: verified for cold boots.
+  const restored = state.vms.length > 0 && state.vms.every((vm) => vm.restored === true);
+  const restoreReport: RestoreVerifyReport = { ...report, restored, kino: run.kino };
   const [settled] = await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE scenario_revisions SET state = CASE WHEN ?4 = 'passed' THEN 'verified' ELSE state END,
-          verify_run_id = ?3, verify_report_json = ?5
-        WHERE scenario_id = ?1 AND rev = ?2 AND state = 'ready' AND verify_run_id IS NOT ?3
-        RETURNING rev`,
-    ).bind(run.scenario_id, run.scenario_rev, runId, outcome, JSON.stringify(report)),
+    run.restore_check
+      ? env.DB.prepare(
+        `UPDATE scenario_revisions SET restore_verify_report_json = ?5,
+            restore_verified_at = CASE WHEN ?4 = 1 THEN ?6 ELSE restore_verified_at END
+          WHERE scenario_id = ?1 AND rev = ?2 AND restore_verify_run_id = ?3 AND restore_verify_report_json IS NULL
+          RETURNING rev`,
+      ).bind(run.scenario_id, run.scenario_rev, runId, outcome === "passed" && restored ? 1 : 0,
+        JSON.stringify(restoreReport), report.at)
+      : env.DB.prepare(
+        `UPDATE scenario_revisions SET state = CASE WHEN ?4 = 'passed' THEN 'verified' ELSE state END,
+            verify_run_id = ?3, verify_report_json = ?5
+          WHERE scenario_id = ?1 AND rev = ?2 AND state = 'ready' AND verify_run_id IS NOT ?3
+          RETURNING rev`,
+      ).bind(run.scenario_id, run.scenario_rev, runId, outcome, JSON.stringify(report)),
     env.DB.prepare(
       `UPDATE scenario_runs SET end_reason = coalesce(end_reason, 'verify_timeout')
         WHERE run_id = ?1 AND ?2 = 'verify_timeout'`,
@@ -363,7 +404,8 @@ export async function settleVerifyRun(
   ]);
   const fresh = Boolean(settled?.results.length);
   if (fresh) {
-    console.info(JSON.stringify({ event: "scenario_verify_run", runId, scenarioId: run.scenario_id, rev: run.scenario_rev, outcome }));
+    console.info(JSON.stringify({ event: "scenario_verify_run", runId, scenarioId: run.scenario_id, rev: run.scenario_rev, outcome,
+      ...(run.restore_check ? { restoreCheck: true, restored } : {}) }));
   }
   // An expired lease ends the run itself; any other outcome tears it down.
   if (outcome !== "verify_timeout" && run.delete_requested_at === null) {
@@ -380,6 +422,18 @@ export async function settleVerifyRun(
     }
   }
   return fresh;
+}
+
+/**
+ * Withdraws a revision's restore verification: its runs cold-boot again
+ * until a restore check passes. True when it was set.
+ */
+export async function clearRestoreVerified(scenarioId: string, rev: string): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE scenario_revisions SET restore_verified_at = NULL
+      WHERE scenario_id = ?1 AND rev = ?2 AND restore_verified_at IS NOT NULL`,
+  ).bind(scenarioId, rev).run();
+  return result.meta.changes > 0;
 }
 
 export interface MachineBuildSummary {

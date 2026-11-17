@@ -132,6 +132,9 @@ export interface RunVmStateDocument {
   /// asynchronously afterwards. Optional: older stored docs lack it.
   hasRecording?: boolean;
   terminalTarget: TerminalTarget;
+  /// The host started this VM from its snapshot and the guest woke, as of
+  /// the VM's latest report. Optional: older stored docs lack it.
+  restored?: boolean;
   /// Explicit live cgroup boundary reported by the agent. Optional for stored
   /// run documents written before boot quota sealing was introduced.
   runtimeConstraints?: RuntimeConstraintsEvidence | null;

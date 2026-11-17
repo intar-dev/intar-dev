@@ -15,8 +15,10 @@ import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
   assertScenarioAdmin,
+  clearRestoreVerified,
   listAdministeredScenarios,
   moveLiveRevision,
+  type RestoreVerifyReport,
   type VerifyReport,
 } from "@/lib/scenario-revisions";
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
@@ -612,6 +614,103 @@ describe("promotion, rollback and verify runs", () => {
       const { runId } = await verify();
       await expect(getScenarioRunStatusForUser({ runId, userId: LEARNER })).rejects.toMatchObject({ status: 404 });
       await expect(getScenarioRunStatusForUser({ runId, userId: ADMIN })).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
+  describe("restore checks", () => {
+    const passed = { steps: [], done: true, passed: true, pre_done: true };
+    const restoreRow = (at = rev("a")) => env.DB.prepare(
+      `SELECT state, verify_run_id, restore_verified_at, restore_verify_run_id, restore_verify_report_json
+         FROM scenario_revisions WHERE scenario_id = ?1 AND rev = ?2`,
+    ).bind(PUBLIC_ID, at).first<{ state: string; verify_run_id: string | null; restore_verified_at: number | null;
+      restore_verify_run_id: string | null; restore_verify_report_json: string | null }>();
+    const check = () => beginVerifyRun({ scenarioId: PUBLIC_ID, rev: rev("a"), allowDrainedAdminProof: true, restoreCheck: true });
+    const restoredVm = (runId: string, restored: boolean) => {
+      const vm = verifyVm(runId, verifyLab(passed));
+      return restored ? { ...vm, start: { restored: true } } : vm;
+    };
+    const settled = () => until(restoreRow, (row) => row?.restore_verify_report_json != null);
+    const vmOf = async (hostId = PLATFORM) => (await desiredDoc(hostId))!.vms.at(-1)!;
+
+    it("is refused for a revision that is not verified, and never touches the verify result", async () => {
+      await expect(check()).rejects.toMatchObject({ status: 409, code: "restore_check_not_possible" });
+      await markVerified(PUBLIC_ID, rev("a"));
+      const { runId } = await check();
+      expect(await runOf(runId)).toMatchObject({ user_id: VALIDATION_USER_ID, launch_source: "verify", host_id: PLATFORM });
+      expect(await restoreRow()).toMatchObject({ state: "verified", verify_run_id: null, restore_verify_run_id: runId });
+      // The run is a verify run with a VM that may start from a snapshot.
+      expect(await vmOf()).toMatchObject({ run_id: runId, mode: "verify", may_restore: true });
+      const doc = (await desiredDoc(PLATFORM))!;
+      expect(validateBridgeMessageV9({ type: "desired_state", protocol_version: 9, host_id: PLATFORM, desired_state: doc })).toBe(true);
+      await expect(check()).rejects.toMatchObject({ code: "verify_run_active" });
+    });
+
+    it("marks the revision when the lab started from a snapshot and passed, and ends the run", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      const { runId } = await check();
+      // A first report while the guest has not woken says nothing yet.
+      sendVm(ws, PLATFORM, verifyVm(runId, verifyLab({ ...passed, done: false, passed: false })));
+      sendVm(ws, PLATFORM, restoredVm(runId, true));
+      const row = await settled();
+      expect(row!.restore_verified_at).not.toBeNull();
+      expect(JSON.parse(row!.restore_verify_report_json!) as RestoreVerifyReport)
+        .toMatchObject({ runId, outcome: "passed", restored: true, kino: KINO });
+      expect(row).toMatchObject({ state: "verified", verify_run_id: null });
+      expect((await until(() => runOf(runId), (run) => run?.delete_requested_at !== null))?.delete_requested_at).not.toBeNull();
+      const listed = (await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.revisions.find((revision) => revision.rev === rev("a"))!;
+      expect(listed).toMatchObject({ canVerifyRestore: false, restoreVerifyReport: { restored: true } });
+      expect(listed.restoreVerifiedAt).not.toBeNull();
+      // Once is enough.
+      await until(() => runOf(runId), (run) => run?.active_key === null);
+      await expect(check()).rejects.toMatchObject({ code: "restore_check_not_possible" });
+    });
+
+    it("proves nothing when the lab started cold, and can be repeated", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      const { runId } = await check();
+      sendVm(ws, PLATFORM, restoredVm(runId, false));
+      const row = await settled();
+      expect(row!.restore_verified_at).toBeNull();
+      expect(JSON.parse(row!.restore_verify_report_json!) as RestoreVerifyReport).toMatchObject({ outcome: "passed", restored: false });
+      await until(() => runOf(runId), (run) => run?.active_key === null);
+      const again = await check();
+      expect(await restoreRow()).toMatchObject({ restore_verify_run_id: again.runId, restore_verify_report_json: null });
+    });
+
+    it("leaves the revision verified when the checks fail after a snapshot start", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      const { runId } = await check();
+      sendVm(ws, PLATFORM, { ...verifyVm(runId, verifyLab({ ...passed, passed: false })), start: { restored: true } });
+      const row = await settled();
+      expect(row).toMatchObject({ state: "verified", restore_verified_at: null });
+      expect(JSON.parse(row!.restore_verify_report_json!) as RestoreVerifyReport).toMatchObject({ outcome: "failed", restored: true });
+      await promote(rev("a"), null);
+    });
+
+    it("lets learners start from a snapshot only once the revision passed, and only on a platform host", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      const cold = await learnerStart(LEARNER);
+      expect(await vmOf(cold.hostId)).not.toHaveProperty("may_restore");
+      // The restore check of the live revision.
+      const { runId } = await check();
+      sendVm(ws, PLATFORM, restoredVm(runId, true));
+      expect((await until(restoreRow, (row) => row?.restore_verified_at != null))!.restore_verified_at).not.toBeNull();
+      const restored = await learnerStart(LEARNER_2);
+      expect(restored.hostId).toBe(PLATFORM);
+      expect(await vmOf()).toMatchObject({ run_id: restored.runId, mode: "learn", may_restore: true });
+      // Withdrawn: the next learner cold-boots again.
+      expect(await clearRestoreVerified(PUBLIC_ID, rev("a"))).toBe(true);
+      expect((await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.revisions[0]).toMatchObject({ restoreVerifiedAt: null, canVerifyRestore: true });
+    });
+
+    it("never tells a host with an older agent", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await env.DB.prepare("UPDATE agent_hosts SET hello_json = json_set(hello_json, '$.agent_version', '0.21.0') WHERE id = ?1")
+        .bind(PLATFORM).run();
+      const { runId } = await check();
+      expect(await vmOf()).toMatchObject({ run_id: runId });
+      expect(await vmOf()).not.toHaveProperty("may_restore");
     });
   });
 });
