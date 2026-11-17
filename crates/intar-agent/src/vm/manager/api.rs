@@ -837,7 +837,7 @@ impl VmManager {
                     .is_ok()
             {
                 snapshot::restore_failed(&inner, abandoned).await;
-                snapshot::set_restored(&inner, &name_for_task, false).await;
+                snapshot::forget_restore(&inner, &name_for_task).await;
                 // Discard first: stopping the booting VM the usual way would
                 // export the abandoned guest's recording into the run.
                 let discarded = {

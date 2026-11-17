@@ -188,16 +188,36 @@ impl Snapshots {
     }
 }
 
-/// Record whether a VM runs from a snapshot: its connections are answered
-/// with `Wake`, and its report says so.
-pub(super) async fn set_restored(inner: &Inner, vm_name: &str, restored: bool) {
-    if restored {
-        inner.snapshots.mark_restored(vm_name);
-    } else {
-        inner.snapshots.forget_vm(vm_name);
-    }
+/// From just before the restore call: the VM's connections are answered
+/// with `Wake`. This says nothing yet about whether the guest woke.
+pub(super) fn expect_wake(inner: &Inner, vm_name: &str) {
+    inner.snapshots.mark_restored(vm_name);
+}
+
+/// The restored guest got to `SSH_READY`: the VM's report says it runs from
+/// a snapshot. Only from here on, since the site takes it as proof.
+pub(super) async fn confirm_restored(inner: &Inner, vm_name: &str) {
     if let Some(vm) = inner.states.write().await.get_mut(vm_name) {
-        vm.restored_from_snapshot = restored;
+        vm.restored_from_snapshot = true;
+    }
+}
+
+/// A restore was abandoned: no more `Wake`, no claim in the report, and no
+/// marker for a later agent start to find beside the cold-booted VM.
+pub(super) async fn forget_restore(inner: &Inner, vm_name: &str) {
+    inner.snapshots.forget_vm(vm_name);
+    let marker = {
+        let mut states = inner.states.write().await;
+        states.get_mut(vm_name).and_then(|vm| {
+            vm.restored_from_snapshot = false;
+            vm.details.as_ref().and_then(restored_marker)
+        })
+    };
+    if let Some(marker) = marker
+        && let Err(error) = tokio::fs::remove_file(&marker).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(error = %error, path = %marker.display(), "failed to remove a restore marker");
     }
 }
 
@@ -438,7 +458,14 @@ pub(super) async fn recover_restored_vm(
     if !restored_marker(details).is_some_and(|marker| marker.exists()) {
         return;
     }
-    set_restored(inner, vm_name, true).await;
+    expect_wake(inner, vm_name);
+    // Only a VM that was already up before the agent stopped is known to
+    // have woken; one caught in the middle stays unclaimed.
+    if let Some(vm) = inner.states.write().await.get_mut(vm_name)
+        && vm.state == VmLifecycleState::Running
+    {
+        vm.restored_from_snapshot = true;
+    }
     if let Err(error) = ch.vm_resume().await {
         debug!(error = %error, vm = vm_name, "a restored VM was not paused");
     }

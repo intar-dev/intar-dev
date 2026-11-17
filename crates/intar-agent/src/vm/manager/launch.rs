@@ -1160,7 +1160,7 @@ pub(super) async fn run_create(
         // the VM again as a restored one; the listener answers its
         // connections with Wake from here on.
         snapshot::write_restored_marker(&details).await;
-        snapshot::set_restored(inner, req.name, true).await;
+        snapshot::expect_wake(inner, req.name);
         debug!("calling cloud-hypervisor vm.restore");
         snapshot::restore_vm(&ch)
             .await
@@ -1180,6 +1180,7 @@ pub(super) async fn run_create(
         Some(key) => match timeout(snapshot::RESTORE_TIMEOUT, waiting).await {
             Ok(Ok(ready)) => {
                 inner.snapshots.restore_succeeded(key);
+                snapshot::confirm_restored(inner, req.name).await;
                 ready
             }
             Ok(Err(error)) => return Err(snapshot::abandoned(key, &error)),
