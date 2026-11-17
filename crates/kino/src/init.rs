@@ -163,17 +163,24 @@ async fn run_ready(
                 exec::run(dir, &format!("ready-{index}"), &script.script, env, left).await;
             let passed = outcome.status == Status::Pass;
             let out_of_time = Instant::now() + READY_INTERVAL >= deadline;
-            report.send_modify(|report| {
-                let state = &mut report.ready[index];
-                state.set_status(if passed || out_of_time {
+            // A retry that fails the same way is not news: a report per
+            // attempt would queue up on the host ahead of the one that says
+            // the script passed.
+            report.send_if_modified(|report| {
+                let mut next = report.ready[index].clone();
+                next.set_status(if passed || out_of_time {
                     outcome.status
                 } else {
                     Status::Pending
                 });
-                state.tail = tail(&outcome.tail, READY_TAIL_BYTES).to_owned();
-                if !passed && out_of_time {
+                next.tail = tail(&outcome.tail, READY_TAIL_BYTES).to_owned();
+                let failed = !passed && out_of_time;
+                let changed = failed || report.ready[index] != next;
+                report.ready[index] = next;
+                if failed {
                     report.failure = format!("ready '{}' did not pass", script.name);
                 }
+                changed
             });
             if passed {
                 break;
