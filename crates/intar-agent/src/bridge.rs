@@ -56,6 +56,10 @@ const STATE_REPORT_INTERVAL_SECS: u64 = 20;
 const RUN_CLI_ACCESS_REFRESH_INTERVAL_SECS: u64 = 60;
 const RUN_CLI_ACCESS_REFRESH_TIMEOUT_SECS: u64 = 5;
 const INVENTORY_REPORT_JAILER_BUDGET_MS: u64 = 50;
+/// How old the daemon's last capacity answer may be for an inventory report
+/// to use it when a refresh misses its budget. Three report intervals: a
+/// daemon that has not answered for longer is reported as having no room.
+const JAILER_CAPACITY_MAX_AGE: Duration = Duration::from_secs(3 * STATE_REPORT_INTERVAL_SECS);
 const OUTBOUND_SEND_BUDGET_MS: u64 = 25;
 #[cfg(test)]
 const INVENTORY_DELIVERY_TARGET_MS: u64 = 250;
@@ -75,6 +79,8 @@ const CLOSE_UPGRADE_REQUIRED: u16 = 4426;
 struct BridgeReportCache {
     host_profile: Arc<RwLock<host_profile::HostProfile>>,
     jailer_capabilities: Arc<RwLock<Option<JailerCapabilities>>>,
+    /// When the daemon last answered.
+    jailer_answered_at: Arc<RwLock<Option<Instant>>>,
     hardware: Arc<RwLock<HostHardwareV1>>,
     cached_images: Arc<RwLock<Vec<CachedImageStateV2>>>,
 }
@@ -87,11 +93,30 @@ impl BridgeReportCache {
     ) -> Self {
         Self {
             host_profile: Arc::new(RwLock::new(host_profile)),
+            // The seed was asked before the handshake: its age is unknown.
+            jailer_answered_at: Arc::new(RwLock::new(None)),
             jailer_capabilities: Arc::new(RwLock::new(jailer_capabilities)),
             hardware: Arc::new(RwLock::new(hardware)),
             cached_images: Arc::new(RwLock::new(Vec::new())),
         }
     }
+
+    async fn remember_jailer(&self, capabilities: &JailerCapabilities) {
+        *self.jailer_capabilities.write().await = Some(capabilities.clone());
+        *self.jailer_answered_at.write().await = Some(Instant::now());
+    }
+
+    /// The daemon's last answer, if it is at most `max_age` old.
+    async fn recent_jailer(&self, max_age: Duration) -> Option<JailerCapabilities> {
+        if !answered_within(*self.jailer_answered_at.read().await, max_age) {
+            return None;
+        }
+        self.jailer_capabilities.read().await.clone()
+    }
+}
+
+fn answered_within(answered_at: Option<Instant>, max_age: Duration) -> bool {
+    answered_at.is_some_and(|at| at.elapsed() <= max_age)
 }
 
 #[derive(Clone)]
