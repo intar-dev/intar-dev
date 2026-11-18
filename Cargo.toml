@@ -17,6 +17,7 @@ members = [
     "crates/kino",
     "crates/stargate-core",
     "crates/stargate-gateway",
+    "crates/zpm",
 ]
 resolver = "3"
 
