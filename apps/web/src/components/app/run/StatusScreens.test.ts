@@ -85,4 +85,14 @@ describe("ScenarioShellStatusCard", () => {
     expect(text).not.toContain("Running");
     expect(text).not.toContain("will open when your workspace is ready");
   });
+
+  it("points a local run to the desktop app instead of promising a browser terminal", () => {
+    const text = renderToStaticMarkup(
+      createElement(ScenarioShellStatusCard, { phase: "running", title: "Workspace ready", pending: true, local: true }),
+    ).replace(/<[^>]+>/g, " ");
+
+    expect(text).toContain("Running in the desktop app");
+    expect(text).toContain("Workspace ready");
+    expect(text).not.toContain("browser terminal");
+  });
 });

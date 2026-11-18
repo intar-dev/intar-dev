@@ -714,6 +714,7 @@ export function ProgressSection({
                           ? formatDurationMs(cell.solveDurationMs)
                           : null,
                         cell.status === "assisted" ? "Solution used" : null,
+                        cell.local ? "Local run" : null,
                       ]
                         .filter(Boolean)
                         .join(" · ");

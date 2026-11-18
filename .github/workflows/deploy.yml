@@ -143,6 +143,11 @@ jobs:
         run: cuenv task -p ci --package ci website-apply-d1-migrations
       - name: Verify production D1 schema
         run: cuenv task -p ci --package ci website-verify-d1-schema
+      - name: Apply production D1 seeds
+        env:
+          CLOUDFLARE_DATABASE_ID: ${{ env.DATABASE_ID }}
+          SEED_APPLY_EVIDENCE: ${{ runner.temp }}/production-d1-seeds.json
+        run: cuenv task -p ci --package ci website-apply-d1-seeds
       - name: Deploy the image registry cleanup worker
         run: cuenv task -p ci --package ci website-deploy-registry-cleanup
       - name: Deploy production at 100 percent
@@ -175,6 +180,7 @@ jobs:
             ${{ runner.temp }}/production-d1-migrate.log
             ${{ runner.temp }}/production-d1-migrate.json
             ${{ runner.temp }}/production-d1-verified.json
+            ${{ runner.temp }}/production-d1-seeds.json
             ${{ runner.temp }}/maintenance-after-drain-deployment.json
             ${{ runner.temp }}/maintenance-after-drain.json
             ${{ runner.temp }}/web-maintenance.json

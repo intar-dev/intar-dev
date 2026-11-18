@@ -167,6 +167,15 @@ import (
 				name: "Verify production D1 schema"
 				#StepTask & {#task: "website-verify-d1-schema"}
 			}, {
+				// Rows production needs that no request creates (apps/web/seeds).
+				// A seed only ever adds a missing row, so it runs on every deploy.
+				name: "Apply production D1 seeds"
+				env: {
+					CLOUDFLARE_DATABASE_ID: "${{ env.DATABASE_ID }}"
+					SEED_APPLY_EVIDENCE:    "${{ runner.temp }}/production-d1-seeds.json"
+				}
+				#StepTask & {#task: "website-apply-d1-seeds"}
+			}, {
 				name: "Deploy the image registry cleanup worker"
 				#StepTask & {#task: "website-deploy-registry-cleanup"}
 			}, {
@@ -207,6 +216,7 @@ import (
 						${{ runner.temp }}/production-d1-migrate.log
 						${{ runner.temp }}/production-d1-migrate.json
 						${{ runner.temp }}/production-d1-verified.json
+						${{ runner.temp }}/production-d1-seeds.json
 						${{ runner.temp }}/maintenance-after-drain-deployment.json
 						${{ runner.temp }}/maintenance-after-drain.json
 						${{ runner.temp }}/web-maintenance.json
@@ -307,6 +317,7 @@ tasks: {
 	"website-drain-maintenance": #Script & {_script: "tools/workflows/website/drain-maintenance.sh", _production: true}
 	"website-apply-d1-migrations": #Script & {_script: "tools/workflows/website/apply-d1-migrations.sh", _production: true}
 	"website-verify-d1-schema": #Script & {_script: "tools/workflows/website/verify-d1-schema.sh", _production: true}
+	"website-apply-d1-seeds": #Script & {_script: "tools/workflows/website/apply-d1-seeds.sh", _production: true}
 	"website-deploy-registry-cleanup": #Script & {_script: "tools/workflows/website/deploy-registry-cleanup.sh", _production: true}
 	"website-deploy-production": #Script & {_script: "tools/workflows/website/deploy-production.sh", _production: true}
 	"website-release-registry-collector": #Script & {_script: "tools/workflows/website/release-registry-collector.sh", _production: true}

@@ -10,6 +10,7 @@ import {
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
+import { isLocalHostId } from "@/lib/local-runs";
 import { agentHosts, runtimeVms, scenarioRuns } from "@/db/schema";
 import { isHostUnreachable } from "@/lib/scenario-hosts";
 import {
@@ -114,6 +115,11 @@ export async function getScenarioRunStatusStreamTargetForUser(input: {
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
   }
+  // No host pushes changes of a local run; the page polls its status instead.
+  // ponytail: the page retries the stream every 30 s; push from the report route if polling is too slow.
+  if (isLocalHostId(row.hostId)) {
+    throw appError(409, "scenario_run_local", "a local run has no status stream");
+  }
   return { hostId: row.hostId };
 }
 
@@ -138,6 +144,7 @@ export async function getScenarioRunStatusForUser(input: {
       failedAt: scenarioRuns.failedAt,
       createdAt: scenarioRuns.createdAt,
       updatedAt: scenarioRuns.updatedAt,
+      runtime: scenarioRuns.runtime,
       hostConnected: agentHosts.connected,
       hostDisconnectedAt: agentHosts.disconnectedAt,
       hostLastHeartbeatAt: agentHosts.lastHeartbeatAt,
@@ -169,6 +176,8 @@ export async function getScenarioRunStatusForUser(input: {
   // Read-time only: a reconnect restores the stored state as it was.
   const machineUnreachable =
     runPhaseAcceptsTerminalSessions(state.phase) &&
+    // A local run's placeholder host never connects; that says nothing.
+    row.runtime !== "local" &&
     row.hostConnected !== null &&
     isHostUnreachable(
       {

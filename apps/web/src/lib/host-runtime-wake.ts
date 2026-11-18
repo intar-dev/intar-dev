@@ -1,3 +1,4 @@
+import { isLocalHostId } from "@/lib/local-runs";
 import { env } from "cloudflare:workers";
 import {
   tryWakeHostRuntimeViaNamespace,
@@ -7,10 +8,13 @@ import {
 const HOST_RUNTIME_WAKE_TIMEOUT_MS = 10_000;
 
 export async function wakeHostRuntime(hostId: string): Promise<void> {
+  // A local run's placeholder host has no runtime to wake.
+  if (isLocalHostId(hostId)) return;
   await wakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId);
 }
 
 export async function tryWakeHostRuntime(hostId: string): Promise<void> {
+  if (isLocalHostId(hostId)) return;
   await tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId);
 }
 

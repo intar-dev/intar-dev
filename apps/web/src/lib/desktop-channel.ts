@@ -1,0 +1,365 @@
+// The desktop app's channel to intar (#399), first slice: who the caller is,
+// and starting, reading and ending a local run.
+//
+// The app signs in through the OAuth provider as a public client and sends
+// its opaque access token as a bearer credential. The provider has no helper
+// that verifies such a token for a client without a secret, so the check is
+// one read here, on the hash the provider stores.
+
+import { env } from "cloudflare:workers";
+import { drizzle } from "drizzle-orm/d1";
+import { activeAccountSql, usableIdentityExistsSql } from "@/lib/account-access";
+import { jsonResponse } from "@/lib/agent-bridge";
+import { AppError, toErrorResponse } from "@/lib/app-error";
+import { hashStoredOAuthToken } from "@/lib/auth";
+import { listCourseCatalogForUser } from "@/lib/course-catalogs";
+import type { VmStateV3 } from "@/generated/contracts/bridge-message-v9";
+import validateBridgeMessageV9 from "@/generated/contracts/bridge-message-v9.validate";
+import { requireIdempotencyKey } from "@/lib/idempotency-key";
+import { endLocalRun, localHostId } from "@/lib/local-runs";
+import { resolveOrganizationId } from "@/lib/organizations";
+import { enforceRateLimit } from "@/lib/request-security";
+import { applyVmStateV3ToRunState } from "@/lib/run-lifecycle";
+import { persistRunState } from "@/lib/run-projection";
+import { isRevisionScenarioId } from "@/lib/scenario-id";
+import { beginScenarioRun } from "@/lib/scenario-runs/begin";
+import { liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
+
+/** The one OAuth client the routes accept. A deploy seeds its row (apps/web/seeds). */
+export const DESKTOP_OAUTH_CLIENT_ID = "intar-jumper";
+export const LOCAL_RUNS_SCOPE = "local-runs";
+/** Version of this channel's requests and answers. */
+export const DESKTOP_PROTOCOL = 1;
+/** The only architecture machine images exist for today. */
+const IMAGE_ARCHITECTURE = "x86_64";
+
+export type DesktopCaller =
+  | { ok: true; userId: string; accessTokenId: string }
+  | { ok: false; response: Response };
+
+const signedOut = () =>
+  jsonResponse(
+    { error: "unauthorized", code: "signed_out" },
+    { status: 401, headers: { "www-authenticate": "Bearer", "cache-control": "no-store" } },
+  );
+
+/**
+ * The learner behind the app's access token. The token must be the app's
+ * own, unexpired and unrevoked, carry the local-runs scope, still have its
+ * session if it was bound to one, and belong to an account that could sign
+ * in now. A cookie is never read here. The provider stores the scopes as a
+ * JSON string holding the array; a plain array is read too.
+ */
+export async function requireDesktopCaller(
+  request: Request,
+  d1: D1Database = env.DB,
+): Promise<DesktopCaller> {
+  const header = request.headers.get("authorization") ?? "";
+  const presented = /^Bearer ([A-Za-z0-9._~+/-]{16,512}=*)$/u.exec(header)?.[1];
+  if (!presented) return { ok: false, response: signedOut() };
+  const row = await d1.prepare(
+    `SELECT token.id, token.user_id FROM oauth_access_token token
+       JOIN oauth_client client ON client.client_id = token.client_id
+       JOIN user owner ON owner.id = token.user_id
+      WHERE token.token = ?1 AND token.client_id = ?2
+        AND token.expires_at > ?3 AND token.revoked IS NULL
+        AND coalesce(client.disabled, 0) = 0
+        AND EXISTS (SELECT 1 FROM json_each(CASE json_type(token.scopes)
+          WHEN 'text' THEN token.scopes ->> '$' ELSE token.scopes END) scope WHERE scope.value = ?4)
+        AND (token.session_id IS NULL OR EXISTS (SELECT 1 FROM session bound
+          WHERE bound.id = token.session_id AND bound.expires_at > ?3))
+        AND ${activeAccountSql("owner")}
+        AND ${usableIdentityExistsSql("owner.id")}`,
+  ).bind(await hashStoredOAuthToken(presented), DESKTOP_OAUTH_CLIENT_ID, Date.now(), LOCAL_RUNS_SCOPE)
+    .first<{ id: string; user_id: string }>();
+  if (!row) return { ok: false, response: signedOut() };
+  return { ok: true, userId: row.user_id, accessTokenId: row.id };
+}
+
+export interface LocalRunMachine {
+  name: string;
+  image: string;
+  spec: string;
+  kino: string;
+  mode: "learn";
+  cpuMillis: number;
+  memoryMib: number;
+  diskMib: number;
+  egress: boolean;
+  terminal: boolean;
+  peers: string[];
+}
+
+export interface LocalRunView {
+  runId: string;
+  scenarioId: string;
+  /** The run's phase as the server holds it; the app stops its VMs when `active` is false. */
+  state: string;
+  active: boolean;
+  /** Every VM state the app reports names this execution and generation. */
+  executionId: string | null;
+  generation: number | null;
+  machines: LocalRunMachine[];
+}
+
+/** What the app runs for a local run of this learner, and where the run stands. */
+export async function localRunView(
+  d1: D1Database,
+  runId: string,
+  userId: string,
+): Promise<LocalRunView | null> {
+  const row = await d1.prepare(
+    `SELECT run.scenario_id, run.state, run.active_key IS NOT NULL AS active, run.state_json, revision.doc_json,
+        run.runtime_execution_id AS execution_id,
+        (SELECT execution.generation FROM runtime_executions execution
+          WHERE execution.id = run.runtime_execution_id) AS generation,
+        (SELECT json_group_array(json_object('vmId', vm.vm_id, 'ordinal', vm.ordinal, 'image', vm.image_digest,
+            'spec', vm.spec_digest, 'kino', vm.kino_digest, 'cpuMillis', vm.cpu_millis,
+            'memoryMib', vm.memory_mib, 'diskMib', vm.disk_mib))
+           FROM runtime_vms vm WHERE vm.execution_id = run.runtime_execution_id) AS vms
+       FROM scenario_runs run
+       LEFT JOIN scenario_revisions revision
+         ON revision.scenario_id = run.scenario_id AND revision.rev = run.scenario_rev
+      WHERE run.run_id = ?1 AND run.user_id = ?2 AND run.runtime = 'local'`,
+  ).bind(runId, userId).first<{
+    scenario_id: string; state: string; active: number; state_json: string; doc_json: string | null; vms: string;
+    execution_id: string | null; generation: number | null;
+  }>();
+  if (!row) return null;
+  const names = new Map<string, string>(
+    (JSON.parse(row.state_json) as { vms?: Array<{ id: string; scenarioVmName: string }> }).vms
+      ?.map((vm) => [vm.id, vm.scenarioVmName]) ?? [],
+  );
+  const described = new Map<string, { egress?: boolean; terminal?: boolean }>(
+    (row.doc_json ? (JSON.parse(row.doc_json) as { machines?: Array<{ name: string; egress?: boolean; terminal?: boolean }> }).machines ?? [] : [])
+      .map((machine) => [machine.name, machine]),
+  );
+  const vms = (JSON.parse(row.vms) as Array<{
+    vmId: string; ordinal: number; image: string; spec: string; kino: string;
+    cpuMillis: number; memoryMib: number; diskMib: number;
+  }>).sort((a, b) => a.ordinal - b.ordinal);
+  const allNames = vms.map((vm) => names.get(vm.vmId) ?? vm.vmId);
+  return {
+    runId,
+    scenarioId: row.scenario_id,
+    state: row.state,
+    active: row.active === 1,
+    executionId: row.execution_id,
+    generation: row.generation,
+    machines: vms.map((vm, index) => {
+      const name = allNames[index]!;
+      return {
+        name,
+        image: vm.image,
+        spec: vm.spec,
+        kino: vm.kino,
+        mode: "learn",
+        cpuMillis: vm.cpuMillis,
+        memoryMib: vm.memoryMib,
+        diskMib: vm.diskMib,
+        egress: described.get(name)?.egress === true,
+        terminal: described.get(name)?.terminal !== false,
+        peers: allNames.filter((peer) => peer !== name),
+      };
+    }),
+  };
+}
+
+const refuse = (status: number, code: string, error: string) =>
+  jsonResponse({ error, code, protocol: DESKTOP_PROTOCOL }, { status, headers: { "cache-control": "no-store" } });
+const answer = (run: LocalRunView, extra: Record<string, unknown> = {}, status = 200) =>
+  jsonResponse({ protocol: DESKTOP_PROTOCOL, run, ...extra }, { status, headers: { "cache-control": "no-store" } });
+
+/**
+ * `POST /api/local/runs`: start a local run. The body names the scenario,
+ * the protocol the app speaks, the guest contracts it implements and its
+ * architecture. No admin option of the internal start is reachable here.
+ */
+export async function startLocalRunRequest(
+  request: Request,
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  const limited = await enforceRateLimit(request, workerEnv, "scenario-start", `desktop:${caller.userId}`);
+  if (!limited.ok) return limited.response;
+
+  let idempotencyKey: string;
+  try {
+    idempotencyKey = requireIdempotencyKey(request.headers.get("Idempotency-Key") ?? undefined);
+  } catch (error) {
+    const { status, body } = toErrorResponse(error, "invalid Idempotency-Key");
+    return jsonResponse(body, { status });
+  }
+  let body: Record<string, unknown>;
+  try {
+    const parsed: unknown = await request.json();
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not an object");
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return refuse(400, "invalid_body", "the body must be a JSON object");
+  }
+  if (body.protocol !== DESKTOP_PROTOCOL) {
+    return refuse(409, "upgrade_required", "this version of the app is too old to start a run; update it");
+  }
+  const { scenarioId, organizationId: organizationKey, guestContracts, arch } = body;
+  if (typeof scenarioId !== "string" || !isRevisionScenarioId(scenarioId)) {
+    return refuse(400, "invalid_scenario", "scenarioId must be <namespace>/<slug>");
+  }
+  if (!Array.isArray(guestContracts) || guestContracts.length === 0 || guestContracts.length > 16 ||
+      !guestContracts.every((contract) => Number.isSafeInteger(contract))) {
+    return refuse(400, "invalid_guest_contracts", "guestContracts must list the guest contracts the app implements");
+  }
+  if (organizationKey !== undefined && organizationKey !== null && typeof organizationKey !== "string") {
+    return refuse(400, "invalid_organization", "organizationId must be a string");
+  }
+  if (arch !== IMAGE_ARCHITECTURE) {
+    return refuse(409, "architecture_unavailable", "no machine images exist for this computer's architecture yet");
+  }
+  const organizationId = typeof organizationKey === "string" && organizationKey.trim()
+    ? await resolveOrganizationId(organizationKey.trim())
+    : null;
+  // An organization the learner is not in answers like one that does not
+  // exist, before any of its scenarios is looked up.
+  if (typeof organizationKey === "string" && organizationKey.trim() && (!organizationId ||
+      !(await workerEnv.DB.prepare("SELECT 1 FROM member WHERE organization_id = ?1 AND user_id = ?2")
+        .bind(organizationId, caller.userId).first()))) {
+    return refuse(404, "scenario_not_found", "scenario not found");
+  }
+  // Refuse what the app cannot boot before a run exists. The admission
+  // anchors the same live revision again at its commit.
+  const revision = await liveScenarioRevision(workerEnv.DB, scenarioId, organizationId);
+  if (!revision) return refuse(404, "scenario_not_found", "scenario not found");
+  if (!guestContracts.includes(revision.guestContract)) {
+    return refuse(409, "upgrade_required", "this scenario needs a newer version of the app; update it");
+  }
+
+  try {
+    const started = await beginScenarioRun({
+      scenarioId,
+      userId: caller.userId,
+      idempotencyKey,
+      organizationId,
+      runtime: "local",
+    });
+    const run = await localRunView(workerEnv.DB, started.runId, caller.userId);
+    if (!run) return refuse(500, "local_run_missing", "the run started but could not be read");
+    return answer(run, { reused: started.reused }, started.reused ? 200 : 201);
+  } catch (error) {
+    if (!(error instanceof AppError)) throw error;
+    const { status, body: refusal } = toErrorResponse(error, "the run could not be started");
+    return jsonResponse({ ...refusal, protocol: DESKTOP_PROTOCOL }, { status, headers: { "cache-control": "no-store" } });
+  }
+}
+
+/** `GET /api/local/runs/<id>` and `POST /api/local/runs/<id>/end`. */
+export async function localRunRequest(
+  request: Request,
+  runId: string,
+  action: "read" | "end",
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  if (action === "end" && !(await endLocalRun({ d1: workerEnv.DB, runId, userId: caller.userId }))) {
+    return refuse(404, "run_not_found", "run not found");
+  }
+  const run = await localRunView(workerEnv.DB, runId, caller.userId);
+  return run ? answer(run) : refuse(404, "run_not_found", "run not found");
+}
+
+/**
+ * `POST /api/local/runs/<id>/report`: the app reports its VMs in the shape
+ * an agent host does (bridge 9 `VmStateV3`), and the same projection turns
+ * them into phases, task states and course completion. A report for a run
+ * the server has closed is refused; the answer says so, and the app stops.
+ *
+ * The server keeps no endpoint the device names: the terminal and network
+ * of a local VM stay on the learner's computer.
+ */
+// ponytail: no rate limit; each report is one bounded write by a signed-in
+// learner with an active run. Add a per-run limiter if that is abused.
+// ponytail: reports are ordered by the device's clock per VM, as a host's
+// are; add a sequence number if a device's clock proves unusable.
+export async function reportLocalRunRequest(
+  request: Request,
+  runId: string,
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  const d1 = workerEnv.DB;
+  const body = (await request.json().catch(() => null)) as { protocol?: unknown; vms?: unknown } | null;
+  if (body?.protocol !== DESKTOP_PROTOCOL) {
+    return refuse(409, "upgrade_required", "this version of the app is too old to report; update it");
+  }
+  const before = await localRunView(d1, runId, caller.userId);
+  if (!before) return refuse(404, "run_not_found", "run not found");
+  if (!before.active) {
+    return jsonResponse(
+      { error: "the run has ended", code: "run_closed", protocol: DESKTOP_PROTOCOL, run: before },
+      { status: 409, headers: { "cache-control": "no-store" } },
+    );
+  }
+  const hostId = localHostId(caller.userId);
+  const reported = Array.isArray(body.vms) ? body.vms : [];
+  if (reported.length === 0 || reported.length > before.machines.length) {
+    return refuse(400, "invalid_report", "vms must list one to all of the run's machines, each once");
+  }
+  const vms: VmStateV3[] = [];
+  for (const candidate of reported) {
+    const vm = candidate as VmStateV3;
+    const at = vm?.updated_at_unix_ms;
+    const valid = validateBridgeMessageV9({
+      type: "vm_report", protocol_version: 9, host_id: hostId,
+      report: { schema_version: 7, host_id: hostId, observed_at_unix_ms: at, vm },
+    });
+    if (!valid || vm.run_id !== runId || vm.owner_user_id !== caller.userId ||
+        vm.runtime_execution_id !== before.executionId || vm.generation !== before.generation ||
+        !before.machines.some((machine) => machine.name === vm.name) ||
+        vms.some((earlier) => earlier.name === vm.name)) {
+      return refuse(400, "invalid_report", "a reported VM is malformed or not of this run");
+    }
+    vms.push({ ...vm, network: null, ssh_host_keys_openssh: [], terminal: { state: "pending", observed_at_unix_ms: at } });
+  }
+  const outcome = await persistRunState(
+    d1,
+    runId,
+    (latest) => vms.reduce((state, vm) => applyVmStateV3ToRunState({ runId, current: state, vm }), latest),
+    {
+      keepDeleteRequestedAt: true,
+      expectedExecution: { id: before.executionId!, ownerUserId: caller.userId, generation: before.generation! },
+    },
+  );
+  if (outcome.kind !== "updated") {
+    // An unchanged report still shows the device is there (LOCAL_RUN_SILENCE_MS).
+    await d1.prepare(
+      `UPDATE scenario_runs SET updated_at = max(updated_at + 1, ?2)
+        WHERE run_id = ?1 AND runtime = 'local' AND active_key IS NOT NULL`,
+    ).bind(runId, Date.now()).run();
+  }
+  const run = await localRunView(d1, runId, caller.userId);
+  return run ? answer(run) : refuse(404, "run_not_found", "run not found");
+}
+
+/**
+ * `GET /api/local/catalog`: the courses the learner sees on the website,
+ * public ones and those of every organization they are in, with each
+ * lecture's scenario and where the learner stands in it. A lecture names the
+ * `scenarioId`, and its course the `organizationId`, that a start takes.
+ * No admin option applies: a locked lecture stays locked.
+ */
+export async function localCatalogRequest(
+  request: Request,
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  const { courses } = await listCourseCatalogForUser({
+    db: drizzle(workerEnv.DB),
+    userId: caller.userId,
+    organizationId: null,
+    local: true,
+  });
+  return jsonResponse({ protocol: DESKTOP_PROTOCOL, courses }, { headers: { "cache-control": "no-store" } });
+}

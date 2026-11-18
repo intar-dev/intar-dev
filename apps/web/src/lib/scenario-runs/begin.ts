@@ -94,6 +94,8 @@ export interface BeginScenarioRunInput {
   launchSource?: "play";
   /** Where the play page was opened from, as the start route validated it. */
   ref?: string;
+  /** The VMs run on the learner's own computer; no host is scheduled. */
+  runtime?: "local";
 }
 
 export interface BeginScenarioRunResult {
@@ -283,6 +285,7 @@ function scenarioStartRequestScope(
     allowDrainedAdminProof: input.allowDrainedAdminProof === true,
     allowSequenceBypass: input.allowSequenceBypass === true,
     ...(input.launchSource === "play" ? { launchSource: "play" as const, ref: input.ref ?? null } : {}),
+    ...(input.runtime === "local" ? { runtime: "local" as const } : {}),
   };
 }
 
@@ -444,6 +447,11 @@ export interface AdmissionCommitInput {
   verifyScopeKey?: string | null;
   /** The verify run is a restore check of a verified revision. */
   verifyRestoreCheck?: boolean;
+  /**
+   * A local run: its host is the learner's placeholder, and nothing is
+   * written for a host (desired state, CPU quota, resource reservation).
+   */
+  local?: boolean;
   now: number;
 }
 
@@ -610,6 +618,19 @@ export interface AdmissionBatch {
 /** @internal Exported for adversarial D1-boundary tests. */
 export function admissionStatements(input: AdmissionCommitInput): AdmissionBatch {
   const run = input.run;
+  if (input.local) {
+    return {
+      statements: [
+        runtimeExecutionStatement(run, input),
+        insertRunStatement(run, input),
+        runRefusedSentinelStatement(run, input),
+        ...sshKeyStatements(run, input.sshKeyRows),
+        ...runtimeVmStatements(run, input),
+        activeSlotStatement(run),
+      ],
+      runGateIndex: 1,
+    };
+  }
   const statements = [
     // The run references the execution, so insert the execution first. Both
     // require an active owner account through the placement guard. The run
@@ -677,6 +698,7 @@ const RUN_INSERT_COLUMNS = [
   "tasks_json",
   "launch_source",
   "ref",
+  "runtime",
 ];
 
 /**
@@ -739,6 +761,7 @@ function insertRunStatement(
     run.tasksJson ? JSON.stringify(run.tasksJson) : null,
     run.launchSource ?? null,
     run.ref ?? null,
+    run.runtime ?? "platform",
   ];
   const hostParam = values.length + 1;
   const userParam = values.length + 2;
@@ -770,10 +793,14 @@ function insertRunStatement(
     " FROM agent_hosts host" +
     " WHERE host.id = ?" +
     String(hostParam) +
-    " AND host.disabled = 0 AND host.role = 'agent'" +
-    " AND host.scenario_enabled = 1" +
-    " AND " + metalAdmissionSql("?" + String(userParam), "?3") +
-    " AND " + admissionHostReadinessCondition(readinessParam) +
+    (input.local
+      // The learner's own placeholder, and an active owner: there is no
+      // host to be enabled, placed on or ready.
+      ? " AND " + localOwnerSql("?" + String(userParam), "?3")
+      : " AND host.disabled = 0 AND host.role = 'agent'" +
+        " AND host.scenario_enabled = 1" +
+        " AND " + metalAdmissionSql("?" + String(userParam), "?3") +
+        " AND " + admissionHostReadinessCondition(readinessParam)) +
     " AND " + admissionContentAccessCondition(contentParam) +
     drainGateCondition(input.allowDrainedAdminProof) +
     (anchorCondition ? " AND " + anchorCondition : "") +
@@ -783,9 +810,22 @@ function insertRunStatement(
     run.hostId,
     run.userId,
     ...anchorParams,
-    JSON.stringify(input.desired.readiness),
+    // A local run reads no readiness; the slot keeps the numbering.
+    JSON.stringify(input.local ? {} : input.desired.readiness),
     JSON.stringify(admissionContentAccess(run, input.allowDrainedAdminProof)),
   );
+}
+
+/**
+ * The owner guard of a local run, on the joined placeholder `host`: it is
+ * the owner's own, the account is active, and the owner belongs to the run's
+ * organization if it has one.
+ */
+function localOwnerSql(userParameter: string, organizationParameter: string): string {
+  return `host.user_id = ${userParameter} AND host.disabled = 1` +
+    ` AND ${activeAccountExistsSql(userParameter)}` +
+    ` AND (${organizationParameter} IS NULL OR EXISTS (SELECT 1 FROM member membership` +
+    ` WHERE membership.user_id = ${userParameter} AND membership.organization_id = ${organizationParameter}))`;
 }
 
 function sshKeyStatements(
@@ -902,8 +942,10 @@ function runtimeExecutionStatement(
       " 'scenario', ?2, 1, NULL, NULL, 'provisioning', ?6," +
       " NULL, NULL, ?7, ?7" +
       " FROM agent_hosts host" +
-      " WHERE host.id = ?5 AND host.disabled = 0" +
-      " AND " + metalAdmissionSql("?3", "?4"),
+      " WHERE host.id = ?5 AND " +
+      (input.local
+        ? localOwnerSql("?3", "?4")
+        : "host.disabled = 0 AND " + metalAdmissionSql("?3", "?4")),
   ).bind(
     run.runtimeExecutionId ?? null,
     run.runId,

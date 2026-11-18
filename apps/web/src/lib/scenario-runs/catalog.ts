@@ -98,6 +98,7 @@ export async function listScenarioRunsForUser(params: {
       failedAt: scenarioRuns.failedAt,
       deleteRequestedAt: scenarioRuns.deleteRequestedAt,
       solutionAssisted: scenarioRuns.solutionAssisted,
+      runtime: scenarioRuns.runtime,
     })
     .from(scenarioRuns)
     .where(eq(scenarioRuns.userId, params.userId))
@@ -144,6 +145,7 @@ export async function listScenarioRunsForUser(params: {
         solvedAt: row.solvedAt,
       }),
       solutionAssisted: row.solutionAssisted,
+      local: row.runtime === "local",
       hasReplay: replayState === "ready",
     };
   });
