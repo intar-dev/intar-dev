@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.22.2 (2026-11-18)
+
+### Bug fixes
+
+- **intar-agent:** Report a host's CPU as free while a lab starts (#385) (75b8d9a7)
+
 ## agent/v0.22.1 (2026-11-18)
 
 ### Performance
