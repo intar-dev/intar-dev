@@ -18,6 +18,9 @@ use crate::contract::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use intar_contracts::bridge_v9::VmStateV3;
+use intar_contracts::run_cli::{
+    RUN_CLI_MAX_FRAME_BYTES, RunCliRequestV1, RunCliResponseV1, RunCliResultV1,
+};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
@@ -278,6 +281,40 @@ impl Subspace {
         .await
     }
 
+    /// Passes on what the learner's `intar` command in a guest asked, for the
+    /// machine named `machine`, and returns intar's answer. intar answers a
+    /// refused command with an error result the command can render, whatever
+    /// the HTTP status; only an answer that is no run CLI response at all is
+    /// an [`Error`].
+    pub async fn run_cli(
+        &self,
+        run_id: &str,
+        machine: &str,
+        request: &RunCliRequestV1,
+    ) -> Result<RunCliResponseV1, Error> {
+        let path = format!("/api/local/runs/{run_id}/machines/{machine}/cli");
+        let response = self.send(Method::POST, &path, Some(request), None).await?;
+        let status = response.status();
+        let refused = || Error::Refused {
+            status: status.as_u16(),
+            code: "run_cli".to_owned(),
+            message: "intar did not answer the command".to_owned(),
+            run: None,
+        };
+        let bytes = response.bytes().await?;
+        // The broker's frame limit; intar keeps its answers below it.
+        if bytes.len() > RUN_CLI_MAX_FRAME_BYTES {
+            return Err(refused());
+        }
+        let answer: RunCliResponseV1 = serde_json::from_slice(&bytes).map_err(|_| refused())?;
+        // A success-shaped body behind a failed request is not trusted.
+        if status.is_success() || matches!(answer.result, RunCliResultV1::Error { .. }) {
+            Ok(answer)
+        } else {
+            Err(refused())
+        }
+    }
+
     /// Reports one to all of the run's VMs. A closed run answers
     /// [`Error::Refused`] with code `run_closed` and the run: stop its VMs.
     pub async fn report(
@@ -305,6 +342,35 @@ impl Subspace {
         body: Option<&B>,
         idempotency_key: Option<&str>,
     ) -> Result<T, Error> {
+        let response = self.send(method, path, body, idempotency_key).await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response.json().await?);
+        }
+        let refusal: Option<LocalRunRefusalV1> = response.json().await.ok();
+        Err(Error::Refused {
+            status: status.as_u16(),
+            code: refusal
+                .as_ref()
+                .and_then(|refusal| refusal.code.clone())
+                .unwrap_or_default(),
+            message: refusal
+                .as_ref()
+                .map(|refusal| refusal.error.clone())
+                .unwrap_or_default(),
+            run: refusal.and_then(|refusal| refusal.run).map(Box::new),
+        })
+    }
+
+    /// Sends one request with the access token, refreshing it once when the
+    /// server refuses it. Any other answer is the caller's to read.
+    async fn send<B: Serialize>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+        idempotency_key: Option<&str>,
+    ) -> Result<reqwest::Response, Error> {
         let url = self.base.join(path)?;
         // One refresh per call: a second 401 means the sign-in is gone.
         for refreshed in [false, true] {
@@ -325,30 +391,13 @@ impl Subspace {
                 request = request.header("idempotency-key", key);
             }
             let response = request.send().await?;
-            let status = response.status();
-            if status == StatusCode::UNAUTHORIZED && !refreshed {
-                self.refresh(&access_token).await?;
-                continue;
+            if response.status() != StatusCode::UNAUTHORIZED {
+                return Ok(response);
             }
-            if status == StatusCode::UNAUTHORIZED {
-                return Err(Error::SignedOut);
+            if refreshed {
+                break;
             }
-            if status.is_success() {
-                return Ok(response.json().await?);
-            }
-            let refusal: Option<LocalRunRefusalV1> = response.json().await.ok();
-            return Err(Error::Refused {
-                status: status.as_u16(),
-                code: refusal
-                    .as_ref()
-                    .and_then(|refusal| refusal.code.clone())
-                    .unwrap_or_default(),
-                message: refusal
-                    .as_ref()
-                    .map(|refusal| refusal.error.clone())
-                    .unwrap_or_default(),
-                run: refusal.and_then(|refusal| refusal.run).map(Box::new),
-            });
+            self.refresh(&access_token).await?;
         }
         Err(Error::SignedOut)
     }

@@ -141,6 +141,52 @@ async fn act(
     )
 }
 
+/// intar's run CLI route: a view for `web`, a renderable error behind a 400
+/// for a bad command, and something that is no answer for `broken`.
+async fn cli(
+    State(shared): State<Shared>,
+    headers: HeaderMap,
+    Path((_, machine)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    if !bearer_ok(&shared.lock().expect("lock"), &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized", "code": "signed_out" })),
+        );
+    }
+    let id = body["request_id"].clone();
+    match machine.as_str() {
+        "web" if body["action"]["kind"] == "status" => {
+            let mut answer: Value = serde_json::from_str(include_str!(
+                "../../intar-contracts/fixtures/run-cli/response-v1.json"
+            ))
+            .expect("fixture");
+            answer["request_id"] = id;
+            (StatusCode::OK, Json(answer))
+        }
+        "web" => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({ "protocol_version": 1, "request_id": id, "result": { "kind": "error",
+                "error": { "code": "locked", "message": "No hint is ready for that check.", "retryable": false } } }),
+            ),
+        ),
+        "liar" => {
+            let mut answer: Value = serde_json::from_str(include_str!(
+                "../../intar-contracts/fixtures/run-cli/response-v1.json"
+            ))
+            .expect("fixture");
+            answer["request_id"] = id;
+            (StatusCode::BAD_GATEWAY, Json(answer))
+        }
+        _ => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "upstream" })),
+        ),
+    }
+}
+
 async fn serve() -> (Url, Shared) {
     let shared = Shared::default();
     let app = Router::new()
@@ -156,6 +202,7 @@ async fn serve() -> (Url, Shared) {
                         "blockedBy": null, "activeRunId": null, "scenarioReady": true }] }] }))
             }),
         )
+        .route("/api/local/runs/{id}/machines/{machine}/cli", post(cli))
         .route("/api/local/runs", post(start))
         .route("/api/local/runs/{id}/{action}", post(act))
         .route(
@@ -255,6 +302,41 @@ async fn signs_in_and_drives_a_run() {
     );
     assert_eq!(stale.tokens().await.access_token, "access-8");
     assert_eq!(shared.lock().expect("lock").refreshes, 1);
+
+    // The guest's `intar` command, passed on: a view, a renderable refusal
+    // behind an error status, and answers that are not to be trusted.
+    let command = |kind: &str| -> intar_contracts::run_cli::RunCliRequestV1 {
+        serde_json::from_value(
+            json!({ "protocol_version": 1, "request_id": "r1", "action": { "kind": kind } }),
+        )
+        .expect("request")
+    };
+    let view = stale
+        .run_cli("run-1", "web", &command("status"))
+        .await
+        .expect("status");
+    assert!(matches!(
+        view.result,
+        intar_contracts::run_cli::RunCliResultV1::Ok { .. }
+    ));
+    assert_eq!(view.request_id, "r1");
+    let locked = stale
+        .run_cli("run-1", "web", &command("hints"))
+        .await
+        .expect("a renderable refusal");
+    assert!(matches!(
+        locked.result,
+        intar_contracts::run_cli::RunCliResultV1::Error { .. }
+    ));
+    for machine in ["liar", "broken"] {
+        assert!(
+            matches!(
+                stale.run_cli("run-1", machine, &command("status")).await,
+                Err(Error::Refused { .. })
+            ),
+            "{machine}"
+        );
+    }
 
     // A closed run comes back with the refusal, so the caller can stop its VMs.
     assert!(!stale.end_run("run-1").await.expect("end").run.active);
