@@ -6,6 +6,11 @@
 //! scenario content, parks, and is snapshotted. Later single-VM runs of the
 //! shape are restored from it and woken; a restore that does not get the
 //! guest to `SSH_READY` is abandoned and the run cold-boots.
+//!
+//! A snapshot lives a week. The host remembers what each shape's capture is
+//! made from (its recipe), and a sweep captures a shape again before its
+//! snapshot expires, and when it has none: after a host boot, or when the
+//! Kino pin changed.
 
 #![cfg_attr(
     not(target_os = "linux"),
@@ -46,11 +51,17 @@ const CHECK_CID: u32 = KINO_VSOCK_CID_MIN - 1;
 const PARKED_TIMEOUT: Duration = Duration::from_secs(240);
 /// A restore from an uncached memory file answered after up to 8.6 s.
 pub(super) const RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Tested: restores within the host boot that took the snapshot, under an
-/// hour old. Longer lives need their own proof first.
-const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-/// A shape in use is captured again before it expires.
-const REFRESH_AGE: Duration = Duration::from_secs(20 * 60 * 60);
+/// Within the host boot that took the snapshot. Tested: a guest that is
+/// told on its wake that seven days passed (#387).
+const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// A shape is captured again a day before its snapshot expires.
+const REFRESH_AGE: Duration = Duration::from_secs(6 * 24 * 60 * 60);
+const SWEEP_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// A shape no run asked for in this long is not captured again: a scenario
+/// that changed its machine leaves its old shape behind on the same image.
+const RECIPE_IDLE_SECS: i64 = 30 * 24 * 60 * 60;
+/// In the image cache root, beside its directories.
+const RECIPES_FILENAME: &str = "snapshot-recipes.json";
 const RESTORE_FAILURES_TO_REMOVE: u32 = 2;
 const CAPTURE_FAILURES_PER_DAY: u32 = 3;
 
@@ -87,7 +98,82 @@ pub(super) fn abandoned(key: &Sha256Digest, error: &anyhow::Error) -> anyhow::Er
     .into()
 }
 
-/// Everything a capture needs, taken from the cold boot that asked for it.
+/// What a capture of one image and shape is made from, kept across agent
+/// starts and host boots. The Kino is not part of it: a capture uses the
+/// one the site pins.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct Recipe {
+    image: OciDigest,
+    /// Of the shape's latest run; a capture drops its scripts.
+    spec: OciDigest,
+    cpu_millis: u32,
+    memory_mib: u32,
+    disk_mib: Option<u32>,
+    hostname: String,
+    egress: bool,
+    dns: Vec<String>,
+    /// The snapshot last taken or used for this recipe.
+    key: Option<String>,
+    /// When a run of the shape last booted.
+    #[serde(default)]
+    last_run_unix_s: i64,
+}
+
+impl Recipe {
+    /// One recipe per image and shape.
+    fn id(&self) -> String {
+        format!(
+            "{} {} {} {:?} {} {} {}",
+            self.image.hex(),
+            self.cpu_millis,
+            self.memory_mib,
+            self.disk_mib,
+            self.hostname,
+            self.egress,
+            self.dns.join(",")
+        )
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Standing {
+    /// No run of it comes back: the site dropped its image and the host no
+    /// longer holds it, or nothing ran it for a month.
+    Forget,
+    /// Held but not pinned right now.
+    Skip,
+    Keep,
+}
+
+fn standing(recipe: &Recipe, pinned: bool, held: bool, now_unix_s: i64) -> Standing {
+    if now_unix_s.saturating_sub(recipe.last_run_unix_s) >= RECIPE_IDLE_SECS || !(pinned || held) {
+        Standing::Forget
+    } else if pinned && held {
+        Standing::Keep
+    } else {
+        Standing::Skip
+    }
+}
+
+/// What the sweep does about one kept recipe: the snapshot to remove because
+/// the recipe asks for another key now, and whether to capture.
+fn renewal(
+    recipe: &Recipe,
+    wanted: &str,
+    usable: &BTreeMap<String, SnapshotInfo>,
+) -> (Option<SnapshotInfo>, bool) {
+    let superseded = recipe
+        .key
+        .as_deref()
+        .filter(|key| *key != wanted)
+        .and_then(|key| usable.get(key).cloned());
+    let due = usable
+        .get(wanted)
+        .is_none_or(|snapshot| age_of(snapshot) >= REFRESH_AGE);
+    (superseded, due)
+}
+
+/// Everything a capture needs.
 pub(super) struct CaptureJob {
     key: Sha256Digest,
     ready: image_cache::ReadyImage,
@@ -117,6 +203,13 @@ pub(super) struct Snapshots {
     allow_unstable_tsc: bool,
     /// Published and test-restored, by key.
     usable: SyncMutex<BTreeMap<String, SnapshotInfo>>,
+    /// By `Recipe::id`; the file in the cache root holds the same.
+    recipes: SyncMutex<BTreeMap<String, Recipe>>,
+    /// Held from a change of the recipes until their file is written.
+    recipes_file: Mutex<()>,
+    /// The snapshot a running capture is about to replace, until it removes
+    /// it from the store: a capture that ends before that puts it back.
+    replacing: SyncMutex<Option<SnapshotInfo>>,
     loaded: OnceCell<()>,
     /// VMs that were restored: their connections are answered with `Wake`.
     restored: SyncMutex<BTreeSet<String>>,
@@ -132,6 +225,9 @@ impl Snapshots {
             enabled: config.enabled,
             allow_unstable_tsc: config.allow_unstable_tsc,
             usable: SyncMutex::default(),
+            recipes: SyncMutex::default(),
+            recipes_file: Mutex::new(()),
+            replacing: SyncMutex::default(),
             loaded: OnceCell::new(),
             restored: SyncMutex::default(),
             counters: SyncMutex::default(),
@@ -388,6 +484,13 @@ async fn load(inner: &Inner) {
                     usable.insert(snapshot.key.as_str().to_owned(), snapshot);
                 }
             }
+            let recipes = match image_cache::default_cache_root() {
+                Ok(cache_root) => read_recipes(&cache_root.join(RECIPES_FILENAME)).await,
+                Err(_) => BTreeMap::new(),
+            };
+            if let Ok(mut known) = inner.snapshots.recipes.lock() {
+                *known = recipes;
+            }
         })
         .await;
 }
@@ -416,15 +519,6 @@ pub(super) async fn restore_key(
         return None;
     }
     Some(key)
-}
-
-/// Whether the snapshot a run was restored from is due for its refresh.
-pub(super) fn refresh_due(inner: &Inner, key: &Sha256Digest) -> bool {
-    inner.snapshots.usable.lock().is_ok_and(|usable| {
-        usable
-            .get(key.as_str())
-            .is_some_and(|snapshot| age_of(snapshot) >= REFRESH_AGE)
-    })
 }
 
 /// The launch request's snapshot mode for a run.
@@ -524,10 +618,67 @@ pub(super) async fn restore_failed(inner: &Inner, abandoned: &RestoreAbandoned) 
     }
 }
 
-/// After a cold boot of a single-VM run: capture its shape in the
-/// background, unless a snapshot exists, one is queued, or captures of it
-/// keep failing today.
-pub(super) async fn queue_capture(
+/// A recipes file that is missing or unreadable is an empty one: the next
+/// run of each shape writes its recipe again.
+async fn read_recipes(path: &Path) -> BTreeMap<String, Recipe> {
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
+        Err(error) => {
+            warn!(error = %error, path = %path.display(), "failed to read the snapshot recipes");
+            return BTreeMap::new();
+        }
+    };
+    serde_json::from_slice::<Vec<Recipe>>(&bytes).map_or_else(
+        |error| {
+            warn!(error = %error, path = %path.display(), "the snapshot recipes are invalid");
+            BTreeMap::new()
+        },
+        |recipes| {
+            recipes
+                .into_iter()
+                .map(|recipe| (recipe.id(), recipe))
+                .collect()
+        },
+    )
+}
+
+/// After a host boot the recipes are all that says what to capture, so the
+/// file is on disk before it takes its name.
+async fn write_recipes(path: &Path, recipes: Vec<Recipe>) -> Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+    let temporary = path.with_extension("json.tmp");
+    let mut file = tokio::fs::File::create(&temporary).await?;
+    file.write_all(&serde_json::to_vec(&recipes)?).await?;
+    file.sync_all().await?;
+    drop(file);
+    tokio::fs::rename(&temporary, path).await?;
+    Ok(())
+}
+
+/// Change the recipes and, when that changed anything, their file.
+async fn update_recipes(inner: &Inner, change: impl FnOnce(&mut BTreeMap<String, Recipe>)) {
+    let _file = inner.snapshots.recipes_file.lock().await;
+    let changed = inner.snapshots.recipes.lock().ok().and_then(|mut recipes| {
+        let before = recipes.clone();
+        change(&mut recipes);
+        (*recipes != before).then(|| recipes.values().cloned().collect::<Vec<_>>())
+    });
+    let Some(recipes) = changed else {
+        return;
+    };
+    let written = match image_cache::default_cache_root() {
+        Ok(cache_root) => write_recipes(&cache_root.join(RECIPES_FILENAME), recipes).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = written {
+        warn!(error = %format!("{error:#}"), "failed to write the snapshot recipes");
+    }
+}
+
+/// After a single-VM run booted: remember what its shape is captured from,
+/// and capture it when the run cold-booted or its snapshot is due.
+pub(super) async fn after_boot(
     inner: &Arc<Inner>,
     req: &RunCreateInput<'_>,
     ready: &image_cache::ReadyImage,
@@ -535,9 +686,153 @@ pub(super) async fn queue_capture(
     if !available(inner) || !req.peer_guest_ips.is_empty() {
         return;
     }
+    load(inner).await;
     let Ok(key) = run_key(inner, req, ready).await else {
         return;
     };
+    let recipe = Recipe {
+        image: req.image.clone(),
+        spec: req.spec.clone(),
+        cpu_millis: req.cpu_millis,
+        memory_mib: req.memory_mib,
+        disk_mib: req.disk_mib,
+        hostname: req.hostname.to_owned(),
+        egress: req.egress,
+        dns: req.network.dns.clone(),
+        key: Some(key.as_str().to_owned()),
+        last_run_unix_s: now_unix_s(),
+    };
+    update_recipes(inner, |recipes| {
+        recipes.insert(recipe.id(), recipe.clone());
+    })
+    .await;
+    // Only now: a refresh takes the old snapshot away, which must not race
+    // this run's own restore. A cold boot beside a good snapshot (a run that
+    // may not restore) captures nothing.
+    let due = inner
+        .snapshots
+        .usable
+        .lock()
+        .is_ok_and(|usable| renewal(&recipe, key.as_str(), &usable).1);
+    if due {
+        queue_capture(inner, &recipe, ready, req.kino, key).await;
+    }
+}
+
+/// Every ten minutes: remove what expired, and capture every remembered
+/// shape that has no snapshot or one that is due.
+pub(super) fn spawn_sweep(inner: &Arc<Inner>) {
+    let inner = Arc::clone(inner);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(SWEEP_INTERVAL).await;
+            sweep(&inner).await;
+        }
+    });
+}
+
+async fn sweep(inner: &Arc<Inner>) {
+    if !available(inner) {
+        return;
+    }
+    load(inner).await;
+    let usable = || {
+        inner
+            .snapshots
+            .usable
+            .lock()
+            .map_or_else(|_| BTreeMap::new(), |usable| usable.clone())
+    };
+    for snapshot in usable().values() {
+        if age_of(snapshot) >= MAX_AGE {
+            info!(key = snapshot.key.as_str(), "removing an expired snapshot");
+            remove(inner, snapshot).await;
+        }
+    }
+    // Without the site's pins nothing says which shapes are still wanted.
+    let Some(desired) = crate::bridge::load_cached_desired_state(&inner.bridge, &inner.db).await
+    else {
+        return;
+    };
+    let Some(kino) = desired.kino_pin.as_ref() else {
+        return;
+    };
+    let (Ok(capabilities), Ok(cache_root)) = (
+        cached_jailer_launch_capabilities(inner).await,
+        image_cache::default_cache_root(),
+    ) else {
+        return;
+    };
+    let recipes = inner
+        .snapshots
+        .recipes
+        .lock()
+        .map_or_else(|_| BTreeMap::new(), |recipes| recipes.clone());
+    for (id, recipe) in recipes {
+        let pinned = desired.cached_images.contains(&recipe.image);
+        let ready = image_cache::require_ready_image(&cache_root, &recipe.image)
+            .await
+            .ok();
+        let ready = match standing(&recipe, pinned, ready.is_some(), now_unix_s()) {
+            Standing::Keep => ready,
+            Standing::Skip => None,
+            Standing::Forget => {
+                info!(recipe = id, "forgetting a snapshot recipe no run asks for");
+                update_recipes(inner, |recipes| {
+                    recipes.remove(&id);
+                })
+                .await;
+                // Its snapshot is nobody's now and leaves when it expires.
+                None
+            }
+        };
+        let Some(ready) = ready else {
+            continue;
+        };
+        let Ok(key) = key_of(
+            &Shape {
+                ready: &ready,
+                kino,
+                cpu_millis: recipe.cpu_millis,
+                memory_mib: recipe.memory_mib,
+                root_disk_size_bytes: root_disk_size_bytes(&ready, recipe.disk_mib),
+                hostname: &recipe.hostname,
+                egress: recipe.egress,
+                dns: &recipe.dns,
+            },
+            &capabilities.cloud_hypervisor_sha256,
+        ) else {
+            continue;
+        };
+        let (superseded, due) = renewal(&recipe, key.as_str(), &usable());
+        if let Some(snapshot) = superseded {
+            info!(
+                key = snapshot.key.as_str(),
+                "removing a snapshot its shape no longer starts from"
+            );
+            remove(inner, &snapshot).await;
+        }
+        update_recipes(inner, |recipes| {
+            if let Some(recipe) = recipes.get_mut(&id) {
+                recipe.key = Some(key.as_str().to_owned());
+            }
+        })
+        .await;
+        if due {
+            queue_capture(inner, &recipe, &ready, kino, key).await;
+        }
+    }
+}
+
+/// Capture a shape in the background, unless a capture of it is queued or
+/// captures of it keep failing today.
+async fn queue_capture(
+    inner: &Arc<Inner>,
+    recipe: &Recipe,
+    ready: &image_cache::ReadyImage,
+    kino: &OciDigest,
+    key: Sha256Digest,
+) {
     let today = now_unix_s() / 86_400;
     let failing = inner.snapshots.counters.lock().is_ok_and(|counters| {
         counters
@@ -545,26 +840,26 @@ pub(super) async fn queue_capture(
             .get(key.as_str())
             .is_some_and(|(count, day)| *day == today && *count >= CAPTURE_FAILURES_PER_DAY)
     });
-    let Some(vms_dir) = req
-        .config_disk_path
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-    else {
-        return;
-    };
     if failing {
         return;
     }
-    let Ok(cache_root) = image_cache::default_cache_root() else {
+    let (Ok(work_dir), Ok(cache_root)) = (
+        resolve_work_dir(&inner.defaults),
+        image_cache::default_cache_root(),
+    ) else {
         return;
     };
-    let Ok(spec) = inner
+    let spec = match inner
         .oci
-        .spec(req.spec, &image_cache::BlobStore::new(&cache_root))
+        .spec(&recipe.spec, &image_cache::BlobStore::new(&cache_root))
         .await
-    else {
-        return;
+    {
+        Ok(spec) => spec,
+        Err(error) => {
+            warn!(error = %format!("{error:#}"), key = key.as_str(), "a snapshot capture's spec is unavailable");
+            inner.snapshots.count_capture_failure(key.as_str());
+            return;
+        }
     };
     let newly_queued = inner
         .snapshots
@@ -577,21 +872,35 @@ pub(super) async fn queue_capture(
     let job = CaptureJob {
         key,
         ready: ready.clone(),
-        kino: req.kino.clone(),
+        kino: kino.clone(),
         spec,
-        cpu_millis: req.cpu_millis,
-        memory_mib: req.memory_mib,
-        disk_mib: req.disk_mib,
-        hostname: req.hostname.to_owned(),
-        egress: req.egress,
-        dns: req.network.dns.clone(),
-        vms_dir,
+        cpu_millis: recipe.cpu_millis,
+        memory_mib: recipe.memory_mib,
+        disk_mib: recipe.disk_mib,
+        hostname: recipe.hostname.clone(),
+        egress: recipe.egress,
+        dns: recipe.dns.clone(),
+        vms_dir: work_dir.join("vms"),
     };
     let inner = Arc::clone(inner);
     tokio::spawn(async move {
-        // One capture at a time.
+        // One capture at a time, and none while a run boots.
         let _lane = inner.snapshots.lane.lock().await;
+        image_cache::wait_for_vm_boot_idle().await;
         let key = job.key.clone();
+        // The queue can be an hour long: by now the Kino pin may have changed
+        // and no shape starts from this key any more.
+        let wanted = inner.snapshots.recipes.lock().is_ok_and(|recipes| {
+            recipes
+                .values()
+                .any(|recipe| recipe.key.as_deref() == Some(key.as_str()))
+        });
+        if !wanted {
+            if let Ok(mut queued) = inner.snapshots.queued.lock() {
+                queued.remove(key.as_str());
+            }
+            return;
+        }
         // A capture that fails or is aborted after its publish must not
         // leave an untested snapshot for the next agent start to trust.
         let unpublish = JailerRequest::RemoveSnapshot(RemoveSnapshotRequest {
@@ -609,8 +918,17 @@ pub(super) async fn queue_capture(
         if let Ok(mut current) = inner.snapshots.capture.lock() {
             *current = None;
         }
-        if let Ok(mut queued) = inner.snapshots.queued.lock() {
-            queued.remove(key.as_str());
+        // A capture that ended before it removed the snapshot it was about
+        // to replace: that one is still in the store, and nothing new is.
+        let kept = inner
+            .snapshots
+            .replacing
+            .lock()
+            .ok()
+            .and_then(|mut replacing| replacing.take());
+        let replaced = kept.is_none();
+        if let (Some(old), Ok(mut usable)) = (kept, inner.snapshots.usable.lock()) {
+            usable.insert(old.key.as_str().to_owned(), old);
         }
         match outcome {
             Ok(Ok(snapshot)) => {
@@ -631,18 +949,27 @@ pub(super) async fn queue_capture(
                 let busy = error
                     .downcast_ref::<JailerdError>()
                     .is_some_and(|error| error.0.code == "cpu_capacity_exhausted");
-                warn!(error = %format!("{error:#}"), key = key.as_str(), busy, "snapshot capture failed");
+                warn!(error = %format!("{error:#}"), key = key.as_str(), busy, replaced, "snapshot capture failed");
                 if !busy {
                     inner.snapshots.count_capture_failure(key.as_str());
                 }
                 clean_up_until_gone(&inner).await;
-                let _ = request_jailerd(&inner, unpublish).await;
+                if replaced {
+                    let _ = request_jailerd(&inner, unpublish).await;
+                }
             }
             // Aborted for a launch: not a failure.
             Err(_) => {
                 clean_up_until_gone(&inner).await;
-                let _ = request_jailerd(&inner, unpublish).await;
+                if replaced {
+                    let _ = request_jailerd(&inner, unpublish).await;
+                }
             }
+        }
+        // Only now, so that a sweep never sees the key neither queued nor
+        // usable.
+        if let Ok(mut queued) = inner.snapshots.queued.lock() {
+            queued.remove(key.as_str());
         }
     });
 }
@@ -902,6 +1229,18 @@ async fn read_frame(stream: &mut tokio::net::UnixStream) -> Result<Option<Vec<u8
 /// Capture, publish and test-restore one snapshot.
 #[cfg(target_os = "linux")]
 async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
+    // A refresh: runs stop being offered the old snapshot now, and it leaves
+    // the store only just before the new one is published, since a key is
+    // published once. VMs restored from it keep their links and clones.
+    let old = inner
+        .snapshots
+        .usable
+        .lock()
+        .ok()
+        .and_then(|mut usable| usable.remove(job.key.as_str()));
+    if let Ok(mut replacing) = inner.snapshots.replacing.lock() {
+        replacing.clone_from(&old);
+    }
     clean_up_until_gone(inner).await;
     // Snapshots past their age go, whatever their key: after a Kino pin
     // change or for a shape nobody runs any more, no run would ask for them.
@@ -918,16 +1257,6 @@ async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
     for snapshot in &expired {
         remove(inner, snapshot).await;
     }
-    // A refresh: runs stop being offered the old snapshot now, and it leaves
-    // the store only just before the new one is published, since a key is
-    // published once. VMs restored from it keep their links and clones.
-    let old = inner
-        .snapshots
-        .usable
-        .lock()
-        .ok()
-        .and_then(|mut usable| usable.remove(job.key.as_str()));
-
     // Capture: boot with no scenario content until Kino reports PARKED.
     let (launched, _) = launch(
         inner,
@@ -1001,6 +1330,9 @@ async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
     ch.vm_snapshot(&format!("file://{JAILED_SNAPSHOT_DIR}"))
         .await
         .context("capture vm.snapshot failed")?;
+    if let Ok(mut replacing) = inner.snapshots.replacing.lock() {
+        *replacing = None;
+    }
     if let Some(old) = &old {
         remove(inner, old).await;
     }
@@ -1107,5 +1439,111 @@ mod tests {
             Some(Ipv4Addr::new(10, 77, 255, 224))
         );
         assert_eq!(capture_subnet(pool, 2), None);
+    }
+
+    fn recipe(key: Option<&str>) -> Recipe {
+        let digest = |digit: &str| {
+            OciDigest::try_from(format!("sha256:{}", digit.repeat(64)))
+                .unwrap_or_else(|error| panic!("test digest: {error}"))
+        };
+        Recipe {
+            image: digest("1"),
+            spec: digest("2"),
+            cpu_millis: 2000,
+            memory_mib: 3072,
+            disk_mib: None,
+            hostname: "control-plane".to_owned(),
+            egress: false,
+            dns: Vec::new(),
+            key: key.map(str::to_owned),
+            last_run_unix_s: now_unix_s(),
+        }
+    }
+
+    fn snapshot(key: &str, age: Duration) -> (String, SnapshotInfo) {
+        let digest = |digit: &str| {
+            Sha256Digest::parse(digit.repeat(64))
+                .unwrap_or_else(|error| panic!("test digest: {error}"))
+        };
+        let captured = now_unix_ms() - i64::try_from(age.as_millis()).unwrap_or(i64::MAX);
+        let info = SnapshotInfo {
+            image_id: digest("a"),
+            key: digest(key),
+            cpu_millis: 2000,
+            memory_mib: 3072,
+            root_disk_size_bytes: 1,
+            captured_at_unix_ms: u64::try_from(captured).unwrap_or(0),
+            bytes_on_disk: 1,
+        };
+        (info.key.as_str().to_owned(), info)
+    }
+
+    #[test]
+    fn a_shape_is_captured_when_it_has_no_snapshot_or_a_due_one() {
+        let day = Duration::from_secs(24 * 60 * 60);
+        let (fresh_key, fresh) = snapshot("b", day);
+        let (due_key, due) = snapshot("c", 6 * day + Duration::from_secs(60));
+        let usable = BTreeMap::from([(fresh_key.clone(), fresh), (due_key.clone(), due.clone())]);
+
+        // Its snapshot is a day old: nothing to do.
+        assert_eq!(
+            renewal(&recipe(Some(&fresh_key)), &fresh_key, &usable),
+            (None, false)
+        );
+        // Six days old: captured again, and offered until then.
+        assert_eq!(
+            renewal(&recipe(Some(&due_key)), &due_key, &usable),
+            (None, true)
+        );
+        // The Kino pin changed, so the shape asks for a key nothing has:
+        // the old snapshot goes and the shape is captured.
+        let wanted = "d".repeat(64);
+        assert_eq!(
+            renewal(&recipe(Some(&due_key)), &wanted, &usable),
+            (Some(due), true)
+        );
+        // After a host boot the store is empty.
+        assert_eq!(
+            renewal(&recipe(Some(&fresh_key)), &fresh_key, &BTreeMap::new()),
+            (None, true)
+        );
+    }
+
+    #[test]
+    fn a_recipe_is_kept_while_its_image_is_pinned_and_runs_come() {
+        let now = now_unix_s();
+        let kept = recipe(None);
+        assert_eq!(standing(&kept, true, true, now), Standing::Keep);
+        // Being prepared again, or held but not pinned at the moment.
+        assert_eq!(standing(&kept, true, false, now), Standing::Skip);
+        assert_eq!(standing(&kept, false, true, now), Standing::Skip);
+        assert_eq!(standing(&kept, false, false, now), Standing::Forget);
+        // Pinned and held, but no run for a month.
+        assert_eq!(
+            standing(&kept, true, true, now + RECIPE_IDLE_SECS),
+            Standing::Forget
+        );
+    }
+
+    #[tokio::test]
+    async fn recipes_survive_an_agent_start() {
+        let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let path = directory.path().join(RECIPES_FILENAME);
+        assert!(read_recipes(&path).await.is_empty());
+
+        let kept = recipe(Some(&"b".repeat(64)));
+        write_recipes(&path, vec![kept.clone()])
+            .await
+            .unwrap_or_else(|error| panic!("write: {error}"));
+        assert_eq!(
+            read_recipes(&path).await,
+            BTreeMap::from([(kept.id(), kept)])
+        );
+
+        // A broken file is an empty one.
+        tokio::fs::write(&path, b"{")
+            .await
+            .unwrap_or_else(|error| panic!("write: {error}"));
+        assert!(read_recipes(&path).await.is_empty());
     }
 }
