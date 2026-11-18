@@ -10,8 +10,8 @@ use std::io::{Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 
 use intar_contracts::guest::{
-    BOOT_JSON_FILENAME, GUEST_CONTRACT, GuestBootV3, GuestNetworkV3, GuestSshV3, KINO_FILENAME,
-    RECORDING_DISK_LABEL, RUNTIME_DISK_LABEL,
+    BOOT_JSON_FILENAME, GUEST_CONTRACT, GuestBootV3, GuestHostV3, GuestNetworkV3, GuestSshV3,
+    KINO_FILENAME, RECORDING_DISK_LABEL, RUNTIME_DISK_LABEL,
 };
 use intar_contracts::scenario::{MachineSpecV1, SpecMode};
 
@@ -34,6 +34,8 @@ pub struct Boot<'a> {
     pub authorized_keys: &'a [String],
     /// The spec blob as pulled, already checked against its digest.
     pub spec: &'a [u8],
+    /// Where Kino reaches this computer; `None` is vsock, on a Linux host.
+    pub host: Option<GuestHostV3>,
 }
 
 /// The exact `boot.json` bytes for a learner's run.
@@ -74,6 +76,7 @@ pub fn boot_json(boot: &Boot<'_>) -> Result<Vec<u8>, Error> {
         root_resize: false,
         mode: SpecMode::Learn,
         spec,
+        host: boot.host.clone(),
     };
     serde_json::to_vec(&document).map_err(|error| Error::RunDisk(error.to_string()))
 }
@@ -146,6 +149,7 @@ mod tests {
             peers,
             authorized_keys: keys,
             spec: SPEC,
+            host: None,
         }
     }
 
@@ -205,6 +209,25 @@ mod tests {
         .expect("fat");
         assert_eq!(filesystem.volume_label(), "INTARREC");
         assert_eq!(filesystem.root_dir().iter().count(), 0);
+    }
+
+    #[test]
+    fn names_the_host_only_when_it_is_not_vsock() {
+        let peers = BTreeMap::new();
+        let keys = ["ssh-ed25519 AAAA one".to_owned()];
+        // Left out, the file is what an agent host writes.
+        let vsock = boot_json(&boot(&keys, &peers)).expect("boot.json");
+        assert!(!String::from_utf8_lossy(&vsock).contains("\"host\""));
+
+        let mut over_tcp = boot(&keys, &peers);
+        over_tcp.host = Some(GuestHostV3::Tcp {
+            address: "10.77.52.1".to_owned(),
+            report_port: 41081,
+            run_cli_port: 41082,
+        });
+        let document: GuestBootV3 =
+            serde_json::from_slice(&boot_json(&over_tcp).expect("boot.json")).expect("parse");
+        assert_eq!(document.host, over_tcp.host);
     }
 
     #[test]

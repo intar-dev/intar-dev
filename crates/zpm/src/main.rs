@@ -50,8 +50,14 @@ struct Args {
     #[arg(long, default_value_t = 2252)]
     ssh_port: u16,
     /// The guest's AF_VSOCK id for Kino's reports (Linux).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "tcp")]
     vsock_cid: Option<u32>,
+    /// Take Kino's reports over TCP instead, as on a host without vsock.
+    #[arg(long)]
+    tcp: bool,
+    /// With `--tcp`: answer every run CLI command with this response file (a test stand-in for intar).
+    #[arg(long, requires = "tcp")]
+    canned_run_cli: Option<PathBuf>,
     /// The machine image's architecture; this computer's by default.
     #[arg(long)]
     arch: Option<String>,
@@ -84,12 +90,43 @@ fn run(args: Args) -> Result<(), zpm::Error> {
     let _ = std::fs::remove_file(&overlay);
     create_overlay(&args.qemu_img, &args.root_base, &overlay)?;
 
+    // Listen before the guest exists, so its first report is not missed.
+    let (tcp_reports, run_cli) = if args.tcp {
+        let canned: Option<intar_contracts::run_cli::RunCliResponseV1> = match &args.canned_run_cli
+        {
+            Some(path) => Some(
+                serde_json::from_slice(&std::fs::read(path)?).map_err(|error| {
+                    zpm::Error::Qemu(format!(
+                        "the canned run CLI response is unreadable: {error}"
+                    ))
+                })?,
+            ),
+            None => None,
+        };
+        let broker = zpm::broker::serve_tcp(move |request| {
+            let mut response = canned.clone()?;
+            response.request_id.clone_from(&request.request_id);
+            Some(response)
+        })?;
+        (Some(zpm::reports::listen_tcp()?), Some(broker))
+    } else {
+        (None, None)
+    };
     let mut disks = vec![Disk {
         path: overlay,
         format: DiskFormat::Qcow2,
         read_only: false,
     }];
     if let (Some(spec), Some(kino), Some(ssh_key)) = (&args.spec, &args.kino, &args.ssh_key) {
+        // Kino dials the gateway address, which QEMU maps to this computer's loopback.
+        let host = match (&tcp_reports, &run_cli) {
+            (Some(reports), Some(run_cli)) => Some(intar_contracts::guest::GuestHostV3::Tcp {
+                address: "10.77.52.1".to_owned(),
+                report_port: reports.port,
+                run_cli_port: run_cli.port,
+            }),
+            _ => None,
+        };
         let json = boot_json(&Boot {
             hostname: "zpm",
             ip_cidr: "10.77.52.2/28",
@@ -98,6 +135,7 @@ fn run(args: Args) -> Result<(), zpm::Error> {
             peers: &Default::default(),
             authorized_keys: &[std::fs::read_to_string(ssh_key)?],
             spec: &std::fs::read(spec)?,
+            host,
         })?;
         let run_disk = args.dir.join("run.raw");
         write_run_disk(&run_disk, &json, &std::fs::read(kino)?)?;
@@ -148,9 +186,8 @@ fn run(args: Args) -> Result<(), zpm::Error> {
         qmp_socket: args.dir.join("qmp.sock"),
     };
     let qemu = args.qemu.unwrap_or_else(|| arch.qemu_binary().into());
-    // Listen before the guest exists, so its first report is not missed.
     #[cfg(target_os = "linux")]
-    let mut reports = match args.vsock_cid {
+    let mut vsock_reports = match args.vsock_cid {
         Some(_) => Some(zpm::reports::listen_vsock()?),
         None => None,
     };
@@ -159,31 +196,39 @@ fn run(args: Args) -> Result<(), zpm::Error> {
     println!("started with {accel:?}; ssh on 127.0.0.1:{}", args.ssh_port);
 
     let end = started + Duration::from_secs(args.seconds);
-    #[cfg(target_os = "linux")]
     let (mut ssh_seen, mut lab_seen) = (false, None);
+    let mut show = |report: zpm::reports::GuestReport| {
+        let ms = started.elapsed().as_millis();
+        if let Some(reason) = &report.failed {
+            println!("guest failed after {ms} ms: {reason}");
+        }
+        if report.ssh_ready && !ssh_seen {
+            ssh_seen = true;
+            println!("ssh ready after {ms} ms");
+        }
+        if lab_seen.as_ref() != Some(&report.lab.state) {
+            println!(
+                "lab {:?} after {ms} ms, {} task(s)",
+                report.lab.state,
+                report.lab.tasks.len()
+            );
+            lab_seen = Some(report.lab.state);
+        }
+    };
     while Instant::now() < end && vm.is_running() {
         #[cfg(target_os = "linux")]
-        while let Some(Ok((cid, report))) = reports.as_mut().map(|reports| reports.try_recv()) {
+        while let Some(Ok((cid, report))) = vsock_reports.as_mut().map(|reports| reports.try_recv())
+        {
             // Reports of another machine on this computer are not this run's.
-            if Some(cid) != args.vsock_cid {
-                continue;
+            if Some(cid) == args.vsock_cid {
+                show(report);
             }
-            let ms = started.elapsed().as_millis();
-            if let Some(reason) = &report.failed {
-                println!("guest failed after {ms} ms: {reason}");
-            }
-            if report.ssh_ready && !ssh_seen {
-                ssh_seen = true;
-                println!("ssh ready after {ms} ms");
-            }
-            if lab_seen.as_ref() != Some(&report.lab.state) {
-                println!(
-                    "lab {:?} after {ms} ms, {} task(s)",
-                    report.lab.state,
-                    report.lab.tasks.len()
-                );
-                lab_seen = Some(report.lab.state);
-            }
+        }
+        while let Some(Ok(report)) = tcp_reports
+            .as_ref()
+            .map(|listener| listener.reports.try_recv())
+        {
+            show(report);
         }
         std::thread::sleep(Duration::from_millis(20));
     }
