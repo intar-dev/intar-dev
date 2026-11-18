@@ -1,0 +1,31 @@
+[package]
+name = "jumper"
+version.workspace = true
+edition.workspace = true
+# src/ui/theme.rs and src/ui/text_input.rs are Apache-2.0 (LICENSE-APACHE).
+license = "MIT AND Apache-2.0"
+publish.workspace = true
+rust-version.workspace = true
+description = "The intar desktop app: run labs on your own computer."
+
+[dependencies]
+gpui.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
+subspace = { path = "../../crates/subspace" }
+tokio.workspace = true
+# Grapheme-aware cursor movement in the text input.
+unicode-segmentation.workspace = true
+url.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# runtime_shaders: builds without the Metal compiler that only full Xcode ships.
+gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = { workspace = true, features = ["wayland", "x11"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui_platform.workspace = true
+
+[lints]
+workspace = true

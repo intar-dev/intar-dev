@@ -64,6 +64,7 @@ lanes: {
 			"bun.lock",
 			// The loader and CLI tests and the release smoke read the example.
 			"content/**",
+			"apps/jumper/**",
 			"crates/**",
 			"deploy/personal-metal/**",
 			"apps/web/public/install.sh",

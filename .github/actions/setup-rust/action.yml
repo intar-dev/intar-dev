@@ -31,6 +31,17 @@ runs:
         rustup target add --toolchain 1.100.0 x86_64-unknown-linux-musl ${TARGETS}
         rustup show active-toolchain
 
+    # apps/jumper builds on GPUI, which links these on Linux. Every workspace
+    # build compiles it, so every Linux job that sets up Rust needs them.
+    - name: Install the desktop app's system libraries
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes --no-install-recommends \
+          pkg-config libfontconfig-dev libwayland-dev libxkbcommon-dev \
+          libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+
     - name: Set up Namespace caches
       if: inputs.namespace-cache == 'true'
       uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
