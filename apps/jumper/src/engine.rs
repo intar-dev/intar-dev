@@ -4,10 +4,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use subspace::{Error, SignIn, Subspace};
+use subspace::{Error, SignIn, Subspace, Tokens};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use url::Url;
 
+use crate::secrets::Keychain;
 use crate::state::{Command, Event};
 
 /// How long the learner has to finish in the browser.
@@ -31,11 +32,24 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
         .spawn(move || {
             runtime.block_on(async move {
                 let http = reqwest::Client::new();
-                // ponytail: tokens live in memory, so every launch signs in again;
-                // the OS keychain is next (#400).
+                let keychain = Keychain::new(&base);
                 let mut channel: Option<Arc<Subspace>> = None;
+                // What the keychain holds, to write only when a call changed the tokens.
+                let mut stored: Option<Tokens> = None;
                 while let Some(command) = inbox.recv().await {
                     let event = match command {
+                        Command::Restore => match keychain.load() {
+                            Ok(Some(tokens)) => {
+                                stored = Some(tokens.clone());
+                                channel = Some(Arc::new(Subspace::new(http.clone(), base.clone(), tokens)));
+                                Event::SignedIn
+                            }
+                            Ok(None) => Event::SignedOut,
+                            Err(error) => Event::Failed(format!("The keychain could not be read: {error}")),
+                        },
+                        // ponytail: the tokens are forgotten here but stay valid on the
+                        // server until they expire; revoke them once subspace can.
+                        Command::SignOut => Event::SignedOut,
                         Command::SignIn => match sign_in(&http, &base, &outbox).await {
                             Ok(signed_in) => {
                                 channel = Some(Arc::new(signed_in));
@@ -52,6 +66,28 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             },
                         },
                     };
+                    // Keep the keychain current: after a sign-in, after a refresh, and
+                    // empty once signed out, whether the learner or the server ended it.
+                    if matches!(event, Event::SignedOut) {
+                        channel = None;
+                    }
+                    let current = match &channel {
+                        Some(channel) => Some(channel.tokens().await),
+                        None => None,
+                    };
+                    if current != stored {
+                        let written = match &current {
+                            Some(tokens) => keychain.save(tokens),
+                            None => keychain.clear(),
+                        };
+                        stored = current;
+                        if let Err(error) = written {
+                            let note = format!("The keychain could not be updated, so the next launch may ask you to sign in again: {error}");
+                            if outbox.send(Event::Failed(note)).is_err() {
+                                break;
+                            }
+                        }
+                    }
                     if outbox.send(event).is_err() {
                         break;
                     }

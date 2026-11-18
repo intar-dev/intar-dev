@@ -2,6 +2,7 @@
 //! the learner's courses.
 
 mod engine;
+mod secrets;
 mod state;
 mod ui;
 
@@ -37,6 +38,8 @@ impl Jumper {
             cx.observe_window_appearance(window, |_, window, cx| theme::apply(window, cx)),
         ];
         theme::apply(window, cx);
+        // The engine answers with the stored sign-in or with "signed out".
+        let _ = commands.send(Command::Restore);
         Self {
             state: State::default(),
             commands,
@@ -112,6 +115,10 @@ impl Render for Jumper {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let content = match &self.state.screen {
+            Screen::Starting => card(p, "Opening your keychain…").child(muted(
+                p,
+                "intar keeps your sign-in there. Your computer may ask you to unlock it.",
+            )),
             Screen::SignedOut => card(p, "Sign in to intar")
                 .child(muted(
                     p,
@@ -135,7 +142,15 @@ impl Render for Jumper {
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .child(div().w(px(520.)).child(self.filter.clone()))
+                    .child(
+                        div()
+                            .w(px(520.))
+                            .flex()
+                            .gap_3()
+                            .items_center()
+                            .child(div().flex_1().child(self.filter.clone()))
+                            .child(self.button(p, "Sign out", || Command::SignOut, cx)),
+                    )
                     .children(courses.iter().map(|course| {
                         card(p, course.title.clone())
                             .child(muted(p, course.summary.clone()))

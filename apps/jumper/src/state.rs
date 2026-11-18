@@ -6,7 +6,10 @@ use subspace::contract::CatalogCourseV1;
 /// What the UI asks of the engine.
 #[derive(Debug)]
 pub enum Command {
+    /// Sent once at launch: use the stored sign-in, if there is one.
+    Restore,
     SignIn,
+    SignOut,
     LoadCatalog,
 }
 
@@ -23,7 +26,9 @@ pub enum Event {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub enum Screen {
+    /// Until the engine has looked in the keychain.
     #[default]
+    Starting,
     SignedOut,
     /// Waiting for the browser; the link is shown in case none opened.
     SigningIn(String),
@@ -55,7 +60,10 @@ impl State {
             Event::Failed(message) => {
                 self.error = Some(message);
                 // A failed sign-in or first load has nothing to show: start over.
-                if matches!(self.screen, Screen::SigningIn(_) | Screen::Loading) {
+                if matches!(
+                    self.screen,
+                    Screen::Starting | Screen::SigningIn(_) | Screen::Loading
+                ) {
                     self.screen = Screen::SignedOut;
                 }
             }
@@ -71,6 +79,10 @@ mod tests {
     #[test]
     fn follows_a_sign_in_to_the_catalog_and_back() {
         let mut state = State::default();
+        assert_eq!(state.screen, Screen::Starting);
+        // No stored sign-in.
+        state.apply(Event::SignedOut);
+        assert_eq!(state.screen, Screen::SignedOut);
         assert!(
             state
                 .apply(Event::SignInStarted("https://intar.dev/x".into()))
@@ -107,5 +119,11 @@ mod tests {
         ));
         assert_eq!(state.screen, Screen::SignedOut);
         assert!(state.error.is_some());
+
+        // A keychain that cannot be read at launch: signed out, with the reason.
+        let mut state = State::default();
+        state.apply(Event::Failed("keychain locked".into()));
+        assert_eq!(state.screen, Screen::SignedOut);
+        assert_eq!(state.error.as_deref(), Some("keychain locked"));
     }
 }

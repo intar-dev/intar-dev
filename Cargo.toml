@@ -31,6 +31,7 @@ rust-version = "1.100"
 
 [workspace.dependencies]
 anyhow = "=1.0.104"
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
 avt = "=0.19.0"
 axum = { version = "=0.8.9", default-features = false }
 blake3 = "=1.8.7"
@@ -57,6 +58,7 @@ hyper-util = { version = "=0.1.21", features = ["tokio"] }
 jsonpath-rust = "=1.0.12"
 jsonwebtoken = { version = "=11.1.0", features = ["rust_crypto"] }
 k8s-openapi = { version = "=0.28.0", features = ["v1_35"] }
+keyring-core = "=1.0.1"
 kube = { version = "=4.2.0", default-features = false, features = ["client", "config", "rustls-tls"] }
 log = "=0.4.34"
 nix = "=0.31.3"
@@ -98,9 +100,11 @@ tracing-opentelemetry = { version = "=0.34.0", default-features = false }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 unicode-segmentation = "=1.13.3"
 url = { version = "=2.5.8", features = ["serde"] }
+windows-native-keyring-store = "=1.1.0"
 uuid = { version = "=1.29.0", features = ["serde", "v4"] }
 zstd = "=0.14.3"
 zbus = { version = "=6.1.0", default-features = false, features = ["default-rt", "proxy"] }
+zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["rt-async-io-crypto-rust"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
