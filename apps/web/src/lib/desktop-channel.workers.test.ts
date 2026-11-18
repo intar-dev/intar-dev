@@ -10,7 +10,9 @@ import {
   DESKTOP_OAUTH_CLIENT_ID, localRunRequest, requireDesktopCaller, startLocalRunRequest, type LocalRunView,
 } from "@/lib/desktop-channel";
 import { guardBetterAuthRequest, guardCustomApiMutation } from "@/lib/request-security";
+import { ALL as authRoute } from "@/pages/api/auth/[...all]";
 import { ensureFixtureMember } from "@/test/account-fixtures";
+import { seedSessionCookie } from "@/test/auth-requests";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
   KINO, LEARNER, ORIGIN, STRANGER, machineImage, revisionDoc, seedScenario, specBlob, store,
@@ -62,12 +64,8 @@ describe("the desktop channel", () => {
       await db.insert(user).values({ id, name: id, email: `${id}@example.test` });
       await ensureFixtureMember({ d1: env.DB, userId: id });
     }
-    await env.DB.batch([
-      // The app's client belongs to nobody, so no account's deletion removes it.
-      env.DB.prepare("INSERT INTO oauth_client (id, client_id, redirect_uris, public) VALUES ('jumper-row', ?1, '[\"http://127.0.0.1/callback\"]', 1)")
-        .bind(DESKTOP_OAUTH_CLIENT_ID),
-      env.DB.prepare("INSERT INTO oauth_client (id, client_id, redirect_uris) VALUES ('other-row', 'other-app', '[\"https://other.example/callback\"]')"),
-    ]);
+    // The app's own client comes from a migration.
+    await env.DB.prepare("INSERT INTO oauth_client (id, client_id, redirect_uris) VALUES ('other-row', 'other-app', '[\"https://other.example/callback\"]')").run();
     expect(await store("application/vnd.intar.kino.v1", KINO_CONFIG_MEDIA_TYPE, { guest_contract: 3, version: "run-test" },
       [["application/octet-stream", "kino binary"]])).toBe(KINO);
     images = { web: await machineImage("web"), client: await machineImage("client") };
@@ -194,7 +192,7 @@ describe("the desktop channel", () => {
   });
 
   it("lets a native client through the origin guard only where it authenticates by token", async () => {
-    const guardEnv = { BETTER_AUTH_URL: ORIGIN };
+    const guardEnv = { BETTER_AUTH_URL: ORIGIN } as unknown as Pick<Cloudflare.Env, "BETTER_AUTH_URL">;
     const post = (path: string, headers: Record<string, string> = {}, body = "{}") =>
       new Request(`${ORIGIN}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
 
@@ -214,5 +212,64 @@ describe("the desktop channel", () => {
     // Everything else under better-auth still needs the browser's origin.
     expect((await guardBetterAuthRequest(form("/api/auth/sign-out"), guardEnv)).ok).toBe(false);
     expect((await guardBetterAuthRequest(form("/api/auth/oauth2/consent"), guardEnv)).ok).toBe(false);
+  });
+
+  it("signs the app in through the provider with the client a migration created", async () => {
+    const cookie = await seedSessionCookie({ id: "web-session", token: "web-session-token", userId: LEARNER, now: Date.now() });
+    const handle = (request: Request) => authRoute({ request } as Parameters<typeof authRoute>[0]) as Promise<Response>;
+    const SITE = "http://localhost"; // the auth base URL in tests
+    const redirectUri = "http://127.0.0.1:53123/callback";
+    const verifier = "v".repeat(64);
+    const challenge = await hashStoredOAuthToken(verifier);
+    const query = new URLSearchParams({
+      client_id: DESKTOP_OAUTH_CLIENT_ID, response_type: "code", redirect_uri: redirectUri,
+      scope: "offline_access local-runs", state: "state-0123456789", code_challenge: challenge, code_challenge_method: "S256",
+    });
+
+    const signIn = async () => {
+      // The browser, signed in on the website, is sent to the consent page.
+      const authorize = await handle(new Request(`${SITE}/api/auth/oauth2/authorize?${query}`, { headers: { cookie } }));
+      expect(authorize.status).toBe(302);
+      const consentPage = new URL(authorize.headers.get("location")!, SITE);
+      // Consent is asked once; a later sign-in returns to the app directly.
+      if (consentPage.href.startsWith(redirectUri)) return consentPage.searchParams.get("code")!;
+      expect(consentPage.pathname).toBe("/oauth/consent");
+      expect(await env.DB.prepare(
+        "SELECT user_id, public, require_pkce, skip_consent, disabled, token_endpoint_auth_method, scopes FROM oauth_client WHERE client_id = ?1",
+      ).bind(DESKTOP_OAUTH_CLIENT_ID).first()).toEqual({
+        user_id: null, public: 1, require_pkce: 1, skip_consent: 0, disabled: 0,
+        token_endpoint_auth_method: "none", scopes: '["offline_access","local-runs"]',
+      });
+
+      const consent = await handle(new Request(`${SITE}/api/auth/oauth2/consent`, {
+        method: "POST",
+        headers: { cookie, origin: SITE, "content-type": "application/json" },
+        body: JSON.stringify({ accept: true, oauth_query: consentPage.search.slice(1) }),
+      }));
+      expect(consent.status).toBe(200);
+      const back = new URL(((await consent.json()) as { url: string }).url);
+      expect(back.origin + back.pathname).toBe(redirectUri);
+      expect(back.searchParams.get("state")).toBe("state-0123456789");
+      return back.searchParams.get("code")!;
+    };
+
+    // The app, with no cookie and no origin, exchanges the code and its verifier.
+    const exchange = (fields: Record<string, string>) => handle(new Request(`${SITE}/api/auth/oauth2/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: DESKTOP_OAUTH_CLIENT_ID, ...fields }).toString(),
+    }));
+    const wrong = await exchange({ grant_type: "authorization_code", code: await signIn(), redirect_uri: redirectUri, code_verifier: "w".repeat(64) });
+    expect(wrong.status).toBeGreaterThanOrEqual(400);
+    const issued = await exchange({ grant_type: "authorization_code", code: await signIn(), redirect_uri: redirectUri, code_verifier: verifier });
+    expect(issued.status).toBe(200);
+    const tokens = (await issued.json()) as { access_token: string; refresh_token: string; scope: string } | null;
+    expect(tokens!.scope.split(" ").sort()).toEqual(["local-runs", "offline_access"]);
+    expect(await requireDesktopCaller(call(tokens!.access_token))).toMatchObject({ ok: true, userId: LEARNER });
+
+    const refreshed = await exchange({ grant_type: "refresh_token", refresh_token: tokens!.refresh_token });
+    expect(refreshed.status).toBe(200);
+    const next = (await refreshed.json()) as { access_token: string };
+    expect(await requireDesktopCaller(call(next.access_token))).toMatchObject({ ok: true, userId: LEARNER });
   });
 });

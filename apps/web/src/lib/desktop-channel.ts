@@ -19,8 +19,7 @@ import { isRevisionScenarioId } from "@/lib/scenario-id";
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
 import { liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
 
-/** The one OAuth client the routes accept. */
-// ponytail: a fixed id; the client row itself is created outside this file (see PR 410's plan).
+/** The one OAuth client the routes accept. Its row is created by a migration. */
 export const DESKTOP_OAUTH_CLIENT_ID = "intar-jumper";
 export const LOCAL_RUNS_SCOPE = "local-runs";
 /** Version of this channel's requests and answers. */
@@ -42,7 +41,8 @@ const signedOut = () =>
  * The learner behind the app's access token. The token must be the app's
  * own, unexpired and unrevoked, carry the local-runs scope, still have its
  * session if it was bound to one, and belong to an account that could sign
- * in now. A cookie is never read here.
+ * in now. A cookie is never read here. The provider stores the scopes as a
+ * JSON string holding the array; a plain array is read too.
  */
 export async function requireDesktopCaller(
   request: Request,
@@ -58,7 +58,8 @@ export async function requireDesktopCaller(
       WHERE token.token = ?1 AND token.client_id = ?2
         AND token.expires_at > ?3 AND token.revoked IS NULL
         AND coalesce(client.disabled, 0) = 0
-        AND EXISTS (SELECT 1 FROM json_each(token.scopes) scope WHERE scope.value = ?4)
+        AND EXISTS (SELECT 1 FROM json_each(CASE json_type(token.scopes)
+          WHEN 'text' THEN token.scopes ->> '$' ELSE token.scopes END) scope WHERE scope.value = ?4)
         AND (token.session_id IS NULL OR EXISTS (SELECT 1 FROM session bound
           WHERE bound.id = token.session_id AND bound.expires_at > ?3))
         AND ${activeAccountSql("owner")}

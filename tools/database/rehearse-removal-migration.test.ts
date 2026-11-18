@@ -64,7 +64,7 @@ describe("removal migration D1 rehearsal", () => {
         appliedCount: BASELINE,
       });
       // The removal migration, and the additive ones committed after it.
-      expect(evidence.appliedTags).toHaveLength(3);
+      expect(evidence.appliedTags).toHaveLength(4);
       expect(evidence.appliedMigrationCount).toBe(evidence.committedMigrationCount);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(evidence.droppedTables).toEqual([
@@ -118,7 +118,7 @@ describe("removal migration D1 rehearsal", () => {
     try {
       await applyBaselineMigrations(client, BASELINE);
       const applied = await applyGeneratedMigrations(client);
-      expect(applied.appliedTags).toHaveLength(3);
+      expect(applied.appliedTags).toHaveLength(4);
       const columns = database
         .query("SELECT name FROM pragma_table_info('runtime_vms') ORDER BY cid")
         .all() as Array<{ name: string }>;
@@ -175,6 +175,10 @@ describe("removal migration D1 rehearsal", () => {
     const before = new Map([["t", table]]);
     expect(() => comparePreservedTables(before, new Map([["t", { ...table, rows: [["'y'"]] }]]))).toThrow(/rows of t/u);
     expect(() => comparePreservedTables(before, new Map([["t", { ...table, sql: "CREATE TABLE t ( a )" }]]))).toThrow(/definition of t/u);
+    // Only the one listed row may be added to an existing table.
+    const clients = new Map([["oauth_client", { ...table, rows: [["'app'"]] }]]);
+    expect(comparePreservedTables(clients, new Map([["oauth_client", { ...table, rows: [["'app'"], ["'intar-jumper'"]] }]])).preservedRows).toBe(1);
+    expect(() => comparePreservedTables(clients, new Map([["oauth_client", { ...table, rows: [["'app'"], ["'other'"]] }]]))).toThrow(/rows of oauth_client/u);
     expect(() => comparePreservedTables(before, new Map([["t", { ...table, columns: ["b"] }]]))).toThrow(/dropped a column of t/u);
     expect(() => comparePreservedTables(before, new Map([["t", table], ["u", table]]))).toThrow(/new table u/u);
     // An added column and an empty added table are what the additive migrations do.

@@ -1,8 +1,8 @@
 {
+  "id": "b030b4b7-930b-44d7-8fa8-dbb6ac8641d2",
+  "prevId": "7dfb6bf1-6055-43de-998f-4210201d5b8c",
   "version": "6",
   "dialect": "sqlite",
-  "id": "7dfb6bf1-6055-43de-998f-4210201d5b8c",
-  "prevId": "ecdb4d8c-3b36-451f-950b-0ac03966525b",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -211,15 +211,15 @@
         "access_revocations_user_id_user_id_fk": {
           "name": "access_revocations_user_id_user_id_fk",
           "tableFrom": "access_revocations",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -352,23 +352,23 @@
           "columns": [
             "user_id"
           ],
-          "isUnique": true,
-          "where": "\"account\".\"provider_id\" = 'github'"
+          "where": "\"account\".\"provider_id\" = 'github'",
+          "isUnique": true
         }
       },
       "foreignKeys": {
         "account_user_id_user_id_fk": {
           "name": "account_user_id_user_id_fk",
           "tableFrom": "account",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -414,28 +414,28 @@
         "active_runtime_slots_user_id_user_id_fk": {
           "name": "active_runtime_slots_user_id_user_id_fk",
           "tableFrom": "active_runtime_slots",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "active_runtime_slots_execution_id_runtime_executions_id_fk": {
           "name": "active_runtime_slots_execution_id_runtime_executions_id_fk",
           "tableFrom": "active_runtime_slots",
-          "tableTo": "runtime_executions",
           "columnsFrom": [
             "execution_id"
           ],
+          "tableTo": "runtime_executions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -517,15 +517,15 @@
         "agent_bootstrap_tokens_host_id_agent_hosts_id_fk": {
           "name": "agent_bootstrap_tokens_host_id_agent_hosts_id_fk",
           "tableFrom": "agent_bootstrap_tokens",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -768,28 +768,28 @@
         "agent_hosts_user_id_user_id_fk": {
           "name": "agent_hosts_user_id_user_id_fk",
           "tableFrom": "agent_hosts",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "agent_hosts_organization_id_organization_id_fk": {
           "name": "agent_hosts_organization_id_organization_id_fk",
           "tableFrom": "agent_hosts",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -869,15 +869,15 @@
         "bundles_organization_id_organization_id_fk": {
           "name": "bundles_organization_id_organization_id_fk",
           "tableFrom": "bundles",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -945,15 +945,15 @@
         "course_catalogs_organization_id_organization_id_fk": {
           "name": "course_catalogs_organization_id_organization_id_fk",
           "tableFrom": "course_catalogs",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1040,28 +1040,28 @@
         "course_unit_completions_user_id_user_id_fk": {
           "name": "course_unit_completions_user_id_user_id_fk",
           "tableFrom": "course_unit_completions",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "course_unit_completions_source_run_id_scenario_runs_run_id_fk": {
           "name": "course_unit_completions_source_run_id_scenario_runs_run_id_fk",
           "tableFrom": "course_unit_completions",
-          "tableTo": "scenario_runs",
           "columnsFrom": [
             "source_run_id"
           ],
+          "tableTo": "scenario_runs",
           "columnsTo": [
             "run_id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -1136,15 +1136,15 @@
         "host_actual_state_host_id_agent_hosts_id_fk": {
           "name": "host_actual_state_host_id_agent_hosts_id_fk",
           "tableFrom": "host_actual_state",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1228,15 +1228,15 @@
         "host_cpu_reservations_host_id_agent_hosts_id_fk": {
           "name": "host_cpu_reservations_host_id_agent_hosts_id_fk",
           "tableFrom": "host_cpu_reservations",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1306,15 +1306,15 @@
         "host_desired_state_host_id_agent_hosts_id_fk": {
           "name": "host_desired_state_host_id_agent_hosts_id_fk",
           "tableFrom": "host_desired_state",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1422,28 +1422,28 @@
         "host_enrollments_organization_id_organization_id_fk": {
           "name": "host_enrollments_organization_id_organization_id_fk",
           "tableFrom": "host_enrollments",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "host_enrollments_user_id_user_id_fk": {
           "name": "host_enrollments_user_id_user_id_fk",
           "tableFrom": "host_enrollments",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1562,28 +1562,28 @@
         "host_resource_reservations_execution_id_runtime_executions_id_fk": {
           "name": "host_resource_reservations_execution_id_runtime_executions_id_fk",
           "tableFrom": "host_resource_reservations",
-          "tableTo": "runtime_executions",
           "columnsFrom": [
             "execution_id"
           ],
+          "tableTo": "runtime_executions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "host_resource_reservations_host_id_agent_hosts_id_fk": {
           "name": "host_resource_reservations_host_id_agent_hosts_id_fk",
           "tableFrom": "host_resource_reservations",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -1961,15 +1961,15 @@
         "image_registry_operation_writers_session_id_image_registry_upload_sessions_id_fk": {
           "name": "image_registry_operation_writers_session_id_image_registry_upload_sessions_id_fk",
           "tableFrom": "image_registry_operation_writers",
-          "tableTo": "image_registry_upload_sessions",
           "columnsFrom": [
             "session_id"
           ],
+          "tableTo": "image_registry_upload_sessions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -2171,28 +2171,28 @@
         "invitation_organization_id_organization_id_fk": {
           "name": "invitation_organization_id_organization_id_fk",
           "tableFrom": "invitation",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "invitation_inviter_id_user_id_fk": {
           "name": "invitation_inviter_id_user_id_fk",
           "tableFrom": "invitation",
-          "tableTo": "user",
           "columnsFrom": [
             "inviter_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -2365,15 +2365,15 @@
         "machine_builds_host_id_agent_hosts_id_fk": {
           "name": "machine_builds_host_id_agent_hosts_id_fk",
           "tableFrom": "machine_builds",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -2453,36 +2453,36 @@
           "columns": [
             "user_id"
           ],
-          "isUnique": true,
-          "where": "\"member\".\"role\" = 'owner'"
+          "where": "\"member\".\"role\" = 'owner'",
+          "isUnique": true
         }
       },
       "foreignKeys": {
         "member_organization_id_organization_id_fk": {
           "name": "member_organization_id_organization_id_fk",
           "tableFrom": "member",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "member_user_id_user_id_fk": {
           "name": "member_user_id_user_id_fk",
           "tableFrom": "member",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -2654,54 +2654,54 @@
         "oauth_access_token_client_id_oauth_client_client_id_fk": {
           "name": "oauth_access_token_client_id_oauth_client_client_id_fk",
           "tableFrom": "oauth_access_token",
-          "tableTo": "oauth_client",
           "columnsFrom": [
             "client_id"
           ],
+          "tableTo": "oauth_client",
           "columnsTo": [
             "client_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "oauth_access_token_session_id_session_id_fk": {
           "name": "oauth_access_token_session_id_session_id_fk",
           "tableFrom": "oauth_access_token",
-          "tableTo": "session",
           "columnsFrom": [
             "session_id"
           ],
+          "tableTo": "session",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "oauth_access_token_user_id_user_id_fk": {
           "name": "oauth_access_token_user_id_user_id_fk",
           "tableFrom": "oauth_access_token",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "oauth_access_token_refresh_id_oauth_refresh_token_id_fk": {
           "name": "oauth_access_token_refresh_id_oauth_refresh_token_id_fk",
           "tableFrom": "oauth_access_token",
-          "tableTo": "oauth_refresh_token",
           "columnsFrom": [
             "refresh_id"
           ],
+          "tableTo": "oauth_refresh_token",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -3011,15 +3011,15 @@
         "oauth_client_user_id_user_id_fk": {
           "name": "oauth_client_user_id_user_id_fk",
           "tableFrom": "oauth_client",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -3118,28 +3118,28 @@
         "oauth_client_resource_client_id_oauth_client_client_id_fk": {
           "name": "oauth_client_resource_client_id_oauth_client_client_id_fk",
           "tableFrom": "oauth_client_resource",
-          "tableTo": "oauth_client",
           "columnsFrom": [
             "client_id"
           ],
+          "tableTo": "oauth_client",
           "columnsTo": [
             "client_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "oauth_client_resource_resource_id_oauth_resource_identifier_fk": {
           "name": "oauth_client_resource_resource_id_oauth_resource_identifier_fk",
           "tableFrom": "oauth_client_resource",
-          "tableTo": "oauth_resource",
           "columnsFrom": [
             "resource_id"
           ],
+          "tableTo": "oauth_resource",
           "columnsTo": [
             "identifier"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -3242,28 +3242,28 @@
         "oauth_consent_client_id_oauth_client_client_id_fk": {
           "name": "oauth_consent_client_id_oauth_client_client_id_fk",
           "tableFrom": "oauth_consent",
-          "tableTo": "oauth_client",
           "columnsFrom": [
             "client_id"
           ],
+          "tableTo": "oauth_client",
           "columnsTo": [
             "client_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "oauth_consent_user_id_user_id_fk": {
           "name": "oauth_consent_user_id_user_id_fk",
           "tableFrom": "oauth_consent",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -3449,41 +3449,41 @@
         "oauth_refresh_token_client_id_oauth_client_client_id_fk": {
           "name": "oauth_refresh_token_client_id_oauth_client_client_id_fk",
           "tableFrom": "oauth_refresh_token",
-          "tableTo": "oauth_client",
           "columnsFrom": [
             "client_id"
           ],
+          "tableTo": "oauth_client",
           "columnsTo": [
             "client_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "oauth_refresh_token_session_id_session_id_fk": {
           "name": "oauth_refresh_token_session_id_session_id_fk",
           "tableFrom": "oauth_refresh_token",
-          "tableTo": "session",
           "columnsFrom": [
             "session_id"
           ],
+          "tableTo": "session",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "oauth_refresh_token_user_id_user_id_fk": {
           "name": "oauth_refresh_token_user_id_user_id_fk",
           "tableFrom": "oauth_refresh_token",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -3713,8 +3713,8 @@
           "columns": [
             "previous_slug"
           ],
-          "isUnique": true,
-          "where": "\"organization\".\"previous_slug\" IS NOT NULL"
+          "where": "\"organization\".\"previous_slug\" IS NOT NULL",
+          "isUnique": true
         }
       },
       "foreignKeys": {},
@@ -3752,15 +3752,15 @@
         "organization_entitlements_organization_id_organization_id_fk": {
           "name": "organization_entitlements_organization_id_organization_id_fk",
           "tableFrom": "organization_entitlements",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -3812,28 +3812,28 @@
         "organization_member_removals_organization_id_organization_id_fk": {
           "name": "organization_member_removals_organization_id_organization_id_fk",
           "tableFrom": "organization_member_removals",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "organization_member_removals_user_id_user_id_fk": {
           "name": "organization_member_removals_user_id_user_id_fk",
           "tableFrom": "organization_member_removals",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {
@@ -3899,17 +3899,17 @@
         "organization_member_removed_logins_organization_id_user_id_organization_member_removals_organization_id_user_id_fk": {
           "name": "organization_member_removed_logins_organization_id_user_id_organization_member_removals_organization_id_user_id_fk",
           "tableFrom": "organization_member_removed_logins",
-          "tableTo": "organization_member_removals",
           "columnsFrom": [
             "organization_id",
             "user_id"
           ],
+          "tableTo": "organization_member_removals",
           "columnsTo": [
             "organization_id",
             "user_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {
@@ -3983,28 +3983,28 @@
         "personal_image_preparations_user_id_user_id_fk": {
           "name": "personal_image_preparations_user_id_user_id_fk",
           "tableFrom": "personal_image_preparations",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "personal_image_preparations_host_id_agent_hosts_id_fk": {
           "name": "personal_image_preparations_host_id_agent_hosts_id_fk",
           "tableFrom": "personal_image_preparations",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -4034,15 +4034,15 @@
         "registry_manifest_blobs_manifest_digest_registry_manifests_digest_fk": {
           "name": "registry_manifest_blobs_manifest_digest_registry_manifests_digest_fk",
           "tableFrom": "registry_manifest_blobs",
-          "tableTo": "registry_manifests",
           "columnsFrom": [
             "manifest_digest"
           ],
+          "tableTo": "registry_manifests",
           "columnsTo": [
             "digest"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {
@@ -4149,15 +4149,15 @@
         "runtime_artifact_uploads_artifact_id_runtime_artifacts_id_fk": {
           "name": "runtime_artifact_uploads_artifact_id_runtime_artifacts_id_fk",
           "tableFrom": "runtime_artifact_uploads",
-          "tableTo": "runtime_artifacts",
           "columnsFrom": [
             "artifact_id"
           ],
+          "tableTo": "runtime_artifacts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -4302,36 +4302,36 @@
             "sha256",
             "size_bytes"
           ],
-          "isUnique": true,
-          "where": "\"runtime_artifacts\".\"kind\" = 'terminal_recording'"
+          "where": "\"runtime_artifacts\".\"kind\" = 'terminal_recording'",
+          "isUnique": true
         }
       },
       "foreignKeys": {
         "runtime_artifacts_execution_id_runtime_executions_id_fk": {
           "name": "runtime_artifacts_execution_id_runtime_executions_id_fk",
           "tableFrom": "runtime_artifacts",
-          "tableTo": "runtime_executions",
           "columnsFrom": [
             "execution_id"
           ],
+          "tableTo": "runtime_executions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "runtime_artifacts_runtime_vm_id_runtime_vms_id_fk": {
           "name": "runtime_artifacts_runtime_vm_id_runtime_vms_id_fk",
           "tableFrom": "runtime_artifacts",
-          "tableTo": "runtime_vms",
           "columnsFrom": [
             "runtime_vm_id"
           ],
+          "tableTo": "runtime_vms",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -4531,54 +4531,54 @@
         "runtime_executions_user_id_user_id_fk": {
           "name": "runtime_executions_user_id_user_id_fk",
           "tableFrom": "runtime_executions",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "runtime_executions_organization_id_organization_id_fk": {
           "name": "runtime_executions_organization_id_organization_id_fk",
           "tableFrom": "runtime_executions",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "runtime_executions_host_id_agent_hosts_id_fk": {
           "name": "runtime_executions_host_id_agent_hosts_id_fk",
           "tableFrom": "runtime_executions",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "runtime_executions_source_fk": {
           "name": "runtime_executions_source_fk",
           "tableFrom": "runtime_executions",
-          "tableTo": "runtime_executions",
           "columnsFrom": [
             "source_execution_id"
           ],
+          "tableTo": "runtime_executions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -4751,41 +4751,41 @@
         "runtime_terminal_sessions_execution_id_runtime_executions_id_fk": {
           "name": "runtime_terminal_sessions_execution_id_runtime_executions_id_fk",
           "tableFrom": "runtime_terminal_sessions",
-          "tableTo": "runtime_executions",
           "columnsFrom": [
             "execution_id"
           ],
+          "tableTo": "runtime_executions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "runtime_terminal_sessions_runtime_vm_id_runtime_vms_id_fk": {
           "name": "runtime_terminal_sessions_runtime_vm_id_runtime_vms_id_fk",
           "tableFrom": "runtime_terminal_sessions",
-          "tableTo": "runtime_vms",
           "columnsFrom": [
             "runtime_vm_id"
           ],
+          "tableTo": "runtime_vms",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "runtime_terminal_sessions_recording_artifact_id_runtime_artifacts_id_fk": {
           "name": "runtime_terminal_sessions_recording_artifact_id_runtime_artifacts_id_fk",
           "tableFrom": "runtime_terminal_sessions",
-          "tableTo": "runtime_artifacts",
           "columnsFrom": [
             "recording_artifact_id"
           ],
+          "tableTo": "runtime_artifacts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -4861,28 +4861,28 @@
         "runtime_vm_access_keys_runtime_vm_id_runtime_vms_id_fk": {
           "name": "runtime_vm_access_keys_runtime_vm_id_runtime_vms_id_fk",
           "tableFrom": "runtime_vm_access_keys",
-          "tableTo": "runtime_vms",
           "columnsFrom": [
             "runtime_vm_id"
           ],
+          "tableTo": "runtime_vms",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "runtime_vm_access_keys_execution_id_runtime_executions_id_fk": {
           "name": "runtime_vm_access_keys_execution_id_runtime_executions_id_fk",
           "tableFrom": "runtime_vm_access_keys",
-          "tableTo": "runtime_executions",
           "columnsFrom": [
             "execution_id"
           ],
+          "tableTo": "runtime_executions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -4972,41 +4972,41 @@
         "runtime_vm_actual_state_runtime_vm_id_runtime_vms_id_fk": {
           "name": "runtime_vm_actual_state_runtime_vm_id_runtime_vms_id_fk",
           "tableFrom": "runtime_vm_actual_state",
-          "tableTo": "runtime_vms",
           "columnsFrom": [
             "runtime_vm_id"
           ],
+          "tableTo": "runtime_vms",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "runtime_vm_actual_state_execution_id_runtime_executions_id_fk": {
           "name": "runtime_vm_actual_state_execution_id_runtime_executions_id_fk",
           "tableFrom": "runtime_vm_actual_state",
-          "tableTo": "runtime_executions",
           "columnsFrom": [
             "execution_id"
           ],
+          "tableTo": "runtime_executions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "runtime_vm_actual_state_host_id_agent_hosts_id_fk": {
           "name": "runtime_vm_actual_state_host_id_agent_hosts_id_fk",
           "tableFrom": "runtime_vm_actual_state",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -5224,15 +5224,15 @@
         "runtime_vms_execution_id_runtime_executions_id_fk": {
           "name": "runtime_vms_execution_id_runtime_executions_id_fk",
           "tableFrom": "runtime_vms",
-          "tableTo": "runtime_executions",
           "columnsFrom": [
             "execution_id"
           ],
+          "tableTo": "runtime_executions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -5322,28 +5322,28 @@
         "scenario_assignments_organization_id_organization_id_fk": {
           "name": "scenario_assignments_organization_id_organization_id_fk",
           "tableFrom": "scenario_assignments",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "scenario_assignments_assigned_by_user_id_fk": {
           "name": "scenario_assignments_assigned_by_user_id_fk",
           "tableFrom": "scenario_assignments",
-          "tableTo": "user",
           "columnsFrom": [
             "assigned_by"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -5458,15 +5458,15 @@
         "scenario_revisions_scenario_id_scenarios_id_fk": {
           "name": "scenario_revisions_scenario_id_scenarios_id_fk",
           "tableFrom": "scenario_revisions",
-          "tableTo": "scenarios",
           "columnsFrom": [
             "scenario_id"
           ],
+          "tableTo": "scenarios",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {
@@ -5535,15 +5535,15 @@
         "scenario_run_artifact_uploads_artifact_id_scenario_run_artifacts_id_fk": {
           "name": "scenario_run_artifact_uploads_artifact_id_scenario_run_artifacts_id_fk",
           "tableFrom": "scenario_run_artifact_uploads",
-          "tableTo": "scenario_run_artifacts",
           "columnsFrom": [
             "artifact_id"
           ],
+          "tableTo": "scenario_run_artifacts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -5676,15 +5676,15 @@
         "scenario_run_artifacts_run_id_scenario_runs_run_id_fk": {
           "name": "scenario_run_artifacts_run_id_scenario_runs_run_id_fk",
           "tableFrom": "scenario_run_artifacts",
-          "tableTo": "scenario_runs",
           "columnsFrom": [
             "run_id"
           ],
+          "tableTo": "scenario_runs",
           "columnsTo": [
             "run_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -5753,15 +5753,15 @@
         "scenario_run_session_transcripts_run_id_scenario_runs_run_id_fk": {
           "name": "scenario_run_session_transcripts_run_id_scenario_runs_run_id_fk",
           "tableFrom": "scenario_run_session_transcripts",
-          "tableTo": "scenario_runs",
           "columnsFrom": [
             "run_id"
           ],
+          "tableTo": "scenario_runs",
           "columnsTo": [
             "run_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -5851,15 +5851,15 @@
         "scenario_run_ssh_keys_run_id_scenario_runs_run_id_fk": {
           "name": "scenario_run_ssh_keys_run_id_scenario_runs_run_id_fk",
           "tableFrom": "scenario_run_ssh_keys",
-          "tableTo": "scenario_runs",
           "columnsFrom": [
             "run_id"
           ],
+          "tableTo": "scenario_runs",
           "columnsTo": [
             "run_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -6297,8 +6297,8 @@
             "coalesce(\"archive_entered_at\", \"created_at\")",
             "run_id"
           ],
-          "isUnique": false,
-          "where": "\"scenario_runs\".\"hidden_at\" IS NULL AND \"scenario_runs\".\"state\" IN ('archiving', 'completed', 'failed')"
+          "where": "\"scenario_runs\".\"hidden_at\" IS NULL AND \"scenario_runs\".\"state\" IN ('archiving', 'completed', 'failed')",
+          "isUnique": false
         },
         "scenario_runs_runtime_execution_uidx": {
           "name": "scenario_runs_runtime_execution_uidx",
@@ -6312,54 +6312,54 @@
         "scenario_runs_user_id_user_id_fk": {
           "name": "scenario_runs_user_id_user_id_fk",
           "tableFrom": "scenario_runs",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "scenario_runs_organization_id_organization_id_fk": {
           "name": "scenario_runs_organization_id_organization_id_fk",
           "tableFrom": "scenario_runs",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "scenario_runs_runtime_execution_id_runtime_executions_id_fk": {
           "name": "scenario_runs_runtime_execution_id_runtime_executions_id_fk",
           "tableFrom": "scenario_runs",
-          "tableTo": "runtime_executions",
           "columnsFrom": [
             "runtime_execution_id"
           ],
+          "tableTo": "runtime_executions",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "scenario_runs_host_id_agent_hosts_id_fk": {
           "name": "scenario_runs_host_id_agent_hosts_id_fk",
           "tableFrom": "scenario_runs",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -6508,28 +6508,28 @@
         "scenario_source_commits_scope_key_scenario_sources_scope_key_fk": {
           "name": "scenario_source_commits_scope_key_scenario_sources_scope_key_fk",
           "tableFrom": "scenario_source_commits",
-          "tableTo": "scenario_sources",
           "columnsFrom": [
             "scope_key"
           ],
+          "tableTo": "scenario_sources",
           "columnsTo": [
             "scope_key"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "scenario_source_commits_compile_host_id_agent_hosts_id_fk": {
           "name": "scenario_source_commits_compile_host_id_agent_hosts_id_fk",
           "tableFrom": "scenario_source_commits",
-          "tableTo": "agent_hosts",
           "columnsFrom": [
             "compile_host_id"
           ],
+          "tableTo": "agent_hosts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -6724,36 +6724,36 @@
           "columns": [
             "github_repository_id"
           ],
-          "isUnique": true,
-          "where": "\"scenario_sources\".\"disconnected_at\" IS NULL"
+          "where": "\"scenario_sources\".\"disconnected_at\" IS NULL",
+          "isUnique": true
         }
       },
       "foreignKeys": {
         "scenario_sources_organization_id_organization_id_fk": {
           "name": "scenario_sources_organization_id_organization_id_fk",
           "tableFrom": "scenario_sources",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "scenario_sources_bound_by_user_id_user_id_fk": {
           "name": "scenario_sources_bound_by_user_id_user_id_fk",
           "tableFrom": "scenario_sources",
-          "tableTo": "user",
           "columnsFrom": [
             "bound_by_user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -6869,15 +6869,15 @@
         "scenarios_organization_id_organization_id_fk": {
           "name": "scenarios_organization_id_organization_id_fk",
           "tableFrom": "scenarios",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -6984,23 +6984,23 @@
           "columns": [
             "impersonated_by"
           ],
-          "isUnique": false,
-          "where": "\"session\".\"impersonated_by\" IS NOT NULL"
+          "where": "\"session\".\"impersonated_by\" IS NOT NULL",
+          "isUnique": false
         }
       },
       "foreignKeys": {
         "session_user_id_user_id_fk": {
           "name": "session_user_id_user_id_fk",
           "tableFrom": "session",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -7045,15 +7045,15 @@
         "signup_reservations_user_id_user_id_fk": {
           "name": "signup_reservations_user_id_user_id_fk",
           "tableFrom": "signup_reservations",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -7240,28 +7240,28 @@
         "sso_provider_user_id_user_id_fk": {
           "name": "sso_provider_user_id_user_id_fk",
           "tableFrom": "sso_provider",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "sso_provider_organization_id_organization_id_fk": {
           "name": "sso_provider_organization_id_organization_id_fk",
           "tableFrom": "sso_provider",
-          "tableTo": "organization",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organization",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -7306,15 +7306,15 @@
         "sso_provider_policies_provider_id_sso_provider_provider_id_fk": {
           "name": "sso_provider_policies_provider_id_sso_provider_provider_id_fk",
           "tableFrom": "sso_provider_policies",
-          "tableTo": "sso_provider",
           "columnsFrom": [
             "provider_id"
           ],
+          "tableTo": "sso_provider",
           "columnsTo": [
             "provider_id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -7396,28 +7396,28 @@
         "support_comments_topic_id_support_topics_id_fk": {
           "name": "support_comments_topic_id_support_topics_id_fk",
           "tableFrom": "support_comments",
-          "tableTo": "support_topics",
           "columnsFrom": [
             "topic_id"
           ],
+          "tableTo": "support_topics",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "support_comments_author_id_user_id_fk": {
           "name": "support_comments_author_id_user_id_fk",
           "tableFrom": "support_comments",
-          "tableTo": "user",
           "columnsFrom": [
             "author_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -7539,28 +7539,28 @@
         "support_topics_author_id_user_id_fk": {
           "name": "support_topics_author_id_user_id_fk",
           "tableFrom": "support_topics",
-          "tableTo": "user",
           "columnsFrom": [
             "author_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "support_topics_solved_by_id_user_id_fk": {
           "name": "support_topics_solved_by_id_user_id_fk",
           "tableFrom": "support_topics",
-          "tableTo": "user",
           "columnsFrom": [
             "solved_by_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -7821,15 +7821,15 @@
         "user_ssh_keys_user_id_user_id_fk": {
           "name": "user_ssh_keys_user_id_user_id_fk",
           "tableFrom": "user_ssh_keys",
-          "tableTo": "user",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "user",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -7902,9 +7902,9 @@
   "views": {},
   "enums": {},
   "_meta": {
+    "columns": {},
     "schemas": {},
-    "tables": {},
-    "columns": {}
+    "tables": {}
   },
   "internal": {
     "indexes": {
