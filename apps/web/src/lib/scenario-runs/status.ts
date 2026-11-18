@@ -138,6 +138,7 @@ export async function getScenarioRunStatusForUser(input: {
       failedAt: scenarioRuns.failedAt,
       createdAt: scenarioRuns.createdAt,
       updatedAt: scenarioRuns.updatedAt,
+      runtime: scenarioRuns.runtime,
       hostConnected: agentHosts.connected,
       hostDisconnectedAt: agentHosts.disconnectedAt,
       hostLastHeartbeatAt: agentHosts.lastHeartbeatAt,
@@ -169,6 +170,8 @@ export async function getScenarioRunStatusForUser(input: {
   // Read-time only: a reconnect restores the stored state as it was.
   const machineUnreachable =
     runPhaseAcceptsTerminalSessions(state.phase) &&
+    // A local run's placeholder host never connects; that says nothing.
+    row.runtime !== "local" &&
     row.hostConnected !== null &&
     isHostUnreachable(
       {

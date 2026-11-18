@@ -94,6 +94,19 @@ describe("local runs", () => {
     expect((await begin("local-key-2")).reused).toBe(false);
   });
 
+  it("frees the slot when a shutdown was already requested", async () => {
+    // Member removal stamps delete_requested_at on the run before it ends it.
+    const { runId } = await begin();
+    await env.DB.prepare("UPDATE scenario_runs SET delete_requested_at = updated_at WHERE run_id = ?1").bind(runId).run();
+    await destroyScenarioRunForUser({ runId, userId: LEARNER });
+    expect(await runRow(runId)).toMatchObject({ state: "completed", active_key: null });
+    expect(await count("SELECT count(*) AS n FROM active_runtime_slots WHERE user_id = ?1", LEARNER)).toBe(0);
+    expect((await begin("local-key-2")).reused).toBe(false);
+    // An ended run is never picked up by the cleanup again.
+    await env.DB.prepare("UPDATE scenario_runs SET updated_at = 1 WHERE run_id = ?1").bind(runId).run();
+    expect(await reapSilentLocalRuns(env.DB)).toBe(0);
+  });
+
   it("is not ended by another learner", async () => {
     const { runId } = await begin();
     await expect(destroyScenarioRunForUser({ runId, userId: STRANGER })).rejects.toMatchObject({ code: "scenario_run_not_found" });

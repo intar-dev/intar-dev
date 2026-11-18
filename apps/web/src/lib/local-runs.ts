@@ -6,7 +6,7 @@
 // the foreign key. No host acknowledges anything for a local run, so the
 // server ends one in a single write.
 
-import { persistRunState } from "@/lib/run-projection";
+import { updateRunState } from "@/lib/scenario-runs/storage";
 
 /** The magic prefix of a placeholder host's id. */
 export const LOCAL_HOST_PREFIX = "local:";
@@ -39,9 +39,10 @@ export function ensureLocalHostStatement(
 }
 
 /**
- * Ends a local run at once: every VM is completed, so the run completes,
- * frees the learner's active slot and, if it was solved, counts for its
- * course. A run that already ended stays as it is.
+ * Ends a local run at once: every VM is completed, so the run completes (or
+ * stays failed), the learner's active slot is freed whether or not a shutdown
+ * was requested first, and a solved run counts for its course. A run that
+ * has fully ended is left untouched.
  */
 export async function endLocalRun(input: {
   d1: D1Database;
@@ -49,15 +50,23 @@ export async function endLocalRun(input: {
   userId?: string;
 }): Promise<boolean> {
   const run = await input.d1.prepare(
-    "SELECT 1 FROM scenario_runs WHERE run_id = ?1 AND runtime = 'local'" +
+    "SELECT (active_key IS NULL AND NOT EXISTS (SELECT 1 FROM json_each(state_json, '$.vms') vm" +
+      " WHERE json_extract(vm.value, '$.phase') <> 'completed')) AS settled" +
+      " FROM scenario_runs WHERE run_id = ?1 AND runtime = 'local'" +
       " AND (?2 IS NULL OR user_id = ?2)",
-  ).bind(input.runId, input.userId ?? null).first();
+  ).bind(input.runId, input.userId ?? null).first<{ settled: number }>();
   if (!run) return false;
-  await persistRunState(input.d1, input.runId, (state) => ({
-    ...state,
-    vms: state.vms.map((vm) =>
-      vm.phase === "failed" ? vm : { ...vm, phase: "completed" as const }),
-  }));
+  if (run.settled === 1) return true;
+  // The same write the platform's teardown acceptance ends with: it frees the
+  // slot even when delete_requested_at is already set, which the report
+  // projection deliberately does not.
+  await updateRunState(input.runId, {
+    mutate: (state) => ({
+      ...state,
+      vms: state.vms.map((vm) => ({ ...vm, phase: "completed" as const })),
+    }),
+    releaseActiveSlot: true,
+  });
   return true;
 }
 
