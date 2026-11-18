@@ -1300,6 +1300,7 @@ export function ScenarioRun() {
       infrastructureTeardownPending) &&
     !showBackgroundStatus;
   const showSshAction = Boolean(
+    !localRun &&
     selectedVm &&
     selectedVmSessionRequest &&
     attemptData?.outcome === "in_progress" &&

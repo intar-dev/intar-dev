@@ -276,6 +276,7 @@ function ActiveRunCard({ run }: { run: MyRunEntry }) {
         <MetaLine
           items={[
             <StatusToken key="status" tone="live" word="In progress" />,
+            run.local ? "Local run" : null,
             run.courseLocation?.courseTitle ?? null,
             <span key="started">
               started <RelativeTime at={run.createdAt} />
