@@ -498,6 +498,10 @@ export async function createScenarioSshSessionForUser(params: {
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
   }
+  // A local run's machines are on the learner's computer: no route leads to them.
+  if (isLocalHostId(row.hostId)) {
+    throw appError(409, "scenario_terminal_local", "this run's terminal is in the desktop app");
+  }
   const requestedMode = params.mode ?? "browser";
   // A pending browser route waits for ready; native SSH still requires ready.
   const runAcceptsThisMode =

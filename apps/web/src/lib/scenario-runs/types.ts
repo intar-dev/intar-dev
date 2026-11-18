@@ -86,6 +86,8 @@ export type ScenarioTerminalSessionResult =
 
 export interface ScenarioRunListEntry {
   runId: string;
+  /** The run's machines ran on the learner's own computer. */
+  local: boolean;
   scenarioId: string;
   organizationId: string | null;
   courseLocation?: CourseLocation | null;

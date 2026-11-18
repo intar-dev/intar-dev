@@ -12,6 +12,8 @@ import {
 } from "@/lib/desktop-channel";
 import { LOCAL_RUN_SILENCE_MS, reapSilentLocalRuns } from "@/lib/local-runs";
 import { guardBetterAuthRequest, guardCustomApiMutation } from "@/lib/request-security";
+import { createScenarioSshSessionForUser, listScenarioRunsForUser } from "@/lib/scenario-runs";
+import { getScenarioRunStatusStreamTargetForUser } from "@/lib/scenario-runs/status";
 import { ALL as authRoute } from "@/pages/api/auth/[...all]";
 import { ensureFixtureMember } from "@/test/account-fixtures";
 import { seedSessionCookie } from "@/test/auth-requests";
@@ -341,6 +343,21 @@ describe("the desktop channel", () => {
     // A member is told to update the app.
     await env.DB.prepare("INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('m1', 'org-1', ?1, 'member', 1)").bind(LEARNER).run();
     expect((await view(await start(mine, { scenarioId: "acme/secret", organizationId: "org-1", guestContracts: [99] }))).code).toBe("upgrade_required");
+  });
+
+  it("is marked local on the website, which offers it no terminal and no status stream", async () => {
+    const { run } = await view(await start(await token("mine", LEARNER)));
+    expect(await listScenarioRunsForUser({ userId: LEARNER })).toMatchObject([{ runId: run.runId, local: true, active: true }]);
+    const vmId = JSON.parse((await env.DB.prepare("SELECT state_json FROM scenario_runs WHERE run_id = ?1").bind(run.runId)
+      .first<{ state_json: string }>())!.state_json).vms[0].id as string;
+    for (const mode of ["browser", "native"] as const) {
+      await expect(createScenarioSshSessionForUser({ runId: run.runId, vmId, userId: LEARNER, mode }))
+        .rejects.toMatchObject({ code: "scenario_terminal_local" });
+    }
+    await expect(getScenarioRunStatusStreamTargetForUser({ runId: run.runId, userId: LEARNER }))
+      .rejects.toMatchObject({ code: "scenario_run_local" });
+    await expect(getScenarioRunStatusStreamTargetForUser({ runId: run.runId, userId: STRANGER }))
+      .rejects.toMatchObject({ code: "scenario_run_not_found" });
   });
 
   it("signs the app in through the provider with the client a migration created", async () => {

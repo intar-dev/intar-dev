@@ -17,6 +17,8 @@ export interface RunListItemData {
   createdAt: number;
   solveDurationMs: number | null;
   solutionAssisted?: boolean;
+  /** The run's machines ran on the learner's own computer. */
+  local?: boolean;
   hasReplay?: boolean;
   /** Per-scenario ordinal, where attempt 1 is the earliest recorded run. */
   attemptNumber?: number;
@@ -136,6 +138,7 @@ export function RunListItem({
             <RunOutcomeToken key="status" run={run} />,
             attemptLabel,
             run.solutionAssisted ? "Solution used" : null,
+            run.local ? "Local run" : null,
             ...courseContext,
             <RelativeTime key="started" at={run.createdAt} />,
           ]}
