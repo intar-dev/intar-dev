@@ -57,6 +57,9 @@ const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// A shape is captured again a day before its snapshot expires.
 const REFRESH_AGE: Duration = Duration::from_secs(6 * 24 * 60 * 60);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// A shape no run asked for in this long is not captured again: a scenario
+/// that changed its machine leaves its old shape behind on the same image.
+const RECIPE_IDLE_SECS: i64 = 30 * 24 * 60 * 60;
 /// In the image cache root, beside its directories.
 const RECIPES_FILENAME: &str = "snapshot-recipes.json";
 const RESTORE_FAILURES_TO_REMOVE: u32 = 2;
@@ -111,6 +114,9 @@ struct Recipe {
     dns: Vec<String>,
     /// The snapshot last taken or used for this recipe.
     key: Option<String>,
+    /// When a run of the shape last booted.
+    #[serde(default)]
+    last_run_unix_s: i64,
 }
 
 impl Recipe {
@@ -129,8 +135,28 @@ impl Recipe {
     }
 }
 
-/// What the sweep does about one recipe: the snapshot to remove because the
-/// recipe asks for another key now, and whether to capture.
+#[derive(Debug, Eq, PartialEq)]
+enum Standing {
+    /// No run of it comes back: the site dropped its image and the host no
+    /// longer holds it, or nothing ran it for a month.
+    Forget,
+    /// Held but not pinned right now.
+    Skip,
+    Keep,
+}
+
+fn standing(recipe: &Recipe, pinned: bool, held: bool, now_unix_s: i64) -> Standing {
+    if now_unix_s.saturating_sub(recipe.last_run_unix_s) >= RECIPE_IDLE_SECS || !(pinned || held) {
+        Standing::Forget
+    } else if pinned && held {
+        Standing::Keep
+    } else {
+        Standing::Skip
+    }
+}
+
+/// What the sweep does about one kept recipe: the snapshot to remove because
+/// the recipe asks for another key now, and whether to capture.
 fn renewal(
     recipe: &Recipe,
     wanted: &str,
@@ -179,6 +205,11 @@ pub(super) struct Snapshots {
     usable: SyncMutex<BTreeMap<String, SnapshotInfo>>,
     /// By `Recipe::id`; the file in the cache root holds the same.
     recipes: SyncMutex<BTreeMap<String, Recipe>>,
+    /// Held from a change of the recipes until their file is written.
+    recipes_file: Mutex<()>,
+    /// The snapshot a running capture is about to replace, until it removes
+    /// it from the store: a capture that ends before that puts it back.
+    replacing: SyncMutex<Option<SnapshotInfo>>,
     loaded: OnceCell<()>,
     /// VMs that were restored: their connections are answered with `Wake`.
     restored: SyncMutex<BTreeSet<String>>,
@@ -195,6 +226,8 @@ impl Snapshots {
             allow_unstable_tsc: config.allow_unstable_tsc,
             usable: SyncMutex::default(),
             recipes: SyncMutex::default(),
+            recipes_file: Mutex::new(()),
+            replacing: SyncMutex::default(),
             loaded: OnceCell::new(),
             restored: SyncMutex::default(),
             counters: SyncMutex::default(),
@@ -488,15 +521,6 @@ pub(super) async fn restore_key(
     Some(key)
 }
 
-/// Whether the snapshot a run was restored from is due for its refresh.
-fn refresh_due(inner: &Inner, key: &Sha256Digest) -> bool {
-    inner.snapshots.usable.lock().is_ok_and(|usable| {
-        usable
-            .get(key.as_str())
-            .is_some_and(|snapshot| age_of(snapshot) >= REFRESH_AGE)
-    })
-}
-
 /// The launch request's snapshot mode for a run.
 pub(super) fn restore_launch(key: Option<&Sha256Digest>) -> Option<SnapshotLaunch> {
     key.map(|key| SnapshotLaunch::Restore { key: key.clone() })
@@ -619,15 +643,22 @@ async fn read_recipes(path: &Path) -> BTreeMap<String, Recipe> {
     )
 }
 
+/// After a host boot the recipes are all that says what to capture, so the
+/// file is on disk before it takes its name.
 async fn write_recipes(path: &Path, recipes: Vec<Recipe>) -> Result<()> {
+    use tokio::io::AsyncWriteExt as _;
     let temporary = path.with_extension("json.tmp");
-    tokio::fs::write(&temporary, serde_json::to_vec(&recipes)?).await?;
+    let mut file = tokio::fs::File::create(&temporary).await?;
+    file.write_all(&serde_json::to_vec(&recipes)?).await?;
+    file.sync_all().await?;
+    drop(file);
     tokio::fs::rename(&temporary, path).await?;
     Ok(())
 }
 
 /// Change the recipes and, when that changed anything, their file.
 async fn update_recipes(inner: &Inner, change: impl FnOnce(&mut BTreeMap<String, Recipe>)) {
+    let _file = inner.snapshots.recipes_file.lock().await;
     let changed = inner.snapshots.recipes.lock().ok().and_then(|mut recipes| {
         let before = recipes.clone();
         change(&mut recipes);
@@ -651,7 +682,6 @@ pub(super) async fn after_boot(
     inner: &Arc<Inner>,
     req: &RunCreateInput<'_>,
     ready: &image_cache::ReadyImage,
-    restored: Option<&Sha256Digest>,
 ) {
     if !available(inner) || !req.peer_guest_ips.is_empty() {
         return;
@@ -670,14 +700,21 @@ pub(super) async fn after_boot(
         egress: req.egress,
         dns: req.network.dns.clone(),
         key: Some(key.as_str().to_owned()),
+        last_run_unix_s: now_unix_s(),
     };
     update_recipes(inner, |recipes| {
         recipes.insert(recipe.id(), recipe.clone());
     })
     .await;
     // Only now: a refresh takes the old snapshot away, which must not race
-    // this run's own restore.
-    if restored.is_none_or(|key| refresh_due(inner, key)) {
+    // this run's own restore. A cold boot beside a good snapshot (a run that
+    // may not restore) captures nothing.
+    let due = inner
+        .snapshots
+        .usable
+        .lock()
+        .is_ok_and(|usable| renewal(&recipe, key.as_str(), &usable).1);
+    if due {
         queue_capture(inner, &recipe, ready, req.kino, key).await;
     }
 }
@@ -733,19 +770,25 @@ async fn sweep(inner: &Arc<Inner>) {
         .map_or_else(|_| BTreeMap::new(), |recipes| recipes.clone());
     for (id, recipe) in recipes {
         let pinned = desired.cached_images.contains(&recipe.image);
-        let Ok(ready) = image_cache::require_ready_image(&cache_root, &recipe.image).await else {
-            // Neither wanted nor held any more: no run of it comes back.
-            if !pinned {
+        let ready = image_cache::require_ready_image(&cache_root, &recipe.image)
+            .await
+            .ok();
+        let ready = match standing(&recipe, pinned, ready.is_some(), now_unix_s()) {
+            Standing::Keep => ready,
+            Standing::Skip => None,
+            Standing::Forget => {
+                info!(recipe = id, "forgetting a snapshot recipe no run asks for");
                 update_recipes(inner, |recipes| {
                     recipes.remove(&id);
                 })
                 .await;
+                // Its snapshot is nobody's now and leaves when it expires.
+                None
             }
+        };
+        let Some(ready) = ready else {
             continue;
         };
-        if !pinned {
-            continue;
-        }
         let Ok(key) = key_of(
             &Shape {
                 ready: &ready,
@@ -806,12 +849,17 @@ async fn queue_capture(
     ) else {
         return;
     };
-    let Ok(spec) = inner
+    let spec = match inner
         .oci
         .spec(&recipe.spec, &image_cache::BlobStore::new(&cache_root))
         .await
-    else {
-        return;
+    {
+        Ok(spec) => spec,
+        Err(error) => {
+            warn!(error = %format!("{error:#}"), key = key.as_str(), "a snapshot capture's spec is unavailable");
+            inner.snapshots.count_capture_failure(key.as_str());
+            return;
+        }
     };
     let newly_queued = inner
         .snapshots
@@ -840,6 +888,19 @@ async fn queue_capture(
         let _lane = inner.snapshots.lane.lock().await;
         image_cache::wait_for_vm_boot_idle().await;
         let key = job.key.clone();
+        // The queue can be an hour long: by now the Kino pin may have changed
+        // and no shape starts from this key any more.
+        let wanted = inner.snapshots.recipes.lock().is_ok_and(|recipes| {
+            recipes
+                .values()
+                .any(|recipe| recipe.key.as_deref() == Some(key.as_str()))
+        });
+        if !wanted {
+            if let Ok(mut queued) = inner.snapshots.queued.lock() {
+                queued.remove(key.as_str());
+            }
+            return;
+        }
         // A capture that fails or is aborted after its publish must not
         // leave an untested snapshot for the next agent start to trust.
         let unpublish = JailerRequest::RemoveSnapshot(RemoveSnapshotRequest {
@@ -857,8 +918,17 @@ async fn queue_capture(
         if let Ok(mut current) = inner.snapshots.capture.lock() {
             *current = None;
         }
-        if let Ok(mut queued) = inner.snapshots.queued.lock() {
-            queued.remove(key.as_str());
+        // A capture that ended before it removed the snapshot it was about
+        // to replace: that one is still in the store, and nothing new is.
+        let kept = inner
+            .snapshots
+            .replacing
+            .lock()
+            .ok()
+            .and_then(|mut replacing| replacing.take());
+        let replaced = kept.is_none();
+        if let (Some(old), Ok(mut usable)) = (kept, inner.snapshots.usable.lock()) {
+            usable.insert(old.key.as_str().to_owned(), old);
         }
         match outcome {
             Ok(Ok(snapshot)) => {
@@ -874,6 +944,11 @@ async fn queue_capture(
                     counters.restore_failures.remove(key.as_str());
                 }
             }
+            Ok(Err(error)) if !replaced => {
+                warn!(error = %format!("{error:#}"), key = key.as_str(), "snapshot capture failed; the old snapshot stays");
+                clean_up_until_gone(&inner).await;
+            }
+            Err(_) if !replaced => clean_up_until_gone(&inner).await,
             Ok(Err(error)) => {
                 // No CPU for the capture right now is not a failed capture.
                 let busy = error
@@ -891,6 +966,11 @@ async fn queue_capture(
                 clean_up_until_gone(&inner).await;
                 let _ = request_jailerd(&inner, unpublish).await;
             }
+        }
+        // Only now, so that a sweep never sees the key neither queued nor
+        // usable.
+        if let Ok(mut queued) = inner.snapshots.queued.lock() {
+            queued.remove(key.as_str());
         }
     });
 }
@@ -1175,6 +1255,9 @@ async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
         .lock()
         .ok()
         .and_then(|mut usable| usable.remove(job.key.as_str()));
+    if let Ok(mut replacing) = inner.snapshots.replacing.lock() {
+        replacing.clone_from(&old);
+    }
 
     // Capture: boot with no scenario content until Kino reports PARKED.
     let (launched, _) = launch(
@@ -1249,6 +1332,9 @@ async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
     ch.vm_snapshot(&format!("file://{JAILED_SNAPSHOT_DIR}"))
         .await
         .context("capture vm.snapshot failed")?;
+    if let Ok(mut replacing) = inner.snapshots.replacing.lock() {
+        *replacing = None;
+    }
     if let Some(old) = &old {
         remove(inner, old).await;
     }
@@ -1372,6 +1458,7 @@ mod tests {
             egress: false,
             dns: Vec::new(),
             key: key.map(str::to_owned),
+            last_run_unix_s: now_unix_s(),
         }
     }
 
@@ -1421,6 +1508,23 @@ mod tests {
         assert_eq!(
             renewal(&recipe(Some(&fresh_key)), &fresh_key, &BTreeMap::new()),
             (None, true)
+        );
+    }
+
+    #[test]
+    fn a_recipe_is_kept_while_its_image_is_pinned_and_runs_come() {
+        let now = now_unix_s();
+        let kept = recipe(None);
+        assert_eq!(standing(&kept, true, true, now), Standing::Keep);
+        // Being prepared again, or held but not pinned at the moment.
+        assert_eq!(standing(&kept, true, false, now), Standing::Skip);
+        assert_eq!(standing(&kept, false, true, now), Standing::Skip);
+        assert_eq!(standing(&kept, false, false, now), Standing::Forget);
+        // Pinned and held, but no run for a month; a file from before the
+        // field existed reads as never run.
+        assert_eq!(
+            standing(&kept, true, true, now + RECIPE_IDLE_SECS),
+            Standing::Forget
         );
     }
 

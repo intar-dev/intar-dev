@@ -1278,7 +1278,7 @@ pub(super) async fn run_create(
         restored = restore_key.is_some(),
         "vm booted"
     );
-    snapshot::after_boot(inner, &req, &ready_image, restore_key.as_ref()).await;
+    snapshot::after_boot(inner, &req, &ready_image).await;
 
     Ok(())
 }
