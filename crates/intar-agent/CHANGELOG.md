@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.23.1 (2026-11-18)
+
+### Bug fixes
+
+- **intar-agent:** Take a snapshot only after the lab's ready scripts pass (#389) (a23ffea5)
+
 ## agent/v0.23.0 (2026-11-18)
 
 ### Features
