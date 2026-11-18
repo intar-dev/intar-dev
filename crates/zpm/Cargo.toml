@@ -1,0 +1,19 @@
+[package]
+name = "zpm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Runs a lab's machines under QEMU on the learner's own computer."
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

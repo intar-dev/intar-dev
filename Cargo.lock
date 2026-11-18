@@ -6023,6 +6023,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
+name = "zpm"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "zruntime"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
