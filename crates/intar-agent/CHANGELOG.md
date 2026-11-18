@@ -1,5 +1,15 @@
 # Changelog
 
+## agent/v0.24.0 (2026-11-18)
+
+### Features
+
+- **kino:** Reach the host over TCP when boot.json says so (#414) (1f32333b)
+
+### Bug fixes
+
+- **intar-contracts:** Sort canonical JSON keys explicitly (#412) (82555a9c)
+
 ## agent/v0.23.2 (2026-11-18)
 
 ### Bug fixes
