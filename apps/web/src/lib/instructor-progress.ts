@@ -20,6 +20,8 @@ export interface ProgressCell {
   status: ProgressStatus;
   solveDurationMs: number | null;
   runId: string | null;
+  /** Every solve was on the learner's own computer, which intar cannot check. */
+  local: boolean;
 }
 
 export interface ProgressRow {
@@ -84,6 +86,7 @@ export async function getOrganizationProgress(params: {
       activeKey: scenarioRuns.activeKey,
       solvedAt: scenarioRuns.solvedAt,
       solutionAssisted: scenarioRuns.solutionAssisted,
+      runtime: scenarioRuns.runtime,
       createdAt: scenarioRuns.createdAt,
     })
     .from(scenarioRuns)
@@ -102,6 +105,7 @@ export async function getOrganizationProgress(params: {
     )
     .orderBy(desc(scenarioRuns.createdAt));
 
+  const localRuns = new Set(runs.filter((run) => run.runtime === "local").map((run) => run.runId));
   const factsByCell = new Map<string, RunFacts[]>();
   for (const run of runs) {
     const key = `${run.userId}:${run.scenarioId}`;
@@ -134,6 +138,7 @@ export async function getOrganizationProgress(params: {
         status: cellStatus(facts),
         solveDurationMs: bestSolveDuration(facts),
         runId: best?.runId ?? facts[0]?.runId ?? null,
+        local: solvedRuns.length > 0 && solvedRuns.every((run) => localRuns.has(run.runId)),
       };
     }),
   }));

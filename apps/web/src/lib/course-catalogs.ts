@@ -168,6 +168,8 @@ export async function listCourseCatalogForUser(input: {
   capacityPressure?: number | null;
   resourceCapacity?: ResourceCapacity | null;
   allowSequenceBypass?: boolean;
+  /** For the desktop app: a local run needs no host that holds the images. */
+  local?: boolean;
 }): Promise<CourseCatalogForUser> {
   const views = await loadCourseViews({ ...input, includeMemberCatalogs: true });
   return {
@@ -435,6 +437,8 @@ async function loadCourseViews(input: {
   organizationId: string | null;
   allowSequenceBypass?: boolean;
   includeMemberCatalogs?: boolean;
+  /** A local run needs no host that holds the images. */
+  local?: boolean;
 }): Promise<CourseView[]> {
   if (input.organizationId) {
     const [membership] = await input.db
@@ -562,7 +566,8 @@ async function loadCourseViews(input: {
         : null;
       const scenarioReady = scenarioLive === null
         ? null
-        : scenarioLive && scenarioById.get(lecture.scenarioId!)?.imagesReady === 1;
+        : scenarioLive &&
+          (input.local === true || scenarioById.get(lecture.scenarioId!)?.imagesReady === 1);
       const blockedBy =
         source.course.sequential &&
         !input.allowSequenceBypass &&

@@ -656,6 +656,8 @@ export function ScenarioRun() {
       // Lost access refuses every upgrade; don't keep retrying it.
       !isAccessResponseError(runStatus.error, true) &&
       attempt.data?.run &&
+      // No host pushes a local run's changes; its status is polled.
+      attempt.data.run.local !== true &&
       attempt.data.run.activity === "foreground" &&
       attempt.data.run.phase !== "failed" &&
       attempt.data.run.phase !== "completed",
@@ -1107,7 +1109,10 @@ export function ScenarioRun() {
       !selectedVmShellReady &&
       !terminalVisible,
   );
-  const showBootSequence = showSelectedVmPreparation || vmFailedBeforeShell;
+  // A local run boots, and has its terminal, in the desktop app.
+  const localRun = attemptData?.local === true;
+  const showBootSequence =
+    !localRun && (showSelectedVmPreparation || vmFailedBeforeShell);
   const showBackgroundStatus = attemptData?.activity === "background";
   const acceptanceRetryNeeded = Boolean(
     attemptData?.activity === "foreground" &&
@@ -1199,7 +1204,7 @@ export function ScenarioRun() {
     transportReport,
     selectedVm?.id ?? null,
   );
-  const showTerminal = shouldRevealTerminal({
+  const showTerminal = !localRun && shouldRevealTerminal({
     transportReady,
     projectedReady: selectedVmShellReady,
     userWantsTerminal: terminalVisible,
@@ -1207,7 +1212,7 @@ export function ScenarioRun() {
   });
   // The transport starts while the VM boots, hidden. It connects and waits for
   // its target, and reports readiness so the shell can be revealed at once.
-  const terminalTransportMounted = shouldMountTerminalTransport({
+  const terminalTransportMounted = !localRun && shouldMountTerminalTransport({
     hasSessionRequest: Boolean(selectedVm && selectedVmSessionRequest),
     runForeground: attemptData?.activity === "foreground",
     transportReady,
@@ -1295,6 +1300,7 @@ export function ScenarioRun() {
       infrastructureTeardownPending) &&
     !showBackgroundStatus;
   const showSshAction = Boolean(
+    !localRun &&
     selectedVm &&
     selectedVmSessionRequest &&
     attemptData?.outcome === "in_progress" &&
@@ -1950,6 +1956,7 @@ export function ScenarioRun() {
                         Boolean(selectedVm && selectedVm.phase !== "failed")
                       }
                       unreachable={attemptData.machineUnreachable === true}
+                      local={localRun}
                     />
                   )}
                 </div>

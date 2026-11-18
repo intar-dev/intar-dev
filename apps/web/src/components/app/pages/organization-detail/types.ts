@@ -63,6 +63,7 @@ export interface ProgressResponse {
         status: "not_started" | "in_progress" | "solved" | "assisted";
         solveDurationMs: number | null;
         runId: string | null;
+        local?: boolean;
       }>;
     }>;
   };

@@ -1,3 +1,4 @@
+import { endLocalRun, isLocalHostId } from "@/lib/local-runs";
 import { settleVerifyRun } from "@/lib/scenario-revisions";
 import { GUEST_USERNAME } from "@/generated/constants";
 import { loadStargateSshTransport } from "@/lib/stargate-relay";
@@ -138,6 +139,21 @@ export async function destroyScenarioRunForUserWithDependencies(
   }
 
   const acceptedAt = Date.now();
+  if (isLocalHostId(row.hostId)) {
+    // No host acknowledges a local run's teardown: it ends in one write.
+    await endLocalRun({ d1: env.DB, runId: row.runId, userId: params.userId });
+    const ended = await loadRunRow(row.runId, params.userId);
+    if (!ended) {
+      throw appError(500, "scenario_run_snapshot_missing", "the local run ended but its snapshot could not be loaded");
+    }
+    return {
+      accepted: true,
+      runId: row.runId,
+      acceptedAt,
+      activeSlotReleased: true,
+      run: toScenarioRunRecord(ended),
+    };
+  }
   const [cleanup] = await requestScenarioRunRouteCleanup(row.hostId, [row.runId], acceptedAt);
   if (!cleanup) throw appError(404, "scenario_run_not_found", "scenario run not found");
   const deleteRequestedAt = row.deleteRequestedAt ?? acceptedAt;
@@ -481,6 +497,10 @@ export async function createScenarioSshSessionForUser(params: {
   );
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
+  }
+  // A local run's machines are on the learner's computer: no route leads to them.
+  if (isLocalHostId(row.hostId)) {
+    throw appError(409, "scenario_terminal_local", "this run's terminal is in the desktop app");
   }
   const requestedMode = params.mode ?? "browser";
   // A pending browser route waits for ready; native SSH still requires ready.

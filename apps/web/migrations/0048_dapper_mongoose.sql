@@ -1,0 +1,1 @@
+ALTER TABLE `scenario_runs` ADD `runtime` text DEFAULT 'platform' NOT NULL;

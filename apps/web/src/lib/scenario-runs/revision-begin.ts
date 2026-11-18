@@ -1,3 +1,4 @@
+import { endLocalRun, ensureLocalHostStatement, localHostId } from "@/lib/local-runs";
 import { env } from "cloudflare:workers";
 import { and, desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -234,6 +235,7 @@ export async function admitRevisionRun(context: {
 }): Promise<BeginScenarioRunResult> {
   const { input, revision, organizationId, courseLecture } = context;
   const verifyScopeKey = context.verifyScopeKey ?? null;
+  const local = input.runtime === "local" && verifyScopeKey === null;
   const verifyRestoreCheck = verifyScopeKey !== null && context.verifyRestoreCheck === true;
   const doc = revision.doc;
   // A VM may start from its host's snapshot only in a restore check, or for
@@ -357,6 +359,7 @@ export async function admitRevisionRun(context: {
     organizationId,
     runtimeExecutionId: runId,
     hostId: "",
+    runtime: local ? "local" as const : "platform" as const,
     scenarioId: revision.scenarioId,
     scenarioName: revision.scenarioId,
     scenarioRev: revision.rev,
@@ -418,6 +421,19 @@ export async function admitRevisionRun(context: {
   const images = [...new Set(machines.map((machine) => machine.image))].sort();
   for (let attempt = 1; attempt <= ADMISSION_CAS_ATTEMPTS; attempt += 1) {
     const now = Date.now();
+    let allocated: AdmissionHostAllocation;
+    if (local) {
+      // No host is chosen: the run points at the learner's placeholder, and
+      // the device pulls and boots what the run's VM rows name.
+      await ensureLocalHostStatement(env.DB, input.userId, now).run();
+      allocated = {
+        hostId: localHostId(input.userId),
+        readiness: { credentialGeneration: 0, activeSessionId: "", actualReportedAt: 0, actualReportText: "" },
+        expectedVersion: 0,
+        nextVersion: 0,
+        nextDocJson: "",
+      };
+    } else {
     const candidates = await eligibleRevisionHosts({
       userId: input.userId,
       organizationId,
@@ -432,7 +448,6 @@ export async function admitRevisionRun(context: {
     // this read fails the commit and the next attempt reads it again.
     const isReady = (candidate: RevisionHostCandidate) => reportHasImagesReady(candidate.report, images);
     const ready = candidates.filter(isReady);
-    let allocated: AdmissionHostAllocation;
     if (candidates[0]!.scope === "platform") {
       // Platform hosts cache every live and candidate image on their own.
       if (!ready.length) throw scenarioImagePreparing();
@@ -451,6 +466,7 @@ export async function admitRevisionRun(context: {
       // The preparation moved the desired state; plan against the new version.
       allocated = await planRevisionHost({ candidates: [chosen], desiredVms, cpuMillis, reservationResources, now, reload: true });
     }
+    }
     await assertAgentKvmRunsOpen(env.DB, input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {});
     const outcome = await commitAdmissionBatch({
       run: { ...run, hostId: allocated.hostId },
@@ -466,13 +482,15 @@ export async function admitRevisionRun(context: {
       verifyScopeKey,
       ...(verifyRestoreCheck ? { verifyRestoreCheck: true } : {}),
       ...(input.allowDrainedAdminProof ? { allowDrainedAdminProof: true } : {}),
+      ...(local ? { local: true } : {}),
       now: Date.now(),
     });
     if (outcome.ok) {
       try {
         await assertAccountStillActive({ userId: input.userId, runId, hostId: allocated.hostId });
       } catch (error) {
-        await cancelRevisionRun({ runId, userId: input.userId, hostId: allocated.hostId });
+        if (local) await endLocalRun({ d1: env.DB, runId });
+        else await cancelRevisionRun({ runId, userId: input.userId, hostId: allocated.hostId });
         throw error;
       }
       return {

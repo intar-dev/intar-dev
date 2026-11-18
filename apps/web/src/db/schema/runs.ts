@@ -29,6 +29,8 @@ export interface ScenarioStartRequestScope {
   /** Present on a start from a play page, with the page's `ref`. */
   launchSource?: "play";
   ref?: string | null;
+  /** Present on a start of a local run. */
+  runtime?: "local";
 }
 
 export const scenarioRuns = sqliteTable(
@@ -48,6 +50,12 @@ export const scenarioRuns = sqliteTable(
     hostId: text("host_id")
       .notNull()
       .references(() => agentHosts.id, { onDelete: "restrict" }),
+    // Where the VMs run: on a scheduled host, or on the learner's own
+    // computer through the desktop channel (#399).
+    runtime: text("runtime")
+      .$type<"platform" | "local">()
+      .notNull()
+      .default("platform"),
     scenarioId: text("scenario_id").notNull(),
     scenarioName: text("scenario_name").notNull(),
     // The scenario revision the run started from, and its tasks.

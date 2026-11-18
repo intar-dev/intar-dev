@@ -6,6 +6,8 @@ import {
   type VerifiedAgentHost,
 } from "@/control-plane/auth";
 import { GUEST_CONTRACT, KINO_ARTIFACT_TYPE, MACHINE_ARTIFACT_TYPE } from "@/generated/constants";
+import { activeAccountSql } from "@/lib/account-access";
+import { requireDesktopCaller } from "@/lib/desktop-channel";
 import { preparationAuthoritySql } from "@/lib/personal-image-access";
 import { currentScenarioRunContentAccessCondition } from "@/lib/scenario-runs/content-access";
 import { DIGEST_RE, HEX_RE, ociObjectKey, readKinoPin } from "./push";
@@ -15,10 +17,18 @@ import { DIGEST_RE, HEX_RE, ociObjectKey, readKinoPin } from "./push";
  * Pull category only. A token carries identity only; every request re-runs
  * its repository's grant before R2 is read and again before the body is
  * returned, and a denial looks exactly like an unknown object.
+ *
+ * The desktop app (#399) reads with its OAuth access token as the bearer
+ * credential, checked on every request, and is granted only what the
+ * learner's active local run names.
  */
 
 const SERVICE = "intar.dev";
+const JWT_RE = /^[^.\s]+\.[^.\s]+\.[^.\s]+$/;
 const NOW_MS = "CAST(unixepoch('subsecond') * 1000 AS INTEGER)";
+
+/** Who reads: an agent host, or a learner through the desktop app. */
+type Reader = { host: VerifiedAgentHost } | { userId: string };
 
 type Repository =
   | { kind: "machines"; image: string }
@@ -44,13 +54,17 @@ export async function handleOciRequest(
 
   const route = parseRoute(url.pathname);
   const presented = bearer(request);
-  const agent = presented
-    ? await verifyAgentToken(env, presented, { audience: REGISTRY_TOKEN_AUDIENCE })
-    : null;
-  if (!agent?.ok || agent.agent.role !== "agent") {
-    return challenge(request, route?.repository, presented !== null);
+  let reader: Reader | null = null;
+  if (presented && JWT_RE.test(presented)) {
+    const agent = await verifyAgentToken(env, presented, { audience: REGISTRY_TOKEN_AUDIENCE });
+    if (agent.ok && agent.agent.role === "agent") reader = { host: agent.agent };
+  } else if (presented) {
+    // ponytail: the app's opaque access token is the credential, one more D1
+    // read per request; mint a registry token for it if pulls get hot.
+    const caller = await requireDesktopCaller(request, env.DB);
+    if (caller.ok) reader = { userId: caller.userId };
   }
-  const host = agent.agent;
+  if (!reader) return challenge(request, route?.repository, presented !== null);
   if (url.pathname === "/v2" || url.pathname === "/v2/") {
     return new Response("{}", {
       headers: { "content-type": "application/json", "docker-distribution-api-version": "registry/2.0" },
@@ -59,10 +73,10 @@ export async function handleOciRequest(
   if (!route) return ociError(404, "NAME_UNKNOWN", "unknown repository");
   if ("error" in route) return route.error;
 
-  const response = await serve(request, env, host, route);
+  const response = await serve(request, env, reader, route);
   audit({
     event: "registry.pull",
-    host_id: host.hostId,
+    ..."host" in reader ? { host_id: reader.host.hostId } : { host_id: null, user_id: reader.userId },
     repository: route.repository.kind,
     // A tag is logged as the digest it resolved to whenever something was served.
     digest: response.headers.get("docker-content-digest") ?? route.digest,
@@ -109,7 +123,7 @@ function parseRoute(pathname: string): Route | null {
 async function serve(
   request: Request,
   env: Cloudflare.Env,
-  host: VerifiedAgentHost,
+  reader: Reader,
   route: { repository: Repository; manifest: boolean; digest: string },
 ): Promise<Response> {
   const unknown = () =>
@@ -121,7 +135,9 @@ async function serve(
     if (!pin) return unknown();
     digest = pin.current;
   }
-  const grant = () => readGrant(env, host, route.repository, route.manifest, digest);
+  const grant = () => "host" in reader
+    ? readGrant(env, reader.host, route.repository, route.manifest, digest)
+    : readLocalRunGrant(env, reader.userId, route.repository, route.manifest, digest);
   const mediaType = await grant();
   if (mediaType === null) return unknown();
 
@@ -239,6 +255,64 @@ async function readGrant(
 }
 
 /**
+ * The grant of one read by a learner's desktop app: what a VM of the
+ * learner's (?1) active local run names, and nothing else. The run must
+ * still be active and unhidden with a live execution, the account able to
+ * sign in, and the run's content access must still hold.
+ */
+async function readLocalRunGrant(
+  env: Cloudflare.Env,
+  userId: string,
+  repository: Repository,
+  manifest: boolean,
+  digest: string,
+): Promise<string | null> {
+  let sql: string;
+  const binds = [userId, digest];
+  if (repository.kind === "machines") {
+    if (manifest && digest !== repository.image) return null;
+    binds[1] = repository.image;
+    binds.push(manifest ? repository.image : digest);
+    // ?3 is the manifest itself or one of its blobs.
+    sql = `SELECT media_type FROM registry_manifests
+      WHERE digest = ?2 AND artifact_type = '${MACHINE_ARTIFACT_TYPE}'
+        AND (?3 = ?2 OR EXISTS (SELECT 1 FROM registry_manifest_blobs
+          WHERE manifest_digest = ?2 AND blob_digest = ?3))
+        AND EXISTS (SELECT 1 FROM local_vms WHERE image_digest = ?2)`;
+  } else if (repository.kind === "kino") {
+    sql = manifest
+      ? `SELECT media_type FROM registry_manifests
+          WHERE digest = ?2 AND artifact_type = '${KINO_ARTIFACT_TYPE}'
+            AND EXISTS (SELECT 1 FROM local_vms WHERE kino_digest = ?2)`
+      : `SELECT 'application/octet-stream' AS media_type FROM registry_manifest_blobs blob
+          JOIN registry_manifests kino ON kino.digest = blob.manifest_digest
+          WHERE blob.blob_digest = ?2 AND kino.artifact_type = '${KINO_ARTIFACT_TYPE}'
+            AND EXISTS (SELECT 1 FROM local_vms WHERE kino_digest = kino.digest)`;
+  } else {
+    if (manifest) return null;
+    sql = `SELECT 'application/octet-stream' AS media_type
+      WHERE EXISTS (SELECT 1 FROM local_vms WHERE spec_digest = ?2)`;
+  }
+  const row = await env.DB.prepare(`WITH ${LOCAL_RUN_VMS_SQL} ${sql} LIMIT 1`)
+    .bind(...binds)
+    .first<{ media_type: string }>();
+  return row?.media_type ?? null;
+}
+
+const LOCAL_RUN_VMS_SQL = `local_vms AS MATERIALIZED (
+    SELECT vm.image_digest, vm.spec_digest, vm.kino_digest FROM scenario_runs run
+      JOIN runtime_executions execution ON execution.id = run.runtime_execution_id
+      JOIN runtime_vms vm ON vm.execution_id = execution.id
+      JOIN user owner ON owner.id = run.user_id
+     WHERE run.user_id = ?1 AND run.runtime = 'local' AND run.active_key = run.user_id
+       AND run.hidden_at IS NULL AND run.completed_at IS NULL AND run.failed_at IS NULL
+       AND run.delete_requested_at IS NULL
+       AND execution.user_id = run.user_id AND execution.state IN ('provisioning', 'ready')
+       AND execution.ended_at IS NULL AND execution.archive_requested_at IS NULL
+       AND ${activeAccountSql("owner")}
+       AND ${currentScenarioRunContentAccessCondition()})`;
+
+/**
  * The token's host (?1, generation ?3), still enrolled as a current agent,
  * its desired state, and the runs and preparations on it that still pass
  * their access checks (materialized apart to stay under D1's expression
@@ -337,7 +411,7 @@ async function issueToken(request: Request, env: Cloudflare.Env): Promise<Respon
   let kind: "c2" | "jwt" | "none" = "none";
   let verified: { agent: VerifiedAgentHost; notAfter?: number } | null = null;
   if (credential) {
-    if (/^[^.\s]+\.[^.\s]+\.[^.\s]+$/.test(credential.secret)) {
+    if (JWT_RE.test(credential.secret)) {
       kind = "jwt";
       const result = await verifyAgentToken(env, credential.secret, {
         audience: String(env.AGENT_JWT_AUDIENCE ?? "agent-connect"),

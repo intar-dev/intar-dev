@@ -82,6 +82,8 @@ const oauthScopes = [
   "email",
   "offline_access",
   "roles",
+  // The desktop app's channel (#399): start, end and pull a local run.
+  "local-runs",
 ] as const;
 
 const oauthAdvertisedClaims = [
@@ -257,7 +259,8 @@ async function storedRefreshTokenExists(
   return row !== null;
 }
 
-async function hashStoredOAuthToken(value: string): Promise<string> {
+/** How the OAuth provider stores a token: SHA-256, base64url. */
+export async function hashStoredOAuthToken(value: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(value),

@@ -337,7 +337,30 @@ export function ScenarioShellStatusCard(props: {
   pending?: boolean;
   /** The machine is out of reach; the card says so instead. */
   unreachable?: boolean;
+  /** The run is in the desktop app; there is no shell to wait for here. */
+  local?: boolean;
 }) {
+  if (props.local) {
+    return (
+      <Card as="section" aria-labelledby="scenario-shell-title">
+        <CardHeader>
+          <CardTitle as="h2" id="scenario-shell-title">
+            Shell
+          </CardTitle>
+          <CardDescription>{props.title}</CardDescription>
+        </CardHeader>
+        <CardContent className="flex min-h-[20rem] flex-col items-center justify-center gap-1 text-center">
+          <p className="text-support font-medium text-foreground">
+            Running in the desktop app
+          </p>
+          <p className="text-support text-muted-foreground">
+            This run's machines are on your computer. Use the terminal in the
+            Intar desktop app; your progress shows here.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
   const title = props.unreachable ? "Not reachable" : props.title;
   const isTransient =
     props.unreachable === true ||

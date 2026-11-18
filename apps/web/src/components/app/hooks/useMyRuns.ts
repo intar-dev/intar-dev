@@ -14,6 +14,8 @@ import {
 } from "@/components/app/lib/http-response-error";
 
 export interface MyRunEntry {
+  /** The run's machines ran on the learner's own computer. */
+  local?: boolean;
   runId: string;
   scenarioId: string;
   organizationId?: string | null;
