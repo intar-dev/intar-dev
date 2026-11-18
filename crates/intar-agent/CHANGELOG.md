@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.23.0 (2026-11-18)
+
+### Features
+
+- **intar-agent:** Keep snapshots a week and capture them again before they expire (#387) (f29045f3)
+
 ## agent/v0.22.2 (2026-11-18)
 
 ### Bug fixes
