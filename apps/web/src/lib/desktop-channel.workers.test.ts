@@ -7,15 +7,17 @@ import { KINO_CONFIG_MEDIA_TYPE } from "@/control-plane/image-registry/push";
 import { user } from "@/db/schema";
 import { hashStoredOAuthToken } from "@/lib/auth";
 import {
-  DESKTOP_OAUTH_CLIENT_ID, localRunRequest, requireDesktopCaller, startLocalRunRequest, type LocalRunView,
+  DESKTOP_OAUTH_CLIENT_ID, localRunRequest, reportLocalRunRequest, requireDesktopCaller, startLocalRunRequest,
+  type LocalRunView,
 } from "@/lib/desktop-channel";
+import { LOCAL_RUN_SILENCE_MS, reapSilentLocalRuns } from "@/lib/local-runs";
 import { guardBetterAuthRequest, guardCustomApiMutation } from "@/lib/request-security";
 import { ALL as authRoute } from "@/pages/api/auth/[...all]";
 import { ensureFixtureMember } from "@/test/account-fixtures";
 import { seedSessionCookie } from "@/test/auth-requests";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  KINO, LEARNER, ORIGIN, STRANGER, machineImage, revisionDoc, seedScenario, specBlob, store, v2,
+  KINO, LEARNER, ORIGIN, STRANGER, labState, machineImage, revisionDoc, seedScenario, specBlob, store, v2, vmState,
 } from "./scenario-runs/revision-test-fixtures";
 
 const FAR = 9_999_999_999_999;
@@ -254,6 +256,72 @@ describe("the desktop channel", () => {
     expect(await statuses(mine)).toEqual(all(200));
     expect((await localRunRequest(call(mine, { method: "POST" }, `/api/local/runs/${run.runId}/end`), run.runId, "end")).status).toBe(200);
     expect(await statuses(mine)).toEqual(all(404));
+  });
+
+  it("turns the app's reports into the run's state, and refuses them once the run is closed", async () => {
+    const mine = await token("mine", LEARNER);
+    const { run } = await view(await start(mine));
+    expect(run).toMatchObject({ executionId: run.runId, generation: 1 });
+    const report = async (vms: unknown[], secret = mine, protocol = 1) => {
+      const response = await reportLocalRunRequest(call(secret, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ protocol, vms }),
+      }, `/api/local/runs/${run.runId}/report`), run.runId);
+      return { status: response.status, ...(await view(response)) };
+    };
+    const row = () => env.DB.prepare(
+      "SELECT state, active_key, solved_at, updated_at, state_json FROM scenario_runs WHERE run_id = ?1").bind(run.runId)
+      .first<{ state: string; active_key: string | null; solved_at: number | null; updated_at: number; state_json: string }>();
+    const passed = (id: string, at: number) => [{ id, status: "pass" as const, message: "", passed_at_unix_ms: at }];
+    const t0 = Date.now();
+
+    // Booting, then one machine ready, then both with their tasks passed.
+    expect(await report([vmState(run.runId, "web", labState("preparing"), t0)])).toMatchObject({ status: 200, run: { state: "provisioning" } });
+    expect(await report([vmState(run.runId, "web", labState("ready"), t0 + 1)])).toMatchObject({ run: { state: "active_partial" } });
+    // A report older than the last one of that machine changes nothing.
+    expect(await report([vmState(run.runId, "web", labState("preparing"), t0)])).toMatchObject({ run: { state: "active_partial" } });
+    expect(await report([
+      vmState(run.runId, "web", labState("ready", passed("serve", t0 + 2)), t0 + 2),
+      vmState(run.runId, "client", labState("ready", passed("fetch", t0 + 2)), t0 + 2),
+    ])).toMatchObject({ status: 200, run: { state: "solved", active: true } });
+    const solved = (await row())!;
+    expect(solved.solved_at).not.toBeNull();
+    // No endpoint the device named is kept.
+    expect(solved.state_json).not.toContain("203.0.113.9");
+    expect(JSON.parse(solved.state_json).vms.every((vm: { canOpenTerminal: boolean }) => !vm.canOpenTerminal)).toBe(true);
+
+    // Only this run's own VMs, from its learner, in the app's protocol.
+    const good = vmState(run.runId, "web", labState("ready"), t0 + 3);
+    expect((await report([good], await token("theirs", STRANGER))).status).toBe(404);
+    expect((await report([good], mine, 2)).code).toBe("upgrade_required");
+    for (const bad of [
+      { ...good, owner_user_id: STRANGER }, { ...good, run_id: "another-run" }, { ...good, name: "unknown" },
+      { ...good, generation: 2 }, { ...good, runtime_execution_id: "another" }, { ...good, phase: "flying" }, "nonsense",
+    ]) expect((await report([bad])).code, JSON.stringify(bad).slice(0, 80)).toBe("invalid_report");
+    expect((await report([])).code).toBe("invalid_report");
+    expect((await report([good, good])).code).toBe("invalid_report");
+    expect((await report([good, good, good])).code).toBe("invalid_report");
+    expect((await row())!.state_json).toBe(solved.state_json);
+
+    // An unchanged report still keeps a silent run from being closed.
+    await env.DB.prepare("UPDATE scenario_runs SET updated_at = ?2 WHERE run_id = ?1").bind(run.runId, Date.now() - LOCAL_RUN_SILENCE_MS - 1).run();
+    expect((await report([vmState(run.runId, "web", labState("ready", passed("serve", t0 + 2)), t0 + 2)])).status).toBe(200);
+    expect(await reapSilentLocalRuns(env.DB)).toBe(0);
+
+    // Once the server closed the run, a report is refused and says so.
+    expect((await localRunRequest(call(mine, { method: "POST" }, `/api/local/runs/${run.runId}/end`), run.runId, "end")).status).toBe(200);
+    const closed = (await row())!;
+    expect(await report([vmState(run.runId, "web", labState("preparing"), t0 + 9)]))
+      .toMatchObject({ status: 409, code: "run_closed", run: { active: false, state: "completed" } });
+    expect(await row()).toEqual(closed);
+
+    // A lab the device reports as failed fails the run and frees the learner's slot.
+    const second = (await view(await start(mine, {}, "desktop-key-2"))).run;
+    const failed = await reportLocalRunRequest(call(mine, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ protocol: 1, vms: [{ ...vmState(second.runId, "web", labState("failed", [], "boom")), runtime_execution_id: second.executionId }] }),
+    }, `/api/local/runs/${second.runId}/report`), second.runId);
+    expect(await view(failed)).toMatchObject({ run: { state: "failed", active: false } });
+    expect((await start(mine, {}, "desktop-key-3")).status).toBe(201);
   });
 
   it("signs the app in through the provider with the client a migration created", async () => {

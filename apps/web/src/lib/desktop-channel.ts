@@ -11,10 +11,14 @@ import { activeAccountSql, usableIdentityExistsSql } from "@/lib/account-access"
 import { jsonResponse } from "@/lib/agent-bridge";
 import { AppError, toErrorResponse } from "@/lib/app-error";
 import { hashStoredOAuthToken } from "@/lib/auth";
+import type { VmStateV3 } from "@/generated/contracts/bridge-message-v9";
+import validateBridgeMessageV9 from "@/generated/contracts/bridge-message-v9.validate";
 import { requireIdempotencyKey } from "@/lib/idempotency-key";
-import { endLocalRun } from "@/lib/local-runs";
+import { endLocalRun, localHostId } from "@/lib/local-runs";
 import { resolveOrganizationId } from "@/lib/organizations";
 import { enforceRateLimit } from "@/lib/request-security";
+import { applyVmStateV3ToRunState } from "@/lib/run-lifecycle";
+import { persistRunState } from "@/lib/run-projection";
 import { isRevisionScenarioId } from "@/lib/scenario-id";
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
 import { liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
@@ -90,6 +94,9 @@ export interface LocalRunView {
   /** The run's phase as the server holds it; the app stops its VMs when `active` is false. */
   state: string;
   active: boolean;
+  /** Every VM state the app reports names this execution and generation. */
+  executionId: string | null;
+  generation: number | null;
   machines: LocalRunMachine[];
 }
 
@@ -101,6 +108,9 @@ export async function localRunView(
 ): Promise<LocalRunView | null> {
   const row = await d1.prepare(
     `SELECT run.scenario_id, run.state, run.active_key IS NOT NULL AS active, run.state_json, revision.doc_json,
+        run.runtime_execution_id AS execution_id,
+        (SELECT execution.generation FROM runtime_executions execution
+          WHERE execution.id = run.runtime_execution_id) AS generation,
         (SELECT json_group_array(json_object('vmId', vm.vm_id, 'ordinal', vm.ordinal, 'image', vm.image_digest,
             'spec', vm.spec_digest, 'kino', vm.kino_digest, 'cpuMillis', vm.cpu_millis,
             'memoryMib', vm.memory_mib, 'diskMib', vm.disk_mib))
@@ -111,6 +121,7 @@ export async function localRunView(
       WHERE run.run_id = ?1 AND run.user_id = ?2 AND run.runtime = 'local'`,
   ).bind(runId, userId).first<{
     scenario_id: string; state: string; active: number; state_json: string; doc_json: string | null; vms: string;
+    execution_id: string | null; generation: number | null;
   }>();
   if (!row) return null;
   const names = new Map<string, string>(
@@ -131,6 +142,8 @@ export async function localRunView(
     scenarioId: row.scenario_id,
     state: row.state,
     active: row.active === 1,
+    executionId: row.execution_id,
+    generation: row.generation,
     machines: vms.map((vm, index) => {
       const name = allNames[index]!;
       return {
@@ -246,5 +259,79 @@ export async function localRunRequest(
     return refuse(404, "run_not_found", "run not found");
   }
   const run = await localRunView(workerEnv.DB, runId, caller.userId);
+  return run ? answer(run) : refuse(404, "run_not_found", "run not found");
+}
+
+/**
+ * `POST /api/local/runs/<id>/report`: the app reports its VMs in the shape
+ * an agent host does (bridge 9 `VmStateV3`), and the same projection turns
+ * them into phases, task states and course completion. A report for a run
+ * the server has closed is refused; the answer says so, and the app stops.
+ *
+ * The server keeps no endpoint the device names: the terminal and network
+ * of a local VM stay on the learner's computer.
+ */
+// ponytail: no rate limit; each report is one bounded write by a signed-in
+// learner with an active run. Add a per-run limiter if that is abused.
+// ponytail: reports are ordered by the device's clock per VM, as a host's
+// are; add a sequence number if a device's clock proves unusable.
+export async function reportLocalRunRequest(
+  request: Request,
+  runId: string,
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  const d1 = workerEnv.DB;
+  const body = (await request.json().catch(() => null)) as { protocol?: unknown; vms?: unknown } | null;
+  if (body?.protocol !== DESKTOP_PROTOCOL) {
+    return refuse(409, "upgrade_required", "this version of the app is too old to report; update it");
+  }
+  const before = await localRunView(d1, runId, caller.userId);
+  if (!before) return refuse(404, "run_not_found", "run not found");
+  if (!before.active) {
+    return jsonResponse(
+      { error: "the run has ended", code: "run_closed", protocol: DESKTOP_PROTOCOL, run: before },
+      { status: 409, headers: { "cache-control": "no-store" } },
+    );
+  }
+  const hostId = localHostId(caller.userId);
+  const reported = Array.isArray(body.vms) ? body.vms : [];
+  if (reported.length === 0 || reported.length > before.machines.length) {
+    return refuse(400, "invalid_report", "vms must list one to all of the run's machines, each once");
+  }
+  const vms: VmStateV3[] = [];
+  for (const candidate of reported) {
+    const vm = candidate as VmStateV3;
+    const at = vm?.updated_at_unix_ms;
+    const valid = validateBridgeMessageV9({
+      type: "vm_report", protocol_version: 9, host_id: hostId,
+      report: { schema_version: 7, host_id: hostId, observed_at_unix_ms: at, vm },
+    });
+    if (!valid || vm.run_id !== runId || vm.owner_user_id !== caller.userId ||
+        vm.runtime_execution_id !== before.executionId || vm.generation !== before.generation ||
+        !before.machines.some((machine) => machine.name === vm.name) ||
+        vms.some((earlier) => earlier.name === vm.name)) {
+      return refuse(400, "invalid_report", "a reported VM is malformed or not of this run");
+    }
+    vms.push({ ...vm, network: null, ssh_host_keys_openssh: [], terminal: { state: "pending", observed_at_unix_ms: at } });
+  }
+  const outcome = await persistRunState(
+    d1,
+    runId,
+    (latest) => vms.reduce((state, vm) => applyVmStateV3ToRunState({ runId, current: state, vm }), latest),
+    {
+      keepDeleteRequestedAt: true,
+      expectedExecution: { id: before.executionId!, ownerUserId: caller.userId, generation: before.generation! },
+    },
+  );
+  if (outcome.kind !== "updated") {
+    // An unchanged report still shows the device is there (LOCAL_RUN_SILENCE_MS).
+    await d1.prepare(
+      `UPDATE scenario_runs SET updated_at = max(updated_at + 1, ?2)
+        WHERE run_id = ?1 AND runtime = 'local' AND active_key IS NOT NULL`,
+    ).bind(runId, Date.now()).run();
+  }
+  const run = await localRunView(d1, runId, caller.userId);
   return run ? answer(run) : refuse(404, "run_not_found", "run not found");
 }
