@@ -1278,16 +1278,7 @@ pub(super) async fn run_create(
         restored = restore_key.is_some(),
         "vm booted"
     );
-    // Capture the shape after its first cold boot, and again when the
-    // snapshot this run started from nears its age limit. Only now: a
-    // refresh takes the old snapshot away, which must not race this run's
-    // own restore.
-    if restore_key
-        .as_ref()
-        .is_none_or(|key| snapshot::refresh_due(inner, key))
-    {
-        snapshot::queue_capture(inner, &req, &ready_image).await;
-    }
+    snapshot::after_boot(inner, &req, &ready_image, restore_key.as_ref()).await;
 
     Ok(())
 }

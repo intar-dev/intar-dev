@@ -356,6 +356,7 @@ impl VmManager {
 
     pub async fn reconcile_tracked_vms(&self) -> Result<()> {
         snapshot::clean_up_at_start(&self.inner).await;
+        snapshot::spawn_sweep(&self.inner);
         let names = {
             let states = self.inner.states.read().await;
             states.keys().cloned().collect::<Vec<_>>()
