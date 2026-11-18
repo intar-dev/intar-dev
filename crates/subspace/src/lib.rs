@@ -13,8 +13,8 @@ pub mod contract;
 use std::time::{Duration, SystemTime};
 
 use crate::contract::{
-    LocalRunAnswerV1, LocalRunRefusalV1, LocalRunReportV1, LocalRunV1, SUBSPACE_OAUTH_CLIENT_ID,
-    SUBSPACE_OAUTH_SCOPE, SUBSPACE_PROTOCOL_VERSION, StartLocalRunV1,
+    LocalCatalogV1, LocalRunAnswerV1, LocalRunRefusalV1, LocalRunReportV1, LocalRunV1,
+    SUBSPACE_OAUTH_CLIENT_ID, SUBSPACE_OAUTH_SCOPE, SUBSPACE_PROTOCOL_VERSION, StartLocalRunV1,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use intar_contracts::bridge_v9::VmStateV3;
@@ -226,6 +226,12 @@ impl Subspace {
     /// The current tokens, for the caller to store after a call refreshed them.
     pub async fn tokens(&self) -> Tokens {
         self.tokens.lock().await.clone()
+    }
+
+    /// The courses the learner sees, with each lecture's scenario and state.
+    pub async fn catalog(&self) -> Result<LocalCatalogV1, Error> {
+        self.call::<(), _>(Method::GET, "/api/local/catalog", None, None)
+            .await
     }
 
     /// Starts a local run. The same `idempotency_key` returns the same run.

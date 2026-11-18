@@ -145,6 +145,17 @@ async fn serve() -> (Url, Shared) {
     let shared = Shared::default();
     let app = Router::new()
         .route("/api/auth/oauth2/token", post(token))
+        .route(
+            "/api/local/catalog",
+            // The website's answer, with fields this client does not read.
+            get(|| async {
+                Json(json!({ "protocol": 1, "courses": [{ "courseId": "c1", "organizationId": null,
+                    "organizationName": null, "title": "Web", "summary": "s", "bodyMarkdown": "b", "sequential": true,
+                    "lectures": [{ "lectureId": "l1", "title": "Serve", "summary": "s", "category": "web", "tags": ["nginx"],
+                        "difficulty": "easy", "estimatedMinutes": 10, "scenarioId": "intar/web", "state": "available",
+                        "blockedBy": null, "activeRunId": null, "scenarioReady": true }] }] }))
+            }),
+        )
         .route("/api/local/runs", post(start))
         .route("/api/local/runs/{id}/{action}", post(act))
         .route(
@@ -197,6 +208,13 @@ async fn signs_in_and_drives_a_run() {
     assert_eq!(tokens.access_token, "access-1");
 
     let channel = Subspace::new(http.clone(), base.clone(), tokens);
+    let catalog = channel.catalog().await.expect("catalog");
+    let lecture = &catalog.courses[0].lectures[0];
+    assert_eq!(
+        (lecture.scenario_id.as_deref(), lecture.state.as_str()),
+        (Some("intar/web"), "available")
+    );
+
     let started = channel
         .start_run("intar/web", None, &[3], "key-1")
         .await

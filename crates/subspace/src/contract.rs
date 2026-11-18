@@ -99,3 +99,44 @@ pub struct LocalRunReportV1 {
     pub protocol: u16,
     pub vms: Vec<VmStateV3>,
 }
+
+/// `GET /api/local/catalog`: the courses the learner sees on the website.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct LocalCatalogV1 {
+    pub protocol: u16,
+    pub courses: Vec<CatalogCourseV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogCourseV1 {
+    pub course_id: String,
+    /// What a start of one of this course's lectures takes as its organization.
+    pub organization_id: Option<String>,
+    pub organization_name: Option<String>,
+    pub title: String,
+    pub summary: String,
+    pub body_markdown: String,
+    /// Lectures unlock in order.
+    pub sequential: bool,
+    pub lectures: Vec<CatalogLectureV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogLectureV1 {
+    pub lecture_id: String,
+    pub title: String,
+    pub summary: String,
+    pub category: String,
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub difficulty: Option<String>,
+    pub estimated_minutes: Option<u32>,
+    /// What a start takes; absent on a lecture without a lab.
+    pub scenario_id: Option<String>,
+    /// `locked`, `available`, `waiting_for_scenario`, `in_progress` or `completed`.
+    pub state: String,
+    /// The learner's active run of this lecture, local or not.
+    pub active_run_id: Option<String>,
+}
