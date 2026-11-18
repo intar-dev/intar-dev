@@ -324,6 +324,25 @@ describe("the desktop channel", () => {
     expect((await start(mine, {}, "desktop-key-3")).status).toBe(201);
   });
 
+  it("says nothing about another organization's scenarios", async () => {
+    await env.DB.prepare("INSERT INTO organization (id, name, slug, created_at) VALUES ('org-1', 'Acme', 'acme', 1)").run();
+    await seedScenario("acme/secret", "org-1", revisionDoc(images, specs));
+    const mine = await token("mine", LEARNER);
+    // Not a member: an existing scenario answers like a missing one, whatever the app claims to support.
+    for (const scenarioId of ["acme/secret", "acme/missing"]) {
+      for (const guestContracts of [[3], [99]]) {
+        for (const organizationId of ["org-1", "acme"]) {
+          const response = await start(mine, { scenarioId, organizationId, guestContracts });
+          expect([response.status, (await view(response)).code], `${scenarioId} ${guestContracts} ${organizationId}`)
+            .toEqual([404, "scenario_not_found"]);
+        }
+      }
+    }
+    // A member is told to update the app.
+    await env.DB.prepare("INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('m1', 'org-1', ?1, 'member', 1)").bind(LEARNER).run();
+    expect((await view(await start(mine, { scenarioId: "acme/secret", organizationId: "org-1", guestContracts: [99] }))).code).toBe("upgrade_required");
+  });
+
   it("signs the app in through the provider with the client a migration created", async () => {
     const cookie = await seedSessionCookie({ id: "web-session", token: "web-session-token", userId: LEARNER, now: Date.now() });
     const handle = (request: Request) => authRoute({ request } as Parameters<typeof authRoute>[0]) as Promise<Response>;

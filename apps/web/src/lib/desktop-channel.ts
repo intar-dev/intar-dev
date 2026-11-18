@@ -217,7 +217,11 @@ export async function startLocalRunRequest(
   const organizationId = typeof organizationKey === "string" && organizationKey.trim()
     ? await resolveOrganizationId(organizationKey.trim())
     : null;
-  if (typeof organizationKey === "string" && organizationKey.trim() && !organizationId) {
+  // An organization the learner is not in answers like one that does not
+  // exist, before any of its scenarios is looked up.
+  if (typeof organizationKey === "string" && organizationKey.trim() && (!organizationId ||
+      !(await workerEnv.DB.prepare("SELECT 1 FROM member WHERE organization_id = ?1 AND user_id = ?2")
+        .bind(organizationId, caller.userId).first()))) {
     return refuse(404, "scenario_not_found", "scenario not found");
   }
   // Refuse what the app cannot boot before a run exists. The admission
