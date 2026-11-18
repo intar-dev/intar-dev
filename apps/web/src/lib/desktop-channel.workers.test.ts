@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { KINO_CONFIG_MEDIA_TYPE } from "@/control-plane/image-registry/push";
+import { handleLocalRunCliRequest } from "@/control-plane/run-cli";
 import { user } from "@/db/schema";
 import { hashStoredOAuthToken } from "@/lib/auth";
 import {
@@ -393,6 +394,48 @@ describe("the desktop channel", () => {
     expect((await catalog()).lectures.map((lecture) => [lecture.scenarioId, lecture.organizationId]).sort())
       .toEqual([["acme/secret", "org-1"], ["intar/web", null]]);
     expect((await catalog(await token("theirs", STRANGER))).lectures.map((lecture) => lecture.scenarioId)).toEqual(["intar/web"]);
+  });
+
+  it("answers the guest's intar command for its learner's active local run", async () => {
+    const mine = await token("mine", LEARNER);
+    const { run } = await view(await start(mine));
+    const cli = async (action: Record<string, unknown>, options: { secret?: string | null; machine?: string } = {}) => {
+      const machine = options.machine ?? "web";
+      const response = await handleLocalRunCliRequest(call(options.secret === undefined ? mine : options.secret, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ protocol_version: 1, request_id: "r1", action }),
+      }, `/api/local/runs/${run.runId}/machines/${machine}/cli`), run.runId, machine);
+      const body = await response.json() as { request_id?: string; result?: { kind: string; error?: { code: string };
+        aliases?: string[]; view?: { run: { title: string }; hint_groups: Array<{ alias: string; can_reveal: boolean;
+          revealed_count: number; entries: Array<{ ordinal: number; state: string; title?: string }> }> } } };
+      return { status: response.status, ...body };
+    };
+
+    expect((await cli({ kind: "status" }, { secret: null })).status).toBe(401);
+
+    // Status carries the run's safe view; nothing sealed is in it.
+    const status = await cli({ kind: "status" });
+    expect(status).toMatchObject({ status: 200, request_id: "r1", result: { kind: "ok", view: { run: { title: "Lecture" } } } });
+    const group = status.result!.view!.hint_groups.find((candidate) => candidate.can_reveal)!;
+    expect(group.entries.every((entry) => entry.title === undefined)).toBe(true);
+    expect(await cli({ kind: "completion" })).toMatchObject({ result: { kind: "completion" } });
+
+    // Revealing a hint is stored on the run, as from the website.
+    const revealed = await cli({ kind: "hint_reveal", alias: group.alias, expected_ordinal: 1 });
+    expect(revealed.result!.view!.hint_groups.find((candidate) => candidate.alias === group.alias))
+      .toMatchObject({ revealed_count: 1, entries: [{ ordinal: 1, state: "revealed" }] });
+    expect(JSON.parse((await env.DB.prepare("SELECT revealed_hints_json AS hints FROM scenario_runs WHERE run_id = ?1")
+      .bind(run.runId).first<{ hints: string }>())!.hints)).toHaveLength(1);
+
+    // Another learner, a machine the run does not have, and malformed commands get nothing of it.
+    expect(await cli({ kind: "status" }, { secret: await token("theirs", STRANGER) }))
+      .toMatchObject({ status: 200, result: { kind: "error", error: { code: "unavailable" } } });
+    expect((await cli({ kind: "status" }, { machine: "no-such-machine" })).result).toMatchObject({ kind: "error" });
+    expect((await cli({ kind: "format-disk" })).result).toMatchObject({ kind: "error", error: { code: "invalid_request" } });
+
+    // Once the run has ended, the command says so.
+    expect((await localRunRequest(call(mine, { method: "POST" }, `/api/local/runs/${run.runId}/end`), run.runId, "end")).status).toBe(200);
+    expect(await cli({ kind: "status" })).toMatchObject({ status: 200, result: { kind: "error", error: { code: "unavailable" } } });
   });
 
   it("signs the app in through the provider with the client a deploy seeds", async () => {

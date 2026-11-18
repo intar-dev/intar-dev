@@ -33,6 +33,8 @@ import {
 } from "@/generated/run-cli";
 import { activeAccountCondition, isActiveAccount } from "@/lib/account-access";
 import { AppError } from "@/lib/app-error";
+import { requireDesktopCaller } from "@/lib/desktop-channel";
+import { revisionVmId } from "@/lib/run-lifecycle";
 import {
   revealScenarioRunHintForUser,
   revealScenarioRunSolutionForUser,
@@ -55,7 +57,8 @@ type RunCliSubject = {
   userId: string;
   runId: string;
   runtimeVmName: string;
-  mutationFence: ScenarioRunCliMutationFence;
+  /** Absent for a local run: no host reports the VM that would fence it. */
+  mutationFence?: ScenarioRunCliMutationFence;
   retryScope: string;
 };
 
@@ -194,6 +197,72 @@ export async function handleAgentRunCliRequest(
   return response;
 }
 
+/**
+ * `POST /api/local/runs/<id>/machines/<name>/cli`: the same commands for a
+ * local run (#399). The desktop app's broker passes on what the learner's
+ * `intar` command in a guest asked; the caller is the app's access token, and
+ * the run has to be the caller's own active local run, before and after the
+ * command.
+ */
+export async function handleLocalRunCliRequest(
+  request: Request,
+  runId: string,
+  machine: string,
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  if (!isSafeId(runId) || !isSafeId(machine)) {
+    return runCliErrorResponse({
+      requestId: "invalid",
+      status: 400,
+      code: "invalid_request",
+      message: "This Intar command is invalid.",
+      retryable: false,
+    });
+  }
+  const parsed = await parseRunCliRequest(request);
+  if (!parsed.ok) return parsed.response;
+
+  const unavailable = () =>
+    runCliErrorResponse({
+      requestId: parsed.request.request_id,
+      // As for an agent host: a valid command for a run that is gone is a
+      // renderable result, not a transport failure.
+      status: 200,
+      code: "unavailable",
+      message: "This workspace is no longer active. Start it again in the Intar app.",
+      retryable: true,
+    });
+  const subject = () => localRunCliSubject(workerEnv.DB, runId, machine, caller.userId);
+  const current = await subject();
+  if (!current) return unavailable();
+  const response = await handleRunCliSubjectRequest({ request: parsed.request, subject: current });
+  return (await subject()) ? response : unavailable();
+}
+
+async function localRunCliSubject(
+  d1: D1Database,
+  runId: string,
+  machine: string,
+  userId: string,
+): Promise<RunCliSubject | null> {
+  const row = await d1.prepare(
+    `SELECT runtime_execution_id AS executionId FROM scenario_runs
+      WHERE run_id = ?1 AND user_id = ?2 AND runtime = 'local'
+        AND active_key IS NOT NULL AND delete_requested_at IS NULL`,
+  ).bind(runId, userId).first<{ executionId: string | null }>();
+  if (!row?.executionId) return null;
+  const runtimeVmName = revisionVmId(machine, runId);
+  return {
+    kind: "scenario",
+    userId,
+    runId,
+    runtimeVmName,
+    retryScope: await opaqueRetryScope(["local", row.executionId, runtimeVmName]),
+  };
+}
+
 async function handleRunCliSubjectRequest(input: {
   request: RunCliRequestV1;
   subject: RunCliSubject;
@@ -286,14 +355,14 @@ async function dispatchScenarioRunCliAction(input: {
         runId: input.subject.runId,
         userId: input.subject.userId,
         hintKey: target.key,
-        mutationFence: input.subject.mutationFence,
+        ...(input.subject.mutationFence ? { mutationFence: input.subject.mutationFence } : {}),
       });
     }
   } else if (input.action.kind === "solution_reveal") {
     run = await revealScenarioRunSolutionForUser({
       runId: input.subject.runId,
       userId: input.subject.userId,
-      mutationFence: input.subject.mutationFence,
+      ...(input.subject.mutationFence ? { mutationFence: input.subject.mutationFence } : {}),
     });
   }
 
