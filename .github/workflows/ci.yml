@@ -35,6 +35,8 @@ jobs:
         uses: ./.github/actions/setup-cuenv
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
+        with:
+          desktop-libraries: "true"
       - name: Set up the CI runtime
         uses: ./.github/actions/setup-runtime
       - name: installer-tests

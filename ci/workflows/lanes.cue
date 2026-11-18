@@ -43,8 +43,9 @@ sharedInputs: [
 
 lanes: {
 	rust: {
-		// The generated contracts include validators a Bun script emits.
-		setup: [gha.#SetupRust, gha.#SetupRuntime]
+		// The generated contracts include validators a Bun script emits. The
+		// lane builds the whole workspace, so also apps/jumper on GPUI.
+		setup: [gha.#SetupRust & {with: "desktop-libraries": "true"}, gha.#SetupRuntime]
 		steps: ["installer-tests", "verify", "install-js", "check-generated-contracts"]
 		timeout: 45
 		inputs: [
