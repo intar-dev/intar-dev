@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "ecdb4d8c-3b36-451f-950b-0ac03966525b",
-  "prevId": "333a5d3b-5b3d-4349-91ce-527b4eba2b4b",
+  "id": "7dfb6bf1-6055-43de-998f-4210201d5b8c",
+  "prevId": "ecdb4d8c-3b36-451f-950b-0ac03966525b",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -5903,6 +5903,14 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "runtime": {
+          "name": "runtime",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'platform'"
         },
         "scenario_id": {
           "name": "scenario_id",

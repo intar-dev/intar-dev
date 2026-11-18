@@ -63,8 +63,8 @@ describe("removal migration D1 rehearsal", () => {
         client: new PrefixWriteClient(database),
         appliedCount: BASELINE,
       });
-      // The removal migration, and the additive one committed after it.
-      expect(evidence.appliedTags).toHaveLength(2);
+      // The removal migration, and the additive ones committed after it.
+      expect(evidence.appliedTags).toHaveLength(3);
       expect(evidence.appliedMigrationCount).toBe(evidence.committedMigrationCount);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(evidence.droppedTables).toEqual([
@@ -118,7 +118,7 @@ describe("removal migration D1 rehearsal", () => {
     try {
       await applyBaselineMigrations(client, BASELINE);
       const applied = await applyGeneratedMigrations(client);
-      expect(applied.appliedTags).toHaveLength(2);
+      expect(applied.appliedTags).toHaveLength(3);
       const columns = database
         .query("SELECT name FROM pragma_table_info('runtime_vms') ORDER BY cid")
         .all() as Array<{ name: string }>;
