@@ -22,7 +22,7 @@ use intar_kino_proto::kino_v2::{Phase, Ready, Report, Status, Task, Verify};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 /// Root-only, on tmpfs: the run disk is noexec.
 const SCRIPT_DIR: &str = "/run/intar/scripts";
@@ -48,11 +48,20 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         ..Report::default()
     });
     boot::mark(&report, Phase::Booting, "kino_started");
-    let publisher = tokio::spawn(wire::publish(changes));
+    // The publisher learns where the host is once boot.json is read.
+    let (host, host_known) = oneshot::channel();
+    let publisher = tokio::spawn(wire::publish(changes, host_known));
 
-    let boot = match read_boot() {
-        Ok(boot) => boot,
-        Err(error) => return fail(&report, error).await,
+    let boot = match read_boot().and_then(|boot| Ok((wire::Host::of(&boot)?, boot))) {
+        Ok((link, boot)) => {
+            let _ = host.send(link);
+            boot
+        }
+        Err(error) => {
+            // Without a readable boot.json the host is where it always was.
+            let _ = host.send(wire::Host::Vsock);
+            return fail(&report, error).await;
+        }
     };
     if let Err(error) = boot::bring_up(&boot, &report).await {
         return fail(&report, error).await;

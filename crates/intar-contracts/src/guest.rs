@@ -29,7 +29,8 @@ pub const ENV_PEER_HOSTS_B64: &str = "INTAR_PEER_HOSTS_B64";
 /// mounts the run disk at [`RUN_DISK_MOUNT`] and executes [`KINO_FILENAME`]
 /// from it with `init`; [`BOOT_JSON_FILENAME`] on that disk is a
 /// [`GuestBootV3`]; Kino reports on [`REPORT_PORT`] and the run CLI's broker
-/// listens on [`RUN_CLI_PORT`], both on the host's vsock CID.
+/// listens on [`RUN_CLI_PORT`], both on the host's vsock CID unless
+/// `boot.json` names another [`GuestHostV3`].
 pub const GUEST_CONTRACT: u32 = 3;
 pub const REPORT_PORT: u32 = 18081;
 pub const RUN_CLI_PORT: u32 = 18082;
@@ -53,6 +54,30 @@ pub struct GuestBootV3 {
     pub root_resize: bool,
     pub mode: crate::scenario::SpecMode,
     pub spec: crate::scenario::MachineSpecV1,
+    /// Where Kino reaches the host for its reports and the run CLI's broker.
+    /// Absent, it is the host's vsock CID, as on every agent host; a host
+    /// that leaves it out writes the same bytes as before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<GuestHostV3>,
+}
+
+/// The host's end of Kino's two connections.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GuestHostV3 {
+    /// AF_VSOCK to the host's CID, on [`REPORT_PORT`] and [`RUN_CLI_PORT`].
+    Vsock,
+    /// TCP to this IP address, for a host without vsock: a learner's own
+    /// computer running macOS or Windows. The ports are the host's choice,
+    /// since every guest there reaches it at the same address and only the
+    /// port tells two machines apart.
+    Tcp {
+        address: String,
+        #[schemars(range(min = 1))]
+        report_port: u16,
+        #[schemars(range(min = 1))]
+        run_cli_port: u16,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -216,6 +241,53 @@ mod tests {
                 serde_json::from_value::<GuestBootV3>(unknown).is_err(),
                 "{pointer}"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_host_is_vsock_unless_boot_json_names_another() -> Result<(), serde_json::Error> {
+        let boot = |host: Option<serde_json::Value>| {
+            let mut json = serde_json::json!({
+                "contract": 3, "hostname": "web",
+                "network": {"ip_cidr": "10.77.52.2/28", "gateway": "10.77.52.1", "dns": []},
+                "peers": {}, "ssh": {"enabled": false, "authorized_keys": []},
+                "root_resize": false, "mode": "learn",
+                "spec": {"scenario_id": "", "machine": "web", "env": {}, "defer": [], "ready": [], "tasks": []},
+            });
+            if let (Some(host), Some(object)) = (host, json.as_object_mut()) {
+                object.insert("host".to_owned(), host);
+            }
+            serde_json::from_value::<GuestBootV3>(json)
+        };
+        // An agent host writes no `host`, and its boot.json keeps its bytes.
+        let absent = boot(None)?;
+        assert_eq!(absent.host, None);
+        assert!(!serde_json::to_string(&absent)?.contains("host\""));
+
+        let tcp = boot(Some(serde_json::json!({
+            "transport": "tcp", "address": "10.77.52.1", "report_port": 41081, "run_cli_port": 41082,
+        })))?;
+        assert_eq!(
+            tcp.host,
+            Some(GuestHostV3::Tcp {
+                address: "10.77.52.1".to_owned(),
+                report_port: 41081,
+                run_cli_port: 41082,
+            })
+        );
+        assert_eq!(
+            boot(Some(serde_json::json!({"transport": "vsock"})))?.host,
+            Some(GuestHostV3::Vsock)
+        );
+        for refused in [
+            serde_json::json!({"transport": "udp"}),
+            serde_json::json!({"transport": "tcp", "address": "10.77.52.1"}),
+            serde_json::json!({"transport": "tcp", "address": "10.77.52.1", "report_port": 1, "run_cli_port": 2, "more": 3}),
+            serde_json::json!({"transport": "tcp", "address": "10.77.52.1", "report_port": 70000, "run_cli_port": 2}),
+            serde_json::json!("10.77.52.1"),
+        ] {
+            assert!(boot(Some(refused.clone())).is_err(), "{refused}");
         }
         Ok(())
     }

@@ -14,5 +14,10 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# The tests run with insertion-ordered JSON objects, as in a build where some
+# other crate turns the feature on: canonical JSON must sort regardless.
+serde_json = { workspace = true, features = ["preserve_order"] }
+
 [lints]
 workspace = true
