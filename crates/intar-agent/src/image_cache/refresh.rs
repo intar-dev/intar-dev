@@ -372,6 +372,14 @@ async fn scrub_retained_content(
 
 /// Verify one cache file and write its completed verification on success.
 async fn verify_scrub_item(db: &Db, item: &scheduler::ScrubItem) -> Result<bool> {
+    // A file that is gone is repaired like a corrupt one; any other failure
+    // to read is an error, and nothing is removed for it.
+    if matches!(
+        tokio::fs::symlink_metadata(&item.path).await,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return Ok(false);
+    }
     let hashed = hash_file_bounded(&item.path).await?;
     if hashed.digest_hex() != item.expected_sha256 {
         return Ok(false);
@@ -439,9 +447,13 @@ fn scrub_items(store: &BlobStore, pins: &RequiredPins) -> Vec<scheduler::ScrubIt
             // Not pulled yet: the prepare path owns it.
             continue;
         }
-        for blob in
-            std::iter::once(manifest.clone()).chain(ready::manifest_references(store, manifest))
-        {
+        // The references are the config, then the layers. A Kino pull stores
+        // the manifest and the binary only, so its config is not scrubbed.
+        let unstored = usize::from(matches!(target, scheduler::ScrubTarget::Kino(_)));
+        let stored = ready::manifest_references(store, manifest)
+            .into_iter()
+            .skip(unstored);
+        for blob in std::iter::once(manifest.clone()).chain(stored) {
             items.push(scheduler::ScrubItem {
                 dedup_key: blob.hex().to_owned(),
                 path: store.path(&blob),
@@ -459,6 +471,35 @@ mod tests {
 
     use super::super::pins::tests::digest;
     use super::*;
+
+    #[test]
+    fn a_kino_is_scrubbed_without_its_config_and_an_image_with_it() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = BlobStore::new(root.path());
+        std::fs::create_dir_all(store.directory())?;
+        let descriptor = |blob: char| serde_json::json!({"mediaType": "x", "digest": String::from(digest(blob)), "size": 1});
+        let manifest = serde_json::json!({
+            "schemaVersion": 2, "mediaType": "x", "artifactType": "x",
+            "config": descriptor('c'), "layers": [descriptor('d')],
+        });
+        for owner in ['a', 'b'] {
+            std::fs::write(store.path(&digest(owner)), serde_json::to_vec(&manifest)?)?;
+        }
+        let pins = RequiredPins {
+            images: [digest('a')].into(),
+            kino: [digest('b')].into(),
+        };
+        let scrubbed = |kino: bool| -> Vec<String> {
+            scrub_items(&store, &pins)
+                .into_iter()
+                .filter(|item| matches!(item.target, scheduler::ScrubTarget::Kino(_)) == kino)
+                .map(|item| item.expected_sha256[..1].to_owned())
+                .collect()
+        };
+        assert_eq!(scrubbed(false), ["a", "c", "d"]);
+        assert_eq!(scrubbed(true), ["b", "d"]);
+        Ok(())
+    }
 
     struct Sweep {
         _root: tempfile::TempDir,
