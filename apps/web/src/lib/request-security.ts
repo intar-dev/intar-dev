@@ -93,8 +93,13 @@ export async function guardBetterAuthRequest(
   }
   if (!isMutatingMethod(request.method)) return { ok: true, request };
 
-  const originResult = validateCanonicalBrowserOrigin(request, workerEnv);
-  if (!originResult.ok) return originResult;
+  // A native app has no browser origin. These two endpoints authenticate by
+  // the request itself (client, code verifier, the token), never by a
+  // cookie; the body bound below still applies.
+  if (!isOAuthTokenClientPath(pathname)) {
+    const originResult = validateCanonicalBrowserOrigin(request, workerEnv);
+    if (!originResult.ok) return originResult;
+  }
 
   const declaredLengthHeader = request.headers.get("content-length");
   let declaredLength: number | null = null;
@@ -151,8 +156,13 @@ export async function guardCustomApiMutation(
     return { ok: true, request };
   }
 
-  const originResult = validateCanonicalBrowserOrigin(request, workerEnv);
-  if (!originResult.ok) return originResult;
+  // The desktop channel authenticates by a bearer token and never reads a
+  // cookie, so only the origin check is skipped; the JSON and size rules
+  // below still apply.
+  if (!pathname.startsWith("/api/local/")) {
+    const originResult = validateCanonicalBrowserOrigin(request, workerEnv);
+    if (!originResult.ok) return originResult;
+  }
 
   const maxBodyBytes = MAX_API_JSON_BODY_BYTES;
   const declaredLengthHeader = request.headers.get("content-length");
@@ -346,6 +356,10 @@ function isBetterAuthStartPath(pathname: string): boolean {
     pathname === "/api/auth/send-verification-email" ||
     pathname === "/api/auth/oauth2/public-client-prelogin"
   );
+}
+
+function isOAuthTokenClientPath(pathname: string): boolean {
+  return pathname === "/api/auth/oauth2/token" || pathname === "/api/auth/oauth2/revoke";
 }
 
 function isPrehandledBearerApiPath(pathname: string): boolean {
