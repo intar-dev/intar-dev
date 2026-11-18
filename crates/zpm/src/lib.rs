@@ -10,6 +10,7 @@
 //! Pulling images is not here yet.
 
 pub mod accel;
+pub mod broker;
 pub mod qemu;
 pub mod reports;
 pub mod rundisk;
