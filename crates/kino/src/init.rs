@@ -28,6 +28,8 @@ use tokio::sync::watch;
 const SCRIPT_DIR: &str = "/run/intar/scripts";
 
 const READY_INTERVAL: Duration = Duration::from_millis(250);
+/// How long the first run of the ready scripts, all together, may take.
+const READY_TOGETHER_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 5000 });
 /// One second under test, where a failing script should not take 300.
 const READY_TOTAL: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 300 });
 const TASK_INTERVAL: Duration = Duration::from_secs(2);
@@ -172,8 +174,10 @@ async fn run_ready(
     report: &watch::Sender<Report>,
 ) -> bool {
     let deadline = Instant::now() + READY_TOTAL;
-    let attempt = |index: usize| async move {
-        let left = deadline.saturating_duration_since(Instant::now());
+    let attempt = |index: usize, limit: Duration| async move {
+        let left = deadline
+            .saturating_duration_since(Instant::now())
+            .min(limit);
         let outcome = exec::run(
             dir,
             &format!("ready-{index}"),
@@ -186,9 +190,14 @@ async fn run_ready(
     };
     // A lab that starts from a snapshot is up already: every script passes
     // on its first run, and run together they take as long as the slowest
-    // one, not as long as all of them. A booting lab loses nothing by it:
-    // what fails here is retried below as before.
-    let first = futures_util::future::join_all((0..scripts.len()).map(attempt)).await;
+    // one, not as long as all of them. What fails here is retried below as
+    // before. This round is short: a script that waits for what an earlier
+    // one checks would otherwise hold every retry back, or use up the lab's
+    // whole time when it once had its turn only after the earlier one passed.
+    let first = futures_util::future::join_all(
+        (0..scripts.len()).map(|index| attempt(index, READY_TOGETHER_TIMEOUT)),
+    )
+    .await;
     if first.contains(&Attempt::OutOfTime) {
         return false;
     }
@@ -196,7 +205,7 @@ async fn run_ready(
         let mut last = first;
         while last != Attempt::Passed {
             tokio::time::sleep(READY_INTERVAL).await;
-            last = attempt(index).await;
+            last = attempt(index, READY_TOTAL).await;
             if last == Attempt::OutOfTime {
                 return false;
             }

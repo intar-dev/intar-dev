@@ -243,12 +243,36 @@ async fn a_ready_script_that_keeps_failing_the_same_way_reports_once() {
 async fn ready_scripts_that_pass_run_together() {
     let temp = tempfile::tempdir().expect("tempdir");
     // One after another these take 1.2 s, more than the second the test
-    // build allows all of them.
+    // build allows all of them; together they fit its first round.
     let spec = spec(
-        r#"{"machine":"m","ready":[{"name":"a","script":"sleep 0.4"},{"name":"b","script":"sleep 0.4"},{"name":"c","script":"sleep 0.4"}]}"#,
+        r#"{"machine":"m","ready":[{"name":"a","script":"sleep 0.2"},{"name":"b","script":"sleep 0.2"},{"name":"c","script":"sleep 0.2"},{"name":"d","script":"sleep 0.2"},{"name":"e","script":"sleep 0.2"},{"name":"f","script":"sleep 0.2"}]}"#,
     );
     let (report, _changes) = watch::channel(Report {
-        ready: vec![Ready::default(); 3],
+        ready: vec![Ready::default(); 6],
+        ..Report::default()
+    });
+    assert!(run_ready(&spec.ready, &no_env(), &temp.path().join("s"), &report).await);
+    assert!(
+        report
+            .borrow()
+            .ready
+            .iter()
+            .all(|ready| ready.status() == Status::Pass)
+    );
+}
+
+#[tokio::test]
+async fn a_ready_script_that_blocks_until_an_earlier_one_passed_gets_its_turn() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let flag = temp.path().join("flag");
+    // Run before the first has passed, the second blocks for longer than the
+    // lab has; in its turn it passes at once.
+    let spec = spec(&format!(
+        r#"{{"machine":"m","ready":[{{"name":"first","script":"sleep 0.1; touch '{f}'"}},{{"name":"second","script":"test -f '{f}' || sleep 5"}}]}}"#,
+        f = flag.display(),
+    ));
+    let (report, _changes) = watch::channel(Report {
+        ready: vec![Ready::default(); 2],
         ..Report::default()
     });
     assert!(run_ready(&spec.ready, &no_env(), &temp.path().join("s"), &report).await);
