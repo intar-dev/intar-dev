@@ -9,8 +9,16 @@ description = "Runs a lab's machines under QEMU on the learner's own computer."
 
 [dependencies]
 clap.workspace = true
+fatfs.workspace = true
+intar-contracts = { path = "../intar-contracts" }
+intar-kino-proto = { path = "../intar-kino-proto" }
 serde_json.workspace = true
 thiserror.workspace = true
+
+# Kino reports over AF_VSOCK, which only a Linux host has.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio = { workspace = true }
+tokio-vsock.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -6027,9 +6027,14 @@ name = "zpm"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "fatfs",
+ "intar-contracts",
+ "intar-kino-proto",
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-vsock",
 ]
 
 [[package]]

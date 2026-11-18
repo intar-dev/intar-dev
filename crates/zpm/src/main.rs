@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use zpm::rundisk::{Boot, boot_json, write_recording_disk, write_run_disk};
 use zpm::{Accel, Arch, Disk, DiskFormat, Machine, UserNetwork, Vm, create_overlay};
 
 #[derive(Parser)]
@@ -24,7 +25,17 @@ struct Args {
     /// The machine image's raw root disk; the run writes to an overlay on it.
     #[arg(long)]
     root_base: PathBuf,
-    /// More raw disks in the guest's order, the run disk first. `:ro` makes one read-only.
+    /// The machine's spec blob. With `--kino` and `--ssh-key`, zpm writes the
+    /// run disk and the recordings disk itself.
+    #[arg(long, requires_all = ["kino", "ssh_key"])]
+    spec: Option<PathBuf>,
+    /// The Kino binary for the run disk.
+    #[arg(long)]
+    kino: Option<PathBuf>,
+    /// An OpenSSH public key file that may log in to the guest.
+    #[arg(long)]
+    ssh_key: Option<PathBuf>,
+    /// More raw disks in the guest's order, after the ones zpm writes. `:ro` makes one read-only.
     #[arg(long = "disk")]
     disks: Vec<String>,
     #[arg(
@@ -78,6 +89,31 @@ fn run(args: Args) -> Result<(), zpm::Error> {
         format: DiskFormat::Qcow2,
         read_only: false,
     }];
+    if let (Some(spec), Some(kino), Some(ssh_key)) = (&args.spec, &args.kino, &args.ssh_key) {
+        let json = boot_json(&Boot {
+            hostname: "zpm",
+            ip_cidr: "10.77.52.2/28",
+            gateway: "10.77.52.1",
+            dns: &["10.77.52.3".to_owned()],
+            peers: &Default::default(),
+            authorized_keys: &[std::fs::read_to_string(ssh_key)?],
+            spec: &std::fs::read(spec)?,
+        })?;
+        let run_disk = args.dir.join("run.raw");
+        write_run_disk(&run_disk, &json, &std::fs::read(kino)?)?;
+        let recordings = args.dir.join("rec.vfat");
+        write_recording_disk(&recordings)?;
+        disks.push(Disk {
+            path: run_disk,
+            format: DiskFormat::Raw,
+            read_only: true,
+        });
+        disks.push(Disk {
+            path: recordings,
+            format: DiskFormat::Raw,
+            read_only: false,
+        });
+    }
     for disk in &args.disks {
         let (path, read_only) = match disk.strip_suffix(":ro") {
             Some(path) => (path, true),
@@ -112,12 +148,44 @@ fn run(args: Args) -> Result<(), zpm::Error> {
         qmp_socket: args.dir.join("qmp.sock"),
     };
     let qemu = args.qemu.unwrap_or_else(|| arch.qemu_binary().into());
+    // Listen before the guest exists, so its first report is not missed.
+    #[cfg(target_os = "linux")]
+    let mut reports = match args.vsock_cid {
+        Some(_) => Some(zpm::reports::listen_vsock()?),
+        None => None,
+    };
+    let started = Instant::now();
     let mut vm = Vm::start(&qemu, &machine, &args.dir.join("qemu.log"))?;
     println!("started with {accel:?}; ssh on 127.0.0.1:{}", args.ssh_port);
 
-    let end = Instant::now() + Duration::from_secs(args.seconds);
+    let end = started + Duration::from_secs(args.seconds);
+    #[cfg(target_os = "linux")]
+    let (mut ssh_seen, mut lab_seen) = (false, None);
     while Instant::now() < end && vm.is_running() {
-        std::thread::sleep(Duration::from_millis(200));
+        #[cfg(target_os = "linux")]
+        while let Some(Ok((cid, report))) = reports.as_mut().map(|reports| reports.try_recv()) {
+            // Reports of another machine on this computer are not this run's.
+            if Some(cid) != args.vsock_cid {
+                continue;
+            }
+            let ms = started.elapsed().as_millis();
+            if let Some(reason) = &report.failed {
+                println!("guest failed after {ms} ms: {reason}");
+            }
+            if report.ssh_ready && !ssh_seen {
+                ssh_seen = true;
+                println!("ssh ready after {ms} ms");
+            }
+            if lab_seen.as_ref() != Some(&report.lab.state) {
+                println!(
+                    "lab {:?} after {ms} ms, {} task(s)",
+                    report.lab.state,
+                    report.lab.tasks.len()
+                );
+                lab_seen = Some(report.lab.state);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
     let ran_to_the_end = vm.is_running();
     vm.stop(Duration::from_secs(5));
