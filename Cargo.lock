@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "intar-agent"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "anyhow",
  "avt",
