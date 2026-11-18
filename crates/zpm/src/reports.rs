@@ -40,6 +40,66 @@ pub fn read_reports(
     }
 }
 
+/// Kino's reports from one machine over TCP, for a host without vsock. The
+/// listener is on the loopback interface, on a port of its own, and closes
+/// when this is dropped.
+pub struct TcpReports {
+    pub port: u16,
+    pub reports: std::sync::mpsc::Receiver<GuestReport>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for TcpReports {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Listens on a free loopback port for one machine's reports. The machine's
+/// `boot.json` has to name that port; QEMU's network lets the guest reach
+/// the host's loopback at its gateway address.
+// ponytail: every program on this computer can connect to the port and send
+// reports; the app's own network (#408) gives each machine a private link.
+pub fn listen_tcp() -> std::io::Result<TcpReports> {
+    use std::sync::atomic::Ordering;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
+    let (sender, reports) = std::sync::mpsc::channel();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
+    std::thread::Builder::new()
+        .name("zpm-reports".into())
+        .spawn(move || {
+            while !stopped.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        // Kino reconnects after a lost link, so each connection is read on its own.
+                        let sender = sender.clone();
+                        let _ = std::thread::Builder::new()
+                            .name("zpm-report-link".into())
+                            .spawn(move || {
+                                if stream.set_nonblocking(false).is_ok() {
+                                    let _ = read_reports(stream, |report| {
+                                        let _ = sender.send(report);
+                                    });
+                                }
+                            });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        })?;
+    Ok(TcpReports {
+        port,
+        reports,
+        stop,
+    })
+}
+
 /// A report with the vsock id of the guest that sent it.
 #[cfg(target_os = "linux")]
 pub type FromGuest = (u32, GuestReport);
@@ -128,5 +188,32 @@ mod tests {
         cut.extend_from_slice(&[1, 2, 3]);
         assert!(read_reports(&cut[..], |_| seen += 1).is_err());
         assert_eq!(seen, 0);
+    }
+
+    #[test]
+    fn the_tcp_listener_takes_connections_on_its_own_port_and_closes_when_dropped() {
+        use std::io::Write as _;
+        let listener = listen_tcp().expect("listen");
+        let port = listener.port;
+        // Two links, as after a reconnect; garbage on one does not stop the other.
+        let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        first
+            .write_all(&[0, 0, 0, 3, 0xff, 0xff, 0xff])
+            .expect("write");
+        let second = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect again");
+        drop(second);
+        assert!(
+            listener
+                .reports
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "no report was sent"
+        );
+        drop(listener);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+            "the port is closed"
+        );
     }
 }
