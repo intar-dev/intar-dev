@@ -30,7 +30,7 @@ use intar_jailer_protocol::{
 use std::sync::Mutex as SyncMutex;
 
 /// Bumped when a capture is made differently: older snapshots stop matching.
-const RECIPE: &str = "1";
+const RECIPE: &str = "2";
 /// kvm-clock steps the guest's monotonic clock by the snapshot's age on a
 /// restore; the TSC clock source does not (measured in #348).
 const CAPTURE_CMDLINE: &str = " clocksource=tsc tsc=reliable";
@@ -104,7 +104,7 @@ pub(super) fn abandoned(key: &Sha256Digest, error: &anyhow::Error) -> anyhow::Er
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Recipe {
     image: OciDigest,
-    /// Of the shape's latest run; a capture drops its scripts.
+    /// Of the shape's latest run; a capture drops its tasks.
     spec: OciDigest,
     cpu_millis: u32,
     memory_mib: u32,
@@ -178,7 +178,7 @@ pub(super) struct CaptureJob {
     key: Sha256Digest,
     ready: image_cache::ReadyImage,
     kino: OciDigest,
-    /// The run's machine spec; its scripts are dropped for the capture.
+    /// The run's machine spec; its tasks are dropped for the capture.
     spec: Vec<u8>,
     cpu_millis: u32,
     memory_mib: u32,
@@ -1122,8 +1122,10 @@ async fn launch(
 
     let mut spec: intar_contracts::scenario::MachineSpecV1 =
         serde_json::from_slice(&job.spec).context("the machine spec is not a MachineSpecV1")?;
-    // One image serves several scenarios: a snapshot holds none of them.
-    spec.ready.clear();
+    // One image serves several scenarios: a snapshot holds no tasks. The
+    // ready scripts stay, as Kino parks only after they pass: a guest parked
+    // on quiet alone can be one whose cluster DNS has not come up yet, and
+    // every run restored from it then waits for that again.
     spec.tasks.clear();
     let root_disk_size_bytes = root_disk_size_bytes(&job.ready, job.disk_mib);
     let boot = runtime_disk::boot_json(&runtime_disk::BootJsonInput {
@@ -1257,7 +1259,7 @@ async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
     for snapshot in &expired {
         remove(inner, snapshot).await;
     }
-    // Capture: boot with no scenario content until Kino reports PARKED.
+    // Capture: boot with the ready scripts only until Kino reports PARKED.
     let (launched, _) = launch(
         inner,
         job,
