@@ -86,7 +86,11 @@ pub(crate) async fn bring_up(
     if boot.root_resize {
         run(RESIZE2FS, &[ROOT_DEVICE]).await?;
     }
-    write(RUN_CLI_BROKER, &format!("vsock://2:{RUN_CLI_PORT}\n"))?;
+    let broker = match super::wire::Host::of(boot)? {
+        super::wire::Host::Vsock => format!("vsock://2:{RUN_CLI_PORT}\n"),
+        super::wire::Host::Tcp { run_cli, .. } => format!("tcp://{run_cli}\n"),
+    };
+    write(RUN_CLI_BROKER, &broker)?;
     if ssh {
         start_sshd().await?;
         let key = std::fs::read_to_string(format!("{HOST_KEY}.pub"))

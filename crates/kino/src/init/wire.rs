@@ -1,5 +1,6 @@
-//! The `kino.v2` stream: length-prefixed protobuf frames on the vsock
-//! connection Kino opens to the host's report port.
+//! The `kino.v2` stream: length-prefixed protobuf frames on the connection
+//! Kino opens to the host's report port, over vsock or, when `boot.json`
+//! says so, TCP.
 
 use super::{Report, head, verify};
 use intar_kino_proto::kino_v2::{GuestFrame, HostFrame, MAX_FRAME_BYTES, guest_frame, host_frame};
@@ -28,16 +29,18 @@ impl Drop for Reader {
 /// Send every report change, and the latest report every 10 s. A lost
 /// connection is opened again and the latest report resent, so the host
 /// never has to ask.
-pub(crate) async fn publish(mut changes: watch::Receiver<Report>) {
+pub(crate) async fn publish(mut changes: watch::Receiver<Report>, host: oneshot::Receiver<Host>) {
     let mut seq = 0_u64;
-    let mut link = connect().await;
+    // A dropped sender means init is gone; vsock is the contract's default.
+    let host = host.await.unwrap_or(Host::Vsock);
+    let mut link = connect(host).await;
     loop {
         let mut next = changes.borrow_and_update().clone();
         seq += 1;
         next.seq = seq;
         let frame = encode(next);
         if link.0.write_all(&frame).await.is_err() || link.0.flush().await.is_err() {
-            link = connect().await;
+            link = connect(host).await;
             continue;
         }
         tokio::select! {
@@ -47,7 +50,7 @@ pub(crate) async fn publish(mut changes: watch::Receiver<Report>) {
                 }
             }
             () = tokio::time::sleep(KEEPALIVE) => {}
-            _ = &mut link.1 => link = connect().await,
+            _ = &mut link.1 => link = connect(host).await,
         }
     }
 }
@@ -62,22 +65,80 @@ pub(super) fn close_on_exec(stream: &tokio_vsock::VsockStream) {
     }
 }
 
-/// Retries until the host listens.
+/// Where the host is, from `boot.json`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Host {
+    Vsock,
+    Tcp {
+        reports: std::net::SocketAddr,
+        run_cli: std::net::SocketAddr,
+    },
+}
+
+impl Host {
+    pub(crate) fn of(boot: &intar_contracts::guest::GuestBootV3) -> Result<Self, String> {
+        use intar_contracts::guest::GuestHostV3;
+        match &boot.host {
+            None | Some(GuestHostV3::Vsock) => Ok(Self::Vsock),
+            Some(GuestHostV3::Tcp {
+                address,
+                report_port,
+                run_cli_port,
+            }) => {
+                let ip: std::net::IpAddr = address.parse().map_err(|_| {
+                    format!("boot.json: the host address {address:?} is not an IP address")
+                })?;
+                if *report_port == 0 || *run_cli_port == 0 {
+                    return Err("boot.json: a host port is 0".to_owned());
+                }
+                Ok(Self::Tcp {
+                    reports: (ip, *report_port).into(),
+                    run_cli: (ip, *run_cli_port).into(),
+                })
+            }
+        }
+    }
+}
+
+/// The link over an open stream: its write half, and a reader that signals
+/// when the host closed it.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "used by the Linux guest only")
+)]
+fn link(stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static) -> Link {
+    let (read, write) = tokio::io::split(stream);
+    let (done, closed) = oneshot::channel();
+    let reader = tokio::spawn(async move {
+        read_host_frames(read).await;
+        let _ = done.send(());
+    });
+    (Box::new(write), closed, Reader(reader))
+}
+
+/// Retries until the host listens. Over TCP the first tries fail until the
+/// guest's network is up.
 #[cfg(target_os = "linux")]
-async fn connect() -> Link {
+async fn connect(host: Host) -> Link {
     use intar_contracts::guest::REPORT_PORT;
     use tokio_vsock::{VMADDR_CID_HOST, VsockAddr, VsockStream};
     loop {
-        if let Ok(stream) = VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, REPORT_PORT)).await
-        {
-            close_on_exec(&stream);
-            let (read, write) = tokio::io::split(stream);
-            let (done, closed) = oneshot::channel();
-            let reader = tokio::spawn(async move {
-                read_host_frames(read).await;
-                let _ = done.send(());
-            });
-            return (Box::new(write), closed, Reader(reader));
+        match host {
+            Host::Vsock => {
+                if let Ok(stream) =
+                    VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, REPORT_PORT)).await
+                {
+                    close_on_exec(&stream);
+                    return link(stream);
+                }
+            }
+            Host::Tcp { reports, .. } => {
+                // std sockets are close-on-exec; no script inherits this one.
+                if let Ok(stream) = tokio::net::TcpStream::connect(reports).await {
+                    let _ = stream.set_nodelay(true);
+                    return link(stream);
+                }
+            }
         }
         tokio::time::sleep(RECONNECT).await;
     }
@@ -85,7 +146,7 @@ async fn connect() -> Link {
 
 /// There is no vsock off Linux; the supervisor only runs in a guest.
 #[cfg(not(target_os = "linux"))]
-async fn connect() -> Link {
+async fn connect(_host: Host) -> Link {
     let _ = RECONNECT;
     std::future::pending().await
 }

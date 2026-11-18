@@ -10,6 +10,17 @@
       "maximum": 3,
       "minimum": 3
     },
+    "host": {
+      "description": "Where Kino reaches the host for its reports and the run CLI's broker.\nAbsent, it is the host's vsock CID, as on every agent host; a host\nthat leaves it out writes the same bytes as before the field existed.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GuestHostV3"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "hostname": {
       "type": "string"
     },
@@ -48,6 +59,57 @@
     "spec"
   ],
   "$defs": {
+    "GuestHostV3": {
+      "description": "The host's end of Kino's two connections.",
+      "oneOf": [
+        {
+          "description": "AF_VSOCK to the host's CID, on [`REPORT_PORT`] and [`RUN_CLI_PORT`].",
+          "type": "object",
+          "properties": {
+            "transport": {
+              "type": "string",
+              "const": "vsock"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "transport"
+          ]
+        },
+        {
+          "description": "TCP to this IP address, for a host without vsock: a learner's own\ncomputer running macOS or Windows. The ports are the host's choice,\nsince every guest there reaches it at the same address and only the\nport tells two machines apart.",
+          "type": "object",
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "report_port": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1
+            },
+            "run_cli_port": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1
+            },
+            "transport": {
+              "type": "string",
+              "const": "tcp"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "transport",
+            "address",
+            "report_port",
+            "run_cli_port"
+          ]
+        }
+      ]
+    },
     "GuestNetworkV3": {
       "type": "object",
       "properties": {
