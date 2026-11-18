@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.23.2 (2026-11-18)
+
+### Bug fixes
+
+- **intar-agent:** Scrub only what a kino pull stores (#406) (97245581)
+
 ## agent/v0.23.1 (2026-11-18)
 
 ### Bug fixes
