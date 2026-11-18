@@ -202,6 +202,7 @@ pub(super) async fn build_host_state_report(
         .iter()
         .filter_map(|status| status.details.as_ref()?.cpu_millis)
         .fold(0_u32, u32::saturating_add);
+    let mut missed_budget = false;
     let live_jailer = if inspect_runtime {
         vm.jailer_capabilities().await.ok()
     } else {
@@ -236,19 +237,26 @@ pub(super) async fn build_host_state_report(
                 warn!(error = %error, "the jailer capacity refresh did not finish");
                 None
             }
-            Err(_) => None,
+            Err(_) => {
+                missed_budget = true;
+                None
+            }
         }
     };
     if let Some(capabilities) = live_jailer.as_ref() {
         report_cache.remember_jailer(capabilities).await;
     }
-    // Without a live answer the report uses a recent one. Only the committed
-    // CPU in it can have moved, and only through this agent: a VM launched
-    // since is in `statuses`, and one destroyed since makes the number too
-    // high, which errs on the side of no room. The daemon admits every
-    // launch itself whatever is reported here.
+    // A report whose refresh only missed its budget uses a recent answer:
+    // the daemon is busy, not gone. Only the committed CPU in it can have
+    // moved, and only through this agent: a VM launched since is in
+    // `statuses`, and one destroyed since makes the number too high, which
+    // errs on the side of no room. The daemon admits every launch itself
+    // whatever is reported here. A daemon that refused or failed the request
+    // is reported as having no room at once, as is every full report
+    // without a live answer.
     let capacity_jailer = match live_jailer.clone() {
         Some(capabilities) => Some(capabilities),
+        None if !missed_budget => None,
         None => {
             let recent = report_cache.recent_jailer(JAILER_CAPACITY_MAX_AGE).await;
             if recent.is_none() {
@@ -267,8 +275,9 @@ pub(super) async fn build_host_state_report(
     };
     // Feature and template-store attestations are immutable for a jailerd
     // process lifetime. A short capacity refresh timeout must not make a
-    // performance-ready host flap, while mutable capacity below still fails
-    // closed by using only the live response.
+    // performance-ready host flap. Mutable capacity below fails closed: it
+    // comes from the live response, or from a recent one when this report's
+    // refresh only ran out of time.
     let cached_jailer = report_cache.jailer_capabilities.read().await.clone();
     let attested_jailer = preserve_last_attestation(live_jailer.as_ref(), cached_jailer.as_ref());
     let (total_cpu_millis, reserved_cpu_millis, schedulable_cpu_millis, committed_cpu_millis) =

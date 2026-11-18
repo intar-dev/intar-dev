@@ -93,9 +93,8 @@ impl BridgeReportCache {
     ) -> Self {
         Self {
             host_profile: Arc::new(RwLock::new(host_profile)),
-            jailer_answered_at: Arc::new(RwLock::new(
-                jailer_capabilities.as_ref().map(|_| Instant::now()),
-            )),
+            // The seed was asked before the handshake: its age is unknown.
+            jailer_answered_at: Arc::new(RwLock::new(None)),
             jailer_capabilities: Arc::new(RwLock::new(jailer_capabilities)),
             hardware: Arc::new(RwLock::new(hardware)),
             cached_images: Arc::new(RwLock::new(Vec::new())),
