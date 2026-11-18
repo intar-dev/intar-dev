@@ -28,6 +28,8 @@ use tokio::sync::watch;
 const SCRIPT_DIR: &str = "/run/intar/scripts";
 
 const READY_INTERVAL: Duration = Duration::from_millis(250);
+/// How long the first run of the ready scripts, all together, may take.
+const READY_TOGETHER_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 5000 });
 /// One second under test, where a failing script should not take 300.
 const READY_TOTAL: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 300 });
 const TASK_INTERVAL: Duration = Duration::from_secs(2);
@@ -163,7 +165,8 @@ pub(crate) async fn run(
     }
 }
 
-/// Each script every 250 ms until it exits 0, all within 300 s.
+/// Every script once, all together; then each one that did not pass, in
+/// order, every 250 ms until it exits 0. All within 300 s.
 async fn run_ready(
     scripts: &[ScriptV1],
     env: &BTreeMap<String, String>,
@@ -171,42 +174,89 @@ async fn run_ready(
     report: &watch::Sender<Report>,
 ) -> bool {
     let deadline = Instant::now() + READY_TOTAL;
-    for (index, script) in scripts.iter().enumerate() {
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let outcome =
-                exec::run(dir, &format!("ready-{index}"), &script.script, env, left).await;
-            let passed = outcome.status == Status::Pass;
-            let out_of_time = Instant::now() + READY_INTERVAL >= deadline;
-            // A retry that fails the same way is not news: a report per
-            // attempt would queue up on the host ahead of the one that says
-            // the script passed.
-            report.send_if_modified(|report| {
-                let mut next = report.ready[index].clone();
-                next.set_status(if passed || out_of_time {
-                    outcome.status
-                } else {
-                    Status::Pending
-                });
-                next.tail = tail(&outcome.tail, READY_TAIL_BYTES).to_owned();
-                let failed = !passed && out_of_time;
-                let changed = failed || report.ready[index] != next;
-                report.ready[index] = next;
-                if failed {
-                    report.failure = format!("ready '{}' did not pass", script.name);
-                }
-                changed
-            });
-            if passed {
-                break;
-            }
-            if out_of_time {
+    let attempt = |index: usize, limit: Duration| async move {
+        let left = deadline
+            .saturating_duration_since(Instant::now())
+            .min(limit);
+        let outcome = exec::run(
+            dir,
+            &format!("ready-{index}"),
+            &scripts[index].script,
+            env,
+            left,
+        )
+        .await;
+        record_ready(report, index, &scripts[index].name, &outcome, deadline)
+    };
+    // A lab that starts from a snapshot is up already: every script passes
+    // on its first run, and run together they take as long as the slowest
+    // one, not as long as all of them. What fails here is retried below as
+    // before. This round is short: a script that waits for what an earlier
+    // one checks would otherwise hold every retry back, or use up the lab's
+    // whole time when it once had its turn only after the earlier one passed.
+    let first = futures_util::future::join_all(
+        (0..scripts.len()).map(|index| attempt(index, READY_TOGETHER_TIMEOUT)),
+    )
+    .await;
+    if first.contains(&Attempt::OutOfTime) {
+        return false;
+    }
+    for (index, first) in first.into_iter().enumerate() {
+        let mut last = first;
+        while last != Attempt::Passed {
+            tokio::time::sleep(READY_INTERVAL).await;
+            last = attempt(index, READY_TOTAL).await;
+            if last == Attempt::OutOfTime {
                 return false;
             }
-            tokio::time::sleep(READY_INTERVAL).await;
         }
     }
     true
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attempt {
+    Passed,
+    Retry,
+    OutOfTime,
+}
+
+/// Puts one run of a ready script into the report.
+fn record_ready(
+    report: &watch::Sender<Report>,
+    index: usize,
+    name: &str,
+    outcome: &exec::Outcome,
+    deadline: Instant,
+) -> Attempt {
+    let passed = outcome.status == Status::Pass;
+    let out_of_time = Instant::now() + READY_INTERVAL >= deadline;
+    // A retry that fails the same way is not news: a report per attempt
+    // would queue up on the host ahead of the one that says the script
+    // passed.
+    report.send_if_modified(|report| {
+        let mut next = report.ready[index].clone();
+        next.set_status(if passed || out_of_time {
+            outcome.status
+        } else {
+            Status::Pending
+        });
+        next.tail = tail(&outcome.tail, READY_TAIL_BYTES).to_owned();
+        let failed = !passed && out_of_time;
+        let changed = failed || report.ready[index] != next;
+        report.ready[index] = next;
+        if failed {
+            report.failure = format!("ready '{name}' did not pass");
+        }
+        changed
+    });
+    if passed {
+        Attempt::Passed
+    } else if out_of_time {
+        Attempt::OutOfTime
+    } else {
+        Attempt::Retry
+    }
 }
 
 /// Run the unlatched tasks together every 2 s; the first pass latches a
