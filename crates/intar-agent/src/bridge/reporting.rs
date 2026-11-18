@@ -205,29 +205,66 @@ pub(super) async fn build_host_state_report(
     let live_jailer = if inspect_runtime {
         vm.jailer_capabilities().await.ok()
     } else {
+        // The daemon answers one request at a time, and a lab start keeps it
+        // busy for longer than this report may wait: every start missed the
+        // budget. The request runs as its own task, so one that misses still
+        // finishes and leaves its answer for the next report, and the daemon
+        // is not left writing to a closed socket.
+        let refresh = tokio::spawn({
+            let vm = vm.clone();
+            let cache = report_cache.clone();
+            async move {
+                let answer = vm.jailer_capabilities().await;
+                if let Ok(capabilities) = &answer {
+                    cache.remember_jailer(capabilities).await;
+                }
+                answer
+            }
+        });
         match timeout(
             Duration::from_millis(INVENTORY_REPORT_JAILER_BUDGET_MS),
-            vm.jailer_capabilities(),
+            refresh,
         )
         .await
         {
-            Ok(Ok(capabilities)) => Some(capabilities),
-            Ok(Err(error)) => {
+            Ok(Ok(Ok(capabilities))) => Some(capabilities),
+            Ok(Ok(Err(error))) => {
                 warn!(error = %error, "failed to refresh jailer capacity for inventory report");
                 None
             }
-            Err(_) => {
+            Ok(Err(error)) => {
+                warn!(error = %error, "the jailer capacity refresh did not finish");
+                None
+            }
+            Err(_) => None,
+        }
+    };
+    if let Some(capabilities) = live_jailer.as_ref() {
+        report_cache.remember_jailer(capabilities).await;
+    }
+    // Without a live answer the report uses a recent one. Only the committed
+    // CPU in it can have moved, and only through this agent: a VM launched
+    // since is in `statuses`, and one destroyed since makes the number too
+    // high, which errs on the side of no room. The daemon admits every
+    // launch itself whatever is reported here.
+    let capacity_jailer = match live_jailer.clone() {
+        Some(capabilities) => Some(capabilities),
+        None => {
+            let recent = report_cache.recent_jailer(JAILER_CAPACITY_MAX_AGE).await;
+            if recent.is_none() {
                 warn!(
                     budget_ms = INVENTORY_REPORT_JAILER_BUDGET_MS,
                     "timed out refreshing jailer capacity for inventory report"
                 );
-                None
             }
+            recent.map(|capabilities| JailerCapabilities {
+                committed_cpu_millis: capabilities
+                    .committed_cpu_millis
+                    .max(u64::from(local_committed_cpu_millis)),
+                ..capabilities
+            })
         }
     };
-    if let Some(capabilities) = live_jailer.as_ref() {
-        *report_cache.jailer_capabilities.write().await = Some(capabilities.clone());
-    }
     // Feature and template-store attestations are immutable for a jailerd
     // process lifetime. A short capacity refresh timeout must not make a
     // performance-ready host flap, while mutable capacity below still fails
@@ -235,7 +272,7 @@ pub(super) async fn build_host_state_report(
     let cached_jailer = report_cache.jailer_capabilities.read().await.clone();
     let attested_jailer = preserve_last_attestation(live_jailer.as_ref(), cached_jailer.as_ref());
     let (total_cpu_millis, reserved_cpu_millis, schedulable_cpu_millis, committed_cpu_millis) =
-        live_jailer.as_ref().map_or_else(
+        capacity_jailer.as_ref().map_or_else(
             || {
                 // Helper unavailability is fail-closed: advertise no
                 // schedulable CPU even when the host profile is otherwise

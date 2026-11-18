@@ -368,6 +368,15 @@ async fn outbound_writer_prioritizes_inventory_reports() {
 }
 
 #[test]
+fn only_a_recent_jailer_answer_stands_in_for_a_missed_refresh() {
+    let now = Instant::now();
+    assert!(answered_within(Some(now), JAILER_CAPACITY_MAX_AGE));
+    assert!(!answered_within(None, JAILER_CAPACITY_MAX_AGE));
+    let long_ago = now.checked_sub(JAILER_CAPACITY_MAX_AGE + Duration::from_secs(1));
+    assert!(long_ago.is_some_and(|at| !answered_within(Some(at), JAILER_CAPACITY_MAX_AGE)));
+}
+
+#[test]
 fn bounded_inventory_path_fits_delivery_target() {
     let worst_case_ms = INVENTORY_REPORT_JAILER_BUDGET_MS
         .saturating_add(OUTBOUND_SEND_BUDGET_MS)
