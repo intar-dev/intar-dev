@@ -11,6 +11,7 @@
 
 pub mod accel;
 pub mod broker;
+pub mod preflight;
 pub mod qemu;
 pub mod reports;
 pub mod rundisk;
@@ -27,6 +28,10 @@ pub enum Error {
     /// QEMU or qemu-img could not be started, or stopped right away.
     #[error("{0}")]
     Qemu(String),
+    /// The computer has too little of something for the lab. The text names
+    /// what and how much; the caller shows it as it is.
+    #[error("{0}")]
+    Preflight(String),
     /// The run disk could not be written, or what should go on it is unusable.
     #[error("{0}")]
     RunDisk(String),

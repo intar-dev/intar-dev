@@ -161,9 +161,9 @@ pub fn create_overlay(qemu_img: &Path, base: &Path, overlay: &Path) -> Result<()
     }
 }
 
-/// A running machine. Dropping it kills QEMU.
-// ponytail: an app that is killed outright leaves QEMU running; find and stop
-// such leftovers at the next start, by the run directory in their arguments.
+/// A running machine. Dropping it kills QEMU. An app that is killed outright
+/// cannot do that; [`stop_leftover`] finds what it left by the pid file kept
+/// beside the control socket.
 pub struct Vm {
     process: Option<Child>,
     qmp_socket: PathBuf,
@@ -174,6 +174,8 @@ impl Vm {
     /// stops within the first second, such as on missing acceleration, is an
     /// error carrying what it printed; nothing is retried another way.
     pub fn start(qemu: &Path, machine: &Machine, log: &Path) -> Result<Self, Error> {
+        // A QEMU of this run that outlived its app holds the run's disk.
+        stop_leftover(&machine.qmp_socket)?;
         let out = File::create(log)?;
         let mut process = Command::new(qemu)
             .args(qemu_args(machine))
@@ -182,9 +184,12 @@ impl Vm {
             .stderr(out)
             .spawn()
             .map_err(|error| Error::Qemu(format!("could not start {}: {error}", qemu.display())))?;
+        let pid_file = pid_file(&machine.qmp_socket);
+        std::fs::write(&pid_file, process.id().to_string())?;
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
             if let Some(status) = process.try_wait()? {
+                let _ = std::fs::remove_file(&pid_file);
                 let printed = std::fs::read_to_string(log).unwrap_or_default();
                 let reason = match printed.trim() {
                     "" => format!("QEMU stopped at once ({status})"),
@@ -224,8 +229,68 @@ impl Drop for Vm {
             let _ = process.kill();
             let _ = process.wait();
         }
+        let _ = std::fs::remove_file(pid_file(&self.qmp_socket));
         let _ = std::fs::remove_file(&self.qmp_socket);
     }
+}
+
+fn pid_file(qmp_socket: &Path) -> PathBuf {
+    qmp_socket.with_extension("pid")
+}
+
+/// Stops the QEMU an earlier, killed app left running for the run whose
+/// control socket is `qmp_socket`. True when there was one.
+///
+/// Only a process whose command line names this very socket is touched: a
+/// pid file can outlive its process, and the number can belong to something
+/// else by now.
+#[cfg(unix)]
+pub fn stop_leftover(qmp_socket: &Path) -> Result<bool, Error> {
+    let pid_file = pid_file(qmp_socket);
+    let Ok(recorded) = std::fs::read_to_string(&pid_file) else {
+        return Ok(false);
+    };
+    let pid = recorded.trim().to_owned();
+    let marker = format!("unix:{}", qmp_socket.to_string_lossy().replace(',', ",,"));
+    let ours = || {
+        pid.bytes().all(|byte| byte.is_ascii_digit())
+            && !pid.is_empty()
+            && Command::new("ps")
+                .args(["-o", "command=", "-p", &pid])
+                .output()
+                .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&marker))
+    };
+    let found = ours();
+    if found {
+        // Ask first; a QEMU that did not take the request gets no grace.
+        let grace = if qmp_quit(qmp_socket).is_ok() { 3 } else { 0 };
+        let deadline = Instant::now() + Duration::from_secs(grace);
+        while ours() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if ours() {
+            let _ = Command::new("kill").args(["-KILL", &pid]).status();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while ours() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        if ours() {
+            return Err(Error::Qemu(format!(
+                "a machine of an earlier run is still running (process {pid}) and could not be stopped"
+            )));
+        }
+        let _ = std::fs::remove_file(qmp_socket);
+    }
+    let _ = std::fs::remove_file(&pid_file);
+    Ok(found)
+}
+
+// ponytail: Windows keeps no pid file check yet; a leftover there is found by
+// QEMU failing to open the run's disk. Job objects in #405.
+#[cfg(not(unix))]
+pub fn stop_leftover(_qmp_socket: &Path) -> Result<bool, Error> {
+    Ok(false)
 }
 
 /// `quit` over QMP: greeting, capabilities, command.
@@ -261,6 +326,17 @@ fn qmp_quit(_socket: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A script that keeps running with its arguments on its command line,
+    /// as QEMU does, and ignores them.
+    #[cfg(unix)]
+    fn fake_qemu(dir: &Path) -> PathBuf {
+        let script = dir.join("qemu");
+        std::fs::write(&script, "#!/bin/sh\nwhile :; do sleep 1; done\n").expect("script");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("mode");
+        script
+    }
 
     fn machine() -> Machine {
         Machine {
@@ -358,12 +434,7 @@ mod tests {
         let log = dir.path().join("qemu.log");
         let mut machine = machine();
         machine.qmp_socket = dir.path().join("qmp.sock");
-        // `sleep` ignores what it cannot parse as a number only on some systems,
-        // so a script that sleeps stands in for a QEMU that keeps running.
-        let script = dir.path().join("qemu");
-        std::fs::write(&script, "#!/bin/sh\nexec sleep 60\n").expect("script");
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .expect("mode");
+        let script = fake_qemu(dir.path());
         let mut vm = Vm::start(&script, &machine, &log).expect("start");
         assert!(vm.is_running());
         let pid = vm.process.as_ref().expect("process").id();
@@ -375,5 +446,48 @@ mod tests {
             .status()
             .expect("kill -0");
         assert!(!alive.success(), "the process outlived its Vm");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_qemu_left_by_a_killed_app_is_stopped_and_nothing_else_is() {
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join("qemu.log");
+        let mut machine = machine();
+        machine.qmp_socket = dir.path().join("qmp.sock");
+        let pid_file = pid_file(&machine.qmp_socket);
+        let running = |pid: u32| {
+            Command::new("ps")
+                .args(["-o", "command=", "-p", &pid.to_string()])
+                .output()
+                .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("qmp.sock"))
+        };
+
+        // Nothing was left: nothing to do.
+        assert!(!stop_leftover(&machine.qmp_socket).expect("none"));
+
+        // The app dies without dropping its Vm: QEMU and the pid file stay.
+        let vm = Vm::start(&fake_qemu(dir.path()), &machine, &log).expect("start");
+        let pid = vm.process.as_ref().expect("process").id();
+        std::mem::forget(vm);
+        assert!(pid_file.exists() && running(pid));
+        assert!(stop_leftover(&machine.qmp_socket).expect("stopped"));
+        assert!(!running(pid) && !pid_file.exists());
+
+        // The next start of the same run stops a leftover by itself.
+        let vm = Vm::start(&fake_qemu(dir.path()), &machine, &log).expect("start");
+        let first = vm.process.as_ref().expect("process").id();
+        std::mem::forget(vm);
+        let again = Vm::start(&fake_qemu(dir.path()), &machine, &log).expect("start again");
+        assert!(!running(first));
+        drop(again);
+        assert!(!pid_file.exists());
+
+        // A pid file that names some other live process: that process is left alone.
+        std::fs::write(&pid_file, std::process::id().to_string()).expect("write");
+        assert!(!stop_leftover(&machine.qmp_socket).expect("not ours"));
+        assert!(!pid_file.exists());
+        std::fs::write(&pid_file, "1; rm -rf /").expect("write");
+        assert!(!stop_leftover(&machine.qmp_socket).expect("garbage"));
     }
 }

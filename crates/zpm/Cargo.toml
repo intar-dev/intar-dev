@@ -15,6 +15,10 @@ intar-kino-proto = { path = "../intar-kino-proto" }
 serde_json.workspace = true
 thiserror.workspace = true
 
+# Free disk space for the preflight.
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 # Kino reports over AF_VSOCK, which only a Linux host has.
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio = { workspace = true }

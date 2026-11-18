@@ -6032,6 +6032,7 @@ dependencies = [
  "fatfs",
  "intar-contracts",
  "intar-kino-proto",
+ "rustix",
  "serde_json",
  "tempfile",
  "thiserror",

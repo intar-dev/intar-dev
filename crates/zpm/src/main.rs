@@ -85,6 +85,13 @@ fn run(args: Args) -> Result<(), zpm::Error> {
         Accel::detect(arch)?
     };
 
+    // The overlay and the two small disks; the image itself is already on disk.
+    let needs = zpm::preflight::Needs {
+        cpus: args.cpus,
+        memory_mib: args.memory,
+        disk_mib: 256,
+    };
+    zpm::preflight::check(&needs, &zpm::preflight::Has::measure(&args.dir))?;
     std::fs::create_dir_all(&args.dir)?;
     let overlay = args.dir.join("root.qcow2");
     let _ = std::fs::remove_file(&overlay);
