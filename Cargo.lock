@@ -4183,6 +4183,7 @@ dependencies = [
  "apple-native-keyring-store",
  "gpui",
  "gpui_platform",
+ "intar-contracts",
  "keyring-core",
  "reqwest",
  "serde_json",
@@ -4190,6 +4191,7 @@ dependencies = [
  "tokio",
  "unicode-segmentation",
  "url",
+ "uuid",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
 ]

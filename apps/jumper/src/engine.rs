@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use subspace::contract::LocalRunAnswerV1;
 use subspace::{Error, SignIn, Subspace, Tokens};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use url::Url;
@@ -65,6 +66,19 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                                 Err(error) => Event::Failed(error.to_string()),
                             },
                         },
+                        // Each press of Start is its own request; the server answers a repeat
+                        // of the same key with the same run.
+                        Command::StartRun { scenario_id, organization_id } => {
+                            let key = uuid::Uuid::new_v4().to_string();
+                            run_event(&channel, async |channel| {
+                                channel
+                                    .start_run(&scenario_id, organization_id.as_deref(), &[intar_contracts::guest::GUEST_CONTRACT], &key)
+                                    .await
+                            })
+                            .await
+                        }
+                        Command::ReadRun { run_id } => run_event(&channel, async |channel| channel.run(&run_id).await).await,
+                        Command::EndRun { run_id } => run_event(&channel, async |channel| channel.end_run(&run_id).await).await,
                     };
                     // Keep the keychain current: after a sign-in, after a refresh, and
                     // empty once signed out, whether the learner or the server ended it.
@@ -109,4 +123,22 @@ async fn sign_in(
         .await
         .map_err(|_| Error::SignIn("no answer from the browser in five minutes".into()))??;
     Ok(Subspace::new(http.clone(), base.clone(), tokens))
+}
+
+/// One call about a run, as the event the UI gets.
+async fn run_event(
+    channel: &Option<Arc<Subspace>>,
+    call: impl AsyncFnOnce(&Subspace) -> Result<LocalRunAnswerV1, Error>,
+) -> Event {
+    let Some(channel) = channel else {
+        return Event::SignedOut;
+    };
+    match call(channel).await {
+        Ok(answer) => Event::Run(answer.run),
+        Err(Error::SignedOut) => Event::SignedOut,
+        // A run the server has closed is still the run to show.
+        Err(Error::Refused { run: Some(run), .. }) => Event::Run(*run),
+        Err(Error::Refused { message, .. }) if !message.is_empty() => Event::Failed(message),
+        Err(error) => Event::Failed(error.to_string()),
+    }
 }

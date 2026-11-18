@@ -10,6 +10,7 @@ description = "The intar desktop app: run labs on your own computer."
 
 [dependencies]
 gpui.workspace = true
+intar-contracts = { path = "../../crates/intar-contracts" }
 # The sign-in is kept in the OS keychain, never on disk.
 keyring-core.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
@@ -19,6 +20,7 @@ tokio.workspace = true
 # Grapheme-aware cursor movement in the text input.
 unicode-segmentation.workspace = true
 url.workspace = true
+uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # runtime_shaders: builds without the Metal compiler that only full Xcode ships.

@@ -8,8 +8,8 @@ mod ui;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClickEvent, Context, Div, Entity, SharedString, Subscription, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, div, px, rgb, size,
+    App, Bounds, ClickEvent, Context, Div, Entity, SharedString, Stateful, Subscription,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, rgb, size,
 };
 use gpui_platform::application;
 use state::{Command, Event, Screen, State};
@@ -63,25 +63,231 @@ impl Jumper {
         cx.notify();
     }
 
+    /// A button; `act` runs on a click and may change the screen or ask the engine.
     fn button(
         &self,
         p: &Palette,
         label: &'static str,
-        command: fn() -> Command,
+        primary: bool,
+        act: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let hover = p.accent_hover;
+    ) -> Stateful<Div> {
+        let (bg, hover, text) = if primary {
+            (p.accent, p.accent_hover, p.on_accent)
+        } else {
+            (p.panel, p.border, p.text)
+        };
         div()
             .id(label)
             .px_4()
             .py_2()
             .rounded_md()
-            .bg(rgb(p.accent))
+            .border_1()
+            .border_color(rgb(if primary { p.accent } else { p.input_border }))
+            .bg(rgb(bg))
             .hover(move |style| style.bg(rgb(hover)))
-            .text_color(rgb(p.on_accent))
+            .text_color(rgb(text))
             .cursor_pointer()
             .child(label)
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, _| this.send(command())))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                act(this, cx);
+                cx.notify();
+            }))
+    }
+
+    /// A button that only asks the engine for something.
+    fn command_button(
+        &self,
+        p: &Palette,
+        label: &'static str,
+        primary: bool,
+        command: impl Fn() -> Command + 'static,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        self.button(p, label, primary, move |this, _| this.send(command()), cx)
+    }
+
+    fn catalog(&self, p: &Palette, cx: &Context<Self>) -> Div {
+        if self.state.catalog.is_empty() {
+            return card(p, "No courses yet")
+                .child(muted(p, "Courses you can take show up here."))
+                .child(div().flex().child(self.command_button(
+                    p,
+                    "Sign out",
+                    false,
+                    || Command::SignOut,
+                    cx,
+                )));
+        }
+        let filter = self.filter.read(cx).text().trim().to_lowercase();
+        let courses = self
+            .state
+            .catalog
+            .iter()
+            .enumerate()
+            .map(|(course_index, course)| {
+                let lectures = course
+                    .lectures
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, lecture)| lecture.title.to_lowercase().contains(&filter))
+                    .map(|(lecture_index, lecture)| {
+                        let hover = p.border;
+                        div()
+                            .id(("lecture", course_index * 10_000 + lecture_index))
+                            .flex()
+                            .justify_between()
+                            .gap_4()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(rgb(hover)))
+                            .child(lecture.title.clone())
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(lecture_color(p, &lecture.state)))
+                                    .child(lecture.state.replace('_', " ")),
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.state.open_lecture(course_index, lecture_index);
+                                cx.notify();
+                            }))
+                    });
+                card(p, course.title.clone())
+                    .child(muted(p, course.summary.clone()))
+                    .children(lectures)
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .w(px(520.))
+                    .flex()
+                    .gap_3()
+                    .items_center()
+                    .child(div().flex_1().child(self.filter.clone()))
+                    .child(self.command_button(p, "Sign out", false, || Command::SignOut, cx)),
+            )
+            .children(courses)
+    }
+
+    fn lecture(&self, p: &Palette, cx: &Context<Self>) -> Div {
+        let Some((course, lecture)) = self.state.lecture() else {
+            return card(p, "This lecture is no longer in your courses");
+        };
+        let back = self.button(
+            p,
+            "Back to courses",
+            false,
+            |this, _| {
+                let reload = this.state.back_to_catalog();
+                this.send(reload)
+            },
+            cx,
+        );
+        let facts = [
+            Some(course.title.clone()),
+            lecture.difficulty.clone(),
+            lecture
+                .estimated_minutes
+                .map(|minutes| format!("{minutes} min")),
+            Some(lecture.state.replace('_', " ")),
+        ];
+        let body = card(p, lecture.title.clone())
+            .child(muted(
+                p,
+                facts.into_iter().flatten().collect::<Vec<_>>().join(" · "),
+            ))
+            .child(div().child(lecture.summary.clone()));
+        let run = self.button(
+            p,
+            if lecture.active_run_id.is_some() {
+                "Open the run"
+            } else {
+                "Start on this computer"
+            },
+            true,
+            |this, _| {
+                if let Some(command) = this.state.open_run() {
+                    this.send(command);
+                }
+            },
+            cx,
+        );
+        match (&lecture.scenario_id, lecture.state.as_str()) {
+            (None, _) => body
+                .child(muted(p, "This lecture has no lab."))
+                .child(div().flex().child(back)),
+            (Some(_), "locked") => body
+                .child(muted(
+                    p,
+                    "Finish the lectures before this one to unlock its lab.",
+                ))
+                .child(div().flex().child(back)),
+            (Some(_), "waiting_for_scenario") => body
+                .child(muted(p, "This lecture's lab is not ready yet."))
+                .child(div().flex().child(back)),
+            (Some(_), _) => body.child(div().flex().gap_3().child(run).child(back)),
+        }
+    }
+
+    fn run(&self, p: &Palette, run: &subspace::contract::LocalRunV1, cx: &Context<Self>) -> Div {
+        let back = self.button(
+            p,
+            "Back to courses",
+            false,
+            |this, _| {
+                let reload = this.state.back_to_catalog();
+                this.send(reload)
+            },
+            cx,
+        );
+        let machines = run.machines.iter().map(|machine| {
+            div()
+                .flex()
+                .justify_between()
+                .gap_4()
+                .child(machine.name.clone())
+                .child(muted(
+                    p,
+                    format!(
+                        "{} CPU · {} MiB memory · {} MiB disk",
+                        machine.cpu_millis as f32 / 1000.0,
+                        machine.memory_mib,
+                        machine.disk_mib
+                    ),
+                ))
+        });
+        let body = card(p, run.scenario_id.clone())
+            .child(muted(
+                p,
+                format!(
+                    "{} · {}",
+                    if run.active { "Active" } else { "Ended" },
+                    run.state.replace('_', " ")
+                ),
+            ))
+            .children(machines);
+        if !run.active {
+            return body.child(div().flex().child(back));
+        }
+        let run_id = run.run_id.clone();
+        let end = self.command_button(
+            p,
+            "End run",
+            true,
+            move || Command::EndRun {
+                run_id: run_id.clone(),
+            },
+            cx,
+        );
+        // ponytail: the run exists on intar, but nothing boots yet; the QEMU engine (#398) is next.
+        body.child(muted(p, "This version of the app cannot start the machines yet. The run counts as active on intar until you end it."))
+            .child(div().flex().gap_3().child(end).child(back))
     }
 }
 
@@ -124,62 +330,21 @@ impl Render for Jumper {
                     p,
                     "Your browser opens intar's sign-in page. Labs then run on this computer.",
                 ))
-                .child(
-                    div()
-                        .flex()
-                        .child(self.button(p, "Sign in", || Command::SignIn, cx)),
-                ),
+                .child(div().flex().child(self.command_button(
+                    p,
+                    "Sign in",
+                    true,
+                    || Command::SignIn,
+                    cx,
+                ))),
             Screen::SigningIn(url) => card(p, "Finish signing in in your browser")
                 .child(muted(p, "If no browser opened, open this link yourself:"))
                 .child(muted(p, url.clone())),
             Screen::Loading => card(p, "Loading your courses…"),
-            Screen::Catalog(courses) if courses.is_empty() => {
-                card(p, "No courses yet").child(muted(p, "Courses you can take show up here."))
-            }
-            Screen::Catalog(courses) => {
-                let filter = self.filter.read(cx).text().trim().to_lowercase();
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(
-                        div()
-                            .w(px(520.))
-                            .flex()
-                            .gap_3()
-                            .items_center()
-                            .child(div().flex_1().child(self.filter.clone()))
-                            .child(self.button(p, "Sign out", || Command::SignOut, cx)),
-                    )
-                    .children(courses.iter().map(|course| {
-                        card(p, course.title.clone())
-                            .child(muted(p, course.summary.clone()))
-                            .children(
-                                course
-                                    .lectures
-                                    .iter()
-                                    .filter(|lecture| {
-                                        lecture.title.to_lowercase().contains(&filter)
-                                    })
-                                    .map(|lecture| {
-                                        div()
-                                            .flex()
-                                            .justify_between()
-                                            .gap_4()
-                                            .child(lecture.title.clone())
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(rgb(lecture_color(
-                                                        p,
-                                                        &lecture.state,
-                                                    )))
-                                                    .child(lecture.state.replace('_', " ")),
-                                            )
-                                    }),
-                            )
-                    }))
-            }
+            Screen::Catalog => self.catalog(p, cx),
+            Screen::Lecture { .. } => self.lecture(p, cx),
+            Screen::OpeningRun => card(p, "Asking intar for the run…"),
+            Screen::Run(run) => self.run(p, run, cx),
         };
         div()
             .id("jumper")
@@ -197,7 +362,7 @@ impl Render for Jumper {
                 self.state
                     .error
                     .clone()
-                    .map(|error| div().text_color(rgb(p.red)).child(error)),
+                    .map(|error| div().max_w(px(520.)).text_color(rgb(p.red)).child(error)),
             )
             .child(content)
     }
