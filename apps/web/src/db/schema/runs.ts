@@ -29,6 +29,8 @@ export interface ScenarioStartRequestScope {
   /** Present on a start from a play page, with the page's `ref`. */
   launchSource?: "play";
   ref?: string | null;
+  /** Present on a start of a local run. */
+  runtime?: "local";
 }
 
 export const scenarioRuns = sqliteTable(

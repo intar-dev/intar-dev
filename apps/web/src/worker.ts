@@ -25,6 +25,7 @@ import {
 } from "@/maintenance";
 import { MaintenanceState } from "@/maintenance-state";
 import { sweepUndeliveredHostDesiredState } from "@/lib/host-runtime-dispatch-outbox";
+import { reapSilentLocalRuns } from "@/lib/local-runs";
 import {
   guardCanonicalRequestPath,
   secureApplicationApiRequest,
@@ -129,6 +130,16 @@ export default {
       console.error(
         JSON.stringify({
           event: "host_desired_dispatch_sweep_failed",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+    try {
+      await reapSilentLocalRuns(env.DB);
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "local_run_reap_failed",
           error: error instanceof Error ? error.message : String(error),
         }),
       );
