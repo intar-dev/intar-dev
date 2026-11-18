@@ -224,7 +224,12 @@ impl TerminalStyle {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum BrokerEndpoint {
     Unix(PathBuf),
-    Vsock { cid: u32, port: u32 },
+    /// A host without vsock (`boot.json` names a TCP host).
+    Tcp(std::net::SocketAddr),
+    Vsock {
+        cid: u32,
+        port: u32,
+    },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -881,6 +886,12 @@ fn parse_broker_endpoint(raw: &str) -> Result<BrokerEndpoint, EndpointError> {
         }
         return Err(EndpointError::Invalid);
     }
+    if let Some(address) = raw.strip_prefix("tcp://") {
+        return match address.parse::<std::net::SocketAddr>() {
+            Ok(address) if address.port() != 0 => Ok(BrokerEndpoint::Tcp(address)),
+            _ => Err(EndpointError::Invalid),
+        };
+    }
     let Some(address) = raw.strip_prefix("vsock://") else {
         return Err(EndpointError::Invalid);
     };
@@ -991,6 +1002,16 @@ impl BrokerClient {
                         .await
                         .map_err(|_| TransportError::Unavailable)?
                         .map_err(|_| TransportError::Unavailable)?;
+                request_over_stream(&mut stream, request).await
+            }
+            BrokerEndpoint::Tcp(address) => {
+                let mut stream = tokio::time::timeout(
+                    BROKER_CONNECT_TIMEOUT,
+                    tokio::net::TcpStream::connect(address),
+                )
+                .await
+                .map_err(|_| TransportError::Unavailable)?
+                .map_err(|_| TransportError::Unavailable)?;
                 request_over_stream(&mut stream, request).await
             }
             BrokerEndpoint::Vsock { cid, port } => request_vsock(*cid, *port, request).await,
@@ -1933,7 +1954,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_only_private_unix_and_vsock_broker_endpoints() {
+    fn parses_unix_vsock_and_tcp_broker_endpoints() {
         assert_eq!(
             parse_broker_endpoint("unix:///run/intar/broker.sock"),
             Ok(BrokerEndpoint::Unix(PathBuf::from(
@@ -1947,7 +1968,15 @@ mod tests {
                 port: 18_082
             })
         );
-        assert!(parse_broker_endpoint("tcp://127.0.0.1:1").is_err());
+        // What init writes for a host that boot.json names by TCP address.
+        assert_eq!(
+            parse_broker_endpoint("tcp://10.77.52.1:18082"),
+            Ok(BrokerEndpoint::Tcp(([10, 77, 52, 1], 18_082).into()))
+        );
+        assert!(parse_broker_endpoint("tcp://10.77.52.1:0").is_err());
+        assert!(parse_broker_endpoint("tcp://host.example:18082").is_err());
+        assert!(parse_broker_endpoint("tcp://10.77.52.1").is_err());
+        assert!(parse_broker_endpoint("http://10.77.52.1:18082").is_err());
         assert!(parse_broker_endpoint("unix://relative.sock").is_err());
         assert!(parse_broker_endpoint("vsock://2:0").is_err());
     }

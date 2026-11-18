@@ -64,6 +64,8 @@ pub fn boot_json(input: &BootJsonInput<'_>) -> Result<Vec<u8>> {
         root_resize: input.root_resize,
         mode: input.mode,
         spec,
+        // An agent host is reached on its vsock CID.
+        host: None,
     };
     serde_json::to_vec(&boot).context("serialize boot.json")
 }
