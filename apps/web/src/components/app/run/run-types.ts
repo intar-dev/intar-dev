@@ -133,6 +133,8 @@ export interface ScenarioRunRecord {
   canOpenTerminal: boolean;
   /** Set from live status: the run's machine is out of reach right now. */
   machineUnreachable?: boolean;
+  /** The run's machines are on the learner's own computer, in the desktop app. */
+  local?: boolean;
   terminalTarget?: {
     host: string | null;
     port: number;

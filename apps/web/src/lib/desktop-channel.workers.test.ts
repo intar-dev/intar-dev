@@ -12,7 +12,7 @@ import {
 } from "@/lib/desktop-channel";
 import { LOCAL_RUN_SILENCE_MS, reapSilentLocalRuns } from "@/lib/local-runs";
 import { guardBetterAuthRequest, guardCustomApiMutation } from "@/lib/request-security";
-import { createScenarioSshSessionForUser, listScenarioRunsForUser } from "@/lib/scenario-runs";
+import { createScenarioSshSessionForUser, getScenarioRunForUser, listScenarioRunsForUser } from "@/lib/scenario-runs";
 import { getScenarioRunStatusStreamTargetForUser } from "@/lib/scenario-runs/status";
 import { ALL as authRoute } from "@/pages/api/auth/[...all]";
 import { ensureFixtureMember } from "@/test/account-fixtures";
@@ -348,6 +348,7 @@ describe("the desktop channel", () => {
   it("is marked local on the website, which offers it no terminal and no status stream", async () => {
     const { run } = await view(await start(await token("mine", LEARNER)));
     expect(await listScenarioRunsForUser({ userId: LEARNER })).toMatchObject([{ runId: run.runId, local: true, active: true }]);
+    expect(await getScenarioRunForUser({ runId: run.runId, userId: LEARNER })).toMatchObject({ id: run.runId, local: true, canOpenTerminal: false });
     const vmId = JSON.parse((await env.DB.prepare("SELECT state_json FROM scenario_runs WHERE run_id = ?1").bind(run.runId)
       .first<{ state_json: string }>())!.state_json).vms[0].id as string;
     for (const mode of ["browser", "native"] as const) {

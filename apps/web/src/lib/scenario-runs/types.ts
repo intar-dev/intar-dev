@@ -37,6 +37,8 @@ export interface ScenarioRunRecord extends Omit<RunStateDocument, "tasks"> {
   tasks?: RunTaskView[];
   /** Set by live status only: the run's machine is out of reach right now. */
   machineUnreachable?: boolean;
+  /** The run's machines are on the learner's own computer, in the desktop app. */
+  local: boolean;
   id: string;
   scenarioId: string;
   organizationId: string | null;
