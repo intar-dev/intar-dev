@@ -23,7 +23,7 @@ import { isRevisionScenarioId } from "@/lib/scenario-id";
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
 import { liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
 
-/** The one OAuth client the routes accept. Its row is created by a migration. */
+/** The one OAuth client the routes accept. A deploy seeds its row (apps/web/seeds). */
 export const DESKTOP_OAUTH_CLIENT_ID = "intar-jumper";
 export const LOCAL_RUNS_SCOPE = "local-runs";
 /** Version of this channel's requests and answers. */

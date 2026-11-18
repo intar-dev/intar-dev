@@ -64,7 +64,6 @@ describe("generated migration apply", () => {
         "0046_yielding_smiling_tiger",
         "0047_slimy_proudstar",
         "0048_dapper_mongoose",
-        "0049_desktop_oauth_client",
       ]);
     } finally {
       fixture.database.close(false);
@@ -134,7 +133,6 @@ describe("generated migration apply", () => {
         "0046_yielding_smiling_tiger",
         "0047_slimy_proudstar",
         "0048_dapper_mongoose",
-        "0049_desktop_oauth_client",
       ]);
 
       const evidence = await applyGeneratedMigrations(client);

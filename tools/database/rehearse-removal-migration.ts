@@ -79,14 +79,6 @@ export async function runRehearsal(input: {
   };
 }
 
-/**
- * Rows the pending migrations may add to an existing table, as the `quote()`
- * text of the table's first column: the desktop app's OAuth client (0049).
- */
-export const ADDED_ROWS: Readonly<Record<string, readonly string[]>> = {
-  oauth_client: ["'intar-jumper'"],
-};
-
 export interface TableSnapshot {
   readonly sql: string;
   readonly columns: readonly string[];
@@ -154,12 +146,10 @@ export function comparePreservedTables(
       const indexes = kept.map((index) => columns.indexOf(earlier.columns[index]!));
       return JSON.stringify(rows.map((row) => indexes.map((index) => row[index]!)).sort(compareRows));
     };
-    const had = new Set(earlier.rows.map((row) => row[0]));
-    const rows = table.rows.filter((row) => had.has(row[0]) || !ADDED_ROWS[name]?.includes(row[0]!));
-    if (project(earlier.columns, earlier.rows) !== project(table.columns, rows)) {
+    if (project(earlier.columns, earlier.rows) !== project(table.columns, table.rows)) {
       throw new Error(`the migrations changed the rows of ${name}`);
     }
-    preservedRows += rows.length;
+    preservedRows += table.rows.length;
     preservedTables += 1;
   }
   return {

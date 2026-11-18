@@ -136,6 +136,7 @@ it("holds before it changes production and releases last", () => {
     "Enable maintenance for pending migrations",
     "Apply pending D1 migrations",
     "Verify production D1 schema",
+    "Apply production D1 seeds",
     "Deploy the image registry cleanup worker",
     "Deploy production at 100 percent",
     "Release the image registry collector",

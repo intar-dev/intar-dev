@@ -16,6 +16,7 @@ import { createScenarioSshSessionForUser, getScenarioRunForUser, listScenarioRun
 import { getScenarioRunStatusStreamTargetForUser } from "@/lib/scenario-runs/status";
 import { ALL as authRoute } from "@/pages/api/auth/[...all]";
 import { ensureFixtureMember } from "@/test/account-fixtures";
+import desktopClientSeed from "../../seeds/desktop-oauth-client.sql?raw";
 import { seedSessionCookie } from "@/test/auth-requests";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
@@ -68,7 +69,8 @@ describe("the desktop channel", () => {
       await db.insert(user).values({ id, name: id, email: `${id}@example.test` });
       await ensureFixtureMember({ d1: env.DB, userId: id });
     }
-    // The app's own client comes from a migration.
+    // The app's own client is the row a deploy seeds.
+    await env.DB.prepare(desktopClientSeed).run();
     await env.DB.prepare("INSERT INTO oauth_client (id, client_id, redirect_uris) VALUES ('other-row', 'other-app', '[\"https://other.example/callback\"]')").run();
     expect(await store("application/vnd.intar.kino.v1", KINO_CONFIG_MEDIA_TYPE, { guest_contract: 3, version: "run-test" },
       [["application/octet-stream", "kino binary"]])).toBe(KINO);
@@ -361,7 +363,7 @@ describe("the desktop channel", () => {
       .rejects.toMatchObject({ code: "scenario_run_not_found" });
   });
 
-  it("signs the app in through the provider with the client a migration created", async () => {
+  it("signs the app in through the provider with the client a deploy seeds", async () => {
     const cookie = await seedSessionCookie({ id: "web-session", token: "web-session-token", userId: LEARNER, now: Date.now() });
     const handle = (request: Request) => authRoute({ request } as Parameters<typeof authRoute>[0]) as Promise<Response>;
     const SITE = "http://localhost"; // the auth base URL in tests
