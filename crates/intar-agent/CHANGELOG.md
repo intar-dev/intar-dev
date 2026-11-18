@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.22.1 (2026-11-18)
+
+### Performance
+
+- **intar-jailerd:** Give back the empty pages of a snapshot's memory file (#383) (546f60d9)
+
 ## agent/v0.22.0 (2026-11-17)
 
 ### Features
