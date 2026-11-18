@@ -39,14 +39,14 @@
     // compile the retired source format, so these stay empty until the
     // release workflow's pin pull request names the first one that compiles
     // the current format.
-    "SCENARIO_COMPILER_CLI_VERSION": "0.11.0",
+    "SCENARIO_COMPILER_CLI_VERSION": "0.12.0",
     // Public run shares keep their terminal logs next to the run recordings.
     // Local workerd has no jurisdictions, so local configs leave this unset.
     "RUN_SHARE_JURISDICTION": "eu",
     // The public origin of SHARE_LIVE_BUCKET, and its zone for cache purges
     // (with the optional SHARE_LIVE_PURGE_TOKEN secret).
     "SHARE_LIVE_ORIGIN": "https://live.intar.dev",
-    "SCENARIO_COMPILER_CLI_SHA256": "{\"linux_amd64\":\"73453e9159af10f7d9fc55b13bfb41a0a1bd7f918632aaeb346dc42e5a489e22\",\"linux_arm64\":\"d06cea382ee56ec1b6a09bc3d9b5aeb336f2baf6ce4280f9c4e35285dafa46c1\"}",
+    "SCENARIO_COMPILER_CLI_SHA256": "{\"linux_amd64\":\"2ac52ff16df875fb03579c67be95cdab5590aea6bd7705bb081d406092b45b74\",\"linux_arm64\":\"9505301e14de292f576b0979e86343fac917043520dd825a805b8a0e4a04569a\"}",
   },
   "vpc_services": [
     {
