@@ -225,9 +225,26 @@ pub struct RevisionMachineV1 {
 /// `value` as JSON with object keys sorted by byte order and no whitespace:
 /// the bytes stored documents and spec blobs are hashed over.
 pub fn canonical_json<T: Serialize>(value: &T) -> serde_json::Result<Vec<u8>> {
-    // `serde_json::Map` is a `BTreeMap` (no `preserve_order`), so a `Value`
-    // writes its keys sorted.
-    serde_json::to_vec(&serde_json::to_value(value)?)
+    serde_json::to_vec(&sorted(serde_json::to_value(value)?))
+}
+
+/// `value` with the keys of every object in byte order. `serde_json::Map`
+/// sorts on its own only while no crate in the build turns on
+/// `preserve_order`, which any dependency can; the digests must not depend
+/// on that.
+fn sorted(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Object(object) => {
+            let keys: BTreeMap<String, Value> = object
+                .into_iter()
+                .map(|(key, value)| (key, sorted(value)))
+                .collect();
+            Value::Object(keys.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
+        other => other,
+    }
 }
 
 impl MachineSpecV1 {
@@ -899,6 +916,29 @@ mod tests {
         images[0].from = "klustered".to_owned();
         images[0].disk_mib = None;
         assert!(problems(&scenario, &images).contains("from chain forms a cycle"));
+    }
+
+    #[test]
+    fn canonical_json_sorts_keys_at_every_depth() {
+        #[derive(Serialize)]
+        struct Outer {
+            zebra: u8,
+            inner: Vec<Inner>,
+            alpha: u8,
+        }
+        #[derive(Serialize)]
+        struct Inner {
+            y: u8,
+            x: u8,
+        }
+        let value = Outer {
+            zebra: 1,
+            inner: vec![Inner { y: 2, x: 3 }],
+            alpha: 4,
+        };
+        let json =
+            String::from_utf8(canonical_json(&value).unwrap_or_default()).unwrap_or_default();
+        assert_eq!(json, r#"{"alpha":4,"inner":[{"x":3,"y":2}],"zebra":1}"#);
     }
 
     #[test]
