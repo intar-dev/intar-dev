@@ -1,5 +1,11 @@
 # Changelog
 
+## kino/v0.9.1 (2026-11-18)
+
+### Performance
+
+- **kino:** Run a lab's ready scripts together on their first attempt (#381) (6b6db34a)
+
 ## kino/v0.9.0 (2026-11-17)
 
 ### Features
