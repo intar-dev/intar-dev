@@ -944,27 +944,26 @@ async fn queue_capture(
                     counters.restore_failures.remove(key.as_str());
                 }
             }
-            Ok(Err(error)) if !replaced => {
-                warn!(error = %format!("{error:#}"), key = key.as_str(), "snapshot capture failed; the old snapshot stays");
-                clean_up_until_gone(&inner).await;
-            }
-            Err(_) if !replaced => clean_up_until_gone(&inner).await,
             Ok(Err(error)) => {
                 // No CPU for the capture right now is not a failed capture.
                 let busy = error
                     .downcast_ref::<JailerdError>()
                     .is_some_and(|error| error.0.code == "cpu_capacity_exhausted");
-                warn!(error = %format!("{error:#}"), key = key.as_str(), busy, "snapshot capture failed");
+                warn!(error = %format!("{error:#}"), key = key.as_str(), busy, replaced, "snapshot capture failed");
                 if !busy {
                     inner.snapshots.count_capture_failure(key.as_str());
                 }
                 clean_up_until_gone(&inner).await;
-                let _ = request_jailerd(&inner, unpublish).await;
+                if replaced {
+                    let _ = request_jailerd(&inner, unpublish).await;
+                }
             }
             // Aborted for a launch: not a failure.
             Err(_) => {
                 clean_up_until_gone(&inner).await;
-                let _ = request_jailerd(&inner, unpublish).await;
+                if replaced {
+                    let _ = request_jailerd(&inner, unpublish).await;
+                }
             }
         }
         // Only now, so that a sweep never sees the key neither queued nor
@@ -1230,6 +1229,18 @@ async fn read_frame(stream: &mut tokio::net::UnixStream) -> Result<Option<Vec<u8
 /// Capture, publish and test-restore one snapshot.
 #[cfg(target_os = "linux")]
 async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
+    // A refresh: runs stop being offered the old snapshot now, and it leaves
+    // the store only just before the new one is published, since a key is
+    // published once. VMs restored from it keep their links and clones.
+    let old = inner
+        .snapshots
+        .usable
+        .lock()
+        .ok()
+        .and_then(|mut usable| usable.remove(job.key.as_str()));
+    if let Ok(mut replacing) = inner.snapshots.replacing.lock() {
+        replacing.clone_from(&old);
+    }
     clean_up_until_gone(inner).await;
     // Snapshots past their age go, whatever their key: after a Kino pin
     // change or for a shape nobody runs any more, no run would ask for them.
@@ -1246,19 +1257,6 @@ async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
     for snapshot in &expired {
         remove(inner, snapshot).await;
     }
-    // A refresh: runs stop being offered the old snapshot now, and it leaves
-    // the store only just before the new one is published, since a key is
-    // published once. VMs restored from it keep their links and clones.
-    let old = inner
-        .snapshots
-        .usable
-        .lock()
-        .ok()
-        .and_then(|mut usable| usable.remove(job.key.as_str()));
-    if let Ok(mut replacing) = inner.snapshots.replacing.lock() {
-        replacing.clone_from(&old);
-    }
-
     // Capture: boot with no scenario content until Kino reports PARKED.
     let (launched, _) = launch(
         inner,
@@ -1520,8 +1518,7 @@ mod tests {
         assert_eq!(standing(&kept, true, false, now), Standing::Skip);
         assert_eq!(standing(&kept, false, true, now), Standing::Skip);
         assert_eq!(standing(&kept, false, false, now), Standing::Forget);
-        // Pinned and held, but no run for a month; a file from before the
-        // field existed reads as never run.
+        // Pinned and held, but no run for a month.
         assert_eq!(
             standing(&kept, true, true, now + RECIPE_IDLE_SECS),
             Standing::Forget
