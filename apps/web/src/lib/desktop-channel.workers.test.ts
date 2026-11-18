@@ -7,7 +7,7 @@ import { KINO_CONFIG_MEDIA_TYPE } from "@/control-plane/image-registry/push";
 import { user } from "@/db/schema";
 import { hashStoredOAuthToken } from "@/lib/auth";
 import {
-  DESKTOP_OAUTH_CLIENT_ID, localRunRequest, reportLocalRunRequest, requireDesktopCaller, startLocalRunRequest,
+  DESKTOP_OAUTH_CLIENT_ID, localCatalogRequest, localRunRequest, reportLocalRunRequest, requireDesktopCaller, startLocalRunRequest,
   type LocalRunView,
 } from "@/lib/desktop-channel";
 import { LOCAL_RUN_SILENCE_MS, reapSilentLocalRuns } from "@/lib/local-runs";
@@ -361,6 +361,38 @@ describe("the desktop channel", () => {
       .rejects.toMatchObject({ code: "scenario_run_local" });
     await expect(getScenarioRunStatusStreamTargetForUser({ runId: run.runId, userId: STRANGER }))
       .rejects.toMatchObject({ code: "scenario_run_not_found" });
+  });
+
+  it("lists the courses its learner sees, with where they stand", async () => {
+    await env.DB.prepare("INSERT INTO organization (id, name, slug, created_at) VALUES ('org-1', 'Acme', 'acme', 1)").run();
+    await seedScenario("acme/secret", "org-1", revisionDoc(images, specs));
+    const mine = await token("mine", LEARNER);
+    const catalog = async (secret: string | null = mine) => {
+      const response = await localCatalogRequest(call(secret, {}, "/api/local/catalog"));
+      const body = await response.json() as { protocol: number; courses: Array<{ organizationId: string | null;
+        lectures: Array<{ scenarioId: string | null; state: string; activeRunId: string | null }> }> };
+      return { status: response.status, protocol: body.protocol,
+        lectures: (body.courses ?? []).flatMap((course) => course.lectures.map((lecture) => ({ ...lecture, organizationId: course.organizationId }))) };
+    };
+    expect((await catalog(null)).status).toBe(401);
+
+    // The public scenario is there to start; another organization's is not.
+    const before = await catalog();
+    expect(before).toMatchObject({ status: 200, protocol: 1 });
+    expect(before.lectures.filter((lecture) => lecture.scenarioId)).toMatchObject([
+      { scenarioId: "intar/web", organizationId: null, state: "available", activeRunId: null },
+    ]);
+
+    // A started run shows on its lecture, and what the catalog names is what a start takes.
+    const { run } = await view(await start(mine, { scenarioId: before.lectures[0]!.scenarioId }));
+    expect((await catalog()).lectures.find((lecture) => lecture.scenarioId === "intar/web"))
+      .toMatchObject({ state: "in_progress", activeRunId: run.runId });
+
+    // A member sees the organization's course too.
+    await env.DB.prepare("INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('m1', 'org-1', ?1, 'member', 1)").bind(LEARNER).run();
+    expect((await catalog()).lectures.map((lecture) => [lecture.scenarioId, lecture.organizationId]).sort())
+      .toEqual([["acme/secret", "org-1"], ["intar/web", null]]);
+    expect((await catalog(await token("theirs", STRANGER))).lectures.map((lecture) => lecture.scenarioId)).toEqual(["intar/web"]);
   });
 
   it("signs the app in through the provider with the client a deploy seeds", async () => {

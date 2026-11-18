@@ -7,10 +7,12 @@
 // one read here, on the hash the provider stores.
 
 import { env } from "cloudflare:workers";
+import { drizzle } from "drizzle-orm/d1";
 import { activeAccountSql, usableIdentityExistsSql } from "@/lib/account-access";
 import { jsonResponse } from "@/lib/agent-bridge";
 import { AppError, toErrorResponse } from "@/lib/app-error";
 import { hashStoredOAuthToken } from "@/lib/auth";
+import { listCourseCatalogForUser } from "@/lib/course-catalogs";
 import type { VmStateV3 } from "@/generated/contracts/bridge-message-v9";
 import validateBridgeMessageV9 from "@/generated/contracts/bridge-message-v9.validate";
 import { requireIdempotencyKey } from "@/lib/idempotency-key";
@@ -338,4 +340,26 @@ export async function reportLocalRunRequest(
   }
   const run = await localRunView(d1, runId, caller.userId);
   return run ? answer(run) : refuse(404, "run_not_found", "run not found");
+}
+
+/**
+ * `GET /api/local/catalog`: the courses the learner sees on the website,
+ * public ones and those of every organization they are in, with each
+ * lecture's scenario and where the learner stands in it. A lecture names the
+ * `scenarioId`, and its course the `organizationId`, that a start takes.
+ * No admin option applies: a locked lecture stays locked.
+ */
+export async function localCatalogRequest(
+  request: Request,
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  const { courses } = await listCourseCatalogForUser({
+    db: drizzle(workerEnv.DB),
+    userId: caller.userId,
+    organizationId: null,
+    local: true,
+  });
+  return jsonResponse({ protocol: DESKTOP_PROTOCOL, courses }, { headers: { "cache-control": "no-store" } });
 }
