@@ -329,6 +329,12 @@ async fn run_key(
     )
 }
 
+/// A publish stops the capture VM, clones its root disk and reads its whole
+/// memory file once to give back the empty pages: more than the daemon's
+/// usual request takes. Timing out is worse than waiting, since the agent
+/// then removes the snapshot the daemon went on to publish.
+const PUBLISH_TIMEOUT: Duration = Duration::from_secs(60);
+
 async fn jailer(inner: &Inner, request: JailerRequest) -> Result<JailerResponse> {
     match request_jailerd(inner, request).await? {
         JailerResponse::Error(error) => Err(JailerdError(error).into()),
@@ -998,15 +1004,17 @@ async fn capture(inner: &Inner, job: &CaptureJob) -> Result<SnapshotInfo> {
     if let Some(old) = &old {
         remove(inner, old).await;
     }
-    let snapshot = match jailer(
+    let snapshot = match request_jailerd_with_timeout(
         inner,
         JailerRequest::PublishSnapshot(PublishSnapshotRequest {
             generation: launched.generation.clone(),
             key: job.key.clone(),
         }),
+        PUBLISH_TIMEOUT,
     )
     .await?
     {
+        JailerResponse::Error(error) => return Err(JailerdError(error).into()),
         JailerResponse::PublishSnapshot(snapshot) => snapshot,
         response => anyhow::bail!("unexpected answer to a snapshot publish: {response:?}"),
     };

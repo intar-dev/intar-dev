@@ -8,13 +8,15 @@
 //! snapshot's root disk, and the VM config with its own TAP name.
 //!
 //! The memory and state files were written by a hypervisor that ran guest
-//! code. Nothing here reads them; only another jailed hypervisor does.
+//! code. Nothing here interprets them; only another jailed hypervisor does.
+//! The memory file is scanned once for empty pages, whose blocks go back to
+//! the filesystem.
 
 use super::*;
 use intar_jailer_protocol::{
     MAX_LISTED_SNAPSHOTS, SNAPSHOT_CONFIG_FILE, SNAPSHOT_MEMORY_FILE, SNAPSHOT_STATE_FILE,
 };
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 
 const SNAPSHOTS_DIRECTORY: &str = "snapshots";
 const METADATA_FILE: &str = "snapshot.json";
@@ -24,6 +26,9 @@ const STATE_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 const CONFIG_LIMIT_BYTES: u64 = 64 * 1024;
 /// What the memory file may exceed the VM's memory by.
 const MEMORY_SLACK_BYTES: u64 = 1024 * 1024;
+
+/// The unit a memory file is searched for empty pages in.
+const PAGE_BYTES: usize = 4096;
 
 /// Device and inode of a hard link staged into a jail.
 pub(super) type LinkIdentity = (u64, u64);
@@ -274,8 +279,36 @@ pub(super) fn publish_snapshot(
                 Some(rustix::process::Uid::ROOT),
                 Some(rustix::process::Gid::ROOT),
             )?;
+            let mut blocks = stat.st_blocks;
+            if name == SNAPSHOT_MEMORY_FILE {
+                // Cloud Hypervisor writes every page of the guest's memory,
+                // the ones the guest never touched too: more than half of a
+                // Kubernetes lab's file. A restore maps the file, and a hole
+                // reads as the zeros that were there. The file is root's by
+                // now and not yet read-only, so the daemon can open it to
+                // write without overriding its mode.
+                let dug = rustix::fs::fchmod(&fd, Mode::RUSR | Mode::WUSR)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|()| {
+                        Ok(File::from(rustix::fs::openat(
+                            &staging,
+                            &name_c,
+                            OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                            Mode::empty(),
+                        )?))
+                    })
+                    .and_then(|writable| dig_holes(&writable, stat.st_size as u64));
+                match dug {
+                    Ok(()) => blocks = rustix::fs::fstat(&fd)?.st_blocks,
+                    // The file is whole either way.
+                    Err(error) => tracing::warn!(
+                        error = %format!("{error:#}"),
+                        "the snapshot's memory file keeps its empty pages"
+                    ),
+                }
+            }
             rustix::fs::fchmod(&fd, Mode::RUSR | Mode::RGRP | Mode::ROTH)?;
-            bytes_on_disk = bytes_on_disk.saturating_add(stat.st_blocks as u64 * 512);
+            bytes_on_disk = bytes_on_disk.saturating_add(blocks as u64 * 512);
         }
         // The capture VM is stopped: its root disk is as the paused guest
         // left it, which is what the memory file expects to find.
@@ -332,6 +365,47 @@ pub(super) fn publish_snapshot(
         let _ = std::fs::remove_dir_all(&temporary);
     }
     operation
+}
+
+/// Punches a hole over every run of empty pages in the first `len` bytes of
+/// `file`. Its contents read back the same.
+fn dig_holes(file: &File, len: u64) -> Result<()> {
+    let punch = |start: u64, end: u64| {
+        rustix::fs::fallocate(
+            file,
+            rustix::fs::FallocateFlags::PUNCH_HOLE | rustix::fs::FallocateFlags::KEEP_SIZE,
+            start,
+            end - start,
+        )
+        .context("punch a hole in the memory file")
+    };
+    let mut buffer = vec![0_u8; 256 * PAGE_BYTES];
+    let mut offset = 0_u64;
+    let mut hole = None;
+    while offset < len {
+        let want = buffer
+            .len()
+            .min(usize::try_from(len - offset).unwrap_or(usize::MAX));
+        file.read_exact_at(&mut buffer[..want], offset)
+            .context("read the memory file")?;
+        for (index, page) in buffer[..want].chunks(PAGE_BYTES).enumerate() {
+            let at = offset + (index * PAGE_BYTES) as u64;
+            let empty = page.len() == PAGE_BYTES && page.iter().all(|byte| *byte == 0);
+            match (empty, hole) {
+                (true, None) => hole = Some(at),
+                (false, Some(start)) => {
+                    punch(start, at)?;
+                    hole = None;
+                }
+                _ => {}
+            }
+        }
+        offset += want as u64;
+    }
+    if let Some(start) = hole {
+        punch(start, len)?;
+    }
+    Ok(())
 }
 
 /// Remove a published snapshot. VMs restored from it keep running: their
@@ -421,6 +495,33 @@ mod tests {
                 "net": [{"tap": "tap7", "mac": "02:00:00:00:00:01", "id": "_net0"}],
                 "vsock": {"cid": 3}
             })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn digging_holes_frees_empty_pages_and_keeps_the_contents() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("memory-ranges");
+        // Data, a run of empty pages, a page with one byte at its end, empty
+        // pages up to a last page that is not a whole one.
+        let mut contents = vec![7_u8; 3 * PAGE_BYTES];
+        contents.extend(vec![0_u8; 600 * PAGE_BYTES]);
+        contents.extend(vec![0_u8; PAGE_BYTES - 1]);
+        contents.push(1);
+        contents.extend(vec![0_u8; 300 * PAGE_BYTES + 100]);
+        std::fs::write(&path, &contents)?;
+        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        file.sync_all()?;
+        let before = file.metadata()?.blocks();
+        dig_holes(&file, contents.len() as u64)?;
+        file.sync_all()?;
+        assert_eq!(std::fs::read(&path)?, contents);
+        assert_eq!(file.metadata()?.len(), contents.len() as u64);
+        let after = file.metadata()?.blocks();
+        assert!(
+            after * 512 <= 8 * PAGE_BYTES as u64,
+            "{before} blocks before, {after} after"
         );
         Ok(())
     }
