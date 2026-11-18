@@ -239,6 +239,50 @@ async fn a_ready_script_that_keeps_failing_the_same_way_reports_once() {
     assert_eq!(counter.await.expect("counter"), 2);
 }
 
+#[tokio::test]
+async fn ready_scripts_that_pass_run_together() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    // One after another these take 1.2 s, more than the second the test
+    // build allows all of them.
+    let spec = spec(
+        r#"{"machine":"m","ready":[{"name":"a","script":"sleep 0.4"},{"name":"b","script":"sleep 0.4"},{"name":"c","script":"sleep 0.4"}]}"#,
+    );
+    let (report, _changes) = watch::channel(Report {
+        ready: vec![Ready::default(); 3],
+        ..Report::default()
+    });
+    assert!(run_ready(&spec.ready, &no_env(), &temp.path().join("s"), &report).await);
+    assert!(
+        report
+            .borrow()
+            .ready
+            .iter()
+            .all(|ready| ready.status() == Status::Pass)
+    );
+}
+
+#[tokio::test]
+async fn a_ready_script_that_needs_an_earlier_one_passes_on_its_retry() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let flag = temp.path().join("flag");
+    let spec = spec(&format!(
+        r#"{{"machine":"m","ready":[{{"name":"first","script":"sleep 0.2; touch '{f}'"}},{{"name":"second","script":"test -f '{f}'"}}]}}"#,
+        f = flag.display(),
+    ));
+    let (report, _changes) = watch::channel(Report {
+        ready: vec![Ready::default(); 2],
+        ..Report::default()
+    });
+    assert!(run_ready(&spec.ready, &no_env(), &temp.path().join("s"), &report).await);
+    assert!(
+        report
+            .borrow()
+            .ready
+            .iter()
+            .all(|ready| ready.status() == Status::Pass)
+    );
+}
+
 /// The worst case the compiler allows: 32 tasks with full messages and step
 /// tails, 16 ready tails, a full failure text.
 fn worst_case(tail_bytes: usize) -> Report {
