@@ -15,7 +15,7 @@ import { ensureFixtureMember } from "@/test/account-fixtures";
 import { seedSessionCookie } from "@/test/auth-requests";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  KINO, LEARNER, ORIGIN, STRANGER, machineImage, revisionDoc, seedScenario, specBlob, store,
+  KINO, LEARNER, ORIGIN, STRANGER, machineImage, revisionDoc, seedScenario, specBlob, store, v2,
 } from "./scenario-runs/revision-test-fixtures";
 
 const FAR = 9_999_999_999_999;
@@ -212,6 +212,48 @@ describe("the desktop channel", () => {
     // Everything else under better-auth still needs the browser's origin.
     expect((await guardBetterAuthRequest(form("/api/auth/sign-out"), guardEnv)).ok).toBe(false);
     expect((await guardBetterAuthRequest(form("/api/auth/oauth2/consent"), guardEnv)).ok).toBe(false);
+  });
+
+  it("lets the app pull what its learner's active local run names, and nothing else", async () => {
+    const mine = await token("mine", LEARNER);
+    const theirs = await token("theirs", STRANGER);
+    const unlisted = await machineImage("unlisted");
+    const blobOf = async (manifest: string) => (await env.DB.prepare(
+      "SELECT blob_digest FROM registry_manifest_blobs WHERE manifest_digest = ?1 LIMIT 1").bind(manifest).first<{ blob_digest: string }>())!.blob_digest;
+    const repository = (image: string) => `/v2/machines/${image.slice(7)}`;
+    const named = [
+      `${repository(images.web!)}/manifests/machine`,
+      `${repository(images.web!)}/manifests/${images.web}`,
+      `${repository(images.web!)}/blobs/${await blobOf(images.web!)}`,
+      `${repository(images.client!)}/manifests/machine`,
+      `/v2/specs/blobs/${specs.web}`,
+      `/v2/kino/manifests/${KINO}`,
+      `/v2/kino/blobs/${await blobOf(KINO)}`,
+    ];
+    const statuses = async (secret: string) => Promise.all(named.map((path) => v2(path, secret)));
+    const all = (status: number) => named.map(() => status);
+
+    // No run yet: nothing is granted, and a denial looks like an unknown object.
+    expect(await statuses(mine)).toEqual(all(404));
+    const { run } = await view(await start(mine));
+    expect(await statuses(mine)).toEqual(all(200));
+    expect(await v2("/v2/", mine)).toBe(200);
+
+    // Another learner, an image the run does not name, and a blob of another image.
+    expect(await statuses(theirs)).toEqual(all(404));
+    expect(await v2(`${repository(unlisted)}/manifests/machine`, mine)).toBe(404);
+    expect(await v2(`${repository(images.web!)}/blobs/${await blobOf(unlisted)}`, mine)).toBe(404);
+    // No credential the registry knows.
+    expect(await v2("/v2/", "secret-unknown-0123456789abcdef")).toBe(401);
+    expect(await v2(named[0]!, await token("unscoped", LEARNER, { scopes: ["offline_access"] }))).toBe(401);
+
+    // A hidden run, and then an ended one, grants nothing.
+    await env.DB.prepare("UPDATE scenario_runs SET hidden_at = 1 WHERE run_id = ?1").bind(run.runId).run();
+    expect(await statuses(mine)).toEqual(all(404));
+    await env.DB.prepare("UPDATE scenario_runs SET hidden_at = NULL WHERE run_id = ?1").bind(run.runId).run();
+    expect(await statuses(mine)).toEqual(all(200));
+    expect((await localRunRequest(call(mine, { method: "POST" }, `/api/local/runs/${run.runId}/end`), run.runId, "end")).status).toBe(200);
+    expect(await statuses(mine)).toEqual(all(404));
   });
 
   it("signs the app in through the provider with the client a migration created", async () => {
