@@ -257,8 +257,8 @@ describe("machine builds over bridge 9", () => {
   }
 
   /** Pushes a machine image for `key` through the real routes; its digest. */
-  async function pushImage(key: string, architecture = "amd64") {
-    const config = await blob(JSON.stringify(machineConfig(key, { architecture })));
+  async function pushImage(key: string, architecture = "amd64", overrides: Record<string, unknown> = {}) {
+    const config = await blob(JSON.stringify(machineConfig(key, { architecture, ...overrides })));
     const kernel = await blob("kernel bytes");
     const chunk = await blob("chunk bytes");
     for (const pushed of [config, kernel, chunk] as PushedBlob[]) {
@@ -426,6 +426,43 @@ describe("machine builds over bridge 9", () => {
     const ready = await until(() => revision(1), (row) => row?.state === "ready");
     expect(ready!.content_digest).toMatch(/^sha256:/);
     expect(await build()).toMatchObject({ state: "succeeded", attempt: 1, image_digest: image });
+    ws.close();
+  });
+
+  it("lets a builder that restarted after its amd64 image carry on with the arm64 one", async () => {
+    await ingest(1);
+    const { ws } = await connectBuilder(ARM64_BUILDER);
+    await until(build, (row) => row?.state === "assigned");
+    const key = (await build())!.build_key;
+    ws.send(report(key, 1, "building"));
+    ws.send(report(key, 1, "pushing"));
+    const amd64 = await pushImage(key);
+    expect((await postResult(key, 1, amd64)).status).toBe(201);
+
+    // The builder restarted and runs the same attempt again: it reads what the
+    // attempt recorded, or builds the amd64 image again, which differs.
+    const recorded = await handleImageRegistryRequest(new Request(
+      `https://intar.test/registry/v1/builds/${key.slice(7)}/result?attempt=1`, { headers: { authorization: `Bearer ${token}` } },
+    ), env);
+    expect(await recorded!.json()).toEqual({ image_digest: amd64, arm64_image_digest: null });
+    ws.send(report(key, 1, "building"));
+    ws.send(report(key, 1, "pushing"));
+    const rebuilt = await pushImage(key, "amd64", { boot: { cmdline: "console=ttyS0" } });
+    expect(rebuilt).not.toBe(amd64);
+    const refused = await postResult(key, 1, rebuilt);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ code: "build_result_recorded", image_digest: amd64 });
+    expect(await arm64()).toMatchObject({ arm64_state: "building" });
+
+    ws.send(report(key, 1, "building"));
+    const image = await pushImage(key, "arm64");
+    expect((await postResult(key, 1, image, "&arch=arm64")).status).toBe(201);
+    // The rebuilt image is not the build's: a report that names it is refused.
+    ws.send(report(key, 1, "succeeded", { image_digest: rebuilt }));
+    ws.send(report(key, 1, "succeeded", { image_digest: amd64 }));
+    await until(() => revision(1), (row) => row?.state === "ready");
+    expect(await build()).toMatchObject({ state: "succeeded", attempt: 1, image_digest: amd64 });
+    expect(await arm64()).toEqual({ arm64_asked: 1, arm64_state: "succeeded", arm64_image_digest: image, arm64_error: null });
     ws.close();
   });
 

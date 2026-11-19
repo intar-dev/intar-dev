@@ -188,8 +188,36 @@ describe("registry push routes", () => {
     const secondDigest = (await putManifest(second.manifest)).digest;
     const refused = await postResult(secondDigest, 2);
     expect(refused.status).toBe(409);
-    expect(await refused.json()).toMatchObject({ code: "build_result_recorded" });
+    // The refusal tells the attempt's own builder which image it recorded.
+    expect(await refused.json()).toMatchObject({ code: "build_result_recorded", image_digest: digest });
     expect(await env.DB.prepare("SELECT image_digest FROM machine_builds").first("image_digest")).toBe(digest);
+  });
+
+  it("answers what an attempt has recorded to its own builder only", async () => {
+    const read = (attempt: number, bearer?: string) =>
+      call("GET", `/builds/${BUILD_KEY_HEX}/result?attempt=${attempt}`, bearer ? { bearer } : {});
+    expect(await (await read(2)).json()).toEqual({ image_digest: null, arm64_image_digest: null });
+    const image = await machineImage();
+    await pushBlobs(image.blobs);
+    const { digest } = await putManifest(image.manifest);
+    expect((await postResult(digest, 2)).status).toBe(201);
+    const writers = () => env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n");
+    const before = await writers();
+
+    const answer = await read(2);
+    expect(answer.status).toBe(200);
+    expect(await answer.json()).toEqual({ image_digest: digest, arm64_image_digest: null });
+    // Another attempt, another builder and another kind of caller learn nothing.
+    for (const refused of [await read(1), await read(2, await seedBuilder("builder-b"))]) {
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).not.toHaveProperty("image_digest");
+    }
+    expect((await read(2, PUBLISH)).status).toBe(403);
+    expect((await read(2, "wrong")).status).toBe(401);
+    expect((await call("GET", `/builds/${"c".repeat(64)}/result?attempt=2`)).status).toBe(404);
+    expect((await call("PUT", `/builds/${BUILD_KEY_HEX}/result?attempt=2`)).status).toBe(405);
+    // A read registers no writer.
+    expect(await writers()).toBe(before);
   });
 
   it("records the arm64 image of a job after its amd64 one, each only as its own architecture", async () => {
