@@ -149,8 +149,12 @@ impl Jumper {
         if !matches!(&self.state.screen, Screen::Run(run) if run.active) {
             self.ending = false;
         }
-        // The terminal belongs to a machine that is up; it goes with it.
-        if !matches!(self.state.machine, Some(MachineStatus::Ready { .. })) {
+        // The terminal belongs to a machine that runs; it goes with it. SSH
+        // can be up while the lab is still preparing, so booting keeps it.
+        if !matches!(
+            self.state.machine,
+            Some(MachineStatus::Booting | MachineStatus::Ready { .. })
+        ) {
             self.terminal = None;
         }
         cx.notify();
