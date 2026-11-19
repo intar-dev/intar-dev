@@ -47,6 +47,25 @@ pub struct ImageFiles {
     pub kernel: PathBuf,
     pub initrd: Option<PathBuf>,
     pub root: PathBuf,
+    /// The kernel command line the image was published with, when the pull
+    /// kept it and it is one plain line.
+    pub cmdline: Option<String>,
+}
+
+/// The name of the file that holds an image's kernel command line.
+pub const CMDLINE_FILE: &str = "cmdline";
+/// No command line an image is published with comes near this.
+const MAX_CMDLINE_BYTES: usize = 512;
+
+/// A command line as an image may state it: one line of printable ASCII.
+fn plain_cmdline(text: &str) -> Option<String> {
+    let line = text.trim_end_matches('\n');
+    let plain = !line.is_empty()
+        && line.len() <= MAX_CMDLINE_BYTES
+        && line
+            .bytes()
+            .all(|byte| byte == b' ' || byte.is_ascii_graphic());
+    plain.then(|| line.to_owned())
 }
 
 impl Cache {
@@ -82,10 +101,14 @@ impl Cache {
         if !kernel.is_file() || !root.is_file() {
             return Err(Self::missing("This lab's machine image"));
         }
+        let cmdline = std::fs::read_to_string(dir.join(CMDLINE_FILE))
+            .ok()
+            .and_then(|text| plain_cmdline(&text));
         Ok(ImageFiles {
             kernel,
             initrd: initrd.is_file().then_some(initrd),
             root,
+            cmdline,
         })
     }
 
@@ -219,12 +242,14 @@ pub fn start(
         memory_mib: plan.memory_mib,
         kernel: image.kernel,
         initrd: image.initrd,
-        // ponytail: the image's own command line is in its config, which the
-        // cache does not keep; use that once images state their architecture (#395).
-        cmdline: format!(
-            "root=/dev/vda rw console={} quiet loglevel=4 systemd.show_status=false",
-            arch.console()
-        ),
+        // The image says how it boots; one pulled before the cache kept that
+        // gets the line every image of its architecture has had.
+        cmdline: image.cmdline.unwrap_or_else(|| {
+            format!(
+                "root=/dev/vda rw console={} quiet loglevel=4 systemd.show_status=false",
+                arch.console()
+            )
+        }),
         disks: vec![
             Disk {
                 path: overlay,
@@ -274,6 +299,17 @@ mod tests {
     use super::*;
 
     const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn only_a_plain_single_line_is_taken_as_a_command_line() {
+        assert_eq!(
+            plain_cmdline("root=/dev/vda rw console=ttyAMA0 quiet\n").as_deref(),
+            Some("root=/dev/vda rw console=ttyAMA0 quiet")
+        );
+        for refused in ["", "\n", "a\nb", "tab\there", "caf\u{e9}", &"x".repeat(513)] {
+            assert_eq!(plain_cmdline(refused), None, "{refused:?}");
+        }
+    }
 
     #[test]
     fn the_cache_finds_files_by_digest_and_says_when_they_are_not_there() {
