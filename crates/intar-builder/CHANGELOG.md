@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.20.2 (2026-11-19)
+
+### Bug fixes
+
+- **intar-builder:** Keep the arm64 image through a restart and run one emulated build at a time (#432) (90e6ebdc)
+
 ## builder/v0.20.1 (2026-11-19)
 
 ### Bug fixes
