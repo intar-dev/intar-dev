@@ -46,6 +46,10 @@ pub struct LocalRunV1 {
     pub state: String,
     /// False once the server has closed the run: the app stops its VMs.
     pub active: bool,
+    /// The learner; every reported VM state names them as its owner. Absent
+    /// from an intar that predates reports from the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
     /// Every reported VM state names this execution and generation.
     pub execution_id: Option<String>,
     pub generation: Option<u64>,

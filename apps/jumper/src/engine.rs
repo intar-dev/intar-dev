@@ -50,10 +50,32 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             None => break,
                         },
                         _ = tick.tick() => {
-                            if let Some(status) = local.poll()
+                            let polled = local.poll();
+                            if let Some(status) = polled.status
                                 && outbox.send(Event::Machine(status)).is_err()
                             {
                                 break;
+                            }
+                            // The guest's latest report goes to intar, which also keeps the
+                            // run from being closed as silent. A report that cannot be sent
+                            // is not queued: Kino repeats its latest every ten seconds.
+                            if let (Some(vm), Some(reporting)) = (polled.report, channel.clone()) {
+                                let closed = match reporting.report(&vm.run_id.clone(), vec![vm]).await {
+                                    Ok(answer) => (!answer.run.active).then_some(Event::Run(answer.run)),
+                                    // intar closed the run: its machine stops.
+                                    Err(Error::Refused { run: Some(run), .. }) => Some(Event::Run(*run)),
+                                    Err(Error::SignedOut) => Some(Event::SignedOut),
+                                    Err(_) => None,
+                                };
+                                if let Some(event) = closed {
+                                    local.stop().await;
+                                    if matches!(event, Event::SignedOut) {
+                                        channel = None;
+                                    }
+                                    if outbox.send(event).is_err() {
+                                        break;
+                                    }
+                                }
                             }
                             continue;
                         }

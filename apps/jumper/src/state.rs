@@ -151,7 +151,11 @@ impl State {
                 if !run.active || !same {
                     self.machine = None;
                 }
-                self.screen = Screen::Run(run);
+                // The answer to a start or a read opens the run; news about a
+                // run the learner has left does not pull them back to it.
+                if same || self.screen == Screen::OpeningRun {
+                    self.screen = Screen::Run(run);
+                }
             }
             Event::Machine(status) => self.machine = Some(status),
             Event::Failed(message) => {
@@ -253,6 +257,7 @@ mod tests {
             scenario_id: "intar/web".into(),
             state: "provisioning".into(),
             active,
+            user_id: None,
             execution_id: None,
             generation: None,
             machines: vec![],
@@ -354,8 +359,18 @@ mod tests {
         assert_eq!(state.back_to_catalog(), Command::LoadCatalog);
         assert_eq!(state.screen, Screen::Catalog);
 
-        // The machine's status belongs to the run on screen and goes with it.
+        // News about a run arrives while the learner is elsewhere: they stay there.
         let mut state = State::default();
+        state.apply(Event::SignedIn);
+        state.apply(Event::Catalog(vec![]));
+        state.apply(Event::Run(run(false)));
+        assert_eq!(state.screen, Screen::Catalog);
+
+        // The machine's status belongs to the run on screen and goes with it.
+        let mut state = State {
+            screen: Screen::OpeningRun,
+            ..State::default()
+        };
         state.apply(Event::Run(run(true)));
         state.apply(Event::Machine(MachineStatus::Booting));
         state.apply(Event::Run(run(true)));

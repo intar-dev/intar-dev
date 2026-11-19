@@ -1,16 +1,18 @@
 //! The run's machine on this computer: started through zpm from the local
 //! cache, watched through Kino's reports, and stopped with the run.
 //
-// ponytail: what the guest reports is shown here but not sent to intar yet,
-// so intar still sees the run as starting and closes it after an hour
-// without a report. Sending needs the learner's id in the run view (#399).
+// What the guest's Kino reports is shown here and handed to the engine as
+// the state intar takes, the shape an agent host reports a VM in.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use intar_contracts::bridge::{VmTerminalStateKindV1, VmTerminalStateV1};
+use intar_contracts::bridge_v9::{VmPhaseV2, VmStateV3};
 use subspace::Subspace;
 use subspace::contract::LocalRunV1;
 use zpm::machine::{Cache, Plan, RunningMachine};
+use zpm::reports::GuestReport;
 
 use crate::state::MachineStatus;
 
@@ -18,7 +20,7 @@ pub struct Local {
     cache: PathBuf,
     runs: PathBuf,
     /// The run a machine is running for, and the machine.
-    machine: Option<(String, RunningMachine)>,
+    machine: Option<(LocalRunV1, RunningMachine)>,
     last: Option<MachineStatus>,
 }
 
@@ -40,7 +42,7 @@ impl Local {
     pub fn runs(&self, run_id: &str) -> bool {
         self.machine
             .as_ref()
-            .is_some_and(|(running, _)| running == run_id)
+            .is_some_and(|(running, _)| running.run_id == run_id)
     }
 
     /// Starts the run's machine. The guest's `intar` command is answered by
@@ -90,7 +92,7 @@ impl Local {
         .await;
         match started {
             Ok(Ok(machine)) => {
-                self.machine = Some((run.run_id.clone(), machine));
+                self.machine = Some((run.clone(), machine));
                 MachineStatus::Booting
             }
             Ok(Err(error)) => MachineStatus::Failed(error.to_string()),
@@ -106,19 +108,169 @@ impl Local {
         }
     }
 
-    /// The machine's status if it changed since the last call.
-    pub fn poll(&mut self) -> Option<MachineStatus> {
-        let (_, machine) = self.machine.as_mut()?;
-        let mut status = None;
+    /// What the machine said since the last call: its status if that
+    /// changed, and its latest report as the state to send to intar.
+    pub fn poll(&mut self) -> Polled {
+        let Some((run, machine)) = self.machine.as_mut() else {
+            return Polled::default();
+        };
+        let mut latest = None;
         while let Ok(report) = machine.reports.reports.try_recv() {
-            status = Some(MachineStatus::of(&report));
+            latest = Some(report);
         }
+        let mut status = latest.as_ref().map(MachineStatus::of);
+        let report = latest
+            .as_ref()
+            .and_then(|report| vm_state(run, &machine.name, report, now_ms()));
         if !machine.is_running() {
             status = Some(MachineStatus::Failed("The machine stopped.".to_owned()));
             self.machine = None;
         }
-        let status = status.filter(|status| self.last.as_ref() != Some(status))?;
-        self.last = Some(status.clone());
-        Some(status)
+        let status = status.filter(|status| self.last.as_ref() != Some(status));
+        if let Some(status) = &status {
+            self.last = Some(status.clone());
+        }
+        Polled { status, report }
+    }
+}
+
+#[derive(Default)]
+pub struct Polled {
+    pub status: Option<MachineStatus>,
+    pub report: Option<VmStateV3>,
+}
+
+fn now_ms() -> i64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// One report of the guest's Kino as the VM state intar takes for `machine`
+/// of `run`. `None` when the run view lacks what a report has to name, as
+/// from an intar that predates reports from the app.
+///
+/// intar keeps no endpoint a device names, so the terminal and the network
+/// are left out; the lab and the phase are what it projects.
+pub fn vm_state(
+    run: &LocalRunV1,
+    machine: &str,
+    report: &GuestReport,
+    now_ms: i64,
+) -> Option<VmStateV3> {
+    Some(VmStateV3 {
+        owner_user_id: run.user_id.clone()?,
+        runtime_execution_id: run.execution_id.clone()?,
+        generation: run.generation?,
+        run_id: run.run_id.clone(),
+        name: machine.to_owned(),
+        desired_version: None,
+        phase: if report.failed.is_some() {
+            VmPhaseV2::Failed
+        } else if report.ssh_ready {
+            VmPhaseV2::Ready
+        } else {
+            VmPhaseV2::Booting
+        },
+        image: None,
+        kino: None,
+        start: None,
+        network: None,
+        terminal: VmTerminalStateV1 {
+            state: VmTerminalStateKindV1::Pending,
+            target: None,
+            reason: None,
+            observed_at_unix_ms: now_ms,
+        },
+        runtime_constraints: None,
+        resource_state: None,
+        sandbox: None,
+        ssh_host_keys_openssh: Vec::new(),
+        lab: Some(report.lab.clone()),
+        archive: None,
+        // The guest's own failure text is for operators; the lab's state carries the outcome.
+        error: None,
+        updated_at_unix_ms: now_ms,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use intar_contracts::bridge_v9::{CheckStatus, LabState, VmLabV1, VmReadyV1, VmTaskV1};
+
+    use super::*;
+
+    fn run() -> LocalRunV1 {
+        LocalRunV1 {
+            run_id: "run-1".into(),
+            scenario_id: "intar/web".into(),
+            state: "provisioning".into(),
+            active: true,
+            user_id: Some("learner".into()),
+            execution_id: Some("run-1".into()),
+            generation: Some(1),
+            machines: vec![],
+        }
+    }
+
+    fn report(ssh_ready: bool, state: LabState) -> GuestReport {
+        GuestReport {
+            ssh_ready,
+            failed: None,
+            ssh_host_keys_openssh: vec!["ssh-ed25519 AAAA host".into()],
+            lab: VmLabV1 {
+                state,
+                kino_version: "0.9.1".into(),
+                ready: vec![VmReadyV1 {
+                    name: "nginx".into(),
+                    status: CheckStatus::Pass,
+                    tail: String::new(),
+                }],
+                tasks: vec![VmTaskV1 {
+                    id: "serve".into(),
+                    status: CheckStatus::Pass,
+                    message: String::new(),
+                    passed_at_unix_ms: Some(5),
+                }],
+                timings_ms: Default::default(),
+                failure: None,
+                verify: None,
+            },
+        }
+    }
+
+    /// The exact JSON the app sends for one machine. The website's test
+    /// `desktop-channel.workers.test.ts` posts this same text to the report
+    /// route, so a change here that intar would refuse fails there.
+    #[test]
+    fn a_guest_report_becomes_the_state_intar_takes() {
+        let vm = vm_state(
+            &run(),
+            "web",
+            &report(true, LabState::Ready),
+            1_700_000_000_000,
+        )
+        .expect("state");
+        assert_eq!(
+            serde_json::to_string(&vm).expect("json"),
+            r#"{"owner_user_id":"learner","runtime_execution_id":"run-1","generation":1,"run_id":"run-1","name":"web","phase":"ready","terminal":{"state":"pending","observed_at_unix_ms":1700000000000},"ssh_host_keys_openssh":[],"lab":{"state":"ready","kino_version":"0.9.1","ready":[{"name":"nginx","status":"pass","tail":""}],"tasks":[{"id":"serve","status":"pass","message":"","passed_at_unix_ms":5}],"timings_ms":{}},"updated_at_unix_ms":1700000000000}"#
+        );
+        // Until SSH is up the machine is booting; a guest that failed is failed.
+        assert_eq!(
+            vm_state(&run(), "web", &report(false, LabState::Preparing), 1)
+                .expect("state")
+                .phase,
+            VmPhaseV2::Booting
+        );
+        let mut failed = report(false, LabState::Preparing);
+        failed.failed = Some("no network".into());
+        let state = vm_state(&run(), "web", &failed, 1).expect("state");
+        assert_eq!((state.phase, state.error), (VmPhaseV2::Failed, None));
+
+        // A run view without the learner's id cannot be reported on.
+        let mut old = run();
+        old.user_id = None;
+        assert!(vm_state(&old, "web", &report(true, LabState::Ready), 1).is_none());
     }
 }
