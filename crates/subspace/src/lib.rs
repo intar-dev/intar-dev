@@ -275,8 +275,7 @@ impl Subspace {
         // The catalog says what this computer can start: a lecture whose
         // machine images are not built for its processor waits.
         let path = format!("/api/local/catalog?arch={}", std::env::consts::ARCH);
-        self.call::<(), _>(Method::GET, &path, None, None)
-            .await
+        self.call::<(), _>(Method::GET, &path, None, None).await
     }
 
     /// Starts a local run. The same `idempotency_key` returns the same run.
