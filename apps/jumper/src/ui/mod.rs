@@ -6,5 +6,6 @@
 //! file says what was changed. The rest of the app is MIT.
 
 pub mod kit;
+pub mod terminal_view;
 pub mod text_input;
 pub mod theme;
