@@ -43,7 +43,7 @@ fn an_image_of_this_format_or_the_next_is_read_and_no_other() {
         }))
         .expect("config")
     };
-    for read in [intar_contracts::oci::IMAGE_FORMAT, "intar-image-4"] {
+    for read in [intar_contracts::oci::IMAGE_FORMAT, "intar-image-3"] {
         assert!(ready::check_machine_config(&config(read)).is_ok(), "{read}");
     }
     for refused in ["intar-image-2", "intar-image-5", ""] {
