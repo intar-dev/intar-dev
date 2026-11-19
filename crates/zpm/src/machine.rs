@@ -201,7 +201,8 @@ pub fn start(
         dir.join("rec.vfat"),
     );
     // A leftover of this run holds the old overlay; it goes before the file does.
-    crate::qemu::stop_leftover(&dir.join("qmp.sock"))?;
+    let control = crate::qemu::control_socket(dir);
+    crate::qemu::stop_leftover(&control)?;
     let _ = std::fs::remove_file(&overlay);
     create_overlay(qemu_img, &image.root, &overlay, grow)?;
     write_run_disk(&run_disk, &json, &kino)?;
@@ -218,8 +219,12 @@ pub fn start(
         memory_mib: plan.memory_mib,
         kernel: image.kernel,
         initrd: image.initrd,
-        cmdline: "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false"
-            .to_owned(),
+        // ponytail: the image's own command line is in its config, which the
+        // cache does not keep; use that once images state their architecture (#395).
+        cmdline: format!(
+            "root=/dev/vda rw console={} quiet loglevel=4 systemd.show_status=false",
+            arch.console()
+        ),
         disks: vec![
             Disk {
                 path: overlay,
@@ -252,7 +257,7 @@ pub fn start(
         ssh_port,
         vsock_cid: None,
         serial_log: dir.join("serial.log"),
-        qmp_socket: dir.join("qmp.sock"),
+        qmp_socket: control,
     };
     let vm = Vm::start(qemu, &machine, &dir.join("qemu.log"))?;
     Ok(RunningMachine {

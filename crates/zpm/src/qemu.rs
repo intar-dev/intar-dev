@@ -272,6 +272,30 @@ impl Drop for Vm {
     }
 }
 
+/// The longest socket path every system takes; macOS stops at 104 bytes.
+const SOCKET_PATH_MAX: usize = 100;
+
+/// Where QEMU's control socket for the machine in `dir` goes: in `dir`, or,
+/// when that path is longer than a socket's may be, under a short name in the
+/// temporary directory. The same `dir` always gives the same path, so a
+/// leftover of an earlier app is found again.
+//
+// ponytail: the name is a std hash of `dir`, which may change with the Rust
+// version; an app update then misses a leftover QEMU of the version before.
+// The temporary directory is per user on macOS and Windows; on Linux it is
+// shared, which matters only for run directories this long.
+pub fn control_socket(dir: &Path) -> PathBuf {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let own = dir.join("qmp.sock");
+    if own.as_os_str().len() <= SOCKET_PATH_MAX {
+        return own;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    dir.hash(&mut hasher);
+    std::env::temp_dir().join(format!("zpm-{:016x}.sock", hasher.finish()))
+}
+
 fn pid_file(qmp_socket: &Path) -> PathBuf {
     qmp_socket.with_extension("pid")
 }
@@ -453,6 +477,24 @@ mod tests {
             ),
             "{line}"
         );
+    }
+
+    #[test]
+    fn the_control_socket_stays_within_what_a_socket_path_may_be() {
+        let short = Path::new("/run/zpm/web");
+        assert_eq!(control_socket(short), short.join("qmp.sock"));
+        // A run directory as macOS has it, under Application Support.
+        let long = Path::new("/Users/someone/Library/Application Support/intar/jumper/runs")
+            .join("bfmoqyzq5l2w8vnk6qead0xf")
+            .join("webserver");
+        let socket = control_socket(&long);
+        assert!(socket.as_os_str().len() <= 104, "{}", socket.display());
+        assert_eq!(
+            socket,
+            control_socket(&long),
+            "the same run finds its socket again"
+        );
+        assert_ne!(socket, control_socket(&long.with_file_name("database")));
     }
 
     #[test]
