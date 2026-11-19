@@ -21,6 +21,7 @@ updates:
       - ".github/workflows/release.yml"
       - ".github/workflows/image-ops.yml"
       - ".github/workflows/kernel.yml"
+      - ".github/workflows/image-probe.yml"
       - ".github/workflows/pr-title.yml"
     schedule:
       interval: weekly

@@ -1,0 +1,40 @@
+# Generated from ci/workflows/image-probe.cue by cuenv; do not edit manually.
+# Regenerate with: cuenv sync codegen
+name: Image build probe
+run-name: Image build probe @ ${{ github.sha }}
+"on":
+  pull_request:
+    branches:
+      - main
+concurrency:
+  group: image-probe-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    if: github.head_ref == 'ci/image-build-probe'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: namespace-profile-intar-dev
+          - arch: arm64
+            runner: namespace-profile-intar-dev-arm64
+      fail-fast: false
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+      - name: Build two lab images
+        env:
+          PROBE_ARCH: ${{ matrix.arch }}
+        run: cuenv task -p ci --package ci image-probe-build
