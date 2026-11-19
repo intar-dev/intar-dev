@@ -49,6 +49,12 @@ fn descriptor_path(cache_root: &Path, image: &OciDigest) -> PathBuf {
         .join(format!("{}.ready.json", image.hex()))
 }
 
+/// The image format that follows [`IMAGE_FORMAT`]. A format is a name for the
+/// platform baked into an image, not a layout: this agent reads images of
+/// the next one exactly as it reads today's. It knows the name ahead of the
+/// change, so a host keeps running the images it has while newer ones arrive.
+const NEXT_IMAGE_FORMAT: &str = "intar-image-4";
+
 /// Refuse an image this agent's Kino contract cannot boot.
 pub(crate) fn check_machine_config(config: &MachineConfigV1) -> Result<()> {
     anyhow::ensure!(
@@ -57,8 +63,8 @@ pub(crate) fn check_machine_config(config: &MachineConfigV1) -> Result<()> {
         config.guest_contract
     );
     anyhow::ensure!(
-        config.image_format == IMAGE_FORMAT,
-        "unsupported_artifact: image format {:?}, this agent reads {IMAGE_FORMAT:?}",
+        [IMAGE_FORMAT, NEXT_IMAGE_FORMAT].contains(&config.image_format.as_str()),
+        "unsupported_artifact: image format {:?}, this agent reads {IMAGE_FORMAT:?} and {NEXT_IMAGE_FORMAT:?}",
         config.image_format
     );
     Ok(())
