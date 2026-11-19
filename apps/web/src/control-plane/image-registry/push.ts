@@ -247,13 +247,18 @@ export async function handleManifestPut(
  * `?arch=arm64` records the job's arm64 image instead, after the amd64 one
  * and only when the attempt was asked for it. Each must be an image for
  * exactly that architecture.
+ *
+ * A refusal of a different image names the recorded one, and a GET answers
+ * both recorded digests, to the same builder and attempt only: a builder that
+ * restarted in the middle of a job carries on from what it already recorded.
  */
 export async function handleBuildResult(
   request: Request,
   env: Cloudflare.Env,
   buildId: string,
 ): Promise<Response> {
-  if (request.method !== "POST") return methodNotAllowed("POST");
+  const read = request.method === "GET";
+  if (!read && request.method !== "POST") return methodNotAllowed("GET, POST");
   const auth = await readRegistryAuth(request, env);
   if (!auth.ok) return auth.response;
   if (auth.owner.kind !== "builder") {
@@ -268,12 +273,16 @@ export async function handleBuildResult(
   if (!buildKey || attempt < 1 || attempt > MAX_ATTEMPT) {
     return invalid("a result names a build id and an attempt");
   }
-  const length = declaredLength(request, MAX_RESULT_BYTES);
-  if (length instanceof Response) return length;
-  const body = parseJson(await request.arrayBuffer());
-  const imageDigest = isRecord(body) && Object.keys(body).length === 1 ? body.image_digest : null;
-  if (typeof imageDigest !== "string" || !DIGEST_RE.test(imageDigest)) {
-    return invalid("the result is {\"image_digest\":\"sha256:<hex>\"}");
+  let imageDigest = "";
+  if (!read) {
+    const length = declaredLength(request, MAX_RESULT_BYTES);
+    if (length instanceof Response) return length;
+    const body = parseJson(await request.arrayBuffer());
+    const named = isRecord(body) && Object.keys(body).length === 1 ? body.image_digest : null;
+    if (typeof named !== "string" || !DIGEST_RE.test(named)) {
+      return invalid("the result is {\"image_digest\":\"sha256:<hex>\"}");
+    }
+    imageDigest = named;
   }
 
   const build = await env.DB.prepare(
@@ -293,6 +302,7 @@ export async function handleBuildResult(
   if (build.host_id !== auth.owner.id || build.attempt !== attempt) {
     return jsonResponse({ error: "this attempt is not the build's current one", code: "build_superseded" }, 409);
   }
+  if (read) return jsonResponse({ image_digest: build.image_digest, arm64_image_digest: build.arm64_image_digest });
   const arm64 = architecture === "arm64";
   if (arm64 && (build.arm64_asked !== 1 || build.image_digest === null)) {
     return jsonResponse({ error: "this attempt has no arm64 image to record yet", code: "arm64_not_expected" }, 409);
@@ -301,7 +311,10 @@ export async function handleBuildResult(
   if (recorded !== null) {
     return recorded === imageDigest
       ? jsonResponse({ ok: true, image_digest: imageDigest })
-      : jsonResponse({ error: "this attempt already recorded another image", code: "build_result_recorded" }, 409);
+      // The caller is the build's own host and attempt: it may know its image.
+      : jsonResponse({
+          error: "this attempt already recorded another image", code: "build_result_recorded", image_digest: recorded,
+        }, 409);
   }
 
   const manifest = await env.DB.prepare(

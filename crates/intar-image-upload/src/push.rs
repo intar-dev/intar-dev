@@ -12,6 +12,10 @@
 //! error, a 429 or a 5xx is retried; a 409 and every other refusal fail the
 //! push. A session the registry stops admitting restarts the push from its
 //! HEADs.
+//!
+//! One refusal of step 3 ends the push well: `build_result_recorded` with the
+//! `image_digest` this attempt recorded before. The builder restarted in the
+//! middle of the job and built the image again; the recorded one stands.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -53,6 +57,7 @@ const BUSY_BACKOFFS: u32 = 30;
 const BUSY_WAIT_CAP: Duration = Duration::from_secs(15);
 const REGISTRY_PAUSED_CODE: &str = "registry_paused";
 const REGISTRY_SWEEP_CODE: &str = "registry_sweep_in_progress";
+const RESULT_RECORDED_CODE: &str = "build_result_recorded";
 const REGISTRY_ADMISSION_PROTOCOL_VERSION: u32 = 1;
 const HEARTBEAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
@@ -98,7 +103,9 @@ impl RegistryPusher {
     }
 
     /// Push the image `manifest` from `dir` (`sha256/<hex>` blobs) and record
-    /// it as the `architecture` result of `attempt` of `build_id`.
+    /// it as the `architecture` result of `attempt` of `build_id`. Returns
+    /// the image the attempt has recorded for that architecture: `manifest`,
+    /// or another one when an earlier run of the same attempt recorded it.
     ///
     /// # Errors
     /// Returns the first call that failed for good.
@@ -109,7 +116,7 @@ impl RegistryPusher {
         build_id: &str,
         attempt: u32,
         architecture: Architecture,
-    ) -> Result<()> {
+    ) -> Result<OciDigest> {
         let blobs = dir.join("sha256");
         let manifest_bytes = std::fs::read(blobs.join(manifest.hex()))?;
         let parsed: OciManifestV1 = serde_json::from_slice(&manifest_bytes)?;
@@ -179,7 +186,7 @@ impl RegistryPusher {
         manifest: &OciDigest,
         manifest_bytes: &[u8],
         result_url: &url::Url,
-    ) -> Result<()> {
+    ) -> Result<OciDigest> {
         self.push_blobs(session, blobs, digests)?;
         let url = self
             .root
@@ -192,10 +199,36 @@ impl RegistryPusher {
                 .body(manifest_bytes.to_vec()))
         })?;
         let body = serde_json::json!({ "image_digest": manifest.as_str() });
-        self.call(session, || {
+        match self.call(session, || {
             Ok(self.client.post(result_url.clone()).json(&body))
-        })?;
-        Ok(())
+        }) {
+            Ok(_) => Ok(manifest.clone()),
+            Err(error) => recorded_before(&error).ok_or(error),
+        }
+    }
+
+    /// The amd64 image `attempt` of `build_id` has recorded, if any: a job
+    /// that runs again after a restart need not build it again. Asked once,
+    /// without a session: it reads, and its caller can do without the answer.
+    ///
+    /// # Errors
+    /// Returns an error when the registry does not answer the attempt's own
+    /// builder with its result.
+    pub fn recorded_image(&self, build_id: &str, attempt: u32) -> Result<Option<OciDigest>> {
+        #[derive(serde::Deserialize)]
+        struct Recorded {
+            image_digest: Option<OciDigest>,
+        }
+        let url = self
+            .root
+            .join(&format!("builds/{build_id}/result?attempt={attempt}"))?;
+        let response = self.client.get(url).bearer_auth(&self.token).send()?;
+        let status = response.status();
+        let body = response.text()?;
+        if !status.is_success() {
+            return Err(Error::HttpStatus { status, body });
+        }
+        Ok(serde_json::from_str::<Recorded>(&body)?.image_digest)
     }
 
     /// HEAD each blob and PUT the missing ones, [`BLOB_CONCURRENCY`] at a
@@ -439,14 +472,14 @@ struct SessionProtocol {
 }
 
 /// Keep the push's own error; a failed close is reported, wrapping it.
-fn settle(
+fn settle<T>(
     session_id: String,
-    result: Result<()>,
+    result: Result<T>,
     beat: Option<BeatFailure>,
     finish: Result<()>,
-) -> Result<()> {
+) -> Result<T> {
     let result = match (result, beat) {
-        (Ok(()), Some(failure)) => Err(Error::SessionBroken {
+        (Ok(_), Some(failure)) => Err(Error::SessionBroken {
             session_id: session_id.clone(),
             detail: format!(
                 "the registry stopped admitting the session ({}) before the push ended",
@@ -458,7 +491,7 @@ fn settle(
     };
     match (result, finish) {
         (result, Ok(())) => result,
-        (Ok(()), Err(termination)) => Err(Error::SessionBroken {
+        (Ok(_), Err(termination)) => Err(Error::SessionBroken {
             session_id,
             detail: format!("the push finished but the session did not close ({termination})"),
             cause: None,
@@ -492,6 +525,24 @@ fn registry_busy(error: &Error) -> bool {
             Some(REGISTRY_PAUSED_CODE | REGISTRY_SWEEP_CODE)
         )
     })
+}
+
+/// The image a refused result says this attempt recorded before. The registry
+/// names it only to the attempt's own builder.
+fn recorded_before(error: &Error) -> Option<OciDigest> {
+    #[derive(serde::Deserialize)]
+    struct Refusal {
+        code: String,
+        image_digest: OciDigest,
+    }
+    let Error::HttpStatus { status, body } = error else {
+        return None;
+    };
+    if *status != StatusCode::CONFLICT {
+        return None;
+    }
+    let refusal: Refusal = serde_json::from_str(body).ok()?;
+    (refusal.code == RESULT_RECORDED_CODE).then_some(refusal.image_digest)
 }
 
 fn reports_lost_session(error: &Error) -> bool {

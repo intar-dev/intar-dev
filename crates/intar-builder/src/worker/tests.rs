@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use super::{
     LOG_UPLOAD_ERROR_BYTES, LOG_UPLOAD_TAIL_BYTES, arm64_config, attempt_dirs, checked_target,
     decode_bundle, failure_message, is_current, publish, push_verified, read_log_tail,
+    recorded_amd64,
 };
 use crate::db::{self, BuilderDb};
 
@@ -227,6 +228,14 @@ fn the_arm64_half_of_a_job_works_beside_the_amd64_half() {
 }
 
 #[test]
+fn emulated_builds_take_turns() {
+    let first = super::EMULATED_BUILDS.try_acquire().unwrap();
+    assert!(super::EMULATED_BUILDS.try_acquire().is_err());
+    drop(first);
+    assert!(super::EMULATED_BUILDS.try_acquire().is_ok());
+}
+
+#[test]
 fn every_tail_fits_one_upload() {
     // The Worker refuses a build log over 9 MiB; headers take a few bytes.
     let total = 4 * LOG_UPLOAD_TAIL_BYTES + LOG_UPLOAD_ERROR_BYTES as u64 + 4096;
@@ -242,4 +251,38 @@ fn a_failure_names_the_attempt_its_logs_were_uploaded_with_not_a_path() {
         "build the image: the build VM failed (exit status: 1) (the logs are uploaded with attempt 2)"
     );
     assert!(!message.contains('/'));
+}
+
+#[tokio::test]
+async fn a_restarted_job_learns_its_recorded_amd64_image_or_builds_it() {
+    use std::io::{Read as _, Write as _};
+
+    let build = webserver(intar_contracts::scenario::base_key());
+    let recorded = format!("sha256:{}", "a".repeat(64));
+    // A registry that answers one request with what the attempt recorded.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let body = format!(r#"{{"image_digest":"{recorded}","arm64_image_digest":null}}"#);
+    let served = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let read = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        String::from_utf8_lossy(&request[..read]).into_owned()
+    });
+    let answered = recorded_amd64(&url, "token", &build).await.unwrap();
+    assert_eq!(answered.as_str(), recorded);
+    let request = served.join().unwrap();
+    assert!(
+        request.starts_with("GET /registry/v1/builds/build-1/result?attempt=1 "),
+        "{request}"
+    );
+
+    // The listener is gone: no answer, so the image is built.
+    assert_eq!(recorded_amd64(&url, "token", &build).await, None);
 }

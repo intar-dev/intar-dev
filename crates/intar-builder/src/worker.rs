@@ -18,7 +18,7 @@ use intar_image_build::{
 };
 use intar_image_upload::RegistryPusher;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
 
@@ -38,6 +38,13 @@ const LOG_UPLOAD_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 /// directories: each half keeps its logs, and both go when the attempt ends.
 const ARM64_DIR: &str = "arm64";
 const LOG_UPLOAD_ERROR_BYTES: usize = 64 * 1024;
+
+/// One emulated build at a time. An emulated build VM needs more than one
+/// host thread per guest CPU, so two of them on one builder starve each
+/// other: k3s then misses its own start-up deadlines and the arm64 image is
+/// lost. The amd64 halves of two jobs still build side by side; their arm64
+/// halves take turns.
+static EMULATED_BUILDS: Semaphore = Semaphore::const_new(1);
 
 /// Runs queued builds once the bridge applied a live desired state.
 pub async fn worker_loop(
@@ -146,24 +153,46 @@ async fn build_and_push(
         config,
         output_dir: output_dir.to_owned(),
     };
-    let digest = build_one(
-        cfg,
-        reports,
-        build,
-        started,
-        request.clone(),
-        Architecture::Amd64,
-    )
-    .await?;
+    let wants_arm64 = build.architectures.contains(&Architecture::Arm64);
+    // A job that runs again after a restart may have recorded its amd64 image
+    // already: that half is done, and only the arm64 one is left to build.
+    let recorded = if wants_arm64 {
+        recorded_amd64(&cfg.bridge.base_url, &token, build).await
+    } else {
+        None
+    };
+    let digest = match recorded {
+        Some(digest) => {
+            info!(build_id = %build.build_id, image = %digest.as_str(), "the amd64 image is already recorded");
+            digest
+        }
+        None => {
+            build_one(
+                cfg,
+                reports,
+                build,
+                started,
+                request.clone(),
+                Architecture::Amd64,
+            )
+            .await?
+        }
+    };
     // The amd64 image is recorded. The arm64 one is extra: whatever happens
     // to it, the build has succeeded.
-    if !build.architectures.contains(&Architecture::Arm64) {
+    if !wants_arm64 {
         return Ok((digest, None));
     }
     let arm64 = MachineBuildRequest {
         config: arm64_config(&request.config),
         output_dir: output_dir.join(ARM64_DIR),
         ..request
+    };
+    // Held through the push: the turn is over when the image is recorded.
+    let _turn = if arm64.config.accelerator == "tcg" {
+        EMULATED_BUILDS.acquire().await.ok()
+    } else {
+        None
     };
     let arm64_error = build_one(cfg, reports, build, started, arm64, Architecture::Arm64)
         .await
@@ -179,8 +208,40 @@ pub(crate) fn arm64_config(config: &QemuBuildConfig) -> QemuBuildConfig {
     arm64
 }
 
+/// The amd64 image this attempt of `build` has recorded, if any. Asking is an
+/// optimisation: without an answer the image is built, and a push of it that
+/// is refused names the recorded one.
+pub(crate) async fn recorded_amd64(
+    base_url: &str,
+    token: &str,
+    build: &DesiredBuildV2,
+) -> Option<OciDigest> {
+    let (base_url, token, build_id, attempt) = (
+        base_url.to_owned(),
+        token.to_owned(),
+        build.build_id.clone(),
+        build.attempt,
+    );
+    let asked = tokio::task::spawn_blocking(move || {
+        RegistryPusher::new(&base_url, &token)?.recorded_image(&build_id, attempt)
+    })
+    .await;
+    match asked {
+        Ok(Ok(recorded)) => recorded,
+        Ok(Err(error)) => {
+            warn!(build_id = %build.build_id, error = %error, "failed to ask for the recorded image");
+            None
+        }
+        Err(error) => {
+            warn!(build_id = %build.build_id, error = %error, "the task asking for the recorded image panicked");
+            None
+        }
+    }
+}
+
 /// Build the image of `request` and record it as the job's `architecture`
-/// result.
+/// result. Returns the image the attempt has recorded for it: the one built
+/// here, or the one an earlier run of this attempt recorded before a restart.
 async fn build_one(
     cfg: &BuilderConfig,
     reports: &mpsc::Sender<BuildReportV2>,
@@ -198,7 +259,7 @@ async fn build_one(
     phase(cfg, reports, build, BuildPhaseV2::Pushing, started).await?;
     // A long build outlives its first token.
     let token = bootstrap_builder_access_token(&cfg.bridge).await?;
-    push_verified(
+    let recorded = push_verified(
         &cfg.bridge.base_url,
         &token,
         &output_dir,
@@ -208,11 +269,19 @@ async fn build_one(
         architecture,
     )
     .await?;
-    Ok(digest)
+    // Only a job with an arm64 half carries on from an earlier run's image;
+    // any other fails as before, and the control plane settles it.
+    ensure!(
+        recorded == digest || build.architectures.contains(&Architecture::Arm64),
+        "this attempt already recorded another image ({})",
+        recorded.as_str()
+    );
+    Ok(recorded)
 }
 
 /// Push the image in `dir` once it passes the checks a run host makes
 /// before it boots one; an image that fails them is not pushed at all.
+/// Returns the image the attempt has recorded for `architecture`.
 pub(crate) async fn push_verified(
     base_url: &str,
     token: &str,
@@ -221,7 +290,7 @@ pub(crate) async fn push_verified(
     build_id: &str,
     attempt: u32,
     architecture: Architecture,
-) -> Result<()> {
+) -> Result<OciDigest> {
     let (base_url, token, dir, digest, build_id) = (
         base_url.to_owned(),
         token.to_owned(),

@@ -414,3 +414,104 @@ fn the_registry_url_must_be_http() {
     assert!(RegistryPusher::new("ssh://example", "token").is_err());
     assert!(RegistryPusher::new("https://intar.dev", " ").is_err());
 }
+
+/// Refuses the result POST with `body`; everything else succeeds.
+fn result_refused(body: String) -> FakeRegistry {
+    FakeRegistry::start(move |request, _| match request.method.as_str() {
+        "HEAD" => (200, String::new()),
+        "POST" => (409, body.clone()),
+        _ => (201, "{}".to_owned()),
+    })
+}
+
+#[test]
+fn a_result_the_attempt_recorded_before_ends_the_push_with_that_image() {
+    // The builder restarted and built the image again: the registry keeps
+    // the one this attempt recorded and names it.
+    let recorded = digest_of(b"the image of the first run");
+    let registry = result_refused(format!(
+        r#"{{"error":"this attempt already recorded another image","code":"build_result_recorded","image_digest":"{}"}}"#,
+        recorded.as_str()
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, _) = image(dir.path());
+    assert_ne!(manifest, recorded);
+    for architecture in [Architecture::Amd64, Architecture::Arm64] {
+        let pushed = registry
+            .pusher()
+            .push_build(dir.path(), &manifest, "build-1", 1, architecture)
+            .unwrap();
+        assert_eq!(pushed, recorded);
+    }
+    // The refusal is an answer: the result is not posted again.
+    let posts = registry
+        .calls()
+        .iter()
+        .filter(|call| call.method == "POST")
+        .count();
+    assert_eq!(posts, 2);
+
+    // A push that records its own image answers that one.
+    let pushed = FakeRegistry::start(missing)
+        .pusher()
+        .push_build(dir.path(), &manifest, "build-1", 1, Architecture::Amd64)
+        .unwrap();
+    assert_eq!(pushed, manifest);
+}
+
+#[test]
+fn any_other_refused_result_fails_the_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, _) = image(dir.path());
+    for body in [
+        // A registry from before the refusal named the image.
+        r#"{"error":"this attempt already recorded another image","code":"build_result_recorded"}"#,
+        r#"{"code":"build_result_recorded","image_digest":"sha256:nope"}"#,
+        r#"{"code":"build_superseded","image_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}"#,
+        "not json",
+    ] {
+        let error = result_refused(body.to_owned())
+            .pusher()
+            .push_build(dir.path(), &manifest, "build-1", 1, Architecture::Amd64)
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::HttpStatus { status, .. } if status.as_u16() == 409),
+            "{body}: {error}"
+        );
+    }
+}
+
+#[test]
+fn the_recorded_image_of_an_attempt_is_read_without_a_session() {
+    let recorded = digest_of(b"the image of the first run");
+    let answer = format!(
+        r#"{{"image_digest":"{}","arm64_image_digest":null}}"#,
+        recorded.as_str()
+    );
+    let registry = FakeRegistry::start(move |_, _| (200, answer.clone()));
+    assert_eq!(
+        registry.pusher().recorded_image("build-7", 3).unwrap(),
+        Some(recorded)
+    );
+    let requests = registry.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(
+        requests[0].path,
+        "/registry/v1/builds/build-7/result?attempt=3"
+    );
+    assert_eq!(requests[0].headers["authorization"], "Bearer token");
+
+    let nothing = FakeRegistry::start(|_, _| {
+        (
+            200,
+            r#"{"image_digest":null,"arm64_image_digest":null}"#.to_owned(),
+        )
+    });
+    assert_eq!(nothing.pusher().recorded_image("build-7", 3).unwrap(), None);
+    // A registry from before the route, or one that fences the caller out.
+    for status in [405, 409] {
+        let refusing = FakeRegistry::start(move |_, _| (status, "{}".to_owned()));
+        assert!(refusing.pusher().recorded_image("build-7", 3).is_err());
+    }
+}
