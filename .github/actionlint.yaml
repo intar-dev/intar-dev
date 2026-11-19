@@ -1,4 +1,6 @@
 self-hosted-runner:
   labels:
-    - namespace-profile-intar-dev
-    - namespace-profile-intar-dev-arm64
+    - namespace-profile-linux-amd64-smol
+    - namespace-profile-linux-amd64-chonky
+    - namespace-profile-linux-arm64-macos
+    - namespace-profile-macos-arm64-smol

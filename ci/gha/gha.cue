@@ -10,7 +10,19 @@ package gha
 // does not check #fields either, so a parameter that changes the output has no
 // default: a misspelt one leaves it unset and fails evaluation.
 
-runner: "namespace-profile-intar-dev"
+// The Namespace runner profiles, by what a job needs. Most jobs are scripts,
+// tests of one workspace or a JavaScript build and take the small one; a
+// whole-workspace Rust build, a release build and a kernel take the large.
+runners: {
+	// linux/amd64, 8 vCPU and 16 GB.
+	smol: "namespace-profile-linux-amd64-smol"
+	// linux/amd64, 16 vCPU and 32 GB.
+	chonky: "namespace-profile-linux-amd64-chonky"
+	// linux/arm64, 8 vCPU and 16 GB.
+	arm64: "namespace-profile-linux-arm64-macos"
+	// macOS on Apple silicon, 6 vCPU and 14 GB.
+	macos: "namespace-profile-macos-arm64-smol"
+}
 
 #Workflow: {
 	name!:       string

@@ -27,7 +27,7 @@
     "package": "intar-builder",
     "binary": "intar-builder",
     "manifest": "crates/intar-builder/Cargo.toml",
-    "runner": "namespace-profile-intar-dev",
+    "runner": "namespace-profile-linux-amd64-chonky",
     "paths": [
       "crates/intar-builder/**",
       "crates/intar-contracts/**",
@@ -45,7 +45,7 @@
     "package": "intar-image-cli",
     "binary": "intar-image-cli",
     "manifest": "crates/intar-image-cli/Cargo.toml",
-    "runner": "namespace-profile-intar-dev",
+    "runner": "namespace-profile-linux-amd64-chonky",
     "paths": [
       "crates/intar-image-cli/**",
       "crates/intar-contracts/**",
@@ -59,7 +59,7 @@
     "package": "kino",
     "binary": "kino",
     "manifest": "crates/kino/Cargo.toml",
-    "runner": "namespace-profile-intar-dev",
+    "runner": "namespace-profile-linux-amd64-chonky",
     "paths": [
       "crates/kino/**",
       "crates/intar-contracts/**",
@@ -72,7 +72,7 @@
     "package": "stargate-gateway",
     "binary": "stargate",
     "manifest": "crates/stargate-gateway/Cargo.toml",
-    "runner": "namespace-profile-intar-dev",
+    "runner": "namespace-profile-linux-amd64-chonky",
     "paths": [
       "crates/stargate-gateway/**",
       "crates/intar-contracts/**",

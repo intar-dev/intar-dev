@@ -51,7 +51,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 	jobs: {
 		request: {
 			name:              "Validate the operation"
-			"runs-on":         "namespace-profile-intar-dev"
+			"runs-on":         gha.runners.smol
 			"timeout-minutes": 5
 			outputs: {
 				operation: "${{ steps.validate.outputs.operation }}"
@@ -116,7 +116,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 		}
 		gate: {
 			name:      "Set and verify production run gate"
-			"runs-on": "namespace-profile-intar-dev"
+			"runs-on": gha.runners.smol
 			needs: ["request"]
 			if: "needs.request.outputs.job == 'gate'"
 			concurrency: {
@@ -192,7 +192,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 		}
 		kino: {
 			name:      "Store a Kino release in the registry"
-			"runs-on": "namespace-profile-intar-dev"
+			"runs-on": gha.runners.smol
 			needs: ["request"]
 			if: "needs.request.outputs.job == 'kino'"
 			concurrency: {
@@ -230,7 +230,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 		}
 		cleanup: {
 			name:      "Image registry cleanup"
-			"runs-on": "namespace-profile-intar-dev"
+			"runs-on": gha.runners.smol
 			needs: ["request"]
 			if:                "needs.request.outputs.job == 'cleanup'"
 			"timeout-minutes": 75
