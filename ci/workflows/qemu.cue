@@ -57,7 +57,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			needs: ["check"]
 			strategy: {
 				matrix: include: [
-					{target: "macos-arm64", runner: "macos-15"},
+					{target: "macos-arm64", runner: gha.runners.macos},
 				]
 				"fail-fast": false
 			}

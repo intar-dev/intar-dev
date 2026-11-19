@@ -57,7 +57,7 @@ jobs:
       matrix:
         include:
           - target: macos-arm64
-            runner: macos-15
+            runner: namespace-profile-macos-arm64-smol
       fail-fast: false
     timeout-minutes: 60
     steps:

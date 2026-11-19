@@ -175,9 +175,24 @@ builder would compile it under emulation, for hours.
   every time. When the source's kernel set is the pinned one, the file must
   have the pinned checksum, or the job fails: that is the reproducibility
   check.
+  Then `smoke.sh` boots the file in QEMU, in the same pinned image, to an
+  `/sbin/init` on a virtio disk that prints the kernel's release.
 - **`publish`** attests both files and publishes them as the release
   `kernel/v<set>`: draft, upload, compare, publish, never "latest". A set
   that is already published must hold these exact bytes.
+- **`check`** and **`pin`** make the weekly update. On the schedule and on a
+  dispatch, `check` asks Debian for the newest kernel source of the pinned
+  series (`latest.sh`) and, when one is newer, moves the source pins in this
+  run's checkout (`bump.py`); the other jobs apply the same bump. After the
+  publish, `pin` writes the set, the two checksums and the platform digest
+  (`pin.py`), runs the crate's tests, and opens the pull request
+  `updates/kernel` as the release app. Merging it releases the builder, and
+  every lab is rebuilt after that builder is rolled out, so it is merged when
+  that is wanted.
+
+A week without a newer kernel rebuilds the pinned one, and `publish` then
+checks that the bytes are the published ones. A pull request that changes the
+kernel's inputs runs `check` and `build` and publishes nothing.
 
 The set id covers every input that decides a file's bytes: both profiles, both
 Debian images, the job count and the packing recipe. Image builds download
@@ -264,3 +279,29 @@ conditions, and only when:
 - `cuenv sync ci --check` is stable,
 - the parsed output matches `ci.yml`, and
 - the gate job is still named `ci-ok`, so the ruleset keeps working.
+
+## qemu.yml
+
+The QEMU the desktop app ships (`apps/jumper` runs no other). It has the shape
+of `kernel.yml`, for one target so far, macOS on Apple silicon.
+
+- **`check`** decides what the run does. On the schedule and on a dispatch it
+  looks for the newest stable release on download.qemu.org (`latest.sh`); a
+  newer tarball must carry a valid signature of the QEMU release key
+  (`qemu-release-key.asc`, the key qemu.org names) before `bump.sh` puts its
+  URL and SHA-256 into `sources.txt`.
+- **`build`** runs `build.sh` on a runner of the target: QEMU with glib and
+  libslirp linked in, one system emulator and `qemu-img`, the licence texts,
+  and a second file with the exact sources. `smoke.sh` then boots the pinned
+  guest kernel with that QEMU until the guest finds its virtio disk.
+- **`publish`** runs when the set these sources build is not the one in
+  `pins.txt` and is not published yet: it attests the files and publishes
+  them as the release `qemu/v<set>`. A set is a digest of `sources.txt` and
+  `build.sh`; a second build of a set does not give the same bytes, so a
+  published set is never replaced.
+- **`pin`** writes the release's checksums into `pins.txt` and opens the pull
+  request `updates/qemu` as the release app.
+
+`cuenv task jumper-qemu` downloads the pinned archive for a development build
+and refuses any other file. A pull request that changes the build runs
+`check` and `build` and publishes nothing.
