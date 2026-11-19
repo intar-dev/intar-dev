@@ -22,7 +22,7 @@ jobs:
   rust:
     if: needs.changes.outputs.rust == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-chonky
     permissions:
       contents: read
     timeout-minutes: 45
@@ -50,7 +50,7 @@ jobs:
   security:
     if: needs.changes.outputs.security == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     permissions:
       contents: read
     timeout-minutes: 30
@@ -82,7 +82,7 @@ jobs:
   images:
     if: needs.changes.outputs.images == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     permissions:
       contents: read
     timeout-minutes: 30
@@ -100,7 +100,7 @@ jobs:
   web:
     if: needs.changes.outputs.web == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     permissions:
       contents: read
     timeout-minutes: 30
@@ -139,7 +139,7 @@ jobs:
   kino:
     if: needs.changes.outputs.kino == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     permissions:
       contents: read
     timeout-minutes: 20
@@ -157,7 +157,7 @@ jobs:
   docs:
     if: needs.changes.outputs.docs == 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     permissions:
       contents: read
     timeout-minutes: 10
@@ -186,7 +186,7 @@ jobs:
     name: web build
     if: needs.changes.outputs.web_touched == 'true' && needs.changes.outputs.web != 'true'
     needs: changes
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     permissions:
       contents: read
     timeout-minutes: 30
@@ -256,7 +256,7 @@ jobs:
     name: Chromium smoke
     needs: changes
     if: needs.changes.outputs.web == 'true'
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     permissions:
       contents: read
     timeout-minutes: 20

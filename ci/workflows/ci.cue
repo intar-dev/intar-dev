@@ -89,7 +89,7 @@ import (
 
 		for name, lane in lanes {
 			(name): {
-				"runs-on":         gha.runner
+				"runs-on":         lane.runner
 				needs:             "changes"
 				if:                "needs.changes.outputs.\(name) == 'true'"
 				"timeout-minutes": lane.timeout
@@ -105,7 +105,7 @@ import (
 		for id, lane in lanes if lane.dist != _|_ if lane.dist.build != _|_ {
 			"\(id)-build": {
 				name:              "\(id) build"
-				"runs-on":         gha.runner
+				"runs-on":         lane.runner
 				needs:             "changes"
 				if:                "needs.changes.outputs.\(id)_touched == 'true' && needs.changes.outputs.\(id) != 'true'"
 				"timeout-minutes": lane.timeout

@@ -168,7 +168,7 @@ The guest kernel is compiled here, not on the builder: for arm64 an x86
 builder would compile it under emulation, for hours.
 
 - **`build`** runs once per architecture on a runner of that architecture
-  (`namespace-profile-intar-dev`, `namespace-profile-intar-dev-arm64`).
+  (the large amd64 profile and the arm64 one, see `runners` in `ci/gha/gha.cue`).
   `tools/workflows/kernel/build.sh` writes the build script, profile and init
   script with `cargo run -p intar-image-build --example kernel_inputs`, runs
   the script in the pinned Debian image, and packs the result the same way
