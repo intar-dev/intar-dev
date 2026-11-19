@@ -6,19 +6,21 @@ mod local;
 mod pull;
 mod secrets;
 mod state;
+mod terminal;
 mod ui;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, FontWeight, SharedString,
-    Stateful, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, px,
-    relative, rgb, size,
+    App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, Focusable, FontWeight,
+    SharedString, Stateful, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    div, point, px, relative, rgb, size,
 };
 use gpui_platform::application;
 use state::{Command, Event, MachineStatus, Screen, State};
 use subspace::contract::{CatalogCourseV1, CatalogLectureV1, LocalRunV1};
 use tokio::sync::mpsc::UnboundedSender;
 use ui::kit::{self, Kind, Size};
+use ui::terminal_view::TerminalView;
 use ui::text_input::TextInput;
 use ui::theme::{self, MONO, Palette, palette, term};
 use url::Url;
@@ -33,6 +35,10 @@ struct Jumper {
     search: Entity<TextInput>,
     /// The learner pressed End run and is asked whether they mean it.
     ending: bool,
+    /// The terminal of the run's machine, once its SSH is up.
+    terminal: Option<Entity<TerminalView>>,
+    /// The terminal just opened and has not been given the keyboard yet.
+    focus_terminal: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -112,6 +118,8 @@ impl Jumper {
             commands,
             search,
             ending: false,
+            terminal: None,
+            focus_terminal: false,
             _subscriptions: subscriptions,
         }
     }
@@ -122,6 +130,16 @@ impl Jumper {
     }
 
     fn apply(&mut self, event: Event, cx: &mut Context<Self>) {
+        let event = match event {
+            // The terminal is a view of its own; it takes the keyboard when it opens.
+            Event::Terminal(terminal, changes) => {
+                self.terminal = Some(cx.new(|cx| TerminalView::new(terminal, changes, cx)));
+                self.focus_terminal = true;
+                cx.notify();
+                return;
+            }
+            other => other,
+        };
         if let Event::SignInStarted(url) = &event {
             cx.open_url(url);
         }
@@ -130,6 +148,14 @@ impl Jumper {
         }
         if !matches!(&self.state.screen, Screen::Run(run) if run.active) {
             self.ending = false;
+        }
+        // The terminal belongs to a machine that runs; it goes with it. SSH
+        // can be up while the lab is still preparing, so booting keeps it.
+        if !matches!(
+            self.state.machine,
+            Some(MachineStatus::Booting | MachineStatus::Ready { .. })
+        ) {
+            self.terminal = None;
         }
         cx.notify();
     }
@@ -876,10 +902,14 @@ impl Jumper {
             })
     }
 
-    /// The terminal's place once the lab is up.
-    // ponytail: the terminal itself is #402; until then the area says so.
-    fn terminal(run: &LocalRunV1) -> Div {
-        let tabs = run.machines.iter().enumerate().map(|(index, machine)| {
+    /// The terminal, once the lab is up.
+    fn terminal(&self, run: &LocalRunV1, cx: &Context<Self>) -> Div {
+        let shown = self
+            .terminal
+            .as_ref()
+            .map(|view| view.read(cx).machine().to_owned());
+        let tabs = run.machines.iter().map(|machine| {
+            let on = shown.as_deref() == Some(machine.name.as_str());
             div()
                 .flex()
                 .items_center()
@@ -888,10 +918,8 @@ impl Jumper {
                 .font_family(MONO)
                 .text_size(px(13.))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(if index == 0 { term::TEXT } else { term::MUTED }))
-                .when(index == 0, |tab| {
-                    tab.border_b_2().border_color(rgb(term::BRAND))
-                })
+                .text_color(rgb(if on { term::TEXT } else { term::MUTED }))
+                .when(on, |tab| tab.border_b_2().border_color(rgb(term::BRAND)))
                 .child(div().size(px(6.)).rounded_full().bg(rgb(term::GREEN)))
                 .child(machine.name.clone())
         });
@@ -928,16 +956,17 @@ impl Jumper {
                             .child(machine_facts(machine))
                     })),
             )
-            .child(
-                div()
+            .child(match &self.terminal {
+                Some(view) => div().flex_1().min_h_0().child(view.clone()),
+                None => div()
                     .flex_1()
                     .px(px(18.))
                     .py(px(14.))
                     .font_family(MONO)
                     .text_size(px(14.))
                     .text_color(rgb(term::MUTED))
-                    .child("The machines are running. The terminal is not built into this version of the app yet."),
-            )
+                    .child("Opening the terminal…"),
+            })
     }
 
     fn run(&self, p: &Palette, run: &LocalRunV1, cx: &Context<Self>) -> Div {
@@ -996,7 +1025,7 @@ impl Jumper {
             _ => (0, None),
         };
         let stage = match tasks {
-            Some(_) => Self::terminal(run),
+            Some(_) => self.terminal(run, cx),
             None => self.stages(p, run, cx),
         };
         let machines = run.machines.iter().enumerate().map(|(position, machine)| {
@@ -1127,8 +1156,12 @@ impl Jumper {
 }
 
 impl Render for Jumper {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        if let Some(view) = self.terminal.as_ref().filter(|_| self.focus_terminal) {
+            window.focus(&view.focus_handle(cx), cx);
+            self.focus_terminal = false;
+        }
         let (body, confirm) = match &self.state.screen {
             Screen::Catalog | Screen::Lecture { .. } => (self.catalog(p, cx), None),
             Screen::Run(run) => (

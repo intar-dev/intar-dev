@@ -2,6 +2,9 @@
 //! here, so it is tested without a window.
 
 use subspace::contract::{CatalogCourseV1, CatalogLectureV1, LocalRunV1};
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use crate::terminal::Terminal;
 
 /// What the UI asks of the engine.
 #[derive(Debug, PartialEq, Eq)]
@@ -35,6 +38,8 @@ pub enum Event {
     Run(LocalRunV1),
     /// Where the run's machine on this computer stands.
     Machine(MachineStatus),
+    /// A machine's terminal is open; the receiver hears when its grid changed.
+    Terminal(Terminal, UnboundedReceiver<()>),
     Failed(String),
 }
 
@@ -122,7 +127,10 @@ pub struct State {
 impl State {
     /// Applies an event; the command to send next, if any.
     pub fn apply(&mut self, event: Event) -> Option<Command> {
-        if !matches!(event, Event::Failed(_) | Event::Machine(_)) {
+        if !matches!(
+            event,
+            Event::Failed(_) | Event::Machine(_) | Event::Terminal(..)
+        ) {
             self.error = None;
         }
         match event {
@@ -159,6 +167,8 @@ impl State {
                     self.screen = Screen::Run(run);
                 }
             }
+            // The window keeps the terminal; it is no part of what is tested here.
+            Event::Terminal(..) => {}
             Event::Machine(status) => {
                 self.stage = match status {
                     MachineStatus::Starting => 0,

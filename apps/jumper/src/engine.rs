@@ -12,6 +12,7 @@ use url::Url;
 use crate::local::Local;
 use crate::secrets::Keychain;
 use crate::state::{Command, Event, MachineStatus};
+use crate::terminal::{self, Size};
 
 /// How often the running machine's reports are looked at.
 const MACHINE_POLL: Duration = Duration::from_millis(300);
@@ -53,6 +54,14 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                         },
                         _ = tick.tick() => {
                             let polled = local.poll();
+                            if let Some((machine, target)) = polled.terminal {
+                                // The window fits the grid to its size at its first paint.
+                                let size = Size { columns: 80, rows: 24 };
+                                let (terminal, changes) = terminal::open(&machine, target, size);
+                                if outbox.send(Event::Terminal(terminal, changes)).is_err() {
+                                    break;
+                                }
+                            }
                             if let Some(status) = polled.status
                                 && outbox.send(Event::Machine(status)).is_err()
                             {

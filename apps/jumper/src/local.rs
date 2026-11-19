@@ -15,6 +15,7 @@ use zpm::machine::{Cache, Plan, RunningMachine};
 use zpm::reports::GuestReport;
 
 use crate::state::MachineStatus;
+use crate::terminal::{RunKey, Target};
 
 pub struct Local {
     cache: PathBuf,
@@ -22,6 +23,8 @@ pub struct Local {
     /// The run a machine is running for, and the machine.
     machine: Option<(LocalRunV1, RunningMachine)>,
     last: Option<MachineStatus>,
+    /// The key the terminal logs in with, until the terminal took it.
+    key: Option<RunKey>,
 }
 
 impl Local {
@@ -36,6 +39,7 @@ impl Local {
             runs: home.join("runs"),
             machine: None,
             last: None,
+            key: None,
         }
     }
 
@@ -70,6 +74,12 @@ impl Local {
         {
             return MachineStatus::Failed(reason);
         }
+        // The app's terminal logs in with a key made for this run.
+        let key = match RunKey::generate() {
+            Ok(key) => key,
+            Err(reason) => return MachineStatus::Failed(reason),
+        };
+        let login = key.public_openssh.clone();
         let (run_id, machine) = (run.run_id.clone(), machine.clone());
         let handle = tokio::runtime::Handle::current();
         // A guest without internet access reaches the app through this
@@ -97,8 +107,7 @@ impl Local {
                 disk_mib: machine.disk_mib,
                 egress: machine.egress,
                 relay: &relay,
-                // ponytail: no key, so no SSH in the guest, until the app has a terminal (#402).
-                authorized_keys: &[],
+                authorized_keys: &[login],
             };
             let (asked_run, asked_machine) = (run_id, machine.name.clone());
             // ponytail: QEMU from PATH; the app ships its own with #403.
@@ -120,6 +129,7 @@ impl Local {
         match started {
             Ok(Ok(machine)) => {
                 self.machine = Some((run.clone(), machine));
+                self.key = Some(key);
                 MachineStatus::Booting
             }
             Ok(Err(error)) => MachineStatus::Failed(error.to_string()),
@@ -130,6 +140,7 @@ impl Local {
     /// Stops the machine, if one runs. Waits for QEMU to be gone.
     pub async fn stop(&mut self) {
         self.last = None;
+        self.key = None;
         if let Some((_, machine)) = self.machine.take() {
             let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
         }
@@ -146,6 +157,18 @@ impl Local {
             latest = Some(report);
         }
         let mut status = latest.as_ref().map(MachineStatus::of);
+        // Once the guest's SSH is up and it has said which host keys are its
+        // own, the terminal can open; that happens once per run.
+        let terminal = latest
+            .as_ref()
+            .filter(|report| report.ssh_ready && !report.ssh_host_keys_openssh.is_empty())
+            .and_then(|report| {
+                let key = self.key.take()?;
+                Some((
+                    machine.name.clone(),
+                    Target::new(machine.ssh_port, &key, report.ssh_host_keys_openssh.clone()),
+                ))
+            });
         let report = latest
             .as_ref()
             .and_then(|report| vm_state(run, &machine.name, report, now_ms()));
@@ -157,7 +180,11 @@ impl Local {
         if let Some(status) = &status {
             self.last = Some(status.clone());
         }
-        Polled { status, report }
+        Polled {
+            status,
+            report,
+            terminal,
+        }
     }
 }
 
@@ -165,6 +192,8 @@ impl Local {
 pub struct Polled {
     pub status: Option<MachineStatus>,
     pub report: Option<VmStateV3>,
+    /// A machine whose terminal can open now, by name.
+    pub terminal: Option<(String, Target)>,
 }
 
 fn now_ms() -> i64 {
@@ -368,10 +397,15 @@ mod tests {
         let mut status = local.start(&run, channel.clone(), &downloaded).await;
         eprintln!("live: {status:?} after {:?}", began.elapsed());
         let mut reported = 0;
-        while matches!(status, MachineStatus::Booting) && began.elapsed() < Duration::from_secs(900)
+        // The terminal can open a moment after the lab is ready: wait for both.
+        let mut terminal = None;
+        while (matches!(status, MachineStatus::Booting)
+            || matches!(status, MachineStatus::Ready { .. }) && terminal.is_none())
+            && began.elapsed() < Duration::from_secs(900)
         {
             tokio::time::sleep(Duration::from_millis(300)).await;
             let polled = local.poll();
+            terminal = terminal.or(polled.terminal);
             if let Some(vm) = polled.report {
                 match channel.report(&run.run_id, vec![vm]).await {
                     Ok(_) => reported += 1,
@@ -383,6 +417,31 @@ mod tests {
                 status = next;
             }
         }
+        // The app's own key and the guest's reported host key open a shell.
+        let mut typed = false;
+        if let Some((machine, target)) = terminal {
+            let size = crate::terminal::Size {
+                columns: 100,
+                rows: 30,
+            };
+            let (terminal, mut changes) = crate::terminal::open(&machine, target, size);
+            terminal.write(b"echo terminal-$((40+2))\r".to_vec());
+            let shows = |wanted: &str| {
+                let grid = terminal.grid.lock();
+                let screen: String = grid
+                    .renderable_content()
+                    .display_iter
+                    .map(|cell| cell.c)
+                    .collect();
+                screen.contains(wanted)
+            };
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                while !shows("terminal-42") && changes.recv().await.is_some() {}
+            })
+            .await;
+            typed = shows("terminal-42");
+            eprintln!("live: terminal on {machine}: {typed}");
+        }
         local.stop().await;
         let ended = channel.end_run(&run.run_id).await;
         eprintln!("live: ended: {:?}", ended.map(|answer| answer.run.active));
@@ -391,5 +450,6 @@ mod tests {
             "the lab did not come up: {status:?}"
         );
         assert!(reported > 0, "no report reached intar");
+        assert!(typed, "the terminal did not show a command's output");
     }
 }
