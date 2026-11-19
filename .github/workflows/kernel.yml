@@ -4,9 +4,6 @@ name: Guest kernel
 run-name: Guest kernel @ ${{ github.sha }}
 "on":
   workflow_dispatch: {}
-  push:
-    branches:
-      - kernel-build/**
 concurrency:
   group: intar-kernel
   cancel-in-progress: false

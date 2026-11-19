@@ -13,12 +13,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 	// bytes are kept: nothing reaches an image until a reviewed change pins it.
 	// A change to the kernel's inputs runs this on its branch, pins the
 	// checksums it prints, and merges with them.
-	on: {
-		workflow_dispatch: {}
-		// ponytail: only until this workflow is on main; a dispatch on a branch
-		// does the same once it is.
-		push: branches: ["kernel-build/**"]
-	}
+	on: workflow_dispatch: {}
 	// One run at a time: a second run for the same set would meet the first
 	// one's half-filled draft.
 	concurrency: {
