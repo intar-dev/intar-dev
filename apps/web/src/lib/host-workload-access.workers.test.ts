@@ -231,9 +231,9 @@ it("keeps shared organization work on its assigned host after placement and crea
   const state = await organizationWorkload();
   expect(await enforceHostWorkloadAccess(state)).toBe(state);
   expect(await loadScenarioTerminalRouteGeneration({ runId: "run-1", vmId: "vm-1" })).toMatchObject({ hostId: "host-1", userId: "user-1" });
-  const runVm = await resolveRunVm({ db: drizzle(env.DB), runId: "run-1", vmName: "runtime-1-run-1", agent: {
+  const runVm = await resolveRunVm({ db: drizzle(env.DB), runId: "run-1", vmName: "runtime-1-run-1", writer: { kind: "agent", agent: {
     scope: "organization", organizationId: "org", credentialGeneration: 1, hostId: "host-1", userId: "creator", role: "agent",
-  } });
+  } } });
   expect(runVm).toMatchObject({ userId: "user-1", hostId: "host-1" });
   const now = Date.now();
   const message = stateReport("host-1", { observedAt: now, appliedDesiredVersion: state.version, vms: [actualVm("run-1", "runtime-1", now)] });

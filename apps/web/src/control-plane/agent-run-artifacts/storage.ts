@@ -1,4 +1,6 @@
 import { GUEST_USERNAME } from "@/generated/constants";
+import { activeAccountSql } from "@/lib/account-access";
+import { requireDesktopCaller } from "@/lib/desktop-channel";
 import { currentRunHostScopeCondition } from "@/lib/metal-placement";
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -45,8 +47,34 @@ export interface UploadedPartRecord {
   etag: string;
 }
 
+/**
+ * Who writes a run's artifacts: the agent of the host the run is on, or, for
+ * a run on the learner's own computer, the desktop app signed in as them.
+ */
+export type ArtifactWriter =
+  | { kind: "agent"; agent: VerifiedAgentHost }
+  | { kind: "learner"; userId: string; accessTokenId: string };
+
+/** The desktop app's archive routes: the agent's path tails under this prefix. */
+export const LOCAL_ARCHIVE_PREFIX = "/api/local/archive";
+
+/** The caller of an archive route, by which prefix the request came in on. */
+export async function requireArtifactWriter(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<{ ok: true; writer: ArtifactWriter } | { ok: false; response: Response }> {
+  if (new URL(request.url).pathname.startsWith(`${LOCAL_ARCHIVE_PREFIX}/`)) {
+    const caller = await requireDesktopCaller(request, env.DB);
+    return caller.ok
+      ? { ok: true, writer: { kind: "learner", userId: caller.userId, accessTokenId: caller.accessTokenId } }
+      : caller;
+  }
+  const verified = await requireVerifiedAgentRequest(request, env);
+  return verified.ok ? { ok: true, writer: { kind: "agent", agent: verified.agent } } : verified;
+}
+
 export interface ResolvedRunVm {
-  agent: VerifiedAgentHost;
+  writer: ArtifactWriter;
   generation: number;
   domainKind: RuntimeDomainKind;
   domainId: string;
@@ -62,13 +90,17 @@ export interface ResolvedRunVm {
 
 /** The original JWT identity must survive every body/R2 await. Never refresh it. */
 function artifactWriteCondition(runVm: ResolvedRunVm, allowSealed = false) {
+  if (runVm.writer.kind === "learner") {
+    return learnerArtifactWriteCondition(runVm, runVm.writer, allowSealed);
+  }
+  const agent = runVm.writer.agent;
   // Lease expiry archives the execution before its VMs upload, so the per-VM
   // seal, not the execution state, closes artifact writes.
-  return sql`${currentAgentHost(runVm.agent)}
-    AND (${runVm.agent.scope} = 'organization' OR EXISTS (SELECT 1 FROM user host_owner WHERE host_owner.id = ${runVm.agent.userId}
+  return sql`${currentAgentHost(agent)}
+    AND (${agent.scope} = 'organization' OR EXISTS (SELECT 1 FROM user host_owner WHERE host_owner.id = ${agent.userId}
       AND host_owner.deleted_at IS NULL AND coalesce(host_owner.banned, 0) = 0))
-    AND EXISTS (SELECT 1 FROM agent_bootstrap_tokens credential WHERE credential.host_id = ${runVm.agent.hostId}
-      AND credential.credential_generation = ${runVm.agent.credentialGeneration} AND credential.revoked_at IS NULL
+    AND EXISTS (SELECT 1 FROM agent_bootstrap_tokens credential WHERE credential.host_id = ${agent.hostId}
+      AND credential.credential_generation = ${agent.credentialGeneration} AND credential.revoked_at IS NULL
       AND (credential.expires_at IS NULL OR credential.expires_at > CAST(unixepoch('subsecond') * 1000 AS INTEGER)))
     AND EXISTS (
     SELECT 1 FROM runtime_executions execution
@@ -76,7 +108,7 @@ function artifactWriteCondition(runVm: ResolvedRunVm, allowSealed = false) {
     JOIN scenario_runs run ON run.runtime_execution_id = execution.id
     JOIN agent_hosts host ON host.id = execution.host_id
     JOIN user owner ON owner.id = execution.user_id
-    WHERE execution.id = ${runVm.runId} AND execution.host_id = ${runVm.agent.hostId}
+    WHERE execution.id = ${runVm.runId} AND execution.host_id = ${agent.hostId}
       AND execution.user_id = ${runVm.userId} AND execution.generation = ${runVm.generation}
       AND execution.domain_kind = 'scenario' AND execution.domain_id = ${runVm.domainId}
       AND run.run_id = execution.domain_id AND run.user_id = execution.user_id
@@ -85,6 +117,45 @@ function artifactWriteCondition(runVm: ResolvedRunVm, allowSealed = false) {
       AND vm.runtime_vm_name = ${runVm.runtimeVmName}
       AND owner.deleted_at IS NULL AND coalesce(owner.banned, 0) = 0
       AND ${sql.raw(currentRunHostScopeCondition())}
+      AND NOT EXISTS (SELECT 1 FROM runtime_executions newer
+        WHERE newer.domain_kind = execution.domain_kind AND newer.domain_id = execution.domain_id
+          AND newer.generation > execution.generation)
+      AND EXISTS (SELECT 1 FROM json_each(run.state_json, '$.vms') scenario_vm
+        WHERE json_extract(scenario_vm.value, '$.id') = vm.vm_id
+          AND json_extract(scenario_vm.value, '$.runtimeVmName') = vm.runtime_vm_name
+          AND (${allowSealed ? 1 : 0} = 1 OR json_extract(scenario_vm.value, '$.phase') <> 'completed'))
+      AND (${allowSealed ? 1 : 0} = 1 OR vm.artifact_writes_sealed = 0)
+  )`;
+}
+
+/**
+ * The fence for the desktop app. Every request was already authenticated in
+ * full; what is checked again around each write is only what stays true or
+ * false for good: the run is the learner's own local run, their account is
+ * active, and the token was not revoked. A token that merely expired, or was
+ * replaced by a refresh, in the middle of an upload does not fence it: the
+ * app's next request authenticates with the new one.
+ */
+function learnerArtifactWriteCondition(
+  runVm: ResolvedRunVm,
+  writer: Extract<ArtifactWriter, { kind: "learner" }>,
+  allowSealed: boolean,
+) {
+  return sql`NOT EXISTS (SELECT 1 FROM oauth_access_token token
+      WHERE token.id = ${writer.accessTokenId} AND token.revoked IS NOT NULL)
+    AND EXISTS (
+    SELECT 1 FROM runtime_executions execution
+    JOIN runtime_vms vm ON vm.execution_id = execution.id
+    JOIN scenario_runs run ON run.runtime_execution_id = execution.id
+    JOIN user owner ON owner.id = execution.user_id
+    WHERE execution.id = ${runVm.runId} AND execution.user_id = ${writer.userId}
+      AND execution.generation = ${runVm.generation}
+      AND execution.domain_kind = 'scenario' AND execution.domain_id = ${runVm.domainId}
+      AND run.run_id = execution.domain_id AND run.user_id = execution.user_id
+      AND run.runtime = 'local'
+      AND vm.id = ${runVm.runtimeVmId} AND vm.vm_id = ${runVm.vmId}
+      AND vm.runtime_vm_name = ${runVm.runtimeVmName}
+      AND ${sql.raw(activeAccountSql("owner"))}
       AND NOT EXISTS (SELECT 1 FROM runtime_executions newer
         WHERE newer.domain_kind = execution.domain_kind AND newer.domain_id = execution.domain_id
           AND newer.generation > execution.generation)
@@ -405,7 +476,7 @@ export async function requireVerifiedRunVm(
   | { ok: true; db: ReturnType<typeof drizzle>; runVm: ResolvedRunVm }
   | { ok: false; response: Response }
 > {
-  const verified = await requireVerifiedAgentRequest(request, env);
+  const verified = await requireArtifactWriter(request, env);
   if (!verified.ok) {
     return verified;
   }
@@ -414,7 +485,7 @@ export async function requireVerifiedRunVm(
     db,
     runId,
     vmName,
-    agent: verified.agent,
+    writer: verified.writer,
   });
   if (!runVm) {
     return {
@@ -440,8 +511,9 @@ export async function resolveRunVm(input: {
   db: ReturnType<typeof drizzle>;
   runId: string;
   vmName: string;
-  agent: VerifiedAgentHost;
+  writer: ArtifactWriter;
 }): Promise<ResolvedRunVm | null> {
+  const { writer } = input;
   const runtimeRows = await input.db
     .select({
       runId: runtimeExecutions.id,
@@ -462,7 +534,10 @@ export async function resolveRunVm(input: {
     .where(
       and(
         eq(runtimeExecutions.id, input.runId),
-        eq(runtimeExecutions.hostId, input.agent.hostId),
+        // An agent reaches the runs on its host; the app the learner's own.
+        writer.kind === "agent"
+          ? eq(runtimeExecutions.hostId, writer.agent.hostId)
+          : eq(runtimeExecutions.userId, writer.userId),
         eq(runtimeVms.runtimeVmName, input.vmName),
       ),
     )
@@ -482,6 +557,8 @@ export async function resolveRunVm(input: {
       and(
         eq(scenarioRuns.runId, runtime.domainId),
         eq(scenarioRuns.runtimeExecutionId, runtime.runId),
+        // The app writes only to runs on the learner's own computer.
+        ...(writer.kind === "learner" ? [eq(scenarioRuns.runtime, "local")] : []),
       ),
     )
     .limit(1);
@@ -497,7 +574,7 @@ export async function resolveRunVm(input: {
     return null;
   }
   const resolved: ResolvedRunVm = {
-    agent: input.agent,
+    writer,
     generation: runtime.generation,
     domainKind: "scenario",
     domainId: runtime.domainId,
