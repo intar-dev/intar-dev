@@ -175,6 +175,12 @@ if [ "$kernel_arch" = arm64 ]; then
   # this build ships none: what would be a module is built in instead.
   make mod2yesconfig >/dev/null
   make olddefconfig >/dev/null
+  # A few symbols can only ever be modules, such as the kernel's self-tests.
+  # Nothing in a guest needs one of them, so they are switched off.
+  for symbol in $(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)=m$/\1/p' .config); do
+    ./scripts/config --disable "$symbol"
+  done
+  make olddefconfig >/dev/null
 fi
 
 log "verifying the required built-in feature set"
