@@ -52,16 +52,11 @@ printf '%s  %s\n%s  %s\n' "${buildkit_sha256}" "${tools}/buildkit.tar.gz" "${umo
 tar -xzf "${tools}/buildkit.tar.gz" -C "${tools}"
 chmod 0755 "${tools}/bin/umoci"
 
-# The builder's own daemon layout: a private BuildKit whose socket is in the
-# OCI cache root.
-cat > "${tools}/buildkitd.toml" <<EOF
-[worker.oci]
-  enabled = true
-  binary = "${tools}/bin/buildkit-runc"
-[worker.containerd]
-  enabled = false
-EOF
-sudo sh -c "nohup '${tools}/bin/buildkitd' --config '${tools}/buildkitd.toml' --root '${oci}/buildkitd' --addr 'unix://${oci}/buildkitd.sock' > '${work}/logs/buildkitd.log' 2>&1 < /dev/null &"
+# A private BuildKit whose socket is in the OCI cache root, as on the builder.
+# It runs in a privileged container: the runner's own cgroup tree is read-only,
+# so a daemon started on it directly cannot run a build step.
+sudo docker run --detach --privileged --name intar-probe-buildkitd --volume "${oci}:${oci}" \
+  "moby/buildkit:${buildkit_version}" --addr "unix://${oci}/buildkitd.sock" > /dev/null
 for _ in $(seq 1 30); do
   sudo "${tools}/bin/buildctl" --addr "unix://${oci}/buildkitd.sock" debug workers > /dev/null 2>&1 && break
   sleep 1
