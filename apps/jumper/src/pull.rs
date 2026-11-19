@@ -32,6 +32,8 @@ const MAX_BOOT_LAYER_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_CHUNK_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 /// Chunks are 4 MiB of disk; a config that names far larger ones is refused.
 const MAX_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
+/// Room kept free beside a downloaded image, for the run's own disks.
+const SPARE_MIB: u64 = 1024;
 /// Disk chunks fetched at once.
 const FANOUT: usize = 4;
 /// Progress is told about this often, in bytes.
@@ -272,6 +274,22 @@ async fn pull_image(
             Some((_, same)) if *same == raw => {}
             Some(_) => return Err(bad()),
         }
+    }
+    // Refuse before anything is written what this computer has no room for:
+    // the download unpacks to the disk's chunks, and a run needs room too.
+    let needed_mib = (config.disk.chunks.len() as u64 * chunk_size
+        + boot_layers.iter().map(|(_, layer)| layer.size).sum::<u64>())
+        / (1024 * 1024)
+        + SPARE_MIB;
+    if let Some(free_mib) = zpm::preflight::Has::measure(dir)
+        .disk_mib
+        .filter(|free| *free < needed_mib)
+    {
+        return Err(format!(
+            "This scenario needs about {:.1} GB of free disk space, and this computer has {:.1} GB.",
+            needed_mib as f32 / 1024.,
+            free_mib as f32 / 1024.
+        ));
     }
     let progress = Progress {
         done: Cell::new(0),
