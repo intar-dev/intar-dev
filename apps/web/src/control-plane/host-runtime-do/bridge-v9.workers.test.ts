@@ -197,11 +197,30 @@ describe("machine builds over bridge 9", () => {
     token = await seedBuilder("builder-1");
   });
 
-  async function ingest(n: number) {
+  async function ingest(n: number, bundle: unknown = bundleFixture) {
     expect(await ingestSourceBundle(env, {
-      organizationId: null, rev: rev(n), gzip: new Uint8Array(gzipSync(JSON.stringify(bundleFixture))), stored: false,
+      organizationId: null, rev: rev(n), gzip: new Uint8Array(gzipSync(JSON.stringify(bundle))), stored: false,
     })).toBeNull();
   }
+
+  it("starts only the builds the newest revision of a scenario still needs", async () => {
+    // Two publishes before a builder is there; the second changes the machine, so its build key.
+    await ingest(1);
+    const changed = structuredClone(bundleFixture) as typeof bundleFixture;
+    changed.scenarios[0]!.machines[0]!.setup[0]!.script += "true\n";
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await ingest(2, changed);
+    const rows = () => env.DB.prepare("SELECT bundle_rev, state FROM machine_builds ORDER BY created_at").all<{ bundle_rev: string; state: string }>();
+    expect((await rows()).results).toEqual([{ bundle_rev: rev(1), state: "queued" }, { bundle_rev: rev(2), state: "queued" }]);
+
+    const { ws, messages } = await connectBuilder();
+    const desired = await until(() => desiredStates(messages).at(-1), (last) => (last?.desired_state.builds.length ?? 0) > 0);
+    // The replaced revision's build is older, and is not what the builder gets.
+    expect(desired!.desired_state.builds.map((build) => build.bundle_rev)).toEqual([rev(2)]);
+    await maintainMachineBuilds(env, null, Date.now());
+    expect((await rows()).results).toEqual([{ bundle_rev: rev(1), state: "queued" }, { bundle_rev: rev(2), state: "assigned" }]);
+    ws.close();
+  });
 
   const build = () => env.DB.prepare("SELECT build_key, state, attempt, host_id, image_digest, error, updated_at FROM machine_builds").first<{
     build_key: string; state: string; attempt: number; host_id: string | null; image_digest: string | null; error: string | null;
