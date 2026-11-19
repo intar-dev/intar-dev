@@ -1,5 +1,16 @@
 # Changelog
 
+## agent/v0.25.0 (2026-11-19)
+
+### Breaking changes
+
+- **intar-contracts:** [**breaking**] Move to image format 4 and build arm64 machine images (#425) (88130d03)
+
+### Features
+
+- **jumper:** Upload a local run's session recordings (#421) (020922cd)
+- **intar-agent:** Read images of the next image format too (#424) (85bee57c)
+
 ## agent/v0.24.0 (2026-11-19)
 
 ### Features

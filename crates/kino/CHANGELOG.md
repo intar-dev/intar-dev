@@ -1,5 +1,11 @@
 # Changelog
 
+## kino/v0.11.0 (2026-11-19)
+
+### Breaking changes
+
+- **intar-contracts:** [**breaking**] Move to image format 4 and build arm64 machine images (#425) (88130d03)
+
 ## kino/v0.10.0 (2026-11-19)
 
 ### Features
