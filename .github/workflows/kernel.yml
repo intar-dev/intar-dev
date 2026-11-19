@@ -1,0 +1,86 @@
+# Generated from ci/workflows/kernel.cue by cuenv; do not edit manually.
+# Regenerate with: cuenv sync codegen
+name: Guest kernel
+run-name: Guest kernel @ ${{ github.sha }}
+"on":
+  workflow_dispatch: {}
+concurrency:
+  group: intar-kernel
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    outputs:
+      set: ${{ steps.build.outputs.set }}
+      tag: ${{ steps.build.outputs.tag }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: namespace-profile-intar-dev
+          - arch: arm64
+            runner: namespace-profile-intar-dev-arm64
+      fail-fast: false
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          namespace-cache: "false"
+      - name: Build the kernel
+        id: build
+        env:
+          KERNEL_ARCH: ${{ matrix.arch }}
+        run: cuenv task -p ci --package ci kernel-build
+      - name: Keep the kernel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: kernel-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+  publish:
+    name: Publish ${{ needs.build.outputs.tag }}
+    needs:
+      - build
+    runs-on: ubuntu-24.04
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Download the kernels
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: kernel-*
+          path: dist/
+          merge-multiple: true
+      - name: Write the checksums
+        run: cuenv task -p ci --package ci kernel-checksums
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/intar-kernel_checksums.txt
+      - name: Publish the kernel release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: cuenv task -p ci --package ci kernel-publish

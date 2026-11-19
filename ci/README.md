@@ -162,6 +162,35 @@ Production jobs queue behind each other and are never cancelled halfway. The
 `production` and `release-pr` environments admit main only; that is a
 repository setting, not part of the CUE.
 
+## kernel.yml
+
+The guest kernel is compiled here, not on the builder: for arm64 an x86
+builder would compile it under emulation, for hours.
+
+- **`build`** runs once per architecture on a runner of that architecture
+  (`namespace-profile-intar-dev`, `namespace-profile-intar-dev-arm64`).
+  `tools/workflows/kernel/build.sh` writes the build script, profile and init
+  script with `cargo run -p intar-image-build --example kernel_inputs`, runs
+  the script in the pinned Debian image, and packs the result the same way
+  every time. When the source's kernel set is the pinned one, the file must
+  have the pinned checksum, or the job fails: that is the reproducibility
+  check.
+- **`publish`** attests both files and publishes them as the release
+  `kernel/v<set>`: draft, upload, compare, publish, never "latest". A set
+  that is already published must hold these exact bytes.
+
+The set id covers every input that decides a file's bytes: both profiles, both
+Debian images, the job count and the packing recipe. Image builds download
+their file by the SHA-256 pinned in `crates/intar-image-build/src/kernel.rs`,
+so the pins, changed only through review, are all an image trusts; the release
+is where the bytes are kept.
+
+To change the kernel (version, profile, toolchain image): make the change on a
+branch, where the pin test now fails; dispatch the workflow on that branch
+(`gh workflow run kernel.yml --ref <branch>`); put the set and the two
+checksums it prints into `kernel.rs`; dispatch it once more, which must
+reproduce them; merge.
+
 ## Checks on the workflows
 
 - `cuenv task sync-check`: the rendered files match the CUE, the workflow set is

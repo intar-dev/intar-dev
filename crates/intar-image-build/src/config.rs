@@ -216,15 +216,27 @@ fn default_umoci_binary() -> PathBuf {
 // BuildKit would take an index digest for either platform, but a manifest
 // digest cannot resolve to the wrong one.
 fn default_debian_image() -> String {
-    String::from(
-        "docker.io/library/debian@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392",
-    )
+    String::from(DEBIAN_IMAGE_AMD64)
 }
 
 fn default_debian_image_arm64() -> String {
-    String::from(
-        "docker.io/library/debian@sha256:24a01011d10eba3a023bc8585b9650b8b29021240d4217c05b905e09ef4a5232",
-    )
+    String::from(DEBIAN_IMAGE_ARM64)
+}
+
+const DEBIAN_IMAGE_AMD64: &str = "docker.io/library/debian@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392";
+const DEBIAN_IMAGE_ARM64: &str = "docker.io/library/debian@sha256:24a01011d10eba3a023bc8585b9650b8b29021240d4217c05b905e09ef4a5232";
+
+impl BuildArch {
+    /// The pinned Debian image of this architecture: what a base is built
+    /// from unless a builder's configuration names another, and what the
+    /// kernel is always compiled in.
+    #[must_use]
+    pub fn pinned_debian_image(self) -> &'static str {
+        match self {
+            Self::Amd64 => DEBIAN_IMAGE_AMD64,
+            Self::Arm64 => DEBIAN_IMAGE_ARM64,
+        }
+    }
 }
 
 fn default_mke2fs_binary() -> PathBuf {

@@ -361,7 +361,7 @@ mod tests {
     fn the_baked_platform_is_pinned_to_the_image_format() {
         const PINNED: (&str, &str) = (
             "intar-image-4",
-            "21602f43790d1d585a4bccc5162e28357b60b31a43f3f47969b21e9f51eb1cae",
+            "5811190ece2aec1aee0dd0d1a3370d6ae3a5987d55497433388991c758811f79",
         );
         assert_eq!(
             (IMAGE_FORMAT, baked_platform_digest().as_str()),
