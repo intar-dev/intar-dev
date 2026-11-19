@@ -3,6 +3,7 @@ use std::{env, fs, process::Command};
 
 use crate::config::BuilderConfig;
 use intar_contracts::catalog::ImageArchitecture;
+use intar_contracts::oci::Architecture;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreflightStatus {
@@ -58,6 +59,41 @@ impl PreflightEnvironment {
     }
 }
 
+/// Where the kernel lists the emulator it runs arm64 programs with; `BuildKit`
+/// builds the arm64 base image through it.
+const ARM64_BINFMT: &str = "/proc/sys/fs/binfmt_misc/qemu-aarch64";
+
+/// What this builder can build, as its hello says it: amd64, and arm64 too
+/// when the arm64 QEMU is beside the configured one and the kernel runs arm64
+/// programs.
+#[must_use]
+pub fn architectures(cfg: &BuilderConfig) -> Vec<Architecture> {
+    let env = PreflightEnvironment::detect();
+    let mut all = vec![Architecture::Amd64];
+    if arm64_missing(cfg, &env.path_entries, Path::new(ARM64_BINFMT)).is_none() {
+        all.push(Architecture::Arm64);
+    }
+    all
+}
+
+/// Why this builder cannot build arm64 images, or `None` when it can.
+fn arm64_missing(cfg: &BuilderConfig, path_entries: &[PathBuf], binfmt: &Path) -> Option<String> {
+    let qemu = Path::new(&cfg.qemu.qemu_binary).with_file_name("qemu-system-aarch64");
+    if resolve_command(&qemu.to_string_lossy(), path_entries).is_none() {
+        return Some(format!("{} is not installed", qemu.display()));
+    }
+    if !binfmt.exists() {
+        return Some(format!(
+            "{} is missing: the kernel runs no arm64 programs (install qemu-user-static)",
+            binfmt.display()
+        ));
+    }
+    if !is_pinned_oci_image(&cfg.qemu.layered.debian_image_arm64) {
+        return Some("qemu.layered.debian_image_arm64 is not pinned by digest".to_owned());
+    }
+    None
+}
+
 #[must_use]
 pub fn collect_preflight(cfg: &BuilderConfig) -> PreflightReport {
     collect_preflight_with_environment(cfg, &PreflightEnvironment::detect())
@@ -95,6 +131,13 @@ pub fn collect_preflight_with_environment(
     );
     push_command_check(&mut checks, "zstd binary", "zstd", &env.path_entries);
     push_pinned_image_check(&mut checks, &cfg.qemu.layered.debian_image);
+    // Optional: a builder without it builds amd64 images only.
+    checks.push(
+        match arm64_missing(cfg, &env.path_entries, Path::new(ARM64_BINFMT)) {
+            None => pass("arm64 images", "arm64 images are built by emulation"),
+            Some(why) => warn("arm64 images", format!("not built here: {why}")),
+        },
+    );
     push_command_check(
         &mut checks,
         "mke2fs binary",
