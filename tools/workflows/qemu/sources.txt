@@ -1,0 +1,9 @@
+# What the app's QEMU is built from: name, URL, SHA-256. build.sh downloads
+# and checks each; a change here is a new QEMU set (crates/zpm/src/bundled.rs).
+qemu https://download.qemu.org/qemu-11.1.3.tar.xz 5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22
+glib https://download.gnome.org/sources/glib/2.90/glib-2.90.1.tar.xz 93c941aa17d5eb1d53fe838365f29a8b4e539c222a256d974ec8f30fc413e396
+libslirp https://gitlab.freedesktop.org/slirp/libslirp/-/archive/v4.9.7/libslirp-v4.9.7.tar.gz d2567fa06a6357c7755d61c67293b2c0bf069b3f2173bde6b76cf768529a1938
+# Build tools; nothing of them is in the archive.
+meson https://github.com/mesonbuild/meson/releases/download/1.12.1/meson-1.12.1.tar.gz ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743
+ninja https://github.com/ninja-build/ninja/archive/refs/tags/v1.13.2.tar.gz 974d6b2f4eeefa25625d34da3cb36bdcebe7fbce40f4c16ac0835fd1c0cbae17
+pkgconf https://distfiles.ariadne.space/pkgconf/pkgconf-3.0.11.tar.xz d0cd841bc8e55b9da888106c00dc256d05b7d1d8e5a46f4be4eb4c5125bd2dc4

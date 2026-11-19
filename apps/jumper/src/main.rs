@@ -4,6 +4,7 @@
 mod engine;
 mod local;
 mod pull;
+mod qemu;
 mod secrets;
 mod state;
 mod terminal;
