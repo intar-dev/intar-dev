@@ -14,3 +14,13 @@ pinned. The `arm64 images` line of `doctor` says whether it does and what is
 missing. A job whose arm64 image fails has still succeeded: learners on amd64
 hosts and computers are not held up by it, and the failure is in the build's
 log and on its row.
+
+## The guest kernel
+
+The builder does not compile the guest kernel. A base image build downloads
+the kernel that `kernel.yml` built and published as a release of this
+repository, and BuildKit refuses the file unless it has the checksum pinned in
+`crates/intar-image-build/src/kernel.rs`. The host therefore needs to reach
+GitHub's release downloads when it builds a base image that is not in its
+caches. `qemu.layered.kernel_build_jobs` is still read from the configuration
+and no longer used.

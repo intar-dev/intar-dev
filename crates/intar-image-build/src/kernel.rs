@@ -3,8 +3,11 @@
 //! The single Intar kernel profile.
 //!
 //! There is one profile. There is no toggle, no variant, and no fallback to a
-//! distribution kernel package. The image pipeline compiles this kernel inside
-//! the normal OCI base-image build, so no step copies a kernel by hand.
+//! distribution kernel package. `kernel.yml` compiles this kernel for each
+//! architecture on a runner of that architecture and publishes the files as a
+//! release; the OCI base-image build downloads its architecture's file and
+//! BuildKit refuses it unless it has the SHA-256 pinned here. An x86 builder
+//! therefore never compiles the arm64 kernel under emulation.
 //!
 //! Four properties matter, and each one is checked here rather than assumed:
 //!
