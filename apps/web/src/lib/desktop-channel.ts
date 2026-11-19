@@ -96,6 +96,8 @@ export interface LocalRunView {
   /** The run's phase as the server holds it; the app stops its VMs when `active` is false. */
   state: string;
   active: boolean;
+  /** The learner; every VM state the app reports names them as its owner. */
+  userId: string;
   /** Every VM state the app reports names this execution and generation. */
   executionId: string | null;
   generation: number | null;
@@ -144,6 +146,7 @@ export async function localRunView(
     scenarioId: row.scenario_id,
     state: row.state,
     active: row.active === 1,
+    userId,
     executionId: row.execution_id,
     generation: row.generation,
     machines: vms.map((vm, index) => {
