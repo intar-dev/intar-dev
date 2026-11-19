@@ -306,6 +306,62 @@ fn a_conflict_fails_the_push_before_the_manifest() {
 }
 
 #[test]
+fn a_paused_registry_is_waited_out_with_a_fresh_session() {
+    // A website deploy holds the registry: the blob check, a HEAD, is refused
+    // with a 409 that carries no body, and a write with one that names why.
+    let registry = FakeRegistry::start(|request, seen| match request.method.as_str() {
+        "HEAD" if seen < 2 => (409, String::new()),
+        "HEAD" => (404, String::new()),
+        "PUT" if request.path.contains("/manifests/") && seen == 0 => (
+            409,
+            r#"{"error":"registry sweep is in progress","code":"registry_sweep_in_progress"}"#
+                .to_owned(),
+        ),
+        _ => (201, "{}".to_owned()),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, _) = image(dir.path());
+    registry
+        .pusher()
+        .push_build(dir.path(), &manifest, "build-1", 1, Architecture::Amd64)
+        .unwrap();
+
+    let calls = registry.calls();
+    // The push started over three times: twice at the refused blob check
+    // and once at the refused manifest, each time from the first blob.
+    let first_blob = &calls[0].path;
+    let heads = calls
+        .iter()
+        .filter(|call| call.method == "HEAD" && &call.path == first_blob)
+        .count();
+    assert_eq!(heads, 4, "{first_blob}");
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.path.contains("/builds/build-1/result"))
+    );
+}
+
+#[test]
+fn a_registry_that_stays_paused_fails_the_push_in_the_end() {
+    let registry = FakeRegistry::start(|request, _| match request.method.as_str() {
+        "HEAD" => (409, String::new()),
+        _ => (201, "{}".to_owned()),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, _) = image(dir.path());
+    let error = registry
+        .pusher()
+        .push_build(dir.path(), &manifest, "build-1", 1, Architecture::Amd64)
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::HttpStatus { status, .. } if status.as_u16() == 409),
+        "{error}"
+    );
+    assert!(!registry.calls().iter().any(|call| call.method == "PUT"));
+}
+
+#[test]
 fn a_transient_failure_is_retried() {
     let registry = FakeRegistry::start(|request, seen| match request.method.as_str() {
         "HEAD" if seen == 0 => (503, String::new()),

@@ -42,6 +42,17 @@ const BACKOFF_CAP: Duration = Duration::from_secs(5);
 const SESSION_OPEN_ATTEMPTS: u32 = 6;
 /// A lease that lapses twice is an operator problem, not a third attempt's.
 const SESSION_RESTARTS: u32 = 2;
+/// How often a push starts over while the registry refuses writers: a website
+/// deploy holds it for a couple of minutes and a clean-up sweep for longer.
+/// Ending the push instead fails the build, and a build with warm caches
+/// burns every attempt before a deploy is over. With the default backoff this
+/// is twenty minutes.
+const BUSY_RESTARTS: u32 = 80;
+/// The wait before each of those, in units of the first retry's backoff.
+const BUSY_BACKOFFS: u32 = 30;
+const BUSY_WAIT_CAP: Duration = Duration::from_secs(15);
+const REGISTRY_PAUSED_CODE: &str = "registry_paused";
+const REGISTRY_SWEEP_CODE: &str = "registry_sweep_in_progress";
 const REGISTRY_ADMISSION_PROTOCOL_VERSION: u32 = 1;
 const HEARTBEAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
@@ -117,8 +128,16 @@ impl RegistryPusher {
             }
         ))?;
         let mut restarts = 0;
+        let mut busy_restarts = 0;
         loop {
-            let session = self.open_session()?;
+            let session = match self.open_session() {
+                Err(error) if registry_busy(&error) && busy_restarts < BUSY_RESTARTS => {
+                    busy_restarts += 1;
+                    std::thread::sleep(self.busy_wait());
+                    continue;
+                }
+                opened => opened?,
+            };
             let result = self.push_in(
                 &session,
                 &blobs,
@@ -137,6 +156,15 @@ impl RegistryPusher {
             });
             if lost && result.is_err() && restarts < SESSION_RESTARTS {
                 restarts += 1;
+                continue;
+            }
+            // Every step is repeatable: a blob that is stored is found by its
+            // HEAD, and a recorded result answers the same again.
+            if matches!(&result, Err(error) if registry_busy(error))
+                && busy_restarts < BUSY_RESTARTS
+            {
+                busy_restarts += 1;
+                std::thread::sleep(self.busy_wait());
                 continue;
             }
             return settle(session.id, result, beat, finish);
@@ -272,6 +300,10 @@ impl RegistryPusher {
             std::thread::sleep(wait);
             attempt += 1;
         }
+    }
+
+    fn busy_wait(&self) -> Duration {
+        (self.backoff * BUSY_BACKOFFS).min(BUSY_WAIT_CAP)
     }
 
     fn backoff_for(&self, attempt: u32) -> Duration {
@@ -440,6 +472,28 @@ fn settle(
 }
 
 /// A body with a session code: the session no longer protected the call.
+/// The registry refuses writers for now: it is paused (a website deploy holds
+/// it) or a clean-up sweep runs. Its answer is a 409 naming one of the two,
+/// or a 409 without a body: the blob check is a HEAD, which carries none, and
+/// that route's own answers are only 200 and 404.
+fn registry_busy(error: &Error) -> bool {
+    let Error::HttpStatus { status, body } = error else {
+        return false;
+    };
+    if *status != StatusCode::CONFLICT {
+        return false;
+    }
+    if body.trim().is_empty() {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(body).is_ok_and(|value| {
+        matches!(
+            value.get("code").and_then(serde_json::Value::as_str),
+            Some(REGISTRY_PAUSED_CODE | REGISTRY_SWEEP_CODE)
+        )
+    })
+}
+
 fn reports_lost_session(error: &Error) -> bool {
     matches!(error, Error::HttpStatus { status, body } if session_code(*status, body).is_some())
 }
