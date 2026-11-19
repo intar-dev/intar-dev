@@ -18,8 +18,8 @@ runners: {
 	smol: "namespace-profile-linux-amd64-smol"
 	// linux/amd64, 16 vCPU and 32 GB.
 	chonky: "namespace-profile-linux-amd64-chonky"
-	// linux/arm64, 8 vCPU and 16 GB, whatever the profile's name says.
-	arm64: "namespace-profile-linux-amd64-macos"
+	// linux/arm64, 8 vCPU and 16 GB.
+	arm64: "namespace-profile-linux-arm64-macos"
 	// macOS on Apple silicon, 6 vCPU and 14 GB.
 	macos: "namespace-profile-macos-arm64-smol"
 }

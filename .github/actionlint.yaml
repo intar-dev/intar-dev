@@ -2,5 +2,5 @@ self-hosted-runner:
   labels:
     - namespace-profile-linux-amd64-smol
     - namespace-profile-linux-amd64-chonky
-    - namespace-profile-linux-amd64-macos
+    - namespace-profile-linux-arm64-macos
     - namespace-profile-macos-arm64-smol
