@@ -20,16 +20,17 @@ epoch="$(jq -er .source_date_epoch "${work}/inputs.json")"
 pinned="$(jq -r '.pinned_sha256 // empty' "${work}/inputs.json")"
 [[ "${file}" =~ ^[A-Za-z0-9._-]+$ && "${epoch}" =~ ^[0-9]+$ ]]
 
-# The image has no CA certificates of its own; the build reads the runner's.
+# The image has no CA certificates of its own, so the build starts with a copy
+# of the runner's. A copy, not a mount: installing ca-certificates rewrites it.
 ca=/etc/ssl/certs/ca-certificates.crt
 docker run --rm \
   --volume "${work}/in:/build-in:ro" \
   --volume "${work}/out:/kernel" \
-  --volume "${ca}:${ca}:ro" \
+  --volume "${ca}:/build-in-ca.crt:ro" \
   --env INTAR_KERNEL_CONFIG=/build-in/intar-kernel.config \
   --env INTAR_KERNEL_INIT_SOURCE=/build-in/intar-initramfs-init.sh \
   --env "INTAR_APT_CA_INFO=Acquire::https::CaInfo=${ca}" \
-  "${image}" sh /build-in/intar-kernel-build.sh /kernel
+  "${image}" sh -c "mkdir -p /etc/ssl/certs && cp /build-in-ca.crt ${ca} && exec sh /build-in/intar-kernel-build.sh /kernel"
 
 # Packed by the same pinned tar and gzip, with nothing of this run in it:
 # sorted names, one timestamp, root as owner, no gzip header fields.
