@@ -16,6 +16,7 @@ upstream_major='@UPSTREAM_MAJOR@'
 upstream_minor='@UPSTREAM_MINOR@'
 upstream_patch='@UPSTREAM_PATCH@'
 release='@RELEASE@'
+kernel_arch='@KERNEL_ARCH@'
 jobs='@JOBS@'
 source_date_epoch='@SOURCE_DATE_EPOCH@'
 base_url='@BASE_URL@'
@@ -56,6 +57,22 @@ require_makefile_version() {
     fail "$src/Makefile does not declare $1 = $2; the tree is not the pinned kernel"
 }
 
+# What differs between the architectures: the configuration the profile is
+# merged over, the image the build makes, and where the build leaves it.
+case "$kernel_arch" in
+  x86_64)
+    defconfig=x86_64_defconfig
+    image_target=bzImage
+    image_path=arch/x86/boot/bzImage
+    ;;
+  arm64)
+    defconfig=defconfig
+    image_target=Image
+    image_path=arch/arm64/boot/Image
+    ;;
+  *) fail "kernel architecture '$kernel_arch' is not one this build knows" ;;
+esac
+
 case "$jobs" in
   ''|*[!0-9]*) fail "job count '$jobs' is not a number" ;;
 esac
@@ -72,12 +89,16 @@ mkdir -p "$out" "$work"
 
 # The toolchain must not float. The kernel stage installs every package from
 # one dated Debian snapshot, and the two binaries that reach the initramfs are
-# pinned to an exact version on top of that. The base image keeps its own
+# pinned to an exact version on top of that. The updates and security suites
+# of the same date are named too: the base image already carries their
+# packages, and a library's -dev package must be the library's own version. The base image keeps its own
 # pinned digest; only this stage changes its apt source.
 log "pinning apt to the $snapshot snapshot"
 rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*
 cat > /etc/apt/sources.list <<EOF_APT
 deb [check-valid-until=no] $snapshot_url/$snapshot/ trixie main
+deb [check-valid-until=no] $snapshot_url/$snapshot/ trixie-updates main
+deb [check-valid-until=no] $snapshot_url-security/$snapshot/ trixie-security main
 EOF_APT
 apt-get -o "$apt_ca" update >/dev/null
 
@@ -138,10 +159,23 @@ require_makefile_version PATCHLEVEL "$upstream_minor"
 require_makefile_version SUBLEVEL "$upstream_patch"
 cd "$src"
 
-log "merging the Intar kernel profile over x86_64_defconfig"
-make x86_64_defconfig >/dev/null
+log "merging the Intar kernel profile over $defconfig"
+make "$defconfig" >/dev/null
+if [ "$kernel_arch" = arm64 ]; then
+  # The arm64 defconfig serves every board there is. A guest only ever sees
+  # QEMU's virt machine, which needs none of the platform families.
+  for platform in $(sed -n 's/^config \(ARCH_[A-Z0-9_]*\)$/\1/p' arch/arm64/Kconfig.platforms); do
+    ./scripts/config --disable "$platform"
+  done
+fi
 bash ./scripts/kconfig/merge_config.sh -m .config "$config_fragment" >/dev/null
 make olddefconfig >/dev/null
+if [ "$kernel_arch" = arm64 ]; then
+  # That defconfig leaves much of what the x86 one builds in as modules, and
+  # this build ships none: what would be a module is built in instead.
+  make mod2yesconfig >/dev/null
+  make olddefconfig >/dev/null
+fi
 
 log "verifying the required built-in feature set"
 missing=''
@@ -157,21 +191,21 @@ if [ -n "$missing" ]; then
   fail "the kernel profile is not built in:$missing"
 fi
 
-# This build produces bzImage only. A symbol that Kconfig resolves to "=m" is
+# This build produces the kernel image only. A symbol that Kconfig resolves to "=m" is
 # not in the kernel, so it is missing from the guest no matter what the fragment
 # asked for. Fail on any of them instead of shipping a silent gap: a fragment
 # line of "=y" that Kconfig capped at "=m" is a defect in the profile, and the
 # list below names every one of them.
 m_lines="$(grep -cE '^CONFIG_[A-Z0-9_]*=m$' .config || true)"
 if [ "$m_lines" -ne 0 ]; then
-  echo "intar-kernel-build: $m_lines symbol(s) resolved to =m, and this build produces bzImage only:" >&2
+  echo "intar-kernel-build: $m_lines symbol(s) resolved to =m, and this build produces the kernel image only:" >&2
   grep -E '^CONFIG_[A-Z0-9_]*=m$' .config >&2
   fail 'the profile must be fully built in; set these to =y or turn them off'
 fi
 log "the final .config is fully built in: no symbol resolved to =m"
 
 log "compiling $release with $jobs parallel jobs"
-make -j"$jobs" bzImage
+make -j"$jobs" "$image_target"
 
 log "collecting the module tree"
 modules_dir="$out/modules/lib/modules/$release"
@@ -216,7 +250,7 @@ install -m 0755 "$init_script" "$initramfs/init"
 # Every entry carries the pinned timestamp, so the archive is byte-identical
 # for identical inputs.
 find "$initramfs" -depth -exec touch -h -d "@$source_date_epoch" {} +
-install -m 0644 arch/x86/boot/bzImage "$out/vmlinuz"
+install -m 0644 "$image_path" "$out/vmlinuz"
 touch -h -d "@$source_date_epoch" "$out/vmlinuz"
 
 cd "$initramfs"

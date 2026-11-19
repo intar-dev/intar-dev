@@ -12,7 +12,7 @@ use intar_contracts::guest::{GUEST_LOADER_PATH, GUEST_USERNAME, KINO_FILENAME, R
 use intar_contracts::oci::IMAGE_FORMAT;
 use intar_contracts::scenario::{PLATFORM_BASE_IMAGE, base_key};
 
-use crate::config::QemuBuildConfig;
+use crate::config::{BuildArch, QemuBuildConfig};
 use crate::rootfs::{
     BaseImageSpec, BaseRootfsArtifact, INTAR_ACPI_EVENT_PATH, INTAR_ACPI_EVENT_RULE,
     INTAR_ACPI_POWEROFF_PATH, INTAR_ACPI_POWEROFF_SCRIPT, MASKED_UNITS, RootfsBuildPlan,
@@ -134,11 +134,17 @@ const PACKAGES: &[&str] = &[
 /// The Debian side of the base.
 #[must_use]
 pub fn platform_base_spec() -> BaseImageSpec {
+    platform_base_spec_for(BuildArch::Amd64)
+}
+
+/// The Debian side of the base for machines of `arch`.
+#[must_use]
+pub fn platform_base_spec_for(arch: BuildArch) -> BaseImageSpec {
     BaseImageSpec {
         name: PLATFORM_BASE_IMAGE.to_owned(),
         suite: "trixie".to_owned(),
         mirror: "https://deb.debian.org/debian".to_owned(),
-        arch: "amd64".to_owned(),
+        arch: arch.debian().to_owned(),
         packages: PACKAGES.iter().map(|&package| package.to_owned()).collect(),
     }
 }
@@ -146,7 +152,7 @@ pub fn platform_base_spec() -> BaseImageSpec {
 /// The OCI build plan of the base.
 #[must_use]
 pub fn render_platform_rootfs_plan(config: &QemuBuildConfig) -> RootfsBuildPlan {
-    let base = platform_base_spec();
+    let base = platform_base_spec_for(config.arch());
     let essential_hook = render_essential_hook();
     let customize_hook = render_platform_customize_hook();
     let layered =
@@ -173,7 +179,7 @@ pub fn render_platform_rootfs_plan(config: &QemuBuildConfig) -> RootfsBuildPlan 
 /// Returns an error when the BuildKit build or the ext4 assembly fails.
 pub fn ensure_platform_base(config: &QemuBuildConfig) -> Result<BaseRootfsArtifact> {
     let plan = render_platform_rootfs_plan(config);
-    crate::oci::ensure_oci_base_rootfs(&platform_base_spec(), config, &plan)
+    crate::oci::ensure_oci_base_rootfs(&platform_base_spec_for(config.arch()), config, &plan)
 }
 
 fn render_platform_customize_hook() -> String {
@@ -336,7 +342,7 @@ mod tests {
                 config.layered.debian_image.clone(),
                 render_essential_hook(),
                 render_platform_customize_hook(),
-                crate::kernel::kernel_profile_digest(),
+                crate::kernel::kernel_profile_digest(BuildArch::Amd64),
                 crate::oci::render_oci_dockerfile(&platform_base_spec(), &config)
                     .expect("the default config renders the platform Dockerfile"),
                 crate::machine::script::finalize_script(&std::collections::BTreeSet::from([

@@ -173,6 +173,7 @@ async fn an_image_that_fails_verification_is_not_pushed() {
         &dir.path().join("kernel"),
         &dir.path().join("initrd"),
         &intar_contracts::scenario::base_key(),
+        intar_image_build::BuildArch::Amd64,
         &out,
     )
     .unwrap();

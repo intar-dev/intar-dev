@@ -1,6 +1,60 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// The architecture of the machines an image is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildArch {
+    Amd64,
+    Arm64,
+}
+
+impl BuildArch {
+    /// Debian's name, which the build's `target_arch` and BuildKit's platform use.
+    #[must_use]
+    pub fn debian(self) -> &'static str {
+        match self {
+            Self::Amd64 => "amd64",
+            Self::Arm64 => "arm64",
+        }
+    }
+
+    /// The architecture this builder itself runs on, if images exist for it.
+    #[must_use]
+    pub fn host() -> Option<Self> {
+        Self::parse(std::env::consts::ARCH)
+    }
+
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "amd64" | "x86_64" => Some(Self::Amd64),
+            "arm64" | "aarch64" => Some(Self::Arm64),
+            _ => None,
+        }
+    }
+
+    /// The guest's serial console, as its kernel names it.
+    #[must_use]
+    pub fn console(self) -> &'static str {
+        match self {
+            Self::Amd64 => "ttyS0",
+            Self::Arm64 => "ttyAMA0",
+        }
+    }
+
+    #[must_use]
+    pub fn qemu_binary(self) -> &'static str {
+        match self {
+            Self::Amd64 => "qemu-system-x86_64",
+            Self::Arm64 => "qemu-system-aarch64",
+        }
+    }
+}
+
+/// A foreign architecture is emulated instruction by instruction; a build
+/// then gets this many times the time a native one has.
+const EMULATION_TIME_FACTOR: u64 = 6;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QemuBuildConfig {
@@ -30,6 +84,43 @@ pub struct QemuBuildConfig {
     pub work_root: PathBuf,
     #[serde(default)]
     pub layered: LayeredBuildConfig,
+}
+
+impl QemuBuildConfig {
+    /// The architecture this configuration builds for. An unknown name is
+    /// refused where the build starts; here it reads as amd64.
+    #[must_use]
+    pub fn arch(&self) -> BuildArch {
+        BuildArch::parse(&self.target_arch).unwrap_or(BuildArch::Amd64)
+    }
+
+    /// The Debian image the base starts from, for this configuration's architecture.
+    #[must_use]
+    pub fn debian_image(&self) -> &str {
+        match self.arch() {
+            BuildArch::Amd64 => &self.layered.debian_image,
+            BuildArch::Arm64 => &self.layered.debian_image_arm64,
+        }
+    }
+
+    /// This configuration for another architecture, on the same host: the
+    /// same tools and directories, that architecture's QEMU beside this one,
+    /// and, when it is not the host's own, emulation with more time.
+    #[must_use]
+    pub fn for_arch(&self, arch: BuildArch) -> Self {
+        if arch == self.arch() {
+            return self.clone();
+        }
+        let mut other = self.clone();
+        arch.debian().clone_into(&mut other.target_arch);
+        other.qemu_binary = self.qemu_binary.with_file_name(arch.qemu_binary());
+        if BuildArch::host() != Some(arch) {
+            "tcg".clone_into(&mut other.accelerator);
+            other.provision_timeout_seconds *= EMULATION_TIME_FACTOR;
+            other.qemu_exit_timeout_seconds *= EMULATION_TIME_FACTOR;
+        }
+        other
+    }
 }
 
 impl Default for QemuBuildConfig {
@@ -63,6 +154,9 @@ pub struct LayeredBuildConfig {
     pub umoci_binary: PathBuf,
     #[serde(default = "default_debian_image")]
     pub debian_image: String,
+    /// The same Debian release for arm64.
+    #[serde(default = "default_debian_image_arm64")]
+    pub debian_image_arm64: String,
     #[serde(default)]
     pub oci_cache_root: Option<PathBuf>,
     #[serde(default)]
@@ -86,6 +180,7 @@ impl Default for LayeredBuildConfig {
             buildctl_binary: default_buildctl_binary(),
             umoci_binary: default_umoci_binary(),
             debian_image: default_debian_image(),
+            debian_image_arm64: default_debian_image_arm64(),
             oci_cache_root: None,
             checkpoint_cache_root: None,
             use_cache: default_layered_use_cache(),
@@ -117,9 +212,18 @@ fn default_umoci_binary() -> PathBuf {
     PathBuf::from("umoci")
 }
 
+// Both are `debian:trixie-20261104-slim`, each by its own platform's manifest:
+// BuildKit would take an index digest for either platform, but a manifest
+// digest cannot resolve to the wrong one.
 fn default_debian_image() -> String {
     String::from(
-        "docker.io/library/debian@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f",
+        "docker.io/library/debian@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392",
+    )
+}
+
+fn default_debian_image_arm64() -> String {
+    String::from(
+        "docker.io/library/debian@sha256:24a01011d10eba3a023bc8585b9650b8b29021240d4217c05b905e09ef4a5232",
     )
 }
 
