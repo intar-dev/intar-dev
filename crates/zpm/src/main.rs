@@ -240,7 +240,7 @@ fn run(args: Args) -> Result<(), zpm::Error> {
         ssh_port: args.ssh_port,
         vsock_cid: args.vsock_cid,
         serial_log: args.dir.join("serial.log"),
-        qmp_socket: args.dir.join("qmp.sock"),
+        qmp_socket: zpm::qemu::control_socket(&args.dir),
     };
     let qemu = args.qemu.unwrap_or_else(|| arch.qemu_binary().into());
     #[cfg(target_os = "linux")]

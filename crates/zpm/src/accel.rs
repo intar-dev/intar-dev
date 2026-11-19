@@ -24,6 +24,15 @@ impl Arch {
         }
     }
 
+    /// The guest's serial console, as its kernel names it: a 16550 on a PC,
+    /// the PL011 of QEMU's `virt` machine on Arm.
+    pub fn console(self) -> &'static str {
+        match self {
+            Self::X86_64 => "ttyS0",
+            Self::Aarch64 => "ttyAMA0",
+        }
+    }
+
     pub fn qemu_binary(self) -> &'static str {
         match self {
             Self::X86_64 => "qemu-system-x86_64",
