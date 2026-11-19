@@ -232,6 +232,7 @@ impl Jumper {
                 let (title, course) = self.run_titles(run);
                 let (word, color) = match (&self.state.machine, run.active) {
                     (_, false) => ("Closed", p.muted),
+                    (Some(MachineStatus::Saving), _) => ("Saving", p.brand_text),
                     (Some(MachineStatus::Failed(_)), _) => ("Could not start", p.red),
                     (Some(MachineStatus::Ready { passed, tasks }), _)
                         if tasks > &0 && passed == tasks =>
@@ -1010,6 +1011,8 @@ impl Jumper {
                                 )),
                         ),
                 )
+                // What went wrong while the run ended, such as an unsaved replay.
+                .children(self.state.error.clone().map(|error| kit::failure(p, error)))
                 .child(div().flex().justify_end().child(self.back_to_catalog(p, Kind::Primary, Size::Medium, cx)));
             return body.child(
                 kit::panel(p)
@@ -1024,9 +1027,23 @@ impl Jumper {
             Some(MachineStatus::Ready { passed, tasks }) => (passed, Some(tasks)),
             _ => (0, None),
         };
-        let stage = match tasks {
-            Some(_) => self.terminal(run, cx),
-            None => self.stages(p, run, cx),
+        let stage = match (&self.state.machine, tasks) {
+            // The run is ending: the machine is off and its sessions go to intar.
+            (Some(MachineStatus::Saving), _) => kit::card(p)
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(kit::page(p, "Saving your sessions"))
+                .child(kit::support(
+                    p,
+                    "The machine has stopped. What you did in the terminal is sent to Intar for this run's replay.",
+                )),
+            (_, Some(_)) => self.terminal(run, cx),
+            (_, None) => self.stages(p, run, cx),
         };
         let machines = run.machines.iter().enumerate().map(|(position, machine)| {
             div()

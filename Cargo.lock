@@ -4241,9 +4241,12 @@ name = "jumper"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "anyhow",
  "apple-native-keyring-store",
  "axum",
+ "dhd",
  "dirs 7.0.0",
+ "fatfs",
  "futures-util",
  "gpui",
  "gpui_platform",

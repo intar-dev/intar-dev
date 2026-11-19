@@ -88,6 +88,7 @@ impl Dimensions for Size {
 enum ToGuest {
     Bytes(Vec<u8>),
     Resize(Size),
+    Close,
 }
 
 /// The emulator's own answers to the guest, such as where the cursor is.
@@ -123,6 +124,13 @@ impl Terminal {
     pub fn write(&self, bytes: Vec<u8>) {
         // The session is gone once the run is; typing then goes nowhere.
         let _ = self.to_guest.send(ToGuest::Bytes(bytes));
+    }
+
+    /// Ends the session, as logging out would. The guest then finishes the
+    /// session's recording, which a session cut off by a stopping machine
+    /// may not get to.
+    pub fn close(&self) {
+        let _ = self.to_guest.send(ToGuest::Close);
     }
 
     /// The grid takes the new size at once, so the next frame fits; the
@@ -324,8 +332,11 @@ async fn session(
                     let (columns, rows) = cells(size);
                     channel.window_change(columns, rows, 0, 0).await.map_err(failed)?;
                 }
-                // The window let go of the terminal.
-                None => return Ok(()),
+                // The run is ending, or the window let go of the terminal.
+                Some(ToGuest::Close) | None => {
+                    let _ = channel.close().await;
+                    return Ok(());
+                }
             },
         }
     }

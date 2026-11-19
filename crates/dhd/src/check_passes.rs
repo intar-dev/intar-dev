@@ -13,9 +13,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-#[cfg(any(test, target_os = "linux"))]
 use anyhow::{Context as _, Result};
-#[cfg(any(test, target_os = "linux"))]
 use intar_contracts::bridge_v9::{CheckStatus, VmTaskV1};
 use tracing::warn;
 
@@ -27,7 +25,6 @@ pub type CheckPasses = BTreeMap<String, u64>;
 /// Adds every passing task that has no recorded pass yet; a task that
 /// passes, fails and passes again keeps its first time. True when anything
 /// was added.
-#[cfg(any(test, target_os = "linux"))]
 pub fn merge_first_passes(passes: &mut CheckPasses, tasks: &[VmTaskV1]) -> bool {
     let mut changed = false;
     for task in tasks {
@@ -46,7 +43,6 @@ pub fn merge_first_passes(passes: &mut CheckPasses, tasks: &[VmTaskV1]) -> bool 
 /// Records the first passes in `tasks` beside the VM's artifacts. Most
 /// reports add nothing and write nothing; a write replaces the file
 /// atomically, so a crash never leaves half a document.
-#[cfg(any(test, target_os = "linux"))]
 pub async fn record_check_passes(artifacts_dir: &Path, tasks: &[VmTaskV1]) -> Result<()> {
     if !tasks.iter().any(|task| task.status == CheckStatus::Pass) {
         return Ok(());
