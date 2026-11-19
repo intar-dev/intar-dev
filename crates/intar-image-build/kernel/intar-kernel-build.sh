@@ -171,12 +171,10 @@ fi
 bash ./scripts/kconfig/merge_config.sh -m .config "$config_fragment" >/dev/null
 make olddefconfig >/dev/null
 if [ "$kernel_arch" = arm64 ]; then
-  # That defconfig leaves much of what the x86 one builds in as modules, and
-  # this build ships none: what would be a module is built in instead.
-  make mod2yesconfig >/dev/null
-  make olddefconfig >/dev/null
-  # A few symbols can only ever be modules, such as the kernel's self-tests.
-  # Nothing in a guest needs one of them, so they are switched off.
+  # That defconfig leaves most drivers as modules, for boards a guest never
+  # runs on. This build ships no module, and everything a guest needs is named
+  # in the profile and checked below, so what is left as a module is switched
+  # off, not built in.
   for symbol in $(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)=m$/\1/p' .config); do
     ./scripts/config --disable "$symbol"
   done

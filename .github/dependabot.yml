@@ -20,6 +20,7 @@ updates:
       - ".github/workflows/deploy.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/image-ops.yml"
+      - ".github/workflows/kernel.yml"
       - ".github/workflows/pr-title.yml"
     schedule:
       interval: weekly

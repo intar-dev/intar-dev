@@ -417,6 +417,77 @@ pub fn kernel_profile_digest(arch: BuildArch) -> String {
     crate::sha256::sha256_bytes_hex(identity.as_bytes())
 }
 
+/// The job count every published kernel is compiled with. It is written into
+/// the provenance record, so it is fixed: the files must not depend on the
+/// runner that built them.
+pub const KERNEL_ARTIFACT_JOBS: u32 = 8;
+
+/// Bumped when the way a kernel is packed changes (`tools/workflows/kernel`),
+/// since that changes the file's bytes without changing a profile.
+const KERNEL_ARTIFACT_REVISION: u32 = 1;
+
+/// Where the published kernels are: the releases of this repository.
+const KERNEL_ARTIFACT_RELEASES: &str = "https://github.com/intar-dev/intar-dev/releases/download";
+
+/// The kernels an image build downloads: the set they were built as, and the
+/// SHA-256 of each architecture's file. `kernel.yml` builds and publishes a
+/// set; these pins are what an image trusts, the release is only where the
+/// bytes are kept. A profile change needs new pins: run the workflow on the
+/// branch, then put the checksums it prints here.
+pub const KERNEL_ARTIFACT_SET: &str = "unpublished";
+const KERNEL_ARTIFACT_SHA256_AMD64: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+const KERNEL_ARTIFACT_SHA256_ARM64: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// The identity of the kernels this source builds, for both architectures:
+/// every input that decides a published file's bytes.
+#[must_use]
+pub fn kernel_set_id() -> String {
+    let mut identity =
+        format!("intar-kernel-set-v{KERNEL_ARTIFACT_REVISION}\njobs={KERNEL_ARTIFACT_JOBS}\n");
+    for arch in [BuildArch::Amd64, BuildArch::Arm64] {
+        identity.push_str(&format!(
+            "{}={} in {}\n",
+            arch.debian(),
+            kernel_profile_digest(arch),
+            arch.pinned_debian_image()
+        ));
+    }
+    crate::sha256::sha256_bytes_hex(identity.as_bytes())[..12].to_owned()
+}
+
+/// The release tag a set is published under. Tags of this shape cannot be
+/// moved or deleted (`.github/rulesets/release-tags.json`).
+#[must_use]
+pub fn kernel_artifact_tag(set: &str) -> String {
+    format!("kernel/v{set}")
+}
+
+/// The file of one architecture's kernel in a release.
+#[must_use]
+pub fn kernel_artifact_file_name(arch: BuildArch) -> String {
+    format!("intar-kernel_{}.tar.gz", arch.debian())
+}
+
+/// Where the pinned kernel of `arch` is downloaded from.
+#[must_use]
+pub fn kernel_artifact_url(arch: BuildArch) -> String {
+    format!(
+        "{KERNEL_ARTIFACT_RELEASES}/kernel%2Fv{KERNEL_ARTIFACT_SET}/{}",
+        kernel_artifact_file_name(arch)
+    )
+}
+
+/// The SHA-256 the downloaded kernel of `arch` must have.
+#[must_use]
+pub fn kernel_artifact_sha256(arch: BuildArch) -> &'static str {
+    match arch {
+        BuildArch::Amd64 => KERNEL_ARTIFACT_SHA256_AMD64,
+        BuildArch::Arm64 => KERNEL_ARTIFACT_SHA256_ARM64,
+    }
+}
+
 /// Return required symbols that are not built in (value y) in a kernel .config.
 #[must_use]
 pub fn missing_required_builtins(config: &str) -> Vec<&'static str> {
@@ -969,7 +1040,9 @@ mod tests {
         let script = render_kernel_build_script(&config);
         assert!(script.contains("kernel_arch='arm64'"));
         assert!(script.contains("image_path=arch/arm64/boot/Image"));
-        assert!(script.contains("make mod2yesconfig"));
+        // What its defconfig leaves as a module is switched off, never built in.
+        assert!(!script.contains("mod2yesconfig"));
+        assert!(script.contains("./scripts/config --disable \"$symbol\""));
         // Its required features are the virt machine's devices, not a PC's.
         let required = required_builtins(BuildArch::Arm64);
         for symbol in [
@@ -995,5 +1068,27 @@ mod tests {
             kernel_profile_digest(BuildArch::Arm64),
             kernel_profile_digest(BuildArch::Amd64)
         );
+    }
+
+    #[test]
+    fn the_pinned_kernels_are_the_ones_this_source_builds() {
+        // A changed profile, toolchain image or packing builds other kernels
+        // than the pinned files: run kernel.yml on the branch and pin its set.
+        assert_eq!(
+            super::kernel_set_id(),
+            super::KERNEL_ARTIFACT_SET,
+            "the kernel inputs changed: publish the new set with kernel.yml and pin it in kernel.rs"
+        );
+        for arch in [BuildArch::Amd64, BuildArch::Arm64] {
+            let sha256 = super::kernel_artifact_sha256(arch);
+            assert!(sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert_ne!(sha256, "0".repeat(64), "{arch:?} has no pinned kernel");
+            assert!(super::kernel_artifact_url(arch).ends_with(&format!(
+                "/kernel%2Fv{}/intar-kernel_{}.tar.gz",
+                super::KERNEL_ARTIFACT_SET,
+                arch.debian()
+            )));
+        }
+        assert_eq!(super::kernel_artifact_tag("abc"), "kernel/vabc");
     }
 }

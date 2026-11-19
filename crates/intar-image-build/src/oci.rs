@@ -40,13 +40,7 @@ const APT_HTTPS_CA_INFO: &str = "Acquire::https::CaInfo=/etc/ssl/certs/ca-certif
 /// the artifacts from it.
 const KERNEL_STAGE_NAME: &str = "intar-kernel";
 /// Build context file names for the kernel stage.
-const KERNEL_BUILD_SCRIPT_FILE: &str = "intar-kernel-build.sh";
-const KERNEL_CONFIG_FILE: &str = "intar-kernel.config";
-const KERNEL_INIT_SCRIPT_FILE: &str = "intar-initramfs-init.sh";
 /// In-container paths for the kernel stage.
-const KERNEL_BUILD_SCRIPT_PATH: &str = "/usr/local/libexec/intar/intar-kernel-build.sh";
-const KERNEL_STAGE_CONFIG_PATH: &str = "/build/intar-kernel.config";
-const KERNEL_STAGE_INIT_PATH: &str = "/build/intar-initramfs-init.sh";
 const KERNEL_STAGE_OUTPUT_DIR: &str = "/kernel";
 
 static OCI_BUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -561,36 +555,6 @@ fn write_oci_build_context(
         )
     })?;
     fs::write(
-        context_dir.join(KERNEL_BUILD_SCRIPT_FILE),
-        crate::kernel::render_kernel_build_script(config),
-    )
-    .with_context(|| {
-        format!(
-            "failed to write kernel build script in '{}'",
-            context_dir.display()
-        )
-    })?;
-    fs::write(
-        context_dir.join(KERNEL_CONFIG_FILE),
-        crate::kernel::kernel_config_fragment(config.arch()),
-    )
-    .with_context(|| {
-        format!(
-            "failed to write kernel config fragment in '{}'",
-            context_dir.display()
-        )
-    })?;
-    fs::write(
-        context_dir.join(KERNEL_INIT_SCRIPT_FILE),
-        crate::kernel::KERNEL_INITRAMFS_INIT_SCRIPT,
-    )
-    .with_context(|| {
-        format!(
-            "failed to write kernel initramfs init script in '{}'",
-            context_dir.display()
-        )
-    })?;
-    fs::write(
         context_dir.join("intar-debian.list"),
         render_debian_sources(base),
     )
@@ -622,41 +586,27 @@ pub(crate) fn render_oci_dockerfile(
     let release = crate::kernel::kernel_release();
     let mut dockerfile = String::new();
 
-    // Stage one compiles the pinned kernel profile and the minimal initramfs.
-    // The stage holds a compiler and the Debian source tooling, so the final
-    // image never carries them. BuildKit caches this stage, and the stage is
-    // part of the normal base-image build: no separate build step exists.
+    // Stage one holds the pinned kernel and the minimal initramfs. They are
+    // compiled in CI (`kernel.yml`) and published as a release file; BuildKit
+    // downloads the file and refuses it unless it has the pinned checksum, so
+    // the pin in `kernel.rs` is all an image trusts. The stage only unpacks
+    // it: the final image never carries the archive.
+    let kernel_archive = format!(
+        "/{}",
+        crate::kernel::kernel_artifact_file_name(config.arch())
+    );
+    dockerfile.push_str(&format!("FROM {debian_image} AS {KERNEL_STAGE_NAME}\n"));
     dockerfile.push_str(&format!(
-        "FROM {debian_image} AS {KERNEL_STAGE_NAME}\nENV DEBIAN_FRONTEND=noninteractive\n"
+        "ADD --checksum=sha256:{} {} {kernel_archive}\n",
+        crate::kernel::kernel_artifact_sha256(config.arch()),
+        crate::kernel::kernel_artifact_url(config.arch()),
     ));
-    dockerfile.push_str(&format!(
-        "COPY {HOST_CA_BUNDLE_FILE} {HOST_CA_BUNDLE_PATH}\n"
-    ));
-    dockerfile.push_str(&format!("ENV INTAR_APT_CA_INFO=\"{APT_HTTPS_CA_INFO}\"\n"));
-    dockerfile.push_str(&format!(
-        "ENV INTAR_KERNEL_CONFIG={KERNEL_STAGE_CONFIG_PATH}\n"
-    ));
-    dockerfile.push_str(&format!(
-        "ENV INTAR_KERNEL_INIT_SOURCE={KERNEL_STAGE_INIT_PATH}\n"
-    ));
-    dockerfile.push_str(&format!(
-        "COPY --chmod=0755 {KERNEL_BUILD_SCRIPT_FILE} {KERNEL_BUILD_SCRIPT_PATH}\n"
-    ));
-    dockerfile.push_str(&format!(
-        "COPY {KERNEL_CONFIG_FILE} {KERNEL_STAGE_CONFIG_PATH}\n"
-    ));
-    dockerfile.push_str(&format!(
-        "COPY {KERNEL_INIT_SCRIPT_FILE} {KERNEL_STAGE_INIT_PATH}\n"
-    ));
+    dockerfile.push_str(&format!("WORKDIR {KERNEL_STAGE_OUTPUT_DIR}\n"));
     dockerfile.push_str(&docker_run([
-        "rm",
-        "-f",
-        "/etc/apt/sources.list",
-        "/etc/apt/sources.list.d/debian.sources",
-    ])?);
-    dockerfile.push_str("COPY intar-debian.list /etc/apt/sources.list\n");
-    dockerfile.push_str(&docker_run([
-        KERNEL_BUILD_SCRIPT_PATH,
+        "tar",
+        "-xzf",
+        kernel_archive.as_str(),
+        "-C",
         KERNEL_STAGE_OUTPUT_DIR,
     ])?);
 
@@ -1441,15 +1391,22 @@ mod tests {
             .unwrap();
         let apt_update = dockerfile.find("APT::Update::Error-Mode=any").unwrap();
         assert!(ca_copy < apt_update);
-        // The kernel stage inherits the CA path through the build environment.
-        assert!(dockerfile.contains("ENV INTAR_APT_CA_INFO=\"Acquire::https::CaInfo="));
         assert!(dockerfile.contains("COPY --chmod=0755 intar-essential-hook.sh"));
         assert!(dockerfile.contains("COPY --chmod=0755 intar-customize-hook.sh"));
-        // The kernel stage compiles the pinned profile and the final stage
-        // takes the boot artifacts from it. No distribution kernel package.
-        assert!(dockerfile.contains("COPY --chmod=0755 intar-kernel-build.sh"));
-        assert!(dockerfile.contains("intar-kernel.config"));
-        assert!(dockerfile.contains("intar-initramfs-init.sh"));
+        // The kernel stage downloads the pinned kernel, checked by BuildKit,
+        // and the final stage takes the boot artifacts from it. Nothing is
+        // compiled here, and there is no distribution kernel package.
+        assert!(dockerfile.contains(&format!(
+            "ADD --checksum=sha256:{} https://github.com/intar-dev/intar-dev/releases/download/kernel%2Fv{}/intar-kernel_amd64.tar.gz /intar-kernel_amd64.tar.gz\n",
+            crate::kernel::kernel_artifact_sha256(crate::config::BuildArch::Amd64),
+            crate::kernel::KERNEL_ARTIFACT_SET,
+        )));
+        assert!(
+            dockerfile.contains(
+                "RUN [\"tar\",\"-xzf\",\"/intar-kernel_amd64.tar.gz\",\"-C\",\"/kernel\"]"
+            )
+        );
+        assert!(!dockerfile.contains("intar-kernel-build.sh"));
         assert!(dockerfile.contains("COPY --from=intar-kernel /kernel/vmlinuz /boot/vmlinuz-"));
         assert!(
             dockerfile.contains("COPY --from=intar-kernel /kernel/initrd.img /boot/initrd.img-")
@@ -1594,8 +1551,8 @@ mod tests {
         assert!(
             render_oci_dockerfile(&base, &config)
                 .unwrap()
-                .contains(super::KERNEL_BUILD_SCRIPT_PATH),
-            "the hashed Dockerfile runs the kernel build script"
+                .contains(crate::kernel::kernel_artifact_sha256(config.arch())),
+            "the hashed Dockerfile names the pinned kernel"
         );
     }
 
