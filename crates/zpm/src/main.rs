@@ -13,7 +13,46 @@ use zpm::rundisk::{Boot, boot_json, write_recording_disk, write_run_disk};
 use zpm::{Accel, Arch, Disk, DiskFormat, Machine, UserNetwork, Vm, create_overlay};
 
 #[derive(Parser)]
-#[command(about = "Boot one machine under QEMU and stop it again")]
+#[command(about = "Try zpm by hand: boot one machine under QEMU and stop it again")]
+enum Cli {
+    /// Boot from files given one by one.
+    Boot(Box<Args>),
+    /// Boot one machine of a run from a local cache, as the desktop app does.
+    Machine(Box<MachineArgs>),
+}
+
+#[derive(clap::Args)]
+struct MachineArgs {
+    /// The cache: `machines/<hex>/{kernel,initrd,root.raw}`, `kino/<hex>`, `specs/<hex>`.
+    #[arg(long)]
+    cache: PathBuf,
+    /// Where the machine's disks and logs go.
+    #[arg(long)]
+    dir: PathBuf,
+    #[arg(long)]
+    name: String,
+    /// Digests, as intar's answer to a start names them.
+    #[arg(long)]
+    image: String,
+    #[arg(long)]
+    spec: String,
+    #[arg(long)]
+    kino: String,
+    #[arg(long, default_value_t = 1000)]
+    cpu_millis: u64,
+    #[arg(long, default_value_t = 512)]
+    memory: u64,
+    /// An OpenSSH public key file that may log in; without one the guest starts no SSH.
+    #[arg(long)]
+    ssh_key: Option<PathBuf>,
+    /// Answer every run CLI command with this response file (a stand-in for intar).
+    #[arg(long)]
+    canned_run_cli: Option<PathBuf>,
+    #[arg(long, default_value_t = 60)]
+    seconds: u64,
+}
+
+#[derive(clap::Args)]
 struct Args {
     /// Where the run's files go: the root overlay, the logs, the control socket.
     #[arg(long)]
@@ -252,8 +291,81 @@ fn run(args: Args) -> Result<(), zpm::Error> {
     Ok(())
 }
 
+fn machine(args: MachineArgs) -> Result<(), zpm::Error> {
+    let canned: Option<intar_contracts::run_cli::RunCliResponseV1> = match &args.canned_run_cli {
+        Some(path) => Some(
+            serde_json::from_slice(&std::fs::read(path)?).map_err(|error| {
+                zpm::Error::Qemu(format!(
+                    "the canned run CLI response is unreadable: {error}"
+                ))
+            })?,
+        ),
+        None => None,
+    };
+    let keys = match &args.ssh_key {
+        Some(path) => vec![std::fs::read_to_string(path)?],
+        None => Vec::new(),
+    };
+    let arch = Arch::host()
+        .ok_or_else(|| zpm::Error::Qemu("no machine images exist for this architecture".into()))?;
+    let plan = zpm::machine::Plan {
+        name: &args.name,
+        image: &args.image,
+        spec: &args.spec,
+        kino: &args.kino,
+        cpu_millis: args.cpu_millis,
+        memory_mib: args.memory,
+        authorized_keys: &keys,
+    };
+    let started = Instant::now();
+    let mut running = zpm::machine::start(
+        std::path::Path::new(arch.qemu_binary()),
+        std::path::Path::new("qemu-img"),
+        &zpm::machine::Cache::new(&args.cache),
+        &args.dir,
+        &plan,
+        move |request| {
+            let mut response = canned.clone()?;
+            response.request_id.clone_from(&request.request_id);
+            Some(response)
+        },
+    )?;
+    println!(
+        "started {}; ssh on 127.0.0.1:{}",
+        running.name, running.ssh_port
+    );
+    let end = started + Duration::from_secs(args.seconds);
+    let mut lab_seen = None;
+    while Instant::now() < end && running.is_running() {
+        while let Ok(report) = running.reports.reports.try_recv() {
+            if lab_seen.as_ref() != Some(&report.lab.state) {
+                println!(
+                    "lab {:?} after {} ms, {} task(s), ssh {}",
+                    report.lab.state,
+                    started.elapsed().as_millis(),
+                    report.lab.tasks.len(),
+                    if report.ssh_ready {
+                        "ready"
+                    } else {
+                        "not ready"
+                    }
+                );
+                lab_seen = Some(report.lab.state);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    running.stop();
+    println!("stopped");
+    Ok(())
+}
+
 fn main() -> ExitCode {
-    match run(Args::parse()) {
+    let outcome = match Cli::parse() {
+        Cli::Boot(args) => run(*args),
+        Cli::Machine(args) => machine(*args),
+    };
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("zpm: {error}");

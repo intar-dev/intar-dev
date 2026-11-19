@@ -11,6 +11,7 @@
 
 pub mod accel;
 pub mod broker;
+pub mod machine;
 pub mod preflight;
 pub mod qemu;
 pub mod reports;
@@ -32,6 +33,9 @@ pub enum Error {
     /// what and how much; the caller shows it as it is.
     #[error("{0}")]
     Preflight(String),
+    /// Something the machine boots from is not on this computer.
+    #[error("{0}")]
+    NotCached(String),
     /// The run disk could not be written, or what should go on it is unusable.
     #[error("{0}")]
     RunDisk(String),
