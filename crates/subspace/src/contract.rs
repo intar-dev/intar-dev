@@ -61,6 +61,10 @@ pub struct LocalRunV1 {
 #[serde(rename_all = "camelCase")]
 pub struct LocalRunMachineV1 {
     pub name: String,
+    /// The machine's name in the archive routes. Absent from an intar that
+    /// predates them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_name: Option<String>,
     /// Digest of the machine image manifest (`/v2/machines/<hex>`).
     pub image: String,
     /// Digest of the spec blob (`/v2/specs`).
