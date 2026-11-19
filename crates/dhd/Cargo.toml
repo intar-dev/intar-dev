@@ -1,0 +1,26 @@
+[package]
+name = "dhd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "What any host of a lab's machines needs: reading recorded sessions and rendering their replays."
+
+[dependencies]
+anyhow.workspace = true
+avt.workspace = true
+base64.workspace = true
+fatfs.workspace = true
+intar-contracts = { path = "../intar-contracts" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "rt"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[lints]
+workspace = true

@@ -31,14 +31,14 @@ const TRANSCRIPT_MAX_BYTES: usize = 1_000_000;
 const TRUNCATION_MARKER: &str = "[transcript truncated: earliest output omitted]";
 const TRUNCATION_PREFIX: &str = "[transcript truncated: earliest output omitted]\n";
 
-pub(crate) struct Transcript {
-    pub(crate) text: String,
+pub struct Transcript {
+    pub text: String,
     /// True when the earliest output was dropped, either by scrollback
     /// eviction while feeding or by the byte cap afterwards.
-    pub(crate) truncated: bool,
+    pub truncated: bool,
 }
 
-pub(crate) fn render_transcript(session: &ParsedKrec) -> Transcript {
+pub fn render_transcript(session: &ParsedKrec) -> Transcript {
     // The clamps keep both dimensions positive, so construction cannot fail.
     let Ok(mut vt) = Terminal::with_scrollback(
         clamp_cols(session.width),
@@ -108,11 +108,7 @@ impl Observer for Evictions {
 /// used for the timeline-wide budget after each session has applied its own
 /// storage cap. The output is always valid UTF-8 and, when possible, starts at
 /// a complete line rather than in the middle of one.
-pub(crate) fn trim_transcript_to_byte_limit(
-    text: &mut String,
-    truncated: &mut bool,
-    max_bytes: usize,
-) {
+pub fn trim_transcript_to_byte_limit(text: &mut String, truncated: &mut bool, max_bytes: usize) {
     if text.len() <= max_bytes {
         return;
     }

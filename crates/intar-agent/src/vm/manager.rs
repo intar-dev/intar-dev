@@ -47,7 +47,8 @@ use crate::config::{AgentConfig, BridgeConfig, SshAccessConfig, VmDefaultsConfig
 use crate::db::{ArchiveJobRow, Db, PendingTeardownRow, VmLabRow, VmRow};
 use crate::image_cache;
 
-use super::{mac, replay_media, runtime_disk};
+use super::{mac, runtime_disk};
+use dhd::replay_media;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

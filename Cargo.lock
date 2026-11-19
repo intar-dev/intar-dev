@@ -1838,6 +1838,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dhd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "avt",
+ "base64 0.23.1",
+ "fatfs",
+ "intar-contracts",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3729,6 +3745,7 @@ dependencies = [
  "base64 0.23.1",
  "clap",
  "cloud-hypervisor-client",
+ "dhd",
  "dirs 7.0.0",
  "fatfs",
  "fs2",

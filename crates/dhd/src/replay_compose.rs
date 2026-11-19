@@ -26,7 +26,7 @@ const IDLE_TIME_LIMIT_S: f64 = 1.5;
 /// `markers` option after idle compression, which is why they live in the
 /// data. A marker never moves the events around it, and one past the last
 /// event marks the end.
-pub(crate) fn compose_session(session: &ParsedKrec, markers: &[(f64, String)]) -> Result<String> {
+pub fn compose_session(session: &ParsedKrec, markers: &[(f64, String)]) -> Result<String> {
     let header = json!({
         "version": 3,
         "term": {

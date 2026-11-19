@@ -9,6 +9,7 @@
     "paths": [
       "crates/intar-agent/**",
       "crates/cloud-hypervisor-client/**",
+      "crates/dhd/**",
       "crates/intar-contracts/**",
       "crates/intar-jailer/**",
       "crates/intar-jailer-protocol/**",

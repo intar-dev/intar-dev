@@ -13,6 +13,7 @@ avt.workspace = true
 axum = { workspace = true, features = ["http1", "json", "macros", "tokio", "ws"] }
 base16ct.workspace = true
 base64.workspace = true
+dhd = { path = "../dhd" }
 clap.workspace = true
 cloud-hypervisor-client = { path = "../cloud-hypervisor-client" }
 dirs.workspace = true
