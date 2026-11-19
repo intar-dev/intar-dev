@@ -12,7 +12,10 @@ import { agentBootstrapTokens, agentHosts, hostDesiredState, user } from "@/db/s
 import type { BridgeMessageV9, BuildReportV2, HostStateReportV3 } from "@/generated/contracts/bridge-message-v9";
 import validateBridgeMessageV9 from "@/generated/contracts/bridge-message-v9.validate";
 import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
-import { expireMachineBuildLeases, maintainMachineBuilds, REVISION_BUILD_FAILURE } from "@/lib/machine-builds";
+import {
+  BUILD_REPLACED, expireMachineBuildLeases, maintainMachineBuilds, REVISION_BUILD_FAILURE, REVISION_REPLACED,
+  settleScenarioRevisions,
+} from "@/lib/machine-builds";
 import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { canonicalJson, sha256Digest } from "@/lib/scenario-contract/canonical-json";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
@@ -211,16 +214,57 @@ describe("machine builds over bridge 9", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     await ingest(2, changed);
     const rows = () => env.DB.prepare("SELECT bundle_rev, state FROM machine_builds ORDER BY created_at").all<{ bundle_rev: string; state: string }>();
-    expect((await rows()).results).toEqual([{ bundle_rev: rev(1), state: "queued" }, { bundle_rev: rev(2), state: "queued" }]);
+    // The replaced revision and its build, which will never start, are settled, not left waiting.
+    expect((await rows()).results).toEqual([{ bundle_rev: rev(1), state: "failed" }, { bundle_rev: rev(2), state: "queued" }]);
+    expect(await states()).toEqual([
+      { rev: rev(1), state: "failed", failure_reason: REVISION_REPLACED },
+      { rev: rev(2), state: "building", failure_reason: null },
+    ]);
+    expect(await env.DB.prepare("SELECT error, attempt FROM machine_builds WHERE bundle_rev = ?1").bind(rev(1)).first())
+      .toEqual({ error: BUILD_REPLACED, attempt: 0 });
+
+    // Rows that were already stuck are settled by the next maintenance pass.
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_revisions SET state = 'building', failure_reason = NULL WHERE rev = ?1").bind(rev(1)),
+      env.DB.prepare("UPDATE machine_builds SET state = 'queued', error = NULL WHERE bundle_rev = ?1").bind(rev(1)),
+    ]);
+    await maintainMachineBuilds(env, null, Date.now());
+    expect((await states())[0]).toEqual({ rev: rev(1), state: "failed", failure_reason: REVISION_REPLACED });
 
     const { ws, messages } = await connectBuilder();
     const desired = await until(() => desiredStates(messages).at(-1), (last) => (last?.desired_state.builds.length ?? 0) > 0);
     // The replaced revision's build is older, and is not what the builder gets.
     expect(desired!.desired_state.builds.map((build) => build.bundle_rev)).toEqual([rev(2)]);
     await maintainMachineBuilds(env, null, Date.now());
-    expect((await rows()).results).toEqual([{ bundle_rev: rev(1), state: "queued" }, { bundle_rev: rev(2), state: "assigned" }]);
+    expect((await rows()).results).toEqual([{ bundle_rev: rev(1), state: "failed" }, { bundle_rev: rev(2), state: "assigned" }]);
+
+    // A third publish goes back to the first machine: its build is queued anew for the new revision, and started.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await ingest(3);
+    // The second revision is replaced too, but its build has started: neither is touched.
+    expect((await rows()).results).toEqual([{ bundle_rev: rev(3), state: "assigned" }, { bundle_rev: rev(2), state: "assigned" }]);
+    expect((await states()).map((row) => row.state)).toEqual(["failed", "building", "building"]);
     ws.close();
   });
+
+  it("leaves a replaced revision building while a newer one waits for the same build", async () => {
+    await ingest(1);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await ingest(2);
+    await maintainMachineBuilds(env, null, Date.now());
+    expect((await states()).map((row) => row.state)).toEqual(["building", "building"]);
+    const { build_key: buildKey } = (await build())!;
+    await env.DB.prepare("UPDATE machine_builds SET state = 'succeeded', image_digest = ?1").bind(digestOf("a")).run();
+    await settleScenarioRevisions(env, { buildKey });
+    await maintainMachineBuilds(env, null, Date.now());
+    // Both settle as before, and only the newest is the candidate.
+    expect((await states()).map((row) => row.state)).toEqual(["ready", "ready"]);
+    expect(await env.DB.prepare("SELECT candidate_rev FROM scenarios").first("candidate_rev")).toBe(rev(2));
+  });
+
+  const states = async () => (await env.DB.prepare(
+    "SELECT rev, state, failure_reason FROM scenario_revisions ORDER BY created_at, rev",
+  ).all<{ rev: string; state: string; failure_reason: string | null }>()).results;
 
   const build = () => env.DB.prepare("SELECT build_key, state, attempt, host_id, image_digest, error, updated_at FROM machine_builds").first<{
     build_key: string; state: string; attempt: number; host_id: string | null; image_digest: string | null; error: string | null;

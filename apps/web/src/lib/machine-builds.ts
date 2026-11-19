@@ -56,6 +56,10 @@ const BUILD_REPORT_STALE_AFTER_MS = 30 * 60 * 1000;
 const BUILDER_BUILD_SLOTS = 2;
 /** What a learner or tenant reads about a revision whose image failed. */
 export const REVISION_BUILD_FAILURE = "An image of this scenario failed to build.";
+/** What an admin or tenant reads about a revision that a newer publish replaced; no learner sees a failed revision. */
+export const REVISION_REPLACED = "A newer publish replaced this revision before its images were built.";
+/** What the builds page says about a build nobody waits for any more. */
+export const BUILD_REPLACED = "not started: a newer publish replaced every revision that needed this build";
 const MAX_BUILD_ERROR_CHARS = 4096;
 // The builder replays its reports on every heartbeat, so a build without a
 // report for BUILD_REPORT_STALE_AFTER_MS lost its builder. One attempt may
@@ -85,8 +89,9 @@ const FREE_BUILDER = `host.role = 'builder' AND host.scope = 'platform' AND host
 // A queued build somebody still waits for: a building revision that is its
 // scenario's newest names its key. A build queued for a revision that a later
 // publish replaced stays queued and is never started, so a new publish does
-// not wait behind the work of the ones before it. The platform base is every
-// machine's parent and always wanted.
+// not wait behind the work of the ones before it; settleReplacedRevisions
+// then fails it and the revisions that waited for it. The platform base is
+// every machine's parent and always wanted.
 const STILL_WANTED = `(json_extract(build.target_json, '$.kind') = 'image' OR EXISTS (
   SELECT 1 FROM scenario_revisions head, json_each(head.doc_json, '$.machines') machine
    WHERE head.state = 'building' AND json_extract(machine.value, '$.build_key') = build.build_key
@@ -103,11 +108,43 @@ const BUILDS_ARM64 = `EXISTS (SELECT 1 FROM agent_hosts able, json_each(able.hel
  * since its own runtime calls this and dispatches afterwards.
  */
 export async function maintainMachineBuilds(env: Env, selfHostId: string | null, now: number): Promise<void> {
-  const changed = new Set([...(await expireMachineBuildLeases(env, now)), ...(await assignQueuedMachineBuilds(env, now))]);
+  const released = await expireMachineBuildLeases(env, now);
+  await settleReplacedRevisions(env, now);
+  const changed = new Set([...released, ...(await assignQueuedMachineBuilds(env, now))]);
   if (selfHostId) changed.add(selfHostId);
   for (const hostId of changed) {
     if ((await syncBuilderDesiredState(env, hostId, now)) && hostId !== selfHostId) await tryWakeHostRuntime(hostId);
   }
+}
+
+/**
+ * Fails what a newer publish left behind: a building revision that is not
+ * its scenario's newest and waits for a queued build the queue will never
+ * start, and then every such build, which no building revision names any
+ * more. A replaced revision whose builds are all wanted by another, started
+ * or done settles as before, and an assigned or building build is left
+ * alone. A later publish that needs the key again queues the failed build
+ * anew, as it does any failed build.
+ */
+export async function settleReplacedRevisions(env: Env, now: number): Promise<void> {
+  const unwanted = `build.state = 'queued' AND NOT ${STILL_WANTED}`;
+  // Nearly always nothing: one indexed read, and no scan of the revisions.
+  if (!(await env.DB.prepare(`SELECT 1 FROM machine_builds build WHERE ${unwanted} LIMIT 1`).first())) return;
+  // One transaction: the builds are judged after the revisions that named them failed.
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE scenario_revisions SET state = 'failed', failure_reason = ?1
+        WHERE state = 'building'
+          AND EXISTS (SELECT 1 FROM scenario_revisions newer WHERE newer.scenario_id = scenario_revisions.scenario_id
+            AND (newer.created_at > scenario_revisions.created_at
+              OR (newer.created_at = scenario_revisions.created_at AND newer.rev > scenario_revisions.rev)))
+          AND EXISTS (SELECT 1 FROM json_each(scenario_revisions.doc_json, '$.machines') needed
+            JOIN machine_builds build ON build.build_key = json_extract(needed.value, '$.build_key')
+            WHERE ${unwanted})`,
+    ).bind(REVISION_REPLACED),
+    env.DB.prepare(`UPDATE machine_builds AS build SET state = 'failed', error = ?1, updated_at = ?2 WHERE ${unwanted}`)
+      .bind(BUILD_REPLACED, now),
+  ]);
 }
 
 /**
