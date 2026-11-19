@@ -20,9 +20,9 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: namespace-profile-intar-dev
+            runner: namespace-profile-linux-amd64-chonky
           - arch: arm64
-            runner: namespace-profile-intar-dev-arm64
+            runner: namespace-profile-linux-amd64-macos
       fail-fast: false
     timeout-minutes: 120
     steps:

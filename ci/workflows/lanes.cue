@@ -14,6 +14,8 @@ lanes: [string]: close({
 	// Root tasks, run in order.
 	steps: [...string]
 	timeout: int
+	// The runner profile; the large one for a lane that compiles the workspace.
+	runner: *gha.runners.smol | string
 	// The build the lane checks, which deploy.yml deploys. A merge group that
 	// changes the lane's inputs, and a dispatch from main, upload this directory
 	// as the artifact <lane>-dist-<hash of the lane's inputs>.
@@ -46,6 +48,7 @@ lanes: {
 		// The generated contracts include validators a Bun script emits. The
 		// lane builds the whole workspace, so also apps/jumper on GPUI.
 		setup: [gha.#SetupRust & {with: "desktop-libraries": "true"}, gha.#SetupRuntime]
+		runner: gha.runners.chonky
 		steps: ["installer-tests", "verify", "install-js", "check-generated-contracts"]
 		timeout: 45
 		inputs: [
@@ -210,7 +213,7 @@ laneSteps: {
 // container. `cuenv task test-ui-smoke` runs the same test locally.
 chromiumSmoke: {
 	name:      "Chromium smoke"
-	"runs-on": gha.runner
+	"runs-on": gha.runners.smol
 	container: {
 		image:   "mcr.microsoft.com/playwright:v1.64.1-noble@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf"
 		options: "--ipc=host"

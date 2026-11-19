@@ -26,8 +26,8 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			name: "Build ${{ matrix.arch }}"
 			strategy: {
 				matrix: include: [
-					{arch: "amd64", runner: "namespace-profile-intar-dev"},
-					{arch: "arm64", runner: "namespace-profile-intar-dev-arm64"},
+					{arch: "amd64", runner: gha.runners.chonky},
+					{arch: "arm64", runner: gha.runners.arm64},
 				]
 				"fail-fast": false
 			}

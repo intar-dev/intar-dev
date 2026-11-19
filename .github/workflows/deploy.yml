@@ -64,7 +64,7 @@ jobs:
     name: Deploy the website
     needs: resolve
     if: needs.resolve.outputs.web_artifact != ''
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     permissions:
       actions: read
       contents: read
@@ -198,7 +198,7 @@ jobs:
     name: Deploy the docs
     needs: resolve
     if: needs.resolve.outputs.docs_artifact != ''
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     concurrency:
       group: docs-production
       cancel-in-progress: false

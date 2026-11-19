@@ -62,7 +62,7 @@ import (
 			name:      "Deploy the website"
 			needs:     "resolve"
 			if:        "needs.resolve.outputs.web_artifact != ''"
-			"runs-on": "namespace-profile-intar-dev"
+			"runs-on": gha.runners.smol
 			permissions: {
 				actions:  "read"
 				contents: "read"
@@ -240,7 +240,7 @@ import (
 			name:              "Deploy the docs"
 			needs:             "resolve"
 			if:                "needs.resolve.outputs.docs_artifact != ''"
-			"runs-on":         "namespace-profile-intar-dev"
+			"runs-on":         gha.runners.smol
 			"timeout-minutes": 10
 			permissions: {
 				actions:  "read"

@@ -33,7 +33,7 @@ permissions:
 jobs:
   request:
     name: Validate the operation
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     outputs:
       operation: ${{ steps.validate.outputs.operation }}
       job: ${{ steps.validate.outputs.job }}
@@ -97,7 +97,7 @@ jobs:
     if: needs.request.outputs.job == 'gate'
     needs:
       - request
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     concurrency:
       group: intar-image-catalog-promotion
       cancel-in-progress: false
@@ -157,7 +157,7 @@ jobs:
     if: needs.request.outputs.job == 'kino'
     needs:
       - request
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     concurrency:
       group: intar-image-catalog-promotion
       cancel-in-progress: false
@@ -189,7 +189,7 @@ jobs:
     if: needs.request.outputs.job == 'cleanup'
     needs:
       - request
-    runs-on: namespace-profile-intar-dev
+    runs-on: namespace-profile-linux-amd64-smol
     concurrency:
       group: ${{ needs.request.outputs.action == 'status' && 'intar-image-registry-cleanup-status' || 'intar-image-registry-cleanup' }}
       cancel-in-progress: false
