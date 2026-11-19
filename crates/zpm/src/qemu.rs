@@ -280,20 +280,23 @@ const SOCKET_PATH_MAX: usize = 100;
 /// temporary directory. The same `dir` always gives the same path, so a
 /// leftover of an earlier app is found again.
 //
-// ponytail: the name is a std hash of `dir`, which may change with the Rust
-// version; an app update then misses a leftover QEMU of the version before.
-// The temporary directory is per user on macOS and Windows; on Linux it is
-// shared, which matters only for run directories this long.
+// ponytail: the temporary directory is per user on macOS and Windows; on
+// Linux it is shared, which matters only for run directories this long.
 pub fn control_socket(dir: &Path) -> PathBuf {
-    use std::hash::{Hash as _, Hasher as _};
-
     let own = dir.join("qmp.sock");
     if own.as_os_str().len() <= SOCKET_PATH_MAX {
         return own;
     }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    dir.hash(&mut hasher);
-    std::env::temp_dir().join(format!("zpm-{:016x}.sock", hasher.finish()))
+    // FNV-1a over the path's bytes: the same in every build of the app, so
+    // an updated app still finds what the one before it left running.
+    let hash = dir
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    std::env::temp_dir().join(format!("zpm-{hash:016x}.sock"))
 }
 
 fn pid_file(qmp_socket: &Path) -> PathBuf {
@@ -495,6 +498,12 @@ mod tests {
             "the same run finds its socket again"
         );
         assert_ne!(socket, control_socket(&long.with_file_name("database")));
+        // The name is pinned: an update of the app must find an older leftover.
+        assert!(
+            socket.ends_with("zpm-d63708453f0a4f53.sock"),
+            "{}",
+            socket.display()
+        );
     }
 
     #[test]
