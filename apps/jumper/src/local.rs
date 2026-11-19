@@ -284,4 +284,96 @@ mod tests {
         old.user_id = None;
         assert!(vm_state(&old, "web", &report(true, LabState::Ready), 1).is_none());
     }
+
+    /// A whole run against a real intar, without the window: sign in through
+    /// a browser, start a lecture's scenario, download and boot its machine,
+    /// pass the guest's reports on, and end the run. It prints the sign-in
+    /// link and waits for it to be opened.
+    ///
+    /// `INTAR_LIVE_COURSE="Linux Basics" cargo test -p jumper live_run -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "signs in to a real intar and starts a run there"]
+    async fn live_run_downloads_boots_and_reports() {
+        use std::time::{Duration, Instant};
+
+        let base = std::env::var("INTAR_URL").unwrap_or_else(|_| "https://intar.dev".into());
+        let base = url::Url::parse(&base).expect("INTAR_URL");
+        let course = std::env::var("INTAR_LIVE_COURSE").unwrap_or_default();
+        let http = reqwest::Client::new();
+        let sign_in = subspace::SignIn::begin(&base)
+            .await
+            .expect("begin a sign-in");
+        eprintln!("live: open {}", sign_in.authorize_url());
+        let tokens = tokio::time::timeout(Duration::from_secs(600), sign_in.finish(&http))
+            .await
+            .expect("the sign-in link was not opened in ten minutes")
+            .expect("sign in");
+        let channel = Arc::new(Subspace::new(http, base, tokens));
+
+        let catalog = channel.catalog().await.expect("catalog").courses;
+        let (organization, scenario) = catalog
+            .iter()
+            .filter(|listed| listed.title.contains(&course))
+            .find_map(|listed| {
+                let lecture = listed.lectures.iter().find(|lecture| {
+                    lecture.scenario_id.is_some()
+                        && !matches!(lecture.state.as_str(), "locked" | "waiting_for_scenario")
+                })?;
+                eprintln!("live: {} / {}", listed.title, lecture.title);
+                Some((listed.organization_id.clone(), lecture.scenario_id.clone()?))
+            })
+            .expect("a lecture of that course whose scenario can start");
+        let run = channel
+            .start_run(
+                &scenario,
+                organization.as_deref(),
+                &[intar_contracts::guest::GUEST_CONTRACT],
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .await
+            .expect("start the run")
+            .run;
+        eprintln!(
+            "live: run {} with {} machine(s)",
+            run.run_id,
+            run.machines.len()
+        );
+
+        // Whatever happens from here, the run is ended before the test judges it.
+        let mut local = Local::new();
+        let percent = std::cell::Cell::new(u64::MAX);
+        let downloaded = |done: u64, total: u64| {
+            let now = done * 100 / total.max(1);
+            if percent.replace(now) != now {
+                eprintln!("live: downloaded {now} % of {total} bytes");
+            }
+        };
+        let began = Instant::now();
+        let mut status = local.start(&run, channel.clone(), &downloaded).await;
+        eprintln!("live: {status:?} after {:?}", began.elapsed());
+        let mut reported = 0;
+        while matches!(status, MachineStatus::Booting) && began.elapsed() < Duration::from_secs(900)
+        {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let polled = local.poll();
+            if let Some(vm) = polled.report {
+                match channel.report(&run.run_id, vec![vm]).await {
+                    Ok(_) => reported += 1,
+                    Err(error) => eprintln!("live: report refused: {error}"),
+                }
+            }
+            if let Some(next) = polled.status {
+                eprintln!("live: {next:?} after {:?}", began.elapsed());
+                status = next;
+            }
+        }
+        local.stop().await;
+        let ended = channel.end_run(&run.run_id).await;
+        eprintln!("live: ended: {:?}", ended.map(|answer| answer.run.active));
+        assert!(
+            matches!(status, MachineStatus::Ready { .. }),
+            "the lab did not come up: {status:?}"
+        );
+        assert!(reported > 0, "no report reached intar");
+    }
 }
