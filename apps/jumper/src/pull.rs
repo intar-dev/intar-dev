@@ -314,6 +314,9 @@ async fn pull_image(
         std::fs::write(part.join(name), bytes).map_err(disk)?;
     }
 
+    // The image's own kernel command line, for zpm to boot it with.
+    std::fs::write(part.join(zpm::machine::CMDLINE_FILE), &config.boot.cmdline).map_err(disk)?;
+
     let mut root = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -474,7 +477,7 @@ mod tests {
             image_format: IMAGE_FORMAT.to_owned(),
             build_key: put(&blobs, b"key".to_vec()),
             boot: MachineBootV1 {
-                cmdline: String::new(),
+                cmdline: "root=/dev/vda rw console=ttyS0".to_owned(),
             },
             disk: MachineDiskV1 {
                 size_bytes: (4 * CHUNK + 100) as u64,
@@ -529,6 +532,10 @@ mod tests {
         let files = cache.image(image.as_str()).expect("image in the cache");
         assert_eq!(std::fs::read(files.kernel).expect("kernel"), b"kernel");
         assert!(files.initrd.is_none());
+        assert_eq!(
+            files.cmdline.as_deref(),
+            Some("root=/dev/vda rw console=ttyS0")
+        );
         let expected = [a.clone(), vec![0; CHUNK], a.clone(), b, last].concat();
         assert_eq!(std::fs::read(files.root).expect("root"), expected);
         assert_eq!(cache.kino(kino.as_str()).expect("kino"), b"kino");
