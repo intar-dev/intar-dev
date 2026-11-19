@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.20.1 (2026-11-19)
+
+### Bug fixes
+
+- **intar-builder:** Wait out a registry that refuses writers instead of failing the build (#430) (06df8c76)
+
 ## builder/v0.20.0 (2026-11-19)
 
 ### Features
