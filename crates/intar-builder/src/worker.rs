@@ -18,7 +18,7 @@ use intar_image_build::{
 };
 use intar_image_upload::RegistryPusher;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
 
@@ -38,6 +38,13 @@ const LOG_UPLOAD_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 /// directories: each half keeps its logs, and both go when the attempt ends.
 const ARM64_DIR: &str = "arm64";
 const LOG_UPLOAD_ERROR_BYTES: usize = 64 * 1024;
+
+/// One emulated build at a time. An emulated build VM needs more than one
+/// host thread per guest CPU, so two of them on one builder starve each
+/// other: k3s then misses its own start-up deadlines and the arm64 image is
+/// lost. The amd64 halves of two jobs still build side by side; their arm64
+/// halves take turns.
+static EMULATED_BUILDS: Semaphore = Semaphore::const_new(1);
 
 /// Runs queued builds once the bridge applied a live desired state.
 pub async fn worker_loop(
@@ -180,6 +187,12 @@ async fn build_and_push(
         config: arm64_config(&request.config),
         output_dir: output_dir.join(ARM64_DIR),
         ..request
+    };
+    // Held through the push: the turn is over when the image is recorded.
+    let _turn = if arm64.config.accelerator == "tcg" {
+        EMULATED_BUILDS.acquire().await.ok()
+    } else {
+        None
     };
     let arm64_error = build_one(cfg, reports, build, started, arm64, Architecture::Arm64)
         .await

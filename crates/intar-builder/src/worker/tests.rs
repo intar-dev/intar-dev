@@ -228,6 +228,14 @@ fn the_arm64_half_of_a_job_works_beside_the_amd64_half() {
 }
 
 #[test]
+fn emulated_builds_take_turns() {
+    let first = super::EMULATED_BUILDS.try_acquire().unwrap();
+    assert!(super::EMULATED_BUILDS.try_acquire().is_err());
+    drop(first);
+    assert!(super::EMULATED_BUILDS.try_acquire().is_ok());
+}
+
+#[test]
 fn every_tail_fits_one_upload() {
     // The Worker refuses a build log over 9 MiB; headers take a few bytes.
     let total = 4 * LOG_UPLOAD_TAIL_BYTES + LOG_UPLOAD_ERROR_BYTES as u64 + 4096;
