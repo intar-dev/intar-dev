@@ -13,6 +13,7 @@ use anyhow::{Context as _, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::config::BuildArch;
 use crate::sha256::sha256_file_hex;
 
 const ROOT_BLOCK_DEVICE: &str = "intar-root";
@@ -121,13 +122,14 @@ pub(crate) fn snapshot_sync_arguments(continuation_disk: &Path) -> Result<serde_
     }))
 }
 
-pub(crate) fn append_layered_devices(args: &mut Vec<String>) {
-    args.extend([
-        "-device".to_string(),
-        "vmgenid,guid=auto".to_string(),
-        "-device".to_string(),
-        VIRTIO_BALLOON_DEVICE.to_string(),
-    ]);
+pub(crate) fn append_layered_devices(args: &mut Vec<String>, arch: BuildArch) {
+    // The generation id tells a guest it was resumed from a checkpoint. It is
+    // an ACPI device, which QEMU's arm64 board booted from a kernel has none
+    // of, and QEMU has no such device for it.
+    if arch == BuildArch::Amd64 {
+        args.extend(["-device".to_string(), "vmgenid,guid=auto".to_string()]);
+    }
+    args.extend(["-device".to_string(), VIRTIO_BALLOON_DEVICE.to_string()]);
 }
 
 pub(crate) fn replace_serial_log_with_append(args: &mut Vec<String>, serial_log_path: &Path) {
@@ -426,8 +428,11 @@ mod tests {
 
     #[test]
     fn balloon_device_is_stable_and_invalidates_checkpoint_identity() {
+        let mut arm64 = Vec::new();
+        append_layered_devices(&mut arm64, BuildArch::Arm64);
+        assert_eq!(arm64, ["-device", VIRTIO_BALLOON_DEVICE]);
         let mut devices = Vec::new();
-        append_layered_devices(&mut devices);
+        append_layered_devices(&mut devices, BuildArch::Amd64);
         assert_eq!(
             devices
                 .windows(2)

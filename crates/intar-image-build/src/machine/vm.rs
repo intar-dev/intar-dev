@@ -276,7 +276,7 @@ impl Vm<'_> {
             ],
         );
         replace_serial_log_with_append(&mut args, &files.serial);
-        append_layered_devices(&mut args);
+        append_layered_devices(&mut args, self.config.arch());
         args
     }
 
