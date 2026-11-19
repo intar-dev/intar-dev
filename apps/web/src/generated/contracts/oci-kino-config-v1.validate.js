@@ -3,8 +3,8 @@
 "use strict";
 export const validate = validate20;
 export default validate20;
-const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"KinoConfigV1","description":"The config blob of a Kino manifest.","type":"object","properties":{"architecture":{"description":"The guests the binary runs in; absent for amd64.","anyOf":[{"$ref":"#/$defs/OtherArchitecture"},{"type":"null"}]},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"version":{"type":"string"}},"additionalProperties":false,"required":["guest_contract","version"],"$defs":{"OtherArchitecture":{"description":"An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.","type":"string","enum":["arm64"]}}};
-const schema32 = {"description":"An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.","type":"string","enum":["arm64"]};
+const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"KinoConfigV1","description":"The config blob of a Kino manifest.","type":"object","properties":{"architecture":{"description":"The guests the binary runs in. An artifact made before the field\nexisted names none and is amd64.","anyOf":[{"$ref":"#/$defs/Architecture"},{"type":"null"}]},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"version":{"type":"string"}},"additionalProperties":false,"required":["guest_contract","version"],"$defs":{"Architecture":{"description":"The processors machine images and Kino exist for.","type":"string","enum":["amd64","arm64"]}}};
+const schema32 = {"description":"The processors machine images and Kino exist for.","type":"string","enum":["amd64","arm64"]};
 
 function validate20(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
 let vErrors = null;
@@ -40,7 +40,7 @@ const _errs3 = errors;
 let valid1 = false;
 const _errs4 = errors;
 if(typeof data0 !== "string"){
-const err0 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/OtherArchitecture/type",keyword:"type",params:{type: "string"},message:"must be string"};
+const err0 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/Architecture/type",keyword:"type",params:{type: "string"},message:"must be string"};
 if(vErrors === null){
 vErrors = [err0];
 }
@@ -49,8 +49,8 @@ vErrors.push(err0);
 }
 errors++;
 }
-if(!(data0 === "arm64")){
-const err1 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/OtherArchitecture/enum",keyword:"enum",params:{allowedValues: schema32.enum},message:"must be equal to one of the allowed values"};
+if(!((data0 === "amd64") || (data0 === "arm64"))){
+const err1 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/Architecture/enum",keyword:"enum",params:{allowedValues: schema32.enum},message:"must be equal to one of the allowed values"};
 if(vErrors === null){
 vErrors = [err1];
 }

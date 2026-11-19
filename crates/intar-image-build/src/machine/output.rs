@@ -12,10 +12,9 @@ use intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES;
 use intar_contracts::guest::GUEST_CONTRACT;
 use intar_contracts::oci::verify::{layers_of, verified_image};
 use intar_contracts::oci::{
-    DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE,
+    Architecture, DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE,
     MACHINE_ARTIFACT_TYPE, MACHINE_CONFIG_MEDIA_TYPE, MachineBootV1, MachineConfigV1,
-    MachineDiskV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1,
-    OtherArchitecture, Sha256Hex,
+    MachineDiskV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1, Sha256Hex,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -57,10 +56,10 @@ pub fn write_machine_image(
         guest_contract: GUEST_CONTRACT,
         image_format: IMAGE_FORMAT.to_owned(),
         build_key: build_key.clone(),
-        architecture: match arch {
-            BuildArch::Amd64 => None,
-            BuildArch::Arm64 => Some(OtherArchitecture::Arm64),
-        },
+        architecture: Some(match arch {
+            BuildArch::Amd64 => Architecture::Amd64,
+            BuildArch::Arm64 => Architecture::Arm64,
+        }),
         boot: MachineBootV1 {
             cmdline: published_boot_cmdline(arch),
         },

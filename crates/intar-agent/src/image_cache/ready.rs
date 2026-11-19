@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 
 use intar_contracts::guest::GUEST_CONTRACT;
-use intar_contracts::oci::{IMAGE_FORMAT, MachineConfigV1, OciManifestV1};
+use intar_contracts::oci::{
+    Architecture, IMAGE_FORMAT, MachineConfigV1, OciManifestV1, PREVIOUS_IMAGE_FORMAT,
+};
 
 use super::*;
 
@@ -49,13 +51,6 @@ fn descriptor_path(cache_root: &Path, image: &OciDigest) -> PathBuf {
         .join(format!("{}.ready.json", image.hex()))
 }
 
-/// The image format before [`IMAGE_FORMAT`]. A format is a name for the
-/// platform baked into an image, not a layout, and this agent reads images of
-/// the one before exactly as it reads today's: a host keeps running the
-/// images it has until every scenario is rebuilt. Drop this once none of the
-/// older format is live.
-const PREVIOUS_IMAGE_FORMAT: &str = "intar-image-3";
-
 /// Refuse an image this agent's Kino contract cannot boot.
 pub(crate) fn check_machine_config(config: &MachineConfigV1) -> Result<()> {
     anyhow::ensure!(
@@ -67,6 +62,14 @@ pub(crate) fn check_machine_config(config: &MachineConfigV1) -> Result<()> {
         [IMAGE_FORMAT, PREVIOUS_IMAGE_FORMAT].contains(&config.image_format.as_str()),
         "unsupported_artifact: image format {:?}, this agent reads {IMAGE_FORMAT:?} and {PREVIOUS_IMAGE_FORMAT:?}",
         config.image_format
+    );
+    // A platform host is amd64; the control plane hands it nothing else.
+    let architecture = config
+        .architecture()
+        .map_err(|problem| anyhow::anyhow!("unsupported_artifact: {problem}"))?;
+    anyhow::ensure!(
+        architecture == Architecture::Amd64,
+        "unsupported_artifact: the image is for {architecture:?} machines, this host runs amd64 ones"
     );
     Ok(())
 }

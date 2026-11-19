@@ -59,12 +59,9 @@ export type BridgeMessageV9 =
       type: "sync_request";
     };
 /**
- * An architecture a config has to name. amd64 is not one: a config is for
- * amd64 when it leaves the field out, so every amd64 config, and with it
- * every amd64 image's digest, is what it was before a second architecture
- * existed.
+ * The processors machine images and Kino exist for.
  */
-export type OtherArchitecture = "arm64";
+export type Architecture = "amd64" | "arm64";
 export type HostRoleV1 = "agent" | "builder";
 /**
  * What a build builds: a repository image (`trixie` is the platform base)
@@ -117,10 +114,10 @@ export type SyncRequestReason = "connect" | "reconnect" | "desired_version_lag" 
  */
 export interface BuilderHelloV1 {
   /**
-   * What the builder can build besides amd64. Left out when that is
-   * nothing, so such a builder says what it always said.
+   * Every architecture the builder can build. A builder from before the
+   * field existed sends none and builds amd64.
    */
-  architectures?: OtherArchitecture[];
+  architectures?: Architecture[];
   image_format: string;
   /**
    * `source_compile_digest(image_format, compiler version)`.
@@ -186,10 +183,11 @@ export interface HostDesiredStateV3 {
  */
 export interface DesiredBuildV2 {
   /**
-   * What to build after the amd64 image, in the same job. Asked only of
-   * a builder whose hello lists it, and fixed for the attempt.
+   * What to build in this job, in this order. Only what the builder's
+   * hello lists is asked for, and the list is fixed for the attempt. None
+   * is what a builder from before the field existed is sent: amd64.
    */
-  architectures?: OtherArchitecture[];
+  architectures?: Architecture[];
   attempt: number;
   build_id: string;
   /**

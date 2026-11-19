@@ -260,6 +260,14 @@
     }
   ],
   "$defs": {
+    "Architecture": {
+      "description": "The processors machine images and Kino exist for.",
+      "type": "string",
+      "enum": [
+        "amd64",
+        "arm64"
+      ]
+    },
     "BuildPhaseV2": {
       "type": "string",
       "enum": [
@@ -388,10 +396,10 @@
       "type": "object",
       "properties": {
         "architectures": {
-          "description": "What the builder can build besides amd64. Left out when that is\nnothing, so such a builder says what it always said.",
+          "description": "Every architecture the builder can build. A builder from before the\nfield existed sends none and builds amd64.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/OtherArchitecture"
+            "$ref": "#/$defs/Architecture"
           }
         },
         "image_format": {
@@ -457,10 +465,10 @@
       "type": "object",
       "properties": {
         "architectures": {
-          "description": "What to build after the amd64 image, in the same job. Asked only of\na builder whose hello lists it, and fixed for the attempt.",
+          "description": "What to build in this job, in this order. Only what the builder's\nhello lists is asked for, and the list is fixed for the attempt. None\nis what a builder from before the field existed is sent: amd64.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/OtherArchitecture"
+            "$ref": "#/$defs/Architecture"
           }
         },
         "attempt": {
@@ -1000,13 +1008,6 @@
       "description": "An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.",
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
-    },
-    "OtherArchitecture": {
-      "description": "An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.",
-      "type": "string",
-      "enum": [
-        "arm64"
-      ]
     },
     "SpecMode": {
       "type": "string",

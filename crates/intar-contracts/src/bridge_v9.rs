@@ -15,7 +15,7 @@ use crate::bridge::{
     SyncRequestReason, VmArchiveStateV1, VmNetworkStateV1, VmResourceStateV3,
     VmRuntimeConstraintsV2, VmSandboxStateV1, VmTerminalStateV1,
 };
-use crate::oci::{OciDigest, OtherArchitecture};
+use crate::oci::{Architecture, OciDigest};
 use crate::scenario::SpecMode;
 
 pub const BRIDGE_PROTOCOL_VERSION_9: u16 = 9;
@@ -69,10 +69,10 @@ pub struct BuilderHelloV1 {
     pub image_format: String,
     /// `source_compile_digest(image_format, compiler version)`.
     pub source_compile_digest: String,
-    /// What the builder can build besides amd64. Left out when that is
-    /// nothing, so such a builder says what it always said.
+    /// Every architecture the builder can build. A builder from before the
+    /// field existed sends none and builds amd64.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub architectures: Vec<OtherArchitecture>,
+    pub architectures: Vec<Architecture>,
 }
 
 /// What the host can do. Facts only: no rollout switches.
@@ -184,10 +184,11 @@ pub struct DesiredBuildV2 {
     pub target: BuildTargetV1,
     #[schemars(range(min = 1))]
     pub attempt: u32,
-    /// What to build after the amd64 image, in the same job. Asked only of
-    /// a builder whose hello lists it, and fixed for the attempt.
+    /// What to build in this job, in this order. Only what the builder's
+    /// hello lists is asked for, and the list is fixed for the attempt. None
+    /// is what a builder from before the field existed is sent: amd64.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub architectures: Vec<OtherArchitecture>,
+    pub architectures: Vec<Architecture>,
 }
 
 /// What a build builds: a repository image (`trixie` is the platform base)

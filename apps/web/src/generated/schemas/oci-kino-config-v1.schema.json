@@ -5,10 +5,10 @@
   "type": "object",
   "properties": {
     "architecture": {
-      "description": "The guests the binary runs in; absent for amd64.",
+      "description": "The guests the binary runs in. An artifact made before the field\nexisted names none and is amd64.",
       "anyOf": [
         {
-          "$ref": "#/$defs/OtherArchitecture"
+          "$ref": "#/$defs/Architecture"
         },
         {
           "type": "null"
@@ -30,10 +30,11 @@
     "version"
   ],
   "$defs": {
-    "OtherArchitecture": {
-      "description": "An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.",
+    "Architecture": {
+      "description": "The processors machine images and Kino exist for.",
       "type": "string",
       "enum": [
+        "amd64",
         "arm64"
       ]
     }

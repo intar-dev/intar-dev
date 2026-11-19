@@ -5,10 +5,10 @@
   "type": "object",
   "properties": {
     "architecture": {
-      "description": "The machines the image boots on; absent for amd64.",
+      "description": "The machines the image boots on. Every config says it; only one of\n[`PREVIOUS_IMAGE_FORMAT`], written before the field existed, does not.\nRead it through [`MachineConfigV1::architecture`].",
       "anyOf": [
         {
-          "$ref": "#/$defs/OtherArchitecture"
+          "$ref": "#/$defs/Architecture"
         },
         {
           "type": "null"
@@ -42,6 +42,14 @@
     "disk"
   ],
   "$defs": {
+    "Architecture": {
+      "description": "The processors machine images and Kino exist for.",
+      "type": "string",
+      "enum": [
+        "amd64",
+        "arm64"
+      ]
+    },
     "MachineBootV1": {
       "type": "object",
       "properties": {
@@ -103,13 +111,6 @@
       "description": "An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.",
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
-    },
-    "OtherArchitecture": {
-      "description": "An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.",
-      "type": "string",
-      "enum": [
-        "arm64"
-      ]
     },
     "Sha256Hex": {
       "description": "A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.",

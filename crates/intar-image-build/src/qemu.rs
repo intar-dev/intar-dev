@@ -2,7 +2,11 @@ use std::path::Path;
 
 use crate::config::{BuildArch, QemuBuildConfig};
 
+// The amd64 lines as they have always been; the tests hold the functions
+// below to them.
+#[cfg(test)]
 pub const BUILD_BOOT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0";
+#[cfg(test)]
 pub const PUBLISHED_BOOT_CMDLINE: &str =
     "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false";
 

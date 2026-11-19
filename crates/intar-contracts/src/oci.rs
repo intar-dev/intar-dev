@@ -127,15 +127,17 @@ pub struct OciDescriptorV1 {
     pub size: u64,
 }
 
-/// An architecture a config has to name. amd64 is not one: a config is for
-/// amd64 when it leaves the field out, so every amd64 config, and with it
-/// every amd64 image's digest, is what it was before a second architecture
-/// existed.
+/// The image format before [`IMAGE_FORMAT`]. Its images stay readable until
+/// every scenario is rebuilt; its configs name no architecture and are amd64.
+pub const PREVIOUS_IMAGE_FORMAT: &str = "intar-image-3";
+
+/// The processors machine images and Kino exist for.
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
 )]
 #[serde(rename_all = "lowercase")]
-pub enum OtherArchitecture {
+pub enum Architecture {
+    Amd64,
     Arm64,
 }
 
@@ -147,11 +149,28 @@ pub struct MachineConfigV1 {
     pub guest_contract: u32,
     pub image_format: String,
     pub build_key: OciDigest,
-    /// The machines the image boots on; absent for amd64.
+    /// The machines the image boots on. Every config says it; only one of
+    /// [`PREVIOUS_IMAGE_FORMAT`], written before the field existed, does not.
+    /// Read it through [`MachineConfigV1::architecture`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub architecture: Option<OtherArchitecture>,
+    pub architecture: Option<Architecture>,
     pub boot: MachineBootV1,
     pub disk: MachineDiskV1,
+}
+
+impl MachineConfigV1 {
+    /// The architecture the image is for. A config that names none is amd64
+    /// when it is of the previous format, and is refused otherwise.
+    ///
+    /// # Errors
+    /// Returns what is wrong with a config that has to name one and does not.
+    pub fn architecture(&self) -> Result<Architecture, &'static str> {
+        match self.architecture {
+            Some(architecture) => Ok(architecture),
+            None if self.image_format == PREVIOUS_IMAGE_FORMAT => Ok(Architecture::Amd64),
+            None => Err("the image config does not name its architecture"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -176,9 +195,10 @@ pub struct MachineDiskV1 {
 pub struct KinoConfigV1 {
     pub guest_contract: u32,
     pub version: String,
-    /// The guests the binary runs in; absent for amd64.
+    /// The guests the binary runs in. An artifact made before the field
+    /// existed names none and is amd64.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub architecture: Option<OtherArchitecture>,
+    pub architecture: Option<Architecture>,
 }
 
 #[cfg(test)]
@@ -196,33 +216,40 @@ mod tests {
     }
 
     #[test]
-    fn a_config_names_its_architecture_only_when_it_is_not_amd64() -> Result<(), serde_json::Error>
-    {
-        // An amd64 config is byte for byte what it was before the field existed.
-        let amd64: MachineConfigV1 = serde_json::from_value(machine_json())?;
-        assert_eq!(amd64.architecture, None);
-        assert!(!serde_json::to_string(&amd64)?.contains("architecture"));
-
+    fn a_config_names_its_architecture_unless_it_is_of_the_previous_format()
+    -> Result<(), serde_json::Error> {
+        // Written before the field existed: no architecture, read as amd64.
         let mut json = machine_json();
-        json["architecture"] = serde_json::json!("arm64");
-        let arm64: MachineConfigV1 = serde_json::from_value(json.clone())?;
-        assert_eq!(arm64.architecture, Some(OtherArchitecture::Arm64));
-        assert_eq!(serde_json::to_value(&arm64)?, json);
-        // amd64 is never spelled out, and nothing else is known.
-        for refused in ["amd64", "x86_64", "riscv64", ""] {
+        json["image_format"] = serde_json::json!(PREVIOUS_IMAGE_FORMAT);
+        let old: MachineConfigV1 = serde_json::from_value(json.clone())?;
+        assert_eq!(old.architecture(), Ok(Architecture::Amd64));
+        assert_eq!(
+            serde_json::to_value(&old)?,
+            json,
+            "its bytes stay as they were"
+        );
+
+        // Of this format: the architecture is there, or the config is refused.
+        let missing: MachineConfigV1 = serde_json::from_value(machine_json())?;
+        assert!(missing.architecture().is_err());
+        for (name, architecture) in [
+            ("amd64", Architecture::Amd64),
+            ("arm64", Architecture::Arm64),
+        ] {
+            let mut json = machine_json();
+            json["architecture"] = serde_json::json!(name);
+            let config: MachineConfigV1 = serde_json::from_value(json.clone())?;
+            assert_eq!(config.architecture(), Ok(architecture));
+            assert_eq!(serde_json::to_value(&config)?, json);
+        }
+        let mut json = machine_json();
+        for refused in ["x86_64", "aarch64", "riscv64", ""] {
             json["architecture"] = serde_json::json!(refused);
             assert!(
                 serde_json::from_value::<MachineConfigV1>(json.clone()).is_err(),
                 "{refused}"
             );
         }
-
-        let kino: KinoConfigV1 = serde_json::from_str(r#"{"guest_contract":3,"version":"1.0.0"}"#)?;
-        assert_eq!(kino.architecture, None);
-        assert_eq!(
-            serde_json::to_string(&kino)?,
-            r#"{"guest_contract":3,"version":"1.0.0"}"#
-        );
         Ok(())
     }
 

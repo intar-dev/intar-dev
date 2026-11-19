@@ -3,8 +3,8 @@
 "use strict";
 export const validate = validate20;
 export default validate20;
-const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"MachineConfigV1","description":"The config blob of a machine image. The image's identity is its\nmanifest's digest.","type":"object","properties":{"architecture":{"description":"The machines the image boots on; absent for amd64.","anyOf":[{"$ref":"#/$defs/OtherArchitecture"},{"type":"null"}]},"boot":{"$ref":"#/$defs/MachineBootV1"},"build_key":{"$ref":"#/$defs/OciDigest"},"disk":{"$ref":"#/$defs/MachineDiskV1"},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"image_format":{"type":"string"}},"additionalProperties":false,"required":["guest_contract","image_format","build_key","boot","disk"],"$defs":{"MachineBootV1":{"type":"object","properties":{"cmdline":{"type":"string"}},"additionalProperties":false,"required":["cmdline"]},"MachineDiskV1":{"type":"object","properties":{"chunk_size":{"type":"integer","minimum":0},"chunks":{"description":"`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.","type":"array","items":{"type":"array","maxItems":3,"minItems":3,"prefixItems":[{"type":"integer","minimum":0},{"type":"integer","minimum":0,"maximum":4294967295},{"$ref":"#/$defs/Sha256Hex"}]}},"size_bytes":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["size_bytes","chunk_size","chunks"]},"OciDigest":{"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"OtherArchitecture":{"description":"An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.","type":"string","enum":["arm64"]},"Sha256Hex":{"description":"A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.","type":"string","pattern":"^[0-9a-f]{64}$"}}};
-const schema32 = {"description":"An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.","type":"string","enum":["arm64"]};
+const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"MachineConfigV1","description":"The config blob of a machine image. The image's identity is its\nmanifest's digest.","type":"object","properties":{"architecture":{"description":"The machines the image boots on. Every config says it; only one of\n[`PREVIOUS_IMAGE_FORMAT`], written before the field existed, does not.\nRead it through [`MachineConfigV1::architecture`].","anyOf":[{"$ref":"#/$defs/Architecture"},{"type":"null"}]},"boot":{"$ref":"#/$defs/MachineBootV1"},"build_key":{"$ref":"#/$defs/OciDigest"},"disk":{"$ref":"#/$defs/MachineDiskV1"},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"image_format":{"type":"string"}},"additionalProperties":false,"required":["guest_contract","image_format","build_key","boot","disk"],"$defs":{"Architecture":{"description":"The processors machine images and Kino exist for.","type":"string","enum":["amd64","arm64"]},"MachineBootV1":{"type":"object","properties":{"cmdline":{"type":"string"}},"additionalProperties":false,"required":["cmdline"]},"MachineDiskV1":{"type":"object","properties":{"chunk_size":{"type":"integer","minimum":0},"chunks":{"description":"`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.","type":"array","items":{"type":"array","maxItems":3,"minItems":3,"prefixItems":[{"type":"integer","minimum":0},{"type":"integer","minimum":0,"maximum":4294967295},{"$ref":"#/$defs/Sha256Hex"}]}},"size_bytes":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["size_bytes","chunk_size","chunks"]},"OciDigest":{"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"Sha256Hex":{"description":"A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.","type":"string","pattern":"^[0-9a-f]{64}$"}}};
+const schema32 = {"description":"The processors machine images and Kino exist for.","type":"string","enum":["amd64","arm64"]};
 const schema33 = {"type":"object","properties":{"cmdline":{"type":"string"}},"additionalProperties":false,"required":["cmdline"]};
 const schema34 = {"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"};
 const pattern4 = new RegExp("^sha256:[0-9a-f]{64}$", "u");
@@ -240,7 +240,7 @@ const _errs3 = errors;
 let valid1 = false;
 const _errs4 = errors;
 if(typeof data0 !== "string"){
-const err0 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/OtherArchitecture/type",keyword:"type",params:{type: "string"},message:"must be string"};
+const err0 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/Architecture/type",keyword:"type",params:{type: "string"},message:"must be string"};
 if(vErrors === null){
 vErrors = [err0];
 }
@@ -249,8 +249,8 @@ vErrors.push(err0);
 }
 errors++;
 }
-if(!(data0 === "arm64")){
-const err1 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/OtherArchitecture/enum",keyword:"enum",params:{allowedValues: schema32.enum},message:"must be equal to one of the allowed values"};
+if(!((data0 === "amd64") || (data0 === "arm64"))){
+const err1 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/Architecture/enum",keyword:"enum",params:{allowedValues: schema32.enum},message:"must be equal to one of the allowed values"};
 if(vErrors === null){
 vErrors = [err1];
 }

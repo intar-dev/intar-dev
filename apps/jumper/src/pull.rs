@@ -16,9 +16,9 @@ use std::path::Path;
 
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use intar_contracts::oci::{
-    DISK_CHUNK_MEDIA_TYPE, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE, KINO_ARTIFACT_TYPE,
+    Architecture, DISK_CHUNK_MEDIA_TYPE, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE, KINO_ARTIFACT_TYPE,
     MACHINE_ARTIFACT_TYPE, MACHINE_CONFIG_MEDIA_TYPE, MachineConfigV1, OciDescriptorV1, OciDigest,
-    OciManifestV1, OtherArchitecture,
+    OciManifestV1,
 };
 use sha2::{Digest as _, Sha256};
 use subspace::Subspace;
@@ -118,10 +118,11 @@ fn blob(repository: &str, digest: &OciDigest) -> String {
 }
 
 /// The processor an image's machines have, as Rust names it.
-fn image_arch(config: &MachineConfigV1) -> &'static str {
-    match config.architecture {
-        None => "x86_64",
-        Some(OtherArchitecture::Arm64) => "aarch64",
+fn image_arch(config: &MachineConfigV1) -> Result<&'static str, String> {
+    match config.architecture() {
+        Ok(Architecture::Amd64) => Ok("x86_64"),
+        Ok(Architecture::Arm64) => Ok("aarch64"),
+        Err(_) => Err(unreadable("a machine image")),
     }
 }
 
@@ -235,7 +236,7 @@ async fn pull_image(
     let config: MachineConfigV1 = serde_json::from_slice(&config).map_err(|_| bad())?;
     // intar hands this computer images for its own processor; one for another
     // would not boot, so it is refused before anything large is fetched.
-    if image_arch(&config) != std::env::consts::ARCH {
+    if image_arch(&config)? != std::env::consts::ARCH {
         return Err(
             "This scenario's machine image is for another kind of processor than this computer's."
                 .to_owned(),
@@ -489,8 +490,12 @@ mod tests {
         ];
         let total: u64 = layers.iter().map(|layer| layer.size).sum();
         // The image is for the computer the test runs on.
-        let own = (std::env::consts::ARCH == "aarch64").then_some(OtherArchitecture::Arm64);
-        let other = own.is_none().then_some(OtherArchitecture::Arm64);
+        let (own, other) = if std::env::consts::ARCH == "aarch64" {
+            (Architecture::Arm64, Architecture::Amd64)
+        } else {
+            (Architecture::Amd64, Architecture::Arm64)
+        };
+        let (own, other) = (Some(own), Some(other));
         let disk_for = |architecture, chunks| MachineConfigV1 {
             architecture,
             guest_contract: 3,
