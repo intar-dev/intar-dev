@@ -171,6 +171,7 @@ describe("the desktop channel", () => {
       // No arm64 images are built for this scenario; no images exist for the other at all.
       [{ arch: "aarch64" }, 409, "architecture_unavailable"],
       [{ arch: "riscv64" }, 409, "architecture_unavailable"],
+      [{ arch: "constructor" }, 409, "architecture_unavailable"],
       [{ scenarioId: "intar/unknown" }, 404, "scenario_not_found"],
       [{ scenarioId: "not-an-id" }, 400, "invalid_scenario"],
       [{ organizationId: "no-such-org" }, 404, "scenario_not_found"],

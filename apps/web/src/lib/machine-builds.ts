@@ -227,7 +227,7 @@ export async function expireMachineBuildLeases(env: Env, now: number): Promise<s
   const { results } = await env.DB.prepare(
     `SELECT build_key, host_id, attempt, image_digest FROM machine_builds build
       WHERE state IN ('assigned', 'building') AND (host_id IS NULL OR updated_at <= ?1
-        OR assigned_at <= CASE WHEN arm64_asked = 1 THEN ?4 ELSE ?3 END
+        OR assigned_at <= CASE WHEN arm64_asked = 1 AND image_digest IS NOT NULL THEN ?4 ELSE ?3 END
         OR EXISTS (SELECT 1 FROM agent_hosts host WHERE host.id = build.host_id
           AND (host.disabled = 1 OR (host.connected = 0 AND host.disconnected_at <= ?2))))`,
   ).bind(now - BUILD_REPORT_STALE_AFTER_MS, now - BUILDER_REASSIGN_AFTER_MS, now - MACHINE_BUILD_ATTEMPT_CEILING_MS,

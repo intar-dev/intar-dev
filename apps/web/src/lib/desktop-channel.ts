@@ -219,7 +219,7 @@ export async function startLocalRunRequest(
   if (organizationKey !== undefined && organizationKey !== null && typeof organizationKey !== "string") {
     return refuse(400, "invalid_organization", "organizationId must be a string");
   }
-  const architecture = typeof arch === "string" ? IMAGE_ARCHITECTURES[arch] : undefined;
+  const architecture = typeof arch === "string" && Object.hasOwn(IMAGE_ARCHITECTURES, arch) ? IMAGE_ARCHITECTURES[arch] : undefined;
   if (!architecture) {
     return refuse(409, "architecture_unavailable", "no machine images exist for this computer's architecture yet");
   }
@@ -373,7 +373,7 @@ export async function localCatalogRequest(
   // images exist; until then it waits, as one whose images are not built.
   // ponytail: one lookup per startable lecture; fold it into the catalog's
   // own readiness query if catalogs grow.
-  if (IMAGE_ARCHITECTURES[new URL(request.url).searchParams.get("arch") ?? ""] === "arm64") {
+  if (new URL(request.url).searchParams.get("arch") === "aarch64") {
     for (const course of courses) {
       for (const lecture of course.lectures) {
         if (!lecture.scenarioId || (lecture.state !== "available" && lecture.state !== "in_progress")) continue;

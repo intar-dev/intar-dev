@@ -293,6 +293,28 @@ describe("machine builds over bridge 9", () => {
     ws.close();
   });
 
+  it("gives an attempt the longer ceiling only once its amd64 image is recorded", async () => {
+    await ingest(1);
+    const { ws } = await connectBuilder(ARM64_BUILDER);
+    await until(build, (row) => row?.state === "assigned");
+    const key = (await build())!.build_key;
+    const pastCeiling = () => env.DB.prepare("UPDATE machine_builds SET assigned_at = ?1, updated_at = ?2")
+      .bind(Date.now() - 3 * 60 * 60_000 - 1, Date.now()).run();
+
+    // amd64 still building after three hours: taken back like any build.
+    await pastCeiling();
+    await maintainMachineBuilds(env, null, Date.now());
+    expect(await build()).toMatchObject({ state: "assigned", attempt: 2 });
+
+    // amd64 recorded: the emulated half has its extra time.
+    expect((await postResult(key, 2, await pushImage(key))).status).toBe(201);
+    await pastCeiling();
+    await maintainMachineBuilds(env, null, Date.now());
+    expect(await build()).toMatchObject({ attempt: 2 });
+    expect(await arm64()).toMatchObject({ arm64_state: "building" });
+    ws.close();
+  });
+
   it("asks a builder that names no architectures for the amd64 image only", async () => {
     await ingest(1);
     const { ws, messages } = await connectBuilder();
