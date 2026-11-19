@@ -15,8 +15,8 @@ set_id="$(sed -n 's/^set //p' "${here}/pins.txt")"
 pin="$(sed -n "s/^${os} ${arch} //p" "${here}/pins.txt")"
 [[ "${set_id}" =~ ^[0-9a-f]{12}$ && "${pin}" =~ ^[0-9a-f]{64}$ ]] || { echo "pins.txt names no QEMU for ${os} ${arch}." >&2; exit 1; }
 # The pinned set must be the one these sources build.
-built="$(cat "${here}/sources.txt" "${here}/build.sh" | sha256 | cut -c1-12)"
-[ "${built}" = "${set_id}" ] || { echo "pins.txt pins QEMU set ${set_id}, but the sources build ${built}: run qemu.yml and pin its checksums." >&2; exit 1; }
+built="$(bash "${here}/set.sh")"
+[ "${built}" = "${set_id}" ] || { echo "pins.txt pins QEMU set ${set_id}, but the sources build ${built}: qemu.yml publishes that set and opens the pull request that pins it." >&2; exit 1; }
 
 file="intar-qemu_${os}_${arch}.tar.gz"
 cache="${root}/target/qemu/${set_id}"

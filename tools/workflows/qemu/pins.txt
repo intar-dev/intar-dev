@@ -1,0 +1,4 @@
+# The published QEMU builds the app's tooling takes: the set (qemu/v<set>) and
+# each target's archive by SHA-256. qemu.yml writes this after it published a
+# set; fetch.sh takes nothing else.
+set 000000000000
