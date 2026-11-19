@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.20.0 (2026-11-19)
+
+### Features
+
+- **intar-image-build:** Download the guest kernel that CI built instead of compiling it (#427) (c490d008)
+
 ## builder/v0.19.0 (2026-11-19)
 
 ### Breaking changes
