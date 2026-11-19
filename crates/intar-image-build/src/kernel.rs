@@ -231,6 +231,20 @@ CONFIG_GPIO_PL061=y
 CONFIG_KEYBOARD_GPIO=y
 CONFIG_POWER_RESET=y
 CONFIG_EFI=y
+# --- arm64: size reductions -------------------------------------------------
+# The arm64 defconfig carries drivers for every board as modules, and the
+# build turns what is left as a module into built-in code (the x86 defconfig
+# builds the kernel's own features in; this one leaves many as modules, IPv6
+# among them). These families are hardware a guest never has, so they are
+# off first. Preferences, like the ones above: not contract lines.
+CONFIG_ETHERNET=n
+CONFIG_MEDIA_SUPPORT=n
+CONFIG_IIO=n
+CONFIG_MTD=n
+CONFIG_CAN=n
+CONFIG_NFC=n
+CONFIG_INPUT_TOUCHSCREEN=n
+CONFIG_STAGING=n
 ";
 
 /// Every symbol a guest of `arch` needs built in.
@@ -1040,9 +1054,10 @@ mod tests {
         let script = render_kernel_build_script(&config);
         assert!(script.contains("kernel_arch='arm64'"));
         assert!(script.contains("image_path=arch/arm64/boot/Image"));
-        // What its defconfig leaves as a module is switched off, never built in.
-        assert!(!script.contains("mod2yesconfig"));
-        assert!(script.contains("./scripts/config --disable \"$symbol\""));
+        assert!(script.contains("make mod2yesconfig"));
+        // The driver families no guest has are off before that, so they are
+        // not built in with the rest.
+        assert!(kernel_config_fragment(BuildArch::Arm64).contains("CONFIG_ETHERNET=n\n"));
         // Its required features are the virt machine's devices, not a PC's.
         let required = required_builtins(BuildArch::Arm64);
         for symbol in [
