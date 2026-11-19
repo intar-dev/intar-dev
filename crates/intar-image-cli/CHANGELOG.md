@@ -1,5 +1,15 @@
 # Changelog
 
+## image-cli/v0.13.0 (2026-11-19)
+
+### Features
+
+- **kino:** Reach the host over TCP when boot.json says so (#414) (1f32333b)
+
+### Bug fixes
+
+- **intar-contracts:** Sort canonical JSON keys explicitly (#412) (82555a9c)
+
 ## image-cli/v0.12.0 (2026-11-17)
 
 ### Features
