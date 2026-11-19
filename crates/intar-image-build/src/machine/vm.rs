@@ -147,6 +147,7 @@ pub(crate) fn build_disk(
     let (qemu_version, qemu_cpu) =
         qemu_host_identity(&config.qemu_binary, work, config.qemu_exit_timeout_seconds)?;
     let host = CheckpointHost {
+        arch: config.arch(),
         base_sha256: sha256_file_hex(&base.base_ext4_path)?,
         kernel_sha256: sha256_file_hex(&base.kernel_path)?,
         initrd_sha256: sha256_file_hex(&base.initrd_path)?,

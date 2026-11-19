@@ -713,7 +713,7 @@ mod tests {
             "agent_version": "1.0.0", "role": "builder", "guest_contract": 3,
             "hardware": {"cloud_hypervisor_sha256": null, "kvm": true, "vsock": false,
                 "reflink": false, "landlock": false, "cgroup_v2": false, "hard_cpu_quota": false},
-            "builder": {"image_format": "intar-image-3", "source_compile_digest": "p0011aabb"},
+            "builder": {"image_format": "intar-image-4", "source_compile_digest": "p0011aabb"},
         });
         let message: BridgeMessageV9 = serde_json::from_value(hello.clone())?;
         assert_eq!(serde_json::to_value(&message)?, hello);

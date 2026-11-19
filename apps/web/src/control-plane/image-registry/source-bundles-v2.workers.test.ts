@@ -256,7 +256,7 @@ describe("v2 bundle ingest", () => {
     // The broken-nginx machine has setup on the base, so it is a machine build.
     expect(after.builds).toHaveLength(1);
     expect(after.builds[0]).toMatchObject({
-      image_format: "intar-image-3", bundle_rev: rev(), state: "queued", attempt: 0, host_id: null,
+      image_format: "intar-image-4", bundle_rev: rev(), state: "queued", attempt: 0, host_id: null,
       target_json: JSON.stringify({ kind: "machine", scenario: "broken-nginx", machine: "webserver" }),
     });
     const revision = JSON.parse(STORED.revision.json) as { machines: { build_key: string }[] };

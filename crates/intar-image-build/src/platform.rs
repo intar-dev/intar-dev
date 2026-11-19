@@ -132,6 +132,7 @@ const PACKAGES: &[&str] = &[
 ];
 
 /// The Debian side of the base.
+#[cfg(test)]
 #[must_use]
 pub fn platform_base_spec() -> BaseImageSpec {
     platform_base_spec_for(BuildArch::Amd64)

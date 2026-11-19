@@ -83,7 +83,7 @@ describe("registry push routes", () => {
     await resetD1Database();
     token = await seedBuilder("builder-a");
     await drizzle(env.DB).insert(machineBuilds).values({
-      buildKey: BUILD_KEY, imageFormat: "intar-image-3", bundleRev: "rev", state: "building", attempt: 2, hostId: "builder-a",
+      buildKey: BUILD_KEY, imageFormat: "intar-image-4", bundleRev: "rev", state: "building", attempt: 2, hostId: "builder-a",
     });
   });
 

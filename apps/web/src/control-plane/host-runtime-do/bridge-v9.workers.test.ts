@@ -29,7 +29,7 @@ function hello(hostId: string, role: "agent" | "builder", overrides: Record<stri
     type: "client_hello", protocol_version: 9, host_id: hostId, agent_version: "1.0.0", role, guest_contract: 3,
     hardware: HARDWARE,
     ...(role === "builder"
-      ? { builder: { image_format: "intar-image-3", source_compile_digest: "p00000000" } }
+      ? { builder: { image_format: "intar-image-4", source_compile_digest: "p00000000" } }
       : {}),
     ...overrides,
   };

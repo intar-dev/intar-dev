@@ -196,10 +196,10 @@ mod tests {
 
     #[test]
     fn source_compile_digest_matches_a_fixed_vector() {
-        // printf 'intar-image-3\nintar-source-compiler-v2' | shasum -a 256
+        // printf 'intar-image-4\nintar-source-compiler-v2' | shasum -a 256
         assert_eq!(
             source_compile_digest(IMAGE_FORMAT, SOURCE_COMPILER_VERSION_V2),
-            "pefcf1cdb"
+            "p08e31612"
         );
     }
 

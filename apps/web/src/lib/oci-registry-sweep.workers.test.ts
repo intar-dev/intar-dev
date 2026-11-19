@@ -129,7 +129,7 @@ const ROOTS: Array<[string, () => Promise<{ keep: string[]; pins?: string }>]> =
     const built = await image();
     doc.machines[0]!.build_key = `sha256:${"c".repeat(64)}`;
     await env.DB.prepare(`INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, image_digest, updated_at)
-      VALUES (?1, 'intar-image-3', 'b', 'succeeded', ?2, 0)`).bind(doc.machines[0]!.build_key, built).run();
+      VALUES (?1, 'intar-image-4', 'b', 'succeeded', ?2, 0)`).bind(doc.machines[0]!.build_key, built).run();
     await seedScenario("intar/build");
     await seedRevision("intar/build", "r1", "building", doc);
     return { keep: [...keep, ...await closure(built)] };
@@ -152,13 +152,13 @@ const ROOTS: Array<[string, () => Promise<{ keep: string[]; pins?: string }>]> =
   ["a build in flight", async () => {
     const built = await image();
     await env.DB.prepare(`INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, image_digest, attempt, updated_at)
-      VALUES (?1, 'intar-image-3', 'b', 'building', ?2, 1, 0)`).bind(`sha256:${"d".repeat(64)}`, built).run();
+      VALUES (?1, 'intar-image-4', 'b', 'building', ?2, 1, 0)`).bind(`sha256:${"d".repeat(64)}`, built).run();
     return { keep: await closure(built) };
   }],
   ["a build that finished within the age guard", async () => {
     const built = await image();
     await env.DB.prepare(`INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, image_digest, attempt, updated_at)
-      VALUES (?1, 'intar-image-3', 'b', 'succeeded', ?2, 1, ?3)`).bind(`sha256:${"e".repeat(64)}`, built, later()).run();
+      VALUES (?1, 'intar-image-4', 'b', 'succeeded', ?2, 1, ?3)`).bind(`sha256:${"e".repeat(64)}`, built, later()).run();
     return { keep: await closure(built) };
   }],
   ["an active run's snapshot", async () => {

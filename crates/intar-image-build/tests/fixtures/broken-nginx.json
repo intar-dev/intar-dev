@@ -1,6 +1,6 @@
 {
  "compiler": "intar-source-compiler-v2",
- "image_format": "intar-image-3",
+ "image_format": "intar-image-4",
  "scenarios": [
   {
    "slug": "broken-nginx",

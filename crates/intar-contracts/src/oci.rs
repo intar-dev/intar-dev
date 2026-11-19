@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Bumped with every change to the platform base or to how images are built.
-pub const IMAGE_FORMAT: &str = "intar-image-3";
+pub const IMAGE_FORMAT: &str = "intar-image-4";
 /// `artifactType` of a machine image's manifest.
 pub const MACHINE_ARTIFACT_TYPE: &str = "application/vnd.intar.machine.v1";
 /// A machine image's config blob, a [`MachineConfigV1`].
