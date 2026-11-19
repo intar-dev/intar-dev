@@ -78,6 +78,8 @@ export async function requireDesktopCaller(
 
 export interface LocalRunMachine {
   name: string;
+  /** The VM's name in the archive routes (`/api/local/archive/...`). */
+  runtimeName: string;
   image: string;
   spec: string;
   kino: string;
@@ -115,7 +117,7 @@ export async function localRunView(
         run.runtime_execution_id AS execution_id,
         (SELECT execution.generation FROM runtime_executions execution
           WHERE execution.id = run.runtime_execution_id) AS generation,
-        (SELECT json_group_array(json_object('vmId', vm.vm_id, 'ordinal', vm.ordinal, 'image', vm.image_digest,
+        (SELECT json_group_array(json_object('vmId', vm.vm_id, 'runtimeName', vm.runtime_vm_name, 'ordinal', vm.ordinal, 'image', vm.image_digest,
             'spec', vm.spec_digest, 'kino', vm.kino_digest, 'cpuMillis', vm.cpu_millis,
             'memoryMib', vm.memory_mib, 'diskMib', vm.disk_mib))
            FROM runtime_vms vm WHERE vm.execution_id = run.runtime_execution_id) AS vms
@@ -137,7 +139,7 @@ export async function localRunView(
       .map((machine) => [machine.name, machine]),
   );
   const vms = (JSON.parse(row.vms) as Array<{
-    vmId: string; ordinal: number; image: string; spec: string; kino: string;
+    vmId: string; runtimeName: string; ordinal: number; image: string; spec: string; kino: string;
     cpuMillis: number; memoryMib: number; diskMib: number;
   }>).sort((a, b) => a.ordinal - b.ordinal);
   const allNames = vms.map((vm) => names.get(vm.vmId) ?? vm.vmId);
@@ -153,6 +155,7 @@ export async function localRunView(
       const name = allNames[index]!;
       return {
         name,
+        runtimeName: vm.runtimeName,
         image: vm.image,
         spec: vm.spec,
         kino: vm.kino,

@@ -13,22 +13,19 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-#[cfg(any(test, target_os = "linux"))]
 use anyhow::{Context as _, Result};
-#[cfg(any(test, target_os = "linux"))]
 use intar_contracts::bridge_v9::{CheckStatus, VmTaskV1};
 use tracing::warn;
 
-pub(crate) const CHECK_PASSES_FILENAME: &str = "check-passes.json";
+pub const CHECK_PASSES_FILENAME: &str = "check-passes.json";
 
 /// Task id to the guest unix time (ms) of its first pass.
-pub(crate) type CheckPasses = BTreeMap<String, u64>;
+pub type CheckPasses = BTreeMap<String, u64>;
 
 /// Adds every passing task that has no recorded pass yet; a task that
 /// passes, fails and passes again keeps its first time. True when anything
 /// was added.
-#[cfg(any(test, target_os = "linux"))]
-pub(crate) fn merge_first_passes(passes: &mut CheckPasses, tasks: &[VmTaskV1]) -> bool {
+pub fn merge_first_passes(passes: &mut CheckPasses, tasks: &[VmTaskV1]) -> bool {
     let mut changed = false;
     for task in tasks {
         if task.status != CheckStatus::Pass || passes.contains_key(&task.id) {
@@ -46,8 +43,7 @@ pub(crate) fn merge_first_passes(passes: &mut CheckPasses, tasks: &[VmTaskV1]) -
 /// Records the first passes in `tasks` beside the VM's artifacts. Most
 /// reports add nothing and write nothing; a write replaces the file
 /// atomically, so a crash never leaves half a document.
-#[cfg(any(test, target_os = "linux"))]
-pub(crate) async fn record_check_passes(artifacts_dir: &Path, tasks: &[VmTaskV1]) -> Result<()> {
+pub async fn record_check_passes(artifacts_dir: &Path, tasks: &[VmTaskV1]) -> Result<()> {
     if !tasks.iter().any(|task| task.status == CheckStatus::Pass) {
         return Ok(());
     }
@@ -77,7 +73,7 @@ pub(crate) async fn record_check_passes(artifacts_dir: &Path, tasks: &[VmTaskV1]
 
 /// The recorded passes, or none: a missing or unreadable file only costs the
 /// replay its check markers.
-pub(crate) fn load_check_passes(artifacts_dir: &Path) -> CheckPasses {
+pub fn load_check_passes(artifacts_dir: &Path) -> CheckPasses {
     let path = artifacts_dir.join(CHECK_PASSES_FILENAME);
     match std::fs::read(&path) {
         Ok(bytes) => parse_check_passes(&bytes, &path),
@@ -100,7 +96,7 @@ fn parse_check_passes(bytes: &[u8], path: &Path) -> CheckPasses {
 /// seconds from its start, in time order. A session owns the passes from its
 /// start until the next session starts (`next_start_ms`), so a check that
 /// passed after the last keystroke still marks the session that caused it.
-pub(crate) fn session_check_markers(
+pub fn session_check_markers(
     passes: &CheckPasses,
     start_ms: u64,
     next_start_ms: Option<u64>,

@@ -47,12 +47,15 @@ export async function platformArtifactFixture(d1: D1Database, vmName: string) {
     db: drizzle(d1),
     runId: "run-1",
     vmName,
-    agent: {
-      scope: "platform",
-      credentialGeneration: 1,
-      hostId: "host-1",
-      userId: "user-1",
-      role: "agent",
+    writer: {
+      kind: "agent",
+      agent: {
+        scope: "platform",
+        credentialGeneration: 1,
+        hostId: "host-1",
+        userId: "user-1",
+        role: "agent",
+      },
     },
   });
   if (!runVm) throw new Error("missing artifact fixture");

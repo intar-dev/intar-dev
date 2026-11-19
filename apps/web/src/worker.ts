@@ -4,6 +4,7 @@ import { handle } from "@astrojs/cloudflare/handler";
 import { handleAgentBootstrap, handleAgentConnect } from "@/control-plane/auth";
 import { handleHostEnrollment } from "@/control-plane/host-enrollment";
 import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifacts";
+import { LOCAL_ARCHIVE_PREFIX } from "@/control-plane/agent-run-artifacts/storage";
 import { handleAgentRunCliRequest } from "@/control-plane/run-cli";
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
 import { RunShareDO } from "@/control-plane/run-share-do";
@@ -87,6 +88,15 @@ export default {
       if (runCliResponse) {
         return respond(runCliResponse);
       }
+      const response = await traceOperation("run.artifacts", () => handleAgentRunArtifactRequest(request, env));
+      if (response) {
+        return respond(response);
+      }
+    }
+
+    // The desktop app's recordings of a local run. Routed here, ahead of the
+    // API guard, because its parts are larger than that guard lets a body be.
+    if (url.pathname.startsWith(`${LOCAL_ARCHIVE_PREFIX}/`)) {
       const response = await traceOperation("run.artifacts", () => handleAgentRunArtifactRequest(request, env));
       if (response) {
         return respond(response);

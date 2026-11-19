@@ -1,5 +1,5 @@
 import { drizzle } from "drizzle-orm/d1";
-import { requireVerifiedAgentRequest } from "@/control-plane/auth";
+import { enforceRateLimit } from "@/lib/request-security";
 import { type SessionTimelineEntry } from "@/lib/run-state";
 import {
   ArtifactStateConflict,
@@ -15,17 +15,20 @@ import {
   inspectExistingArtifactManifestRetry,
   initializeArtifactUpload,
   jsonResponse,
+  LOCAL_ARCHIVE_PREFIX,
   loadArtifactForRunVm,
   loadArtifactStatesForRunVm,
   loadArtifactUploadState,
   markArtifactUploaded,
   normalizeArtifactInputs,
   parseUploadedParts,
+  requireArtifactWriter,
   requireVerifiedRunVm,
   resolveRunVm,
   runPurgedResponse,
   transitionRunVmToArchiving,
   transitionRunVmToCompleted,
+  type ArtifactWriter,
   type ResolvedRunVm,
   type SourceArtifactState,
 } from "./agent-run-artifacts/storage";
@@ -78,6 +81,14 @@ const MAX_BEGIN_ARTIFACTS = 1024;
 // rows, and the 2 MiB request cap remains the primary memory bound.
 const MAX_LEGACY_BEGIN_RETRY_ARTIFACTS = 4_096;
 const MAX_BEGIN_REQUEST_BYTES = 2 * 1024 * 1024;
+// A learner's computer is not an operator's host: what the desktop app may
+// store for a local run is bounded before a byte is taken. It sends replay
+// casts only, one per session, each in a single part.
+const LEARNER_ARTIFACT_KIND = "ssh_recording_segment";
+const LEARNER_ARTIFACT_CONTENT_TYPE = "application/x-asciicast; charset=utf-8";
+const LEARNER_MAX_ARTIFACTS = MAX_TIMELINE_SESSIONS;
+const LEARNER_MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
+const LEARNER_MAX_MANIFEST_BYTES = 64 * 1024 * 1024;
 const MAX_RUN_IDENTIFIER_BYTES = 128;
 const MAX_VM_NAME_BYTES = 128;
 /** The agent caps transcripts around 1 MB; leave headroom but stay well
@@ -148,8 +159,23 @@ async function dispatchAgentRunArtifactRequest(
   env: Cloudflare.Env,
 ): Promise<Response | null> {
   const url = new URL(request.url);
-  const pathname = url.pathname;
+  // The desktop app's routes are the agent's path tails under their own
+  // prefix; who the caller is follows from the prefix (requireArtifactWriter).
+  const local = url.pathname.startsWith(`${LOCAL_ARCHIVE_PREFIX}/`);
+  const pathname = local
+    ? `/agent/runs${url.pathname.slice(LOCAL_ARCHIVE_PREFIX.length)}`
+    : url.pathname;
+  const response = await dispatchArtifactPath(request, env, pathname, local);
+  // Nothing else lives under the app's prefix, so no other handler gets a try.
+  return response ?? (local ? jsonResponse({ error: "not found" }, 404) : null);
+}
 
+async function dispatchArtifactPath(
+  request: Request,
+  env: Cloudflare.Env,
+  pathname: string,
+  local: boolean,
+): Promise<Response | null> {
   if (pathname === "/agent/runs/begin") {
     return handleBeginRunUpload(request, env);
   }
@@ -212,7 +238,8 @@ async function dispatchAgentRunArtifactRequest(
   const archiveStageMatch = pathname.match(
     /^\/agent\/runs\/([^/]+)\/vms\/([^/]+)\/archive-stage$/,
   );
-  if (archiveStageMatch) {
+  // Archive stages are a host agent's progress report; the app sends none.
+  if (archiveStageMatch && !local) {
     const runId = decodePathSegment(archiveStageMatch[1] ?? "");
     const vmName = decodePathSegment(archiveStageMatch[2] ?? "");
     if (!runId || !vmName) {
@@ -256,10 +283,13 @@ async function handleBeginRunUpload(
     return jsonResponse({ error: "method not allowed" }, 405);
   }
 
-  const verified = await requireVerifiedAgentRequest(request, env);
+  const verified = await requireArtifactWriter(request, env);
   if (!verified.ok) {
     return verified.response;
   }
+  const { writer } = verified;
+  const limited = await limitLearner(request, env, writer);
+  if (limited) return limited;
 
   const parsedBody = await parseBoundedJsonRequest<AgentRunBeginRequest>(
     request,
@@ -298,13 +328,16 @@ async function handleBeginRunUpload(
   if (artifacts === null) {
     return jsonResponse({ error: "invalid artifacts payload" }, 400);
   }
+  if (writer.kind === "learner" && !learnerManifestAllowed(artifacts)) {
+    return jsonResponse({ error: "invalid artifacts payload" }, 400);
+  }
 
   const db = drizzle(env.DB);
   const runVm = await resolveRunVm({
     db,
     runId,
     vmName,
-    agent: verified.agent,
+    writer,
   });
   if (!runVm) {
     return runPurgedResponse();
@@ -313,7 +346,7 @@ async function handleBeginRunUpload(
   // new agent can distinguish an upgraded control plane from an older one
   // that silently ignored the request field.
   const archiveProgressVersion =
-    body.archiveProgressVersion === 1 ? 1 : undefined;
+    body.archiveProgressVersion === 1 && writer.kind === "agent" ? 1 : undefined;
 
   if (oversizedManifestRetry) {
     // The post-deploy compatibility path never reserves or changes manifest
@@ -387,6 +420,40 @@ async function handleBeginRunUpload(
   });
 
   return runBeginSuccessResponse(runVm, archiveProgressVersion);
+}
+
+/** The app's begin and timeline calls are few per run; more is abuse. */
+async function limitLearner(
+  request: Request,
+  env: Cloudflare.Env,
+  writer: ArtifactWriter,
+): Promise<Response | null> {
+  if (writer.kind !== "learner") return null;
+  const limited = await enforceRateLimit(
+    request,
+    env,
+    "scenario-start",
+    `desktop-archive:${writer.userId}`,
+  );
+  return limited.ok ? null : limited.response;
+}
+
+/** Replay casts only, each small, and no more of them than sessions are shown. */
+function learnerManifestAllowed(
+  artifacts: ReadonlyArray<{ kind: string; contentType: string; sizeBytes: number }>,
+): boolean {
+  let total = 0;
+  for (const artifact of artifacts) {
+    total += artifact.sizeBytes;
+    if (
+      artifact.kind !== LEARNER_ARTIFACT_KIND ||
+      artifact.contentType !== LEARNER_ARTIFACT_CONTENT_TYPE ||
+      artifact.sizeBytes > LEARNER_MAX_ARTIFACT_BYTES
+    ) {
+      return false;
+    }
+  }
+  return artifacts.length <= LEARNER_MAX_ARTIFACTS && total <= LEARNER_MAX_MANIFEST_BYTES;
 }
 
 function runBeginSuccessResponse(
@@ -534,13 +601,26 @@ async function handleMultipartPart(
       409,
     );
   }
+  if (runVm.writer.kind === "learner") {
+    // The app sends an artifact as one part of exactly its declared size, so
+    // nothing larger than the manifest allowed ever reaches storage.
+    const length = Number(request.headers.get("content-length") ?? "NaN");
+    if (partNumber !== 1 || !Number.isSafeInteger(length) || length !== artifact.sizeBytes) {
+      return jsonResponse({ error: "a part must be the whole artifact" }, 400);
+    }
+  }
 
   const multipart = env.VM_RUN_ARTIFACTS_BUCKET.resumeMultipartUpload(
     artifact.r2Key,
     upload.r2UploadId,
   );
   await artifactWriteBatch(db.$client, runVm, []);
-  const uploadedPart = await multipart.uploadPart(partNumber, request.body);
+  // For the app the stream is cut to the declared size, whatever was sent.
+  const body =
+    runVm.writer.kind === "learner"
+      ? request.body.pipeThrough(new FixedLengthStream(artifact.sizeBytes))
+      : request.body;
+  const uploadedPart = await multipart.uploadPart(partNumber, body);
   const uploadedParts = parseUploadedParts(upload.uploadedPartsJson);
   uploadedParts.push({
     partNumber,
@@ -848,6 +928,8 @@ async function handleRunTimeline(
   if (!resolved.ok) {
     return resolved.response;
   }
+  const limited = await limitLearner(request, env, resolved.runVm.writer);
+  if (limited) return limited;
   const { db, runVm } = resolved;
   if (runVm.artifactWritesSealed) {
     return artifactWritesSealedResponse();

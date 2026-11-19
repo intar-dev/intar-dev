@@ -18,45 +18,45 @@ use super::krec::{ParsedKrec, parse_krec};
 use super::replay_compose::compose_session;
 use super::transcript::{render_transcript, trim_transcript_to_byte_limit};
 
-pub(crate) const SESSION_CAST_KIND: &str = "ssh_recording_segment";
-pub(crate) const TIMELINE_VERSION: u32 = 1;
+pub const SESSION_CAST_KIND: &str = "ssh_recording_segment";
+pub const TIMELINE_VERSION: u32 = 1;
 /// The control plane accepts at most 4 MiB of decoded transcript text per
 /// timeline. The HTTP request can be larger because JSON escaping adds bytes.
-pub(crate) const TIMELINE_TRANSCRIPT_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const TIMELINE_TRANSCRIPT_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Wire payload for `POST /agent/runs/{runId}/vms/{vmName}/timeline`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TimelineDocument {
-    pub(crate) version: u32,
-    pub(crate) sessions: Vec<TimelineSession>,
+pub struct TimelineDocument {
+    pub version: u32,
+    pub sessions: Vec<TimelineSession>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TimelineSession {
+pub struct TimelineSession {
     /// 1-based chronological session number.
-    pub(crate) index: u32,
-    pub(crate) start_timestamp_ms: u64,
+    pub index: u32,
+    pub start_timestamp_ms: u64,
     /// Wall-clock session length — reconnect gaps in the UI are computed
     /// from this, so it is never idle-clamped like the cast timing.
-    pub(crate) duration_ms: u64,
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) cast_filename: String,
-    pub(crate) transcript: String,
-    pub(crate) transcript_truncated: bool,
+    pub duration_ms: u64,
+    pub exit_code: Option<i32>,
+    pub cast_filename: String,
+    pub transcript: String,
+    pub transcript_truncated: bool,
 }
 
-pub(crate) struct RenderedSessionMedia {
+pub struct RenderedSessionMedia {
     /// One cast per session, in timeline order.
-    pub(crate) cast_paths: Vec<PathBuf>,
-    pub(crate) timeline: TimelineDocument,
+    pub cast_paths: Vec<PathBuf>,
+    pub timeline: TimelineDocument,
 }
 
 /// Renders recordings from `artifacts_dir` into a separate `output_dir`.
 /// Archive retries use a private output directory so a detached blocking
 /// renderer can never write the deterministic cast paths owned by a retry.
-pub(crate) async fn render_session_media_into(
+pub async fn render_session_media_into(
     artifacts_dir: &Path,
     output_dir: &Path,
 ) -> Result<Option<RenderedSessionMedia>> {
@@ -235,21 +235,21 @@ fn parse_krec_file(path: &Path) -> Result<ParsedKrec> {
 /// Test-only asciicast v3 reader used to verify composed output. Event
 /// intervals are accumulated into absolute `time_s` for easy assertions.
 #[cfg(test)]
-pub(crate) struct ParsedCast {
-    pub(crate) width: u16,
-    pub(crate) height: u16,
-    pub(crate) events: Vec<CastEvent>,
+pub struct ParsedCast {
+    pub width: u16,
+    pub height: u16,
+    pub events: Vec<CastEvent>,
 }
 
 #[cfg(test)]
-pub(crate) struct CastEvent {
-    pub(crate) time_s: f64,
-    pub(crate) kind: String,
-    pub(crate) payload: String,
+pub struct CastEvent {
+    pub time_s: f64,
+    pub kind: String,
+    pub payload: String,
 }
 
 #[cfg(test)]
-pub(crate) fn parse_cast(content: &str) -> Result<ParsedCast> {
+pub fn parse_cast(content: &str) -> Result<ParsedCast> {
     use serde_json::{Map, Value};
 
     let mut lines = content.lines();

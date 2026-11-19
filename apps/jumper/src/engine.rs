@@ -58,6 +58,7 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                                 // The window fits the grid to its size at its first paint.
                                 let size = Size { columns: 80, rows: 24 };
                                 let (terminal, changes) = terminal::open(&machine, target, size);
+                                local.opened(terminal.clone());
                                 if outbox.send(Event::Terminal(terminal, changes)).is_err() {
                                     break;
                                 }
@@ -91,7 +92,16 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             continue;
                         }
                     } };
-                    // The machine goes before the run or the sign-in does.
+                    // The machine goes before the run or the sign-in does. A run the
+                    // learner ends has its sessions sent to intar first: intar takes
+                    // none for a run that is over.
+                    let mut unsaved = None;
+                    if let (Command::EndRun { run_id }, Some(channel)) = (&command, &channel)
+                        && local.runs(run_id)
+                    {
+                        let _ = outbox.send(Event::Machine(MachineStatus::Saving));
+                        unsaved = local.stop_and_save(channel).await.err();
+                    }
                     if matches!(command, Command::EndRun { .. } | Command::SignOut) {
                         local.stop().await;
                     }
@@ -171,6 +181,13 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                     }
                     if outbox.send(event).is_err() {
                         break;
+                    }
+                    // Said after the run's end, so it stays on the closed run's screen.
+                    if let Some(reason) = unsaved {
+                        let note = format!("This run's terminal sessions could not be saved for its replay: {reason}");
+                        if outbox.send(Event::Failed(note)).is_err() {
+                            break;
+                        }
                     }
                     if let Some((run, channel)) = boot {
                         let _ = outbox.send(Event::Machine(MachineStatus::Starting));

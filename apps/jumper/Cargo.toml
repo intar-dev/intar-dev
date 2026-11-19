@@ -9,8 +9,11 @@ rust-version.workspace = true
 description = "The intar desktop app: run labs on your own computer."
 
 [dependencies]
+anyhow.workspace = true
 # Terminal emulation for the run's terminal; the app draws the grid itself.
 alacritty_terminal.workspace = true
+# Reads a run's recorded sessions and renders their replays.
+dhd = { path = "../../crates/dhd" }
 dirs.workspace = true
 futures-util.workspace = true
 gpui.workspace = true
@@ -33,7 +36,8 @@ zpm = { path = "../../crates/zpm" }
 zstd.workspace = true
 
 [dev-dependencies]
-axum = { workspace = true, features = ["http1", "tokio"] }
+fatfs.workspace = true
+axum = { workspace = true, features = ["http1", "json", "tokio"] }
 tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

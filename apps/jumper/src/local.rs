@@ -4,18 +4,26 @@
 // What the guest's Kino reports is shown here and handed to the engine as
 // the state intar takes, the shape an agent host reports a VM in.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use intar_contracts::bridge::{VmTerminalStateKindV1, VmTerminalStateV1};
 use intar_contracts::bridge_v9::{VmPhaseV2, VmStateV3};
-use subspace::Subspace;
 use subspace::contract::LocalRunV1;
+use subspace::{ArchiveCastV1, Subspace};
 use zpm::machine::{Cache, Plan, RunningMachine};
 use zpm::reports::GuestReport;
 
 use crate::state::MachineStatus;
-use crate::terminal::{RunKey, Target};
+use crate::terminal::{RunKey, Target, Terminal};
+
+/// Where a machine's recorded sessions are copied to, in its run directory.
+const SESSIONS: &str = "sessions";
+/// What intar takes for one replay, and for all of a machine's.
+const MAX_CAST_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REPLAY_BYTES: usize = 64 * 1024 * 1024;
+/// How long the guest gets to finish a session's recording after a logout.
+const LOGOUT_GRACE: std::time::Duration = std::time::Duration::from_millis(700);
 
 pub struct Local {
     cache: PathBuf,
@@ -25,6 +33,10 @@ pub struct Local {
     last: Option<MachineStatus>,
     /// The key the terminal logs in with, until the terminal took it.
     key: Option<RunKey>,
+    /// The machine's open terminal, to log out of before the machine stops.
+    terminal: Option<Terminal>,
+    /// A machine that stopped by itself, by its run and its name.
+    stopped: Option<(LocalRunV1, String)>,
 }
 
 impl Local {
@@ -40,13 +52,15 @@ impl Local {
             machine: None,
             last: None,
             key: None,
+            terminal: None,
+            stopped: None,
         }
     }
 
     pub fn runs(&self, run_id: &str) -> bool {
-        self.machine
-            .as_ref()
-            .is_some_and(|(running, _)| running.run_id == run_id)
+        let running = self.machine.as_ref().map(|(run, _)| run);
+        let stopped = self.stopped.as_ref().map(|(run, _)| run);
+        running.or(stopped).is_some_and(|run| run.run_id == run_id)
     }
 
     /// Starts the run's machine. The guest's `intar` command is answered by
@@ -141,9 +155,48 @@ impl Local {
     pub async fn stop(&mut self) {
         self.last = None;
         self.key = None;
+        self.terminal = None;
+        self.stopped = None;
         if let Some((_, machine)) = self.machine.take() {
             let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
         }
+    }
+
+    /// Stops the machine and sends what its sessions recorded to intar, so
+    /// the run's page can replay them. The run has to be ended afterwards; a
+    /// run that ends first takes no recordings. `Ok` is how many sessions
+    /// were sent.
+    pub async fn stop_and_save(&mut self, channel: &Subspace) -> Result<usize, String> {
+        // A machine that stopped by itself left its sessions behind as well.
+        let (run, name) = match (&self.machine, &self.stopped) {
+            (Some((run, machine)), _) => (run.clone(), machine.name.clone()),
+            (None, Some((run, name))) => (run.clone(), name.clone()),
+            (None, None) => return Ok(0),
+        };
+        let listed = run.machines.iter().find(|listed| listed.name == name);
+        // An intar that predates the archive routes names neither.
+        let target = run
+            .execution_id
+            .clone()
+            .zip(listed.and_then(|listed| listed.runtime_name.clone()));
+        let dir = self.runs.join(&run.run_id).join(&name);
+        // Logging out lets the guest finish the session's recording; a session
+        // cut off by the stopping machine is left unfinished and is not kept.
+        if let Some(terminal) = self.terminal.take() {
+            terminal.close();
+            tokio::time::sleep(LOGOUT_GRACE).await;
+        }
+        // The disk is read only once the guest no longer writes to it.
+        self.stop().await;
+        let Some((execution_id, vm)) = target else {
+            return Ok(0);
+        };
+        save_sessions(&dir, channel, &execution_id, &vm).await
+    }
+
+    /// The machine's terminal opened; it is logged out of when the run ends.
+    pub fn opened(&mut self, terminal: Terminal) {
+        self.terminal = Some(terminal);
     }
 
     /// What the machine said since the last call: its status if that
@@ -155,6 +208,22 @@ impl Local {
         let mut latest = None;
         while let Ok(report) = machine.reports.reports.try_recv() {
             latest = Some(report);
+        }
+        // The replay marks when each task was first solved; that is noted
+        // beside the sessions while the machine runs.
+        if let Some(report) = latest
+            .as_ref()
+            .filter(|report| !report.lab.tasks.is_empty())
+        {
+            let sessions = self
+                .runs
+                .join(&run.run_id)
+                .join(&machine.name)
+                .join(SESSIONS);
+            let tasks = report.lab.tasks.clone();
+            tokio::spawn(async move {
+                let _ = dhd::check_passes::record_check_passes(&sessions, &tasks).await;
+            });
         }
         let mut status = latest.as_ref().map(MachineStatus::of);
         // Once the guest's SSH is up and it has said which host keys are its
@@ -174,6 +243,9 @@ impl Local {
             .and_then(|report| vm_state(run, &machine.name, report, now_ms()));
         if !machine.is_running() {
             status = Some(MachineStatus::Failed("The machine stopped.".to_owned()));
+            // Its run and its directory are kept: ending the run still sends
+            // the sessions it recorded.
+            self.stopped = Some((run.clone(), machine.name.clone()));
             self.machine = None;
         }
         let status = status.filter(|status| self.last.as_ref() != Some(status));
@@ -186,6 +258,59 @@ impl Local {
             terminal,
         }
     }
+}
+
+/// Reads the finished sessions off the stopped machine's recordings disk in
+/// `dir`, renders their replays and sends them to intar.
+async fn save_sessions(
+    dir: &Path,
+    channel: &Subspace,
+    execution_id: &str,
+    vm: &str,
+) -> Result<usize, String> {
+    let failed = |error: anyhow::Error| format!("{error:#}");
+    let sessions = dir.join(SESSIONS);
+    let (disk, into) = (dir.join("rec.vfat"), sessions.clone());
+    tokio::task::spawn_blocking(move || dhd::recordings::extract(&disk, &into))
+        .await
+        .map_err(|_| "reading the recorded sessions stopped".to_owned())?
+        .map_err(failed)?;
+    let replay = dir.join("replay");
+    tokio::fs::create_dir_all(&replay)
+        .await
+        .map_err(|error| format!("{}: {error}", replay.display()))?;
+    let Some(rendered) = dhd::replay_media::render_session_media_into(&sessions, &replay)
+        .await
+        .map_err(failed)?
+    else {
+        return Ok(0);
+    };
+    let mut casts = Vec::new();
+    for path in &rendered.cast_paths {
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        casts.push(ArchiveCastV1 { filename, bytes });
+    }
+    // intar takes what it can show: no single replay over 8 MiB and no
+    // more than 64 MiB for a machine.
+    // ponytail: over a limit nothing is sent; send the sessions that fit
+    // once a learner hits it.
+    let total: usize = casts.iter().map(|cast| cast.bytes.len()).sum();
+    if total > MAX_REPLAY_BYTES || casts.iter().any(|cast| cast.bytes.len() > MAX_CAST_BYTES) {
+        return Err("the recorded sessions are larger than intar keeps for a run".to_owned());
+    }
+    let timeline = serde_json::to_value(&rendered.timeline).map_err(|error| error.to_string())?;
+    channel
+        .archive(execution_id, vm, &casts, &timeline)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(casts.len())
 }
 
 #[derive(Default)]
@@ -419,6 +544,7 @@ mod tests {
         }
         // The app's own key and the guest's reported host key open a shell.
         let mut typed = false;
+        let mut opened = None;
         if let Some((machine, target)) = terminal {
             let size = crate::terminal::Size {
                 columns: 100,
@@ -441,7 +567,14 @@ mod tests {
             .await;
             typed = shows("terminal-42");
             eprintln!("live: terminal on {machine}: {typed}");
+            opened = Some(terminal.clone());
         }
+        // Ending as the app does: log out, stop, send the sessions, then end.
+        if let Some(terminal) = opened {
+            local.opened(terminal);
+        }
+        let saved = local.stop_and_save(&channel).await;
+        eprintln!("live: sessions saved: {saved:?}");
         local.stop().await;
         let ended = channel.end_run(&run.run_id).await;
         eprintln!("live: ended: {:?}", ended.map(|answer| answer.run.active));
@@ -451,5 +584,126 @@ mod tests {
         );
         assert!(reported > 0, "no report reached intar");
         assert!(typed, "the terminal did not show a command's output");
+        assert_eq!(saved, Ok(1), "the terminal's session was not saved");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_machines_sessions_are_rendered_and_sent() {
+        use std::io::Write as _;
+        use std::sync::Mutex;
+
+        use axum::body::Bytes;
+        use axum::extract::{Path as UrlPath, State};
+        use axum::http::{HeaderMap, Method};
+
+        // intar's archive routes, noting what they were sent.
+        type Calls = Arc<Mutex<Vec<(String, String, Option<String>, Bytes)>>>;
+        async fn route(
+            State(calls): State<Calls>,
+            method: Method,
+            UrlPath(path): UrlPath<String>,
+            headers: HeaderMap,
+            body: Bytes,
+        ) -> axum::Json<serde_json::Value> {
+            let length = headers
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            calls
+                .lock()
+                .expect("calls")
+                .push((method.to_string(), path, length, body));
+            axum::Json(serde_json::json!({ "done": false, "nextExpectedPart": 1 }))
+        }
+        let calls = Calls::default();
+        let app = axum::Router::new()
+            .route("/api/local/archive/{*path}", axum::routing::any(route))
+            .with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("listen");
+        let base = format!("http://{}", listener.local_addr().expect("address"));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let channel = Subspace::new(
+            reqwest::Client::new(),
+            base.parse().expect("url"),
+            subspace::Tokens {
+                access_token: "token".into(),
+                refresh_token: None,
+                expires_at: u64::MAX,
+            },
+        );
+
+        // A recordings disk as a guest leaves it: one finished session, one cut off.
+        let dir = tempfile::tempdir().expect("dir");
+        let disk = dir.path().join("rec.vfat");
+        zpm::rundisk::write_recording_disk(&disk).expect("disk");
+        let session = concat!(
+            r#"{"type":"header","format":"kino.raw-event-log","version":1,"width":80,"height":24,"start_timestamp_ms":1000}"#,
+            "\n",
+            r#"{"type":"event","offset_ms":10,"event":"o","data_b64":"aGVsbG8NCg=="}"#,
+            "\n",
+            r#"{"type":"event","offset_ms":900,"event":"x","exit_code":0}"#,
+            "\n",
+        );
+        {
+            let image = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&disk)
+                .expect("open");
+            let files = fatfs::FileSystem::new(image, fatfs::FsOptions::new()).expect("fat");
+            let root = files.root_dir();
+            for (name, text) in [
+                ("ssh-session-1000-7.krec", session),
+                ("ssh-session-2000-9.krec.partial", session),
+            ] {
+                root.create_file(name)
+                    .expect("create")
+                    .write_all(text.as_bytes())
+                    .expect("write");
+            }
+        }
+
+        assert_eq!(
+            save_sessions(dir.path(), &channel, "execution-1", "web-run-1").await,
+            Ok(1)
+        );
+        let calls = calls.lock().expect("calls");
+        let steps: Vec<_> = calls
+            .iter()
+            .map(|(method, path, ..)| format!("{method} {path}"))
+            .collect();
+        let vm = "execution-1/vms/web-run-1";
+        assert_eq!(
+            steps,
+            [
+                "POST begin".to_owned(),
+                format!("POST {vm}/artifacts/1/multipart-begin"),
+                format!("PUT {vm}/artifacts/1/parts/1"),
+                format!("POST {vm}/artifacts/1/complete"),
+                format!("POST {vm}/timeline"),
+                format!("POST {vm}/complete"),
+            ]
+        );
+        // The manifest names the cast that the part then carries, whole.
+        let begin: serde_json::Value = serde_json::from_slice(&calls[0].3).expect("begin");
+        let cast = &calls[2];
+        assert_eq!(begin["runId"], "execution-1");
+        assert_eq!(begin["vmName"], "web-run-1");
+        assert_eq!(begin["artifacts"][0]["kind"], "ssh_recording_segment");
+        assert_eq!(begin["artifacts"][0]["filename"], "session-01.cast");
+        assert_eq!(begin["artifacts"][0]["sizeBytes"], cast.3.len());
+        assert_eq!(cast.2.as_deref(), Some(cast.3.len().to_string().as_str()));
+        assert!(String::from_utf8_lossy(&cast.3).contains("hello"));
+        let timeline: serde_json::Value = serde_json::from_slice(&calls[4].3).expect("timeline");
+        assert_eq!(timeline["sessions"][0]["index"], 1);
+        assert_eq!(timeline["sessions"][0]["castFilename"], "session-01.cast");
+        assert_eq!(timeline["sessions"][0]["exitCode"], 0);
+        assert!(
+            timeline["sessions"][0]["transcript"]
+                .as_str()
+                .is_some_and(|text| text.contains("hello"))
+        );
     }
 }

@@ -58,6 +58,9 @@ pub enum MachineStatus {
         passed: usize,
         tasks: usize,
     },
+    /// The run is ending: the machine has stopped and its sessions are sent
+    /// to intar.
+    Saving,
     /// In words the learner can read.
     Failed(String),
 }
@@ -175,7 +178,7 @@ impl State {
                     MachineStatus::Downloading { .. } => 1,
                     MachineStatus::Booting => 2,
                     MachineStatus::Ready { .. } => 3,
-                    MachineStatus::Failed(_) => self.stage,
+                    MachineStatus::Saving | MachineStatus::Failed(_) => self.stage,
                 };
                 self.machine = Some(status);
             }

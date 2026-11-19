@@ -504,6 +504,7 @@ mod tests {
         );
         let machine = |image: &OciDigest| LocalRunMachineV1 {
             name: "web".into(),
+            runtime_name: None,
             image: image.as_str().to_owned(),
             spec: put(&blobs, b"spec".to_vec()).as_str().to_owned(),
             kino: kino.as_str().to_owned(),

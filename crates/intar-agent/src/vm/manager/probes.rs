@@ -255,7 +255,7 @@ async fn record_vm_check_passes(inner: &Inner, vm_name: &str, update: &GuestUpda
         return;
     };
     if let Err(error) =
-        crate::vm::check_passes::record_check_passes(&artifacts_dir, &update.lab.tasks).await
+        dhd::check_passes::record_check_passes(&artifacts_dir, &update.lab.tasks).await
     {
         warn!(error = %error, vm = vm_name, "failed to record check passes");
     }

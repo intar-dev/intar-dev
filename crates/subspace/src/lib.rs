@@ -55,6 +55,45 @@ pub enum Error {
     Random(String),
 }
 
+/// The desktop app's archive routes.
+const ARCHIVE: &str = "/api/local/archive";
+
+/// One session's replay, as `dhd` renders it.
+pub struct ArchiveCastV1 {
+    pub filename: String,
+    pub bytes: Vec<u8>,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// An archive route's answer as JSON, or the refusal it sent.
+async fn archive_answer(
+    path: &str,
+    response: reqwest::Response,
+) -> Result<serde_json::Value, Error> {
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    if status.is_success() {
+        return Ok(body);
+    }
+    let said = |field: &str| {
+        body.get(field)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    Err(Error::Refused {
+        status: status.as_u16(),
+        code: said("code").to_owned(),
+        message: format!("intar refused {path} with {status}: {}", said("error")),
+        run: None,
+    })
+}
+
 /// What the caller stores between launches.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Tokens {
@@ -352,6 +391,73 @@ impl Subspace {
         })
     }
 
+    /// Stores the replay of one machine of a local run that is about to end:
+    /// the casts, then the timeline that names them, then the machine is
+    /// marked completed. `execution_id` and `vm` are the run view's
+    /// `execution_id` and the machine's `runtime_name`. Every step may be
+    /// repeated; a cast that is stored already is not sent again.
+    pub async fn archive(
+        &self,
+        execution_id: &str,
+        vm: &str,
+        casts: &[ArchiveCastV1],
+        timeline: &serde_json::Value,
+    ) -> Result<(), Error> {
+        let base = format!("{ARCHIVE}/{execution_id}/vms/{vm}");
+        let manifest: Vec<_> = casts
+            .iter()
+            .zip(1_u32..)
+            .map(|(cast, ordinal)| {
+                serde_json::json!({
+                    "ordinal": ordinal,
+                    "kind": "ssh_recording_segment",
+                    "filename": cast.filename,
+                    "contentType": "application/x-asciicast; charset=utf-8",
+                    "sizeBytes": cast.bytes.len(),
+                    "sha256": sha256_hex(&cast.bytes),
+                })
+            })
+            .collect();
+        let begin =
+            serde_json::json!({ "runId": execution_id, "vmName": vm, "artifacts": manifest });
+        self.archive_step(Method::POST, &format!("{ARCHIVE}/begin"), Some(&begin))
+            .await?;
+        for (cast, ordinal) in casts.iter().zip(1_u32..) {
+            let artifact = format!("{base}/artifacts/{ordinal}");
+            let started = self
+                .archive_step(Method::POST, &format!("{artifact}/multipart-begin"), None)
+                .await?;
+            if started.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
+                continue;
+            }
+            // One part, the whole cast, with its length: the server takes no other.
+            let part = self
+                .send_built(Method::PUT, &format!("{artifact}/parts/1"), |request| {
+                    request
+                        .header("content-length", cast.bytes.len())
+                        .body(cast.bytes.clone())
+                })
+                .await?;
+            archive_answer(&format!("{artifact}/parts/1"), part).await?;
+            self.archive_step(Method::POST, &format!("{artifact}/complete"), None)
+                .await?;
+        }
+        self.archive_step(Method::POST, &format!("{base}/timeline"), Some(timeline))
+            .await?;
+        self.archive_step(Method::POST, &format!("{base}/complete"), None)
+            .await?;
+        Ok(())
+    }
+
+    async fn archive_step(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value, Error> {
+        archive_answer(path, self.send(method, path, body, None).await?).await
+    }
+
     async fn call<B: Serialize, T: DeserializeOwned>(
         &self,
         method: Method,
@@ -388,14 +494,7 @@ impl Subspace {
         body: Option<&B>,
         idempotency_key: Option<&str>,
     ) -> Result<reqwest::Response, Error> {
-        let url = self.base.join(path)?;
-        // One refresh per call: a second 401 means the sign-in is gone.
-        for refreshed in [false, true] {
-            let access_token = self.tokens.lock().await.access_token.clone();
-            let mut request = self
-                .http
-                .request(method.clone(), url.clone())
-                .bearer_auth(&access_token);
+        self.send_built(method.clone(), path, |mut request| {
             // The server takes mutations as JSON only, an empty object included.
             request = match body {
                 Some(body) => request.json(body),
@@ -404,9 +503,30 @@ impl Subspace {
                     .body("{}"),
                 None => request,
             };
-            if let Some(key) = idempotency_key {
-                request = request.header("idempotency-key", key);
+            match idempotency_key {
+                Some(key) => request.header("idempotency-key", key),
+                None => request,
             }
+        })
+        .await
+    }
+
+    /// Sends what `build` makes of a request with the access token on it.
+    async fn send_built(
+        &self,
+        method: Method,
+        path: &str,
+        build: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, Error> {
+        let url = self.base.join(path)?;
+        // One refresh per call: a second 401 means the sign-in is gone.
+        for refreshed in [false, true] {
+            let access_token = self.tokens.lock().await.access_token.clone();
+            let request = build(
+                self.http
+                    .request(method.clone(), url.clone())
+                    .bearer_auth(&access_token),
+            );
             let response = request.send().await?;
             if response.status() != StatusCode::UNAUTHORIZED {
                 return Ok(response);

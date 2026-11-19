@@ -50,24 +50,24 @@ struct RawRecordingEvent {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ParsedKrec {
-    pub(crate) width: u16,
-    pub(crate) height: u16,
-    pub(crate) start_timestamp_ms: u64,
+pub struct ParsedKrec {
+    pub width: u16,
+    pub height: u16,
+    pub start_timestamp_ms: u64,
     /// Wall-clock session length: the offset of the last recorded event.
-    pub(crate) duration_ms: u64,
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) events: Vec<KrecEvent>,
+    pub duration_ms: u64,
+    pub exit_code: Option<i32>,
+    pub events: Vec<KrecEvent>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct KrecEvent {
-    pub(crate) time_s: f64,
-    pub(crate) data: KrecEventData,
+pub struct KrecEvent {
+    pub time_s: f64,
+    pub data: KrecEventData,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum KrecEventData {
+pub enum KrecEventData {
     Output(String),
     /// Typed input never affects rendering, but it feeds the command log
     /// shown next to the replay, so it rides through composition.
@@ -81,7 +81,7 @@ pub(crate) enum KrecEventData {
     },
 }
 
-pub(crate) fn parse_krec<R: Read>(input: R) -> Result<ParsedKrec> {
+pub fn parse_krec<R: Read>(input: R) -> Result<ParsedKrec> {
     let mut reader = BufReader::new(input);
     let mut line = String::new();
 

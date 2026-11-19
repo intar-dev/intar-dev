@@ -2,6 +2,7 @@
 members = [
     "apps/jumper",
     "crates/cloud-hypervisor-client",
+    "crates/dhd",
     "crates/intar-agent",
     "crates/intar-builder",
     "crates/intar-contracts",
