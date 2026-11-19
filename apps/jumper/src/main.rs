@@ -3,6 +3,7 @@
 
 mod engine;
 mod local;
+mod pull;
 mod secrets;
 mod state;
 mod ui;
@@ -11,7 +12,7 @@ use gpui::prelude::*;
 use gpui::{
     App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, FontWeight, SharedString,
     Stateful, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, px,
-    rgb, size,
+    relative, rgb, size,
 };
 use gpui_platform::application;
 use state::{Command, Event, MachineStatus, Screen, State};
@@ -66,6 +67,16 @@ fn solved(course: &CatalogCourseV1) -> usize {
         .iter()
         .filter(|lecture| lecture.state == "completed")
         .count()
+}
+
+/// "1.2 GB" or "340 MB".
+fn megabytes(bytes: u64) -> String {
+    let megabytes = bytes as f32 / (1024. * 1024.);
+    if megabytes >= 1024. {
+        format!("{:.1} GB", megabytes / 1024.)
+    } else {
+        format!("{megabytes:.0} MB")
+    }
 }
 
 /// "2 CPUs · 2 GB memory".
@@ -676,20 +687,32 @@ impl Jumper {
             Some(MachineStatus::Failed(reason)) => Some(reason.clone()),
             _ => None,
         };
-        let stage = self.state.stage.min(2);
+        let stage = self.state.stage.min(3);
         let names = [
-            "Preparing this computer".to_owned(),
+            "Checking with Intar".to_owned(),
+            "Downloading images".to_owned(),
             format!("Booting {machines}"),
             "Ready".to_owned(),
         ];
+        let download = match self.state.machine {
+            Some(MachineStatus::Downloading { done, total }) if failed.is_none() => {
+                Some((done, total))
+            }
+            _ => None,
+        };
         let (headline, summary) = match (&failed, stage) {
             (Some(reason), _) => ("This run could not start".to_owned(), reason.clone()),
             (None, 0) => (
-                names[0].clone(),
-                "Intar puts the machines for this scenario in place on this computer.".to_owned(),
+                "Preparing this run".to_owned(),
+                "Intar looks up which machines this scenario needs on this computer.".to_owned(),
+            ),
+            (None, 1) => (
+                names[1].clone(),
+                "The machines for this scenario are downloaded once and kept on this computer."
+                    .to_owned(),
             ),
             (None, _) => (
-                names[1].clone(),
+                names[2].clone(),
                 "Each machine starts its system and then the lab inside it.".to_owned(),
             ),
         };
@@ -697,7 +720,7 @@ impl Jumper {
             .flex()
             .items_center()
             .gap(px(6.))
-            .children((0..3).map(|index| {
+            .children((0..4).map(|index| {
                 let dot = div().h(px(8.)).rounded(px(4.));
                 match (index.cmp(&stage), failed.is_some()) {
                     (std::cmp::Ordering::Less, _) => dot.w(px(8.)).bg(rgb(p.green)),
@@ -755,16 +778,60 @@ impl Jumper {
                     None,
                 ),
             };
+            // The download says how far it is, in bytes.
+            let detail = download.filter(|_| index == 1).map(|(done, total)| {
+                let part = if total == 0 { 0. } else { done as f32 / total as f32 };
+                div()
+                    .pl(px(36.))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .h(px(8.))
+                            .rounded(px(4.))
+                            .bg(rgb(p.track))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(relative(part.clamp(0., 1.)))
+                                    .rounded(px(4.))
+                                    .bg(rgb(p.accent)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(format!("{} of {}", megabytes(done), megabytes(total))),
+                            )
+                            .child(kit::meta(p, format!("{:.0} %", part * 100.))),
+                    )
+                    .child(kit::caption(
+                        p,
+                        "Every piece is checked as it arrives. If you end the run now, the download starts again next time.",
+                    ))
+            });
             div()
                 .flex()
-                .items_center()
-                .gap_3()
+                .flex_col()
+                .gap(px(10.))
                 .p_3()
                 .rounded(px(10.))
                 .when_some(fill, |row, fill| row.bg(rgb(fill)))
-                .child(mark)
-                .child(div().flex_1().child(kit::card_title(p, name.clone())))
-                .child(kit::label(p, word).text_color(rgb(word_color)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(mark)
+                        .child(div().flex_1().child(kit::card_title(p, name.clone())))
+                        .child(kit::label(p, word).text_color(rgb(word_color))),
+                )
+                .children(detail)
         });
         kit::card(p)
             .flex_1()
@@ -786,7 +853,7 @@ impl Jumper {
                             .items_center()
                             .gap_3()
                             .child(track)
-                            .child(kit::label(p, format!("Stage {} of 3", stage + 1))),
+                            .child(kit::label(p, format!("Stage {} of 4", stage + 1))),
                     )
                     .child(kit::page(p, headline))
                     .child(kit::support(p, summary).text_size(px(15.))),

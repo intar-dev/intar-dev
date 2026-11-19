@@ -3,8 +3,8 @@
 //!
 //! The cache holds what a pull stores, by digest:
 //! `machines/<hex>/{kernel,initrd,root.raw}`, `kino/<hex>` and `specs/<hex>`.
-//! Nothing here fills it yet; a machine whose files are missing is refused
-//! with [`Error::NotCached`].
+//! The caller fills it ([`Cache::entry`] says where); a machine whose files
+//! are missing is refused with [`Error::NotCached`].
 //
 // ponytail: one machine per run. QEMU's built-in network gives every guest
 // the same private address and no way to reach another guest; several
@@ -51,7 +51,7 @@ impl Cache {
 
     /// The directory or file for `digest` under `kind`. A digest is used as
     /// a path only when it is exactly `sha256:` and 64 hex digits.
-    fn entry(&self, kind: &str, digest: &str) -> Result<PathBuf, Error> {
+    pub fn entry(&self, kind: &str, digest: &str) -> Result<PathBuf, Error> {
         match digest.strip_prefix("sha256:") {
             Some(hex)
                 if hex.len() == 64
@@ -68,9 +68,7 @@ impl Cache {
     }
 
     fn missing(what: &str) -> Error {
-        Error::NotCached(format!(
-            "{what} is not on this computer yet, and this version of the app cannot download it."
-        ))
+        Error::NotCached(format!("{what} is not on this computer yet."))
     }
 
     pub fn image(&self, digest: &str) -> Result<ImageFiles, Error> {

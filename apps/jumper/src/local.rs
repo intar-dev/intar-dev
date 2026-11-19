@@ -1,5 +1,5 @@
-//! The run's machine on this computer: started through zpm from the local
-//! cache, watched through Kino's reports, and stopped with the run.
+//! The run's machine on this computer: downloaded into the local cache when
+//! it is not there, started through zpm, watched through Kino's reports, and stopped with the run.
 //
 // What the guest's Kino reports is shown here and handed to the engine as
 // the state intar takes, the shape an agent host reports a VM in.
@@ -46,8 +46,14 @@ impl Local {
     }
 
     /// Starts the run's machine. The guest's `intar` command is answered by
-    /// passing it on to intar over `channel`.
-    pub async fn start(&mut self, run: &LocalRunV1, channel: Arc<Subspace>) -> MachineStatus {
+    /// passing it on to intar over `channel`. What the machine boots from is
+    /// downloaded first when it is not here; `downloaded` hears how far that is.
+    pub async fn start(
+        &mut self,
+        run: &LocalRunV1,
+        channel: Arc<Subspace>,
+        downloaded: &dyn Fn(u64, u64),
+    ) -> MachineStatus {
         self.stop().await;
         let [machine] = run.machines.as_slice() else {
             return MachineStatus::Failed(format!(
@@ -59,6 +65,11 @@ impl Local {
             self.cache.clone(),
             self.runs.join(&run.run_id).join(&machine.name),
         );
+        if let Err(reason) =
+            crate::pull::pull(&channel, &Cache::new(&cache), machine, downloaded).await
+        {
+            return MachineStatus::Failed(reason);
+        }
         let (run_id, machine) = (run.run_id.clone(), machine.clone());
         let handle = tokio::runtime::Handle::current();
         let started = tokio::task::spawn_blocking(move || {

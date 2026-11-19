@@ -335,6 +335,23 @@ impl Subspace {
         .await
     }
 
+    /// One manifest or blob of intar's registry (`/v2/...`), which takes the
+    /// app's token for what the learner's active local run needs. The caller
+    /// reads the body and checks it against its digest.
+    pub async fn registry(&self, path: &str) -> Result<reqwest::Response, Error> {
+        let response = self.send::<()>(Method::GET, path, None, None).await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        Err(Error::Refused {
+            status: status.as_u16(),
+            code: "registry".to_owned(),
+            message: format!("intar's registry answered {status} for {path}"),
+            run: None,
+        })
+    }
+
     async fn call<B: Serialize, T: DeserializeOwned>(
         &self,
         method: Method,

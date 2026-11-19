@@ -42,8 +42,10 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                 let mut stored: Option<Tokens> = None;
                 let mut local = Local::new();
                 let mut tick = tokio::time::interval(MACHINE_POLL);
+                // Commands that arrived while a machine was being started.
+                let mut waiting = std::collections::VecDeque::new();
                 loop {
-                    let command = tokio::select! {
+                    let command = if let Some(command) = waiting.pop_front() { command } else { tokio::select! {
                         command = inbox.recv() => match command {
                             Some(command) => command,
                             // The window is gone: stop the machine with it.
@@ -79,7 +81,7 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             }
                             continue;
                         }
-                    };
+                    } };
                     // The machine goes before the run or the sign-in does.
                     if matches!(command, Command::EndRun { .. } | Command::SignOut) {
                         local.stop().await;
@@ -163,8 +165,30 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                     }
                     if let Some((run, channel)) = boot {
                         let _ = outbox.send(Event::Machine(MachineStatus::Starting));
-                        let status = local.start(&run, channel).await;
-                        if outbox.send(Event::Machine(status)).is_err() {
+                        let downloaded = |done, total| {
+                            let _ = outbox.send(Event::Machine(MachineStatus::Downloading { done, total }));
+                        };
+                        // A download can take minutes. Ending the run or signing out
+                        // drops the start, and with it the download; anything else waits.
+                        let status = {
+                            let start = local.start(&run, channel, &downloaded);
+                            tokio::pin!(start);
+                            loop {
+                                tokio::select! {
+                                    status = &mut start => break Some(status),
+                                    command = inbox.recv() => {
+                                        let stop = !matches!(command, Some(Command::LoadCatalog | Command::ReadRun { .. } | Command::Restore));
+                                        waiting.extend(command);
+                                        if stop {
+                                            break None;
+                                        }
+                                    }
+                                }
+                            }
+                        };
+                        if let Some(status) = status
+                            && outbox.send(Event::Machine(status)).is_err()
+                        {
                             break;
                         }
                     }

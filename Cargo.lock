@@ -4181,14 +4181,18 @@ name = "jumper"
 version = "0.1.0"
 dependencies = [
  "apple-native-keyring-store",
+ "axum",
  "dirs 7.0.0",
+ "futures-util",
  "gpui",
  "gpui_platform",
  "intar-contracts",
  "keyring-core",
  "reqwest",
  "serde_json",
+ "sha2 0.11.1",
  "subspace",
+ "tempfile",
  "tokio",
  "unicode-segmentation",
  "url",
@@ -4196,6 +4200,7 @@ dependencies = [
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
  "zpm",
+ "zstd",
 ]
 
 [[package]]

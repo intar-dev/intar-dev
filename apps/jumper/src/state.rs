@@ -42,6 +42,11 @@ pub enum Event {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MachineStatus {
     Starting,
+    /// The machine's image is on its way: `done` of `total` bytes.
+    Downloading {
+        done: u64,
+        total: u64,
+    },
     Booting,
     /// The lab is up; `passed` of its `tasks` are solved.
     Ready {
@@ -104,7 +109,8 @@ pub struct State {
     pub error: Option<String>,
     /// The machine of the run on screen, once the engine started on it.
     pub machine: Option<MachineStatus>,
-    /// How far the machine's start came: 0 starting, 1 booting, 2 ready. A
+    /// How far the machine's start came: 0 starting, 1 downloading, 2 booting,
+    /// 3 ready. A
     /// failure keeps it, so the screen can say where the start stopped.
     pub stage: usize,
     /// The course the catalog shows.
@@ -156,8 +162,9 @@ impl State {
             Event::Machine(status) => {
                 self.stage = match status {
                     MachineStatus::Starting => 0,
-                    MachineStatus::Booting => 1,
-                    MachineStatus::Ready { .. } => 2,
+                    MachineStatus::Downloading { .. } => 1,
+                    MachineStatus::Booting => 2,
+                    MachineStatus::Ready { .. } => 3,
                     MachineStatus::Failed(_) => self.stage,
                 };
                 self.machine = Some(status);
@@ -386,7 +393,7 @@ mod tests {
         state.apply(Event::Run(run(true)));
         state.apply(Event::Machine(MachineStatus::Booting));
         state.apply(Event::Machine(MachineStatus::Failed("no disk".into())));
-        assert_eq!(state.stage, 1, "a failure keeps the stage it happened in");
+        assert_eq!(state.stage, 2, "a failure keeps the stage it happened in");
         state.apply(Event::Machine(MachineStatus::Booting));
         state.apply(Event::Run(run(true)));
         assert_eq!(
@@ -398,7 +405,7 @@ mod tests {
             passed: 1,
             tasks: 3,
         }));
-        assert_eq!(state.stage, 2);
+        assert_eq!(state.stage, 3);
         state.apply(Event::Run(run(false)));
         assert_eq!(state.machine, None, "an ended run has no machine");
         assert_eq!(state.stage, 0);
