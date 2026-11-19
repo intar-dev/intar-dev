@@ -124,7 +124,7 @@ describe("the desktop channel", () => {
     expect(response.status).toBe(201);
     const { run, reused } = await view(response);
     expect(reused).toBe(false);
-    expect(run).toMatchObject({ scenarioId: "intar/web", state: "provisioning", active: true });
+    expect(run).toMatchObject({ scenarioId: "intar/web", state: "provisioning", active: true, userId: LEARNER });
     expect(run.machines.map((machine) => machine.name).sort()).toEqual(["client", "web"]);
     for (const machine of run.machines) {
       expect(machine).toMatchObject({
@@ -436,6 +436,26 @@ describe("the desktop channel", () => {
     // Once the run has ended, the command says so.
     expect((await localRunRequest(call(mine, { method: "POST" }, `/api/local/runs/${run.runId}/end`), run.runId, "end")).status).toBe(200);
     expect(await cli({ kind: "status" })).toMatchObject({ status: 200, result: { kind: "error", error: { code: "unavailable" } } });
+  });
+
+  it("takes the report the desktop app sends, byte for byte", async () => {
+    const mine = await token("mine", LEARNER);
+    const { run } = await view(await start(mine));
+    expect(run.userId).toBe(LEARNER);
+    // The exact text of jumper's test `a_guest_report_becomes_the_state_intar_takes`
+    // (apps/jumper/src/local.rs); only the run's id and the time are this run's.
+    const fromTheApp = String.raw`{"owner_user_id":"learner","runtime_execution_id":"run-1","generation":1,"run_id":"run-1","name":"web","phase":"ready","terminal":{"state":"pending","observed_at_unix_ms":1700000000000},"ssh_host_keys_openssh":[],"lab":{"state":"ready","kino_version":"0.9.1","ready":[{"name":"nginx","status":"pass","tail":""}],"tasks":[{"id":"serve","status":"pass","message":"","passed_at_unix_ms":5}],"timings_ms":{}},"updated_at_unix_ms":1700000000000}`;
+    const now = String(Date.now());
+    const vm = JSON.parse(fromTheApp.replaceAll('"run-1"', JSON.stringify(run.runId)).replaceAll("1700000000000", now));
+    const response = await reportLocalRunRequest(call(mine, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ protocol: 1, vms: [vm] }),
+    }, `/api/local/runs/${run.runId}/report`), run.runId);
+    expect(response.status).toBe(200);
+    // One of the run's two machines is ready, and its task counts.
+    expect((await view(response)).run).toMatchObject({ state: "active_partial", active: true });
+    const stored = JSON.parse((await env.DB.prepare("SELECT state_json FROM scenario_runs WHERE run_id = ?1").bind(run.runId)
+      .first<{ state_json: string }>())!.state_json) as { tasks: Array<{ id: string; status: string }> };
+    expect(stored.tasks.find((task) => task.id === "serve")).toMatchObject({ status: "pass" });
   });
 
   it("signs the app in through the provider with the client a deploy seeds", async () => {
