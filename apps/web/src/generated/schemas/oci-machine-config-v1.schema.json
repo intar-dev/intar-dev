@@ -4,6 +4,17 @@
   "description": "The config blob of a machine image. The image's identity is its\nmanifest's digest.",
   "type": "object",
   "properties": {
+    "architecture": {
+      "description": "The machines the image boots on; absent for amd64.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OtherArchitecture"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "boot": {
       "$ref": "#/$defs/MachineBootV1"
     },
@@ -92,6 +103,13 @@
       "description": "An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.",
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "OtherArchitecture": {
+      "description": "An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.",
+      "type": "string",
+      "enum": [
+        "arm64"
+      ]
     },
     "Sha256Hex": {
       "description": "A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.",

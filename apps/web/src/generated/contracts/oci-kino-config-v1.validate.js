@@ -3,7 +3,8 @@
 "use strict";
 export const validate = validate20;
 export default validate20;
-const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"KinoConfigV1","description":"The config blob of a Kino manifest.","type":"object","properties":{"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"version":{"type":"string"}},"additionalProperties":false,"required":["guest_contract","version"]};
+const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"KinoConfigV1","description":"The config blob of a Kino manifest.","type":"object","properties":{"architecture":{"description":"The guests the binary runs in; absent for amd64.","anyOf":[{"$ref":"#/$defs/OtherArchitecture"},{"type":"null"}]},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"version":{"type":"string"}},"additionalProperties":false,"required":["guest_contract","version"],"$defs":{"OtherArchitecture":{"description":"An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.","type":"string","enum":["arm64"]}}};
+const schema32 = {"description":"An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.","type":"string","enum":["arm64"]};
 
 function validate20(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
 let vErrors = null;
@@ -25,31 +26,74 @@ return false;
 else {
 const _errs1 = errors;
 for(const key0 in data){
-if(!((key0 === "guest_contract") || (key0 === "version"))){
+if(!(((key0 === "architecture") || (key0 === "guest_contract")) || (key0 === "version"))){
 validate20.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
 return false;
 break;
 }
 }
 if(_errs1 === errors){
-if(data.guest_contract !== undefined){
-let data0 = data.guest_contract;
+if(data.architecture !== undefined){
+let data0 = data.architecture;
 const _errs2 = errors;
-if(!(((typeof data0 == "number") && (!(data0 % 1) && !isNaN(data0))) && (isFinite(data0)))){
-validate20.errors = [{instancePath:instancePath+"/guest_contract",schemaPath:"#/properties/guest_contract/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
-return false;
+const _errs3 = errors;
+let valid1 = false;
+const _errs4 = errors;
+if(typeof data0 !== "string"){
+const err0 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/OtherArchitecture/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err0];
 }
-if(errors === _errs2){
-if((typeof data0 == "number") && (isFinite(data0))){
-if(data0 > 4294967295 || isNaN(data0)){
-validate20.errors = [{instancePath:instancePath+"/guest_contract",schemaPath:"#/properties/guest_contract/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
+else {
+vErrors.push(err0);
+}
+errors++;
+}
+if(!(data0 === "arm64")){
+const err1 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/OtherArchitecture/enum",keyword:"enum",params:{allowedValues: schema32.enum},message:"must be equal to one of the allowed values"};
+if(vErrors === null){
+vErrors = [err1];
+}
+else {
+vErrors.push(err1);
+}
+errors++;
+}
+var _valid0 = _errs4 === errors;
+valid1 = valid1 || _valid0;
+const _errs7 = errors;
+if(data0 !== null){
+const err2 = {instancePath:instancePath+"/architecture",schemaPath:"#/properties/architecture/anyOf/1/type",keyword:"type",params:{type: "null"},message:"must be null"};
+if(vErrors === null){
+vErrors = [err2];
+}
+else {
+vErrors.push(err2);
+}
+errors++;
+}
+var _valid0 = _errs7 === errors;
+valid1 = valid1 || _valid0;
+if(!valid1){
+const err3 = {instancePath:instancePath+"/architecture",schemaPath:"#/properties/architecture/anyOf",keyword:"anyOf",params:{},message:"must match a schema in anyOf"};
+if(vErrors === null){
+vErrors = [err3];
+}
+else {
+vErrors.push(err3);
+}
+errors++;
+validate20.errors = vErrors;
 return false;
 }
 else {
-if(data0 < 0 || isNaN(data0)){
-validate20.errors = [{instancePath:instancePath+"/guest_contract",schemaPath:"#/properties/guest_contract/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"}];
-return false;
+errors = _errs3;
+if(vErrors !== null){
+if(_errs3){
+vErrors.length = _errs3;
 }
+else {
+vErrors = null;
 }
 }
 }
@@ -59,16 +103,44 @@ else {
 var valid0 = true;
 }
 if(valid0){
+if(data.guest_contract !== undefined){
+let data1 = data.guest_contract;
+const _errs9 = errors;
+if(!(((typeof data1 == "number") && (!(data1 % 1) && !isNaN(data1))) && (isFinite(data1)))){
+validate20.errors = [{instancePath:instancePath+"/guest_contract",schemaPath:"#/properties/guest_contract/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
+return false;
+}
+if(errors === _errs9){
+if((typeof data1 == "number") && (isFinite(data1))){
+if(data1 > 4294967295 || isNaN(data1)){
+validate20.errors = [{instancePath:instancePath+"/guest_contract",schemaPath:"#/properties/guest_contract/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
+return false;
+}
+else {
+if(data1 < 0 || isNaN(data1)){
+validate20.errors = [{instancePath:instancePath+"/guest_contract",schemaPath:"#/properties/guest_contract/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"}];
+return false;
+}
+}
+}
+}
+var valid0 = _errs9 === errors;
+}
+else {
+var valid0 = true;
+}
+if(valid0){
 if(data.version !== undefined){
-const _errs4 = errors;
+const _errs11 = errors;
 if(typeof data.version !== "string"){
 validate20.errors = [{instancePath:instancePath+"/version",schemaPath:"#/properties/version/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
-var valid0 = _errs4 === errors;
+var valid0 = _errs11 === errors;
 }
 else {
 var valid0 = true;
+}
 }
 }
 }

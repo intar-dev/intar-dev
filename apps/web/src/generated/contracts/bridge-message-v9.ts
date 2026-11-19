@@ -58,6 +58,13 @@ export type BridgeMessageV9 =
       reason: SyncRequestReason;
       type: "sync_request";
     };
+/**
+ * An architecture a config has to name. amd64 is not one: a config is for
+ * amd64 when it leaves the field out, so every amd64 config, and with it
+ * every amd64 image's digest, is what it was before a second architecture
+ * existed.
+ */
+export type OtherArchitecture = "arm64";
 export type HostRoleV1 = "agent" | "builder";
 /**
  * What a build builds: a repository image (`trixie` is the platform base)
@@ -109,6 +116,11 @@ export type SyncRequestReason = "connect" | "reconnect" | "desired_version_lag" 
  * its `source_compile_digest`.
  */
 export interface BuilderHelloV1 {
+  /**
+   * What the builder can build besides amd64. Left out when that is
+   * nothing, so such a builder says what it always said.
+   */
+  architectures?: OtherArchitecture[];
   image_format: string;
   /**
    * `source_compile_digest(image_format, compiler version)`.
@@ -173,6 +185,11 @@ export interface HostDesiredStateV3 {
  * One image to build out of a stored bundle, and push.
  */
 export interface DesiredBuildV2 {
+  /**
+   * What to build after the amd64 image, in the same job. Asked only of
+   * a builder whose hello lists it, and fixed for the attempt.
+   */
+  architectures?: OtherArchitecture[];
   attempt: number;
   build_id: string;
   /**
@@ -449,6 +466,11 @@ export interface VmReportV3 {
  * pushed manifest, present exactly when the build succeeded.
  */
 export interface BuildReportV2 {
+  /**
+   * Why the arm64 image of this job was not built. The job itself is
+   * judged by its amd64 image alone.
+   */
+  arm64_error?: string | null;
   attempt: number;
   build_id: string;
   build_key: OciDigest;

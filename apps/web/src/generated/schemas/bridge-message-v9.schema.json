@@ -275,6 +275,13 @@
       "description": "One build's state, sent as soon as it changes. `image_digest` is the\npushed manifest, present exactly when the build succeeded.",
       "type": "object",
       "properties": {
+        "arm64_error": {
+          "description": "Why the arm64 image of this job was not built. The job itself is\njudged by its amd64 image alone.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "attempt": {
           "type": "integer",
           "format": "uint32",
@@ -380,6 +387,13 @@
       "description": "A builder is assigned only builds of its `image_format` and compiles of\nits `source_compile_digest`.",
       "type": "object",
       "properties": {
+        "architectures": {
+          "description": "What the builder can build besides amd64. Left out when that is\nnothing, so such a builder says what it always said.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OtherArchitecture"
+          }
+        },
         "image_format": {
           "type": "string"
         },
@@ -442,6 +456,13 @@
       "description": "One image to build out of a stored bundle, and push.",
       "type": "object",
       "properties": {
+        "architectures": {
+          "description": "What to build after the amd64 image, in the same job. Asked only of\na builder whose hello lists it, and fixed for the attempt.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OtherArchitecture"
+          }
+        },
         "attempt": {
           "type": "integer",
           "format": "uint32",
@@ -979,6 +1000,13 @@
       "description": "An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.",
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "OtherArchitecture": {
+      "description": "An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.",
+      "type": "string",
+      "enum": [
+        "arm64"
+      ]
     },
     "SpecMode": {
       "type": "string",

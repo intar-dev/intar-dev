@@ -2,6 +2,13 @@
 // schemas/<name>.schema.json. Do not edit.
 
 /**
+ * An architecture a config has to name. amd64 is not one: a config is for
+ * amd64 when it leaves the field out, so every amd64 config, and with it
+ * every amd64 image's digest, is what it was before a second architecture
+ * existed.
+ */
+export type OtherArchitecture = "arm64";
+/**
  * An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex
  * digits.
  */
@@ -12,6 +19,10 @@ export type OciDigest = string;
  * manifest's digest.
  */
 export interface MachineConfigV1 {
+  /**
+   * The machines the image boots on; absent for amd64.
+   */
+  architecture?: OtherArchitecture | null;
   boot: MachineBootV1;
   build_key: OciDigest;
   disk: MachineDiskV1;

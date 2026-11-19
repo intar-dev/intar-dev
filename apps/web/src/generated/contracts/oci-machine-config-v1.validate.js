@@ -3,12 +3,13 @@
 "use strict";
 export const validate = validate20;
 export default validate20;
-const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"MachineConfigV1","description":"The config blob of a machine image. The image's identity is its\nmanifest's digest.","type":"object","properties":{"boot":{"$ref":"#/$defs/MachineBootV1"},"build_key":{"$ref":"#/$defs/OciDigest"},"disk":{"$ref":"#/$defs/MachineDiskV1"},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"image_format":{"type":"string"}},"additionalProperties":false,"required":["guest_contract","image_format","build_key","boot","disk"],"$defs":{"MachineBootV1":{"type":"object","properties":{"cmdline":{"type":"string"}},"additionalProperties":false,"required":["cmdline"]},"MachineDiskV1":{"type":"object","properties":{"chunk_size":{"type":"integer","minimum":0},"chunks":{"description":"`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.","type":"array","items":{"type":"array","maxItems":3,"minItems":3,"prefixItems":[{"type":"integer","minimum":0},{"type":"integer","minimum":0,"maximum":4294967295},{"$ref":"#/$defs/Sha256Hex"}]}},"size_bytes":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["size_bytes","chunk_size","chunks"]},"OciDigest":{"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"Sha256Hex":{"description":"A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.","type":"string","pattern":"^[0-9a-f]{64}$"}}};
-const schema32 = {"type":"object","properties":{"cmdline":{"type":"string"}},"additionalProperties":false,"required":["cmdline"]};
-const schema33 = {"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"};
+const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"MachineConfigV1","description":"The config blob of a machine image. The image's identity is its\nmanifest's digest.","type":"object","properties":{"architecture":{"description":"The machines the image boots on; absent for amd64.","anyOf":[{"$ref":"#/$defs/OtherArchitecture"},{"type":"null"}]},"boot":{"$ref":"#/$defs/MachineBootV1"},"build_key":{"$ref":"#/$defs/OciDigest"},"disk":{"$ref":"#/$defs/MachineDiskV1"},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"image_format":{"type":"string"}},"additionalProperties":false,"required":["guest_contract","image_format","build_key","boot","disk"],"$defs":{"MachineBootV1":{"type":"object","properties":{"cmdline":{"type":"string"}},"additionalProperties":false,"required":["cmdline"]},"MachineDiskV1":{"type":"object","properties":{"chunk_size":{"type":"integer","minimum":0},"chunks":{"description":"`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.","type":"array","items":{"type":"array","maxItems":3,"minItems":3,"prefixItems":[{"type":"integer","minimum":0},{"type":"integer","minimum":0,"maximum":4294967295},{"$ref":"#/$defs/Sha256Hex"}]}},"size_bytes":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["size_bytes","chunk_size","chunks"]},"OciDigest":{"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"OtherArchitecture":{"description":"An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.","type":"string","enum":["arm64"]},"Sha256Hex":{"description":"A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.","type":"string","pattern":"^[0-9a-f]{64}$"}}};
+const schema32 = {"description":"An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.","type":"string","enum":["arm64"]};
+const schema33 = {"type":"object","properties":{"cmdline":{"type":"string"}},"additionalProperties":false,"required":["cmdline"]};
+const schema34 = {"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"};
 const pattern4 = new RegExp("^sha256:[0-9a-f]{64}$", "u");
-const schema34 = {"type":"object","properties":{"chunk_size":{"type":"integer","minimum":0},"chunks":{"description":"`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.","type":"array","items":{"type":"array","maxItems":3,"minItems":3,"prefixItems":[{"type":"integer","minimum":0},{"type":"integer","minimum":0,"maximum":4294967295},{"$ref":"#/$defs/Sha256Hex"}]}},"size_bytes":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["size_bytes","chunk_size","chunks"]};
-const schema35 = {"description":"A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.","type":"string","pattern":"^[0-9a-f]{64}$"};
+const schema35 = {"type":"object","properties":{"chunk_size":{"type":"integer","minimum":0},"chunks":{"description":"`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.","type":"array","items":{"type":"array","maxItems":3,"minItems":3,"prefixItems":[{"type":"integer","minimum":0},{"type":"integer","minimum":0,"maximum":4294967295},{"$ref":"#/$defs/Sha256Hex"}]}},"size_bytes":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["size_bytes","chunk_size","chunks"]};
+const schema36 = {"description":"A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.","type":"string","pattern":"^[0-9a-f]{64}$"};
 const pattern5 = new RegExp("^[0-9a-f]{64}$", "u");
 
 function validate21(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
@@ -225,36 +226,106 @@ return false;
 else {
 const _errs1 = errors;
 for(const key0 in data){
-if(!(((((key0 === "boot") || (key0 === "build_key")) || (key0 === "disk")) || (key0 === "guest_contract")) || (key0 === "image_format"))){
+if(!((((((key0 === "architecture") || (key0 === "boot")) || (key0 === "build_key")) || (key0 === "disk")) || (key0 === "guest_contract")) || (key0 === "image_format"))){
 validate20.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
 return false;
 break;
 }
 }
 if(_errs1 === errors){
-if(data.boot !== undefined){
-let data0 = data.boot;
+if(data.architecture !== undefined){
+let data0 = data.architecture;
 const _errs2 = errors;
 const _errs3 = errors;
-if(errors === _errs3){
-if(data0 && typeof data0 == "object" && !Array.isArray(data0)){
+let valid1 = false;
+const _errs4 = errors;
+if(typeof data0 !== "string"){
+const err0 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/OtherArchitecture/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err0];
+}
+else {
+vErrors.push(err0);
+}
+errors++;
+}
+if(!(data0 === "arm64")){
+const err1 = {instancePath:instancePath+"/architecture",schemaPath:"#/$defs/OtherArchitecture/enum",keyword:"enum",params:{allowedValues: schema32.enum},message:"must be equal to one of the allowed values"};
+if(vErrors === null){
+vErrors = [err1];
+}
+else {
+vErrors.push(err1);
+}
+errors++;
+}
+var _valid0 = _errs4 === errors;
+valid1 = valid1 || _valid0;
+const _errs7 = errors;
+if(data0 !== null){
+const err2 = {instancePath:instancePath+"/architecture",schemaPath:"#/properties/architecture/anyOf/1/type",keyword:"type",params:{type: "null"},message:"must be null"};
+if(vErrors === null){
+vErrors = [err2];
+}
+else {
+vErrors.push(err2);
+}
+errors++;
+}
+var _valid0 = _errs7 === errors;
+valid1 = valid1 || _valid0;
+if(!valid1){
+const err3 = {instancePath:instancePath+"/architecture",schemaPath:"#/properties/architecture/anyOf",keyword:"anyOf",params:{},message:"must match a schema in anyOf"};
+if(vErrors === null){
+vErrors = [err3];
+}
+else {
+vErrors.push(err3);
+}
+errors++;
+validate20.errors = vErrors;
+return false;
+}
+else {
+errors = _errs3;
+if(vErrors !== null){
+if(_errs3){
+vErrors.length = _errs3;
+}
+else {
+vErrors = null;
+}
+}
+}
+var valid0 = _errs2 === errors;
+}
+else {
+var valid0 = true;
+}
+if(valid0){
+if(data.boot !== undefined){
+let data1 = data.boot;
+const _errs9 = errors;
+const _errs10 = errors;
+if(errors === _errs10){
+if(data1 && typeof data1 == "object" && !Array.isArray(data1)){
 let missing1;
-if((data0.cmdline === undefined) && (missing1 = "cmdline")){
+if((data1.cmdline === undefined) && (missing1 = "cmdline")){
 validate20.errors = [{instancePath:instancePath+"/boot",schemaPath:"#/$defs/MachineBootV1/required",keyword:"required",params:{missingProperty: missing1},message:"must have required property '"+missing1+"'"}];
 return false;
 }
 else {
-const _errs5 = errors;
-for(const key1 in data0){
+const _errs12 = errors;
+for(const key1 in data1){
 if(!(key1 === "cmdline")){
 validate20.errors = [{instancePath:instancePath+"/boot",schemaPath:"#/$defs/MachineBootV1/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key1},message:"must NOT have additional properties"}];
 return false;
 break;
 }
 }
-if(_errs5 === errors){
-if(data0.cmdline !== undefined){
-if(typeof data0.cmdline !== "string"){
+if(_errs12 === errors){
+if(data1.cmdline !== undefined){
+if(typeof data1.cmdline !== "string"){
 validate20.errors = [{instancePath:instancePath+"/boot/cmdline",schemaPath:"#/$defs/MachineBootV1/properties/cmdline/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
@@ -267,19 +338,19 @@ validate20.errors = [{instancePath:instancePath+"/boot",schemaPath:"#/$defs/Mach
 return false;
 }
 }
-var valid0 = _errs2 === errors;
+var valid0 = _errs9 === errors;
 }
 else {
 var valid0 = true;
 }
 if(valid0){
 if(data.build_key !== undefined){
-let data2 = data.build_key;
-const _errs8 = errors;
-const _errs9 = errors;
-if(errors === _errs9){
-if(typeof data2 === "string"){
-if(!pattern4.test(data2)){
+let data3 = data.build_key;
+const _errs15 = errors;
+const _errs16 = errors;
+if(errors === _errs16){
+if(typeof data3 === "string"){
+if(!pattern4.test(data3)){
 validate20.errors = [{instancePath:instancePath+"/build_key",schemaPath:"#/$defs/OciDigest/pattern",keyword:"pattern",params:{pattern: "^sha256:[0-9a-f]{64}$"},message:"must match pattern \""+"^sha256:[0-9a-f]{64}$"+"\""}];
 return false;
 }
@@ -289,61 +360,62 @@ validate20.errors = [{instancePath:instancePath+"/build_key",schemaPath:"#/$defs
 return false;
 }
 }
-var valid0 = _errs8 === errors;
+var valid0 = _errs15 === errors;
 }
 else {
 var valid0 = true;
 }
 if(valid0){
 if(data.disk !== undefined){
-const _errs11 = errors;
+const _errs18 = errors;
 if(!(validate21(data.disk, {instancePath:instancePath+"/disk",parentData:data,parentDataProperty:"disk",rootData,dynamicAnchors}))){
 vErrors = vErrors === null ? validate21.errors : vErrors.concat(validate21.errors);
 errors = vErrors.length;
 }
-var valid0 = _errs11 === errors;
+var valid0 = _errs18 === errors;
 }
 else {
 var valid0 = true;
 }
 if(valid0){
 if(data.guest_contract !== undefined){
-let data4 = data.guest_contract;
-const _errs12 = errors;
-if(!(((typeof data4 == "number") && (!(data4 % 1) && !isNaN(data4))) && (isFinite(data4)))){
+let data5 = data.guest_contract;
+const _errs19 = errors;
+if(!(((typeof data5 == "number") && (!(data5 % 1) && !isNaN(data5))) && (isFinite(data5)))){
 validate20.errors = [{instancePath:instancePath+"/guest_contract",schemaPath:"#/properties/guest_contract/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
 return false;
 }
-if(errors === _errs12){
-if((typeof data4 == "number") && (isFinite(data4))){
-if(data4 > 4294967295 || isNaN(data4)){
+if(errors === _errs19){
+if((typeof data5 == "number") && (isFinite(data5))){
+if(data5 > 4294967295 || isNaN(data5)){
 validate20.errors = [{instancePath:instancePath+"/guest_contract",schemaPath:"#/properties/guest_contract/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
 return false;
 }
 else {
-if(data4 < 0 || isNaN(data4)){
+if(data5 < 0 || isNaN(data5)){
 validate20.errors = [{instancePath:instancePath+"/guest_contract",schemaPath:"#/properties/guest_contract/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"}];
 return false;
 }
 }
 }
 }
-var valid0 = _errs12 === errors;
+var valid0 = _errs19 === errors;
 }
 else {
 var valid0 = true;
 }
 if(valid0){
 if(data.image_format !== undefined){
-const _errs14 = errors;
+const _errs21 = errors;
 if(typeof data.image_format !== "string"){
 validate20.errors = [{instancePath:instancePath+"/image_format",schemaPath:"#/properties/image_format/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
-var valid0 = _errs14 === errors;
+var valid0 = _errs21 === errors;
 }
 else {
 var valid0 = true;
+}
 }
 }
 }

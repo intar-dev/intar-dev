@@ -223,6 +223,7 @@ pub fn report(build: &DesiredBuildV2, phase: BuildPhaseV2, now_ms: i64) -> Build
         finished_at_unix_ms: None,
         error: None,
         image_digest: None,
+        arm64_error: None,
     }
 }
 
@@ -333,6 +334,7 @@ mod tests {
                 machine: "web".to_owned(),
             },
             attempt,
+            architectures: Vec::new(),
         }
     }
 

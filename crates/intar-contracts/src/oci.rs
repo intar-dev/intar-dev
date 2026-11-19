@@ -127,6 +127,18 @@ pub struct OciDescriptorV1 {
     pub size: u64,
 }
 
+/// An architecture a config has to name. amd64 is not one: a config is for
+/// amd64 when it leaves the field out, so every amd64 config, and with it
+/// every amd64 image's digest, is what it was before a second architecture
+/// existed.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum OtherArchitecture {
+    Arm64,
+}
+
 /// The config blob of a machine image. The image's identity is its
 /// manifest's digest.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -135,6 +147,9 @@ pub struct MachineConfigV1 {
     pub guest_contract: u32,
     pub image_format: String,
     pub build_key: OciDigest,
+    /// The machines the image boots on; absent for amd64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<OtherArchitecture>,
     pub boot: MachineBootV1,
     pub disk: MachineDiskV1,
 }
@@ -161,6 +176,9 @@ pub struct MachineDiskV1 {
 pub struct KinoConfigV1 {
     pub guest_contract: u32,
     pub version: String,
+    /// The guests the binary runs in; absent for amd64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<OtherArchitecture>,
 }
 
 #[cfg(test)]
@@ -175,6 +193,37 @@ mod tests {
             "disk": {"size_bytes": 8_589_934_592_u64, "chunk_size": 4_194_304,
                      "chunks": [[0, 2, hex], [1, 3, hex], [5, 2, hex]]},
         })
+    }
+
+    #[test]
+    fn a_config_names_its_architecture_only_when_it_is_not_amd64() -> Result<(), serde_json::Error>
+    {
+        // An amd64 config is byte for byte what it was before the field existed.
+        let amd64: MachineConfigV1 = serde_json::from_value(machine_json())?;
+        assert_eq!(amd64.architecture, None);
+        assert!(!serde_json::to_string(&amd64)?.contains("architecture"));
+
+        let mut json = machine_json();
+        json["architecture"] = serde_json::json!("arm64");
+        let arm64: MachineConfigV1 = serde_json::from_value(json.clone())?;
+        assert_eq!(arm64.architecture, Some(OtherArchitecture::Arm64));
+        assert_eq!(serde_json::to_value(&arm64)?, json);
+        // amd64 is never spelled out, and nothing else is known.
+        for refused in ["amd64", "x86_64", "riscv64", ""] {
+            json["architecture"] = serde_json::json!(refused);
+            assert!(
+                serde_json::from_value::<MachineConfigV1>(json.clone()).is_err(),
+                "{refused}"
+            );
+        }
+
+        let kino: KinoConfigV1 = serde_json::from_str(r#"{"guest_contract":3,"version":"1.0.0"}"#)?;
+        assert_eq!(kino.architecture, None);
+        assert_eq!(
+            serde_json::to_string(&kino)?,
+            r#"{"guest_contract":3,"version":"1.0.0"}"#
+        );
+        Ok(())
     }
 
     #[test]

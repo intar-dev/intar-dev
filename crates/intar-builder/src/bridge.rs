@@ -402,6 +402,8 @@ fn builder_client_hello(cfg: &BuilderConfig, last_applied: Option<u64>) -> Bridg
         builder: Some(BuilderHelloV1 {
             image_format: IMAGE_FORMAT.to_owned(),
             source_compile_digest: source_compile_digest(IMAGE_FORMAT, SOURCE_COMPILER_VERSION_V2),
+            // ponytail: filled once the builder builds a second architecture (#396).
+            architectures: Vec::new(),
         }),
     })
 }

@@ -2,9 +2,21 @@
 // schemas/<name>.schema.json. Do not edit.
 
 /**
+ * An architecture a config has to name. amd64 is not one: a config is for
+ * amd64 when it leaves the field out, so every amd64 config, and with it
+ * every amd64 image's digest, is what it was before a second architecture
+ * existed.
+ */
+export type OtherArchitecture = "arm64";
+
+/**
  * The config blob of a Kino manifest.
  */
 export interface KinoConfigV1 {
+  /**
+   * The guests the binary runs in; absent for amd64.
+   */
+  architecture?: OtherArchitecture | null;
   guest_contract: number;
   version: string;
 }

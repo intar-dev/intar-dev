@@ -15,7 +15,7 @@ use crate::bridge::{
     SyncRequestReason, VmArchiveStateV1, VmNetworkStateV1, VmResourceStateV3,
     VmRuntimeConstraintsV2, VmSandboxStateV1, VmTerminalStateV1,
 };
-use crate::oci::OciDigest;
+use crate::oci::{OciDigest, OtherArchitecture};
 use crate::scenario::SpecMode;
 
 pub const BRIDGE_PROTOCOL_VERSION_9: u16 = 9;
@@ -69,6 +69,10 @@ pub struct BuilderHelloV1 {
     pub image_format: String,
     /// `source_compile_digest(image_format, compiler version)`.
     pub source_compile_digest: String,
+    /// What the builder can build besides amd64. Left out when that is
+    /// nothing, so such a builder says what it always said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub architectures: Vec<OtherArchitecture>,
 }
 
 /// What the host can do. Facts only: no rollout switches.
@@ -180,6 +184,10 @@ pub struct DesiredBuildV2 {
     pub target: BuildTargetV1,
     #[schemars(range(min = 1))]
     pub attempt: u32,
+    /// What to build after the amd64 image, in the same job. Asked only of
+    /// a builder whose hello lists it, and fixed for the attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub architectures: Vec<OtherArchitecture>,
 }
 
 /// What a build builds: a repository image (`trixie` is the platform base)
@@ -231,6 +239,10 @@ pub struct BuildReportV2 {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_digest: Option<OciDigest>,
+    /// Why the arm64 image of this job was not built. The job itself is
+    /// judged by its amd64 image alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arm64_error: Option<String>,
 }
 
 /// 1 to 128 of `[A-Za-z0-9._-]`, not `.` or `..`: ids and revs name files

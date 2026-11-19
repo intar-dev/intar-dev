@@ -33,6 +33,7 @@ fn webserver(key: OciDigest) -> DesiredBuildV2 {
             machine: "webserver".to_owned(),
         },
         attempt: 1,
+        architectures: Vec::new(),
     }
 }
 

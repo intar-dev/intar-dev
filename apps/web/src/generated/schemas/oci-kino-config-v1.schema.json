@@ -4,6 +4,17 @@
   "description": "The config blob of a Kino manifest.",
   "type": "object",
   "properties": {
+    "architecture": {
+      "description": "The guests the binary runs in; absent for amd64.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OtherArchitecture"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "guest_contract": {
       "type": "integer",
       "format": "uint32",
@@ -17,5 +28,14 @@
   "required": [
     "guest_contract",
     "version"
-  ]
+  ],
+  "$defs": {
+    "OtherArchitecture": {
+      "description": "An architecture a config has to name. amd64 is not one: a config is for\namd64 when it leaves the field out, so every amd64 config, and with it\nevery amd64 image's digest, is what it was before a second architecture\nexisted.",
+      "type": "string",
+      "enum": [
+        "arm64"
+      ]
+    }
+  }
 }

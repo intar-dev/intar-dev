@@ -41,6 +41,7 @@ fn build() -> DesiredBuildV2 {
             name: "trixie".to_owned(),
         },
         attempt: 1,
+        architectures: Vec::new(),
     }
 }
 
