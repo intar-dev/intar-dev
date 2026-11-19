@@ -29,10 +29,12 @@ if [ "$(jq length <<<"${table}")" -eq 0 ]; then
   echo "${pin_file} pins Kino, but D1 has no registry yet. Deploy the registry migrations without a pin, run image-ops with the kino-promote option, then pin." >&2
   exit 1
 fi
-digests="$(jq -r '[.[] | .current, .previous | select(. != null)] | unique | map("\u0027" + . + "\u0027") | join(",")' <<<"${pins}")"
+# Every digest the pin names: each contract's amd64 pair and, nested, its arm64 pair.
+named='[.[] | ., (.arm64 // empty) | .current, .previous | select(. != null)] | unique'
+digests="$(jq -r "${named}"' | map("\u0027" + . + "\u0027") | join(",")' <<<"${pins}")"
 stored="$(d1_query "SELECT digest FROM registry_manifests WHERE artifact_type = 'application/vnd.intar.kino.v1' AND digest IN (${digests})")"
 missing="$(jq -nr --argjson pins "${pins}" --argjson stored "${stored}" \
-  '([$pins[] | .current, .previous | select(. != null)] | unique) - [$stored[].digest] | join(" ")')"
+  "(\$pins | ${named}) - [\$stored[].digest] | join(\" \")")"
 if [ -n "${missing}" ]; then
   echo "The registry stores no Kino artifact ${missing}. Run image-ops with the kino-promote option for that release before this deploy." >&2
   exit 1

@@ -50,10 +50,14 @@ function run(tags: { cli: "old" | "current"; kino: "old" | "current" }) {
     git("tag", "image-cli/v0.11.0", tags.cli === "old" ? old : "HEAD");
     git("tag", "kino/v0.6.0", tags.kino === "old" ? old : "HEAD");
 
-    write(join(release, "kino"), "\x7fELF a static kino");
-    spawnSync("tar", ["-czf", join(release, "kino_0.6.0_linux_amd64.tar.gz"), "-C", release, "./kino"]);
     const sum = (file: string) => createHash("sha256").update(readFileSync(join(release, file))).digest("hex");
-    write(join(release, "kino_0.6.0_checksums.txt"), `${sum("kino_0.6.0_linux_amd64.tar.gz")}  kino_0.6.0_linux_amd64.tar.gz\n`);
+    let checksums = "";
+    for (const arch of ["amd64", "arm64"]) {
+      write(join(release, "kino"), `\x7fELF a static ${arch} kino`);
+      spawnSync("tar", ["-czf", join(release, `kino_0.6.0_linux_${arch}.tar.gz`), "-C", release, "./kino"]);
+      checksums += `${sum(`kino_0.6.0_linux_${arch}.tar.gz`)}  kino_0.6.0_linux_${arch}.tar.gz\n`;
+    }
+    write(join(release, "kino_0.6.0_checksums.txt"), checksums);
     write(join(release, "intar-image-cli_0.11.0_checksums.txt"),
       `${"a".repeat(64)}  intar-image-cli_0.11.0_linux_amd64.tar.gz\n${"b".repeat(64)}  intar-image-cli_0.11.0_linux_arm64.tar.gz\n`);
     script("gh", `echo "$*" >> "${root}/gh.log"
@@ -63,7 +67,7 @@ case "$1 $2" in
   "release view") echo false ;;
   "release download") dir=. out=""; pats=()
     while [ $# -gt 0 ]; do case "$1" in --dir) dir="$2"; shift ;; --output) out="$2"; shift ;; --pattern) pats+=("$2"); shift ;; esac; shift; done
-    for p in "\${pats[@]}"; do if [ -n "$out" ]; then cp "${release}/$p" "$out"; else cp "${release}/$p" "$dir"; fi; done ;;
+    for p in "\${pats[@]}"; do if [ -n "$out" ]; then cp "${release}"/$p "$out"; else cp "${release}"/$p "$dir"; fi; done ;;
   "pr list") ;;
 esac`);
     script("bun", `case "$1" in install) ;; run) echo "// regenerated" >> apps/web/worker-configuration.d.ts ;; *) exec "${process.execPath}" "$@" ;; esac`);
@@ -115,6 +119,6 @@ test("pins both when both releases match HEAD's contracts", () => {
   const ran = run({ cli: "current", kino: "current" });
   expect(ran.status, ran.output).toBe(0);
   expect(ran.files).toContain("tools/deploy/kino-pin.json");
-  expect(ran.pin).toMatch(/^\{"3":\{"current":"sha256:[0-9a-f]{64}","previous":null\}\}\n$/);
+  expect(ran.pin).toMatch(/^\{"3":\{"current":"sha256:[0-9a-f]{64}","previous":null,"arm64":\{"current":"sha256:[0-9a-f]{64}","previous":null\}\}\}\n$/);
   expect(ran.committed).toStartWith("chore(web): pin the scenario compiler to intar-image-cli 0.11.0 and kino 0.6.0");
 });

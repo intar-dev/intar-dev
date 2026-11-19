@@ -85,8 +85,9 @@ else
 fi
 fi
 
-# Guest VMs are x86_64, so the pin is the amd64 build. The guest contract is
-# the one the tag's source was built for.
+# The pin names the amd64 build, which hosts run, and the arm64 one, for a
+# learner's own arm64 computer. The guest contract is the one the tag's source
+# was built for.
 kino_version="$(manifest_version crates/kino/Cargo.toml)"
 kino_tag="kino/v${kino_version}"
 contract="$(contract_const HEAD crates/intar-contracts/src/guest.rs "${guest_sed}")"
@@ -95,14 +96,21 @@ if [ -z "${contract}" ] || [ "$(contract_const "${kino_tag}" crates/intar-contra
 elif published "${kino_tag}"; then
   kino_dir="$(mktemp -d)"
   gh release download "${kino_tag}" --dir "${kino_dir}" \
-    --pattern "kino_${kino_version}_linux_amd64.tar.gz" \
+    --pattern "kino_${kino_version}_linux_*.tar.gz" \
     --pattern "kino_${kino_version}_checksums.txt"
-  (cd "${kino_dir}" && sha256sum --check --strict --ignore-missing "kino_${kino_version}_checksums.txt")
-  tar -xzf "${kino_dir}/kino_${kino_version}_linux_amd64.tar.gz" -C "${kino_dir}" ./kino
-  digest="$(bun tools/deploy/kino-artifact.ts build --binary "${kino_dir}/kino" \
-    --version "${kino_version}" --guest-contract "${contract}" --out "${kino_dir}/artifact" | jq -er .digest)"
-  bun tools/deploy/kino-artifact.ts pin --file tools/deploy/kino-pin.json \
-    --guest-contract "${contract}" --digest "${digest}"
+  (cd "${kino_dir}" && sha256sum --check --strict "kino_${kino_version}_checksums.txt")
+  # amd64 first: the arm64 pair nests in the contract's amd64 entry.
+  digest=""
+  for arch in amd64 arm64; do
+    mkdir -p "${kino_dir}/${arch}"
+    tar -xzf "${kino_dir}/kino_${kino_version}_linux_${arch}.tar.gz" -C "${kino_dir}/${arch}" ./kino
+    built="$(bun tools/deploy/kino-artifact.ts build --binary "${kino_dir}/${arch}/kino" --architecture "${arch}" \
+      --version "${kino_version}" --guest-contract "${contract}" --out "${kino_dir}/${arch}/artifact" | jq -er .digest)"
+    bun tools/deploy/kino-artifact.ts pin --file tools/deploy/kino-pin.json \
+      --guest-contract "${contract}" --architecture "${arch}" --digest "${built}"
+    # The pull request names the amd64 digest, the one hosts run.
+    digest="${digest:-${built}}"
+  done
   if git diff --quiet -- tools/deploy/kino-pin.json && git ls-files --error-unmatch tools/deploy/kino-pin.json >/dev/null 2>&1; then
     echo "The website already pins kino ${kino_version}."
   else
