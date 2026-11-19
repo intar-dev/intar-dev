@@ -36,6 +36,8 @@ pub struct Boot<'a> {
     pub spec: &'a [u8],
     /// Where Kino reaches this computer; `None` is vsock, on a Linux host.
     pub host: Option<GuestHostV3>,
+    /// The disk is larger than the image: the guest grows its file system.
+    pub root_resize: bool,
 }
 
 /// The exact `boot.json` bytes for a learner's run.
@@ -69,7 +71,7 @@ pub fn boot_json(boot: &Boot<'_>) -> Result<Vec<u8>, Error> {
             enabled: !keys.is_empty(),
             authorized_keys: keys,
         },
-        root_resize: false,
+        root_resize: boot.root_resize,
         mode: SpecMode::Learn,
         spec,
         host: boot.host.clone(),
@@ -146,6 +148,7 @@ mod tests {
             authorized_keys: keys,
             spec: SPEC,
             host: None,
+            root_resize: false,
         }
     }
 

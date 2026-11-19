@@ -19,6 +19,9 @@ enum Cli {
     Boot(Box<Args>),
     /// Boot one machine of a run from a local cache, as the desktop app does.
     Machine(Box<MachineArgs>),
+    /// Pass this process's input and output on to a port of 127.0.0.1. QEMU
+    /// runs this for a guest without internet access.
+    Relay { port: u16 },
 }
 
 #[derive(clap::Args)]
@@ -48,6 +51,12 @@ struct MachineArgs {
     /// Answer every run CLI command with this response file (a stand-in for intar).
     #[arg(long)]
     canned_run_cli: Option<PathBuf>,
+    /// The disk the scenario asks for, in MiB.
+    #[arg(long, default_value_t = 0)]
+    disk: u64,
+    /// Cut the guest off from the internet and from this computer.
+    #[arg(long)]
+    no_egress: bool,
     #[arg(long, default_value_t = 60)]
     seconds: u64,
 }
@@ -134,7 +143,7 @@ fn run(args: Args) -> Result<(), zpm::Error> {
     std::fs::create_dir_all(&args.dir)?;
     let overlay = args.dir.join("root.qcow2");
     let _ = std::fs::remove_file(&overlay);
-    create_overlay(&args.qemu_img, &args.root_base, &overlay)?;
+    create_overlay(&args.qemu_img, &args.root_base, &overlay, None)?;
 
     // Listen before the guest exists, so its first report is not missed.
     let (tcp_reports, run_cli) = if args.tcp {
@@ -182,6 +191,7 @@ fn run(args: Args) -> Result<(), zpm::Error> {
             authorized_keys: &[std::fs::read_to_string(ssh_key)?],
             spec: &std::fs::read(spec)?,
             host,
+            root_resize: false,
         })?;
         let run_disk = args.dir.join("run.raw");
         write_run_disk(&run_disk, &json, &std::fs::read(kino)?)?;
@@ -225,6 +235,7 @@ fn run(args: Args) -> Result<(), zpm::Error> {
             dns: "10.77.52.3".into(),
             guest: "10.77.52.2".into(),
             mac: "02:00:00:00:34:02".into(),
+            cut_off: None,
         },
         ssh_port: args.ssh_port,
         vsock_cid: args.vsock_cid,
@@ -315,6 +326,9 @@ fn machine(args: MachineArgs) -> Result<(), zpm::Error> {
         kino: &args.kino,
         cpu_millis: args.cpu_millis,
         memory_mib: args.memory,
+        disk_mib: args.disk,
+        egress: !args.no_egress,
+        relay: &std::env::current_exe()?,
         authorized_keys: &keys,
     };
     let started = Instant::now();
@@ -364,6 +378,7 @@ fn main() -> ExitCode {
     let outcome = match Cli::parse() {
         Cli::Boot(args) => run(*args),
         Cli::Machine(args) => machine(*args),
+        Cli::Relay { port } => zpm::relay::relay(port).map_err(Into::into),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,

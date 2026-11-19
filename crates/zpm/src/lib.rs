@@ -14,11 +14,12 @@ pub mod broker;
 pub mod machine;
 pub mod preflight;
 pub mod qemu;
+pub mod relay;
 pub mod reports;
 pub mod rundisk;
 
 pub use accel::{Accel, Arch};
-pub use qemu::{Disk, DiskFormat, Machine, UserNetwork, Vm, create_overlay, qemu_args};
+pub use qemu::{Disk, DiskFormat, HostLink, Machine, UserNetwork, Vm, create_overlay, qemu_args};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

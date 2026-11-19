@@ -21,7 +21,9 @@ use crate::broker::{RunCliBroker, serve_tcp};
 use crate::preflight::{Has, Needs, check};
 use crate::reports::{TcpReports, listen_tcp};
 use crate::rundisk::{Boot, boot_json, write_recording_disk, write_run_disk};
-use crate::{Accel, Arch, Disk, DiskFormat, Error, Machine, UserNetwork, Vm, create_overlay};
+use crate::{
+    Accel, Arch, Disk, DiskFormat, Error, HostLink, Machine, UserNetwork, Vm, create_overlay,
+};
 
 /// The guest's side of QEMU's built-in network. The gateway is where the
 /// guest reaches this computer's loopback interface.
@@ -29,6 +31,9 @@ const NETWORK: &str = "10.77.52.0/28";
 const GATEWAY: &str = "10.77.52.1";
 const GUEST: &str = "10.77.52.2";
 const DNS: &str = "10.77.52.3";
+/// Where a guest without internet access reaches this computer instead of
+/// the gateway.
+const HOST_LINK: &str = "10.77.52.4";
 /// The overlay and the two small disks; the image itself is in the cache.
 const RUN_DISK_MIB: u64 = 512;
 
@@ -104,6 +109,14 @@ pub struct Plan<'a> {
     pub kino: &'a str,
     pub cpu_millis: u64,
     pub memory_mib: u64,
+    /// The disk the scenario asks for; the image's own size when that is larger.
+    pub disk_mib: u64,
+    /// False cuts the guest off from the internet and from this computer,
+    /// except for its link to the app.
+    pub egress: bool,
+    /// The program that carries that link: run as `<relay> relay <port>`, it
+    /// has to call [`crate::relay::relay`].
+    pub relay: &'a Path,
     /// OpenSSH public keys that may log in; none starts no SSH in the guest.
     pub authorized_keys: &'a [String],
 }
@@ -159,6 +172,10 @@ pub fn start(
     let image = cache.image(plan.image)?;
     let (spec, kino) = (cache.spec(plan.spec)?, cache.kino(plan.kino)?);
 
+    // A scenario may ask for more disk than its image has.
+    let image_mib = std::fs::metadata(&image.root)?.len().div_ceil(1024 * 1024);
+    let grow = (plan.disk_mib > image_mib).then_some(plan.disk_mib);
+
     std::fs::create_dir_all(dir)?;
     // Listen before the guest exists, so its first report is not missed.
     let reports = listen_tcp()?;
@@ -172,10 +189,11 @@ pub fn start(
         authorized_keys: plan.authorized_keys,
         spec: &spec,
         host: Some(GuestHostV3::Tcp {
-            address: GATEWAY.to_owned(),
+            address: if plan.egress { GATEWAY } else { HOST_LINK }.to_owned(),
             report_port: reports.port,
             run_cli_port: broker.port,
         }),
+        root_resize: grow.is_some(),
     })?;
     let (overlay, run_disk, recordings) = (
         dir.join("root.qcow2"),
@@ -185,7 +203,7 @@ pub fn start(
     // A leftover of this run holds the old overlay; it goes before the file does.
     crate::qemu::stop_leftover(&dir.join("qmp.sock"))?;
     let _ = std::fs::remove_file(&overlay);
-    create_overlay(qemu_img, &image.root, &overlay)?;
+    create_overlay(qemu_img, &image.root, &overlay, grow)?;
     write_run_disk(&run_disk, &json, &kino)?;
     write_recording_disk(&recordings)?;
 
@@ -225,6 +243,11 @@ pub fn start(
             dns: DNS.to_owned(),
             guest: GUEST.to_owned(),
             mac: "02:00:00:00:34:02".to_owned(),
+            cut_off: (!plan.egress).then(|| HostLink {
+                relay: plan.relay.to_owned(),
+                address: HOST_LINK.to_owned(),
+                ports: vec![reports.port, broker.port],
+            }),
         },
         ssh_port,
         vsock_cid: None,
@@ -308,6 +331,9 @@ mod tests {
             kino: DIGEST,
             cpu_millis: 1000,
             memory_mib: 64,
+            disk_mib: 0,
+            egress: true,
+            relay: Path::new("relay"),
             authorized_keys: &[],
         };
         let run = dir.path().join("run");

@@ -57,6 +57,21 @@ pub struct UserNetwork {
     pub dns: String,
     pub guest: String,
     pub mac: String,
+    /// Set for a guest that must not reach the internet: the network is cut
+    /// off from everything, and only these ports lead to this computer.
+    pub cut_off: Option<HostLink>,
+}
+
+/// How a guest without internet access reaches the app.
+#[derive(Clone, Debug)]
+pub struct HostLink {
+    /// The program QEMU runs per connection, as `<relay> relay <port>`
+    /// ([`crate::relay::relay`]).
+    pub relay: PathBuf,
+    /// The address the guest dials; one of the network's, and no other role's.
+    pub address: String,
+    /// Each is passed on to the same port of 127.0.0.1.
+    pub ports: Vec<u16>,
 }
 
 /// QEMU's arguments for `machine`.
@@ -113,10 +128,24 @@ pub fn qemu_args(machine: &Machine) -> Vec<OsString> {
 
     let net = &machine.network;
     arg("-netdev");
-    arg(&format!(
+    let mut netdev = format!(
         "user,id=net0,net={},host={},dns={},hostfwd=tcp:127.0.0.1:{}-{}:22",
         net.network, net.gateway, net.dns, machine.ssh_port, net.guest
-    ));
+    );
+    if let Some(link) = &net.cut_off {
+        // QEMU reads the command as a shell would, so the path is quoted;
+        // a comma would end the option, so it is doubled.
+        let relay = link.relay.to_string_lossy().replace(',', ",,");
+        for port in &link.ports {
+            netdev.push_str(&format!(
+                ",guestfwd=tcp:{}:{port}-cmd:'{relay}' relay {port}",
+                link.address
+            ));
+        }
+        // No way out and no way to this computer, except the rules above.
+        netdev.push_str(",restrict=on");
+    }
+    arg(&netdev);
     arg("-device");
     arg(&format!(
         "virtio-net-pci,netdev=net0,mac={},addr={slot:#x}",
@@ -144,11 +173,20 @@ pub fn qemu_args(machine: &Machine) -> Vec<OsString> {
 
 /// Creates `overlay`, a copy-on-write disk over the cached `base` image, so a
 /// run never changes the image it started from.
-pub fn create_overlay(qemu_img: &Path, base: &Path, overlay: &Path) -> Result<(), Error> {
+///
+/// `size_mib` makes the disk larger than the image; the guest then has to
+/// grow its file system into the room.
+pub fn create_overlay(
+    qemu_img: &Path,
+    base: &Path,
+    overlay: &Path,
+    size_mib: Option<u64>,
+) -> Result<(), Error> {
     let output = Command::new(qemu_img)
         .args(["create", "-q", "-f", "qcow2", "-F", "raw", "-b"])
         .arg(base)
         .arg(overlay)
+        .args(size_mib.map(|size| format!("{size}M")))
         .output()
         .map_err(|error| Error::Qemu(format!("could not run {}: {error}", qemu_img.display())))?;
     if output.status.success() {
@@ -365,6 +403,7 @@ mod tests {
                 dns: "10.77.52.3".into(),
                 guest: "10.77.52.2".into(),
                 mac: "02:00:00:00:34:02".into(),
+                cut_off: None,
             },
             ssh_port: 2252,
             vsock_cid: Some(10052),
@@ -393,6 +432,26 @@ mod tests {
              -device virtio-net-pci,netdev=net0,mac=02:00:00:00:34:02,addr=0x5 \
              -device vhost-vsock-pci,guest-cid=10052,addr=0x6 \
              -serial file:/run/serial.log -qmp unix:/run/qmp.sock,server=on,wait=off"
+        );
+    }
+
+    #[test]
+    fn a_guest_without_internet_is_cut_off_except_for_its_link_to_the_app() {
+        let mut machine = machine();
+        machine.network.cut_off = Some(HostLink {
+            relay: "/opt/in,tar/app".into(),
+            address: "10.77.52.4".into(),
+            ports: vec![4001, 4002],
+        });
+        let line = joined(&machine);
+        assert!(
+            line.contains(
+                "hostfwd=tcp:127.0.0.1:2252-10.77.52.2:22\
+                 ,guestfwd=tcp:10.77.52.4:4001-cmd:'/opt/in,,tar/app' relay 4001\
+                 ,guestfwd=tcp:10.77.52.4:4002-cmd:'/opt/in,,tar/app' relay 4002\
+                 ,restrict=on -device"
+            ),
+            "{line}"
         );
     }
 

@@ -72,6 +72,19 @@ impl Local {
         }
         let (run_id, machine) = (run.run_id.clone(), machine.clone());
         let handle = tokio::runtime::Handle::current();
+        // A guest without internet access reaches the app through this
+        // program, run as `<program> relay <port>`: the app itself.
+        let relay = match std::env::var_os("INTAR_RELAY") {
+            Some(program) => PathBuf::from(program),
+            None => match std::env::current_exe() {
+                Ok(program) => program,
+                Err(error) => {
+                    return MachineStatus::Failed(format!(
+                        "The app could not find its own program file: {error}"
+                    ));
+                }
+            },
+        };
         let started = tokio::task::spawn_blocking(move || {
             let arch = zpm::Arch::host().map_or("qemu-system-x86_64", zpm::Arch::qemu_binary);
             let plan = Plan {
@@ -81,6 +94,9 @@ impl Local {
                 kino: &machine.kino,
                 cpu_millis: machine.cpu_millis,
                 memory_mib: machine.memory_mib,
+                disk_mib: machine.disk_mib,
+                egress: machine.egress,
+                relay: &relay,
                 // ponytail: no key, so no SSH in the guest, until the app has a terminal (#402).
                 authorized_keys: &[],
             };
