@@ -82,6 +82,17 @@ const FREE_BUILDER = `host.role = 'builder' AND host.scope = 'platform' AND host
   AND host.connected = 1 AND host.active_session_id IS NOT NULL
   AND json_extract(host.hello_json, '$.builder.image_format') = ?`;
 
+// A queued build somebody still waits for: a building revision that is its
+// scenario's newest names its key. A build queued for a revision that a later
+// publish replaced stays queued and is never started, so a new publish does
+// not wait behind the work of the ones before it. The platform base is every
+// machine's parent and always wanted.
+const STILL_WANTED = `(json_extract(build.target_json, '$.kind') = 'image' OR EXISTS (
+  SELECT 1 FROM scenario_revisions head, json_each(head.doc_json, '$.machines') machine
+   WHERE head.state = 'building' AND json_extract(machine.value, '$.build_key') = build.build_key
+     AND NOT EXISTS (SELECT 1 FROM scenario_revisions newer WHERE newer.scenario_id = head.scenario_id
+       AND (newer.created_at > head.created_at OR (newer.created_at = head.created_at AND newer.rev > head.rev)))))`;
+
 // The builder a build is being assigned to (?2) says it also builds arm64.
 const BUILDS_ARM64 = `EXISTS (SELECT 1 FROM agent_hosts able, json_each(able.hello_json, '$.builder.architectures') built
   WHERE able.id = ?2 AND built.value = 'arm64')`;
@@ -184,7 +195,8 @@ export async function assignQueuedMachineBuilds(env: Env, now: number): Promise<
         FROM agent_hosts host WHERE ${FREE_BUILDER}`,
     ).bind(IMAGE_FORMAT),
     env.DB.prepare(
-      `SELECT build_key FROM machine_builds WHERE state = 'queued' AND image_format = ?1
+      `SELECT build_key FROM machine_builds build WHERE state = 'queued' AND image_format = ?1
+          AND ${STILL_WANTED}
         ORDER BY created_at, build_key LIMIT ${ASSIGN_BATCH}`,
     ).bind(IMAGE_FORMAT),
   ]);
