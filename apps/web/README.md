@@ -141,6 +141,9 @@ must stay paused.
 Hosts take Kino as a stored Kino artifact. `KINO_PINS_JSON` pins one per
 guest contract, as `{"<contract>":{"current":"sha256:<hex>","previous":null}}`;
 a pin whose digest is not a stored Kino artifact for that contract pins nothing.
+That pair is the amd64 Kino, which hosts run. An `"arm64":{"current":...,"previous":...}`
+pair nested in the entry pins the arm64 Kino, which a learner's arm64 computer
+runs; without it no local run starts there.
 The website deploy sets it from `tools/deploy/kino-pin.json`, which the release
 workflow writes; without that file the variable is unset and no VM is placed.
 
