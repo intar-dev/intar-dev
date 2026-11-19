@@ -784,7 +784,7 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .rounded_md()
+            .rounded_lg()
             .border_1()
             .border_color(rgb(if self.invalid {
                 pal.red
@@ -793,12 +793,12 @@ impl Render for TextInput {
             } else {
                 pal.input_border
             }))
-            .bg(rgb(pal.bg))
+            .bg(rgb(pal.panel))
             .px_3()
-            .py(px(7.0))
+            .py(px(8.0))
             .overflow_hidden()
             .line_height(px(18.))
-            .text_size(px(13.))
+            .text_size(px(14.))
             .text_color(rgb(pal.text))
             .child(TextElement { input: cx.entity() })
     }

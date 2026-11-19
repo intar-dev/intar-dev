@@ -1,5 +1,5 @@
-//! The intar desktop app (#391, #401). This first shell signs in and lists
-//! the learner's courses.
+//! The intar desktop app (#391, #401): sign-in, the learner's courses, and a
+//! run on this computer. The screens follow the app's design.
 
 mod engine;
 mod local;
@@ -9,22 +9,77 @@ mod ui;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClickEvent, Context, Div, Entity, SharedString, Stateful, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, rgb, size,
+    App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, FontWeight, SharedString,
+    Stateful, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, px,
+    rgb, size,
 };
 use gpui_platform::application;
-use state::{Command, Event, Screen, State};
+use state::{Command, Event, MachineStatus, Screen, State};
+use subspace::contract::{CatalogCourseV1, CatalogLectureV1, LocalRunV1};
 use tokio::sync::mpsc::UnboundedSender;
+use ui::kit::{self, Kind, Size};
 use ui::text_input::TextInput;
-use ui::theme::{self, Palette, palette};
+use ui::theme::{self, MONO, Palette, palette, term};
 use url::Url;
+
+/// The window's title bar is the app's own on macOS; elsewhere the system draws one.
+const OWN_TITLE_BAR: bool = cfg!(target_os = "macos");
 
 struct Jumper {
     state: State,
     commands: UnboundedSender<Command>,
-    /// Narrows the catalog to lectures whose title contains it.
-    filter: Entity<TextInput>,
+    /// Narrows the lecture list to titles that contain it.
+    search: Entity<TextInput>,
+    /// The learner pressed End run and is asked whether they mean it.
+    ending: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+fn plural(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// "Easy scenario · ~15 min", from what the lecture says about its scenario.
+fn lecture_facts(lecture: &CatalogLectureV1) -> String {
+    let difficulty = lecture.difficulty.as_ref().map(|difficulty| {
+        let mut letters = difficulty.chars();
+        let first = letters.next().map(|c| c.to_uppercase().collect::<String>());
+        format!("{}{} scenario", first.unwrap_or_default(), letters.as_str())
+    });
+    let minutes = lecture
+        .estimated_minutes
+        .map(|minutes| format!("~{minutes} min"));
+    let none = lecture
+        .scenario_id
+        .is_none()
+        .then(|| "No scenario".to_owned());
+    [none, difficulty, minutes]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn solved(course: &CatalogCourseV1) -> usize {
+    course
+        .lectures
+        .iter()
+        .filter(|lecture| lecture.state == "completed")
+        .count()
+}
+
+/// "2 CPUs · 2 GB memory".
+fn machine_facts(machine: &subspace::contract::LocalRunMachineV1) -> String {
+    let cpus = machine.cpu_millis as f32 / 1000.0;
+    let memory = if machine.memory_mib >= 1024 {
+        format!("{} GB", machine.memory_mib as f32 / 1024.0)
+    } else {
+        format!("{} MB", machine.memory_mib)
+    };
+    format!(
+        "{cpus} {} · {memory} memory",
+        if cpus == 1.0 { "CPU" } else { "CPUs" }
+    )
 }
 
 impl Jumper {
@@ -33,9 +88,9 @@ impl Jumper {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let filter = cx.new(|cx| TextInput::new("Filter lectures", false, 0, cx));
+        let search = cx.new(|cx| TextInput::new("Search lectures", false, 0, cx));
         let subscriptions = vec![
-            cx.observe(&filter, |_, _, cx| cx.notify()),
+            cx.observe(&search, |_, _, cx| cx.notify()),
             cx.observe_window_appearance(window, |_, window, cx| theme::apply(window, cx)),
         ];
         theme::apply(window, cx);
@@ -44,7 +99,8 @@ impl Jumper {
         Self {
             state: State::default(),
             commands,
-            filter,
+            search,
+            ending: false,
             _subscriptions: subscriptions,
         }
     }
@@ -61,327 +117,971 @@ impl Jumper {
         if let Some(next) = self.state.apply(event) {
             self.send(next);
         }
+        if !matches!(&self.state.screen, Screen::Run(run) if run.active) {
+            self.ending = false;
+        }
         cx.notify();
     }
 
-    /// A button; `act` runs on a click and may change the screen or ask the engine.
-    fn button(
-        &self,
-        p: &Palette,
-        label: &'static str,
-        primary: bool,
-        act: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    /// Gives `element` its click; `act` may change the screen or ask the engine.
+    fn on_click(
+        element: Stateful<Div>,
         cx: &Context<Self>,
+        act: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> Stateful<Div> {
-        let (bg, hover, text) = if primary {
-            (p.accent, p.accent_hover, p.on_accent)
-        } else {
-            (p.panel, p.border, p.text)
-        };
-        div()
-            .id(label)
-            .px_4()
-            .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(if primary { p.accent } else { p.input_border }))
-            .bg(rgb(bg))
-            .hover(move |style| style.bg(rgb(hover)))
-            .text_color(rgb(text))
-            .cursor_pointer()
-            .child(label)
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                act(this, cx);
-                cx.notify();
-            }))
+        element.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            act(this, cx);
+            cx.notify();
+        }))
     }
 
-    /// A button that only asks the engine for something.
-    fn command_button(
+    fn back_to_catalog(
         &self,
         p: &Palette,
-        label: &'static str,
-        primary: bool,
-        command: impl Fn() -> Command + 'static,
+        kind: Kind,
+        size: Size,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
-        self.button(p, label, primary, move |this, _| this.send(command()), cx)
+        let button = kit::button(p, "back", kind, size, None, "Back to catalog", None);
+        Self::on_click(button, cx, |this, _| {
+            let reload = this.state.back_to_catalog();
+            this.send(reload);
+        })
+    }
+
+    /// The run on screen, and its lecture's and course's titles when the catalog has them.
+    fn run_titles(&self, run: &LocalRunV1) -> (SharedString, Option<SharedString>) {
+        self.state
+            .catalog
+            .iter()
+            .find_map(|course| {
+                let lecture = course
+                    .lectures
+                    .iter()
+                    .find(|lecture| lecture.scenario_id.as_deref() == Some(&run.scenario_id))?;
+                Some((
+                    lecture.title.clone().into(),
+                    Some(course.title.clone().into()),
+                ))
+            })
+            .unwrap_or_else(|| (run.scenario_id.clone().into(), None))
+    }
+
+    fn title_bar(&self, p: &Palette, cx: &Context<Self>) -> Div {
+        let bar = div()
+            .h(px(46.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(14.))
+            // Room for the window's own buttons.
+            .pl(px(if OWN_TITLE_BAR { 84. } else { 16. }))
+            .pr(px(10.))
+            .child(kit::logo());
+        let wordmark = div()
+            .text_size(px(15.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child("Intar");
+        let fill = div().flex_1().min_w_0();
+        // ponytail: "Connected" means the last call to intar worked; a live
+        // connection state comes with the report outbox.
+        let connected = self
+            .state
+            .error
+            .is_none()
+            .then(|| kit::status(p.green, "Connected").text_color(rgb(p.muted)));
+        match &self.state.screen {
+            Screen::Run(run) => {
+                let (title, course) = self.run_titles(run);
+                let (word, color) = match (&self.state.machine, run.active) {
+                    (_, false) => ("Closed", p.muted),
+                    (Some(MachineStatus::Failed(_)), _) => ("Could not start", p.red),
+                    (Some(MachineStatus::Ready { passed, tasks }), _)
+                        if tasks > &0 && passed == tasks =>
+                    {
+                        ("Solved", p.green)
+                    }
+                    (Some(MachineStatus::Ready { .. }), _) => ("Running", p.brand_text),
+                    _ => ("Starting", p.brand_text),
+                };
+                let badge = div()
+                    .h(px(22.))
+                    .px_2()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(5.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(p.border))
+                    .bg(rgb(p.subtle))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(p.muted))
+                    .child(kit::icon("monitor", 12., p.muted))
+                    .child("Local run");
+                let leave = if run.active {
+                    let end = kit::button(
+                        p,
+                        "end",
+                        Kind::QuietDanger,
+                        Size::Small,
+                        Some("stop"),
+                        "End run",
+                        None,
+                    );
+                    Self::on_click(end, cx, |this, _| this.ending = !this.ending)
+                } else {
+                    self.back_to_catalog(p, Kind::Outline, Size::Small, cx)
+                };
+                bar.child(kit::card_title(p, title).truncate())
+                    .children(course.map(|course| kit::label(p, course).flex_none()))
+                    .child(kit::status(color, word))
+                    .child(badge)
+                    .child(fill)
+                    .children(connected)
+                    .child(div().w(px(1.)).h(px(18.)).bg(rgb(p.border)))
+                    .child(leave)
+            }
+            Screen::Catalog | Screen::Lecture { .. } => {
+                let catalog = div()
+                    .h(px(30.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(p.border))
+                    .bg(rgb(p.panel))
+                    .shadow_sm()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(kit::icon("grid", 14., p.accent))
+                    .child("Catalog");
+                let sign_out = kit::button(
+                    p,
+                    "sign-out",
+                    Kind::Ghost,
+                    Size::Small,
+                    None,
+                    "Sign out",
+                    None,
+                );
+                bar.child(wordmark)
+                    .child(catalog)
+                    .child(fill)
+                    .children(connected)
+                    .child(Self::on_click(sign_out, cx, |this, _| {
+                        this.send(Command::SignOut)
+                    }))
+            }
+            _ => bar.child(wordmark),
+        }
+    }
+
+    /// The screens before the catalog: one column in the middle of the window.
+    fn front(&self, p: &Palette, cx: &Context<Self>) -> Div {
+        let column = div().w(px(460.)).flex().flex_col().gap(px(28.));
+        let words = |title: &'static str, lede: &'static str| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(kit::feature(p, title))
+                .child(kit::lede(p, lede))
+        };
+        let column = match &self.state.screen {
+            Screen::SigningIn(url) => {
+                let again = kit::button(
+                    p,
+                    "again",
+                    Kind::Outline,
+                    Size::Medium,
+                    Some("external"),
+                    "Open the browser again",
+                    None,
+                );
+                let copy = kit::button(
+                    p,
+                    "copy",
+                    Kind::Outline,
+                    Size::Small,
+                    Some("copy"),
+                    "Copy link",
+                    None,
+                );
+                let (open, link) = (url.clone(), url.clone());
+                column
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(kit::status(p.brand_text, "Waiting for your browser"))
+                            .child(kit::feature(p, "Finish signing in in your browser"))
+                            .child(kit::lede(
+                                p,
+                                "A browser window opened on intar's sign-in page. Sign in there, and this window continues by itself.",
+                            )),
+                    )
+                    .child(div().flex().child(Self::on_click(again, cx, move |_, cx| cx.open_url(&open))))
+                    .child(
+                        kit::card(p)
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .px(px(14.))
+                            .py_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().font_weight(FontWeight::MEDIUM).child("Browser did not open?"))
+                                    .child(kit::meta(
+                                        p,
+                                        "Copy the sign-in link and paste it into any browser on this computer.",
+                                    )),
+                            )
+                            .child(Self::on_click(copy, cx, move |_, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                            })),
+                    )
+            }
+            Screen::SignedOut => {
+                let sign_in = kit::button(
+                    p,
+                    "sign-in",
+                    Kind::Primary,
+                    Size::Large,
+                    None,
+                    "Sign in with your browser",
+                    Some("external"),
+                );
+                column
+                    .child(words(
+                        "Sign in to Intar",
+                        "Intar opens your browser to sign you in, then brings you back here. You never type a password into this app.",
+                    ))
+                    .child(div().flex().child(Self::on_click(sign_in, cx, |this, _| this.send(Command::SignIn))))
+            }
+            Screen::Starting => column.child(words(
+                "Opening your keychain…",
+                "Intar keeps your sign-in there. Your computer may ask you to unlock it.",
+            )),
+            Screen::OpeningRun => column.child(words(
+                "Asking Intar for the run…",
+                "Intar checks your course and says which machines this scenario needs.",
+            )),
+            _ => column.child(words("Loading your courses…", "This takes a moment.")),
+        };
+        kit::panel(p)
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_8()
+            .child(column.children(self.state.error.clone().map(|error| kit::failure(p, error))))
     }
 
     fn catalog(&self, p: &Palette, cx: &Context<Self>) -> Div {
-        if self.state.catalog.is_empty() {
-            return card(p, "No courses yet")
-                .child(muted(p, "Courses you can take show up here."))
-                .child(div().flex().child(self.command_button(
-                    p,
-                    "Sign out",
-                    false,
-                    || Command::SignOut,
-                    cx,
-                )));
+        let courses = &self.state.catalog;
+        let shown = self.state.course.min(courses.len().saturating_sub(1));
+        let Some(course) = courses.get(shown) else {
+            return kit::panel(p)
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(kit::page(p, "No courses yet"))
+                .child(kit::support(p, "Courses you can take show up here."));
+        };
+        let selected = match self.state.screen {
+            Screen::Lecture { lecture, .. } => course.lectures.get(lecture).map(|l| (lecture, l)),
+            _ => None,
+        };
+
+        let rail = div()
+            .w(px(244.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .px_1()
+            .pt(px(6.))
+            .child(kit::label(p, "Your courses").px(px(10.)).pt_2().pb(px(6.)))
+            .children(courses.iter().enumerate().map(|(index, course)| {
+                let done = solved(course);
+                let total = course.lectures.len();
+                let row = div()
+                    .id(("course", index))
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.))
+                    .px(px(10.))
+                    .py(px(9.))
+                    .rounded_lg()
+                    .border_1()
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(course.title.clone()),
+                    )
+                    .child(kit::segments(p, done, total, 3.))
+                    .child(kit::caption(
+                        p,
+                        if done == 0 {
+                            format!("Not started · {}", plural(total, "lecture", "lectures"))
+                        } else {
+                            format!("{done} of {total} solved")
+                        },
+                    ));
+                let row = if index == shown {
+                    row.bg(rgb(p.panel)).border_color(rgb(p.border)).shadow_sm()
+                } else {
+                    let hover = p.track;
+                    row.border_color(gpui::transparent_black())
+                        .hover(move |style| style.bg(rgb(hover)))
+                };
+                Self::on_click(row, cx, move |this, _| this.state.open_course(index))
+            }));
+
+        let query = self.search.read(cx).text().trim().to_lowercase();
+        let minutes: u32 = course
+            .lectures
+            .iter()
+            .filter_map(|l| l.estimated_minutes)
+            .sum();
+        let mut facts = vec![
+            plural(course.lectures.len(), "lecture", "lectures"),
+            format!("{} solved", solved(course)),
+        ];
+        if minutes > 0 {
+            facts.push(format!("about {minutes} min"));
         }
-        let filter = self.filter.read(cx).text().trim().to_lowercase();
-        let courses = self
-            .state
-            .catalog
+        let rows = course
+            .lectures
             .iter()
             .enumerate()
-            .map(|(course_index, course)| {
-                let lectures = course
-                    .lectures
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, lecture)| lecture.title.to_lowercase().contains(&filter))
-                    .map(|(lecture_index, lecture)| {
-                        let hover = p.border;
+            .filter(|(_, lecture)| lecture.title.to_lowercase().contains(&query))
+            .enumerate()
+            .map(|(position, (index, lecture))| {
+                let (glyph, glyph_color) = match lecture.state.as_str() {
+                    "completed" => ("check-circle", p.green),
+                    "locked" => ("lock", p.disabled),
+                    "in_progress" => ("circle", p.accent),
+                    _ => ("circle", p.disabled),
+                };
+                let (word, word_color) = match lecture.state.as_str() {
+                    "completed" => ("Solved", p.green),
+                    "in_progress" => ("In progress", p.brand_text),
+                    "locked" => ("Locked", p.disabled),
+                    "waiting_for_scenario" => ("Not ready yet", p.disabled),
+                    _ => ("Not started", p.disabled),
+                };
+                let row = div()
+                    .id(("lecture", index))
+                    .flex()
+                    .items_start()
+                    .gap_3()
+                    .px_4()
+                    .py(px(13.))
+                    .when(position > 0, |row| row.border_t_1())
+                    .border_color(rgb(p.border))
+                    .cursor_pointer()
+                    .child(div().pt(px(3.)).child(kit::icon(glyph, 16., glyph_color)))
+                    .child(
                         div()
-                            .id(("lecture", course_index * 10_000 + lecture_index))
+                            .flex_1()
+                            .min_w_0()
                             .flex()
-                            .justify_between()
-                            .gap_4()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(rgb(hover)))
-                            .child(lecture.title.clone())
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(lecture_color(p, &lecture.state)))
-                                    .child(lecture.state.replace('_', " ")),
-                            )
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.state.open_lecture(course_index, lecture_index);
-                                cx.notify();
-                            }))
-                    });
-                card(p, course.title.clone())
-                    .child(muted(p, course.summary.clone()))
-                    .children(lectures)
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(kit::card_title(p, lecture.title.clone()))
+                            .when(!lecture.summary.is_empty(), |text| {
+                                text.child(kit::support(p, lecture.summary.clone()))
+                            })
+                            .child(kit::meta(p, lecture_facts(lecture))),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .gap(px(2.))
+                            .pt(px(2.))
+                            .child(kit::label(p, word).text_color(rgb(word_color)))
+                            .when(lecture.active_run_id.is_some(), |right| {
+                                right.child(kit::caption(p, "Run active"))
+                            }),
+                    );
+                let row = if selected.is_some_and(|(at, _)| at == index) {
+                    row.bg(rgb(p.selected))
+                } else {
+                    let hover = p.bg;
+                    row.hover(move |style| style.bg(rgb(hover)))
+                };
+                Self::on_click(row, cx, move |this, _| {
+                    this.state.open_lecture(shown, index)
+                })
             });
+        let list = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(18.))
+            .p_6()
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap_6()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(kit::page(p, course.title.clone()))
+                            .child(kit::meta(p, facts.join(" · "))),
+                    )
+                    .child(div().w(px(260.)).child(self.search.clone())),
+            )
+            .children(self.state.error.clone().map(|error| kit::failure(p, error)))
+            .child(
+                div()
+                    .id("lectures")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(kit::card(p).children(rows)),
+            );
+
+        let detail = div()
+            .w(px(372.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(rgb(p.border));
+        let words = div()
+            .id("detail")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_6();
+        let foot = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .px_6()
+            .pt_4()
+            .pb(px(18.))
+            .border_t_1()
+            .border_color(rgb(p.border));
+        let detail = match selected {
+            None => detail.child(
+                words.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(kit::label(p, "Course"))
+                        .child(kit::content(p, course.title.clone()))
+                        .child(kit::support(p, course.summary.clone()).text_size(px(15.)))
+                        .child(kit::meta(p, "Pick a lecture to see its scenario.")),
+                ),
+            ),
+            Some((index, lecture)) => {
+                let start = kit::button(
+                    p,
+                    "start",
+                    Kind::Primary,
+                    Size::Large,
+                    None,
+                    if lecture.active_run_id.is_some() {
+                        "Open the run"
+                    } else {
+                        "Start scenario"
+                    },
+                    Some("arrow-right"),
+                );
+                let blocked = match (&lecture.scenario_id, lecture.state.as_str()) {
+                    (None, _) => Some("This lecture has no scenario."),
+                    (_, "locked") => {
+                        Some("Finish the lectures before this one to unlock its scenario.")
+                    }
+                    (_, "waiting_for_scenario") => {
+                        Some("This lecture's scenario is not ready yet.")
+                    }
+                    _ => None,
+                };
+                let foot = match blocked {
+                    Some(why) if lecture.scenario_id.is_none() => foot.child(kit::caption(p, why)),
+                    Some(why) => foot
+                        .child(start.opacity(0.5).cursor_default())
+                        .child(kit::caption(p, why)),
+                    None => foot
+                        .child(Self::on_click(start, cx, |this, _| {
+                            if let Some(command) = this.state.open_run() {
+                                this.send(command);
+                            }
+                        }))
+                        .child(kit::caption(
+                            p,
+                            "Runs on this computer. The result counts toward your course and is marked as a local run.",
+                        )),
+                };
+                detail
+                    .child(
+                        words.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(kit::label(
+                                    p,
+                                    format!("Lecture {} of {}", index + 1, course.lectures.len()),
+                                ))
+                                .child(kit::content(p, lecture.title.clone()))
+                                .child(kit::support(p, lecture.summary.clone()).text_size(px(15.)))
+                                .child(kit::meta(p, lecture_facts(lecture))),
+                        ),
+                    )
+                    .child(foot)
+            }
+        };
+
+        div().flex_1().min_w_0().flex().gap_2().child(rail).child(
+            kit::panel(p)
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .overflow_hidden()
+                .child(list)
+                .child(detail),
+        )
+    }
+
+    /// The run's start, stage by stage; it sits where the terminal will be.
+    fn stages(&self, p: &Palette, run: &LocalRunV1, cx: &Context<Self>) -> Div {
+        let machines = plural(run.machines.len(), "machine", "machines");
+        let failed = match &self.state.machine {
+            Some(MachineStatus::Failed(reason)) => Some(reason.clone()),
+            _ => None,
+        };
+        let stage = self.state.stage.min(2);
+        let names = [
+            "Preparing this computer".to_owned(),
+            format!("Booting {machines}"),
+            "Ready".to_owned(),
+        ];
+        let (headline, summary) = match (&failed, stage) {
+            (Some(reason), _) => ("This run could not start".to_owned(), reason.clone()),
+            (None, 0) => (
+                names[0].clone(),
+                "Intar puts the machines for this scenario in place on this computer.".to_owned(),
+            ),
+            (None, _) => (
+                names[1].clone(),
+                "Each machine starts its system and then the lab inside it.".to_owned(),
+            ),
+        };
+        let track = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .children((0..3).map(|index| {
+                let dot = div().h(px(8.)).rounded(px(4.));
+                match (index.cmp(&stage), failed.is_some()) {
+                    (std::cmp::Ordering::Less, _) => dot.w(px(8.)).bg(rgb(p.green)),
+                    (std::cmp::Ordering::Equal, true) => dot.w(px(64.)).bg(rgb(p.red)),
+                    (std::cmp::Ordering::Equal, false) => dot
+                        .w(px(64.))
+                        .bg(rgb(p.brand_subtle))
+                        .border_1()
+                        .border_color(rgb(p.brand_border)),
+                    (std::cmp::Ordering::Greater, _) => dot.w(px(8.)).bg(rgb(p.track)),
+                }
+            }));
+        let steps = names.iter().enumerate().map(|(index, name)| {
+            let mark = div()
+                .size(px(24.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD);
+            let number = (index + 1).to_string();
+            let (mark, word, word_color, fill) = match (index.cmp(&stage), failed.is_some()) {
+                (std::cmp::Ordering::Less, _) => (
+                    mark.bg(rgb(p.green))
+                        .child(kit::icon("check", 14., p.on_green)),
+                    "Done",
+                    p.green,
+                    None,
+                ),
+                (std::cmp::Ordering::Equal, true) => (
+                    mark.bg(rgb(p.red)).text_color(rgb(p.on_red)).child("!"),
+                    "Failed",
+                    p.red,
+                    Some(p.red_subtle),
+                ),
+                (std::cmp::Ordering::Equal, false) => (
+                    mark.bg(rgb(p.brand_subtle))
+                        .border_1()
+                        .border_color(rgb(p.brand_border))
+                        .text_color(rgb(p.brand_text))
+                        .child(number),
+                    "In progress",
+                    p.brand_text,
+                    Some(p.selected),
+                ),
+                (std::cmp::Ordering::Greater, _) => (
+                    mark.border_1()
+                        .border_color(rgb(p.border_strong))
+                        .text_color(rgb(p.muted))
+                        .child(number),
+                    "Up next",
+                    p.disabled,
+                    None,
+                ),
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .p_3()
+                .rounded(px(10.))
+                .when_some(fill, |row, fill| row.bg(rgb(fill)))
+                .child(mark)
+                .child(div().flex_1().child(kit::card_title(p, name.clone())))
+                .child(kit::label(p, word).text_color(rgb(word_color)))
+        });
+        kit::card(p)
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(22.))
+            .px_12()
+            .py_8()
+            .child(
+                div()
+                    .max_w(px(640.))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(track)
+                            .child(kit::label(p, format!("Stage {} of 3", stage + 1))),
+                    )
+                    .child(kit::page(p, headline))
+                    .child(kit::support(p, summary).text_size(px(15.))),
+            )
+            .child(
+                div()
+                    .max_w(px(720.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .children(steps),
+            )
+            .when(failed.is_some(), |card| {
+                card.child(div().flex().child(self.back_to_catalog(
+                    p,
+                    Kind::Outline,
+                    Size::Medium,
+                    cx,
+                )))
+            })
+    }
+
+    /// The terminal's place once the lab is up.
+    // ponytail: the terminal itself is #402; until then the area says so.
+    fn terminal(run: &LocalRunV1) -> Div {
+        let tabs = run.machines.iter().enumerate().map(|(index, machine)| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .font_family(MONO)
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(if index == 0 { term::TEXT } else { term::MUTED }))
+                .when(index == 0, |tab| {
+                    tab.border_b_2().border_color(rgb(term::BRAND))
+                })
+                .child(div().size(px(6.)).rounded_full().bg(rgb(term::GREEN)))
+                .child(machine.name.clone())
+        });
         div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded_xl()
+            .border_1()
+            .border_color(rgb(term::BORDER))
+            .bg(rgb(term::BG))
+            .child(
+                div()
+                    .h(px(42.))
+                    .flex_none()
+                    .flex()
+                    .items_stretch()
+                    .gap(px(2.))
+                    .px_2()
+                    .bg(rgb(term::SURFACE))
+                    .border_b_1()
+                    .border_color(rgb(term::BORDER))
+                    .children(tabs)
+                    .child(div().flex_1())
+                    .children(run.machines.first().map(|machine| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .pr(px(6.))
+                            .text_size(px(12.))
+                            .text_color(rgb(term::MUTED))
+                            .child(machine_facts(machine))
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .px(px(18.))
+                    .py(px(14.))
+                    .font_family(MONO)
+                    .text_size(px(14.))
+                    .text_color(rgb(term::MUTED))
+                    .child("The machines are running. The terminal is not built into this version of the app yet."),
+            )
+    }
+
+    fn run(&self, p: &Palette, run: &LocalRunV1, cx: &Context<Self>) -> Div {
+        let body = div().flex_1().min_w_0().flex().gap_2();
+        if !run.active {
+            let closed = kit::card(p)
+                .w(px(460.))
+                .p_6()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(14.))
+                        .child(
+                            div()
+                                .size(px(36.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(10.))
+                                .border_1()
+                                .border_color(rgb(p.border))
+                                .bg(rgb(p.subtle))
+                                .child(kit::icon("power", 16., p.muted)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .child(kit::section(p, "This run was closed"))
+                                .child(kit::support(
+                                    p,
+                                    "Its machines on this computer have stopped. Tasks verified before then stay on your account.",
+                                )),
+                        ),
+                )
+                .child(div().flex().justify_end().child(self.back_to_catalog(p, Kind::Primary, Size::Medium, cx)));
+            return body.child(
+                kit::panel(p)
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(closed),
+            );
+        }
+        let (passed, tasks) = match self.state.machine {
+            Some(MachineStatus::Ready { passed, tasks }) => (passed, Some(tasks)),
+            _ => (0, None),
+        };
+        let stage = match tasks {
+            Some(_) => Self::terminal(run),
+            None => self.stages(p, run, cx),
+        };
+        let machines = run.machines.iter().enumerate().map(|(position, machine)| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(14.))
+                .py(px(10.))
+                .when(position > 0, |row| row.border_t_1())
+                .border_color(rgb(p.border))
+                .child(kit::icon("monitor", 16., p.disabled))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .child(kit::code(p, machine.name.clone())),
+                )
+                .child(kit::meta(p, machine_facts(machine)).text_color(rgb(p.muted)))
+        });
+        let side = kit::panel(p)
+            .w(px(400.))
+            .flex_none()
             .flex()
             .flex_col()
             .gap_4()
+            .p_4()
             .child(
                 div()
-                    .w(px(520.))
                     .flex()
-                    .gap_3()
-                    .items_center()
-                    .child(div().flex_1().child(self.filter.clone()))
-                    .child(self.command_button(p, "Sign out", false, || Command::SignOut, cx)),
+                    .items_baseline()
+                    .justify_between()
+                    .px_1()
+                    .child(kit::section(p, "Tasks"))
+                    .child(kit::meta(
+                        p,
+                        match tasks {
+                            Some(tasks) => format!("{passed} of {tasks} verified"),
+                            None => "Begin when the machines are ready".to_owned(),
+                        },
+                    )),
             )
-            .children(courses)
+            .children(tasks.map(|tasks| kit::segments(p, passed, tasks, 4.).px_1()))
+            .when(
+                tasks.is_some_and(|tasks| tasks > 0 && passed == tasks),
+                |side| {
+                    side.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .px(px(14.))
+                            .py_3()
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_color(rgb(p.green_border))
+                            .bg(rgb(p.green_subtle))
+                            .child(kit::icon("check-circle", 20., p.green))
+                            .child(
+                                div()
+                                    .child(kit::card_title(p, "All tasks verified"))
+                                    .child(kit::meta(p, "Saved to your course as a local run")),
+                            ),
+                    )
+                },
+            )
+            .children(self.state.error.clone().map(|error| kit::failure(p, error)))
+            .child(kit::label(p, "Machines").px_1())
+            .child(kit::card(p).mt(px(-8.)).children(machines));
+        body.child(stage).child(side)
     }
 
-    fn lecture(&self, p: &Palette, cx: &Context<Self>) -> Div {
-        let Some((course, lecture)) = self.state.lecture() else {
-            return card(p, "This lecture is no longer in your courses");
-        };
-        let back = self.button(
+    /// Asks before a run ends: its machines are deleted with it.
+    fn end_confirm(&self, p: &Palette, run: &LocalRunV1, cx: &Context<Self>) -> Div {
+        let keep = kit::button(
             p,
-            "Back to courses",
-            false,
-            |this, _| {
-                let reload = this.state.back_to_catalog();
-                this.send(reload)
-            },
-            cx,
+            "keep",
+            Kind::Outline,
+            Size::Small,
+            None,
+            "Keep working",
+            None,
         );
-        let facts = [
-            Some(course.title.clone()),
-            lecture.difficulty.clone(),
-            lecture
-                .estimated_minutes
-                .map(|minutes| format!("{minutes} min")),
-            Some(lecture.state.replace('_', " ")),
-        ];
-        let body = card(p, lecture.title.clone())
-            .child(muted(
-                p,
-                facts.into_iter().flatten().collect::<Vec<_>>().join(" · "),
-            ))
-            .child(div().child(lecture.summary.clone()));
-        let run = self.button(
+        let end = kit::button(
             p,
-            if lecture.active_run_id.is_some() {
-                "Open the run"
-            } else {
-                "Start on this computer"
-            },
-            true,
-            |this, _| {
-                if let Some(command) = this.state.open_run() {
-                    this.send(command);
-                }
-            },
-            cx,
+            "end-now",
+            Kind::Danger,
+            Size::Small,
+            None,
+            "End run and delete machines",
+            None,
         );
-        match (&lecture.scenario_id, lecture.state.as_str()) {
-            (None, _) => body
-                .child(muted(p, "This lecture has no lab."))
-                .child(div().flex().child(back)),
-            (Some(_), "locked") => body
-                .child(muted(
-                    p,
-                    "Finish the lectures before this one to unlock its lab.",
-                ))
-                .child(div().flex().child(back)),
-            (Some(_), "waiting_for_scenario") => body
-                .child(muted(p, "This lecture's lab is not ready yet."))
-                .child(div().flex().child(back)),
-            (Some(_), _) => body.child(div().flex().gap_3().child(run).child(back)),
-        }
-    }
-
-    fn run(&self, p: &Palette, run: &subspace::contract::LocalRunV1, cx: &Context<Self>) -> Div {
-        let back = self.button(
-            p,
-            "Back to courses",
-            false,
-            |this, _| {
-                let reload = this.state.back_to_catalog();
-                this.send(reload)
-            },
-            cx,
-        );
-        let machines = run.machines.iter().map(|machine| {
-            div()
-                .flex()
-                .justify_between()
-                .gap_4()
-                .child(machine.name.clone())
-                .child(muted(
-                    p,
-                    format!(
-                        "{} CPU · {} MiB memory · {} MiB disk",
-                        machine.cpu_millis as f32 / 1000.0,
-                        machine.memory_mib,
-                        machine.disk_mib
-                    ),
-                ))
-        });
-        let body = card(p, run.scenario_id.clone())
-            .child(muted(
-                p,
-                format!(
-                    "{} · {}",
-                    if run.active { "Active" } else { "Ended" },
-                    run.state.replace('_', " ")
-                ),
-            ))
-            .children(machines);
-        if !run.active {
-            return body.child(div().flex().child(back));
-        }
         let run_id = run.run_id.clone();
-        let end = self.command_button(
-            p,
-            "End run",
-            true,
-            move || Command::EndRun {
-                run_id: run_id.clone(),
-            },
-            cx,
-        );
-        // The machine's own status: starting, booting, the lab's tasks, or why it failed.
-        let status = match &self.state.machine {
-            Some(status @ state::MachineStatus::Failed(_)) => {
-                div().text_sm().text_color(rgb(p.red)).child(status.label())
-            }
-            Some(status @ state::MachineStatus::Ready { .. }) => div()
-                .text_sm()
-                .text_color(rgb(p.green))
-                .child(status.label()),
-            Some(status) => muted(p, status.label()),
-            None => muted(p, "Waiting for the machine…"),
-        };
-        body.child(status)
-            // ponytail: no terminal in the app yet (#402), so a ready lab cannot be worked on from here.
-            .child(muted(
-                p,
-                "The terminal is not built into this version of the app yet.",
-            ))
-            .child(div().flex().gap_3().child(end).child(back))
-    }
-}
-
-fn card(p: &Palette, title: impl Into<SharedString>) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .p_6()
-        .w(px(520.))
-        .rounded_lg()
-        .bg(rgb(p.panel))
-        .border_1()
-        .border_color(rgb(p.border))
-        .child(div().text_xl().child(title.into()))
-}
-
-fn muted(p: &Palette, text: impl Into<SharedString>) -> Div {
-    div().text_sm().text_color(rgb(p.muted)).child(text.into())
-}
-
-fn lecture_color(p: &Palette, state: &str) -> u32 {
-    match state {
-        "completed" => p.green,
-        "in_progress" => p.accent,
-        _ => p.muted,
+        kit::card(p)
+            .absolute()
+            .top(px(48.))
+            .right(px(10.))
+            .w(px(348.))
+            .occlude()
+            .shadow_lg()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(kit::card_title(p, "End this run?"))
+                    .child(kit::support(
+                        p,
+                        "The machines stop and their disks are deleted from this computer. Tasks verified so far stay on your account.",
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::on_click(keep, cx, |this, _| this.ending = false))
+                    .child(Self::on_click(end, cx, move |this, _| {
+                        this.ending = false;
+                        this.send(Command::EndRun { run_id: run_id.clone() });
+                    })),
+            )
     }
 }
 
 impl Render for Jumper {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let content = match &self.state.screen {
-            Screen::Starting => card(p, "Opening your keychain…").child(muted(
-                p,
-                "intar keeps your sign-in there. Your computer may ask you to unlock it.",
-            )),
-            Screen::SignedOut => card(p, "Sign in to intar")
-                .child(muted(
-                    p,
-                    "Your browser opens intar's sign-in page. Labs then run on this computer.",
-                ))
-                .child(div().flex().child(self.command_button(
-                    p,
-                    "Sign in",
-                    true,
-                    || Command::SignIn,
-                    cx,
-                ))),
-            Screen::SigningIn(url) => card(p, "Finish signing in in your browser")
-                .child(muted(p, "If no browser opened, open this link yourself:"))
-                .child(muted(p, url.clone())),
-            Screen::Loading => card(p, "Loading your courses…"),
-            Screen::Catalog => self.catalog(p, cx),
-            Screen::Lecture { .. } => self.lecture(p, cx),
-            Screen::OpeningRun => card(p, "Asking intar for the run…"),
-            Screen::Run(run) => self.run(p, run, cx),
+        let (body, confirm) = match &self.state.screen {
+            Screen::Catalog | Screen::Lecture { .. } => (self.catalog(p, cx), None),
+            Screen::Run(run) => (
+                self.run(p, run, cx),
+                self.ending.then(|| self.end_confirm(p, run, cx)),
+            ),
+            _ => (self.front(p, cx), None),
         };
         div()
-            .id("jumper")
             .when_some(theme::ui_font(cx), |root, font| root.font_family(font))
+            .relative()
             .size_full()
             .flex()
             .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_4()
-            .overflow_y_scroll()
-            .bg(rgb(p.bg))
+            .bg(rgb(p.canvas))
             .text_color(rgb(p.text))
-            .children(
-                self.state
-                    .error
-                    .clone()
-                    .map(|error| div().max_w(px(520.)).text_color(rgb(p.red)).child(error)),
-            )
-            .child(content)
+            .text_size(px(14.))
+            .child(self.title_bar(p, cx))
+            .child(div().flex_1().min_h_0().flex().px_2().pb_2().child(body))
+            .children(confirm)
     }
 }
 
@@ -405,39 +1105,42 @@ fn main() {
             std::process::exit(1);
         }
     };
-    application().run(move |cx: &mut App| {
-        ui::text_input::bind_keys(cx);
-        theme::init_ui_font(cx);
-        let bounds = Bounds::centered(None, size(px(960.), px(680.)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("intar".into()),
+    application()
+        .with_assets(kit::Assets)
+        .run(move |cx: &mut App| {
+            ui::text_input::bind_keys(cx);
+            theme::init_ui_font(cx);
+            let bounds = Bounds::centered(None, size(px(1280.), px(760.)), cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Intar".into()),
+                    appears_transparent: OWN_TITLE_BAR,
+                    traffic_light_position: Some(point(px(16.), px(15.))),
+                }),
+                window_min_size: Some(size(px(1040.), px(600.))),
                 ..Default::default()
-            }),
-            window_min_size: Some(size(px(640.), px(480.))),
-            ..Default::default()
-        };
-        let opened = cx.open_window(options, move |window, cx| {
-            let view = cx.new(|cx| Jumper::new(commands, window, cx));
-            // Engine → view. The task ends with the engine or the window.
-            let weak = view.downgrade();
-            cx.spawn(async move |cx| {
-                while let Some(event) = events.recv().await {
-                    if weak.update(cx, |view, cx| view.apply(event, cx)).is_err() {
-                        break;
+            };
+            let opened = cx.open_window(options, move |window, cx| {
+                let view = cx.new(|cx| Jumper::new(commands, window, cx));
+                // Engine → view. The task ends with the engine or the window.
+                let weak = view.downgrade();
+                cx.spawn(async move |cx| {
+                    while let Some(event) = events.recv().await {
+                        if weak.update(cx, |view, cx| view.apply(event, cx)).is_err() {
+                            break;
+                        }
                     }
+                })
+                .detach();
+                view
+            });
+            match opened {
+                Ok(_) => cx.activate(true),
+                Err(error) => {
+                    eprintln!("jumper: could not open a window: {error}");
+                    cx.quit();
                 }
-            })
-            .detach();
-            view
-        });
-        match opened {
-            Ok(_) => cx.activate(true),
-            Err(error) => {
-                eprintln!("jumper: could not open a window: {error}");
-                cx.quit();
             }
-        }
-    });
+        });
 }

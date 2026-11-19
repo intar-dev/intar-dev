@@ -73,17 +73,6 @@ impl MachineStatus {
             },
         }
     }
-
-    pub fn label(&self) -> String {
-        match self {
-            Self::Starting => "Starting the machine on this computer…".to_owned(),
-            Self::Booting => "The machine is booting…".to_owned(),
-            Self::Ready { passed, tasks } => {
-                format!("The lab is ready. {passed} of {tasks} tasks solved.")
-            }
-            Self::Failed(reason) => reason.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -115,6 +104,11 @@ pub struct State {
     pub error: Option<String>,
     /// The machine of the run on screen, once the engine started on it.
     pub machine: Option<MachineStatus>,
+    /// How far the machine's start came: 0 starting, 1 booting, 2 ready. A
+    /// failure keeps it, so the screen can say where the start stopped.
+    pub stage: usize,
+    /// The course the catalog shows.
+    pub course: usize,
     /// The lecture a run was opened from, to return to when the server refuses.
     opened_from: Option<(usize, usize)>,
 }
@@ -133,6 +127,7 @@ impl State {
             }
             Event::SignedOut => {
                 self.machine = None;
+                self.stage = 0;
                 self.catalog.clear();
                 self.screen = Screen::SignedOut;
             }
@@ -150,6 +145,7 @@ impl State {
                 let same = matches!(&self.screen, Screen::Run(shown) if shown.run_id == run.run_id);
                 if !run.active || !same {
                     self.machine = None;
+                    self.stage = 0;
                 }
                 // The answer to a start or a read opens the run; news about a
                 // run the learner has left does not pull them back to it.
@@ -157,7 +153,15 @@ impl State {
                     self.screen = Screen::Run(run);
                 }
             }
-            Event::Machine(status) => self.machine = Some(status),
+            Event::Machine(status) => {
+                self.stage = match status {
+                    MachineStatus::Starting => 0,
+                    MachineStatus::Booting => 1,
+                    MachineStatus::Ready { .. } => 2,
+                    MachineStatus::Failed(_) => self.stage,
+                };
+                self.machine = Some(status);
+            }
             Event::Failed(message) => {
                 self.error = Some(message);
                 self.screen = match std::mem::take(&mut self.screen) {
@@ -184,8 +188,16 @@ impl State {
         Some((course, course.lectures.get(lecture)?))
     }
 
+    /// Shows another course's lectures, with none of them selected.
+    pub fn open_course(&mut self, course: usize) {
+        self.error = None;
+        self.course = course;
+        self.screen = Screen::Catalog;
+    }
+
     pub fn open_lecture(&mut self, course: usize, lecture: usize) {
         self.error = None;
+        self.course = course;
         self.screen = Screen::Lecture { course, lecture };
     }
 
@@ -373,6 +385,9 @@ mod tests {
         };
         state.apply(Event::Run(run(true)));
         state.apply(Event::Machine(MachineStatus::Booting));
+        state.apply(Event::Machine(MachineStatus::Failed("no disk".into())));
+        assert_eq!(state.stage, 1, "a failure keeps the stage it happened in");
+        state.apply(Event::Machine(MachineStatus::Booting));
         state.apply(Event::Run(run(true)));
         assert_eq!(
             state.machine,
@@ -383,12 +398,10 @@ mod tests {
             passed: 1,
             tasks: 3,
         }));
-        assert_eq!(
-            state.machine.as_ref().map(MachineStatus::label).as_deref(),
-            Some("The lab is ready. 1 of 3 tasks solved.")
-        );
+        assert_eq!(state.stage, 2);
         state.apply(Event::Run(run(false)));
         assert_eq!(state.machine, None, "an ended run has no machine");
+        assert_eq!(state.stage, 0);
 
         let mut state = State::default();
         state.apply(Event::SignedIn);

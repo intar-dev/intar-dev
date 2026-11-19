@@ -4,8 +4,8 @@
 //! Colour palettes and the active-theme global.
 //!
 //! Ported from korora-tech/eloquawk's `src/ui/theme.rs` (Apache-2.0). The
-//! tokens are the website's (`apps/web/src/styles/global.css`), light and
-//! dark. Every view reads colours through [`palette`], so switching the
+//! tokens are the Intar design system's, as the app's design uses them
+//! (Paper and Graphite with the oxide accent), light and dark. Every view reads colours through [`palette`], so switching the
 //! [`Theme`] global and refreshing the windows restyles the whole app. The
 //! contrast tests hold both palettes to WCAG AA.
 //
@@ -33,6 +33,36 @@ pub struct Palette {
     /// Text selection fill; opaque, painted under the text.
     pub selection: u32,
     pub input_border: u32,
+    /// The window behind the panels.
+    pub canvas: u32,
+    /// Quiet fills: badges, inline code.
+    pub subtle: u32,
+    /// Meter and avatar fills.
+    pub track: u32,
+    pub border_strong: u32,
+    /// A selected row: the accent mixed 6% into `panel`.
+    pub selected: u32,
+    pub brand_subtle: u32,
+    pub brand_text: u32,
+    pub brand_border: u32,
+    pub on_green: u32,
+    pub green_subtle: u32,
+    pub green_border: u32,
+    pub warning: u32,
+    pub on_red: u32,
+    pub red_subtle: u32,
+    pub red_border: u32,
+}
+
+/// The terminal's colours; it is dark in both themes.
+pub mod term {
+    pub const BG: u32 = 0x0f1114;
+    pub const SURFACE: u32 = 0x16181c;
+    pub const BORDER: u32 = 0x26292e;
+    pub const TEXT: u32 = 0xdfe1e6;
+    pub const MUTED: u32 = 0x91959d;
+    pub const BRAND: u32 = 0xf88a3d;
+    pub const GREEN: u32 = 0x62d397;
 }
 
 pub static LIGHT: Palette = Palette {
@@ -49,6 +79,21 @@ pub static LIGHT: Palette = Palette {
     red: 0xba2b2b,
     selection: 0xeec7b0,
     input_border: 0x928777,
+    canvas: 0xece5d9,
+    subtle: 0xf0e9de,
+    track: 0xe9e1d4,
+    border_strong: 0x7d7365,
+    selected: 0xfcf2ea,
+    brand_subtle: 0xf8ebe3,
+    brand_text: 0xa93800,
+    brand_border: 0xeec7b0,
+    on_green: 0xfdfbf9,
+    green_subtle: 0xe5f0ea,
+    green_border: 0xb4d5c4,
+    warning: 0x87540f,
+    on_red: 0xfdfbf9,
+    red_subtle: 0xf6e8e7,
+    red_border: 0xe9bebd,
 };
 
 pub static DARK: Palette = Palette {
@@ -65,6 +110,21 @@ pub static DARK: Palette = Palette {
     red: 0xf97772,
     selection: 0x5a3a26,
     input_border: 0x73695e,
+    canvas: 0x12100e,
+    subtle: 0x2a2622,
+    track: 0x312c27,
+    border_strong: 0x8a8073,
+    selected: 0x312620,
+    brand_subtle: 0x352922,
+    brand_text: 0xfaa663,
+    brand_border: 0x644029,
+    on_green: 0x0b2317,
+    green_subtle: 0x22322e,
+    green_border: 0x315947,
+    warning: 0xefc469,
+    on_red: 0x2a0e0d,
+    red_subtle: 0x352629,
+    red_border: 0x653a3b,
 };
 
 /// The palette every view draws with.
@@ -125,6 +185,15 @@ pub fn init_ui_font(cx: &mut App) {
     let font = pick_ui_font(names.iter().map(String::as_str)).map(SharedString::from);
     cx.set_global(UiFont(font));
 }
+
+/// The monospace family for machine names, code and the terminal.
+pub const MONO: &str = if cfg!(target_os = "macos") {
+    "Menlo"
+} else if cfg!(target_os = "windows") {
+    "Consolas"
+} else {
+    "DejaVu Sans Mono"
+};
 
 /// The UI font family for a window root, when one was chosen.
 pub fn ui_font(cx: &App) -> Option<SharedString> {
