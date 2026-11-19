@@ -9,9 +9,12 @@ use subspace::{Error, SignIn, Subspace, Tokens};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use url::Url;
 
+use crate::local::Local;
 use crate::secrets::Keychain;
-use crate::state::{Command, Event};
+use crate::state::{Command, Event, MachineStatus};
 
+/// How often the running machine's reports are looked at.
+const MACHINE_POLL: Duration = Duration::from_millis(300);
 /// How long the learner has to finish in the browser.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -37,7 +40,28 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                 let mut channel: Option<Arc<Subspace>> = None;
                 // What the keychain holds, to write only when a call changed the tokens.
                 let mut stored: Option<Tokens> = None;
-                while let Some(command) = inbox.recv().await {
+                let mut local = Local::new();
+                let mut tick = tokio::time::interval(MACHINE_POLL);
+                loop {
+                    let command = tokio::select! {
+                        command = inbox.recv() => match command {
+                            Some(command) => command,
+                            // The window is gone: stop the machine with it.
+                            None => break,
+                        },
+                        _ = tick.tick() => {
+                            if let Some(status) = local.poll()
+                                && outbox.send(Event::Machine(status)).is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    // The machine goes before the run or the sign-in does.
+                    if matches!(command, Command::EndRun { .. } | Command::SignOut) {
+                        local.stop().await;
+                    }
                     let event = match command {
                         Command::Restore => match keychain.load() {
                             Ok(Some(tokens)) => {
@@ -84,7 +108,17 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                     // empty once signed out, whether the learner or the server ended it.
                     if matches!(event, Event::SignedOut) {
                         channel = None;
+                        local.stop().await;
                     }
+                    // An active run gets its machine; a run intar closed loses it.
+                    let boot = match (&event, &channel) {
+                        (Event::Run(run), _) if !run.active => {
+                            local.stop().await;
+                            None
+                        }
+                        (Event::Run(run), Some(channel)) if !local.runs(&run.run_id) => Some((run.clone(), channel.clone())),
+                        _ => None,
+                    };
                     let current = match &channel {
                         Some(channel) => Some(channel.tokens().await),
                         None => None,
@@ -105,7 +139,15 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                     if outbox.send(event).is_err() {
                         break;
                     }
+                    if let Some((run, channel)) = boot {
+                        let _ = outbox.send(Event::Machine(MachineStatus::Starting));
+                        let status = local.start(&run, channel).await;
+                        if outbox.send(Event::Machine(status)).is_err() {
+                            break;
+                        }
+                    }
                 }
+                local.stop().await;
             });
         })?;
     Ok(Engine { commands, events })

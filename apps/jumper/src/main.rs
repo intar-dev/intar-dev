@@ -2,6 +2,7 @@
 //! the learner's courses.
 
 mod engine;
+mod local;
 mod secrets;
 mod state;
 mod ui;
@@ -285,8 +286,24 @@ impl Jumper {
             },
             cx,
         );
-        // ponytail: the run exists on intar, but nothing boots yet; the QEMU engine (#398) is next.
-        body.child(muted(p, "This version of the app cannot start the machines yet. The run counts as active on intar until you end it."))
+        // The machine's own status: starting, booting, the lab's tasks, or why it failed.
+        let status = match &self.state.machine {
+            Some(status @ state::MachineStatus::Failed(_)) => {
+                div().text_sm().text_color(rgb(p.red)).child(status.label())
+            }
+            Some(status @ state::MachineStatus::Ready { .. }) => div()
+                .text_sm()
+                .text_color(rgb(p.green))
+                .child(status.label()),
+            Some(status) => muted(p, status.label()),
+            None => muted(p, "Waiting for the machine…"),
+        };
+        body.child(status)
+            // ponytail: no terminal in the app yet (#402), so a ready lab cannot be worked on from here.
+            .child(muted(
+                p,
+                "The terminal is not built into this version of the app yet.",
+            ))
             .child(div().flex().gap_3().child(end).child(back))
     }
 }

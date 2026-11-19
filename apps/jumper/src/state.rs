@@ -33,7 +33,57 @@ pub enum Event {
     Catalog(Vec<CatalogCourseV1>),
     /// A run as the server holds it: after a start, a read or an end.
     Run(LocalRunV1),
+    /// Where the run's machine on this computer stands.
+    Machine(MachineStatus),
     Failed(String),
+}
+
+/// The run's machine on this computer, from its start to what its lab reports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MachineStatus {
+    Starting,
+    Booting,
+    /// The lab is up; `passed` of its `tasks` are solved.
+    Ready {
+        passed: usize,
+        tasks: usize,
+    },
+    /// In words the learner can read.
+    Failed(String),
+}
+
+impl MachineStatus {
+    /// What one report of the guest's Kino means for the learner.
+    pub fn of(report: &zpm::reports::GuestReport) -> Self {
+        use intar_contracts::bridge_v9::{CheckStatus, LabState};
+        if let Some(reason) = &report.failed {
+            return Self::Failed(format!("The machine failed to start: {reason}"));
+        }
+        match report.lab.state {
+            LabState::Failed => Self::Failed("The lab on this machine failed to start.".to_owned()),
+            LabState::Preparing => Self::Booting,
+            LabState::Ready => Self::Ready {
+                passed: report
+                    .lab
+                    .tasks
+                    .iter()
+                    .filter(|task| task.status == CheckStatus::Pass)
+                    .count(),
+                tasks: report.lab.tasks.len(),
+            },
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Starting => "Starting the machine on this computer…".to_owned(),
+            Self::Booting => "The machine is booting…".to_owned(),
+            Self::Ready { passed, tasks } => {
+                format!("The lab is ready. {passed} of {tasks} tasks solved.")
+            }
+            Self::Failed(reason) => reason.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -63,6 +113,8 @@ pub struct State {
     pub catalog: Vec<CatalogCourseV1>,
     /// The last failure, shown until the next event that is not one.
     pub error: Option<String>,
+    /// The machine of the run on screen, once the engine started on it.
+    pub machine: Option<MachineStatus>,
     /// The lecture a run was opened from, to return to when the server refuses.
     opened_from: Option<(usize, usize)>,
 }
@@ -70,7 +122,7 @@ pub struct State {
 impl State {
     /// Applies an event; the command to send next, if any.
     pub fn apply(&mut self, event: Event) -> Option<Command> {
-        if !matches!(event, Event::Failed(_)) {
+        if !matches!(event, Event::Failed(_) | Event::Machine(_)) {
             self.error = None;
         }
         match event {
@@ -80,6 +132,7 @@ impl State {
                 return Some(Command::LoadCatalog);
             }
             Event::SignedOut => {
+                self.machine = None;
                 self.catalog.clear();
                 self.screen = Screen::SignedOut;
             }
@@ -92,7 +145,15 @@ impl State {
                     self.screen = Screen::Catalog;
                 }
             }
-            Event::Run(run) => self.screen = Screen::Run(run),
+            Event::Run(run) => {
+                // A run that has ended has no machine; a new run starts without one.
+                let same = matches!(&self.screen, Screen::Run(shown) if shown.run_id == run.run_id);
+                if !run.active || !same {
+                    self.machine = None;
+                }
+                self.screen = Screen::Run(run);
+            }
+            Event::Machine(status) => self.machine = Some(status),
             Event::Failed(message) => {
                 self.error = Some(message);
                 self.screen = match std::mem::take(&mut self.screen) {
@@ -293,6 +354,33 @@ mod tests {
         assert_eq!(state.back_to_catalog(), Command::LoadCatalog);
         assert_eq!(state.screen, Screen::Catalog);
 
+        // The machine's status belongs to the run on screen and goes with it.
+        let mut state = State::default();
+        state.apply(Event::Run(run(true)));
+        state.apply(Event::Machine(MachineStatus::Booting));
+        state.apply(Event::Run(run(true)));
+        assert_eq!(
+            state.machine,
+            Some(MachineStatus::Booting),
+            "a re-read keeps it"
+        );
+        state.apply(Event::Machine(MachineStatus::Ready {
+            passed: 1,
+            tasks: 3,
+        }));
+        assert_eq!(
+            state.machine.as_ref().map(MachineStatus::label).as_deref(),
+            Some("The lab is ready. 1 of 3 tasks solved.")
+        );
+        state.apply(Event::Run(run(false)));
+        assert_eq!(state.machine, None, "an ended run has no machine");
+
+        let mut state = State::default();
+        state.apply(Event::SignedIn);
+        state.apply(Event::Catalog(vec![course(vec![
+            lecture(Some("intar/dns"), Some("run-9")),
+            lecture(None, None),
+        ])]));
         // A lecture that already has a run opens that run instead of starting one.
         state.apply(Event::Catalog(vec![course(vec![
             lecture(Some("intar/dns"), Some("run-9")),
