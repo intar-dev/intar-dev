@@ -55,11 +55,6 @@ pub fn boot_json(boot: &Boot<'_>) -> Result<Vec<u8>, Error> {
             keys.push(key.to_owned());
         }
     }
-    if keys.is_empty() {
-        return Err(Error::RunDisk(
-            "no SSH key was given, so nothing could log in".into(),
-        ));
-    }
     let document = GuestBootV3 {
         contract: GUEST_CONTRACT,
         hostname: boot.hostname.to_owned(),
@@ -69,8 +64,9 @@ pub fn boot_json(boot: &Boot<'_>) -> Result<Vec<u8>, Error> {
             dns: boot.dns.to_vec(),
         },
         peers: boot.peers.clone(),
+        // Without a key nothing could log in, so the guest starts no SSH at all.
         ssh: GuestSshV3 {
-            enabled: true,
+            enabled: !keys.is_empty(),
             authorized_keys: keys,
         },
         root_resize: false,
@@ -233,8 +229,12 @@ mod tests {
     #[test]
     fn refuses_keys_and_specs_that_would_not_boot_a_usable_machine() {
         let peers = BTreeMap::new();
+        // No key at all is not an error: the machine boots without SSH.
+        let none: GuestBootV3 =
+            serde_json::from_slice(&boot_json(&boot(&[], &peers)).expect("boot.json"))
+                .expect("parse");
+        assert!(!none.ssh.enabled && none.ssh.authorized_keys.is_empty());
         for keys in [
-            vec![],
             vec![String::new()],
             vec!["ssh-ed25519 AAAA a\nssh-ed25519 AAAA b".to_owned()],
         ] {

@@ -13,6 +13,13 @@ inputs:
       release build, since pull request runs write them.
     required: false
     default: "true"
+  desktop-libraries:
+    description: >-
+      Install the libraries GPUI links on Linux, for a job that builds the
+      whole workspace and so apps/jumper. The versions are the runner
+      image's; fontconfig, xcb and pkg-config are already on it.
+    required: false
+    default: "false"
 
 # Checkout stays with the caller. The components and target match
 # rust-toolchain.toml; installing them here keeps the first Cargo run from
@@ -30,6 +37,17 @@ runs:
         # TARGETS is word-split on purpose: one argument per target.
         rustup target add --toolchain 1.100.0 x86_64-unknown-linux-musl ${TARGETS}
         rustup show active-toolchain
+
+    # apps/jumper builds on GPUI, which links these on Linux. Only a job that
+    # builds the whole workspace needs them; a release build builds one
+    # product and runs on another image, where these versions do not exist.
+    - name: Install the desktop app's system libraries
+      if: inputs.desktop-libraries == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update
+        # One line: the workflow policy checks the pins line by line.
+        sudo apt-get install --yes --no-install-recommends libwayland-dev=1.24.0-2 libxkbcommon-dev=1.13.1-1 libxkbcommon-x11-dev=1.13.1-1 libx11-xcb-dev=2:1.8.13-1ubuntu0.1 libvulkan-dev=1.4.341.0-1
 
     - name: Set up Namespace caches
       if: inputs.namespace-cache == 'true'

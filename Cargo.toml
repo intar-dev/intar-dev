@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/jumper",
     "crates/cloud-hypervisor-client",
     "crates/intar-agent",
     "crates/intar-builder",
@@ -17,6 +18,7 @@ members = [
     "crates/kino",
     "crates/stargate-core",
     "crates/stargate-gateway",
+    "crates/subspace",
     "crates/zpm",
 ]
 resolver = "3"
@@ -30,6 +32,7 @@ rust-version = "1.100"
 
 [workspace.dependencies]
 anyhow = "=1.0.104"
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
 avt = "=0.19.0"
 axum = { version = "=0.8.9", default-features = false }
 blake3 = "=1.8.7"
@@ -43,6 +46,10 @@ dirs = "=7.0.0"
 fatfs = "=0.3.6"
 flate2 = "=1.1.10"
 fs2 = "=0.4.3"
+# GPUI has no current crates.io release; Zed's maintainers say to pin a commit
+# of their repository until it has. Both crates move together.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "28d0a3547f16b9609b301b48ab363bfca649c864", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "28d0a3547f16b9609b301b48ab363bfca649c864", default-features = false }
 futures-util = "=0.3.34"
 getrandom = "=0.4.3"
 hcl-rs = "=0.19.9"
@@ -52,6 +59,7 @@ hyper-util = { version = "=0.1.21", features = ["tokio"] }
 jsonpath-rust = "=1.0.12"
 jsonwebtoken = { version = "=11.1.0", features = ["rust_crypto"] }
 k8s-openapi = { version = "=0.28.0", features = ["v1_35"] }
+keyring-core = "=1.0.1"
 kube = { version = "=4.2.0", default-features = false, features = ["client", "config", "rustls-tls"] }
 log = "=0.4.34"
 nix = "=0.31.3"
@@ -91,10 +99,13 @@ opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = 
 opentelemetry-otlp = { version = "=0.33.1", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 tracing-opentelemetry = { version = "=0.34.0", default-features = false }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+unicode-segmentation = "=1.13.3"
 url = { version = "=2.5.8", features = ["serde"] }
+windows-native-keyring-store = "=1.1.0"
 uuid = { version = "=1.29.0", features = ["serde", "v4"] }
 zstd = "=0.14.3"
 zbus = { version = "=6.1.0", default-features = false, features = ["default-rt", "proxy"] }
+zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["rt-async-io-crypto-rust"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

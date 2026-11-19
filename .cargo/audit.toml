@@ -6,4 +6,15 @@ ignore = [
     "RUSTSEC-2026-0387",
     # Owner: Agent. chrono 0.4.45 is flagged unmaintained, not vulnerable; it comes only through fatfs 0.3.6's default feature, which stamps FAT entries with the local time. Drop the feature in a rehearsed change. Review by 2026-12-01.
     "RUSTSEC-2026-0543",
+    # Owner: Jumper. The six below are flagged unmaintained, not vulnerable, and come only through GPUI at the pinned Zed commit and the Linux keychain store (apps/jumper); no released product builds them. They go when Zed's pin moves past them. Review by 2026-12-02.
+    # paste 1.0.15, a proc macro, through metal (gpui_apple).
+    "RUSTSEC-2024-0436",
+    # ttf-parser 0.25.1, through gpui, fontdb and cosmic-text: GPUI's text stack.
+    "RUSTSEC-2026-0192",
+    # rustybuzz 0.20.1, through usvg and resvg: GPUI's SVG rendering.
+    "RUSTSEC-2026-0206",
+    # zvariant 5.15.1, zbus_names 4.3.5 and zvariant_derive 5.15.1, through zbus 5.19: GPUI's Linux portals and accessibility, and the Secret Service keychain store.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
