@@ -7,7 +7,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use intar_contracts::oci::{OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1};
+use intar_contracts::oci::{
+    Architecture, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1,
+};
 use sha2::{Digest as _, Sha256};
 
 use super::{Error, RegistryPusher};
@@ -182,7 +184,7 @@ fn a_blob_the_registry_has_is_not_put() {
     let (manifest, blobs) = image(dir.path());
     registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-1", 1)
+        .push_build(dir.path(), &manifest, "build-1", 1, Architecture::Amd64)
         .unwrap();
 
     let calls = registry.calls();
@@ -207,7 +209,7 @@ fn a_missing_blob_is_put_with_its_bytes_under_its_digest() {
     let (manifest, blobs) = image(dir.path());
     registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-1", 1)
+        .push_build(dir.path(), &manifest, "build-1", 1, Architecture::Amd64)
         .unwrap();
 
     let calls = registry.calls();
@@ -232,7 +234,7 @@ fn the_manifest_follows_every_blob_and_the_result_names_it() {
     let (manifest, _) = image(dir.path());
     registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-7", 3)
+        .push_build(dir.path(), &manifest, "build-7", 3, Architecture::Amd64)
         .unwrap();
 
     let calls = registry.calls();
@@ -265,6 +267,16 @@ fn the_manifest_follows_every_blob_and_the_result_names_it() {
         body,
         serde_json::json!({ "image_digest": manifest.as_str() })
     );
+
+    // The arm64 image of the same attempt is recorded as that.
+    registry
+        .pusher()
+        .push_build(dir.path(), &manifest, "build-7", 3, Architecture::Arm64)
+        .unwrap();
+    assert_eq!(
+        registry.calls().last().unwrap().path,
+        "/registry/v1/builds/build-7/result?attempt=3&arch=arm64"
+    );
 }
 
 #[test]
@@ -278,7 +290,7 @@ fn a_conflict_fails_the_push_before_the_manifest() {
     let (manifest, _) = image(dir.path());
     let error = registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-1", 1)
+        .push_build(dir.path(), &manifest, "build-1", 1, Architecture::Amd64)
         .unwrap_err();
 
     assert!(
@@ -306,7 +318,7 @@ fn a_transient_failure_is_retried() {
     let (manifest, blobs) = image(dir.path());
     registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-1", 1)
+        .push_build(dir.path(), &manifest, "build-1", 1, Architecture::Amd64)
         .unwrap();
 
     let calls = registry.calls();
@@ -331,7 +343,7 @@ fn a_refused_token_is_not_retried() {
     let (manifest, _) = image(dir.path());
     registry
         .pusher()
-        .push_build(dir.path(), &manifest, "build-1", 1)
+        .push_build(dir.path(), &manifest, "build-1", 1, Architecture::Amd64)
         .unwrap_err();
     // Each blob's HEAD may have left before the first refusal; none again.
     let calls = registry.calls();

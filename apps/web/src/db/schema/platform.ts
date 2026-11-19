@@ -348,6 +348,14 @@ export const machineBuilds = sqliteTable(
     }),
     logKey: text("log_key"),
     error: text("error"),
+    // The arm64 image of the same key, built after the amd64 one in the same
+    // job when the builder can. `arm64_asked` is fixed when an attempt is
+    // assigned; the state is null when it never was. Its failure never
+    // fails the build.
+    arm64Asked: integer("arm64_asked", { mode: "boolean" }).default(false).notNull(),
+    arm64State: text("arm64_state").$type<"building" | "succeeded" | "failed">(),
+    arm64ImageDigest: text("arm64_image_digest"),
+    arm64Error: text("arm64_error"),
     // When the current attempt was assigned; `updated_at` is the builder's
     // last report on it.
     assignedAt: integer("assigned_at"),

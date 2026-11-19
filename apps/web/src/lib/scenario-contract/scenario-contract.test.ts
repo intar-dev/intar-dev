@@ -24,7 +24,7 @@ function bundle(): SourceBundleV2 {
 
 describe("build keys", () => {
   it("hold every golden vector", async () => {
-    expect(vectors.image_format).toBe("intar-image-3");
+    expect(vectors.image_format).toBe("intar-image-4");
     expect(await baseKey()).toBe(vectors.base_key);
     const found = new Map<string, string>();
     for (const testCase of vectors.cases) {

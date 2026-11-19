@@ -29,7 +29,7 @@ function hello(hostId: string, role: "agent" | "builder", overrides: Record<stri
     type: "client_hello", protocol_version: 9, host_id: hostId, agent_version: "1.0.0", role, guest_contract: 3,
     hardware: HARDWARE,
     ...(role === "builder"
-      ? { builder: { image_format: "intar-image-3", source_compile_digest: "p00000000" } }
+      ? { builder: { image_format: "intar-image-4", source_compile_digest: "p00000000" } }
       : {}),
     ...overrides,
   };
@@ -213,8 +213,8 @@ describe("machine builds over bridge 9", () => {
     "SELECT state, content_digest, doc_json, failure_reason FROM scenario_revisions WHERE rev = ?1",
   ).bind(rev(n)).first<{ state: string; content_digest: string | null; doc_json: string; failure_reason: string | null }>();
 
-  async function connectBuilder() {
-    const session = await connect("builder-1", hello("builder-1", "builder"));
+  async function connectBuilder(overrides: Record<string, unknown> = {}) {
+    const session = await connect("builder-1", hello("builder-1", "builder", overrides));
     await until(() => session.messages, (all) => all.length > 0);
     session.ws.send(JSON.stringify(stateReport("builder-1")));
     return session;
@@ -238,8 +238,8 @@ describe("machine builds over bridge 9", () => {
   }
 
   /** Pushes a machine image for `key` through the real routes; its digest. */
-  async function pushImage(key: string) {
-    const config = await blob(JSON.stringify(machineConfig(key)));
+  async function pushImage(key: string, architecture = "amd64") {
+    const config = await blob(JSON.stringify(machineConfig(key, { architecture })));
     const kernel = await blob("kernel bytes");
     const chunk = await blob("chunk bytes");
     for (const pushed of [config, kernel, chunk] as PushedBlob[]) {
@@ -253,10 +253,76 @@ describe("machine builds over bridge 9", () => {
     return manifest.digest;
   }
 
-  async function postResult(key: string, attempt: number, image: string) {
+  async function postResult(key: string, attempt: number, image: string, arch = "") {
     const body = new TextEncoder().encode(JSON.stringify({ image_digest: image }));
-    return call("POST", `/builds/${key.slice(7)}/result?attempt=${attempt}`, body, "application/json");
+    return call("POST", `/builds/${key.slice(7)}/result?attempt=${attempt}${arch}`, body, "application/json");
   }
+
+  const ARM64_BUILDER = { builder: { image_format: "intar-image-4", source_compile_digest: "p00000000", architectures: ["amd64", "arm64"] } };
+  const arm64 = () => env.DB.prepare("SELECT arm64_asked, arm64_state, arm64_image_digest, arm64_error FROM machine_builds").first();
+
+  it("asks a builder that can for the arm64 image too, in the same job", async () => {
+    await ingest(1);
+    const { ws, messages } = await connectBuilder(ARM64_BUILDER);
+    const desired = await until(() => desiredStates(messages).at(-1), (last) => (last?.desired_state.builds.length ?? 0) > 0);
+    expect(validateBridgeMessageV9(desired)).toBe(true);
+    expect(desired!.desired_state.builds[0]).toMatchObject({ attempt: 1, architectures: ["amd64", "arm64"] });
+    expect(await arm64()).toMatchObject({ arm64_asked: 1, arm64_state: "building" });
+
+    const key = (await build())!.build_key;
+    expect((await postResult(key, 1, await pushImage(key))).status).toBe(201);
+    const image = await pushImage(key, "arm64");
+    expect((await postResult(key, 1, image, "&arch=arm64")).status).toBe(201);
+    ws.send(report(key, 1, "succeeded", { image_digest: (await build())!.image_digest! }));
+    await until(() => revision(1), (row) => row?.state === "ready");
+    expect(await arm64()).toEqual({ arm64_asked: 1, arm64_state: "succeeded", arm64_image_digest: image, arm64_error: null });
+    ws.close();
+  });
+
+  it("makes the revision ready on the amd64 image alone when the arm64 one fails", async () => {
+    await ingest(1);
+    const { ws } = await connectBuilder(ARM64_BUILDER);
+    await until(build, (row) => row?.state === "assigned");
+    const key = (await build())!.build_key;
+    const image = await pushImage(key);
+    expect((await postResult(key, 1, image)).status).toBe(201);
+    ws.send(report(key, 1, "succeeded", { image_digest: image, arm64_error: "the emulated build VM timed out" }));
+    await until(() => revision(1), (row) => row?.state === "ready");
+    expect(await build()).toMatchObject({ state: "succeeded", image_digest: image });
+    expect(await arm64()).toEqual({ arm64_asked: 1, arm64_state: "failed", arm64_image_digest: null, arm64_error: "the emulated build VM timed out" });
+    ws.close();
+  });
+
+  it("gives an attempt the longer ceiling only once its amd64 image is recorded", async () => {
+    await ingest(1);
+    const { ws } = await connectBuilder(ARM64_BUILDER);
+    await until(build, (row) => row?.state === "assigned");
+    const key = (await build())!.build_key;
+    const pastCeiling = () => env.DB.prepare("UPDATE machine_builds SET assigned_at = ?1, updated_at = ?2")
+      .bind(Date.now() - 3 * 60 * 60_000 - 1, Date.now()).run();
+
+    // amd64 still building after three hours: taken back like any build.
+    await pastCeiling();
+    await maintainMachineBuilds(env, null, Date.now());
+    expect(await build()).toMatchObject({ state: "assigned", attempt: 2 });
+
+    // amd64 recorded: the emulated half has its extra time.
+    expect((await postResult(key, 2, await pushImage(key))).status).toBe(201);
+    await pastCeiling();
+    await maintainMachineBuilds(env, null, Date.now());
+    expect(await build()).toMatchObject({ attempt: 2 });
+    expect(await arm64()).toMatchObject({ arm64_state: "building" });
+    ws.close();
+  });
+
+  it("asks a builder that names no architectures for the amd64 image only", async () => {
+    await ingest(1);
+    const { ws, messages } = await connectBuilder();
+    const desired = await until(() => desiredStates(messages).at(-1), (last) => (last?.desired_state.builds.length ?? 0) > 0);
+    expect(desired!.desired_state.builds[0]).not.toHaveProperty("architectures");
+    expect(await arm64()).toMatchObject({ arm64_asked: 0, arm64_state: null });
+    ws.close();
+  });
 
   it("builds an ingested revision to ready, refusing a mismatching report and a stale attempt", async () => {
     await ingest(1);

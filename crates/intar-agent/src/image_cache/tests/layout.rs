@@ -42,6 +42,7 @@ fn a_machine_config_of_another_contract_or_format_is_refused() {
         serde_json::from_value::<intar_contracts::oci::MachineConfigV1>(serde_json::json!({
             "guest_contract": guest_contract,
             "image_format": image_format,
+            "architecture": "amd64",
             "build_key": format!("sha256:{}", "d".repeat(64)),
             "boot": {"cmdline": "console=ttyS0"},
             "disk": {"size_bytes": 1, "chunk_size": 1, "chunks": []},

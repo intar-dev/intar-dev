@@ -2,6 +2,10 @@
 // schemas/<name>.schema.json. Do not edit.
 
 /**
+ * The processors machine images and Kino exist for.
+ */
+export type Architecture = "amd64" | "arm64";
+/**
  * An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex
  * digits.
  */
@@ -12,6 +16,12 @@ export type OciDigest = string;
  * manifest's digest.
  */
 export interface MachineConfigV1 {
+  /**
+   * The machines the image boots on. Every config says it; only one of
+   * [`PREVIOUS_IMAGE_FORMAT`], written before the field existed, does not.
+   * Read it through [`MachineConfigV1::architecture`].
+   */
+  architecture?: Architecture | null;
   boot: MachineBootV1;
   build_key: OciDigest;
   disk: MachineDiskV1;

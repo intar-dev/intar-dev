@@ -11,13 +11,14 @@ use intar_contracts::scenario::{
 use intar_contracts::source::{SourceBundleV2, validate_bundle};
 
 use crate::checkpoint::CheckpointIdentity;
+use crate::config::BuildArch;
 use crate::platform::PLATFORM_BASE_DISK_BYTES;
 use crate::sha256::sha256_bytes_hex;
 
 const MIB: u64 = 1024 * 1024;
 /// The checkpoint namespace: one scope per checkpoint, so retention is the
 /// cache's LRU alone.
-const CHECKPOINT_SCOPE: &str = "intar-image-3/stage";
+const CHECKPOINT_SCOPE: &str = "intar-image-4/stage";
 /// Changes with anything the driver does around a stage.
 pub(crate) const PROVISIONING_ABI: &str = "intar-machine-stages-v1";
 
@@ -194,6 +195,9 @@ fn planned(
 /// device arguments, and the base's digests.
 #[derive(Clone, Debug)]
 pub(crate) struct CheckpointHost {
+    /// The architecture the checkpoints are of. Two architectures of one
+    /// image share its key, and must not retire each other's checkpoints.
+    pub arch: BuildArch,
     pub base_sha256: String,
     pub kernel_sha256: String,
     pub initrd_sha256: String,
@@ -222,7 +226,10 @@ pub(crate) fn checkpoint_identities(
         let mut scope_input = parent_prefix.clone().into_bytes();
         scope_input.extend_from_slice(&stage_bytes);
         let identity = CheckpointIdentity {
-            scenario_id: CHECKPOINT_SCOPE.to_owned(),
+            scenario_id: match host.arch {
+                BuildArch::Amd64 => CHECKPOINT_SCOPE.to_owned(),
+                BuildArch::Arm64 => format!("{CHECKPOINT_SCOPE}/arm64"),
+            },
             vm_name: sha256_bytes_hex(&scope_input),
             parent_prefix,
             stage_bytes,
@@ -284,6 +291,7 @@ mod tests {
 
     fn host() -> CheckpointHost {
         CheckpointHost {
+            arch: BuildArch::Amd64,
             base_sha256: "a".repeat(64),
             kernel_sha256: "b".repeat(64),
             initrd_sha256: "c".repeat(64),
@@ -390,6 +398,24 @@ mod tests {
         assert_eq!(plan.disk_bytes, PLATFORM_BASE_DISK_BYTES);
         let base = plan_build(&bundle, &BuildTarget::Base, Some(&base_key())).expect("base");
         assert_eq!(base, plan);
+    }
+
+    #[test]
+    fn two_architectures_of_one_image_keep_their_checkpoints_apart() {
+        let plan = plan_build(&bundle(), &webserver(), None).expect("plan");
+        let scopes = |arch| -> Vec<(String, String)> {
+            checkpoint_identities(&plan, &CheckpointHost { arch, ..host() })
+                .expect("identities")
+                .into_iter()
+                .map(|identity| (identity.scenario_id, identity.vm_name))
+                .collect()
+        };
+        let (amd64, arm64) = (scopes(BuildArch::Amd64), scopes(BuildArch::Arm64));
+        assert!(!amd64.is_empty());
+        assert_eq!(amd64.len(), arm64.len());
+        for (one, other) in amd64.iter().zip(&arm64) {
+            assert_ne!(one, other, "the same key and stage, another architecture");
+        }
     }
 
     #[test]

@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use intar_contracts::oci::{OCI_MANIFEST_MEDIA_TYPE, OciDigest, OciManifestV1};
+use intar_contracts::oci::{Architecture, OCI_MANIFEST_MEDIA_TYPE, OciDigest, OciManifestV1};
 use reqwest::Method;
 use reqwest::StatusCode;
 use reqwest::blocking::{Body, Client, RequestBuilder, Response};
@@ -87,7 +87,7 @@ impl RegistryPusher {
     }
 
     /// Push the image `manifest` from `dir` (`sha256/<hex>` blobs) and record
-    /// it as the result of `attempt` of `build_id`.
+    /// it as the `architecture` result of `attempt` of `build_id`.
     ///
     /// # Errors
     /// Returns the first call that failed for good.
@@ -97,6 +97,7 @@ impl RegistryPusher {
         manifest: &OciDigest,
         build_id: &str,
         attempt: u32,
+        architecture: Architecture,
     ) -> Result<()> {
         let blobs = dir.join("sha256");
         let manifest_bytes = std::fs::read(blobs.join(manifest.hex()))?;
@@ -107,9 +108,14 @@ impl RegistryPusher {
                 digests.push(layer.digest);
             }
         }
-        let result_url = self
-            .root
-            .join(&format!("builds/{build_id}/result?attempt={attempt}"))?;
+        let result_url = self.root.join(&format!(
+            "builds/{build_id}/result?attempt={attempt}{}",
+            // A result is the amd64 one unless it says otherwise.
+            match architecture {
+                Architecture::Amd64 => "",
+                Architecture::Arm64 => "&arch=arm64",
+            }
+        ))?;
         let mut restarts = 0;
         loop {
             let session = self.open_session()?;

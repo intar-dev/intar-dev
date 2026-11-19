@@ -9,11 +9,12 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail, ensure};
 use flate2::read::GzDecoder;
 use intar_contracts::bridge_v9::{BuildPhaseV2, BuildReportV2, BuildTargetV1, DesiredBuildV2};
-use intar_contracts::oci::{IMAGE_FORMAT, OciDigest};
+use intar_contracts::oci::{Architecture, IMAGE_FORMAT, OciDigest};
 use intar_contracts::scenario::PLATFORM_BASE_IMAGE;
 use intar_contracts::source::{MAX_SOURCE_BUNDLE_GZIP_BYTES, SourceBundleV2};
 use intar_image_build::{
-    BuildTarget, MachineBuildRequest, build_machine_image, plan_build, verify_machine_image,
+    BuildArch, BuildTarget, MachineBuildRequest, QemuBuildConfig, build_machine_image, plan_build,
+    verify_machine_image,
 };
 use intar_image_upload::RegistryPusher;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -30,8 +31,12 @@ use crate::db::{self, BuilderDb};
 const MAX_BUNDLE_JSON_BYTES: u64 = 64 * 1024 * 1024;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 /// The most of each log a build uploads: its end, where a failure shows.
-// Two log tails plus the error stay under the Worker's 9 MiB log cap.
-const LOG_UPLOAD_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+// Four log tails (two per architecture) plus the errors stay under the
+// Worker's 9 MiB log cap.
+const LOG_UPLOAD_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+/// Where the arm64 half of a job works and writes, under the attempt's own
+/// directories: each half keeps its logs, and both go when the attempt ends.
+const ARM64_DIR: &str = "arm64";
 const LOG_UPLOAD_ERROR_BYTES: usize = 64 * 1024;
 
 /// Runs queued builds once the bridge applied a live desired state.
@@ -89,10 +94,15 @@ async fn run_build(
     report.started_at_unix_ms = Some(started);
     report.finished_at_unix_ms = Some(report.observed_at_unix_ms);
     let error = match result {
-        Ok(digest) => {
+        Ok((digest, arm64_error)) => {
             info!(build_id = %build.build_id, image = %digest.as_str(), "build pushed");
             report.image_digest = Some(digest);
-            None
+            // The build succeeded: its amd64 image is what it is for.
+            if let Some(error) = &arm64_error {
+                warn!(build_id = %build.build_id, error = %error, "the arm64 image was not built");
+            }
+            report.arm64_error.clone_from(&arm64_error);
+            arm64_error.map(|error| format!("arm64: {error}"))
         }
         Err(error) => {
             let message = failure_message(&error, build.attempt);
@@ -122,11 +132,10 @@ async fn build_and_push(
     started: i64,
     work_root: &Path,
     output_dir: &Path,
-) -> Result<OciDigest> {
+) -> Result<(OciDigest, Option<String>)> {
     let token = bootstrap_builder_access_token(&cfg.bridge).await?;
     let bundle = fetch_bundle(&cfg.bridge.base_url, &token, &build.bundle_rev).await?;
     let target = checked_target(&bundle, build)?;
-    phase(cfg, reports, build, BuildPhaseV2::Building, started).await?;
 
     let mut config = cfg.qemu_build_config();
     config.work_root = work_root.to_owned();
@@ -137,6 +146,51 @@ async fn build_and_push(
         config,
         output_dir: output_dir.to_owned(),
     };
+    let digest = build_one(
+        cfg,
+        reports,
+        build,
+        started,
+        request.clone(),
+        Architecture::Amd64,
+    )
+    .await?;
+    // The amd64 image is recorded. The arm64 one is extra: whatever happens
+    // to it, the build has succeeded.
+    if !build.architectures.contains(&Architecture::Arm64) {
+        return Ok((digest, None));
+    }
+    let arm64 = MachineBuildRequest {
+        config: arm64_config(&request.config),
+        output_dir: output_dir.join(ARM64_DIR),
+        ..request
+    };
+    let arm64_error = build_one(cfg, reports, build, started, arm64, Architecture::Arm64)
+        .await
+        .err()
+        .map(|error| format!("{error:#}"));
+    Ok((digest, arm64_error))
+}
+
+/// `config` for the arm64 half of the same job.
+pub(crate) fn arm64_config(config: &QemuBuildConfig) -> QemuBuildConfig {
+    let mut arm64 = config.for_arch(BuildArch::Arm64);
+    arm64.work_root = config.work_root.join(ARM64_DIR);
+    arm64
+}
+
+/// Build the image of `request` and record it as the job's `architecture`
+/// result.
+async fn build_one(
+    cfg: &BuilderConfig,
+    reports: &mpsc::Sender<BuildReportV2>,
+    build: &DesiredBuildV2,
+    started: i64,
+    request: MachineBuildRequest,
+    architecture: Architecture,
+) -> Result<OciDigest> {
+    phase(cfg, reports, build, BuildPhaseV2::Building, started).await?;
+    let output_dir = request.output_dir.clone();
     let output = tokio::task::spawn_blocking(move || build_machine_image(&request))
         .await
         .context("the build task panicked")??;
@@ -147,10 +201,11 @@ async fn build_and_push(
     push_verified(
         &cfg.bridge.base_url,
         &token,
-        output_dir,
+        &output_dir,
         &digest,
         &build.build_id,
         build.attempt,
+        architecture,
     )
     .await?;
     Ok(digest)
@@ -165,6 +220,7 @@ pub(crate) async fn push_verified(
     digest: &OciDigest,
     build_id: &str,
     attempt: u32,
+    architecture: Architecture,
 ) -> Result<()> {
     let (base_url, token, dir, digest, build_id) = (
         base_url.to_owned(),
@@ -176,7 +232,7 @@ pub(crate) async fn push_verified(
     tokio::task::spawn_blocking(move || {
         verify_machine_image(&dir, &digest).context("the built image fails verification")?;
         RegistryPusher::new(&base_url, &token)?
-            .push_build(&dir, &digest, &build_id, attempt)
+            .push_build(&dir, &digest, &build_id, attempt, architecture)
             .context("failed to push the image")
     })
     .await
@@ -337,11 +393,26 @@ async fn upload_log(
         let error = str_tail(error, LOG_UPLOAD_ERROR_BYTES);
         log.push_str(&format!("== error ==\n{error}\n\n"));
     }
-    for (title, path, limit) in [
-        ("build log", &log_path, LOG_UPLOAD_TAIL_BYTES),
-        ("serial log", &serial_path, LOG_UPLOAD_TAIL_BYTES),
-    ] {
-        append_log(&mut log, title, path, limit).await;
+    append_log(&mut log, "build log", &log_path, LOG_UPLOAD_TAIL_BYTES).await;
+    append_log(&mut log, "serial log", &serial_path, LOG_UPLOAD_TAIL_BYTES).await;
+    if build.architectures.contains(&Architecture::Arm64) {
+        let log_path =
+            intar_image_build::machine_build_log_path(&work_root.join(ARM64_DIR), &build.build_key);
+        let serial_path = log_path.with_extension("serial.log");
+        append_log(
+            &mut log,
+            "arm64 build log",
+            &log_path,
+            LOG_UPLOAD_TAIL_BYTES,
+        )
+        .await;
+        append_log(
+            &mut log,
+            "arm64 serial log",
+            &serial_path,
+            LOG_UPLOAD_TAIL_BYTES,
+        )
+        .await;
     }
     let result = async {
         let token = bootstrap_builder_access_token(&cfg.bridge).await?;

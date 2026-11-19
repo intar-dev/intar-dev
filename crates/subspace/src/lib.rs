@@ -272,8 +272,10 @@ impl Subspace {
 
     /// The courses the learner sees, with each lecture's scenario and state.
     pub async fn catalog(&self) -> Result<LocalCatalogV1, Error> {
-        self.call::<(), _>(Method::GET, "/api/local/catalog", None, None)
-            .await
+        // The catalog says what this computer can start: a lecture whose
+        // machine images are not built for its processor waits.
+        let path = format!("/api/local/catalog?arch={}", std::env::consts::ARCH);
+        self.call::<(), _>(Method::GET, &path, None, None).await
     }
 
     /// Starts a local run. The same `idempotency_key` returns the same run.

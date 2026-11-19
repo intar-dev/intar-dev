@@ -208,6 +208,10 @@ export async function handleManifestPut(
   if (machine && (config as { image_format: string }).image_format !== IMAGE_FORMAT) {
     return jsonResponse({ error: `the image format is not ${IMAGE_FORMAT}`, code: "image_format" }, 409);
   }
+  // Every image of this format says which machines it boots on.
+  if (machine && (config as { architecture?: string }).architecture === undefined) {
+    return jsonResponse({ error: "the image config names no architecture", code: "architecture" }, 409);
+  }
 
   const digest = `sha256:${hex}`;
   await bucket.put(OCI_PREFIX + hex, bytes, {
@@ -239,6 +243,10 @@ export async function handleManifestPut(
  * attempt is assigned to may record it, only for an image built for the
  * build's key, and only once: a replay of the same digest is accepted, a
  * different one is refused.
+ *
+ * `?arch=arm64` records the job's arm64 image instead, after the amd64 one
+ * and only when the attempt was asked for it. Each must be an image for
+ * exactly that architecture.
  */
 export async function handleBuildResult(
   request: Request,
@@ -252,7 +260,10 @@ export async function handleBuildResult(
     return jsonResponse({ error: "a builder records build results" }, 403);
   }
   const buildKey = machineBuildKey(buildId);
-  const attemptText = new URL(request.url).searchParams.get("attempt") ?? "";
+  const query = new URL(request.url).searchParams;
+  const architecture = query.get("arch") ?? "amd64";
+  if (architecture !== "amd64" && architecture !== "arm64") return invalid("a result is for amd64 or arm64");
+  const attemptText = query.get("attempt") ?? "";
   const attempt = /^[1-9][0-9]{0,9}$/.test(attemptText) ? Number(attemptText) : 0;
   if (!buildKey || attempt < 1 || attempt > MAX_ATTEMPT) {
     return invalid("a result names a build id and an attempt");
@@ -266,20 +277,29 @@ export async function handleBuildResult(
   }
 
   const build = await env.DB.prepare(
-    `SELECT host_id, attempt, state, image_digest, image_format FROM machine_builds WHERE build_key = ?1`,
+    `SELECT host_id, attempt, state, image_digest, image_format, arm64_asked, arm64_state, arm64_image_digest
+       FROM machine_builds WHERE build_key = ?1`,
   ).bind(buildKey).first<{
     host_id: string | null;
     attempt: number;
     state: string;
     image_digest: string | null;
     image_format: string;
+    arm64_asked: number;
+    arm64_state: string | null;
+    arm64_image_digest: string | null;
   }>();
   if (!build) return jsonResponse({ error: "unknown build" }, 404);
   if (build.host_id !== auth.owner.id || build.attempt !== attempt) {
     return jsonResponse({ error: "this attempt is not the build's current one", code: "build_superseded" }, 409);
   }
-  if (build.image_digest !== null) {
-    return build.image_digest === imageDigest
+  const arm64 = architecture === "arm64";
+  if (arm64 && (build.arm64_asked !== 1 || build.image_digest === null)) {
+    return jsonResponse({ error: "this attempt has no arm64 image to record yet", code: "arm64_not_expected" }, 409);
+  }
+  const recorded = arm64 ? build.arm64_image_digest : build.image_digest;
+  if (recorded !== null) {
+    return recorded === imageDigest
       ? jsonResponse({ ok: true, image_digest: imageDigest })
       : jsonResponse({ error: "this attempt already recorded another image", code: "build_result_recorded" }, 409);
   }
@@ -294,12 +314,21 @@ export async function handleBuildResult(
   if (config.build_key !== buildKey || config.image_format !== build.image_format) {
     return jsonResponse({ error: "the image was built for another build key", code: "build_key_mismatch" }, 409);
   }
+  // Both images of a job carry the same key; only this tells them apart.
+  if (config.architecture !== architecture) {
+    return jsonResponse({ error: `the image is not an ${architecture} image`, code: "architecture_mismatch" }, 409);
+  }
 
   const updated = await env.DB.prepare(
-    `UPDATE machine_builds SET image_digest = ?1, updated_at = ?2
-      WHERE build_key = ?3 AND host_id = ?4 AND attempt = ?5
-        AND state IN ('assigned', 'building') AND image_digest IS NULL
-      RETURNING build_key`,
+    arm64
+      ? `UPDATE machine_builds SET arm64_image_digest = ?1, arm64_state = 'succeeded', arm64_error = NULL, updated_at = ?2
+          WHERE build_key = ?3 AND host_id = ?4 AND attempt = ?5
+            AND state IN ('assigned', 'building') AND arm64_state = 'building' AND arm64_image_digest IS NULL
+          RETURNING build_key`
+      : `UPDATE machine_builds SET image_digest = ?1, updated_at = ?2
+          WHERE build_key = ?3 AND host_id = ?4 AND attempt = ?5
+            AND state IN ('assigned', 'building') AND image_digest IS NULL
+          RETURNING build_key`,
   ).bind(imageDigest, Date.now(), buildKey, auth.owner.id, attempt).first();
   if (!updated) {
     return jsonResponse({ error: "the build moved on before this result", code: "build_superseded" }, 409);
@@ -319,9 +348,12 @@ export interface KinoPin {
 export async function readKinoPin(
   env: Cloudflare.Env,
   guestContract: number,
+  architecture: "amd64" | "arm64" = "amd64",
 ): Promise<KinoPin | null> {
   const pins = parseJsonText(env.KINO_PINS_JSON ?? "");
-  const entry = isRecord(pins) ? pins[String(guestContract)] : null;
+  const contractEntry = isRecord(pins) ? pins[String(guestContract)] : null;
+  // The amd64 pair is the entry itself; another architecture's is nested in it.
+  const entry = isRecord(contractEntry) && architecture !== "amd64" ? contractEntry[architecture] : contractEntry;
   if (!isRecord(entry)) return null;
   const { current, previous = null } = entry;
   const valid = (value: unknown): value is string => typeof value === "string" && DIGEST_RE.test(value);
@@ -332,11 +364,13 @@ export async function readKinoPin(
     const kino = await env.DB.prepare(
       `SELECT 1 AS present FROM registry_manifests WHERE digest = ?1 AND artifact_type = ?2`,
     ).bind(digest, KINO_ARTIFACT_TYPE).first();
-    return { digest, contract: kino ? await kinoGuestContract(env, digest) : null };
+    return { digest, kino: kino ? await kinoIdentity(env, digest) : null };
   }));
-  for (const { digest, contract } of contracts) {
-    if (contract !== guestContract) {
-      console.error(JSON.stringify({ event: "kino_pin_invalid", guest_contract: guestContract, digest }));
+  for (const { digest, kino } of contracts) {
+    // A pin is a root of trust: the binary must be for this contract and for
+    // these guests, or a host would be handed one it cannot run.
+    if (kino?.contract !== guestContract || kino.architecture !== architecture) {
+      console.error(JSON.stringify({ event: "kino_pin_invalid", guest_contract: guestContract, architecture, digest }));
       return null;
     }
   }
@@ -344,20 +378,25 @@ export async function readKinoPin(
 }
 
 /**
- * The guest contract a stored Kino artifact's config names, or null. A
+ * The guest contract and the architecture a stored Kino artifact's config
+ * names, or null. An artifact from before configs named one is amd64. A
  * digest names its content, so what was read once from the bucket holds for
  * as long as the manifest is stored, which the caller asks the database.
  */
-async function kinoGuestContract(env: Cloudflare.Env, digest: string): Promise<number | null> {
-  const known = kinoGuestContracts.get(digest);
+async function kinoIdentity(
+  env: Cloudflare.Env,
+  digest: string,
+): Promise<{ contract: number; architecture: string } | null> {
+  const known = kinoIdentities.get(digest);
   if (known !== undefined) return known;
   const config = await readStoredConfig(env, digest);
   if (!validateKinoConfig(config)) return null;
-  kinoGuestContracts.set(digest, config.guest_contract);
-  return config.guest_contract;
+  const identity = { contract: config.guest_contract, architecture: config.architecture ?? "amd64" };
+  kinoIdentities.set(digest, identity);
+  return identity;
 }
 
-const kinoGuestContracts = new Map<string, number>();
+const kinoIdentities = new Map<string, { contract: number; architecture: string }>();
 
 /** The parsed config blob of a stored manifest. */
 async function readStoredConfig(env: Cloudflare.Env, manifestDigest: string): Promise<unknown> {

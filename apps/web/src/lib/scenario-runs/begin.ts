@@ -96,6 +96,8 @@ export interface BeginScenarioRunInput {
   ref?: string;
   /** The VMs run on the learner's own computer; no host is scheduled. */
   runtime?: "local";
+  /** That computer's processor, when it is not amd64. Only with `runtime`. */
+  architecture?: "arm64";
 }
 
 export interface BeginScenarioRunResult {
@@ -286,6 +288,8 @@ function scenarioStartRequestScope(
     allowSequenceBypass: input.allowSequenceBypass === true,
     ...(input.launchSource === "play" ? { launchSource: "play" as const, ref: input.ref ?? null } : {}),
     ...(input.runtime === "local" ? { runtime: "local" as const } : {}),
+    // Another processor is another request: its machines boot other images.
+    ...(input.runtime === "local" && input.architecture ? { architecture: input.architecture } : {}),
   };
 }
 

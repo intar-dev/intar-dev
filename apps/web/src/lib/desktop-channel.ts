@@ -23,15 +23,15 @@ import { applyVmStateV3ToRunState } from "@/lib/run-lifecycle";
 import { persistRunState } from "@/lib/run-projection";
 import { isRevisionScenarioId } from "@/lib/scenario-id";
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
-import { liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
+import { arm64MachineImages, liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
 
 /** The one OAuth client the routes accept. A deploy seeds its row (apps/web/seeds). */
 export const DESKTOP_OAUTH_CLIENT_ID = "intar-jumper";
 export const LOCAL_RUNS_SCOPE = "local-runs";
 /** Version of this channel's requests and answers. */
 export const DESKTOP_PROTOCOL = 1;
-/** The only architecture machine images exist for today. */
-const IMAGE_ARCHITECTURE = "x86_64";
+/** The processors machine images exist for, as the app names its own (Rust's names). */
+const IMAGE_ARCHITECTURES: Record<string, "amd64" | "arm64"> = { x86_64: "amd64", aarch64: "arm64" };
 
 export type DesktopCaller =
   | { ok: true; userId: string; accessTokenId: string }
@@ -219,7 +219,8 @@ export async function startLocalRunRequest(
   if (organizationKey !== undefined && organizationKey !== null && typeof organizationKey !== "string") {
     return refuse(400, "invalid_organization", "organizationId must be a string");
   }
-  if (arch !== IMAGE_ARCHITECTURE) {
+  const architecture = typeof arch === "string" && Object.hasOwn(IMAGE_ARCHITECTURES, arch) ? IMAGE_ARCHITECTURES[arch] : undefined;
+  if (!architecture) {
     return refuse(409, "architecture_unavailable", "no machine images exist for this computer's architecture yet");
   }
   const organizationId = typeof organizationKey === "string" && organizationKey.trim()
@@ -247,6 +248,7 @@ export async function startLocalRunRequest(
       idempotencyKey,
       organizationId,
       runtime: "local",
+      ...(architecture === "arm64" ? { architecture } : {}),
     });
     const run = await localRunView(workerEnv.DB, started.runId, caller.userId);
     if (!run) return refuse(500, "local_run_missing", "the run started but could not be read");
@@ -367,5 +369,18 @@ export async function localCatalogRequest(
     organizationId: null,
     local: true,
   });
+  // On an arm64 computer a lecture can start only once its scenario's arm64
+  // images exist; until then it waits, as one whose images are not built.
+  // ponytail: one lookup per startable lecture; fold it into the catalog's
+  // own readiness query if catalogs grow.
+  if (new URL(request.url).searchParams.get("arch") === "aarch64") {
+    for (const course of courses) {
+      for (const lecture of course.lectures) {
+        if (!lecture.scenarioId || (lecture.state !== "available" && lecture.state !== "in_progress")) continue;
+        const revision = await liveScenarioRevision(workerEnv.DB, lecture.scenarioId, course.organizationId ?? null);
+        if (!revision || !(await arm64MachineImages(workerEnv.DB, revision.doc))) lecture.state = "waiting_for_scenario";
+      }
+    }
+  }
   return jsonResponse({ protocol: DESKTOP_PROTOCOL, courses }, { headers: { "cache-control": "no-store" } });
 }

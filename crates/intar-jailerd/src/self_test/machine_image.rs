@@ -101,6 +101,8 @@ pub(crate) fn build_machine_image(
         image_format: IMAGE_FORMAT.to_owned(),
         // The self-test has no build; the raw disk stands for its inputs.
         build_key: digest(&hex(&disk_hash.finalize()))?,
+        // Run hosts are amd64, and so is the image the self-test boots.
+        architecture: Some(intar_contracts::oci::Architecture::Amd64),
         boot: MachineBootV1 {
             cmdline: cmdline.to_owned(),
         },

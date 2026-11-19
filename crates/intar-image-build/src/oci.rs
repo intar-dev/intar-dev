@@ -104,10 +104,10 @@ pub(crate) fn layered_definition_hash(
     let identity = format!(
         "{}\n--hooks--\n{essential_hook}\n--\n{customize_hook}\n--layered-oci--\nabi={OCI_BASE_CACHE_ABI}\nimage={}\nplatform=linux/{}\nfilesystem=ext4\nlabel={BASE_EXT4_LABEL}\nmke2fs={}\nkernel={}",
         base.content_identity(),
-        config.layered.debian_image,
+        config.debian_image(),
         base.arch,
         config.mke2fs_binary.display(),
-        crate::kernel::kernel_profile_digest(),
+        crate::kernel::kernel_profile_digest(config.arch()),
     );
     // An input the Dockerfile refuses fails the build itself, so its error
     // stands in for the steps here.
@@ -184,7 +184,7 @@ pub(crate) fn ensure_oci_base_rootfs(
 }
 
 fn validate_layered_inputs(base: &BaseImageSpec, config: &QemuBuildConfig) -> Result<()> {
-    validate_pinned_image_reference(&config.layered.debian_image)?;
+    validate_pinned_image_reference(config.debian_image())?;
     ensure!(
         base.arch == config.target_arch || (base.arch == "amd64" && config.target_arch == "x86_64"),
         "layered base '{}' has architecture '{}' but builder target is '{}'",
@@ -572,7 +572,7 @@ fn write_oci_build_context(
     })?;
     fs::write(
         context_dir.join(KERNEL_CONFIG_FILE),
-        crate::kernel::KERNEL_CONFIG_FRAGMENT,
+        crate::kernel::kernel_config_fragment(config.arch()),
     )
     .with_context(|| {
         format!(
@@ -618,7 +618,7 @@ pub(crate) fn render_oci_dockerfile(
     config: &QemuBuildConfig,
 ) -> Result<String> {
     validate_layered_inputs(base, config)?;
-    let debian_image = &config.layered.debian_image;
+    let debian_image = config.debian_image();
     let release = crate::kernel::kernel_release();
     let mut dockerfile = String::new();
 

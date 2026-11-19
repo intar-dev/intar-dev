@@ -33,7 +33,7 @@ fn default_bundle_path_uses_the_requested_revision() {
     );
 }
 
-const GIT_REV: &str = "git-1-0123456789abcdef0123456789abcdef01234567-pefcf1cdb";
+const GIT_REV: &str = "git-1-0123456789abcdef0123456789abcdef01234567-p08e31612";
 
 fn bundle_args(argv: &[&str]) -> BundleCommand {
     let cli = Cli::try_parse_from([&["intar-image-cli", "bundle"], argv].concat())
@@ -62,7 +62,7 @@ fn parses_the_frozen_workflow_argv() {
     assert_eq!(args.rev.as_deref(), Some(GIT_REV));
     assert_eq!(args.output, Some(PathBuf::from("bundle.tar.gz")));
     assert!(!args.no_upload);
-    assert_eq!(compile_digest(), "pefcf1cdb");
+    assert_eq!(compile_digest(), "p08e31612");
     // The legacy lane's flags are gone.
     for gone in ["--courses-root", "--base-images", "--config"] {
         assert!(Cli::try_parse_from(["intar-image-cli", "bundle", gone, "x"]).is_err());
@@ -173,7 +173,7 @@ fn bundle_uploads_the_gzipped_v2_bundle() {
     let (url, server) = serve_once(
         SOURCE_BUNDLES_PATH,
         "202 Accepted",
-        r#"{"ok":true,"rev":"git-1-0123456789abcdef0123456789abcdef01234567-pefcf1cdb","queued":0,"assigned":[]}"#,
+        r#"{"ok":true,"rev":"git-1-0123456789abcdef0123456789abcdef01234567-p08e31612","queued":0,"assigned":[]}"#,
     );
     let root = repository.path().to_string_lossy().into_owned();
     let output_text = output.to_string_lossy().into_owned();

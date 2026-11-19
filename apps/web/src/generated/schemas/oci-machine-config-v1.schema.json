@@ -4,6 +4,17 @@
   "description": "The config blob of a machine image. The image's identity is its\nmanifest's digest.",
   "type": "object",
   "properties": {
+    "architecture": {
+      "description": "The machines the image boots on. Every config says it; only one of\n[`PREVIOUS_IMAGE_FORMAT`], written before the field existed, does not.\nRead it through [`MachineConfigV1::architecture`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Architecture"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "boot": {
       "$ref": "#/$defs/MachineBootV1"
     },
@@ -31,6 +42,14 @@
     "disk"
   ],
   "$defs": {
+    "Architecture": {
+      "description": "The processors machine images and Kino exist for.",
+      "type": "string",
+      "enum": [
+        "amd64",
+        "arm64"
+      ]
+    },
     "MachineBootV1": {
       "type": "object",
       "properties": {

@@ -58,6 +58,10 @@ export type BridgeMessageV9 =
       reason: SyncRequestReason;
       type: "sync_request";
     };
+/**
+ * The processors machine images and Kino exist for.
+ */
+export type Architecture = "amd64" | "arm64";
 export type HostRoleV1 = "agent" | "builder";
 /**
  * What a build builds: a repository image (`trixie` is the platform base)
@@ -109,6 +113,11 @@ export type SyncRequestReason = "connect" | "reconnect" | "desired_version_lag" 
  * its `source_compile_digest`.
  */
 export interface BuilderHelloV1 {
+  /**
+   * Every architecture the builder can build. A builder from before the
+   * field existed sends none and builds amd64.
+   */
+  architectures?: Architecture[];
   image_format: string;
   /**
    * `source_compile_digest(image_format, compiler version)`.
@@ -173,6 +182,12 @@ export interface HostDesiredStateV3 {
  * One image to build out of a stored bundle, and push.
  */
 export interface DesiredBuildV2 {
+  /**
+   * What to build in this job, in this order. Only what the builder's
+   * hello lists is asked for, and the list is fixed for the attempt. None
+   * is what a builder from before the field existed is sent: amd64.
+   */
+  architectures?: Architecture[];
   attempt: number;
   build_id: string;
   /**
@@ -449,6 +464,11 @@ export interface VmReportV3 {
  * pushed manifest, present exactly when the build succeeded.
  */
 export interface BuildReportV2 {
+  /**
+   * Why the arm64 image of this job was not built. The job itself is
+   * judged by its amd64 image alone.
+   */
+  arm64_error?: string | null;
   attempt: number;
   build_id: string;
   build_key: OciDigest;

@@ -23,7 +23,7 @@ pub use chunked::{
     ScannedImageChunk, reconstruct_chunked_image, scan_raw_image_chunks,
     write_chunked_image_artifact, write_scanned_chunked_image_artifact,
 };
-pub use config::{LayeredBuildConfig, QemuBuildConfig};
+pub use config::{BuildArch, LayeredBuildConfig, QemuBuildConfig};
 pub use kernel::{
     KERNEL_APT_SNAPSHOT, KERNEL_APT_SNAPSHOT_URL, KERNEL_BUILD_HOST, KERNEL_BUILD_SCRIPT_SOURCE,
     KERNEL_BUILD_USER, KERNEL_BUSYBOX_STATIC_VERSION, KERNEL_CONFIG_FRAGMENT,

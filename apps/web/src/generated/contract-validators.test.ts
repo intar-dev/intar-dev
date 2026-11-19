@@ -25,7 +25,7 @@ const hardware = {
 // One sound document per validator.
 const cases: [string, (data: unknown) => boolean, Record<string, unknown>][] = [
   ["source bundle", validateBundle, bundle],
-  ["bundle meta", validateBundleMeta, { rev: "git-1-abc-pefcf1cdb" }],
+  ["bundle meta", validateBundleMeta, { rev: "git-1-abc-p08e31612" }],
   ["revision", validateRevision, JSON.parse(stored.revision.json)],
   ["learn spec", validateMachineSpec, JSON.parse(stored.specs.webserver.learn.json)],
   ["verify spec", validateMachineSpec, JSON.parse(stored.specs.webserver.verify.json)],
@@ -45,7 +45,7 @@ const cases: [string, (data: unknown) => boolean, Record<string, unknown>][] = [
     validateMachineConfig,
     {
       guest_contract: 3,
-      image_format: "intar-image-3",
+      image_format: "intar-image-4",
       build_key: digest("a"),
       boot: { cmdline: "console=hvc0" },
       disk: { size_bytes: 8589934592, chunk_size: 4194304, chunks: [[0, 2, hex]] },
@@ -76,7 +76,7 @@ const cases: [string, (data: unknown) => boolean, Record<string, unknown>][] = [
       role: "builder",
       guest_contract: 3,
       hardware,
-      builder: { image_format: "intar-image-3", source_compile_digest: "pefcf1cdb" },
+      builder: { image_format: "intar-image-4", source_compile_digest: "p08e31612" },
     },
   ],
 ];

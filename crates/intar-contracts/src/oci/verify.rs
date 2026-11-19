@@ -172,7 +172,7 @@ mod tests {
             ],
         });
         let machine = serde_json::json!({
-            "guest_contract": 3, "image_format": "intar-image-3",
+            "guest_contract": 3, "image_format": "intar-image-4",
             "build_key": format!("sha256:{}", hex("b")),
             "boot": {"cmdline": "root=LABEL=INTARROOT"},
             "disk": {"size_bytes": 10 * MIB, "chunk_size": 4 * MIB,

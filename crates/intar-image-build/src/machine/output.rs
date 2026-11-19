@@ -12,14 +12,15 @@ use intar_contracts::catalog::IMAGE_CHUNK_SIZE_BYTES;
 use intar_contracts::guest::GUEST_CONTRACT;
 use intar_contracts::oci::verify::{layers_of, verified_image};
 use intar_contracts::oci::{
-    DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE,
+    Architecture, DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE,
     MACHINE_ARTIFACT_TYPE, MACHINE_CONFIG_MEDIA_TYPE, MachineBootV1, MachineConfigV1,
     MachineDiskV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1, Sha256Hex,
 };
 use sha2::{Digest as _, Sha256};
 
 use crate::chunked::{scan_raw_image_chunks, write_scanned_chunked_image_artifact};
-use crate::qemu::PUBLISHED_BOOT_CMDLINE;
+use crate::config::BuildArch;
+use crate::qemu::published_boot_cmdline;
 
 /// A written machine image.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -44,6 +45,7 @@ pub fn write_machine_image(
     kernel: &Path,
     initrd: &Path,
     build_key: &OciDigest,
+    arch: BuildArch,
     output: &Path,
 ) -> Result<MachineImage> {
     let mut writer = ImageWriter::new(output)?;
@@ -54,8 +56,12 @@ pub fn write_machine_image(
         guest_contract: GUEST_CONTRACT,
         image_format: IMAGE_FORMAT.to_owned(),
         build_key: build_key.clone(),
+        architecture: Some(match arch {
+            BuildArch::Amd64 => Architecture::Amd64,
+            BuildArch::Arm64 => Architecture::Arm64,
+        }),
         boot: MachineBootV1 {
-            cmdline: PUBLISHED_BOOT_CMDLINE.to_owned(),
+            cmdline: published_boot_cmdline(arch),
         },
         disk: disk.disk,
     })
@@ -368,8 +374,15 @@ mod tests {
         fs::write(dir.join("initrd"), b"initrd").expect("initrd");
         let out = dir.join("out");
         let key = intar_contracts::scenario::base_key();
-        let image = write_machine_image(&raw, &dir.join("kernel"), &dir.join("initrd"), &key, &out)
-            .expect("image");
+        let image = write_machine_image(
+            &raw,
+            &dir.join("kernel"),
+            &dir.join("initrd"),
+            &key,
+            BuildArch::Amd64,
+            &out,
+        )
+        .expect("image");
         (image, out)
     }
 
@@ -403,7 +416,10 @@ mod tests {
             .collect();
         assert_eq!(entries, [(0, 2), (2, 2), (4, 3)]);
         assert_eq!(verified.config.disk.size_bytes, 4 * CHUNK + CHUNK / 2);
-        assert_eq!(verified.config.boot.cmdline, PUBLISHED_BOOT_CMDLINE);
+        assert_eq!(
+            verified.config.boot.cmdline,
+            crate::qemu::PUBLISHED_BOOT_CMDLINE
+        );
         assert_eq!(
             verified.config.build_key,
             intar_contracts::scenario::base_key()

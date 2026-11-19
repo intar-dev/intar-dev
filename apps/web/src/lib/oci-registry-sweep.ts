@@ -162,16 +162,25 @@ desired_roots(kind, digest, source) AS (
   UNION ALL SELECT 'manifest', cached.value, 'desired ' || desired.host_id
     FROM desired, json_each(desired.doc_json, '$.cached_images') cached
   UNION ALL SELECT 'manifest', json_extract(doc_json, '$.kino_pin'), 'desired ' || host_id FROM desired),
+-- The arm64 image of a build: kept for as long as a kept revision needs the
+-- build's key, and while the build is in flight or young, like the amd64 one.
+arm64_roots(kind, digest, source) AS (
+  SELECT 'manifest', build.arm64_image_digest, 'arm64 build ' || build.build_key
+    FROM machines JOIN machine_builds build ON build.build_key = json_extract(m, '$.build_key')
+   WHERE build.arm64_image_digest IS NOT NULL
+  UNION ALL SELECT 'manifest', arm64_image_digest, 'arm64 build ' || build_key FROM machine_builds
+   WHERE arm64_image_digest IS NOT NULL AND (state IN ('queued', 'assigned', 'building') OR updated_at >= ?1)),
 pin_roots(kind, digest, source) AS (
   SELECT 'manifest', pin.value, 'kino pin' FROM json_each(?2) pin
   -- Every Kino artifact: an artifact can be pinned long after its push, and a
   -- re-push keeps its first created_at. They are few and small.
   UNION ALL SELECT 'manifest', digest, 'kino artifact' FROM registry_manifests WHERE artifact_type = '${KINO_ARTIFACT_TYPE}'
   UNION ALL SELECT 'manifest', digest, 'young manifest' FROM registry_manifests WHERE created_at >= ?1),
--- D1 allows five terms per compound SELECT, hence the four parts.
+-- D1 allows five terms per compound SELECT, hence the five parts.
 roots(kind, digest, source) AS (
   SELECT * FROM revision_roots UNION ALL SELECT * FROM activity_roots
-  UNION ALL SELECT * FROM desired_roots UNION ALL SELECT * FROM pin_roots)`;
+  UNION ALL SELECT * FROM desired_roots UNION ALL SELECT * FROM pin_roots
+  UNION ALL SELECT * FROM arm64_roots)`;
 
 const FAULTS_SQL = `${ROOTS_SQL}
 SELECT code, source, digest FROM (
@@ -486,12 +495,19 @@ export function readKinoPins(json: string | null): { digests: string[] } | { fau
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return invalid;
   const digests: string[] = [];
-  for (const entry of Object.values(parsed)) {
-    if (typeof entry !== "object" || entry === null) return invalid;
+  // A contract's entry is its amd64 pair; the arm64 pair is nested in it.
+  const pair = (entry: unknown): boolean => {
+    if (typeof entry !== "object" || entry === null) return false;
     const { current, previous = null } = entry as { current?: unknown; previous?: unknown };
-    if (typeof current !== "string" || !DIGEST_RE.test(current)) return invalid;
-    if (previous !== null && (typeof previous !== "string" || !DIGEST_RE.test(previous))) return invalid;
+    if (typeof current !== "string" || !DIGEST_RE.test(current)) return false;
+    if (previous !== null && (typeof previous !== "string" || !DIGEST_RE.test(previous))) return false;
     digests.push(current, ...(previous === null ? [] : [previous]));
+    return true;
+  };
+  for (const entry of Object.values(parsed)) {
+    if (!pair(entry)) return invalid;
+    const arm64 = (entry as { arm64?: unknown }).arm64;
+    if (arm64 !== undefined && !pair(arm64)) return invalid;
   }
   return { digests };
 }

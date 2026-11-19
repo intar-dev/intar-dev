@@ -16,7 +16,7 @@ use std::path::Path;
 
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use intar_contracts::oci::{
-    DISK_CHUNK_MEDIA_TYPE, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE, KINO_ARTIFACT_TYPE,
+    Architecture, DISK_CHUNK_MEDIA_TYPE, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE, KINO_ARTIFACT_TYPE,
     MACHINE_ARTIFACT_TYPE, MACHINE_CONFIG_MEDIA_TYPE, MachineConfigV1, OciDescriptorV1, OciDigest,
     OciManifestV1,
 };
@@ -115,6 +115,15 @@ fn publish(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 fn blob(repository: &str, digest: &OciDigest) -> String {
     format!("/v2/{repository}/blobs/{}", digest.as_str())
+}
+
+/// The processor an image's machines have, as Rust names it.
+fn image_arch(config: &MachineConfigV1) -> Result<&'static str, String> {
+    match config.architecture() {
+        Ok(Architecture::Amd64) => Ok("x86_64"),
+        Ok(Architecture::Arm64) => Ok("aarch64"),
+        Err(_) => Err(unreadable("a machine image")),
+    }
 }
 
 /// One disk chunk, unpacked: at most `chunk_size` bytes that hash to `raw`.
@@ -225,6 +234,14 @@ async fn pull_image(
     )
     .await?;
     let config: MachineConfigV1 = serde_json::from_slice(&config).map_err(|_| bad())?;
+    // intar hands this computer images for its own processor; one for another
+    // would not boot, so it is refused before anything large is fetched.
+    if image_arch(&config)? != std::env::consts::ARCH {
+        return Err(
+            "This scenario's machine image is for another kind of processor than this computer's."
+                .to_owned(),
+        );
+    }
 
     let of = |media_type: &str| -> Vec<&OciDescriptorV1> {
         manifest
@@ -472,7 +489,15 @@ mod tests {
             layer(&blobs, DISK_CHUNK_MEDIA_TYPE, packed(&last)),
         ];
         let total: u64 = layers.iter().map(|layer| layer.size).sum();
-        let disk = |chunks| MachineConfigV1 {
+        // The image is for the computer the test runs on.
+        let (own, other) = if std::env::consts::ARCH == "aarch64" {
+            (Architecture::Arm64, Architecture::Amd64)
+        } else {
+            (Architecture::Amd64, Architecture::Arm64)
+        };
+        let (own, other) = (Some(own), Some(other));
+        let disk_for = |architecture, chunks| MachineConfigV1 {
+            architecture,
             guest_contract: 3,
             image_format: IMAGE_FORMAT.to_owned(),
             build_key: put(&blobs, b"key".to_vec()),
@@ -485,6 +510,7 @@ mod tests {
                 chunks,
             },
         };
+        let disk = |chunks| disk_for(own, chunks);
         let image_of = |config: &MachineConfigV1| {
             let config = layer(
                 &blobs,
@@ -550,6 +576,15 @@ mod tests {
         pull(&channel, &cache, &machine(&image), &quiet)
             .await
             .expect("cached");
+
+        // An image for another processor is refused.
+        let foreign = image_of(&disk_for(other, vec![(0, 1, raw_hex(&a))]));
+        let none = |_, _| {};
+        let refused = pull(&channel, &cache, &machine(&foreign), &none)
+            .await
+            .expect_err("another processor");
+        assert!(refused.contains("another kind of processor"), "{refused}");
+        assert!(cache.image(foreign.as_str()).is_err());
 
         // A chunk that unpacks to something else than the config names, a
         // chunk past the disk's end, and a blob that is not its digest: each

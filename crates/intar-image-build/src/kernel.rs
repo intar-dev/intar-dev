@@ -27,7 +27,7 @@
 //! initramfs rootfs may not pivot_root, so the script moves its mounts into the
 //! new root and hands over with busybox switch_root.
 
-use crate::config::QemuBuildConfig;
+use crate::config::{BuildArch, QemuBuildConfig};
 
 /// Debian source package version. The source package name is linux.
 pub const KERNEL_SOURCE_VERSION: &str = "6.12.96-1";
@@ -48,7 +48,7 @@ pub const KERNEL_SOURCE_BASE_URL: &str =
 /// Dated Debian snapshot that the kernel stage installs its toolchain from.
 /// A floating compiler would break the reproducibility claim, so the stage
 /// points apt at exactly this date instead of at the moving stable suite.
-pub const KERNEL_APT_SNAPSHOT: &str = "20260912T000000Z";
+pub const KERNEL_APT_SNAPSHOT: &str = "20261105T000000Z";
 
 /// Snapshot service root. `{root}/{snapshot}/` is an apt suite.
 pub const KERNEL_APT_SNAPSHOT_URL: &str = "https://snapshot.debian.org/archive/debian";
@@ -59,12 +59,12 @@ pub const KERNEL_APT_SNAPSHOT_URL: &str = "https://snapshot.debian.org/archive/d
 /// from dists/trixie/main/binary-amd64/Packages. A newer build in the Debian
 /// pool is not installable from that snapshot, so a pool version is not a valid
 /// pin here.
-pub const KERNEL_BUSYBOX_STATIC_VERSION: &str = "1:1.37.0-6+b8";
+pub const KERNEL_BUSYBOX_STATIC_VERSION: &str = "1:1.37.0-6+b9";
 
 /// Apt version of the static e2fsck that the initramfs runs.
 ///
 /// Same rule as the busybox pin: it is the snapshot suite version.
-pub const KERNEL_E2FSCK_STATIC_VERSION: &str = "1.47.2-3+b11";
+pub const KERNEL_E2FSCK_STATIC_VERSION: &str = "1.47.2-3+b12";
 
 /// Build timestamp for the kernel compile. A fixed value makes the build
 /// reproducible. It also stamps every initramfs entry.
@@ -118,10 +118,7 @@ pub const KERNEL_SOURCE_FILES: &[KernelSourceFile] = &[
 /// A missing symbol fails the build. Do not trim this list without checking the
 /// guest contract.
 pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
-    // Cloud Hypervisor CPU enumeration uses x2APIC MADT entries.
     "CONFIG_SMP",
-    "CONFIG_HYPERVISOR_GUEST",
-    "CONFIG_X86_X2APIC",
     // virtio and vsock, for disks, network, console, and Kino.
     "CONFIG_VIRTIO_PCI",
     "CONFIG_VIRTIO_BLK",
@@ -139,8 +136,6 @@ pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     "CONFIG_RD_GZIP",
     "CONFIG_DEVTMPFS",
     "CONFIG_DEVTMPFS_MOUNT",
-    "CONFIG_SERIAL_8250",
-    "CONFIG_SERIAL_8250_CONSOLE",
     "CONFIG_UNIX98_PTYS",
     // isolation, scheduling, and security.
     "CONFIG_CGROUPS",
@@ -200,6 +195,74 @@ pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     "CONFIG_TUN",
     "CONFIG_PACKET",
 ];
+
+/// What only an x86 guest needs built in, on top of [`KERNEL_REQUIRED_BUILTINS`].
+pub const KERNEL_REQUIRED_BUILTINS_X86_64: &[&str] = &[
+    // Cloud Hypervisor CPU enumeration uses x2APIC MADT entries.
+    "CONFIG_HYPERVISOR_GUEST",
+    "CONFIG_X86_X2APIC",
+    "CONFIG_SERIAL_8250",
+    "CONFIG_SERIAL_8250_CONSOLE",
+];
+
+/// What only an arm64 guest needs built in: the devices of QEMU's `virt`
+/// machine. The power key is how a power-down request reaches the guest
+/// there, where no ACPI exists.
+pub const KERNEL_REQUIRED_BUILTINS_ARM64: &[&str] = &[
+    "CONFIG_SERIAL_AMBA_PL011",
+    "CONFIG_SERIAL_AMBA_PL011_CONSOLE",
+    "CONFIG_PCI_HOST_GENERIC",
+    "CONFIG_RTC_DRV_PL031",
+    "CONFIG_GPIO_PL061",
+    "CONFIG_KEYBOARD_GPIO",
+    "CONFIG_POWER_RESET",
+];
+
+/// The arm64 lines of the profile, merged after [`KERNEL_CONFIG_FRAGMENT`].
+/// The x86 lines of that fragment name symbols arm64 does not have, and the
+/// merge leaves those out by itself.
+pub const KERNEL_CONFIG_FRAGMENT_ARM64: &str = "\
+# --- arm64: the devices of QEMU's virt machine ------------------------------
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+CONFIG_PCI_HOST_GENERIC=y
+CONFIG_RTC_DRV_PL031=y
+CONFIG_GPIO_PL061=y
+CONFIG_KEYBOARD_GPIO=y
+CONFIG_POWER_RESET=y
+CONFIG_EFI=y
+";
+
+/// Every symbol a guest of `arch` needs built in.
+#[must_use]
+pub fn required_builtins(arch: BuildArch) -> Vec<&'static str> {
+    let own = match arch {
+        BuildArch::Amd64 => KERNEL_REQUIRED_BUILTINS_X86_64,
+        BuildArch::Arm64 => KERNEL_REQUIRED_BUILTINS_ARM64,
+    };
+    KERNEL_REQUIRED_BUILTINS
+        .iter()
+        .chain(own)
+        .copied()
+        .collect()
+}
+
+/// The profile the kernel of `arch` is configured with.
+#[must_use]
+pub fn kernel_config_fragment(arch: BuildArch) -> String {
+    match arch {
+        BuildArch::Amd64 => KERNEL_CONFIG_FRAGMENT.to_owned(),
+        BuildArch::Arm64 => format!("{KERNEL_CONFIG_FRAGMENT}{KERNEL_CONFIG_FRAGMENT_ARM64}"),
+    }
+}
+
+/// The kernel source tree's name for `arch`.
+fn kernel_arch_name(arch: BuildArch) -> &'static str {
+    match arch {
+        BuildArch::Amd64 => "x86_64",
+        BuildArch::Arm64 => "arm64",
+    }
+}
 
 /// The build script template, with the @TOKEN@ fields that
 /// [`render_kernel_build_script`] fills from the pins in this module.
@@ -294,9 +357,10 @@ pub fn render_kernel_build_script(config: &QemuBuildConfig) -> String {
         .map(|file| format!("{} {}", file.sha256, file.name))
         .collect::<Vec<_>>()
         .join("\n");
-    let required = KERNEL_REQUIRED_BUILTINS.join("\n");
+    let required = required_builtins(config.arch()).join("\n");
     let (major, minor, patch) = upstream_version_parts();
     KERNEL_BUILD_SCRIPT_SOURCE
+        .replace("@KERNEL_ARCH@", kernel_arch_name(config.arch()))
         .replace("@SOURCE_VERSION@", KERNEL_SOURCE_VERSION)
         .replace("@UPSTREAM_MAJOR@", major)
         .replace("@UPSTREAM_MINOR@", minor)
@@ -320,9 +384,13 @@ pub fn render_kernel_build_script(config: &QemuBuildConfig) -> String {
 /// The OCI base-image cache key includes this value, so a changed pin, config,
 /// toolchain, build script, or init script always invalidates the cached base image.
 #[must_use]
-pub fn kernel_profile_digest() -> String {
+pub fn kernel_profile_digest(arch: BuildArch) -> String {
     let mut identity = String::new();
     identity.push_str("intar-kernel-profile-v3\n");
+    // amd64 keeps the identity it had before a second architecture existed.
+    if arch != BuildArch::Amd64 {
+        identity.push_str(&format!("arch={}\n", kernel_arch_name(arch)));
+    }
     identity.push_str(&format!("source_version={KERNEL_SOURCE_VERSION}\n"));
     identity.push_str(&format!("upstream_version={KERNEL_UPSTREAM_VERSION}\n"));
     identity.push_str(&format!("localversion={KERNEL_LOCALVERSION}\n"));
@@ -339,9 +407,9 @@ pub fn kernel_profile_digest() -> String {
         ));
     }
     identity.push_str("--required-builtins--\n");
-    identity.push_str(&KERNEL_REQUIRED_BUILTINS.join("\n"));
+    identity.push_str(&required_builtins(arch).join("\n"));
     identity.push_str("\n--config-fragment--\n");
-    identity.push_str(KERNEL_CONFIG_FRAGMENT);
+    identity.push_str(&kernel_config_fragment(arch));
     identity.push_str("--init-script--\n");
     identity.push_str(KERNEL_INITRAMFS_INIT_SCRIPT);
     identity.push_str("--build-script--\n");
@@ -352,9 +420,8 @@ pub fn kernel_profile_digest() -> String {
 /// Return required symbols that are not built in (value y) in a kernel .config.
 #[must_use]
 pub fn missing_required_builtins(config: &str) -> Vec<&'static str> {
-    KERNEL_REQUIRED_BUILTINS
-        .iter()
-        .copied()
+    required_builtins(BuildArch::Amd64)
+        .into_iter()
         .filter(|symbol| !config_line_is_builtin(config, symbol))
         .collect()
 }
@@ -375,7 +442,11 @@ mod tests {
         kernel_profile_digest, kernel_release, missing_required_builtins,
         render_kernel_build_script,
     };
+    use crate::config::BuildArch;
     use crate::config::QemuBuildConfig;
+    use crate::kernel::{
+        KERNEL_REQUIRED_BUILTINS_ARM64, kernel_config_fragment, required_builtins,
+    };
 
     fn jobs_config(jobs: u32) -> QemuBuildConfig {
         QemuBuildConfig {
@@ -426,7 +497,7 @@ mod tests {
         // The fragment is the only source of the built-in feature set. A
         // symbol that the build verifies must also be a line in the fragment,
         // so the check and the profile cannot drift apart.
-        for symbol in KERNEL_REQUIRED_BUILTINS {
+        for symbol in required_builtins(BuildArch::Amd64) {
             assert!(
                 KERNEL_CONFIG_FRAGMENT.contains(&format!("\n{symbol}=y")),
                 "{symbol} is verified but the profile does not build it in"
@@ -441,7 +512,7 @@ mod tests {
     #[test]
     fn missing_required_builtins_reports_each_absent_symbol() {
         let mut config = String::new();
-        for symbol in KERNEL_REQUIRED_BUILTINS {
+        for symbol in required_builtins(BuildArch::Amd64) {
             config.push_str(&format!("{symbol}=y\n"));
         }
         assert!(missing_required_builtins(&config).is_empty());
@@ -525,7 +596,9 @@ mod tests {
         assert!(script.contains("touch -h -d"));
         // Capped parallelism and no host-specific code generation.
         assert!(script.contains("jobs='3'"));
-        assert!(script.contains("make -j\"$jobs\" bzImage"));
+        assert!(script.contains("kernel_arch='x86_64'"));
+        assert!(script.contains("image_target=bzImage"));
+        assert!(script.contains("make -j\"$jobs\" \"$image_target\""));
         assert!(!script.contains("-march=native"));
         assert!(!script.contains("-mtune=native"));
         // Profile merge, the feature-set gate, and the module tree.
@@ -586,10 +659,10 @@ mod tests {
 
     #[test]
     fn the_kernel_profile_digest_covers_every_pinned_input() {
-        let digest = kernel_profile_digest();
+        let digest = kernel_profile_digest(BuildArch::Amd64);
         assert_eq!(digest.len(), 64);
         assert!(digest.chars().all(|value| value.is_ascii_hexdigit()));
-        assert_eq!(digest, kernel_profile_digest());
+        assert_eq!(digest, kernel_profile_digest(BuildArch::Amd64));
     }
 
     #[test]
@@ -788,7 +861,7 @@ mod tests {
         // kernel. The build must stop and name every such symbol instead of
         // shipping the gap.
         assert!(script.contains("grep -cE '^CONFIG_[A-Z0-9_]*=m$' .config"));
-        assert!(script.contains("resolved to =m, and this build produces bzImage only"));
+        assert!(script.contains("resolved to =m, and this build produces the kernel image only"));
         assert!(script.contains("grep -E '^CONFIG_[A-Z0-9_]*=m$' .config >&2"));
         assert!(script.contains("set these to =y or turn them off"));
         assert!(script.contains("no symbol resolved to =m"));
@@ -876,7 +949,7 @@ mod tests {
         // The gate itself must see them as present. A config that lacks one
         // must report it, and a config that has every one must report nothing.
         let mut config = String::new();
-        for symbol in KERNEL_REQUIRED_BUILTINS {
+        for symbol in required_builtins(BuildArch::Amd64) {
             config.push_str(&format!("{symbol}=y\n"));
         }
         assert!(missing_required_builtins(&config).is_empty());
@@ -887,5 +960,40 @@ mod tests {
                 "a resolved-but-modular {symbol} must fail the build"
             );
         }
+    }
+
+    #[test]
+    fn an_arm64_kernel_is_its_own_profile_for_qemus_virt_machine() {
+        let mut config = jobs_config(4);
+        "arm64".clone_into(&mut config.target_arch);
+        let script = render_kernel_build_script(&config);
+        assert!(script.contains("kernel_arch='arm64'"));
+        assert!(script.contains("image_path=arch/arm64/boot/Image"));
+        assert!(script.contains("make mod2yesconfig"));
+        // Its required features are the virt machine's devices, not a PC's.
+        let required = required_builtins(BuildArch::Arm64);
+        for symbol in [
+            "CONFIG_SERIAL_AMBA_PL011_CONSOLE",
+            "CONFIG_PCI_HOST_GENERIC",
+            "CONFIG_KEYBOARD_GPIO",
+            "CONFIG_VIRTIO_BLK",
+        ] {
+            assert!(required.contains(&symbol), "{symbol}");
+            assert!(script.contains(&format!("\n{symbol}\n")), "{symbol}");
+        }
+        for symbol in ["CONFIG_X86_X2APIC", "CONFIG_SERIAL_8250_CONSOLE"] {
+            assert!(!required.contains(&symbol), "{symbol}");
+        }
+        // Every arm64 requirement is asked for by the arm64 profile.
+        let fragment = kernel_config_fragment(BuildArch::Arm64);
+        for symbol in KERNEL_REQUIRED_BUILTINS_ARM64 {
+            assert!(fragment.contains(&format!("{symbol}=y\n")), "{symbol}");
+        }
+        assert!(fragment.starts_with(KERNEL_CONFIG_FRAGMENT));
+        // A base built for one architecture is never taken for the other's.
+        assert_ne!(
+            kernel_profile_digest(BuildArch::Arm64),
+            kernel_profile_digest(BuildArch::Amd64)
+        );
     }
 }

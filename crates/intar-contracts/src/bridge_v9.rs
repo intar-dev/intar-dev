@@ -15,7 +15,7 @@ use crate::bridge::{
     SyncRequestReason, VmArchiveStateV1, VmNetworkStateV1, VmResourceStateV3,
     VmRuntimeConstraintsV2, VmSandboxStateV1, VmTerminalStateV1,
 };
-use crate::oci::OciDigest;
+use crate::oci::{Architecture, OciDigest};
 use crate::scenario::SpecMode;
 
 pub const BRIDGE_PROTOCOL_VERSION_9: u16 = 9;
@@ -69,6 +69,10 @@ pub struct BuilderHelloV1 {
     pub image_format: String,
     /// `source_compile_digest(image_format, compiler version)`.
     pub source_compile_digest: String,
+    /// Every architecture the builder can build. A builder from before the
+    /// field existed sends none and builds amd64.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub architectures: Vec<Architecture>,
 }
 
 /// What the host can do. Facts only: no rollout switches.
@@ -180,6 +184,11 @@ pub struct DesiredBuildV2 {
     pub target: BuildTargetV1,
     #[schemars(range(min = 1))]
     pub attempt: u32,
+    /// What to build in this job, in this order. Only what the builder's
+    /// hello lists is asked for, and the list is fixed for the attempt. None
+    /// is what a builder from before the field existed is sent: amd64.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub architectures: Vec<Architecture>,
 }
 
 /// What a build builds: a repository image (`trixie` is the platform base)
@@ -231,6 +240,10 @@ pub struct BuildReportV2 {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_digest: Option<OciDigest>,
+    /// Why the arm64 image of this job was not built. The job itself is
+    /// judged by its amd64 image alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arm64_error: Option<String>,
 }
 
 /// 1 to 128 of `[A-Za-z0-9._-]`, not `.` or `..`: ids and revs name files
@@ -713,7 +726,7 @@ mod tests {
             "agent_version": "1.0.0", "role": "builder", "guest_contract": 3,
             "hardware": {"cloud_hypervisor_sha256": null, "kvm": true, "vsock": false,
                 "reflink": false, "landlock": false, "cgroup_v2": false, "hard_cpu_quota": false},
-            "builder": {"image_format": "intar-image-3", "source_compile_digest": "p0011aabb"},
+            "builder": {"image_format": "intar-image-4", "source_compile_digest": "p0011aabb"},
         });
         let message: BridgeMessageV9 = serde_json::from_value(hello.clone())?;
         assert_eq!(serde_json::to_value(&message)?, hello);

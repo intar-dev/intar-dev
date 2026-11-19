@@ -485,6 +485,15 @@ jq -c '{success: true, result: [{success: true, results: .}]}' "${root}/$f.json"
     expect(readFileSync(join(root, "queries.sql"), "utf8")).toContain(
       `artifact_type = 'application/vnd.intar.kino.v1' AND digest IN ('${current}','${previous}')`,
     );
+    // The arm64 pair is checked and injected with the contract's own.
+    const arm64 = `sha256:${"c".repeat(64)}`;
+    const nested = `{"3":{"current":"${current}","previous":"${previous}","arm64":{"current":"${arm64}","previous":null}}}`;
+    writeFileSync(join(repo, "tools/deploy/kino-pin.json"), `${nested}\n`);
+    expect(inject(["registry_manifests"], [current, previous, arm64]).vars.KINO_PINS_JSON).toBe(nested);
+    const unstored = inject(["registry_manifests"], [current, previous]);
+    expect(unstored.status).not.toBe(0);
+    expect(unstored.stderr).toContain(arm64);
+    writeFileSync(join(repo, "tools/deploy/kino-pin.json"), `{"3": {"current": "${current}", "previous": "${previous}"}}\n`);
     // A pin whose artifact image-ops has not pushed stops the deploy and names the fix.
     const missing = inject(["registry_manifests"], [current]);
     expect(missing.status).not.toBe(0);

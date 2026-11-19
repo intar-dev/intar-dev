@@ -876,6 +876,7 @@ fn desired_identity_is_mandatory_and_personal_owner_is_bound() {
                 name: "trixie".into(),
             },
             attempt: 1,
+            architectures: Vec::new(),
         });
     assert!(
         validate_desired_state(&cfg, &wrong).is_err(),

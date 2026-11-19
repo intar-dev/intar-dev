@@ -12,8 +12,8 @@ use intar_contracts::bridge_v9::BuildPhaseV2;
 use tokio::sync::mpsc;
 
 use super::{
-    LOG_UPLOAD_ERROR_BYTES, LOG_UPLOAD_TAIL_BYTES, attempt_dirs, checked_target, decode_bundle,
-    failure_message, is_current, publish, push_verified, read_log_tail,
+    LOG_UPLOAD_ERROR_BYTES, LOG_UPLOAD_TAIL_BYTES, arm64_config, attempt_dirs, checked_target,
+    decode_bundle, failure_message, is_current, publish, push_verified, read_log_tail,
 };
 use crate::db::{self, BuilderDb};
 
@@ -33,6 +33,7 @@ fn webserver(key: OciDigest) -> DesiredBuildV2 {
             machine: "webserver".to_owned(),
         },
         attempt: 1,
+        architectures: Vec::new(),
     }
 }
 
@@ -173,6 +174,7 @@ async fn an_image_that_fails_verification_is_not_pushed() {
         &dir.path().join("kernel"),
         &dir.path().join("initrd"),
         &intar_contracts::scenario::base_key(),
+        intar_image_build::BuildArch::Amd64,
         &out,
     )
     .unwrap();
@@ -186,9 +188,17 @@ async fn an_image_that_fails_verification_is_not_pushed() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let error = push_verified(&url, "token", &out, &image.manifest_digest, "build-1", 1)
-        .await
-        .unwrap_err();
+    let error = push_verified(
+        &url,
+        "token",
+        &out,
+        &image.manifest_digest,
+        "build-1",
+        1,
+        intar_contracts::oci::Architecture::Amd64,
+    )
+    .await
+    .unwrap_err();
     assert!(
         format!("{error:#}").contains("fails verification"),
         "{error:#}"
@@ -197,9 +207,29 @@ async fn an_image_that_fails_verification_is_not_pushed() {
 }
 
 #[test]
+fn the_arm64_half_of_a_job_works_beside_the_amd64_half() {
+    let cfg = crate::config::parse(include_str!("../../deploy/config.example.toml")).unwrap();
+    // A builder is an amd64 host, whatever these tests run on.
+    let amd64 = intar_image_build::QemuBuildConfig {
+        target_arch: "amd64".to_owned(),
+        ..cfg.qemu_build_config()
+    };
+    let arm64 = arm64_config(&amd64);
+    assert_eq!(arm64.target_arch, "arm64");
+    assert_eq!(arm64.work_root, amd64.work_root.join("arm64"));
+    assert!(arm64.qemu_binary.ends_with("qemu-system-aarch64"));
+    assert_ne!(arm64.debian_image(), amd64.debian_image());
+    // The caches are shared: each architecture keeps its own entries in them.
+    assert_eq!(
+        arm64.layered.checkpoint_cache_root,
+        amd64.layered.checkpoint_cache_root
+    );
+}
+
+#[test]
 fn every_tail_fits_one_upload() {
     // The Worker refuses a build log over 9 MiB; headers take a few bytes.
-    let total = 2 * LOG_UPLOAD_TAIL_BYTES + LOG_UPLOAD_ERROR_BYTES as u64 + 4096;
+    let total = 4 * LOG_UPLOAD_TAIL_BYTES + LOG_UPLOAD_ERROR_BYTES as u64 + 4096;
     assert!(total < 9 * 1024 * 1024);
 }
 

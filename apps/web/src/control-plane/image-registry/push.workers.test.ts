@@ -55,8 +55,8 @@ const putManifest = async (manifest: unknown, bearer?: string) => {
   });
   return { response, digest: pushed.digest };
 };
-const postResult = (digest: string, attempt: number, bearer?: string) =>
-  call("POST", `/builds/${BUILD_KEY_HEX}/result?attempt=${attempt}`, {
+const postResult = (digest: string, attempt: number, bearer?: string, arch = "") =>
+  call("POST", `/builds/${BUILD_KEY_HEX}/result?attempt=${attempt}${arch}`, {
     body: JSON.stringify({ image_digest: digest }), headers: { "content-type": "application/json" }, ...(bearer ? { bearer } : {}),
   });
 
@@ -83,7 +83,7 @@ describe("registry push routes", () => {
     await resetD1Database();
     token = await seedBuilder("builder-a");
     await drizzle(env.DB).insert(machineBuilds).values({
-      buildKey: BUILD_KEY, imageFormat: "intar-image-3", bundleRev: "rev", state: "building", attempt: 2, hostId: "builder-a",
+      buildKey: BUILD_KEY, imageFormat: "intar-image-4", bundleRev: "rev", state: "building", attempt: 2, hostId: "builder-a",
     });
   });
 
@@ -192,6 +192,36 @@ describe("registry push routes", () => {
     expect(await env.DB.prepare("SELECT image_digest FROM machine_builds").first("image_digest")).toBe(digest);
   });
 
+  it("records the arm64 image of a job after its amd64 one, each only as its own architecture", async () => {
+    const code = async (response: Response) => [response.status, ((await response.json()) as { code?: string }).code];
+    const push = async (overrides: Record<string, unknown>) => {
+      const image = await machineImage(BUILD_KEY, overrides);
+      await pushBlobs(image.blobs);
+      return putManifest(image.manifest);
+    };
+    // An image that names no architecture is not stored.
+    const unnamed = await push({ architecture: undefined });
+    expect(await code(unnamed.response)).toEqual([409, "architecture"]);
+
+    const amd64 = (await push({})).digest;
+    const arm64 = (await push({ architecture: "arm64" })).digest;
+    expect(await code(await postResult(arm64, 2))).toEqual([409, "architecture_mismatch"]);
+    expect((await postResult(arm64, 2, undefined, "&arch=riscv64")).status).toBe(400);
+
+    // Not asked of this attempt, then asked but before the amd64 image.
+    expect((await postResult(amd64, 2)).status).toBe(201);
+    expect(await code(await postResult(arm64, 2, undefined, "&arch=arm64"))).toEqual([409, "arm64_not_expected"]);
+    await env.DB.prepare("UPDATE machine_builds SET arm64_asked = 1, arm64_state = 'building', image_digest = NULL").run();
+    expect(await code(await postResult(arm64, 2, undefined, "&arch=arm64"))).toEqual([409, "arm64_not_expected"]);
+    expect((await postResult(amd64, 2)).status).toBe(201);
+
+    expect(await code(await postResult(amd64, 2, undefined, "&arch=arm64"))).toEqual([409, "architecture_mismatch"]);
+    expect((await postResult(arm64, 2, undefined, "&arch=arm64")).status).toBe(201);
+    expect((await postResult(arm64, 2, undefined, "&arch=arm64")).status).toBe(200);
+    expect(await env.DB.prepare("SELECT image_digest, arm64_image_digest, arm64_state, state FROM machine_builds").first())
+      .toEqual({ image_digest: amd64, arm64_image_digest: arm64, arm64_state: "succeeded", state: "building" });
+  });
+
   it("takes Kino artifacts only with the publish token and reads the pin", async () => {
     const config = await blob(JSON.stringify({ guest_contract: 3, version: "1.0.0" }));
     const binary = await blob("kino binary");
@@ -213,5 +243,17 @@ describe("registry push routes", () => {
     expect(await readKinoPin(pins({ 3: { current: machineDigest } }), 3)).toBeNull();
     expect(await readKinoPin(pins({ 3: { current: digest, previous: "sha256:nope" } }), 3)).toBeNull();
     expect(await readKinoPin({ ...env, KINO_PINS_JSON: "not json" }, 3)).toBeNull();
+
+    // The arm64 pair is nested in the contract's entry, and each pair holds only its own architecture.
+    const armConfig = await blob(JSON.stringify({ guest_contract: 3, version: "1.0.0", architecture: "arm64" }));
+    await pushBlobs([armConfig], PUBLISH);
+    const arm = (await putManifest(manifestOf("application/vnd.intar.kino.v1", armConfig, KINO_CONFIG_MEDIA_TYPE,
+      [["application/octet-stream", binary]]), PUBLISH)).digest;
+    const both = pins({ 3: { current: digest, arm64: { current: arm } } });
+    expect(await readKinoPin(both, 3)).toEqual({ current: digest, previous: null });
+    expect(await readKinoPin(both, 3, "arm64")).toEqual({ current: arm, previous: null });
+    expect(await readKinoPin(pins({ 3: { current: digest } }), 3, "arm64")).toBeNull();
+    expect(await readKinoPin(pins({ 3: { current: digest, arm64: { current: digest } } }), 3, "arm64")).toBeNull();
+    expect(await readKinoPin(pins({ 3: { current: arm } }), 3)).toBeNull();
   });
 });

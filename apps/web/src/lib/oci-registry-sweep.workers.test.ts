@@ -129,7 +129,7 @@ const ROOTS: Array<[string, () => Promise<{ keep: string[]; pins?: string }>]> =
     const built = await image();
     doc.machines[0]!.build_key = `sha256:${"c".repeat(64)}`;
     await env.DB.prepare(`INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, image_digest, updated_at)
-      VALUES (?1, 'intar-image-3', 'b', 'succeeded', ?2, 0)`).bind(doc.machines[0]!.build_key, built).run();
+      VALUES (?1, 'intar-image-4', 'b', 'succeeded', ?2, 0)`).bind(doc.machines[0]!.build_key, built).run();
     await seedScenario("intar/build");
     await seedRevision("intar/build", "r1", "building", doc);
     return { keep: [...keep, ...await closure(built)] };
@@ -152,14 +152,24 @@ const ROOTS: Array<[string, () => Promise<{ keep: string[]; pins?: string }>]> =
   ["a build in flight", async () => {
     const built = await image();
     await env.DB.prepare(`INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, image_digest, attempt, updated_at)
-      VALUES (?1, 'intar-image-3', 'b', 'building', ?2, 1, 0)`).bind(`sha256:${"d".repeat(64)}`, built).run();
+      VALUES (?1, 'intar-image-4', 'b', 'building', ?2, 1, 0)`).bind(`sha256:${"d".repeat(64)}`, built).run();
     return { keep: await closure(built) };
   }],
   ["a build that finished within the age guard", async () => {
     const built = await image();
     await env.DB.prepare(`INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, image_digest, attempt, updated_at)
-      VALUES (?1, 'intar-image-3', 'b', 'succeeded', ?2, 1, ?3)`).bind(`sha256:${"e".repeat(64)}`, built, later()).run();
+      VALUES (?1, 'intar-image-4', 'b', 'succeeded', ?2, 1, ?3)`).bind(`sha256:${"e".repeat(64)}`, built, later()).run();
     return { keep: await closure(built) };
+  }],
+  ["the arm64 image of a kept revision's build, and of a build in flight", async () => {
+    const { doc, keep } = await revisionImage();
+    const [kept, flying] = [await image(), await image()];
+    await env.DB.prepare(`INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, arm64_image_digest, updated_at)
+      VALUES (?1, 'intar-image-4', 'b', 'succeeded', ?2, 0), (?3, 'intar-image-4', 'b', 'building', ?4, 0)`)
+      .bind(doc.machines[0]!.build_key, kept, `sha256:${"f".repeat(64)}`, flying).run();
+    await seedScenario("intar/arm", { live: "r1" });
+    await seedRevision("intar/arm", "r1", "verified", doc);
+    return { keep: [...keep, ...await closure(kept), ...await closure(flying)] };
   }],
   ["an active run's snapshot", async () => {
     const [vmImage, pin, spec] = [await image(), await kino(), await specBlob(`run-${n++}`)];
@@ -183,7 +193,9 @@ const ROOTS: Array<[string, () => Promise<{ keep: string[]; pins?: string }>]> =
   }],
   ["the Kino pins, current and previous", async () => {
     const [current, previous] = [await kino(), await kino()];
-    return { keep: [...await closure(current), ...await closure(previous)], pins: JSON.stringify({ 3: { current, previous } }) };
+    const arm64 = await kino();
+    return { keep: [...await closure(current), ...await closure(previous), ...await closure(arm64)],
+      pins: JSON.stringify({ 3: { current, previous, arm64: { current: arm64 } } }) };
   }],
   ["an old Kino artifact that no pin names", async () => ({ keep: await closure(await kino()) })],
 ];

@@ -13,11 +13,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use intar_contracts::oci::OciDigest;
 use intar_contracts::source::SourceBundleV2;
 
-use crate::config::QemuBuildConfig;
+use crate::config::{BuildArch, QemuBuildConfig};
 use crate::platform::ensure_platform_base;
 
 pub use output::{
@@ -67,9 +67,19 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
         &request.target,
         request.expected_key.as_ref(),
     )?;
+    let arch = BuildArch::parse(&request.config.target_arch).with_context(|| {
+        format!(
+            "no machine images exist for architecture '{}'",
+            request.config.target_arch
+        )
+    })?;
+    // The host's own architecture is built with KVM and nothing else. Another
+    // one has no KVM to use and is emulated.
+    let native = BuildArch::host() == Some(arch);
     ensure!(
-        cfg!(target_os = "linux") && request.config.accelerator == "kvm",
-        "machine builds need Linux and KVM"
+        cfg!(target_os = "linux")
+            && request.config.accelerator == if native { "kvm" } else { "tcg" },
+        "machine builds need Linux, with KVM for the host's own architecture and emulation (tcg) for another"
     );
     let started = Instant::now();
     let base = ensure_platform_base(&request.config)?;
@@ -90,6 +100,7 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
         &base.kernel_path,
         &base.initrd_path,
         &plan.build_key,
+        arch,
         &request.output_dir,
     )?;
     Ok(MachineBuildOutput {

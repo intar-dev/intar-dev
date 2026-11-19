@@ -216,6 +216,24 @@ export async function liveRevisionImages(d1: D1Database, contract: number): Prom
 }
 
 /**
+ * The arm64 image of each machine of `doc`, by build key: the one its build
+ * recorded and the registry still holds. Null when any machine has none.
+ */
+export async function arm64MachineImages(
+  d1: D1Database,
+  doc: ScenarioRevisionV1,
+): Promise<Map<string, string> | null> {
+  const keys = [...new Set(doc.machines.map((machine) => machine.build_key))];
+  const { results } = await d1.prepare(
+    `SELECT build.build_key, build.arm64_image_digest AS digest FROM machine_builds build
+       JOIN registry_manifests manifest ON manifest.digest = build.arm64_image_digest
+      WHERE build.arm64_state = 'succeeded' AND build.build_key IN (SELECT value FROM json_each(?1))`,
+  ).bind(JSON.stringify(keys)).all<{ build_key: string; digest: string }>();
+  const images = new Map(results.map((row) => [row.build_key, row.digest]));
+  return keys.length > 0 && keys.every((key) => images.has(key)) ? images : null;
+}
+
+/**
  * Admits one run of a live revision. It shares the catalog start's commit
  * batch (run, keys, execution, VM mirrors, reservations, desired-state CAS,
  * active slot); only the source, the placement and the desired VMs differ.
@@ -247,7 +265,15 @@ export async function admitRevisionRun(context: {
   if (!doc.machines.length || doc.machines.some((machine) => !machine.image_digest)) {
     throw appError(409, "image_not_ready", "scenario images are not built yet");
   }
-  const pin = await readKinoPin(env, revision.guestContract);
+  // A learner's arm64 computer boots the arm64 image of each machine's build
+  // and the arm64 Kino. Either may be missing: those builds are not what a
+  // revision waits for.
+  const arm64 = local && input.architecture === "arm64";
+  const arm64Images = arm64 ? await arm64MachineImages(env.DB, doc) : null;
+  const pin = await readKinoPin(env, revision.guestContract, arm64 ? "arm64" : "amd64");
+  if (arm64 && (!arm64Images || !pin)) {
+    throw appError(409, "architecture_unavailable", "this scenario has no machine images for this computer's processor yet");
+  }
   if (!pin) throw noEligibleHost();
 
   const runId = createAppId();
@@ -258,7 +284,7 @@ export async function admitRevisionRun(context: {
     ordinal,
     vmId: createAppId(),
     runtimeVmName: revisionVmId(machine.name, runId),
-    image: machine.image_digest as string,
+    image: arm64Images?.get(machine.build_key) ?? (machine.image_digest as string),
   }));
   const vms = machines.map(({ machine, ordinal, vmId, runtimeVmName, image }) => {
     const vm = buildInitialVmState({

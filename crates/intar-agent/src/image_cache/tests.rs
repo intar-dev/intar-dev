@@ -32,25 +32,41 @@ mod layout;
 mod registry;
 
 #[test]
-fn an_image_of_this_format_or_the_next_is_read_and_no_other() {
-    let config = |format: &str| -> intar_contracts::oci::MachineConfigV1 {
-        serde_json::from_value(serde_json::json!({
-            "guest_contract": intar_contracts::guest::GUEST_CONTRACT,
-            "image_format": format,
-            "build_key": format!("sha256:{}", "a".repeat(64)),
-            "boot": { "cmdline": "root=/dev/vda" },
-            "disk": { "size_bytes": 4096, "chunk_size": 4096, "chunks": [] },
-        }))
-        .expect("config")
-    };
-    for read in [intar_contracts::oci::IMAGE_FORMAT, "intar-image-4"] {
-        assert!(ready::check_machine_config(&config(read)).is_ok(), "{read}");
-    }
-    for refused in ["intar-image-2", "intar-image-5", ""] {
-        let error = ready::check_machine_config(&config(refused)).expect_err(refused);
-        assert!(ready::is_definitive_failure(
-            &error.context("failed to cache image")
-        ));
+fn an_amd64_image_of_this_format_or_the_one_before_is_read_and_no_other() {
+    let config =
+        |format: &str, architecture: Option<&str>| -> intar_contracts::oci::MachineConfigV1 {
+            let mut json = serde_json::json!({
+                "guest_contract": intar_contracts::guest::GUEST_CONTRACT,
+                "image_format": format,
+                "build_key": format!("sha256:{}", "a".repeat(64)),
+                "boot": { "cmdline": "root=/dev/vda" },
+                "disk": { "size_bytes": 4096, "chunk_size": 4096, "chunks": [] },
+            });
+            if let Some(architecture) = architecture {
+                json["architecture"] = serde_json::json!(architecture);
+            }
+            serde_json::from_value(json).expect("config")
+        };
+    let current = intar_contracts::oci::IMAGE_FORMAT;
+    let previous = intar_contracts::oci::PREVIOUS_IMAGE_FORMAT;
+    // Today's format says amd64; the one before said nothing and was amd64.
+    assert!(ready::check_machine_config(&config(current, Some("amd64"))).is_ok());
+    assert!(ready::check_machine_config(&config(previous, None)).is_ok());
+    for (format, architecture) in [
+        // Of today's format without its architecture, or for other machines.
+        (current, None),
+        (current, Some("arm64")),
+        (previous, Some("arm64")),
+        ("intar-image-2", Some("amd64")),
+        ("intar-image-5", Some("amd64")),
+        ("", None),
+    ] {
+        let error =
+            ready::check_machine_config(&config(format, architecture)).expect_err("refused");
+        assert!(
+            ready::is_definitive_failure(&error.context("failed to cache image")),
+            "{format:?} {architecture:?}"
+        );
     }
 }
 

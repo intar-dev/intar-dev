@@ -2,9 +2,19 @@
 // schemas/<name>.schema.json. Do not edit.
 
 /**
+ * The processors machine images and Kino exist for.
+ */
+export type Architecture = "amd64" | "arm64";
+
+/**
  * The config blob of a Kino manifest.
  */
 export interface KinoConfigV1 {
+  /**
+   * The guests the binary runs in. An artifact made before the field
+   * existed names none and is amd64.
+   */
+  architecture?: Architecture | null;
   guest_contract: number;
   version: string;
 }

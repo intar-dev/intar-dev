@@ -8,6 +8,7 @@ import { formatKinoPins, kinoArtifact, parseKinoPins, pinKino } from "./kino-art
 
 const sha = (bytes: Uint8Array | string) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 const binary = new TextEncoder().encode("\x7fELF a static kino");
+const arm64Binary = new TextEncoder().encode("\x7fELF a static arm64 kino");
 
 describe("Kino artifact", () => {
   test("is the manifest the registry stores for a Kino push, and the same bytes every time", () => {
@@ -25,6 +26,12 @@ describe("Kino artifact", () => {
     expect(artifact.digest).toBe(sha(artifact.manifest));
     expect(kinoArtifact(binary, "0.6.0", 3).digest).toBe(artifact.digest);
     expect(kinoArtifact(binary, "0.6.1", 3).digest).not.toBe(artifact.digest);
+
+    // The arm64 artifact says so; the amd64 one stays the bytes it always was.
+    const arm64 = kinoArtifact(binary, "0.6.0", 3, "arm64");
+    expect(JSON.parse(new TextDecoder().decode(arm64.config))).toEqual({ guest_contract: 3, version: "0.6.0", architecture: "arm64" });
+    expect(arm64.digest).not.toBe(artifact.digest);
+    expect(kinoArtifact(binary, "0.6.0", 3, "amd64").digest).toBe(artifact.digest);
   });
 
   test("refuses what no agent would run", () => {
@@ -47,6 +54,21 @@ describe("Kino pin", () => {
     const second = pinKino({ ...first, "2": { current: c, previous: null } }, 3, b);
     expect(second).toEqual({ "2": { current: c, previous: null }, "3": { current: b, previous: a } });
     expect(formatKinoPins(second)).toBe(`{"2":{"current":"${c}","previous":null},"3":{"current":"${b}","previous":"${a}"}}\n`);
+  });
+
+  test("nests the arm64 pair in the contract's entry and keeps it through an amd64 pin", () => {
+    expect(() => pinKino({}, 3, a, "arm64")).toThrow();
+    const both = pinKino(pinKino({}, 3, a), 3, b, "arm64");
+    expect(both).toEqual({ "3": { current: a, previous: null, arm64: { current: b, previous: null } } });
+    expect(pinKino(both, 3, b, "arm64")).toBe(both);
+    const next = pinKino(pinKino(both, 3, c), 3, c, "arm64");
+    expect(formatKinoPins(next)).toBe(`{"3":{"current":"${c}","previous":"${a}","arm64":{"current":"${c}","previous":"${b}"}}}\n`);
+    expect(parseKinoPins(formatKinoPins(next))).toEqual(next);
+    for (const text of [`{"3":{"current":"${a}","previous":null,"arm64":{"current":"x","previous":null}}}`,
+      `{"3":{"current":"${a}","previous":null,"arm64":{"current":"${b}","previous":null,"arm64":{}}}}`,
+      `{"3":{"current":"${a}","previous":null,"arm64":[]}}`]) {
+      expect(() => parseKinoPins(text), text).toThrow();
+    }
   });
 
   test("reads only the shape the Worker reads", () => {
@@ -84,11 +106,14 @@ describe("image-ops kino-promote", () => {
     const bin = join(root, "bin");
     const release = join(root, "release");
     spawnSync("mkdir", ["-p", bin, release, join(root, "repo/tools/deploy")]);
-    writeFileSync(join(release, "kino"), binary);
-    spawnSync("tar", ["-czf", join(release, "kino_0.6.0_linux_amd64.tar.gz"), "-C", release, "./kino"]);
-    const archive = readFileSync(join(release, "kino_0.6.0_linux_amd64.tar.gz"));
-    writeFileSync(join(release, "kino_0.6.0_checksums.txt"),
-      `${createHash("sha256").update(archive).digest("hex")}  kino_0.6.0_linux_amd64.tar.gz\n${"0".repeat(64)}  kino_0.6.0_linux_arm64.tar.gz\n`);
+    let checksums = "";
+    for (const [arch, bytes] of [["amd64", binary], ["arm64", arm64Binary]] as const) {
+      writeFileSync(join(release, "kino"), bytes);
+      spawnSync("tar", ["-czf", join(release, `kino_0.6.0_linux_${arch}.tar.gz`), "-C", release, "./kino"]);
+      const archive = readFileSync(join(release, `kino_0.6.0_linux_${arch}.tar.gz`));
+      checksums += `${createHash("sha256").update(archive).digest("hex")}  kino_0.6.0_linux_${arch}.tar.gz\n`;
+    }
+    writeFileSync(join(release, "kino_0.6.0_checksums.txt"), checksums);
     writeFileSync(join(root, "repo/tools/deploy/kino-artifact.ts"), readFileSync("tools/deploy/kino-artifact.ts"));
     if (pin !== null) writeFileSync(join(root, "repo/tools/deploy/kino-pin.json"), pin);
     const script = (name: string, body: string) => {
@@ -97,7 +122,7 @@ describe("image-ops kino-promote", () => {
     };
     script("gh", `case "$1 $2" in
   "release download") dir=""; while [ $# -gt 0 ]; do [ "$1" = --dir ] && dir="$2"; shift; done
-    cp "${release}"/kino_0.6.0_linux_amd64.tar.gz "${release}"/kino_0.6.0_checksums.txt "$dir" ;;
+    cp "${release}"/kino_0.6.0_linux_*.tar.gz "${release}"/kino_0.6.0_checksums.txt "$dir" ;;
   "attestation verify") echo "$@" >> "${root}/gh.log" ;;
   *) exit 1 ;;
 esac`);
@@ -141,20 +166,28 @@ exit 0`);
     }
   }
 
-  test("pushes the blobs and then the manifest in one session, and says whether main pins it", () => {
+  test("pushes each architecture's blobs and then its manifest in one session, and says whether main pins it", () => {
     const artifact = kinoArtifact(binary, "0.6.0", 3);
+    const arm64 = kinoArtifact(arm64Binary, "0.6.0", 3, "arm64");
     const hex = (digest: string) => digest.slice("sha256:".length);
     const ran = promote(`{"3":{"current":"${artifact.digest}","previous":null}}`);
     expect(ran.status, ran.stderr).toBe(0);
     expect(ran.gh).toContain("kino_0.6.0_linux_amd64.tar.gz");
+    expect(ran.gh).toContain("kino_0.6.0_linux_arm64.tar.gz");
     expect(ran.curl).toEqual([
       `POST /upload-sessions session= sum= {"intent":"kino-promote"}`,
-      `PUT /blobs/${artifact.descriptors.config.digest} session=s-1 sum=${hex(artifact.descriptors.config.digest)} `,
-      `PUT /blobs/${artifact.descriptors.binary.digest} session=s-1 sum=${hex(artifact.descriptors.binary.digest)} `,
-      `PUT /manifests/${artifact.digest} session=s-1 sum=${hex(artifact.digest)} `,
+      ...[artifact, arm64].flatMap((stored) => [
+        `PUT /blobs/${stored.descriptors.config.digest} session=s-1 sum=${hex(stored.descriptors.config.digest)} `,
+        `PUT /blobs/${stored.descriptors.binary.digest} session=s-1 sum=${hex(stored.descriptors.binary.digest)} `,
+        `PUT /manifests/${stored.digest} session=s-1 sum=${hex(stored.digest)} `,
+      ]),
       `POST /upload-sessions/complete session=s-1 sum= {"outcome":"published"}`,
     ]);
-    expect(ran.summary).toContain("main already pins it");
+    // amd64 is pinned, arm64 not yet.
+    expect(ran.summary).toContain(`Stored amd64 kino 0.6.0 for guest contract 3 as ${artifact.digest}.\nmain already pins it`);
+    expect(ran.summary).toContain(`Stored arm64 kino 0.6.0 for guest contract 3 as ${arm64.digest}.\nmain pins nothing`);
+    const both = promote(`{"3":{"current":"${artifact.digest}","previous":null,"arm64":{"current":"${arm64.digest}","previous":null}}}`);
+    expect(both.summary.match(/main already pins it/g)).toHaveLength(2);
     expect(promote(null).summary).toContain("main pins nothing");
   });
 

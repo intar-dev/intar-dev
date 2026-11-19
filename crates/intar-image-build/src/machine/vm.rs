@@ -37,7 +37,7 @@ use crate::checkpoint::{
 };
 use crate::config::QemuBuildConfig;
 use crate::disk::{prepare_scenario_disk, render_scenario_disk_plan};
-use crate::qemu::{BUILD_BOOT_CMDLINE, DirectBootQemuInput, render_direct_boot_qemu_command};
+use crate::qemu::{DirectBootQemuInput, build_boot_cmdline, render_direct_boot_qemu_command};
 use crate::rootfs::BaseRootfsArtifact;
 use crate::seed::{BuildSeedInput, write_build_seed};
 use crate::sha256::sha256_file_hex;
@@ -147,6 +147,7 @@ pub(crate) fn build_disk(
     let (qemu_version, qemu_cpu) =
         qemu_host_identity(&config.qemu_binary, work, config.qemu_exit_timeout_seconds)?;
     let host = CheckpointHost {
+        arch: config.arch(),
         base_sha256: sha256_file_hex(&base.base_ext4_path)?,
         kernel_sha256: sha256_file_hex(&base.kernel_path)?,
         initrd_sha256: sha256_file_hex(&base.initrd_path)?,
@@ -248,7 +249,7 @@ impl Vm<'_> {
             ssh_host_port: port,
             memory_mib: self.config.build_memory_mb,
             cpu_count: self.config.build_cpus,
-            boot_cmdline: BUILD_BOOT_CMDLINE,
+            boot_cmdline: &build_boot_cmdline(self.config.arch()),
         })
         .args;
         for arg in &mut args {
@@ -275,7 +276,7 @@ impl Vm<'_> {
             ],
         );
         replace_serial_log_with_append(&mut args, &files.serial);
-        append_layered_devices(&mut args);
+        append_layered_devices(&mut args, self.config.arch());
         args
     }
 

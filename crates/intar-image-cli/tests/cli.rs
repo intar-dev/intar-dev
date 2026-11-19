@@ -56,7 +56,7 @@ fn validate_reports_every_problem_with_its_place() {
         stdout.contains("validated 1 scenarios, 0 images, 1 courses"),
         "{stdout}"
     );
-    assert!(stdout.contains("compile digest: pefcf1cdb"), "{stdout}");
+    assert!(stdout.contains("compile digest: p08e31612"), "{stdout}");
 
     let scenario = temp.path().join("scenarios/broken-nginx/scenario.hcl");
     let body = std::fs::read_to_string(&scenario).expect("read");
