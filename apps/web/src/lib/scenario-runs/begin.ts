@@ -288,6 +288,8 @@ function scenarioStartRequestScope(
     allowSequenceBypass: input.allowSequenceBypass === true,
     ...(input.launchSource === "play" ? { launchSource: "play" as const, ref: input.ref ?? null } : {}),
     ...(input.runtime === "local" ? { runtime: "local" as const } : {}),
+    // Another processor is another request: its machines boot other images.
+    ...(input.runtime === "local" && input.architecture ? { architecture: input.architecture } : {}),
   };
 }
 

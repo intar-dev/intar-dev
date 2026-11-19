@@ -396,6 +396,12 @@ describe("the desktop channel", () => {
     expect(response.status, await response.clone().text()).toBe(201);
     for (const machine of (await view(response)).run.machines) expect(machine).toMatchObject({ image: arm64Image, kino: arm64Kino });
     expect(await env.DB.prepare("SELECT count(*) AS n FROM scenario_runs").first("n")).toBe(1);
+
+    // The same key from the same computer is the same run; from an amd64 one it is another request.
+    expect(await view(await startArm("desktop-arm-key-3"))).toMatchObject({ reused: true });
+    const other = await start(secret, {}, "desktop-arm-key-3");
+    expect(other.status).toBe(409);
+    expect((await view(other)).code).toBe("idempotency_key_conflict");
   });
 
   it("lists the courses its learner sees, with where they stand", async () => {
