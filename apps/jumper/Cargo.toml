@@ -9,12 +9,16 @@ rust-version.workspace = true
 description = "The intar desktop app: run labs on your own computer."
 
 [dependencies]
+# Terminal emulation for the run's terminal; the app draws the grid itself.
+alacritty_terminal.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
 gpui.workspace = true
 intar-contracts = { path = "../../crates/intar-contracts" }
 # The sign-in is kept in the OS keychain, never on disk.
 keyring-core.workspace = true
+# The terminal's SSH connection to the guest.
+russh.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 serde_json.workspace = true
 # Downloads are checked against their digests; disk chunks are zstd.
