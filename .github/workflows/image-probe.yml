@@ -34,7 +34,7 @@ jobs:
         uses: ./.github/actions/setup-cuenv
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
-      - name: Build two lab images
+      - name: Build a lab image
         env:
           PROBE_ARCH: ${{ matrix.arch }}
         run: cuenv task -p ci --package ci image-probe-build

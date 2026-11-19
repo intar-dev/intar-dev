@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# image-probe.yml, job build, step "Build two lab images".
+# image-probe.yml, job build, step "Build a lab image".
 # A measurement, not a pipeline: reports whether this runner has KVM and which
-# processor, then builds one plain lab and one Kubernetes lab of the runner's
+# processor, then builds the repository's own lab for the runner's
 # own architecture with the same code the builder runs, cold, and writes the
 # times to the job summary. Nothing is uploaded.
 set -euo pipefail
@@ -11,8 +11,6 @@ case "$(uname -m)/${arch}" in
   aarch64/arm64) qemu=qemu-system-aarch64; qemu_package=qemu-system-arm ;;
   *) echo "This $(uname -m) runner cannot build ${arch} images natively." >&2; exit 1 ;;
 esac
-# The scenarios repository as published on 2026-11-19 (intar-dev/scenarios#7).
-scenarios_rev=abece0144589550b819713ac196ccd4d81bbfa92
 buildkit_version=v0.30.0
 umoci_version=v0.6.0
 case "${arch}" in
@@ -70,11 +68,9 @@ for _ in $(seq 1 30); do
 done
 sudo "${tools}/bin/buildctl" --addr "unix://${oci}/buildkitd.sock" debug workers
 
-git clone --quiet https://github.com/intar-dev/scenarios "${work}/scenarios"
-git -C "${work}/scenarios" checkout --quiet "${scenarios_rev}"
 cargo build --locked --release --quiet -p intar-image-build --example build_machine
 target_dir="$(cargo metadata --format-version 1 --no-deps | jq -er .target_directory)"
-cargo run --locked --release --quiet -p intar-image-cli -- bundle --root "${work}/scenarios" --rev probe --no-upload --output "${work}/bundle.json.gz"
+cargo run --locked --release --quiet -p intar-image-cli -- bundle --root content --rev probe --no-upload --output "${work}/bundle.json.gz"
 
 jq -n --arg arch "${arch}" --arg qemu "$(command -v "${qemu}")" --arg work "${work}" --arg tools "${tools}" --arg oci "${oci}" --argjson cpus "$(( $(nproc) < 4 ? $(nproc) : 4 ))" '{
   target_arch: $arch, qemu_binary: $qemu, accelerator: "kvm",
@@ -91,7 +87,8 @@ cat "${work}/qemu.json"
 printf '\n| target | result | wall | base | build | output |\n|---|---|---|---|---|---|\n' >> "${GITHUB_STEP_SUMMARY}"
 failed=0
 n=0
-for target in broken-nginx/webserver kubernetes-devops-fundamentals-04-repair-service-routing/control-plane; do
+# The repository's own lab; the Kubernetes labs are in a private repository.
+for target in broken-nginx/webserver; do
   n=$((n + 1))
   started="$(date +%s)"
   result=built

@@ -32,7 +32,7 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 			gha.#SetupCuenv,
 			gha.#SetupRust,
 			{
-				name: "Build two lab images"
+				name: "Build a lab image"
 				env: PROBE_ARCH: "${{ matrix.arch }}"
 				#StepTask & {#task: "image-probe-build"}
 			},
