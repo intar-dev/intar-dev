@@ -3,6 +3,11 @@
 // build's attempt goes up each time it is assigned. A build's id on the
 // bridge and on the push routes is its build key's hex.
 //
+// A builder that can also builds the arm64 image of the same key, after the
+// amd64 one and in the same job. The row's state, its retries and the
+// revisions that wait for it follow the amd64 image alone: the arm64 columns
+// say what became of the other, and a start on an arm64 computer reads them.
+//
 // A row moves queued → assigned → building → succeeded or failed. Only the
 // result POST writes `image_digest`; a succeeded report must name that
 // digest. The Worker owns retries: a build whose builder reported a failure,
@@ -58,6 +63,16 @@ const MAX_BUILD_ERROR_CHARS = 4096;
 // boot (provision_timeout_seconds, 40 min by default), a QEMU exit wait
 // (5 min) and the push with 5 min per request. Three hours is above that sum.
 const MACHINE_BUILD_ATTEMPT_CEILING_MS = 3 * 60 * 60 * 1000;
+// An attempt that also builds the arm64 image does that by emulation on an
+// amd64 builder, with six times the provision and exit time (intar-image-build
+// EMULATION_TIME_FACTOR): four and a half hours on top, and its own push.
+const ARM64_ATTEMPT_EXTRA_MS = 6 * 60 * 60 * 1000;
+/** What the row says when a job ended without its arm64 image and named no reason. */
+const ARM64_UNFINISHED = "the job ended before the arm64 image was built";
+// An arm64 image still in flight ends with the job, whatever ended the job.
+const CLOSE_ARM64 = (ended: string, reason: string) => `arm64_state = CASE WHEN arm64_state = 'building' AND ${ended}
+      THEN 'failed' ELSE arm64_state END,
+    arm64_error = CASE WHEN arm64_state = 'building' AND ${ended} THEN ${reason} ELSE arm64_error END`;
 const ASSIGN_BATCH = 100;
 
 type Env = Pick<Cloudflare.Env, "DB">;
@@ -66,6 +81,10 @@ type Env = Pick<Cloudflare.Env, "DB">;
 const FREE_BUILDER = `host.role = 'builder' AND host.scope = 'platform' AND host.disabled = 0
   AND host.connected = 1 AND host.active_session_id IS NOT NULL
   AND json_extract(host.hello_json, '$.builder.image_format') = ?`;
+
+// The builder a build is being assigned to (?2) says it also builds arm64.
+const BUILDS_ARM64 = `EXISTS (SELECT 1 FROM agent_hosts able, json_each(able.hello_json, '$.builder.architectures') built
+  WHERE able.id = ?2 AND built.value = 'arm64')`;
 
 /**
  * Releases expired builds, assigns queued ones, and brings each builder
@@ -93,7 +112,7 @@ export async function syncBuilderDesiredState(env: Env, hostId: string, now: num
         WHERE state.host_id = ?1`,
     ).bind(hostId),
     env.DB.prepare(
-      `SELECT build_key, bundle_rev, target_json, attempt FROM machine_builds
+      `SELECT build_key, bundle_rev, target_json, attempt, arm64_asked FROM machine_builds
         WHERE host_id = ?1 AND state IN ('assigned', 'building') ORDER BY build_key`,
     ).bind(hostId),
     env.DB.prepare(
@@ -102,13 +121,18 @@ export async function syncBuilderDesiredState(env: Env, hostId: string, now: num
     ).bind(hostId),
   ]);
   if ((schema?.results[0] as { schema?: number } | undefined)?.schema !== HOST_DESIRED_STATE_SCHEMA_VERSION_V3) return false;
-  const wantedBuilds = (builds!.results as Array<{ build_key: string; bundle_rev: string; target_json: string; attempt: number }>)
+  const wantedBuilds = (builds!.results as Array<{
+    build_key: string; bundle_rev: string; target_json: string; attempt: number; arm64_asked: number;
+  }>)
     .map((row): DesiredBuildV2 => ({
       build_id: row.build_key.slice("sha256:".length),
       build_key: row.build_key,
       bundle_rev: row.bundle_rev,
       target: JSON.parse(row.target_json) as BuildTargetV1,
       attempt: row.attempt,
+      // Decided when the attempt was assigned and not again: a build whose
+      // desired entry changes is a new build to the builder.
+      ...(row.arm64_asked === 1 ? { architectures: ["amd64", "arm64"] as const } : {}),
     }));
   const wantedCompiles = (compiles!.results as Array<{ id: string; attempt: number; rev: string; purpose: string }>)
     .map((row): DesiredSourceCompileV2 => ({
@@ -173,7 +197,10 @@ export async function assignQueuedMachineBuilds(env: Env, now: number): Promise<
     if (!builder) break;
     const claimed = await env.DB.prepare(
       `UPDATE machine_builds SET state = 'assigned', host_id = ?2, attempt = attempt + 1, phase = NULL,
-          error = NULL, assigned_at = ?3, updated_at = ?3
+          error = NULL, assigned_at = ?3, updated_at = ?3,
+          arm64_asked = ${BUILDS_ARM64}, arm64_state = CASE WHEN ${BUILDS_ARM64} THEN 'building' ELSE arm64_state END,
+          arm64_image_digest = CASE WHEN ${BUILDS_ARM64} THEN NULL ELSE arm64_image_digest END,
+          arm64_error = CASE WHEN ${BUILDS_ARM64} THEN NULL ELSE arm64_error END
         WHERE build_key = ?1 AND state = 'queued'
           AND (SELECT count(*) FROM machine_builds slot
             WHERE slot.host_id = ?2 AND slot.state IN ('assigned', 'building')) < ?4
@@ -199,21 +226,25 @@ export async function assignQueuedMachineBuilds(env: Env, now: number): Promise<
 export async function expireMachineBuildLeases(env: Env, now: number): Promise<string[]> {
   const { results } = await env.DB.prepare(
     `SELECT build_key, host_id, attempt, image_digest FROM machine_builds build
-      WHERE state IN ('assigned', 'building') AND (host_id IS NULL OR updated_at <= ?1 OR assigned_at <= ?3
+      WHERE state IN ('assigned', 'building') AND (host_id IS NULL OR updated_at <= ?1
+        OR assigned_at <= CASE WHEN arm64_asked = 1 THEN ?4 ELSE ?3 END
         OR EXISTS (SELECT 1 FROM agent_hosts host WHERE host.id = build.host_id
           AND (host.disabled = 1 OR (host.connected = 0 AND host.disconnected_at <= ?2))))`,
-  ).bind(now - BUILD_REPORT_STALE_AFTER_MS, now - BUILDER_REASSIGN_AFTER_MS, now - MACHINE_BUILD_ATTEMPT_CEILING_MS)
+  ).bind(now - BUILD_REPORT_STALE_AFTER_MS, now - BUILDER_REASSIGN_AFTER_MS, now - MACHINE_BUILD_ATTEMPT_CEILING_MS,
+    now - MACHINE_BUILD_ATTEMPT_CEILING_MS - ARM64_ATTEMPT_EXTRA_MS)
     .all<{ build_key: string; host_id: string | null; attempt: number; image_digest: string | null }>();
   const released = new Set<string>();
   for (const build of results) {
     const state = build.image_digest ? "succeeded" : build.attempt >= MAX_MACHINE_BUILD_ATTEMPTS ? "failed" : "queued";
     const moved = await env.DB.prepare(
       `UPDATE machine_builds SET state = ?4, host_id = CASE WHEN ?4 = 'queued' THEN NULL ELSE host_id END,
-          error = CASE ?4 WHEN 'succeeded' THEN error ELSE ?5 END, updated_at = ?6
+          error = CASE ?4 WHEN 'succeeded' THEN error ELSE ?5 END, updated_at = ?6,
+          ${CLOSE_ARM64("1 = 1", "?7")}
         WHERE build_key = ?1 AND host_id IS ?2 AND attempt = ?3 AND state IN ('assigned', 'building')
         RETURNING build_key`,
     ).bind(build.build_key, build.host_id, build.attempt, state,
-      state === "failed" ? "the build did not finish in any attempt" : "the builder stopped reporting the build", now).first();
+      state === "failed" ? "the build did not finish in any attempt" : "the builder stopped reporting the build", now,
+      ARM64_UNFINISHED).first();
     if (!moved) continue;
     if (build.host_id) released.add(build.host_id);
     if (state !== "queued") await settleScenarioRevisions(env, { buildKey: build.build_key });
@@ -264,14 +295,17 @@ export async function recordMachineBuildReport(
   // racing this report is never lost.
   const failure = `CASE WHEN image_digest IS NOT NULL THEN 'succeeded' WHEN attempt < ${MAX_MACHINE_BUILD_ATTEMPTS}
     THEN 'queued' ELSE 'failed' END`;
+  // The job is over once the report is a final one, whatever the row then says.
   const moved = await env.DB.prepare(
     `UPDATE machine_builds SET state = CASE WHEN ?4 = 'failed' THEN ${failure} ELSE ?4 END,
         host_id = CASE WHEN ?4 = 'failed' AND ${failure} = 'queued' THEN NULL ELSE host_id END,
-        phase = ?5, error = ?6, updated_at = ?7
+        phase = ?5, error = ?6, updated_at = ?7,
+        ${CLOSE_ARM64("?4 IN ('succeeded', 'failed')", "?9")}
       WHERE ${current} AND phase IS NOT ?5 AND (?5 <> 'succeeded' OR image_digest = ?8)
       RETURNING state`,
   ).bind(report.build_key, hostId, report.attempt, state, report.phase, error, now,
-    report.image_digest ?? null).first<{ state: string }>();
+    report.image_digest ?? null,
+    (report.arm64_error || ARM64_UNFINISHED).slice(0, MAX_BUILD_ERROR_CHARS)).first<{ state: string }>();
   if (!moved) return false;
   if (moved.state === "succeeded" || moved.state === "failed") await settleScenarioRevisions(env, { buildKey: report.build_key });
   if (moved.state !== "assigned" && moved.state !== "building") await syncBuilderDesiredState(env, hostId, now);

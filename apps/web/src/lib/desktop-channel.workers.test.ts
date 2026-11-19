@@ -168,7 +168,9 @@ describe("the desktop channel", () => {
     const cases: Array<[Record<string, unknown>, number, string]> = [
       [{ protocol: 2 }, 409, "upgrade_required"],
       [{ guestContracts: [2] }, 409, "upgrade_required"],
+      // No arm64 images are built for this scenario; no images exist for the other at all.
       [{ arch: "aarch64" }, 409, "architecture_unavailable"],
+      [{ arch: "riscv64" }, 409, "architecture_unavailable"],
       [{ scenarioId: "intar/unknown" }, 404, "scenario_not_found"],
       [{ scenarioId: "not-an-id" }, 400, "invalid_scenario"],
       [{ organizationId: "no-such-org" }, 404, "scenario_not_found"],
@@ -362,6 +364,37 @@ describe("the desktop channel", () => {
       .rejects.toMatchObject({ code: "scenario_run_local" });
     await expect(getScenarioRunStatusStreamTargetForUser({ runId: run.runId, userId: STRANGER }))
       .rejects.toMatchObject({ code: "scenario_run_not_found" });
+  });
+
+  it("starts an arm64 computer on the arm64 images and Kino, once both exist", async () => {
+    const secret = await token("t1", LEARNER);
+    const arm64Image = await store("application/vnd.intar.machine.v1", "application/vnd.intar.machine.config.v1+json",
+      { guest_contract: 3, architecture: "arm64" }, [["application/vnd.intar.kernel.v1", "arm64 kernel"]]);
+    const startArm = (key: string) => startLocalRunRequest(call(secret, {
+      method: "POST", headers: { "content-type": "application/json", "idempotency-key": key },
+      body: JSON.stringify({ protocol: 1, scenarioId: "intar/web", guestContracts: [3], arch: "aarch64" }),
+    }), channelEnv);
+    const lecture = async () => ((await (await localCatalogRequest(call(secret, {}, "/api/local/catalog?arch=aarch64"))).json()) as {
+      courses: Array<{ lectures: Array<{ state: string }> }> }).courses[0]!.lectures[0]!.state;
+
+    // The build's arm64 image failed: the lecture waits and a start is refused.
+    await env.DB.prepare(`INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, arm64_asked, arm64_state, arm64_error)
+      VALUES (?1, 'intar-image-4', 'b', 'succeeded', 1, 'failed', 'no')`).bind(`sha256:${"b".repeat(64)}`).run();
+    expect(await lecture()).toBe("waiting_for_scenario");
+    expect((await view(await startArm("desktop-arm-key-1"))).code).toBe("architecture_unavailable");
+
+    await env.DB.prepare("UPDATE machine_builds SET arm64_state = 'succeeded', arm64_image_digest = ?1").bind(arm64Image).run();
+    expect(await lecture()).toBe("available");
+    // The images exist; the arm64 Kino the pin names is not stored yet.
+    expect((await view(await startArm("desktop-arm-key-2"))).code).toBe("architecture_unavailable");
+    const arm64Kino = await store("application/vnd.intar.kino.v1", KINO_CONFIG_MEDIA_TYPE,
+      { guest_contract: 3, version: "run-test", architecture: "arm64" }, [["application/octet-stream", "arm64 kino"]]);
+    expect(arm64Kino).toBe("sha256:97dacd4f819cdd85e9f25f5cc8d994d5771b1838c951b828a7fcb10e3f31daa3");
+
+    const response = await startArm("desktop-arm-key-3");
+    expect(response.status, await response.clone().text()).toBe(201);
+    for (const machine of (await view(response)).run.machines) expect(machine).toMatchObject({ image: arm64Image, kino: arm64Kino });
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM scenario_runs").first("n")).toBe(1);
   });
 
   it("lists the courses its learner sees, with where they stand", async () => {

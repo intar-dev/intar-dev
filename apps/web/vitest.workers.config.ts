@@ -20,9 +20,10 @@ export default defineConfig({
           GITHUB_CLIENT_ID: "test-client-id",
           GITHUB_CLIENT_SECRET: "test-client-secret",
           // The Kino artifact revision-runs.workers.test.ts stores; without
-          // it in the registry the pin reads as unset.
+          // it in the registry the pin reads as unset. The arm64 one is the
+          // artifact desktop-channel.workers.test.ts stores.
           KINO_PINS_JSON:
-            '{"3":{"current":"sha256:ba84da6c273cceb718a63a6374ceeebc4ad862fd4098e570ed71937fe01b4639","previous":null}}',
+            '{"3":{"current":"sha256:ba84da6c273cceb718a63a6374ceeebc4ad862fd4098e570ed71937fe01b4639","previous":null,"arm64":{"current":"sha256:97dacd4f819cdd85e9f25f5cc8d994d5771b1838c951b828a7fcb10e3f31daa3"}}}',
           GITHUB_APP_WEBHOOK_SECRET: "test-github-webhook-secret",
           REGISTRY_PUBLISH_TOKEN: "test-publish-token",
           SCENARIO_RUN_KEY_ENCRYPTION_SECRET: "test-run-key-secret",

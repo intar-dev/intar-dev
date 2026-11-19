@@ -61,9 +61,9 @@ describe("rehearsal entrypoint", () => {
       };
       expect(evidence.baselineTags).toHaveLength(46);
       // The removal migration, and the additive ones committed after it.
-      expect(evidence.appliedTags).toEqual(["0046_yielding_smiling_tiger", "0047_slimy_proudstar", "0048_dapper_mongoose"]);
-      expect(evidence.appliedMigrationCount).toBe(49);
-      expect(evidence.committedMigrationCount).toBe(49);
+      expect(evidence.appliedTags).toEqual(["0046_yielding_smiling_tiger", "0047_slimy_proudstar", "0048_dapper_mongoose", "0049_steady_kinsey_walden"]);
+      expect(evidence.appliedMigrationCount).toBe(50);
+      expect(evidence.committedMigrationCount).toBe(50);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(evidence.droppedTables).toContain("vm_scenarios");
       expect(evidence.preservedRows).toBeGreaterThan(0);
@@ -77,7 +77,7 @@ describe("rehearsal entrypoint", () => {
       // The disposable database is deleted in the entrypoint's finally block,
       // so the run leaves nothing behind.
       expect(log.requests.some((entry) => entry.startsWith("DELETE"))).toBe(true);
-      expect(log.ledgerRows).toBe(49);
+      expect(log.ledgerRows).toBe(50);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

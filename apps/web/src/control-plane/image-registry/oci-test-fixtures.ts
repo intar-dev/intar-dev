@@ -20,6 +20,7 @@ export function machineConfig(buildKey: string, overrides: Record<string, unknow
     guest_contract: 3,
     image_format: "intar-image-4",
     build_key: buildKey,
+    architecture: "amd64",
     boot: { cmdline: "console=hvc0" },
     disk: { size_bytes: 4194304, chunk_size: 4194304, chunks: [[0, 1, "a".repeat(64)]] },
     ...overrides,
