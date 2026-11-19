@@ -35,6 +35,8 @@ pub struct Local {
     key: Option<RunKey>,
     /// The machine's open terminal, to log out of before the machine stops.
     terminal: Option<Terminal>,
+    /// A machine that stopped by itself, by its run and its name.
+    stopped: Option<(LocalRunV1, String)>,
 }
 
 impl Local {
@@ -51,13 +53,14 @@ impl Local {
             last: None,
             key: None,
             terminal: None,
+            stopped: None,
         }
     }
 
     pub fn runs(&self, run_id: &str) -> bool {
-        self.machine
-            .as_ref()
-            .is_some_and(|(running, _)| running.run_id == run_id)
+        let running = self.machine.as_ref().map(|(run, _)| run);
+        let stopped = self.stopped.as_ref().map(|(run, _)| run);
+        running.or(stopped).is_some_and(|run| run.run_id == run_id)
     }
 
     /// Starts the run's machine. The guest's `intar` command is answered by
@@ -153,6 +156,7 @@ impl Local {
         self.last = None;
         self.key = None;
         self.terminal = None;
+        self.stopped = None;
         if let Some((_, machine)) = self.machine.take() {
             let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
         }
@@ -163,19 +167,19 @@ impl Local {
     /// run that ends first takes no recordings. `Ok` is how many sessions
     /// were sent.
     pub async fn stop_and_save(&mut self, channel: &Subspace) -> Result<usize, String> {
-        let Some((run, machine)) = self.machine.as_ref() else {
-            return Ok(0);
+        // A machine that stopped by itself left its sessions behind as well.
+        let (run, name) = match (&self.machine, &self.stopped) {
+            (Some((run, machine)), _) => (run.clone(), machine.name.clone()),
+            (None, Some((run, name))) => (run.clone(), name.clone()),
+            (None, None) => return Ok(0),
         };
-        let listed = run
-            .machines
-            .iter()
-            .find(|listed| listed.name == machine.name);
+        let listed = run.machines.iter().find(|listed| listed.name == name);
         // An intar that predates the archive routes names neither.
         let target = run
             .execution_id
             .clone()
             .zip(listed.and_then(|listed| listed.runtime_name.clone()));
-        let dir = self.runs.join(&run.run_id).join(&machine.name);
+        let dir = self.runs.join(&run.run_id).join(&name);
         // Logging out lets the guest finish the session's recording; a session
         // cut off by the stopping machine is left unfinished and is not kept.
         if let Some(terminal) = self.terminal.take() {
@@ -239,6 +243,9 @@ impl Local {
             .and_then(|report| vm_state(run, &machine.name, report, now_ms()));
         if !machine.is_running() {
             status = Some(MachineStatus::Failed("The machine stopped.".to_owned()));
+            // Its run and its directory are kept: ending the run still sends
+            // the sessions it recorded.
+            self.stopped = Some((run.clone(), machine.name.clone()));
             self.machine = None;
         }
         let status = status.filter(|status| self.last.as_ref() != Some(status));
