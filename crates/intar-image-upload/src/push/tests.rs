@@ -310,8 +310,14 @@ fn a_conflict_fails_the_push_before_the_manifest() {
 fn a_paused_registry_is_waited_out_with_a_fresh_session() {
     // A website deploy holds the registry: the blob check, a HEAD, is refused
     // with a 409 that carries no body, and a write with one that names why.
-    let registry = FakeRegistry::start(|request, seen| match request.method.as_str() {
-        "HEAD" if seen < 2 => (409, String::new()),
+    // Blobs are pushed side by side and a refusal stops the others, so only
+    // the first blob's check is refused: every pass makes that one.
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, blobs) = image(dir.path());
+    let first_blob = format!("/registry/v1/blobs/{}", blobs[0].0.as_str());
+    let refused = first_blob.clone();
+    let registry = FakeRegistry::start(move |request, seen| match request.method.as_str() {
+        "HEAD" if request.path == refused && seen < 2 => (409, String::new()),
         "HEAD" => (404, String::new()),
         "PUT" if request.path.contains("/manifests/") && seen == 0 => (
             409,
@@ -320,8 +326,6 @@ fn a_paused_registry_is_waited_out_with_a_fresh_session() {
         ),
         _ => (201, "{}".to_owned()),
     });
-    let dir = tempfile::tempdir().unwrap();
-    let (manifest, _) = image(dir.path());
     registry
         .pusher()
         .push_build(dir.path(), &manifest, "build-1", 1, Architecture::Amd64)
@@ -330,10 +334,9 @@ fn a_paused_registry_is_waited_out_with_a_fresh_session() {
     let calls = registry.calls();
     // The push started over three times: twice at the refused blob check
     // and once at the refused manifest, each time from the first blob.
-    let first_blob = &calls[0].path;
     let heads = calls
         .iter()
-        .filter(|call| call.method == "HEAD" && &call.path == first_blob)
+        .filter(|call| call.method == "HEAD" && call.path == first_blob)
         .count();
     assert_eq!(heads, 4, "{first_blob}");
     assert!(
