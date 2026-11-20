@@ -15,6 +15,10 @@ import {
 export const PIPELINE_SESSION_TOKEN_PREFIX = "ips_";
 /** The bytes one session may store. */
 export const PIPELINE_SESSION_MAX_BYTES = 16 * 1024 * 1024 * 1024;
+/** The config and layers of one image a pipeline pushes. */
+export const PIPELINE_IMAGE_MAX_BYTES = PIPELINE_SESSION_MAX_BYTES;
+/** The images one scope may have recorded, counted over those a kept revision names. */
+export const PIPELINE_SCOPE_STORAGE_BYTES = 200 * 1024 * 1024 * 1024;
 
 export function readBearer(request: Request): string | null {
   return /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")?.[1] ?? null;

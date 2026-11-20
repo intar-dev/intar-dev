@@ -108,8 +108,8 @@ export async function handleImageRegistryRequest(
     const hex = ociMatch[2]?.match(/^sha256:([a-f0-9]{64})$/)?.[1];
     if (!hex) return jsonResponse({ error: "invalid digest" }, 400);
     if (ociMatch[1] === "manifests") {
-      return admitted(request, env, "PUT", "manifest_put", () =>
-        handleManifestPut(request, env, hex),
+      return admitted(request, env, "PUT", "manifest_put", (lease) =>
+        handleManifestPut(request, env, hex, lease),
       );
     }
     return request.method === "HEAD"
@@ -125,8 +125,8 @@ export async function handleImageRegistryRequest(
     /^\/registry\/v1\/builds\/([^/]+)\/result$/,
   );
   if (buildResultMatch) {
-    return admitted(request, env, "POST", "build_result", () =>
-      handleBuildResult(request, env, buildResultMatch[1] ?? ""),
+    return admitted(request, env, "POST", "build_result", (lease) =>
+      handleBuildResult(request, env, buildResultMatch[1] ?? "", lease),
     );
   }
 
@@ -177,20 +177,9 @@ async function admitted(
   env: Cloudflare.Env,
   method: string,
   operation: ImageRegistryOperationKind,
-  run: () => Promise<Response>,
+  run: (lease?: RegistryOperationLease) => Promise<Response>,
 ): Promise<Response> {
   if (request.method !== method) return run();
-
-  // A pipeline pushes blobs only so far. It is refused before a writer is
-  // registered for it: the handler would refuse it too, but only after it
-  // read the body, and a request that ends there leaves a writer nobody
-  // settles, which holds the sweep.
-  if (operation === "manifest_put" || operation === "build_result") {
-    const auth = await readRegistryAuth(request, env);
-    if (auth.ok && auth.owner.kind === "pipeline") {
-      return jsonResponse({ error: "a pipeline pushes blobs only" }, 403);
-    }
-  }
 
   const admitted_ = await admitRegistryOperation(request, env, { operation });
   if (!admitted_.ok) return admitted_.response;
@@ -198,7 +187,7 @@ async function admitted(
 
   let outcome: "ok" | "error" | "unknown" = "unknown";
   try {
-    const response = await run();
+    const response = await run(lease);
     // A refusal by the handler is settled: these handlers decide before they
     // write. A server error is not settled, because the write may have landed
     // before the failure, so it stays a hold until an operator resolves it.
@@ -208,6 +197,11 @@ async function admitted(
     outcome = "unknown";
     throw error;
   } finally {
-    await lease.complete(outcome);
+    // What a pipeline writes is one batch fenced on this lease: it landed
+    // whole or not at all, so its writer is settled however the request
+    // ended, and a request cut off by its sender holds nothing.
+    const auth = await readRegistryAuth(request, env);
+    const pipeline = auth.ok && auth.owner.kind === "pipeline";
+    await lease.complete(pipeline && outcome === "unknown" ? "error" : outcome);
   }
 }
