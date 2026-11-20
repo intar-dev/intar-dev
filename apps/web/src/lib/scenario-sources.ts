@@ -182,7 +182,9 @@ function failPipelineRevisions(db: DrizzleD1Database, scopeKey: string, reason: 
 /**
  * With them, the `building` commit rows of those bundles fail: no revision
  * of theirs waits any more, and a failed row is what a new publish or a
- * re-run of the check takes up again.
+ * re-run of the check takes up again. It goes after `failPipelineRevisions`
+ * in the batch and follows it: a commit whose revisions all had their
+ * images, and still reads `building`, is left as it is.
  */
 function failPipelineCommits(db: DrizzleD1Database, scopeKey: string, now: number, reason: string, ended: SQL) {
   return db
@@ -195,6 +197,10 @@ function failPipelineCommits(db: DrizzleD1Database, scopeKey: string, now: numbe
         eq(scenarioSourceCommits.state, "building"),
         sql`${scenarioSourceCommits.rev} IN (SELECT rev FROM bundles
           WHERE scope_key = ${scopeKey} AND image_producer = 'pipeline')`,
+        sql`EXISTS (SELECT 1 FROM scenario_revisions ended
+          WHERE ended.rev = ${scenarioSourceCommits.rev} AND ended.state = 'failed' AND ended.failure_reason = ${reason})`,
+        sql`NOT EXISTS (SELECT 1 FROM scenario_revisions waiting
+          WHERE waiting.rev = ${scenarioSourceCommits.rev} AND waiting.state = 'building')`,
         ended,
       ),
     );

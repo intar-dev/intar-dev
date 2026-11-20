@@ -593,6 +593,18 @@ describe("what only a platform administrator changes", () => {
     });
   });
 
+  it("leaves the commit of a pipeline head that has its images as it is, on a switch to pull and on a disconnect", async () => {
+    await insertBinding({ mode: "push" });
+    await pipelineHead();
+    await db().update(scenarioRevisions).set({ state: "ready" });
+    await change({ action: "mode", mode: "pull" });
+    expect(await binding()).toMatchObject({ mode: "pull" });
+    expect((await db().select().from(scenarioSourceCommits))[0]).toMatchObject({ state: "building", detail: null });
+    await change({ action: "disconnect" });
+    expect((await db().select().from(scenarioSourceCommits))[0]).toMatchObject({ state: "building", detail: null });
+    expect((await db().select().from(scenarioRevisions))[0]).toMatchObject({ state: "ready" });
+  });
+
   it("starts a reconnected source on the builder and on GitHub's runners", async () => {
     await insertBinding({ mode: "push", imageProducer: "pipeline", allowSelfHostedRunners: true, disconnectedAt: 1, disconnectReason: "admin" });
     github();
