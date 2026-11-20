@@ -46,6 +46,8 @@ export async function ingestSourceBundle(
     stored: boolean;
     /** Who builds this source's images now; absent, a builder. */
     imageProducer?: ImageProducer;
+    /** The source is in push mode, so a pipeline can push this rev's images. Absent, it is. */
+    pipelineCanPush?: boolean;
   },
 ): Promise<string | null> {
   const { organizationId, rev } = input;
@@ -85,6 +87,16 @@ export async function ingestSourceBundle(
   ]);
   if (foreignBundle) return "this commit is owned by another scope";
   if (foreignScenario) return `scenario \`${foreignScenario.id}\` belongs to another scope`;
+
+  // A rev keeps the producer it was first ingested with, whatever its source
+  // is set to since. A source's ingests run one at a time, in its object.
+  const { producer } = await producerInForce(env, scopeKey, rev, input.imageProducer ?? "builder");
+  const byPipeline = producer === "pipeline";
+  // Only a push source's pipeline can open a session: taken up here, the
+  // rev's revisions would wait a day for images nobody can push.
+  if (byPipeline && input.pipelineCanPush === false) {
+    return "the images of this commit come from the repository's pipeline, and this source no longer publishes from it; publish a new commit";
+  }
 
   const bucket = env.VM_IMAGE_REGISTRY_BUCKET;
   const objectKey = sourceBundleObjectKey(rev);
@@ -148,10 +160,6 @@ export async function ingestSourceBundle(
   // applies it from the stored bundle, each lecture `scenario_id` written as
   // `<namespace>/<slug>`.
   const now = Date.now();
-  // A rev keeps the producer it was first ingested with, whatever its source
-  // is set to since. A source's ingests run one at a time, in its object.
-  const { producer } = await producerInForce(env, scopeKey, rev, input.imageProducer ?? "builder");
-  const byPipeline = producer === "pipeline";
   // One transaction, one statement per revision so no bound value carries
   // more than one document. `WHERE true` keeps SQLite from reading ON
   // CONFLICT as a join constraint of the SELECT.
@@ -191,7 +199,9 @@ export async function ingestSourceBundle(
           WHERE EXISTS (SELECT 1 FROM scenarios WHERE id = ?1 AND scope_key = ?6)
           ON CONFLICT (scenario_id, rev) DO ${byPipeline
             ? `UPDATE SET state = 'building', failure_reason = NULL, created_at = excluded.created_at
-                WHERE scenario_revisions.state IN ('failed', 'building')`
+                WHERE scenario_revisions.state IN ('failed', 'building')
+                  AND EXISTS (SELECT 1 FROM scenario_sources source WHERE source.scope_key = ?6
+                    AND source.mode = 'push' AND source.disconnected_at IS NULL)`
             : "NOTHING"}`,
       ).bind(scenario.id, rev, GUEST_CONTRACT, scenario.doc, now, scopeKey),
     ),

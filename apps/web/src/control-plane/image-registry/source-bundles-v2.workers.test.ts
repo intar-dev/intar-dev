@@ -654,6 +654,31 @@ describe("a source whose pipeline builds its images", () => {
     expect(await commits()).toEqual([expect.objectContaining({ state: "failed" })]);
   });
 
+  it("does not take up a pipeline's commit again once its source pulls", async () => {
+    await byPipeline();
+    await push();
+    await tick("public");
+    // Switched to the builder and to pull mode; the head's revision failed with the switch.
+    await env.DB.prepare("UPDATE scenario_sources SET image_producer = 'builder', mode = 'pull'").run();
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'failed', failure_reason = 'switched'").run();
+    // A re-run of the check asks for the commit again.
+    await env.DB.prepare("UPDATE scenario_source_commits SET state = 'ingesting', attempt = attempt + 1").run();
+    const before = (await written()).objects;
+    await tick("public");
+    expect(await commits()).toEqual([{
+      rev: rev(), state: "invalid", detail: expect.stringContaining("publish a new commit"),
+    }]);
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "failed", failure_reason: "switched" })]);
+    expect((await written()).objects).toEqual(before);
+    expect((await written()).builds).toEqual([]);
+
+    // Back in push mode the same commit is taken up.
+    await env.DB.prepare("UPDATE scenario_sources SET mode = 'push'").run();
+    await env.DB.prepare("UPDATE scenario_source_commits SET state = 'ingesting', attempt = attempt + 1").run();
+    await tick("public");
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "building", failure_reason: null })]);
+  });
+
   it("still ingests when the pass over the pipeline's revisions fails", async () => {
     await push();
     // The pass reads this table first.

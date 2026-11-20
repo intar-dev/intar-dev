@@ -16,10 +16,12 @@ import {
 } from "@/control-plane/image-registry/shared";
 import {
   account,
+  bundles,
   pipelineUploadSessions,
   scenarioRevisions,
   scenarioSourceCommits,
   scenarioSources,
+  scopeMachineImages,
   type CourseCatalogSnapshotV2,
 } from "@/db/schema";
 import type { ImageProducer, ScenarioSourceCommitState } from "@/db/schema/scenarios";
@@ -68,6 +70,10 @@ import {
 } from "@/lib/request-security";
 
 export const SCENARIO_GIT_SOURCES_FLAG = "scenario_git_sources";
+/** Lets a platform administrator set a scope's source to pipeline-built images (#441). */
+export const SCENARIO_PIPELINE_IMAGES_FLAG = "scenario_pipeline_images";
+const REVISION_SOURCE_PULLS =
+  "The scenario source was switched to pull mode before the images of this revision were pushed.";
 
 // Until GitHub confirms the caller is a repository admin, every refusal reads
 // the same and is sent no earlier than this after the request started, so
@@ -91,6 +97,9 @@ export interface ScenarioSourceView {
   repository: string;
   defaultBranch: string;
   mode: "push" | "pull";
+  /** Who builds the images of the commits ingested from now on. */
+  imageProducer: ImageProducer;
+  allowSelfHostedRunners: boolean;
   pausedAt: number | null;
   pauseReason: "admin" | "binder_lost_admin" | "suspended" | null;
   disconnectedAt: number | null;
@@ -100,15 +109,21 @@ export interface ScenarioSourceView {
   commit: {
     sha: string;
     state: ScenarioSourceCommitState;
+    /** Who builds this commit's images: it keeps the producer it was ingested with. Null before ingest. */
+    imageProducer: ImageProducer | null;
     detail: string | null;
     diagnostics: Array<Pick<SourceCompileErrorV1, "path" | "line" | "message">>;
     updatedAt: number;
   } | null;
+  /** Only in the answer to `forget_image`: what was forgotten, and the revisions whose document still names it. */
+  forgotten?: { imageDigest: string; revisions: Array<{ scenarioId: string; rev: string; state: string }> };
 }
 
 export interface ScenarioSourceCard {
   /** Whether bind, resume and mode are available to this scope. */
   enabled: boolean;
+  /** Whether a platform administrator may set this scope's source to pipeline-built images. */
+  pipelineImages: boolean;
   /** For `public`: whether a repository id is pinned for it. */
   configured?: boolean;
   appSlug: string | null;
@@ -133,24 +148,33 @@ export function scenarioSourceBindingPredicate(): SQL {
     AND ${scenarioSourceBinderPredicate()})`;
 }
 
+/** The scope's source is disconnected. */
+const sourceDisconnected = (scopeKey: string): SQL =>
+  sql`EXISTS (SELECT 1 FROM scenario_sources source
+    WHERE source.scope_key = ${scopeKey} AND source.disconnected_at IS NOT NULL)`;
+
+/** The scope's source compiles on a builder: no pipeline can open a session for it. */
+const sourcePulls = (scopeKey: string): SQL =>
+  sql`EXISTS (SELECT 1 FROM scenario_sources source
+    WHERE source.scope_key = ${scopeKey} AND source.mode = 'pull')`;
+
 /**
- * Fails the building revisions of a scope's pipeline bundles (#441) once its
- * source is disconnected; it goes in the batch that disconnects, and like
- * the session close does nothing when the disconnect did not apply. A
- * disconnected source is not polled, so nothing later would end them.
+ * Fails the building revisions of a scope's pipeline bundles (#441) while
+ * `ended` holds for its source: disconnected, or switched to pull mode. It
+ * goes in the batch that makes the change, after it, so it does nothing when
+ * the change did not apply. Nothing later would end them sooner than the
+ * deadline: no session can be opened for them any more.
  */
-export function failDisconnectedPipelineRevisions(db: DrizzleD1Database, scopeKey: string) {
+function failPipelineRevisions(db: DrizzleD1Database, scopeKey: string, reason: string, ended: SQL) {
   return db
     .update(scenarioRevisions)
-    .set({ state: "failed", failureReason: REVISION_SOURCE_DISCONNECTED })
+    .set({ state: "failed", failureReason: reason })
     .where(
       and(
         eq(scenarioRevisions.state, "building"),
         sql`${scenarioRevisions.rev} IN (SELECT rev FROM bundles
           WHERE scope_key = ${scopeKey} AND image_producer = 'pipeline')`,
-        sql`EXISTS (SELECT 1 FROM scenario_sources source
-          WHERE source.scope_key = ${scopeKey}
-            AND source.disconnected_at IS NOT NULL)`,
+        ended,
       ),
     );
 }
@@ -158,12 +182,12 @@ export function failDisconnectedPipelineRevisions(db: DrizzleD1Database, scopeKe
 /**
  * With them, the `building` commit rows of those bundles fail: no revision
  * of theirs waits any more, and a failed row is what a new publish or a
- * re-run of the check takes up again after a reconnect.
+ * re-run of the check takes up again.
  */
-export function failDisconnectedPipelineCommits(db: DrizzleD1Database, scopeKey: string, now: number) {
+function failPipelineCommits(db: DrizzleD1Database, scopeKey: string, now: number, reason: string, ended: SQL) {
   return db
     .update(scenarioSourceCommits)
-    .set({ state: "failed", detail: REVISION_SOURCE_DISCONNECTED, updatedAt: now })
+    .set({ state: "failed", detail: reason, updatedAt: now })
     .where(
       and(
         eq(scenarioSourceCommits.scopeKey, scopeKey),
@@ -171,12 +195,15 @@ export function failDisconnectedPipelineCommits(db: DrizzleD1Database, scopeKey:
         eq(scenarioSourceCommits.state, "building"),
         sql`${scenarioSourceCommits.rev} IN (SELECT rev FROM bundles
           WHERE scope_key = ${scopeKey} AND image_producer = 'pipeline')`,
-        sql`EXISTS (SELECT 1 FROM scenario_sources source
-          WHERE source.scope_key = ${scopeKey}
-            AND source.disconnected_at IS NOT NULL)`,
+        ended,
       ),
     );
 }
+
+export const failDisconnectedPipelineRevisions = (db: DrizzleD1Database, scopeKey: string) =>
+  failPipelineRevisions(db, scopeKey, REVISION_SOURCE_DISCONNECTED, sourceDisconnected(scopeKey));
+export const failDisconnectedPipelineCommits = (db: DrizzleD1Database, scopeKey: string, now: number) =>
+  failPipelineCommits(db, scopeKey, now, REVISION_SOURCE_DISCONNECTED, sourceDisconnected(scopeKey));
 
 /**
  * Closes the open pipeline upload sessions of a scope once its source is
@@ -268,16 +295,27 @@ export async function scenarioGitSourcesEnabled(
   });
 }
 
+export async function scenarioPipelineImagesEnabled(
+  scope: ScenarioSourceScope,
+  toggles: FeatureToggleService = featureToggleService(),
+): Promise<boolean> {
+  return toggles.getBoolean(SCENARIO_PIPELINE_IMAGES_FLAG, false, {
+    targetingKey: scope.key,
+  });
+}
+
 export async function scenarioSourceCard(
   scope: ScenarioSourceScope,
   toggles?: FeatureToggleService,
 ): Promise<ScenarioSourceCard> {
-  const [enabled, source] = await Promise.all([
+  const [enabled, pipelineImages, source] = await Promise.all([
     scenarioGitSourcesEnabled(scope, toggles),
+    scenarioPipelineImagesEnabled(scope, toggles),
     loadScenarioSource(scope),
   ]);
   return {
     enabled,
+    pipelineImages,
     ...(scope.organizationId === null
       ? { configured: Boolean(env.PUBLIC_SCENARIO_SOURCE_REPOSITORY_ID) }
       : {}),
@@ -308,10 +346,19 @@ export async function loadScenarioSource(
     )
     .orderBy(desc(scenarioSourceCommits.createdAt), desc(scenarioSourceCommits.id))
     .limit(1);
+  const [stamp] = commit
+    ? await db
+        .select({ imageProducer: bundles.imageProducer })
+        .from(bundles)
+        .where(and(eq(bundles.rev, commit.rev), eq(bundles.scopeKey, scope.key)))
+        .limit(1)
+    : [];
   return {
     repository: binding.githubRepository,
     defaultBranch: binding.defaultBranch,
     mode: binding.mode,
+    imageProducer: binding.imageProducer,
+    allowSelfHostedRunners: binding.allowSelfHostedRunners,
     pausedAt: binding.pausedAt,
     pauseReason: binding.pauseReason,
     disconnectedAt: binding.disconnectedAt,
@@ -322,6 +369,7 @@ export async function loadScenarioSource(
       ? {
           sha: commit.sha,
           state: commit.state,
+          imageProducer: stamp?.imageProducer ?? null,
           detail: commit.detail === null ? null : redactHostPaths(commit.detail),
           diagnostics: parseDiagnostics(commit.diagnosticsJson),
           updatedAt: commit.updatedAt,
@@ -357,13 +405,23 @@ export function parseDiagnostics(
 type Change =
   | { action: "connect"; repository: string }
   | { action: "resume" | "pause" | "disconnect" | "purge" }
-  | { action: "mode"; mode: "push" | "pull" };
+  | { action: "mode"; mode: "push" | "pull" }
+  | { action: "image_producer"; producer: ImageProducer }
+  | { action: "runner_policy"; allowSelfHosted: boolean }
+  | { action: "forget_image"; buildKey: string; architecture: "amd64" | "arm64" };
+
+/** The changes only a platform administrator makes, in any scope. */
+const PLATFORM_ACTIONS: ReadonlySet<Change["action"]> = new Set(["image_producer", "runner_policy", "forget_image"]);
 
 function parseChange(body: unknown): Change {
   const input = (body ?? {}) as {
     action?: unknown;
     repository?: unknown;
     mode?: unknown;
+    producer?: unknown;
+    allow_self_hosted?: unknown;
+    build_key?: unknown;
+    architecture?: unknown;
   };
   switch (input.action) {
     case "connect": {
@@ -386,6 +444,25 @@ function parseChange(body: unknown): Change {
     case "mode":
       if (input.mode === "push" || input.mode === "pull") {
         return { action: "mode", mode: input.mode };
+      }
+      break;
+    case "image_producer":
+      if (input.producer === "builder" || input.producer === "pipeline") {
+        return { action: "image_producer", producer: input.producer };
+      }
+      break;
+    case "runner_policy":
+      if (typeof input.allow_self_hosted === "boolean") {
+        return { action: "runner_policy", allowSelfHosted: input.allow_self_hosted };
+      }
+      break;
+    case "forget_image":
+      if (
+        typeof input.build_key === "string" &&
+        /^sha256:[a-f0-9]{64}$/.test(input.build_key) &&
+        (input.architecture === "amd64" || input.architecture === "arm64")
+      ) {
+        return { action: "forget_image", buildKey: input.build_key, architecture: input.architecture };
       }
       break;
   }
@@ -433,16 +510,31 @@ export async function changeScenarioSource(input: {
 }): Promise<ScenarioSourceView | null> {
   const { scope, actorUserId } = input;
   const change = parseChange(input.body);
-  if (
-    change.action !== "pause" &&
-    change.action !== "disconnect" &&
-    change.action !== "purge" &&
-    !(await scenarioGitSourcesEnabled(scope, input.toggles))
-  ) {
-    throw appError(404, "not_found", "not found");
-  }
   const db = drizzle(env.DB);
   const now = Date.now();
+  if (PLATFORM_ACTIONS.has(change.action)) {
+    // Asked before any flag, so the answer does not tell a flag's state. Each
+    // write below asks again in its own statement.
+    if (!(await mayChangeRunnerPolicy(db, actorUserId))) {
+      throw appError(404, "not_found", "not found");
+    }
+  }
+  // Stopping and stepping back never need a flag: a flag that is off, or
+  // cannot be read, must not keep a source on its pipeline or on runners it
+  // was allowed. Only what widens does.
+  const flag =
+    change.action === "pause" || change.action === "disconnect" || change.action === "purge" ||
+    change.action === "forget_image" ||
+    (change.action === "image_producer" && change.producer === "builder") ||
+    (change.action === "runner_policy" && !change.allowSelfHosted)
+      ? null
+      : change.action === "image_producer"
+        ? scenarioPipelineImagesEnabled
+        : scenarioGitSourcesEnabled;
+  if (flag && !(await flag(scope, input.toggles))) {
+    throw appError(404, "not_found", "not found");
+  }
+  let forgotten: ScenarioSourceView["forgotten"];
   const authority =
     scope.organizationId === null
       ? activeAdministrator(actorUserId)
@@ -554,8 +646,99 @@ export async function changeScenarioSource(input: {
         actorUserId,
       });
       break;
+    case "image_producer": {
+      // In the statement: the actor is still a platform administrator, and a
+      // pipeline builds only for a connected push source. Back to the builder
+      // is always possible.
+      const [set] = await db
+        .update(scenarioSources)
+        .set({ imageProducer: change.producer, updatedAt: now })
+        .where(
+          and(
+            eq(scenarioSources.scopeKey, scope.key),
+            activeAdministrator(actorUserId),
+            change.producer === "builder"
+              ? undefined
+              : and(isNull(scenarioSources.disconnectedAt), eq(scenarioSources.mode, "push")),
+          ),
+        )
+        .returning({ scopeKey: scenarioSources.scopeKey });
+      if (!set) throw await platformChangeRefusal(db, scope, actorUserId, change.producer === "pipeline");
+      break;
+    }
+    case "runner_policy": {
+      const [set, closed] = await db.batch([
+        db
+          .update(scenarioSources)
+          .set({ allowSelfHostedRunners: change.allowSelfHosted, updatedAt: now })
+          .where(and(eq(scenarioSources.scopeKey, scope.key), isNull(scenarioSources.disconnectedAt), activeAdministrator(actorUserId)))
+          .returning({ scopeKey: scenarioSources.scopeKey }),
+        // A session is not asked about its runner again, so one a runner that
+        // is no longer allowed holds ends here.
+        db
+          .update(pipelineUploadSessions)
+          .set({ closedAt: now })
+          .where(
+            and(
+              eq(pipelineUploadSessions.scopeKey, scope.key),
+              isNull(pipelineUploadSessions.closedAt),
+              ne(pipelineUploadSessions.runnerEnvironment, "github-hosted"),
+              sql`EXISTS (SELECT 1 FROM scenario_sources source
+                WHERE source.scope_key = ${scope.key} AND source.allow_self_hosted_runners = 0)`,
+              activeAdministrator(actorUserId),
+            ),
+          )
+          .returning({ id: pipelineUploadSessions.id }),
+      ]);
+      if (!set.length) throw await platformChangeRefusal(db, scope, actorUserId, false);
+      console.info(JSON.stringify({
+        event: "scenario_source_runner_policy_set", scope_key: scope.key, actor_user_id: actorUserId,
+        allow_self_hosted: change.allowSelfHosted, closed_sessions: closed.length,
+      }));
+      break;
+    }
+    case "forget_image": {
+      const [row] = await db
+        .delete(scopeMachineImages)
+        .where(
+          and(
+            eq(scopeMachineImages.scopeKey, scope.key),
+            eq(scopeMachineImages.buildKey, change.buildKey),
+            eq(scopeMachineImages.architecture, change.architecture),
+            activeAdministrator(actorUserId),
+          ),
+        )
+        .returning();
+      if (!row) {
+        if (!(await mayChangeRunnerPolicy(db, actorUserId))) throw appError(404, "not_found", "not found");
+        throw appError(404, "image_not_recorded", "This source has no image recorded for that key and architecture.");
+      }
+      // The row was the only record of who built the image.
+      console.info(JSON.stringify({ event: "scenario_source_image_forgotten", actor_user_id: actorUserId, image: row }));
+      // An amd64 image stays in the documents of the revisions that settled
+      // on it; only a new commit replaces it there.
+      const { results } = await env.DB.prepare(
+        `SELECT revision.scenario_id, revision.rev, revision.state FROM scenario_revisions revision
+           JOIN scenarios scenario ON scenario.id = revision.scenario_id AND scenario.scope_key = ?1
+          WHERE EXISTS (SELECT 1 FROM json_each(revision.doc_json, '$.machines') machine
+            WHERE json_extract(machine.value, '$.image_digest') = ?2)
+          ORDER BY revision.created_at DESC LIMIT 50`,
+      ).bind(scope.key, row.imageDigest).all<{ scenario_id: string; rev: string; state: string }>();
+      forgotten = {
+        imageDigest: row.imageDigest,
+        revisions: results.map((revision) => ({ scenarioId: revision.scenario_id, rev: revision.rev, state: revision.state })),
+      };
+      break;
+    }
     case "mode": {
-      const switching = and(connected, ne(scenarioSources.mode, change.mode));
+      // A pipeline builds only for a push source, so the producer goes back
+      // to the builder first; in the statement, so this and a producer
+      // change at the same moment cannot end as pull with a pipeline.
+      const switching = and(
+        connected,
+        ne(scenarioSources.mode, change.mode),
+        change.mode === "pull" ? eq(scenarioSources.imageProducer, "builder") : undefined,
+      );
       // A fetch or compile under the old mode is dropped; the new mode
       // delivers the head again.
       const [dropped] = await db.batch([
@@ -579,12 +762,62 @@ export async function changeScenarioSource(input: {
           .update(scenarioSources)
           .set({ mode: change.mode, pokedAt: now, updatedAt: now })
           .where(switching),
+        // After the switch, so they do nothing unless the source pulls now.
+        failPipelineRevisions(db, scope.key, REVISION_SOURCE_PULLS, sourcePulls(scope.key)),
+        failPipelineCommits(db, scope.key, now, REVISION_SOURCE_PULLS, sourcePulls(scope.key)),
       ]);
       await endSourceCompiles(env, dropped.map((row) => row.hostId));
+      if (change.mode === "pull") {
+        const [left] = await db
+          .select({ mode: scenarioSources.mode, imageProducer: scenarioSources.imageProducer })
+          .from(scenarioSources)
+          .where(connected)
+          .limit(1);
+        if (left?.mode === "push" && left.imageProducer === "pipeline") {
+          throw appError(
+            409,
+            "scenario_source_pipeline_images",
+            "This source's images are built by its pipeline. Set the image producer to builder first.",
+          );
+        }
+      }
       break;
     }
   }
-  return loadScenarioSource(scope);
+  const view = await loadScenarioSource(scope);
+  return view && forgotten ? { ...view, forgotten } : view;
+}
+
+/**
+ * Who may let a source's bundles and images come from self-hosted runners,
+ * and make the other platform-only changes: a platform administrator, for
+ * now (Q1 of #438 changes this function).
+ */
+async function mayChangeRunnerPolicy(db: DrizzleD1Database, actorUserId: string): Promise<boolean> {
+  const row = await db.get<{ ok: number }>(sql`SELECT 1 AS ok WHERE ${activeAdministrator(actorUserId)}`);
+  return row !== undefined && row !== null;
+}
+
+/** Why a platform-only change changed nothing. */
+async function platformChangeRefusal(
+  db: DrizzleD1Database,
+  scope: ScenarioSourceScope,
+  actorUserId: string,
+  needsPush: boolean,
+): Promise<AppError> {
+  if (!(await mayChangeRunnerPolicy(db, actorUserId))) return appError(404, "not_found", "not found");
+  const [binding] = await db
+    .select({ mode: scenarioSources.mode, disconnectedAt: scenarioSources.disconnectedAt })
+    .from(scenarioSources)
+    .where(eq(scenarioSources.scopeKey, scope.key))
+    .limit(1);
+  if (!binding || binding.disconnectedAt !== null) {
+    return appError(409, "scenario_source_not_connected", "No repository is connected.");
+  }
+  if (needsPush && binding.mode !== "push") {
+    return appError(409, "scenario_source_mode_pull", "A pipeline builds images only for a push-mode source. Switch it to push mode first.");
+  }
+  return appError(409, "scenario_source_change_conflict", "The source changed. Reload and try again.");
 }
 
 // One statement connects a new scope or re-binds a disconnected one. A
@@ -620,6 +853,8 @@ async function connect(input: {
         github_repository = excluded.github_repository,
         default_branch = excluded.default_branch,
         mode = excluded.mode,
+        image_producer = 'builder',
+        allow_self_hosted_runners = 0,
         bound_by_user_id = excluded.bound_by_user_id,
         head_sha = NULL,
         head_observed_at = 0,
