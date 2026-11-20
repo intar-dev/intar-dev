@@ -50,14 +50,17 @@ export const PIPELINE_OPEN_SESSIONS_PER_SCOPE = 8;
 /** Sessions one scope may open in `PIPELINE_SESSION_WINDOW_MS`. */
 export const PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW = 200;
 export const PIPELINE_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Bytes the sessions one scope opened in the window may have stored. */
+export const PIPELINE_BYTES_PER_SCOPE_PER_WINDOW = 400 * 1024 ** 3;
 /** How long a pipeline waits before it asks again while its bundle is ingested. */
 export const PIPELINE_BUNDLE_PENDING_RETRY_SECONDS = 5;
 const MAX_SESSION_REQUEST_BYTES = 1024;
 
 /**
  * The id of the session a token names, while the session may write: not
- * expired, not closed, and its source still connected, not paused and with a
- * binder that holds the scope.
+ * expired, not closed, and its source still the push-mode binding of the
+ * repository that opened it: connected, not paused and with a binder that
+ * holds the scope.
  */
 export async function findPipelineSession(
   env: Cloudflare.Env,
@@ -75,6 +78,8 @@ export async function findPipelineSession(
         eq(pipelineUploadSessions.tokenHash, await pipelineSessionTokenHash(token)),
         gt(pipelineUploadSessions.expiresAt, Date.now()),
         isNull(pipelineUploadSessions.closedAt),
+        eq(scenarioSources.mode, "push"),
+        eq(scenarioSources.githubRepositoryId, pipelineUploadSessions.githubRepositoryId),
         scenarioSourceBindingPredicate(),
       ),
     )
@@ -191,6 +196,8 @@ export async function handlePipelineSessionOpen(
                 WHERE scope_key = ?3 AND closed_at IS NULL AND expires_at > ?13) < ?15
           AND (SELECT COUNT(*) FROM pipeline_upload_sessions
                 WHERE scope_key = ?3 AND created_at > ?16) < ?17
+          AND (SELECT COALESCE(SUM(bytes_put), 0) FROM pipeline_upload_sessions
+                WHERE scope_key = ?3 AND created_at > ?16) < ?18
        RETURNING id`,
     )
       .bind(
@@ -211,13 +218,14 @@ export async function handlePipelineSessionOpen(
         PIPELINE_OPEN_SESSIONS_PER_SCOPE,
         now - PIPELINE_SESSION_WINDOW_MS,
         PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW,
+        PIPELINE_BYTES_PER_SCOPE_PER_WINDOW,
       )
       .first();
     if (!opened) {
       throw appError(
         429,
         "pipeline_session_limit",
-        "This source has too many upload sessions. Close one or try again later.",
+        "This source has reached its upload limits. Close a session or try again later.",
       );
     }
     return jsonResponse(

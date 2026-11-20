@@ -18,13 +18,22 @@ import {
   user,
 } from "@/db/schema";
 import { GITHUB_ACTIONS_ISSUER } from "@/lib/github-oidc";
-import { acquireRegistrySweep, REGISTRY_SESSION_HEADER } from "@/lib/image-registry-admission";
+import {
+  acquireRegistrySweep,
+  compactRegistryAdmissionHistory,
+  heartbeatRegistrySweep,
+  REGISTRY_REAP_GRACE_MS,
+  REGISTRY_SESSION_HEADER,
+  setRegistryEnforcement,
+} from "@/lib/image-registry-admission";
+import { OCI_SWEEP_AGE_GUARD_MS, runOciSweep } from "@/lib/oci-registry-sweep";
 import { PIPELINE_SESSION_MAX_BYTES } from "@/lib/pipeline-upload-sessions";
 import { changeScenarioSource, scenarioSourceScope } from "@/lib/scenario-sources";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { blob, machineConfig, manifestOf, type PushedBlob } from "./oci-test-fixtures";
 import {
+  PIPELINE_BYTES_PER_SCOPE_PER_WINDOW,
   PIPELINE_OPEN_SESSIONS_PER_SCOPE,
   PIPELINE_SESSIONS_CLOSE_PATH,
   PIPELINE_SESSIONS_PATH,
@@ -361,6 +370,21 @@ describe("opening a pipeline upload session", () => {
       .where(eq(pipelineUploadSessions.id, "old-0"));
     expect((await open()).status).toBe(201);
   });
+
+  it("limits the bytes a scope's sessions store in a day", async () => {
+    await seedBundle();
+    await session();
+    await db().update(pipelineUploadSessions).set({ bytesPut: PIPELINE_BYTES_PER_SCOPE_PER_WINDOW, closedAt: Date.now() });
+    await refusal(await open(), 429, "pipeline_session_limit");
+
+    await db().update(pipelineUploadSessions).set({ bytesPut: PIPELINE_BYTES_PER_SCOPE_PER_WINDOW - 1 });
+    expect((await open()).status).toBe(201);
+    // What an older session stored is not counted.
+    await db().update(pipelineUploadSessions).set({ bytesPut: PIPELINE_BYTES_PER_SCOPE_PER_WINDOW, closedAt: Date.now() });
+    await refusal(await open(), 429, "pipeline_session_limit");
+    await db().update(pipelineUploadSessions).set({ createdAt: Date.now() - 25 * 60 * 60 * 1000 });
+    expect((await open()).status).toBe(201);
+  });
 });
 
 describe("a pipeline session token as a registry credential", () => {
@@ -467,6 +491,28 @@ describe("a pipeline session token as a registry credential", () => {
     expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
   });
 
+  it("is refused a manifest or a result before its body is read, so an interrupted one holds nothing", async () => {
+    await seedBundle();
+    const token = await session();
+    for (const [method, path] of [
+      ["PUT", `/registry/v1/manifests/sha256:${"e".repeat(64)}`],
+      ["POST", `/registry/v1/builds/${"b".repeat(64)}/result?attempt=1`],
+    ] as const) {
+      // A body that never arrives: the answer cannot have waited for it.
+      const body = new ReadableStream<Uint8Array>();
+      const response = await handleImageRegistryRequest(
+        new Request(`${ORIGIN}${path}`, {
+          method, body, duplex: "half",
+          headers: { authorization: `Bearer ${token}`, "content-type": OCI_MANIFEST_MEDIA_TYPE },
+        } as RequestInit),
+        testEnv,
+      );
+      expect(response?.status).toBe(403);
+    }
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
+    expect((await acquireRegistrySweep(env, { owner: "collector-a" })).ok).toBe(true);
+  });
+
   it("is refused by admission control, the cutover gate and the agent routes", async () => {
     await seedBundle();
     const token = await session();
@@ -544,6 +590,17 @@ describe("a pipeline session token as a registry credential", () => {
     expect((await putBlob(await blob("blob"), token)).status).toBe(201);
   });
 
+  it("stops working when its source is switched to pull mode or bound to another repository", async () => {
+    await seedBundle();
+    const token = await session();
+    await db().update(scenarioSources).set({ mode: "pull" });
+    expect((await putBlob(await blob("blob"), token)).status).toBe(401);
+    await db().update(scenarioSources).set({ mode: "push", githubRepositoryId: REPO + 1 });
+    expect((await putBlob(await blob("blob"), token)).status).toBe(401);
+    await db().update(scenarioSources).set({ githubRepositoryId: REPO });
+    expect((await putBlob(await blob("blob"), token)).status).toBe(201);
+  });
+
   it("stops working when its binder no longer holds the scope", async () => {
     await seedBundle();
     const token = await session();
@@ -602,6 +659,65 @@ describe("a pipeline session token as a registry credential", () => {
     const during = await putBlob(await blob("during the sweep"), token);
     expect(during.status).toBe(409);
     expect(await during.json()).toMatchObject({ code: "registry_sweep_in_progress" });
+  });
+
+  it("lets the sweep delete while its session is open and a blob upload was cut off", async () => {
+    await setRegistryEnforcement({ DB: env.DB }, "enforce");
+    await seedBundle();
+    const token = await session();
+    const created = await call("POST", "/registry/v1/upload-sessions", { bearer: token });
+    const { session_id: sessionId } = (await created.json()) as { session_id: string };
+    // A blob upload that never settled, as an aborted request leaves it.
+    const cutOff = (id: string, expiresAt: number) => env.DB.prepare(
+      `INSERT INTO image_registry_operation_writers
+         (id, session_id, owner_kind, owner_id, operation, epoch, outcome, created_at, heartbeat_at, expires_at)
+       SELECT ?1, id, owner_kind, owner_id, 'blob_put', 0, 'pending', ?2, ?2, ?2
+         FROM image_registry_upload_sessions WHERE id = ?3`,
+    ).bind(id, expiresAt, sessionId).run();
+    await cutOff("recent", Date.now());
+    await cutOff("old", Date.now() - REGISTRY_REAP_GRACE_MS - 1);
+
+    // What the platform reads says the same as what the sweep is allowed.
+    const status = await call("GET", "/registry/v1/admission", { bearer: PUBLISH });
+    expect(await status.json()).toMatchObject({ idle: true, idle_blocked_reason: null });
+
+    const orphan = await blob("an object nothing names");
+    const key = `oci/sha256/${orphan.digest.slice("sha256:".length)}`;
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(key, orphan.bytes);
+    const report = await runOciSweep(env, { mode: "delete", nowMs: Date.now() + 2 * OCI_SWEEP_AGE_GUARD_MS, kinoPinsJson: "" });
+    expect(report.error).toBeNull();
+    expect(report.deletedObjects).toBe(1);
+    expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(key)).toBeNull();
+
+    // The sweep removed the writer nothing else would, and kept the recent one.
+    const writers = await env.DB.prepare("SELECT id FROM image_registry_operation_writers").all<{ id: string }>();
+    expect(writers.results.map((row) => row.id)).toEqual(["recent"]);
+
+    const acquired = await acquireRegistrySweep(env, { owner: "collector-a" });
+    expect(acquired.ok && (await heartbeatRegistrySweep(env, { sweepToken: acquired.lease.sweepToken })))
+      .toMatchObject({ ok: true, deleteAllowed: true, blockedReason: null });
+  });
+
+  it("leaves nothing behind once its session has ended", async () => {
+    await seedBundle();
+    const token = await session();
+    const created = await call("POST", "/registry/v1/upload-sessions", { bearer: token });
+    const { session_id: sessionId } = (await created.json()) as { session_id: string };
+    await env.DB.prepare(
+      `INSERT INTO image_registry_operation_writers
+         (id, session_id, owner_kind, owner_id, operation, epoch, outcome, created_at, heartbeat_at, expires_at)
+       SELECT 'cut-off', id, owner_kind, owner_id, 'blob_put', 0, 'pending', ?1, ?1, ?1
+         FROM image_registry_upload_sessions WHERE id = ?2`,
+    ).bind(Date.now() - REGISTRY_REAP_GRACE_MS - 1, sessionId).run();
+    await db().update(pipelineUploadSessions).set({ expiresAt: Date.now() - 1 });
+
+    // The acquire ends the admission session and drops the writer; the
+    // history pass then removes the session row.
+    expect((await acquireRegistrySweep(env, { owner: "collector-a" })).ok).toBe(true);
+    expect(await compactRegistryAdmissionHistory({ DB: env.DB }, { retainClosedSessionsMs: -1000 }))
+      .toMatchObject({ removedSessions: 1 });
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_upload_sessions").first("n")).toBe(0);
   });
 });
 

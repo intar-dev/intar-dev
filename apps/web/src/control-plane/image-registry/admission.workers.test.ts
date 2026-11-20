@@ -482,9 +482,10 @@ describe("image registry admission", () => {
         objectKeys: ["oci/sha256/aa"],
       });
       expect(deletable.ok).toBe(true);
-      // The pipeline's session is still its own, and its rows are untouched.
+      // The pipeline's session is still its own. Of its rows only the one
+      // long past its lease is gone: nothing else would remove it.
       expect(await sessionState(session.sessionId)).toBe("open");
-      expect(await writerRowIds()).toHaveLength(5);
+      expect(await writerRowIds()).toHaveLength(4);
     });
 
     it("closes the admission sessions of a pipeline whose credential has ended", async () => {

@@ -34,6 +34,7 @@ import {
 import {
   admitRegistryOperation,
   providePipelineSessionLookup,
+  readRegistryAuth,
   type RegistryOperationLease,
 } from "@/lib/image-registry-admission";
 import type { ImageRegistryOperationKind } from "@/db/schema";
@@ -179,6 +180,17 @@ async function admitted(
   run: () => Promise<Response>,
 ): Promise<Response> {
   if (request.method !== method) return run();
+
+  // A pipeline pushes blobs only so far. It is refused before a writer is
+  // registered for it: the handler would refuse it too, but only after it
+  // read the body, and a request that ends there leaves a writer nobody
+  // settles, which holds the sweep.
+  if (operation === "manifest_put" || operation === "build_result") {
+    const auth = await readRegistryAuth(request, env);
+    if (auth.ok && auth.owner.kind === "pipeline") {
+      return jsonResponse({ error: "a pipeline pushes blobs only" }, 403);
+    }
+  }
 
   const admitted_ = await admitRegistryOperation(request, env, { operation });
   if (!admitted_.ok) return admitted_.response;

@@ -1279,6 +1279,14 @@ export async function acquireRegistrySweep(
                WHERE key = ?5 AND state = 'sweeping' AND sweep_token = ?3)
        RETURNING id`,
     ).bind(runId, input.owner, sweepToken, now, REGISTRY_ADMISSION_KEY),
+    // A pipeline's blob writer that was never settled holds nothing and is
+    // counted nowhere, so nothing else would ever remove it.
+    env.DB.prepare(
+      `DELETE FROM image_registry_operation_writers
+        WHERE owner_kind = 'pipeline'
+          AND operation IN ('blob_exists', 'blob_put')
+          AND expires_at <= ?1`,
+    ).bind(now - REGISTRY_REAP_GRACE_MS),
   ]);
 
   const marker = firstRow(results[2]);
