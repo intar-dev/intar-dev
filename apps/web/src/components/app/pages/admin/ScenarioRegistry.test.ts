@@ -43,7 +43,7 @@ describe("scenario source card", () => {
   const source = { repository: "intar-dev/scenarios" } as ScenarioSourceView;
 
   it("hides the public card until a repository is pinned or bound", () => {
-    const card = { enabled: true, configured: false, appSlug: null };
+    const card = { enabled: true, pipelineImages: false, configured: false, appSlug: null };
     expect(scenarioSourceCardVisible({ ...card, source: null })).toBe(false);
     expect(
       scenarioSourceCardVisible({ ...card, configured: true, source: null }),
@@ -52,7 +52,7 @@ describe("scenario source card", () => {
   });
 
   it("shows an organization card once the flag is on or a binding exists", () => {
-    const card = { enabled: false, appSlug: null };
+    const card = { enabled: false, pipelineImages: false, appSlug: null };
     expect(scenarioSourceCardVisible({ ...card, source: null })).toBe(false);
     expect(
       scenarioSourceCardVisible({ ...card, enabled: true, source: null }),

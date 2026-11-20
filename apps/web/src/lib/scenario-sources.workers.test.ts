@@ -1,18 +1,26 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { exportPKCS8, generateKeyPair } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agentHosts,
+  bundles,
   hostDesiredState,
   member,
   organization,
+  pipelineUploadSessions,
+  scenarioRevisions,
   scenarioSourceCommits,
   scenarioSources,
+  scenarios,
+  scopeMachineImages,
+  user,
 } from "@/db/schema";
+import { pipelinePlan } from "@/lib/pipeline-revisions";
+import { arm64MachineImages } from "@/lib/scenario-runs/revision-begin";
 import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { syncBuilderDesiredState } from "@/lib/machine-builds";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
@@ -23,6 +31,7 @@ import {
   redactHostPaths,
   refuseScenarioSourceWrite,
   scenarioSourceBindingPredicate,
+  scenarioSourceCard,
   scenarioSourceScope,
   type ScenarioSourceEnv,
 } from "@/lib/scenario-sources";
@@ -438,6 +447,230 @@ describe("scenario source changes", () => {
     const refused = await refuseScenarioSourceWrite(post("198.51.100.9"), { userId: OWNER }, workerEnv);
     expect(refused?.status).toBe(429);
     expect([...counts.keys()]).toEqual([`web-edge:scenario-source:user:${OWNER}`]);
+  });
+});
+
+describe("what only a platform administrator changes", () => {
+  const ADMIN = "platform-admin";
+  const KEY = `sha256:${"c".repeat(64)}`;
+  const REV = `git-9-${"a".repeat(40)}-digest`;
+  const pipelineOn = new StaticFeatureToggleService({ scenario_git_sources: true, scenario_pipeline_images: true });
+  const as = (body: unknown, toggles: StaticFeatureToggleService = pipelineOn, actorUserId = ADMIN) =>
+    change(body, { actorUserId, toggles });
+  const db = () => drizzle(env.DB);
+
+  beforeEach(async () => {
+    await createFixtureMember({ d1: env.DB, userId: ADMIN, role: "admin", githubAccountId: "1000" });
+  });
+
+  /** A pipeline's bundle of `REV` with one building revision and its building commit row. */
+  async function pipelineHead(producer: "pipeline" | "builder" = "pipeline") {
+    await db().insert(bundles).values({
+      rev: REV, scopeKey: ORG_SCOPE.key, organizationId: ORG, compilerVersion: "c", r2Key: "k", imageProducer: producer,
+    });
+    await db().insert(scenarios).values({
+      id: `${ORG}/lab`, namespace: ORG, slug: "lab", organizationId: ORG, scopeKey: ORG_SCOPE.key, enabled: true, play: false,
+    });
+    await db().insert(scenarioRevisions).values({
+      scenarioId: `${ORG}/lab`, rev: REV, guestContract: 3, state: "building",
+      docJson: { machines: [{ name: "m", build_key: KEY, image_digest: null }] } as never,
+    });
+    await db().insert(scenarioSourceCommits).values({
+      id: "head", scopeKey: ORG_SCOPE.key, purpose: "deploy", sha: "a".repeat(40), rev: REV, via: "push", state: "building",
+    });
+  }
+  const image = (architecture: "amd64" | "arm64", imageDigest = `sha256:${"1".repeat(64)}`, scopeKey = ORG_SCOPE.key) =>
+    db().insert(scopeMachineImages).values({
+      scopeKey, buildKey: KEY, architecture, imageDigest, imageFormat: "intar-image-4", sizeBytes: 1,
+      githubRepositoryId: 9, githubRepository: "acme/old", sha: "a".repeat(40), runId: "1", runAttempt: 1,
+      runnerEnvironment: "github-hosted", jobWorkflowSha: "w",
+    });
+
+  it("is not there for an organization's administrator, a demoted administrator or a body it cannot read", async () => {
+    await insertBinding({ mode: "push" });
+    await image("amd64");
+    const bodies = [
+      { action: "image_producer", producer: "pipeline" },
+      { action: "image_producer", producer: "builder" },
+      { action: "runner_policy", allow_self_hosted: true },
+      { action: "forget_image", build_key: KEY, architecture: "amd64" },
+    ];
+    for (const body of bodies) {
+      await expect(as(body, pipelineOn, OWNER)).rejects.toMatchObject({ status: 404, code: "not_found" });
+    }
+    await db().update(user).set({ role: "user" }).where(eq(user.id, ADMIN));
+    for (const body of bodies) {
+      await expect(as(body)).rejects.toMatchObject({ status: 404, code: "not_found" });
+    }
+    expect(await binding()).toMatchObject({ imageProducer: "builder", allowSelfHostedRunners: false });
+    expect(await db().select().from(scopeMachineImages)).toHaveLength(1);
+
+    await db().update(user).set({ role: "admin" }).where(eq(user.id, ADMIN));
+    for (const body of [
+      { action: "image_producer", producer: "host" },
+      { action: "runner_policy", allow_self_hosted: "yes" },
+      { action: "forget_image", build_key: "latest", architecture: "amd64" },
+      { action: "forget_image", build_key: KEY, architecture: "riscv" },
+    ]) {
+      await expect(as(body)).rejects.toMatchObject({ status: 400 });
+    }
+  });
+
+  it("needs its flag only for what widens: a pipeline and self-hosted runners", async () => {
+    await insertBinding({ mode: "push" });
+    // `enabled` has the sources flag only; `disabled` has none.
+    await expect(as({ action: "image_producer", producer: "pipeline" }, enabled)).rejects.toMatchObject({ status: 404 });
+    await expect(as({ action: "runner_policy", allow_self_hosted: true }, disabled)).rejects.toMatchObject({ status: 404 });
+    expect(await binding()).toMatchObject({ imageProducer: "builder", allowSelfHostedRunners: false });
+
+    expect(await as({ action: "image_producer", producer: "pipeline" })).toMatchObject({ imageProducer: "pipeline" });
+    expect(await as({ action: "runner_policy", allow_self_hosted: true }, enabled)).toMatchObject({ allowSelfHostedRunners: true });
+    // The way back, and forgetting, with every flag off.
+    await image("amd64");
+    expect(await as({ action: "image_producer", producer: "builder" }, disabled)).toMatchObject({ imageProducer: "builder" });
+    expect(await as({ action: "runner_policy", allow_self_hosted: false }, disabled)).toMatchObject({ allowSelfHostedRunners: false });
+    await as({ action: "forget_image", build_key: KEY, architecture: "amd64" }, disabled);
+    expect(await db().select().from(scopeMachineImages)).toEqual([]);
+    expect(await scenarioSourceCard(ORG_SCOPE, pipelineOn)).toMatchObject({ enabled: true, pipelineImages: true });
+    expect(await scenarioSourceCard(ORG_SCOPE, enabled)).toMatchObject({ enabled: true, pipelineImages: false });
+  });
+
+  it("sets a pipeline only for a connected push source, and the builder for any", async () => {
+    await insertBinding();
+    await expect(as({ action: "image_producer", producer: "pipeline" })).rejects.toMatchObject({
+      status: 409, code: "scenario_source_mode_pull",
+    });
+    await db().update(scenarioSources).set({ mode: "push", disconnectedAt: 1 });
+    await expect(as({ action: "image_producer", producer: "pipeline" })).rejects.toMatchObject({
+      status: 409, code: "scenario_source_not_connected",
+    });
+    await expect(as({ action: "runner_policy", allow_self_hosted: true })).rejects.toMatchObject({
+      status: 409, code: "scenario_source_not_connected",
+    });
+    await db().update(scenarioSources).set({ imageProducer: "pipeline", pausedAt: 1, pauseReason: "admin" });
+    expect(await as({ action: "image_producer", producer: "builder" })).toMatchObject({ imageProducer: "builder" });
+  });
+
+  it("applies from the next commit: the view shows what the head commit was ingested with", async () => {
+    await insertBinding({ mode: "push" });
+    await pipelineHead("builder");
+    const view = await as({ action: "image_producer", producer: "pipeline" });
+    expect(view).toMatchObject({ imageProducer: "pipeline", commit: { imageProducer: "builder", state: "building" } });
+    // Nothing of the head changed.
+    expect((await db().select().from(scenarioRevisions))[0]).toMatchObject({ state: "building" });
+  });
+
+  it("does not switch to pull while a pipeline builds, and ends what waits for one when it does switch", async () => {
+    await insertBinding({ mode: "push", imageProducer: "pipeline" });
+    await pipelineHead();
+    await expect(change({ action: "mode", mode: "pull" })).rejects.toMatchObject({
+      status: 409, code: "scenario_source_pipeline_images",
+    });
+    expect(await binding()).toMatchObject({ mode: "push" });
+    expect((await db().select().from(scenarioRevisions))[0]).toMatchObject({ state: "building" });
+    // A switch to the mode it already has ends nothing either.
+    await change({ action: "mode", mode: "push" });
+    expect((await db().select().from(scenarioSourceCommits))[0]).toMatchObject({ state: "building" });
+
+    await as({ action: "image_producer", producer: "builder" });
+    // A builder's building head of the same scope is left alone.
+    await db().insert(bundles).values({ rev: "builders", scopeKey: ORG_SCOPE.key, organizationId: ORG, compilerVersion: "c", r2Key: "k2" });
+    await db().insert(scenarios).values({
+      id: `${ORG}/other`, namespace: ORG, slug: "other", organizationId: ORG, scopeKey: ORG_SCOPE.key, enabled: true, play: false,
+    });
+    await db().insert(scenarioRevisions).values({
+      scenarioId: `${ORG}/other`, rev: "builders", guestContract: 3, state: "building", docJson: { machines: [] } as never,
+    });
+    await change({ action: "mode", mode: "pull" });
+    expect(await binding()).toMatchObject({ mode: "pull", imageProducer: "builder" });
+    expect(await db().select({ rev: scenarioRevisions.rev, state: scenarioRevisions.state, reason: scenarioRevisions.failureReason })
+      .from(scenarioRevisions).orderBy(scenarioRevisions.rev)).toEqual([
+      { rev: "builders", state: "building", reason: null },
+      { rev: REV, state: "failed", reason: expect.stringContaining("pull mode") },
+    ]);
+    expect((await db().select().from(scenarioSourceCommits))[0]).toMatchObject({
+      state: "failed", detail: expect.stringContaining("pull mode"),
+    });
+  });
+
+  it("leaves the commit of a pipeline head that has its images as it is, on a switch to pull and on a disconnect", async () => {
+    await insertBinding({ mode: "push" });
+    await pipelineHead();
+    await db().update(scenarioRevisions).set({ state: "ready" });
+    await change({ action: "mode", mode: "pull" });
+    expect(await binding()).toMatchObject({ mode: "pull" });
+    expect((await db().select().from(scenarioSourceCommits))[0]).toMatchObject({ state: "building", detail: null });
+    await change({ action: "disconnect" });
+    expect((await db().select().from(scenarioSourceCommits))[0]).toMatchObject({ state: "building", detail: null });
+    expect((await db().select().from(scenarioRevisions))[0]).toMatchObject({ state: "ready" });
+  });
+
+  it("starts a reconnected source on the builder and on GitHub's runners", async () => {
+    await insertBinding({ mode: "push", imageProducer: "pipeline", allowSelfHostedRunners: true, disconnectedAt: 1, disconnectReason: "admin" });
+    github();
+    await change({ action: "connect", repository: "acme/labs" });
+    expect(await binding()).toMatchObject({
+      githubRepositoryId: 42, mode: "pull", imageProducer: "builder", allowSelfHostedRunners: false, disconnectedAt: null,
+    });
+  });
+
+  it("closes the sessions of self-hosted runners when they are no longer allowed", async () => {
+    await insertBinding({ mode: "push", allowSelfHostedRunners: true });
+    const session = (id: string, runnerEnvironment: string) => db().insert(pipelineUploadSessions).values({
+      id, tokenHash: id, scopeKey: ORG_SCOPE.key, githubRepositoryId: 9, githubRepository: "acme/old", ref: "refs/heads/main",
+      sha: "a".repeat(40), rev: REV, runId: "1", runAttempt: 1, runnerEnvironment, jobWorkflowSha: "w",
+      expiresAt: Date.now() + 60_000,
+    });
+    await session("hosted", "github-hosted");
+    await session("own", "self-hosted");
+    // Allowing them again closes nothing.
+    await as({ action: "runner_policy", allow_self_hosted: true });
+    expect((await db().select().from(pipelineUploadSessions)).every((row) => row.closedAt === null)).toBe(true);
+
+    await as({ action: "runner_policy", allow_self_hosted: false });
+    expect(await db().select({ id: pipelineUploadSessions.id, closed: sql<number>`closed_at IS NOT NULL` })
+      .from(pipelineUploadSessions).orderBy(pipelineUploadSessions.id)).toEqual([
+      { id: "hosted", closed: 0 },
+      { id: "own", closed: 1 },
+    ]);
+  });
+
+  it("forgets one recorded image and says which revisions still name it", async () => {
+    await insertBinding({ mode: "push", imageProducer: "pipeline" });
+    await pipelineHead();
+    const amd = `sha256:${"1".repeat(64)}`;
+    const arm = `sha256:${"2".repeat(64)}`;
+    await image("amd64", amd);
+    await image("arm64", arm);
+    await image("amd64", amd, "public");
+    await db().update(scenarioRevisions).set({
+      state: "ready", docJson: { machines: [{ name: "m", build_key: KEY, image_digest: amd }] } as never,
+    });
+    const revision = { scenarioId: `${ORG}/lab`, rev: REV, doc: { machines: [{ build_key: KEY }] } as never };
+    for (const digest of [amd, arm]) {
+      await env.DB.prepare(
+        `INSERT INTO registry_manifests (digest, media_type, artifact_type, size) VALUES (?1, 'm', 'application/vnd.intar.machine.v1', 1)`,
+      ).bind(digest).run();
+    }
+    expect(await arm64MachineImages(env.DB, revision)).toEqual(new Map([[KEY, arm]]));
+
+    // The arm64 image is read where it is recorded: a local arm64 run of the
+    // settled revision has none until the next push.
+    const armGone = await as({ action: "forget_image", build_key: KEY, architecture: "arm64" });
+    expect(armGone?.forgotten).toEqual({ imageDigest: arm, revisions: [] });
+    expect(await arm64MachineImages(env.DB, revision)).toBeNull();
+
+    // The amd64 one stays in the revision that settled on it.
+    const amdGone = await as({ action: "forget_image", build_key: KEY, architecture: "amd64" });
+    expect(amdGone?.forgotten).toEqual({ imageDigest: amd, revisions: [{ scenarioId: `${ORG}/lab`, rev: REV, state: "ready" }] });
+    expect((await db().select().from(scenarioRevisions))[0]).toMatchObject({ state: "ready" });
+    // Another scope's record of the same key is not this source's to forget.
+    expect(await db().select({ scopeKey: scopeMachineImages.scopeKey }).from(scopeMachineImages)).toEqual([{ scopeKey: "public" }]);
+    await expect(as({ action: "forget_image", build_key: KEY, architecture: "amd64" })).rejects.toMatchObject({
+      status: 404, code: "image_not_recorded",
+    });
+    // The next upload is told the key is missing again.
+    expect((await pipelinePlan(env, ORG_SCOPE.key, [KEY])).missing).toHaveLength(2);
   });
 });
 

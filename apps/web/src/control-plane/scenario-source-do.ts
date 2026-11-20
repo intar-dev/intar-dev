@@ -88,6 +88,8 @@ interface Step {
   digest: string;
   /** Who builds the images of what this pass ingests. */
   imageProducer: ImageProducer;
+  /** The source is in push mode. */
+  pipelineCanPush: boolean;
 }
 
 type ActiveBinding = Pick<
@@ -233,7 +235,7 @@ async function tickScenarioSource(
   if (!active) return again;
   // Only a push source's own pipeline builds images.
   const imageProducer = active.mode === "push" ? active.imageProducer : "builder";
-  const step = { env, storage, scopeKey, organizationId, digest, imageProducer };
+  const step = { env, storage, scopeKey, organizationId, digest, imageProducer, pipelineCanPush: active.mode === "push" };
   const ingestAgain = await ingest(step);
   // After ingest, so a re-run failed row that ingest finds without its
   // staged objects is delivered again in the same pass.
@@ -631,6 +633,7 @@ async function ingestSourceBundleRow(step: Step, rev: string): Promise<WriteOutc
       gzip,
       stored: stored !== null,
       imageProducer: step.imageProducer,
+      pipelineCanPush: step.pipelineCanPush,
     });
     outcome = refused === null ? "ok" : "error";
     return refused === null ? "done" : invalid(refused);
