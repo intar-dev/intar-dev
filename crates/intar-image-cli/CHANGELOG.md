@@ -1,5 +1,20 @@
 # Changelog
 
+## image-cli/v0.15.0 (2026-11-20)
+
+### Features
+
+- **intar-image-build:** Download the guest kernel that CI built instead of compiling it (#427) (c490d008)
+- **intar-image-cli:** Build a machine image and boot it once (#439) (f10b3b10)
+- **intar-image-cli:** Plan a pipeline's images and push one (#449) (ccac1158)
+- **intar-image-cli:** Set up the build tools on a runner (#450) (8dd481a9)
+
+### Bug fixes
+
+- **intar-builder:** Wait out a registry that refuses writers instead of failing the build (#430) (06df8c76)
+- **intar-builder:** Keep the arm64 image through a restart and run one emulated build at a time (#432) (90e6ebdc)
+- **intar-image-cli:** Let a job's cache volume fill before it evicts checkpoints (#452) (ed2ba581)
+
 ## image-cli/v0.14.0 (2026-11-19)
 
 ### Breaking changes

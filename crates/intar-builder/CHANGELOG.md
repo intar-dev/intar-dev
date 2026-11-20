@@ -1,5 +1,13 @@
 # Changelog
 
+## builder/v0.21.0 (2026-11-20)
+
+### Features
+
+- **intar-image-cli:** Build a machine image and boot it once (#439) (f10b3b10)
+- **intar-image-cli:** Plan a pipeline's images and push one (#449) (ccac1158)
+- **intar-image-cli:** Set up the build tools on a runner (#450) (8dd481a9)
+
 ## builder/v0.20.2 (2026-11-19)
 
 ### Bug fixes

@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.26.0 (2026-11-20)
+
+### Features
+
+- **intar-image-cli:** Build a machine image and boot it once (#439) (f10b3b10)
+
 ## agent/v0.25.0 (2026-11-19)
 
 ### Breaking changes
