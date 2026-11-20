@@ -456,7 +456,10 @@ describe("a source whose pipeline builds its images", () => {
     await record({ architecture: "arm64", digest: `sha256:${"2".repeat(64)}`, manifest: false });
     expect(await plan(await push())).toEqual({ architectures: ["amd64", "arm64"], missing: BOTH });
     await record();
+    const before = await written();
     expect(await plan(await push())).toEqual({ architectures: ["amd64", "arm64"], missing: [BOTH[1]] });
+    // Answering for a rev that is already held stages and claims nothing.
+    expect(await written()).toEqual(before);
   });
 
   it("gives a builder source the receipt it always got, whatever is recorded", async () => {
@@ -567,7 +570,7 @@ describe("a source whose pipeline builds its images", () => {
     expect(await commits()).toEqual([expect.objectContaining({ state: "building", detail: null })]);
   });
 
-  it("leaves the commit building while one of its revisions still waits or is ready", async () => {
+  it("leaves the commit building while one of its revisions still waits", async () => {
     await byPipeline();
     await push();
     await tick("public");
@@ -580,6 +583,19 @@ describe("a source whose pipeline builds its images", () => {
     await tick("public");
     expect((await revisions()).map((row) => row.state).sort()).toEqual(["building", "failed"]);
     expect(await commits()).toEqual([expect.objectContaining({ state: "building" })]);
+
+    // Once the other is ready the commit fails for the one that never was,
+    // and a new publish takes up that one alone.
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'ready', created_at = 5 WHERE scenario_id = 'intar/other'").run();
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'building' WHERE scenario_id != 'intar/other'").run();
+    await tick("public");
+    expect(await commits()).toEqual([expect.objectContaining({ state: "failed" })]);
+    expect((await push()).status).toBe(202);
+    await tick("public");
+    expect(await all("SELECT scenario_id, state, created_at = 5 AS untouched FROM scenario_revisions ORDER BY scenario_id")).toEqual([
+      { scenario_id: "intar/broken-nginx", state: "building", untouched: 0 },
+      { scenario_id: "intar/other", state: "ready", untouched: 1 },
+    ]);
   });
 
   it("fails a revision a newer publish of its scenario replaced", async () => {
@@ -616,8 +632,10 @@ describe("a source whose pipeline builds its images", () => {
     });
     expect(await revisions()).toEqual([expect.objectContaining({ state: "failed", failure_reason: REVISION_SOURCE_DISCONNECTED })]);
 
+    // Its commit failed with it, so the next publish is not answered as done.
+    expect(await commits()).toEqual([{ rev: rev(), state: "failed", detail: REVISION_SOURCE_DISCONNECTED }]);
+
     await env.DB.prepare("UPDATE scenario_sources SET disconnected_at = NULL, disconnect_reason = NULL").run();
-    await env.DB.prepare("UPDATE scenario_source_commits SET state = 'superseded'").run();
     expect((await push()).status).toBe(202);
     await tick("public");
     expect(await revisions()).toEqual([expect.objectContaining({ state: "building", failure_reason: null })]);
@@ -633,6 +651,7 @@ describe("a source whose pipeline builds its images", () => {
     expect((await all("SELECT disconnect_reason FROM scenario_sources WHERE scope_key = 'public'"))[0])
       .toEqual({ disconnect_reason: "github_gone" });
     expect(await revisions()).toEqual([expect.objectContaining({ state: "failed", failure_reason: REVISION_SOURCE_DISCONNECTED })]);
+    expect(await commits()).toEqual([expect.objectContaining({ state: "failed" })]);
   });
 
   it("still ingests when the pass over the pipeline's revisions fails", async () => {

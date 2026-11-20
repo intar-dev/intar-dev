@@ -156,6 +156,29 @@ export function failDisconnectedPipelineRevisions(db: DrizzleD1Database, scopeKe
 }
 
 /**
+ * With them, the `building` commit rows of those bundles fail: no revision
+ * of theirs waits any more, and a failed row is what a new publish or a
+ * re-run of the check takes up again after a reconnect.
+ */
+export function failDisconnectedPipelineCommits(db: DrizzleD1Database, scopeKey: string, now: number) {
+  return db
+    .update(scenarioSourceCommits)
+    .set({ state: "failed", detail: REVISION_SOURCE_DISCONNECTED, updatedAt: now })
+    .where(
+      and(
+        eq(scenarioSourceCommits.scopeKey, scopeKey),
+        eq(scenarioSourceCommits.purpose, "deploy"),
+        eq(scenarioSourceCommits.state, "building"),
+        sql`${scenarioSourceCommits.rev} IN (SELECT rev FROM bundles
+          WHERE scope_key = ${scopeKey} AND image_producer = 'pipeline')`,
+        sql`EXISTS (SELECT 1 FROM scenario_sources source
+          WHERE source.scope_key = ${scopeKey}
+            AND source.disconnected_at IS NOT NULL)`,
+      ),
+    );
+}
+
+/**
  * Closes the open pipeline upload sessions of a scope once its source is
  * disconnected; it goes in the batch that disconnects. A session already
  * stops working with the binding, but a reconnect must not bring it back.
@@ -518,6 +541,7 @@ export async function changeScenarioSource(input: {
           .where(connected),
         closeDisconnectedPipelineSessions(db, scope.key, now),
         failDisconnectedPipelineRevisions(db, scope.key),
+        failDisconnectedPipelineCommits(db, scope.key, now),
       ]);
       break;
     case "purge":

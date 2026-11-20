@@ -39,6 +39,7 @@ import {
 import { CUTOVER_WIPED_SQL } from "@/lib/run-admission-gate";
 import {
   closeDisconnectedPipelineSessions,
+  failDisconnectedPipelineCommits,
   failDisconnectedPipelineRevisions,
   endSourceCompiles,
   MAX_COMPILE_ATTEMPTS,
@@ -279,6 +280,7 @@ async function observe(
           .where(bound),
         closeDisconnectedPipelineSessions(db, binding.scopeKey, now),
         failDisconnectedPipelineRevisions(db, binding.scopeKey),
+        failDisconnectedPipelineCommits(db, binding.scopeKey, now),
       ]);
     } else if (mint.status === "suspended") {
       await db
