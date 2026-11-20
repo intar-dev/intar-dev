@@ -88,6 +88,7 @@ esac`);
       files: git("show", "--name-only", "--format=", "HEAD").split("\n").filter(Boolean),
       wrangler: readFileSync(join(repo, "apps/web/wrangler.jsonc"), "utf8"),
       pin: existsSync(join(repo, "tools/deploy/kino-pin.json")) ? readFileSync(join(repo, "tools/deploy/kino-pin.json"), "utf8") : null,
+      release: existsSync(join(repo, "tools/deploy/kino-release.json")) ? readFileSync(join(repo, "tools/deploy/kino-release.json"), "utf8") : null,
     };
   } finally {
     rmSync(root, { force: true, recursive: true });
@@ -119,6 +120,14 @@ test("pins both when both releases match HEAD's contracts", () => {
   const ran = run({ cli: "current", kino: "current" });
   expect(ran.status, ran.output).toBe(0);
   expect(ran.files).toContain("tools/deploy/kino-pin.json");
+  // With the pin, which release each pinned artifact is.
+  expect(ran.files).toContain("tools/deploy/kino-release.json");
+  expect(ran.release).toMatch(
+    /^\{"3":\{"amd64":\{"version":"0\.6\.0","sha256":"[0-9a-f]{64}","digest":"sha256:[0-9a-f]{64}"\},"arm64":\{"version":"0\.6\.0","sha256":"[0-9a-f]{64}","digest":"sha256:[0-9a-f]{64}"\}\}\}\n$/,
+  );
+  const pin = JSON.parse(ran.pin ?? "{}") as { 3: { current: string; arm64: { current: string } } };
+  const release = JSON.parse(ran.release ?? "{}") as { 3: { amd64: { digest: string }; arm64: { digest: string } } };
+  expect([release[3].amd64.digest, release[3].arm64.digest]).toEqual([pin[3].current, pin[3].arm64.current]);
   expect(ran.pin).toMatch(/^\{"3":\{"current":"sha256:[0-9a-f]{64}","previous":null,"arm64":\{"current":"sha256:[0-9a-f]{64}","previous":null\}\}\}\n$/);
   expect(ran.committed).toStartWith("chore(web): pin the scenario compiler to intar-image-cli 0.11.0 and kino 0.6.0");
 });

@@ -838,6 +838,33 @@ describe("compiler descriptor", () => {
     } as unknown as Cloudflare.Env);
     await expect(response?.json()).resolves.toEqual({ cli_version: "0.9.0", sha256, digest });
   });
+
+  it("names the release of the pinned Kino once the deploy says which it is, for both architectures", async () => {
+    const sha256 = { linux_amd64: "e".repeat(64) };
+    const amd64 = { version: "0.12.0", sha256: "a".repeat(64) };
+    const arm64 = { version: "0.12.0", sha256: "b".repeat(64) };
+    const read = async (releases: unknown) => {
+      const response = await handleImageRegistryRequest(new Request(`https://intar.test${SOURCE_COMPILER_PATH}`), {
+        ...testEnv,
+        SCENARIO_COMPILER_CLI_VERSION: "0.9.0",
+        SCENARIO_COMPILER_CLI_SHA256: JSON.stringify(sha256),
+        KINO_RELEASES_JSON: typeof releases === "string" ? releases : JSON.stringify(releases),
+      } as unknown as Cloudflare.Env);
+      return ((await response?.json()) as { kino?: unknown }).kino;
+    };
+    expect(await read({ 3: { amd64, arm64 } })).toEqual({ amd64, arm64 });
+    // Another contract's, one architecture alone, a malformed entry or text: none.
+    for (const releases of [
+      { 2: { amd64, arm64 } },
+      { 3: { amd64 } },
+      { 3: { amd64, arm64: { version: "latest", sha256: "b".repeat(64) } } },
+      { 3: { amd64, arm64: { version: "0.12.0", sha256: "short" } } },
+      "not json",
+      "",
+    ]) {
+      expect(await read(releases)).toBeUndefined();
+    }
+  });
 });
 
 it("queues the base image build for a zero-setup machine on the platform base", async () => {

@@ -35,6 +35,12 @@ declare global {
        * The deploy injects it; without it no host has a Kino pin.
        */
       KINO_PINS_JSON?: string;
+      /**
+       * The release of each pinned Kino artifact, as JSON: what the compiler
+       * descriptor names for a pipeline's boot check. The deploy injects it
+       * with the pin.
+       */
+      KINO_RELEASES_JSON?: string;
     }
   }
 }

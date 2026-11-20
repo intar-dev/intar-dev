@@ -24,6 +24,7 @@ zpm = { path = "../zpm" }
 
 [dev-dependencies]
 flate2.workspace = true
+tar.workspace = true
 
 [lints]
 workspace = true

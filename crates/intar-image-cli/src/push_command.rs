@@ -60,9 +60,12 @@ pub(crate) struct PushCommand {
     /// The service, as `https://host`.
     #[arg(long)]
     url: String,
-    /// The run's GitHub Actions OIDC token.
+    /// The run's GitHub Actions OIDC token. Without it, in a GitHub Actions
+    /// job that may ask for one (`id-token: write`), a new one is asked for
+    /// on every try, with `--url` as its audience: a token lives for
+    /// minutes, and the wait for the bundle can be longer.
     #[arg(long)]
-    token: String,
+    token: Option<String>,
     /// The rev `plan` uploaded the bundle as.
     #[arg(long)]
     rev: String,
@@ -75,7 +78,22 @@ pub(crate) fn push_command(args: &PushCommand) -> Result<()> {
         "arm64" => Architecture::Arm64,
         other => anyhow::bail!("{IMAGE_FILE} names the architecture '{other}'"),
     };
-    let session = PipelineSession::open(&args.url, &args.token, &args.rev).map_err(failed)?;
+    // Told apart from a runner whose token endpoint fails for a moment:
+    // without either there is nothing to try again.
+    anyhow::ensure!(
+        args.token.is_some() || std::env::var_os("ACTIONS_ID_TOKEN_REQUEST_URL").is_some(),
+        "pass --token, or run in a GitHub Actions job with `id-token: write`"
+    );
+    let audience = args.url.trim().trim_end_matches('/').to_owned();
+    let session = PipelineSession::open(
+        &args.url,
+        || match &args.token {
+            Some(token) => Ok(token.clone()),
+            None => github_oidc_token(&audience),
+        },
+        &args.rev,
+    )
+    .map_err(failed)?;
     let pushed = RegistryPusher::new(&args.url, session.token())
         .and_then(|pusher| {
             pusher.push_image(
@@ -100,6 +118,34 @@ pub(crate) fn push_command(args: &PushCommand) -> Result<()> {
     Ok(())
 }
 
+/// A new OIDC token of this GitHub Actions job for `audience`, from the
+/// endpoint the runner names to a job with `id-token: write`.
+fn github_oidc_token(audience: &str) -> std::result::Result<String, String> {
+    let (Ok(url), Ok(bearer)) = (
+        std::env::var("ACTIONS_ID_TOKEN_REQUEST_URL"),
+        std::env::var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+    ) else {
+        return Err(
+            "pass --token, or run in a GitHub Actions job with `id-token: write`".to_owned(),
+        );
+    };
+    let mut url = reqwest::Url::parse(&url).map_err(|error| error.to_string())?;
+    url.query_pairs_mut().append_pair("audience", audience);
+    let answer: serde_json::Value = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .and_then(|client| client.get(url).bearer_auth(bearer).send())
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .and_then(reqwest::blocking::Response::json)
+        // The error names the endpoint without its query, never the bearer.
+        .map_err(|error| error.without_url().to_string())?;
+    answer
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "the runner's answer holds no token".to_owned())
+}
+
 /// A failed push with the exit code a workflow acts on: 3 when the commit is
 /// no longer the one to build for, 75 when trying again may pass. Only the
 /// session open says 3: a session that ends while the push runs is refused as
@@ -107,6 +153,8 @@ pub(crate) fn push_command(args: &PushCommand) -> Result<()> {
 pub(crate) fn failed(error: UploadError) -> anyhow::Error {
     let exit_code = match &error {
         UploadError::Http(error) if error.is_builder() => 1,
+        // The runner's token endpoint may answer on another try.
+        UploadError::Token(_) => EXIT_TRANSIENT,
         UploadError::Http(_) | UploadError::SessionBroken { .. } => EXIT_TRANSIENT,
         UploadError::HttpStatus { status, body } => {
             let code = serde_json::from_str::<serde_json::Value>(body)

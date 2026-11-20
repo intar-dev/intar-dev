@@ -93,6 +93,30 @@ describe("Kino pin", () => {
       const checked = run("check", "--file", file);
       expect(checked.status, checked.stderr).toBe(0);
       expect(checked.stdout).toBe(`{"3":{"current":"${digest}","previous":null}}\n`);
+
+      // The release of the pinned artifact is served only while it is the pinned one.
+      const releases = join(root, "kino-release.json");
+      const none = run("releases", "--file", file, "--releases", releases);
+      expect(none.stdout).toBe("{}\n");
+      const archive = "c".repeat(64);
+      expect(run("release", "--file", releases, "--guest-contract", "3", "--version", "0.6.0", "--sha256", archive, "--digest", digest).status).toBe(0);
+      const other = `sha256:${"d".repeat(64)}`;
+      expect(run("release", "--file", releases, "--guest-contract", "3", "--architecture", "arm64", "--version", "0.6.0", "--sha256", archive, "--digest", other).status).toBe(0);
+      expect(readFileSync(releases, "utf8")).toBe(
+        `{"3":{"amd64":{"version":"0.6.0","sha256":"${archive}","digest":"${digest}"},"arm64":{"version":"0.6.0","sha256":"${archive}","digest":"${other}"}}}\n`,
+      );
+      // arm64 is not pinned here, so its release is not named.
+      expect(run("releases", "--file", file, "--releases", releases).stdout).toBe(`{"3":{"amd64":{"version":"0.6.0","sha256":"${archive}"}}}\n`);
+      expect(run("pin", "--file", file, "--guest-contract", "3", "--architecture", "arm64", "--digest", other).status).toBe(0);
+      expect(run("releases", "--file", file, "--releases", releases).stdout).toBe(
+        `{"3":{"amd64":{"version":"0.6.0","sha256":"${archive}"},"arm64":{"version":"0.6.0","sha256":"${archive}"}}}\n`,
+      );
+      // A pin moved on without its release names none for that architecture.
+      expect(run("pin", "--file", file, "--guest-contract", "3", "--digest", other).status).toBe(0);
+      expect(run("releases", "--file", file, "--releases", releases).stdout).toBe(`{"3":{"arm64":{"version":"0.6.0","sha256":"${archive}"}}}\n`);
+      // A release that is no release is refused when it is written.
+      const bad = run("release", "--file", releases, "--guest-contract", "3", "--version", "latest", "--sha256", archive, "--digest", digest);
+      expect(bad.status).not.toBe(0);
     } finally {
       rmSync(root, { force: true, recursive: true });
     }

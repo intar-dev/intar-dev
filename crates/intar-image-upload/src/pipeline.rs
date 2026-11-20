@@ -35,17 +35,23 @@ pub struct PipelineSession {
 }
 
 impl PipelineSession {
-    /// Opens the session of the run `oidc_token` names, for the bundle `rev`.
+    /// Opens the session of the run whose OIDC token `oidc_token` answers,
+    /// for the bundle `rev`. The token is asked for anew on every try: one
+    /// lives for minutes, and the wait for a bundle can be longer.
     ///
     /// # Errors
     /// Returns the refusal, or the last failure once the tries are used up.
-    pub fn open(base_url: &str, oidc_token: &str, rev: &str) -> Result<Self> {
+    pub fn open(
+        base_url: &str,
+        oidc_token: impl Fn() -> std::result::Result<String, String>,
+        rev: &str,
+    ) -> Result<Self> {
         Self::open_with(base_url, oidc_token, rev, DEFAULT_WAIT)
     }
 
     pub(crate) fn open_with(
         base_url: &str,
-        oidc_token: &str,
+        oidc_token: impl Fn() -> std::result::Result<String, String>,
         rev: &str,
         default_wait: Duration,
     ) -> Result<Self> {
@@ -60,17 +66,18 @@ impl PipelineSession {
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
             return Err(Error::InvalidConfig("the registry URL must be http(s)"));
         }
-        if oidc_token.trim().is_empty() {
-            return Err(Error::InvalidConfig("the OIDC token is empty"));
-        }
         let client = Client::builder().timeout(REQUEST_TIMEOUT).build()?;
         let body = serde_json::json!({ "rev": rev });
         let mut attempt = 1;
         let mut failures = 0;
         loop {
+            let token = oidc_token().map_err(Error::Token)?;
+            if token.trim().is_empty() {
+                return Err(Error::InvalidConfig("the OIDC token is empty"));
+            }
             let sent = client
                 .post(url.clone())
-                .bearer_auth(oidc_token.trim())
+                .bearer_auth(token.trim())
                 .json(&body)
                 .send();
             let wait = match sent {

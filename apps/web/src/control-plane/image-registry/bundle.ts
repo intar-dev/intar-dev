@@ -3,6 +3,7 @@ import {
   type CourseCatalogSnapshotV2,
 } from "@/db/schema";
 import type { CourseCatalogSnapshotV2 as CourseCatalogSnapshotV2Wire } from "@/generated/catalog";
+import { GUEST_CONTRACT } from "@/generated/constants";
 import { appError, toErrorResponse } from "@/lib/app-error";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { mintInstallationToken, readRepository } from "@/lib/github-app";
@@ -133,7 +134,35 @@ export async function handleSourceCompilerDescriptor(
   ) {
     return jsonResponse({ error: "the scenario compiler is not configured" }, 503);
   }
-  return jsonResponse({ cli_version: version, sha256, digest });
+  const kino = pinnedKinoRelease(env.KINO_RELEASES_JSON);
+  return jsonResponse({ cli_version: version, sha256, digest, ...(kino ? { kino } : {}) });
+}
+
+/**
+ * The release of the Kino the platform pins for the current guest contract,
+ * per architecture (#441): a pipeline boots the image it built with it. Null
+ * until the deploy names one for both architectures.
+ */
+function pinnedKinoRelease(json: string | undefined) {
+  let releases: unknown = null;
+  try {
+    releases = JSON.parse(json || "null");
+  } catch {
+    // An unreadable value names none.
+  }
+  const entry = isRecord(releases) ? releases[String(GUEST_CONTRACT)] : null;
+  if (!isRecord(entry)) return null;
+  const release = (value: unknown) =>
+    isRecord(value) &&
+    typeof value.version === "string" &&
+    /^\d+\.\d+\.\d+$/.test(value.version) &&
+    typeof value.sha256 === "string" &&
+    SHA256_HEX_RE.test(value.sha256)
+      ? { version: value.version, sha256: value.sha256 }
+      : null;
+  const amd64 = release(entry.amd64);
+  const arm64 = release(entry.arm64);
+  return amd64 && arm64 ? { amd64, arm64 } : null;
 }
 
 export function normalizeCourseCatalogSnapshot(

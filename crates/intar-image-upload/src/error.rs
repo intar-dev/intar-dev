@@ -4,6 +4,8 @@ use std::io;
 #[derive(Debug)]
 pub enum Error {
     InvalidConfig(&'static str),
+    /// The run's OIDC token could not be had.
+    Token(String),
     Io(io::Error),
     Json(serde_json::Error),
     Http(reqwest::Error),
@@ -30,6 +32,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConfig(message) => write!(f, "invalid upload config: {message}"),
+            Self::Token(message) => write!(f, "no OIDC token: {message}"),
             Self::Io(err) => write!(f, "i/o error: {err}"),
             Self::Json(err) => write!(f, "json error: {err}"),
             Self::Http(err) => write!(f, "http error: {err}"),
@@ -55,6 +58,7 @@ impl std::error::Error for Error {
                 cause: Some(cause), ..
             } => Some(cause.as_ref()),
             Self::InvalidConfig(_)
+            | Self::Token(_)
             | Self::SessionBroken { cause: None, .. }
             | Self::HttpStatus { .. } => None,
         }
