@@ -30,6 +30,7 @@ import { platformHasRevisionImagesSql, readyPlatformImagesCtes } from "@/lib/sce
 import { verifyOutcome, type VerifyOutcome } from "@/lib/run-tasks";
 import type { RunStateDocument } from "@/lib/run-state";
 import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
+import { pokeAutomaticSource } from "@/lib/source-pokes";
 import { VALIDATION_USER_ID } from "@/lib/scenario-runs/content-access";
 import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
 import { markRunVmsAbsentInDesiredState, revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
@@ -397,7 +398,7 @@ export async function moveLiveRevision(input: {
  * revision than the live one of the scenarios row aliased `scenario`, with
  * the same content and guest contract: learners would get the same lab.
  */
-function sameAsLiveSql(revision: string, scenario: string): string {
+export function sameAsLiveSql(revision: string, scenario: string): string {
   return `EXISTS (SELECT 1 FROM scenario_revisions same_live WHERE same_live.scenario_id = ${scenario}.id
     AND same_live.rev = ${scenario}.live_rev AND same_live.rev <> ${revision}.rev
     AND same_live.content_digest = ${revision}.content_digest AND same_live.guest_contract = ${revision}.guest_contract)`;
@@ -503,6 +504,8 @@ export async function liftRevisionHold(input: { scenarioId: string; rev: string;
     ).bind(scenarioId, now),
   ]);
   if (!lifted?.results.length) throw appError(409, "revision_not_held", "this revision is not on hold");
+  // An automatic source's job takes the lab up again.
+  await pokeAutomaticSource(env.DB, { scenarioId }).run();
   console.info(JSON.stringify({ event: "scenario_revision_hold_lifted", scenarioId, rev, actorUserId }));
 }
 
@@ -627,6 +630,9 @@ export async function settleVerifyRun(
         error: error instanceof Error ? error.message : String(error) }));
     }
   }
+  // After the teardown, which frees the run's slot: an automatic source's
+  // job goes on with the lab, or with the next one that waited for the slot.
+  if (fresh) await pokeAutomaticSource(env.DB, { scenarioId: run.scenario_id }).run();
   return fresh;
 }
 

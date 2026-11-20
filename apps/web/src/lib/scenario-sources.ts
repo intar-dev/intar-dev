@@ -201,6 +201,10 @@ function failPipelineCommits(db: DrizzleD1Database, scopeKey: string, now: numbe
           WHERE ended.rev = ${scenarioSourceCommits.rev} AND ended.state = 'failed' AND ended.failure_reason = ${reason})`,
         sql`NOT EXISTS (SELECT 1 FROM scenario_revisions waiting
           WHERE waiting.rev = ${scenarioSourceCommits.rev} AND waiting.state = 'building')`,
+        // An automatic source's job decides its row, unless the source is
+        // gone: a disconnected one has no job any more.
+        sql`NOT EXISTS (SELECT 1 FROM scenario_sources source
+          WHERE source.scope_key = ${scopeKey} AND source.promotion = 'automatic' AND source.disconnected_at IS NULL)`,
         ended,
       ),
     );

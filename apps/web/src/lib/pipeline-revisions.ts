@@ -84,7 +84,11 @@ export async function maintainPipelineRevisions(
             AND EXISTS (SELECT 1 FROM scenario_revisions ended
               WHERE ended.rev = ?2 AND ended.state = 'failed' AND ended.failure_reason = ?3)
             AND NOT EXISTS (SELECT 1 FROM scenario_revisions waiting
-              WHERE waiting.rev = ?2 AND waiting.state = 'building')`,
+              WHERE waiting.rev = ?2 AND waiting.state = 'building')
+            -- An automatic source's job decides its row: other labs of the
+            -- commit may still be checked (#454).
+            AND NOT EXISTS (SELECT 1 FROM scenario_sources source
+              WHERE source.scope_key = ?1 AND source.promotion = 'automatic')`,
       ).bind(
         scopeKey,
         rev,

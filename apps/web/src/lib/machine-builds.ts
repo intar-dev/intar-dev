@@ -29,6 +29,7 @@ import { HOST_DESIRED_STATE_SCHEMA_VERSION_V3, mutateHostDesiredStateV3 } from "
 import { HOST_DEGRADED_AFTER_MS } from "@/lib/host-health";
 import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
 import { behaviourVerifiedSql } from "@/lib/kept-revisions";
+import { pokeAutomaticSource } from "@/lib/source-pokes";
 import { canonicalJson, sha256Digest } from "@/lib/scenario-contract/canonical-json";
 import { behaviourDigest, restoreDigest } from "@/lib/scenario-contract/revision-digests";
 
@@ -398,6 +399,9 @@ export async function settleScenarioRevisions(
     scenario_id: string; rev: string; doc_json: string; restore_basis: string | null;
     scope_key: string | null; producer: string;
   }>();
+  // The scopes a revision of which left `building`: an automatic source's
+  // job goes on with it.
+  const settled = new Set<string>();
   for (const revision of results) {
     const doc = JSON.parse(revision.doc_json) as ScenarioRevisionV1;
     const keys = [...new Set(doc.machines.map((machine) => machine.build_key))];
@@ -424,6 +428,7 @@ export async function settleScenarioRevisions(
         `UPDATE scenario_revisions SET state = 'failed', failure_reason = ?3
           WHERE scenario_id = ?1 AND rev = ?2 AND state = 'building'`,
       ).bind(revision.scenario_id, revision.rev, REVISION_BUILD_FAILURE).run();
+      if (revision.scope_key) settled.add(revision.scope_key);
       continue;
     }
     if (!keys.every((key) => byKey.get(key)?.state === "succeeded" && byKey.get(key)?.image_digest)) continue;
@@ -457,10 +462,12 @@ export async function settleScenarioRevisions(
       ),
       selectCandidateRevision(env.DB, revision.scenario_id, revision.rev),
     ]);
+    if (revision.scope_key) settled.add(revision.scope_key);
     // A new candidate's images enter the platform hosts' cache now, so its
     // verify run finds them ready.
     await wakePlatformAgents();
   }
+  for (const scopeKey of settled) await pokeAutomaticSource(env.DB, { scopeKey }).run();
 }
 
 /** Revisions one pass gives their behaviour digest. */

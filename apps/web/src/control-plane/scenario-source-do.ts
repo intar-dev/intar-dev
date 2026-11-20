@@ -32,6 +32,14 @@ import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { createAppId } from "@/lib/id";
 import { ingestSourceBundle, sourceBundleObjectKey } from "@/lib/scenario-bundles";
 import { maintainPipelineRevisions } from "@/lib/pipeline-revisions";
+import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { VALIDATION_USER_ID } from "@/lib/scenario-runs/content-access";
+import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
+import { beginVerifyRun } from "@/lib/scenario-runs/revision-begin";
+import { markRunVmsAbsentInDesiredState, revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
+import {
+  DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_WAIT_MS, driveDeployJob, type DeployJob, type DeployJobDeps,
+} from "@/lib/source-deploy-job";
 import { backfillBehaviourDigests } from "@/lib/machine-builds";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
@@ -167,6 +175,18 @@ export class ScenarioSourceDO extends DurableObject<Cloudflare.Env> {
   }
 }
 
+/** The job's runs are the validation account's, as an administrator's verify runs are. */
+const DEPLOY_JOB_DEPS: DeployJobDeps = {
+  beginVerifyRun: (input) => beginVerifyRun(input),
+  endVerifyRun: async (runId) => {
+    await destroyScenarioRunForUserWithDependencies({ runId, userId: VALIDATION_USER_ID }, {
+      markVmsAbsent: markRunVmsAbsentInDesiredState,
+      revokeRoutes: revokeScenarioRunRoutes,
+      wakeHostRuntime: tryWakeHostRuntime,
+    });
+  },
+};
+
 /** A poke, or an earlier step, that armed a sooner alarm keeps its time. */
 async function armAt(storage: Storage, at: number): Promise<void> {
   const pending = await storage.getAlarm();
@@ -252,8 +272,21 @@ async function tickScenarioSource(
   // After ingest, so a re-run failed row that ingest finds without its
   // staged objects is delivered again in the same pass.
   if (active.mode === "pull") await deliver(step, active);
+  // An automatic source's job checks the head's labs (#454). It arms its
+  // own next pass while it waits, apart from the retry backoff; a fault in
+  // it stops nothing else.
+  let jobAgain = false;
+  try {
+    const job = await driveDeployJob({ db: env.DB, storage, scopeKey, digest, now: Date.now(), deps: DEPLOY_JOB_DEPS });
+    if (job.wait) await armAt(storage, Date.now() + DEPLOY_JOB_WAIT_MS);
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "deploy_job_failed", scope_key: scopeKey, error: error instanceof Error ? error.message : String(error),
+    }));
+    jobAgain = true;
+  }
   const checkAgain = await syncDeployCheckRun(step, active);
-  return again || ingestAgain || checkAgain;
+  return again || ingestAgain || jobAgain || checkAgain;
 }
 
 // Reads the repository through a token minted for the bound id. The mint is
@@ -749,12 +782,16 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
   const state = left ? "superseded" : row.state === "superseded" && isHead ? "fetching" : row.state;
   const check = DEPLOY_CHECKS[state];
   // live_rev in progress is a retarget restoring its catalog, not a new deploy.
+  // The job's own count of the labs it has decided, while it is this row's.
+  const job = state === "waiting" ? await step.storage.get<DeployJob>(DEPLOY_JOB_STORAGE_KEY) : undefined;
   const title =
     row.is_live_rev && check.status !== "completed"
       ? "Restoring"
       : state === "building"
         ? `Building ${built}/${total}`
-        : check.title;
+        : job?.rowId === row.id
+          ? `Checking ${job.decided}/${job.total}`
+          : check.title;
   // GitHub renders the summary as Markdown and drops tags such as `<path>`.
   const summary = [
     ...(row.detail === null ? [] : [redactHostPaths(row.detail)]),
