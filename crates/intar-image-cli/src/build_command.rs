@@ -60,6 +60,11 @@ pub(crate) struct BuildCommand {
     /// Seconds the booted image has to report its lab ready.
     #[arg(long)]
     boot_timeout: Option<u64>,
+    /// Processors this build may use, in place of the configuration's: the
+    /// build VM gets them, and so does an emulated boot. Two builds beside
+    /// each other on one computer each take a share.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    cpus: Option<u32>,
 }
 
 /// `intar-image-cli relay <port>`: how a booted guest without internet access
@@ -104,7 +109,13 @@ pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
         .with_context(|| format!("{} is not a build configuration", path.display()))?,
         None => QemuBuildConfig::default(),
     };
-    let config = host.for_arch(arch);
+    let mut config = host.for_arch(arch);
+    if let Some(cpus) = args.cpus {
+        config.build_cpus = cpus;
+    }
+    // Each architecture works in a directory of its own: the two builds of
+    // one image have the same key, and may run beside each other.
+    config.work_root = config.work_root.join(arch.debian());
 
     let output = build_machine_image(&MachineBuildRequest {
         bundle: bundle.clone(),
@@ -152,8 +163,8 @@ pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
     };
     let booted = boot.run()?;
     println!(
-        "boot_s={:.1} boot_accelerator={} tasks={} passed={}",
-        booted.seconds, booted.accelerator, booted.tasks, booted.passed
+        "boot_s={:.1} boot_accelerator={} boot_cpus={} tasks={} passed={}",
+        booted.seconds, booted.accelerator, booted.cpus, booted.tasks, booted.passed
     );
     Ok(())
 }
@@ -172,6 +183,7 @@ struct Boot<'a> {
 
 struct Booted {
     seconds: f64,
+    cpus: u64,
     accelerator: &'static str,
     tasks: usize,
     passed: usize,
@@ -257,6 +269,16 @@ impl Boot<'_> {
         // An emulated guest is several times slower than a learner's; its lab
         // gets that much longer to become ready.
         let ready_seconds = emulated.then_some(READY_SECONDS * EMULATED_BOOT_FACTOR);
+        // Emulated processors are slow one by one, and what a lab does while
+        // it starts spreads over several: an emulated boot gets the build
+        // VM's processors when the lab declares fewer. A learner's machine,
+        // and a boot that is not emulated, has what the lab declares.
+        let declared = u64::from(machine.cpu_millis);
+        let cpu_millis = if emulated {
+            declared.max(u64::from(self.config.build_cpus) * 1000)
+        } else {
+            declared
+        };
         let relay = std::env::current_exe().context("find this program's own file")?;
         let run = work.path().join("run");
         let started = Instant::now();
@@ -270,7 +292,7 @@ impl Boot<'_> {
                 image: self.manifest.as_str(),
                 spec: &spec_digest,
                 kino: &kino_digest,
-                cpu_millis: u64::from(machine.cpu_millis),
+                cpu_millis,
                 memory_mib: u64::from(machine.memory_mib),
                 disk_mib: u64::from(machine.disk_mib),
                 egress: machine.egress,
@@ -354,6 +376,7 @@ impl Boot<'_> {
         match outcome {
             Ok(lab) => Ok(Booted {
                 seconds: waited,
+                cpus: cpu_millis.div_ceil(1000),
                 accelerator: accel.qemu_name(),
                 tasks: lab.tasks.len(),
                 passed: lab
