@@ -29,7 +29,7 @@ import { logKeyAttempt, machineBuildLogKey, storedBehaviourDigest } from "@/lib/
 import { platformHasRevisionImagesSql, readyPlatformImagesCtes } from "@/lib/scenario-runs/image-readiness";
 import { verifyOutcome, type VerifyOutcome } from "@/lib/run-tasks";
 import type { RunStateDocument } from "@/lib/run-state";
-import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
+import { readSourceBundle, sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { pokeAutomaticSource } from "@/lib/source-pokes";
 import { VALIDATION_USER_ID } from "@/lib/scenario-runs/content-access";
 import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
@@ -226,6 +226,12 @@ export async function assertScenarioAdmin(actorUserId: string, scenarioId: strin
  * takes over the replaced revision's restore verification when a snapshot
  * start of both depends on the same things. A rollback puts the behaviour
  * of the revision it leaves on hold.
+ *
+ * With `source` the move is an automatic source's job's (#454): a promotion
+ * of one lab of its head commit, with no catalog, which the job applies
+ * once for the commit. `actorUserId` is then the source's binder, whose
+ * rights are the binding's, and the source and its commit row are checked
+ * again in the move's own statement.
  */
 export async function moveLiveRevision(input: {
   scenarioId: string;
@@ -234,12 +240,15 @@ export async function moveLiveRevision(input: {
   liveRev: string | null;
   kind: "promote" | "rollback";
   actorUserId: string;
+  source?: SourceHead;
 }): Promise<{ liveRev: string }> {
-  const { scenarioId, rev, liveRev, kind, actorUserId } = input;
+  const { scenarioId, rev, liveRev, kind, actorUserId, source } = input;
+  if (source && kind !== "promote") throw new Error("a source's job only promotes");
   const row = await env.DB.prepare(
     `WITH ${KEPT_REVISIONS_CTE}
     SELECT scenario.namespace, scenario.organization_id, scenario.live_rev, scenario.candidate_rev,
-        revision.state, revision.guest_contract, revision.live_at, bundle.r2_key, ${scopeAdminSql(3)} AS manage,
+        revision.state, revision.guest_contract, revision.live_at, bundle.r2_key,
+        (${scopeAdminSql(3)}${source ? ` AND ${sourceHeadSql("scenario.scope_key", { binder: "?3", rev: "?2", row: "?4", attempt: "?5", digest: "?6" })}` : ""}) AS manage,
         revision.doc_json, ${sameAsLiveSql("revision", "scenario")} AS same_as_live,
         (SELECT live.doc_json FROM scenario_revisions live
           WHERE live.scenario_id = scenario.id AND live.rev = scenario.live_rev) AS live_doc_json,
@@ -249,7 +258,7 @@ export async function moveLiveRevision(input: {
       JOIN scenario_revisions revision ON revision.scenario_id = scenario.id AND revision.rev = ?2
       LEFT JOIN bundles bundle ON bundle.rev = revision.rev AND bundle.scope_key = scenario.scope_key
       WHERE scenario.id = ?1`,
-  ).bind(scenarioId, rev, actorUserId).first<{
+  ).bind(scenarioId, rev, actorUserId, ...(source ? [source.rowId, source.attempt, source.digest] : [])).first<{
     namespace: string; organization_id: string | null; live_rev: string | null; candidate_rev: string | null;
     state: string; guest_contract: number; live_at: number | null; r2_key: string | null; manage: number;
     kept: number; images_present: number; doc_json: string; live_doc_json: string | null; same_as_live: number;
@@ -259,6 +268,10 @@ export async function moveLiveRevision(input: {
   if (row.live_rev !== liveRev) throw appError(409, "live_revision_changed", "the live revision changed; reload and try again");
   if (kind === "promote" && row.candidate_rev !== rev) {
     throw appError(409, "revision_not_candidate", "only the scenario's candidate revision can be promoted");
+  }
+  // The job moves no unchanged lab, and its catalog is not this path's.
+  if (source && row.same_as_live) {
+    throw appError(409, "revision_unchanged", "this revision is the same as the live one");
   }
   if (kind === "promote" && row.same_as_live) {
     await publishCatalogOnly({ scenarioId, rev, liveRev, actorUserId, namespace: row.namespace,
@@ -287,7 +300,7 @@ export async function moveLiveRevision(input: {
   const scopeKey = courseCatalogScopeKey(row.organization_id);
   // Only a promotion of a newer bundle moves the scope's catalog; a rollback
   // or a lagging candidate leaves it, so the catalog never goes backwards.
-  const forward = kind === "promote" && (await env.DB.prepare(`SELECT ${catalogForwardSql("?1", "?2")} AS forward`)
+  const forward = kind === "promote" && !source && (await env.DB.prepare(`SELECT ${catalogForwardSql("?1", "?2")} AS forward`)
     .bind(rev, scopeKey).first<{ forward: number }>())?.forward === 1;
   const catalogJson = forward ? JSON.stringify(await namespacedCatalog(row.r2_key, row.namespace)) : null;
   if (catalogJson !== null && (await countUnitGuardRuns(env.DB, row.organization_id, JSON.parse(catalogJson)))) {
@@ -316,9 +329,10 @@ export async function moveLiveRevision(input: {
           AND (?10 IS NULL OR NOT ${catalogForwardSql("?2", "?9")} OR NOT EXISTS (SELECT 1 ${unitGuardRunsSql(8, 9, 10)}))
           -- A rollback racing this promotion may have put the behaviour on hold.
           AND (?5 = 'rollback' OR NOT ${behaviourHeldSql("?1", "?11")})
+          ${source ? `AND ${sourceHeadSql("scenarios.scope_key", { binder: "?7", rev: "?2", row: "?12", attempt: "?13", digest: "?14" })}` : ""}
         RETURNING id`,
     ).bind(scenarioId, rev, now, liveRev, kind, GUEST_CONTRACT, actorUserId, row.organization_id, scopeKey, catalogJson,
-      behaviour),
+      behaviour, ...(source ? [source.rowId, source.attempt, source.digest] : [])),
     env.DB.prepare(
       // "Last made live": a rollback target becomes the newest again, so
       // retention keeps what was live most recently.
@@ -366,7 +380,7 @@ export async function moveLiveRevision(input: {
   // pass that marked without it.
   const writer = await admitInternalRegistryOperation(env, {
     operation: "pointer_mutation",
-    owner: { kind: "system", id: actorUserId },
+    owner: { kind: "system", id: source ? `source:${source.scopeKey}` : actorUserId },
   });
   if (!writer.ok) throw appError(503, "registry_busy", "the image registry is busy; try again shortly");
   let outcome: "ok" | "error" = "error";
@@ -387,10 +401,41 @@ export async function moveLiveRevision(input: {
     }
     throw appError(409, "live_revision_changed", "the scenario changed; reload and try again");
   }
-  console.info(JSON.stringify({ event: "scenario_live_revision", scenarioId, kind, from: liveRev, to: rev, actorUserId,
+  console.info(JSON.stringify({ event: "scenario_live_revision", scenarioId, kind, from: liveRev, to: rev,
+    ...(source ? { source: source.scopeKey, commitRow: source.rowId } : { actorUserId }),
     ...(leftBehaviour !== "" ? { held: leftBehaviour } : {}) }));
   await wakePlatformAgents();
   return { liveRev: rev };
+}
+
+/** The head commit of an automatic source, as its job read it. */
+export interface SourceHead {
+  scopeKey: string;
+  /** The deploy row of the head and its attempt. */
+  rowId: string;
+  attempt: number;
+  /** The compile digest the head's rev is built on. */
+  digest: string;
+}
+
+/**
+ * Holds while the source of scope `scope` may act for its head commit: it
+ * is bound by `binder`, automatic, connected and not paused, and its deploy
+ * row `row` of attempt `attempt` has rev `rev`, is the head's on compile
+ * digest `digest`, and is one the job still drives. All are SQL
+ * expressions. With the binder's rights (`scopeAdminSql`) this is the
+ * source's binding predicate, held in the statement that writes.
+ */
+export function sourceHeadSql(
+  scope: string, by: { binder: string; rev: string; row: string; attempt: string; digest: string },
+): string {
+  return `EXISTS (SELECT 1 FROM scenario_sources source
+      JOIN scenario_source_commits head ON head.scope_key = source.scope_key AND head.purpose = 'deploy'
+     WHERE source.scope_key = ${scope} AND source.bound_by_user_id = ${by.binder} AND source.promotion = 'automatic'
+       AND source.disconnected_at IS NULL AND source.paused_at IS NULL
+       AND head.id = ${by.row} AND head.attempt = ${by.attempt} AND head.rev = ${by.rev}
+       AND head.state IN ('building', 'waiting', 'awaiting_promote')
+       AND head.rev = 'git-' || source.github_repository_id || '-' || source.head_sha || '-' || ${by.digest})`;
 }
 
 /**
@@ -479,10 +524,15 @@ const revisionHeld = () =>
  * Lifts the hold a rollback left on the behaviour of revision `rev`. The
  * scenario's candidate is then verified without a run when it is ready, no
  * verify run of it is active, and a verified revision behaves the same.
+ *
+ * An automatic source's head commit whose job has ended is taken up again,
+ * as a new attempt: the lab that was held is checked and goes live without
+ * a new commit.
  */
 export async function liftRevisionHold(input: { scenarioId: string; rev: string; actorUserId: string }): Promise<void> {
   const { scenarioId, rev, actorUserId } = input;
   const now = Date.now();
+  const digest = await sourceCompileDigest();
   const [lifted] = await env.DB.batch([
     env.DB.prepare(
       `UPDATE scenario_revision_holds SET lifted_at = ?3, lifted_by_user_id = ?4
@@ -502,6 +552,19 @@ export async function liftRevisionHold(input: { scenarioId: string; rev: string;
           AND NOT EXISTS (SELECT 1 FROM scenario_runs run WHERE run.scenario_id = ?1
             AND run.scenario_rev = scenario_revisions.rev AND run.launch_source = 'verify' AND run.active_key IS NOT NULL)`,
     ).bind(scenarioId, now),
+    // Only a row the job ended, which has its bundle: one that failed
+    // before its ingest has no labs to take up.
+    env.DB.prepare(
+      `UPDATE scenario_source_commits SET state = 'waiting', attempt = attempt + 1, detail = NULL, updated_at = ?2
+        WHERE purpose = 'deploy' AND state IN ('live', 'failed')
+          AND EXISTS (SELECT 1 FROM scenario_revision_holds hold WHERE hold.scenario_id = ?1 AND hold.lifted_at = ?2)
+          AND EXISTS (SELECT 1 FROM scenario_sources source JOIN scenarios scenario ON scenario.scope_key = source.scope_key
+            WHERE scenario.id = ?1 AND source.scope_key = scenario_source_commits.scope_key
+              AND source.promotion = 'automatic' AND source.disconnected_at IS NULL
+              AND scenario_source_commits.rev = 'git-' || source.github_repository_id || '-' || source.head_sha || '-' || ?3)
+          AND EXISTS (SELECT 1 FROM bundles bundle
+            WHERE bundle.rev = scenario_source_commits.rev AND bundle.scope_key = scenario_source_commits.scope_key)`,
+    ).bind(scenarioId, now, digest),
   ]);
   if (!lifted?.results.length) throw appError(409, "revision_not_held", "this revision is not on hold");
   // An automatic source's job takes the lab up again.
@@ -517,7 +580,7 @@ const activeRunsWouldLoseAccess = () =>
  * catalog comes from, by ingest time and then rev; both are SQL
  * expressions. No catalog, or one from outside the bundles table, is older.
  */
-function catalogForwardSql(rev: string, scopeKey: string): string {
+export function catalogForwardSql(rev: string, scopeKey: string): string {
   return `(EXISTS (SELECT 1 FROM bundles promoted_bundle WHERE promoted_bundle.rev = ${rev})
     AND NOT EXISTS (SELECT 1 FROM course_catalogs current_catalog
       JOIN bundles current_bundle ON current_bundle.rev = current_catalog.source_revision
@@ -528,7 +591,7 @@ function catalogForwardSql(rev: string, scopeKey: string): string {
 }
 
 /** The bundle's course catalog with each lecture's scenario as `<namespace>/<slug>`. */
-async function namespacedCatalog(r2Key: string | null, namespace: string): Promise<CourseCatalogSnapshotV2> {
+export async function namespacedCatalog(r2Key: string | null, namespace: string): Promise<CourseCatalogSnapshotV2> {
   const object = r2Key ? await env.VM_IMAGE_REGISTRY_BUCKET.get(r2Key) : null;
   if (!object) throw appError(409, "bundle_missing", "this revision's bundle is gone");
   const catalog = normalizeCourseCatalogSnapshot((await readSourceBundle(new Uint8Array(await object.arrayBuffer()))).course_catalog);

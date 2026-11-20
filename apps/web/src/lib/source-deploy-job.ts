@@ -1,14 +1,22 @@
 // The job of an automatic source's head commit (#454): it checks each lab of
-// the commit on a platform host, up to "every lab passed". The source
-// object's pass drives it, one step per pass; nothing here goes live.
+// the commit on a platform host and puts each one that passed live. The
+// source object's pass drives it, one step per pass.
 //
 // A lab is one scenario's revision of the commit. It has passed when the
 // revision is verified, by inheritance or by a verify run the job started;
-// it is skipped when it would not move (unchanged, on hold, disabled); it
-// failed when its revision failed, its checks did not pass, or a wait ran
-// out. The commit row is `building` while a revision waits for an image,
-// `waiting` while a lab is undecided, and `failed` once every lab is decided
-// and one failed.
+// it is skipped when it would not move (unchanged, on hold); it failed when
+// its revision failed, its checks did not pass, or a wait ran out. A lab
+// that passed goes live by a move of its own, whatever the commit's other
+// labs do.
+//
+// Besides its labs a commit has one step of its own: its course catalog
+// becomes the scope's, the scenarios it no longer has are disabled and
+// those it has again are enabled. It is held while it would take content
+// from a running lab.
+//
+// The commit row is `building` while a revision waits for an image,
+// `waiting` while a lab is undecided, `awaiting_promote` while only the
+// commit's step is held, and then `live`, or `failed` when a lab failed.
 //
 // The job counts only what it started itself: the ids of its verify runs
 // live in the source object's storage, with the row and attempt they belong
@@ -19,8 +27,11 @@ import { drizzle } from "drizzle-orm/d1";
 import { scenarioSources } from "@/db/schema";
 import { AppError } from "@/lib/app-error";
 import { behaviourHeldSql } from "@/lib/kept-revisions";
-import { sameAsLiveSql, type VerifyReport } from "@/lib/scenario-revisions";
-import { scenarioSourceBindingPredicate } from "@/lib/scenario-sources";
+import {
+  catalogForwardSql, namespacedCatalog, sameAsLiveSql, sourceHeadSql, type moveLiveRevision, type SourceHead,
+  type VerifyReport,
+} from "@/lib/scenario-revisions";
+import { scenarioSourceBindingPredicate, unitGuardRunsSql } from "@/lib/scenario-sources";
 
 export const DEPLOY_JOB_STORAGE_KEY = "deploy_job";
 /** A job's verify run may take this long: three hour-long tries would hold a slot for three hours. */
@@ -55,6 +66,8 @@ export interface DeployJobDeps {
   beginVerifyRun(input: { scenarioId: string; rev: string; leaseMs: number }): Promise<{ runId: string }>;
   /** Ends a verify run the job started. */
   endVerifyRun(runId: string): Promise<void>;
+  /** Puts a lab of the head commit live; throws an `AppError` when refused. */
+  moveLive: typeof moveLiveRevision;
 }
 
 type Storage = Pick<DurableObjectStorage, "get" | "put" | "delete">;
@@ -82,8 +95,19 @@ const LAB_WAITS: Record<string, string> = {
   verify_revision_not_candidate: "waiting",
 };
 
+/** Refusals of a move that the next pass reads again. */
+const MOVE_RETRIES = new Set(["live_revision_changed", "revision_held", "revision_unchanged", "revision_already_live",
+  "revision_not_verified", "revision_not_candidate", "scenario_revision_not_found"]);
+/** Refusals of a move that are the lab's end. */
+const MOVE_FAILURES: Record<string, string> = {
+  guest_contract_mismatch: "it was built for another guest contract; publish the commit again",
+  revision_not_retained: "its revision is no longer kept",
+  revision_images_gone: "its images are no longer stored",
+};
+
 interface LabRow {
   scenario_id: string;
+  live_rev: string | null;
   state: "building" | "ready" | "verified" | "failed";
   failure_reason: string | null;
   enabled: number;
@@ -97,13 +121,16 @@ interface LabRow {
 }
 
 type Lab =
-  | { kind: "passed" | "building" | "checking" }
-  | { kind: "skipped" | "failed" | "waiting"; note: string };
+  | { kind: "building" | "checking" | "unchanged" }
+  /** Live: by this pass, before it, or by an administrator. */
+  | { kind: "live"; inherited: boolean }
+  | { kind: "held" | "failed" | "waiting"; note: string };
 
 /**
  * One step of the job of scope `scopeKey`'s head commit, whose rev is built
  * on compile digest `digest`. The caller has found the binding active.
- * `wait` asks for another pass in a minute: a start was refused.
+ * `wait` asks for another pass in a minute: a start or a move was refused,
+ * or the commit's own step is held.
  */
 export async function driveDeployJob(input: {
   db: D1Database;
@@ -116,7 +143,8 @@ export async function driveDeployJob(input: {
   const { db, storage, scopeKey, digest, now, deps } = input;
   const head = await readHead(db, scopeKey, digest);
   const stored = await storage.get<DeployJob>(DEPLOY_JOB_STORAGE_KEY);
-  const driven = head?.automatic === 1 && head.id !== null && (head.state === "building" || head.state === "waiting");
+  const driven = head?.automatic === 1 && head.id !== null && head.binder !== null &&
+    (head.state === "building" || head.state === "waiting" || head.state === "awaiting_promote");
   if (stored && (!driven || stored.rowId !== head.id || stored.attempt !== head.attempt)) {
     await closeJob(db, storage, stored, deps);
   }
@@ -125,13 +153,14 @@ export async function driveDeployJob(input: {
     // `building`, or `failed` when a revision of it failed and none builds
     // any more, which is what a re-run or a new publish takes up. Nothing
     // else would end such a row: the job left it to itself.
-    if (head && head.automatic !== 1 && head.id !== null && (head.state === "waiting" || head.state === "building")) {
+    if (head && head.automatic !== 1 && head.id !== null &&
+      (head.state === "waiting" || head.state === "building" || head.state === "awaiting_promote")) {
       await db.prepare(
         `UPDATE scenario_source_commits SET
             state = CASE WHEN ${MANUAL_ROW_FAILED} THEN 'failed' ELSE 'building' END,
             detail = CASE WHEN ${MANUAL_ROW_FAILED} THEN 'a revision of this commit failed' ELSE NULL END,
             updated_at = ?3
-          WHERE id = ?1 AND attempt = ?2 AND state = ?4 AND (state = 'waiting' OR ${MANUAL_ROW_FAILED})`,
+          WHERE id = ?1 AND attempt = ?2 AND state = ?4 AND (state <> 'building' OR ${MANUAL_ROW_FAILED})`,
       ).bind(head.id, head.attempt, now, head.state).run();
     }
     return { wait: false };
@@ -142,7 +171,7 @@ export async function driveDeployJob(input: {
   const overdue = now - job.since >= DEPLOY_JOB_DEADLINE_MS;
 
   const { results: rows } = await db.prepare(
-    `SELECT revision.scenario_id, revision.state, revision.failure_reason, scenario.enabled,
+    `SELECT revision.scenario_id, scenario.live_rev, revision.state, revision.failure_reason, scenario.enabled,
         scenario.live_rev IS revision.rev AS live, scenario.candidate_rev IS revision.rev AS candidate,
         ${sameAsLiveSql("revision", "scenario")} AS unchanged,
         ${behaviourHeldSql("revision.scenario_id", "revision.behaviour_digest")} AS held,
@@ -155,12 +184,36 @@ export async function driveDeployJob(input: {
      WHERE revision.rev = ?1 ORDER BY revision.scenario_id`,
   ).bind(head.rev, scopeKey).all<LabRow>();
 
+  const source: SourceHead = { scopeKey, rowId: head.id!, attempt: head.attempt!, digest };
+  if (!rows.length) {
+    // Nothing to check, and nothing to tell removed labs from an empty
+    // bundle by: the commit fails and disables nothing.
+    await endRow(db, head, source, "failed", "the commit has no labs", now, false);
+    await closeJob(db, storage, job, deps);
+    return { wait: false };
+  }
+  // The commit's own step, once none of its revisions builds any more. It
+  // comes before the labs: a lab the commit has again is enabled by it.
+  let step: "done" | "held" | "building" = "building";
+  let updatedAt = head.updated_at!;
+  if (!rows.some((row) => row.state === "building")) {
+    const at = Math.max(now, updatedAt + 1);
+    step = await commitStep(db, { head, source, organizationId: head.organization_id, at });
+    if (step === "done") updatedAt = at;
+  }
+
   const labs = new Map<string, Lab>();
-  let wait = false;
+  let wait = step === "held";
   let scopeWait: string | null = null;
   for (const row of rows) {
-    const decided = decide(row, overdue);
+    let decided = decide(row, overdue);
+    if (decided === "move") {
+      decided = await move(row, head, source, deps);
+      if (decided.kind === "waiting") wait = true;
+    }
     if (decided) {
+      // A lab the commit's step has just enabled is read again at once.
+      if (decided.kind === "waiting" && !row.enabled && step === "done") wait = true;
       labs.set(row.scenario_id, decided);
       continue;
     }
@@ -224,26 +277,31 @@ export async function driveDeployJob(input: {
 
   const kinds = [...labs.values()].map((lab) => lab.kind);
   const undecided = kinds.filter((kind) => kind === "building" || kind === "checking" || kind === "waiting").length;
-  const state = kinds.includes("building") ? "building" : undecided === 0 && kinds.includes("failed") ? "failed" : "waiting";
-  // While the job goes on, what a lab waits for or why it stays; at the end,
-  // which labs failed and why.
-  const noted = [...labs].filter((entry): entry is [string, Extract<Lab, { note: string }>] => "note" in entry[1]);
-  const detail = noted
-    .filter(([, lab]) => state !== "failed" || lab.kind === "failed")
-    .map(([scenarioId, lab]) => `- ${scenarioId}: ${lab.kind === "skipped" ? `not checked, ${lab.note}` : lab.note}`)
-    .join("\n").slice(0, MAX_DETAIL_CHARS) || null;
+  // The step still held at the deadline is the commit's failure; the labs
+  // that went live stay live.
+  const stepFailed = step === "held" && overdue;
+  const state = kinds.includes("building") ? "building"
+    : undecided > 0 ? "waiting"
+    : step === "held" && !stepFailed ? "awaiting_promote"
+    : kinds.includes("failed") || stepFailed ? "failed" : "live";
+  const detail = detailOf(labs, step === "held"
+    ? stepFailed
+      ? "- the course catalog was not published: runs kept using what the commit removes"
+      : "- the course catalog waits for an idle moment: a run still uses what the commit removes"
+    : null);
+  if (state === "live" || state === "failed") {
+    await endRow(db, { ...head, updated_at: updatedAt }, source, state, detail, now, true);
+    // Every lab is decided; a run the deadline overtook is ended.
+    await closeJob(db, storage, job, deps);
+    return { wait: false };
+  }
   if (state !== head.state || detail !== head.detail) {
     await db.prepare(
       `UPDATE scenario_source_commits SET state = ?4, detail = ?5, updated_at = ?6
         WHERE id = ?1 AND attempt = ?2 AND state = ?3
           AND rev = (SELECT 'git-' || github_repository_id || '-' || head_sha || '-' || ?8
             FROM scenario_sources WHERE scope_key = ?7)`,
-    ).bind(head.id, head.attempt, head.state, state, detail, now, scopeKey, digest).run();
-  }
-  if (state === "failed") {
-    // Every lab is decided; a run the deadline overtook is ended.
-    await closeJob(db, storage, job, deps);
-    return { wait: false };
+    ).bind(head.id, head.attempt, head.state, state, detail, Math.max(now, updatedAt + 1), scopeKey, digest).run();
   }
   job.total = rows.length;
   job.decided = rows.length - undecided;
@@ -251,20 +309,167 @@ export async function driveDeployJob(input: {
   return { wait };
 }
 
-/** The lab's outcome where no verify run is needed to tell, else null. */
-function decide(row: LabRow, overdue: boolean): Lab | null {
+/**
+ * The check run's lines: one per lab that changed, the failed and held
+ * first, the unchanged as a count; cut at a line when they are too many.
+ */
+function detailOf(labs: Map<string, Lab>, stepLine: string | null): string | null {
+  const rank = { failed: 0, held: 1, waiting: 2, live: 3 } as const;
+  const lines = [...labs]
+    .filter((entry): entry is [string, Extract<Lab, { kind: keyof typeof rank }>] => entry[1].kind in rank)
+    .sort(([, a], [, b]) => rank[a.kind] - rank[b.kind])
+    .map(([scenarioId, lab]) => `- ${scenarioId}: ${lab.kind === "live"
+      ? `live${lab.inherited ? ", verified without a run" : ""}`
+      : lab.kind === "held" ? `held; ${lab.note}` : lab.note}`);
+  const unchanged = [...labs.values()].filter((lab) => lab.kind === "unchanged").length;
+  if (unchanged) lines.push(`- ${unchanged} ${unchanged === 1 ? "lab" : "labs"} unchanged`);
+  if (stepLine) lines.unshift(stepLine);
+  const kept: string[] = [];
+  let length = 0;
+  for (const line of lines) {
+    if (length + line.length + 1 > MAX_DETAIL_CHARS - 32) {
+      kept.push(`- and ${lines.length - kept.length} more`);
+      break;
+    }
+    kept.push(line);
+    length += line.length + 1;
+  }
+  return kept.join("\n") || null;
+}
+
+/**
+ * Ends the job's row as `live` or `failed`, and names the commit as the
+ * last one whose job ended on its source, in one batch. A commit that had
+ * nothing to check is named by nothing (`named` false).
+ */
+async function endRow(
+  db: D1Database, head: Head, source: SourceHead, state: "live" | "failed", detail: string | null, now: number,
+  named: boolean,
+): Promise<void> {
+  const at = Math.max(now, (head.updated_at ?? 0) + 1);
+  await db.batch([
+    db.prepare(
+      `UPDATE scenario_source_commits SET state = ?4, detail = ?5, updated_at = ?6
+        WHERE id = ?1 AND attempt = ?2 AND state = ?3
+          AND ${sourceHeadSql("scenario_source_commits.scope_key", { binder: "?7", rev: "scenario_source_commits.rev", row: "?1", attempt: "?2", digest: "?8" })}`,
+    ).bind(head.id, head.attempt, head.state, state, detail, at, head.binder, source.digest),
+    db.prepare(
+      `UPDATE scenario_sources SET live_rev = ?3, live_sha = head_sha, live_at = ?2, updated_at = ?2
+        WHERE scope_key = ?1 AND ?6 = 1 AND EXISTS (SELECT 1 FROM scenario_source_commits ended
+          WHERE ended.id = ?4 AND ended.state = ?5 AND ended.updated_at = ?2)`,
+    ).bind(source.scopeKey, at, head.rev, head.id, state, named ? 1 : 0),
+  ]);
+}
+
+/**
+ * The commit's own step: its course catalog becomes the scope's when its
+ * bundle is newer than the catalog's; and then, with the catalog this
+ * commit's, the scope's scenarios the commit no longer has are disabled and
+ * those it has again are enabled. One batch behind a marker on the commit
+ * row, which holds only for the source's head and while no unfinished run
+ * would lose its unit to the new catalog or is of a scenario to disable.
+ * `done` when nothing of it is left, also when nothing was to do.
+ */
+async function commitStep(
+  db: D1Database, input: { head: Head; source: SourceHead; organizationId: string | null; at: number },
+): Promise<"done" | "held"> {
+  const { head, source, organizationId, at } = input;
+  const scope = source.scopeKey;
+  const missing = `NOT EXISTS (SELECT 1 FROM scenario_revisions had WHERE had.scenario_id = scenarios.id AND had.rev = ?2)`;
+  const todo = await db.prepare(
+    `SELECT ${catalogForwardSql("?2", "?1")} AS forward,
+        (SELECT source_revision FROM course_catalogs WHERE scope_key = ?1) IS ?2 AS ours,
+        (SELECT COUNT(*) FROM scenarios WHERE scope_key = ?1 AND enabled = 1 AND ${missing}) AS removed,
+        (SELECT COUNT(*) FROM scenarios WHERE scope_key = ?1 AND enabled = 0 AND NOT ${missing}) AS returned,
+        (SELECT r2_key FROM bundles WHERE rev = ?2 AND scope_key = ?1) AS r2_key,
+        (SELECT namespace FROM scenarios WHERE scope_key = ?1 AND NOT ${missing} LIMIT 1) AS namespace`,
+  ).bind(scope, head.rev).first<{
+    forward: number; ours: number; removed: number; returned: number; r2_key: string | null; namespace: string | null;
+  }>();
+  if (!todo) return "done";
+  // Removals belong to the commit whose catalog is the scope's: a head that
+  // an older bundle made, as after a force-push back, changes nothing.
+  if (!todo.forward && (!todo.ours || (!todo.removed && !todo.returned))) return "done";
+  const catalogJson = todo.forward && todo.namespace !== null
+    ? JSON.stringify(await namespacedCatalog(todo.r2_key, todo.namespace)) : null;
+  const marked = `EXISTS (SELECT 1 FROM scenario_source_commits marked WHERE marked.id = ?3 AND marked.updated_at = ?4)`;
+  const ours = `EXISTS (SELECT 1 FROM course_catalogs WHERE scope_key = ?1 AND source_revision = ?2)`;
+  const [marker] = await db.batch([
+    db.prepare(
+      `UPDATE scenario_source_commits SET updated_at = ?4
+        WHERE id = ?3 AND attempt = ?5 AND state = ?6
+          AND ${sourceHeadSql("?1", { binder: "?7", rev: "?2", row: "?3", attempt: "?5", digest: "?8" })}
+          AND (?10 IS NULL OR NOT EXISTS (SELECT 1 ${unitGuardRunsSql(9, 1, 10)}))
+          AND NOT EXISTS (SELECT 1 FROM scenario_runs run JOIN scenarios ON scenarios.id = run.scenario_id
+            WHERE scenarios.scope_key = ?1 AND scenarios.enabled = 1 AND ${missing}
+              AND run.state NOT IN ('completed', 'failed'))
+        RETURNING id`,
+    ).bind(scope, head.rev, head.id, at, head.attempt, head.state, head.binder, source.digest, organizationId, catalogJson),
+    db.prepare(
+      `INSERT INTO course_catalogs (scope_key, organization_id, catalog_json, source_revision, created_at, updated_at)
+        SELECT ?1, ?5, ?6, ?2, ?4, ?4 WHERE ?6 IS NOT NULL AND ${marked} AND ${catalogForwardSql("?2", "?1")}
+        ON CONFLICT (scope_key) DO UPDATE SET catalog_json = excluded.catalog_json,
+          source_revision = excluded.source_revision, updated_at = max(course_catalogs.updated_at + 1, excluded.updated_at)`,
+    ).bind(scope, head.rev, head.id, at, organizationId, catalogJson),
+    db.prepare(
+      `UPDATE scenarios SET enabled = 0, updated_at = ?4
+        WHERE scope_key = ?1 AND enabled = 1 AND ${missing} AND ${marked} AND ${ours}`,
+    ).bind(scope, head.rev, head.id, at),
+    db.prepare(
+      `UPDATE scenarios SET enabled = 1, updated_at = ?4
+        WHERE scope_key = ?1 AND enabled = 0 AND NOT ${missing} AND ${marked} AND ${ours}`,
+    ).bind(scope, head.rev, head.id, at),
+  ]);
+  if (!marker?.results.length) return "held";
+  console.info(JSON.stringify({ event: "source_commit_step", scope_key: scope, rev: head.rev,
+    catalog: catalogJson !== null, removed: todo.removed, returned: todo.returned }));
+  return "done";
+}
+
+/** Puts a lab that passed live, or says what its move waits for or failed on. */
+async function move(row: LabRow, head: Head, source: SourceHead, deps: DeployJobDeps): Promise<Lab> {
+  try {
+    await deps.moveLive({
+      scenarioId: row.scenario_id, rev: head.rev!, liveRev: row.live_rev, kind: "promote", actorUserId: head.binder!, source,
+    });
+    return { kind: "live", inherited: row.verify_run_id === null };
+  } catch (error) {
+    const code = error instanceof AppError ? error.code : "";
+    if (code in MOVE_FAILURES) return { kind: "failed", note: MOVE_FAILURES[code]! };
+    if (code === "registry_busy") return { kind: "waiting", note: "waiting for the image registry" };
+    if (!MOVE_RETRIES.has(code)) {
+      console.error(JSON.stringify({
+        event: "deploy_job_move_failed", scope_key: source.scopeKey, scenario_id: row.scenario_id,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
+    return { kind: "waiting", note: "waiting to go live" };
+  }
+}
+
+/**
+ * The lab's outcome where no verify run is needed to tell; `move` for one
+ * that passed and is not live yet; null for one that needs a verify run.
+ */
+function decide(row: LabRow, overdue: boolean): Lab | "move" | null {
   if (row.state === "failed") return { kind: "failed", note: row.failure_reason ?? "its revision failed" };
-  if (row.live) return { kind: "passed" };
+  if (row.live) return { kind: "live", inherited: row.verify_run_id === null };
   if (row.state === "building") {
     return overdue ? { kind: "failed", note: "its images did not arrive within 24 hours" } : { kind: "building" };
   }
-  if (row.unchanged) return { kind: "skipped", note: "unchanged" };
-  if (row.held) return { kind: "skipped", note: "held; an administrator must lift it" };
-  if (!row.enabled) return { kind: "skipped", note: "the scenario is disabled" };
+  if (row.unchanged) return { kind: "unchanged" };
+  if (row.held) return { kind: "held", note: "an administrator must lift it" };
+  // Disabled with a revision of the head: the commit has the lab again,
+  // and its step enables it.
+  if (!row.enabled) {
+    return overdue
+      ? { kind: "failed", note: "the scenario could not be enabled within 24 hours" }
+      : { kind: "waiting", note: "waiting for the commit to enable it" };
+  }
   // Only a candidate is verified and promoted. A head that is not its
   // labs' newest ingest, as after a force-push back to it, cannot pass.
   if (!row.candidate) return { kind: "failed", note: "a newer revision of this lab exists; publish the commit again" };
-  if (row.state === "verified") return { kind: "passed" };
+  if (row.state === "verified") return "move";
   return null;
 }
 
@@ -292,17 +497,23 @@ function labFailure(runs: Array<{ outcome?: RunOutcome }>, overdue: boolean): st
 
 interface Head {
   automatic: number;
+  /** The source's binder, whose rights the job's writes are checked by. */
+  binder: string | null;
+  organization_id: string | null;
   id: string | null;
   attempt: number | null;
   state: string | null;
   rev: string | null;
   detail: string | null;
+  updated_at: number | null;
 }
 
 /** The scope's source and its head's deploy row, when it has one. */
 async function readHead(db: D1Database, scopeKey: string, digest: string): Promise<Head | undefined> {
   return await drizzle(db).get<Head>(sql`
-    SELECT ${scenarioSources.promotion} = 'automatic' AS automatic, head.id, head.attempt, head.state, head.rev, head.detail
+    SELECT ${scenarioSources.promotion} = 'automatic' AS automatic, ${scenarioSources.boundByUserId} AS binder,
+        ${scenarioSources.organizationId} AS organization_id,
+        head.id, head.attempt, head.state, head.rev, head.detail, head.updated_at
       FROM ${scenarioSources}
       LEFT JOIN scenario_source_commits head ON head.scope_key = ${scenarioSources.scopeKey} AND head.purpose = 'deploy'
         AND head.rev = 'git-' || ${scenarioSources.githubRepositoryId} || '-' || ${scenarioSources.headSha} || '-' || ${digest}

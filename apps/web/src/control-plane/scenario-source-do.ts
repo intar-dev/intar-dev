@@ -35,6 +35,7 @@ import { maintainPipelineRevisions } from "@/lib/pipeline-revisions";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { VALIDATION_USER_ID } from "@/lib/scenario-runs/content-access";
 import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
+import { moveLiveRevision } from "@/lib/scenario-revisions";
 import { beginVerifyRun } from "@/lib/scenario-runs/revision-begin";
 import { markRunVmsAbsentInDesiredState, revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
 import {
@@ -178,6 +179,7 @@ export class ScenarioSourceDO extends DurableObject<Cloudflare.Env> {
 /** The job's runs are the validation account's, as an administrator's verify runs are. */
 const DEPLOY_JOB_DEPS: DeployJobDeps = {
   beginVerifyRun: (input) => beginVerifyRun(input),
+  moveLive: moveLiveRevision,
   endVerifyRun: async (runId) => {
     await destroyScenarioRunForUserWithDependencies({ runId, userId: VALIDATION_USER_ID }, {
       markVmsAbsent: markRunVmsAbsentInDesiredState,
@@ -385,8 +387,8 @@ async function dropped(env: Cloudflare.Env, scopeKey: string, rows: DroppedRow[]
   await endSourceCompiles(env, rows.map((row) => row.compile_host_id));
 }
 
-// Supersedes rows that are neither head nor live, except a promotion that
-// must finish.
+// Supersedes the unfinished and failed rows the head left. A `live` row
+// stays as it ended.
 async function supersede(
   env: Cloudflare.Env,
   scopeKey: string,
@@ -398,7 +400,6 @@ async function supersede(
         AND state IN ('fetching', 'compiling', 'ingesting', 'building', 'waiting',
           'awaiting_promote', 'failed')
         AND rev IS NOT ${headRev("?2", "?3")}
-        AND rev IS NOT (SELECT live_rev FROM scenario_sources WHERE scope_key = ?2)
       RETURNING rev, purpose, compile_host_id`,
   )
     .bind(Date.now(), scopeKey, digest)
@@ -702,11 +703,9 @@ interface CheckRow {
   detail: string | null;
   diagnostics_json: string | null;
   check_run_id: number | null;
-  is_live_rev: number;
 }
 
-const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_run_id,
-    rev IS (SELECT live_rev FROM scenario_sources WHERE scope_key = ?1) AS is_live_rev
+const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_run_id
   FROM scenario_source_commits WHERE scope_key = ?1 AND purpose = 'deploy'`;
 
 // A superseded head row waits to be delivered again, so it shows as queued.
@@ -729,11 +728,11 @@ const DEPLOY_CHECKS = {
 // Shows the head row as the Intar / deploy check run on its commit. Only a
 // change is sent, and the last state sent is all the DO keeps; the check run
 // id goes to D1, where the webhook finds a re-run. A check the head moved
-// away from is closed first, so no replaced commit keeps a running check: a
-// promotion is followed to its end, and any other row shows as superseded.
+// away from is closed first, so no replaced commit keeps a running check: it
+// shows as superseded.
 // A check on a repository the scope was bound to before is out of the
 // token's reach, and a paused or disconnected binding sends nothing: its
-// alarm only observes and finishes a promotion, so its check keeps the last
+// alarm only observes, so its check keeps the last
 // state until the binding is active again. True when a send failed, so the
 // alarm tries again.
 async function syncDeployCheckRun(step: Step, binding: ActiveBinding): Promise<boolean> {
@@ -776,27 +775,24 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
     const at = path === undefined ? "" : line === undefined ? `${path}: ` : `${path}:${line}: `;
     return `- ${at}${message}`;
   });
-  // A row the head left, except a promotion, is done with.
-  const left =
-    !isHead && row.state !== "promoting" && DEPLOY_CHECKS[row.state].status !== "completed";
+  // A row the head left is done with.
+  const left = !isHead && DEPLOY_CHECKS[row.state].status !== "completed";
   const state = left ? "superseded" : row.state === "superseded" && isHead ? "fetching" : row.state;
   const check = DEPLOY_CHECKS[state];
-  // live_rev in progress is a retarget restoring its catalog, not a new deploy.
   // The job's own count of the labs it has decided, while it is this row's.
   const job = state === "waiting" ? await step.storage.get<DeployJob>(DEPLOY_JOB_STORAGE_KEY) : undefined;
-  const title =
-    row.is_live_rev && check.status !== "completed"
-      ? "Restoring"
-      : state === "building"
-        ? `Building ${built}/${total}`
-        : job?.rowId === row.id
-          ? `Checking ${job.decided}/${job.total}`
-          : check.title;
+  const title = state === "building"
+    ? `Building ${built}/${total}`
+    : job?.rowId === row.id
+      ? `Checking ${job.decided}/${job.total}`
+      : check.title;
+  // In the job's states the row's detail has a line per lab already.
+  const byJob = state === "waiting" || state === "awaiting_promote" || state === "live";
   // GitHub renders the summary as Markdown and drops tags such as `<path>`.
   const summary = [
     ...(row.detail === null ? [] : [redactHostPaths(row.detail)]),
     ...diagnostics,
-    ...revisionLines,
+    ...(byJob ? [] : revisionLines),
   ]
     .join("\n")
     .replaceAll("&", "&amp;")
