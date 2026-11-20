@@ -54,6 +54,12 @@ export const BUILDER_REASSIGN_AFTER_MS = 10 * 60 * 1000;
 const BUILD_REPORT_STALE_AFTER_MS = 30 * 60 * 1000;
 /** intar-builder's maximum build workers (main.rs validate_job_config). */
 const BUILDER_BUILD_SLOTS = 2;
+/**
+ * The architectures whose image makes a revision complete. A learner's lab
+ * on a platform host runs the amd64 one; the arm64 image is read only for a
+ * run on an arm64 computer.
+ */
+const REVISION_COMPLETE_ARCHITECTURES = ["amd64"] as const;
 /** What a learner or tenant reads about a revision whose image failed. */
 export const REVISION_BUILD_FAILURE = "An image of this scenario failed to build.";
 /** What an admin or tenant reads about a revision that a newer publish replaced; no learner sees a failed revision. */
@@ -368,23 +374,45 @@ export async function recordMachineBuildReport(
  * verified when a verified revision of its scenario has the same digest and
  * guest contract.
  */
-export async function settleScenarioRevisions(env: Env, by: { rev: string } | { buildKey: string }): Promise<void> {
+export async function settleScenarioRevisions(
+  env: Env,
+  by: { rev: string } | { buildKey: string; scopeKey?: string },
+): Promise<void> {
+  // A revision without a scenario or a bundle row settles as a builder's.
+  const select = `SELECT revision.scenario_id, revision.rev, revision.doc_json, scenario.scope_key,
+      COALESCE(bundle.image_producer, 'builder') AS producer
+    FROM scenario_revisions revision
+    LEFT JOIN scenarios scenario ON scenario.id = revision.scenario_id
+    LEFT JOIN bundles bundle ON bundle.rev = revision.rev
+   WHERE revision.state = 'building'`;
   const { results } = await ("rev" in by
-    ? env.DB.prepare(`SELECT scenario_id, rev, doc_json FROM scenario_revisions WHERE state = 'building' AND rev = ?1`)
-      .bind(by.rev)
+    ? env.DB.prepare(`${select} AND revision.rev = ?1`).bind(by.rev)
     : env.DB.prepare(
-        `SELECT scenario_id, rev, doc_json FROM scenario_revisions WHERE state = 'building'
-          AND EXISTS (SELECT 1 FROM json_each(doc_json, '$.machines') machine
+        `${select} AND (?2 IS NULL OR scenario.scope_key = ?2)
+          AND EXISTS (SELECT 1 FROM json_each(revision.doc_json, '$.machines') machine
             WHERE json_extract(machine.value, '$.build_key') = ?1)`,
-      ).bind(by.buildKey)
-  ).all<{ scenario_id: string; rev: string; doc_json: string }>();
+      ).bind(by.buildKey, by.scopeKey ?? null)
+  ).all<{ scenario_id: string; rev: string; doc_json: string; scope_key: string | null; producer: string }>();
   for (const revision of results) {
     const doc = JSON.parse(revision.doc_json) as ScenarioRevisionV1;
     const keys = [...new Set(doc.machines.map((machine) => machine.build_key))];
-    const { results: builds } = await env.DB.prepare(
-      `SELECT build_key, state, image_digest FROM machine_builds
-        WHERE build_key IN (SELECT value FROM json_each(?1))`,
-    ).bind(JSON.stringify(keys)).all<{ build_key: string; state: string; image_digest: string | null }>();
+    // The producer is the revision's own, whoever asked for the settle: a
+    // pipeline's revision is complete only by its own scope's images (#441),
+    // never by a builder's or another scope's image of the same key, and a
+    // builder's only by a build.
+    const { results: builds } = await (revision.producer === "pipeline"
+      ? env.DB.prepare(
+          `SELECT image.build_key, 'succeeded' AS state, image.image_digest FROM scope_machine_images image
+             JOIN registry_manifests manifest ON manifest.digest = image.image_digest
+            WHERE image.scope_key = ?2 AND image.image_format = ?3
+              AND image.architecture IN (${REVISION_COMPLETE_ARCHITECTURES.map((arch) => `'${arch}'`).join(", ")})
+              AND image.build_key IN (SELECT value FROM json_each(?1))`,
+        ).bind(JSON.stringify(keys), revision.scope_key, IMAGE_FORMAT)
+      : env.DB.prepare(
+          `SELECT build_key, state, image_digest FROM machine_builds
+            WHERE build_key IN (SELECT value FROM json_each(?1))`,
+        ).bind(JSON.stringify(keys))
+    ).all<{ build_key: string; state: string; image_digest: string | null }>();
     const byKey = new Map(builds.map((build) => [build.build_key, build]));
     if (keys.some((key) => byKey.get(key)?.state === "failed")) {
       await env.DB.prepare(

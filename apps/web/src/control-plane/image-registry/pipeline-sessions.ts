@@ -1,4 +1,4 @@
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   bundles,
@@ -6,6 +6,7 @@ import {
   scenarioRevisions,
   scenarioSourceCommits,
   scenarioSources,
+  scenarios,
 } from "@/db/schema";
 import { appError, toErrorResponse } from "@/lib/app-error";
 import { encodeBase64Url } from "@/lib/base64url";
@@ -172,12 +173,21 @@ export async function handlePipelineSessionOpen(
       response.headers.set("retry-after", String(PIPELINE_BUNDLE_PENDING_RETRY_SECONDS));
       return response;
     }
-    const [building] = await db
+    // A revision that already has its amd64 images is ready, and its arm64
+    // ones are still to come: only a failed rev takes no more images.
+    const [wanted] = await db
       .select({ rev: scenarioRevisions.rev })
       .from(scenarioRevisions)
-      .where(and(eq(scenarioRevisions.rev, rev), eq(scenarioRevisions.state, "building")))
+      .innerJoin(scenarios, eq(scenarios.id, scenarioRevisions.scenarioId))
+      .where(
+        and(
+          eq(scenarioRevisions.rev, rev),
+          eq(scenarios.scopeKey, binding.scopeKey),
+          inArray(scenarioRevisions.state, ["building", "ready", "verified"]),
+        ),
+      )
       .limit(1);
-    if (!building) throw superseded();
+    if (!wanted) throw superseded();
 
     const now = Date.now();
     const expiresAt = now + PIPELINE_SESSION_TTL_MS;

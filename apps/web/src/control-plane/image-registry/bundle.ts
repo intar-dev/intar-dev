@@ -94,6 +94,7 @@ export async function handleSourceBundleUpload(
       sha: claims.sha,
       purpose: "deploy",
       claim: { via: "push", headSha: head.headSha, observedAt },
+      imageProducer: binding.imageProducer,
     });
   } catch (error) {
     const refusal = toErrorResponse(error, "scenario source upload failed");

@@ -340,13 +340,16 @@ describe("opening a pipeline upload session", () => {
     await refusal(await open(), 409, "superseded");
   });
 
-  it("refuses when no revision of the rev is building", async () => {
-    await seedBundle({ state: "ready" });
+  it("refuses when no revision of the rev in its scope still takes images", async () => {
+    await seedBundle({ state: "failed" });
     await refusal(await open(), 409, "superseded");
-    await db().update(scenarioRevisions).set({ state: "failed" });
+    // A revision that is ready has its amd64 images; its arm64 ones may follow.
+    for (const state of ["building", "ready", "verified"] as const) {
+      await db().update(scenarioRevisions).set({ state });
+      expect((await open()).status).toBe(201);
+    }
+    await db().update(scenarios).set({ scopeKey: "organization:acme" });
     await refusal(await open(), 409, "superseded");
-    await db().update(scenarioRevisions).set({ state: "building" });
-    expect((await open()).status).toBe(201);
   });
 
   it("refuses a self-hosted runner unless the source allows it", async () => {
@@ -845,6 +848,23 @@ describe("a pipeline recording its image", () => {
     expect(await env.DB.prepare("SELECT count(*) AS n FROM machine_builds").first("n")).toBe(0);
     expect((await call("GET", `/registry/v1/builds/${KEY_HEX}/result`, { bearer: token })).status).toBe(405);
     expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
+  });
+
+  it("makes its revision ready with the amd64 image, on the first record and on a repeat", async () => {
+    await seedBundle();
+    const token = await session();
+    const state = async () => (await db().select({ state: scenarioRevisions.state }).from(scenarioRevisions))[0]?.state;
+    const arm = await pushImage(token, KEY_HEX, { architecture: "arm64" });
+    expect((await record(token, arm.digest, KEY_HEX, "?arch=arm64")).status).toBe(201);
+    expect(await state()).toBe("building");
+    const image = await pushImage(token, KEY_HEX);
+    expect((await record(token, image.digest)).status).toBe(201);
+    expect(await state()).toBe("ready");
+
+    // A result whose settle was lost is settled by the pipeline's retry.
+    await db().update(scenarioRevisions).set({ state: "building" });
+    expect((await record(token, image.digest)).status).toBe(200);
+    expect(await state()).toBe("ready");
   });
 
   it("answers a second image of the same key with the recorded one", async () => {

@@ -17,6 +17,8 @@ import { machineSpec, scenarioRevision, specBlob } from "@/lib/scenario-contract
 import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
 import { machineBuildLogKeys, maintainMachineBuilds, settleScenarioRevisions } from "@/lib/machine-builds";
 import { isScenarioNamespace, PUBLIC_NAMESPACE } from "@/lib/organization-slugs";
+import { producerInForce } from "@/lib/pipeline-revisions";
+import type { ImageProducer } from "@/db/schema/scenarios";
 
 
 export function sourceBundleObjectKey(rev: string): string {
@@ -42,6 +44,8 @@ export async function ingestSourceBundle(
     rev: string;
     gzip: Uint8Array<ArrayBuffer>;
     stored: boolean;
+    /** Who builds this source's images now; absent, a builder. */
+    imageProducer?: ImageProducer;
   },
 ): Promise<string | null> {
   const { organizationId, rev } = input;
@@ -144,21 +148,26 @@ export async function ingestSourceBundle(
   // applies it from the stored bundle, each lecture `scenario_id` written as
   // `<namespace>/<slug>`.
   const now = Date.now();
+  // A rev keeps the producer it was first ingested with, whatever its source
+  // is set to since. A source's ingests run one at a time, in its object.
+  const { producer } = await producerInForce(env, scopeKey, rev, input.imageProducer ?? "builder");
+  const byPipeline = producer === "pipeline";
   // One transaction, one statement per revision so no bound value carries
   // more than one document. `WHERE true` keeps SQLite from reading ON
   // CONFLICT as a join constraint of the SELECT.
   const buildsJson = JSON.stringify(Object.fromEntries([...builds].map(([key, target]) => [key, JSON.stringify(target)])));
   const [requeued] = await env.DB.batch([
     // The failed builds the upsert below takes over, read in its transaction:
-    // their logs belong to the previous bundle's owner.
+    // their logs belong to the previous bundle's owner. A pipeline's bundle
+    // has no builds: `?2` is then 0 and the read is empty.
     env.DB.prepare(
       `SELECT build_key, attempt, log_key FROM machine_builds
-        WHERE state = 'failed' AND build_key IN (SELECT key FROM json_each(?1))`,
-    ).bind(buildsJson),
+        WHERE ?2 = 1 AND state = 'failed' AND build_key IN (SELECT key FROM json_each(?1))`,
+    ).bind(buildsJson, byPipeline ? 0 : 1),
     env.DB.prepare(
-      `INSERT INTO bundles (rev, scope_key, organization_id, compiler_version, r2_key, created_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (rev) DO NOTHING`,
-    ).bind(rev, scopeKey, organizationId, SOURCE_COMPILER_VERSION_V2, objectKey, now),
+      `INSERT INTO bundles (rev, scope_key, organization_id, compiler_version, r2_key, image_producer, created_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?7, ?6) ON CONFLICT (rev) DO NOTHING`,
+    ).bind(rev, scopeKey, organizationId, SOURCE_COMPILER_VERSION_V2, objectKey, now, producer),
     env.DB.prepare(
       `INSERT INTO scenarios (id, namespace, slug, organization_id, scope_key, enabled, play, updated_at)
         SELECT json_extract(value, '$.id'), ?2, json_extract(value, '$.slug'), ?3, ?4, 1,
@@ -172,15 +181,21 @@ export async function ingestSourceBundle(
       now,
     ),
     // Only under a scenario of this scope, so no other scope gains a revision.
+    // A pipeline's revision that failed waiting, or still waits, starts its
+    // wait again: only a publish of the head commit is ingested twice, and
+    // nothing else would ever take such a revision up again.
     ...scenarios.map((scenario) =>
       env.DB.prepare(
         `INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state, created_at)
           SELECT ?1, ?2, ?3, ?4, 'building', ?5
           WHERE EXISTS (SELECT 1 FROM scenarios WHERE id = ?1 AND scope_key = ?6)
-          ON CONFLICT (scenario_id, rev) DO NOTHING`,
+          ON CONFLICT (scenario_id, rev) DO ${byPipeline
+            ? `UPDATE SET state = 'building', failure_reason = NULL, created_at = excluded.created_at
+                WHERE scenario_revisions.state IN ('failed', 'building')`
+            : "NOTHING"}`,
       ).bind(scenario.id, rev, GUEST_CONTRACT, scenario.doc, now, scopeKey),
     ),
-    env.DB.prepare(
+    ...(byPipeline ? [] : [env.DB.prepare(
       `INSERT INTO machine_builds (build_key, image_format, bundle_rev, target_json, state, attempt,
           created_at, updated_at)
         SELECT key, ?2, ?3, value, 'queued', 0, ?4, ?4 FROM json_each(?1)
@@ -194,7 +209,7 @@ export async function ingestSourceBundle(
       IMAGE_FORMAT,
       rev,
       now,
-    ),
+    )]),
   ]);
   // Before the requeued builds can be assigned and upload under the same keys.
   const staleLogs = (requeued!.results as Array<{ build_key: string; attempt: number; log_key: string | null }>)
@@ -205,6 +220,6 @@ export async function ingestSourceBundle(
   // A revision whose images all exist is ready now; the rest wait for the
   // builds just queued.
   await settleScenarioRevisions(env, { rev });
-  await maintainMachineBuilds(env, null, now);
+  if (!byPipeline) await maintainMachineBuilds(env, null, now);
   return null;
 }
