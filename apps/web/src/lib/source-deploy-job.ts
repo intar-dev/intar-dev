@@ -59,6 +59,13 @@ export interface DeployJobDeps {
 
 type Storage = Pick<DurableObjectStorage, "get" | "put" | "delete">;
 
+/** Holds for a commit row with a failed revision of its rev in its scope and none still building. */
+const MANUAL_ROW_FAILED = `(EXISTS (SELECT 1 FROM scenario_revisions ended
+      JOIN bundles bundle ON bundle.rev = ended.rev AND bundle.scope_key = scenario_source_commits.scope_key
+    WHERE ended.rev = scenario_source_commits.rev AND ended.state = 'failed')
+  AND NOT EXISTS (SELECT 1 FROM scenario_revisions building
+    WHERE building.rev = scenario_source_commits.rev AND building.state = 'building'))`;
+
 /** Refusals that hold for every lab of the scope: the pass starts nothing more. */
 const SCOPE_WAITS: Record<string, string> = {
   verify_quota_exhausted: "waiting for a free verify slot",
@@ -114,12 +121,18 @@ export async function driveDeployJob(input: {
     await closeJob(db, storage, stored, deps);
   }
   if (!head || !driven) {
-    // A source switched back to manual shows its row as it did before.
-    if (head && head.automatic !== 1 && head.id !== null && head.state === "waiting") {
+    // A source switched back to manual shows its row as a manual source's:
+    // `building`, or `failed` when a revision of it failed and none builds
+    // any more, which is what a re-run or a new publish takes up. Nothing
+    // else would end such a row: the job left it to itself.
+    if (head && head.automatic !== 1 && head.id !== null && (head.state === "waiting" || head.state === "building")) {
       await db.prepare(
-        `UPDATE scenario_source_commits SET state = 'building', detail = NULL, updated_at = ?3
-          WHERE id = ?1 AND attempt = ?2 AND state = 'waiting'`,
-      ).bind(head.id, head.attempt, now).run();
+        `UPDATE scenario_source_commits SET
+            state = CASE WHEN ${MANUAL_ROW_FAILED} THEN 'failed' ELSE 'building' END,
+            detail = CASE WHEN ${MANUAL_ROW_FAILED} THEN 'a revision of this commit failed' ELSE NULL END,
+            updated_at = ?3
+          WHERE id = ?1 AND attempt = ?2 AND state = ?4 AND (state = 'waiting' OR ${MANUAL_ROW_FAILED})`,
+      ).bind(head.id, head.attempt, now, head.state).run();
     }
     return { wait: false };
   }
@@ -152,14 +165,22 @@ export async function driveDeployJob(input: {
       continue;
     }
     // A ready candidate: it needs a verify run.
+    const lab = (job.labs[row.scenario_id] ??= { runs: [] });
+    const last = lab.runs.at(-1);
+    // As soon as the revision names the job's run, before another run of
+    // the revision can take its place there.
+    if (last && !last.outcome && row.verify_run_id === last.id) {
+      last.outcome = outcomeOf(last.id, row);
+      // A run whose lease ended is recorded before its slot is free, and
+      // nothing pokes when it is: look again in a minute.
+      if (row.running) wait = true;
+    }
     if (row.running) {
       // A run on a host that went away is ended by nothing until the host
       // is back; the day's deadline is the lab's last word then.
       labs.set(row.scenario_id, overdue ? { kind: "failed", note: "its verify run did not finish" } : { kind: "checking" });
       continue;
     }
-    const lab = (job.labs[row.scenario_id] ??= { runs: [] });
-    const last = lab.runs.at(-1);
     if (last && !last.outcome) last.outcome = outcomeOf(last.id, row);
     const failure = labFailure(lab.runs, overdue);
     if (failure) {

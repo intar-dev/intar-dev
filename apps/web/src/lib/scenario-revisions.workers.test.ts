@@ -900,6 +900,33 @@ describe("promotion, rollback and verify runs", () => {
       await promote(rev("a"), null);
     });
 
+    it("pokes the scope's automatic source once the run is settled, and never a manual one", async () => {
+      const source = (promotion: string) => env.DB.prepare(
+        `INSERT INTO scenario_sources (scope_key, github_installation_id, github_repository_id, github_repository,
+            default_branch, mode, bound_by_user_id, promotion)
+          VALUES ('public', 7, 42, 'intar/labs', 'main', 'push', ?1, ?2)
+          ON CONFLICT (scope_key) DO UPDATE SET promotion = excluded.promotion, poked_at = NULL`,
+      ).bind(ADMIN, promotion).run();
+      const poked = () => env.DB.prepare("SELECT poked_at FROM scenario_sources WHERE scope_key = 'public'").first<number | null>("poked_at");
+      await source("manual");
+      const first = await verify();
+      sendVm(ws, PLATFORM, verifyVm(first.runId, verifyLab({ steps: [], done: true, passed: false, pre_done: true })));
+      await until(() => runOf(first.runId), (run) => run?.active_key === null);
+      expect(await poked()).toBeNull();
+      await source("automatic");
+      const second = await verify();
+      sendVm(ws, PLATFORM, verifyVm(second.runId, verifyLab({ steps: [], done: true, passed: true, pre_done: true })));
+      expect(await until(poked, (at) => at !== null)).not.toBeNull();
+    });
+
+    it("gives the run the lease it was started with, an hour when none is named", async () => {
+      const before = Date.now();
+      const { runId } = await beginVerifyRun({ scenarioId: PUBLIC_ID, rev: rev("a"), leaseMs: 600_000 });
+      const lease = (await desiredDoc(PLATFORM))!.vms.find((vm) => vm.run_id === runId)!.lease_expires_at_unix_ms;
+      expect(lease).toBeGreaterThanOrEqual(before + 600_000);
+      expect(lease).toBeLessThan(before + 660_000);
+    });
+
     it("settles from a state report too", async () => {
       const { runId } = await verify();
       sendState(ws, PLATFORM, [verifyVm(runId, verifyLab({ steps: [], done: true, passed: true, pre_done: true }))]);

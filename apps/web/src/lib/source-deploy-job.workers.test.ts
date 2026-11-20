@@ -27,6 +27,8 @@ let digest: string;
 let now: number;
 let stored: Map<string, unknown>;
 let begun: Array<{ scenarioId: string; rev: string; leaseMs: number }>;
+/** Every run row made, so ids stay apart when a test empties `begun`. */
+let runs: number;
 let ended: string[];
 /** The refusal the next starts get, by scenario; `*` for every one. */
 let refuse: Record<string, string>;
@@ -44,7 +46,8 @@ const deps = {
     const code = refuse[input.scenarioId] ?? refuse["*"];
     if (code) throw appError(409, code, code);
     begun.push(input);
-    const runId = `run-${begun.length}`;
+    runs += 1;
+    const runId = `run-${runs}`;
     await env.DB.prepare(`INSERT INTO scenario_runs
       (run_id, user_id, host_id, scenario_id, scenario_rev, scenario_name, title, tagline, briefing_markdown, objectives_json,
        difficulty, estimated_minutes, tags_json, hints_json, solution_markdown, vm_count, state, state_rank, state_json,
@@ -123,6 +126,7 @@ beforeEach(async () => {
   now = Date.now();
   stored = new Map();
   begun = [];
+  runs = 0;
   ended = [];
   refuse = {};
   await createFixtureMember({ d1: env.DB, userId: OWNER });
@@ -332,11 +336,56 @@ describe("an automatic source's job", () => {
     expect(begun).toEqual([]);
     await env.DB.prepare("UPDATE member SET role = 'owner' WHERE user_id = ?1").bind(OWNER).run();
     await drive();
-    expect(begun).toHaveLength(1);
-    await finish("run-1", "failed");
+    expect(job()!.labs[WEB]!.runs).toEqual([{ id: "run-2" }]);
+    await finish("run-2", "failed");
     await drive();
     expect(await commit()).toMatchObject({ state: "waiting" });
+    expect(job()!.labs[WEB]!.runs).toEqual([{ id: "run-2", outcome: "failed" }, { id: "run-3" }]);
+  });
+
+  it("keeps its own run's failure when an administrator's run follows before the next pass", async () => {
+    await head("a");
+    await drive();
+    await finish("run-1", "failed");
+    // An administrator's run starts and fails before the job looks again.
+    await deps.beginVerifyRun({ scenarioId: WEB, rev: rev("a"), leaseMs: 1 });
+    await drive();
+    expect(job()!.labs[WEB]!.runs).toEqual([{ id: "run-1", outcome: "failed" }]);
+    await finish("run-2", "failed");
+    await drive();
+    await finish("run-3", "failed");
+    await drive();
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: its checks did not pass in 2 verify runs` });
+  });
+
+  it("looks again in a minute while a recorded run still holds its slot", async () => {
+    await head("a");
+    await drive();
+    // The lease ended: the report is written, the slot not yet free.
+    const report = { runId: "run-1", outcome: "verify_timeout", at: now, machines: [{ name: "webserver", verify: null, failure: null }] };
+    await env.DB.prepare("UPDATE scenario_revisions SET verify_run_id = 'run-1', verify_report_json = ?1 WHERE rev = ?2")
+      .bind(JSON.stringify(report), rev("a")).run();
+    expect(await drive()).toEqual({ wait: true });
+    expect(begun).toHaveLength(1);
+    await env.DB.prepare("UPDATE scenario_runs SET active_key = NULL WHERE run_id = 'run-1'").run();
+    expect(await drive()).toEqual({ wait: false });
     expect(begun).toHaveLength(2);
+  });
+
+  it("gives a manual source its row back as failed when a revision of it failed", async () => {
+    await head("a");
+    await drive();
+    await finish("run-1", "gone");
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_revisions SET state = 'failed', failure_reason = 'x' WHERE rev = ?1").bind(rev("a")),
+      env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE),
+    ]);
+    await drive();
+    expect(await commit()).toEqual({ state: "failed", detail: "a revision of this commit failed" });
+    // A building row without a failed revision is left as it is.
+    await head("b");
+    await drive();
+    expect(await commit("b")).toEqual({ state: "building", detail: null });
   });
 
   it("fails what is still undecided 24 hours after the job began, not after the revision was made", async () => {
