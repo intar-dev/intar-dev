@@ -2,7 +2,7 @@
 
 import { gzipSync } from "node:zlib";
 import { env } from "cloudflare:workers";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
 import { appError } from "@/lib/app-error";
 import { settleScenarioRevisions } from "@/lib/machine-builds";
@@ -11,7 +11,8 @@ import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { liftRevisionHold, moveLiveRevision } from "@/lib/scenario-revisions";
 import {
-  DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, driveDeployJob, type DeployJob,
+  DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, detailOf, driveDeployJob, type DeployJob,
+  type Lab,
 } from "@/lib/source-deploy-job";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -59,8 +60,10 @@ const deps = {
   },
   async endVerifyRun(runId: string) {
     ended.push(runId);
-    await env.DB.prepare("UPDATE scenario_runs SET active_key = NULL, delete_requested_at = 1 WHERE run_id = ?1").bind(runId).run();
+    await env.DB.prepare("UPDATE scenario_runs SET active_key = NULL, delete_requested_at = 1, state = 'completed' WHERE run_id = ?1")
+      .bind(runId).run();
   },
+  moveLive: moveLiveRevision,
 };
 
 const drive = () => driveDeployJob({ db: env.DB, storage, scopeKey: SCOPE, digest, now, deps });
@@ -68,6 +71,12 @@ const job = () => stored.get(DEPLOY_JOB_STORAGE_KEY) as DeployJob | undefined;
 const commit = (sha = "a") => env.DB.prepare(
   "SELECT state, detail FROM scenario_source_commits WHERE scope_key = ?1 AND rev = ?2",
 ).bind(SCOPE, rev(sha)).first<{ state: string; detail: string | null }>();
+const scenario = (scenarioId: string) => env.DB.prepare("SELECT live_rev, enabled FROM scenarios WHERE id = ?1")
+  .bind(scenarioId).first<{ live_rev: string | null; enabled: number }>();
+const sourceRow = () => env.DB.prepare("SELECT live_rev, live_sha, live_at FROM scenario_sources WHERE scope_key = ?1")
+  .bind(SCOPE).first<{ live_rev: string | null; live_sha: string | null; live_at: number | null }>();
+const catalogRev = () => env.DB.prepare("SELECT source_revision FROM course_catalogs WHERE scope_key = ?1")
+  .bind(SCOPE).first<string>("source_revision");
 const revisionState = (scenarioId: string, sha = "a") => env.DB.prepare(
   "SELECT state FROM scenario_revisions WHERE scenario_id = ?1 AND rev = ?2",
 ).bind(scenarioId, rev(sha)).first<string>("state");
@@ -108,7 +117,7 @@ async function build(sha: string) {
 async function finish(runId: string, outcome: "passed" | "failed" | "verify_timeout" | "gone", reported = true) {
   const run = await env.DB.prepare("SELECT scenario_id, scenario_rev FROM scenario_runs WHERE run_id = ?1")
     .bind(runId).first<{ scenario_id: string; scenario_rev: string }>();
-  await env.DB.prepare("UPDATE scenario_runs SET active_key = NULL WHERE run_id = ?1").bind(runId).run();
+  await env.DB.prepare("UPDATE scenario_runs SET active_key = NULL, state = 'completed' WHERE run_id = ?1").bind(runId).run();
   if (outcome === "gone") return;
   const report = { runId, outcome, at: now, machines: [{ name: "webserver", verify: reported ? { done: false } : null, failure: null }] };
   await env.DB.prepare(
@@ -139,6 +148,10 @@ beforeEach(async () => {
     env.DB.prepare("INSERT INTO agent_hosts (id, user_id, name, scope, credential_generation) VALUES ('host', ?1, 'Server', 'platform', 1)").bind(OWNER),
     env.DB.prepare("INSERT INTO registry_manifests (digest, media_type, artifact_type, size) VALUES (?1, 'm', 'a', 1)").bind(IMAGE),
   ]);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("an automatic source's job", () => {
@@ -173,12 +186,22 @@ describe("an automatic source's job", () => {
     // The run goes on: nothing more is started.
     await drive();
     expect(begun).toHaveLength(1);
-    // It passes: every lab passed, and the row stays for the moves.
+    // The commit's catalog is the scope's by now; the lab is not live yet.
+    expect(await catalogRev()).toBe(rev("a"));
+    expect(await scenario(WEB)).toEqual({ live_rev: null, enabled: 1 });
+    expect(await sourceRow()).toEqual({ live_rev: null, live_sha: null, live_at: null });
+    // It passes: the lab goes live, and with it the commit.
     await finish("run-1", "passed");
     await drive();
     expect(begun).toHaveLength(1);
-    expect(await commit()).toEqual({ state: "waiting", detail: null });
-    expect(job()).toMatchObject({ decided: 1, total: 1 });
+    expect(await scenario(WEB)).toEqual({ live_rev: rev("a"), enabled: 1 });
+    expect(await commit()).toEqual({ state: "live", detail: `- ${WEB}: live` });
+    expect(await sourceRow()).toMatchObject({ live_rev: rev("a"), live_sha: "a".repeat(40) });
+    expect((await sourceRow())!.live_at).not.toBeNull();
+    expect(job()).toBeUndefined();
+    // Nothing is left to drive.
+    expect(await drive()).toEqual({ wait: false });
+    expect(await commit()).toMatchObject({ state: "live" });
   });
 
   it("fails a lab after two failed runs, counting each run once", async () => {
@@ -243,7 +266,11 @@ describe("an automatic source's job", () => {
     expect(job()).toMatchObject({ decided: 1, total: 2 });
     await finish("run-2", "passed");
     await drive();
-    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: its build failed` });
+    // The lab that passed is live although the commit failed.
+    expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("a") });
+    expect(await scenario(WEB)).toMatchObject({ live_rev: null });
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: its build failed\n- ${DB_LAB}: live` });
+    expect(await sourceRow()).toMatchObject({ live_rev: rev("a") });
   });
 
   it("stops starting for the pass at a refusal of the whole scope", async () => {
@@ -262,45 +289,240 @@ describe("an automatic source's job", () => {
     });
   });
 
-  it("skips a lab that is unchanged, held or disabled, and fails one that is not the candidate", async () => {
-    // Rev a goes live by hand.
-    await head("a", twoLabs());
-    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
-    for (const scenarioId of [WEB, DB_LAB]) {
-      await moveLiveRevision({ scenarioId, rev: rev("a"), liveRev: null, kind: "promote", actorUserId: OWNER });
-    }
+  /** Rev `sha` goes live through the job, every lab verified without a run of its own. */
+  async function live(sha: string, bundle: typeof bundleFixture) {
+    await head(sha, bundle);
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1 AND state = 'ready'").bind(rev(sha)).run();
     await drive();
-    // Both are live already: passed, nothing started.
-    expect(begun).toEqual([]);
-    expect(await commit()).toEqual({ state: "waiting", detail: null });
-    expect(job()).toMatchObject({ decided: 2, total: 2 });
+    expect((await commit(sha))!.state).toBe("live");
+  }
 
-    // Rev b changes only the second lab.
+  it("moves only the labs a commit changed, and says so", async () => {
+    await live("a", twoLabs());
+    expect(await commit()).toEqual({
+      state: "live", detail: `- ${WEB}: live, verified without a run\n- ${DB_LAB}: live, verified without a run`,
+    });
+    // Rev b changes only the second lab, and only its words: verified by inheritance.
     await head("b", twoLabs("changed"));
     await drive();
-    expect(ended).toEqual([]);
-    expect(await commit("b")).toEqual({ state: "waiting", detail: `- ${WEB}: not checked, unchanged` });
-    expect(job()).toMatchObject({ rowId: "row-b", decided: 2, total: 2 });
     expect(begun).toEqual([]);
+    expect(await scenario(WEB)).toMatchObject({ live_rev: rev("a") });
+    expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("b") });
+    expect(await commit("b")).toEqual({
+      state: "live", detail: `- ${DB_LAB}: live, verified without a run\n- 1 lab unchanged`,
+    });
+    expect(await catalogRev()).toBe(rev("b"));
+    expect(await sourceRow()).toMatchObject({ live_rev: rev("b"), live_sha: "b".repeat(40) });
+  });
 
-    // A hold on the second lab's behaviour, and a disabled first lab.
+  it("leaves a held lab where it is while the commit goes live, and takes it up again on the lift", async () => {
+    await live("a", twoLabs());
+    await head("b", twoLabs("changed"));
     await env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at)
       SELECT scenario_id, behaviour_digest, 1 FROM scenario_revisions WHERE scenario_id = ?1 AND rev = ?2`).bind(DB_LAB, rev("b")).run();
-    await head("c", twoLabs("changed again"));
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1 AND state = 'ready'").bind(rev("b")).run();
     await drive();
-    expect((await commit("c"))!.detail).toContain(`- ${DB_LAB}: not checked, held; an administrator must lift it`);
-    expect(await revisionState(DB_LAB, "c")).toBe("ready");
-    expect(begun).toEqual([]);
-
-    // Back to rev b's sha: its revisions are no longer the candidates.
-    await env.DB.prepare("UPDATE scenario_source_commits SET state = 'building' WHERE id = 'row-b'").run();
-    await env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "b".repeat(40)).run();
-    await env.DB.prepare("UPDATE scenario_revisions SET state = 'ready' WHERE rev = ?1 AND scenario_id = ?2").bind(rev("b"), DB_LAB).run();
-    await env.DB.prepare("DELETE FROM scenario_revision_holds").run();
-    await drive();
+    expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("a") });
     expect(await commit("b")).toEqual({
-      state: "failed", detail: `- ${DB_LAB}: a newer revision of this lab exists; publish the commit again`,
+      state: "live", detail: `- ${DB_LAB}: held; an administrator must lift it\n- 1 lab unchanged`,
     });
+    // The lift takes the commit up again as a new attempt.
+    await liftRevisionHold({ scenarioId: DB_LAB, rev: rev("b"), actorUserId: OWNER });
+    expect(await env.DB.prepare("SELECT state, attempt, detail FROM scenario_source_commits WHERE id = 'row-b'").first())
+      .toEqual({ state: "waiting", attempt: 2, detail: null });
+    await drive();
+    expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("b") });
+    expect((await commit("b"))!.state).toBe("live");
+    // A row that ended before its ingest has no bundle, and is not taken up.
+    await env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at)
+      SELECT scenario_id, behaviour_digest, 1 FROM scenario_revisions WHERE scenario_id = ?1 AND rev = ?2
+      ON CONFLICT DO UPDATE SET lifted_at = NULL`).bind(DB_LAB, rev("b")).run();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "c".repeat(40)),
+      env.DB.prepare(`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, attempt, state, detail)
+        VALUES ('row-c', ?1, 'deploy', ?2, ?3, 'push', 1, 'failed', 'the fetch failed')`).bind(SCOPE, "c".repeat(40), rev("c")),
+    ]);
+    await liftRevisionHold({ scenarioId: DB_LAB, rev: rev("b"), actorUserId: OWNER });
+    expect(await commit("c")).toEqual({ state: "failed", detail: "the fetch failed" });
+  });
+
+  it("disables a lab the commit no longer has and enables one it has again, which is then checked and moved", async () => {
+    await live("a", twoLabs());
+    // Rev b has only the first lab.
+    await head("b");
+    await drive();
+    expect(await scenario(DB_LAB)).toEqual({ live_rev: rev("a"), enabled: 0 });
+    expect(await scenario(WEB)).toMatchObject({ enabled: 1 });
+    expect(await commit("b")).toEqual({ state: "live", detail: "- 1 lab unchanged" });
+    // Rev c has the second lab again, changed.
+    await head("c", twoLabs("back"));
+    expect(await drive()).toEqual({ wait: true });
+    expect(await scenario(DB_LAB)).toMatchObject({ enabled: 1, live_rev: rev("a") });
+    expect((await commit("c"))!.state).toBe("waiting");
+    await drive();
+    expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("c") });
+    expect((await commit("c"))!.state).toBe("live");
+  });
+
+  it("holds the commit's step while a run uses a lab it removes, and fails the commit at the deadline", async () => {
+    await live("a", twoLabs());
+    await env.DB.prepare(`INSERT INTO scenario_runs
+      (run_id, user_id, host_id, scenario_id, scenario_rev, scenario_name, title, tagline, briefing_markdown, objectives_json,
+       difficulty, estimated_minutes, tags_json, hints_json, solution_markdown, vm_count, state, state_rank, state_json)
+      VALUES ('learner-run', ?1, 'host', ?2, ?3, 'Scenario', 'Title', '', '', '[]', 'beginner', 1, '[]', '[]', '', 0, 'ready', 1, '{}')`)
+      .bind(OWNER, DB_LAB, rev("a")).run();
+    await head("b");
+    expect(await drive()).toEqual({ wait: true });
+    expect(await scenario(DB_LAB)).toMatchObject({ enabled: 1 });
+    expect(await catalogRev()).toBe(rev("a"));
+    expect(await commit("b")).toEqual({
+      state: "awaiting_promote",
+      detail: "- the course catalog waits for an idle moment: a run still uses what the commit removes\n- 1 lab unchanged",
+    });
+    expect(await sourceRow()).toMatchObject({ live_rev: rev("a") });
+    // The run ends: the step goes through and the commit is live.
+    await env.DB.prepare("UPDATE scenario_runs SET state = 'completed' WHERE run_id = 'learner-run'").run();
+    await drive();
+    expect(await scenario(DB_LAB)).toMatchObject({ enabled: 0 });
+    expect(await catalogRev()).toBe(rev("b"));
+    expect((await commit("b"))!.state).toBe("live");
+
+    // Held to the deadline, the commit fails; nothing is taken from the run.
+    await env.DB.prepare("UPDATE scenario_runs SET state = 'ready', scenario_id = ?1 WHERE run_id = 'learner-run'").bind(WEB).run();
+    const none = structuredClone(twoLabs());
+    none.scenarios.shift();
+    none.course_catalog.courses[0]!.lectures = none.course_catalog.courses[0]!.lectures
+      .filter((lecture) => !("scenario_id" in lecture) || lecture.scenario_id !== "broken-nginx");
+    await head("c", none);
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1 AND state = 'ready'").bind(rev("c")).run();
+    await drive();
+    expect((await commit("c"))!.state).toBe("awaiting_promote");
+    // The lab the commit has again stays disabled until the step goes through.
+    expect(await scenario(DB_LAB)).toMatchObject({ enabled: 0 });
+    now += DEPLOY_JOB_DEADLINE_MS;
+    await drive();
+    const failed = await commit("c");
+    expect(failed!.state).toBe("failed");
+    expect(failed!.detail).toContain("the course catalog was not published");
+    expect(await scenario(WEB)).toMatchObject({ enabled: 1 });
+  });
+
+  it("waits for a move that is refused, and fails the lab when it is refused for a day", async () => {
+    await head("a");
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
+    const busy = { ...deps, moveLive: async () => { throw appError(503, "registry_busy", "busy"); } };
+    const driveBusy = () => driveDeployJob({ db: env.DB, storage, scopeKey: SCOPE, digest, now, deps: busy });
+    expect(await driveBusy()).toEqual({ wait: true });
+    expect(await commit()).toEqual({ state: "waiting", detail: `- ${WEB}: waiting for the image registry` });
+    now += DEPLOY_JOB_DEADLINE_MS;
+    await driveBusy();
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: it could not go live within 24 hours` });
+    expect(await scenario(WEB)).toMatchObject({ live_rev: null });
+  });
+
+  it("stops the commit's step at the binder's rights, in the step's own statement", async () => {
+    await head("a");
+    const batch = env.DB.batch.bind(env.DB);
+    vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
+      await env.DB.prepare("UPDATE member SET role = 'member'").run();
+      return batch(statements);
+    });
+    await drive();
+    expect(await catalogRev()).toBeNull();
+    vi.restoreAllMocks();
+  });
+
+  it("lists the failed labs first and cuts the lines at a whole one", () => {
+    const labs = new Map<string, Lab>();
+    for (let index = 0; index < 100; index += 1) {
+      labs.set(`acme/lab-${String(index).padStart(3, "0")}`, index % 2
+        ? { kind: "live", inherited: false } : { kind: "failed", note: `its build failed ${"x".repeat(60)}` });
+    }
+    labs.set("acme/same", { kind: "unchanged" });
+    const lines = detailOf(labs, "- the step")!.split("\n");
+    expect(lines.join("\n").length).toBeLessThanOrEqual(4096);
+    expect(lines[0]).toBe("- the step");
+    expect(lines[1]).toContain("acme/lab-000: its build failed");
+    expect(lines.at(-1)).toBe("- 1 lab unchanged");
+    const shown = lines.length - 3;
+    expect(lines.at(-2)).toBe(`- and ${100 - shown} more`);
+    expect(detailOf(new Map(), null)).toBeNull();
+  });
+
+  it("fails a commit without labs and disables nothing", async () => {
+    await live("a", twoLabs());
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "b".repeat(40)),
+      env.DB.prepare(`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, attempt, state)
+        VALUES ('row-b', ?1, 'deploy', ?2, ?3, 'push', 1, 'building')`).bind(SCOPE, "b".repeat(40), rev("b")),
+    ]);
+    await drive();
+    expect(await commit("b")).toEqual({ state: "failed", detail: "the commit has no labs" });
+    expect(await scenario(WEB)).toMatchObject({ enabled: 1 });
+    expect(await sourceRow()).toMatchObject({ live_rev: rev("a") });
+  });
+
+  it("changes nothing for a head an older bundle made: its labs are not the candidates", async () => {
+    await live("a", twoLabs());
+    await live("b", twoLabs("changed"));
+    // Back to rev a's sha, as after a force-push.
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "a".repeat(40)),
+      env.DB.prepare("UPDATE scenario_source_commits SET state = 'building', attempt = 2 WHERE id = 'row-a'"),
+    ]);
+    await drive();
+    expect(await catalogRev()).toBe(rev("b"));
+    expect(await scenario(DB_LAB)).toEqual({ live_rev: rev("b"), enabled: 1 });
+    expect(await commit("a")).toEqual({
+      state: "failed",
+      detail: `- ${DB_LAB}: a newer revision of this lab exists; publish the commit again\n- ${WEB}: live, verified without a run`,
+    });
+  });
+
+  it("moves nothing once the source may not act: paused, manual, another binder, or a head that moved", async () => {
+    await head("a");
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
+    const source = { scopeKey: SCOPE, rowId: "row-a", attempt: 1, digest };
+    const moveA = () => moveLiveRevision({ scenarioId: WEB, rev: rev("a"), liveRev: null, kind: "promote", actorUserId: OWNER, source });
+    const refused = async (sql: string, undo: string) => {
+      await env.DB.prepare(sql).run();
+      await expect(moveA()).rejects.toMatchObject({ status: 404 });
+      expect(await scenario(WEB)).toMatchObject({ live_rev: null });
+      await env.DB.prepare(undo).run();
+    };
+    await refused("UPDATE scenario_sources SET paused_at = 1", "UPDATE scenario_sources SET paused_at = NULL");
+    await refused("UPDATE scenario_sources SET promotion = 'manual'", "UPDATE scenario_sources SET promotion = 'automatic'");
+    await refused("UPDATE scenario_sources SET disconnected_at = 1", "UPDATE scenario_sources SET disconnected_at = NULL");
+    await refused(`UPDATE scenario_sources SET head_sha = '${"f".repeat(40)}'`, `UPDATE scenario_sources SET head_sha = '${"a".repeat(40)}'`);
+    await refused("UPDATE scenario_source_commits SET attempt = 2", "UPDATE scenario_source_commits SET attempt = 1");
+    await refused("UPDATE scenario_source_commits SET state = 'superseded'", "UPDATE scenario_source_commits SET state = 'building'");
+    await refused("UPDATE member SET role = 'member'", "UPDATE member SET role = 'owner'");
+    // Another binder than the one the job read.
+    await expect(moveLiveRevision({ scenarioId: WEB, rev: rev("a"), liveRev: null, kind: "promote", actorUserId: "someone", source }))
+      .rejects.toMatchObject({ status: 404 });
+    // Lost between the read and the write: the move's own statement refuses.
+    for (const sql of ["UPDATE scenario_sources SET paused_at = 1", "UPDATE member SET role = 'member'",
+      "UPDATE scenario_source_commits SET attempt = 2"]) {
+      const batch = env.DB.batch.bind(env.DB);
+      const spy = vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
+        await env.DB.prepare(sql).run();
+        return batch(statements);
+      });
+      await expect(moveA()).rejects.toMatchObject({ code: "live_revision_changed" });
+      expect(await scenario(WEB)).toMatchObject({ live_rev: null });
+      spy.mockRestore();
+      await env.DB.batch([
+        env.DB.prepare("UPDATE scenario_sources SET paused_at = NULL"), env.DB.prepare("UPDATE member SET role = 'owner'"),
+        env.DB.prepare("UPDATE scenario_source_commits SET attempt = 1"),
+      ]);
+    }
+    // A rollback is never the job's, and the move goes through once all holds.
+    await expect(moveLiveRevision({ scenarioId: WEB, rev: rev("a"), liveRev: null, kind: "rollback", actorUserId: OWNER, source }))
+      .rejects.toThrow();
+    // The catalog is not this path's.
+    await moveA();
+    expect(await scenario(WEB)).toMatchObject({ live_rev: rev("a") });
+    expect(await catalogRev()).toBeNull();
   });
 
   it("ends its runs when the head moves, and starts over for the new head", async () => {
