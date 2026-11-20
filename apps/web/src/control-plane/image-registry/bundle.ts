@@ -6,7 +6,7 @@ import type { CourseCatalogSnapshotV2 as CourseCatalogSnapshotV2Wire } from "@/g
 import { appError, toErrorResponse } from "@/lib/app-error";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { mintInstallationToken, readRepository } from "@/lib/github-app";
-import { verifyGithubActionsToken } from "@/lib/github-oidc";
+import { runnerMayPublish, verifyGithubActionsToken } from "@/lib/github-oidc";
 import { canonicalApplicationOrigin } from "@/lib/request-security";
 import {
   acceptScenarioSourceUpload,
@@ -49,6 +49,11 @@ export async function handleSourceBundleUpload(
       drizzle(env.DB),
       claims.repositoryId,
     );
+    // A runner that is not GitHub-hosted is refused as it always was, whether
+    // or not its repository is connected, unless the source allows it.
+    if (!runnerMayPublish(claims, binding)) {
+      throw appError(401, "unauthorized", "The GitHub Actions token was refused.");
+    }
     if (!binding) {
       throw sourceRefusal(
         409,

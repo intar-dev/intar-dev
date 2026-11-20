@@ -128,14 +128,16 @@ function github() {
   });
 }
 
-async function oidcToken(repo: number): Promise<string> {
+async function oidcToken(repo: number, runner = "github-hosted"): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   return new SignJWT({
     repository_id: String(repo),
     ref: "refs/heads/main",
     sha: SHA,
     event_name: "push",
-    runner_environment: "github-hosted",
+    runner_environment: runner,
+    run_id: "17700000001",
+    run_attempt: "1",
     job_workflow_ref:
       "intar-dev/intar-dev/.github/workflows/scenario-publish.yml@refs/tags/scenario-publish-v1",
     job_workflow_sha: WORKFLOW_SHA,
@@ -167,12 +169,12 @@ async function form(meta: unknown, bundle: Uint8Array<ArrayBuffer> | null, heade
 }
 
 /** The CLI's `bundle` upload. */
-async function push(input: { repo?: 42 | 43; rev?: string; bundle?: Uint8Array<ArrayBuffer> } = {}) {
+async function push(input: { repo?: 42 | 43; rev?: string; bundle?: Uint8Array<ArrayBuffer>; runner?: string } = {}) {
   const repo = input.repo ?? 42;
   const request = await form(
     { rev: input.rev ?? rev(repo) },
     input.bundle ?? gz(BUNDLE),
-    { authorization: `Bearer ${await oidcToken(repo)}` },
+    { authorization: `Bearer ${await oidcToken(repo, input.runner)}` },
     `https://intar.test${SOURCE_BUNDLES_PATH}`,
   );
   const response = await handleImageRegistryRequest(request, testEnv);
@@ -387,6 +389,13 @@ describe("v2 bundle ingest", () => {
     const bomb = gz(`${" ".repeat(33 * 1024 * 1024)}{}`);
     expect((await push({ bundle: bomb })).status).toBe(413);
     expect(await written()).toEqual(before);
+  });
+
+  it("takes a runner that is not GitHub-hosted only for a source that allows it", async () => {
+    // As before the source could say so: the token itself is refused.
+    await expectRefusal(await push({ runner: "self-hosted" }), 401, "unauthorized");
+    await drizzle(env.DB).update(scenarioSources).set({ allowSelfHostedRunners: true });
+    expect((await push({ runner: "self-hosted" })).status).toBe(202);
   });
 
   it("refuses a rev of another commit", async () => {

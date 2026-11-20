@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   GITHUB_ACTIONS_ISSUER,
+  runnerMayPublish,
   verifyGithubActionsToken,
 } from "@/lib/github-oidc";
 
@@ -22,6 +23,8 @@ const CLAIMS = {
   sha: "a".repeat(40),
   event_name: "push",
   runner_environment: "github-hosted",
+  run_id: "17700000001",
+  run_attempt: "2",
   job_workflow_ref: `${WORKFLOW}@refs/tags/scenario-publish-v1`,
   job_workflow_sha: WORKFLOW_SHA,
 };
@@ -68,7 +71,25 @@ describe("GitHub Actions OIDC", () => {
   ])("accepts %s at an allowlisted workflow commit", async (_name, ref) => {
     await expect(
       verify(await token({ job_workflow_ref: ref }), `${"e".repeat(40)}, ${WORKFLOW_SHA}`),
-    ).resolves.toEqual({ repositoryId: 42, ref: CLAIMS.ref, sha: CLAIMS.sha });
+    ).resolves.toEqual({
+      repositoryId: 42,
+      ref: CLAIMS.ref,
+      sha: CLAIMS.sha,
+      runnerEnvironment: "github-hosted",
+      runId: "17700000001",
+      runAttempt: 2,
+      jobWorkflowSha: WORKFLOW_SHA,
+    });
+  });
+
+  it("says which runner a token is from and leaves the rule to the source", async () => {
+    const claims = await verify(await token({ runner_environment: "self-hosted" }));
+    expect(claims.runnerEnvironment).toBe("self-hosted");
+    // Only a source that allows it lets such a runner publish.
+    expect(runnerMayPublish(claims, null)).toBe(false);
+    expect(runnerMayPublish(claims, { allowSelfHostedRunners: false })).toBe(false);
+    expect(runnerMayPublish(claims, { allowSelfHostedRunners: true })).toBe(true);
+    expect(runnerMayPublish({ runnerEnvironment: "github-hosted" }, null)).toBe(true);
   });
 
   it.each([
@@ -80,7 +101,9 @@ describe("GitHub Actions OIDC", () => {
     }],
     ["a Dependabot job", { event_name: "dynamic" }],
     ["a pull request", { event_name: "pull_request" }],
-    ["a self-hosted runner", { runner_environment: "self-hosted" }],
+    ["a runner environment GitHub does not name", { runner_environment: "elsewhere" }],
+    ["no run id", { run_id: undefined }],
+    ["a run attempt that is no number", { run_attempt: "second" }],
   ])("refuses %s", async (_name, claims) => {
     await expect(verify(await token(claims))).rejects.toMatchObject({
       status: 401,

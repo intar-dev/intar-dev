@@ -20,18 +20,39 @@ const WORKFLOW_EVENTS = new Set(["push", "workflow_dispatch"]);
 
 let githubActionsKeys: JWTVerifyGetKey | undefined;
 
+/** Where GitHub says a job ran. */
+export type RunnerEnvironment = "github-hosted" | "self-hosted";
+const RUNNER_ENVIRONMENTS = new Set(["github-hosted", "self-hosted"]);
+
 export interface GithubActionsClaims {
   repositoryId: number;
   ref: string;
   sha: string;
+  /** Not GitHub-hosted for every runner an account brings itself, such as a larger third-party one. */
+  runnerEnvironment: RunnerEnvironment;
+  runId: string;
+  runAttempt: number;
+  /** The commit of the reusable workflow that ran. */
+  jobWorkflowSha: string;
+}
+
+/**
+ * Whether a token's runner may publish for a source. A GitHub-hosted one
+ * always may; another only where the source allows it (#441).
+ */
+export function runnerMayPublish(
+  claims: Pick<GithubActionsClaims, "runnerEnvironment">,
+  source: { allowSelfHostedRunners: boolean } | null,
+): boolean {
+  return claims.runnerEnvironment === "github-hosted" || source?.allowSelfHostedRunners === true;
 }
 
 /**
  * Verifies the token's signature, issuer, audience and lifetime, then the
  * workflow claims: the reusable scenario-publish workflow at an allowlisted
- * commit (`workflowShas`, whitespace- or comma-separated), a push or dispatch
- * on a GitHub-hosted runner. The caller checks the repository, ref and sha
- * against its binding and the GitHub API.
+ * commit (`workflowShas`, whitespace- or comma-separated), on a push or a
+ * dispatch. The caller checks the repository, ref and sha against its binding
+ * and the GitHub API, and the runner against the source ([`runnerMayPublish`]).
  */
 export async function verifyGithubActionsToken(
   token: string,
@@ -76,7 +97,7 @@ export async function verifyGithubActionsToken(
   }
 
   const allowed = (input.workflowShas ?? "").split(/[\s,]+/).filter(Boolean);
-  const { repository_id, ref, sha, job_workflow_ref, job_workflow_sha } = claims;
+  const { repository_id, ref, sha, job_workflow_ref, job_workflow_sha, runner_environment, run_id, run_attempt } = claims;
   if (
     // The claims are JSON strings, so a number is refused.
     typeof repository_id !== "string" ||
@@ -85,7 +106,12 @@ export async function verifyGithubActionsToken(
     typeof ref !== "string" ||
     typeof sha !== "string" ||
     !WORKFLOW_EVENTS.has(String(claims.event_name)) ||
-    claims.runner_environment !== "github-hosted" ||
+    typeof runner_environment !== "string" ||
+    !RUNNER_ENVIRONMENTS.has(runner_environment) ||
+    typeof run_id !== "string" ||
+    !/^[1-9][0-9]{0,19}$/.test(run_id) ||
+    typeof run_attempt !== "string" ||
+    !/^[1-9][0-9]{0,5}$/.test(run_attempt) ||
     typeof job_workflow_ref !== "string" ||
     !WORKFLOW_REF_PATTERN.test(job_workflow_ref) ||
     typeof job_workflow_sha !== "string" ||
@@ -102,7 +128,15 @@ export async function verifyGithubActionsToken(
     );
     throw refused();
   }
-  return { repositoryId: Number(repository_id), ref, sha };
+  return {
+    repositoryId: Number(repository_id),
+    ref,
+    sha,
+    runnerEnvironment: runner_environment as RunnerEnvironment,
+    runId: run_id,
+    runAttempt: Number(run_attempt),
+    jobWorkflowSha: job_workflow_sha,
+  };
 }
 
 function remoteKeys(): JWTVerifyGetKey {
