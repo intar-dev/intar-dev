@@ -59,6 +59,9 @@ export type ScenarioSourceCommitState =
   | "superseded"
   | "validated";
 
+/** Who builds a source's machine images. */
+export type ImageProducer = "builder" | "pipeline";
+
 export const scenarioSources = sqliteTable(
   "scenario_sources",
   {
@@ -71,6 +74,21 @@ export const scenarioSources = sqliteTable(
     githubRepository: text("github_repository").notNull(),
     defaultBranch: text("default_branch").notNull(),
     mode: text("mode").$type<"push" | "pull">().default("pull").notNull(),
+    /**
+     * Who builds this source's machine images: the platform's builder, or the
+     * repository's own pipeline, which pushes them (#441). No CHECK: adding
+     * one to this table would recreate it.
+     */
+    imageProducer: text("image_producer")
+      .$type<ImageProducer>()
+      .default("builder")
+      .notNull(),
+    /** Whether a pipeline on a runner that is not GitHub-hosted may publish. */
+    allowSelfHostedRunners: integer("allow_self_hosted_runners", {
+      mode: "boolean",
+    })
+      .default(false)
+      .notNull(),
     headSha: text("head_sha"),
     headObservedAt: integer("head_observed_at").default(0).notNull(),
     pokedAt: integer("poked_at"),
@@ -225,6 +243,8 @@ export const scenarioRevisions = sqliteTable(
   },
   (table) => [
     primaryKey({ columns: [table.scenarioId, table.rev] }),
+    // A pipeline's pushes and the deadline of its revisions go by rev.
+    index("scenario_revisions_rev_idx").on(table.rev),
     check(
       "scenario_revisions_state_check",
       sql`${table.state} IN ('building', 'ready', 'verified', 'failed')`,
@@ -247,9 +267,94 @@ export const bundles = sqliteTable(
     }),
     compilerVersion: text("compiler_version").notNull(),
     r2Key: text("r2_key").notNull(),
+    /**
+     * The source's producer when this bundle was ingested. A revision keeps
+     * it: switching the source applies from the next commit.
+     */
+    imageProducer: text("image_producer")
+      .$type<ImageProducer>()
+      .default("builder")
+      .notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
   },
   (table) => [index("bundles_organization_idx").on(table.organizationId)],
+);
+
+/**
+ * A machine image a pipeline recorded for a scope (#441). A pipeline says
+ * which build key its image is of and nothing can check that, so its images
+ * are held per scope and satisfy that scope's revisions only; the builder's
+ * are in `machine_builds`, by key alone. `scope_key` is a scenario's, with
+ * no foreign key, as in `scenarios`.
+ */
+export const scopeMachineImages = sqliteTable(
+  "scope_machine_images",
+  {
+    scopeKey: text("scope_key").notNull(),
+    buildKey: text("build_key").notNull(),
+    architecture: text("architecture").$type<"amd64" | "arm64">().notNull(),
+    imageDigest: text("image_digest").notNull(),
+    imageFormat: text("image_format").notNull(),
+    /** The manifest's config and layers. */
+    sizeBytes: integer("size_bytes").notNull(),
+    // Who built it.
+    githubRepositoryId: integer("github_repository_id").notNull(),
+    githubRepository: text("github_repository").notNull(),
+    sha: text("sha").notNull(),
+    runId: text("run_id").notNull(),
+    runAttempt: integer("run_attempt").notNull(),
+    runnerEnvironment: text("runner_environment").notNull(),
+    jobWorkflowSha: text("job_workflow_sha").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.scopeKey, table.buildKey, table.architecture],
+    }),
+    index("scope_machine_images_digest_idx").on(table.imageDigest),
+    check(
+      "scope_machine_images_architecture_check",
+      sql`${table.architecture} IN ('amd64', 'arm64')`,
+    ),
+  ],
+);
+
+/**
+ * The credential a pipeline pushes images with (#441). A GitHub OIDC token
+ * lives for minutes and an image uploads for longer, so the token is checked
+ * once, when the session is opened, and the session is bound to what the
+ * token said. Only the hash of the session's own token is kept.
+ */
+export const pipelineUploadSessions = sqliteTable(
+  "pipeline_upload_sessions",
+  {
+    id: text("id").primaryKey(),
+    tokenHash: text("token_hash").notNull(),
+    scopeKey: text("scope_key")
+      .notNull()
+      .references(() => scenarioSources.scopeKey, { onDelete: "cascade" }),
+    githubRepositoryId: integer("github_repository_id").notNull(),
+    githubRepository: text("github_repository").notNull(),
+    ref: text("ref").notNull(),
+    sha: text("sha").notNull(),
+    rev: text("rev").notNull(),
+    runId: text("run_id").notNull(),
+    runAttempt: integer("run_attempt").notNull(),
+    runnerEnvironment: text("runner_environment").notNull(),
+    jobWorkflowSha: text("job_workflow_sha").notNull(),
+    bytesPut: integer("bytes_put").default(0).notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    /** Absolute, and never extended. */
+    expiresAt: integer("expires_at").notNull(),
+    closedAt: integer("closed_at"),
+  },
+  (table) => [
+    uniqueIndex("pipeline_upload_sessions_token_hash_uidx").on(table.tokenHash),
+    index("pipeline_upload_sessions_scope_expires_idx").on(
+      table.scopeKey,
+      table.expiresAt,
+    ),
+  ],
 );
 
 /** What a platform admin has granted an organization. */

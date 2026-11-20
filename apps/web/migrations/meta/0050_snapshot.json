@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "5839f27f-fdba-4b86-b780-e409b8f1d17c",
-  "prevId": "7dfb6bf1-6055-43de-998f-4210201d5b8c",
+  "id": "0e47420c-0d96-4c49-b01f-2dd7bda9c615",
+  "prevId": "5839f27f-fdba-4b86-b780-e409b8f1d17c",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -846,6 +846,14 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "image_producer": {
+          "name": "image_producer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'builder'"
         },
         "created_at": {
           "name": "created_at",
@@ -4040,6 +4048,160 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "pipeline_upload_sessions": {
+      "name": "pipeline_upload_sessions",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "token_hash": {
+          "name": "token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "scope_key": {
+          "name": "scope_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "github_repository_id": {
+          "name": "github_repository_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "github_repository": {
+          "name": "github_repository",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "ref": {
+          "name": "ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "sha": {
+          "name": "sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "rev": {
+          "name": "rev",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_attempt": {
+          "name": "run_attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "runner_environment": {
+          "name": "runner_environment",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "job_workflow_sha": {
+          "name": "job_workflow_sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "bytes_put": {
+          "name": "bytes_put",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "closed_at": {
+          "name": "closed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "pipeline_upload_sessions_token_hash_uidx": {
+          "name": "pipeline_upload_sessions_token_hash_uidx",
+          "columns": [
+            "token_hash"
+          ],
+          "isUnique": true
+        },
+        "pipeline_upload_sessions_scope_expires_idx": {
+          "name": "pipeline_upload_sessions_scope_expires_idx",
+          "columns": [
+            "scope_key",
+            "expires_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "pipeline_upload_sessions_scope_key_scenario_sources_scope_key_fk": {
+          "name": "pipeline_upload_sessions_scope_key_scenario_sources_scope_key_fk",
+          "tableFrom": "pipeline_upload_sessions",
+          "tableTo": "scenario_sources",
+          "columnsFrom": [
+            "scope_key"
+          ],
+          "columnsTo": [
+            "scope_key"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "registry_manifest_blobs": {
       "name": "registry_manifest_blobs",
       "columns": {
@@ -5482,7 +5644,15 @@
           "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "scenario_revisions_rev_idx": {
+          "name": "scenario_revisions_rev_idx",
+          "columns": [
+            "rev"
+          ],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {
         "scenario_revisions_scenario_id_scenarios_id_fk": {
           "name": "scenario_revisions_scenario_id_scenarios_id_fk",
@@ -6631,6 +6801,22 @@
           "autoincrement": false,
           "default": "'pull'"
         },
+        "image_producer": {
+          "name": "image_producer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'builder'"
+        },
+        "allow_self_hosted_runners": {
+          "name": "allow_self_hosted_runners",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
         "head_sha": {
           "name": "head_sha",
           "type": "text",
@@ -6915,6 +7101,137 @@
         "scenarios_id_check": {
           "name": "scenarios_id_check",
           "value": "\"scenarios\".\"id\" = \"scenarios\".\"namespace\" || '/' || \"scenarios\".\"slug\""
+        }
+      }
+    },
+    "scope_machine_images": {
+      "name": "scope_machine_images",
+      "columns": {
+        "scope_key": {
+          "name": "scope_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "build_key": {
+          "name": "build_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "architecture": {
+          "name": "architecture",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "image_digest": {
+          "name": "image_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "image_format": {
+          "name": "image_format",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "size_bytes": {
+          "name": "size_bytes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "github_repository_id": {
+          "name": "github_repository_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "github_repository": {
+          "name": "github_repository",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "sha": {
+          "name": "sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_attempt": {
+          "name": "run_attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "runner_environment": {
+          "name": "runner_environment",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "job_workflow_sha": {
+          "name": "job_workflow_sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        }
+      },
+      "indexes": {
+        "scope_machine_images_digest_idx": {
+          "name": "scope_machine_images_digest_idx",
+          "columns": [
+            "image_digest"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "scope_machine_images_scope_key_build_key_architecture_pk": {
+          "columns": [
+            "scope_key",
+            "build_key",
+            "architecture"
+          ],
+          "name": "scope_machine_images_scope_key_build_key_architecture_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "scope_machine_images_architecture_check": {
+          "name": "scope_machine_images_architecture_check",
+          "value": "\"scope_machine_images\".\"architecture\" IN ('amd64', 'arm64')"
         }
       }
     },

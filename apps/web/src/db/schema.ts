@@ -51,6 +51,8 @@ export {
   scenarios,
   courseCatalogs,
   scenarioSourceCommits,
+  scopeMachineImages,
+  pipelineUploadSessions,
   scenarioSources,
 } from "./schema/scenarios";
 export {

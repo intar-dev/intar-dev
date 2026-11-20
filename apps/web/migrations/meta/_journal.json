@@ -351,6 +351,13 @@
       "when": 1795085149040,
       "tag": "0049_steady_kinsey_walden",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "6",
+      "when": 1795166988209,
+      "tag": "0050_naive_machine_man",
+      "breakpoints": true
     }
   ]
 }
