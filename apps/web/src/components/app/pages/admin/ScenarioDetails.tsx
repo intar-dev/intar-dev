@@ -65,7 +65,7 @@ export function ScenarioDetails() {
         density="compact"
         title="Play"
         description={record.play
-          ? "Open to play: everyone signed in may start this scenario where its scope allows it."
+          ? "Open to play: everyone signed in may start this scenario where its scope allows it. Closing waits for play runs that are going on."
           : "Not open to play: learners reach this scenario through its course only."}
       >
         {record.canManage ? (
@@ -150,25 +150,31 @@ function RevisionRow({
   const liftHold = <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "lift_hold", rev: revision.rev })}>{pending === "lift_hold" ? PENDING_WORDS[pending] : "Lift hold"}</Button>;
   const actions = !scenario.canManage || live
     ? null
-    : candidate && revision.held
-      ? liftHold
-      : candidate && revision.state === "ready" && !verifying
-        ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
-        // The same lab as the live one: nothing to move, at most a catalog to publish.
-        : candidate && revision.sameAsLive
-          ? revision.catalogPending
-            ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? "Publishing…" : "Publish catalog"}</Button>
-            : null
-        : candidate && revision.canGoLive
-          ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
-          : (
-            <>
-              {revision.canGoLive && revision.liveAt !== null
-                ? <Button size="sm" variant="outline" disabled={busy} onClick={() => move("rollback")}>{pending === "rollback" ? PENDING_WORDS[pending] : "Roll back"}</Button>
-                : null}
-              {revision.held ? liftHold : null}
-            </>
-          );
+    // The same lab as the live one: nothing to move, at most a catalog to
+    // publish, whatever the candidate's own state.
+    : candidate && revision.sameAsLive
+      ? (
+        <>
+          {revision.catalogPending
+            ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending === "promote" ? "Publishing…" : "Publish catalog"}</Button>
+            : null}
+          {revision.held ? liftHold : null}
+        </>
+      )
+      : candidate && revision.held
+        ? liftHold
+        : candidate && revision.state === "ready" && !verifying
+          ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
+          : candidate && revision.canGoLive
+            ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
+            : (
+              <>
+                {revision.canGoLive && revision.liveAt !== null
+                  ? <Button size="sm" variant="outline" disabled={busy} onClick={() => move("rollback")}>{pending === "rollback" ? PENDING_WORDS[pending] : "Roll back"}</Button>
+                  : null}
+                {revision.held ? liftHold : null}
+              </>
+            );
   // A restore check is for any verified revision, the live one included: it
   // decides whether labs of the revision may start from a host snapshot.
   const restoreAction = !scenario.canManage || verifying

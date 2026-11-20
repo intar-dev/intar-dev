@@ -89,13 +89,14 @@ const rev = (sha: string) => `git-42-${sha.repeat(40)}-${digest}`;
 /**
  * Ingests a bundle as `rev` and finishes its builds with `image`, as a
  * builder's result would. Each rev gets words of its own, so its revision is
- * another lab than the one before; `sameWords` leaves the bundle as it is.
+ * another lab than the one before; `words` names the rev whose words it
+ * gets instead, which makes it the same lab as that one.
  */
 async function publish(
-  at: string, image: string, organizationId: string | null = null, bundle: typeof bundleFixture = bundleFixture, sameWords = false,
+  at: string, image: string, organizationId: string | null = null, bundle: typeof bundleFixture = bundleFixture, words = at,
 ) {
   const worded = structuredClone(bundle);
-  if (!sameWords) worded.scenarios[0]!.summary = `${worded.scenarios[0]!.summary} (${at})`;
+  worded.scenarios[0]!.summary = `${worded.scenarios[0]!.summary} (${words})`;
   const refused = await ingestSourceBundle(env, {
     organizationId, rev: at, gzip: new Uint8Array(gzipSync(JSON.stringify(worded))), stored: false,
   });
@@ -655,9 +656,7 @@ describe("promotion, rollback and verify runs", () => {
       await promote(rev("a"), null);
       const live = (await revisionRow(PUBLIC_ID, rev("a")))!.live_at;
       // The same bundle again: the catalog moves to it once, the lab never.
-      await publish(rev("b"), image, null, bundleFixture, true);
-      await env.DB.prepare("UPDATE scenario_revisions SET content_digest = (SELECT content_digest FROM scenario_revisions WHERE rev = ?2) WHERE rev = ?1")
-        .bind(rev("a"), rev("b")).run();
+      await publish(rev("b"), image, null, bundleFixture, rev("a"));
       expect(await listed(rev("b"))).toMatchObject({ sameAsLive: true, catalogPending: true, state: "verified" });
       expect(await listed(rev("a"))).toMatchObject({ sameAsLive: false });
       expect(await promote(rev("b"), rev("a"))).toEqual({ liveRev: rev("a") });
@@ -676,9 +675,7 @@ describe("promotion, rollback and verify runs", () => {
     async function sameLab(bundle: typeof bundleFixture) {
       await markVerified(PUBLIC_ID, rev("a"));
       await promote(rev("a"), null);
-      await publish(rev("b"), image, null, bundle, true);
-      await env.DB.prepare("UPDATE scenario_revisions SET content_digest = (SELECT content_digest FROM scenario_revisions WHERE rev = ?2) WHERE rev = ?1")
-        .bind(rev("a"), rev("b")).run();
+      await publish(rev("b"), image, null, bundle, rev("a"));
     }
 
     it("publishes a catalog-only change without a move, for the scope's administrators only", async () => {
@@ -725,6 +722,23 @@ describe("promotion, rollback and verify runs", () => {
       // The bundle says play is off; the scenario keeps the administrator's word.
       await publish(rev("b"), image);
       expect(await play()).toBe(1);
+      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN });
+      expect(await play()).toBe(0);
+    });
+
+    it("stays open while a play run goes on", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: true, actorUserId: ADMIN });
+      const run = await learnerStart(LEARNER);
+      // A course run does not depend on the setting.
+      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN });
+      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: true, actorUserId: ADMIN });
+      await env.DB.prepare("UPDATE scenario_runs SET launch_source = 'play' WHERE run_id = ?1").bind(run.runId).run();
+      await expect(setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN }))
+        .rejects.toMatchObject({ status: 409, code: "active_runs_would_lose_access" });
+      expect(await play()).toBe(1);
+      await env.DB.prepare("UPDATE scenario_runs SET state = 'completed' WHERE run_id = ?1").bind(run.runId).run();
       await setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN });
       expect(await play()).toBe(0);
     });

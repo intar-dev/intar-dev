@@ -262,7 +262,7 @@ export async function moveLiveRevision(input: {
   if (kind === "promote" && row.same_as_live) {
     await publishCatalogOnly({ scenarioId, rev, liveRev, actorUserId, namespace: row.namespace,
       organizationId: row.organization_id, r2Key: row.r2_key });
-    return { liveRev: liveRev ?? rev };
+    return { liveRev: row.live_rev ?? rev };
   }
   if (kind === "rollback" && row.live_at === null) {
     throw appError(409, "revision_never_live", "a rollback goes only to a revision that was live before");
@@ -446,15 +446,30 @@ async function publishCatalogOnly(input: {
 /**
  * Sets who may play a scenario: `play` opens it to everyone signed in where
  * its scope allows that. It is an administrator's setting; a commit sets it
- * only when it first brings the scenario.
+ * only when it first brings the scenario. Closing waits for the play runs
+ * that are going on: a play run's access is the setting itself, so its lab
+ * would be taken from its host.
  */
 export async function setScenarioPlay(input: { scenarioId: string; play: boolean; actorUserId: string }): Promise<void> {
   const result = await env.DB.prepare(
-    `UPDATE scenarios AS scenario SET play = ?2, updated_at = ?3 WHERE scenario.id = ?1 AND ${scopeAdminSql(4)}`,
+    `UPDATE scenarios AS scenario SET play = ?2, updated_at = ?3 WHERE scenario.id = ?1 AND ${scopeAdminSql(4)}
+        AND (?2 = 1 OR NOT ${ACTIVE_PLAY_RUN_SQL})`,
   ).bind(input.scenarioId, input.play ? 1 : 0, Date.now(), input.actorUserId).run();
-  if (!result.meta.changes) throw appError(404, "scenario_not_found", "scenario not found");
+  if (!result.meta.changes) {
+    const running = await env.DB.prepare(
+      `SELECT ${ACTIVE_PLAY_RUN_SQL} AS running FROM scenarios scenario WHERE scenario.id = ?1 AND ${scopeAdminSql(4)}`,
+    ).bind(input.scenarioId, null, null, input.actorUserId).first<{ running: number }>();
+    if (running?.running) {
+      throw appError(409, "active_runs_would_lose_access", "play runs of this scenario are going on; try again when they end");
+    }
+    throw appError(404, "scenario_not_found", "scenario not found");
+  }
   console.info(JSON.stringify({ event: "scenario_play", scenarioId: input.scenarioId, play: input.play, actorUserId: input.actorUserId }));
 }
+
+/** Holds while a play run of scenario ?1 is going on. */
+const ACTIVE_PLAY_RUN_SQL = `EXISTS (SELECT 1 FROM scenario_runs play_run WHERE play_run.scenario_id = ?1
+  AND play_run.launch_source = 'play' AND play_run.state NOT IN ('completed', 'failed'))`;
 
 const revisionHeld = () =>
   appError(409, "revision_held", "a rollback put this revision's behaviour on hold; lift the hold to promote it");
