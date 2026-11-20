@@ -377,10 +377,21 @@ describe("ScenarioSourceDO observe", () => {
       expect(await binding()).toMatchObject({ pausedAt: 1, pauseReason: "admin" });
     }
 
+    // A pipeline's open upload session is closed with the binding.
+    await env.DB.prepare(
+      `INSERT INTO pipeline_upload_sessions
+         (id, token_hash, scope_key, github_repository_id, github_repository, ref, sha, rev,
+          run_id, run_attempt, runner_environment, job_workflow_sha, expires_at)
+       SELECT 'p1', 'hash', scope_key, github_repository_id, github_repository, 'refs/heads/main', 'sha', 'rev',
+          '1', 1, 'github-hosted', 'sha', ?1 FROM scenario_sources`,
+    ).bind(Date.now() + 60_000).run();
     vi.restoreAllMocks();
     github(refused(404));
     await tick();
-    expect(await binding()).toMatchObject({ disconnectedAt: expect.any(Number), disconnectReason: "github_gone" });
+    const gone = await binding();
+    expect(gone).toMatchObject({ disconnectedAt: expect.any(Number), disconnectReason: "github_gone" });
+    expect(await env.DB.prepare("SELECT closed_at FROM pipeline_upload_sessions").first("closed_at"))
+      .toBe(gone?.disconnectedAt);
   });
 
   it("waits for a first commit without a row, a pause or a disconnect", async () => {

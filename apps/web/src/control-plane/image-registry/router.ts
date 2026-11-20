@@ -10,6 +10,13 @@ import {
 } from "./agent";
 import { handleImageCutoverGate } from "./cutover-gate";
 import {
+  PIPELINE_SESSIONS_CLOSE_PATH,
+  PIPELINE_SESSIONS_PATH,
+  findPipelineSession,
+  handlePipelineSessionClose,
+  handlePipelineSessionOpen,
+} from "./pipeline-sessions";
+import {
   handleBlobHead,
   handleBlobPut,
   handleBuildResult,
@@ -26,6 +33,8 @@ import {
 } from "./upload-sessions";
 import {
   admitRegistryOperation,
+  providePipelineSessionLookup,
+  readRegistryAuth,
   type RegistryOperationLease,
 } from "@/lib/image-registry-admission";
 import type { ImageRegistryOperationKind } from "@/db/schema";
@@ -35,6 +44,10 @@ import {
   SOURCE_BUNDLES_PATH,
   SOURCE_COMPILER_PATH,
 } from "@/generated/constants";
+
+// Every route that reads a registry credential is reached through this
+// module, so a pipeline's session token is known wherever one can arrive.
+providePipelineSessionLookup(findPipelineSession);
 
 export async function handleImageRegistryRequest(
   request: Request,
@@ -73,6 +86,15 @@ export async function handleImageRegistryRequest(
   }
   if (url.pathname === SOURCE_COMPILER_PATH) {
     return handleSourceCompilerDescriptor(request, env);
+  }
+
+  // A pipeline's credential. Neither route touches the bucket, so neither
+  // takes a writer.
+  if (url.pathname === PIPELINE_SESSIONS_PATH) {
+    return handlePipelineSessionOpen(request, env);
+  }
+  if (url.pathname === PIPELINE_SESSIONS_CLOSE_PATH) {
+    return handlePipelineSessionClose(request, env);
   }
 
   if (url.pathname === "/registry/v1/cutover/gate") {
@@ -158,6 +180,17 @@ async function admitted(
   run: () => Promise<Response>,
 ): Promise<Response> {
   if (request.method !== method) return run();
+
+  // A pipeline pushes blobs only so far. It is refused before a writer is
+  // registered for it: the handler would refuse it too, but only after it
+  // read the body, and a request that ends there leaves a writer nobody
+  // settles, which holds the sweep.
+  if (operation === "manifest_put" || operation === "build_result") {
+    const auth = await readRegistryAuth(request, env);
+    if (auth.ok && auth.owner.kind === "pipeline") {
+      return jsonResponse({ error: "a pipeline pushes blobs only" }, 403);
+    }
+  }
 
   const admitted_ = await admitRegistryOperation(request, env, { operation });
   if (!admitted_.ok) return admitted_.response;

@@ -37,6 +37,7 @@ import {
 } from "@/lib/image-registry-admission";
 import { CUTOVER_WIPED_SQL } from "@/lib/run-admission-gate";
 import {
+  closeDisconnectedPipelineSessions,
   endSourceCompiles,
   MAX_COMPILE_ATTEMPTS,
   parseDiagnostics,
@@ -254,10 +255,13 @@ async function observe(
   const now = Date.now();
   if (mint.status !== "ok") {
     if (mint.status === "gone") {
-      await db
-        .update(scenarioSources)
-        .set({ disconnectedAt: now, disconnectReason: "github_gone", updatedAt: now })
-        .where(bound);
+      await db.batch([
+        db
+          .update(scenarioSources)
+          .set({ disconnectedAt: now, disconnectReason: "github_gone", updatedAt: now })
+          .where(bound),
+        closeDisconnectedPipelineSessions(db, binding.scopeKey, now),
+      ]);
     } else if (mint.status === "suspended") {
       await db
         .update(scenarioSources)

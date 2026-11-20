@@ -8,6 +8,7 @@ import type {
   ImageRegistryWriterOutcome,
 } from "@/db/schema";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
+import { readPipelineSessionToken } from "@/lib/pipeline-upload-sessions";
 import {
   hasRegistryPublishToken,
   jsonResponse,
@@ -18,12 +19,27 @@ import {
  * (uploads, publishes, catalog pointer mutations) against the one exclusive
  * collector sweep. The rules live in D1, not in a client:
  *
- * - a sweep cannot start while an upload session or writer lease is unresolved;
+ * - a sweep cannot start while an upload session or writer lease that holds
+ *   it is unresolved;
  * - a writer cannot enter while a sweep holds the gate, and the gate epoch moves
  *   on every sweep, so an already-paused request is rejected instead of
  *   continuing;
  * - an interrupted write stays unresolved and blocks the sweep until an operator
  *   reaps it; there is no timeout that silently takes it over.
+ *
+ * A scenario repository's pipeline (owner kind `pipeline`, #441) is a tenant,
+ * and one tenant must not hold the sweep for everyone. So of a pipeline's
+ * rows only a writer that can change what readers reach holds it:
+ *
+ * - its upload sessions never hold the sweep, and the acquire closes those
+ *   whose pipeline session has ended;
+ * - its blob existence checks and blob uploads never hold it, whether they
+ *   are in flight or ended inconclusively. Nothing young is swept, and a
+ *   manifest names only blobs it found under its own lease;
+ * - its manifest and result writers hold it like anyone's.
+ *
+ * Every row of a builder, of the publish token and of the system holds the
+ * sweep as before.
  *
  * The session owner always comes from the verified credential. No request body
  * can name an owner.
@@ -42,6 +58,13 @@ export const REGISTRY_REAP_BATCH_SIZE = 500;
 export const REGISTRY_CLOSED_SESSION_RETAIN_MS = 6 * 60 * 60 * 1000;
 
 const SESSION_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+// The rows that hold the sweep, as conditions on one row of each table. The
+// counts, the idle state and the acquire all read these, so what is reported
+// as a hold is exactly what refuses a sweep and its deletes.
+const HOLDING_SESSION_SQL = "state = 'open' AND owner_kind <> 'pipeline'";
+const HOLDING_WRITER_SQL = `(released_at IS NULL OR outcome = 'unknown')
+           AND NOT (owner_kind = 'pipeline' AND operation IN ('blob_exists', 'blob_put'))`;
 
 /**
  * The D1-only surface. The collector runs in a child Worker that shares the
@@ -107,6 +130,24 @@ export interface RegistrySweepLease {
 
 const registryAuthByRequest = new WeakMap<Request, Promise<RegistryAuthResult>>();
 
+/** The id of the pipeline upload session a token names while it may write. */
+export type PipelineSessionLookup = (
+  env: Cloudflare.Env,
+  token: string,
+) => Promise<string | null>;
+
+let pipelineSessionLookup: PipelineSessionLookup | null = null;
+
+/**
+ * The lookup follows the source's binding, so it lives with the scenario
+ * sources, and the collector's Worker, which bundles this module, must not
+ * carry those. The registry router hands it in when it loads; until then
+ * every session token is refused.
+ */
+export function providePipelineSessionLookup(lookup: PipelineSessionLookup): void {
+  pipelineSessionLookup = lookup;
+}
+
 /**
  * Verifies the registry credential once per request and remembers it, so the
  * router wrapper and the handler do not verify twice.
@@ -128,6 +169,15 @@ async function verifyRegistryAuth(
 ): Promise<RegistryAuthResult> {
   if (await hasRegistryPublishToken(request, env)) {
     return { ok: true, owner: { kind: "publish_token", id: "publish-token" } };
+  }
+  // A pipeline's session token. Shaped like one, it is never tried as an
+  // agent's.
+  const pipelineToken = readPipelineSessionToken(request);
+  if (pipelineToken) {
+    const sessionId = (await pipelineSessionLookup?.(env, pipelineToken)) ?? null;
+    return sessionId
+      ? { ok: true, owner: { kind: "pipeline", id: sessionId } }
+      : { ok: false, response: jsonResponse({ error: "unauthorized" }, 401) };
   }
   const verified = await requireVerifiedAgentRequest(request, env);
   if (verified.ok) {
@@ -215,16 +265,19 @@ async function readRegistryAdmissionCounts(
     // A writer row is a hold while it is unresolved (the process never
     // reported) or while it ended inconclusively (outcome 'unknown'). Settled
     // rows are deleted on release, so they are not counted and cannot grow.
+    // Only rows that hold the sweep are counted: a pipeline's sessions and
+    // blob writers are not.
     `SELECT
-       (SELECT COUNT(*) FROM image_registry_upload_sessions WHERE state = 'open') AS open_sessions,
-       (SELECT COUNT(*) FROM image_registry_upload_sessions WHERE state = 'open' AND expires_at <= ?1) AS stale_open_sessions,
+       (SELECT COUNT(*) FROM image_registry_upload_sessions WHERE ${HOLDING_SESSION_SQL}) AS open_sessions,
+       (SELECT COUNT(*) FROM image_registry_upload_sessions WHERE ${HOLDING_SESSION_SQL} AND expires_at <= ?1) AS stale_open_sessions,
        (SELECT COUNT(*) FROM image_registry_operation_writers
-         WHERE released_at IS NULL OR outcome = 'unknown') AS pending_writers,
+         WHERE ${HOLDING_WRITER_SQL}) AS pending_writers,
        (SELECT COUNT(*) FROM image_registry_operation_writers
-         WHERE (released_at IS NULL OR outcome = 'unknown')
+         WHERE ${HOLDING_WRITER_SQL}
            AND expires_at <= ?1) AS stale_pending_writers,
        (SELECT COUNT(*) FROM image_registry_operation_writers
-         WHERE released_at IS NOT NULL AND outcome = 'unknown') AS unknown_writers`,
+         WHERE ${HOLDING_WRITER_SQL}
+           AND released_at IS NOT NULL AND outcome = 'unknown') AS unknown_writers`,
   )
     .bind(now)
     .first<{
@@ -1149,11 +1202,16 @@ export type RegistrySweepAcquisition =
     };
 
 /**
- * Takes the exclusive sweep. It refuses while any upload session is open, any
- * writer is unresolved, or a previous run is still `running`. A stale row means
- * an interrupted write whose effect is unknown, and an expired sweep lease does
- * not prove the previous delete loop stopped: only an operator reap may resolve
- * either one.
+ * Takes the exclusive sweep. It refuses while an upload session that holds the
+ * sweep is open, a writer that holds it is unresolved, or a previous run is
+ * still `running`. A stale row means an interrupted write whose effect is
+ * unknown, and an expired sweep lease does not prove the previous delete loop
+ * stopped: only an operator reap may resolve either one.
+ *
+ * A pipeline's sessions and blob writers do not hold it (see the top of this
+ * file). Its sessions whose credential has expired, was closed or is gone are
+ * closed here first: they can admit nothing any more, and nothing else would
+ * end them.
  */
 export async function acquireRegistrySweep(
   env: RegistryAdmissionEnv,
@@ -1166,6 +1224,17 @@ export async function acquireRegistrySweep(
   const results = await env.DB.batch([
     ensureRegistryAdmissionRow(env, now),
     env.DB.prepare(
+      `UPDATE image_registry_upload_sessions
+          SET state = 'abandoned', closed_at = ?1, close_reason = 'pipeline_session_ended'
+        WHERE state = 'open'
+          AND owner_kind = 'pipeline'
+          AND NOT EXISTS (
+                SELECT 1 FROM pipeline_upload_sessions pipeline
+                 WHERE pipeline.id = image_registry_upload_sessions.owner_id
+                   AND pipeline.closed_at IS NULL
+                   AND pipeline.expires_at > ?1)`,
+    ).bind(now),
+    env.DB.prepare(
       `INSERT INTO image_registry_admission
          (key, protocol_version, enforcement, epoch, state, sweep_token,
           sweep_owner, sweep_started_at, sweep_heartbeat_at, sweep_expires_at,
@@ -1173,10 +1242,10 @@ export async function acquireRegistrySweep(
        SELECT ?1, ?2, 'report_only', 1, 'sweeping', ?3, ?4, ?5, ?5, ?6, ?5
        WHERE NOT EXISTS (
                SELECT 1 FROM image_registry_operation_writers
-                 WHERE released_at IS NULL OR outcome = 'unknown')
+                 WHERE ${HOLDING_WRITER_SQL})
           AND NOT EXISTS (
                 SELECT 1 FROM image_registry_upload_sessions
-                 WHERE state = 'open')
+                 WHERE ${HOLDING_SESSION_SQL})
           AND NOT EXISTS (
                 SELECT 1 FROM image_registry_gc_runs
                  WHERE state = 'running')
@@ -1210,9 +1279,17 @@ export async function acquireRegistrySweep(
                WHERE key = ?5 AND state = 'sweeping' AND sweep_token = ?3)
        RETURNING id`,
     ).bind(runId, input.owner, sweepToken, now, REGISTRY_ADMISSION_KEY),
+    // A pipeline's blob writer that was never settled holds nothing and is
+    // counted nowhere, so nothing else would ever remove it.
+    env.DB.prepare(
+      `DELETE FROM image_registry_operation_writers
+        WHERE owner_kind = 'pipeline'
+          AND operation IN ('blob_exists', 'blob_put')
+          AND expires_at <= ?1`,
+    ).bind(now - REGISTRY_REAP_GRACE_MS),
   ]);
 
-  const marker = firstRow(results[1]);
+  const marker = firstRow(results[2]);
   if (!marker) {
     const state = await readRegistryAdmissionState(env);
     return {

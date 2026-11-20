@@ -445,7 +445,218 @@ describe("image registry admission", () => {
       true,
     );
   });
+
+  describe("next to a pipeline", () => {
+    const pipeline = (id: string) => ({ kind: "pipeline", id }) as const;
+
+    beforeEach(async () => {
+      await env.DB.prepare(
+        `INSERT INTO scenario_sources
+           (scope_key, github_installation_id, github_repository_id, github_repository, default_branch, mode)
+         VALUES ('public', 1, 1, 'intar/scenarios', 'main', 'push')`,
+      ).run();
+      await setRegistryEnforcement(env, "enforce");
+    });
+
+    it("does not wait for a pipeline's open session or its blob writers", async () => {
+      await pipelineSession("live", { expiresAt: Date.now() + 60_000 });
+      const session = await createRegistryUploadSession(env, { owner: pipeline("live") });
+      expect(session.ok).toBe(true);
+      if (!session.ok) return;
+      // In flight, never reported, and ended inconclusively.
+      await writerRow({ ownerKind: "pipeline", operation: "blob_exists", sessionId: session.sessionId });
+      await writerRow({ ownerKind: "pipeline", operation: "blob_put", sessionId: session.sessionId });
+      await writerRow({ ownerKind: "pipeline", operation: "blob_put", expiresAt: 1 });
+      await writerRow({ ownerKind: "pipeline", operation: "blob_put", outcome: "unknown", releasedAt: 1 });
+      await writerRow({ ownerKind: "pipeline", operation: "blob_exists", outcome: "unknown", releasedAt: 1 });
+
+      const idle = await readRegistryIdleState(env);
+      expect(idle).toMatchObject({ idle: true, openSessions: 0, pendingWriters: 0, blockedReason: null });
+      const acquired = await acquireRegistrySweep(env, { owner: "collector-a" });
+      expect(acquired.ok).toBe(true);
+      if (!acquired.ok) return;
+      // The sweep may also delete: a hold that let it start must not stop it.
+      expect(acquired.lease).toMatchObject({ deleteAllowed: true, blockedReason: null });
+      const deletable = await assertRegistrySweepDeletable(env, {
+        sweepToken: acquired.lease.sweepToken,
+        objectKeys: ["oci/sha256/aa"],
+      });
+      expect(deletable.ok).toBe(true);
+      // The pipeline's session is still its own. Of its rows only the one
+      // long past its lease is gone: nothing else would remove it.
+      expect(await sessionState(session.sessionId)).toBe("open");
+      expect(await writerRowIds()).toHaveLength(4);
+    });
+
+    it("closes the admission sessions of a pipeline whose credential has ended", async () => {
+      await pipelineSession("live", { expiresAt: Date.now() + 60_000 });
+      await pipelineSession("expired", { expiresAt: Date.now() - 1 });
+      await pipelineSession("closed", { expiresAt: Date.now() + 60_000, closedAt: Date.now() });
+      const sessions: Record<string, string> = {};
+      // "gone": its pipeline session row was deleted with its source.
+      for (const id of ["live", "expired", "closed", "gone"]) {
+        const created = await createRegistryUploadSession(env, { owner: pipeline(id) });
+        if (!created.ok) throw new Error("the session must open");
+        sessions[id] = created.sessionId;
+      }
+
+      expect((await acquireRegistrySweep(env, { owner: "collector-a" })).ok).toBe(true);
+      expect(await sessionState(sessions.live!)).toBe("open");
+      for (const id of ["expired", "closed", "gone"]) {
+        expect(await env.DB.prepare(
+          "SELECT state, close_reason, closed_at IS NOT NULL AS closed FROM image_registry_upload_sessions WHERE id = ?1",
+        ).bind(sessions[id]).first()).toEqual({ state: "abandoned", close_reason: "pipeline_session_ended", closed: 1 });
+      }
+    });
+
+    it("closes them even when the sweep cannot start", async () => {
+      await pipelineSession("expired", { expiresAt: Date.now() - 1 });
+      const ended = await createRegistryUploadSession(env, { owner: pipeline("expired") });
+      const builder = await createRegistryUploadSession(env, { owner: { kind: "builder", id: "builder-a" } });
+      if (!ended.ok || !builder.ok) throw new Error("the sessions must open");
+
+      const blocked = await acquireRegistrySweep(env, { owner: "collector-a" });
+      expect(blocked.ok).toBe(false);
+      expect(await sessionState(ended.sessionId)).toBe("abandoned");
+      // An expired lease of a builder is still not release authority.
+      await env.DB.prepare("UPDATE image_registry_upload_sessions SET expires_at = 1 WHERE id = ?1")
+        .bind(builder.sessionId).run();
+      expect((await acquireRegistrySweep(env, { owner: "collector-a" })).ok).toBe(false);
+      expect(await sessionState(builder.sessionId)).toBe("open");
+    });
+
+    it.each([
+      ["manifest_put", "pending"],
+      ["manifest_put", "unknown"],
+      ["build_result", "pending"],
+      ["build_result", "unknown"],
+      // No route admits a pipeline for these; a row of one holds all the same.
+      ["chunk_put", "pending"],
+      ["publish", "unknown"],
+    ] as const)("waits for a pipeline's %s writer that is %s", async (operation, outcome) => {
+      const id = await writerRow({
+        ownerKind: "pipeline", operation, outcome, releasedAt: outcome === "unknown" ? 1 : null,
+      });
+      const idle = await readRegistryIdleState(env);
+      expect(idle).toMatchObject({ idle: false, pendingWriters: 1, blockedReason: "registry_write_unresolved" });
+      const blocked = await acquireRegistrySweep(env, { owner: "collector-a" });
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) return;
+      expect(blocked.code).toBe("registry_admission_busy");
+
+      await env.DB.prepare("DELETE FROM image_registry_operation_writers WHERE id = ?1").bind(id).run();
+      expect((await acquireRegistrySweep(env, { owner: "collector-a" })).ok).toBe(true);
+    });
+
+    it.each(["builder", "publish_token"] as const)("still waits for an open session of a %s", async (kind) => {
+      const session = await createRegistryUploadSession(env, { owner: { kind, id: `${kind}-a` } });
+      if (!session.ok) throw new Error("the session must open");
+      // Its lease running out changes nothing.
+      await env.DB.prepare("UPDATE image_registry_upload_sessions SET expires_at = 1").run();
+
+      const blocked = await acquireRegistrySweep(env, { owner: "collector-a" });
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) return;
+      expect(blocked.code).toBe("registry_admission_busy");
+      expect(blocked.counts).toMatchObject({ openSessions: 1, staleOpenSessions: 1 });
+      expect(await sessionState(session.sessionId)).toBe("open");
+
+      await completeRegistryUploadSession(env, {
+        owner: { kind, id: `${kind}-a` }, sessionId: session.sessionId, outcome: "abandoned",
+      });
+      expect((await acquireRegistrySweep(env, { owner: "collector-a" })).ok).toBe(true);
+    });
+
+    it.each([
+      ["builder", "blob_exists", "pending"],
+      ["builder", "blob_put", "pending"],
+      ["builder", "blob_put", "unknown"],
+      ["builder", "manifest_put", "pending"],
+      ["builder", "build_result", "unknown"],
+      ["publish_token", "blob_exists", "unknown"],
+      ["publish_token", "blob_put", "pending"],
+      ["publish_token", "blob_put", "unknown"],
+      ["publish_token", "manifest_put", "unknown"],
+      ["system", "run_start", "pending"],
+    ] as const)("still waits for a %s's %s writer that is %s", async (ownerKind, operation, outcome) => {
+      const id = await writerRow({ ownerKind, operation, outcome, releasedAt: outcome === "unknown" ? 1 : null });
+      const blocked = await acquireRegistrySweep(env, { owner: "collector-a" });
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) return;
+      expect(blocked.code).toBe("registry_admission_busy");
+      expect(blocked.counts.pendingWriters).toBe(1);
+
+      await env.DB.prepare("DELETE FROM image_registry_operation_writers WHERE id = ?1").bind(id).run();
+      expect((await acquireRegistrySweep(env, { owner: "collector-a" })).ok).toBe(true);
+    });
+
+    it("stops a sweep's deletes for a writer that holds it, not for a pipeline's blob", async () => {
+      const acquired = await acquireRegistrySweep(env, { owner: "collector-a" });
+      if (!acquired.ok) throw new Error("the sweep must start");
+      const check = () =>
+        assertRegistrySweepDeletable(env, { sweepToken: acquired.lease.sweepToken, objectKeys: ["oci/sha256/aa"] });
+
+      await writerRow({ ownerKind: "pipeline", operation: "blob_put", outcome: "unknown", releasedAt: 1 });
+      expect((await check()).ok).toBe(true);
+      await writerRow({ ownerKind: "builder", operation: "blob_put", outcome: "unknown", releasedAt: 1 });
+      const blocked = await check();
+      expect(blocked.ok).toBe(false);
+      if (!blocked.ok) expect(blocked.code).toBe("registry_write_unresolved");
+    });
+  });
 });
+
+async function pipelineSession(
+  id: string,
+  input: { expiresAt: number; closedAt?: number },
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO pipeline_upload_sessions
+       (id, token_hash, scope_key, github_repository_id, github_repository, ref, sha, rev,
+        run_id, run_attempt, runner_environment, job_workflow_sha, expires_at, closed_at)
+     VALUES (?1, ?1, 'public', 1, 'intar/scenarios', 'refs/heads/main', 'sha', 'rev',
+        '1', 1, 'github-hosted', 'sha', ?2, ?3)`,
+  )
+    .bind(id, input.expiresAt, input.closedAt ?? null)
+    .run();
+}
+
+/** A writer row as an admitted request leaves it, written directly. */
+async function writerRow(input: {
+  ownerKind: string;
+  operation: string;
+  outcome?: "pending" | "unknown";
+  releasedAt?: number | null;
+  expiresAt?: number;
+  sessionId?: string;
+}): Promise<string> {
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO image_registry_operation_writers
+       (id, session_id, owner_kind, owner_id, operation, epoch, outcome,
+        created_at, heartbeat_at, expires_at, released_at)
+     VALUES (?1, ?2, ?3, 'owner', ?4, 0, ?5, ?6, ?6, ?7, ?8)`,
+  )
+    .bind(
+      id,
+      input.sessionId ?? null,
+      input.ownerKind,
+      input.operation,
+      input.outcome ?? "pending",
+      now,
+      input.expiresAt ?? now + 60_000,
+      input.releasedAt ?? null,
+    )
+    .run();
+  return id;
+}
+
+async function sessionState(id: string): Promise<string | null> {
+  return env.DB.prepare("SELECT state FROM image_registry_upload_sessions WHERE id = ?1")
+    .bind(id)
+    .first<string>("state");
+}
 
 function writeRequest(sessionId?: string): Request {
   const headers = new Headers({ authorization: `Bearer ${PUBLISH_TOKEN}` });
