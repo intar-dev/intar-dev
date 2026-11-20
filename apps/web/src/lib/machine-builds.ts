@@ -457,7 +457,7 @@ export async function settleScenarioRevisions(
 }
 
 /** Revisions one pass gives their behaviour digest. */
-const BEHAVIOUR_BACKFILL_PER_PASS = 50;
+const BEHAVIOUR_BACKFILL_PER_PASS = 200;
 
 /**
  * Gives the ready and verified revisions of a scope that have no behaviour

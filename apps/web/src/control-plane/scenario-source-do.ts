@@ -202,10 +202,12 @@ async function tickScenarioSource(
     }));
     again = true;
   }
-  // The rows from before revisions had a behaviour digest (#454), a few a
-  // pass. Like the step above, a fault here stops nothing else.
+  // The rows from before revisions had a behaviour digest (#454), some a
+  // pass. It asks for no pass of its own: the next poll does the next ones,
+  // and a pass asked for here would stretch the wait of a real retry. Like
+  // the step above, a fault here stops nothing else.
   try {
-    if (await backfillBehaviourDigests(env, scopeKey)) again = true;
+    await backfillBehaviourDigests(env, scopeKey);
   } catch (error) {
     console.error(JSON.stringify({
       event: "behaviour_digest_backfill_failed", scope_key: scopeKey, error: String(error),

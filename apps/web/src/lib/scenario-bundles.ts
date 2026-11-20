@@ -202,7 +202,8 @@ export async function ingestSourceBundle(
           SELECT ?1, ?2, ?3, ?4, 'building', ?5, ?7
           WHERE EXISTS (SELECT 1 FROM scenarios WHERE id = ?1 AND scope_key = ?6)
           ON CONFLICT (scenario_id, rev) DO ${byPipeline
-            ? `UPDATE SET state = 'building', failure_reason = NULL, created_at = excluded.created_at
+            ? `UPDATE SET state = 'building', failure_reason = NULL, created_at = excluded.created_at,
+                  restore_basis = excluded.restore_basis
                 WHERE scenario_revisions.state IN ('failed', 'building')
                   AND EXISTS (SELECT 1 FROM scenario_sources source WHERE source.scope_key = ?6
                     AND source.mode = 'push' AND source.disconnected_at IS NULL)`
