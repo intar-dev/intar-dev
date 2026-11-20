@@ -302,13 +302,15 @@ export async function moveLiveRevision(input: {
   ];
   if (kind === "promote" && liveRev !== null) {
     // Restore verification comes from the revision this one replaces and
-    // from no other, so withdrawing it there is not undone by a push.
+    // from no other, so withdrawing it there is not undone by a push. A
+    // revision with a restore check of its own keeps that check's word.
     statements.push(env.DB.prepare(
       `UPDATE scenario_revisions SET restore_verified_at = (SELECT replaced.restore_verified_at
             FROM scenario_revisions replaced WHERE replaced.scenario_id = ?1 AND replaced.rev = ?4
               AND replaced.restore_digest = scenario_revisions.restore_digest
               AND replaced.guest_contract = scenario_revisions.guest_contract)
-        WHERE scenario_id = ?1 AND rev = ?2 AND restore_verified_at IS NULL AND ${moved}`,
+        WHERE scenario_id = ?1 AND rev = ?2 AND restore_verified_at IS NULL AND restore_verify_run_id IS NULL
+          AND ${moved}`,
     ).bind(scenarioId, rev, now, liveRev));
   }
   if (leftBehaviour !== "") {

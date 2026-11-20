@@ -508,6 +508,48 @@ describe("promotion, rollback and verify runs", () => {
       // A second rollback from the same behaviour holds it again.
       await rollback(rev("a"), rev("c"));
       expect(await holds()).toMatchObject([{ lifted_at: null, lifted_by_user_id: null }]);
+      // Going back to a held revision stays possible, and holds what it leaves.
+      await rollback(rev("c"), rev("a"));
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("c"));
+      expect((await holds()).map((hold) => hold.lifted_at)).toEqual([null, null]);
+    });
+
+    it("writes no hold when the rollback does not happen", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      await publish(rev("b"), image, null, rechecked);
+      await markVerified(PUBLIC_ID, rev("b"));
+      await promote(rev("b"), rev("a"));
+      await env.DB.prepare("UPDATE scenario_revisions SET behaviour_digest = NULL WHERE rev = ?1").bind(rev("b")).run();
+      // The scenario is disabled between the read and the move.
+      const batch = env.DB.batch.bind(env.DB);
+      vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
+        await env.DB.prepare("UPDATE scenarios SET enabled = 0 WHERE id = ?1").bind(PUBLIC_ID).run();
+        return batch(statements);
+      });
+      await expect(rollback(rev("a"), rev("b"))).rejects.toMatchObject({ code: "live_revision_changed" });
+      expect(await holds()).toEqual([]);
+      expect((await digestsOf(rev("b")))!.behaviour_digest).toBeNull();
+    });
+
+    it("leaves a candidate ready on a lift when no verified revision behaves the same", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      await publish(rev("b"), image, null, rechecked);
+      await markVerified(PUBLIC_ID, rev("b"));
+      await promote(rev("b"), rev("a"));
+      await rollback(rev("a"), rev("b"));
+      // Another behaviour than the held one.
+      await publish(rev("c"), image, null, otherReady);
+      await lift(rev("b"));
+      expect((await digestsOf(rev("c")))!.state).toBe("ready");
+      // The held behaviour, but its verified revision is of another guest contract.
+      await rollback(rev("b"), rev("a"));
+      await rollback(rev("a"), rev("b"));
+      await publish(rev("d"), image, null, rechecked);
+      await env.DB.prepare("UPDATE scenario_revisions SET guest_contract = 2 WHERE rev = ?1").bind(rev("b")).run();
+      await lift(rev("d"));
+      expect((await digestsOf(rev("d")))!.state).toBe("ready");
     });
 
     it("leaves a candidate ready on a lift while a verify run of it is active", async () => {
@@ -550,7 +592,18 @@ describe("promotion, rollback and verify runs", () => {
       expect((await digestsOf(rev("d")))!.restore_digest).not.toBe((await digestsOf(rev("c")))!.restore_digest);
       await promote(rev("d"), rev("c"));
       expect((await digestsOf(rev("d")))!.restore_verified_at).toBeNull();
-      // Nor from a revision of another guest contract, or one without the digest.
+      // A candidate with a restore check of its own keeps that check's word.
+      await restoreVerified(rev("d"), 10);
+      await publish(rev("f"), image, null, changed((scenario) => {
+        (scenario.machines[0]!.env as Record<string, string>).SITE = "other";
+        scenario.briefing = "Checked by itself.";
+      }));
+      await env.DB.prepare("UPDATE scenario_revisions SET restore_verify_run_id = 'run-own' WHERE rev = ?1").bind(rev("f")).run();
+      await promote(rev("f"), rev("d"));
+      expect((await digestsOf(rev("f")))!.restore_verified_at).toBeNull();
+      await rollback(rev("d"), rev("f"));
+      await lift(rev("f"));
+      // Nor from a revision without the digest.
       await restoreVerified(rev("d"), 11);
       await publish(rev("e"), image, null, otherReady);
       await env.DB.prepare("UPDATE scenario_revisions SET restore_digest = NULL WHERE rev IN (?1, ?2)").bind(rev("d"), rev("e")).run();
