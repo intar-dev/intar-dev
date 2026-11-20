@@ -266,8 +266,11 @@ export async function admitRevisionRun(context: {
   verifyScopeKey?: string;
   /** The verify run is a restore check: its VM may start from a host snapshot. */
   verifyRestoreCheck?: boolean;
+  /** How long the run's VMs live; the usual hour when not given. */
+  leaseMs?: number;
 }): Promise<BeginScenarioRunResult> {
   const { input, revision, organizationId, courseLecture } = context;
+  const leaseMs = context.leaseMs ?? REVISION_RUN_LEASE_MS;
   const verifyScopeKey = context.verifyScopeKey ?? null;
   const local = input.runtime === "local" && verifyScopeKey === null;
   const verifyRestoreCheck = verifyScopeKey !== null && context.verifyRestoreCheck === true;
@@ -294,7 +297,7 @@ export async function admitRevisionRun(context: {
 
   const runId = createAppId();
   const createdAt = Date.now();
-  const leaseExpiresAt = createdAt + REVISION_RUN_LEASE_MS;
+  const leaseExpiresAt = createdAt + leaseMs;
   const machines = doc.machines.map((machine, ordinal) => ({
     machine,
     ordinal,
@@ -319,7 +322,7 @@ export async function admitRevisionRun(context: {
         image,
         imageSha256: image,
         resources: { cpuMillis: machine.cpu_millis, memoryMib: machine.memory_mib, diskMib: machine.disk_mib },
-        leaseDurationSeconds: REVISION_RUN_LEASE_MS / 1000,
+        leaseDurationSeconds: leaseMs / 1000,
         status: "queued",
       },
     } satisfies RunVmStateDocument;
@@ -597,6 +600,8 @@ export async function beginVerifyRun(input: {
    * names the run, which is how its outcome is told from a verify run's.
    */
   restoreCheck?: boolean;
+  /** A shorter lease than an administrator's hour: a source's job starts many runs. */
+  leaseMs?: number;
 }): Promise<BeginScenarioRunResult> {
   const drained = input.allowDrainedAdminProof === true;
   const restoreCheck = input.restoreCheck === true;
@@ -636,6 +641,7 @@ export async function beginVerifyRun(input: {
       },
       verifyScopeKey: row.scope_key,
       ...(restoreCheck ? { verifyRestoreCheck: true } : {}),
+      ...(input.leaseMs === undefined ? {} : { leaseMs: input.leaseMs }),
     });
     if (restoreCheck) {
       // The run is already on its way to the host. Should a report settle
