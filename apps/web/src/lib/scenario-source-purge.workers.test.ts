@@ -118,7 +118,17 @@ async function count(table: string, where = "1") {
 
 describe("purging a disconnected scope", () => {
   it("deletes what the repository published and keeps public content", async () => {
+    // What its pipeline recorded goes with it; another scope's record stays.
+    for (const scope of [SCOPE.key, "public"]) {
+      await env.DB.prepare(
+        `INSERT INTO scope_machine_images (scope_key, build_key, architecture, image_digest, image_format, size_bytes,
+           github_repository_id, github_repository, sha, run_id, run_attempt, runner_environment, job_workflow_sha)
+         VALUES (?1, 'sha256:k', 'amd64', 'sha256:i', 'intar-image-4', 1, 1, 'r', 's', '1', 1, 'github-hosted', 'w')`,
+      ).bind(scope).run();
+    }
     await expect(purge()).resolves.toBeNull();
+    expect(await count("scope_machine_images", `scope_key = '${SCOPE.key}'`)).toBe(0);
+    expect(await count("scope_machine_images")).toBe(1);
 
     for (const table of [
       "scenario_sources", "course_catalogs", "course_unit_completions", "bundles",

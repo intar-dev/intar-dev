@@ -1,3 +1,4 @@
+import { IMAGE_FORMAT } from "@/generated/constants";
 import { endLocalRun, ensureLocalHostStatement, localHostId } from "@/lib/local-runs";
 import { env } from "cloudflare:workers";
 import { and, desc, eq } from "drizzle-orm";
@@ -216,19 +217,34 @@ export async function liveRevisionImages(d1: D1Database, contract: number): Prom
 }
 
 /**
- * The arm64 image of each machine of `doc`, by build key: the one its build
- * recorded and the registry still holds. Null when any machine has none.
+ * The arm64 image of each machine of a revision, by build key: the one
+ * recorded for it that the registry still holds. Null when any machine has
+ * none. A revision whose images its source's pipeline built (#441) has them
+ * among its own scope's images and nowhere else; any other has its builds'.
  */
 export async function arm64MachineImages(
   d1: D1Database,
-  doc: ScenarioRevisionV1,
+  revision: Pick<LiveScenarioRevision, "scenarioId" | "rev" | "doc">,
 ): Promise<Map<string, string> | null> {
-  const keys = [...new Set(doc.machines.map((machine) => machine.build_key))];
-  const { results } = await d1.prepare(
-    `SELECT build.build_key, build.arm64_image_digest AS digest FROM machine_builds build
-       JOIN registry_manifests manifest ON manifest.digest = build.arm64_image_digest
-      WHERE build.arm64_state = 'succeeded' AND build.build_key IN (SELECT value FROM json_each(?1))`,
-  ).bind(JSON.stringify(keys)).all<{ build_key: string; digest: string }>();
+  const keys = [...new Set(revision.doc.machines.map((machine) => machine.build_key))];
+  const source = await d1.prepare(
+    `SELECT scenario.scope_key, COALESCE(bundle.image_producer, 'builder') AS producer
+       FROM scenarios scenario LEFT JOIN bundles bundle ON bundle.rev = ?2
+      WHERE scenario.id = ?1`,
+  ).bind(revision.scenarioId, revision.rev).first<{ scope_key: string; producer: string }>();
+  const { results } = await (source?.producer === "pipeline"
+    ? d1.prepare(
+        `SELECT image.build_key, image.image_digest AS digest FROM scope_machine_images image
+           JOIN registry_manifests manifest ON manifest.digest = image.image_digest
+          WHERE image.scope_key = ?2 AND image.architecture = 'arm64' AND image.image_format = ?3
+            AND image.build_key IN (SELECT value FROM json_each(?1))`,
+      ).bind(JSON.stringify(keys), source.scope_key, IMAGE_FORMAT)
+    : d1.prepare(
+        `SELECT build.build_key, build.arm64_image_digest AS digest FROM machine_builds build
+           JOIN registry_manifests manifest ON manifest.digest = build.arm64_image_digest
+          WHERE build.arm64_state = 'succeeded' AND build.build_key IN (SELECT value FROM json_each(?1))`,
+      ).bind(JSON.stringify(keys))
+  ).all<{ build_key: string; digest: string }>();
   const images = new Map(results.map((row) => [row.build_key, row.digest]));
   return keys.length > 0 && keys.every((key) => images.has(key)) ? images : null;
 }
@@ -269,7 +285,7 @@ export async function admitRevisionRun(context: {
   // and the arm64 Kino. Either may be missing: those builds are not what a
   // revision waits for.
   const arm64 = local && input.architecture === "arm64";
-  const arm64Images = arm64 ? await arm64MachineImages(env.DB, doc) : null;
+  const arm64Images = arm64 ? await arm64MachineImages(env.DB, revision) : null;
   const pin = await readKinoPin(env, revision.guestContract, arm64 ? "arm64" : "amd64");
   if (arm64 && (!arm64Images || !pin)) {
     throw appError(409, "architecture_unavailable", "this scenario has no machine images for this computer's processor yet");

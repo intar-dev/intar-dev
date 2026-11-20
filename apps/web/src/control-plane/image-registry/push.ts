@@ -448,13 +448,20 @@ async function recordPipelineImage(
   ).bind(sessionId, buildKey, architecture, IMAGE_FORMAT).first<string>("image_digest");
   if (standing) return jsonResponse({ ok: true, image_digest: standing, recorded: true });
 
+  // Only a manifest pushed in this session: its blobs were all seen under a
+  // writer's lease then, and its row is young, so the sweep keeps them until
+  // the image recorded here is a root of its own. One that was stored before
+  // may have lost blobs since.
   const stored_ = await env.DB.prepare(
-    `SELECT 1 AS present FROM registry_manifests WHERE digest = ?1 AND artifact_type = ?2`,
-  ).bind(imageDigest, MACHINE_ARTIFACT_TYPE).first();
+    `SELECT 1 AS present FROM registry_manifests manifest
+      WHERE manifest.digest = ?1 AND manifest.artifact_type = ?2 AND ${PUSHED_IN_SESSION}`,
+  ).bind(imageDigest, MACHINE_ARTIFACT_TYPE, sessionId).first();
   const manifest = stored_ ? await readJsonObject(env, imageDigest) : null;
   const config = validateManifest(manifest) ? await readJsonObject(env, manifest.config.digest) : null;
   if (!validateManifest(manifest) || !validateMachineConfig(config)) {
-    return jsonResponse({ error: "the image is not a stored machine image", code: "image_unknown" }, 409);
+    return jsonResponse({
+      error: "the image is not a machine image this session pushed", code: "image_unknown",
+    }, 409);
   }
   if (config.build_key !== buildKey || config.image_format !== IMAGE_FORMAT) {
     return jsonResponse({ error: "the image was built for another build key", code: "build_key_mismatch" }, 409);
@@ -508,7 +515,7 @@ async function recordPipelineImage(
               run_id, run_attempt, runner_environment, job_workflow_sha, ?2
          FROM pipeline_upload_sessions
         WHERE id = ?3 AND ${live}
-          AND EXISTS (SELECT 1 FROM registry_manifests WHERE digest = ?6)
+          AND EXISTS (SELECT 1 FROM registry_manifests manifest WHERE manifest.digest = ?6 AND ${PUSHED_IN_SESSION})
        ON CONFLICT DO NOTHING
        RETURNING image_digest`,
     ).bind(input.operationId, now, sessionId, buildKey, architecture, imageDigest, IMAGE_FORMAT, sizeBytes),
@@ -526,6 +533,9 @@ async function recordPipelineImage(
     ? jsonResponse({ ok: true, image_digest: recorded, recorded: true })
     : jsonResponse({ error: "the image is not a stored machine image", code: "image_unknown" }, 409);
 }
+
+/** `manifest` was pushed, or pushed again, since the session `?3` was opened. */
+const PUSHED_IN_SESSION = `manifest.created_at >= (SELECT created_at FROM pipeline_upload_sessions WHERE id = ?3)`;
 
 /** Whether a revision of the session's rev, in the session's scope, names `buildKey` for a machine. */
 async function keyInSessionBundle(env: Cloudflare.Env, sessionId: string, buildKey: string): Promise<boolean> {

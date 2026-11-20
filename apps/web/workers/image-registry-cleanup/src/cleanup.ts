@@ -259,6 +259,8 @@ export async function runCleanup(
       status,
       mode: report.mode,
       listedObjects: report.listedObjects,
+      unrootedManifests: report.unrootedManifests,
+      removedManifests: report.removedManifests,
       candidateObjects: report.candidateObjects,
       candidateBytes: report.candidateBytes,
       deletedObjects: report.deletedObjects,

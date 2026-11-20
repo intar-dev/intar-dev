@@ -127,6 +127,8 @@ export async function purgeScenarioSource(input: {
     bind(`DELETE FROM scenarios WHERE scope_key = ?1 AND organization_id = ?2 AND ${PURGING}`),
     bind(`DELETE FROM machine_builds WHERE ${SCOPE_BUILDS} AND ${PURGING}`),
     bind(`DELETE FROM bundles WHERE scope_key = ?1 AND organization_id = ?2 AND ${PURGING}`),
+    // What its pipeline recorded; the sweep reclaims the images.
+    bind(`DELETE FROM scope_machine_images WHERE scope_key = ?1 AND ${PURGING}`),
     bind(`DELETE FROM scenario_sources WHERE scope_key = ?1 AND ${PURGING}
       AND NOT EXISTS (${ORG_SCENARIOS})`),
   ]);

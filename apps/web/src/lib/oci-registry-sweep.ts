@@ -28,8 +28,19 @@ import {
  *   - every Kino pin, current and previous, and every Kino artifact
  *   - manifests indexed within the age guard, so a push that has not posted
  *     its result yet keeps its blobs
+ *   - the images a pipeline recorded for its scope (#441), both
+ *     architectures: those whose build key a kept revision of that scope
+ *     names, and those recorded within the age guard
  * A manifest root is closed over `registry_manifest_blobs` (config and
  * layers); a spec root is a blob of its own.
+ *
+ * Rows first: before a delete pass removes any object it removes the rows of
+ * every manifest that is no root: its blob index, the scope images that name
+ * it, and the manifest row, and it takes the image off a finished build that
+ * recorded it. A window holds only some of an image's objects, so without
+ * this an image could lose layers while its row still said it was stored.
+ * A manifest row therefore means every blob of the image is there. While
+ * such rows are left, the pass deletes no object.
  *
  * Sweep: one key window of the listing per pass, from a cursor kept on the
  * pass's gc-run row. An object is deleted only when it is unmarked, older than
@@ -57,6 +68,10 @@ export interface OciSweepOptions {
   batchSize?: number;
   /** Revision rows removed per pass. */
   revisionLimit?: number;
+  /** Unrooted manifests whose rows one statement batch removes; an image has thousands of index rows. */
+  manifestBatch?: number;
+  /** Such batches per pass. */
+  manifestBatches?: number;
   leaseMs?: number;
 }
 
@@ -66,9 +81,12 @@ const DEFAULTS: Required<OciSweepOptions> = {
   maxDeletes: 1000,
   batchSize: 200,
   revisionLimit: 100,
+  manifestBatch: 20,
+  manifestBatches: 50,
   leaseMs: 5 * 60 * 1000,
 };
 const FAULT_SAMPLE = 20;
+const UNROOTED_COUNT_LIMIT = 1000;
 const KEY_SAMPLE = 50;
 
 export interface OciSweepFault {
@@ -93,6 +111,12 @@ export interface OciSweepReport {
   unrecognizedObjects: number;
   markedObjects: number;
   youngObjects: number;
+  /** Manifests no root names: a delete pass removes their rows before any object. Counted up to a limit. */
+  unrootedManifests: number;
+  /** A bounded sample of them. */
+  unrootedManifestSample: string[];
+  /** Manifests whose rows this pass removed. */
+  removedManifests: number;
   candidateObjects: number;
   candidateBytes: number;
   /** A bounded sample of candidate keys. */
@@ -129,8 +153,10 @@ const validDigest = (column: string) =>
 /** `roots(kind, digest, source)`. ?1 is the age-guard cutoff, ?2 the Kino pins as a JSON array. */
 const ROOTS_SQL = `WITH ${KEPT_REVISIONS_CTE},
 machines AS (
-  SELECT revision.scenario_id || '@' || revision.rev AS source, machine.value AS m
-    FROM kept_revisions revision, json_each(revision.doc_json, '$.machines') machine),
+  SELECT revision.scenario_id || '@' || revision.rev AS source, machine.value AS m, scenario.scope_key AS scope_key
+    FROM kept_revisions revision
+    JOIN scenarios scenario ON scenario.id = revision.scenario_id,
+         json_each(revision.doc_json, '$.machines') machine),
 desired AS (
   SELECT host_id, doc_json FROM host_desired_state
    WHERE json_extract(doc_json, '$.schema_version') = ${HOST_DESIRED_STATE_SCHEMA_VERSION_V3}),
@@ -164,12 +190,22 @@ desired_roots(kind, digest, source) AS (
   UNION ALL SELECT 'manifest', json_extract(doc_json, '$.kino_pin'), 'desired ' || host_id FROM desired),
 -- The arm64 image of a build: kept for as long as a kept revision needs the
 -- build's key, and while the build is in flight or young, like the amd64 one.
+-- And a scope's own images, of both architectures: for as long as a kept
+-- revision of that scope needs the key, and while young. A row whose manifest
+-- row is gone records nothing, for every reader, so it is no root either.
 arm64_roots(kind, digest, source) AS (
   SELECT 'manifest', build.arm64_image_digest, 'arm64 build ' || build.build_key
     FROM machines JOIN machine_builds build ON build.build_key = json_extract(m, '$.build_key')
    WHERE build.arm64_image_digest IS NOT NULL
   UNION ALL SELECT 'manifest', arm64_image_digest, 'arm64 build ' || build_key FROM machine_builds
-   WHERE arm64_image_digest IS NOT NULL AND (state IN ('queued', 'assigned', 'building') OR updated_at >= ?1)),
+   WHERE arm64_image_digest IS NOT NULL AND (state IN ('queued', 'assigned', 'building') OR updated_at >= ?1)
+  UNION ALL SELECT 'manifest', image.image_digest, 'scope image ' || image.scope_key || ' ' || image.build_key
+    FROM machines JOIN scope_machine_images image
+      ON image.scope_key = machines.scope_key AND image.build_key = json_extract(m, '$.build_key')
+    JOIN registry_manifests present ON present.digest = image.image_digest
+  UNION ALL SELECT 'manifest', image.image_digest, 'young scope image ' || image.scope_key || ' ' || image.build_key
+    FROM scope_machine_images image JOIN registry_manifests present ON present.digest = image.image_digest
+   WHERE image.created_at >= ?1),
 pin_roots(kind, digest, source) AS (
   SELECT 'manifest', pin.value, 'kino pin' FROM json_each(?2) pin
   -- Every Kino artifact: an artifact can be pinned long after its push, and a
@@ -203,6 +239,16 @@ marked(digest) AS (
   UNION SELECT blob.blob_digest FROM manifests JOIN registry_manifest_blobs blob ON blob.manifest_digest = manifests.digest)
 SELECT digest FROM marked WHERE digest > ?3 AND digest <= ?4 ORDER BY digest LIMIT ?5`;
 
+/**
+ * The first ?3 manifests no root names. A young manifest is a root, so each
+ * is older than the age guard. NULL digests (a building revision's image, a
+ * queued build's) are left out of the root list: with one in it `NOT IN`
+ * would hold for no manifest.
+ */
+const UNROOTED_MANIFESTS = `SELECT manifest.digest FROM registry_manifests manifest
+   WHERE manifest.digest NOT IN (SELECT digest FROM roots WHERE kind = 'manifest' AND digest IS NOT NULL)
+   ORDER BY manifest.digest LIMIT ?3`;
+
 /** Revisions nothing keeps, created before ?1. */
 const UNKEPT_REVISIONS_SQL = `SELECT revision.rowid FROM scenario_revisions revision
    WHERE revision.created_at <= ?1
@@ -230,12 +276,16 @@ export async function runOciSweep(
   const settings = { ...DEFAULTS, ...options };
   settings.listPageLimit = Math.min(Math.max(1, settings.listPageLimit), 1000);
   settings.batchSize = Math.min(Math.max(1, settings.batchSize), 500);
+  // With none a batch, no batch could ever be the last one.
+  settings.manifestBatch = Math.max(1, settings.manifestBatch);
+  settings.manifestBatches = Math.max(1, settings.manifestBatches);
   const report = emptyReport(input.mode);
 
   if (input.mode !== "delete") {
     // Report-only takes no lease and writes nothing.
     try {
-      await plan(env, input, settings, report);
+      const planned = await plan(env, input, settings, report);
+      if (planned) await countUnrootedManifests(env, input, report);
       report.revisionCandidates = await countUnkeptRevisions(env, input.nowMs, settings.revisionLimit);
     } catch (error) {
       report.faults.push({ code: "d1_read_failed", detail: describe(error) });
@@ -282,6 +332,25 @@ export async function runOciSweep(
       report.error = "the mark stopped the sweep: " + describeFaults(report.faults);
       report.resumeRequired = true;
       await finishRegistrySweep(admission, { sweepToken, outcome: "failed", error: report.error });
+      return report;
+    }
+
+    const rowsLeft = await removeUnrootedManifests(env, input, sweepToken, settings, report);
+    if (typeof rowsLeft === "string") report.error = rowsLeft;
+    if (rowsLeft !== false) {
+      // No object goes while a manifest row may outlive its blobs. The window
+      // is not done: the next pass lists it again.
+      report.nextStartAfter = report.startAfter;
+      report.resumeRequired = true;
+      await recordRegistryGcProgress(admission, {
+        sweepToken,
+        detail: { start_after: report.startAfter, next_start_after: report.nextStartAfter, removed_manifests: report.removedManifests },
+      });
+      await finishRegistrySweep(admission, {
+        sweepToken,
+        outcome: report.error ? "failed" : "completed",
+        error: report.error,
+      });
       return report;
     }
 
@@ -450,11 +519,72 @@ async function deleteBatch(
   // unmarked, so the next pass deletes it.
   const digests = JSON.stringify(batch.map((object) => `sha256:${object.hex}`));
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM scope_machine_images WHERE image_digest IN (SELECT value FROM json_each(?1))").bind(digests),
     env.DB.prepare("DELETE FROM registry_manifest_blobs WHERE manifest_digest IN (SELECT value FROM json_each(?1))").bind(digests),
     env.DB.prepare("DELETE FROM registry_manifests WHERE digest IN (SELECT value FROM json_each(?1))").bind(digests),
   ]);
   await env.VM_IMAGE_REGISTRY_BUCKET.delete(keys);
   return null;
+}
+
+/** What the first delete pass would remove rows of; for a report-only pass. */
+async function countUnrootedManifests(env: OciSweepEnv, input: OciSweepInput, report: OciSweepReport): Promise<void> {
+  const pins = readKinoPins(input.kinoPinsJson);
+  if ("fault" in pins) return;
+  const { results } = await env.DB.prepare(`${ROOTS_SQL} ${UNROOTED_MANIFESTS}`)
+    .bind(input.nowMs - OCI_SWEEP_AGE_GUARD_MS, JSON.stringify(pins.digests), UNROOTED_COUNT_LIMIT)
+    .all<{ digest: string }>();
+  report.unrootedManifests = results.length;
+  report.unrootedManifestSample = results.slice(0, KEY_SAMPLE).map((row) => row.digest);
+}
+
+/**
+ * Removes the rows of the manifests no root names, a batch at a time, each
+ * under the gate like a delete batch. False once none is left; true when the
+ * pass's budget ran out first; a refusal code when the gate stopped it.
+ *
+ * Each batch is one transaction that picks its manifests itself, from the
+ * roots as they are then. A finished build that recorded one of them fails
+ * and loses the digest, so a publish that needs its key again builds it
+ * again instead of settling on an image that is gone; `updated_at` stays, or
+ * the build would count as recent activity.
+ */
+async function removeUnrootedManifests(
+  env: OciSweepEnv,
+  input: OciSweepInput,
+  sweepToken: string,
+  settings: Required<OciSweepOptions>,
+  report: OciSweepReport,
+): Promise<boolean | string> {
+  const pins = readKinoPins(input.kinoPinsJson);
+  if ("fault" in pins) return "the Kino pins cannot be read";
+  const admission = { DB: env.DB };
+  const binds = [input.nowMs - OCI_SWEEP_AGE_GUARD_MS, JSON.stringify(pins.digests), settings.manifestBatch] as const;
+  const unrooted = `(${UNROOTED_MANIFESTS})`;
+  for (let batch = 0; batch < settings.manifestBatches; batch += 1) {
+    const heartbeat = await heartbeatRegistrySweep(admission, { sweepToken, leaseMs: settings.leaseMs });
+    if (!heartbeat.ok) return "registry_sweep_superseded";
+    if (!heartbeat.deleteAllowed) return heartbeat.blockedReason ?? "registry_admission_blocked";
+    const allowed = await assertRegistrySweepDeletable(admission, { sweepToken, objectKeys: [] });
+    if (!allowed.ok) return allowed.code;
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `${ROOTS_SQL} UPDATE machine_builds SET state = 'failed', error = 'its image was collected', image_digest = NULL
+          WHERE state = 'succeeded' AND image_digest IN ${unrooted}`,
+      ).bind(...binds),
+      env.DB.prepare(
+        `${ROOTS_SQL} UPDATE machine_builds SET arm64_state = NULL, arm64_image_digest = NULL
+          WHERE arm64_image_digest IN ${unrooted}`,
+      ).bind(...binds),
+      env.DB.prepare(`${ROOTS_SQL} DELETE FROM scope_machine_images WHERE image_digest IN ${unrooted}`).bind(...binds),
+      env.DB.prepare(`${ROOTS_SQL} DELETE FROM registry_manifest_blobs WHERE manifest_digest IN ${unrooted}`).bind(...binds),
+      env.DB.prepare(`${ROOTS_SQL} DELETE FROM registry_manifests WHERE digest IN ${unrooted} RETURNING digest`).bind(...binds),
+    ]);
+    const removed = results.at(-1)?.results.length ?? 0;
+    report.removedManifests += removed;
+    if (removed < settings.manifestBatch) return false;
+  }
+  return true;
 }
 
 async function countUnkeptRevisions(env: OciSweepEnv, nowMs: number, limit: number): Promise<number> {
@@ -516,6 +646,7 @@ function emptyReport(mode: OciSweepReport["mode"]): OciSweepReport {
   return {
     mode, completed: false, resumeRequired: false, faults: [], startAfter: null, nextStartAfter: null,
     listedObjects: 0, listedBytes: 0, unrecognizedObjects: 0, markedObjects: 0, youngObjects: 0,
+    unrootedManifests: 0, unrootedManifestSample: [], removedManifests: 0,
     candidateObjects: 0, candidateBytes: 0, candidateSample: [], deletedObjects: 0, deletedBytes: 0,
     revisionCandidates: 0, deletedRevisions: 0, error: null,
   };

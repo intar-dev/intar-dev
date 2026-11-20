@@ -378,7 +378,7 @@ export async function localCatalogRequest(
       for (const lecture of course.lectures) {
         if (!lecture.scenarioId || (lecture.state !== "available" && lecture.state !== "in_progress")) continue;
         const revision = await liveScenarioRevision(workerEnv.DB, lecture.scenarioId, course.organizationId ?? null);
-        if (!revision || !(await arm64MachineImages(workerEnv.DB, revision.doc))) lecture.state = "waiting_for_scenario";
+        if (!revision || !(await arm64MachineImages(workerEnv.DB, revision))) lecture.state = "waiting_for_scenario";
       }
     }
   }
