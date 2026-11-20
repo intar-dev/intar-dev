@@ -527,7 +527,16 @@ async function recordPipelineImage(
     env.DB.prepare(`SELECT 1 AS live WHERE ${live}`).bind(input.operationId, now),
   ]);
   if (!results[3]?.results.length) return leaseRanOut();
-  if (results[1]?.results.length) return jsonResponse({ ok: true, image_digest: imageDigest }, 201);
+  if (results[1]?.results.length) {
+    // An automatic source's job may wait for just this image before it
+    // puts a lab live.
+    await env.DB.prepare(
+      `UPDATE scenario_sources SET poked_at = ?2
+        WHERE promotion = 'automatic' AND disconnected_at IS NULL
+          AND scope_key = (SELECT scope_key FROM pipeline_upload_sessions WHERE id = ?1)`,
+    ).bind(sessionId, now).run();
+    return jsonResponse({ ok: true, image_digest: imageDigest }, 201);
+  }
   const recorded = (results[2]?.results[0] as { image_digest: string } | undefined)?.image_digest;
   return recorded
     ? jsonResponse({ ok: true, image_digest: recorded, recorded: true })

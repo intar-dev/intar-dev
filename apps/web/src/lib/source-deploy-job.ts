@@ -7,7 +7,10 @@
 // it is skipped when it would not move (unchanged, on hold); it failed when
 // its revision failed, its checks did not pass, or a wait ran out. A lab
 // that passed goes live by a move of its own, whatever the commit's other
-// labs do.
+// labs do. A pipeline's lab goes live only once the image of each of its
+// machines is recorded for every architecture a pipeline is asked to build:
+// a revision is complete on amd64 alone, and a learner's arm64 computer
+// would find no image for a while after each change.
 //
 // Besides its labs a commit has one step of its own: its course catalog
 // becomes the scope's, the scenarios it no longer has are disabled and
@@ -40,6 +43,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { scenarioSources } from "@/db/schema";
 import { AppError } from "@/lib/app-error";
 import { behaviourHeldSql } from "@/lib/kept-revisions";
+import { pipelinePlan } from "@/lib/pipeline-revisions";
 import {
   catalogForwardSql, namespacedCatalog, sameAsLiveSql, sourceHeadSql, type moveLiveRevision, type SourceHead,
   type VerifyReport,
@@ -151,6 +155,9 @@ interface LabRow {
   running: number;
   verify_run_id: string | null;
   verify_report_json: string | null;
+  /** Who builds the revision's images, and the build keys of its machines, as a JSON array. */
+  producer: string;
+  build_keys: string;
   /** Of the head's revision: what becomes the live revision's when the lab moves. */
   restore_verified_at: number | null;
   machines: number;
@@ -249,11 +256,31 @@ export async function driveDeployJob(input: {
     if (step === "done") updatedAt = at;
   }
 
+  // The images a pipeline still owes, by build key: a lab of it does not
+  // go live before each machine has every architecture's.
+  const owed = new Map<string, string[]>();
+  const pipelineKeys = rows.filter((row) => row.producer === "pipeline")
+    .flatMap((row) => JSON.parse(row.build_keys) as string[]);
+  if (pipelineKeys.length) {
+    for (const { build_key: key, architecture } of (await pipelinePlan({ DB: db }, scopeKey, pipelineKeys)).missing) {
+      owed.set(key, [...(owed.get(key) ?? []), architecture]);
+    }
+  }
+
   const labs = new Map<string, Lab>();
   let wait = step === "held";
   let scopeWait: string | null = null;
   for (const row of rows) {
     let decided = decide(row, overdue);
+    if (decided === "move" && row.producer === "pipeline") {
+      const missing = [...new Set((JSON.parse(row.build_keys) as string[]).flatMap((key) => owed.get(key) ?? []))].sort();
+      // The image's own record pokes the source; nothing needs a wait here.
+      if (missing.length) {
+        decided = overdue
+          ? { kind: "failed", note: `its ${missing.join(" and ")} images did not arrive within 24 hours` }
+          : { kind: "waiting", note: `waiting for its ${missing.join(" and ")} images` };
+      }
+    }
     if (decided === "move") {
       decided = await move(row, head, source, deps);
       // A move that is refused day-long is the lab's end too.
@@ -473,7 +500,10 @@ async function readLabs(db: D1Database, rev: string, scopeKey: string): Promise<
         ${behaviourHeldSql("revision.scenario_id", "revision.behaviour_digest")} AS held,
         EXISTS (SELECT 1 FROM scenario_runs run
           WHERE run.active_key = 'verify:' || ?2 || ':' || revision.rev || ':' || revision.scenario_id) AS running,
-        revision.verify_run_id, revision.verify_report_json, revision.restore_verified_at,
+        revision.verify_run_id, revision.verify_report_json, bundle.image_producer AS producer,
+        (SELECT json_group_array(json_extract(machine.value, '$.build_key'))
+           FROM json_each(revision.doc_json, '$.machines') machine) AS build_keys,
+        revision.restore_verified_at,
         json_array_length(revision.doc_json, '$.machines') AS machines,
         live.restore_verified_at AS live_restore_verified_at,
         json_array_length(live.doc_json, '$.machines') AS live_machines,
