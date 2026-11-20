@@ -17,7 +17,14 @@ export interface ScenarioRunHintSnapshot {
 export type AgentHostRole = "agent" | "builder";
 export type ImageRegistryEnforcementMode = "report_only" | "enforce";
 export type ImageRegistryGateState = "open" | "sweeping";
-export type ImageRegistrySessionOwnerKind = "publish_token" | "builder";
+/**
+ * `pipeline` is a scenario repository's own pipeline (#441); its owner id is
+ * its `pipeline_upload_sessions` row.
+ */
+export type ImageRegistrySessionOwnerKind =
+  | "publish_token"
+  | "builder"
+  | "pipeline";
 export type ImageRegistrySessionState =
   | "open"
   | "completed"

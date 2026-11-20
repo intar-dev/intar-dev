@@ -12,13 +12,16 @@ import validateManifest from "@/generated/contracts/oci-manifest-v1.validate";
 import validateMachineConfig from "@/generated/contracts/oci-machine-config-v1.validate";
 import validateKinoConfig from "@/generated/contracts/oci-kino-config-v1.validate";
 import { readRegistryAuth } from "@/lib/image-registry-admission";
+import { chargePipelineSession, refundPipelineSession } from "@/lib/pipeline-upload-sessions";
 import { isRecord, jsonResponse, sha256Hex } from "./shared";
 
 /**
  * The push side of the OCI registry: blobs and manifests under one
  * content-addressed prefix, `oci/sha256/<hex>`, and the result of a machine
  * build. Builders push machine images; the publish token pushes Kino
- * artifacts. The router admits every write as a registry writer.
+ * artifacts. A pipeline (#441) may ask for and store blobs within its
+ * session's byte budget; a manifest and a result are not its to push yet.
+ * The router admits every write as a registry writer.
  */
 
 export const OCI_PREFIX = "oci/sha256/";
@@ -88,6 +91,16 @@ export async function handleBlobPut(
     await request.body?.cancel();
     return stored(hex);
   }
+  // A pipeline pays for what it stores, and only for that: a blob that is
+  // already there costs nothing, and one that fails gives its bytes back.
+  const payer = auth.owner.kind === "pipeline" ? auth.owner.id : null;
+  if (payer && !(await chargePipelineSession(env, payer, length))) {
+    await request.body?.cancel();
+    return jsonResponse(
+      { error: "this upload session has stored all the bytes it may", code: "pipeline_session_bytes" },
+      413,
+    );
+  }
   // The DOM typing of `crypto` hides the Workers DigestStream.
   const hasher = new (crypto as unknown as { DigestStream: typeof DigestStream }).DigestStream("SHA-256");
   const sized = new FixedLengthStream(length);
@@ -95,6 +108,7 @@ export async function handleBlobPut(
   try {
     await bucket.put(key, sized.readable, { sha256: hex });
   } catch (error) {
+    if (payer) await refundPipelineSession(env, payer, length).catch(() => undefined);
     const actual = await copied;
     if (actual !== null && actual !== hex) {
       return jsonResponse({ error: "the blob does not hash to its digest", code: "digest_mismatch" }, 409);
@@ -163,6 +177,7 @@ export async function handleManifestPut(
   if (!machine && manifest.artifactType !== KINO_ARTIFACT_TYPE) {
     return invalid("unsupported artifact type");
   }
+  // A pipeline is neither: it pushes no manifest yet.
   if (auth.owner.kind !== (machine ? "builder" : "publish_token")) {
     return jsonResponse({ error: `${machine ? "a builder" : "the publish token"} pushes this artifact` }, 403);
   }
@@ -261,6 +276,8 @@ export async function handleBuildResult(
   if (!read && request.method !== "POST") return methodNotAllowed("GET, POST");
   const auth = await readRegistryAuth(request, env);
   if (!auth.ok) return auth.response;
+  // A pipeline has no build row to record on; its own result route is not
+  // built yet.
   if (auth.owner.kind !== "builder") {
     return jsonResponse({ error: "a builder records build results" }, 403);
   }

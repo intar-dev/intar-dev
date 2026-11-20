@@ -83,6 +83,9 @@ export async function purgeScenarioSource(input: {
     bind(`UPDATE machine_builds SET state = 'failed', error = 'purged', updated_at = ?4
       WHERE state = 'queued' AND bundle_rev IN (SELECT rev FROM bundles WHERE scope_key = ?1) AND ${QUIET}
       RETURNING build_key`),
+    // A disconnect closes these; this covers a source disconnected before it did.
+    bind(`UPDATE pipeline_upload_sessions SET closed_at = ?4
+      WHERE scope_key = ?1 AND closed_at IS NULL AND ${QUIET}`),
   ]);
   if (!marked?.results.length) throw await refusal(input);
   // Revisions of other scopes that wait on such a build fail with it.

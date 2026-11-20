@@ -16,6 +16,7 @@ import {
 } from "@/control-plane/image-registry/shared";
 import {
   account,
+  pipelineUploadSessions,
   scenarioSourceCommits,
   scenarioSources,
   type CourseCatalogSnapshotV2,
@@ -121,6 +122,30 @@ export function scenarioSourceBindingPredicate(): SQL {
   return sql`(${scenarioSources.disconnectedAt} IS NULL
     AND ${scenarioSources.pausedAt} IS NULL
     AND ${scenarioSourceBinderPredicate()})`;
+}
+
+/**
+ * Closes the open pipeline upload sessions of a scope once its source is
+ * disconnected; it goes in the batch that disconnects. A session already
+ * stops working with the binding, but a reconnect must not bring it back.
+ */
+export function closeDisconnectedPipelineSessions(
+  db: DrizzleD1Database,
+  scopeKey: string,
+  now: number,
+) {
+  return db
+    .update(pipelineUploadSessions)
+    .set({ closedAt: now })
+    .where(
+      and(
+        eq(pipelineUploadSessions.scopeKey, scopeKey),
+        isNull(pipelineUploadSessions.closedAt),
+        sql`EXISTS (SELECT 1 FROM scenario_sources source
+          WHERE source.scope_key = ${scopeKey}
+            AND source.disconnected_at IS NOT NULL)`,
+      ),
+    );
 }
 
 /**
@@ -450,15 +475,18 @@ export async function changeScenarioSource(input: {
         );
       break;
     case "disconnect":
-      await db
-        .update(scenarioSources)
-        .set({
-          disconnectedAt: now,
-          disconnectReason: "admin",
-          pokedAt: now,
-          updatedAt: now,
-        })
-        .where(connected);
+      await db.batch([
+        db
+          .update(scenarioSources)
+          .set({
+            disconnectedAt: now,
+            disconnectReason: "admin",
+            pokedAt: now,
+            updatedAt: now,
+          })
+          .where(connected),
+        closeDisconnectedPipelineSessions(db, scope.key, now),
+      ]);
       break;
     case "purge":
       if (scope.organizationId === null) {

@@ -22,6 +22,10 @@ import { isRecord, jsonResponse, readString } from "./shared";
 /**
  * Upload-session and admission-control HTTP surface. The session header carries
  * an opaque id only; the owner always comes from the verified credential.
+ *
+ * Every owner kind, a pipeline too, may open, heartbeat and complete its own
+ * session. Status is for a builder or the publish token; pause, enforcement
+ * and reap are for the publish token alone.
  */
 
 export async function handleUploadSessionCreate(
@@ -116,6 +120,11 @@ export async function handleRegistryAdmissionStatus(
   }
   const auth = await readRegistryAuth(request, env);
   if (!auth.ok) return auth.response;
+  // The gate's state is the platform's; a tenant's pipeline learns only what
+  // its own session answers.
+  if (auth.owner.kind === "pipeline") {
+    return jsonResponse({ error: "a builder or the publish token reads admission" }, 403);
+  }
   const [state, idle] = await Promise.all([
     readRegistryAdmissionState(env),
     readRegistryIdleState(env),
