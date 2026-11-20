@@ -703,9 +703,11 @@ interface CheckRow {
   detail: string | null;
   diagnostics_json: string | null;
   check_run_id: number | null;
+  automatic: number | null;
 }
 
-const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_run_id
+const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_run_id,
+    (SELECT promotion = 'automatic' FROM scenario_sources WHERE scope_key = ?1) AS automatic
   FROM scenario_source_commits WHERE scope_key = ?1 AND purpose = 'deploy'`;
 
 // A superseded head row waits to be delivered again, so it shows as queued.
@@ -787,7 +789,9 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
       ? `Checking ${job.decided}/${job.total}`
       : check.title;
   // In the job's states the row's detail has a line per lab already.
-  const byJob = state === "waiting" || state === "awaiting_promote" || state === "live";
+  // So has a row the job failed; a manual source's failed row has none.
+  const byJob = state === "waiting" || state === "awaiting_promote" || state === "live" ||
+    (state === "failed" && row.automatic === 1 && total > 0);
   // GitHub renders the summary as Markdown and drops tags such as `<path>`.
   const summary = [
     ...(row.detail === null ? [] : [redactHostPaths(row.detail)]),

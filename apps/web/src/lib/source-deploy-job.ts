@@ -120,7 +120,7 @@ interface LabRow {
   verify_report_json: string | null;
 }
 
-type Lab =
+export type Lab =
   | { kind: "building" | "checking" | "unchanged" }
   /** Live: by this pass, before it, or by an administrator. */
   | { kind: "live"; inherited: boolean }
@@ -209,6 +209,8 @@ export async function driveDeployJob(input: {
     let decided = decide(row, overdue);
     if (decided === "move") {
       decided = await move(row, head, source, deps);
+      // A move that is refused day-long is the lab's end too.
+      if (decided.kind === "waiting" && overdue) decided = { kind: "failed", note: "it could not go live within 24 hours" };
       if (decided.kind === "waiting") wait = true;
     }
     if (decided) {
@@ -313,7 +315,7 @@ export async function driveDeployJob(input: {
  * The check run's lines: one per lab that changed, the failed and held
  * first, the unchanged as a count; cut at a line when they are too many.
  */
-function detailOf(labs: Map<string, Lab>, stepLine: string | null): string | null {
+export function detailOf(labs: Map<string, Lab>, stepLine: string | null): string | null {
   const rank = { failed: 0, held: 1, waiting: 2, live: 3 } as const;
   const lines = [...labs]
     .filter((entry): entry is [string, Extract<Lab, { kind: keyof typeof rank }>] => entry[1].kind in rank)
@@ -322,19 +324,20 @@ function detailOf(labs: Map<string, Lab>, stepLine: string | null): string | nul
       ? `live${lab.inherited ? ", verified without a run" : ""}`
       : lab.kind === "held" ? `held; ${lab.note}` : lab.note}`);
   const unchanged = [...labs.values()].filter((lab) => lab.kind === "unchanged").length;
-  if (unchanged) lines.push(`- ${unchanged} ${unchanged === 1 ? "lab" : "labs"} unchanged`);
-  if (stepLine) lines.unshift(stepLine);
-  const kept: string[] = [];
-  let length = 0;
-  for (const line of lines) {
-    if (length + line.length + 1 > MAX_DETAIL_CHARS - 32) {
-      kept.push(`- and ${lines.length - kept.length} more`);
+  const tail = unchanged ? [`- ${unchanged} ${unchanged === 1 ? "lab" : "labs"} unchanged`] : [];
+  const kept: string[] = stepLine ? [stepLine] : [];
+  let length = kept.concat(tail).join("\n").length + 32;
+  for (const [index, line] of lines.entries()) {
+    // A line of a length of its own, as a build's failure can be, is cut.
+    const fitted = line.length > 400 ? `${line.slice(0, 399)}…` : line;
+    if (length + fitted.length + 1 > MAX_DETAIL_CHARS) {
+      kept.push(`- and ${lines.length - index} more`);
       break;
     }
-    kept.push(line);
-    length += line.length + 1;
+    kept.push(fitted);
+    length += fitted.length + 1;
   }
-  return kept.join("\n") || null;
+  return kept.concat(tail).join("\n") || null;
 }
 
 /**
@@ -390,8 +393,17 @@ async function commitStep(
   // Removals belong to the commit whose catalog is the scope's: a head that
   // an older bundle made, as after a force-push back, changes nothing.
   if (!todo.forward && (!todo.ours || (!todo.removed && !todo.returned))) return "done";
-  const catalogJson = todo.forward && todo.namespace !== null
-    ? JSON.stringify(await namespacedCatalog(todo.r2_key, todo.namespace)) : null;
+  let catalogJson: string | null = null;
+  if (todo.forward && todo.namespace !== null) {
+    try {
+      catalogJson = JSON.stringify(await namespacedCatalog(todo.r2_key, todo.namespace));
+    } catch (error) {
+      // A bundle that is gone or unreadable holds the step; the deadline ends it.
+      if (!(error instanceof AppError)) throw error;
+      console.error(JSON.stringify({ event: "source_commit_catalog_unreadable", scope_key: scope, rev: head.rev, error: error.code }));
+      return "held";
+    }
+  }
   const marked = `EXISTS (SELECT 1 FROM scenario_source_commits marked WHERE marked.id = ?3 AND marked.updated_at = ?4)`;
   const ours = `EXISTS (SELECT 1 FROM course_catalogs WHERE scope_key = ?1 AND source_revision = ?2)`;
   const [marker] = await db.batch([

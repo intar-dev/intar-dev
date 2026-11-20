@@ -423,8 +423,10 @@ export interface SourceHead {
  * is bound by `binder`, automatic, connected and not paused, and its deploy
  * row `row` of attempt `attempt` has rev `rev`, is the head's on compile
  * digest `digest`, and is one the job still drives. All are SQL
- * expressions. With the binder's rights (`scopeAdminSql`) this is the
- * source's binding predicate, held in the statement that writes.
+ * expressions. The
+ * binder must still administer the scope, as `scopeAdminSql` asks of an
+ * actor: this is the source's binding predicate, held in the statement
+ * that writes.
  */
 export function sourceHeadSql(
   scope: string, by: { binder: string; rev: string; row: string; attempt: string; digest: string },
@@ -433,6 +435,12 @@ export function sourceHeadSql(
       JOIN scenario_source_commits head ON head.scope_key = source.scope_key AND head.purpose = 'deploy'
      WHERE source.scope_key = ${scope} AND source.bound_by_user_id = ${by.binder} AND source.promotion = 'automatic'
        AND source.disconnected_at IS NULL AND source.paused_at IS NULL
+       AND ((source.organization_id IS NULL AND EXISTS (SELECT 1 FROM user binder
+           WHERE binder.id = source.bound_by_user_id AND ${activeAdminSql("binder")}))
+         OR EXISTS (SELECT 1 FROM member binder_member JOIN user binder ON binder.id = binder_member.user_id
+           WHERE binder_member.organization_id = source.organization_id
+             AND binder_member.user_id = source.bound_by_user_id
+             AND binder_member.role IN ('owner', 'admin') AND ${activeAccountSql("binder")}))
        AND head.id = ${by.row} AND head.attempt = ${by.attempt} AND head.rev = ${by.rev}
        AND head.state IN ('building', 'waiting', 'awaiting_promote')
        AND head.rev = 'git-' || source.github_repository_id || '-' || source.head_sha || '-' || ${by.digest})`;

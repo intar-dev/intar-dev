@@ -2,7 +2,7 @@
 
 import { gzipSync } from "node:zlib";
 import { env } from "cloudflare:workers";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
 import { appError } from "@/lib/app-error";
 import { settleScenarioRevisions } from "@/lib/machine-builds";
@@ -11,7 +11,8 @@ import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { liftRevisionHold, moveLiveRevision } from "@/lib/scenario-revisions";
 import {
-  DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, driveDeployJob, type DeployJob,
+  DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, detailOf, driveDeployJob, type DeployJob,
+  type Lab,
 } from "@/lib/source-deploy-job";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -147,6 +148,10 @@ beforeEach(async () => {
     env.DB.prepare("INSERT INTO agent_hosts (id, user_id, name, scope, credential_generation) VALUES ('host', ?1, 'Server', 'platform', 1)").bind(OWNER),
     env.DB.prepare("INSERT INTO registry_manifests (digest, media_type, artifact_type, size) VALUES (?1, 'm', 'a', 1)").bind(IMAGE),
   ]);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("an automatic source's job", () => {
@@ -402,6 +407,48 @@ describe("an automatic source's job", () => {
     expect(await scenario(WEB)).toMatchObject({ enabled: 1 });
   });
 
+  it("waits for a move that is refused, and fails the lab when it is refused for a day", async () => {
+    await head("a");
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
+    const busy = { ...deps, moveLive: async () => { throw appError(503, "registry_busy", "busy"); } };
+    const driveBusy = () => driveDeployJob({ db: env.DB, storage, scopeKey: SCOPE, digest, now, deps: busy });
+    expect(await driveBusy()).toEqual({ wait: true });
+    expect(await commit()).toEqual({ state: "waiting", detail: `- ${WEB}: waiting for the image registry` });
+    now += DEPLOY_JOB_DEADLINE_MS;
+    await driveBusy();
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: it could not go live within 24 hours` });
+    expect(await scenario(WEB)).toMatchObject({ live_rev: null });
+  });
+
+  it("stops the commit's step at the binder's rights, in the step's own statement", async () => {
+    await head("a");
+    const batch = env.DB.batch.bind(env.DB);
+    vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
+      await env.DB.prepare("UPDATE member SET role = 'member'").run();
+      return batch(statements);
+    });
+    await drive();
+    expect(await catalogRev()).toBeNull();
+    vi.restoreAllMocks();
+  });
+
+  it("lists the failed labs first and cuts the lines at a whole one", () => {
+    const labs = new Map<string, Lab>();
+    for (let index = 0; index < 100; index += 1) {
+      labs.set(`acme/lab-${String(index).padStart(3, "0")}`, index % 2
+        ? { kind: "live", inherited: false } : { kind: "failed", note: `its build failed ${"x".repeat(60)}` });
+    }
+    labs.set("acme/same", { kind: "unchanged" });
+    const lines = detailOf(labs, "- the step")!.split("\n");
+    expect(lines.join("\n").length).toBeLessThanOrEqual(4096);
+    expect(lines[0]).toBe("- the step");
+    expect(lines[1]).toContain("acme/lab-000: its build failed");
+    expect(lines.at(-1)).toBe("- 1 lab unchanged");
+    const shown = lines.length - 3;
+    expect(lines.at(-2)).toBe(`- and ${100 - shown} more`);
+    expect(detailOf(new Map(), null)).toBeNull();
+  });
+
   it("fails a commit without labs and disables nothing", async () => {
     await live("a", twoLabs());
     await env.DB.batch([
@@ -450,6 +497,25 @@ describe("an automatic source's job", () => {
     await refused("UPDATE scenario_source_commits SET attempt = 2", "UPDATE scenario_source_commits SET attempt = 1");
     await refused("UPDATE scenario_source_commits SET state = 'superseded'", "UPDATE scenario_source_commits SET state = 'building'");
     await refused("UPDATE member SET role = 'member'", "UPDATE member SET role = 'owner'");
+    // Another binder than the one the job read.
+    await expect(moveLiveRevision({ scenarioId: WEB, rev: rev("a"), liveRev: null, kind: "promote", actorUserId: "someone", source }))
+      .rejects.toMatchObject({ status: 404 });
+    // Lost between the read and the write: the move's own statement refuses.
+    for (const sql of ["UPDATE scenario_sources SET paused_at = 1", "UPDATE member SET role = 'member'",
+      "UPDATE scenario_source_commits SET attempt = 2"]) {
+      const batch = env.DB.batch.bind(env.DB);
+      const spy = vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
+        await env.DB.prepare(sql).run();
+        return batch(statements);
+      });
+      await expect(moveA()).rejects.toMatchObject({ code: "live_revision_changed" });
+      expect(await scenario(WEB)).toMatchObject({ live_rev: null });
+      spy.mockRestore();
+      await env.DB.batch([
+        env.DB.prepare("UPDATE scenario_sources SET paused_at = NULL"), env.DB.prepare("UPDATE member SET role = 'owner'"),
+        env.DB.prepare("UPDATE scenario_source_commits SET attempt = 1"),
+      ]);
+    }
     // A rollback is never the job's, and the move goes through once all holds.
     await expect(moveLiveRevision({ scenarioId: WEB, rev: rev("a"), liveRev: null, kind: "rollback", actorUserId: OWNER, source }))
       .rejects.toThrow();
