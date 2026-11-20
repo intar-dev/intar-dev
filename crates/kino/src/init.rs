@@ -16,7 +16,9 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
-use intar_contracts::guest::{BOOT_JSON_FILENAME, GUEST_CONTRACT, GuestBootV3, RUN_DISK_MOUNT};
+use intar_contracts::guest::{
+    BOOT_JSON_FILENAME, GUEST_CONTRACT, GuestBootV3, MAX_READY_SECONDS, RUN_DISK_MOUNT,
+};
 use intar_contracts::scenario::{MachineSpecV1, ScriptV1, SpecMode, SpecTaskV1};
 use intar_kino_proto::kino_v2::{Phase, Ready, Report, Status, Task, Verify};
 use std::collections::BTreeMap;
@@ -67,12 +69,15 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         return fail(&report, error).await;
     }
     boot::release_lab(&report).await;
-    run(
+    run_within(
         &boot.spec,
         boot.mode,
         &peers_of(&boot),
         Path::new(SCRIPT_DIR),
         &report,
+        // A host that boots a slower guest than a learner's says how long.
+        boot.ready_seconds
+            .map_or(READY_TOTAL, |seconds| Duration::from_secs(seconds.into())),
     )
     .await;
     if Path::new(RUN_DISK_MOUNT).join(CAPTURE_FILENAME).exists() {
@@ -125,15 +130,38 @@ fn read_boot() -> Result<GuestBootV3, String> {
             boot.contract
         ));
     }
+    if boot
+        .ready_seconds
+        .is_some_and(|seconds| seconds == 0 || seconds > MAX_READY_SECONDS)
+    {
+        return Err(format!(
+            "boot.json gives the ready scripts {} s; a host may give 1 to {MAX_READY_SECONDS}",
+            boot.ready_seconds.unwrap_or_default()
+        ));
+    }
     Ok(boot)
 }
 
+/// The lab with Kino's own limit for its ready scripts.
+#[cfg(test)]
 pub(crate) async fn run(
     spec: &MachineSpecV1,
     mode: SpecMode,
     peers: &[String],
     dir: &Path,
     report: &watch::Sender<Report>,
+) {
+    run_within(spec, mode, peers, dir, report, READY_TOTAL).await;
+}
+
+/// The lab: its ready scripts, which get `ready_total` in all, then its tasks.
+pub(crate) async fn run_within(
+    spec: &MachineSpecV1,
+    mode: SpecMode,
+    peers: &[String],
+    dir: &Path,
+    report: &watch::Sender<Report>,
+    ready_total: Duration,
 ) {
     report.send_modify(|report| {
         report.ready = spec
@@ -153,7 +181,7 @@ pub(crate) async fn run(
             })
             .collect();
     });
-    if !run_ready(&spec.ready, &spec.env, dir, report).await {
+    if !run_ready(&spec.ready, &spec.env, dir, report, ready_total).await {
         // After SSH_READY this is a lab failure: the VM stays up.
         report.send_modify(|report| {
             report.set_phase(Phase::Failed);
@@ -175,14 +203,16 @@ pub(crate) async fn run(
 }
 
 /// Every script once, all together; then each one that did not pass, in
-/// order, every 250 ms until it exits 0. All within 300 s.
+/// order, every 250 ms until it exits 0. All within `total`: 300 s, unless
+/// the host gave a slower guest longer.
 async fn run_ready(
     scripts: &[ScriptV1],
     env: &BTreeMap<String, String>,
     dir: &Path,
     report: &watch::Sender<Report>,
+    total: Duration,
 ) -> bool {
-    let deadline = Instant::now() + READY_TOTAL;
+    let deadline = Instant::now() + total;
     let attempt = |index: usize, limit: Duration| async move {
         let left = deadline
             .saturating_duration_since(Instant::now())
@@ -214,7 +244,7 @@ async fn run_ready(
         let mut last = first;
         while last != Attempt::Passed {
             tokio::time::sleep(READY_INTERVAL).await;
-            last = attempt(index, READY_TOTAL).await;
+            last = attempt(index, total).await;
             if last == Attempt::OutOfTime {
                 return false;
             }

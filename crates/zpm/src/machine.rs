@@ -147,6 +147,10 @@ pub struct Plan<'a> {
     /// build names them to boot what it built, emulated when the image is
     /// for another processor.
     pub on: Option<(Arch, Accel)>,
+    /// Seconds the lab's ready scripts get. `None` is Kino's own limit, which
+    /// every learner's lab gets; an emulated boot of an image build is slower
+    /// than that and names more.
+    pub ready_seconds: Option<u32>,
 }
 
 /// A running machine with its links to this computer. Dropping it stops the
@@ -229,6 +233,7 @@ pub fn start(
             run_cli_port: broker.port,
         }),
         root_resize: grow.is_some(),
+        ready_seconds: plan.ready_seconds,
     })?;
     let (overlay, run_disk, recordings) = (
         dir.join("root.qcow2"),
@@ -389,6 +394,7 @@ mod tests {
             relay: Path::new("relay"),
             authorized_keys: &[],
             on: None,
+            ready_seconds: None,
         };
         let run = dir.path().join("run");
         match start(

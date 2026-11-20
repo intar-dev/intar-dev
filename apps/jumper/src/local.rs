@@ -123,6 +123,7 @@ impl Local {
                 relay: &relay,
                 authorized_keys: &[login],
                 on: None,
+                ready_seconds: None,
             };
             let (asked_run, asked_machine) = (run_id, machine.name.clone());
             // ponytail: QEMU from PATH; the app ships its own with #403.

@@ -59,7 +59,19 @@ pub struct GuestBootV3 {
     /// that leaves it out writes the same bytes as before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<GuestHostV3>,
+    /// Seconds the lab's ready scripts get in total, when the host knows the
+    /// guest is slower than a learner's: an image build that boots what it
+    /// built under emulation. Absent, Kino's own limit applies, as for every
+    /// run of a lab; a host that leaves it out writes the same bytes as
+    /// before the field existed. A Kino older than the field refuses a
+    /// `boot.json` that has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 3600))]
+    pub ready_seconds: Option<u32>,
 }
+
+/// The most a host may give a lab's ready scripts ([`GuestBootV3::ready_seconds`]).
+pub const MAX_READY_SECONDS: u32 = 3600;
 
 /// The host's end of Kino's two connections.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -263,6 +275,18 @@ mod tests {
         // An agent host writes no `host`, and its boot.json keeps its bytes.
         let absent = boot(None)?;
         assert_eq!(absent.host, None);
+        // Nor does it write `ready_seconds`: only a host that boots a slower
+        // guest than a learner's does, and it reads back as given.
+        assert_eq!(absent.ready_seconds, None);
+        assert!(!serde_json::to_string(&absent)?.contains("ready_seconds"));
+        let mut slower = serde_json::to_value(&absent)?;
+        if let Some(object) = slower.as_object_mut() {
+            object.insert("ready_seconds".to_owned(), 1800.into());
+        }
+        assert_eq!(
+            serde_json::from_value::<GuestBootV3>(slower)?.ready_seconds,
+            Some(1800)
+        );
         assert!(!serde_json::to_string(&absent)?.contains("host\""));
 
         let tcp = boot(Some(serde_json::json!({

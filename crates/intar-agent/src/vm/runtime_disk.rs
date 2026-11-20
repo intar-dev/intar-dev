@@ -66,6 +66,8 @@ pub fn boot_json(input: &BootJsonInput<'_>) -> Result<Vec<u8>> {
         spec,
         // An agent host is reached on its vsock CID.
         host: None,
+        // A learner's lab gets Kino's own limit.
+        ready_seconds: None,
     };
     serde_json::to_vec(&boot).context("serialize boot.json")
 }

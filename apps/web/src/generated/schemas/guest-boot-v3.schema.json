@@ -37,6 +37,16 @@
         "type": "string"
       }
     },
+    "ready_seconds": {
+      "description": "Seconds the lab's ready scripts get in total, when the host knows the\nguest is slower than a learner's: an image build that boots what it\nbuilt under emulation. Absent, Kino's own limit applies, as for every\nrun of a lab; a host that leaves it out writes the same bytes as\nbefore the field existed. A Kino older than the field refuses a\n`boot.json` that has it.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 3600,
+      "minimum": 1
+    },
     "root_resize": {
       "type": "boolean"
     },

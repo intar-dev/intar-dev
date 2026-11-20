@@ -24,10 +24,12 @@ use zpm::{Accel, Arch};
 /// Nobody holds its private half: it was thrown away when this was written.
 const NOBODYS_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEj6vP9F5WJTR6eOGYdjGkibJRysQZNdA4emo8hYFNbu intar-image-cli-boot-check";
 
-/// How long a booted image has to report its lab ready.
-const BOOT_SECONDS: u64 = 300;
+/// What Kino gives a lab's ready scripts.
+const READY_SECONDS: u32 = 300;
 /// An emulated guest gets this many times as long, as an emulated bake does.
-const EMULATED_BOOT_FACTOR: u64 = 6;
+const EMULATED_BOOT_FACTOR: u32 = 6;
+/// How long a guest may take before its ready scripts start.
+const BOOT_SECONDS: u64 = 120;
 
 #[derive(Debug, Args)]
 pub(crate) struct BuildCommand {
@@ -48,7 +50,8 @@ pub(crate) struct BuildCommand {
     #[arg(long)]
     config: Option<PathBuf>,
     /// The Kino binary of the image's architecture; the boot puts it on the
-    /// run disk as a host does.
+    /// run disk as a host does. An emulated boot gives the lab longer to
+    /// become ready, which takes a Kino that knows `ready_seconds`.
     #[arg(long, required_unless_present = "no_boot")]
     kino: Option<PathBuf>,
     /// Bake only. An image that is not a machine is never booted: it has no lab.
@@ -247,9 +250,13 @@ impl Boot<'_> {
         } else {
             Accel::detect(guest).map_err(|error| anyhow::anyhow!("{error}"))?
         };
+        let factor = if emulated { EMULATED_BOOT_FACTOR } else { 1 };
         let seconds = self
             .seconds
-            .unwrap_or(BOOT_SECONDS * if emulated { EMULATED_BOOT_FACTOR } else { 1 });
+            .unwrap_or((BOOT_SECONDS + u64::from(READY_SECONDS)) * u64::from(factor));
+        // An emulated guest is several times slower than a learner's; its lab
+        // gets that much longer to become ready.
+        let ready_seconds = emulated.then_some(READY_SECONDS * EMULATED_BOOT_FACTOR);
         let relay = std::env::current_exe().context("find this program's own file")?;
         let run = work.path().join("run");
         let started = Instant::now();
@@ -270,6 +277,7 @@ impl Boot<'_> {
                 relay: &relay,
                 authorized_keys: &[NOBODYS_KEY.to_owned()],
                 on: Some((guest, accel)),
+                ready_seconds,
             },
             // Nobody types `intar` in this guest.
             |_| None,
@@ -277,12 +285,39 @@ impl Boot<'_> {
         .map_err(|error| anyhow::anyhow!("{error}"))?;
 
         let deadline = started + Duration::from_secs(seconds);
+        // What the guest last said about each ready script, to say each change once.
+        let mut said: Vec<(String, CheckStatus)> = Vec::new();
+        let mut heard = false;
         let outcome = loop {
             let mut latest = None;
             while let Ok(report) = running.reports.reports.try_recv() {
                 latest = Some(report);
             }
             if let Some(report) = latest {
+                let waited = started.elapsed().as_secs();
+                if !heard {
+                    heard = true;
+                    eprintln!("boot: {waited} s: the guest's Kino reports");
+                }
+                let now: Vec<(String, CheckStatus)> = report
+                    .lab
+                    .ready
+                    .iter()
+                    .map(|ready| (ready.name.clone(), ready.status))
+                    .collect();
+                for (index, (name, status)) in now.iter().enumerate() {
+                    if said.get(index) != Some(&(name.clone(), *status)) {
+                        eprintln!("boot: {waited} s: ready '{name}': {status:?}");
+                        let tail = report.lab.ready[index].tail.trim();
+                        if *status != CheckStatus::Pass && !tail.is_empty() {
+                            for line in tail.lines().rev().take(3).collect::<Vec<_>>().iter().rev()
+                            {
+                                eprintln!("boot:   {line}");
+                            }
+                        }
+                    }
+                }
+                said = now;
                 if let Some(reason) = report.failed {
                     break Err(format!("the guest failed to start: {reason}"));
                 }
@@ -298,7 +333,16 @@ impl Boot<'_> {
                 }
             }
             if !running.is_running() {
-                break Err("the machine stopped before its lab was ready".to_owned());
+                // A guest that cannot read its boot document turns itself
+                // off without a word: it does not know where to report.
+                let silent = if heard || ready_seconds.is_none() {
+                    ""
+                } else {
+                    " and never reported; a Kino older than `ready_seconds`, which an emulated boot sets, refuses its boot document"
+                };
+                break Err(format!(
+                    "the machine stopped before its lab was ready{silent}"
+                ));
             }
             if Instant::now() >= deadline {
                 break Err(format!("the lab was not ready after {seconds} s"));
