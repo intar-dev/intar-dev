@@ -142,6 +142,11 @@ pub struct Plan<'a> {
     pub relay: &'a Path,
     /// OpenSSH public keys that may log in; none starts no SSH in the guest.
     pub authorized_keys: &'a [String],
+    /// The processor and accelerator to run on. `None` is this computer's
+    /// own, accelerated, which is all a learner's lab ever gets; an image
+    /// build names them to boot what it built, emulated when the image is
+    /// for another processor.
+    pub on: Option<(Arch, Accel)>,
 }
 
 /// A running machine with its links to this computer. Dropping it stops the
@@ -178,10 +183,17 @@ pub fn start(
     plan: &Plan<'_>,
     answer: impl Fn(&RunCliRequestV1) -> Option<RunCliResponseV1> + Send + Sync + 'static,
 ) -> Result<RunningMachine, Error> {
-    let arch = Arch::host().ok_or_else(|| {
-        Error::NoAcceleration("No machine images exist for this computer's processor.".into())
-    })?;
-    let accel = Accel::detect(arch)?;
+    let (arch, accel) = match plan.on {
+        Some(on) => on,
+        None => {
+            let arch = Arch::host().ok_or_else(|| {
+                Error::NoAcceleration(
+                    "No machine images exist for this computer's processor.".into(),
+                )
+            })?;
+            (arch, Accel::detect(arch)?)
+        }
+    };
     // A started fraction of a processor is a whole one to QEMU.
     let cpus = u32::try_from(plan.cpu_millis.div_ceil(1000).max(1)).unwrap_or(u32::MAX);
     check(
@@ -376,6 +388,7 @@ mod tests {
             egress: true,
             relay: Path::new("relay"),
             authorized_keys: &[],
+            on: None,
         };
         let run = dir.path().join("run");
         match start(
