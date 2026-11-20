@@ -1,14 +1,13 @@
-import { and, eq, gt, inArray, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   bundles,
   pipelineUploadSessions,
-  scenarioRevisions,
   scenarioSourceCommits,
   scenarioSources,
-  scenarios,
 } from "@/db/schema";
 import { appError, toErrorResponse } from "@/lib/app-error";
+import { KEPT_REVISIONS_CTE } from "@/lib/kept-revisions";
 import { encodeBase64Url } from "@/lib/base64url";
 import { runnerMayPublish, verifyGithubActionsToken } from "@/lib/github-oidc";
 import { createAppId } from "@/lib/id";
@@ -174,19 +173,18 @@ export async function handlePipelineSessionOpen(
       return response;
     }
     // A revision that already has its amd64 images is ready, and its arm64
-    // ones are still to come: only a failed rev takes no more images.
-    const [wanted] = await db
-      .select({ rev: scenarioRevisions.rev })
-      .from(scenarioRevisions)
-      .innerJoin(scenarios, eq(scenarios.id, scenarioRevisions.scenarioId))
-      .where(
-        and(
-          eq(scenarioRevisions.rev, rev),
-          eq(scenarios.scopeKey, binding.scopeKey),
-          inArray(scenarioRevisions.state, ["building", "ready", "verified"]),
-        ),
-      )
-      .limit(1);
+    // ones are still to come. It must be one that is kept: the sweep keeps a
+    // scope's images, and the quota counts them, by the keys of kept
+    // revisions, so a run of a rev nothing uses any more records nothing.
+    const wanted = await env.DB.prepare(
+      `WITH ${KEPT_REVISIONS_CTE}
+       SELECT 1 AS kept FROM kept_revisions kept
+         JOIN scenarios scenario ON scenario.id = kept.scenario_id
+         JOIN scenario_revisions revision ON revision.scenario_id = kept.scenario_id AND revision.rev = kept.rev
+        WHERE kept.rev = ?1 AND scenario.scope_key = ?2
+          AND revision.state IN ('building', 'ready', 'verified')
+        LIMIT 1`,
+    ).bind(rev, binding.scopeKey).first();
     if (!wanted) throw superseded();
 
     const now = Date.now();

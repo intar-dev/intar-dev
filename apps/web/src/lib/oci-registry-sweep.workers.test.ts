@@ -538,4 +538,125 @@ describe("the OCI sweep", () => {
     expect(deleting.result?.youngObjects).toBe(orphanKeys.length);
     expect(await present(orphanKeys)).toBe(true);
   });
+
+  describe("a scope's recorded images and the rows of what nothing keeps", () => {
+    const KEY = `sha256:${"c".repeat(64)}`;
+    const rows = (table: string, where = "1") => env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`).first<number>("n");
+    /** A recorded image of `scope` for `buildKey`; recorded long ago unless `createdAt` says otherwise. */
+    async function scopeImage(scope: string, buildKey: string, architecture: string, createdAt = 0) {
+      const digest = await image();
+      await env.DB.prepare(
+        `INSERT INTO scope_machine_images (scope_key, build_key, architecture, image_digest, image_format, size_bytes,
+           github_repository_id, github_repository, sha, run_id, run_attempt, runner_environment, job_workflow_sha, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'intar-image-4', 1, 1, 'r', 's', '1', 1, 'github-hosted', 'w', ?5)`,
+      ).bind(scope, buildKey, architecture, digest, createdAt).run();
+      return digest;
+    }
+    /** A building revision of the public scope that names `KEY`: its image is NULL, like a queued build's. */
+    async function buildingRevision() {
+      const { doc, keep } = await revisionImage(false);
+      for (const machine of doc.machines) machine.build_key = KEY;
+      await seedScenario("intar/pipeline");
+      await seedRevision("intar/pipeline", "r1", "building", doc);
+      await env.DB.prepare(`INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, updated_at)
+        VALUES (?1, 'intar-image-4', 'b', 'queued', 0)`).bind(`sha256:${"d".repeat(64)}`).run();
+      return keep;
+    }
+
+    it("keeps both architectures a kept revision of the scope needs, and a young one, and nothing else", async () => {
+      const specs = await buildingRevision();
+      const amd = await scopeImage("public", KEY, "amd64");
+      const arm = await scopeImage("public", KEY, "arm64");
+      const now = later();
+      const young = await scopeImage("public", `sha256:${"e".repeat(64)}`, "amd64", now);
+      // The same key in a scope whose revisions do not name it, and a key nothing names.
+      const foreign = await scopeImage("organization:x", KEY, "amd64");
+      const unkept = await scopeImage("public", `sha256:${"f".repeat(64)}`, "amd64");
+      // A row whose manifest is gone records nothing: no root, and no fault.
+      await env.DB.prepare(
+        `INSERT INTO scope_machine_images (scope_key, build_key, architecture, image_digest, image_format, size_bytes,
+           github_repository_id, github_repository, sha, run_id, run_attempt, runner_environment, job_workflow_sha, created_at)
+         VALUES ('public', ?1, 'arm64', ?2, 'intar-image-4', 1, 1, 'r', 's', '1', 1, 'github-hosted', 'w', ?3)`,
+      ).bind(`sha256:${"e".repeat(64)}`, `sha256:${"9".repeat(64)}`, now).run();
+      const keep = [...specs, ...await closure(amd), ...await closure(arm), ...await closure(young)];
+      const gone = [...await closure(foreign), ...await closure(unkept)];
+
+      const report = await delete_({}, now);
+
+      expect(report.error).toBeNull();
+      expect(report.faults).toEqual([]);
+      expect(await present(keep)).toBe(true);
+      expect(await absent(gone)).toBe(true);
+      expect(await rows("scope_machine_images", `image_digest IN ('${foreign}', '${unkept}')`)).toBe(0);
+      expect(await rows("scope_machine_images")).toBe(4);
+    });
+
+    it("removes every row of an image nothing keeps before any of its objects, though roots without a digest exist", async () => {
+      await buildingRevision();
+      const kept = await scopeImage("public", KEY, "amd64");
+      const orphans = [await image(), await image(), await scopeImage("public", `sha256:${"f".repeat(64)}`, "arm64")];
+      const orphanKeys = (await Promise.all(orphans.map(closure))).flat();
+      const list = orphans.map((digest) => `'${digest}'`).join(", ");
+
+      // A window of one object: far from all of any image.
+      const report = await delete_({ listPages: 1, listPageLimit: 1, maxDeletes: 1 });
+
+      expect(report.error).toBeNull();
+      expect(report.removedManifests).toBe(3);
+      expect(await rows("registry_manifests", `digest IN (${list})`)).toBe(0);
+      expect(await rows("registry_manifest_blobs", `manifest_digest IN (${list})`)).toBe(0);
+      expect(await rows("scope_machine_images", `image_digest IN (${list})`)).toBe(0);
+      expect(await rows("registry_manifests", `digest = '${kept}'`)).toBe(1);
+      expect(await rows("registry_manifest_blobs", `manifest_digest = '${kept}'`)).toBe(3);
+      expect((await Promise.all(orphanKeys.map((k) => bucket.head(k)))).filter(Boolean).length).toBeGreaterThanOrEqual(orphanKeys.length - 1);
+    });
+
+    it("deletes no object while such rows are left, keeps its place, and finishes over the next passes", async () => {
+      const orphanKeys = (await Promise.all([image(), image(), image()].map(async (digest) => closure(await digest)))).flat();
+      const options = { manifestBatch: 1, manifestBatches: 2 };
+
+      const first = await delete_(options);
+      expect(first).toMatchObject({
+        error: null, removedManifests: 2, deletedObjects: 0, completed: false, resumeRequired: true,
+        startAfter: null, nextStartAfter: null,
+      });
+      expect(await present(orphanKeys)).toBe(true);
+      expect(await rows("registry_manifests")).toBe(1);
+
+      const second = await delete_(options);
+      expect(second).toMatchObject({ error: null, removedManifests: 1, deletedObjects: orphanKeys.length, completed: true });
+      expect(await absent(orphanKeys)).toBe(true);
+    });
+
+    it("takes a collected image off the finished build that recorded it, so a later publish builds it again", async () => {
+      const collected = await image();
+      const arm = await image();
+      const key = `sha256:${"a".repeat(64)}`;
+      await env.DB.prepare(`INSERT INTO machine_builds
+          (build_key, image_format, bundle_rev, state, image_digest, arm64_asked, arm64_state, arm64_image_digest, updated_at)
+        VALUES (?1, 'intar-image-4', 'b', 'succeeded', ?2, 1, 'succeeded', ?3, 7)`).bind(key, collected, arm).run();
+
+      const report = await delete_();
+
+      expect(report.error).toBeNull();
+      expect(await env.DB.prepare("SELECT state, image_digest, arm64_state, arm64_image_digest, updated_at FROM machine_builds").first())
+        .toEqual({ state: "failed", image_digest: null, arm64_state: null, arm64_image_digest: null, updated_at: 7 });
+      // Nothing of it is a root any more, so the next pass finds no fault.
+      expect((await delete_()).faults).toEqual([]);
+    });
+
+    it("says in report-only mode how many manifests a delete pass would take the rows of, and takes none", async () => {
+      await buildingRevision();
+      await scopeImage("public", KEY, "amd64");
+      const orphans = [await image(), await image()];
+
+      const report = await plan();
+
+      expect(report.faults).toEqual([]);
+      expect(report.unrootedManifests).toBe(2);
+      expect([...report.unrootedManifestSample].sort()).toEqual([...orphans].sort());
+      expect(report.removedManifests).toBe(0);
+      expect(await rows("registry_manifests")).toBe(3);
+    });
+  });
 });

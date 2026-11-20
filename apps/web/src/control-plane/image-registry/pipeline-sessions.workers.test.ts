@@ -32,6 +32,7 @@ import {
 import { OCI_SWEEP_AGE_GUARD_MS, runOciSweep } from "@/lib/oci-registry-sweep";
 import { PIPELINE_SCOPE_STORAGE_BYTES, PIPELINE_SESSION_MAX_BYTES } from "@/lib/pipeline-upload-sessions";
 import { changeScenarioSource, scenarioSourceScope } from "@/lib/scenario-sources";
+import { arm64MachineImages } from "@/lib/scenario-runs/revision-begin";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { blob, machineConfig, manifestOf, type PushedBlob } from "./oci-test-fixtures";
@@ -343,11 +344,29 @@ describe("opening a pipeline upload session", () => {
   it("refuses when no revision of the rev in its scope still takes images", async () => {
     await seedBundle({ state: "failed" });
     await refusal(await open(), 409, "superseded");
-    // A revision that is ready has its amd64 images; its arm64 ones may follow.
-    for (const state of ["building", "ready", "verified"] as const) {
-      await db().update(scenarioRevisions).set({ state });
-      expect((await open()).status).toBe(201);
+    await db().update(scenarioRevisions).set({ state: "building" });
+    expect((await open()).status).toBe(201);
+    // A revision that is ready has its amd64 images; its arm64 ones may
+    // follow while it is one that is kept: here, its scenario's candidate.
+    await db().update(scenarioRevisions).set({ state: "ready" });
+    await refusal(await open(), 409, "superseded");
+    await db().update(scenarios).set({ candidateRev: REV });
+    expect((await open()).status).toBe(201);
+    await db().update(scenarios).set({ candidateRev: null, liveRev: REV });
+    await db().update(scenarioRevisions).set({ state: "verified" });
+    expect((await open()).status).toBe(201);
+
+    // A verified revision behind three newer verified ones is kept no more.
+    await db().update(scenarios).set({ liveRev: null });
+    await db().update(scenarioRevisions).set({ createdAt: 1 });
+    for (const newer of ["n1", "n2", "n3"]) {
+      await db().insert(scenarioRevisions).values({
+        scenarioId: "intar/lab", rev: newer, guestContract: 3, docJson: { machines: [] } as never, state: "verified", createdAt: 2,
+      });
     }
+    await refusal(await open(), 409, "superseded");
+    await db().update(scenarios).set({ liveRev: REV });
+    expect((await open()).status).toBe(201);
     await db().update(scenarios).set({ scopeKey: "organization:acme" });
     await refusal(await open(), 409, "superseded");
   });
@@ -865,6 +884,52 @@ describe("a pipeline recording its image", () => {
     await db().update(scenarioRevisions).set({ state: "building" });
     expect((await record(token, image.digest)).status).toBe(200);
     expect(await state()).toBe("ready");
+  });
+
+  it("records only a manifest pushed in its own session, also by another session since", async () => {
+    await seedBundle();
+    const token = await session();
+    const image = await pushImage(token, KEY_HEX);
+    // Stored before this session was opened: some of its blobs may be gone.
+    await env.DB.prepare("UPDATE registry_manifests SET created_at = 1").run();
+    await refusal(await record(token, image.digest), 409, "image_unknown");
+    expect(await rows()).toEqual([]);
+
+    // Another session pushes it again: every blob was just seen, for both.
+    const other = await session();
+    expect((await putManifest(image.manifest, other)).status).toBe(201);
+    expect((await record(token, image.digest)).status).toBe(201);
+  });
+
+  it("gives a local arm64 run of its revision its own scope's arm64 images and no other", async () => {
+    await seedBundle();
+    const token = await session();
+    const revision = { scenarioId: "intar/lab", rev: REV, doc: { machines: [{ build_key: KEY }] } as never };
+    // A builder's arm64 image of the same key is not a pipeline revision's.
+    const builders = await pushImage(token, KEY_HEX, { architecture: "arm64", label: "builder" });
+    await env.DB.prepare(`INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, arm64_asked, arm64_state, arm64_image_digest)
+      VALUES (?1, 'intar-image-4', 'b', 'succeeded', 1, 'succeeded', ?2)`).bind(KEY, builders.digest).run();
+    expect(await arm64MachineImages(env.DB, revision)).toBeNull();
+
+    const arm = await pushImage(token, KEY_HEX, { architecture: "arm64" });
+    expect((await record(token, arm.digest, KEY_HEX, "?arch=arm64")).status).toBe(201);
+    expect(await arm64MachineImages(env.DB, revision)).toEqual(new Map([[KEY, arm.digest]]));
+    // The rev stays a pipeline's when its source is set back to the builder.
+    await db().update(scenarioSources).set({ imageProducer: "builder" });
+    expect(await arm64MachineImages(env.DB, revision)).toEqual(new Map([[KEY, arm.digest]]));
+
+    // Another scope's record, a stale format and a missing manifest are none.
+    await db().update(scopeMachineImages).set({ scopeKey: "organization:acme" });
+    expect(await arm64MachineImages(env.DB, revision)).toBeNull();
+    await db().update(scopeMachineImages).set({ scopeKey: SCOPE, imageFormat: "intar-image-3" });
+    expect(await arm64MachineImages(env.DB, revision)).toBeNull();
+    await db().update(scopeMachineImages).set({ imageFormat: "intar-image-4" });
+    await env.DB.prepare("DELETE FROM registry_manifests WHERE digest = ?1").bind(arm.digest).run();
+    expect(await arm64MachineImages(env.DB, revision)).toBeNull();
+
+    // A builder's revision reads its build, as before.
+    await db().update(bundles).set({ imageProducer: "builder" });
+    expect(await arm64MachineImages(env.DB, revision)).toEqual(new Map([[KEY, builders.digest]]));
   });
 
   it("answers a second image of the same key with the recorded one", async () => {
