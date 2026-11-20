@@ -11,6 +11,8 @@ use std::process::ExitCode;
 
 mod build_command;
 mod bundle_command;
+mod plan_command;
+mod push_command;
 mod spec_command;
 
 use bundle_command::{
@@ -37,8 +39,12 @@ enum Command {
     Spec(spec_command::SpecCommand),
     /// Compile the repository into a bundle, and upload it with `--url`.
     Bundle(BundleCommand),
+    /// Upload the bundle and print the images a pipeline has to build.
+    Plan(plan_command::PlanCommand),
     /// Build one image and boot it once (Linux, with the builder's tools).
     Build(build_command::BuildCommand),
+    /// Push an image `build` wrote and record it for the source.
+    Push(push_command::PushCommand),
     #[command(hide = true)]
     Relay(build_command::RelayCommand),
 }
@@ -89,7 +95,9 @@ fn main() -> ExitCode {
         Command::Fmt(args) => fmt_command(&args),
         Command::Spec(args) => spec_command::spec_command(&args),
         Command::Bundle(args) => bundle_command(&args),
+        Command::Plan(args) => plan_command::plan_command(&args),
         Command::Build(args) => build_command::build_command(&args),
+        Command::Push(args) => push_command::push_command(&args),
         Command::Relay(args) => build_command::relay_command(&args),
     };
     match result {

@@ -306,3 +306,497 @@ fn maps_upload_outcomes_to_exit_codes() {
     assert_eq!(exit_code(&error), 75, "{error:?}");
     server.join().expect("the server ends");
 }
+
+mod pipeline {
+    use std::path::Path;
+
+    use clap::Parser;
+    use intar_contracts::scenario::build_keys;
+    use intar_contracts::source::SOURCE_BUNDLES_PATH;
+    use intar_image_scenario::loader::compile;
+
+    use super::{GIT_REV, example, serve_once};
+    use crate::bundle_command::{MissingImage, PipelineReceipt, parse_bundle_upload_response};
+    use crate::plan_command::{plan_command, plan_of};
+    use crate::push_command::BuiltImage;
+    use crate::{Cli, Command, exit_code};
+
+    /// The build key of the example's one machine.
+    fn example_key(root: &Path) -> String {
+        let (bundle, _) = compile(root).expect("the example compiles");
+        let keys = build_keys(&bundle.scenarios[0], &bundle.images).expect("keys");
+        keys.machines
+            .values()
+            .next()
+            .expect("a machine")
+            .as_str()
+            .to_owned()
+    }
+
+    fn missing(key: &str, architecture: &str) -> MissingImage {
+        MissingImage {
+            build_key: key.to_owned(),
+            architecture: architecture.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_receipt_without_a_plan_is_a_builders() {
+        let body = format!(r#"{{"ok":true,"rev":"{GIT_REV}","queued":0,"assigned":[]}}"#);
+        let receipt = parse_bundle_upload_response(reqwest::StatusCode::ACCEPTED, &body, GIT_REV)
+            .expect("a receipt");
+        assert_eq!(receipt.pipeline, None);
+        let repository = example();
+        let (bundle, _) = compile(repository.path()).expect("compiles");
+        let plan =
+            serde_json::to_value(plan_of(&bundle, GIT_REV, None).expect("a plan")).expect("json");
+        assert_eq!(
+            plan,
+            serde_json::json!({ "rev": GIT_REV, "producer": "builder", "jobs": [], "images": [] })
+        );
+    }
+
+    #[test]
+    fn the_missing_images_become_targets_of_build() {
+        let repository = example();
+        let key = example_key(repository.path());
+        let body = format!(
+            r#"{{"ok":true,"rev":"{GIT_REV}","queued":0,"assigned":[],"pipeline":{{"architectures":["amd64","arm64"],"missing":[{{"build_key":"{key}","architecture":"amd64"}},{{"build_key":"{key}","architecture":"arm64"}}]}}}}"#
+        );
+        let receipt = parse_bundle_upload_response(reqwest::StatusCode::ACCEPTED, &body, GIT_REV)
+            .expect("a receipt");
+        let (bundle, _) = compile(repository.path()).expect("compiles");
+        let plan = serde_json::to_value(
+            plan_of(&bundle, GIT_REV, receipt.pipeline.as_ref()).expect("a plan"),
+        )
+        .expect("json");
+        assert_eq!(
+            plan,
+            serde_json::json!({
+                "rev": GIT_REV,
+                "producer": "pipeline",
+                "jobs": [
+                    { "target": "broken-nginx/webserver", "build_key": key, "arch": "amd64" },
+                    { "target": "broken-nginx/webserver", "build_key": key, "arch": "arm64" },
+                ],
+                "images": [
+                    { "target": "broken-nginx/webserver", "build_key": key, "archs": ["amd64", "arm64"] },
+                ],
+            })
+        );
+
+        // Nothing missing is a pipeline's plan with nothing to do.
+        let nothing = PipelineReceipt {
+            architectures: vec!["amd64".to_owned()],
+            missing: Vec::new(),
+        };
+        let plan = serde_json::to_value(plan_of(&bundle, GIT_REV, Some(&nothing)).expect("a plan"))
+            .expect("json");
+        assert_eq!(plan["producer"], "pipeline");
+        assert_eq!(plan["jobs"], serde_json::json!([]));
+
+        // A key no machine of the commit has is the service's mistake, not a job.
+        let unknown = PipelineReceipt {
+            architectures: vec!["amd64".to_owned()],
+            missing: vec![missing(&format!("sha256:{}", "f".repeat(64)), "amd64")],
+        };
+        let error = plan_of(&bundle, GIT_REV, Some(&unknown)).expect_err("refused");
+        assert!(error.to_string().contains("no machine"), "{error}");
+    }
+
+    #[test]
+    fn a_plan_field_that_is_no_plan_fails_the_upload() {
+        let body = format!(
+            r#"{{"ok":true,"rev":"{GIT_REV}","queued":0,"assigned":[],"pipeline":{{"missing":"all"}}}}"#
+        );
+        let error = parse_bundle_upload_response(reqwest::StatusCode::ACCEPTED, &body, GIT_REV)
+            .expect_err("refused");
+        assert!(format!("{error:#}").contains("pipeline"), "{error:#}");
+    }
+
+    #[test]
+    fn plan_uploads_the_bundle_and_writes_the_step_outputs() {
+        let repository = example();
+        let key = example_key(repository.path());
+        let body: &'static str = Box::leak(
+            format!(
+                r#"{{"ok":true,"rev":"{GIT_REV}","queued":0,"assigned":[],"pipeline":{{"architectures":["amd64","arm64"],"missing":[{{"build_key":"{key}","architecture":"arm64"}}]}}}}"#
+            )
+            .into_boxed_str(),
+        );
+        let (url, server) = serve_once(SOURCE_BUNDLES_PATH, "202 Accepted", body);
+        let root = repository.path().to_string_lossy().into_owned();
+        let bundle = repository.path().join("out/bundle.json.gz");
+        let outputs = repository.path().join("github-output");
+        std::fs::write(&outputs, "earlier=1\n").expect("write");
+        let cli = Cli::try_parse_from([
+            "intar-image-cli",
+            "plan",
+            "--url",
+            &url,
+            "--token",
+            "oidc",
+            "--rev",
+            GIT_REV,
+            "--root",
+            &root,
+            "--output",
+            &bundle.to_string_lossy(),
+            "--github-output",
+            &outputs.to_string_lossy(),
+        ])
+        .expect("plan parses");
+        let Command::Plan(args) = cli.command else {
+            panic!("expected plan");
+        };
+        plan_command(&args).expect("plans");
+
+        let request = server.join().expect("the server ends");
+        assert_eq!(request.header("authorization"), Some("Bearer oidc"));
+        assert!(bundle.is_file());
+        let written = std::fs::read_to_string(&outputs).expect("the outputs");
+        assert_eq!(
+            written,
+            format!(
+                "earlier=1\nrev={GIT_REV}\nproducer=pipeline\nimages=[{{\"target\":\"broken-nginx/webserver\",\"build_key\":\"{key}\",\"archs\":[\"arm64\"]}}]\njobs=[{{\"target\":\"broken-nginx/webserver\",\"build_key\":\"{key}\",\"arch\":\"arm64\"}}]\n"
+            )
+        );
+    }
+
+    #[test]
+    fn plan_ends_like_bundle_when_the_commit_is_superseded() {
+        let repository = example();
+        let (url, server) = serve_once(
+            SOURCE_BUNDLES_PATH,
+            "409 Conflict",
+            r#"{"error":"This commit is no longer the head of the default branch.","code":"superseded"}"#,
+        );
+        let root = repository.path().to_string_lossy().into_owned();
+        let bundle = repository.path().join("bundle.json.gz");
+        let cli = Cli::try_parse_from([
+            "intar-image-cli",
+            "plan",
+            "--url",
+            &url,
+            "--token",
+            "oidc",
+            "--rev",
+            GIT_REV,
+            "--root",
+            &root,
+            "--output",
+            &bundle.to_string_lossy(),
+        ])
+        .expect("plan parses");
+        let Command::Plan(args) = cli.command else {
+            panic!("expected plan");
+        };
+        let error = plan_command(&args).expect_err("refused");
+        server.join().expect("the server ends");
+        assert_eq!(exit_code(&error), 3, "{error:#}");
+    }
+
+    #[test]
+    fn push_reads_what_build_wrote_and_ends_with_the_workflows_exit_codes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let built = BuiltImage {
+            build_key: format!("sha256:{}", "b".repeat(64))
+                .try_into()
+                .expect("a digest"),
+            manifest: format!("sha256:{}", "c".repeat(64))
+                .try_into()
+                .expect("a digest"),
+            arch: "arm64".to_owned(),
+        };
+        built.write(dir.path()).expect("written");
+        let text = std::fs::read_to_string(dir.path().join("image.json")).expect("image.json");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).expect("json"),
+            serde_json::json!({
+                "build_key": format!("sha256:{}", "b".repeat(64)),
+                "manifest": format!("sha256:{}", "c".repeat(64)),
+                "arch": "arm64",
+            })
+        );
+
+        let image = dir.path().to_string_lossy().into_owned();
+        let push = |url: &str| {
+            let cli = Cli::try_parse_from([
+                "intar-image-cli",
+                "push",
+                "--image",
+                &image,
+                "--url",
+                url,
+                "--token",
+                "oidc",
+                "--rev",
+                GIT_REV,
+            ])
+            .expect("push parses");
+            let Command::Push(args) = cli.command else {
+                panic!("expected push");
+            };
+            crate::push_command::push_command(&args)
+        };
+        // The session open answers; nothing else is asked after a refusal.
+        for (status, body, code) in [
+            ("409 Conflict", r#"{"error":"gone","code":"superseded"}"#, 3),
+            (
+                "409 Conflict",
+                r#"{"error":"off","code":"pipeline_images_disabled"}"#,
+                1,
+            ),
+            (
+                "401 Unauthorized",
+                r#"{"error":"unauthorized","code":"unauthorized"}"#,
+                1,
+            ),
+            (
+                "403 Forbidden",
+                r#"{"error":"branch","code":"ref_not_default_branch"}"#,
+                1,
+            ),
+        ] {
+            let (url, server) = serve_once("/registry/v1/pipeline/sessions", status, body);
+            let origin = url
+                .trim_end_matches("/registry/v1/pipeline/sessions")
+                .to_owned();
+            let error = push(&origin).expect_err("refused");
+            let request = server.join().expect("the server ends");
+            assert_eq!(request.header("authorization"), Some("Bearer oidc"));
+            assert_eq!(exit_code(&error), code, "{status} {body}: {error:#}");
+        }
+        // What may pass on another try ends with 75; what the image or the
+        // commit is refused for ends with 1.
+        for (status, body, code) in [
+            (503, "{}", 75),
+            (429, r#"{"code":"pipeline_session_limit"}"#, 75),
+            (409, r#"{"code":"registry_paused"}"#, 75),
+            (409, r#"{"code":"bundle_pending"}"#, 75),
+            (409, r#"{"code":"registry_session_closed"}"#, 75),
+            // A paused registry's answer to the blob check has no body.
+            (409, "", 75),
+            (401, r#"{"error":"unauthorized"}"#, 1),
+            (403, r#"{"code":"build_key_not_in_bundle"}"#, 1),
+            (413, r#"{"code":"pipeline_session_bytes"}"#, 1),
+            (409, r#"{"code":"build_key_mismatch"}"#, 1),
+            (409, r#"{"code":"scope_storage_exceeded"}"#, 1),
+        ] {
+            let error = crate::push_command::failed(intar_image_upload::Error::HttpStatus {
+                status: reqwest::StatusCode::from_u16(status).expect("a status"),
+                body: body.to_owned(),
+            });
+            assert_eq!(exit_code(&error), code, "{status} {body}");
+        }
+        let broken = crate::push_command::failed(intar_image_upload::Error::SessionBroken {
+            session_id: "s".to_owned(),
+            detail: "the heartbeat stopped".to_owned(),
+            cause: None,
+        });
+        assert_eq!(exit_code(&broken), 75);
+
+        // Without image.json there is nothing to push, and nobody is asked.
+        std::fs::remove_file(dir.path().join("image.json")).expect("removed");
+        let error = push("http://127.0.0.1:1").expect_err("refused");
+        assert_eq!(exit_code(&error), 1);
+        assert!(format!("{error:#}").contains("image.json"), "{error:#}");
+    }
+
+    /// A service on a local port for a whole push: `answer` decides each
+    /// request from its method and path; every request is kept as
+    /// `METHOD path token`.
+    fn serve(
+        answer: impl Fn(&str, &str) -> (u16, String) + Send + 'static,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("an address"));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut head = String::new();
+                while !head.ends_with("\r\n\r\n") {
+                    if reader.read_line(&mut head).unwrap_or(0) == 0 {
+                        break;
+                    }
+                }
+                let header = |name: &str| {
+                    head.lines().find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case(name)
+                            .then(|| value.trim().to_owned())
+                    })
+                };
+                let length = header("content-length")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0; length];
+                if reader.read_exact(&mut body).is_err() {
+                    continue;
+                }
+                let mut line = head.split_whitespace();
+                let (method, path) = (
+                    line.next().unwrap_or_default(),
+                    line.next().unwrap_or_default(),
+                );
+                kept.lock().expect("the lock").push(format!(
+                    "{method} {path} {}",
+                    header("authorization")
+                        .unwrap_or_default()
+                        .trim_start_matches("Bearer ")
+                ));
+                let (status, body) = answer(method, path);
+                let length = if method == "HEAD" { 0 } else { body.len() };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {length}\r\nconnection: close\r\n\r\n{}",
+                    if method == "HEAD" { "" } else { &body }
+                );
+            }
+        });
+        (url, seen)
+    }
+
+    /// A directory as `build --out` leaves it: one config, one layer, the
+    /// manifest and `image.json`.
+    fn built_image() -> (tempfile::TempDir, String) {
+        use intar_contracts::oci::{
+            OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blobs = dir.path().join("sha256");
+        std::fs::create_dir_all(&blobs).expect("mkdir");
+        let put = |bytes: &[u8]| {
+            let scratch = blobs.join("scratch");
+            std::fs::write(&scratch, bytes).expect("write");
+            let hex = intar_image_build::sha256_file_hex(&scratch).expect("hash");
+            let digest: OciDigest = format!("sha256:{hex}").try_into().expect("a digest");
+            std::fs::rename(&scratch, blobs.join(digest.hex())).expect("rename");
+            digest
+        };
+        let descriptor = |bytes: &[u8]| OciDescriptorV1 {
+            media_type: "application/octet-stream".to_owned(),
+            digest: put(bytes),
+            size: bytes.len() as u64,
+        };
+        let manifest = serde_json::to_vec(&OciManifestV1 {
+            schema_version: 2,
+            media_type: OCI_MANIFEST_MEDIA_TYPE.to_owned(),
+            artifact_type: "application/vnd.intar.machine.v1".to_owned(),
+            config: descriptor(b"{}"),
+            layers: vec![descriptor(b"layer")],
+        })
+        .expect("json");
+        let manifest = put(&manifest);
+        BuiltImage {
+            build_key: format!("sha256:{}", "b".repeat(64))
+                .try_into()
+                .expect("a digest"),
+            manifest: manifest.clone(),
+            arch: "amd64".to_owned(),
+        }
+        .write(dir.path())
+        .expect("image.json");
+        (dir, manifest.as_str().to_owned())
+    }
+
+    fn push_to(url: &str, image: &Path) -> anyhow::Result<()> {
+        let cli = Cli::try_parse_from([
+            "intar-image-cli",
+            "push",
+            "--image",
+            &image.to_string_lossy(),
+            "--url",
+            url,
+            "--token",
+            "oidc",
+            "--rev",
+            GIT_REV,
+        ])
+        .expect("push parses");
+        let Command::Push(args) = cli.command else {
+            panic!("expected push");
+        };
+        crate::push_command::push_command(&args)
+    }
+
+    #[test]
+    fn push_opens_its_session_pushes_records_and_closes() {
+        let (dir, manifest) = built_image();
+        let recorded = format!(r#"{{"ok":true,"image_digest":"{manifest}"}}"#);
+        let (url, seen) = serve(move |method, path| match (method, path) {
+            ("POST", "/registry/v1/pipeline/sessions") => {
+                (201, r#"{"ok":true,"token":"ips_s"}"#.to_owned())
+            }
+            ("POST", "/registry/v1/upload-sessions") => (200, r#"{"session_id":"a-1"}"#.to_owned()),
+            ("HEAD", _) => (404, String::new()),
+            ("POST", path) if path.contains("/result") => (201, recorded.clone()),
+            _ => (200, r#"{"ok":true}"#.to_owned()),
+        });
+        push_to(&url, dir.path()).expect("pushed");
+
+        let seen = seen.lock().expect("the lock").clone();
+        assert_eq!(
+            seen.first().map(String::as_str),
+            Some("POST /registry/v1/pipeline/sessions oidc")
+        );
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("POST /registry/v1/pipeline/sessions/close ips_s")
+        );
+        let result = format!(
+            "POST /registry/v1/builds/{}/result?arch=amd64 ips_s",
+            "b".repeat(64)
+        );
+        assert!(seen.contains(&result), "{seen:?}");
+        assert!(
+            seen.contains(&format!("PUT /registry/v1/manifests/{manifest} ips_s")),
+            "{seen:?}"
+        );
+        // Only the open carries the OIDC token.
+        assert_eq!(
+            seen.iter().filter(|line| line.ends_with(" oidc")).count(),
+            1,
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn push_closes_its_session_when_the_image_is_refused() {
+        let (dir, _) = built_image();
+        let (url, seen) = serve(|method, path| match (method, path) {
+            ("POST", "/registry/v1/pipeline/sessions") => {
+                (201, r#"{"ok":true,"token":"ips_s"}"#.to_owned())
+            }
+            ("POST", "/registry/v1/upload-sessions") => (200, r#"{"session_id":"a-1"}"#.to_owned()),
+            ("PUT", path) if path.contains("/manifests/") => (
+                403,
+                r#"{"error":"no","code":"build_key_not_in_bundle"}"#.to_owned(),
+            ),
+            _ => (200, r#"{"ok":true}"#.to_owned()),
+        });
+        let error = push_to(&url, dir.path()).expect_err("refused");
+        assert_eq!(exit_code(&error), 1, "{error:#}");
+        let seen = seen.lock().expect("the lock").clone();
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("POST /registry/v1/pipeline/sessions/close ips_s")
+        );
+        assert!(
+            !seen.iter().any(|line| line.contains("/result")),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn an_image_file_of_an_earlier_build_is_forgotten() {
+        let (dir, _) = built_image();
+        BuiltImage::forget(dir.path()).expect("removed");
+        assert!(!dir.path().join("image.json").exists());
+        BuiltImage::forget(dir.path()).expect("nothing to remove is fine");
+    }
+}

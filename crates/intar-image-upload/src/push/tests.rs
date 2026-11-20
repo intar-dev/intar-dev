@@ -12,7 +12,8 @@ use intar_contracts::oci::{
 };
 use sha2::{Digest as _, Sha256};
 
-use super::{Error, RegistryPusher};
+use super::{Error, RecordedImage, RegistryPusher};
+use crate::PipelineSession;
 
 #[derive(Clone, Debug)]
 struct Request {
@@ -513,5 +514,197 @@ fn the_recorded_image_of_an_attempt_is_read_without_a_session() {
     for status in [405, 409] {
         let refusing = FakeRegistry::start(move |_, _| (status, "{}".to_owned()));
         assert!(refusing.pusher().recorded_image("build-7", 3).is_err());
+    }
+}
+
+/// Every blob is there; the result answers `status` and `body`.
+fn result_answers(status: u16, body: String) -> FakeRegistry {
+    FakeRegistry::start(move |request, _| match request.method.as_str() {
+        "POST" => (status, body.clone()),
+        _ => (200, "{}".to_owned()),
+    })
+}
+
+#[test]
+fn a_pipelines_result_names_its_architecture_and_no_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, _) = image(dir.path());
+    let registry = result_answers(
+        201,
+        serde_json::json!({ "ok": true, "image_digest": manifest.as_str() }).to_string(),
+    );
+    let key = "b".repeat(64);
+    for (architecture, query) in [
+        (Architecture::Amd64, "arch=amd64"),
+        (Architecture::Arm64, "arch=arm64"),
+    ] {
+        let recorded = registry
+            .pusher()
+            .push_image(dir.path(), &manifest, &key, architecture)
+            .unwrap();
+        assert_eq!(
+            recorded,
+            RecordedImage {
+                image: manifest.clone(),
+                first: true
+            }
+        );
+        let calls = registry.calls();
+        let result = calls.last().unwrap();
+        assert_eq!(
+            result.path,
+            format!("/registry/v1/builds/{key}/result?{query}")
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&result.body).unwrap(),
+            serde_json::json!({ "image_digest": manifest.as_str() })
+        );
+        // The manifest is always put: the service takes a result only for one
+        // pushed in the session.
+        assert!(calls.iter().any(|call| call.method == "PUT"
+            && call.path == format!("/registry/v1/manifests/{}", manifest.as_str())));
+    }
+}
+
+#[test]
+fn a_key_that_already_has_an_image_ends_the_push_with_that_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, _) = image(dir.path());
+    let standing = digest_of(b"the image another run recorded first");
+    let registry = result_answers(
+        200,
+        serde_json::json!({ "ok": true, "image_digest": standing.as_str(), "recorded": true })
+            .to_string(),
+    );
+    let recorded = registry
+        .pusher()
+        .push_image(dir.path(), &manifest, &"b".repeat(64), Architecture::Amd64)
+        .unwrap();
+    assert_eq!(
+        recorded,
+        RecordedImage {
+            image: standing,
+            first: false
+        }
+    );
+}
+
+#[test]
+fn a_write_whose_lease_ran_out_is_sent_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, _) = image(dir.path());
+    let answer = serde_json::json!({ "ok": true, "image_digest": manifest.as_str() }).to_string();
+    let registry = FakeRegistry::start(move |request, seen| {
+        match (request.method.as_str(), seen) {
+            // The manifest and the result each find their lease run out once.
+            ("PUT" | "POST", 0) if !request.path.contains("/blobs/") => (
+                409,
+                r#"{"error":"push again","code":"registry_writer_expired"}"#.to_owned(),
+            ),
+            ("POST", _) => (201, answer.clone()),
+            _ => (200, "{}".to_owned()),
+        }
+    });
+    registry
+        .pusher()
+        .push_image(dir.path(), &manifest, &"b".repeat(64), Architecture::Amd64)
+        .unwrap();
+    let calls = registry.calls();
+    let count = |method: &str, part: &str| {
+        calls
+            .iter()
+            .filter(|call| call.method == method && call.path.contains(part))
+            .count()
+    };
+    assert_eq!(count("PUT", "/manifests/"), 2, "{calls:?}");
+    assert_eq!(count("POST", "/result"), 2, "{calls:?}");
+}
+
+#[test]
+fn a_key_of_another_commit_fails_the_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, _) = image(dir.path());
+    let registry = FakeRegistry::start(|request, _| match request.method.as_str() {
+        "PUT" if request.path.contains("/manifests/") => (
+            403,
+            r#"{"error":"no","code":"build_key_not_in_bundle"}"#.to_owned(),
+        ),
+        _ => (200, "{}".to_owned()),
+    });
+    let error = registry
+        .pusher()
+        .push_image(dir.path(), &manifest, &"b".repeat(64), Architecture::Amd64)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::HttpStatus { status, .. } if status.as_u16() == 403),
+        "{error}"
+    );
+    assert!(
+        !registry
+            .calls()
+            .iter()
+            .any(|call| call.path.contains("/result"))
+    );
+}
+
+#[test]
+fn a_pipeline_session_waits_for_its_bundle_and_closes_with_its_own_token() {
+    let registry = FakeRegistry::start(|request, seen| match (request.path.as_str(), seen) {
+        ("/registry/v1/pipeline/sessions", 0) => (
+            409,
+            r#"{"error":"still read","code":"bundle_pending"}"#.to_owned(),
+        ),
+        ("/registry/v1/pipeline/sessions", _) => (
+            201,
+            r#"{"ok":true,"token":"ips_secret","expires_at_unix_ms":1,"max_bytes":2}"#.to_owned(),
+        ),
+        _ => (200, r#"{"ok":true}"#.to_owned()),
+    });
+    let session =
+        PipelineSession::open_with(&registry.url, "oidc", "rev-1", Duration::from_millis(1))
+            .unwrap();
+    assert_eq!(session.token(), "ips_secret");
+    session.close().unwrap();
+
+    let calls = registry.calls();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    for open in &calls[..2] {
+        assert_eq!(open.method, "POST");
+        assert_eq!(open.headers["authorization"], "Bearer oidc");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&open.body).unwrap(),
+            serde_json::json!({ "rev": "rev-1" })
+        );
+    }
+    assert_eq!(calls[2].path, "/registry/v1/pipeline/sessions/close");
+    assert_eq!(calls[2].headers["authorization"], "Bearer ips_secret");
+}
+
+#[test]
+fn a_refused_pipeline_session_is_not_asked_for_again() {
+    for (status, code) in [
+        (409, "superseded"),
+        (401, "unauthorized"),
+        (429, "pipeline_session_limit"),
+    ] {
+        let registry = FakeRegistry::start(move |_, _| {
+            (status, format!(r#"{{"error":"no","code":"{code}"}}"#))
+        });
+        let Err(error) =
+            PipelineSession::open_with(&registry.url, "oidc", "rev-1", Duration::from_millis(1))
+        else {
+            panic!("the session must not open");
+        };
+        assert!(
+            matches!(&error, Error::HttpStatus { status: answered, body } if answered.as_u16() == status && body.contains(code)),
+            "{error}"
+        );
+        // A source whose sessions are all taken is the one refusal worth
+        // waiting out, as long as a bundle that is still read.
+        assert_eq!(
+            registry.calls().len(),
+            if status == 429 { 40 } else { 1 },
+            "{status}"
+        );
     }
 }

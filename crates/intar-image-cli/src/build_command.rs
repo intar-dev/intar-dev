@@ -99,6 +99,8 @@ fn target_of(text: &str) -> Result<BuildTarget> {
 
 pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
     let target = target_of(&args.target)?;
+    // One left by an earlier build into this directory describes that build.
+    crate::push_command::BuiltImage::forget(&args.out)?;
     let arch = BuildArch::parse(&args.arch)
         .with_context(|| format!("no image is built for '{}'", args.arch))?;
     let (bundle, _) = compile(&args.root).map_err(|problems| crate::report(&problems))?;
@@ -126,6 +128,13 @@ pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
     })?;
     let image = &output.image;
     verify_machine_image(&args.out, &image.manifest_digest)?;
+    // Written only once every check has passed, the boot included: `push`
+    // takes what it names, and nothing says afterwards that it never booted.
+    let built = crate::push_command::BuiltImage {
+        build_key: output.plan.build_key.clone(),
+        manifest: image.manifest_digest.clone(),
+        arch: arch.debian().to_owned(),
+    };
     println!("build_key={}", output.plan.build_key.as_str());
     println!("manifest={}", image.manifest_digest.as_str());
     println!(
@@ -145,10 +154,10 @@ pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
     );
 
     let BuildTarget::Machine { scenario, machine } = &target else {
-        return Ok(());
+        return built.write(&args.out);
     };
     let Some(kino) = args.kino.as_deref().filter(|_| !args.no_boot) else {
-        return Ok(());
+        return built.write(&args.out);
     };
     let boot = Boot {
         bundle: &bundle,
@@ -166,7 +175,7 @@ pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
         "boot_s={:.1} boot_accelerator={} boot_cpus={} tasks={} passed={}",
         booted.seconds, booted.accelerator, booted.cpus, booted.tasks, booted.passed
     );
-    Ok(())
+    built.write(&args.out)
 }
 
 struct Boot<'a> {
