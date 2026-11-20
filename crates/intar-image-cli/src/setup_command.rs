@@ -36,6 +36,13 @@ pub(crate) struct SetupCommand {
     /// one. Defaults to `<dir>/cache`.
     #[arg(long)]
     cache: Option<PathBuf>,
+    /// The free space the caches leave on their disk, in GiB. Below it a
+    /// build stores nothing more and evicts checkpoints to get back above
+    /// it. A builder host keeps 20 for the work it shares its disk with; a
+    /// job's cache volume has no such neighbour, and with 20 kept free a
+    /// 50 GB volume holds one lab's checkpoints, not two.
+    #[arg(long, default_value_t = 4)]
+    cache_min_free_gib: u32,
     /// Also append what is printed to this file, as a workflow step's outputs.
     #[arg(long)]
     github_output: Option<PathBuf>,
@@ -243,6 +250,7 @@ pub(crate) fn install(args: &SetupCommand, sources: &Sources) -> Result<Installe
             "oci_cache_root": oci,
             "checkpoint_cache_root": cache.join("checkpoints"),
             "use_cache": true,
+            "minimum_free_bytes": u64::from(args.cache_min_free_gib) * 1024 * 1024 * 1024,
         },
     });
     std::fs::write(&config, serde_json::to_vec_pretty(&document)?)

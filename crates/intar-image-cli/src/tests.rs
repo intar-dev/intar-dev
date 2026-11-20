@@ -976,6 +976,9 @@ mod setup {
             Some(cache.join("checkpoints"))
         );
         assert!(config.layered.use_cache);
+        // A job's cache volume keeps little free: the builder host's 20 GiB
+        // would have the cache evict what the same job just stored.
+        assert_eq!(config.layered.minimum_free_bytes, 4 * 1024 * 1024 * 1024);
 
         // The daemon is the pinned image, on the socket `build` looks for.
         assert_eq!(installed.buildkit_socket, cache.join("oci/buildkitd.sock"));
