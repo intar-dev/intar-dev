@@ -30,7 +30,7 @@ export type {
   CourseCatalogSnapshotV2,
 } from "@/db/schema";
 
-const PUBLIC_COURSE_CATALOG_SCOPE = "public";
+export const PUBLIC_COURSE_CATALOG_SCOPE = "public";
 
 // D1 allows 100 bound parameters, and a catalog can link more scenarios than
 // that, so an id list travels as one JSON array.

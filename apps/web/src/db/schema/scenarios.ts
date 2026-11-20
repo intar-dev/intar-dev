@@ -245,7 +245,7 @@ export const scenarioRevisions = sqliteTable(
     failureReason: text("failure_reason"),
     verifyRunId: text("verify_run_id"),
     verifyReportJson: text("verify_report_json"),
-    // When the revision first went live; only such a revision is a rollback
+    // When the revision was last made live; only such a revision is a rollback
     // target.
     liveAt: integer("live_at"),
     // When the revision's checks passed in a lab that a host started from

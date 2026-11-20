@@ -58,8 +58,30 @@ export function ScenarioDetails() {
   }
 
   const failed = action.error ? apiErrorMessage(action.error, "Try again.") ?? "Try again." : null;
+  const playPending = action.isPending && action.variables?.action === "set_play";
   return (
     <PageShell variant="workspace" density="compact">
+      <Section
+        density="compact"
+        title="Play"
+        description={record.play
+          ? "Open to play: everyone signed in may start this scenario where its scope allows it. Closing waits for play runs that are going on."
+          : "Not open to play: learners reach this scenario through its course only."}
+      >
+        {record.canManage ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={action.isPending}
+              onClick={() => action.mutate({ action: "set_play", play: !record.play })}
+            >
+              {playPending ? "Saving…" : record.play ? "Close to play" : "Open to play"}
+            </Button>
+            {action.variables?.action === "set_play" && failed ? <InlineFeedback tone="error">{failed}</InlineFeedback> : null}
+          </div>
+        ) : null}
+      </Section>
       <Section density="compact" title="Revisions" description={pointerSummary(record)} bodyClassName="divide-y">
         {record.revisions.length ? (
           record.revisions.map((revision) => (
@@ -68,8 +90,8 @@ export function ScenarioDetails() {
               scenario={record}
               revision={revision}
               busy={action.isPending}
-              pending={action.isPending && action.variables?.rev === revision.rev ? action.variables.action : null}
-              error={action.variables?.rev === revision.rev ? failed : null}
+              pending={action.isPending && action.variables && action.variables.action !== "set_play" && action.variables.rev === revision.rev ? action.variables.action : null}
+              error={actionRev(action.variables) === revision.rev ? failed : null}
               onAction={(request) => action.mutate(request)}
             />
           ))
@@ -81,6 +103,9 @@ export function ScenarioDetails() {
   );
 }
 
+/** The revision an action is about; the play setting is about none. */
+const actionRev = (request: RevisionAction | undefined) => (request && "rev" in request ? request.rev : null);
+
 function pointerSummary(scenario: AdministeredScenario): string {
   const live = scenario.liveRev ? `Learners start ${shortRev(scenario.liveRev)}` : "No revision is live, so learners cannot start this scenario";
   return scenario.candidateRev && scenario.candidateRev !== scenario.liveRev
@@ -88,7 +113,9 @@ function pointerSummary(scenario: AdministeredScenario): string {
     : `${live}.`;
 }
 
-const PENDING_WORDS: Record<RevisionAction["action"], string> = {
+type RevisionActionName = Exclude<RevisionAction["action"], "set_play">;
+
+const PENDING_WORDS: Record<RevisionActionName, string> = {
   verify: "Starting…",
   verify_restore: "Starting…",
   clear_restore_verified: "Withdrawing…",
@@ -108,7 +135,7 @@ function RevisionRow({
   scenario: AdministeredScenario;
   revision: ScenarioRevisionSummary;
   busy: boolean;
-  pending: RevisionAction["action"] | null;
+  pending: RevisionActionName | null;
   error: string | null;
   onAction: (request: RevisionAction) => void;
 }) {
@@ -123,20 +150,31 @@ function RevisionRow({
   const liftHold = <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "lift_hold", rev: revision.rev })}>{pending === "lift_hold" ? PENDING_WORDS[pending] : "Lift hold"}</Button>;
   const actions = !scenario.canManage || live
     ? null
-    : candidate && revision.held
-      ? liftHold
-      : candidate && revision.state === "ready" && !verifying
-        ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
-        : candidate && revision.canGoLive
-          ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
-          : (
-            <>
-              {revision.canGoLive && revision.liveAt !== null
-                ? <Button size="sm" variant="outline" disabled={busy} onClick={() => move("rollback")}>{pending === "rollback" ? PENDING_WORDS[pending] : "Roll back"}</Button>
-                : null}
-              {revision.held ? liftHold : null}
-            </>
-          );
+    // The same lab as the live one: nothing to move, at most a catalog to
+    // publish, whatever the candidate's own state.
+    : candidate && revision.sameAsLive
+      ? (
+        <>
+          {revision.catalogPending
+            ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending === "promote" ? "Publishing…" : "Publish catalog"}</Button>
+            : null}
+          {revision.held ? liftHold : null}
+        </>
+      )
+      : candidate && revision.held
+        ? liftHold
+        : candidate && revision.state === "ready" && !verifying
+          ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
+          : candidate && revision.canGoLive
+            ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
+            : (
+              <>
+                {revision.canGoLive && revision.liveAt !== null
+                  ? <Button size="sm" variant="outline" disabled={busy} onClick={() => move("rollback")}>{pending === "rollback" ? PENDING_WORDS[pending] : "Roll back"}</Button>
+                  : null}
+                {revision.held ? liftHold : null}
+              </>
+            );
   // A restore check is for any verified revision, the live one included: it
   // decides whether labs of the revision may start from a host snapshot.
   const restoreAction = !scenario.canManage || verifying
@@ -154,13 +192,14 @@ function RevisionRow({
             <code title={revision.rev}>{shortRev(revision.rev)}</code>
             {live ? <Badge variant="success">Live</Badge> : null}
             {candidate && !live ? <Badge variant="outline">Candidate</Badge> : null}
+            {revision.sameAsLive ? <Badge variant="outline" title="The same lab as the live revision. Promoting it would move nothing.">Same as live</Badge> : null}
             {revision.held ? <Badge variant="outline" title="A rollback left this revision's behaviour on hold. It is not promoted until the hold is lifted.">Held</Badge> : null}
           </h3>
           <MetaLine
             items={[
               `Guest contract ${revision.guestContract}`,
               `Built ${formatRelativeTime(revision.createdAt)}`,
-              revision.liveAt ? `First live ${formatTimestamp(revision.liveAt)}` : null,
+              revision.liveAt ? `Last made live ${formatTimestamp(revision.liveAt)}` : null,
               revision.restoreVerifiedAt ? `Starts from a snapshot since ${formatTimestamp(revision.restoreVerifiedAt)}` : null,
             ]}
           />

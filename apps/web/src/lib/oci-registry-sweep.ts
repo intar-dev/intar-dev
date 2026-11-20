@@ -17,7 +17,7 @@ import {
  *
  * Mark: one SQL root set, then the index closure of its manifests:
  *   - revisions that may still be used: live, candidate, building, the three
- *     newest verified of each scenario, and any a running run started from;
+ *     most recently live of each scenario, and any a running run started from;
  *     their machine images, learn and verify specs, and the current image of
  *     each machine's build key
  *   - machine builds in flight, and any build that moved within the age guard

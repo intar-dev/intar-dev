@@ -19,6 +19,7 @@ import {
   liftRevisionHold,
   listAdministeredScenarios,
   moveLiveRevision,
+  setScenarioPlay,
   type RestoreVerifyReport,
   type VerifyReport,
 } from "@/lib/scenario-revisions";
@@ -85,10 +86,19 @@ const ORG_ID = "acme/broken-nginx";
 let digest: string;
 const rev = (sha: string) => `git-42-${sha.repeat(40)}-${digest}`;
 
-/** Ingests a bundle as `rev` and finishes its builds with `image`, as a builder's result would. */
-async function publish(at: string, image: string, organizationId: string | null = null, bundle: unknown = bundleFixture) {
+/**
+ * Ingests a bundle as `rev` and finishes its builds with `image`, as a
+ * builder's result would. Each rev gets words of its own, so its revision is
+ * another lab than the one before; `words` names the rev whose words it
+ * gets instead, which makes it the same lab as that one.
+ */
+async function publish(
+  at: string, image: string, organizationId: string | null = null, bundle: typeof bundleFixture = bundleFixture, words = at,
+) {
+  const worded = structuredClone(bundle);
+  worded.scenarios[0]!.summary = `${worded.scenarios[0]!.summary} (${words})`;
   const refused = await ingestSourceBundle(env, {
-    organizationId, rev: at, gzip: new Uint8Array(gzipSync(JSON.stringify(bundle))), stored: false,
+    organizationId, rev: at, gzip: new Uint8Array(gzipSync(JSON.stringify(worded))), stored: false,
   });
   expect(refused).toBeNull();
   await env.DB.prepare("UPDATE machine_builds SET state = 'succeeded', image_digest = ?1 WHERE image_digest IS NULL")
@@ -306,16 +316,41 @@ describe("promotion, rollback and verify runs", () => {
       await publish(rev("b"), image);
       await markVerified(PUBLIC_ID, rev("b"));
       await promote(rev("b"), rev("a"));
-      // rev a is the third newest verified revision, so it is kept.
-      await publish(rev("c"), image);
-      await markVerified(PUBLIC_ID, rev("c"));
-      expect((await listAdministeredScenarios(ADMIN))[0]?.revisions.find((r) => r.rev === rev("a"))?.canGoLive).toBe(true);
-      // A fourth verified revision pushes it out of the kept set.
-      await publish(rev("d"), image);
-      await markVerified(PUBLIC_ID, rev("d"));
-      expect((await listAdministeredScenarios(ADMIN))[0]?.revisions.find((r) => r.rev === rev("a"))?.canGoLive).toBe(false);
-      await expect(rollback(rev("a"), rev("b"))).rejects.toMatchObject({ code: "revision_not_retained" });
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("b"));
+      const canGoLive = async (at: string) =>
+        (await listAdministeredScenarios(ADMIN))[0]?.revisions.find((r) => r.rev === at)?.canGoLive;
+      // Verified revisions that never go live push nothing out.
+      for (const sha of ["c", "d", "e"]) await publish(rev(sha), image);
+      expect(await canGoLive(rev("a"))).toBe(true);
+      // Only the candidate of them is kept.
+      expect(await canGoLive(rev("d"))).toBe(false);
+      expect(await canGoLive(rev("e"))).toBe(true);
+      // a is the third most recently live once another revision went live.
+      await promote(rev("e"), rev("b"));
+      expect(await canGoLive(rev("a"))).toBe(true);
+      // A fourth one pushes it out.
+      await publish(rev("f"), image);
+      await promote(rev("f"), rev("e"));
+      expect(await canGoLive(rev("a"))).toBe(false);
+      await expect(rollback(rev("a"), rev("f"))).rejects.toMatchObject({ code: "revision_not_retained" });
+      // A rollback makes its target the most recent again: b outlives e.
+      await rollback(rev("b"), rev("f"));
+      await liftRevisionHold({ scenarioId: PUBLIC_ID, rev: rev("f"), actorUserId: ADMIN });
+      await publish(rev("g"), image);
+      await promote(rev("g"), rev("b"));
+      expect(await canGoLive(rev("b"))).toBe(true);
+      expect(await canGoLive(rev("e"))).toBe(false);
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("g"));
+    });
+
+    it("writes when a revision was last made live, on a rollback too", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      const first = (await revisionRow(PUBLIC_ID, rev("a")))!.live_at!;
+      await publish(rev("b"), image);
+      await promote(rev("b"), rev("a"));
+      await env.DB.prepare("UPDATE scenario_revisions SET live_at = 1 WHERE rev = ?1").bind(rev("a")).run();
+      await rollback(rev("a"), rev("b"));
+      expect((await revisionRow(PUBLIC_ID, rev("a")))!.live_at).toBeGreaterThanOrEqual(first);
     });
 
     it("refuses a target whose machine image is no longer indexed, for a promotion too", async () => {
@@ -609,6 +644,103 @@ describe("promotion, rollback and verify runs", () => {
       await env.DB.prepare("UPDATE scenario_revisions SET restore_digest = NULL WHERE rev IN (?1, ?2)").bind(rev("d"), rev("e")).run();
       await promote(rev("e"), rev("d"));
       expect((await digestsOf(rev("e")))!.restore_verified_at).toBeNull();
+    });
+  });
+
+  describe("an unchanged candidate", () => {
+    const listed = async (at: string) =>
+      (await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.revisions.find((revision) => revision.rev === at)!;
+
+    it("does not move, and is refused when its catalog is published", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      const live = (await revisionRow(PUBLIC_ID, rev("a")))!.live_at;
+      // The same bundle again: the catalog moves to it once, the lab never.
+      await publish(rev("b"), image, null, bundleFixture, rev("a"));
+      expect(await listed(rev("b"))).toMatchObject({ sameAsLive: true, catalogPending: true, state: "verified" });
+      expect(await listed(rev("a"))).toMatchObject({ sameAsLive: false });
+      expect(await promote(rev("b"), rev("a"))).toEqual({ liveRev: rev("a") });
+      expect(await scenarioRow(PUBLIC_ID)).toEqual({ live_rev: rev("a"), candidate_rev: rev("b") });
+      expect((await catalogRow())?.source_revision).toBe(rev("b"));
+      expect((await revisionRow(PUBLIC_ID, rev("b")))!.live_at).toBeNull();
+      expect((await revisionRow(PUBLIC_ID, rev("a")))!.live_at).toBe(live);
+      expect(await listed(rev("b"))).toMatchObject({ sameAsLive: true, catalogPending: false });
+      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ code: "revision_unchanged" });
+      // Another guest contract is another lab.
+      await env.DB.prepare("UPDATE scenario_revisions SET guest_contract = 2 WHERE rev = ?1").bind(rev("a")).run();
+      expect(await listed(rev("b"))).toMatchObject({ sameAsLive: false });
+    });
+
+    /** Rev b: rev a's lab with another catalog. */
+    async function sameLab(bundle: typeof bundleFixture) {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      await publish(rev("b"), image, null, bundle, rev("a"));
+    }
+
+    it("publishes a catalog-only change without a move, for the scope's administrators only", async () => {
+      await sameLab(retitled("Linux operations, second edition"));
+      await expect(promote(rev("b"), rev("a"), ORG_OWNER)).rejects.toMatchObject({ status: 404 });
+      await expect(promote(rev("b"), null)).rejects.toMatchObject({ code: "live_revision_changed" });
+      expect((await catalogRow())?.source_revision).toBe(rev("a"));
+      await promote(rev("b"), rev("a"));
+      expect((await catalogRow())?.catalog_json).toContain("second edition");
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("a"));
+    });
+
+    it("holds a catalog that would strand an active run, in the write too", async () => {
+      const dropped = structuredClone(bundleFixture);
+      dropped.course_catalog.courses[0]!.lectures.splice(1, 1);
+      await sameLab(dropped);
+      // A learner start commits between the check and the write.
+      const batch = env.DB.batch.bind(env.DB);
+      let started = "";
+      vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
+        started = (await learnerStart(LEARNER)).runId;
+        return batch(statements);
+      });
+      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ code: "active_runs_would_lose_access" });
+      expect(started).not.toBe("");
+      expect((await catalogRow())?.source_revision).toBe(rev("a"));
+      // And in the check, while the run goes on.
+      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ code: "active_runs_would_lose_access" });
+      expect((await catalogRow())?.source_revision).toBe(rev("a"));
+    });
+  });
+
+  describe("play", () => {
+    const play = () => env.DB.prepare("SELECT play FROM scenarios WHERE id = ?1").bind(PUBLIC_ID).first<number>("play");
+
+    it("is set by the scope's administrators, and a later commit leaves it", async () => {
+      expect(await play()).toBe(0);
+      await expect(setScenarioPlay({ scenarioId: PUBLIC_ID, play: true, actorUserId: ORG_OWNER }))
+        .rejects.toMatchObject({ status: 404 });
+      expect(await play()).toBe(0);
+      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: true, actorUserId: ADMIN });
+      expect(await play()).toBe(1);
+      expect((await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.play).toBe(true);
+      // The bundle says play is off; the scenario keeps the administrator's word.
+      await publish(rev("b"), image);
+      expect(await play()).toBe(1);
+      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN });
+      expect(await play()).toBe(0);
+    });
+
+    it("stays open while a play run goes on", async () => {
+      await markVerified(PUBLIC_ID, rev("a"));
+      await promote(rev("a"), null);
+      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: true, actorUserId: ADMIN });
+      const run = await learnerStart(LEARNER);
+      // A course run does not depend on the setting.
+      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN });
+      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: true, actorUserId: ADMIN });
+      await env.DB.prepare("UPDATE scenario_runs SET launch_source = 'play' WHERE run_id = ?1").bind(run.runId).run();
+      await expect(setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN }))
+        .rejects.toMatchObject({ status: 409, code: "active_runs_would_lose_access" });
+      expect(await play()).toBe(1);
+      await env.DB.prepare("UPDATE scenario_runs SET state = 'completed' WHERE run_id = ?1").bind(run.runId).run();
+      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN });
+      expect(await play()).toBe(0);
     });
   });
 
