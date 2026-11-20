@@ -281,6 +281,7 @@ async function tickScenarioSource(
   try {
     const job = await driveDeployJob({ db: env.DB, storage, scopeKey, digest, now: Date.now(), deps: DEPLOY_JOB_DEPS });
     if (job.wait) await armAt(storage, Date.now() + DEPLOY_JOB_WAIT_MS);
+    if (job.wakeIn !== undefined) await armAt(storage, Date.now() + job.wakeIn);
   } catch (error) {
     console.error(JSON.stringify({
       event: "deploy_job_failed", scope_key: scopeKey, error: error instanceof Error ? error.message : String(error),

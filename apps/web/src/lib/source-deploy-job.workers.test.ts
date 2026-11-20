@@ -11,8 +11,8 @@ import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { liftRevisionHold, moveLiveRevision } from "@/lib/scenario-revisions";
 import {
-  DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, detailOf, driveDeployJob, type DeployJob,
-  type Lab,
+  DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, DEPLOY_JOB_WAIT_MS, detailOf, driveDeployJob,
+  RESTORE_CHECK_EVERY_MS, RESTORE_CHECK_FOR_MS, type DeployJob, type Lab,
 } from "@/lib/source-deploy-job";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -30,6 +30,10 @@ let stored: Map<string, unknown>;
 let begun: Array<{ scenarioId: string; rev: string; leaseMs: number }>;
 /** Every run row made, so ids stay apart when a test empties `begun`. */
 let runs: number;
+/** The restore checks started, by run id; they are not in `begun`. */
+let restoreChecks: Array<{ scenarioId: string; runId: string }>;
+/** Whether a restore check may start: false refuses it as a lab that is restore verified already would be. */
+let restorable: boolean;
 let ended: string[];
 /** The refusal the next starts get, by scenario; `*` for every one. */
 let refuse: Record<string, string>;
@@ -43,12 +47,14 @@ const storage = {
 
 const deps = {
   /** Starts a run as the real start would leave it: active under the revision's verify key. */
-  async beginVerifyRun(input: { scenarioId: string; rev: string; leaseMs: number }) {
+  async beginVerifyRun(input: { scenarioId: string; rev: string; leaseMs: number; restoreCheck?: boolean }) {
     const code = refuse[input.scenarioId] ?? refuse["*"];
     if (code) throw appError(409, code, code);
-    begun.push(input);
+    if (input.restoreCheck && !restorable) throw appError(409, "restore_check_not_possible", "not possible");
     runs += 1;
-    const runId = `run-${runs}`;
+    const runId = input.restoreCheck ? `restore-${runs}` : `run-${runs}`;
+    if (input.restoreCheck) restoreChecks.push({ scenarioId: input.scenarioId, runId });
+    else begun.push({ scenarioId: input.scenarioId, rev: input.rev, leaseMs: input.leaseMs });
     await env.DB.prepare(`INSERT INTO scenario_runs
       (run_id, user_id, host_id, scenario_id, scenario_rev, scenario_name, title, tagline, briefing_markdown, objectives_json,
        difficulty, estimated_minutes, tags_json, hints_json, solution_markdown, vm_count, state, state_rank, state_json,
@@ -136,6 +142,8 @@ beforeEach(async () => {
   stored = new Map();
   begun = [];
   runs = 0;
+  restoreChecks = [];
+  restorable = false;
   ended = [];
   refuse = {};
   await createFixtureMember({ d1: env.DB, userId: OWNER });
@@ -198,9 +206,9 @@ describe("an automatic source's job", () => {
     expect(await commit()).toEqual({ state: "live", detail: `- ${WEB}: live` });
     expect(await sourceRow()).toMatchObject({ live_rev: rev("a"), live_sha: "a".repeat(40) });
     expect((await sourceRow())!.live_at).not.toBeNull();
-    expect(job()).toBeUndefined();
-    // Nothing is left to drive.
-    expect(await drive()).toEqual({ wait: false });
+    // The job stays only for the lab's restore check, which it cannot start yet.
+    expect(job()).toMatchObject({ ended: { detail: `- ${WEB}: live` }, restore: { [WEB]: { tries: [] } } });
+    expect(await drive()).toEqual({ wait: false, wakeIn: DEPLOY_JOB_WAIT_MS });
     expect(await commit()).toMatchObject({ state: "live" });
   });
 
@@ -666,6 +674,130 @@ describe("an automatic source's job", () => {
     ]);
     await maintainPipelineRevisions(env, SCOPE, now + DEPLOY_JOB_DEADLINE_MS + 60_000);
     expect(await commit()).toMatchObject({ state: "failed" });
+  });
+});
+
+describe("restore checks after a lab is live", () => {
+  /** The head's one lab is live through the job, verified by hand. */
+  async function liveLab(sha = "a") {
+    await head(sha);
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev(sha)).run();
+    return drive();
+  }
+  /** A restore check ends; `restored` says whether it passed after a snapshot start. */
+  async function finishRestore(runId: string, restored: boolean) {
+    await env.DB.prepare("UPDATE scenario_runs SET active_key = NULL, state = 'completed' WHERE run_id = ?1").bind(runId).run();
+    if (restored) await env.DB.prepare("UPDATE scenario_revisions SET restore_verified_at = ?1 WHERE scenario_id = ?2").bind(now, WEB).run();
+  }
+
+  it("starts one in the pass that puts the lab live, and again every five minutes until one passed", async () => {
+    restorable = true;
+    expect(await liveLab()).toEqual({ wait: false, wakeIn: 120_000 });
+    expect(await commit()).toEqual({ state: "live", detail: `- ${WEB}: live, verified without a run` });
+    expect(restoreChecks).toEqual([{ scenarioId: WEB, runId: "restore-1" }]);
+    // While it goes on, nothing more is started.
+    expect(await drive()).toEqual({ wait: false, wakeIn: 120_000 });
+    expect(restoreChecks).toHaveLength(1);
+    // It booted cold: not yet. The next one is due five minutes after the first.
+    await finishRestore("restore-1", false);
+    now += 60_000;
+    expect(await drive()).toEqual({ wait: false, wakeIn: RESTORE_CHECK_EVERY_MS - 60_000 });
+    expect(restoreChecks).toHaveLength(1);
+    now += RESTORE_CHECK_EVERY_MS - 60_000;
+    await drive();
+    expect(restoreChecks.map((check) => check.runId)).toEqual(["restore-1", "restore-2"]);
+    // This one started from a snapshot and passed: the job is done.
+    await finishRestore("restore-2", true);
+    expect(await drive()).toEqual({ wait: false });
+    expect(job()).toBeUndefined();
+    expect(await commit()).toEqual({ state: "live", detail: `- ${WEB}: live, verified without a run` });
+    expect(begun).toEqual([]);
+  });
+
+  it("stops after two hours and says so, without failing the commit", async () => {
+    restorable = true;
+    await liveLab();
+    await finishRestore("restore-1", false);
+    now += RESTORE_CHECK_FOR_MS - 1;
+    await drive();
+    expect(restoreChecks).toHaveLength(2);
+    await finishRestore("restore-2", false);
+    now += 1;
+    expect(await drive()).toEqual({ wait: false });
+    expect(restoreChecks).toHaveLength(2);
+    expect(await commit()).toEqual({
+      state: "live", detail: `- ${WEB}: live, verified without a run, starts cold: no snapshot start passed in two hours`,
+    });
+    expect(job()).toBeUndefined();
+  });
+
+  it("starts none for a lab that took over its restore verification, or has more than one machine", async () => {
+    restorable = true;
+    await head("a");
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified', restore_verified_at = 5 WHERE rev = ?1").bind(rev("a")).run();
+    expect(await drive()).toEqual({ wait: false });
+    expect(job()).toBeUndefined();
+    expect(restoreChecks).toEqual([]);
+
+    await head("b", twoLabs("b"));
+    await env.DB.prepare(`UPDATE scenario_revisions SET state = 'verified',
+        doc_json = json_insert(doc_json, '$.machines[#]', json_extract(doc_json, '$.machines[0]'))
+      WHERE rev = ?1 AND scenario_id = ?2`).bind(rev("b"), DB_LAB).run();
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("b")).run();
+    await drive();
+    expect((await commit("b"))!.state).toBe("live");
+    expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("b") });
+    // The lab that went live has two machines; the other did not move.
+    expect(restoreChecks).toEqual([]);
+    expect(job()).toBeUndefined();
+  });
+
+  it("waits for a start that is refused, and gives verify runs the slots first", async () => {
+    restorable = true;
+    await head("a", twoLabs());
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1 AND scenario_id = ?2").bind(rev("a"), WEB).run();
+    // The second lab's verify run is refused for the scope: no restore check either.
+    refuse = { "*": "verify_quota_exhausted" };
+    expect(await drive()).toEqual({ wait: true, wakeIn: DEPLOY_JOB_WAIT_MS });
+    expect(await scenario(WEB)).toMatchObject({ live_rev: rev("a") });
+    expect(restoreChecks).toEqual([]);
+    refuse = {};
+    await drive();
+    expect(begun.map((run) => run.scenarioId)).toEqual([DB_LAB]);
+    expect(restoreChecks.map((check) => check.scenarioId)).toEqual([WEB]);
+  });
+
+  it("ends its restore check when the head moves", async () => {
+    restorable = true;
+    await liveLab();
+    expect(restoreChecks).toHaveLength(1);
+    await head("b");
+    await drive();
+    expect(ended).toEqual(["restore-1"]);
+    expect((await commit("b"))!.state).toBe("live");
+    expect(job()).toBeUndefined();
+  });
+
+  it("starts none once the source may not act", async () => {
+    restorable = true;
+    await head("a");
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
+    restorable = false;
+    await drive();
+    expect((await commit())!.state).toBe("live");
+    restorable = true;
+    await env.DB.prepare("UPDATE member SET role = 'member'").run();
+    await drive();
+    expect(restoreChecks).toEqual([]);
+    await env.DB.prepare("UPDATE member SET role = 'owner'").run();
+    await drive();
+    expect(restoreChecks).toHaveLength(1);
+    // Switched to manual: the check is ended and the row stays live.
+    await env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual'").run();
+    await drive();
+    expect(ended).toEqual(["restore-1"]);
+    expect(job()).toBeUndefined();
+    expect((await commit())!.state).toBe("live");
   });
 });
 
