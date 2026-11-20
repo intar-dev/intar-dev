@@ -13,8 +13,11 @@ use crate::error::{Error, Result};
 const SESSIONS_ROUTE: &str = "registry/v1/pipeline/sessions";
 /// The bundle of the commit is still being read: the session opens once it is.
 const BUNDLE_PENDING_CODE: &str = "bundle_pending";
-/// How often an open is tried while the bundle is read: with the waits the
-/// service names (5 s), a few minutes.
+/// The source has as many sessions open as it may.
+const SESSION_LIMIT_CODE: &str = "pipeline_session_limit";
+/// How often an open is tried while the bundle is read or the source's
+/// sessions are all taken: with the waits the service names (5 s), a few
+/// minutes.
 const OPEN_ATTEMPTS: u32 = 40;
 /// Tries of an open that fails for another passing reason: no answer, a 429
 /// or a 5xx.
@@ -83,10 +86,15 @@ impl PipelineSession {
                             client,
                         });
                     }
-                    let pending = status == StatusCode::CONFLICT
-                        && code_of(&text).as_deref() == Some(BUNDLE_PENDING_CODE);
-                    let failed =
-                        status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                    // The bundle is still read, or the source has its sessions
+                    // all open: other jobs of the same run close theirs soon.
+                    let code = code_of(&text);
+                    let pending = (status == StatusCode::CONFLICT
+                        && code.as_deref() == Some(BUNDLE_PENDING_CODE))
+                        || (status == StatusCode::TOO_MANY_REQUESTS
+                            && code.as_deref() == Some(SESSION_LIMIT_CODE));
+                    let failed = !pending
+                        && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error());
                     failures += u32::from(failed);
                     if !(pending || failed)
                         || attempt >= OPEN_ATTEMPTS

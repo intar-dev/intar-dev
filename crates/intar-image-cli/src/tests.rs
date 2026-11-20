@@ -458,7 +458,7 @@ mod pipeline {
         assert_eq!(
             written,
             format!(
-                "earlier=1\nimages=[{{\"target\":\"broken-nginx/webserver\",\"build_key\":\"{key}\",\"archs\":[\"arm64\"]}}]\njobs=[{{\"target\":\"broken-nginx/webserver\",\"build_key\":\"{key}\",\"arch\":\"arm64\"}}]\n"
+                "earlier=1\nrev={GIT_REV}\nproducer=pipeline\nimages=[{{\"target\":\"broken-nginx/webserver\",\"build_key\":\"{key}\",\"archs\":[\"arm64\"]}}]\njobs=[{{\"target\":\"broken-nginx/webserver\",\"build_key\":\"{key}\",\"arch\":\"arm64\"}}]\n"
             )
         );
     }
@@ -567,24 +567,236 @@ mod pipeline {
             assert_eq!(request.header("authorization"), Some("Bearer oidc"));
             assert_eq!(exit_code(&error), code, "{status} {body}: {error:#}");
         }
-        // What may pass on another try ends with 75.
-        for (status, body) in [
-            (503, "{}"),
-            (429, r#"{"code":"pipeline_session_limit"}"#),
-            (409, r#"{"code":"registry_paused"}"#),
-            (409, r#"{"code":"bundle_pending"}"#),
+        // What may pass on another try ends with 75; what the image or the
+        // commit is refused for ends with 1.
+        for (status, body, code) in [
+            (503, "{}", 75),
+            (429, r#"{"code":"pipeline_session_limit"}"#, 75),
+            (409, r#"{"code":"registry_paused"}"#, 75),
+            (409, r#"{"code":"bundle_pending"}"#, 75),
+            (409, r#"{"code":"registry_session_closed"}"#, 75),
+            // A paused registry's answer to the blob check has no body.
+            (409, "", 75),
+            (401, r#"{"error":"unauthorized"}"#, 1),
+            (403, r#"{"code":"build_key_not_in_bundle"}"#, 1),
+            (413, r#"{"code":"pipeline_session_bytes"}"#, 1),
+            (409, r#"{"code":"build_key_mismatch"}"#, 1),
+            (409, r#"{"code":"scope_storage_exceeded"}"#, 1),
         ] {
             let error = crate::push_command::failed(intar_image_upload::Error::HttpStatus {
                 status: reqwest::StatusCode::from_u16(status).expect("a status"),
                 body: body.to_owned(),
             });
-            assert_eq!(exit_code(&error), 75, "{status} {body}");
+            assert_eq!(exit_code(&error), code, "{status} {body}");
         }
+        let broken = crate::push_command::failed(intar_image_upload::Error::SessionBroken {
+            session_id: "s".to_owned(),
+            detail: "the heartbeat stopped".to_owned(),
+            cause: None,
+        });
+        assert_eq!(exit_code(&broken), 75);
 
         // Without image.json there is nothing to push, and nobody is asked.
         std::fs::remove_file(dir.path().join("image.json")).expect("removed");
         let error = push("http://127.0.0.1:1").expect_err("refused");
         assert_eq!(exit_code(&error), 1);
         assert!(format!("{error:#}").contains("image.json"), "{error:#}");
+    }
+
+    /// A service on a local port for a whole push: `answer` decides each
+    /// request from its method and path; every request is kept as
+    /// `METHOD path token`.
+    fn serve(
+        answer: impl Fn(&str, &str) -> (u16, String) + Send + 'static,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("an address"));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut head = String::new();
+                while !head.ends_with("\r\n\r\n") {
+                    if reader.read_line(&mut head).unwrap_or(0) == 0 {
+                        break;
+                    }
+                }
+                let header = |name: &str| {
+                    head.lines().find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case(name)
+                            .then(|| value.trim().to_owned())
+                    })
+                };
+                let length = header("content-length")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0; length];
+                if reader.read_exact(&mut body).is_err() {
+                    continue;
+                }
+                let mut line = head.split_whitespace();
+                let (method, path) = (
+                    line.next().unwrap_or_default(),
+                    line.next().unwrap_or_default(),
+                );
+                kept.lock().expect("the lock").push(format!(
+                    "{method} {path} {}",
+                    header("authorization")
+                        .unwrap_or_default()
+                        .trim_start_matches("Bearer ")
+                ));
+                let (status, body) = answer(method, path);
+                let length = if method == "HEAD" { 0 } else { body.len() };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {length}\r\nconnection: close\r\n\r\n{}",
+                    if method == "HEAD" { "" } else { &body }
+                );
+            }
+        });
+        (url, seen)
+    }
+
+    /// A directory as `build --out` leaves it: one config, one layer, the
+    /// manifest and `image.json`.
+    fn built_image() -> (tempfile::TempDir, String) {
+        use intar_contracts::oci::{
+            OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blobs = dir.path().join("sha256");
+        std::fs::create_dir_all(&blobs).expect("mkdir");
+        let put = |bytes: &[u8]| {
+            let scratch = blobs.join("scratch");
+            std::fs::write(&scratch, bytes).expect("write");
+            let hex = intar_image_build::sha256_file_hex(&scratch).expect("hash");
+            let digest: OciDigest = format!("sha256:{hex}").try_into().expect("a digest");
+            std::fs::rename(&scratch, blobs.join(digest.hex())).expect("rename");
+            digest
+        };
+        let descriptor = |bytes: &[u8]| OciDescriptorV1 {
+            media_type: "application/octet-stream".to_owned(),
+            digest: put(bytes),
+            size: bytes.len() as u64,
+        };
+        let manifest = serde_json::to_vec(&OciManifestV1 {
+            schema_version: 2,
+            media_type: OCI_MANIFEST_MEDIA_TYPE.to_owned(),
+            artifact_type: "application/vnd.intar.machine.v1".to_owned(),
+            config: descriptor(b"{}"),
+            layers: vec![descriptor(b"layer")],
+        })
+        .expect("json");
+        let manifest = put(&manifest);
+        BuiltImage {
+            build_key: format!("sha256:{}", "b".repeat(64))
+                .try_into()
+                .expect("a digest"),
+            manifest: manifest.clone(),
+            arch: "amd64".to_owned(),
+        }
+        .write(dir.path())
+        .expect("image.json");
+        (dir, manifest.as_str().to_owned())
+    }
+
+    fn push_to(url: &str, image: &Path) -> anyhow::Result<()> {
+        let cli = Cli::try_parse_from([
+            "intar-image-cli",
+            "push",
+            "--image",
+            &image.to_string_lossy(),
+            "--url",
+            url,
+            "--token",
+            "oidc",
+            "--rev",
+            GIT_REV,
+        ])
+        .expect("push parses");
+        let Command::Push(args) = cli.command else {
+            panic!("expected push");
+        };
+        crate::push_command::push_command(&args)
+    }
+
+    #[test]
+    fn push_opens_its_session_pushes_records_and_closes() {
+        let (dir, manifest) = built_image();
+        let recorded = format!(r#"{{"ok":true,"image_digest":"{manifest}"}}"#);
+        let (url, seen) = serve(move |method, path| match (method, path) {
+            ("POST", "/registry/v1/pipeline/sessions") => {
+                (201, r#"{"ok":true,"token":"ips_s"}"#.to_owned())
+            }
+            ("POST", "/registry/v1/upload-sessions") => (200, r#"{"session_id":"a-1"}"#.to_owned()),
+            ("HEAD", _) => (404, String::new()),
+            ("POST", path) if path.contains("/result") => (201, recorded.clone()),
+            _ => (200, r#"{"ok":true}"#.to_owned()),
+        });
+        push_to(&url, dir.path()).expect("pushed");
+
+        let seen = seen.lock().expect("the lock").clone();
+        assert_eq!(
+            seen.first().map(String::as_str),
+            Some("POST /registry/v1/pipeline/sessions oidc")
+        );
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("POST /registry/v1/pipeline/sessions/close ips_s")
+        );
+        let result = format!(
+            "POST /registry/v1/builds/{}/result?arch=amd64 ips_s",
+            "b".repeat(64)
+        );
+        assert!(seen.contains(&result), "{seen:?}");
+        assert!(
+            seen.contains(&format!("PUT /registry/v1/manifests/{manifest} ips_s")),
+            "{seen:?}"
+        );
+        // Only the open carries the OIDC token.
+        assert_eq!(
+            seen.iter().filter(|line| line.ends_with(" oidc")).count(),
+            1,
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn push_closes_its_session_when_the_image_is_refused() {
+        let (dir, _) = built_image();
+        let (url, seen) = serve(|method, path| match (method, path) {
+            ("POST", "/registry/v1/pipeline/sessions") => {
+                (201, r#"{"ok":true,"token":"ips_s"}"#.to_owned())
+            }
+            ("POST", "/registry/v1/upload-sessions") => (200, r#"{"session_id":"a-1"}"#.to_owned()),
+            ("PUT", path) if path.contains("/manifests/") => (
+                403,
+                r#"{"error":"no","code":"build_key_not_in_bundle"}"#.to_owned(),
+            ),
+            _ => (200, r#"{"ok":true}"#.to_owned()),
+        });
+        let error = push_to(&url, dir.path()).expect_err("refused");
+        assert_eq!(exit_code(&error), 1, "{error:#}");
+        let seen = seen.lock().expect("the lock").clone();
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("POST /registry/v1/pipeline/sessions/close ips_s")
+        );
+        assert!(
+            !seen.iter().any(|line| line.contains("/result")),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn an_image_file_of_an_earlier_build_is_forgotten() {
+        let (dir, _) = built_image();
+        BuiltImage::forget(dir.path()).expect("removed");
+        assert!(!dir.path().join("image.json").exists());
+        BuiltImage::forget(dir.path()).expect("nothing to remove is fine");
     }
 }

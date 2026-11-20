@@ -699,7 +699,12 @@ fn a_refused_pipeline_session_is_not_asked_for_again() {
             matches!(&error, Error::HttpStatus { status: answered, body } if answered.as_u16() == status && body.contains(code)),
             "{error}"
         );
-        // A full source is the one refusal worth waiting out.
-        assert_eq!(registry.calls().len() > 1, status == 429, "{status}");
+        // A source whose sessions are all taken is the one refusal worth
+        // waiting out, as long as a bundle that is still read.
+        assert_eq!(
+            registry.calls().len(),
+            if status == 429 { 40 } else { 1 },
+            "{status}"
+        );
     }
 }

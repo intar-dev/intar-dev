@@ -32,8 +32,8 @@ pub(crate) struct PlanCommand {
     /// Defaults to dist/bundles/<rev>.json.gz.
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Also append `images=<json>` and `jobs=<json>` to this file, as a
-    /// workflow step's outputs (`$GITHUB_OUTPUT`).
+    /// Also append `rev`, `producer`, `images=<json>` and `jobs=<json>` to
+    /// this file, as a workflow step's outputs (`$GITHUB_OUTPUT`).
     #[arg(long)]
     github_output: Option<PathBuf>,
     /// The repository root.
@@ -157,6 +157,8 @@ pub(crate) fn plan_command(args: &PlanCommand) -> Result<()> {
             .append(true)
             .open(path)
             .with_context(|| format!("failed to open {}", path.display()))?;
+        writeln!(file, "rev={}", plan.rev)?;
+        writeln!(file, "producer={}", plan.producer)?;
         writeln!(file, "images={}", serde_json::to_string(&plan.images)?)?;
         writeln!(file, "jobs={}", serde_json::to_string(&plan.jobs)?)?;
     }

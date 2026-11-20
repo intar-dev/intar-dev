@@ -31,6 +31,17 @@ impl BuiltImage {
             .with_context(|| format!("failed to write {}", path.display()))
     }
 
+    /// Removes the file, if there is one.
+    pub(crate) fn forget(dir: &Path) -> Result<()> {
+        let path = dir.join(IMAGE_FILE);
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(error).with_context(|| format!("failed to remove {}", path.display()))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn read(dir: &Path) -> Result<Self> {
         let path = dir.join(IMAGE_FILE);
         serde_json::from_slice(
@@ -90,9 +101,12 @@ pub(crate) fn push_command(args: &PushCommand) -> Result<()> {
 }
 
 /// A failed push with the exit code a workflow acts on: 3 when the commit is
-/// no longer the one to build for, 75 when trying again may pass.
+/// no longer the one to build for, 75 when trying again may pass. Only the
+/// session open says 3: a session that ends while the push runs is refused as
+/// unauthorized, and the next open tells why.
 pub(crate) fn failed(error: UploadError) -> anyhow::Error {
     let exit_code = match &error {
+        UploadError::Http(error) if error.is_builder() => 1,
         UploadError::Http(_) | UploadError::SessionBroken { .. } => EXIT_TRANSIENT,
         UploadError::HttpStatus { status, body } => {
             let code = serde_json::from_str::<serde_json::Value>(body)
@@ -100,6 +114,9 @@ pub(crate) fn failed(error: UploadError) -> anyhow::Error {
                 .and_then(|value| value.get("code")?.as_str().map(str::to_owned));
             match (status.as_u16(), code.as_deref()) {
                 (409, Some("superseded")) => EXIT_SUPERSEDED,
+                // A paused registry refuses the blob check, a HEAD, which
+                // carries no body.
+                (409, None) if body.trim().is_empty() => EXIT_TRANSIENT,
                 (429 | 500..=599, _)
                 | (
                     409,
@@ -107,7 +124,10 @@ pub(crate) fn failed(error: UploadError) -> anyhow::Error {
                         "bundle_pending"
                         | "registry_paused"
                         | "registry_sweep_in_progress"
-                        | "registry_writer_expired",
+                        | "registry_writer_expired"
+                        | "registry_session_superseded"
+                        | "registry_session_closed"
+                        | "registry_admission_denied",
                     ),
                 ) => EXIT_TRANSIENT,
                 _ => 1,

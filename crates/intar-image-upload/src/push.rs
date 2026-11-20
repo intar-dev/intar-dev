@@ -255,7 +255,10 @@ impl RegistryPusher {
         match self.call(session, || {
             Ok(self.client.post(result_url.clone()).json(&body))
         }) {
-            Ok(response) => Ok((manifest.clone(), response.text()?)),
+            // The result is recorded once it is answered: a body that cannot
+            // be read does not undo it. A pipeline's push reads the body and
+            // fails on an empty one.
+            Ok(response) => Ok((manifest.clone(), response.text().unwrap_or_default())),
             Err(error) => recorded_before(&error)
                 .map(|image| (image, String::new()))
                 .ok_or(error),
