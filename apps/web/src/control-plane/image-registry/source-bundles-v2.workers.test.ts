@@ -333,7 +333,7 @@ describe("v2 bundle ingest", () => {
     for (let n = 0; n < 20; n += 1) {
       bundle.scenarios.push({
         ...scenario,
-        slug: `broken-nginx-${String(n).padStart(3, "0")}`,
+        slug: `broken-nginx-${String(n).padStart(2, "0")}`,
         briefing: `${String.fromCharCode(97 + n)}`.repeat(60_000),
         solution: "s".repeat(60_000),
       });
