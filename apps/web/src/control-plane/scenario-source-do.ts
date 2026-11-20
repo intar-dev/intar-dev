@@ -13,7 +13,7 @@ import { drizzle } from "drizzle-orm/d1";
 import {
   scenarioSources,
 } from "@/db/schema";
-import type { ScenarioSourceCommitState } from "@/db/schema/scenarios";
+import type { ImageProducer, ScenarioSourceCommitState } from "@/db/schema/scenarios";
 import {
   BUILDER_REASSIGN_AFTER_MS,
   freeSourceCompileBuilders,
@@ -31,6 +31,7 @@ import {
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { createAppId } from "@/lib/id";
 import { ingestSourceBundle, sourceBundleObjectKey } from "@/lib/scenario-bundles";
+import { maintainPipelineRevisions } from "@/lib/pipeline-revisions";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
   admitInternalRegistryOperation,
@@ -38,6 +39,7 @@ import {
 import { CUTOVER_WIPED_SQL } from "@/lib/run-admission-gate";
 import {
   closeDisconnectedPipelineSessions,
+  failDisconnectedPipelineRevisions,
   endSourceCompiles,
   MAX_COMPILE_ATTEMPTS,
   parseDiagnostics,
@@ -83,6 +85,8 @@ interface Step {
   scopeKey: string;
   organizationId: string | null;
   digest: string;
+  /** Who builds the images of what this pass ingests. */
+  imageProducer: ImageProducer;
 }
 
 type ActiveBinding = Pick<
@@ -182,8 +186,18 @@ async function tickScenarioSource(
     .where(eq(scenarioSources.scopeKey, scopeKey))
     .limit(1);
   if (!binding) return false;
-  const again = await observe(env, binding);
+  let again = await observe(env, binding);
   const organizationId = binding.organizationId;
+  // Before anything can return: a paused source's revisions end too. On its
+  // own, so a fault here never stops a source from publishing.
+  try {
+    await maintainPipelineRevisions(env, scopeKey, Date.now());
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "pipeline_revisions_maintenance_failed", scope_key: scopeKey, error: String(error),
+    }));
+    again = true;
+  }
 
   const now = Date.now();
   await db
@@ -207,6 +221,7 @@ async function tickScenarioSource(
   const [active] = await db
     .select({
       mode: scenarioSources.mode,
+      imageProducer: scenarioSources.imageProducer,
       githubInstallationId: scenarioSources.githubInstallationId,
       githubRepository: scenarioSources.githubRepository,
       githubRepositoryId: scenarioSources.githubRepositoryId,
@@ -215,7 +230,9 @@ async function tickScenarioSource(
     .where(and(eq(scenarioSources.scopeKey, scopeKey), scenarioSourceBindingPredicate()))
     .limit(1);
   if (!active) return again;
-  const step = { env, storage, scopeKey, organizationId, digest };
+  // Only a push source's own pipeline builds images.
+  const imageProducer = active.mode === "push" ? active.imageProducer : "builder";
+  const step = { env, storage, scopeKey, organizationId, digest, imageProducer };
   const ingestAgain = await ingest(step);
   // After ingest, so a re-run failed row that ingest finds without its
   // staged objects is delivered again in the same pass.
@@ -261,6 +278,7 @@ async function observe(
           .set({ disconnectedAt: now, disconnectReason: "github_gone", updatedAt: now })
           .where(bound),
         closeDisconnectedPipelineSessions(db, binding.scopeKey, now),
+        failDisconnectedPipelineRevisions(db, binding.scopeKey),
       ]);
     } else if (mint.status === "suspended") {
       await db
@@ -610,6 +628,7 @@ async function ingestSourceBundleRow(step: Step, rev: string): Promise<WriteOutc
       rev,
       gzip,
       stored: stored !== null,
+      imageProducer: step.imageProducer,
     });
     outcome = refused === null ? "ok" : "error";
     return refused === null ? "done" : invalid(refused);

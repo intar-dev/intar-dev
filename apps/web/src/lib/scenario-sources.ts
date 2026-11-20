@@ -17,11 +17,12 @@ import {
 import {
   account,
   pipelineUploadSessions,
+  scenarioRevisions,
   scenarioSourceCommits,
   scenarioSources,
   type CourseCatalogSnapshotV2,
 } from "@/db/schema";
-import type { ScenarioSourceCommitState } from "@/db/schema/scenarios";
+import type { ImageProducer, ScenarioSourceCommitState } from "@/db/schema/scenarios";
 import type { SourceCompileErrorV1 } from "@/generated/bridge";
 import type { SourceRefusalCode } from "@/generated/catalog";
 import {
@@ -36,6 +37,14 @@ import type { UserContext } from "@/lib/agent-bridge";
 import { type AppError, appError, errorChainMatches } from "@/lib/app-error";
 import { courseCatalogScopeKey } from "@/lib/course-catalogs";
 import { syncBuilderDesiredState } from "@/lib/machine-builds";
+import {
+  pipelinePlan,
+  producerInForce,
+  REVISION_SOURCE_DISCONNECTED,
+  revisionBuildKeys,
+  type PipelinePlan,
+} from "@/lib/pipeline-revisions";
+import { buildKeys } from "@/lib/scenario-contract/build-key";
 import type { FeatureToggleService } from "@/lib/feature-toggles";
 import {
   findRepositoryInstallation,
@@ -122,6 +131,28 @@ export function scenarioSourceBindingPredicate(): SQL {
   return sql`(${scenarioSources.disconnectedAt} IS NULL
     AND ${scenarioSources.pausedAt} IS NULL
     AND ${scenarioSourceBinderPredicate()})`;
+}
+
+/**
+ * Fails the building revisions of a scope's pipeline bundles (#441) once its
+ * source is disconnected; it goes in the batch that disconnects, and like
+ * the session close does nothing when the disconnect did not apply. A
+ * disconnected source is not polled, so nothing later would end them.
+ */
+export function failDisconnectedPipelineRevisions(db: DrizzleD1Database, scopeKey: string) {
+  return db
+    .update(scenarioRevisions)
+    .set({ state: "failed", failureReason: REVISION_SOURCE_DISCONNECTED })
+    .where(
+      and(
+        eq(scenarioRevisions.state, "building"),
+        sql`${scenarioRevisions.rev} IN (SELECT rev FROM bundles
+          WHERE scope_key = ${scopeKey} AND image_producer = 'pipeline')`,
+        sql`EXISTS (SELECT 1 FROM scenario_sources source
+          WHERE source.scope_key = ${scopeKey}
+            AND source.disconnected_at IS NOT NULL)`,
+      ),
+    );
 }
 
 /**
@@ -486,6 +517,7 @@ export async function changeScenarioSource(input: {
           })
           .where(connected),
         closeDisconnectedPipelineSessions(db, scope.key, now),
+        failDisconnectedPipelineRevisions(db, scope.key),
       ]);
       break;
     case "purge":
@@ -792,6 +824,8 @@ export async function acceptScenarioSourceUpload(
     sha: string;
     purpose: "deploy" | "validate";
     claim: SourceUploadClaim;
+    /** Who builds the source's images now; absent, a builder. */
+    imageProducer?: ImageProducer;
   },
 ): Promise<Response> {
   const { scope, purpose, claim } = input;
@@ -871,8 +905,29 @@ export async function acceptScenarioSourceUpload(
       ),
     )
     .limit(1);
-  if (existing && SETTLED_STATES.includes(existing.state)) return receipt(rev);
+  const settled = existing !== undefined && SETTLED_STATES.includes(existing.state);
+  // A pipeline's receipt also says which images its scope lacks (#441). The
+  // keys are the ingested revisions' once the rev has a bundle, since those
+  // are what a push is checked against; before that, the uploaded bundle's.
+  const pipeline =
+    claim.via === "push" && purpose === "deploy"
+      ? await producerInForce(workerEnv, scope.key, rev, input.imageProducer ?? "builder")
+      : null;
+  const planned = pipeline?.producer === "pipeline";
+  const receiptOf = async (uploaded: string[]) =>
+    receipt(
+      rev,
+      planned
+        ? await pipelinePlan(
+            workerEnv,
+            scope.key,
+            pipeline.stamped ? await revisionBuildKeys(workerEnv, scope.key, rev) : uploaded,
+          )
+        : undefined,
+    );
+  if (settled && !(planned && !pipeline.stamped)) return receiptOf([]);
 
+  let uploadedKeys: string[] = [];
   const files: Array<[name: string, body: Uint8Array<ArrayBuffer>, type: string]> = [];
   if (bundle instanceof File) {
     if (bundle.size > MAX_SOURCE_BUNDLE_GZIP_BYTES) {
@@ -883,8 +938,15 @@ export async function acceptScenarioSourceUpload(
     if (!normalizeCourseCatalogSnapshot(read.course_catalog)) {
       throw appError(400, "bundle_invalid", "The course catalog is invalid.");
     }
+    if (planned) {
+      for (const scenario of read.scenarios) {
+        uploadedKeys.push(...Object.values((await buildKeys(scenario, read.images)).machines));
+      }
+    }
     if (purpose === "deploy") files.push(["bundle.json.gz", gzip, "application/gzip"]);
   }
+  // The row already holds the rev; only its bundle is not ingested yet.
+  if (settled) return receiptOf(uploadedKeys);
   // A validate-only result has nothing left to do once it is claimed.
   const claimState = purpose === "validate" ? "validated" : "ingesting";
 
@@ -961,7 +1023,7 @@ export async function acceptScenarioSourceUpload(
     .update(scenarioSources)
     .set({ pokedAt: now })
     .where(eq(scenarioSources.scopeKey, scope.key));
-  return receipt(rev);
+  return receiptOf(uploadedKeys);
 }
 
 /**
@@ -999,8 +1061,8 @@ export async function endSourceCompiles(
 }
 
 // The CLI and builder receipt check accepts this; nothing is queued yet.
-function receipt(rev: string): Response {
-  return jsonResponse({ ok: true, rev, queued: 0, assigned: [] }, 202);
+function receipt(rev: string, pipeline?: PipelinePlan): Response {
+  return jsonResponse({ ok: true, rev, queued: 0, assigned: [], ...(pipeline ? { pipeline } : {}) }, 202);
 }
 
 function parseRecord(raw: string | undefined): Record<string, unknown> {

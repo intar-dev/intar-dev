@@ -21,7 +21,9 @@ import {
   handleBlobPut,
   handleBuildResult,
   handleManifestPut,
+  machineBuildKey,
 } from "./push";
+import { settleScenarioRevisions } from "@/lib/machine-builds";
 import {
   handleRegistryAdmissionEnforcement,
   handleRegistryAdmissionPause,
@@ -125,9 +127,11 @@ export async function handleImageRegistryRequest(
     /^\/registry\/v1\/builds\/([^/]+)\/result$/,
   );
   if (buildResultMatch) {
-    return admitted(request, env, "POST", "build_result", (lease) =>
+    const response = await admitted(request, env, "POST", "build_result", (lease) =>
       handleBuildResult(request, env, buildResultMatch[1] ?? "", lease),
     );
+    await settleAfterPipelineResult(request, env, url, buildResultMatch[1] ?? "", response);
+    return response;
   }
 
   const bundleMatch = url.pathname.match(
@@ -172,6 +176,33 @@ export async function handleImageRegistryRequest(
  * leaves the writer unresolved, which blocks the destructive sweep until an
  * operator reaps it.
  */
+/**
+ * A pipeline's recorded amd64 image may complete revisions of its scope
+ * (#441): they are settled here, after the registry writer is released. A
+ * failure is only logged: the image is recorded, and the source's next pass
+ * settles what this missed.
+ */
+async function settleAfterPipelineResult(
+  request: Request,
+  env: Cloudflare.Env,
+  url: URL,
+  buildId: string,
+  response: Response,
+): Promise<void> {
+  if (request.method !== "POST" || !response.ok) return;
+  if ((url.searchParams.get("arch") ?? "amd64") !== "amd64") return;
+  const buildKey = machineBuildKey(buildId);
+  const auth = await readRegistryAuth(request, env);
+  if (!buildKey || !auth.ok || auth.owner.kind !== "pipeline") return;
+  try {
+    const scopeKey = await env.DB.prepare("SELECT scope_key FROM pipeline_upload_sessions WHERE id = ?1")
+      .bind(auth.owner.id).first<string>("scope_key");
+    if (scopeKey) await settleScenarioRevisions(env, { buildKey, scopeKey });
+  } catch (error) {
+    console.error(JSON.stringify({ event: "pipeline_result_settle_failed", build_key: buildKey, error: String(error) }));
+  }
+}
+
 async function admitted(
   request: Request,
   env: Cloudflare.Env,

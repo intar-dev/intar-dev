@@ -23,10 +23,16 @@ import revisionFixture from "@/generated/fixtures/scenario/broken-nginx-revision
 import refusalsFixture from "@/generated/fixtures/scenario/bundle-refusals.json";
 import sourceRefusalSchema from "@/generated/schemas/source-refusal-v1.schema.json";
 import { GITHUB_ACTIONS_ISSUER } from "@/lib/github-oidc";
+import { REVISION_REPLACED, settleScenarioRevisions } from "@/lib/machine-builds";
+import {
+  PIPELINE_REVISION_DEADLINE_MS,
+  REVISION_PIPELINE_DEADLINE,
+  REVISION_SOURCE_DISCONNECTED,
+} from "@/lib/pipeline-revisions";
 import { ingestSourceBundle, sourceBundleObjectKey } from "@/lib/scenario-bundles";
 import { baseKey } from "@/lib/scenario-contract/build-key";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
-import { stagedSourceObjectPrefix } from "@/lib/scenario-sources";
+import { changeScenarioSource, scenarioSourceScope, stagedSourceObjectPrefix } from "@/lib/scenario-sources";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 
@@ -400,6 +406,245 @@ describe("v2 bundle ingest", () => {
 
   it("refuses a rev of another commit", async () => {
     await expectRefusal(await push({ rev: `git-42-${"b".repeat(40)}-${digest}` }), 400, "source_rev_invalid");
+  });
+});
+
+describe("a source whose pipeline builds its images", () => {
+  const KEY = (JSON.parse(STORED.revision.json) as { machines: { build_key: string }[] }).machines[0]!.build_key;
+  const IMAGE = `sha256:${"1".repeat(64)}`;
+  const DAY = PIPELINE_REVISION_DEADLINE_MS;
+  const byPipeline = (scope = "public") =>
+    env.DB.prepare("UPDATE scenario_sources SET image_producer = 'pipeline' WHERE scope_key = ?1").bind(scope).run();
+  /** An image as a pipeline's result records it, with its manifest row. */
+  async function record(input: { scope?: string; architecture?: string; digest?: string; format?: string; manifest?: boolean } = {}) {
+    const digest = input.digest ?? IMAGE;
+    if (input.manifest !== false) {
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO registry_manifests (digest, media_type, artifact_type, size, created_at)
+         VALUES (?1, 'application/vnd.oci.image.manifest.v1+json', 'application/vnd.intar.machine.v1', 1, 0)`,
+      ).bind(digest).run();
+    }
+    await env.DB.prepare(
+      `INSERT INTO scope_machine_images (scope_key, build_key, architecture, image_digest, image_format, size_bytes,
+         github_repository_id, github_repository, sha, run_id, run_attempt, runner_environment, job_workflow_sha)
+       VALUES (?1, ?2, ?3, ?4, ?5, 1, 42, 'intar/scenarios', ?6, '1', 1, 'github-hosted', ?7)`,
+    ).bind(input.scope ?? "public", KEY, input.architecture ?? "amd64", digest, input.format ?? "intar-image-4", SHA, WORKFLOW_SHA).run();
+  }
+  const revisions = () => all("SELECT scenario_id, rev, state, failure_reason, created_at FROM scenario_revisions ORDER BY rev");
+  const commits = () => all("SELECT rev, state, detail FROM scenario_source_commits ORDER BY rev");
+  const age = (ms: number) => env.DB.prepare("UPDATE scenario_revisions SET created_at = created_at - ?1").bind(ms).run();
+  const plan = async (response: Response) => ((await response.json()) as { pipeline?: unknown }).pipeline;
+  const BOTH = [{ build_key: KEY, architecture: "amd64" }, { build_key: KEY, architecture: "arm64" }];
+
+  it("ingests without a build, and says in its receipt which images are missing", async () => {
+    await byPipeline();
+    const first = await push();
+    expect(first.status).toBe(202);
+    // Before ingest the keys are the uploaded bundle's; a second upload reads the same.
+    expect(await plan(first)).toEqual({ architectures: ["amd64", "arm64"], missing: BOTH });
+    expect(await plan(await push())).toEqual({ architectures: ["amd64", "arm64"], missing: BOTH });
+
+    await tick("public");
+    const after = await written();
+    expect(after.builds).toEqual([]);
+    expect(after.bundles).toEqual([expect.objectContaining({ rev: rev(), image_producer: "pipeline" })]);
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "building" })]);
+
+    // After ingest they are the revisions'. Another scope's image, a stale
+    // format and a row without its manifest all leave the image missing.
+    await record({ scope: `organization:${ORG}` });
+    await record({ architecture: "arm64", digest: `sha256:${"2".repeat(64)}`, manifest: false });
+    expect(await plan(await push())).toEqual({ architectures: ["amd64", "arm64"], missing: BOTH });
+    await record();
+    expect(await plan(await push())).toEqual({ architectures: ["amd64", "arm64"], missing: [BOTH[1]] });
+  });
+
+  it("gives a builder source the receipt it always got, whatever is recorded", async () => {
+    await record();
+    const response = await push();
+    await expect(response.json()).resolves.toEqual({ ok: true, rev: rev(), queued: 0, assigned: [] });
+    await tick("public");
+    expect((await written()).bundles).toEqual([expect.objectContaining({ image_producer: "builder" })]);
+    // The scope's image does not complete a builder's revision.
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "building" })]);
+    expect((await written()).builds).toHaveLength(1);
+  });
+
+  it("settles at ingest when every image is recorded, and only from its own scope's amd64 images", async () => {
+    await byPipeline();
+    // None of these is its image: a builder's build of the key, another
+    // scope's image, an arm64 one, one of a stale format, one without its manifest.
+    await env.DB.prepare(
+      `INSERT INTO machine_builds (build_key, image_format, bundle_rev, state, image_digest, updated_at)
+       VALUES (?1, 'intar-image-4', 'other', 'succeeded', ?2, 0)`,
+    ).bind(KEY, IMAGE).run();
+    await record({ scope: `organization:${ORG}` });
+    await record({ architecture: "arm64" });
+    await push();
+    await tick("public");
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "building" })]);
+
+    await record({ format: "intar-image-3" });
+    await settleScenarioRevisions(env, { buildKey: KEY });
+    await env.DB.prepare("UPDATE scope_machine_images SET image_format = 'intar-image-4', image_digest = ?1 WHERE architecture = 'amd64' AND scope_key = 'public'")
+      .bind(`sha256:${"3".repeat(64)}`).run();
+    await settleScenarioRevisions(env, { buildKey: KEY });
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "building" })]);
+
+    // Its own image, and a settle another scope asked for does not reach it.
+    await env.DB.prepare("UPDATE scope_machine_images SET image_digest = ?1 WHERE architecture = 'amd64' AND scope_key = 'public'").bind(IMAGE).run();
+    await settleScenarioRevisions(env, { buildKey: KEY, scopeKey: `organization:${ORG}` });
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "building" })]);
+    await settleScenarioRevisions(env, { buildKey: KEY, scopeKey: "public" });
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "ready" })]);
+    const [{ doc_json: doc }] = await all("SELECT doc_json FROM scenario_revisions") as [{ doc_json: string }];
+    expect((JSON.parse(doc) as { machines: { image_digest: string }[] }).machines[0]!.image_digest).toBe(IMAGE);
+    expect((await all("SELECT candidate_rev FROM scenarios"))[0]).toEqual({ candidate_rev: rev() });
+  });
+
+  it("is ready straight from ingest when its image was recorded before", async () => {
+    await byPipeline();
+    await record();
+    await push();
+    await tick("public");
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "ready" })]);
+  });
+
+  it("keeps the producer a rev was first ingested with", async () => {
+    await byPipeline();
+    await push();
+    await tick("public");
+    await env.DB.prepare("UPDATE scenario_sources SET image_producer = 'builder'").run();
+    await env.DB.prepare("UPDATE scenario_source_commits SET state = 'failed'").run();
+    expect(await plan(await push())).toEqual({ architectures: ["amd64", "arm64"], missing: BOTH });
+    await tick("public");
+    expect((await written()).builds).toEqual([]);
+
+    // And the other way: a builder's rev stays a builder's.
+    await byPipeline(`organization:${ORG}`);
+    await env.DB.prepare("UPDATE scenario_sources SET image_producer = 'builder' WHERE scope_key != 'public'").run();
+    await push({ repo: 43 });
+    await tick(`organization:${ORG}`);
+    await byPipeline(`organization:${ORG}`);
+    await env.DB.prepare("UPDATE scenario_source_commits SET state = 'failed' WHERE scope_key != 'public'").run();
+    expect(await plan(await push({ repo: 43 }))).toBeUndefined();
+  });
+
+  it("settles on its next pass what a result left unsettled", async () => {
+    await byPipeline();
+    await push();
+    await tick("public");
+    await record();
+    await tick("public");
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "ready" })]);
+    expect(await commits()).toEqual([expect.objectContaining({ state: "building" })]);
+  });
+
+  it("fails a revision that waited a day, also while paused, and a new publish of the commit takes it up again", async () => {
+    await byPipeline();
+    await push();
+    await tick("public");
+    await age(DAY - 60_000);
+    await tick("public");
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "building" })]);
+
+    await env.DB.prepare("UPDATE scenario_sources SET paused_at = 1, pause_reason = 'admin'").run();
+    await age(60_001);
+    await tick("public");
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "failed", failure_reason: REVISION_PIPELINE_DEADLINE })]);
+    expect(await commits()).toEqual([{
+      rev: rev(), state: "failed",
+      detail: `${REVISION_PIPELINE_DEADLINE} Missing: intar/broken-nginx/webserver (amd64).`,
+    }]);
+
+    await env.DB.prepare("UPDATE scenario_sources SET paused_at = NULL, pause_reason = NULL").run();
+    const before = Date.now();
+    expect(await plan(await push())).toEqual({ architectures: ["amd64", "arm64"], missing: BOTH });
+    await tick("public");
+    const [revived] = await revisions();
+    expect(revived).toMatchObject({ state: "building", failure_reason: null });
+    expect(revived!.created_at as number).toBeGreaterThanOrEqual(before);
+    expect(await commits()).toEqual([expect.objectContaining({ state: "building", detail: null })]);
+  });
+
+  it("leaves the commit building while one of its revisions still waits or is ready", async () => {
+    await byPipeline();
+    await push();
+    await tick("public");
+    await env.DB.prepare("INSERT INTO scenarios (id, namespace, slug, scope_key, enabled, play) VALUES ('intar/other', 'intar', 'other', 'public', 1, 0)").run();
+    await env.DB.prepare(
+      `INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state, created_at)
+       SELECT 'intar/other', rev, guest_contract, doc_json, 'building', ?1 FROM scenario_revisions`,
+    ).bind(Date.now()).run();
+    await env.DB.prepare("UPDATE scenario_revisions SET created_at = created_at - ?1 WHERE scenario_id != 'intar/other'").bind(DAY + 1).run();
+    await tick("public");
+    expect((await revisions()).map((row) => row.state).sort()).toEqual(["building", "failed"]);
+    expect(await commits()).toEqual([expect.objectContaining({ state: "building" })]);
+  });
+
+  it("fails a revision a newer publish of its scenario replaced", async () => {
+    await byPipeline();
+    await push();
+    await tick("public");
+    await env.DB.prepare(
+      `INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state, created_at)
+       SELECT scenario_id, 'newer', guest_contract, doc_json, 'building', created_at + 1 FROM scenario_revisions`,
+    ).run();
+    await env.DB.prepare(
+      `INSERT INTO bundles (rev, scope_key, compiler_version, r2_key, image_producer) VALUES ('newer', 'public', 'c', 'k', 'pipeline')`,
+    ).run();
+    await tick("public");
+    expect(await revisions()).toEqual([
+      expect.objectContaining({ rev: rev(), state: "failed", failure_reason: REVISION_REPLACED }),
+      expect.objectContaining({ rev: "newer", state: "building" }),
+    ]);
+  });
+
+  it("fails its building revisions with a disconnect, and a reconnect and publish takes them up again", async () => {
+    await byPipeline();
+    await push();
+    await tick("public");
+    // A disconnect that does not apply changes nothing.
+    await createFixtureMember({ d1: env.DB, userId: "stranger", githubAccountId: "1002" });
+    await changeScenarioSource({
+      scope: scenarioSourceScope(null), actorUserId: "stranger", body: { action: "disconnect" }, startedAt: Date.now(),
+    }).catch(() => undefined);
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "building" })]);
+
+    await changeScenarioSource({
+      scope: scenarioSourceScope(null), actorUserId: ADMIN, body: { action: "disconnect" }, startedAt: Date.now(),
+    });
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "failed", failure_reason: REVISION_SOURCE_DISCONNECTED })]);
+
+    await env.DB.prepare("UPDATE scenario_sources SET disconnected_at = NULL, disconnect_reason = NULL").run();
+    await env.DB.prepare("UPDATE scenario_source_commits SET state = 'superseded'").run();
+    expect((await push()).status).toBe(202);
+    await tick("public");
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "building", failure_reason: null })]);
+  });
+
+  it("fails them too when GitHub says the installation is gone", async () => {
+    await byPipeline();
+    await push();
+    await tick("public");
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(null, { status: 404 }));
+    await tick("public");
+    expect((await all("SELECT disconnect_reason FROM scenario_sources WHERE scope_key = 'public'"))[0])
+      .toEqual({ disconnect_reason: "github_gone" });
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "failed", failure_reason: REVISION_SOURCE_DISCONNECTED })]);
+  });
+
+  it("still ingests when the pass over the pipeline's revisions fails", async () => {
+    await push();
+    // The pass reads this table first.
+    await env.DB.prepare("ALTER TABLE bundles RENAME COLUMN image_producer TO producer_gone").run();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await tick("public").catch(() => undefined);
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining("pipeline_revisions_maintenance_failed"));
+    await env.DB.prepare("ALTER TABLE bundles RENAME COLUMN producer_gone TO image_producer").run();
+    await tick("public");
+    expect(await revisions()).toEqual([expect.objectContaining({ state: "building" })]);
   });
 });
 
