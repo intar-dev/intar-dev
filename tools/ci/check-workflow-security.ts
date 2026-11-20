@@ -16,6 +16,18 @@ const PINNED_TAIKI_TOOLS = new Map([
 // Dependabot skips the workflows rendered from ci/workflows, so each of their
 // pins must also sit in a file it scans for the next revision to be proposed.
 const RENDERED_HEADER = "# Generated from ci/workflows/";
+// The reusable workflow installs these on its caller's runner, whose image
+// and package versions it cannot know, so it names them without a version.
+// `intar-image-cli setup` then refuses a QEMU that is too old, and the QEMU
+// binary's hash is part of every checkpoint's key. Nothing else is exempt.
+const CALLER_RUNNER_WORKFLOW = ".github/workflows/scenario-publish.yml";
+const CALLER_RUNNER_PACKAGES = new Set([
+  "qemu-system-x86",
+  "qemu-system-arm",
+  "qemu-utils",
+  "e2fsprogs",
+  "zstd",
+]);
 const SHA = /^[0-9a-f]{40}$/u;
 const EXACT_VERSION = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 const RUST_TOOLCHAIN = "1.100.0";
@@ -315,10 +327,14 @@ function checkInstalledToolVersions(
       .trim()
       .split(/\s+/u)
       .filter((value) => value && !value.startsWith("-") && value !== "\\");
+    const callerRunner =
+      workflowName === CALLER_RUNNER_WORKFLOW &&
+      packages.every((value) => CALLER_RUNNER_PACKAGES.has(value));
     if (
       content.endsWith("\\") ||
       packages.length === 0 ||
-      packages.some((value) => !/^[A-Za-z0-9.+-]+=[^\s=]+$/u.test(value))
+      (!callerRunner &&
+        packages.some((value) => !/^[A-Za-z0-9.+-]+=[^\s=]+$/u.test(value)))
     ) {
       violations.push(
         `${workflowName}:${lineNumber}: apt installs must pin every package with package=version`,

@@ -277,4 +277,28 @@ jobs:
     expect(output).toContain("apps/web/public/_headers: missing");
     expect(output).toContain("docs/public/_headers: missing");
   });
+
+  it("lets only the reusable workflow install its build packages without versions", () => {
+    const root = mkdtempSync(join(tmpdir(), "intar-workflow-security-"));
+    roots.push(root);
+    const install = (packages: string) => `jobs:
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ${packages}
+`;
+    const violations = (name: string, packages: string) => {
+      const workflows = join(root, ".github", "workflows");
+      mkdirSync(workflows, { recursive: true });
+      for (const file of ["scenario-publish.yml", "other.yml"]) rmSync(join(workflows, file), { force: true });
+      writeFileSync(join(workflows, name), install(packages));
+      return checkWorkflowSecurity(root).filter((line) => line.includes("apt installs"));
+    };
+    const packages = "qemu-system-x86 qemu-system-arm qemu-utils e2fsprogs zstd";
+    expect(violations("scenario-publish.yml", packages)).toEqual([]);
+    // Another package there, or the same packages anywhere else, is refused.
+    expect(violations("scenario-publish.yml", `${packages} curl`)).toHaveLength(1);
+    expect(violations("other.yml", packages)).toHaveLength(1);
+  });
 });

@@ -43,6 +43,22 @@ fi
   --output "${smoke_root}/source-bundle.json.gz" \
   --no-upload
 
+# The argv scenario-publish v2 adds: every flag it passes must exist.
+for use in \
+  "plan --url --token --rev --output --github-output" \
+  "setup --dir --descriptor --cache --github-output" \
+  "build --arch --out --root --config --kino --cpus" \
+  "push --image --url --rev"; do
+  read -r command flags <<<"${use}"
+  help="$("${cli}" "${command}" --help)"
+  for flag in ${flags}; do
+    if ! grep -q -- "${flag}" <<<"${help}"; then
+      echo "intar-image-cli ${command} has no ${flag}, which scenario-publish.yml passes" >&2
+      exit 1
+    fi
+  done
+done
+
 gzip -dc "${smoke_root}/source-bundle.json.gz" | jq -e '
   .compiler == "intar-source-compiler-v2"
   and ([.scenarios[].slug] == ["broken-nginx"])
