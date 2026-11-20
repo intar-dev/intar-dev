@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { appError, toErrorResponse } from "@/lib/app-error";
-import { assertScenarioAdmin, clearRestoreVerified, listAdministeredScenarios, moveLiveRevision } from "@/lib/scenario-revisions";
+import { assertScenarioAdmin, clearRestoreVerified, liftRevisionHold, listAdministeredScenarios, moveLiveRevision } from "@/lib/scenario-revisions";
 import { beginVerifyRun } from "@/lib/scenario-runs/revision-begin";
 import { refuseScenarioSourceWrite } from "@/lib/scenario-sources";
 
@@ -30,7 +30,8 @@ export const GET: APIRoute = async ({ request, params }) => {
  * `{action: "verify", rev}` starts a verify run of the candidate;
  * `{action: "verify_restore", rev}` starts a restore check of a verified
  * revision, and `{action: "clear_restore_verified", rev}` withdraws its
- * result;
+ * result; `{action: "lift_hold", rev}` lifts the hold a rollback left on
+ * that revision's behaviour;
  * `{action: "promote" | "rollback", rev, liveRev}` moves the live revision
  * from `liveRev`, the one the caller saw. Only the scenario's scope admins.
  */
@@ -58,8 +59,12 @@ export const POST: APIRoute = async ({ request, params }) => {
       await clearRestoreVerified(scenarioId, rev);
       return jsonResponse({ scenario: await readScenario(authz.context.userId, scenarioId) });
     }
+    if (body?.action === "lift_hold") {
+      await liftRevisionHold({ scenarioId, rev, actorUserId: authz.context.userId });
+      return jsonResponse({ scenario: await readScenario(authz.context.userId, scenarioId) });
+    }
     if (body?.action !== "promote" && body?.action !== "rollback") {
-      throw appError(400, "invalid_request", "action is verify, verify_restore, clear_restore_verified, promote or rollback");
+      throw appError(400, "invalid_request", "action is verify, verify_restore, clear_restore_verified, lift_hold, promote or rollback");
     }
     if (body.liveRev !== null && typeof body.liveRev !== "string") {
       throw appError(400, "invalid_request", "liveRev is the live revision you saw, or null");

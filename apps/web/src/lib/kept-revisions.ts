@@ -36,3 +36,24 @@ export function revisionImagesPresentSql(scenario: string, rev: string): string 
       AND NOT EXISTS (SELECT 1 FROM registry_manifests manifest
         WHERE manifest.digest = json_extract(machine.value, '$.image_digest')))`;
 }
+
+/**
+ * Holds while the behaviour digest (`digest`, an SQL expression) of
+ * `scenario` is on hold: a rollback left it, and no administrator lifted
+ * the hold. A held digest is not verified by inheritance and not promoted.
+ */
+export function behaviourHeldSql(scenario: string, digest: string): string {
+  return `EXISTS (SELECT 1 FROM scenario_revision_holds hold WHERE hold.scenario_id = ${scenario}
+    AND hold.behaviour_digest = ${digest} AND hold.lifted_at IS NULL)`;
+}
+
+/**
+ * Holds while a verified revision of `scenario` and guest contract
+ * `contract` behaves as `digest` says and that behaviour is not on hold:
+ * a revision with this digest needs no verify run of its own (#454).
+ */
+export function behaviourVerifiedSql(scenario: string, digest: string, contract: string): string {
+  return `(EXISTS (SELECT 1 FROM scenario_revisions twin WHERE twin.scenario_id = ${scenario}
+      AND twin.behaviour_digest = ${digest} AND twin.guest_contract = ${contract} AND twin.state = 'verified')
+    AND NOT ${behaviourHeldSql(scenario, digest)})`;
+}

@@ -92,6 +92,7 @@ const PENDING_WORDS: Record<RevisionAction["action"], string> = {
   verify: "Starting…",
   verify_restore: "Starting…",
   clear_restore_verified: "Withdrawing…",
+  lift_hold: "Lifting…",
   promote: "Promoting…",
   rollback: "Rolling back…",
 };
@@ -116,8 +117,12 @@ function RevisionRow({
   const verifying = Boolean(scenario.verifyRuns[revision.rev]);
   const state = REVISION_STATES[revision.state];
   const move = (kind: "promote" | "rollback") => onAction({ action: kind, rev: revision.rev, liveRev: scenario.liveRev });
+  // A rollback left this behaviour on hold: nothing that behaves the same
+  // is promoted until an administrator lifts it.
   const actions = !scenario.canManage || live
     ? null
+    : revision.held
+      ? <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "lift_hold", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : "Lift hold"}</Button>
     : candidate && revision.state === "ready" && !verifying
       ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
       : candidate && revision.canGoLive
@@ -142,6 +147,7 @@ function RevisionRow({
             <code title={revision.rev}>{shortRev(revision.rev)}</code>
             {live ? <Badge variant="success">Live</Badge> : null}
             {candidate && !live ? <Badge variant="outline">Candidate</Badge> : null}
+            {revision.held ? <Badge variant="outline" title="A rollback left this revision's behaviour on hold. It is not promoted until the hold is lifted.">Held</Badge> : null}
           </h3>
           <MetaLine
             items={[
