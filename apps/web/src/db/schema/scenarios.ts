@@ -61,6 +61,7 @@ export type ScenarioSourceCommitState =
 
 /** Who builds a source's machine images. */
 export type ImageProducer = "builder" | "pipeline";
+export type SourcePromotion = "manual" | "automatic";
 
 export const scenarioSources = sqliteTable(
   "scenario_sources",
@@ -89,6 +90,11 @@ export const scenarioSources = sqliteTable(
     })
       .default(false)
       .notNull(),
+    /**
+     * Who puts a commit's labs live once they are checked (#454): an
+     * administrator, or the source's own pass.
+     */
+    promotion: text("promotion").$type<SourcePromotion>().default("manual").notNull(),
     headSha: text("head_sha"),
     headObservedAt: integer("head_observed_at").default(0).notNull(),
     pokedAt: integer("poked_at"),
@@ -225,6 +231,15 @@ export const scenarioRevisions = sqliteTable(
     docJson: jsonText<ScenarioRevisionV1>("doc_json").notNull(),
     // sha256 of the canonical `doc_json`, set when the revision is ready.
     contentDigest: text("content_digest"),
+    // How the revision behaves, without what only people read (#454): set
+    // with `content_digest`. Null on a row from before, until the source's
+    // pass fills it in.
+    behaviourDigest: text("behaviour_digest"),
+    // Each machine's spec without its tasks, taken at ingest; and, once the
+    // revision is ready, that with each machine's image and shape: what a
+    // snapshot start depends on. Null on a row from before.
+    restoreBasis: text("restore_basis"),
+    restoreDigest: text("restore_digest"),
     state: text("state").$type<ScenarioRevisionState>().notNull(),
     // Why a failed revision failed, in words a learner may read.
     failureReason: text("failure_reason"),
@@ -245,6 +260,7 @@ export const scenarioRevisions = sqliteTable(
     primaryKey({ columns: [table.scenarioId, table.rev] }),
     // A pipeline's pushes and the deadline of its revisions go by rev.
     index("scenario_revisions_rev_idx").on(table.rev),
+    index("scenario_revisions_behaviour_idx").on(table.scenarioId, table.behaviourDigest),
     check(
       "scenario_revisions_state_check",
       sql`${table.state} IN ('building', 'ready', 'verified', 'failed')`,
@@ -253,6 +269,29 @@ export const scenarioRevisions = sqliteTable(
       "scenario_revisions_doc_json_check",
       sql`json_valid(${table.docJson})`,
     ),
+  ],
+);
+
+/**
+ * A behaviour of a scenario that must not go live again by itself (#454): a
+ * rollback puts the one it rolled away from here. While a hold is not
+ * lifted, no revision of the scenario with that digest is verified by
+ * inheritance or promoted.
+ */
+export const scenarioRevisionHolds = sqliteTable(
+  "scenario_revision_holds",
+  {
+    scenarioId: text("scenario_id")
+      .notNull()
+      .references(() => scenarios.id, { onDelete: "cascade" }),
+    behaviourDigest: text("behaviour_digest").notNull(),
+    heldAt: integer("held_at").default(nowMsDefault).notNull(),
+    heldByUserId: text("held_by_user_id"),
+    liftedAt: integer("lifted_at"),
+    liftedByUserId: text("lifted_by_user_id"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.scenarioId, table.behaviourDigest] }),
   ],
 );
 
