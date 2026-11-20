@@ -17,10 +17,10 @@ const DEFAULT_BUNDLE_OUTPUT_ROOT: &str = "dist/bundles";
 const BUNDLE_UPLOAD_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 120 });
 /// Exit codes of a failed upload that the scenario-publish workflow acts on.
 /// Every other failure exits 1.
-const EXIT_SUPERSEDED: u8 = 3;
+pub(super) const EXIT_SUPERSEDED: u8 = 3;
 const EXIT_COMPILER_OUTDATED: u8 = 4;
 /// `EX_TEMPFAIL`: a transport error, a client timeout, a 429 or a 5xx.
-const EXIT_TRANSIENT: u8 = 75;
+pub(super) const EXIT_TRANSIENT: u8 = 75;
 
 /// Where an upload goes and the token it carries.
 #[derive(Debug)]
@@ -46,17 +46,33 @@ impl BundleUploadTarget {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BundleUploadReceipt {
     pub(super) queued: u64,
     pub(super) assigned: usize,
+    /// What the source's own pipeline has to build; absent when a builder
+    /// builds its images.
+    pub(super) pipeline: Option<PipelineReceipt>,
 }
 
-/// A failed bundle upload and the exit code it ends the process with.
+/// The receipt's `pipeline` field (#441).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(super) struct PipelineReceipt {
+    pub(super) architectures: Vec<String>,
+    pub(super) missing: Vec<MissingImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(super) struct MissingImage {
+    pub(super) build_key: String,
+    pub(super) architecture: String,
+}
+
+/// A failed upload or push and the exit code it ends the process with.
 #[derive(Debug)]
-struct UploadFailed {
-    exit_code: u8,
-    message: String,
+pub(super) struct UploadFailed {
+    pub(super) exit_code: u8,
+    pub(super) message: String,
 }
 
 impl fmt::Display for UploadFailed {
@@ -219,8 +235,17 @@ pub(super) fn parse_bundle_upload_response(
         .and_then(serde_json::Value::as_array)
         .context("bundle upload response field 'assigned' must be an array")?;
 
+    let pipeline = match object.get("pipeline") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(
+            serde_json::from_value(value.clone())
+                .context("bundle upload response field 'pipeline' is not a plan")?,
+        ),
+    };
+
     Ok(BundleUploadReceipt {
         queued,
         assigned: assigned.len(),
+        pipeline,
     })
 }

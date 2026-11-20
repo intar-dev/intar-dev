@@ -126,6 +126,12 @@ pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
     })?;
     let image = &output.image;
     verify_machine_image(&args.out, &image.manifest_digest)?;
+    crate::push_command::BuiltImage {
+        build_key: output.plan.build_key.clone(),
+        manifest: image.manifest_digest.clone(),
+        arch: arch.debian().to_owned(),
+    }
+    .write(&args.out)?;
     println!("build_key={}", output.plan.build_key.as_str());
     println!("manifest={}", image.manifest_digest.as_str());
     println!(

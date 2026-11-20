@@ -51,6 +51,7 @@
       "crates/intar-contracts/**",
       "crates/intar-image-build/**",
       "crates/intar-image-scenario/**",
+      "crates/intar-image-upload/**",
       "crates/intar-kino-proto/**",
       "crates/zpm/**",
       "content/**"

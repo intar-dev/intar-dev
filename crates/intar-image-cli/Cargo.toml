@@ -13,7 +13,10 @@ intar-contracts = { path = "../intar-contracts" }
 # `build`: the bake the builder runs, and its checks of the result.
 intar-image-build = { path = "../intar-image-build" }
 intar-image-scenario = { path = "../intar-image-scenario" }
+# `push`: the builder's own push of an image, under a pipeline's session.
+intar-image-upload = { path = "../intar-image-upload" }
 reqwest = { workspace = true, features = ["blocking", "multipart", "rustls"] }
+serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 # `build` boots what it built once, with the engine the desktop app runs labs with.

@@ -13,6 +13,10 @@
 //! push. A session the registry stops admitting restarts the push from its
 //! HEADs.
 //!
+//! A pipeline's push (`push_image`) is the same under its session token; its
+//! result names no attempt, and the first image recorded for a key stands:
+//! a later one is answered with it.
+//!
 //! One refusal of step 3 ends the push well: `build_result_recorded` with the
 //! `image_digest` this attempt recorded before. The builder restarted in the
 //! middle of the job and built the image again; the recorded one stands.
@@ -58,6 +62,9 @@ const BUSY_WAIT_CAP: Duration = Duration::from_secs(15);
 const REGISTRY_PAUSED_CODE: &str = "registry_paused";
 const REGISTRY_SWEEP_CODE: &str = "registry_sweep_in_progress";
 const RESULT_RECORDED_CODE: &str = "build_result_recorded";
+/// A pipeline's write found its writer's lease run out: nothing was written,
+/// and the same call passes again.
+const WRITER_EXPIRED_CODE: &str = "registry_writer_expired";
 const REGISTRY_ADMISSION_PROTOCOL_VERSION: u32 = 1;
 const HEARTBEAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
@@ -117,6 +124,60 @@ impl RegistryPusher {
         attempt: u32,
         architecture: Architecture,
     ) -> Result<OciDigest> {
+        let result_url = self.root.join(&format!(
+            "builds/{build_id}/result?attempt={attempt}{}",
+            // A result is the amd64 one unless it says otherwise.
+            match architecture {
+                Architecture::Amd64 => "",
+                Architecture::Arm64 => "&arch=arm64",
+            }
+        ))?;
+        self.push_to(dir, manifest, &result_url)
+            .map(|(image, _)| image)
+    }
+
+    /// Push the image `manifest` from `dir` as a pipeline does and record it
+    /// as its scope's `architecture` image of the build key `build_id` (its
+    /// hex). The first image recorded for a key stands, so the answer is the
+    /// recorded one, which is `manifest` when this push recorded it.
+    ///
+    /// # Errors
+    /// Returns the first call that failed for good.
+    pub fn push_image(
+        &self,
+        dir: &Path,
+        manifest: &OciDigest,
+        build_id: &str,
+        architecture: Architecture,
+    ) -> Result<RecordedImage> {
+        #[derive(serde::Deserialize)]
+        struct Answer {
+            image_digest: OciDigest,
+            #[serde(default)]
+            recorded: bool,
+        }
+        let result_url = self.root.join(&format!(
+            "builds/{build_id}/result?arch={}",
+            match architecture {
+                Architecture::Amd64 => "amd64",
+                Architecture::Arm64 => "arm64",
+            }
+        ))?;
+        let (_, body) = self.push_to(dir, manifest, &result_url)?;
+        let answer: Answer = serde_json::from_str(&body)?;
+        Ok(RecordedImage {
+            first: !answer.recorded,
+            image: answer.image_digest,
+        })
+    }
+
+    /// The push itself; the image and the body of the result's answer.
+    fn push_to(
+        &self,
+        dir: &Path,
+        manifest: &OciDigest,
+        result_url: &url::Url,
+    ) -> Result<(OciDigest, String)> {
         let blobs = dir.join("sha256");
         let manifest_bytes = std::fs::read(blobs.join(manifest.hex()))?;
         let parsed: OciManifestV1 = serde_json::from_slice(&manifest_bytes)?;
@@ -126,14 +187,6 @@ impl RegistryPusher {
                 digests.push(layer.digest);
             }
         }
-        let result_url = self.root.join(&format!(
-            "builds/{build_id}/result?attempt={attempt}{}",
-            // A result is the amd64 one unless it says otherwise.
-            match architecture {
-                Architecture::Amd64 => "",
-                Architecture::Arm64 => "&arch=arm64",
-            }
-        ))?;
         let mut restarts = 0;
         let mut busy_restarts = 0;
         loop {
@@ -151,7 +204,7 @@ impl RegistryPusher {
                 &digests,
                 manifest,
                 &manifest_bytes,
-                &result_url,
+                result_url,
             );
             let beat = session.heartbeat.stop();
             let lost = matches!(beat, Some(BeatFailure::Superseded))
@@ -186,7 +239,7 @@ impl RegistryPusher {
         manifest: &OciDigest,
         manifest_bytes: &[u8],
         result_url: &url::Url,
-    ) -> Result<OciDigest> {
+    ) -> Result<(OciDigest, String)> {
         self.push_blobs(session, blobs, digests)?;
         let url = self
             .root
@@ -202,8 +255,10 @@ impl RegistryPusher {
         match self.call(session, || {
             Ok(self.client.post(result_url.clone()).json(&body))
         }) {
-            Ok(_) => Ok(manifest.clone()),
-            Err(error) => recorded_before(&error).ok_or(error),
+            Ok(response) => Ok((manifest.clone(), response.text()?)),
+            Err(error) => recorded_before(&error)
+                .map(|image| (image, String::new()))
+                .ok_or(error),
         }
     }
 
@@ -318,8 +373,9 @@ impl RegistryPusher {
                     let status = response.status();
                     let retry_after = retry_after(response.headers());
                     let body = response.text().unwrap_or_default();
-                    let retryable =
-                        status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                    let retryable = status == StatusCode::TOO_MANY_REQUESTS
+                        || status.is_server_error()
+                        || writer_expired(status, &body);
                     if !retryable || attempt >= CALL_ATTEMPTS {
                         return Err(Error::HttpStatus { status, body });
                     }
@@ -525,6 +581,21 @@ fn registry_busy(error: &Error) -> bool {
             Some(REGISTRY_PAUSED_CODE | REGISTRY_SWEEP_CODE)
         )
     })
+}
+
+/// What a pipeline's push left recorded for its key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordedImage {
+    pub image: OciDigest,
+    /// This push recorded it; false when the key already had an image.
+    pub first: bool,
+}
+
+fn writer_expired(status: StatusCode, body: &str) -> bool {
+    status == StatusCode::CONFLICT
+        && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|value| {
+            value.get("code").and_then(serde_json::Value::as_str) == Some(WRITER_EXPIRED_CODE)
+        })
 }
 
 /// The image a refused result says this attempt recorded before. The registry
