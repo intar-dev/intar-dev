@@ -1,13 +1,18 @@
 import { ACTIVE_RUNTIME_EXECUTION_STATES } from "@/db/schema";
 
-/** How many verified revisions of a scenario stay rollback targets. */
-export const KEPT_VERIFIED_REVISIONS = 3;
+/** How many revisions of a scenario that were live stay rollback targets, the live one among them. */
+export const KEPT_LIVE_REVISIONS = 3;
 export const ACTIVE_EXECUTIONS = ACTIVE_RUNTIME_EXECUTION_STATES.map((state) => `'${state}'`).join(", ");
 
 /**
  * `kept_revisions(scenario_id, rev, doc_json)`: the revisions that may still
  * be used. The mark, the revision GC and the live-revision moves all read it,
  * so a revision can only go live while the sweep keeps its images.
+ *
+ * Besides the pointers, the building revisions and those a run started
+ * from, a scenario keeps the revisions most recently made live (#454). A
+ * verified revision that was never live is kept only as the candidate:
+ * nothing else can promote it or roll back to it.
  */
 export const KEPT_REVISIONS_CTE = `kept_revisions AS (
   SELECT revision.scenario_id, revision.rev, revision.doc_json
@@ -15,10 +20,10 @@ export const KEPT_REVISIONS_CTE = `kept_revisions AS (
     JOIN scenarios scenario ON scenario.id = revision.scenario_id
    WHERE revision.rev = scenario.live_rev OR revision.rev = scenario.candidate_rev
       OR revision.state = 'building'
-      OR (revision.state = 'verified' AND (SELECT COUNT(*) FROM scenario_revisions newer
-            WHERE newer.scenario_id = revision.scenario_id AND newer.state = 'verified'
-              AND (newer.created_at > revision.created_at
-                OR (newer.created_at = revision.created_at AND newer.rev > revision.rev))) < ${KEPT_VERIFIED_REVISIONS})
+      OR (revision.live_at IS NOT NULL AND (SELECT COUNT(*) FROM scenario_revisions later
+            WHERE later.scenario_id = revision.scenario_id AND later.live_at IS NOT NULL
+              AND (later.live_at > revision.live_at
+                OR (later.live_at = revision.live_at AND later.rev > revision.rev))) < ${KEPT_LIVE_REVISIONS})
       OR EXISTS (SELECT 1 FROM scenario_runs run
             WHERE run.scenario_id = revision.scenario_id AND run.scenario_rev = revision.rev
               AND (run.active_key IS NOT NULL OR EXISTS (SELECT 1 FROM runtime_executions execution

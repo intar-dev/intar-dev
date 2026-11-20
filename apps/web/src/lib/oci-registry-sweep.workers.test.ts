@@ -57,9 +57,11 @@ async function seedScenario(id: string, pointers: { live?: string; candidate?: s
     VALUES (?1, ?2, ?3, 'public', 1, 0, ?4, ?5)`).bind(id, namespace, slug, pointers.live ?? null, pointers.candidate ?? null).run();
 }
 
-async function seedRevision(scenarioId: string, rev: string, state: string, doc: unknown, createdAt = Date.now()) {
-  await env.DB.prepare(`INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state, created_at)
-    VALUES (?1, ?2, 3, ?3, ?4, ?5)`).bind(scenarioId, rev, JSON.stringify(doc), state, createdAt).run();
+async function seedRevision(
+  scenarioId: string, rev: string, state: string, doc: unknown, createdAt = Date.now(), liveAt: number | null = null,
+) {
+  await env.DB.prepare(`INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state, created_at, live_at)
+    VALUES (?1, ?2, 3, ?3, ?4, ?5, ?6)`).bind(scenarioId, rev, JSON.stringify(doc), state, createdAt, liveAt).run();
 }
 
 async function seedExecution(id: string, state: string) {
@@ -134,10 +136,10 @@ const ROOTS: Array<[string, () => Promise<{ keep: string[]; pins?: string }>]> =
     await seedRevision("intar/build", "r1", "building", doc);
     return { keep: [...keep, ...await closure(built)] };
   }],
-  ["a verified revision among the newest three", async () => {
+  ["a revision among the three most recently live", async () => {
     const { doc, keep } = await revisionImage();
     await seedScenario("intar/ver");
-    await seedRevision("intar/ver", "r1", "verified", doc);
+    await seedRevision("intar/ver", "r1", "verified", doc, 1, 1);
     return { keep };
   }],
   ["a revision a running run started from", async () => {
@@ -490,7 +492,11 @@ describe("the OCI sweep", () => {
     await seedScenario("intar/gc", { live: "live", candidate: "cand" });
     await seedRevision("intar/gc", "live", "verified", doc, old);
     await seedRevision("intar/gc", "cand", "ready", doc, old);
-    for (const rev of ["v1", "v2", "v3", "v4"]) await seedRevision("intar/gc", rev, "verified", doc, old + Number(rev[1]));
+    // Made live in another order than they were built: v1 last.
+    const liveAt: Record<string, number> = { v1: 9, v2: 2, v3: 3, v4: 4 };
+    for (const rev of ["v1", "v2", "v3", "v4"]) await seedRevision("intar/gc", rev, "verified", doc, old + Number(rev[1]), liveAt[rev]);
+    // Verified and newer than all of them, but never live.
+    await seedRevision("intar/gc", "v5", "verified", doc, old + 5);
     await seedRevision("intar/gc", "failed-old", "failed", doc, old);
     await seedRevision("intar/gc", "ready-old", "ready", doc, old);
     await seedRevision("intar/gc", "building", "building", doc, old);
@@ -502,14 +508,15 @@ describe("the OCI sweep", () => {
     const before = await revs();
 
     const planned = await plan();
-    expect(planned.revisionCandidates).toBe(3);
+    expect(planned.revisionCandidates).toBe(4);
     expect(await revs()).toEqual(before);
 
     const swept = await delete_();
     expect(swept.error).toBeNull();
-    expect(swept.deletedRevisions).toBe(3);
-    // Of the five verified, the newest three are v2, v3 and v4; live stays by its pointer.
-    expect(await revs()).toEqual(["building", "cand", "failed-young", "live", "running", "v2", "v3", "v4"]);
+    expect(swept.deletedRevisions).toBe(4);
+    // The three most recently live are v1, v4 and v3; live stays by its
+    // pointer, and v5, which was never live, goes.
+    expect(await revs()).toEqual(["building", "cand", "failed-young", "live", "running", "v1", "v3", "v4"]);
   });
 
   it("runs behind the collector's gate and reports beside the old pass", async () => {

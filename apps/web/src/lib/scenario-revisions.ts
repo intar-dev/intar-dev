@@ -10,6 +10,9 @@
 // A rollback puts the behaviour it rolled away from on hold (#454): no
 // revision that behaves the same is verified by inheritance or promoted
 // until an administrator lifts the hold.
+//
+// A candidate with the live revision's content does not move: promoting it
+// only applies its bundle's course catalog, when that is newer.
 
 import { env } from "cloudflare:workers";
 import { normalizeCourseCatalogSnapshot } from "@/control-plane/image-registry/bundle";
@@ -18,7 +21,7 @@ import { GUEST_CONTRACT } from "@/generated/constants";
 import type { BuildTargetV1, VmVerifyV1 } from "@/generated/contracts/bridge-message-v9";
 import { activeAccountSql, activeAdminSql } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
-import { courseCatalogScopeKey } from "@/lib/course-catalogs";
+import { courseCatalogScopeKey, PUBLIC_COURSE_CATALOG_SCOPE } from "@/lib/course-catalogs";
 import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
 import { admitInternalRegistryOperation } from "@/lib/image-registry-admission";
 import { behaviourHeldSql, behaviourVerifiedSql, KEPT_REVISIONS_CTE, revisionImagesPresentSql } from "@/lib/kept-revisions";
@@ -60,6 +63,7 @@ export interface ScenarioRevisionSummary {
   verifyRunId: string | null;
   /** The last verify run's outcome, per machine verify steps and lab failure text; admin-only. */
   verifyReport: VerifyReport | null;
+  /** When the revision was last made live. */
   liveAt: number | null;
   createdAt: number;
   /**
@@ -77,6 +81,10 @@ export interface ScenarioRevisionSummary {
   canVerifyRestore: boolean;
   /** Whether a rollback left this revision's behaviour on hold: it is not promoted until the hold is lifted. */
   held: boolean;
+  /** Whether this is another revision with the live one's content and guest contract: promoting it moves nothing. */
+  sameAsLive: boolean;
+  /** Whether this revision's bundle has a newer course catalog than the scope's, which a promotion applies. */
+  catalogPending: boolean;
 }
 
 /** A restore check: a verify run whose VM was allowed to start from a host snapshot. */
@@ -134,6 +142,9 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
             AND EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = revision.scenario_id AND kept.rev = revision.rev)
             AND ${revisionImagesPresentSql("revision.scenario_id", "revision.rev")}) AS can_go_live,
           ${behaviourHeldSql("revision.scenario_id", "revision.behaviour_digest")} AS held,
+          ${sameAsLiveSql("revision", "scenario")} AS same_as_live,
+          ${catalogForwardSql("revision.rev", `CASE WHEN scenario.organization_id IS NULL
+            THEN '${PUBLIC_COURSE_CATALOG_SCOPE}' ELSE 'organization:' || scenario.organization_id END`)} AS catalog_pending,
           ${platformHasRevisionImagesSql("revision.doc_json")} AS images_ready
         FROM scenario_revisions revision JOIN scenarios scenario ON scenario.id = revision.scenario_id
         WHERE ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2)
@@ -155,7 +166,7 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
     content_digest: string | null; failure_reason: string | null; verify_run_id: string | null;
     verify_report_json: string | null; live_at: number | null; created_at: number; can_go_live: number;
     images_ready: number; restore_verified_at: number | null; restore_verify_report_json: string | null;
-    can_verify_restore: number; held: number;
+    can_verify_restore: number; held: number; same_as_live: number; catalog_pending: number;
   };
   const byScenario = new Map<string, AdministeredScenario>();
   for (const row of scenarios!.results as ScenarioRow[]) {
@@ -177,6 +188,8 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
         ? (JSON.parse(row.restore_verify_report_json) as RestoreVerifyReport) : null,
       canVerifyRestore: row.can_verify_restore === 1,
       held: row.held === 1,
+      sameAsLive: row.same_as_live === 1,
+      catalogPending: row.catalog_pending === 1,
     });
   }
   for (const row of runs!.results as Array<{ run_id: string; scenario_id: string; scenario_rev: string }>) {
@@ -204,6 +217,10 @@ export async function assertScenarioAdmin(actorUserId: string, scenarioId: strin
  * run; a rollback never touches the catalog. The operator drain does not
  * hold it. Platform hosts then cache the new live images.
  *
+ * A candidate with the live revision's content and guest contract does not
+ * move: its promotion applies only the catalog, and is refused when there
+ * is none to apply. Every move writes the revision's `live_at`.
+ *
  * A promotion of a behaviour on hold is refused. One that goes through
  * takes over the replaced revision's restore verification when a snapshot
  * start of both depends on the same things. A rollback puts the behaviour
@@ -222,7 +239,7 @@ export async function moveLiveRevision(input: {
     `WITH ${KEPT_REVISIONS_CTE}
     SELECT scenario.namespace, scenario.organization_id, scenario.live_rev, scenario.candidate_rev,
         revision.state, revision.guest_contract, revision.live_at, bundle.r2_key, ${scopeAdminSql(3)} AS manage,
-        revision.doc_json,
+        revision.doc_json, ${sameAsLiveSql("revision", "scenario")} AS same_as_live,
         (SELECT live.doc_json FROM scenario_revisions live
           WHERE live.scenario_id = scenario.id AND live.rev = scenario.live_rev) AS live_doc_json,
         EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = ?1 AND kept.rev = ?2) AS kept,
@@ -234,13 +251,18 @@ export async function moveLiveRevision(input: {
   ).bind(scenarioId, rev, actorUserId).first<{
     namespace: string; organization_id: string | null; live_rev: string | null; candidate_rev: string | null;
     state: string; guest_contract: number; live_at: number | null; r2_key: string | null; manage: number;
-    kept: number; images_present: number; doc_json: string; live_doc_json: string | null;
+    kept: number; images_present: number; doc_json: string; live_doc_json: string | null; same_as_live: number;
   }>();
   if (!row?.manage) throw appError(404, "scenario_revision_not_found", "scenario revision not found");
   if (row.live_rev === rev) throw appError(409, "revision_already_live", "this revision is already live");
   if (row.live_rev !== liveRev) throw appError(409, "live_revision_changed", "the live revision changed; reload and try again");
   if (kind === "promote" && row.candidate_rev !== rev) {
     throw appError(409, "revision_not_candidate", "only the scenario's candidate revision can be promoted");
+  }
+  if (kind === "promote" && row.same_as_live) {
+    await publishCatalogOnly({ scenarioId, rev, liveRev, actorUserId, namespace: row.namespace,
+      organizationId: row.organization_id, r2Key: row.r2_key });
+    return { liveRev: liveRev ?? rev };
   }
   if (kind === "rollback" && row.live_at === null) {
     throw appError(409, "revision_never_live", "a rollback goes only to a revision that was live before");
@@ -250,7 +272,7 @@ export async function moveLiveRevision(input: {
     throw appError(409, "guest_contract_mismatch", "this revision was built for another guest contract");
   }
   if (!row.kept) {
-    throw appError(409, "revision_not_retained", "only the newest verified revisions stay available to roll back to");
+    throw appError(409, "revision_not_retained", "only the revisions most recently live stay available to roll back to");
   }
   if (!row.images_present) throw appError(409, "revision_images_gone", "this revision's images are no longer stored");
   // Both digests come from the documents, so a revision from before the
@@ -264,7 +286,7 @@ export async function moveLiveRevision(input: {
   const scopeKey = courseCatalogScopeKey(row.organization_id);
   // Only a promotion of a newer bundle moves the scope's catalog; a rollback
   // or a lagging candidate leaves it, so the catalog never goes backwards.
-  const forward = kind === "promote" && (await env.DB.prepare(`SELECT ${catalogForwardSql(1, 2)} AS forward`)
+  const forward = kind === "promote" && (await env.DB.prepare(`SELECT ${catalogForwardSql("?1", "?2")} AS forward`)
     .bind(rev, scopeKey).first<{ forward: number }>())?.forward === 1;
   const catalogJson = forward ? JSON.stringify(await namespacedCatalog(row.r2_key, row.namespace)) : null;
   if (catalogJson !== null && (await countUnitGuardRuns(env.DB, row.organization_id, JSON.parse(catalogJson)))) {
@@ -290,14 +312,16 @@ export async function moveLiveRevision(input: {
           AND EXISTS (SELECT 1 FROM scenarios scenario WHERE scenario.id = ?1 AND ${scopeAdminSql(7)})
           -- The unit guard holds in this statement, so a run admitted after
           -- the check above cannot lose its unit to the catalog below.
-          AND (?10 IS NULL OR NOT ${catalogForwardSql(2, 9)} OR NOT EXISTS (SELECT 1 ${unitGuardRunsSql(8, 9, 10)}))
+          AND (?10 IS NULL OR NOT ${catalogForwardSql("?2", "?9")} OR NOT EXISTS (SELECT 1 ${unitGuardRunsSql(8, 9, 10)}))
           -- A rollback racing this promotion may have put the behaviour on hold.
           AND (?5 = 'rollback' OR NOT ${behaviourHeldSql("?1", "?11")})
         RETURNING id`,
     ).bind(scenarioId, rev, now, liveRev, kind, GUEST_CONTRACT, actorUserId, row.organization_id, scopeKey, catalogJson,
       behaviour),
     env.DB.prepare(
-      `UPDATE scenario_revisions SET live_at = coalesce(live_at, ?3) WHERE scenario_id = ?1 AND rev = ?2 AND ${moved}`,
+      // "Last made live": a rollback target becomes the newest again, so
+      // retention keeps what was live most recently.
+      `UPDATE scenario_revisions SET live_at = ?3 WHERE scenario_id = ?1 AND rev = ?2 AND ${moved}`,
     ).bind(scenarioId, rev, now),
   ];
   if (kind === "promote" && liveRev !== null) {
@@ -331,7 +355,7 @@ export async function moveLiveRevision(input: {
   if (catalogJson !== null) {
     statements.push(env.DB.prepare(
       `INSERT INTO course_catalogs (scope_key, organization_id, catalog_json, source_revision, created_at, updated_at)
-        SELECT ?4, ?5, ?6, ?2, ?3, ?3 WHERE ${moved} AND ${catalogForwardSql(2, 4)}
+        SELECT ?4, ?5, ?6, ?2, ?3, ?3 WHERE ${moved} AND ${catalogForwardSql("?2", "?4")}
         ON CONFLICT (scope_key) DO UPDATE SET catalog_json = excluded.catalog_json,
           source_revision = excluded.source_revision, updated_at = max(course_catalogs.updated_at + 1, excluded.updated_at)`,
     ).bind(scenarioId, rev, now, scopeKey, row.organization_id, catalogJson));
@@ -366,6 +390,70 @@ export async function moveLiveRevision(input: {
     ...(leftBehaviour !== "" ? { held: leftBehaviour } : {}) }));
   await wakePlatformAgents();
   return { liveRev: rev };
+}
+
+/**
+ * Holds while the scenario_revisions row aliased `revision` is another
+ * revision than the live one of the scenarios row aliased `scenario`, with
+ * the same content and guest contract: learners would get the same lab.
+ */
+function sameAsLiveSql(revision: string, scenario: string): string {
+  return `EXISTS (SELECT 1 FROM scenario_revisions same_live WHERE same_live.scenario_id = ${scenario}.id
+    AND same_live.rev = ${scenario}.live_rev AND same_live.rev <> ${revision}.rev
+    AND same_live.content_digest = ${revision}.content_digest AND same_live.guest_contract = ${revision}.guest_contract)`;
+}
+
+/**
+ * The promotion of a candidate that is the same as the live revision: the
+ * lab stays where it is and only its bundle's course catalog is applied,
+ * under the unit guard. Refused when the scope's catalog is not older.
+ */
+async function publishCatalogOnly(input: {
+  scenarioId: string; rev: string; liveRev: string | null; actorUserId: string; namespace: string;
+  organizationId: string | null; r2Key: string | null;
+}): Promise<void> {
+  const { scenarioId, rev, liveRev, actorUserId, organizationId } = input;
+  const scopeKey = courseCatalogScopeKey(organizationId);
+  const forward = (await env.DB.prepare(`SELECT ${catalogForwardSql("?1", "?2")} AS forward`)
+    .bind(rev, scopeKey).first<{ forward: number }>())?.forward === 1;
+  if (!forward) {
+    throw appError(409, "revision_unchanged", "this revision is the same as the live one, and its course catalog is published");
+  }
+  const catalogJson = JSON.stringify(await namespacedCatalog(input.r2Key, input.namespace));
+  if (await countUnitGuardRuns(env.DB, organizationId, JSON.parse(catalogJson))) throw activeRunsWouldLoseAccess();
+  // Everything the read decided holds again in the write: the pointers, the
+  // actor's rights, that the lab is unchanged, and the unit guard.
+  const [published] = await env.DB.batch([env.DB.prepare(
+    `INSERT INTO course_catalogs (scope_key, organization_id, catalog_json, source_revision, created_at, updated_at)
+      SELECT ?4, ?5, ?6, ?2, ?3, ?3
+       WHERE EXISTS (SELECT 1 FROM scenarios scenario
+           JOIN scenario_revisions revision ON revision.scenario_id = scenario.id AND revision.rev = ?2
+          WHERE scenario.id = ?1 AND scenario.live_rev IS ?7 AND scenario.candidate_rev = ?2 AND scenario.enabled = 1
+            AND ${scopeAdminSql(8)} AND ${sameAsLiveSql("revision", "scenario")})
+         AND ${catalogForwardSql("?2", "?4")}
+         AND NOT EXISTS (SELECT 1 ${unitGuardRunsSql(5, 4, 6)})
+      ON CONFLICT (scope_key) DO UPDATE SET catalog_json = excluded.catalog_json,
+        source_revision = excluded.source_revision, updated_at = max(course_catalogs.updated_at + 1, excluded.updated_at)
+      RETURNING scope_key`,
+  ).bind(scenarioId, rev, Date.now(), scopeKey, organizationId, catalogJson, liveRev, actorUserId)]);
+  if (!published?.results.length) {
+    if (await countUnitGuardRuns(env.DB, organizationId, JSON.parse(catalogJson))) throw activeRunsWouldLoseAccess();
+    throw appError(409, "live_revision_changed", "the scenario changed; reload and try again");
+  }
+  console.info(JSON.stringify({ event: "scenario_catalog_published", scenarioId, rev, actorUserId }));
+}
+
+/**
+ * Sets who may play a scenario: `play` opens it to everyone signed in where
+ * its scope allows that. It is an administrator's setting; a commit sets it
+ * only when it first brings the scenario.
+ */
+export async function setScenarioPlay(input: { scenarioId: string; play: boolean; actorUserId: string }): Promise<void> {
+  const result = await env.DB.prepare(
+    `UPDATE scenarios AS scenario SET play = ?2, updated_at = ?3 WHERE scenario.id = ?1 AND ${scopeAdminSql(4)}`,
+  ).bind(input.scenarioId, input.play ? 1 : 0, Date.now(), input.actorUserId).run();
+  if (!result.meta.changes) throw appError(404, "scenario_not_found", "scenario not found");
+  console.info(JSON.stringify({ event: "scenario_play", scenarioId: input.scenarioId, play: input.play, actorUserId: input.actorUserId }));
 }
 
 const revisionHeld = () =>
@@ -407,16 +495,16 @@ const activeRunsWouldLoseAccess = () =>
   appError(409, "active_runs_would_lose_access", "active runs would lose their course unit; try again when they end");
 
 /**
- * Holds while bundle ?{rev} is newer than the bundle scope ?{scopeKey}'s
- * catalog comes from, by ingest time and then rev. No catalog, or one from
- * outside the bundles table, is older.
+ * Holds while bundle `rev` is newer than the bundle scope `scopeKey`'s
+ * catalog comes from, by ingest time and then rev; both are SQL
+ * expressions. No catalog, or one from outside the bundles table, is older.
  */
-function catalogForwardSql(rev: number, scopeKey: number): string {
-  return `(EXISTS (SELECT 1 FROM bundles promoted_bundle WHERE promoted_bundle.rev = ?${rev})
+function catalogForwardSql(rev: string, scopeKey: string): string {
+  return `(EXISTS (SELECT 1 FROM bundles promoted_bundle WHERE promoted_bundle.rev = ${rev})
     AND NOT EXISTS (SELECT 1 FROM course_catalogs current_catalog
       JOIN bundles current_bundle ON current_bundle.rev = current_catalog.source_revision
-      JOIN bundles promoted_bundle ON promoted_bundle.rev = ?${rev}
-      WHERE current_catalog.scope_key = ?${scopeKey}
+      JOIN bundles promoted_bundle ON promoted_bundle.rev = ${rev}
+      WHERE current_catalog.scope_key = ${scopeKey}
         AND (current_bundle.created_at > promoted_bundle.created_at
           OR (current_bundle.created_at = promoted_bundle.created_at AND current_bundle.rev >= promoted_bundle.rev))))`;
 }
