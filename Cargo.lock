@@ -3901,10 +3901,12 @@ dependencies = [
  "clap",
  "flate2",
  "intar-contracts",
+ "intar-image-build",
  "intar-image-scenario",
  "reqwest",
  "serde_json",
  "tempfile",
+ "zpm",
 ]
 
 [[package]]

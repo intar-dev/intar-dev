@@ -192,6 +192,7 @@ fn run(args: Args) -> Result<(), zpm::Error> {
             spec: &std::fs::read(spec)?,
             host,
             root_resize: false,
+            ready_seconds: None,
         })?;
         let run_disk = args.dir.join("run.raw");
         write_run_disk(&run_disk, &json, &std::fs::read(kino)?)?;
@@ -330,6 +331,8 @@ fn machine(args: MachineArgs) -> Result<(), zpm::Error> {
         egress: !args.no_egress,
         relay: &std::env::current_exe()?,
         authorized_keys: &keys,
+        on: None,
+        ready_seconds: None,
     };
     let started = Instant::now();
     let mut running = zpm::machine::start(

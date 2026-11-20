@@ -175,7 +175,14 @@ pub(crate) fn qemu_host_identity(
         String::from_utf8(version.stdout)?,
         sha256_file_hex(&executable)?
     );
-    let cpu = fs::read_to_string("/proc/cpuinfo")?
+    let cpu = cpu_identity(&fs::read_to_string("/proc/cpuinfo")?);
+    Ok((qemu_version, cpu))
+}
+
+/// The lines of `/proc/cpuinfo` that say which processor this is: the first
+/// processor's, by the names an x86 kernel and an arm64 kernel give them.
+fn cpu_identity(cpuinfo: &str) -> String {
+    cpuinfo
         .lines()
         .filter(|line| {
             [
@@ -185,14 +192,19 @@ pub(crate) fn qemu_host_identity(
                 "model name",
                 "stepping",
                 "flags",
+                "CPU implementer",
+                "CPU architecture",
+                "CPU variant",
+                "CPU part",
+                "CPU revision",
+                "Features",
             ]
             .iter()
             .any(|key| line.starts_with(key))
         })
         .take(6)
         .collect::<Vec<_>>()
-        .join("\n");
-    Ok((qemu_version, cpu))
+        .join("\n")
 }
 
 pub(crate) fn resolve_binary(binary: &Path) -> Result<PathBuf> {
@@ -349,6 +361,21 @@ mod tests {
 
     use super::*;
     use crate::checkpoint::CheckpointIdentity;
+
+    #[test]
+    fn a_processor_is_identified_on_x86_and_on_arm64() {
+        let x86 = "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 1\nmodel name\t: AMD EPYC\nstepping\t: 1\nflags\t\t: fpu vme\n\nprocessor\t: 1\nvendor_id\t: AuthenticAMD\n";
+        let identity = cpu_identity(x86);
+        assert_eq!(identity.lines().count(), 6, "{identity}");
+        assert!(identity.contains("model name\t: AMD EPYC") && identity.ends_with("fpu vme"));
+
+        // An arm64 kernel has none of those names; without its own the
+        // identity was empty and a build on such a host stopped.
+        let arm64 = "processor\t: 0\nBogoMIPS\t: 48.00\nFeatures\t: fp asimd\nCPU implementer\t: 0x61\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0x000\nCPU revision\t: 0\n\nprocessor\t: 1\nBogoMIPS\t: 48.00\nFeatures\t: fp asimd\n";
+        let identity = cpu_identity(arm64);
+        assert_eq!(identity.lines().count(), 6, "{identity}");
+        assert!(identity.starts_with("Features\t: fp asimd") && identity.contains("0x61"));
+    }
     use crate::machine::plan::PROVISIONING_ABI;
 
     #[test]

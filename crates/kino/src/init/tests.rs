@@ -232,7 +232,16 @@ async fn a_ready_script_that_keeps_failing_the_same_way_reports_once() {
         }
         seen
     });
-    assert!(!run_ready(&spec.ready, &no_env(), &temp.path().join("s"), &report).await);
+    assert!(
+        !run_ready(
+            &spec.ready,
+            &no_env(),
+            &temp.path().join("s"),
+            &report,
+            READY_TOTAL
+        )
+        .await
+    );
     drop(report);
     // The first attempt and the one that runs out of time; the retries
     // between them, every 250 ms for a second, say nothing new.
@@ -251,7 +260,16 @@ async fn ready_scripts_that_pass_run_together() {
         ready: vec![Ready::default(); 6],
         ..Report::default()
     });
-    assert!(run_ready(&spec.ready, &no_env(), &temp.path().join("s"), &report).await);
+    assert!(
+        run_ready(
+            &spec.ready,
+            &no_env(),
+            &temp.path().join("s"),
+            &report,
+            READY_TOTAL
+        )
+        .await
+    );
     assert!(
         report
             .borrow()
@@ -275,7 +293,16 @@ async fn a_ready_script_that_blocks_until_an_earlier_one_passed_gets_its_turn() 
         ready: vec![Ready::default(); 2],
         ..Report::default()
     });
-    assert!(run_ready(&spec.ready, &no_env(), &temp.path().join("s"), &report).await);
+    assert!(
+        run_ready(
+            &spec.ready,
+            &no_env(),
+            &temp.path().join("s"),
+            &report,
+            READY_TOTAL
+        )
+        .await
+    );
     assert!(
         report
             .borrow()
@@ -297,7 +324,16 @@ async fn a_ready_script_that_needs_an_earlier_one_passes_on_its_retry() {
         ready: vec![Ready::default(); 2],
         ..Report::default()
     });
-    assert!(run_ready(&spec.ready, &no_env(), &temp.path().join("s"), &report).await);
+    assert!(
+        run_ready(
+            &spec.ready,
+            &no_env(),
+            &temp.path().join("s"),
+            &report,
+            READY_TOTAL
+        )
+        .await
+    );
     assert!(
         report
             .borrow()
@@ -470,4 +506,51 @@ async fn a_parked_guest_wakes_on_a_wake_frame_only() {
     assert_eq!(park::read_wake([0_u8, 0].as_slice()).await, None);
     // A running Kino ignores it.
     wire::read_host_frames(woken.as_slice()).await;
+}
+
+#[tokio::test]
+async fn a_host_can_give_a_slower_guest_longer_to_become_ready() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    // Ready only after two seconds: past Kino's own limit, one second in a
+    // test build, and within the five a host gave.
+    let marker = temp.path().join("up");
+    let spec = spec(&format!(
+        r#"{{"machine":"m","ready":[{{"name":"lab","script":"test -e {}"}}]}}"#,
+        marker.display()
+    ));
+    let late = marker.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        std::fs::write(late, b"").expect("marker");
+    });
+    let report = || {
+        watch::channel(Report {
+            ready: vec![Ready::default()],
+            ..Report::default()
+        })
+    };
+    let (own, _changes) = report();
+    assert!(
+        !run_ready(
+            &spec.ready,
+            &no_env(),
+            &temp.path().join("a"),
+            &own,
+            READY_TOTAL
+        )
+        .await
+    );
+    let (given, _changes) = report();
+    let longer = Duration::from_secs(5);
+    assert!(
+        run_ready(
+            &spec.ready,
+            &no_env(),
+            &temp.path().join("b"),
+            &given,
+            longer
+        )
+        .await
+    );
+    assert_eq!(given.borrow().ready[0].status(), Status::Pass);
 }

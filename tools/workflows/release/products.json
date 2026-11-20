@@ -49,7 +49,10 @@
     "paths": [
       "crates/intar-image-cli/**",
       "crates/intar-contracts/**",
+      "crates/intar-image-build/**",
       "crates/intar-image-scenario/**",
+      "crates/intar-kino-proto/**",
+      "crates/zpm/**",
       "content/**"
     ]
   },

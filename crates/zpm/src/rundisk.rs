@@ -38,6 +38,9 @@ pub struct Boot<'a> {
     pub host: Option<GuestHostV3>,
     /// The disk is larger than the image: the guest grows its file system.
     pub root_resize: bool,
+    /// Seconds the lab's ready scripts get, for a guest slower than a
+    /// learner's; `None` is Kino's own limit.
+    pub ready_seconds: Option<u32>,
 }
 
 /// The exact `boot.json` bytes for a learner's run.
@@ -75,6 +78,7 @@ pub fn boot_json(boot: &Boot<'_>) -> Result<Vec<u8>, Error> {
         mode: SpecMode::Learn,
         spec,
         host: boot.host.clone(),
+        ready_seconds: boot.ready_seconds,
     };
     serde_json::to_vec(&document).map_err(|error| Error::RunDisk(error.to_string()))
 }
@@ -149,6 +153,7 @@ mod tests {
             spec: SPEC,
             host: None,
             root_resize: false,
+            ready_seconds: None,
         }
     }
 

@@ -9,6 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod build_command;
 mod bundle_command;
 mod spec_command;
 
@@ -36,6 +37,10 @@ enum Command {
     Spec(spec_command::SpecCommand),
     /// Compile the repository into a bundle, and upload it with `--url`.
     Bundle(BundleCommand),
+    /// Build one image and boot it once (Linux, with the builder's tools).
+    Build(build_command::BuildCommand),
+    #[command(hide = true)]
+    Relay(build_command::RelayCommand),
 }
 
 #[derive(Debug, Args)]
@@ -84,6 +89,8 @@ fn main() -> ExitCode {
         Command::Fmt(args) => fmt_command(&args),
         Command::Spec(args) => spec_command::spec_command(&args),
         Command::Bundle(args) => bundle_command(&args),
+        Command::Build(args) => build_command::build_command(&args),
+        Command::Relay(args) => build_command::relay_command(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
