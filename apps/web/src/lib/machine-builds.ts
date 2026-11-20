@@ -28,6 +28,7 @@ import type { ScenarioRevisionV1 } from "@/generated/contracts/scenario-revision
 import { HOST_DESIRED_STATE_SCHEMA_VERSION_V3, mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { HOST_DEGRADED_AFTER_MS } from "@/lib/host-health";
 import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
+import { behaviourVerifiedSql } from "@/lib/kept-revisions";
 import { canonicalJson, sha256Digest } from "@/lib/scenario-contract/canonical-json";
 import { behaviourDigest, restoreDigest } from "@/lib/scenario-contract/revision-digests";
 
@@ -371,9 +372,9 @@ export async function recordMachineBuildReport(
 /**
  * Settles the building revisions of a rev, or those that need a build key.
  * One with a failed build fails. One whose every machine has its image gets
- * the digests in its document and the document's digest, and is ready, or
- * verified when a verified revision of its scenario has the same digest and
- * guest contract.
+ * the digests in its document and its own digests, and is ready, or verified
+ * when a verified revision of its scenario and guest contract behaves the
+ * same and that behaviour is not on hold.
  */
 export async function settleScenarioRevisions(
   env: Env,
@@ -431,13 +432,19 @@ export async function settleScenarioRevisions(
       machines: doc.machines.map((machine) => ({ ...machine, image_digest: byKey.get(machine.build_key)!.image_digest })),
     } as ScenarioRevisionV1;
     const ready = canonicalJson(withImages);
+    // The verified revisions it is compared with may be from before the
+    // digest existed; they get theirs first, whatever the backfill has done.
+    const { results: undigested } = await env.DB.prepare(
+      `SELECT scenario_id, rev, doc_json FROM scenario_revisions
+        WHERE scenario_id = ?1 AND state = 'verified' AND behaviour_digest IS NULL`,
+    ).bind(revision.scenario_id).all<UndigestedRevision>();
+    for (const verified of undigested) await writeBehaviourDigest(env.DB, verified);
     await env.DB.batch([
       env.DB.prepare(
         `UPDATE scenario_revisions SET doc_json = ?3, content_digest = ?4,
             behaviour_digest = ?5, restore_digest = ?6,
-            state = CASE WHEN EXISTS (SELECT 1 FROM scenario_revisions twin WHERE twin.scenario_id = ?1
-              AND twin.content_digest = ?4 AND twin.guest_contract = scenario_revisions.guest_contract
-              AND twin.state = 'verified') THEN 'verified' ELSE 'ready' END
+            state = CASE WHEN ${behaviourVerifiedSql("?1", "?5", "scenario_revisions.guest_contract")}
+              THEN 'verified' ELSE 'ready' END
           WHERE scenario_id = ?1 AND rev = ?2 AND state = 'building'`,
       ).bind(
         revision.scenario_id,
@@ -471,22 +478,35 @@ export async function backfillBehaviourDigests(env: Pick<Env, "DB">, scopeKey: s
       WHERE scenario.scope_key = ?1 AND revision.behaviour_digest IS NULL
         AND revision.state IN ('ready', 'verified')
       LIMIT ?2`,
-  ).bind(scopeKey, BEHAVIOUR_BACKFILL_PER_PASS + 1).all<{ scenario_id: string; rev: string; doc_json: string }>();
-  for (const revision of results.slice(0, BEHAVIOUR_BACKFILL_PER_PASS)) {
-    let digest: string;
-    try {
-      digest = await behaviourDigest(JSON.parse(revision.doc_json) as ScenarioRevisionV1);
-    } catch {
-      // A document that cannot be read keeps none, and is not asked again
-      // on every pass ahead of the others.
-      digest = "";
-    }
-    await env.DB.prepare(
-      `UPDATE scenario_revisions SET behaviour_digest = ?3
-        WHERE scenario_id = ?1 AND rev = ?2 AND behaviour_digest IS NULL`,
-    ).bind(revision.scenario_id, revision.rev, digest).run();
-  }
+  ).bind(scopeKey, BEHAVIOUR_BACKFILL_PER_PASS + 1).all<UndigestedRevision>();
+  for (const revision of results.slice(0, BEHAVIOUR_BACKFILL_PER_PASS)) await writeBehaviourDigest(env.DB, revision);
   return results.length > BEHAVIOUR_BACKFILL_PER_PASS;
+}
+
+interface UndigestedRevision {
+  scenario_id: string;
+  rev: string;
+  doc_json: string;
+}
+
+/**
+ * The behaviour digest of a stored revision document, or `""` for one that
+ * cannot be read: that matches no other revision and no hold.
+ */
+export async function storedBehaviourDigest(docJson: string): Promise<string> {
+  try {
+    return await behaviourDigest(JSON.parse(docJson) as ScenarioRevisionV1);
+  } catch {
+    return "";
+  }
+}
+
+/** Gives a revision without a behaviour digest its own. An unreadable one gets `""`, so it is not asked again. */
+async function writeBehaviourDigest(d1: D1Database, revision: UndigestedRevision): Promise<void> {
+  await d1.prepare(
+    `UPDATE scenario_revisions SET behaviour_digest = ?3
+      WHERE scenario_id = ?1 AND rev = ?2 AND behaviour_digest IS NULL`,
+  ).bind(revision.scenario_id, revision.rev, await storedBehaviourDigest(revision.doc_json)).run();
 }
 
 /**

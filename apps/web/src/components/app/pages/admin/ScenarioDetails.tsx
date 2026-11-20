@@ -92,6 +92,7 @@ const PENDING_WORDS: Record<RevisionAction["action"], string> = {
   verify: "Starting…",
   verify_restore: "Starting…",
   clear_restore_verified: "Withdrawing…",
+  lift_hold: "Lifting…",
   promote: "Promoting…",
   rollback: "Rolling back…",
 };
@@ -116,15 +117,26 @@ function RevisionRow({
   const verifying = Boolean(scenario.verifyRuns[revision.rev]);
   const state = REVISION_STATES[revision.state];
   const move = (kind: "promote" | "rollback") => onAction({ action: kind, rev: revision.rev, liveRev: scenario.liveRev });
+  // A rollback left this behaviour on hold: nothing that behaves the same
+  // is verified or promoted until an administrator lifts it. Going back to
+  // such a revision stays possible.
+  const liftHold = <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "lift_hold", rev: revision.rev })}>{pending === "lift_hold" ? PENDING_WORDS[pending] : "Lift hold"}</Button>;
   const actions = !scenario.canManage || live
     ? null
-    : candidate && revision.state === "ready" && !verifying
-      ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
-      : candidate && revision.canGoLive
-        ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
-        : revision.canGoLive && revision.liveAt !== null
-          ? <Button size="sm" variant="outline" disabled={busy} onClick={() => move("rollback")}>{pending ? PENDING_WORDS[pending] : "Roll back"}</Button>
-          : null;
+    : candidate && revision.held
+      ? liftHold
+      : candidate && revision.state === "ready" && !verifying
+        ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
+        : candidate && revision.canGoLive
+          ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
+          : (
+            <>
+              {revision.canGoLive && revision.liveAt !== null
+                ? <Button size="sm" variant="outline" disabled={busy} onClick={() => move("rollback")}>{pending === "rollback" ? PENDING_WORDS[pending] : "Roll back"}</Button>
+                : null}
+              {revision.held ? liftHold : null}
+            </>
+          );
   // A restore check is for any verified revision, the live one included: it
   // decides whether labs of the revision may start from a host snapshot.
   const restoreAction = !scenario.canManage || verifying
@@ -142,6 +154,7 @@ function RevisionRow({
             <code title={revision.rev}>{shortRev(revision.rev)}</code>
             {live ? <Badge variant="success">Live</Badge> : null}
             {candidate && !live ? <Badge variant="outline">Candidate</Badge> : null}
+            {revision.held ? <Badge variant="outline" title="A rollback left this revision's behaviour on hold. It is not promoted until the hold is lifted.">Held</Badge> : null}
           </h3>
           <MetaLine
             items={[
