@@ -23,7 +23,7 @@ import revisionFixture from "@/generated/fixtures/scenario/broken-nginx-revision
 import refusalsFixture from "@/generated/fixtures/scenario/bundle-refusals.json";
 import sourceRefusalSchema from "@/generated/schemas/source-refusal-v1.schema.json";
 import { GITHUB_ACTIONS_ISSUER } from "@/lib/github-oidc";
-import { REVISION_REPLACED, settleScenarioRevisions } from "@/lib/machine-builds";
+import { backfillBehaviourDigests, REVISION_REPLACED, settleScenarioRevisions } from "@/lib/machine-builds";
 import {
   PIPELINE_REVISION_DEADLINE_MS,
   REVISION_PIPELINE_DEADLINE,
@@ -511,6 +511,54 @@ describe("a source whose pipeline builds its images", () => {
     await push();
     await tick("public");
     expect(await revisions()).toEqual([expect.objectContaining({ state: "ready" })]);
+  });
+
+  it("gives a revision its restore basis at ingest and its two digests when it gets its images", async () => {
+    await byPipeline();
+    await push();
+    await tick("public");
+    const digests = () => all("SELECT state, content_digest, behaviour_digest, restore_basis, restore_digest FROM scenario_revisions");
+    const digest = expect.stringMatching(/^sha256:[0-9a-f]{64}$/);
+    expect(await digests()).toEqual([{
+      state: "building", content_digest: null, behaviour_digest: null, restore_basis: digest, restore_digest: null,
+    }]);
+    await record();
+    await settleScenarioRevisions(env, { buildKey: KEY, scopeKey: "public" });
+    const [settled] = await digests();
+    expect(settled).toEqual({
+      state: "ready", content_digest: digest, behaviour_digest: digest, restore_basis: digest, restore_digest: digest,
+    });
+    // Three digests of three things.
+    expect(new Set(Object.values(settled!).slice(1)).size).toBe(4);
+  });
+
+  it("gives the revisions from before a behaviour digest, a few a pass, and none to one still building", async () => {
+    await push();
+    await tick("public");
+    const doc = (await all("SELECT doc_json FROM scenario_revisions"))[0]!.doc_json as string;
+    // 60 old ready revisions, one with a document of nothing, one building.
+    const old = (index: number, state: string, json: string) => env.DB.prepare(
+      `INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state, created_at)
+       VALUES ('intar/broken-nginx', ?1, 3, ?2, ?3, 1)`,
+    ).bind(`old-${String(index).padStart(2, "0")}`, json, state);
+    await env.DB.batch(Array.from({ length: 60 }, (_, index) => old(index, index % 2 ? "ready" : "verified", doc)));
+    await old(98, "ready", "{}").run();
+    const without = async () => (await all(
+      "SELECT COUNT(*) AS n FROM scenario_revisions WHERE behaviour_digest IS NULL AND state IN ('ready', 'verified')",
+    ))[0]!.n;
+    expect(await without()).toBe(61);
+    expect(await backfillBehaviourDigests(env, "public")).toBe(true);
+    expect(await without()).toBe(11);
+    // Another scope's pass does none of this scope's.
+    expect(await backfillBehaviourDigests(env, `organization:${ORG}`)).toBe(false);
+    expect(await without()).toBe(11);
+    expect(await backfillBehaviourDigests(env, "public")).toBe(false);
+    expect(await without()).toBe(0);
+    const rows = await all("SELECT rev, state, behaviour_digest FROM scenario_revisions ORDER BY rev");
+    // Equal documents have equal digests; an empty one has its own; the building one waits.
+    expect(new Set(rows.filter((row) => String(row.rev).startsWith("old-") && row.rev !== "old-98").map((row) => row.behaviour_digest)).size).toBe(1);
+    expect(rows.find((row) => row.rev === "old-98")?.behaviour_digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(rows.find((row) => row.state === "building")?.behaviour_digest).toBeNull();
   });
 
   it("keeps the producer a rev was first ingested with", async () => {

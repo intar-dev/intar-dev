@@ -29,6 +29,7 @@ import { HOST_DESIRED_STATE_SCHEMA_VERSION_V3, mutateHostDesiredStateV3 } from "
 import { HOST_DEGRADED_AFTER_MS } from "@/lib/host-health";
 import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
 import { canonicalJson, sha256Digest } from "@/lib/scenario-contract/canonical-json";
+import { behaviourDigest, restoreDigest } from "@/lib/scenario-contract/revision-digests";
 
 export const MAX_MACHINE_BUILD_ATTEMPTS = 3;
 
@@ -379,7 +380,7 @@ export async function settleScenarioRevisions(
   by: { rev: string } | { buildKey: string; scopeKey?: string },
 ): Promise<void> {
   // A revision without a scenario or a bundle row settles as a builder's.
-  const select = `SELECT revision.scenario_id, revision.rev, revision.doc_json, scenario.scope_key,
+  const select = `SELECT revision.scenario_id, revision.rev, revision.doc_json, revision.restore_basis, scenario.scope_key,
       COALESCE(bundle.image_producer, 'builder') AS producer
     FROM scenario_revisions revision
     LEFT JOIN scenarios scenario ON scenario.id = revision.scenario_id
@@ -392,7 +393,10 @@ export async function settleScenarioRevisions(
           AND EXISTS (SELECT 1 FROM json_each(revision.doc_json, '$.machines') machine
             WHERE json_extract(machine.value, '$.build_key') = ?1)`,
       ).bind(by.buildKey, by.scopeKey ?? null)
-  ).all<{ scenario_id: string; rev: string; doc_json: string; scope_key: string | null; producer: string }>();
+  ).all<{
+    scenario_id: string; rev: string; doc_json: string; restore_basis: string | null;
+    scope_key: string | null; producer: string;
+  }>();
   for (const revision of results) {
     const doc = JSON.parse(revision.doc_json) as ScenarioRevisionV1;
     const keys = [...new Set(doc.machines.map((machine) => machine.build_key))];
@@ -422,24 +426,67 @@ export async function settleScenarioRevisions(
       continue;
     }
     if (!keys.every((key) => byKey.get(key)?.state === "succeeded" && byKey.get(key)?.image_digest)) continue;
-    const ready = canonicalJson({
+    const withImages = {
       ...doc,
       machines: doc.machines.map((machine) => ({ ...machine, image_digest: byKey.get(machine.build_key)!.image_digest })),
-    });
+    } as ScenarioRevisionV1;
+    const ready = canonicalJson(withImages);
     await env.DB.batch([
       env.DB.prepare(
         `UPDATE scenario_revisions SET doc_json = ?3, content_digest = ?4,
+            behaviour_digest = ?5, restore_digest = ?6,
             state = CASE WHEN EXISTS (SELECT 1 FROM scenario_revisions twin WHERE twin.scenario_id = ?1
               AND twin.content_digest = ?4 AND twin.guest_contract = scenario_revisions.guest_contract
               AND twin.state = 'verified') THEN 'verified' ELSE 'ready' END
           WHERE scenario_id = ?1 AND rev = ?2 AND state = 'building'`,
-      ).bind(revision.scenario_id, revision.rev, ready, await sha256Digest(ready)),
+      ).bind(
+        revision.scenario_id,
+        revision.rev,
+        ready,
+        await sha256Digest(ready),
+        await behaviourDigest(withImages),
+        // A revision ingested before its basis was taken has none.
+        revision.restore_basis === null ? null : await restoreDigest(revision.restore_basis, withImages),
+      ),
       selectCandidateRevision(env.DB, revision.scenario_id, revision.rev),
     ]);
     // A new candidate's images enter the platform hosts' cache now, so its
     // verify run finds them ready.
     await wakePlatformAgents();
   }
+}
+
+/** Revisions one pass gives their behaviour digest. */
+const BEHAVIOUR_BACKFILL_PER_PASS = 50;
+
+/**
+ * Gives the ready and verified revisions of a scope that have no behaviour
+ * digest theirs: the rows from before the digest existed. It needs only the
+ * stored document. True while more are left.
+ */
+export async function backfillBehaviourDigests(env: Pick<Env, "DB">, scopeKey: string): Promise<boolean> {
+  const { results } = await env.DB.prepare(
+    `SELECT revision.scenario_id, revision.rev, revision.doc_json FROM scenario_revisions revision
+       JOIN scenarios scenario ON scenario.id = revision.scenario_id
+      WHERE scenario.scope_key = ?1 AND revision.behaviour_digest IS NULL
+        AND revision.state IN ('ready', 'verified')
+      LIMIT ?2`,
+  ).bind(scopeKey, BEHAVIOUR_BACKFILL_PER_PASS + 1).all<{ scenario_id: string; rev: string; doc_json: string }>();
+  for (const revision of results.slice(0, BEHAVIOUR_BACKFILL_PER_PASS)) {
+    let digest: string;
+    try {
+      digest = await behaviourDigest(JSON.parse(revision.doc_json) as ScenarioRevisionV1);
+    } catch {
+      // A document that cannot be read keeps none, and is not asked again
+      // on every pass ahead of the others.
+      digest = "";
+    }
+    await env.DB.prepare(
+      `UPDATE scenario_revisions SET behaviour_digest = ?3
+        WHERE scenario_id = ?1 AND rev = ?2 AND behaviour_digest IS NULL`,
+    ).bind(revision.scenario_id, revision.rev, digest).run();
+  }
+  return results.length > BEHAVIOUR_BACKFILL_PER_PASS;
 }
 
 /**

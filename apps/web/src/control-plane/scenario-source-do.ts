@@ -32,6 +32,7 @@ import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { createAppId } from "@/lib/id";
 import { ingestSourceBundle, sourceBundleObjectKey } from "@/lib/scenario-bundles";
 import { maintainPipelineRevisions } from "@/lib/pipeline-revisions";
+import { backfillBehaviourDigests } from "@/lib/machine-builds";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
   admitInternalRegistryOperation,
@@ -200,6 +201,15 @@ async function tickScenarioSource(
       event: "pipeline_revisions_maintenance_failed", scope_key: scopeKey, error: String(error),
     }));
     again = true;
+  }
+  // The rows from before revisions had a behaviour digest (#454), a few a
+  // pass. Like the step above, a fault here stops nothing else.
+  try {
+    if (await backfillBehaviourDigests(env, scopeKey)) again = true;
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "behaviour_digest_backfill_failed", scope_key: scopeKey, error: String(error),
+    }));
   }
 
   const now = Date.now();

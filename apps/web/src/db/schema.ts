@@ -53,6 +53,7 @@ export {
   scenarioSourceCommits,
   scopeMachineImages,
   pipelineUploadSessions,
+  scenarioRevisionHolds,
   scenarioSources,
 } from "./schema/scenarios";
 export {
