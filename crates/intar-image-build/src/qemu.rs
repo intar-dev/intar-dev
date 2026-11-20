@@ -55,9 +55,15 @@ pub fn render_direct_boot_qemu_command(input: &DirectBootQemuInput<'_>) -> Direc
     // host processor to pass through; `max` is every feature QEMU emulates,
     // with the cheap form of pointer authentication, whose default form
     // makes emulation several times slower.
-    let machine = match input.config.arch() {
-        BuildArch::Amd64 => "q35",
-        BuildArch::Arm64 => "virt",
+    // Under KVM the arm64 board goes without its interrupt translation
+    // service. On a linux/arm64 host that is itself a guest on Apple
+    // hardware, a guest with several processors and that service stops soon
+    // after its user space starts (the RCU thread starves); without it the
+    // devices use their plain interrupt lines, which is all these VMs need.
+    let machine = match (input.config.arch(), accelerator) {
+        (BuildArch::Amd64, _) => "q35",
+        (BuildArch::Arm64, "kvm") => "virt,its=off",
+        (BuildArch::Arm64, _) => "virt",
     };
     let cpu = match (accelerator, input.config.arch()) {
         ("tcg", BuildArch::Arm64) => "max,pauth-impdef=on",
@@ -270,6 +276,32 @@ mod tests {
         let has =
             |flag: &str, value: &str| command.args.windows(2).any(|pair| pair == [flag, value]);
         assert!(has("-machine", "virt,accel=tcg"), "{:?}", command.args);
+        // On an arm64 host with KVM the board has no interrupt translation service.
+        let native = QemuBuildConfig {
+            accelerator: "kvm".to_owned(),
+            ..emulated.clone()
+        };
+        let command = render_direct_boot_qemu_command(&DirectBootQemuInput {
+            config: &native,
+            root_disk_path: Path::new("/work/root.raw"),
+            seed_disk_path: Path::new("/work/intarbuild.img"),
+            kernel_path: Path::new("/cache/vmlinuz"),
+            initrd_path: Path::new("/cache/initrd.img"),
+            serial_log_path: Path::new("/work/serial.log"),
+            qmp_socket_path: Path::new("/work/qmp.sock"),
+            ssh_host_port: 22_222,
+            memory_mib: 2048,
+            cpu_count: 2,
+            boot_cmdline: &cmdline,
+        });
+        assert!(
+            command
+                .args
+                .windows(2)
+                .any(|pair| pair == ["-machine", "virt,its=off,accel=kvm"]),
+            "{:?}",
+            command.args
+        );
         assert!(has("-cpu", "max,pauth-impdef=on"));
         assert!(has("-append", "root=/dev/vda rw console=ttyAMA0"));
         assert_eq!(

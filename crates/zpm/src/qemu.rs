@@ -81,9 +81,14 @@ pub fn qemu_args(machine: &Machine) -> Vec<OsString> {
     let emulated = machine.accel == Accel::Tcg;
 
     arg("-M");
-    arg(match machine.arch {
-        Arch::X86_64 => "q35",
-        Arch::Aarch64 => "virt,highmem=on",
+    // Under KVM the arm64 board goes without its interrupt translation
+    // service: on a Linux host that is itself a guest on Apple hardware, a
+    // guest with several processors and that service stops soon after its
+    // user space starts. Its devices then use their plain interrupt lines.
+    arg(match (machine.arch, machine.accel) {
+        (Arch::X86_64, _) => "q35",
+        (Arch::Aarch64, Accel::Kvm) => "virt,highmem=on,its=off",
+        (Arch::Aarch64, _) => "virt,highmem=on",
     });
     arg("-accel");
     arg(machine.accel.qemu_name());
