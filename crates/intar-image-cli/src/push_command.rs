@@ -85,15 +85,30 @@ pub(crate) fn push_command(args: &PushCommand) -> Result<()> {
         "pass --token, or run in a GitHub Actions job with `id-token: write`"
     );
     let audience = args.url.trim().trim_end_matches('/').to_owned();
+    // A runner that will never give a token is told apart from one whose
+    // endpoint fails for a moment.
+    let hopeless = std::cell::Cell::new(false);
     let session = PipelineSession::open(
         &args.url,
         || match &args.token {
             Some(token) => Ok(token.clone()),
-            None => github_oidc_token(&audience),
+            None => github_oidc_token(&audience).map_err(|(error, again)| {
+                hopeless.set(!again);
+                error
+            }),
         },
         &args.rev,
     )
-    .map_err(failed)?;
+    .map_err(|error| {
+        if hopeless.get() {
+            anyhow!(UploadFailed {
+                exit_code: 1,
+                message: format!("the image push failed: {error}"),
+            })
+        } else {
+            failed(error)
+        }
+    })?;
     let pushed = RegistryPusher::new(&args.url, session.token())
         .and_then(|pusher| {
             pusher.push_image(
@@ -119,17 +134,19 @@ pub(crate) fn push_command(args: &PushCommand) -> Result<()> {
 }
 
 /// A new OIDC token of this GitHub Actions job for `audience`, from the
-/// endpoint the runner names to a job with `id-token: write`.
-fn github_oidc_token(audience: &str) -> std::result::Result<String, String> {
+/// endpoint the runner names to a job with `id-token: write`. An error says
+/// whether another try may pass.
+fn github_oidc_token(audience: &str) -> std::result::Result<String, (String, bool)> {
     let (Ok(url), Ok(bearer)) = (
         std::env::var("ACTIONS_ID_TOKEN_REQUEST_URL"),
         std::env::var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
     ) else {
-        return Err(
+        return Err((
             "pass --token, or run in a GitHub Actions job with `id-token: write`".to_owned(),
-        );
+            false,
+        ));
     };
-    let mut url = reqwest::Url::parse(&url).map_err(|error| error.to_string())?;
+    let mut url = reqwest::Url::parse(&url).map_err(|error| (error.to_string(), false))?;
     url.query_pairs_mut().append_pair("audience", audience);
     let answer: serde_json::Value = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -138,12 +155,18 @@ fn github_oidc_token(audience: &str) -> std::result::Result<String, String> {
         .and_then(reqwest::blocking::Response::error_for_status)
         .and_then(reqwest::blocking::Response::json)
         // The error names the endpoint without its query, never the bearer.
-        .map_err(|error| error.without_url().to_string())?;
+        // A refusal is final; no answer or a server's failure is not.
+        .map_err(|error| {
+            let again = !error
+                .status()
+                .is_some_and(|status| status.is_client_error());
+            (error.without_url().to_string(), again)
+        })?;
     answer
         .get("value")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| "the runner's answer holds no token".to_owned())
+        .ok_or_else(|| ("the runner's answer holds no token".to_owned(), false))
 }
 
 /// A failed push with the exit code a workflow acts on: 3 when the commit is

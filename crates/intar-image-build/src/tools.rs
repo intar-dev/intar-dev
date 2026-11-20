@@ -55,7 +55,10 @@ pub fn extract_member(archive: &Path, member: &str, dest: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUILDKIT_ARCHIVE_SHA256, BUILDKIT_VERSION, UMOCI_SHA256, UMOCI_VERSION};
+    use super::{
+        BUILDKIT_ARCHIVE_SHA256, BUILDKIT_IMAGE, BUILDKIT_MAX_USED_BYTES, BUILDKIT_VERSION,
+        UMOCI_SHA256, UMOCI_VERSION,
+    };
 
     #[test]
     fn the_pins_are_the_builder_hosts() {
@@ -71,5 +74,11 @@ mod tests {
         assert_eq!(value("BUILDKIT_ARCHIVE_SHA256"), BUILDKIT_ARCHIVE_SHA256);
         assert_eq!(value("UMOCI_VERSION"), UMOCI_VERSION);
         assert_eq!(value("UMOCI_SHA256"), UMOCI_SHA256);
+        assert_eq!(
+            value("BUILDKIT_MAX_USED_BYTES"),
+            BUILDKIT_MAX_USED_BYTES.to_string()
+        );
+        // The daemon's image is of the client's version.
+        assert!(BUILDKIT_IMAGE.starts_with(&format!("moby/buildkit:{BUILDKIT_VERSION}@sha256:")));
     }
 }

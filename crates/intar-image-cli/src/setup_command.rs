@@ -20,6 +20,7 @@ use intar_image_build::{BuildArch, sha256_file_hex};
 /// and restored through.
 const QEMU_FLOOR: (u32, u32) = (8, 2);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+const DOWNLOAD_TRIES: u32 = if cfg!(test) { 1 } else { 3 };
 
 #[derive(Debug, Args)]
 pub(crate) struct SetupCommand {
@@ -267,26 +268,40 @@ fn absolute(path: &Path) -> Result<PathBuf> {
 
 /// Downloads `url` to `dest` and keeps it only with the hash `sha256`.
 fn fetch(url: &str, sha256: &str, dest: &Path) -> Result<()> {
-    let mut response = reqwest::blocking::Client::builder()
-        .timeout(DOWNLOAD_TIMEOUT)
-        .build()?
-        .get(url)
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .with_context(|| format!("failed to download {url}"))?;
-    let mut file = std::fs::File::create(dest)
-        .with_context(|| format!("failed to create {}", dest.display()))?;
-    response
-        .copy_to(&mut file)
-        .with_context(|| format!("failed to download {url}"))?;
-    drop(file);
-    let actual = sha256_file_hex(dest)?;
+    // Beside its place until it has its hash: nothing cut short or with
+    // another hash is ever where a later step, or a later run, could use it.
+    let part = dest.with_extension("part");
+    let _ = std::fs::remove_file(dest);
+    let download = || -> Result<()> {
+        let mut response = reqwest::blocking::Client::builder()
+            .timeout(DOWNLOAD_TIMEOUT)
+            .build()?
+            .get(url)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)?;
+        let mut file = std::fs::File::create(&part)
+            .with_context(|| format!("failed to create {}", part.display()))?;
+        response.copy_to(&mut file)?;
+        Ok(())
+    };
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        match download() {
+            Ok(()) => break,
+            Err(error) if tries >= DOWNLOAD_TRIES => {
+                let _ = std::fs::remove_file(&part);
+                return Err(error.context(format!("failed to download {url}")));
+            }
+            Err(_) => std::thread::sleep(Duration::from_secs(2)),
+        }
+    }
+    let actual = sha256_file_hex(&part)?;
     if actual != sha256 {
-        // Nothing with another hash stays where a later step could use it.
-        let _ = std::fs::remove_file(dest);
+        let _ = std::fs::remove_file(&part);
         bail!("{url} has the SHA-256 {actual}, not the pinned {sha256}");
     }
-    Ok(())
+    std::fs::rename(&part, dest).with_context(|| format!("failed to write {}", dest.display()))
 }
 
 fn executable(path: &Path) -> Result<()> {
@@ -363,6 +378,8 @@ fn check_host() -> Vec<String> {
         ("mke2fs", "e2fsprogs"),
         ("e2fsck", "e2fsprogs"),
         ("resize2fs", "e2fsprogs"),
+        // A checkpoint's memory is compressed and read back with it.
+        ("zstd", "zstd"),
     ] {
         // Every one of them answers -V, or at least starts.
         if Command::new(tool)
@@ -378,8 +395,8 @@ fn check_host() -> Vec<String> {
     problems
 }
 
-/// Starts `qemu` paused with a build's machine, firmware, network and disk
-/// devices, and stops it. A problem when it does not stay up.
+/// Starts `qemu` paused with a build's machine, its firmware and its network
+/// device, and stops it. A problem when it does not stay up.
 fn start_once(qemu: &str, machine: &str) -> Option<String> {
     let mut child = Command::new(qemu)
         .args(machine.split(' '))
