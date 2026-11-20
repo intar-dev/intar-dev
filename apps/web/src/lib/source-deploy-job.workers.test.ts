@@ -11,7 +11,7 @@ import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { liftRevisionHold, moveLiveRevision } from "@/lib/scenario-revisions";
 import {
-  DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, DEPLOY_JOB_WAIT_MS, detailOf, driveDeployJob,
+  DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, detailOf, driveDeployJob,
   RESTORE_CHECK_EVERY_MS, RESTORE_CHECK_FOR_MS, type DeployJob, type Lab,
 } from "@/lib/source-deploy-job";
 import { createFixtureMember } from "@/test/account-fixtures";
@@ -208,7 +208,7 @@ describe("an automatic source's job", () => {
     expect((await sourceRow())!.live_at).not.toBeNull();
     // The job stays only for the lab's restore check, which it cannot start yet.
     expect(job()).toMatchObject({ ended: { detail: `- ${WEB}: live` }, restore: { [WEB]: { tries: [] } } });
-    expect(await drive()).toEqual({ wait: false, wakeIn: DEPLOY_JOB_WAIT_MS });
+    expect(await drive()).toEqual({ wait: false, wakeIn: RESTORE_CHECK_EVERY_MS });
     expect(await commit()).toMatchObject({ state: "live" });
   });
 
@@ -364,7 +364,7 @@ describe("an automatic source's job", () => {
     expect(await commit("b")).toEqual({ state: "live", detail: "- 1 lab unchanged" });
     // Rev c has the second lab again, changed.
     await head("c", twoLabs("back"));
-    expect(await drive()).toEqual({ wait: true });
+    expect(await drive()).toMatchObject({ wait: true });
     expect(await scenario(DB_LAB)).toMatchObject({ enabled: 1, live_rev: rev("a") });
     expect((await commit("c"))!.state).toBe("waiting");
     await drive();
@@ -380,7 +380,7 @@ describe("an automatic source's job", () => {
       VALUES ('learner-run', ?1, 'host', ?2, ?3, 'Scenario', 'Title', '', '', '[]', 'beginner', 1, '[]', '[]', '', 0, 'ready', 1, '{}')`)
       .bind(OWNER, DB_LAB, rev("a")).run();
     await head("b");
-    expect(await drive()).toEqual({ wait: true });
+    expect(await drive()).toMatchObject({ wait: true });
     expect(await scenario(DB_LAB)).toMatchObject({ enabled: 1 });
     expect(await catalogRev()).toBe(rev("a"));
     expect(await commit("b")).toEqual({
@@ -758,13 +758,71 @@ describe("restore checks after a lab is live", () => {
     await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1 AND scenario_id = ?2").bind(rev("a"), WEB).run();
     // The second lab's verify run is refused for the scope: no restore check either.
     refuse = { "*": "verify_quota_exhausted" };
-    expect(await drive()).toEqual({ wait: true, wakeIn: DEPLOY_JOB_WAIT_MS });
+    expect(await drive()).toMatchObject({ wait: true });
     expect(await scenario(WEB)).toMatchObject({ live_rev: rev("a") });
     expect(restoreChecks).toEqual([]);
     refuse = {};
     await drive();
     expect(begun.map((run) => run.scenarioId)).toEqual([DB_LAB]);
     expect(restoreChecks.map((check) => check.scenarioId)).toEqual([WEB]);
+  });
+
+  it("checks one lab at a time, the one that waited longest first, and says which it never got to", async () => {
+    restorable = true;
+    const three = twoLabs();
+    const third = structuredClone(three.scenarios[1]!);
+    third.slug = "third-lab";
+    three.scenarios.push(third);
+    await head("a", three);
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
+    await drive();
+    const order = () => restoreChecks.map((check) => check.scenarioId);
+    expect(order()).toEqual([WEB]);
+    // While that one goes on, no other starts.
+    await drive();
+    expect(order()).toEqual([WEB]);
+    const next = async () => {
+      await finishRestore(restoreChecks.at(-1)!.runId, false);
+      now += 60_000;
+      await drive();
+    };
+    await next();
+    await next();
+    expect(order()).toEqual([WEB, DB_LAB, "acme/third-lab"]);
+    // All were tried within five minutes: none is due.
+    await next();
+    expect(order()).toHaveLength(3);
+    // The first is due again before the others.
+    now += RESTORE_CHECK_EVERY_MS;
+    await drive();
+    expect(order()).toEqual([WEB, DB_LAB, "acme/third-lab", WEB]);
+  });
+
+  it("says so for a lab it could never start a check of", async () => {
+    await liveLab();
+    now += RESTORE_CHECK_FOR_MS;
+    expect(await drive()).toEqual({ wait: false });
+    expect(restoreChecks).toEqual([]);
+    expect(await commit()).toEqual({
+      state: "live",
+      detail: `- ${WEB}: live, verified without a run, starts cold: its snapshot start could not be checked in two hours`,
+    });
+  });
+
+  it("leaves an administrator's withdrawal of the restore verification alone", async () => {
+    restorable = true;
+    await head("a", twoLabs());
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
+    await drive();
+    await finishRestore("restore-1", true);
+    await drive();
+    expect(job()).toMatchObject({ restore: { [WEB]: { done: true } } });
+    // Withdrawn while the job still checks the other lab.
+    await env.DB.prepare("UPDATE scenario_revisions SET restore_verified_at = NULL WHERE scenario_id = ?1").bind(WEB).run();
+    await finishRestore(restoreChecks.at(-1)!.runId, false);
+    now += RESTORE_CHECK_EVERY_MS;
+    await drive();
+    expect(restoreChecks.filter((check) => check.scenarioId === WEB)).toHaveLength(1);
   });
 
   it("ends its restore check when the head moves", async () => {
@@ -775,7 +833,9 @@ describe("restore checks after a lab is live", () => {
     await drive();
     expect(ended).toEqual(["restore-1"]);
     expect((await commit("b"))!.state).toBe("live");
-    expect(job()).toBeUndefined();
+    // The lab the new head left unchanged is the new job's to check.
+    expect(job()).toMatchObject({ rowId: "row-b", ended: { detail: "- 1 lab unchanged" } });
+    expect(restoreChecks.map((check) => check.runId)).toEqual(["restore-1", "restore-2"]);
   });
 
   it("starts none once the source may not act", async () => {
@@ -786,6 +846,7 @@ describe("restore checks after a lab is live", () => {
     await drive();
     expect((await commit())!.state).toBe("live");
     restorable = true;
+    now += RESTORE_CHECK_EVERY_MS;
     await env.DB.prepare("UPDATE member SET role = 'member'").run();
     await drive();
     expect(restoreChecks).toEqual([]);

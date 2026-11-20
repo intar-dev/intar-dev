@@ -22,9 +22,14 @@
 // started from a host's snapshot and passed. For a lab of one machine the
 // job runs such checks, also after its row has ended: a host takes its
 // snapshot some time after an image's first boot, so a check that booted
-// cold is "not yet". It tries every five minutes for two hours and then
-// says so; a snapshot that is slow or broken costs learners start-up time,
-// never a publish.
+// cold is "not yet". It tries for two hours and then says so; a snapshot
+// that is slow or broken costs learners start-up time, never a publish.
+//
+// The checks are for the labs that serve the head's content: those the
+// commit put live and those it left unchanged, whose live revision an
+// earlier commit's job may not have got to. One check runs at a time, so a
+// verify slot stays free; the lab that waited longest is next, and none is
+// checked again within five minutes.
 //
 // The job counts only what it started itself: the ids of its verify runs
 // live in the source object's storage, with the row and attempt they belong
@@ -55,6 +60,7 @@ export const RESTORE_CHECK_FOR_MS = 2 * 3_600_000;
 /** The next pass while a restore check goes on. */
 const RESTORE_RUNNING_WAIT_MS = 2 * 60_000;
 const RESTORE_GAVE_UP = ", starts cold: no snapshot start passed in two hours";
+const RESTORE_NOT_TRIED = ", starts cold: its snapshot start could not be checked in two hours";
 const MAX_FAILED_RUNS = 2;
 const MAX_STARTS = 3;
 const MAX_DETAIL_CHARS = 4096;
@@ -75,11 +81,15 @@ export interface DeployJob {
   decided: number;
   total: number;
   /**
-   * Per scenario that is live with the head's revision and not restore
-   * verified: when the job began to check its snapshot start, and the
-   * restore checks it started.
+   * Per scenario that serves the head's content: when the job began to
+   * look at its snapshot start, the restore checks it started, and when a
+   * start was last refused for the lab itself. `done` once its revision is
+   * restore verified: the job does not check it again, so a withdrawal by
+   * an administrator stands.
    */
-  restore?: Record<string, { since: number; tries: Array<{ id: string; at: number }>; gaveUp?: true }>;
+  restore?: Record<string, {
+    since: number; tries: Array<{ id: string; at: number }>; refusedAt?: number; gaveUp?: true; done?: true;
+  }>;
   /** Set once the row has ended and only restore checks are left: the lines it ended with. */
   ended?: { detail: string | null };
 }
@@ -141,8 +151,13 @@ interface LabRow {
   running: number;
   verify_run_id: string | null;
   verify_report_json: string | null;
+  /** Of the head's revision: what becomes the live revision's when the lab moves. */
   restore_verified_at: number | null;
   machines: number;
+  /** Of the scenario's live revision, the head's or an older one: what a restore check of it needs. */
+  live_restore_verified_at: number | null;
+  live_machines: number | null;
+  live_running: number;
 }
 
 export type Lab =
@@ -210,6 +225,8 @@ export async function driveDeployJob(input: {
   const job: DeployJob = stored && stored.rowId === head.id && stored.attempt === head.attempt
     ? stored
     : { rowId: head.id!, attempt: head.attempt!, since: now, labs: {}, decided: 0, total: 0 };
+  // Left by a pass that set it and then could not end the row.
+  delete job.ended;
   const overdue = now - job.since >= DEPLOY_JOB_DEADLINE_MS;
 
   const rows = await readLabs(db, head.rev!, scopeKey);
@@ -329,16 +346,19 @@ export async function driveDeployJob(input: {
   const detail = withRestoreNotes(lines, job);
   const wakeIn = restore.wakeIn === undefined ? {} : { wakeIn: restore.wakeIn };
   if (state === "live" || state === "failed") {
-    await endRow(db, { ...head, updated_at: updatedAt }, source, state, detail, now, true);
     // Every lab is decided. The job stays only for restore checks that are
-    // left; a verify run the deadline overtook is ended either way.
+    // left, and says so before the row ends: a fault after that must not
+    // lose them. A verify run the deadline overtook is ended either way.
+    if (restore.pending) {
+      job.ended = { detail: lines };
+      await storage.put(DEPLOY_JOB_STORAGE_KEY, job);
+    }
+    await endRow(db, { ...head, updated_at: updatedAt }, source, state, detail, now, true);
     if (!restore.pending) {
       await closeJob(db, storage, job, deps);
       return { wait: false };
     }
     await endRuns(db, Object.values(job.labs).flatMap((lab) => lab.runs).filter((run) => !run.outcome).map((run) => run.id), deps);
-    job.ended = { detail: lines };
-    await storage.put(DEPLOY_JOB_STORAGE_KEY, job);
     return { wait: false, ...wakeIn };
   }
   if (state !== head.state || detail !== head.detail) {
@@ -356,36 +376,39 @@ export async function driveDeployJob(input: {
 }
 
 /**
- * The restore checks of the labs that are live with the head's revision.
- * A lab of one machine whose revision is not restore verified gets a
- * restore check every five minutes, until one passed after a snapshot
- * start or two hours are over. `blocked` starts none in this pass: a start
- * for the scope was refused already. `pending` while a lab is not settled.
+ * The restore checks of the labs that serve the head's content: live with
+ * the head's revision, or unchanged by it. A lab of one machine whose live
+ * revision is not restore verified is checked until a check passed after a
+ * snapshot start, or two hours are over. One check at a time, the lab that
+ * waited longest first, and none again within five minutes of its last
+ * check or refusal. `blocked` starts none in this pass: a start for the
+ * scope was refused already. `pending` while a lab is not settled.
  */
 async function restoreChecks(input: {
   db: D1Database; storage: Storage; job: DeployJob; rows: LabRow[]; head: Head; scopeKey: string; digest: string;
   now: number; deps: DeployJobDeps; blocked: boolean;
 }): Promise<{ pending: boolean; wakeIn?: number }> {
   const { db, storage, job, rows, head, scopeKey, digest, now, deps } = input;
-  let blocked = input.blocked;
   let pending = false;
   let wakeIn: number | undefined;
   const wake = (ms: number) => {
+    const at = Math.max(ms, 1000);
     pending = true;
-    wakeIn = Math.min(wakeIn ?? ms, Math.max(ms, 1000));
+    wakeIn = Math.min(wakeIn ?? at, at);
   };
+  const restore = (job.restore ??= {});
+  const lastAt = (lab: (typeof restore)[string]) => Math.max(lab.tries.at(-1)?.at ?? 0, lab.refusedAt ?? 0);
+  const due: LabRow[] = [];
+  let active = false;
   for (const row of rows) {
-    // A snapshot is of one machine; and only the head's own revision, once
-    // it is live, is this job's to check.
-    if (!row.live || row.machines !== 1) continue;
-    if (row.restore_verified_at !== null) {
-      // Passed, or taken over from the revision it replaced.
-      if (job.restore) delete job.restore[row.scenario_id];
-      continue;
-    }
-    const lab = ((job.restore ??= {})[row.scenario_id] ??= { since: now, tries: [] });
-    if (lab.gaveUp) continue;
-    if (row.running) {
+    // A snapshot is of one machine.
+    if (!(row.live || row.unchanged) || row.live_rev === null || row.live_machines !== 1) continue;
+    const lab = (restore[row.scenario_id] ??= { since: now, tries: [] });
+    // Passed, or taken over from the revision it replaced.
+    if (row.live_restore_verified_at !== null) lab.done = true;
+    if (lab.done || lab.gaveUp) continue;
+    if (row.live_running) {
+      active = true;
       wake(RESTORE_RUNNING_WAIT_MS);
       continue;
     }
@@ -393,50 +416,52 @@ async function restoreChecks(input: {
       lab.gaveUp = true;
       continue;
     }
-    const last = lab.tries.at(-1);
-    if (last && now - last.at < RESTORE_CHECK_EVERY_MS) {
-      wake(last.at + RESTORE_CHECK_EVERY_MS - now);
-      continue;
-    }
-    if (blocked) {
-      wake(DEPLOY_JOB_WAIT_MS);
-      continue;
-    }
-    if (!(await mayStart(db, scopeKey, digest, head.id!, head.attempt!, head.state!))) {
-      wake(DEPLOY_JOB_WAIT_MS);
-      break;
-    }
-    try {
-      const { runId } = await deps.beginVerifyRun({
-        scenarioId: row.scenario_id, rev: head.rev!, leaseMs: DEPLOY_JOB_VERIFY_LEASE_MS, restoreCheck: true,
-      });
-      lab.tries.push({ id: runId, at: now });
-      await storage.put(DEPLOY_JOB_STORAGE_KEY, job);
-      wake(RESTORE_RUNNING_WAIT_MS);
-    } catch (error) {
-      const code = error instanceof AppError ? error.code : "";
+    const last = lastAt(lab);
+    if (last && now - last < RESTORE_CHECK_EVERY_MS) wake(last + RESTORE_CHECK_EVERY_MS - now);
+    else due.push(row);
+  }
+  if (!due.length) return { pending, ...(wakeIn === undefined ? {} : { wakeIn }) };
+  // One at a time: the scope's other slot stays for verify runs, and a
+  // host takes no snapshot while a run boots.
+  wake(RESTORE_RUNNING_WAIT_MS);
+  if (active || input.blocked) return { pending: true, wakeIn: wakeIn! };
+  due.sort((a, b) => lastAt(restore[a.scenario_id]!) - lastAt(restore[b.scenario_id]!));
+  const row = due[0]!;
+  const lab = restore[row.scenario_id]!;
+  if (!(await mayStart(db, scopeKey, digest, head.id!, head.attempt!, head.state!))) return { pending: true, wakeIn: wakeIn! };
+  try {
+    const { runId } = await deps.beginVerifyRun({
+      scenarioId: row.scenario_id, rev: row.live_rev!, leaseMs: DEPLOY_JOB_VERIFY_LEASE_MS, restoreCheck: true,
+    });
+    lab.tries.push({ id: runId, at: now });
+    await storage.put(DEPLOY_JOB_STORAGE_KEY, job);
+  } catch (error) {
+    const code = error instanceof AppError ? error.code : "";
+    if (!(code in SCOPE_WAITS)) {
+      // The lab's own refusal: it waits its five minutes, and the next lab
+      // has its turn in a minute.
       if (!(code in LAB_WAITS) && code !== "restore_check_not_possible") {
-        if (!(code in SCOPE_WAITS)) {
-          console.error(JSON.stringify({
-            event: "deploy_job_restore_check_failed", scope_key: scopeKey, scenario_id: row.scenario_id,
-            error: error instanceof Error ? error.message : String(error),
-          }));
-        }
-        blocked = true;
+        console.error(JSON.stringify({
+          event: "deploy_job_restore_check_failed", scope_key: scopeKey, scenario_id: row.scenario_id,
+          error: error instanceof Error ? error.message : String(error),
+        }));
       }
-      wake(DEPLOY_JOB_WAIT_MS);
+      lab.refusedAt = now;
+      if (due.length > 1) wake(DEPLOY_JOB_WAIT_MS);
     }
   }
-  return { pending, ...(wakeIn === undefined ? {} : { wakeIn }) };
+  return { pending: true, wakeIn: wakeIn! };
 }
 
 /** `detail` with a word on each live lab whose snapshot start the job gave up proving. */
 function withRestoreNotes(detail: string | null, job: DeployJob): string | null {
   if (detail === null) return null;
-  const gaveUp = Object.entries(job.restore ?? {}).filter(([, lab]) => lab.gaveUp).map(([scenarioId]) => scenarioId);
+  const gaveUp = Object.entries(job.restore ?? {}).filter(([, lab]) => lab.gaveUp);
   if (!gaveUp.length) return detail;
-  return detail.split("\n").map((line) =>
-    gaveUp.some((scenarioId) => line.startsWith(`- ${scenarioId}: live`)) ? `${line}${RESTORE_GAVE_UP}` : line).join("\n");
+  return detail.split("\n").map((line) => {
+    const lab = gaveUp.find(([scenarioId]) => line.startsWith(`- ${scenarioId}: live`))?.[1];
+    return lab ? `${line}${lab.tries.length ? RESTORE_GAVE_UP : RESTORE_NOT_TRIED}` : line;
+  }).join("\n");
 }
 
 /** The head commit's labs: each scenario's revision of `rev` in the scope, with what the job decides by. */
@@ -449,10 +474,15 @@ async function readLabs(db: D1Database, rev: string, scopeKey: string): Promise<
         EXISTS (SELECT 1 FROM scenario_runs run
           WHERE run.active_key = 'verify:' || ?2 || ':' || revision.rev || ':' || revision.scenario_id) AS running,
         revision.verify_run_id, revision.verify_report_json, revision.restore_verified_at,
-        json_array_length(revision.doc_json, '$.machines') AS machines
+        json_array_length(revision.doc_json, '$.machines') AS machines,
+        live.restore_verified_at AS live_restore_verified_at,
+        json_array_length(live.doc_json, '$.machines') AS live_machines,
+        EXISTS (SELECT 1 FROM scenario_runs run
+          WHERE run.active_key = 'verify:' || ?2 || ':' || scenario.live_rev || ':' || revision.scenario_id) AS live_running
       FROM scenario_revisions revision
       JOIN bundles bundle ON bundle.rev = revision.rev AND bundle.scope_key = ?2
       JOIN scenarios scenario ON scenario.id = revision.scenario_id
+      LEFT JOIN scenario_revisions live ON live.scenario_id = scenario.id AND live.rev = scenario.live_rev
      WHERE revision.rev = ?1 ORDER BY revision.scenario_id`,
   ).bind(rev, scopeKey).all<LabRow>();
   return results;
@@ -592,8 +622,13 @@ async function move(row: LabRow, head: Head, source: SourceHead, deps: DeployJob
       scenarioId: row.scenario_id, rev: head.rev!, liveRev: row.live_rev, kind: "promote", actorUserId: head.binder!, source,
     });
     // The pass's later steps read the lab as it is now.
+    // Its restore verification may have been taken over in the move; a
+    // restore check that is not needed is refused, and the next pass knows.
     row.live = 1;
     row.live_rev = head.rev;
+    row.live_restore_verified_at = row.restore_verified_at;
+    row.live_machines = row.machines;
+    row.live_running = 0;
     return { kind: "live", inherited: row.verify_run_id === null };
   } catch (error) {
     const code = error instanceof AppError ? error.code : "";
