@@ -661,8 +661,7 @@ fn a_pipeline_session_waits_for_its_bundle_and_closes_with_its_own_token() {
         _ => (200, r#"{"ok":true}"#.to_owned()),
     });
     let session =
-        PipelineSession::open_with(&registry.url, "oidc", "rev-1", Duration::from_millis(1))
-            .unwrap();
+        PipelineSession::open_with(&registry.url, oidc, "rev-1", Duration::from_millis(1)).unwrap();
     assert_eq!(session.token(), "ips_secret");
     session.close().unwrap();
 
@@ -691,7 +690,7 @@ fn a_refused_pipeline_session_is_not_asked_for_again() {
             (status, format!(r#"{{"error":"no","code":"{code}"}}"#))
         });
         let Err(error) =
-            PipelineSession::open_with(&registry.url, "oidc", "rev-1", Duration::from_millis(1))
+            PipelineSession::open_with(&registry.url, oidc, "rev-1", Duration::from_millis(1))
         else {
             panic!("the session must not open");
         };
@@ -707,4 +706,52 @@ fn a_refused_pipeline_session_is_not_asked_for_again() {
             "{status}"
         );
     }
+}
+
+/// The token of a caller that was handed one.
+fn oidc() -> std::result::Result<String, String> {
+    Ok("oidc".to_owned())
+}
+
+#[test]
+fn every_try_of_a_session_open_asks_for_a_new_token() {
+    let registry = FakeRegistry::start(|request, seen| match (request.path.as_str(), seen) {
+        ("/registry/v1/pipeline/sessions", 0 | 1) => (
+            409,
+            r#"{"error":"still read","code":"bundle_pending"}"#.to_owned(),
+        ),
+        _ => (201, r#"{"ok":true,"token":"ips_secret"}"#.to_owned()),
+    });
+    let asked = std::sync::atomic::AtomicUsize::new(0);
+    PipelineSession::open_with(
+        &registry.url,
+        || {
+            Ok(format!(
+                "t{}",
+                asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            ))
+        },
+        "rev-1",
+        Duration::from_millis(1),
+    )
+    .unwrap();
+    let tokens: Vec<String> = registry
+        .calls()
+        .iter()
+        .map(|call| call.headers["authorization"].clone())
+        .collect();
+    assert_eq!(tokens, ["Bearer t0", "Bearer t1", "Bearer t2"]);
+
+    // A source that cannot give one ends the open without asking the service.
+    let silent = FakeRegistry::start(|_, _| (500, String::new()));
+    let Err(error) = PipelineSession::open_with(
+        &silent.url,
+        || Err("the runner gave none".to_owned()),
+        "rev-1",
+        Duration::from_millis(1),
+    ) else {
+        panic!("the session must not open");
+    };
+    assert!(matches!(error, Error::Token(_)), "{error}");
+    assert!(silent.calls().is_empty());
 }

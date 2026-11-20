@@ -3907,6 +3907,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "zpm",
 ]

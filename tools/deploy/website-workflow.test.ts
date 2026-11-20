@@ -482,6 +482,13 @@ jq -c '{success: true, result: [{success: true, results: .}]}' "${root}/$f.json"
     const ok = inject(["registry_manifests"], [current, previous]);
     expect(ok.status, ok.stderr).toBe(0);
     expect(ok.vars.KINO_PINS_JSON).toBe(`{"3":{"current":"${current}","previous":"${previous}"}}`);
+    // No release is named for a pin without one, and only the pinned artifact's once there is.
+    expect(ok.vars.KINO_RELEASES_JSON).toBe("{}");
+    const archive = "e".repeat(64);
+    writeFileSync(join(repo, "tools/deploy/kino-release.json"),
+      `{"3":{"amd64":{"version":"0.12.0","sha256":"${archive}","digest":"${current}"},"arm64":{"version":"0.12.0","sha256":"${archive}","digest":"${previous}"}}}\n`);
+    expect(inject(["registry_manifests"], [current, previous]).vars.KINO_RELEASES_JSON)
+      .toBe(`{"3":{"amd64":{"version":"0.12.0","sha256":"${archive}"}}}`);
     expect(readFileSync(join(root, "queries.sql"), "utf8")).toContain(
       `artifact_type = 'application/vnd.intar.kino.v1' AND digest IN ('${current}','${previous}')`,
     );

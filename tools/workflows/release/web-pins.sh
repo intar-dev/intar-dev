@@ -108,10 +108,16 @@ elif published "${kino_tag}"; then
       --version "${kino_version}" --guest-contract "${contract}" --out "${kino_dir}/${arch}/artifact" | jq -er .digest)"
     bun tools/deploy/kino-artifact.ts pin --file tools/deploy/kino-pin.json \
       --guest-contract "${contract}" --architecture "${arch}" --digest "${built}"
+    # Which release the pinned artifact is: a pipeline boots its image with
+    # this Kino, and the pin alone does not say where to get it.
+    bun tools/deploy/kino-artifact.ts release --file tools/deploy/kino-release.json \
+      --guest-contract "${contract}" --architecture "${arch}" --digest "${built}" --version "${kino_version}" \
+      --sha256 "$(sha256sum "${kino_dir}/kino_${kino_version}_linux_${arch}.tar.gz" | cut -d' ' -f1)"
     # The pull request names the amd64 digest, the one hosts run.
     digest="${digest:-${built}}"
   done
-  if git diff --quiet -- tools/deploy/kino-pin.json && git ls-files --error-unmatch tools/deploy/kino-pin.json >/dev/null 2>&1; then
+  if git diff --quiet -- tools/deploy/kino-pin.json tools/deploy/kino-release.json \
+    && git ls-files --error-unmatch tools/deploy/kino-pin.json tools/deploy/kino-release.json >/dev/null 2>&1; then
     echo "The website already pins kino ${kino_version}."
   else
     changes+=("kino ${kino_version} (${digest}) for guest contract ${contract}")
@@ -135,9 +141,11 @@ git config user.email "${bot_id}+${bot}@users.noreply.github.com"
 gh auth setup-git --hostname github.com
 git checkout -B "${branch}"
 git add -- apps/web/wrangler.jsonc apps/web/worker-configuration.d.ts
-if [ -e tools/deploy/kino-pin.json ]; then
-  git add -- tools/deploy/kino-pin.json
-fi
+for pin_file in tools/deploy/kino-pin.json tools/deploy/kino-release.json; do
+  if [ -e "${pin_file}" ]; then
+    git add -- "${pin_file}"
+  fi
+done
 git commit --quiet -m "${title}"
 tools/workflows/release/push-bot-branch.sh "${branch}"
 body="The website deploy picks up $(printf '%s; ' "${changes[@]}")merge a Kino pin only after image-ops kino-promote stored that artifact, or the website deploy stops."

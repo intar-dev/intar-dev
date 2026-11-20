@@ -39,8 +39,13 @@ if [ -n "${missing}" ]; then
   echo "The registry stores no Kino artifact ${missing}. Run image-ops with the kino-promote option for that release before this deploy." >&2
   exit 1
 fi
-jq --arg pins "${pins}" '.vars.KINO_PINS_JSON = $pins' \
+# The releases of the pinned artifacts, for a pipeline's boot check: only the
+# entries that are the pin's current ones, so a pin moved by hand names none.
+releases="$(bun tools/deploy/kino-artifact.ts releases --file "${pin_file}" --releases tools/deploy/kino-release.json)"
+jq --arg pins "${pins}" --arg releases "${releases}" \
+  '.vars.KINO_PINS_JSON = $pins | .vars.KINO_RELEASES_JSON = $releases' \
   "${DEPLOYMENT_CONFIG}" > "${DEPLOYMENT_CONFIG}.pinned"
 mv "${DEPLOYMENT_CONFIG}.pinned" "${DEPLOYMENT_CONFIG}"
-jq -e --arg pins "${pins}" '.vars.KINO_PINS_JSON == $pins' "${DEPLOYMENT_CONFIG}" >/dev/null
-printf 'Kino pin: %s\n' "${pins}" >> "${GITHUB_STEP_SUMMARY}"
+jq -e --arg pins "${pins}" --arg releases "${releases}" \
+  '.vars.KINO_PINS_JSON == $pins and .vars.KINO_RELEASES_JSON == $releases' "${DEPLOYMENT_CONFIG}" >/dev/null
+printf 'Kino pin: %s\nKino releases: %s\n' "${pins}" "${releases}" >> "${GITHUB_STEP_SUMMARY}"

@@ -800,3 +800,269 @@ mod pipeline {
         BuiltImage::forget(dir.path()).expect("nothing to remove is fine");
     }
 }
+
+mod setup {
+    use std::collections::HashMap;
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::path::Path;
+
+    use clap::Parser;
+    use intar_image_build::tools::{BUILDKIT_IMAGE, BUILDKIT_VERSION, UMOCI_VERSION};
+    use intar_image_build::{QemuBuildConfig, sha256_file_hex};
+
+    use crate::setup_command::{Sources, install, qemu_version};
+    use crate::{Cli, Command};
+
+    /// A gzipped tar with one file.
+    fn archive(member: &str, content: &[u8]) -> Vec<u8> {
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, member, content)
+            .expect("append");
+        tar.into_inner().expect("tar").finish().expect("gzip")
+    }
+
+    fn sha256(bytes: &[u8]) -> String {
+        let scratch = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(scratch.path(), bytes).expect("write");
+        sha256_file_hex(scratch.path()).expect("hash")
+    }
+
+    /// Serves `files` by path; anything else is a 404.
+    fn serve(files: HashMap<String, Vec<u8>>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("an address"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut head = String::new();
+                while !head.ends_with("\r\n\r\n") {
+                    if reader.read_line(&mut head).unwrap_or(0) == 0 {
+                        break;
+                    }
+                }
+                let path = head.split_whitespace().nth(1).unwrap_or_default();
+                let (status, body) = files
+                    .get(path)
+                    .map_or((404, Vec::new()), |body| (200, body.clone()));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+            }
+        });
+        url
+    }
+
+    struct Fixture {
+        sources: Sources,
+        descriptor: serde_json::Value,
+    }
+
+    /// A server with every download and the descriptor that names its Kinos.
+    fn fixture() -> Fixture {
+        let buildkit = archive("bin/buildctl", b"buildctl");
+        let umoci = b"umoci".to_vec();
+        let kino_amd64 = archive("kino", b"kino for amd64");
+        let kino_arm64 = archive("kino", b"kino for arm64");
+        let descriptor = serde_json::json!({
+            "cli_version": "0.15.0",
+            "sha256": {},
+            "digest": "p00000000",
+            "kino": {
+                "amd64": { "version": "0.12.0", "sha256": sha256(&kino_amd64) },
+                "arm64": { "version": "0.12.0", "sha256": sha256(&kino_arm64) },
+            },
+        });
+        let sources = Sources {
+            buildkit_sha256: sha256(&buildkit),
+            umoci_sha256: sha256(&umoci),
+            github: serve(HashMap::from([
+                (
+                    format!("/moby/buildkit/releases/download/{BUILDKIT_VERSION}/buildkit-{BUILDKIT_VERSION}.linux-amd64.tar.gz"),
+                    buildkit,
+                ),
+                (
+                    format!("/opencontainers/umoci/releases/download/{UMOCI_VERSION}/umoci.linux.amd64"),
+                    umoci,
+                ),
+                (
+                    "/intar-dev/intar-dev/releases/download/kino%2Fv0.12.0/kino_0.12.0_linux_amd64.tar.gz".to_owned(),
+                    kino_amd64,
+                ),
+                (
+                    "/intar-dev/intar-dev/releases/download/kino%2Fv0.12.0/kino_0.12.0_linux_arm64.tar.gz".to_owned(),
+                    kino_arm64,
+                ),
+            ])),
+        };
+        Fixture {
+            sources,
+            descriptor,
+        }
+    }
+
+    fn args(
+        dir: &Path,
+        descriptor: &serde_json::Value,
+        cache: Option<&Path>,
+    ) -> crate::setup_command::SetupCommand {
+        let file = dir.join("descriptor.json");
+        std::fs::create_dir_all(dir).expect("mkdir");
+        std::fs::write(&file, descriptor.to_string()).expect("write");
+        let mut argv = vec![
+            "intar-image-cli".to_owned(),
+            "setup".to_owned(),
+            "--dir".to_owned(),
+            dir.join("intar").to_string_lossy().into_owned(),
+            "--descriptor".to_owned(),
+            file.to_string_lossy().into_owned(),
+        ];
+        if let Some(cache) = cache {
+            argv.extend(["--cache".to_owned(), cache.to_string_lossy().into_owned()]);
+        }
+        let Command::Setup(args) = Cli::try_parse_from(argv).expect("setup parses").command else {
+            panic!("expected setup");
+        };
+        args
+    }
+
+    #[test]
+    fn setup_lays_out_the_tools_and_a_configuration_build_reads() {
+        let fixture = fixture();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache = temp.path().join("volume");
+        let installed = install(
+            &args(temp.path(), &fixture.descriptor, Some(&cache)),
+            &fixture.sources,
+        )
+        .expect("installed");
+
+        let dir = temp.path().join("intar");
+        let read = |path: &Path| std::fs::read(path).expect("the file");
+        assert_eq!(read(&dir.join("bin/buildctl")), b"buildctl");
+        assert_eq!(read(&dir.join("bin/umoci")), b"umoci");
+        assert_eq!(read(&installed.kino_amd64), b"kino for amd64");
+        assert_eq!(read(&installed.kino_arm64), b"kino for arm64");
+        assert_eq!(installed.kino_arm64, dir.join("kino/arm64/kino"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.join("bin/buildctl"))
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111);
+        }
+
+        // The configuration is one `build` takes, with nothing in the checkout.
+        let config: QemuBuildConfig =
+            serde_json::from_slice(&read(&installed.config)).expect("a build configuration");
+        assert_eq!(config.work_root, dir.join("work"));
+        assert_eq!(config.layered.buildctl_binary, dir.join("bin/buildctl"));
+        assert_eq!(config.layered.umoci_binary, dir.join("bin/umoci"));
+        assert_eq!(config.layered.oci_cache_root, Some(cache.join("oci")));
+        assert_eq!(
+            config.layered.checkpoint_cache_root,
+            Some(cache.join("checkpoints"))
+        );
+        assert!(config.layered.use_cache);
+
+        // The daemon is the pinned image, on the socket `build` looks for.
+        assert_eq!(installed.buildkit_socket, cache.join("oci/buildkitd.sock"));
+        assert_eq!(
+            installed.buildkit_run,
+            format!(
+                "{BUILDKIT_IMAGE} --addr unix://{} --root {} --config {}",
+                cache.join("oci/buildkitd.sock").display(),
+                cache.join("buildkit").display(),
+                cache.join("oci/buildkitd.toml").display()
+            )
+        );
+        assert!(
+            String::from_utf8(read(&cache.join("oci/buildkitd.toml")))
+                .expect("text")
+                .contains("maxUsedSpace = 6442450944")
+        );
+    }
+
+    #[test]
+    fn a_download_with_another_hash_is_refused_and_not_kept() {
+        let mut fixture = fixture();
+        fixture.sources.umoci_sha256 = "0".repeat(64);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error = install(
+            &args(temp.path(), &fixture.descriptor, None),
+            &fixture.sources,
+        )
+        .expect_err("refused");
+        assert!(format!("{error:#}").contains("not the pinned"), "{error:#}");
+        assert!(!temp.path().join("intar/bin/umoci").exists());
+
+        // The same for a Kino the descriptor names with another hash.
+        let mut fixture = self::fixture();
+        fixture.descriptor["kino"]["arm64"]["sha256"] = serde_json::json!("1".repeat(64));
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error = install(
+            &args(temp.path(), &fixture.descriptor, None),
+            &fixture.sources,
+        )
+        .expect_err("refused");
+        assert!(format!("{error:#}").contains("not the pinned"), "{error:#}");
+        assert!(!temp.path().join("intar/kino/arm64/kino").exists());
+    }
+
+    #[test]
+    fn a_descriptor_without_a_pinned_kino_downloads_nothing() {
+        let mut fixture = fixture();
+        fixture
+            .descriptor
+            .as_object_mut()
+            .expect("an object")
+            .remove("kino");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error = install(
+            &args(temp.path(), &fixture.descriptor, None),
+            &fixture.sources,
+        )
+        .expect_err("refused");
+        assert!(
+            format!("{error:#}").contains("names no amd64 Kino yet"),
+            "{error:#}"
+        );
+        assert!(!temp.path().join("intar").exists());
+
+        // A version that could leave the release's path is no version.
+        let mut fixture = self::fixture();
+        fixture.descriptor["kino"]["amd64"]["version"] = serde_json::json!("0.12.0/../x");
+        let error = install(
+            &args(temp.path(), &fixture.descriptor, None),
+            &fixture.sources,
+        )
+        .expect_err("refused");
+        assert!(
+            format!("{error:#}").contains("is not a version"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn reads_a_qemu_version() {
+        assert_eq!(
+            qemu_version("QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.4)\nCopyright"),
+            Some((8, 2))
+        );
+        assert_eq!(qemu_version("QEMU emulator version 11.1.3"), Some((11, 1)));
+        assert_eq!(qemu_version("something else"), None);
+        assert!((6, 2) < (8, 2) && (10, 0) > (8, 2));
+    }
+}
