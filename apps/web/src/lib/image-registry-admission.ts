@@ -56,6 +56,12 @@ export const REGISTRY_REAP_GRACE_MS = 60 * 60 * 1000;
 export const REGISTRY_REAP_BATCH_SIZE = 500;
 /** How long a closed session row stays for idempotent retries and diagnosis. */
 export const REGISTRY_CLOSED_SESSION_RETAIN_MS = 6 * 60 * 60 * 1000;
+/**
+ * How long past its lease a pipeline's writer row is kept. What a pipeline
+ * writes is fenced on its lease (`liveWriterSql`), so an expired row guards
+ * nothing; the margin is for clocks that disagree.
+ */
+export const REGISTRY_PIPELINE_WRITER_GRACE_MS = 60 * 1000;
 
 const SESSION_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
 
@@ -65,6 +71,17 @@ const SESSION_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
 const HOLDING_SESSION_SQL = "state = 'open' AND owner_kind <> 'pipeline'";
 const HOLDING_WRITER_SQL = `(released_at IS NULL OR outcome = 'unknown')
            AND NOT (owner_kind = 'pipeline' AND operation IN ('blob_exists', 'blob_put'))`;
+
+/**
+ * Holds while the writer `idParam` is unreleased and its lease has not run
+ * out at `nowParam` (both `?n`). A pipeline's manifest and image inserts
+ * carry it, so a request that outlived its lease writes nothing, and the
+ * sweep may start without it.
+ */
+export function liveWriterSql(idParam: string, nowParam: string): string {
+  return `EXISTS (SELECT 1 FROM image_registry_operation_writers
+           WHERE id = ${idParam} AND released_at IS NULL AND expires_at > ${nowParam})`;
+}
 
 /**
  * The D1-only surface. The collector runs in a child Worker that shares the
@@ -1234,6 +1251,12 @@ export async function acquireRegistrySweep(
                    AND pipeline.closed_at IS NULL
                    AND pipeline.expires_at > ?1)`,
     ).bind(now),
+    // A pipeline's writer past its lease: its request can write nothing any
+    // more, and nothing else would remove the row.
+    env.DB.prepare(
+      `DELETE FROM image_registry_operation_writers
+        WHERE owner_kind = 'pipeline' AND expires_at <= ?1`,
+    ).bind(now - REGISTRY_PIPELINE_WRITER_GRACE_MS),
     env.DB.prepare(
       `INSERT INTO image_registry_admission
          (key, protocol_version, enforcement, epoch, state, sweep_token,
@@ -1279,17 +1302,9 @@ export async function acquireRegistrySweep(
                WHERE key = ?5 AND state = 'sweeping' AND sweep_token = ?3)
        RETURNING id`,
     ).bind(runId, input.owner, sweepToken, now, REGISTRY_ADMISSION_KEY),
-    // A pipeline's blob writer that was never settled holds nothing and is
-    // counted nowhere, so nothing else would ever remove it.
-    env.DB.prepare(
-      `DELETE FROM image_registry_operation_writers
-        WHERE owner_kind = 'pipeline'
-          AND operation IN ('blob_exists', 'blob_put')
-          AND expires_at <= ?1`,
-    ).bind(now - REGISTRY_REAP_GRACE_MS),
   ]);
 
-  const marker = firstRow(results[2]);
+  const marker = firstRow(results[3]);
   if (!marker) {
     const state = await readRegistryAdmissionState(env);
     return {

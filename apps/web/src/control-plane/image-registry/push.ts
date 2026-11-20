@@ -11,16 +11,27 @@ import {
 import validateManifest from "@/generated/contracts/oci-manifest-v1.validate";
 import validateMachineConfig from "@/generated/contracts/oci-machine-config-v1.validate";
 import validateKinoConfig from "@/generated/contracts/oci-kino-config-v1.validate";
-import { readRegistryAuth } from "@/lib/image-registry-admission";
-import { chargePipelineSession, refundPipelineSession } from "@/lib/pipeline-upload-sessions";
+import { KEPT_REVISIONS_CTE } from "@/lib/kept-revisions";
+import {
+  liveWriterSql,
+  readRegistryAuth,
+  type RegistryOperationLease,
+} from "@/lib/image-registry-admission";
+import {
+  chargePipelineSession,
+  PIPELINE_IMAGE_MAX_BYTES,
+  PIPELINE_SCOPE_STORAGE_BYTES,
+  refundPipelineSession,
+} from "@/lib/pipeline-upload-sessions";
 import { isRecord, jsonResponse, sha256Hex } from "./shared";
 
 /**
  * The push side of the OCI registry: blobs and manifests under one
  * content-addressed prefix, `oci/sha256/<hex>`, and the result of a machine
  * build. Builders push machine images; the publish token pushes Kino
- * artifacts. A pipeline (#441) may ask for and store blobs within its
- * session's byte budget; a manifest and a result are not its to push yet.
+ * artifacts. A pipeline (#441) stores blobs within its session's byte
+ * budget, pushes the machine manifests of its own bundle's build keys, and
+ * records each as its scope's image of that key.
  * The router admits every write as a registry writer.
  */
 
@@ -32,7 +43,7 @@ const KINO_BINARY_MEDIA_TYPE = "application/octet-stream";
 export const MAX_BLOB_BYTES = 64 * 1024 * 1024;
 export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_RESULT_BYTES = 4096;
-/** Two binds per row, under D1's 100 per statement. */
+/** Two binds per row and a pipeline's two for its lease: D1's 100 per statement. */
 const INDEX_ROWS_PER_STATEMENT = 49;
 const HEAD_BATCH = 50;
 const MAX_ATTEMPT = 0xffff_ffff;
@@ -154,6 +165,7 @@ export async function handleManifestPut(
   request: Request,
   env: Cloudflare.Env,
   hex: string,
+  lease?: RegistryOperationLease,
 ): Promise<Response> {
   if (request.method !== "PUT") return methodNotAllowed("PUT");
   const auth = await readRegistryAuth(request, env);
@@ -177,9 +189,11 @@ export async function handleManifestPut(
   if (!machine && manifest.artifactType !== KINO_ARTIFACT_TYPE) {
     return invalid("unsupported artifact type");
   }
-  // A pipeline is neither: it pushes no manifest yet.
-  if (auth.owner.kind !== (machine ? "builder" : "publish_token")) {
-    return jsonResponse({ error: `${machine ? "a builder" : "the publish token"} pushes this artifact` }, 403);
+  const pipeline = auth.owner.kind === "pipeline" ? auth.owner.id : null;
+  if (machine ? auth.owner.kind === "publish_token" : auth.owner.kind !== "publish_token") {
+    return jsonResponse({
+      error: `${machine ? "a builder or a pipeline" : "the publish token"} pushes this artifact`,
+    }, 403);
   }
   const mediaTypesAllowed = machine
     ? manifest.config.mediaType === MACHINE_CONFIG_MEDIA_TYPE &&
@@ -197,6 +211,9 @@ export async function handleManifestPut(
       return invalid("one digest is named with two sizes");
     }
     sizes.set(descriptor.digest, descriptor.size);
+  }
+  if (pipeline && imageBytes(sizes) > PIPELINE_IMAGE_MAX_BYTES) {
+    return jsonResponse({ error: "the image is over the size a pipeline may push", code: "image_too_large" }, 413);
   }
   const blobs = [...sizes.keys()];
   const bucket = env.VM_IMAGE_REGISTRY_BUCKET;
@@ -227,29 +244,48 @@ export async function handleManifestPut(
   if (machine && (config as { architecture?: string }).architecture === undefined) {
     return jsonResponse({ error: "the image config names no architecture", code: "architecture" }, 409);
   }
+  if (pipeline && !(await keyInSessionBundle(env, pipeline, (config as { build_key: string }).build_key))) {
+    return notInBundle();
+  }
 
   const digest = `sha256:${hex}`;
+  // A pipeline's rows are written only while its lease holds: the blobs were
+  // seen under it, and a sweep that started since may have deleted them.
+  const now = Date.now();
+  const fenced = pipeline !== null;
+  const fence = (id: number) => (fenced ? ` WHERE ${liveWriterSql(`?${id}`, `?${id + 1}`)}` : "");
+  const fenceBinds = fenced ? [lease?.operationId ?? "", now] : [];
   await bucket.put(OCI_PREFIX + hex, bytes, {
     sha256: hex,
     httpMetadata: { contentType: OCI_MANIFEST_MEDIA_TYPE },
   });
   const statements = [
     env.DB.prepare(
-      `INSERT OR IGNORE INTO registry_manifests (digest, media_type, artifact_type, size, created_at)
-       VALUES (?1, ?2, ?3, ?4, ?5)`,
-    ).bind(digest, manifest.mediaType, manifest.artifactType, bytes.byteLength, Date.now()),
+      // A manifest stored long ago keeps its blobs only while it is young or
+      // rooted. A pipeline that pushes it again has just seen every blob, so
+      // the row is young again and they stay until its image is recorded.
+      fenced
+        ? `INSERT INTO registry_manifests (digest, media_type, artifact_type, size, created_at)
+           SELECT ?1, ?2, ?3, ?4, ?5${fence(6)}
+           ON CONFLICT(digest) DO UPDATE SET created_at = excluded.created_at`
+        : `INSERT OR IGNORE INTO registry_manifests (digest, media_type, artifact_type, size, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5)`,
+    ).bind(digest, manifest.mediaType, manifest.artifactType, bytes.byteLength, now, ...fenceBinds),
   ];
   for (let start = 0; start < blobs.length; start += INDEX_ROWS_PER_STATEMENT) {
     const rows = blobs.slice(start, start + INDEX_ROWS_PER_STATEMENT);
     statements.push(
       env.DB.prepare(
-        `INSERT OR IGNORE INTO registry_manifest_blobs (manifest_digest, blob_digest) VALUES ${rows
-          .map((_, index) => `(?${index * 2 + 1}, ?${index * 2 + 2})`)
-          .join(", ")}`,
-      ).bind(...rows.flatMap((blob) => [digest, blob])),
+        `INSERT OR IGNORE INTO registry_manifest_blobs (manifest_digest, blob_digest)
+         SELECT * FROM (VALUES ${rows
+           .map((_, index) => `(?${index * 2 + 1}, ?${index * 2 + 2})`)
+           .join(", ")})${fence(rows.length * 2 + 1)}`,
+      ).bind(...rows.flatMap((blob) => [digest, blob]), ...fenceBinds),
     );
   }
-  await env.DB.batch(statements);
+  if (fenced) statements.push(env.DB.prepare(`SELECT 1 AS live${fence(1)}`).bind(...fenceBinds));
+  const results = await env.DB.batch(statements);
+  if (fenced && !results.at(-1)?.results.length) return leaseRanOut();
   return stored(hex);
 }
 
@@ -271,20 +307,30 @@ export async function handleBuildResult(
   request: Request,
   env: Cloudflare.Env,
   buildId: string,
+  lease?: RegistryOperationLease,
 ): Promise<Response> {
   const read = request.method === "GET";
   if (!read && request.method !== "POST") return methodNotAllowed("GET, POST");
   const auth = await readRegistryAuth(request, env);
   if (!auth.ok) return auth.response;
-  // A pipeline has no build row to record on; its own result route is not
-  // built yet.
-  if (auth.owner.kind !== "builder") {
-    return jsonResponse({ error: "a builder records build results" }, 403);
+  if (auth.owner.kind === "publish_token") {
+    return jsonResponse({ error: "a builder or a pipeline records build results" }, 403);
   }
   const buildKey = machineBuildKey(buildId);
   const query = new URL(request.url).searchParams;
   const architecture = query.get("arch") ?? "amd64";
   if (architecture !== "amd64" && architecture !== "arm64") return invalid("a result is for amd64 or arm64");
+  if (auth.owner.kind === "pipeline") {
+    // A pipeline has no build row and no attempt, and nothing to read back.
+    if (read) return methodNotAllowed("POST");
+    if (!buildKey) return invalid("a result names a build id");
+    const named = await readResultDigest(request);
+    return named instanceof Response
+      ? named
+      : recordPipelineImage(env, {
+          sessionId: auth.owner.id, operationId: lease?.operationId ?? "", buildKey, architecture, imageDigest: named,
+        });
+  }
   const attemptText = query.get("attempt") ?? "";
   const attempt = /^[1-9][0-9]{0,9}$/.test(attemptText) ? Number(attemptText) : 0;
   if (!buildKey || attempt < 1 || attempt > MAX_ATTEMPT) {
@@ -292,13 +338,8 @@ export async function handleBuildResult(
   }
   let imageDigest = "";
   if (!read) {
-    const length = declaredLength(request, MAX_RESULT_BYTES);
-    if (length instanceof Response) return length;
-    const body = parseJson(await request.arrayBuffer());
-    const named = isRecord(body) && Object.keys(body).length === 1 ? body.image_digest : null;
-    if (typeof named !== "string" || !DIGEST_RE.test(named)) {
-      return invalid("the result is {\"image_digest\":\"sha256:<hex>\"}");
-    }
+    const named = await readResultDigest(request);
+    if (named instanceof Response) return named;
     imageDigest = named;
   }
 
@@ -364,6 +405,160 @@ export async function handleBuildResult(
     return jsonResponse({ error: "the build moved on before this result", code: "build_superseded" }, 409);
   }
   return jsonResponse({ ok: true, image_digest: imageDigest }, 201);
+}
+
+/** The digest a result's body names. */
+async function readResultDigest(request: Request): Promise<string | Response> {
+  const length = declaredLength(request, MAX_RESULT_BYTES);
+  if (length instanceof Response) return length;
+  const body = parseJson(await request.arrayBuffer());
+  const named = isRecord(body) && Object.keys(body).length === 1 ? body.image_digest : null;
+  return typeof named === "string" && DIGEST_RE.test(named)
+    ? named
+    : invalid("the result is {\"image_digest\":\"sha256:<hex>\"}");
+}
+
+/**
+ * Records a pipeline's image as its scope's image of one build key and
+ * architecture (#441). The key must be one of the session's own bundle, and
+ * the first image recorded for it stays: a later one is answered with the
+ * recorded digest, so two runs that baked the same key both succeed. A row
+ * whose manifest is gone or whose format is no longer current is replaced.
+ * Each architecture is recorded by itself.
+ */
+async function recordPipelineImage(
+  env: Cloudflare.Env,
+  input: {
+    sessionId: string;
+    operationId: string;
+    buildKey: string;
+    architecture: "amd64" | "arm64";
+    imageDigest: string;
+  },
+): Promise<Response> {
+  const { sessionId, buildKey, architecture, imageDigest } = input;
+  if (!(await keyInSessionBundle(env, sessionId, buildKey))) return notInBundle();
+  // An image that stands is the answer before anything is asked of the new
+  // one: a second run of the key stores nothing and needs no room.
+  const standing = await env.DB.prepare(
+    `SELECT image.image_digest FROM scope_machine_images image
+      WHERE image.scope_key = (SELECT scope_key FROM pipeline_upload_sessions WHERE id = ?1)
+        AND image.build_key = ?2 AND image.architecture = ?3 AND image.image_format = ?4
+        AND EXISTS (SELECT 1 FROM registry_manifests WHERE digest = image.image_digest)`,
+  ).bind(sessionId, buildKey, architecture, IMAGE_FORMAT).first<string>("image_digest");
+  if (standing) return jsonResponse({ ok: true, image_digest: standing, recorded: true });
+
+  const stored_ = await env.DB.prepare(
+    `SELECT 1 AS present FROM registry_manifests WHERE digest = ?1 AND artifact_type = ?2`,
+  ).bind(imageDigest, MACHINE_ARTIFACT_TYPE).first();
+  const manifest = stored_ ? await readJsonObject(env, imageDigest) : null;
+  const config = validateManifest(manifest) ? await readJsonObject(env, manifest.config.digest) : null;
+  if (!validateManifest(manifest) || !validateMachineConfig(config)) {
+    return jsonResponse({ error: "the image is not a stored machine image", code: "image_unknown" }, 409);
+  }
+  if (config.build_key !== buildKey || config.image_format !== IMAGE_FORMAT) {
+    return jsonResponse({ error: "the image was built for another build key", code: "build_key_mismatch" }, 409);
+  }
+  if (config.architecture !== architecture) {
+    return jsonResponse({ error: `the image is not an ${architecture} image`, code: "architecture_mismatch" }, 409);
+  }
+  const sizeBytes = imageBytes(
+    new Map([manifest.config, ...manifest.layers].map((descriptor) => [descriptor.digest, descriptor.size])),
+  );
+
+  // Rows no kept revision names are left out: nothing reads them, and until
+  // the sweep runs in enforce mode nothing removes them.
+  // ponytail: read before the insert, so results recorded at once can pass it
+  // together; put it into the insert if a scope ever gets near its quota.
+  const used = await env.DB.prepare(
+    `WITH ${KEPT_REVISIONS_CTE}
+     SELECT COALESCE(SUM(image.size_bytes), 0) AS bytes
+       FROM scope_machine_images image, pipeline_upload_sessions session
+      WHERE session.id = ?1 AND image.scope_key = session.scope_key
+        AND NOT (image.build_key = ?2 AND image.architecture = ?3)
+        AND EXISTS (SELECT 1 FROM kept_revisions kept
+                      JOIN scenarios scenario ON scenario.id = kept.scenario_id,
+                      json_each(kept.doc_json, '$.machines') machine
+                     WHERE scenario.scope_key = image.scope_key
+                       AND json_extract(machine.value, '$.build_key') = image.build_key)`,
+  ).bind(sessionId, buildKey, architecture).first<number>("bytes");
+  if ((used ?? 0) + sizeBytes > PIPELINE_SCOPE_STORAGE_BYTES) {
+    return jsonResponse({
+      error: "this source's images are over the storage it may use", code: "scope_storage_exceeded",
+    }, 409);
+  }
+
+  const now = Date.now();
+  const live = liveWriterSql("?1", "?2");
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM scope_machine_images
+        WHERE scope_key = (SELECT scope_key FROM pipeline_upload_sessions WHERE id = ?3)
+          AND build_key = ?4 AND architecture = ?5
+          AND (image_format <> ?6 OR NOT EXISTS (
+                SELECT 1 FROM registry_manifests WHERE digest = scope_machine_images.image_digest))
+          AND ${live}`,
+    ).bind(input.operationId, now, sessionId, buildKey, architecture, IMAGE_FORMAT),
+    env.DB.prepare(
+      `INSERT INTO scope_machine_images
+         (scope_key, build_key, architecture, image_digest, image_format, size_bytes,
+          github_repository_id, github_repository, sha, run_id, run_attempt,
+          runner_environment, job_workflow_sha, created_at)
+       SELECT scope_key, ?4, ?5, ?6, ?7, ?8, github_repository_id, github_repository, sha,
+              run_id, run_attempt, runner_environment, job_workflow_sha, ?2
+         FROM pipeline_upload_sessions
+        WHERE id = ?3 AND ${live}
+          AND EXISTS (SELECT 1 FROM registry_manifests WHERE digest = ?6)
+       ON CONFLICT DO NOTHING
+       RETURNING image_digest`,
+    ).bind(input.operationId, now, sessionId, buildKey, architecture, imageDigest, IMAGE_FORMAT, sizeBytes),
+    env.DB.prepare(
+      `SELECT image_digest FROM scope_machine_images
+        WHERE scope_key = (SELECT scope_key FROM pipeline_upload_sessions WHERE id = ?1)
+          AND build_key = ?2 AND architecture = ?3`,
+    ).bind(sessionId, buildKey, architecture),
+    env.DB.prepare(`SELECT 1 AS live WHERE ${live}`).bind(input.operationId, now),
+  ]);
+  if (!results[3]?.results.length) return leaseRanOut();
+  if (results[1]?.results.length) return jsonResponse({ ok: true, image_digest: imageDigest }, 201);
+  const recorded = (results[2]?.results[0] as { image_digest: string } | undefined)?.image_digest;
+  return recorded
+    ? jsonResponse({ ok: true, image_digest: recorded, recorded: true })
+    : jsonResponse({ error: "the image is not a stored machine image", code: "image_unknown" }, 409);
+}
+
+/** Whether a revision of the session's rev, in the session's scope, names `buildKey` for a machine. */
+async function keyInSessionBundle(env: Cloudflare.Env, sessionId: string, buildKey: string): Promise<boolean> {
+  const named = await env.DB.prepare(
+    `SELECT 1 AS named
+       FROM pipeline_upload_sessions session
+       JOIN scenario_revisions revision ON revision.rev = session.rev
+       JOIN scenarios scenario ON scenario.id = revision.scenario_id AND scenario.scope_key = session.scope_key,
+            json_each(revision.doc_json, '$.machines') machine
+      WHERE session.id = ?1 AND json_extract(machine.value, '$.build_key') = ?2
+      LIMIT 1`,
+  ).bind(sessionId, buildKey).first();
+  return named !== null;
+}
+
+/** The bytes of an image's distinct blobs. */
+function imageBytes(sizes: Map<string, number>): number {
+  return [...sizes.values()].reduce((sum, size) => sum + size, 0);
+}
+
+function notInBundle(): Response {
+  return jsonResponse({
+    error: "no scenario of this session's commit builds this key", code: "build_key_not_in_bundle",
+  }, 403);
+}
+
+/** The writer's lease ended before its rows were written: nothing was, and the caller may push again. */
+function leaseRanOut(): Response {
+  const response = jsonResponse({
+    error: "the registry writer's lease ran out before the write; push again", code: "registry_writer_expired",
+  }, 409);
+  response.headers.set("retry-after", "1");
+  return response;
 }
 
 export interface KinoPin {

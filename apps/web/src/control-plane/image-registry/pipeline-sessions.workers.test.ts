@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +15,7 @@ import {
   scenarioSourceCommits,
   scenarioSources,
   scenarios,
+  scopeMachineImages,
   user,
 } from "@/db/schema";
 import { GITHUB_ACTIONS_ISSUER } from "@/lib/github-oidc";
@@ -22,12 +23,14 @@ import {
   acquireRegistrySweep,
   compactRegistryAdmissionHistory,
   heartbeatRegistrySweep,
+  REGISTRY_PIPELINE_WRITER_GRACE_MS,
   REGISTRY_REAP_GRACE_MS,
   REGISTRY_SESSION_HEADER,
   setRegistryEnforcement,
+  type RegistryOperationLease,
 } from "@/lib/image-registry-admission";
 import { OCI_SWEEP_AGE_GUARD_MS, runOciSweep } from "@/lib/oci-registry-sweep";
-import { PIPELINE_SESSION_MAX_BYTES } from "@/lib/pipeline-upload-sessions";
+import { PIPELINE_SCOPE_STORAGE_BYTES, PIPELINE_SESSION_MAX_BYTES } from "@/lib/pipeline-upload-sessions";
 import { changeScenarioSource, scenarioSourceScope } from "@/lib/scenario-sources";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -40,7 +43,7 @@ import {
   PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW,
   PIPELINE_SESSION_TTL_MS,
 } from "./pipeline-sessions";
-import { KINO_CONFIG_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE } from "./push";
+import { handleBuildResult, handleManifestPut, KINO_CONFIG_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE } from "./push";
 import { handleImageRegistryRequest } from "./router";
 
 const ORIGIN = "https://intar.test";
@@ -53,6 +56,10 @@ const SCOPE = "public";
 // Repository 42 is bound to the public scope; 43 is bound to nothing.
 const REPO = 42;
 const REV = `git-${REPO}-${SHA}-digest`;
+/** The build key of the seeded bundle's one machine, and one no bundle names. */
+const KEY_HEX = "b".repeat(64);
+const KEY = `sha256:${KEY_HEX}`;
+const FOREIGN_HEX = "f".repeat(64);
 
 let testEnv: Cloudflare.Env;
 let oidcKey: CryptoKey;
@@ -97,7 +104,9 @@ afterEach(() => {
 
 /** A bundle of `rev` as ingest leaves it, with one revision in `state`. */
 async function seedBundle(
-  input: { rev?: string; producer?: "builder" | "pipeline"; state?: "building" | "ready" | "failed" } = {},
+  input: {
+    rev?: string; producer?: "builder" | "pipeline"; state?: "building" | "ready" | "failed"; keys?: string[];
+  } = {},
 ) {
   const rev = input.rev ?? REV;
   await db().insert(bundles).values({
@@ -108,7 +117,8 @@ async function seedBundle(
     id: "intar/lab", namespace: "intar", slug: "lab", scopeKey: SCOPE, enabled: true, play: true,
   }).onConflictDoNothing();
   await db().insert(scenarioRevisions).values({
-    scenarioId: "intar/lab", rev, guestContract: 3, docJson: {} as never, state: input.state ?? "building",
+    scenarioId: "intar/lab", rev, guestContract: 3, state: input.state ?? "building",
+    docJson: { machines: (input.keys ?? [KEY]).map((key, index) => ({ name: `m${index}`, build_key: key })) } as never,
   });
 }
 
@@ -167,9 +177,9 @@ async function session(): Promise<string> {
   return ((await response.json()) as { token: string }).token;
 }
 
-async function refusal(response: Response, status: number, code: string) {
+async function refusal(response: Response, status: number, code: string | undefined) {
   expect(response.status).toBe(status);
-  expect(await response.json()).toMatchObject({ code });
+  if (code !== undefined) expect(await response.json()).toMatchObject({ code });
 }
 
 const putBlob = (pushed: PushedBlob, bearer: string) =>
@@ -180,6 +190,26 @@ const putManifest = async (manifest: unknown, bearer: string) => {
     bearer, body: pushed.bytes, headers: { "content-type": OCI_MANIFEST_MEDIA_TYPE },
   });
 };
+/** The blobs and the manifest of a small machine image for `keyHex`. */
+async function machineImage(keyHex: string, input: { architecture?: string; label?: string } = {}) {
+  const label = `${input.label ?? "image"} ${input.architecture ?? "amd64"}`;
+  const config = await blob(JSON.stringify(machineConfig(`sha256:${keyHex}`, { architecture: input.architecture ?? "amd64" })));
+  const kernel = await blob(`kernel ${label}`);
+  const chunk = await blob(`chunk ${label}`);
+  const manifest = manifestOf("application/vnd.intar.machine.v1", config, "application/vnd.intar.machine.config.v1+json", [
+    ["application/vnd.intar.kernel.v1", kernel],
+    ["application/vnd.intar.disk.chunk.v1+zstd", chunk],
+  ]);
+  return { blobs: [config, kernel, chunk], manifest, digest: (await blob(JSON.stringify(manifest))).digest };
+}
+
+/** Pushes that image's blobs and its manifest as `bearer`. */
+async function pushImage(bearer: string, keyHex: string, input: { architecture?: string; label?: string } = {}) {
+  const image = await machineImage(keyHex, input);
+  for (const pushed of image.blobs) await putBlob(pushed, bearer);
+  return { ...image, response: await putManifest(image.manifest, bearer) };
+}
+
 const bytesPut = async () =>
   (await db().select({ bytesPut: pipelineUploadSessions.bytesPut }).from(pipelineUploadSessions))[0]?.bytesPut;
 
@@ -457,19 +487,24 @@ describe("a pipeline session token as a registry credential", () => {
     expect((await putBlob(other, PUBLISH)).status).toBe(201);
   });
 
-  it("cannot push a machine manifest, a Kino manifest or a result", async () => {
+  it("pushes a machine manifest for a key of its bundle, and nothing else", async () => {
     await seedBundle();
     const token = await session();
-    const buildKeyHex = "b".repeat(64);
-    const config = await blob(JSON.stringify(machineConfig(`sha256:${buildKeyHex}`)));
-    const kernel = await blob("kernel bytes");
-    const chunk = await blob("chunk bytes");
-    for (const pushed of [config, kernel, chunk]) expect((await putBlob(pushed, token)).status).toBe(201);
-    const machine = manifestOf("application/vnd.intar.machine.v1", config, "application/vnd.intar.machine.config.v1+json", [
-      ["application/vnd.intar.kernel.v1", kernel],
-      ["application/vnd.intar.disk.chunk.v1+zstd", chunk],
-    ]);
-    expect((await putManifest(machine, token)).status).toBe(403);
+    const mine = await pushImage(token, KEY_HEX);
+    expect(mine.response.status).toBe(201);
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM registry_manifest_blobs WHERE manifest_digest = ?1")
+      .bind(mine.digest).first("n")).toBe(3);
+
+    // A key no revision of its commit names, and one only another scope's does.
+    await refusal((await pushImage(token, FOREIGN_HEX)).response, 403, "build_key_not_in_bundle");
+    await db().insert(scenarios).values({
+      id: "acme/lab", namespace: "acme", slug: "lab", scopeKey: "organization:acme", enabled: true, play: true,
+    });
+    await db().insert(scenarioRevisions).values({
+      scenarioId: "acme/lab", rev: REV, guestContract: 3, state: "building",
+      docJson: { machines: [{ name: "m", build_key: `sha256:${FOREIGN_HEX}` }] } as never,
+    });
+    await refusal((await pushImage(token, FOREIGN_HEX)).response, 403, "build_key_not_in_bundle");
 
     const kinoConfig = await blob(JSON.stringify({ guest_contract: 3, version: "1.0.0" }));
     const binary = await blob("kino");
@@ -478,39 +513,106 @@ describe("a pipeline session token as a registry credential", () => {
       ["application/octet-stream", binary],
     ]);
     expect((await putManifest(kino, token)).status).toBe(403);
-    // The publish token's own push of the same manifest is as it was.
+    // The publish token's own push of the same manifest is as it was, and a
+    // machine manifest is still not its to push.
     expect((await putManifest(kino, PUBLISH)).status).toBe(201);
-    expect(await env.DB.prepare("SELECT count(*) AS n FROM registry_manifests").first("n")).toBe(1);
-
-    const result = `/registry/v1/builds/${buildKeyHex}/result?attempt=1`;
-    const posted = await call("POST", result, {
-      bearer: token, body: JSON.stringify({ image_digest: `sha256:${"d".repeat(64)}` }),
-    });
-    expect(posted.status).toBe(403);
-    expect((await call("GET", result, { bearer: token })).status).toBe(403);
+    expect((await pushImage(PUBLISH, KEY_HEX, { label: "other" })).response.status).toBe(403);
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM registry_manifests").first("n")).toBe(2);
     expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
   });
 
-  it("is refused a manifest or a result before its body is read, so an interrupted one holds nothing", async () => {
+  it("pushes a manifest of more blobs than one statement indexes, and makes a stored one young again", async () => {
+    await seedBundle();
+    const token = await session();
+    const config = await blob(JSON.stringify(machineConfig(KEY)));
+    const chunks = await Promise.all(Array.from({ length: 120 }, (_, index) => blob(`chunk ${index}`)));
+    for (const pushed of [config, ...chunks]) expect((await putBlob(pushed, token)).status).toBe(201);
+    const manifest = manifestOf("application/vnd.intar.machine.v1", config, "application/vnd.intar.machine.config.v1+json",
+      chunks.map((chunk) => ["application/vnd.intar.disk.chunk.v1+zstd", chunk] as [string, PushedBlob]));
+    expect((await putManifest(manifest, token)).status).toBe(201);
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM registry_manifest_blobs").first("n")).toBe(121);
+
+    // Pushed again long after, it protects its blobs like a new one.
+    await env.DB.prepare("UPDATE registry_manifests SET created_at = 1").run();
+    expect((await putManifest(manifest, token)).status).toBe(201);
+    expect(await env.DB.prepare("SELECT created_at FROM registry_manifests").first<number>("created_at")).toBeGreaterThan(1);
+  });
+
+  it("refuses an image over the size a pipeline may push before it looks for a blob", async () => {
+    await seedBundle();
+    const token = await session();
+    const image = await machineImage(KEY_HEX);
+    image.manifest.layers[1]!.size = PIPELINE_SESSION_MAX_BYTES;
+    await refusal(await putManifest(image.manifest, token), 413, "image_too_large");
+  });
+
+  it("is told to push a blob again when it went missing before the manifest", async () => {
+    await seedBundle();
+    const token = await session();
+    const image = await machineImage(KEY_HEX);
+    for (const pushed of image.blobs) expect((await putBlob(pushed, token)).status).toBe(201);
+    // A sweep between the upload and the manifest may have deleted it.
+    await env.VM_IMAGE_REGISTRY_BUCKET.delete(`oci/sha256/${image.blobs[2]!.hex}`);
+    await refusal(await putManifest(image.manifest, token), 409, "blob_unknown");
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM registry_manifests").first("n")).toBe(0);
+  });
+
+  it("writes nothing once its writer's lease has run out", async () => {
+    await seedBundle();
+    const token = await session();
+    const image = await machineImage(KEY_HEX);
+    for (const pushed of image.blobs) expect((await putBlob(pushed, token)).status).toBe(201);
+    const pushed = await blob(JSON.stringify(image.manifest));
+    const request = () => new Request(`${ORIGIN}/registry/v1/manifests/${pushed.digest}`, {
+      method: "PUT", body: pushed.bytes,
+      headers: { authorization: `Bearer ${token}`, "content-type": OCI_MANIFEST_MEDIA_TYPE, "content-length": String(pushed.bytes.length) },
+    });
+    // As the handler runs when the sweep's acquire has removed its writer.
+    const gone: RegistryOperationLease = { operationId: "gone", sessionId: null, epoch: 0, complete: async () => undefined };
+    await refusal(await handleManifestPut(request(), testEnv, pushed.hex, gone), 409, "registry_writer_expired");
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM registry_manifests").first("n")).toBe(0);
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM registry_manifest_blobs").first("n")).toBe(0);
+
+    expect((await putManifest(image.manifest, token)).status).toBe(201);
+    const result = new Request(`${ORIGIN}/registry/v1/builds/${KEY_HEX}/result`, {
+      method: "POST", body: JSON.stringify({ image_digest: pushed.digest }),
+      headers: { authorization: `Bearer ${token}`, "content-length": String(JSON.stringify({ image_digest: pushed.digest }).length) },
+    });
+    await refusal(await handleBuildResult(result, testEnv, KEY_HEX, gone), 409, "registry_writer_expired");
+    expect(await db().select().from(scopeMachineImages)).toEqual([]);
+  });
+
+  it("holds nothing when a manifest or a result is cut off, and the sweep removes a writer past its lease", async () => {
     await seedBundle();
     const token = await session();
     for (const [method, path] of [
       ["PUT", `/registry/v1/manifests/sha256:${"e".repeat(64)}`],
-      ["POST", `/registry/v1/builds/${"b".repeat(64)}/result?attempt=1`],
+      ["POST", `/registry/v1/builds/${KEY_HEX}/result`],
     ] as const) {
-      // A body that never arrives: the answer cannot have waited for it.
-      const body = new ReadableStream<Uint8Array>();
-      const response = await handleImageRegistryRequest(
+      const body = new ReadableStream<Uint8Array>({ start(controller) { controller.error(new Error("cut off")); } });
+      await expect(handleImageRegistryRequest(
         new Request(`${ORIGIN}${path}`, {
           method, body, duplex: "half",
-          headers: { authorization: `Bearer ${token}`, "content-type": OCI_MANIFEST_MEDIA_TYPE },
+          headers: { authorization: `Bearer ${token}`, "content-type": OCI_MANIFEST_MEDIA_TYPE, "content-length": "10" },
         } as RequestInit),
         testEnv,
-      );
-      expect(response?.status).toBe(403);
+      )).rejects.toThrow();
     }
     expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
+
+    // A Worker that died mid-request leaves its row. It holds the sweep for
+    // as long as its lease could still write, and no longer.
+    const left = (id: string, expiresAt: number) => env.DB.prepare(
+      `INSERT INTO image_registry_operation_writers
+         (id, session_id, owner_kind, owner_id, operation, epoch, outcome, created_at, heartbeat_at, expires_at)
+       VALUES (?1, NULL, 'pipeline', 'session', 'manifest_put', 0, 'pending', ?2, ?2, ?2)`,
+    ).bind(id, expiresAt).run();
+    await left("live", Date.now() + 60_000);
+    expect(await acquireRegistrySweep(env, { owner: "collector-a" })).toMatchObject({ ok: false, code: "registry_admission_busy" });
+    await env.DB.prepare("UPDATE image_registry_operation_writers SET expires_at = ?1")
+      .bind(Date.now() - REGISTRY_PIPELINE_WRITER_GRACE_MS - 1).run();
     expect((await acquireRegistrySweep(env, { owner: "collector-a" })).ok).toBe(true);
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
   });
 
   it("is refused by admission control, the cutover gate and the agent routes", async () => {
@@ -718,6 +820,122 @@ describe("a pipeline session token as a registry credential", () => {
       .toMatchObject({ removedSessions: 1 });
     expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
     expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_upload_sessions").first("n")).toBe(0);
+  });
+});
+
+describe("a pipeline recording its image", () => {
+  const record = (token: string, digest: string, hex = KEY_HEX, query = "") =>
+    call("POST", `/registry/v1/builds/${hex}/result${query}`, { bearer: token, body: JSON.stringify({ image_digest: digest }) });
+  const rows = () => db().select().from(scopeMachineImages).orderBy(scopeMachineImages.architecture);
+
+  it("records the first image of a key with what its session says of the run", async () => {
+    await seedBundle();
+    const token = await session();
+    const image = await pushImage(token, KEY_HEX);
+    const recorded = await record(token, image.digest);
+    expect(recorded.status).toBe(201);
+    expect(await recorded.json()).toEqual({ ok: true, image_digest: image.digest });
+    expect(await rows()).toEqual([expect.objectContaining({
+      scopeKey: SCOPE, buildKey: KEY, architecture: "amd64", imageDigest: image.digest, imageFormat: "intar-image-4",
+      sizeBytes: image.blobs.reduce((sum, pushed) => sum + pushed.bytes.length, 0),
+      githubRepositoryId: REPO, githubRepository: "intar/scenarios", sha: SHA, runId: "17700000001", runAttempt: 2,
+      runnerEnvironment: "github-hosted", jobWorkflowSha: WORKFLOW_SHA,
+    })]);
+    // It has no build row, no attempt and nothing to read back.
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM machine_builds").first("n")).toBe(0);
+    expect((await call("GET", `/registry/v1/builds/${KEY_HEX}/result`, { bearer: token })).status).toBe(405);
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
+  });
+
+  it("answers a second image of the same key with the recorded one", async () => {
+    await seedBundle();
+    const first = await session();
+    const second = await session();
+    const image = await pushImage(first, KEY_HEX);
+    const other = await pushImage(second, KEY_HEX, { label: "baked again" });
+    expect((await record(first, image.digest)).status).toBe(201);
+    for (const digest of [other.digest, image.digest]) {
+      const again = await record(second, digest);
+      expect(again.status).toBe(200);
+      expect(await again.json()).toEqual({ ok: true, image_digest: image.digest, recorded: true });
+    }
+    expect(await rows()).toHaveLength(1);
+  });
+
+  it("records arm64 by itself, and each image only as its own architecture", async () => {
+    await seedBundle();
+    const token = await session();
+    const arm = await pushImage(token, KEY_HEX, { architecture: "arm64" });
+    await refusal(await record(token, arm.digest), 409, "architecture_mismatch");
+    await refusal(await record(token, arm.digest, KEY_HEX, "?arch=riscv"), 400, undefined);
+    expect((await record(token, arm.digest, KEY_HEX, "?arch=arm64")).status).toBe(201);
+    const amd = await pushImage(token, KEY_HEX);
+    // The arm64 image stands, so nothing is asked of another one.
+    expect(await (await record(token, amd.digest, KEY_HEX, "?arch=arm64")).json())
+      .toEqual({ ok: true, image_digest: arm.digest, recorded: true });
+    expect((await record(token, amd.digest, KEY_HEX, "?arch=amd64")).status).toBe(201);
+    expect((await rows()).map((row) => [row.architecture, row.imageDigest])).toEqual([["amd64", amd.digest], ["arm64", arm.digest]]);
+  });
+
+  it("refuses a key of another bundle, an image of another key and one that is not stored", async () => {
+    await seedBundle({ keys: [KEY, `sha256:${"c".repeat(64)}`] });
+    const token = await session();
+    const image = await pushImage(token, KEY_HEX);
+    await refusal(await record(token, image.digest, FOREIGN_HEX), 403, "build_key_not_in_bundle");
+    await refusal(await record(token, image.digest, "c".repeat(64)), 409, "build_key_mismatch");
+    await refusal(await record(token, `sha256:${"9".repeat(64)}`), 409, "image_unknown");
+    await refusal(await record(token, "latest"), 400, undefined);
+    expect(await rows()).toEqual([]);
+  });
+
+  it("replaces a recorded image whose manifest is gone or whose format is stale", async () => {
+    await seedBundle();
+    const token = await session();
+    const lost = await pushImage(token, KEY_HEX, { label: "lost" });
+    expect((await record(token, lost.digest)).status).toBe(201);
+    await env.DB.prepare("DELETE FROM registry_manifests WHERE digest = ?1").bind(lost.digest).run();
+    const next = await pushImage(token, KEY_HEX, { label: "next" });
+    expect((await record(token, next.digest)).status).toBe(201);
+
+    await db().update(scopeMachineImages).set({ imageFormat: "intar-image-3" });
+    const newer = await pushImage(token, KEY_HEX, { label: "newer" });
+    expect((await record(token, newer.digest)).status).toBe(201);
+    expect((await rows()).map((row) => [row.imageDigest, row.imageFormat])).toEqual([[newer.digest, "intar-image-4"]]);
+  });
+
+  it("counts a scope's storage over the images a kept revision names", async () => {
+    const kept = `sha256:${"c".repeat(64)}`;
+    await seedBundle({ keys: [KEY, kept] });
+    const token = await session();
+    const image = await pushImage(token, KEY_HEX);
+    const size = image.blobs.reduce((sum, pushed) => sum + pushed.bytes.length, 0);
+    const held = (buildKey: string, scopeKey: string, sizeBytes: number) => db().insert(scopeMachineImages).values({
+      scopeKey, buildKey, architecture: "arm64", imageDigest: `sha256:${"1".repeat(64)}`, imageFormat: "intar-image-4",
+      sizeBytes, githubRepositoryId: REPO, githubRepository: "intar/scenarios", sha: SHA, runId: "1", runAttempt: 1,
+      runnerEnvironment: "github-hosted", jobWorkflowSha: WORKFLOW_SHA,
+    });
+    // Neither an image no kept revision names nor another scope's counts.
+    await held(`sha256:${FOREIGN_HEX}`, SCOPE, PIPELINE_SCOPE_STORAGE_BYTES);
+    await held(kept, "organization:acme", PIPELINE_SCOPE_STORAGE_BYTES);
+    await held(kept, SCOPE, PIPELINE_SCOPE_STORAGE_BYTES - size + 1);
+    await refusal(await record(token, image.digest), 409, "scope_storage_exceeded");
+
+    await db().update(scopeMachineImages).set({ sizeBytes: PIPELINE_SCOPE_STORAGE_BYTES - size })
+      .where(and(eq(scopeMachineImages.buildKey, kept), eq(scopeMachineImages.scopeKey, SCOPE)));
+    expect((await record(token, image.digest)).status).toBe(201);
+    // A second run of a recorded key needs no room at all.
+    await db().update(scopeMachineImages).set({ sizeBytes: PIPELINE_SCOPE_STORAGE_BYTES })
+      .where(and(eq(scopeMachineImages.buildKey, kept), eq(scopeMachineImages.scopeKey, SCOPE)));
+    expect((await record(token, image.digest)).status).toBe(200);
+  });
+
+  it("stops with its session", async () => {
+    await seedBundle();
+    const token = await session();
+    const image = await pushImage(token, KEY_HEX);
+    await db().update(pipelineUploadSessions).set({ closedAt: Date.now() });
+    expect((await record(token, image.digest)).status).toBe(401);
+    expect(await rows()).toEqual([]);
   });
 });
 
