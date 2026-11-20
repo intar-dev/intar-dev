@@ -276,6 +276,9 @@ export async function runOciSweep(
   const settings = { ...DEFAULTS, ...options };
   settings.listPageLimit = Math.min(Math.max(1, settings.listPageLimit), 1000);
   settings.batchSize = Math.min(Math.max(1, settings.batchSize), 500);
+  // With none a batch, no batch could ever be the last one.
+  settings.manifestBatch = Math.max(1, settings.manifestBatch);
+  settings.manifestBatches = Math.max(1, settings.manifestBatches);
   const report = emptyReport(input.mode);
 
   if (input.mode !== "delete") {

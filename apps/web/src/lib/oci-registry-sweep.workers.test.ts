@@ -628,7 +628,23 @@ describe("the OCI sweep", () => {
       expect(await absent(orphanKeys)).toBe(true);
     });
 
-    it("takes a collected image off the finished build that recorded it, so a later publish builds it again", async () => {
+    it("stays at a cursor an earlier pass moved to", async () => {
+      await Promise.all([image(), image()]);
+      // One page of two keys, then stop: the cursor is in the middle of the store.
+      const advanced = await delete_({ listPages: 1, listPageLimit: 2 });
+      expect(advanced.error).toBeNull();
+      expect(advanced.nextStartAfter).toMatch(/^[a-f0-9]{64}$/);
+
+      await Promise.all([image(), image(), image()]);
+      const rowsOnly = await delete_({ manifestBatch: 1, manifestBatches: 1 });
+      expect(rowsOnly).toMatchObject({
+        error: null, removedManifests: 1, deletedObjects: 0, resumeRequired: true,
+        startAfter: advanced.nextStartAfter, nextStartAfter: advanced.nextStartAfter,
+      });
+      expect((await delete_({ manifestBatch: 0, manifestBatches: 0 })).startAfter).toBe(advanced.nextStartAfter);
+    });
+
+    it("takes a collected image off the finished build that recorded it and fails the build", async () => {
       const collected = await image();
       const arm = await image();
       const key = `sha256:${"a".repeat(64)}`;
