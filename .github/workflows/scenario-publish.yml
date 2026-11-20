@@ -112,7 +112,7 @@ jobs:
     name: Publish
     needs: validate
     if: >-
-      inputs.build-only == '' &&
+      !(inputs.build-only != '' && github.event_name == 'workflow_dispatch') &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ inputs.light-runner }}
@@ -255,7 +255,7 @@ jobs:
           persist-credentials: false
 
       - name: Mount the cache volume
-        if: inputs.cache == 'namespace' && inputs.build-only == ''
+        if: inputs.cache == 'namespace' && !(inputs.build-only != '' && github.event_name == 'workflow_dispatch')
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
         with:
           path: /home/runner/intar-cache
@@ -264,7 +264,8 @@ jobs:
         env:
           IMAGES: ${{ needs.publish.outputs.images }}
           REV: ${{ needs.publish.outputs.rev }}
-          BUILD_ONLY: ${{ inputs.build-only }}
+          # Only a manual run builds without publishing.
+          BUILD_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.build-only || '' }}
           CPUS: ${{ inputs.cpus }}
           CACHE: ${{ inputs.cache }}
         run: |
@@ -321,6 +322,10 @@ jobs:
             side_by_side=1
           fi
           # shellcheck disable=SC2153 # CPUS is this step's input, cpus what a build gets
+          if ! [[ "${CPUS}" =~ ^[0-9]+$ ]]; then
+            echo "cpus is a whole number, not \`${CPUS}\`." >&2
+            exit 1
+          fi
           cpus="${CPUS}"
           if [ "${cpus}" = 0 ]; then
             if [ "${CACHE}" != none ]; then
@@ -373,16 +378,25 @@ jobs:
             # shellcheck disable=SC2024 # the logs are this job's user's, the build is root's
             sudo "${cli}" build "$1" --arch "$2" --out "$3" --root "${work}/source" \
               --config "${config}" --kino "${work}/tools/kino/$2/kino" --cpus "${cpus}" \
-              > "${work}/logs/$4.out" 2> "${work}/logs/$4.err"
+              < /dev/null > "${work}/logs/$4.out" 2> "${work}/logs/$4.err"
           }
           failed=0
-          superseded=""
+          superseded=0
+          superseded_why=""
           n=0
           while IFS= read -r image; do
             n=$((n + 1))
             target="$(jq -r '.target' <<<"${image}")"
             key="$(jq -r '.build_key' <<<"${image}")"
             mapfile -t archs < <(jq -r '.archs[]' <<<"${image}")
+            if [ "${superseded}" = 1 ]; then
+              # Intar takes no more images of this commit: building them would
+              # only keep the next commit's run waiting.
+              for arch in "${archs[@]}"; do
+                summary "| \`${target}\` | ${arch} | not built | not pushed: Intar takes no more images of this commit |"
+              done
+              continue
+            fi
             echo "::group::${target} (${archs[*]})"
             declare -A result=()
             if [ "${side_by_side}" = 1 ] && [ "${#archs[@]}" -gt 1 ]; then
@@ -418,8 +432,6 @@ jobs:
             pushed="not pushed: a build of this image failed"
             if [ "${good}" = 1 ] && [ -n "${BUILD_ONLY}" ]; then
               pushed="not pushed: build-only"
-            elif [ "${good}" = 1 ] && [ -n "${superseded}" ]; then
-              pushed="not pushed: ${superseded}"
             elif [ "${good}" = 1 ]; then
               pushed=""
               for arch in "${archs[@]}"; do
@@ -438,7 +450,7 @@ jobs:
                 while :; do
                   status=0
                   "${cli}" push --image "${out}" --url "${INTAR_ORIGIN}" --rev "${REV}" \
-                    > "${work}/logs/${n}-${arch}.push" 2> "${work}/logs/${n}-${arch}.push.err" || status=$?
+                    < /dev/null > "${work}/logs/${n}-${arch}.push" 2> "${work}/logs/${n}-${arch}.push.err" || status=$?
                   tries=$((tries + 1))
                   # `push` waits out a busy registry for about twenty minutes
                   # by itself; twice more is enough.
@@ -454,9 +466,10 @@ jobs:
                   3)
                     # Intar takes no more images for this commit: its head
                     # moved, or its revisions ended. Intar's own words say which.
-                    superseded="$(tail -n 1 "${work}/logs/${n}-${arch}.push.err" | cut -c1-240)"
+                    superseded=1
+                    superseded_why="$(tail -n 1 "${work}/logs/${n}-${arch}.push.err" | cut -c1-240)"
                     pushed="${pushed}${arch}: not taken; "
-                    echo "Intar takes no more images of this commit: ${superseded}"
+                    echo "Intar takes no more images of this commit: ${superseded_why}"
                     break
                     ;;
                   *)
@@ -474,9 +487,9 @@ jobs:
             echo "::endgroup::"
           done < <(jq -c '.[]' <<<"${IMAGES}")
 
-          if [ -n "${superseded}" ]; then
+          if [ "${superseded}" = 1 ]; then
             summary ""
-            summary "Intar took no more images of this commit: ${superseded}"
+            summary "Intar took no more images of this commit: ${superseded_why}"
           fi
           exit "${failed}"
 
@@ -506,4 +519,7 @@ jobs:
         run: |
           sudo docker rm --force intar-buildkitd > /dev/null 2>&1 || true
           # A runner that is kept keeps a build VM this job was cancelled in.
-          sudo pkill -KILL -f -- "${RUNNER_TEMP}/intar/tools/work/" > /dev/null 2>&1 || true
+          # The bracket keeps the pattern from matching this very command.
+          sudo pkill -KILL -f -- "${RUNNER_TEMP}/intar/tools/[w]ork/" > /dev/null 2>&1 || true
+          # And what root wrote, which the runner cannot remove by itself.
+          sudo rm -rf -- "${RUNNER_TEMP}/intar"
