@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRightLeft, GitBranch, Hammer, Pause, Play, Trash2, Unplug } from "lucide-react";
 import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
@@ -39,8 +39,10 @@ export function ScenarioSourceSection({
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
   const [purgeConfirm, setPurgeConfirm] = useState("");
+  // A platform setting whose switch ends work in flight asks first.
+  const [confirming, setConfirming] = useState<SettingConfirm | null>(null);
   const change = useMutation({
-    mutationFn: async (body: Record<string, string>) => {
+    mutationFn: async (body: Record<string, string | boolean>) => {
       // A purge deletes a bounded share per request; it is done once the
       // binding is gone. ponytail: 100 rounds, then the button resumes it.
       for (let round = 0; round < 100; round += 1) {
@@ -59,6 +61,7 @@ export function ScenarioSourceSection({
     onSuccess: async () => {
       setDisconnectOpen(false);
       setPurgeOpen(false);
+      setConfirming(null);
       await queryClient.invalidateQueries({ queryKey });
     },
   });
@@ -108,7 +111,10 @@ export function ScenarioSourceSection({
             pending={change.isPending}
             switching={change.isPending && change.variables?.action === "mode"}
             onChange={(body) => change.mutate(body)}
-            onDisconnect={() => setDisconnectOpen(true)}
+            onDisconnect={() => {
+              change.reset();
+              setDisconnectOpen(true);
+            }}
           />
         ) : (
           <>
@@ -177,6 +183,20 @@ export function ScenarioSourceSection({
             </form>
           </>
         )}
+        {source && card.data.platformSettings ? (
+          <PlatformSettings
+            source={source}
+            enabled={enabled}
+            pipelineImages={card.data.pipelineImages}
+            automaticPromotion={card.data.platformSettings.automaticPromotion}
+            pending={change.isPending}
+            onChange={(body) => change.mutate(body)}
+            onConfirm={(confirm) => {
+              change.reset();
+              setConfirming(confirm);
+            }}
+          />
+        ) : null}
         {disconnected ? (
           <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
             <p className="text-muted-foreground">
@@ -267,6 +287,22 @@ export function ScenarioSourceSection({
         onConfirm={() => change.mutate({ action: "disconnect" })}
       />
       <ConfirmDialog
+        open={confirming !== null}
+        onClose={() => {
+          setConfirming(null);
+          change.reset();
+        }}
+        title={confirming?.title ?? ""}
+        description={confirming?.description ?? ""}
+        error={apiErrorMessage(change.error, "Couldn't change the setting. Try again.")}
+        pending={change.isPending}
+        confirmLabel={confirming?.label ?? ""}
+        pendingLabel="Switching…"
+        onConfirm={() => {
+          if (confirming) change.mutate(confirming.body);
+        }}
+      />
+      <ConfirmDialog
         open={purgeOpen}
         onClose={() => {
           setPurgeOpen(false);
@@ -316,7 +352,7 @@ function ConnectedSource({
   pending: boolean;
   /** The change of mode is the one being saved. */
   switching: boolean;
-  onChange: (body: Record<string, string>) => void;
+  onChange: (body: Record<string, string | boolean>) => void;
   onDisconnect: () => void;
 }) {
   const commit = source.commit;
@@ -427,6 +463,128 @@ function ConnectedSource({
         </Button>
       </div>
     </>
+  );
+}
+
+/** A switch of a platform setting that is asked about first. */
+interface SettingConfirm {
+  title: string;
+  description: string;
+  /** The row's own action, which is also the dialog's confirm. */
+  label: string;
+  body: Record<string, string | boolean>;
+}
+
+/**
+ * What only a platform administrator changes on a source: who builds its
+ * images, which runners may publish, who puts its labs live, and the way
+ * back to pull mode. Each row says what is and offers the other; a switch
+ * that would be refused says why instead.
+ */
+function PlatformSettings({
+  source,
+  enabled,
+  pipelineImages,
+  automaticPromotion,
+  pending,
+  onChange,
+  onConfirm,
+}: {
+  source: ScenarioSourceView;
+  /** The scope's flag for connecting and widening a source. */
+  enabled: boolean;
+  pipelineImages: boolean;
+  automaticPromotion: boolean;
+  pending: boolean;
+  onChange: (body: Record<string, string | boolean>) => void;
+  onConfirm: (confirm: SettingConfirm) => void;
+}) {
+  const reasonId = useId();
+  const pipeline = source.imageProducer === "pipeline";
+  const automatic = source.promotion === "automatic";
+  const rows: Array<{ label: string; state: string; action: string; blocked: string | null; onClick: () => void }> = [
+    {
+      label: "Images",
+      state: pipeline ? "This repository's pipeline builds them" : "Intar's builder builds them",
+      action: pipeline ? "Use Intar's builder" : "Use the repository's pipeline",
+      blocked: pipeline
+        ? null
+        : source.mode !== "push"
+          ? "A pipeline builds only for a source in push mode."
+          : pipelineImages ? null : "Pipeline images are not switched on for this scope.",
+      onClick: () => onChange({ action: "image_producer", producer: pipeline ? "builder" : "pipeline" }),
+    },
+    {
+      label: "Runners",
+      state: source.allowSelfHostedRunners ? "Self-hosted runners may publish" : "Only GitHub-hosted runners may publish",
+      action: source.allowSelfHostedRunners ? "Allow GitHub-hosted runners only" : "Allow self-hosted runners",
+      blocked: source.allowSelfHostedRunners || enabled ? null : "Scenario sources are not switched on for this scope.",
+      onClick: () => onChange({ action: "runner_policy", allow_self_hosted: !source.allowSelfHostedRunners }),
+    },
+    {
+      label: "Going live",
+      state: automatic ? "Each lab goes live once it passed its check" : "An administrator promotes each lab",
+      action: automatic ? "Promote by hand" : "Go live automatically",
+      blocked: automatic || automaticPromotion ? null : "Automatic promotion is not switched on for this scope.",
+      onClick: () => onConfirm(automatic
+        ? {
+            title: "Promote by hand again?",
+            description: "Checks of the latest commit that are running stop, and its labs that are not live yet wait for an administrator to verify and promote them, or for its workflow to be run again after switching back. What is live stays live.",
+            label: "Promote by hand",
+            body: { action: "promotion", promotion: "manual" },
+          }
+        : {
+            title: "Let labs go live by themselves?",
+            description: "From the next commit on, each lab that passes its check on a platform host goes live without an administrator, and the commit's course catalog and removed labs follow. The commit that is the head now stays as it is, unless its workflow is run again. Whoever can push to the default branch then publishes to learners.",
+            label: "Go live automatically",
+            body: { action: "promotion", promotion: "automatic" },
+          }),
+    },
+    ...(source.mode === "push"
+      ? [{
+          label: "Delivery",
+          state: "The repository's workflow pushes each commit",
+          action: "Switch to pull",
+          blocked: pipeline
+            ? "Set the images back to Intar's builder first."
+            : enabled ? null : "Scenario sources are not switched on for this scope.",
+          onClick: () => onConfirm({
+            title: "Switch to pull?",
+            description: "Intar fetches the repository itself again and compiles it on its builder. The repository's publish workflow is refused from then on and fails until the source is switched back to push.",
+            label: "Switch to pull",
+            body: { action: "mode", mode: "pull" },
+          }),
+        }]
+      : []),
+  ];
+  return (
+    <div className="space-y-3 border-t pt-4">
+      <h3 className="font-medium">Platform settings</h3>
+      <ul className="space-y-3">
+        {rows.map((row) => (
+          <li key={row.label} className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-label">{row.label}</p>
+              <p>{row.state}</p>
+              {row.blocked ? (
+                <p id={`${reasonId}-${row.label}`} className="text-muted-foreground">
+                  {row.blocked}
+                </p>
+              ) : null}
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={pending || row.blocked !== null}
+              aria-describedby={row.blocked ? `${reasonId}-${row.label}` : undefined}
+              onClick={row.onClick}
+            >
+              {row.action}
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

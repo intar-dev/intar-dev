@@ -6,17 +6,23 @@ import {
   ScenarioSourceSection,
   scenarioSourceCardVisible,
 } from "@/components/app/pages/organization-detail/scenario-source";
-import type { ScenarioSourceView } from "@/lib/scenario-sources";
+import type { ScenarioSourceCard, ScenarioSourceView } from "@/lib/scenario-sources";
 import { formatScenarioResourceItems } from "./ScenarioRegistry";
 
-function renderCard(source: Partial<ScenarioSourceView> | null, pipelineWorkflowRef: string | null = null): string {
+function renderCard(
+  source: Partial<ScenarioSourceView> | null,
+  pipelineWorkflowRef: string | null = null,
+  card: Partial<ScenarioSourceCard> = {},
+): string {
   const endpoint = "/api/admin/scenario-source";
   const queryClient = new QueryClient();
   queryClient.setQueryData(["scenario-source", endpoint], {
     enabled: true,
     appSlug: null,
+    pipelineImages: false,
     workflowRef: "scenario-publish-v1",
     pipelineWorkflowRef,
+    ...card,
     source: source && {
       repository: "intar-dev/scenarios",
       defaultBranch: "main",
@@ -118,6 +124,61 @@ describe("scenario source card", () => {
     expect(pipeline).toContain("accepts GitHub-hosted runners only");
     expect(renderCard({ imageProducer: "pipeline", allowSelfHostedRunners: true }, "scenario-publish-v2"))
       .toContain("accepts a self-hosted runner");
+  });
+
+  describe("platform settings", () => {
+    const platform = (source: Partial<ScenarioSourceView>, card: Partial<ScenarioSourceCard> = {}) =>
+      renderCard(source, null, { platformSettings: { automaticPromotion: false }, ...card });
+    /** The button with this label, as rendered: disabled or not. */
+    const button = (html: string, label: string) => {
+      const end = html.indexOf(`${label}</button>`);
+      expect(end, label).toBeGreaterThan(-1);
+      return html.slice(html.lastIndexOf("<button", end), end);
+    };
+
+    it("are on the platform's card only, and only for a connected source", () => {
+      expect(renderCard({})).not.toContain("Platform settings");
+      expect(platform({})).toContain("Platform settings");
+      expect(renderCard(null, null, { platformSettings: { automaticPromotion: true } })).not.toContain("Platform settings");
+      expect(platform({ disconnectedAt: 1, disconnectReason: "admin" })).not.toContain("Platform settings");
+    });
+
+    it("offer the other state of each setting", () => {
+      const builder = platform({}, { pipelineImages: true, platformSettings: { automaticPromotion: true } });
+      for (const label of ["Use the repository's pipeline", "Allow self-hosted runners", "Go live automatically", "Switch to pull"]) {
+        expect(button(builder, label.replace("'", "&#x27;"))).not.toMatch(/ disabled(=""|>| )/);
+      }
+      const pipeline = platform({ imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic" });
+      for (const label of ["Use Intar&#x27;s builder", "Allow GitHub-hosted runners only", "Promote by hand"]) {
+        expect(button(pipeline, label)).not.toMatch(/ disabled(=""|>| )/);
+      }
+    });
+
+    it("say why a switch is not offered: a flag that is off, a pull source, a pipeline before pull", () => {
+      const off = platform({});
+      expect(button(off, "Use the repository&#x27;s pipeline")).toMatch(/ disabled(=""|>| )/);
+      expect(off).toContain("Pipeline images are not switched on for this scope.");
+      expect(button(off, "Go live automatically")).toMatch(/ disabled(=""|>| )/);
+      expect(off).toContain("Automatic promotion is not switched on for this scope.");
+      const pull = platform({ mode: "pull" }, { pipelineImages: true });
+      expect(button(pull, "Use the repository&#x27;s pipeline")).toMatch(/ disabled(=""|>| )/);
+      expect(pull).toContain("A pipeline builds only for a source in push mode.");
+      expect(pull).not.toContain("Switch to pull");
+      const pipeline = platform({ imageProducer: "pipeline" });
+      expect(button(pipeline, "Switch to pull")).toMatch(/ disabled(=""|>| )/);
+      expect(pipeline).toContain("Set the images back to Intar&#x27;s builder first.");
+      // A source whose scope's flag is off cannot widen: runners, and the way to pull.
+      const dark = platform({}, { enabled: false });
+      expect(button(dark, "Allow self-hosted runners")).toMatch(/ disabled(=""|>| )/);
+      expect(button(dark, "Switch to pull")).toMatch(/ disabled(=""|>| )/);
+      expect(dark.split("Scenario sources are not switched on for this scope.")).toHaveLength(3);
+      expect(button(dark, "Allow self-hosted runners")).toContain("aria-describedby=");
+      // The way back never needs a flag.
+      const back = platform({ imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic" }, { enabled: false });
+      for (const label of ["Use Intar&#x27;s builder", "Allow GitHub-hosted runners only", "Promote by hand"]) {
+        expect(button(back, label)).not.toMatch(/ disabled(=""|>| )/);
+      }
+    });
   });
 
   it("says a push source without a commit waits for its first workflow run", () => {

@@ -86,3 +86,67 @@ test("a pull source is offered its way to push, in the order that works", async 
   await expect(card.getByText("Waiting for the first workflow run")).toBeVisible();
   if (process.env.SOURCE_CARD_SHOTS) await card.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/push.png` });
 });
+
+test("a platform administrator switches the platform source's settings on its card", async ({ page, ui }) => {
+  let source = { ...disconnected("admin"), disconnectedAt: null, disconnectReason: null };
+  const changes: unknown[] = [];
+  await page.route("**/api/admin/scenario-source", async (route) => {
+    const request = route.request();
+    if (request.method() === "GET") {
+      await route.fulfill({ json: {
+        enabled: true, pipelineImages: true, configured: true, appSlug: null, workflowRef: "scenario-publish-v1",
+        pipelineWorkflowRef: null, platformSettings: { automaticPromotion: true }, source,
+      } });
+      return;
+    }
+    const change = request.postDataJSON() as {
+      action: string; promotion?: string; producer?: string; allow_self_hosted?: boolean; mode?: string;
+    };
+    changes.push(change);
+    if (change.action === "promotion") source = { ...source, promotion: change.promotion! };
+    if (change.action === "image_producer") source = { ...source, imageProducer: change.producer! };
+    if (change.action === "runner_policy") source = { ...source, allowSelfHostedRunners: change.allow_self_hosted! };
+    if (change.action === "mode") source = { ...source, mode: change.mode! };
+    await route.fulfill({ json: { source } });
+  });
+  await ui.open(routeCase("admin-scenarios"));
+
+  const card = page.locator("section", { has: page.getByRole("heading", { name: "Scenario source" }) });
+  await expect(card.getByRole("heading", { name: "Platform settings" })).toBeVisible();
+  if (process.env.SOURCE_CARD_SHOTS) await card.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/platform.png` });
+
+  // Going automatic asks first, and says what it hands over.
+  await card.getByRole("button", { name: "Go live automatically" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("The commit that is the head now stays as it is, unless its workflow is run again.")).toBeVisible();
+  expect(changes).toEqual([]);
+  await dialog.getByRole("button", { name: "Go live automatically" }).click();
+  await expect(dialog).toBeHidden();
+  expect(changes).toEqual([{ action: "promotion", promotion: "automatic" }]);
+  await expect(card.getByRole("button", { name: "Promote by hand" })).toBeVisible();
+
+  // Going back to by-hand asks too: it ends checks that are running.
+  await card.getByRole("button", { name: "Promote by hand" }).click();
+  await expect(dialog.getByText("Checks of the latest commit that are running stop")).toBeVisible();
+  await dialog.getByRole("button", { name: "Promote by hand" }).click();
+  await expect(dialog).toBeHidden();
+  expect(changes.at(-1)).toEqual({ action: "promotion", promotion: "manual" });
+
+  // Images and runners switch at once.
+  await card.getByRole("button", { name: "Allow self-hosted runners" }).click();
+  await expect(card.getByRole("button", { name: "Allow GitHub-hosted runners only" })).toBeVisible();
+  expect(changes.at(-1)).toEqual({ action: "runner_policy", allow_self_hosted: true });
+  await card.getByRole("button", { name: "Use the repository's pipeline" }).click();
+  await expect(card.getByRole("button", { name: "Use Intar's builder" })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Switch to pull" })).toBeDisabled();
+  expect(changes.at(-1)).toEqual({ action: "image_producer", producer: "pipeline" });
+
+  // Back on the builder, the way to pull asks first.
+  await card.getByRole("button", { name: "Use Intar's builder" }).click();
+  await card.getByRole("button", { name: "Switch to pull" }).click();
+  await expect(dialog.getByText("The repository's publish workflow is refused from then on")).toBeVisible();
+  await dialog.getByRole("button", { name: "Switch to pull" }).click();
+  await expect(dialog).toBeHidden();
+  expect(changes.at(-1)).toEqual({ action: "mode", mode: "pull" });
+  await expect(card.getByRole("button", { name: "Switch to push" })).toBeVisible();
+});
