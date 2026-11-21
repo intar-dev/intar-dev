@@ -117,6 +117,30 @@ test("a refused promotion reports inside its revision row", async ({
   await expect(page.locator("div.py-3", { has: alert }).getByRole("button", { name: "Promote" })).toBeVisible();
 });
 
+test("a scenario of an automatic source says what its job is doing, and keeps the by-hand steps as an override", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("admin-scenario-detail"), theme: "light" });
+  const scenario = ui.server.state.scenarioRevisions.find((candidate) => candidate.id === "intar/repair-nginx")!;
+  scenario.sourceJob = { rev: scenario.candidateRev!, driving: true, note: "waiting for its arm64 images" };
+  await page.reload();
+
+  const section = page.locator("section", { has: page.getByRole("heading", { name: "Revisions" }) });
+  await expect(section.getByText("Its source checks this commit and puts each lab that passes live.")).toBeVisible();
+  await expect(section.getByText("Source: waiting for its arm64 images")).toBeVisible();
+  // Still there, as an override.
+  await expect(section.getByRole("button", { name: "Promote" })).toBeVisible();
+  if (process.env.SOURCE_CARD_SHOTS) await section.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/driven.png` });
+
+  // The job has ended on this commit: the by-hand steps are the way forward again.
+  scenario.sourceJob = { rev: scenario.candidateRev!, driving: false, note: "its checks did not pass in 2 verify runs" };
+  await page.reload();
+  await expect(section.getByText("Its source is not working on this commit")).toBeVisible();
+  await expect(section.getByText("Source: its checks did not pass in 2 verify runs")).toBeVisible();
+  if (process.env.SOURCE_CARD_SHOTS) await section.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/not-driven.png` });
+});
+
 test("a failed host refresh reports inside its host row", async ({ page, ui }) => {
   await ui.open({ ...routeCase("admin-hosts"), theme: "light" });
   const card = page.locator("article", { hasText: "agent-eu-1" });

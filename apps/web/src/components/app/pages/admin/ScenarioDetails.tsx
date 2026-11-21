@@ -108,9 +108,21 @@ const actionRev = (request: RevisionAction | undefined) => (request && "rev" in 
 
 function pointerSummary(scenario: AdministeredScenario): string {
   const live = scenario.liveRev ? `Learners start ${shortRev(scenario.liveRev)}` : "No revision is live, so learners cannot start this scenario";
-  return scenario.candidateRev && scenario.candidateRev !== scenario.liveRev
+  const pointers = scenario.candidateRev && scenario.candidateRev !== scenario.liveRev
     ? `${live}; ${shortRev(scenario.candidateRev)} is the candidate.`
     : `${live}.`;
+  // Who takes the candidate from here: the scope's source, or whoever reads this.
+  if (scenario.sourceJob?.driving) return `${pointers} Its source checks this commit and puts each lab that passes live.`;
+  if (scenario.sourceJob) return `${pointers} Its source is not working on this commit: a lab that is not live waits for an administrator, or for the commit to be run again.`;
+  return pointers;
+}
+
+/** What the source's job says of the revision of its commit, for that revision's row. */
+function sourceJobLine(scenario: AdministeredScenario, revision: ScenarioRevisionSummary): string | null {
+  const job = scenario.sourceJob;
+  if (!job || job.rev !== revision.rev) return null;
+  if (job.note) return `Source: ${job.note}`;
+  return job.driving && revision.rev !== scenario.liveRev ? "Source: checking this commit" : null;
 }
 
 type RevisionActionName = Exclude<RevisionAction["action"], "set_play">;
@@ -144,6 +156,10 @@ function RevisionRow({
   const verifying = Boolean(scenario.verifyRuns[revision.rev]);
   const state = REVISION_STATES[revision.state];
   const move = (kind: "promote" | "rollback") => onAction({ action: kind, rev: revision.rev, liveRev: scenario.liveRev });
+  // While the source's job works on this revision's commit, verifying and
+  // promoting by hand are an override, not the way forward.
+  const driven = scenario.sourceJob?.driving === true && scenario.sourceJob.rev === revision.rev;
+  const jobLine = sourceJobLine(scenario, revision);
   // A rollback left this behaviour on hold: nothing that behaves the same
   // is verified or promoted until an administrator lifts it. Going back to
   // such a revision stays possible.
@@ -164,9 +180,9 @@ function RevisionRow({
       : candidate && revision.held
         ? liftHold
         : candidate && revision.state === "ready" && !verifying
-          ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
+          ? <Button size="sm" variant={driven ? "ghost" : "outline"} disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
           : candidate && revision.canGoLive
-            ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
+            ? <Button size="sm" variant={driven ? "ghost" : "default"} disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
             : (
               <>
                 {revision.canGoLive && revision.liveAt !== null
@@ -203,6 +219,7 @@ function RevisionRow({
               revision.restoreVerifiedAt ? `Starts from a snapshot since ${formatTimestamp(revision.restoreVerifiedAt)}` : null,
             ]}
           />
+          {jobLine ? <p className="text-sm text-muted-foreground">{jobLine}</p> : null}
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {verifying ? <StatusToken tone="live" word="Verifying" pulse /> : <StatusToken tone={state.tone} word={state.word} />}

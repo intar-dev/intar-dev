@@ -10,7 +10,7 @@ import { settleScenarioRevisions } from "@/lib/machine-builds";
 import { maintainPipelineRevisions } from "@/lib/pipeline-revisions";
 import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
-import { liftRevisionHold, moveLiveRevision } from "@/lib/scenario-revisions";
+import { liftRevisionHold, listAdministeredScenarios, moveLiveRevision } from "@/lib/scenario-revisions";
 import {
   DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, detailOf, driveDeployJob,
   RESTORE_CHECK_EVERY_MS, RESTORE_CHECK_FOR_MS, type DeployJob, type Lab,
@@ -699,6 +699,52 @@ describe("an automatic source's job", () => {
     ]);
     await maintainPipelineRevisions(env, SCOPE, now + DEPLOY_JOB_DEADLINE_MS + 60_000);
     expect(await commit()).toMatchObject({ state: "failed" });
+  });
+});
+
+describe("what the scenario page learns of the job", () => {
+  const sourceJob = async (scenarioId = WEB) => (await listAdministeredScenarios(OWNER, scenarioId))[0]!.sourceJob;
+
+  it("is nothing for a manual source, and the job's line while it drives the candidate's commit", async () => {
+    await env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE).run();
+    await head("a", twoLabs());
+    expect(await sourceJob()).toBeNull();
+    await env.DB.prepare("UPDATE scenario_sources SET promotion = 'automatic' WHERE scope_key = ?1").bind(SCOPE).run();
+    // Driven from the first pass on, before the job has said anything.
+    expect(await sourceJob()).toEqual({ rev: rev("a"), driving: true, note: null });
+    refuse = { "*": "scenario_host_unavailable" };
+    await drive();
+    expect(await sourceJob()).toEqual({ rev: rev("a"), driving: true, note: "waiting for a platform host" });
+    expect(await sourceJob(DB_LAB)).toEqual({ rev: rev("a"), driving: true, note: "waiting for a platform host" });
+  });
+
+  it("says the job is not driving: a paused source, a binder without rights, the head left at the switch, an ended commit", async () => {
+    await head("a");
+    const not = async (sql: string, undo: string) => {
+      await env.DB.prepare(sql).run();
+      expect(await sourceJob()).toMatchObject({ driving: false });
+      await env.DB.prepare(undo).run();
+      expect(await sourceJob()).toMatchObject({ driving: true });
+    };
+    await not("UPDATE scenario_sources SET paused_at = 1", "UPDATE scenario_sources SET paused_at = NULL");
+    await not("UPDATE scenario_sources SET promotion_after = 'row-a:1'", "UPDATE scenario_sources SET promotion_after = 'row-a:0'");
+    await not("UPDATE scenario_source_commits SET state = 'failed'", "UPDATE scenario_source_commits SET state = 'building'");
+    // The reader is the binder here; the page says so only to someone who may read it.
+    await env.DB.prepare("UPDATE scenario_sources SET disconnected_at = 1").run();
+    expect(await sourceJob()).toBeNull();
+  });
+
+  it("keeps the job's last word on a lab once the commit has ended, and none for a scenario of another commit", async () => {
+    await head("a");
+    await drive();
+    await finish("run-1", "failed");
+    await drive();
+    await finish("run-2", "failed");
+    await drive();
+    expect(await sourceJob()).toEqual({ rev: rev("a"), driving: false, note: "its checks did not pass in 2 verify runs" });
+    // The head moves to a commit that has no revision of the scenario's candidate or live.
+    await env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "f".repeat(40)).run();
+    expect(await sourceJob()).toBeNull();
   });
 });
 

@@ -57,7 +57,7 @@ export function ScenarioRegistry() {
         <Section
           density="compact"
           title="Registry"
-          description="Learners start a scenario's live revision. A new revision becomes the candidate once it builds; verify it, then promote it."
+          description="Learners start a scenario's live revision. A new revision becomes the candidate once it builds. A source with automatic promotion checks it and puts it live; otherwise verify it, then promote it."
           bodyClassName="space-y-4"
         >
           <FilterBar
