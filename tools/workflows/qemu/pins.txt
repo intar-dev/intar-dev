@@ -1,4 +1,5 @@
 # The published QEMU builds the app's tooling takes: the set (qemu/v<set>) and
 # each target's archive by SHA-256. qemu.yml writes this after it published a
 # set; fetch.sh takes nothing else.
-set 000000000000
+set 6425a644d1d0
+macos arm64 daaa61651a26ba9fb60e3ae39be793e30bbd7b85c288d8ea55232f7f1003ffa0
