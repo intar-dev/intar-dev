@@ -20,6 +20,8 @@ jq -e \
     .assets.directory == "../client" and
     .assets.run_worker_first == ["/api/*"]
   ' "${config}" >/dev/null
+# The workflow refs the source card shows are ones the Worker accepts.
+"${GITHUB_WORKSPACE}/tools/workflows/website/check-scenario-publish-refs.sh" "${config}"
 test -f "${GITHUB_WORKSPACE}/apps/web/dist/client/favicon.svg"
 test -f "${GITHUB_WORKSPACE}/apps/web/dist/client/_headers"
 # The image registry cleanup worker is an auxiliary worker of this

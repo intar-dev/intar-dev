@@ -67,13 +67,20 @@ export function ScenarioSourceSection({
     fields: { repository: /repositor|github|install/i },
   });
   if (!card.data || !scenarioSourceCardVisible(card.data)) return null;
-  const { enabled, appSlug } = card.data;
+  const { enabled, appSlug, workflowRef, pipelineWorkflowRef } = card.data;
   const source = card.data.source?.disconnectedAt === null ? card.data.source : null;
   const disconnected = card.data.source?.disconnectedAt != null ? card.data.source : null;
   const branch = source?.defaultBranch ?? "main";
   // The builds page lists what builder hosts build: a source whose own
   // pipeline builds its images has nothing there.
   const builderBuilds = card.data.source?.imageProducer === "builder";
+  // A pipeline that builds images needs the workflow's second version and
+  // a runner with KVM; the builder's sources call the first.
+  const pipelineBuilds = source?.imageProducer === "pipeline";
+  const ref = pipelineBuilds ? pipelineWorkflowRef : workflowRef;
+  const workflow = `name: Intar\non:\n  push: { branches: [${branch}] }\n  pull_request:\n  workflow_dispatch:\npermissions: { contents: read, id-token: write }\njobs:\n  intar:\n    uses: intar-dev/intar-dev/.github/workflows/scenario-publish.yml@${ref}${
+    pipelineBuilds ? "\n    with:\n      runner: your-kvm-runner" : ""
+  }`;
   // Connecting a repository can refuse it; the field says why.
   const repositoryError =
     !source && failure?.field === "repository" ? failure.message : null;
@@ -223,9 +230,23 @@ export function ScenarioSourceSection({
               </>
             )}
           </p>
-          <Snippet>
-            {`name: Intar\non:\n  push: { branches: [${branch}] }\n  pull_request:\n  workflow_dispatch:\npermissions: { contents: read, id-token: write }\njobs:\n  intar:\n    uses: intar-dev/intar-dev/.github/workflows/scenario-publish.yml@scenario-publish-v1`}
-          </Snippet>
+          {ref === null ? (
+            <p className="mt-2 text-muted-foreground">
+              This repository's pipeline builds its images, which needs the workflow's second version. It has no
+              released tag yet: call it at the commit Intar's operators name, with <code>runner</code> set to a Linux
+              amd64 runner with KVM.
+            </p>
+          ) : (
+            <Snippet>{workflow}</Snippet>
+          )}
+          {pipelineBuilds && ref !== null ? (
+            <p className="mt-2 text-muted-foreground">
+              The image builds need a Linux amd64 runner with KVM: put its label in <code>runner</code>.
+              {source?.allowSelfHostedRunners
+                ? " This source accepts a self-hosted runner."
+                : " This source accepts GitHub-hosted runners only; a self-hosted one publishes once a platform administrator allows it."}
+            </p>
+          ) : null}
         </details>
       </div>
       <ConfirmDialog

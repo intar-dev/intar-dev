@@ -9,12 +9,14 @@ import {
 import type { ScenarioSourceView } from "@/lib/scenario-sources";
 import { formatScenarioResourceItems } from "./ScenarioRegistry";
 
-function renderCard(source: Partial<ScenarioSourceView> | null): string {
+function renderCard(source: Partial<ScenarioSourceView> | null, pipelineWorkflowRef: string | null = null): string {
   const endpoint = "/api/admin/scenario-source";
   const queryClient = new QueryClient();
   queryClient.setQueryData(["scenario-source", endpoint], {
     enabled: true,
     appSlug: null,
+    workflowRef: "scenario-publish-v1",
+    pipelineWorkflowRef,
     source: source && {
       repository: "intar-dev/scenarios",
       defaultBranch: "main",
@@ -45,7 +47,7 @@ describe("scenario source card", () => {
   const source = { repository: "intar-dev/scenarios" } as ScenarioSourceView;
 
   it("hides the public card until a repository is pinned or bound", () => {
-    const card = { enabled: true, pipelineImages: false, configured: false, appSlug: null };
+    const card = { enabled: true, pipelineImages: false, configured: false, appSlug: null, workflowRef: "scenario-publish-v1", pipelineWorkflowRef: null };
     expect(scenarioSourceCardVisible({ ...card, source: null })).toBe(false);
     expect(
       scenarioSourceCardVisible({ ...card, configured: true, source: null }),
@@ -54,7 +56,7 @@ describe("scenario source card", () => {
   });
 
   it("shows an organization card once the flag is on or a binding exists", () => {
-    const card = { enabled: false, pipelineImages: false, appSlug: null };
+    const card = { enabled: false, pipelineImages: false, appSlug: null, workflowRef: "scenario-publish-v1", pipelineWorkflowRef: null };
     expect(scenarioSourceCardVisible({ ...card, source: null })).toBe(false);
     expect(
       scenarioSourceCardVisible({ ...card, enabled: true, source: null }),
@@ -99,6 +101,23 @@ describe("scenario source card", () => {
     const pipeline = renderCard({ imageProducer: "pipeline", promotion: "automatic" });
     expect(pipeline).toContain("Built by this repository&#x27;s pipeline");
     expect(pipeline).toContain("Each lab goes live once it passed its check");
+  });
+
+  it("shows the workflow ref the server names, and a pipeline source the second version with its runner", () => {
+    const builder = renderCard({});
+    expect(builder).toContain("scenario-publish.yml@scenario-publish-v1");
+    expect(builder).not.toContain("runner:");
+    expect(renderCard(null)).toContain("scenario-publish.yml@scenario-publish-v1");
+    // No released second version yet: no snippet that would build nothing.
+    const untagged = renderCard({ imageProducer: "pipeline" });
+    expect(untagged).not.toContain("scenario-publish.yml@");
+    expect(untagged).toContain("call it at the commit");
+    const pipeline = renderCard({ imageProducer: "pipeline" }, "scenario-publish-v2");
+    expect(pipeline).toContain("scenario-publish.yml@scenario-publish-v2");
+    expect(pipeline).toContain("runner: your-kvm-runner");
+    expect(pipeline).toContain("accepts GitHub-hosted runners only");
+    expect(renderCard({ imageProducer: "pipeline", allowSelfHostedRunners: true }, "scenario-publish-v2"))
+      .toContain("accepts a self-hosted runner");
   });
 
   it("says a push source without a commit waits for its first workflow run", () => {

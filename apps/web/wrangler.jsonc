@@ -30,6 +30,14 @@
     "GITHUB_APP_SLUG": "intar-dev-image-builder",
     // The only GitHub repository id the public scope may bind. Empty: none.
     "PUBLIC_SCENARIO_SOURCE_REPOSITORY_ID": "1305773952",
+    // The refs of the scenario-publish workflow the source card shows a
+    // repository to call: for a source whose images the builder builds, and
+    // for one whose pipeline builds them, which needs version 2. A tag
+    // scenario-publish-vN or a commit; the second is empty until version 2
+    // is released. The deploy refuses a ref that does not resolve to a commit
+    // on SCENARIO_PUBLISH_WORKFLOW_SHAS.
+    "SCENARIO_PUBLISH_WORKFLOW_REF": "scenario-publish-v1",
+    "SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF": "",
     // Peeled commit SHAs of the released scenario-publish-vN tags, separated
     // by commas or whitespace. Empty: every push upload is refused.
     // 6c83304d is what scenario-publish-v1 resolves to; a73e571c is the commit

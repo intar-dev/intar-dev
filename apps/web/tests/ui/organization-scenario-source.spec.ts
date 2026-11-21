@@ -24,7 +24,7 @@ test("an owner deletes what a disconnected repository published", async ({ page,
   await page.route(`**${api}`, async (route) => {
     const request = route.request();
     if (request.method() === "GET") {
-      await route.fulfill({ json: { enabled: true, appSlug: null, source } });
+      await route.fulfill({ json: { enabled: true, appSlug: null, workflowRef: "scenario-publish-v1", pipelineWorkflowRef: null, source } });
       return;
     }
     purges.push(request.postDataJSON());
@@ -59,7 +59,7 @@ test("a pull source is offered its way to push, in the order that works", async 
   await page.route(`**${api}`, async (route) => {
     const request = route.request();
     if (request.method() === "GET") {
-      await route.fulfill({ json: { enabled: true, appSlug: null, source } });
+      await route.fulfill({ json: { enabled: true, appSlug: null, workflowRef: "scenario-publish-v1", pipelineWorkflowRef: null, source } });
       return;
     }
     changes.push(request.postDataJSON());
