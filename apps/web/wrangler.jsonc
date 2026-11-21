@@ -52,7 +52,7 @@
     // compile the retired source format, so these stay empty until the
     // release workflow's pin pull request names the first one that compiles
     // the current format.
-    "SCENARIO_COMPILER_CLI_VERSION": "0.15.0",
+    "SCENARIO_COMPILER_CLI_VERSION": "0.16.0",
     // The desktop app's release an installed app is offered as its update,
     // per system and processor, with the SHA-256 of its download:
     // {"macos_arm64":{"version":"X.Y.Z","sha256":"<hex>"}}. Empty: the app
@@ -67,7 +67,7 @@
     // The public origin of SHARE_LIVE_BUCKET, and its zone for cache purges
     // (with the optional SHARE_LIVE_PURGE_TOKEN secret).
     "SHARE_LIVE_ORIGIN": "https://live.intar.dev",
-    "SCENARIO_COMPILER_CLI_SHA256": "{\"linux_amd64\":\"911b49fd1bc7f0088b47bc2a317224c0b69fe75c358a36f04bd0b70dbbdc08b9\",\"linux_arm64\":\"a6dfbbe6291d4f5fd5502314d494618a8cc91e775f1b0612bdbbc6d4a1b7cf2c\"}",
+    "SCENARIO_COMPILER_CLI_SHA256": "{\"linux_amd64\":\"dcf82cc8c2767b860df090da2e44f6da5c79a04a3c3965709306bea0371c8b9c\",\"linux_arm64\":\"a0eb52d9f30688460bfa60c0ada8906db0c8a4f019e45b0539b005298da0869a\"}",
   },
   "vpc_services": [
     {
