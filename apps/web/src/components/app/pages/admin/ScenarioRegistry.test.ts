@@ -149,7 +149,7 @@ describe("scenario source card", () => {
         expect(button(builder, label.replace("'", "&#x27;"))).not.toMatch(/ disabled(=""|>| )/);
       }
       const pipeline = platform({ imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic" });
-      for (const label of ["Use Intar&#x27;s builder", "GitHub-hosted only", "Promote by hand"]) {
+      for (const label of ["Use Intar&#x27;s builder", "Allow GitHub-hosted runners only", "Promote by hand"]) {
         expect(button(pipeline, label)).not.toMatch(/ disabled(=""|>| )/);
       }
     });
@@ -167,9 +167,15 @@ describe("scenario source card", () => {
       const pipeline = platform({ imageProducer: "pipeline" });
       expect(button(pipeline, "Switch to pull")).toMatch(/ disabled(=""|>| )/);
       expect(pipeline).toContain("Set the images back to Intar&#x27;s builder first.");
+      // A source whose scope's flag is off cannot widen: runners, and the way to pull.
+      const dark = platform({}, { enabled: false });
+      expect(button(dark, "Allow self-hosted runners")).toMatch(/ disabled(=""|>| )/);
+      expect(button(dark, "Switch to pull")).toMatch(/ disabled(=""|>| )/);
+      expect(dark.split("Scenario sources are not switched on for this scope.")).toHaveLength(3);
+      expect(button(dark, "Allow self-hosted runners")).toContain("aria-describedby=");
       // The way back never needs a flag.
       const back = platform({ imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic" }, { enabled: false });
-      for (const label of ["Use Intar&#x27;s builder", "GitHub-hosted only", "Promote by hand"]) {
+      for (const label of ["Use Intar&#x27;s builder", "Allow GitHub-hosted runners only", "Promote by hand"]) {
         expect(button(back, label)).not.toMatch(/ disabled(=""|>| )/);
       }
     });

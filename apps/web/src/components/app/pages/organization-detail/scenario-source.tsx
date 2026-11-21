@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRightLeft, GitBranch, Hammer, Pause, Play, Trash2, Unplug } from "lucide-react";
 import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
@@ -39,7 +39,8 @@ export function ScenarioSourceSection({
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
   const [purgeConfirm, setPurgeConfirm] = useState("");
-  const [automaticOpen, setAutomaticOpen] = useState(false);
+  // A platform setting whose switch ends work in flight asks first.
+  const [confirming, setConfirming] = useState<SettingConfirm | null>(null);
   const change = useMutation({
     mutationFn: async (body: Record<string, string | boolean>) => {
       // A purge deletes a bounded share per request; it is done once the
@@ -60,7 +61,7 @@ export function ScenarioSourceSection({
     onSuccess: async () => {
       setDisconnectOpen(false);
       setPurgeOpen(false);
-      setAutomaticOpen(false);
+      setConfirming(null);
       await queryClient.invalidateQueries({ queryKey });
     },
   });
@@ -110,7 +111,10 @@ export function ScenarioSourceSection({
             pending={change.isPending}
             switching={change.isPending && change.variables?.action === "mode"}
             onChange={(body) => change.mutate(body)}
-            onDisconnect={() => setDisconnectOpen(true)}
+            onDisconnect={() => {
+              change.reset();
+              setDisconnectOpen(true);
+            }}
           />
         ) : (
           <>
@@ -187,9 +191,9 @@ export function ScenarioSourceSection({
             automaticPromotion={card.data.platformSettings.automaticPromotion}
             pending={change.isPending}
             onChange={(body) => change.mutate(body)}
-            onAutomatic={() => {
+            onConfirm={(confirm) => {
               change.reset();
-              setAutomaticOpen(true);
+              setConfirming(confirm);
             }}
           />
         ) : null}
@@ -283,18 +287,20 @@ export function ScenarioSourceSection({
         onConfirm={() => change.mutate({ action: "disconnect" })}
       />
       <ConfirmDialog
-        open={automaticOpen}
+        open={confirming !== null}
         onClose={() => {
-          setAutomaticOpen(false);
+          setConfirming(null);
           change.reset();
         }}
-        title="Let labs go live by themselves?"
-        description="From the next commit on, each lab that passes its check on a platform host goes live without an administrator, and the commit's course catalog and removed labs follow. The commit that is the head now stays as it is. Whoever can push to the default branch then publishes to learners."
-        error={apiErrorMessage(change.error, "Couldn't change the promotion. Try again.")}
+        title={confirming?.title ?? ""}
+        description={confirming?.description ?? ""}
+        error={apiErrorMessage(change.error, "Couldn't change the setting. Try again.")}
         pending={change.isPending}
-        confirmLabel="Go live automatically"
+        confirmLabel={confirming?.label ?? ""}
         pendingLabel="Switching…"
-        onConfirm={() => change.mutate({ action: "promotion", promotion: "automatic" })}
+        onConfirm={() => {
+          if (confirming) change.mutate(confirming.body);
+        }}
       />
       <ConfirmDialog
         open={purgeOpen}
@@ -460,6 +466,15 @@ function ConnectedSource({
   );
 }
 
+/** A switch of a platform setting that is asked about first. */
+interface SettingConfirm {
+  title: string;
+  description: string;
+  /** The row's own action, which is also the dialog's confirm. */
+  label: string;
+  body: Record<string, string | boolean>;
+}
+
 /**
  * What only a platform administrator changes on a source: who builds its
  * images, which runners may publish, who puts its labs live, and the way
@@ -473,7 +488,7 @@ function PlatformSettings({
   automaticPromotion,
   pending,
   onChange,
-  onAutomatic,
+  onConfirm,
 }: {
   source: ScenarioSourceView;
   /** The scope's flag for connecting and widening a source. */
@@ -482,8 +497,9 @@ function PlatformSettings({
   automaticPromotion: boolean;
   pending: boolean;
   onChange: (body: Record<string, string | boolean>) => void;
-  onAutomatic: () => void;
+  onConfirm: (confirm: SettingConfirm) => void;
 }) {
+  const reasonId = useId();
   const pipeline = source.imageProducer === "pipeline";
   const automatic = source.promotion === "automatic";
   const rows: Array<{ label: string; state: string; action: string; blocked: string | null; onClick: () => void }> = [
@@ -501,7 +517,7 @@ function PlatformSettings({
     {
       label: "Runners",
       state: source.allowSelfHostedRunners ? "Self-hosted runners may publish" : "Only GitHub-hosted runners may publish",
-      action: source.allowSelfHostedRunners ? "GitHub-hosted only" : "Allow self-hosted runners",
+      action: source.allowSelfHostedRunners ? "Allow GitHub-hosted runners only" : "Allow self-hosted runners",
       blocked: source.allowSelfHostedRunners || enabled ? null : "Scenario sources are not switched on for this scope.",
       onClick: () => onChange({ action: "runner_policy", allow_self_hosted: !source.allowSelfHostedRunners }),
     },
@@ -510,7 +526,19 @@ function PlatformSettings({
       state: automatic ? "Each lab goes live once it passed its check" : "An administrator promotes each lab",
       action: automatic ? "Promote by hand" : "Go live automatically",
       blocked: automatic || automaticPromotion ? null : "Automatic promotion is not switched on for this scope.",
-      onClick: automatic ? () => onChange({ action: "promotion", promotion: "manual" }) : onAutomatic,
+      onClick: () => onConfirm(automatic
+        ? {
+            title: "Promote by hand again?",
+            description: "Checks of the latest commit that are running stop, and its labs that are not live yet wait for an administrator to verify and promote them, or for its workflow to be run again after switching back. What is live stays live.",
+            label: "Promote by hand",
+            body: { action: "promotion", promotion: "manual" },
+          }
+        : {
+            title: "Let labs go live by themselves?",
+            description: "From the next commit on, each lab that passes its check on a platform host goes live without an administrator, and the commit's course catalog and removed labs follow. The commit that is the head now stays as it is, unless its workflow is run again. Whoever can push to the default branch then publishes to learners.",
+            label: "Go live automatically",
+            body: { action: "promotion", promotion: "automatic" },
+          }),
     },
     ...(source.mode === "push"
       ? [{
@@ -520,7 +548,12 @@ function PlatformSettings({
           blocked: pipeline
             ? "Set the images back to Intar's builder first."
             : enabled ? null : "Scenario sources are not switched on for this scope.",
-          onClick: () => onChange({ action: "mode", mode: "pull" }),
+          onClick: () => onConfirm({
+            title: "Switch to pull?",
+            description: "Intar fetches the repository itself again and compiles it on its builder. The repository's publish workflow is refused from then on and fails until the source is switched back to push.",
+            label: "Switch to pull",
+            body: { action: "mode", mode: "pull" },
+          }),
         }]
       : []),
   ];
@@ -533,9 +566,19 @@ function PlatformSettings({
             <div className="min-w-0">
               <p className="text-label">{row.label}</p>
               <p>{row.state}</p>
-              {row.blocked ? <p className="text-muted-foreground">{row.blocked}</p> : null}
+              {row.blocked ? (
+                <p id={`${reasonId}-${row.label}`} className="text-muted-foreground">
+                  {row.blocked}
+                </p>
+              ) : null}
             </div>
-            <Button size="sm" variant="outline" disabled={pending || row.blocked !== null} onClick={row.onClick}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={pending || row.blocked !== null}
+              aria-describedby={row.blocked ? `${reasonId}-${row.label}` : undefined}
+              onClick={row.onClick}
+            >
               {row.action}
             </Button>
           </li>
