@@ -161,6 +161,7 @@ jobs:
           VERSION: ${{ matrix.version }}
         run: cuenv task -p ci --package ci release-smoke-test-image-cli-package
       - name: Check the release payload
+        if: hashFiles('tools/workflows/release/check-release-payload.sh') != ''
         env:
           BINARY: ${{ matrix.binary }}
           VERSION: ${{ matrix.version }}

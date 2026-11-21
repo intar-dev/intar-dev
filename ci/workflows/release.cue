@@ -289,8 +289,11 @@ let _gitCliff = {
 			env: VERSION: "${{ matrix.version }}"
 			#StepTask & {#task: "release-smoke-test-image-cli-package"}
 		},
+		// A draft whose tag is older than this check has no such task: it is
+		// built as it always was.
 		{
 			name: "Check the release payload"
+			if:   "hashFiles('tools/workflows/release/check-release-payload.sh') != ''"
 			env: {
 				BINARY:  "${{ matrix.binary }}"
 				VERSION: "${{ matrix.version }}"
