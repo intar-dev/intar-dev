@@ -4,6 +4,8 @@
 # way zpm starts it, and passes when the guest's initramfs finds its virtio
 # disk. That covers the emulator, the accelerator, the virtio disk on a qcow2
 # overlay made by qemu-img, the user-mode network and the serial log.
+# With a directory as its argument it boots with the QEMU in that directory
+# instead, such as the `Contents/Helpers` of the app's bundle.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "${here}/../../.." && pwd)"
@@ -14,8 +16,12 @@ esac
 sha256() { if command -v sha256sum > /dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
-tar -xzf "${root}/dist/intar-qemu_${os}_${arch}.tar.gz" -C "${work}"
-bin="${work}/qemu/bin"
+if [ $# -gt 0 ]; then
+  bin="$(cd "$1" && pwd)"
+else
+  tar -xzf "${root}/dist/intar-qemu_${os}_${arch}.tar.gz" -C "${work}"
+  bin="${work}/qemu/bin"
+fi
 
 # The guest kernel every image boots, by the pins image builds use.
 kernel_rs="${root}/crates/intar-image-build/src/kernel.rs"

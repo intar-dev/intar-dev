@@ -1207,13 +1207,21 @@ fn main() {
     // QEMU runs the app itself as `<app> relay <port>` for a guest without
     // internet access; that is no window, only a pipe to the app's port.
     let mut arguments = std::env::args().skip(1);
-    if arguments.next().as_deref() == Some("relay") {
-        let relayed = arguments
-            .next()
-            .and_then(|port| port.parse().ok())
-            .ok_or_else(|| std::io::Error::other("relay takes a port"))
-            .and_then(zpm::relay::relay);
-        std::process::exit(i32::from(relayed.is_err()));
+    match arguments.next().as_deref() {
+        Some("relay") => {
+            let relayed = arguments
+                .next()
+                .and_then(|port| port.parse().ok())
+                .ok_or_else(|| std::io::Error::other("relay takes a port"))
+                .and_then(zpm::relay::relay);
+            std::process::exit(i32::from(relayed.is_err()));
+        }
+        // What a release checks its bundle by, and an update compares.
+        Some("--version") => {
+            println!("jumper {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        _ => {}
     }
     // INTAR_URL points the app at another intar, such as a local Worker.
     let base = std::env::var("INTAR_URL").unwrap_or_else(|_| "https://intar.dev".into());

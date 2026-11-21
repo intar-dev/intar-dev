@@ -67,6 +67,19 @@ schema.#Project & {
 		// What the app lane runs on a Mac: the desktop app and its engine alone.
 		"clippy-app": #Cargo & {args: ["clippy", "-p", "jumper", "-p", "zpm", "--all-targets", "--", "-D", "warnings"]}
 		"test-app": #Cargo & {args: ["nextest", "run", "-p", "jumper", "-p", "zpm"]}
+		// The app's macOS bundle, as a release builds it, and a guest booted
+		// with the QEMU inside it. Only a Mac with Apple silicon can build one;
+		// anywhere else the lane's other steps are the check.
+		"bundle-app": #Bash & {
+			_script: """
+				if [ "$(uname -sm)" != "Darwin arm64" ]; then
+				  echo "Skipped: the app's bundle is built on macOS on Apple silicon."
+				  exit 0
+				fi
+				tools/workflows/release/build-jumper-macos.sh
+				tools/workflows/qemu/smoke.sh dist/Intar.app/Contents/Helpers
+				"""
+		}
 
 		check: {
 			type: "group"
