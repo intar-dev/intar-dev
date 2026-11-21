@@ -1,5 +1,11 @@
 # Changelog
 
+## image-cli/v0.17.0 (2026-11-21)
+
+### Features
+
+- **intar-image-cli:** Set up a Linux arm64 computer (#497) (6ed7a964)
+
 ## image-cli/v0.16.0 (2026-11-21)
 
 ### Features
