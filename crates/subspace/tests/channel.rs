@@ -202,6 +202,16 @@ async fn serve() -> (Url, Shared) {
                         "blockedBy": null, "activeRunId": null, "scenarioReady": true }] }] }))
             }),
         )
+        .route(
+            "/api/local/app-release",
+            // Offers a release to an Apple-silicon Mac and none to anything else.
+            get(|axum::extract::RawQuery(query): axum::extract::RawQuery| async move {
+                let release = (query.as_deref() == Some("os=macos&arch=aarch64")).then(|| {
+                    json!({ "version": "0.2.0", "sha256": "ab".repeat(32), "url": "https://example.test/app.zip" })
+                });
+                Json(json!({ "protocol": 1, "release": release }))
+            }),
+        )
         .route("/api/local/runs/{id}/machines/{machine}/cli", post(cli))
         .route("/api/local/runs", post(start))
         .route("/api/local/runs/{id}/{action}", post(act))
@@ -389,4 +399,20 @@ async fn refuses_a_callback_from_another_sign_in() {
     assert!(matches!(tokens, Err(Error::SignIn(_))));
     // The code was never exchanged.
     assert_eq!(shared.lock().expect("lock").access, 0);
+}
+
+#[tokio::test]
+async fn asks_for_the_app_release_of_this_computer_without_a_sign_in() {
+    let (base, _) = serve().await;
+    let release = subspace::app_release(&reqwest::Client::new(), &base)
+        .await
+        .expect("answer");
+    // The stand-in offers one to an Apple-silicon Mac only.
+    if (std::env::consts::OS, std::env::consts::ARCH) == ("macos", "aarch64") {
+        let release = release.expect("release");
+        assert_eq!(release.version, "0.2.0");
+        assert_eq!(release.url, "https://example.test/app.zip");
+    } else {
+        assert_eq!(release, None);
+    }
 }

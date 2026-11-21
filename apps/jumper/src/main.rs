@@ -9,6 +9,7 @@ mod secrets;
 mod state;
 mod terminal;
 mod ui;
+mod update;
 
 use gpui::prelude::*;
 use gpui::{
@@ -114,6 +115,7 @@ impl Jumper {
         theme::apply(window, cx);
         // The engine answers with the stored sign-in or with "signed out".
         let _ = commands.send(Command::Restore);
+        let _ = commands.send(Command::CheckUpdate);
         Self {
             state: State::default(),
             commands,
@@ -143,6 +145,11 @@ impl Jumper {
         };
         if let Event::SignInStarted(url) = &event {
             cx.open_url(url);
+        }
+        // The new app is starting; this one makes room for it.
+        if matches!(event, Event::Restart) {
+            cx.quit();
+            return;
         }
         if let Some(next) = self.state.apply(event) {
             self.send(next);
@@ -307,9 +314,38 @@ impl Jumper {
                     "Sign out",
                     None,
                 );
+                // Offered between runs only: an update restarts the app.
+                let update = self.state.update.clone().map(|version| {
+                    let install = kit::button(
+                        p,
+                        "update",
+                        Kind::Outline,
+                        Size::Small,
+                        None,
+                        if self.state.updating {
+                            "Updating…"
+                        } else {
+                            "Update and restart"
+                        },
+                        None,
+                    );
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(kit::label(p, format!("Version {version} is available")))
+                        .child(Self::on_click(install, cx, |this, _| {
+                            if !this.state.updating {
+                                this.state.updating = true;
+                                this.send(Command::InstallUpdate);
+                            }
+                        }))
+                });
                 bar.child(wordmark)
                     .child(catalog)
                     .child(fill)
+                    .children(update)
                     .children(connected)
                     .child(Self::on_click(sign_out, cx, |this, _| {
                         this.send(Command::SignOut)
@@ -1219,6 +1255,35 @@ fn main() {
         // What a release checks its bundle by, and an update compares.
         Some("--version") => {
             println!("jumper {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        // Replaces this app with the one in a zip, without a window:
+        // `<app> install-update <zip> <sha256>`. The app's own update does the
+        // same after its download; this is that step by itself.
+        Some("install-update") => {
+            let installed = match (arguments.next(), arguments.next()) {
+                (Some(zip), Some(sha256)) => std::env::current_exe()
+                    .map_err(update::Refusal::from)
+                    .and_then(|program| update::bundle_of(&program))
+                    .and_then(|bundle| {
+                        update::install(
+                            &bundle,
+                            env!("CARGO_PKG_VERSION"),
+                            std::path::Path::new(&zip),
+                            &sha256,
+                        )
+                    }),
+                _ => Err(update::Refusal::NotTheUpdate(
+                    "install-update takes a zip and its SHA-256".to_owned(),
+                )),
+            };
+            match installed {
+                Ok(bundle) => println!("installed {}", bundle.display()),
+                Err(refusal) => {
+                    eprintln!("jumper: not updated: {refusal}");
+                    std::process::exit(1);
+                }
+            }
             return;
         }
         _ => {}

@@ -57,6 +57,11 @@ impl Local {
         }
     }
 
+    /// Whether a machine is running on this computer.
+    pub fn running(&self) -> bool {
+        self.machine.is_some()
+    }
+
     pub fn runs(&self, run_id: &str) -> bool {
         let running = self.machine.as_ref().map(|(run, _)| run);
         let stopped = self.stopped.as_ref().map(|(run, _)| run);

@@ -21,6 +21,7 @@
     "SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF": "",
     "SCENARIO_COMPILER_CLI_VERSION": "",
     "SCENARIO_COMPILER_CLI_SHA256": "",
+    "JUMPER_RELEASE_JSON": "",
   },
   "assets": {
     "directory": "./dist",

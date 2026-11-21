@@ -58,6 +58,26 @@ pub enum Error {
 /// The desktop app's archive routes.
 const ARCHIVE: &str = "/api/local/archive";
 
+/// The release of the app that intar offers this computer as an update. It is
+/// the same for everyone, so it is asked without a sign-in.
+pub async fn app_release(
+    http: &reqwest::Client,
+    base: &Url,
+) -> Result<Option<contract::AppReleaseV1>, Error> {
+    let mut url = base.join("/api/local/app-release")?;
+    url.query_pairs_mut()
+        .append_pair("os", std::env::consts::OS)
+        .append_pair("arch", std::env::consts::ARCH);
+    let answer: contract::AppReleaseAnswerV1 = http
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(answer.release)
+}
+
 /// One session's replay, as `dhd` renders it.
 pub struct ArchiveCastV1 {
     pub filename: String,
