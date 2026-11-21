@@ -37,15 +37,17 @@
     // its tag is released. The deploy refuses a ref that does not resolve to a
     // commit on SCENARIO_PUBLISH_WORKFLOW_SHAS.
     "SCENARIO_PUBLISH_WORKFLOW_REF": "scenario-publish-v1",
-    "SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF": "635a4d711df45f12e7038cb2119d0d1d37089372",
+    "SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF": "594dd143c4f586d106578a0ccb6c2a034b1a30d2",
     // Peeled commit SHAs of the released scenario-publish-vN tags, separated
     // by commas or whitespace. Empty: every push upload is refused.
     // 6c83304d is what scenario-publish-v1 resolves to; a73e571c is the commit
     // that last changed the workflow, for a caller that pins it. b72793b3 is
     // version 2, which builds and pushes a repository's images; 635a4d71 is
-    // version 2 with a job for each image, which the source card names. It
-    // has no tag yet, and b72793b3 stays for a caller that still pins it.
-    "SCENARIO_PUBLISH_WORKFLOW_SHAS": "6c83304d76405e8297933e3e6c24044eca19fd75 a73e571caccc35b499fa11e021f4ac6a9546b647 b72793b3d9a51c81b339de8511cd98a00b5c68e4 635a4d711df45f12e7038cb2119d0d1d37089372",
+    // version 2 with a job for each image; 594dd143 is version 2 with an
+    // amd64 and then an arm64 job for each image, which the source card
+    // names. It has no tag yet, and the two before it stay for a caller that
+    // still pins one.
+    "SCENARIO_PUBLISH_WORKFLOW_SHAS": "6c83304d76405e8297933e3e6c24044eca19fd75 a73e571caccc35b499fa11e021f4ac6a9546b647 b72793b3d9a51c81b339de8511cd98a00b5c68e4 635a4d711df45f12e7038cb2119d0d1d37089372 594dd143c4f586d106578a0ccb6c2a034b1a30d2",
     // The intar-image-cli release the compiler descriptor names, and its
     // release tarball sha256 per target as JSON, e.g. {"linux_amd64":"<hex>"}.
     // While either is empty the descriptor answers 503. Releases up to 0.10.3
