@@ -22,8 +22,8 @@ export function scenarioSourceCardVisible(card: Card): boolean {
 }
 
 /**
- * The binding of one scope to a GitHub repository. `scope` is the value its
- * intar.yaml must name: the organization slug, or `public`.
+ * The binding of one scope to a GitHub repository. `scope` is the
+ * organization's slug, or `public`: the namespace of its labs' ids.
  */
 export function ScenarioSourceSection({
   endpoint,
@@ -267,7 +267,7 @@ export function ScenarioSourceSection({
             <p className="mt-2 text-muted-foreground">
               This repository's pipeline builds its images, which needs the workflow's second version. It has no
               released tag yet: call it at the commit Intar's operators name, with <code>runner</code> set to a Linux
-              amd64 runner with KVM.
+              amd64 runner with KVM and Docker, where the job may run as root.
             </p>
           ) : (
             <Snippet>{workflow}</Snippet>
@@ -524,7 +524,9 @@ function SourceSettings({
     {
       label: "Images",
       state: pipeline ? "This repository's pipeline builds them" : "Intar's builder builds them",
-      // Back to the builder is the platform's step.
+      // An organization is not offered the way back to the builder (#472): the
+      // platform steps it back. The server would take it, as it builds for any
+      // organization that has no pipeline.
       action: pipeline ? (platform ? "Use Intar's builder" : null) : "Use the repository's pipeline",
       blocked: pipeline
         ? null
