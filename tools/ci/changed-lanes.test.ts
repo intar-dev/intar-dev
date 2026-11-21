@@ -107,6 +107,7 @@ test("a docs-only pull request runs only the docs lane", () => {
     images: "false",
     web: "false",
     kino: "false",
+    app: "false",
     docs: "true",
   });
 });
@@ -268,6 +269,7 @@ test("a local run compares the working tree with the merge base of origin/main",
     "images=false",
     "web=true",
     "kino=false",
+    "app=false",
     "docs=true",
   ]);
 });

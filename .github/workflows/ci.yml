@@ -154,6 +154,26 @@ jobs:
         uses: ./.github/actions/setup-rust
       - name: build-kino-guest
         run: cuenv task build-kino-guest
+  app:
+    if: needs.changes.outputs.app == 'true'
+    needs: changes
+    runs-on: namespace-profile-macos-arm64-smol
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+      - name: clippy-app
+        run: cuenv task clippy-app
+      - name: test-app
+        run: cuenv task test-app
   docs:
     if: needs.changes.outputs.docs == 'true'
     needs: changes
@@ -229,6 +249,7 @@ jobs:
       images: ${{ steps.lanes.outputs.images == 'true' }}
       web: ${{ steps.lanes.outputs.web == 'true' }}
       kino: ${{ steps.lanes.outputs.kino == 'true' }}
+      app: ${{ steps.lanes.outputs.app == 'true' }}
       docs: ${{ steps.lanes.outputs.docs == 'true' || steps.lanes.outputs.docs_touched == 'true' }}
       web_inputs: ${{ steps.inputs.outputs.web }}
       docs_inputs: ${{ steps.inputs.outputs.docs }}
@@ -403,6 +424,7 @@ jobs:
       - images
       - web
       - kino
+      - app
       - docs
       - web-build
     runs-on: ubuntu-24.04

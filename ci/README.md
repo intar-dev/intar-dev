@@ -55,10 +55,11 @@ that exact commit already passed.
    the group changed. The checkout holds only the group's commit and its base,
    so it first fetches main's history without file contents, where the merge
    base lies. The `changes` log says which way it went, and why.
-2. **One job per lane** (`rust`, `security`, `images`, `web`, `kino`,
+2. **One job per lane** (`rust`, `security`, `images`, `web`, `kino`, `app`,
    `docs`), skipped when its output is false. `kino` builds the kino guest
    with its size-optimised, fat-LTO profile, so only a change that reaches
-   kino pays that minute. `web-ui` runs the Chromium smoke in the Playwright
+   kino pays that minute. `app` checks the desktop app and its engine on the
+   macOS runner, where the app runs; `rust` builds it on Linux only. `web-ui` runs the Chromium smoke in the Playwright
    container when `web` runs.
 3. **Builds for `deploy.yml`.** A pull request's run executes branch code, so
    production never takes its upload. A merge group that changes a lane with

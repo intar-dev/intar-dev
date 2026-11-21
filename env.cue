@@ -64,6 +64,10 @@ schema.#Project & {
 		"fmt-check": #Cargo & {args: ["fmt", "--", "--check"]}
 		clippy: #Cargo & {args: ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]}
 
+		// What the app lane runs on a Mac: the desktop app and its engine alone.
+		"clippy-app": #Cargo & {args: ["clippy", "-p", "jumper", "-p", "zpm", "--all-targets", "--", "-D", "warnings"]}
+		"test-app": #Cargo & {args: ["nextest", "run", "-p", "jumper", "-p", "zpm"]}
+
 		check: {
 			type: "group"
 			rust: #Cargo & {args: ["check", "--workspace"]}
