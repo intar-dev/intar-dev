@@ -618,8 +618,6 @@ interface AdminOrganizationRow {
     allowExternalEmailSignups: boolean;
   } | null;
   removedMemberCount: number;
-  /** When a platform admin opened the organization's play scenarios to everyone. */
-  publicPlayGrantedAt: number | null;
 }
 
 function OrganizationsPanel() {
@@ -706,7 +704,6 @@ function OrganizationsPanel() {
                   <TableHead>Members</TableHead>
                   <TableHead>Assignments</TableHead>
                   <TableHead>Sign-in</TableHead>
-                  <TableHead>Public play</TableHead>
                   <TableHead>Created</TableHead>
                 </TableRow>
               </TableHeader>
@@ -771,9 +768,6 @@ function OrganizationsPanel() {
                         "—"
                       )}
                     </TableCell>
-                    <TableCell className="text-sm">
-                      <PublicPlayControl organization={organization} />
-                    </TableCell>
                     <TableCell className="text-metadata">
                       {formatRelativeTime(organization.createdAt)}
                     </TableCell>
@@ -798,39 +792,6 @@ function OrganizationsPanel() {
         />
       ) : null}
     </Section>
-  );
-}
-
-/** Grants or revokes the organization's public play; the server decides. */
-function PublicPlayControl({ organization }: { organization: AdminOrganizationRow }) {
-  const queryClient = useQueryClient();
-  const granted = organization.publicPlayGrantedAt !== null;
-  const change = useMutation({
-    mutationFn: () =>
-      adminJson(`/api/admin/organizations/${encodeURIComponent(organization.id)}/public-play`, {
-        method: granted ? "DELETE" : "PUT",
-      }),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ["admin", "organizations"] }),
-  });
-  return (
-    <div className="flex items-center gap-2">
-      <span>{granted ? "Granted" : "Members only"}</span>
-      <Button
-        size="sm"
-        variant="ghost"
-        aria-label={`${granted ? "Revoke" : "Grant"} public play for ${organization.name}`}
-        aria-busy={change.isPending || undefined}
-        disabled={change.isPending}
-        onClick={() => change.mutate()}
-      >
-        {granted ? "Revoke" : "Grant"}
-      </Button>
-      {change.error ? (
-        <InlineFeedback tone="error">
-          {change.error instanceof Error ? change.error.message : "Couldn't change public play."}
-        </InlineFeedback>
-      ) : null}
-    </div>
   );
 }
 

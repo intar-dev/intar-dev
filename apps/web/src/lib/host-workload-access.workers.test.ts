@@ -283,3 +283,22 @@ it("accepts a removed member's VM report so cleanup cannot make the shared host 
   await env.DB.prepare("UPDATE scenario_runs SET organization_id = NULL WHERE run_id = 'run-1'").run();
   expect(await save()).toBe(false);
 });
+
+// Play labs can no longer be started; a run that was started before keeps
+// its machines and terminal until it ends.
+it("keeps an active play run's machines and terminal while its scenario stays open to play", async () => {
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE scenario_runs SET launch_source = 'play', course_scope_key = NULL, course_id = NULL,
+      lecture_id = NULL WHERE run_id = 'run-1'`),
+    env.DB.prepare("UPDATE scenarios SET play = 1"),
+    // No course leads to the scenario: only the play branch can permit the run.
+    env.DB.prepare("DELETE FROM course_catalogs"),
+  ]);
+  const state = await loadStoredHostDesiredState(drizzle(env.DB), "host-1", Date.now());
+  expect(await enforceHostWorkloadAccess(state)).toBe(state);
+  expect(await loadScenarioTerminalRouteGeneration({ runId: "run-1", vmId: "vm-1" })).toMatchObject({ hostId: "host-1", userId: "user-1" });
+  expect(gateway.deleteRoute).not.toHaveBeenCalled();
+
+  await env.DB.prepare("UPDATE scenarios SET play = 0").run();
+  expect((await enforceHostWorkloadAccess(state)).vms[0]?.desired_phase).toBe("absent");
+});

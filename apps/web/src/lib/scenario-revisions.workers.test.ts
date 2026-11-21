@@ -19,7 +19,6 @@ import {
   liftRevisionHold,
   listAdministeredScenarios,
   moveLiveRevision,
-  setScenarioPlay,
   type RestoreVerifyReport,
   type VerifyReport,
 } from "@/lib/scenario-revisions";
@@ -709,38 +708,14 @@ describe("promotion, rollback and verify runs", () => {
   });
 
   describe("play", () => {
-    const play = () => env.DB.prepare("SELECT play FROM scenarios WHERE id = ?1").bind(PUBLIC_ID).first<number>("play");
-
-    it("is set by the scope's administrators, and a later commit leaves it", async () => {
-      expect(await play()).toBe(0);
-      await expect(setScenarioPlay({ scenarioId: PUBLIC_ID, play: true, actorUserId: ORG_OWNER }))
-        .rejects.toMatchObject({ status: 404 });
-      expect(await play()).toBe(0);
-      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: true, actorUserId: ADMIN });
-      expect(await play()).toBe(1);
-      expect((await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.play).toBe(true);
-      // The bundle says play is off; the scenario keeps the administrator's word.
-      await publish(rev("b"), image);
-      expect(await play()).toBe(1);
-      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN });
-      expect(await play()).toBe(0);
-    });
-
-    it("stays open while a play run goes on", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: true, actorUserId: ADMIN });
-      const run = await learnerStart(LEARNER);
-      // A course run does not depend on the setting.
-      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN });
-      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: true, actorUserId: ADMIN });
-      await env.DB.prepare("UPDATE scenario_runs SET launch_source = 'play' WHERE run_id = ?1").bind(run.runId).run();
-      await expect(setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN }))
-        .rejects.toMatchObject({ status: 409, code: "active_runs_would_lose_access" });
-      expect(await play()).toBe(1);
-      await env.DB.prepare("UPDATE scenario_runs SET state = 'completed' WHERE run_id = ?1").bind(run.runId).run();
-      await setScenarioPlay({ scenarioId: PUBLIC_ID, play: false, actorUserId: ADMIN });
-      expect(await play()).toBe(0);
+    it("is not read from a bundle: a new scenario is never open to play", async () => {
+      const playable = structuredClone(bundleFixture);
+      playable.scenarios[0]!.play = true;
+      // The organization's scenario is new with this bundle.
+      await publish(rev("c"), image, "org-a", playable);
+      expect(await env.DB.prepare("SELECT play FROM scenarios WHERE id = ?1").bind(ORG_ID).first<number>("play")).toBe(0);
+      // The revision document still carries the bundle's word; nothing reads it.
+      expect(JSON.parse((await revisionRow(ORG_ID, rev("c")))!.doc_json).play).toBe(true);
     });
   });
 

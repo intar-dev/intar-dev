@@ -182,9 +182,7 @@ export function ScenarioRunStart() {
   const queryClient = useQueryClient();
   const { _splat: scenarioId = "" } = useParams({ from: "/app/runs/start/$" });
   const search = useSearch({ from: "/app/runs/start/$" });
-  const play = search.source === "play";
-  const playRef = search.ref;
-  const organizationId = play ? null : (search.organizationId ?? null);
+  const organizationId = search.organizationId ?? null;
   const abortRef = useRef<AbortController | null>(null);
   const [startState, setStartState] = useState<
     "requesting" | "waiting" | "failed"
@@ -215,9 +213,7 @@ export function ScenarioRunStart() {
     lectureDetail?.lecture.title ??
     findStartLectureTitle(courseCatalog.data, search) ??
     "Scenario run";
-  const returnTarget = play
-    ? { href: `/play/${scenarioId}`, label: "Back to scenario", text: "Scenario" }
-    : getStartReturnTarget(search);
+  const returnTarget = getStartReturnTarget(search);
   const startGuidanceProps: RunLearningPanelProps = {
     briefingMarkdown: "",
     lectureMarkdown: lectureDetail?.lecture.bodyMarkdown ?? null,
@@ -253,8 +249,6 @@ export function ScenarioRunStart() {
     void requestScenarioStartWithCapacityWait(scenarioId, {
       signal: controller.signal,
       organizationId,
-      ...(play ? { launchSource: "play" as const } : {}),
-      ...(play && playRef ? { ref: playRef } : {}),
       onCapacityWait: (contention) => {
         setStartContention(contention);
         setStartState("waiting");
@@ -300,7 +294,7 @@ export function ScenarioRunStart() {
             : "Could not start the scenario.",
         );
       });
-  }, [navigate, organizationId, play, playRef, queryClient, scenarioId]);
+  }, [navigate, organizationId, queryClient, scenarioId]);
 
   useEffect(() => {
     startScenario();

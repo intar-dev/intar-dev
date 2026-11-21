@@ -143,7 +143,7 @@ export async function ingestSourceBundle(
     // Under D1's value limit: readSourceBundle refuses a larger document.
     const doc = canonicalJson(await scenarioRevision(scenario, scenarioId, keys));
     scenarios.push({
-      id: scenarioId, slug: scenario.slug, play: scenario.play, doc,
+      id: scenarioId, slug: scenario.slug, doc,
       restoreBasis: await restoreBasis(scenario, scenarioId),
     });
   }
@@ -183,10 +183,11 @@ export async function ingestSourceBundle(
     env.DB.prepare(
       `INSERT INTO scenarios (id, namespace, slug, organization_id, scope_key, enabled, play, updated_at)
         SELECT json_extract(value, '$.id'), ?2, json_extract(value, '$.slug'), ?3, ?4, 1,
-          json_extract(value, '$.play'), ?5
+          -- A bundle's play is not read: no new scenario is open to play.
+          0, ?5
         FROM json_each(?1) WHERE true ON CONFLICT (id) DO NOTHING`,
     ).bind(
-      JSON.stringify(scenarios.map(({ id: scenarioId, slug, play }) => ({ id: scenarioId, slug, play }))),
+      JSON.stringify(scenarios.map(({ id: scenarioId, slug }) => ({ id: scenarioId, slug }))),
       namespace,
       organizationId,
       scopeKey,

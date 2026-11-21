@@ -110,7 +110,6 @@ export interface AdministeredScenario {
   organizationId: string | null;
   title: string | null;
   enabled: boolean;
-  play: boolean;
   liveRev: string | null;
   candidateRev: string | null;
   /** Whether the reader may verify, promote and roll back. */
@@ -149,7 +148,7 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
   const [scenarios, revisions, runs, jobs] = await env.DB.batch([
     env.DB.prepare(
       `SELECT scenario.id, scenario.namespace, scenario.slug, scenario.organization_id, scenario.enabled,
-          scenario.play, scenario.live_rev, scenario.candidate_rev, ${scopeAdminSql(1)} AS can_manage,
+          scenario.live_rev, scenario.candidate_rev, ${scopeAdminSql(1)} AS can_manage,
           (SELECT json_extract(titled.doc_json, '$.title') FROM scenario_revisions titled
             WHERE titled.scenario_id = scenario.id ORDER BY titled.rev = scenario.live_rev DESC,
               titled.created_at DESC LIMIT 1) AS title
@@ -201,7 +200,7 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
     ).bind(actorUserId, scenarioId ?? null, digest),
   ]);
   type ScenarioRow = {
-    id: string; namespace: string; slug: string; organization_id: string | null; enabled: number; play: number;
+    id: string; namespace: string; slug: string; organization_id: string | null; enabled: number;
     live_rev: string | null; candidate_rev: string | null; can_manage: number; title: string | null;
   };
   type RevisionRow = {
@@ -215,7 +214,7 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
   for (const row of scenarios!.results as ScenarioRow[]) {
     byScenario.set(row.id, {
       id: row.id, namespace: row.namespace, slug: row.slug, organizationId: row.organization_id, title: row.title,
-      enabled: row.enabled === 1, play: row.play === 1, liveRev: row.live_rev, candidateRev: row.candidate_rev,
+      enabled: row.enabled === 1, liveRev: row.live_rev, candidateRev: row.candidate_rev,
       canManage: row.can_manage === 1, verifyRuns: {}, revisions: [], sourceJob: null,
     });
   }
@@ -490,11 +489,6 @@ export function sourceHeadSql(
       JOIN scenario_source_commits head ON head.scope_key = source.scope_key AND head.purpose = 'deploy'
      WHERE source.scope_key = ${scope} AND source.bound_by_user_id = ${by.binder} AND source.promotion = 'automatic'
        AND source.disconnected_at IS NULL AND source.paused_at IS NULL
-       -- An organization whose play labs are open to everyone promotes by
-       -- hand (#472); a source that was automatic before it was granted is
-       -- held here whatever let it through.
-       AND NOT EXISTS (SELECT 1 FROM organization_entitlements entitlement
-         WHERE entitlement.organization_id = source.organization_id AND entitlement.public_play_granted_at IS NOT NULL)
        AND ((source.organization_id IS NULL AND EXISTS (SELECT 1 FROM user binder
            WHERE binder.id = source.bound_by_user_id AND ${activeAdminSql("binder")}))
          OR EXISTS (SELECT 1 FROM member binder_member JOIN user binder ON binder.id = binder_member.user_id
@@ -556,34 +550,6 @@ async function publishCatalogOnly(input: {
   }
   console.info(JSON.stringify({ event: "scenario_catalog_published", scenarioId, rev, actorUserId }));
 }
-
-/**
- * Sets who may play a scenario: `play` opens it to everyone signed in where
- * its scope allows that. It is an administrator's setting; a commit sets it
- * only when it first brings the scenario. Closing waits for the play runs
- * that are going on: a play run's access is the setting itself, so its lab
- * would be taken from its host.
- */
-export async function setScenarioPlay(input: { scenarioId: string; play: boolean; actorUserId: string }): Promise<void> {
-  const result = await env.DB.prepare(
-    `UPDATE scenarios AS scenario SET play = ?2, updated_at = ?3 WHERE scenario.id = ?1 AND ${scopeAdminSql(4)}
-        AND (?2 = 1 OR NOT ${ACTIVE_PLAY_RUN_SQL})`,
-  ).bind(input.scenarioId, input.play ? 1 : 0, Date.now(), input.actorUserId).run();
-  if (!result.meta.changes) {
-    const running = await env.DB.prepare(
-      `SELECT ${ACTIVE_PLAY_RUN_SQL} AS running FROM scenarios scenario WHERE scenario.id = ?1 AND ${scopeAdminSql(4)}`,
-    ).bind(input.scenarioId, null, null, input.actorUserId).first<{ running: number }>();
-    if (running?.running) {
-      throw appError(409, "active_runs_would_lose_access", "play runs of this scenario are going on; try again when they end");
-    }
-    throw appError(404, "scenario_not_found", "scenario not found");
-  }
-  console.info(JSON.stringify({ event: "scenario_play", scenarioId: input.scenarioId, play: input.play, actorUserId: input.actorUserId }));
-}
-
-/** Holds while a play run of scenario ?1 is going on. */
-const ACTIVE_PLAY_RUN_SQL = `EXISTS (SELECT 1 FROM scenario_runs play_run WHERE play_run.scenario_id = ?1
-  AND play_run.launch_source = 'play' AND play_run.state NOT IN ('completed', 'failed'))`;
 
 const revisionHeld = () =>
   appError(409, "revision_held", "a rollback put this revision's behaviour on hold; lift the hold to promote it");

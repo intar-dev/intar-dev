@@ -95,7 +95,7 @@ test("a platform administrator switches the platform source's settings on its ca
     if (request.method() === "GET") {
       await route.fulfill({ json: {
         enabled: true, pipelineImages: true, configured: true, appSlug: null, workflowRef: "scenario-publish-v1",
-        pipelineWorkflowRef: null, settings: { platform: true, automaticPromotion: true, publicPlay: false }, source,
+        pipelineWorkflowRef: null, settings: { platform: true, automaticPromotion: true }, source,
       } });
       return;
     }
@@ -160,7 +160,7 @@ test("an organization's owner switches its own source's settings", async ({ page
       await route.fulfill({ json: {
         enabled: true, pipelineImages: true, appSlug: null, workflowRef: "scenario-publish-v1",
         pipelineWorkflowRef: "scenario-publish-v2",
-        settings: { platform: false, automaticPromotion: true, publicPlay: false }, source,
+        settings: { platform: false, automaticPromotion: true }, source,
       } });
       return;
     }
@@ -215,7 +215,7 @@ test("an organization's owner reads its pipeline's usage and forgets a recorded 
       await route.fulfill({ json: {
         enabled: true, pipelineImages: true, appSlug: null, workflowRef: "scenario-publish-v1",
         pipelineWorkflowRef: "scenario-publish-v2",
-        settings: { platform: false, automaticPromotion: true, publicPlay: false },
+        settings: { platform: false, automaticPromotion: true },
         usage: {
           openSessions: { used: 0, limit: 8 }, sessions: { used: 3, limit: 200 },
           uploadedBytes: { used: 4 * GIB, limit: 100 * GIB },

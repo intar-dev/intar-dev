@@ -641,8 +641,6 @@ function LinkedLectureAction({
             organizationId: route.organizationId ?? undefined,
             courseId: route.courseId,
             lectureId: lecture.lectureId,
-            source: undefined,
-            ref: undefined,
           }}
           onClick={(event) => {
             if (

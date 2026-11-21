@@ -90,10 +90,6 @@ export interface BeginScenarioRunInput {
   hostId?: string;
   allowDrainedAdminProof?: boolean;
   allowSequenceBypass?: boolean;
-  /** A start from a play page: no course, and play access instead. */
-  launchSource?: "play";
-  /** Where the play page was opened from, as the start route validated it. */
-  ref?: string;
   /** The VMs run on the learner's own computer; no host is scheduled. */
   runtime?: "local";
   /** That computer's processor, when it is not amd64. Only with `runtime`. */
@@ -197,29 +193,25 @@ async function admitScenarioStart(
   const { idempotencyKey, organizationId } = prelude;
   const scope = scenarioStartRequestScope(input, input.scenarioId);
   const db = drizzle(env.DB);
-  const play = input.launchSource === "play";
-  // Every scenario id is namespaced and starts from its live revision. A
-  // play start is personal.
-  if (!isRevisionScenarioId(input.scenarioId) || (play && organizationId !== null)) {
+  // Every scenario id is namespaced and starts from its live revision.
+  if (!isRevisionScenarioId(input.scenarioId)) {
     throw appError(404, "scenario_not_found", "scenario not found");
   }
   const [revision, active] = await Promise.all([
-    liveScenarioRevision(env.DB, input.scenarioId, organizationId, { play }),
+    liveScenarioRevision(env.DB, input.scenarioId, organizationId),
     loadActiveRunRow(input.userId),
   ]);
   if (!revision) throw appError(404, "scenario_not_found", "scenario not found");
   const scenarioId = input.scenarioId;
   // Resolve the V2 unit before any reuse can return, so an old direct
   // request cannot revive an unlinked scenario around the course gate.
-  const courseLecture = play
-    ? null
-    : await assertCourseScenarioStartAllowed({
-        db,
-        userId: input.userId,
-        organizationId,
-        scenarioId,
-        ...(input.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
-      });
+  const courseLecture = await assertCourseScenarioStartAllowed({
+    db,
+    userId: input.userId,
+    organizationId,
+    scenarioId,
+    ...(input.allowSequenceBypass ? { allowSequenceBypass: true } : {}),
+  });
   await assertAccountActive(input.userId);
 
   const replayed = await loadRunByIdempotencyKey(
@@ -286,7 +278,6 @@ function scenarioStartRequestScope(
     candidateBuildId: null,
     allowDrainedAdminProof: input.allowDrainedAdminProof === true,
     allowSequenceBypass: input.allowSequenceBypass === true,
-    ...(input.launchSource === "play" ? { launchSource: "play" as const, ref: input.ref ?? null } : {}),
     ...(input.runtime === "local" ? { runtime: "local" as const } : {}),
     // Another processor is another request: its machines boot other images.
     ...(input.runtime === "local" && input.architecture ? { architecture: input.architecture } : {}),

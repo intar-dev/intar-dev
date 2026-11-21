@@ -2,7 +2,7 @@ import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { appError, toErrorResponse } from "@/lib/app-error";
 import {
-  assertScenarioAdmin, clearRestoreVerified, liftRevisionHold, listAdministeredScenarios, moveLiveRevision, setScenarioPlay,
+  assertScenarioAdmin, clearRestoreVerified, liftRevisionHold, listAdministeredScenarios, moveLiveRevision,
 } from "@/lib/scenario-revisions";
 import { beginVerifyRun } from "@/lib/scenario-runs/revision-begin";
 import { refuseScenarioSourceWrite } from "@/lib/scenario-sources";
@@ -37,7 +37,6 @@ export const GET: APIRoute = async ({ request, params }) => {
  * `{action: "promote" | "rollback", rev, liveRev}` moves the live revision
  * from `liveRev`, the one the caller saw; a candidate that is the same as
  * the live revision moves nothing and only publishes its course catalog.
- * `{action: "set_play", play}` sets whether the scenario is open to play.
  * Only the scenario's scope admins.
  */
 export const POST: APIRoute = async ({ request, params }) => {
@@ -49,13 +48,8 @@ export const POST: APIRoute = async ({ request, params }) => {
     const refused = await refuseScenarioSourceWrite(request, authz.context);
     if (refused) return refused;
     const body = (await request.json().catch(() => null)) as {
-      action?: unknown; rev?: unknown; liveRev?: unknown; play?: unknown;
+      action?: unknown; rev?: unknown; liveRev?: unknown;
     } | null;
-    if (body?.action === "set_play") {
-      if (typeof body.play !== "boolean") throw appError(400, "invalid_request", "play is true or false");
-      await setScenarioPlay({ scenarioId, play: body.play, actorUserId: authz.context.userId });
-      return jsonResponse({ scenario: await readScenario(authz.context.userId, scenarioId) });
-    }
     const rev = typeof body?.rev === "string" ? body.rev : "";
     if (!rev) throw appError(400, "invalid_request", "rev is required");
     if (body?.action === "verify") {
@@ -76,7 +70,7 @@ export const POST: APIRoute = async ({ request, params }) => {
       return jsonResponse({ scenario: await readScenario(authz.context.userId, scenarioId) });
     }
     if (body?.action !== "promote" && body?.action !== "rollback") {
-      throw appError(400, "invalid_request", "action is verify, verify_restore, clear_restore_verified, lift_hold, promote, rollback or set_play");
+      throw appError(400, "invalid_request", "action is verify, verify_restore, clear_restore_verified, lift_hold, promote or rollback");
     }
     if (body.liveRev !== null && typeof body.liveRev !== "string") {
       throw appError(400, "invalid_request", "liveRev is the live revision you saw, or null");

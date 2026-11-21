@@ -96,23 +96,6 @@ const organizationDirectSignInRoute = createRoute({
   ),
 });
 
-// A scenario open to play: public, and its Start needs sign-in.
-const playRoute = createRoute({
-  getParentRoute: () => marketingLayoutRoute,
-  path: "play/$namespace/$slug",
-  validateSearch: (search: Record<string, unknown>): { ref?: string } =>
-    typeof search.ref === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(search.ref)
-      ? { ref: search.ref }
-      : {},
-  head: () =>
-    routeHead(
-      "Repair scenario",
-      "Start a systems repair scenario and fix a live system in your browser.",
-    ),
-  pendingComponent: FullPageRoutePending,
-  component: lazyRouteComponent(() => import("./pages/Play"), "Play"),
-});
-
 /* -------------------------------------------------------------------------- */
 /* Shared run (public, no sign-in). Its own page, outside both layouts.       */
 /* -------------------------------------------------------------------------- */
@@ -470,7 +453,6 @@ const routeTree = rootRoute.addChildren([
     oauthConsentRoute,
     organizationSignInRoute,
     organizationDirectSignInRoute,
-    playRoute,
   ]),
   appLayoutRoute.addChildren([
     supportForumRoute,
@@ -542,8 +524,6 @@ function validateScenarioRunStartSearch(search: Record<string, unknown>) {
     organizationId: text(search.organizationId),
     courseId: text(search.courseId),
     lectureId: text(search.lectureId),
-    source: search.source === "play" ? ("play" as const) : undefined,
-    ref: text(search.ref),
   };
 }
 

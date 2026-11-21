@@ -78,8 +78,6 @@ export async function requestScenarioStartWithCapacityWait(
     signal: AbortSignal;
     onCapacityWait: (contention: ScenarioStartContention) => void;
     organizationId?: string | null;
-    launchSource?: "play";
-    ref?: string;
   },
 ): Promise<ScenarioStartAcceptedResponse> {
   const startedAt = Date.now();
@@ -102,8 +100,6 @@ export async function requestScenarioStartWithCapacityWait(
         {
           idempotencyKey,
           organizationId: options.organizationId ?? null,
-          ...(options.launchSource ? { launchSource: options.launchSource } : {}),
-          ...(options.ref ? { ref: options.ref } : {}),
         },
       );
     } catch (error) {
@@ -199,8 +195,6 @@ async function requestScenarioStart(
   options: {
     idempotencyKey: string;
     organizationId: string | null;
-    launchSource?: "play";
-    ref?: string;
   },
 ): Promise<ScenarioStartAcceptedResponse> {
   let response: Response;
@@ -220,8 +214,6 @@ async function requestScenarioStart(
           ...(options.organizationId
             ? { organizationId: options.organizationId }
             : {}),
-          ...(options.launchSource ? { launchSource: options.launchSource } : {}),
-          ...(options.ref ? { ref: options.ref } : {}),
         }),
       },
     );

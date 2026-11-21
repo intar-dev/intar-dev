@@ -182,8 +182,6 @@ export interface ScenarioSourceCard {
     platform: boolean;
     /** Whether automatic promotion is switched on for the scope. */
     automaticPromotion: boolean;
-    /** The organization's play labs are open to everyone, so it promotes by hand. */
-    publicPlay: boolean;
   };
   /** With `settings`, for a scope with a connected source. */
   usage?: ScenarioSourceUsage;
@@ -394,15 +392,10 @@ export async function scenarioSourceCard(
    */
   settingsFor?: "platform" | "scope",
 ): Promise<ScenarioSourceCard> {
-  const [enabled, pipelineImages, automaticPromotion, publicPlay, source] = await Promise.all([
+  const [enabled, pipelineImages, automaticPromotion, source] = await Promise.all([
     scenarioGitSourcesEnabled(scope, toggles),
     scenarioPipelineImagesEnabled(scope, toggles),
     settingsFor ? scenarioAutomaticPromotionEnabled(scope, toggles) : false,
-    settingsFor === "scope" && scope.organizationId !== null
-      ? env.DB.prepare(
-          "SELECT 1 AS granted FROM organization_entitlements WHERE organization_id = ?1 AND public_play_granted_at IS NOT NULL",
-        ).bind(scope.organizationId).first().then((row) => row !== null)
-      : false,
     loadScenarioSource(scope),
   ]);
   return {
@@ -414,7 +407,7 @@ export async function scenarioSourceCard(
     appSlug: env.GITHUB_APP_SLUG || null,
     workflowRef: env.SCENARIO_PUBLISH_WORKFLOW_REF || "scenario-publish-v1",
     pipelineWorkflowRef: env.SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF || null,
-    ...(settingsFor ? { settings: { platform: settingsFor === "platform", automaticPromotion, publicPlay } } : {}),
+    ...(settingsFor ? { settings: { platform: settingsFor === "platform", automaticPromotion } } : {}),
     ...(settingsFor && source?.disconnectedAt === null ? { usage: await scenarioSourceUsage(scope.key) } : {}),
     source,
   };
@@ -901,8 +894,7 @@ export async function changeScenarioSource(input: {
     }
     case "promotion": {
       // In the statement: the actor still administers the scope, only a
-      // connected source is given a job, and an organization whose play
-      // labs are open to everyone does not publish to them unreviewed (#472). Back to manual is always
+      // connected source is given a job. Back to manual is always
       // possible. Switching changes nothing a learner sees: the job leaves
       // the commit that is the head now as the administrator left it, and
       // takes up the next one, or a re-run of this one. The poke runs the
@@ -924,18 +916,11 @@ export async function changeScenarioSource(input: {
             authority,
             change.promotion === "manual"
               ? undefined
-              : and(isNull(scenarioSources.disconnectedAt), sql`NOT ${PUBLIC_PLAY_GRANTED}`),
+              : isNull(scenarioSources.disconnectedAt),
           ),
         )
         .returning({ scopeKey: scenarioSources.scopeKey });
-      if (!set) {
-        if (change.promotion === "automatic" && (await db.get(sql`SELECT 1 AS granted FROM scenario_sources
-            WHERE scope_key = ${scope.key} AND ${PUBLIC_PLAY_GRANTED}`))) {
-          throw appError(409, "scenario_source_public_play",
-            "This organization's play labs are open to everyone, so its labs are promoted by hand. Automatic promotion needs the public-play grant withdrawn first.");
-        }
-        throw await settingRefusal(db, scope, authority, false);
-      }
+      if (!set) throw await settingRefusal(db, scope, authority, false);
       console.info(JSON.stringify({
         event: "scenario_source_promotion_set", scope_key: scope.key, actor_user_id: actorUserId, promotion: change.promotion,
       }));
@@ -1031,11 +1016,6 @@ export async function changeScenarioSource(input: {
   const view = await loadScenarioSource(scope);
   return view && forgotten ? { ...view, forgotten } : view;
 }
-
-/** Holds while the source of a scope is an organization's that has the public-play grant. */
-const PUBLIC_PLAY_GRANTED = sql`EXISTS (SELECT 1 FROM organization_entitlements entitlement
-  WHERE entitlement.organization_id = ${scenarioSources.organizationId}
-    AND entitlement.public_play_granted_at IS NOT NULL)`;
 
 /** Whether the actor an authority predicate names holds it now. */
 async function holdsAuthority(db: DrizzleD1Database, authority: SQL): Promise<boolean> {

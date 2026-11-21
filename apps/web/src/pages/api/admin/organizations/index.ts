@@ -5,7 +5,6 @@ import { drizzle } from "drizzle-orm/d1";
 import {
   member,
   organization,
-  organizationEntitlements,
   organizationMemberRemovals,
   scenarioAssignments,
   ssoProvider,
@@ -36,13 +35,8 @@ export const GET: APIRoute = async ({ request }) => {
             name: organization.name,
             slug: organization.slug,
             createdAt: organization.createdAt,
-            publicPlayGrantedAt: organizationEntitlements.publicPlayGrantedAt,
           })
           .from(organization)
-          .leftJoin(
-            organizationEntitlements,
-            eq(organizationEntitlements.organizationId, organization.id),
-          )
           .orderBy(desc(organization.createdAt)),
         db
           .select({ organizationId: member.organizationId, members: count() })
@@ -125,7 +119,6 @@ export const GET: APIRoute = async ({ request }) => {
         owner: ownerByOrganization.get(entry.id) ?? null,
         oidc: providerByOrganization.get(entry.id) ?? null,
         removedMemberCount: removalsByOrganization.get(entry.id) ?? 0,
-        publicPlayGrantedAt: entry.publicPlayGrantedAt ?? null,
       })),
     });
   } catch (error) {
