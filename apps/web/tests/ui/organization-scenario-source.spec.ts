@@ -248,6 +248,7 @@ test("an organization's owner reads its pipeline's usage and forgets a recorded 
 
   await card.getByRole("button", { name: /^Forget the amd64 image/ }).click();
   expect(changes).toEqual([]);
+  await expect(page.getByRole("dialog")).toContainText("Revisions that already name the image keep it");
   await page.getByRole("dialog").getByRole("button", { name: "Forget" }).click();
   await expect(card.getByText("Recorded images")).toHaveCount(0);
   expect(changes).toEqual([{ action: "forget_image", build_key: `sha256:${"a".repeat(64)}`, architecture: "amd64" }]);

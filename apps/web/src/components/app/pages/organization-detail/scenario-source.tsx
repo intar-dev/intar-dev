@@ -220,7 +220,13 @@ export function ScenarioSourceSection({
               change.reset();
               setConfirming({
                 title: `Forget this ${image.architecture} image?`,
-                description: `Its record here is deleted, with who built it. Revisions that already name the image keep it, live ones too. The next commit that needs build key ${shortKey(image.buildKey)} for ${image.architecture} builds it again.`,
+                // A revision's document names its amd64 image; its arm64 one is
+                // only this record.
+                description: `Its record here is deleted, with who built it. ${
+                  image.architecture === "amd64"
+                    ? "Revisions that already name the image keep it, live ones too."
+                    : "Labs that use it, live ones too, stop starting on arm64 computers, and the image may be deleted."
+                } The next workflow run that needs build key ${shortKey(image.buildKey)} for ${image.architecture} builds it again.`,
                 label: "Forget",
                 body: { action: "forget_image", build_key: image.buildKey, architecture: image.architecture },
               });

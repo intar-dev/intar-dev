@@ -185,7 +185,7 @@ export interface ScenarioSourceCard {
     /** The organization's play labs are open to everyone, so it promotes by hand. */
     publicPlay: boolean;
   };
-  /** With `settings`, for a scope that has a binding. */
+  /** With `settings`, for a scope with a connected source. */
   usage?: ScenarioSourceUsage;
   source: ScenarioSourceView | null;
 }
@@ -415,7 +415,7 @@ export async function scenarioSourceCard(
     workflowRef: env.SCENARIO_PUBLISH_WORKFLOW_REF || "scenario-publish-v1",
     pipelineWorkflowRef: env.SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF || null,
     ...(settingsFor ? { settings: { platform: settingsFor === "platform", automaticPromotion, publicPlay } } : {}),
-    ...(settingsFor && source ? { usage: await scenarioSourceUsage(scope.key) } : {}),
+    ...(settingsFor && source?.disconnectedAt === null ? { usage: await scenarioSourceUsage(scope.key) } : {}),
     source,
   };
 }
