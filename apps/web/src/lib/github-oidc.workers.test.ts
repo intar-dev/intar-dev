@@ -68,6 +68,8 @@ describe("GitHub Actions OIDC", () => {
   it.each([
     ["a tag-pinned caller", `${WORKFLOW}@refs/tags/scenario-publish-v1`],
     ["a SHA-pinned caller", `${WORKFLOW}@${"d".repeat(40)}`],
+    ["an image job of a SHA-pinned caller", `${WORKFLOW.replace(".yml", "-image.yml")}@${"d".repeat(40)}`],
+    ["an image job of a tag-pinned caller", `${WORKFLOW.replace(".yml", "-image.yml")}@refs/tags/scenario-publish-v2`],
   ])("accepts %s at an allowlisted workflow commit", async (_name, ref) => {
     await expect(
       verify(await token({ job_workflow_ref: ref }), `${"e".repeat(40)}, ${WORKFLOW_SHA}`),

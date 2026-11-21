@@ -26,6 +26,10 @@ on:
       runner:
         type: string
         required: true
+      arm64-runner:
+        description: The runner of the arm64 job; `runner` when empty.
+        type: string
+        required: true
       cpus:
         type: number
         required: true
@@ -57,14 +61,6 @@ jobs:
     env:
       ARCH: amd64
     steps: &steps
-      - name: DEBUG token claims (temporary)
-        run: |
-          set -euo pipefail
-          payload="$(curl --fail --silent --show-error --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=probe" | jq -r '.value' | cut -d. -f2 | tr '_-' '/+')"
-          while [ $(( ${#payload} % 4 )) != 0 ]; do payload="${payload}="; done
-          base64 -d <<<"${payload}" | jq '{job_workflow_ref, job_workflow_sha, workflow_ref, event_name, runner_environment}'
-
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -100,11 +96,19 @@ jobs:
           summary "### \`${target}\` ${ARCH}"
           summary ""
 
+          # What this runner is: its own architecture is built with KVM,
+          # the other one emulated.
+          case "$(uname -m)" in
+            x86_64) native=amd64 ;;
+            aarch64) native=arm64 ;;
+            *) echo "This runner is $(uname -m); an image job needs Linux amd64 or arm64." >&2; exit 1 ;;
+          esac
+
           # The CLI and the Kino Intar names now.
           curl --fail --silent --show-error --retry 20 --retry-delay 60 \
             --output "${work}/descriptor.json" "${INTAR_ORIGIN}/registry/v1/sources/compiler"
           cli_version="$(jq -r '.cli_version' "${work}/descriptor.json")"
-          cli_sha256="$(jq -r '.sha256.linux_amd64' "${work}/descriptor.json")"
+          cli_sha256="$(jq -r --arg host "linux_${native}" '.sha256[$host] // empty' "${work}/descriptor.json")"
           digest="$(jq -r '.digest' "${work}/descriptor.json")"
           if ! [[ "${cli_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${cli_sha256}" =~ ^[0-9a-f]{64}$ && "${digest}" =~ ^p[0-9a-f]{8}$ ]]; then
             echo "The compiler descriptor is malformed: $(cat "${work}/descriptor.json")" >&2
@@ -120,7 +124,7 @@ jobs:
             echo "Intar's compiler changed since this commit was uploaded. Re-run all jobs." >&2
             exit 1
           fi
-          archive="${work}/intar-image-cli_${cli_version}_linux_amd64.tar.gz"
+          archive="${work}/intar-image-cli_${cli_version}_linux_${native}.tar.gz"
           curl --fail --silent --show-error --location --retry 3 --output "${archive}" \
             "https://github.com/intar-dev/intar-dev/releases/download/image-cli%2Fv${cli_version}/${archive##*/}"
           echo "${cli_sha256}  ${archive}" | sha256sum --check --strict
@@ -153,11 +157,6 @@ jobs:
             cpus="${threads}"
           fi
           # An emulated machine gets two processors whatever `cpus` says.
-          case "$(uname -m)" in
-            x86_64) native=amd64 ;;
-            aarch64) native=arm64 ;;
-            *) native="" ;;
-          esac
           how=native
           if [ "${ARCH}" != "${native}" ]; then
             how=emulated
@@ -302,7 +301,7 @@ jobs:
         needs.amd64.result == 'skipped' ||
         (needs.amd64.result == 'success' && needs.amd64.outputs.stopped == '')
       )
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ inputs.arm64-runner || inputs.runner }}
     timeout-minutes: 120
     permissions:
       contents: read

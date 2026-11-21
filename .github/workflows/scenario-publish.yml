@@ -17,8 +17,9 @@ name: Intar scenario publish
 # - Image builds were measured on Linux amd64 with KVM, 16 threads and 32 GiB;
 #   GitHub's own runner is not measured. The image job needs Docker and root.
 #   A build for the runner's own architecture gets `cpus` processors, an
-#   emulated one two at most.
-# - A runner that is not GitHub's own (`runner`, and `light-runner` if set)
+#   emulated one two at most. With `arm64-runner` no build is emulated.
+# - A runner that is not GitHub's own (`runner`, `arm64-runner`, and
+#   `light-runner` if set)
 #   publishes only for a source that allows self-hosted runners.
 # - With `cache: namespace` an image job keeps its caches on a Namespace
 #   cache volume. No job a pull request can trigger may mount that volume:
@@ -47,6 +48,13 @@ on:
         description: The label of the runner the images are built on.
         type: string
         default: ubuntu-latest
+      arm64-runner:
+        description: >-
+          The label of a Linux arm64 runner with KVM that builds the arm64
+          images. Empty, they are emulated on `runner`, several times slower.
+          It needs intar-image-cli 0.17.0 or newer.
+        type: string
+        default: ""
       light-runner:
         description: The label of the runner that validates and uploads.
         type: string
@@ -280,5 +288,6 @@ jobs:
       # Only a manual run builds without publishing.
       build-only: ${{ github.event_name == 'workflow_dispatch' && inputs.build-only || '' }}
       runner: ${{ inputs.runner }}
+      arm64-runner: ${{ inputs.arm64-runner }}
       cpus: ${{ inputs.cpus }}
       cache: ${{ inputs.cache }}
