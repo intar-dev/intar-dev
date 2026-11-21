@@ -1,5 +1,11 @@
 # Changelog
 
+## image-cli/v0.16.0 (2026-11-21)
+
+### Features
+
+- **zpm:** Run the app's own QEMU and update it and the guest kernel weekly (#436) (9ddd53f3)
+
 ## image-cli/v0.15.0 (2026-11-21)
 
 ### Features
