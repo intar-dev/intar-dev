@@ -261,6 +261,22 @@ describe("binding a repository", () => {
     });
   });
 
+  it("drops a fetch or compile a pull source left in flight when it is bound again", async () => {
+    github();
+    await insertBinding({ mode: "pull", disconnectedAt: 3, disconnectReason: "admin" });
+    const rows = (state: string) => ({
+      id: state, scopeKey: ORG_SCOPE.key, purpose: "deploy" as const, sha: state.padEnd(40, "0"),
+      rev: `git-9-${state}`, via: "pull" as const, state: state as "fetching",
+    });
+    await drizzle(env.DB).insert(scenarioSourceCommits).values([rows("fetching"), rows("compiling"), rows("building")]);
+    await change({ action: "connect", repository: "acme/labs" });
+    const states = await drizzle(env.DB).select({ id: scenarioSourceCommits.id, state: scenarioSourceCommits.state })
+      .from(scenarioSourceCommits).orderBy(scenarioSourceCommits.id);
+    expect(states).toEqual([
+      { id: "building", state: "building" }, { id: "compiling", state: "superseded" }, { id: "fetching", state: "superseded" },
+    ]);
+  });
+
   it("waits for a purge of the last repository before re-binding", async () => {
     github();
     await insertBinding({ disconnectedAt: 3, disconnectReason: "purging" });

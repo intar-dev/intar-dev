@@ -99,6 +99,7 @@ export function ScenarioSourceSection({
             source={source}
             enabled={enabled}
             pending={change.isPending}
+            switching={change.isPending && change.variables?.action === "mode"}
             onChange={(body) => change.mutate(body)}
             onDisconnect={() => setDisconnectOpen(true)}
           />
@@ -285,12 +286,15 @@ function ConnectedSource({
   source,
   enabled,
   pending,
+  switching,
   onChange,
   onDisconnect,
 }: {
   source: ScenarioSourceView;
   enabled: boolean;
   pending: boolean;
+  /** The change of mode is the one being saved. */
+  switching: boolean;
   onChange: (body: Record<string, string>) => void;
   onDisconnect: () => void;
 }) {
@@ -322,7 +326,7 @@ function ConnectedSource({
             onClick={() => onChange({ action: "mode", mode: "push" })}
           >
             <ArrowRightLeft className="size-4" />
-            {pending ? "Switching…" : "Switch to push"}
+            {switching ? "Switching…" : "Switch to push"}
           </Button>
         </div>
       ) : null}

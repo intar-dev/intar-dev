@@ -950,7 +950,21 @@ async function connect(input: {
     }
     throw error;
   }
-  if (changes === 1) return;
+  if (changes === 1) {
+    // A fetch or compile that a pull source left in flight is dropped, as a
+    // change of mode drops it: a push source delivers nothing itself, and a
+    // row left on the head would refuse the workflow's first upload.
+    const dropped = await db
+      .update(scenarioSourceCommits)
+      .set({ state: "superseded", updatedAt: now })
+      .where(and(
+        eq(scenarioSourceCommits.scopeKey, scope.key),
+        inArray(scenarioSourceCommits.state, ["fetching", "compiling"]),
+      ))
+      .returning({ hostId: scenarioSourceCommits.compileHostId });
+    await endSourceCompiles(env, dropped.map((row) => row.hostId));
+    return;
+  }
   const [existing] = await db
     .select({
       disconnectedAt: scenarioSources.disconnectedAt,

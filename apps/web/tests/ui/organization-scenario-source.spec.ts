@@ -74,6 +74,7 @@ test("a pull source is offered its way to push, in the order that works", async 
 
   const card = page.locator("section", { has: page.getByRole("heading", { name: "Scenario source" }) });
   await expect(card.getByText("Delivery mode")).toHaveCount(0);
+  await expect(card.getByText("switch to push first, then commit the workflow file")).toBeVisible();
   await expect(card.getByText("Built by Intar's builder")).toBeVisible();
   await expect(card.getByText("An administrator promotes each lab")).toBeVisible();
   await expect(card.getByRole("link", { name: "Builds" })).toBeVisible();
