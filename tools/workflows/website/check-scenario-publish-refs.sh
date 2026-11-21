@@ -11,22 +11,26 @@ set -euo pipefail
 config="$1"
 remote="${SCENARIO_PUBLISH_REMOTE:-origin}"
 shas=" $(jq -r '.vars.SCENARIO_PUBLISH_WORKFLOW_SHAS // ""' "${config}" | tr ',\n\t' '   ') "
+# The first ref is shown to every source the builder builds for, so it must
+# be there; the second is empty until the workflow's second version is out.
+if ! jq -e '(.vars.SCENARIO_PUBLISH_WORKFLOW_REF // "") != ""' "${config}" >/dev/null; then
+  echo "the artifact names no scenario-publish workflow ref for the source card" >&2
+  exit 1
+fi
 refs="$(jq -r '
   [.vars.SCENARIO_PUBLISH_WORKFLOW_REF, .vars.SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF]
   | map(select(. != null and . != "")) | unique | .[]
 ' "${config}")"
-if [[ -z "${refs}" ]]; then
-  echo "the artifact names no scenario-publish workflow ref for the source card" >&2
-  exit 1
-fi
 while IFS= read -r ref; do
   if [[ "${ref}" =~ ^[0-9a-f]{40}$ ]]; then
     commit="${ref}"
   elif [[ "${ref}" =~ ^scenario-publish-v[0-9]+$ ]]; then
     # An annotated tag lists its commit on the `^{}` line; a lightweight one
-    # has only its own.
+    # has only its own. A pattern matches by the end of a ref's path, so the
+    # names are compared whole.
     commit="$(git ls-remote "${remote}" "refs/tags/${ref}" "refs/tags/${ref}^{}" |
-      awk '$2 ~ /\^\{\}$/ { peeled = $1 } $2 !~ /\^\{\}$/ { plain = $1 } END { print (peeled ? peeled : plain) }')"
+      awk -v tag="refs/tags/${ref}" '
+        $2 == tag "^{}" { peeled = $1 } $2 == tag { plain = $1 } END { print (peeled ? peeled : plain) }')"
     if [[ -z "${commit}" ]]; then
       echo "the scenario-publish ref ${ref} is not a tag on ${remote}" >&2
       exit 1

@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -82,5 +82,19 @@ describe("the scenario-publish refs the source card shows", () => {
       .toContain("neither a scenario-publish-vN tag nor a commit");
     expect(check({ SCENARIO_PUBLISH_WORKFLOW_REF: second, SCENARIO_PUBLISH_WORKFLOW_SHAS: first }).status).toBe(1);
     expect(check({ SCENARIO_PUBLISH_WORKFLOW_SHAS: first }).stderr).toContain("names no scenario-publish workflow ref");
+    // The first ref is shown whatever the second is, so it alone must be there.
+    expect(check({ SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF: "scenario-publish-v2", SCENARIO_PUBLISH_WORKFLOW_SHAS: second }).stderr)
+      .toContain("names no scenario-publish workflow ref");
+  });
+
+  it("compare a tag by its whole name, not by the end of another ref's path", () => {
+    git("update-ref", "refs/tags/x/refs/tags/scenario-publish-v1", second);
+    expect(check({ SCENARIO_PUBLISH_WORKFLOW_REF: "scenario-publish-v1", SCENARIO_PUBLISH_WORKFLOW_SHAS: first }).status).toBe(0);
+    expect(check({ SCENARIO_PUBLISH_WORKFLOW_REF: "scenario-publish-v1", SCENARIO_PUBLISH_WORKFLOW_SHAS: second }).status).toBe(1);
+  });
+
+  it("is part of the step that verifies the production configuration", () => {
+    const pin = readFileSync(join(import.meta.dirname, "../workflows/website/pin-production-config.sh"), "utf8");
+    expect(pin).toContain('tools/workflows/website/check-scenario-publish-refs.sh" "${config}"');
   });
 });
