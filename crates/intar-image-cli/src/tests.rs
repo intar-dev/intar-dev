@@ -807,10 +807,14 @@ mod setup {
     use std::path::Path;
 
     use clap::Parser;
-    use intar_image_build::tools::{BUILDKIT_IMAGE, BUILDKIT_VERSION, UMOCI_VERSION};
-    use intar_image_build::{QemuBuildConfig, sha256_file_hex};
+    use intar_image_build::tools::{
+        BUILDKIT_ARCHIVE_SHA256, BUILDKIT_IMAGE, BUILDKIT_VERSION, UMOCI_SHA256, UMOCI_VERSION,
+    };
+    use intar_image_build::{BuildArch, QemuBuildConfig, sha256_file_hex};
 
-    use crate::setup_command::{Sources, install, qemu_version};
+    use crate::setup_command::{
+        BUILDKIT_ARCHIVE_SHA256_ARM64, Sources, UMOCI_SHA256_ARM64, install, qemu_version, qemus,
+    };
     use crate::{Cli, Command};
 
     /// A gzipped tar with one file.
@@ -868,8 +872,10 @@ mod setup {
         descriptor: serde_json::Value,
     }
 
-    /// A server with every download and the descriptor that names its Kinos.
-    fn fixture() -> Fixture {
+    /// A server with every download a computer of `host` makes and the
+    /// descriptor that names its Kinos. Any other tool's name is a 404.
+    fn fixture_for(host: BuildArch) -> Fixture {
+        let name = host.debian();
         let buildkit = archive("bin/buildctl", b"buildctl");
         let umoci = b"umoci".to_vec();
         let kino_amd64 = archive("kino", b"kino for amd64");
@@ -884,15 +890,16 @@ mod setup {
             },
         });
         let sources = Sources {
+            host,
             buildkit_sha256: sha256(&buildkit),
             umoci_sha256: sha256(&umoci),
             github: serve(HashMap::from([
                 (
-                    format!("/moby/buildkit/releases/download/{BUILDKIT_VERSION}/buildkit-{BUILDKIT_VERSION}.linux-amd64.tar.gz"),
+                    format!("/moby/buildkit/releases/download/{BUILDKIT_VERSION}/buildkit-{BUILDKIT_VERSION}.linux-{name}.tar.gz"),
                     buildkit,
                 ),
                 (
-                    format!("/opencontainers/umoci/releases/download/{UMOCI_VERSION}/umoci.linux.amd64"),
+                    format!("/opencontainers/umoci/releases/download/{UMOCI_VERSION}/umoci.linux.{name}"),
                     umoci,
                 ),
                 (
@@ -909,6 +916,10 @@ mod setup {
             sources,
             descriptor,
         }
+    }
+
+    fn fixture() -> Fixture {
+        fixture_for(BuildArch::Amd64)
     }
 
     fn args(
@@ -967,6 +978,8 @@ mod setup {
         // The configuration is one `build` takes, with nothing in the checkout.
         let config: QemuBuildConfig =
             serde_json::from_slice(&read(&installed.config)).expect("a build configuration");
+        assert_eq!(config.arch(), BuildArch::Amd64);
+        assert_eq!(config.qemu_binary, Path::new("qemu-system-x86_64"));
         assert_eq!(config.work_root, dir.join("work"));
         assert_eq!(config.layered.buildctl_binary, dir.join("bin/buildctl"));
         assert_eq!(config.layered.umoci_binary, dir.join("bin/umoci"));
@@ -996,6 +1009,54 @@ mod setup {
                 .expect("text")
                 .contains("maxUsedSpace = 6442450944")
         );
+    }
+
+    #[test]
+    fn setup_on_arm64_brings_arm64_tools_and_builds_arm64_natively() {
+        let fixture = fixture_for(BuildArch::Arm64);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installed = install(
+            &args(temp.path(), &fixture.descriptor, None),
+            &fixture.sources,
+        )
+        .expect("installed");
+        let dir = temp.path().join("intar");
+        assert_eq!(
+            std::fs::read(dir.join("bin/buildctl")).expect("buildctl"),
+            b"buildctl"
+        );
+        let config: QemuBuildConfig =
+            serde_json::from_slice(&std::fs::read(&installed.config).expect("the configuration"))
+                .expect("a build configuration");
+        assert_eq!(config.arch(), BuildArch::Arm64);
+        assert_eq!(config.qemu_binary, Path::new("qemu-system-aarch64"));
+        assert_eq!(config.accelerator, "kvm");
+        // No checkpoints there: a guest stalls after one's pause.
+        assert!(!config.layered.use_cache);
+        // amd64 from there is the other QEMU, beside this one.
+        assert_eq!(
+            config.for_arch(BuildArch::Amd64).qemu_binary,
+            Path::new("qemu-system-x86_64")
+        );
+    }
+
+    #[test]
+    fn each_host_has_its_own_pins_and_its_own_kvm() {
+        let amd64 = Sources::pinned(BuildArch::Amd64);
+        assert_eq!(amd64.buildkit_sha256, BUILDKIT_ARCHIVE_SHA256);
+        assert_eq!(amd64.umoci_sha256, UMOCI_SHA256);
+        let arm64 = Sources::pinned(BuildArch::Arm64);
+        assert_eq!(arm64.buildkit_sha256, BUILDKIT_ARCHIVE_SHA256_ARM64);
+        assert_eq!(arm64.umoci_sha256, UMOCI_SHA256_ARM64);
+        assert_eq!(arm64.github, "https://github.com");
+
+        // The host's own QEMU is started with KVM, the other emulated.
+        for host in [BuildArch::Amd64, BuildArch::Arm64] {
+            let [(native, _, native_machine), (_, _, foreign_machine)] = qemus(host);
+            assert_eq!(native, host.qemu_binary());
+            assert!(native_machine.contains("-accel kvm -cpu host"), "{host:?}");
+            assert!(foreign_machine.contains("-accel tcg"), "{host:?}");
+        }
     }
 
     #[test]

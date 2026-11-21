@@ -40,7 +40,7 @@ enum Command {
     Spec(spec_command::SpecCommand),
     /// Compile the repository into a bundle, and upload it with `--url`.
     Bundle(BundleCommand),
-    /// Bring the tools `build` needs and check this computer (Linux amd64).
+    /// Bring the tools `build` needs and check this computer (Linux amd64 or arm64).
     Setup(setup_command::SetupCommand),
     /// Upload the bundle and print the images a pipeline has to build.
     Plan(plan_command::PlanCommand),

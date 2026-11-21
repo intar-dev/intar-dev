@@ -16,6 +16,14 @@ use intar_image_build::tools::{
 };
 use intar_image_build::{BuildArch, sha256_file_hex};
 
+/// Of `buildkit-<version>.linux-arm64.tar.gz`, beside the amd64 one the
+/// builder shares. The daemon's image is an index that has both.
+pub(crate) const BUILDKIT_ARCHIVE_SHA256_ARM64: &str =
+    "d0c9601e49f441dcc5c6493c884275a5470dcc9c188c96573c4dd503f2fde97d";
+/// Of `umoci.linux.arm64`.
+pub(crate) const UMOCI_SHA256_ARM64: &str =
+    "5cfd17f2e7a4bcf9ed67ea1b955ca893d200349b9ce6a3d3707dba415f458a1f";
+
 /// The oldest QEMU whose `migrate` takes the channels a checkpoint is saved
 /// and restored through.
 const QEMU_FLOOR: (u32, u32) = (8, 2);
@@ -52,16 +60,25 @@ pub(crate) struct SetupCommand {
 pub(crate) struct Sources {
     /// `https://github.com`, or a test's server.
     pub(crate) github: String,
+    /// This computer's architecture: the tools are its own, and it builds
+    /// its own images natively.
+    pub(crate) host: BuildArch,
     pub(crate) buildkit_sha256: String,
     pub(crate) umoci_sha256: String,
 }
 
-impl Default for Sources {
-    fn default() -> Self {
+impl Sources {
+    /// GitHub, with the hashes pinned for a computer of `host`.
+    pub(crate) fn pinned(host: BuildArch) -> Self {
+        let (buildkit, umoci) = match host {
+            BuildArch::Amd64 => (BUILDKIT_ARCHIVE_SHA256, UMOCI_SHA256),
+            BuildArch::Arm64 => (BUILDKIT_ARCHIVE_SHA256_ARM64, UMOCI_SHA256_ARM64),
+        };
         Self {
             github: "https://github.com".to_owned(),
-            buildkit_sha256: BUILDKIT_ARCHIVE_SHA256.to_owned(),
-            umoci_sha256: UMOCI_SHA256.to_owned(),
+            host,
+            buildkit_sha256: buildkit.to_owned(),
+            umoci_sha256: umoci.to_owned(),
         }
     }
 }
@@ -98,14 +115,13 @@ impl Installed {
 }
 
 pub(crate) fn setup_command(args: &SetupCommand) -> Result<()> {
-    // The pipeline builds on amd64 and emulates arm64 (#438); the pinned
-    // tools are that computer's.
-    ensure!(
-        cfg!(all(target_os = "linux", target_arch = "x86_64")),
-        "setup is for a Linux amd64 computer"
-    );
-    let installed = install(args, &Sources::default())?;
-    let problems = check_host();
+    // A computer builds its own architecture with KVM and emulates the
+    // other (#438); the pinned tools are its own.
+    let host = BuildArch::host()
+        .filter(|_| cfg!(target_os = "linux"))
+        .context("setup is for a Linux amd64 or arm64 computer")?;
+    let installed = install(args, &Sources::pinned(host))?;
+    let problems = check_host(host);
     for problem in &problems {
         eprintln!("{problem}");
     }
@@ -185,10 +201,11 @@ pub(crate) fn install(args: &SetupCommand, sources: &Sources) -> Result<Installe
     }
 
     let github = sources.github.trim_end_matches('/');
+    let host = sources.host.debian();
     let archive = downloads.join("buildkit.tar.gz");
     fetch(
         &format!(
-            "{github}/moby/buildkit/releases/download/{BUILDKIT_VERSION}/buildkit-{BUILDKIT_VERSION}.linux-amd64.tar.gz"
+            "{github}/moby/buildkit/releases/download/{BUILDKIT_VERSION}/buildkit-{BUILDKIT_VERSION}.linux-{host}.tar.gz"
         ),
         &sources.buildkit_sha256,
         &archive,
@@ -199,7 +216,7 @@ pub(crate) fn install(args: &SetupCommand, sources: &Sources) -> Result<Installe
     let umoci = bin.join("umoci");
     fetch(
         &format!(
-            "{github}/opencontainers/umoci/releases/download/{UMOCI_VERSION}/umoci.linux.amd64"
+            "{github}/opencontainers/umoci/releases/download/{UMOCI_VERSION}/umoci.linux.{host}"
         ),
         &sources.umoci_sha256,
         &umoci,
@@ -240,8 +257,8 @@ pub(crate) fn install(args: &SetupCommand, sources: &Sources) -> Result<Installe
     // The work directories are here, not in the directory `build` is run
     // from, which is the repository's checkout.
     let config = dir.join("build.json");
-    let document = serde_json::json!({
-        "target_arch": "amd64",
+    let mut document = serde_json::json!({
+        "target_arch": host,
         "work_root": dir.join("work"),
         "output_root": dir.join("dist"),
         "layered": {
@@ -249,10 +266,22 @@ pub(crate) fn install(args: &SetupCommand, sources: &Sources) -> Result<Installe
             "umoci_binary": umoci,
             "oci_cache_root": oci,
             "checkpoint_cache_root": cache.join("checkpoints"),
-            "use_cache": true,
+            // ponytail: no cache on an arm64 computer. On the arm64 runner
+            // this was measured on (KVM nested under Apple's hypervisor) a
+            // guest answers nothing for half a minute after the pause a
+            // checkpoint takes, and a lab's next stage fails; without
+            // checkpoints the same image builds in two minutes. It also
+            // gives up the converted bases and BuildKit's layer cache, so
+            // `--cache` holds little there. Split the settings, or find the
+            // stall, when arm64 builds get slow enough to want any of it.
+            "use_cache": sources.host != BuildArch::Arm64,
             "minimum_free_bytes": u64::from(args.cache_min_free_gib) * 1024 * 1024 * 1024,
         },
     });
+    // Without one named, `build` takes amd64's QEMU for any architecture.
+    if sources.host != BuildArch::Amd64 {
+        document["qemu_binary"] = sources.host.qemu_binary().into();
+    }
     std::fs::write(&config, serde_json::to_vec_pretty(&document)?)
         .with_context(|| format!("failed to write {}", config.display()))?;
 
@@ -331,10 +360,42 @@ pub(crate) fn qemu_version(output: &str) -> Option<(u32, u32)> {
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
+/// Each QEMU a computer of `host` builds with, the package that brings it,
+/// and the machine a build starts: the host's own with KVM, the other
+/// emulated.
+pub(crate) fn qemus(host: BuildArch) -> [(&'static str, &'static str, &'static str); 2] {
+    match host {
+        BuildArch::Amd64 => [
+            (
+                "qemu-system-x86_64",
+                "qemu-system-x86",
+                "-M q35 -accel kvm -cpu host",
+            ),
+            (
+                "qemu-system-aarch64",
+                "qemu-system-arm",
+                "-M virt,highmem=on -accel tcg -cpu max,pauth-impdef=on",
+            ),
+        ],
+        BuildArch::Arm64 => [
+            (
+                "qemu-system-aarch64",
+                "qemu-system-arm",
+                "-M virt,its=off,highmem=on -accel kvm -cpu host",
+            ),
+            (
+                "qemu-system-x86_64",
+                "qemu-system-x86",
+                "-M q35 -accel tcg -cpu max",
+            ),
+        ],
+    }
+}
+
 /// What of this computer a build would fail on, each as one line that says
 /// what to do. Checked by using it: a program that is there but cannot start
 /// with the devices a build gives it is found here, not twenty minutes in.
-fn check_host() -> Vec<String> {
+fn check_host(host: BuildArch) -> Vec<String> {
     let mut problems = Vec::new();
     if let Err(error) = std::fs::OpenOptions::new()
         .read(true)
@@ -345,18 +406,7 @@ fn check_host() -> Vec<String> {
             "/dev/kvm cannot be opened ({error}): this computer needs KVM, and `setup` and `build` run as root"
         ));
     }
-    for (qemu, package, machine) in [
-        (
-            "qemu-system-x86_64",
-            "qemu-system-x86",
-            "-M q35 -accel kvm -cpu host",
-        ),
-        (
-            "qemu-system-aarch64",
-            "qemu-system-arm",
-            "-M virt,highmem=on -accel tcg -cpu max,pauth-impdef=on",
-        ),
-    ] {
+    for (qemu, package, machine) in qemus(host) {
         match Command::new(qemu).arg("--version").output() {
             Err(_) => {
                 problems.push(format!("{qemu} is missing: install the package {package}"));
