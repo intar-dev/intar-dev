@@ -5,8 +5,10 @@ import {
   HeadContent,
   Link,
   lazyRouteComponent,
+  notFound,
   Outlet,
   redirect,
+  rootRouteId,
   type ErrorComponentProps,
   type ParsedLocation,
 } from "@tanstack/react-router";
@@ -94,23 +96,6 @@ const organizationDirectSignInRoute = createRoute({
     () => import("./pages/OrganizationSignIn"),
     "OrganizationSignIn",
   ),
-});
-
-// A scenario open to play: public, and its Start needs sign-in.
-const playRoute = createRoute({
-  getParentRoute: () => marketingLayoutRoute,
-  path: "play/$namespace/$slug",
-  validateSearch: (search: Record<string, unknown>): { ref?: string } =>
-    typeof search.ref === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(search.ref)
-      ? { ref: search.ref }
-      : {},
-  head: () =>
-    routeHead(
-      "Repair scenario",
-      "Start a systems repair scenario and fix a live system in your browser.",
-    ),
-  pendingComponent: FullPageRoutePending,
-  component: lazyRouteComponent(() => import("./pages/Play"), "Play"),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -218,6 +203,11 @@ const scenarioRunStartRoute = createRoute({
   // A splat, so a namespaced id keeps its slash: /runs/start/intar/<slug>.
   path: "runs/start/$",
   validateSearch: validateScenarioRunStartSearch,
+  // An old play link is not found: without this, a reload of a tab on
+  // it would start the scenario as a course run nobody asked for.
+  beforeLoad: ({ location }) => {
+    if ((location.search as Record<string, unknown>).source === "play") throw notFound({ routeId: rootRouteId });
+  },
   head: () =>
     routeHead(
       "Starting run",
@@ -470,7 +460,6 @@ const routeTree = rootRoute.addChildren([
     oauthConsentRoute,
     organizationSignInRoute,
     organizationDirectSignInRoute,
-    playRoute,
   ]),
   appLayoutRoute.addChildren([
     supportForumRoute,
@@ -542,8 +531,6 @@ function validateScenarioRunStartSearch(search: Record<string, unknown>) {
     organizationId: text(search.organizationId),
     courseId: text(search.courseId),
     lectureId: text(search.lectureId),
-    source: search.source === "play" ? ("play" as const) : undefined,
-    ref: text(search.ref),
   };
 }
 

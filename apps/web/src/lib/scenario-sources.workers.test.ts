@@ -23,7 +23,6 @@ import { arm64MachineImages } from "@/lib/scenario-runs/revision-begin";
 import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { syncBuilderDesiredState } from "@/lib/machine-builds";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
-import { setPublicPlay } from "@/lib/organization-entitlements";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
   BIND_REFUSAL_MESSAGE,
@@ -671,26 +670,12 @@ describe("a source's settings", () => {
     expect(await as({ action: "mode", mode: "push" })).toMatchObject({ mode: "push" });
   });
 
-  it("does not put an organization on automatic promotion while its play labs are open to everyone, nor open them while it is", async () => {
+  it("puts an organization on automatic promotion whatever public-play grant row it still has", async () => {
     const promotionOn = new StaticFeatureToggleService({ scenario_git_sources: true, scenario_automatic_promotion: true });
     await insertBinding({ mode: "push" });
-    await setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: true });
-    await expect(as({ action: "promotion", promotion: "automatic" }, promotionOn)).rejects.toMatchObject({
-      status: 409, code: "scenario_source_public_play",
-    });
-    expect(await binding()).toMatchObject({ promotion: "manual" });
-    // Without the grant it goes through, and then the grant is refused.
-    await setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: false });
-    await as({ action: "promotion", promotion: "automatic" }, promotionOn);
-    await expect(setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: true })).rejects.toMatchObject({
-      status: 409, code: "public_play_automatic_promotion",
-    });
-    // Withdrawing a grant is never refused, and a disconnected source holds nothing back.
-    expect(await setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: false })).toMatchObject({ publicPlayGrantedAt: null });
-    await db().update(scenarioSources).set({ disconnectedAt: 1, disconnectReason: "admin" });
-    expect((await setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: true })).publicPlayGrantedAt).not.toBeNull();
-    // Someone who is no administrator is still told that, not the source's state.
-    await expect(setPublicPlay({ organizationId: ORG, actorUserId: OWNER, granted: true })).rejects.toMatchObject({ status: 403 });
+    await env.DB.prepare("INSERT INTO organization_entitlements (organization_id, public_play_granted_at) VALUES (?1, 1)").bind(ORG).run();
+    expect(await as({ action: "promotion", promotion: "automatic" }, promotionOn)).toMatchObject({ promotion: "automatic" });
+    expect(await binding()).toMatchObject({ promotion: "automatic" });
   });
 
   it("starts an organization that may use its pipeline on it, and every other source on the builder", async () => {
@@ -729,13 +714,10 @@ describe("a source's settings", () => {
 // Without a reader who changes settings, the card offers none.
     expect((await scenarioSourceCard(ORG_SCOPE, promotionOn)).settings).toBeUndefined();
     expect((await scenarioSourceCard(PUBLIC_SCOPE, promotionOn, "platform")).settings)
-      .toEqual({ platform: true, automaticPromotion: true, publicPlay: false });
+      .toEqual({ platform: true, automaticPromotion: true });
     expect((await scenarioSourceCard(ORG_SCOPE, promotionOn, "scope")).settings)
-      .toEqual({ platform: false, automaticPromotion: true, publicPlay: false });
+      .toEqual({ platform: false, automaticPromotion: true });
     expect((await scenarioSourceCard(ORG_SCOPE, enabled, "scope")).settings).toMatchObject({ automaticPromotion: false });
-    // An organization with the public-play grant is told so.
-    await setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: true });
-    expect((await scenarioSourceCard(ORG_SCOPE, promotionOn, "scope")).settings).toMatchObject({ publicPlay: true });
   });
 
   it("sets a pipeline only for a connected push source, and the builder for any", async () => {

@@ -769,9 +769,6 @@ async function mayStart(
         AND head.rev = 'git-' || ${scenarioSources.githubRepositoryId} || '-' || ${scenarioSources.headSha} || '-' || ${digest}
      WHERE ${scenarioSources.scopeKey} = ${scopeKey} AND ${scenarioSources.promotion} = 'automatic'
        AND ${scenarioSourceBindingPredicate()}
-       AND NOT EXISTS (SELECT 1 FROM organization_entitlements entitlement
-         WHERE entitlement.organization_id = ${scenarioSources.organizationId}
-           AND entitlement.public_play_granted_at IS NOT NULL)
        AND head.id = ${rowId} AND head.attempt = ${attempt} AND head.state = ${state}`);
   return row?.ok === 1;
 }

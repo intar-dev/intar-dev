@@ -58,30 +58,8 @@ export function ScenarioDetails() {
   }
 
   const failed = action.error ? apiErrorMessage(action.error, "Try again.") ?? "Try again." : null;
-  const playPending = action.isPending && action.variables?.action === "set_play";
   return (
     <PageShell variant="workspace" density="compact">
-      <Section
-        density="compact"
-        title="Play"
-        description={record.play
-          ? "Open to play: everyone signed in may start this scenario where its scope allows it. Closing waits for play runs that are going on."
-          : "Not open to play: learners reach this scenario through its course only."}
-      >
-        {record.canManage ? (
-          <div className="flex flex-wrap items-center gap-3">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={action.isPending}
-              onClick={() => action.mutate({ action: "set_play", play: !record.play })}
-            >
-              {playPending ? "Saving…" : record.play ? "Close to play" : "Open to play"}
-            </Button>
-            {action.variables?.action === "set_play" && failed ? <InlineFeedback tone="error">{failed}</InlineFeedback> : null}
-          </div>
-        ) : null}
-      </Section>
       <Section density="compact" title="Revisions" description={pointerSummary(record)} bodyClassName="divide-y">
         {record.revisions.length ? (
           record.revisions.map((revision) => (
@@ -90,8 +68,8 @@ export function ScenarioDetails() {
               scenario={record}
               revision={revision}
               busy={action.isPending}
-              pending={action.isPending && action.variables && action.variables.action !== "set_play" && action.variables.rev === revision.rev ? action.variables.action : null}
-              error={actionRev(action.variables) === revision.rev ? failed : null}
+              pending={action.isPending && action.variables?.rev === revision.rev ? action.variables.action : null}
+              error={action.variables?.rev === revision.rev ? failed : null}
               onAction={(request) => action.mutate(request)}
             />
           ))
@@ -102,9 +80,6 @@ export function ScenarioDetails() {
     </PageShell>
   );
 }
-
-/** The revision an action is about; the play setting is about none. */
-const actionRev = (request: RevisionAction | undefined) => (request && "rev" in request ? request.rev : null);
 
 function pointerSummary(scenario: AdministeredScenario): string {
   const live = scenario.liveRev ? `Learners start ${shortRev(scenario.liveRev)}` : "No revision is live, so learners cannot start this scenario";
@@ -130,7 +105,7 @@ function sourceJobLine(scenario: AdministeredScenario, revision: ScenarioRevisio
   return job.driving ? "Source: checking this commit" : null;
 }
 
-type RevisionActionName = Exclude<RevisionAction["action"], "set_play">;
+type RevisionActionName = RevisionAction["action"];
 
 const PENDING_WORDS: Record<RevisionActionName, string> = {
   verify: "Starting…",

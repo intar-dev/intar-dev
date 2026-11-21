@@ -537,7 +537,7 @@ function SourceSettings({
   onConfirm: (confirm: SettingConfirm) => void;
 }) {
   const reasonId = useId();
-  const { platform, automaticPromotion, publicPlay } = settings;
+  const { platform, automaticPromotion } = settings;
   // The platform's card is its operators'; an organization's is its own
   // administrators', who have no builder to choose and no pull mode.
   const here = platform ? "this scope" : "this organization";
@@ -571,9 +571,7 @@ function SourceSettings({
       action: automatic ? "Promote by hand" : "Go live automatically",
       blocked: automatic
         ? null
-        : publicPlay
-          ? "This organization's play labs are open to everyone, so its labs are promoted by hand."
-          : automaticPromotion ? null : `Automatic promotion is not switched on for ${here}.`,
+        : automaticPromotion ? null : `Automatic promotion is not switched on for ${here}.`,
       onClick: () => onConfirm(automatic
         ? {
             title: "Promote by hand again?",

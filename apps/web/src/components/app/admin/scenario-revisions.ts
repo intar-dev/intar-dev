@@ -37,8 +37,7 @@ export function useAdministeredScenario(scenarioId: string) {
 
 export type RevisionAction =
   | { action: "verify" | "verify_restore" | "clear_restore_verified" | "lift_hold"; rev: string }
-  | { action: "promote" | "rollback"; rev: string; liveRev: string | null }
-  | { action: "set_play"; play: boolean };
+  | { action: "promote" | "rollback"; rev: string; liveRev: string | null };
 
 export function useRevisionAction(scenarioId: string) {
   const queryClient = useQueryClient();
@@ -51,7 +50,7 @@ export function useRevisionAction(scenarioId: string) {
         body: JSON.stringify(request),
       });
       const body = await response.json().catch(() => null);
-      if (!response.ok) throw HttpResponseError.fromBody(response.status, body, request.action === "set_play" ? "Could not change who may play this scenario" : `Could not ${request.action} this revision`);
+      if (!response.ok) throw HttpResponseError.fromBody(response.status, body, `Could not ${request.action} this revision`);
       return (body as { scenario: AdministeredScenario }).scenario;
     },
     onSuccess: (scenario) => {

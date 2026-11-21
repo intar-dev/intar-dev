@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { KINO_CONFIG_MEDIA_TYPE } from "@/control-plane/image-registry/push";
 import { user } from "@/db/schema";
 import { listCourseCatalogForUser } from "@/lib/course-catalogs";
-import { loadPlayScenario } from "@/lib/play-scenarios";
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
 import { ensureFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -97,18 +96,14 @@ describe("starts wait for their images on a host", () => {
       await expect(begin("start-key-1")).resolves.toMatchObject({ runId, reused: true });
     });
 
-    it("answers the lecture and play pages from the same readiness", async () => {
+    it("answers the lecture page from the readiness", async () => {
       const ws = await host(HOST, "platform", []);
       const lecture = async () => (await listCourseCatalogForUser({ db: drizzle(env.DB), userId: LEARNER, organizationId: null }))
         .courses[0]!.lectures[0]!;
-      const play = async () => (await loadPlayScenario(env.DB, "intar", "web", LEARNER)) as { ready: boolean } | null;
-      await env.DB.prepare("UPDATE scenarios SET play = 1 WHERE id = 'intar/web'").run();
       expect(await lecture()).toMatchObject({ state: "waiting_for_scenario", scenarioReady: false });
-      expect((await play())?.ready).toBe(false);
       sendState(ws, HOST, [], Object.values(images));
       await reported(HOST, 2);
       expect(await lecture()).toMatchObject({ state: "available", scenarioReady: true });
-      expect((await play())?.ready).toBe(true);
     });
   });
 

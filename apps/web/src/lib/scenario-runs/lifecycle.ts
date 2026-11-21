@@ -68,8 +68,6 @@ export async function startScenarioRunForUser(params: {
   hostId?: string;
   allowDrainedAdminProof?: boolean;
   allowSequenceBypass?: boolean;
-  launchSource?: "play";
-  ref?: string;
 }): Promise<{
   accepted: true;
   runId: string;

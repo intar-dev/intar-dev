@@ -6,7 +6,6 @@ import { makeMultiReplayRun, markMachineUnreachable } from "./fixtures/data";
 import { routeCase } from "./routes";
 import { expectNoAxeViolations } from "./support/axe";
 import { expectNoHorizontalOverflow, setRootTextScale200 } from "./support/layout";
-import { PLAY_PATH, mockPlayScenario } from "./support/play";
 
 const TEMPORARY_RUN_SSH_COMMAND = buildTemporaryNativeSshCommand({
   username: "route-test-only",
@@ -2365,17 +2364,19 @@ test.describe("small-screen access management", () => {
 
 test.describe("play page", () => {
   for (const signedIn of [false, true]) {
-    test(`${signedIn ? "signed in" : "signed out"}`, async ({ page, ui }, testInfo) => {
-      await mockPlayScenario(page, signedIn);
-      await ui.open({ path: PLAY_PATH, sessionRole: signedIn ? "learner" : "anonymous", theme: signedIn ? "dark" : "light" });
-      await expect(page.getByRole("heading", { level: 1, name: "Repair the nginx front door" })).toBeVisible();
-      if (signedIn) {
-        await expect(page.getByRole("link", { name: "Start scenario" })).toBeVisible();
-      } else {
-        await expect(page.getByText("The front door returns")).toHaveCount(0);
-      }
-      await expectNoHorizontalOverflow(page);
-      await expectNoAxeViolations(page, testInfo);
+    test(`is not found, ${signedIn ? "signed in" : "signed out"}`, async ({ page, ui }) => {
+      await ui.open({ path: "/play/intar/repair-nginx?ref=stream-42", sessionRole: signedIn ? "learner" : "anonymous", theme: "light" });
+      await expect(page.getByRole("heading", { level: 1, name: "That route is not in the manual" })).toBeVisible();
+      await expect(page.getByRole("link", { name: "Start scenario" })).toHaveCount(0);
     });
   }
+  test("an old play start link is not found and starts nothing", async ({ page, ui }) => {
+    const starts: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().endsWith("/start")) starts.push(request.url());
+    });
+    await ui.open({ path: "/runs/start/intar/repair-nginx?source=play&ref=stream-42", sessionRole: "learner", theme: "light" });
+    await expect(page.getByRole("heading", { level: 1, name: "That route is not in the manual" })).toBeVisible();
+    expect(starts).toEqual([]);
+  });
 });

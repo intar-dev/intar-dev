@@ -129,7 +129,7 @@ describe("scenario source card", () => {
 
   describe("platform settings", () => {
     const platform = (source: Partial<ScenarioSourceView>, card: Partial<ScenarioSourceCard> = {}) =>
-      renderCard(source, null, { settings: { platform: true, automaticPromotion: false, publicPlay: false }, ...card });
+      renderCard(source, null, { settings: { platform: true, automaticPromotion: false }, ...card });
     /** The button with this label, as rendered: disabled or not. */
     const button = (html: string, label: string) => {
       const end = html.indexOf(`${label}</button>`);
@@ -140,12 +140,12 @@ describe("scenario source card", () => {
     it("are on the platform's card only, and only for a connected source", () => {
       expect(renderCard({})).not.toContain("Platform settings");
       expect(platform({})).toContain("Platform settings");
-      expect(renderCard(null, null, { settings: { platform: true, automaticPromotion: true, publicPlay: false } })).not.toContain("Platform settings");
+      expect(renderCard(null, null, { settings: { platform: true, automaticPromotion: true } })).not.toContain("Platform settings");
       expect(platform({ disconnectedAt: 1, disconnectReason: "admin" })).not.toContain("Platform settings");
     });
 
     it("offer the other state of each setting", () => {
-      const builder = platform({}, { pipelineImages: true, settings: { platform: true, automaticPromotion: true, publicPlay: false } });
+      const builder = platform({}, { pipelineImages: true, settings: { platform: true, automaticPromotion: true } });
       for (const label of ["Use the repository's pipeline", "Allow self-hosted runners", "Go live automatically", "Switch to pull"]) {
         expect(button(builder, label.replace("'", "&#x27;"))).not.toMatch(/ disabled(=""|>| )/);
       }
@@ -186,7 +186,7 @@ describe("scenario source card", () => {
     const own = (source: Partial<ScenarioSourceView>, card: Partial<ScenarioSourceCard> = {}, settings = {}) =>
       renderCard(source, null, {
         pipelineImages: true,
-        settings: { platform: false, automaticPromotion: true, publicPlay: false, ...settings },
+        settings: { platform: false, automaticPromotion: true, ...settings },
         ...card,
       }, "acme");
     const button = (html: string, label: string) => {
@@ -217,11 +217,8 @@ describe("scenario source card", () => {
       expect(button(off, "Use the repository&#x27;s pipeline")).toMatch(/ disabled(=""|>| )/);
       expect(off).toContain("Pipeline images are not switched on for this organization.");
       expect(off).toContain("Automatic promotion is not switched on for this organization.");
-      const granted = own({}, {}, { publicPlay: true });
-      expect(button(granted, "Go live automatically")).toMatch(/ disabled(=""|>| )/);
-      expect(granted).toContain("play labs are open to everyone, so its labs are promoted by hand");
       // Back to by-hand is never held.
-      expect(button(own({ promotion: "automatic" }, {}, { publicPlay: true }), "Promote by hand")).not.toMatch(/ disabled(=""|>| )/);
+      expect(button(own({ promotion: "automatic" }, {}, { automaticPromotion: false }), "Promote by hand")).not.toMatch(/ disabled(=""|>| )/);
     });
   });
 
@@ -293,7 +290,7 @@ describe("scenario registry resources", () => {
       uploadedBytes: { used: 10 * GIB, limit: 100 * GIB }, countedBytes: { used: 20 * GIB, limit: 50 * GIB },
       images: [image], imageCount: 2,
     };
-    const settings = { platform: false, automaticPromotion: true, publicPlay: false };
+    const settings = { platform: false, automaticPromotion: true };
 
     it("shows what the source used of each limit, and each image with what built it", () => {
       const html = renderCard({ imageProducer: "pipeline" }, "scenario-publish-v2", { settings, usage }, "acme");
