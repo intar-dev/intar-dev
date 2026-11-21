@@ -17,13 +17,13 @@ import {
   scenarioSources,
   scenarios,
   scopeMachineImages,
-  user,
 } from "@/db/schema";
 import { pipelinePlan } from "@/lib/pipeline-revisions";
 import { arm64MachineImages } from "@/lib/scenario-runs/revision-begin";
 import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { syncBuilderDesiredState } from "@/lib/machine-builds";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
+import { setPublicPlay } from "@/lib/organization-entitlements";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
   BIND_REFUSAL_MESSAGE,
@@ -110,6 +110,7 @@ function change(
     actorUserId?: string;
     startedAt?: number;
     toggles?: StaticFeatureToggleService;
+    asPlatform?: boolean;
   } = {},
 ) {
   return changeScenarioSource({
@@ -119,6 +120,7 @@ function change(
     startedAt: options.startedAt ?? Date.now(),
     toggles: options.toggles ?? enabled,
     appEnv,
+    ...(options.asPlatform ? { asPlatform: true } : {}),
   });
 }
 
@@ -470,13 +472,17 @@ describe("scenario source changes", () => {
   });
 });
 
-describe("what only a platform administrator changes", () => {
+describe("a source's settings", () => {
   const ADMIN = "platform-admin";
   const KEY = `sha256:${"c".repeat(64)}`;
   const REV = `git-9-${"a".repeat(40)}-digest`;
   const pipelineOn = new StaticFeatureToggleService({ scenario_git_sources: true, scenario_pipeline_images: true });
-  const as = (body: unknown, toggles: StaticFeatureToggleService = pipelineOn, actorUserId = ADMIN) =>
+  // The organization's owner changes its settings; a platform administrator
+  // who is not one of its own only steps it back.
+  const as = (body: unknown, toggles: StaticFeatureToggleService = pipelineOn, actorUserId = OWNER) =>
     change(body, { actorUserId, toggles });
+  const platform = (body: unknown, toggles: StaticFeatureToggleService = pipelineOn, actorUserId = ADMIN) =>
+    change(body, { actorUserId, toggles, asPlatform: true });
   const db = () => drizzle(env.DB);
 
   beforeEach(async () => {
@@ -506,9 +512,12 @@ describe("what only a platform administrator changes", () => {
       runnerEnvironment: "github-hosted", jobWorkflowSha: "w",
     });
 
-  it("is not there for an organization's administrator, a demoted administrator or a body it cannot read", async () => {
+  it("are its scope's administrators' alone: not a platform administrator's, a member's or a stranger's", async () => {
     await insertBinding({ mode: "push" });
     await image("amd64");
+    const everyFlag = new StaticFeatureToggleService({
+      scenario_git_sources: true, scenario_pipeline_images: true, scenario_automatic_promotion: true,
+    });
     const bodies = [
       { action: "image_producer", producer: "pipeline" },
       { action: "image_producer", producer: "builder" },
@@ -517,17 +526,25 @@ describe("what only a platform administrator changes", () => {
       { action: "promotion", promotion: "manual" },
       { action: "forget_image", build_key: KEY, architecture: "amd64" },
     ];
+    // A platform administrator is not one of the organization's.
     for (const body of bodies) {
-      await expect(as(body, pipelineOn, OWNER)).rejects.toMatchObject({ status: 404, code: "not_found" });
+      await expect(as(body, everyFlag, ADMIN)).rejects.toMatchObject({ status: 404, code: "not_found" });
     }
-    await db().update(user).set({ role: "user" }).where(eq(user.id, ADMIN));
+    // Nor is the owner once they are a plain member.
+    await db().update(member).set({ role: "member" }).where(eq(member.userId, OWNER));
     for (const body of bodies) {
-      await expect(as(body)).rejects.toMatchObject({ status: 404, code: "not_found" });
+      await expect(as(body, everyFlag)).rejects.toMatchObject({ status: 404, code: "not_found" });
     }
     expect(await binding()).toMatchObject({ imageProducer: "builder", allowSelfHostedRunners: false, promotion: "manual" });
     expect(await db().select().from(scopeMachineImages)).toHaveLength(1);
 
-    await db().update(user).set({ role: "admin" }).where(eq(user.id, ADMIN));
+    // The owner again: each one goes through.
+    await db().update(member).set({ role: "owner" }).where(eq(member.userId, OWNER));
+    expect(await as(bodies[0], everyFlag)).toMatchObject({ imageProducer: "pipeline" });
+    expect(await as(bodies[2], everyFlag)).toMatchObject({ allowSelfHostedRunners: true });
+    expect(await as(bodies[3], everyFlag)).toMatchObject({ promotion: "automatic" });
+    await as(bodies[5], everyFlag);
+    expect(await db().select().from(scopeMachineImages)).toEqual([]);
     for (const body of [
       { action: "image_producer", producer: "host" },
       { action: "runner_policy", allow_self_hosted: "yes" },
@@ -537,6 +554,78 @@ describe("what only a platform administrator changes", () => {
     ]) {
       await expect(as(body)).rejects.toMatchObject({ status: 400 });
     }
+  });
+
+  it("lets a platform administrator step any organization's source back, and nothing more", async () => {
+    const everyFlag = new StaticFeatureToggleService({
+      scenario_git_sources: true, scenario_pipeline_images: true, scenario_automatic_promotion: true,
+    });
+    await insertBinding({ mode: "push", imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic" });
+    await image("amd64");
+    // What widens, connects or removes is the organization's own to do.
+    for (const body of [
+      { action: "image_producer", producer: "pipeline" },
+      { action: "runner_policy", allow_self_hosted: true },
+      { action: "promotion", promotion: "automatic" },
+      { action: "mode", mode: "push" },
+      { action: "resume" },
+      { action: "disconnect" },
+      { action: "purge" },
+      { action: "connect", repository: "acme/labs" },
+    ]) {
+      await expect(platform(body, everyFlag)).rejects.toMatchObject({ status: 400, code: "scenario_source_change_invalid" });
+    }
+    // Not for someone who is no platform administrator, whatever they are in the organization.
+    await expect(platform({ action: "promotion", promotion: "manual" }, everyFlag, OWNER)).rejects.toMatchObject({ status: 404 });
+    expect(await binding()).toMatchObject({ imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic", pausedAt: null });
+
+    // Every step back, with every flag off.
+    expect(await platform({ action: "promotion", promotion: "manual" }, disabled)).toMatchObject({ promotion: "manual" });
+    expect(await platform({ action: "runner_policy", allow_self_hosted: false }, disabled)).toMatchObject({ allowSelfHostedRunners: false });
+    expect(await platform({ action: "image_producer", producer: "builder" }, disabled)).toMatchObject({ imageProducer: "builder" });
+    await platform({ action: "forget_image", build_key: KEY, architecture: "amd64" }, disabled);
+    expect(await db().select().from(scopeMachineImages)).toEqual([]);
+    expect(await platform({ action: "pause" }, disabled)).toMatchObject({ pauseReason: "admin" });
+  });
+
+  it("leaves pull mode to the platform: an organization's administrator cannot switch to it", async () => {
+    await insertBinding({ mode: "push" });
+    await expect(as({ action: "mode", mode: "pull" })).rejects.toMatchObject({ status: 404, code: "not_found" });
+    expect(await binding()).toMatchObject({ mode: "push" });
+    expect(await platform({ action: "mode", mode: "pull" })).toMatchObject({ mode: "pull" });
+    // Back to push is the organization's own again.
+    expect(await as({ action: "mode", mode: "push" })).toMatchObject({ mode: "push" });
+  });
+
+  it("does not put an organization on automatic promotion while its play labs are open to everyone, nor open them while it is", async () => {
+    const promotionOn = new StaticFeatureToggleService({ scenario_git_sources: true, scenario_automatic_promotion: true });
+    await insertBinding({ mode: "push" });
+    await setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: true });
+    await expect(as({ action: "promotion", promotion: "automatic" }, promotionOn)).rejects.toMatchObject({
+      status: 409, code: "scenario_source_public_play",
+    });
+    expect(await binding()).toMatchObject({ promotion: "manual" });
+    // Without the grant it goes through, and then the grant is refused.
+    await setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: false });
+    await as({ action: "promotion", promotion: "automatic" }, promotionOn);
+    await expect(setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: true })).rejects.toMatchObject({
+      status: 409, code: "public_play_automatic_promotion",
+    });
+    // Withdrawing a grant is never refused, and a disconnected source holds nothing back.
+    expect(await setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: false })).toMatchObject({ publicPlayGrantedAt: null });
+    await db().update(scenarioSources).set({ disconnectedAt: 1, disconnectReason: "admin" });
+    expect((await setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: true })).publicPlayGrantedAt).not.toBeNull();
+    // Someone who is no administrator is still told that, not the source's state.
+    await expect(setPublicPlay({ organizationId: ORG, actorUserId: OWNER, granted: true })).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("starts an organization that may use its pipeline on it, and every other source on the builder", async () => {
+    github();
+    await change({ action: "connect", repository: "acme/labs" }, { toggles: pipelineOn });
+    expect(await binding()).toMatchObject({ mode: "push", imageProducer: "pipeline" });
+    await db().delete(scenarioSources);
+    await change({ action: "connect", repository: "acme/labs" }, { toggles: enabled });
+    expect(await binding()).toMatchObject({ mode: "push", imageProducer: "builder" });
   });
 
   it("needs its flag only for what widens: a pipeline and self-hosted runners", async () => {
@@ -591,7 +680,7 @@ describe("what only a platform administrator changes", () => {
   it("does not switch to pull while a pipeline builds, and ends what waits for one when it does switch", async () => {
     await insertBinding({ mode: "push", imageProducer: "pipeline" });
     await pipelineHead();
-    await expect(change({ action: "mode", mode: "pull" })).rejects.toMatchObject({
+    await expect(platform({ action: "mode", mode: "pull" })).rejects.toMatchObject({
       status: 409, code: "scenario_source_pipeline_images",
     });
     expect(await binding()).toMatchObject({ mode: "push" });
@@ -609,7 +698,7 @@ describe("what only a platform administrator changes", () => {
     await db().insert(scenarioRevisions).values({
       scenarioId: `${ORG}/other`, rev: "builders", guestContract: 3, state: "building", docJson: { machines: [] } as never,
     });
-    await change({ action: "mode", mode: "pull" });
+    await platform({ action: "mode", mode: "pull" });
     expect(await binding()).toMatchObject({ mode: "pull", imageProducer: "builder" });
     expect(await db().select({ rev: scenarioRevisions.rev, state: scenarioRevisions.state, reason: scenarioRevisions.failureReason })
       .from(scenarioRevisions).orderBy(scenarioRevisions.rev)).toEqual([
@@ -625,7 +714,7 @@ describe("what only a platform administrator changes", () => {
     await insertBinding({ mode: "push" });
     await pipelineHead();
     await db().update(scenarioRevisions).set({ state: "ready" });
-    await change({ action: "mode", mode: "pull" });
+    await platform({ action: "mode", mode: "pull" });
     expect(await binding()).toMatchObject({ mode: "pull" });
     expect((await db().select().from(scenarioSourceCommits))[0]).toMatchObject({ state: "building", detail: null });
     await change({ action: "disconnect" });

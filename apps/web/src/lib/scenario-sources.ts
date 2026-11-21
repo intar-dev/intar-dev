@@ -451,8 +451,36 @@ type Change =
   | { action: "promotion"; promotion: SourcePromotion }
   | { action: "forget_image"; buildKey: string; architecture: "amd64" | "arm64" };
 
-/** The changes only a platform administrator makes, in any scope. */
-const PLATFORM_ACTIONS: ReadonlySet<Change["action"]> = new Set(["image_producer", "runner_policy", "promotion", "forget_image"]);
+/**
+ * A source's settings: who builds its images, which runners may publish,
+ * who puts its labs live, and forgetting an image. Its scope's
+ * administrators change them (#472): an organization's owners and admins
+ * for theirs, a platform administrator for the platform's.
+ */
+const SETTING_ACTIONS: ReadonlySet<Change["action"]> = new Set(["image_producer", "runner_policy", "promotion", "forget_image"]);
+
+/**
+ * Whether a platform administrator may make `change` on a scope that is
+ * not theirs to run: what steps a source back or stops it, forgetting an
+ * image, and the way to pull mode, which only the platform has.
+ */
+function platformMayStepBack(change: Change): boolean {
+  switch (change.action) {
+    case "pause":
+    case "forget_image":
+      return true;
+    case "image_producer":
+      return change.producer === "builder";
+    case "runner_policy":
+      return !change.allowSelfHosted;
+    case "promotion":
+      return change.promotion === "manual";
+    case "mode":
+      return change.mode === "pull";
+    default:
+      return false;
+  }
+}
 
 function parseChange(body: unknown): Change {
   const input = (body ?? {}) as {
@@ -554,15 +582,30 @@ export async function changeScenarioSource(input: {
   startedAt: number;
   toggles?: FeatureToggleService;
   appEnv?: ScenarioSourceEnv;
+  /**
+   * The actor is a platform administrator stepping a scope's source back,
+   * not one of the scope's own administrators: only what
+   * `platformMayStepBack` names, checked by the platform's rights.
+   */
+  asPlatform?: boolean;
 }): Promise<ScenarioSourceView | null> {
   const { scope, actorUserId } = input;
   const change = parseChange(input.body);
   const db = drizzle(env.DB);
   const now = Date.now();
-  if (PLATFORM_ACTIONS.has(change.action)) {
+  if (input.asPlatform && !platformMayStepBack(change)) {
+    throw appError(400, "scenario_source_change_invalid", "A platform administrator can only step a source back.");
+  }
+  // Pull mode needs the platform's builder: only the platform switches to it.
+  const platformOnly = input.asPlatform === true || (change.action === "mode" && change.mode === "pull");
+  const authority =
+    platformOnly || scope.organizationId === null
+      ? activeAdministrator(actorUserId)
+      : administersOrganization(scope.organizationId, actorUserId);
+  if (SETTING_ACTIONS.has(change.action) || platformOnly) {
     // Asked before any flag, so the answer does not tell a flag's state. Each
     // write below asks again in its own statement.
-    if (!(await mayChangeRunnerPolicy(db, actorUserId))) {
+    if (!(await holdsAuthority(db, authority))) {
       throw appError(404, "not_found", "not found");
     }
   }
@@ -585,10 +628,6 @@ export async function changeScenarioSource(input: {
     throw appError(404, "not_found", "not found");
   }
   let forgotten: ScenarioSourceView["forgotten"];
-  const authority =
-    scope.organizationId === null
-      ? activeAdministrator(actorUserId)
-      : administersOrganization(scope.organizationId, actorUserId);
   const connected = and(
     eq(scenarioSources.scopeKey, scope.key),
     isNull(scenarioSources.disconnectedAt),
@@ -601,6 +640,11 @@ export async function changeScenarioSource(input: {
         fullName: change.repository,
         authority,
         now,
+        // An organization that may use its own pipeline starts on it, so its
+        // first publish queues nothing for the builder. The platform's own
+        // source is switched by its operators.
+        producer: scope.organizationId !== null && (await scenarioPipelineImagesEnabled(scope, input.toggles))
+          ? "pipeline" : "builder",
       });
       break;
     case "resume": {
@@ -697,7 +741,7 @@ export async function changeScenarioSource(input: {
       });
       break;
     case "image_producer": {
-      // In the statement: the actor is still a platform administrator, and a
+      // In the statement: the actor still administers the scope, and a
       // pipeline builds only for a connected push source. Back to the builder
       // is always possible.
       const [set] = await db
@@ -706,14 +750,14 @@ export async function changeScenarioSource(input: {
         .where(
           and(
             eq(scenarioSources.scopeKey, scope.key),
-            activeAdministrator(actorUserId),
+            authority,
             change.producer === "builder"
               ? undefined
               : and(isNull(scenarioSources.disconnectedAt), eq(scenarioSources.mode, "push")),
           ),
         )
         .returning({ scopeKey: scenarioSources.scopeKey });
-      if (!set) throw await platformChangeRefusal(db, scope, actorUserId, change.producer === "pipeline");
+      if (!set) throw await settingRefusal(db, scope, authority, change.producer === "pipeline");
       break;
     }
     case "runner_policy": {
@@ -721,7 +765,7 @@ export async function changeScenarioSource(input: {
         db
           .update(scenarioSources)
           .set({ allowSelfHostedRunners: change.allowSelfHosted, updatedAt: now })
-          .where(and(eq(scenarioSources.scopeKey, scope.key), isNull(scenarioSources.disconnectedAt), activeAdministrator(actorUserId)))
+          .where(and(eq(scenarioSources.scopeKey, scope.key), isNull(scenarioSources.disconnectedAt), authority))
           .returning({ scopeKey: scenarioSources.scopeKey }),
         // A session is not asked about its runner again, so one a runner that
         // is no longer allowed holds ends here.
@@ -735,12 +779,12 @@ export async function changeScenarioSource(input: {
               ne(pipelineUploadSessions.runnerEnvironment, "github-hosted"),
               sql`EXISTS (SELECT 1 FROM scenario_sources source
                 WHERE source.scope_key = ${scope.key} AND source.allow_self_hosted_runners = 0)`,
-              activeAdministrator(actorUserId),
+              authority,
             ),
           )
           .returning({ id: pipelineUploadSessions.id }),
       ]);
-      if (!set.length) throw await platformChangeRefusal(db, scope, actorUserId, false);
+      if (!set.length) throw await settingRefusal(db, scope, authority, false);
       console.info(JSON.stringify({
         event: "scenario_source_runner_policy_set", scope_key: scope.key, actor_user_id: actorUserId,
         allow_self_hosted: change.allowSelfHosted, closed_sessions: closed.length,
@@ -748,8 +792,9 @@ export async function changeScenarioSource(input: {
       break;
     }
     case "promotion": {
-      // In the statement: the actor is still a platform administrator, and
-      // only a connected source is given a job. Back to manual is always
+      // In the statement: the actor still administers the scope, only a
+      // connected source is given a job, and an organization whose play
+      // labs are open to everyone does not publish to them unreviewed (#472). Back to manual is always
       // possible. Switching changes nothing a learner sees: the job leaves
       // the commit that is the head now as the administrator left it, and
       // takes up the next one, or a re-run of this one. The poke runs the
@@ -768,12 +813,21 @@ export async function changeScenarioSource(input: {
         .where(
           and(
             eq(scenarioSources.scopeKey, scope.key),
-            activeAdministrator(actorUserId),
-            change.promotion === "manual" ? undefined : isNull(scenarioSources.disconnectedAt),
+            authority,
+            change.promotion === "manual"
+              ? undefined
+              : and(isNull(scenarioSources.disconnectedAt), sql`NOT ${PUBLIC_PLAY_GRANTED}`),
           ),
         )
         .returning({ scopeKey: scenarioSources.scopeKey });
-      if (!set) throw await platformChangeRefusal(db, scope, actorUserId, false);
+      if (!set) {
+        if (change.promotion === "automatic" && (await db.get(sql`SELECT 1 AS granted FROM scenario_sources
+            WHERE scope_key = ${scope.key} AND ${PUBLIC_PLAY_GRANTED}`))) {
+          throw appError(409, "scenario_source_public_play",
+            "This organization's play labs are open to everyone, so its labs are promoted by hand. Automatic promotion needs the public-play grant withdrawn first.");
+        }
+        throw await settingRefusal(db, scope, authority, false);
+      }
       console.info(JSON.stringify({
         event: "scenario_source_promotion_set", scope_key: scope.key, actor_user_id: actorUserId, promotion: change.promotion,
       }));
@@ -787,12 +841,12 @@ export async function changeScenarioSource(input: {
             eq(scopeMachineImages.scopeKey, scope.key),
             eq(scopeMachineImages.buildKey, change.buildKey),
             eq(scopeMachineImages.architecture, change.architecture),
-            activeAdministrator(actorUserId),
+            authority,
           ),
         )
         .returning();
       if (!row) {
-        if (!(await mayChangeRunnerPolicy(db, actorUserId))) throw appError(404, "not_found", "not found");
+        if (!(await holdsAuthority(db, authority))) throw appError(404, "not_found", "not found");
         throw appError(404, "image_not_recorded", "This source has no image recorded for that key and architecture.");
       }
       // The row was the only record of who built the image.
@@ -870,24 +924,25 @@ export async function changeScenarioSource(input: {
   return view && forgotten ? { ...view, forgotten } : view;
 }
 
-/**
- * Who may let a source's bundles and images come from self-hosted runners,
- * and make the other platform-only changes: a platform administrator, for
- * now (Q1 of #438 changes this function).
- */
-async function mayChangeRunnerPolicy(db: DrizzleD1Database, actorUserId: string): Promise<boolean> {
-  const row = await db.get<{ ok: number }>(sql`SELECT 1 AS ok WHERE ${activeAdministrator(actorUserId)}`);
+/** Holds while the source of a scope is an organization's that has the public-play grant. */
+const PUBLIC_PLAY_GRANTED = sql`EXISTS (SELECT 1 FROM organization_entitlements entitlement
+  WHERE entitlement.organization_id = ${scenarioSources.organizationId}
+    AND entitlement.public_play_granted_at IS NOT NULL)`;
+
+/** Whether the actor an authority predicate names holds it now. */
+async function holdsAuthority(db: DrizzleD1Database, authority: SQL): Promise<boolean> {
+  const row = await db.get<{ ok: number }>(sql`SELECT 1 AS ok WHERE ${authority}`);
   return row !== undefined && row !== null;
 }
 
-/** Why a platform-only change changed nothing. */
-async function platformChangeRefusal(
+/** Why a change of a setting changed nothing. */
+async function settingRefusal(
   db: DrizzleD1Database,
   scope: ScenarioSourceScope,
-  actorUserId: string,
+  authority: SQL,
   needsPush: boolean,
 ): Promise<AppError> {
-  if (!(await mayChangeRunnerPolicy(db, actorUserId))) return appError(404, "not_found", "not found");
+  if (!(await holdsAuthority(db, authority))) return appError(404, "not_found", "not found");
   const [binding] = await db
     .select({ mode: scenarioSources.mode, disconnectedAt: scenarioSources.disconnectedAt })
     .from(scenarioSources)
@@ -917,6 +972,8 @@ async function connect(input: {
   appEnv?: ScenarioSourceEnv;
   authority: SQL;
   now: number;
+  /** Who builds the new source's images; it is in push mode, which a pipeline needs. */
+  producer: ImageProducer;
 }): Promise<void> {
   const { scope, now } = input;
   const bound = await confirmRepositoryAdmin(input);
@@ -926,11 +983,11 @@ async function connect(input: {
   try {
     const result = await db.run(sql`INSERT INTO scenario_sources (scope_key,
         organization_id, github_installation_id, github_repository_id,
-        github_repository, default_branch, mode, bound_by_user_id, poked_at,
+        github_repository, default_branch, mode, image_producer, bound_by_user_id, poked_at,
         created_at, updated_at)
       SELECT ${scope.key}, ${scope.organizationId}, ${bound.installationId},
         ${bound.repository.id}, ${bound.repository.fullName},
-        ${bound.repository.defaultBranch}, 'push', ${input.actorUserId}, ${now},
+        ${bound.repository.defaultBranch}, 'push', ${input.producer}, ${input.actorUserId}, ${now},
         ${now}, ${now}
       WHERE ${input.authority}
       ON CONFLICT (scope_key) DO UPDATE SET
@@ -939,7 +996,7 @@ async function connect(input: {
         github_repository = excluded.github_repository,
         default_branch = excluded.default_branch,
         mode = excluded.mode,
-        image_producer = 'builder',
+        image_producer = excluded.image_producer,
         allow_self_hosted_runners = 0,
         promotion = 'manual',
         promotion_after = NULL,
