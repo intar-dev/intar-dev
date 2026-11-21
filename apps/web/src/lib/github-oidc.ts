@@ -12,9 +12,10 @@ import { appError, type AppError } from "@/lib/app-error";
 
 export const GITHUB_ACTIONS_ISSUER = "https://token.actions.githubusercontent.com";
 
-// A tag-pinned and a SHA-pinned caller of the reusable workflow.
+// A tag-pinned and a SHA-pinned caller of the reusable workflow. Its image
+// jobs are in the workflow it calls for each image, at the same commit.
 const WORKFLOW_REF_PATTERN =
-  /^intar-dev\/intar-dev\/\.github\/workflows\/scenario-publish\.yml@(refs\/tags\/scenario-publish-v\d+|[0-9a-f]{40})$/;
+  /^intar-dev\/intar-dev\/\.github\/workflows\/scenario-publish(-image)?\.yml@(refs\/tags\/scenario-publish-v\d+|[0-9a-f]{40})$/;
 // Dependabot jobs carry "dynamic", which stays outside.
 const WORKFLOW_EVENTS = new Set(["push", "workflow_dispatch"]);
 
