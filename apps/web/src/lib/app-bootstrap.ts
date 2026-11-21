@@ -12,6 +12,8 @@ export type AppAccessState = "active" | "inactive";
 export interface AppBootstrapData {
   session: AppSessionData | null;
   access: AppAccessState;
+  /** Whether a platform administrator is shown the builder's own surfaces. */
+  builderOperations: boolean;
 }
 
 // Mutations invalidate what they change, so a short stale window only skips
@@ -47,13 +49,14 @@ export async function getClientAppBootstrap(): Promise<AppBootstrapData> {
 
 export function parseAppBootstrapData(value: unknown): AppBootstrapData {
   if (!isRecord(value)) {
-    return { session: null, access: "inactive" };
+    return { session: null, access: "inactive", builderOperations: false };
   }
 
   const session = isAppSessionData(value.session) ? value.session : null;
   return {
     session,
     access: session && value.access === "active" ? "active" : "inactive",
+    builderOperations: session !== null && value.builderOperations === true,
   };
 }
 

@@ -23,6 +23,8 @@ export interface NavItem {
   external?: boolean;
   /** Match the active state on this prefix (defaults to `to`). */
   matchPrefix?: string;
+  /** Shown only while the builder's own surfaces are (`useBuilderOperations`). */
+  builderOperations?: true;
 }
 
 export interface NavSection {
@@ -92,6 +94,7 @@ export const NAV_SECTIONS: NavSection[] = [
         to: "/admin/builds",
         icon: Hammer,
         requires: "admin",
+        builderOperations: true,
       },
     ],
   },

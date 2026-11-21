@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/sidebar";
 import { isAdminUser } from "@/lib/authz";
 import { useMyRunsSummary } from "../hooks/useMyRuns";
-import { useSession } from "../hooks/useSession";
+import { useBuilderOperations, useSession } from "../hooks/useSession";
 import { NAV_SECTIONS, findActiveNavItem } from "./nav-config";
 import { SidebarUserMenu } from "./SidebarUserMenu";
 import { BrandMark } from "../patterns/BrandMark";
@@ -67,6 +67,7 @@ export function AppSidebar() {
   });
   const { data } = useSession();
   const isAdmin = isAdminUser(data?.user ?? null);
+  const builderOperations = useBuilderOperations();
   const activeId = findActiveNavItem(pathname)?.id ?? null;
   const runs = useMyRunsSummary();
   const ongoingRunCount = runs.data?.activeCount ?? 0;
@@ -159,7 +160,7 @@ export function AppSidebar() {
         <span ref={ghost} aria-hidden="true" data-nav-ghost />
         {sections.map((section) => {
           const items = section.items.filter(
-            (item) => item.requires !== "admin" || isAdmin,
+            (item) => (item.requires !== "admin" || isAdmin) && (!item.builderOperations || builderOperations),
           );
           if (items.length === 0) return null;
           return (

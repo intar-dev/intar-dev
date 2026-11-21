@@ -58,6 +58,8 @@ export interface CourseFixture {
 }
 
 export interface MockApiState {
+  /** False hides the builder's own surfaces, as with the operator flag off; they show otherwise. */
+  builderOperations?: boolean;
   sessionRole: SessionRole;
   variant: DataVariant;
   runState: RunFixtureState;

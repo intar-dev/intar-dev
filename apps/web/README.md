@@ -312,7 +312,9 @@ providers that use secrets cannot sign in: remove their configuration and
 register a public client.
 
 Private scenarios use the `<organization-slug>-<local-scenario-id>` namespace.
-They are built by platform builders and can run only on agent runners owned by
+Their images are built by a platform builder, or by the repository's own
+pipeline once a platform administrator sets the scenario source to it, and
+they can run only on agent runners owned by
 the same organization. Organization runner bootstrap credentials remain valid
 until rotation, revocation, host disablement, or deletion; the access JWTs they
 mint remain short-lived.

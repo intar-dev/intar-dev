@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Hammer, Server } from "lucide-react";
+import { useBuilderOperations } from "@/components/app/hooks/useSession";
 import { apiErrorMessage } from "@/components/app/lib/api-errors";
 import { formatTimestamp } from "@/components/app/lib/format";
 import { HttpResponseError } from "@/components/app/lib/http-response-error";
@@ -105,6 +106,7 @@ export function HostOnboardingPanel({
 }: HostOnboardingPanelProps) {
   const [hostName, setHostName] = useState("");
   const [hostRole, setHostRole] = useState<HostRole>("agent");
+  const builderOperations = useBuilderOperations();
   const [enrollment, setEnrollment] = useState<PlatformEnrollment | null>(
     null,
   );
@@ -171,6 +173,8 @@ export function HostOnboardingPanel({
           <h2 className="text-section-title">{title}</h2>
         </div>
 
+        {/* A builder is enrolled only while the builder's surfaces are shown; otherwise every new host is an agent. */}
+        {builderOperations ? (
         <div
           role="group"
           aria-label="Host role"
@@ -199,6 +203,7 @@ export function HostOnboardingPanel({
             Builder
           </Button>
         </div>
+        ) : null}
 
         <form
           className="flex flex-col gap-2 sm:flex-row"
