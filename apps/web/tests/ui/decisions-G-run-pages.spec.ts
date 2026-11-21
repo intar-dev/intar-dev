@@ -142,6 +142,28 @@ test("a scenario of an automatic source says what its job is doing, and keeps th
   if (process.env.SOURCE_CARD_SHOTS) await section.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/not-driven.png` });
 });
 
+test("the builder's surfaces are out of sight unless the operator flag shows them", async ({ page, ui }) => {
+  await ui.open({ ...routeCase("admin-hosts"), theme: "light" });
+  const nav = page.getByRole("navigation").first();
+  // Shown: the builds page in the navigation, the builder role in enrollment.
+  await expect(nav.getByRole("link", { name: "Builds" })).toBeVisible();
+  await page.getByRole("button", { name: "Add host" }).first().click();
+  await expect(page.getByRole("group", { name: "Host role" })).toBeVisible();
+
+  ui.server.state.builderOperations = false;
+  await page.reload();
+  await expect(nav.getByRole("link", { name: "Hosts" })).toBeVisible();
+  await expect(nav.getByRole("link", { name: "Builds" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Add host" }).first().click();
+  await expect(page.getByRole("heading", { name: "Host enrollment" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Host role" })).toHaveCount(0);
+  if (process.env.SOURCE_CARD_SHOTS) await page.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/operator-off.png` });
+
+  // The page itself stays reachable.
+  await page.goto("/admin/builds");
+  await expect(page.getByRole("heading", { name: "Build queue" })).toBeVisible();
+});
+
 test("a failed host refresh reports inside its host row", async ({ page, ui }) => {
   await ui.open({ ...routeCase("admin-hosts"), theme: "light" });
   const card = page.locator("article", { hasText: "agent-eu-1" });

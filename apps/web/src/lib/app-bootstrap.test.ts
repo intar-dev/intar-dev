@@ -30,6 +30,7 @@ describe("app bootstrap client", () => {
     await expect(getClientAppBootstrap()).resolves.toEqual({
       session,
       access: "active",
+      builderOperations: false,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith("/api/app/bootstrap", {
@@ -40,22 +41,28 @@ describe("app bootstrap client", () => {
   });
 
   it("fails closed for malformed bootstrap data", () => {
-    expect(parseAppBootstrapData({ access: "active" })).toEqual({
+    expect(parseAppBootstrapData({ access: "active", builderOperations: true })).toEqual({
       session: null,
       access: "inactive",
+      builderOperations: false,
     });
     expect(
       parseAppBootstrapData({
         session: { session: { id: 1 }, user: { id: "user-1" } },
         access: "unexpected",
       }),
-    ).toEqual({ session: null, access: "inactive" });
+    ).toEqual({ session: null, access: "inactive", builderOperations: false });
     expect(
       parseAppBootstrapData({
         session: { session: { id: "session-1" }, user: { id: "user-1" } },
         access: "unexpected",
       }),
     ).toMatchObject({ access: "inactive" });
+    // Only a literal true shows the builder's surfaces.
+    const session = { session: { id: "session-1" }, user: { id: "user-1" } };
+    expect(parseAppBootstrapData({ session, access: "active", builderOperations: true }).builderOperations).toBe(true);
+    expect(parseAppBootstrapData({ session, access: "active", builderOperations: "yes" }).builderOperations).toBe(false);
+    expect(parseAppBootstrapData({ session, access: "active" }).builderOperations).toBe(false);
   });
 
   it("rejects an unavailable bootstrap endpoint", async () => {
@@ -76,6 +83,7 @@ describe("app bootstrap client", () => {
         user: { id: "user-1" },
       },
       access: "active",
+      builderOperations: false,
     } as const;
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(bootstrap), { status: 200 }),

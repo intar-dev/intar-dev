@@ -225,6 +225,15 @@ serve `on` only when the `targetingKey` context field matches a selected Better
 Auth user ID. The toggle controls creation only—it is not an authentication or
 authorization boundary.
 
+The `builder_operations` boolean flag, evaluated the same way for the platform
+administrator who reads, also defaults to `off`. While it is off, the admin
+navigation has no "Builds" entry and host enrollment offers no "Builder" role:
+scenario repositories build their own images, and the builder is the fallback.
+Serve `on` to show both again. Nothing else depends on it: the builds page and
+its API stay reachable at `/admin/builds`, the enrollment API still accepts a
+builder from a platform administrator, enrolled builders keep working, and a
+scenario source card links to its builds whenever a builder builds for it.
+
 ### Organization OIDC
 
 An organization admin can configure one OIDC provider and a domain the
@@ -312,7 +321,9 @@ providers that use secrets cannot sign in: remove their configuration and
 register a public client.
 
 Private scenarios use the `<organization-slug>-<local-scenario-id>` namespace.
-They are built by platform builders and can run only on agent runners owned by
+Their images are built by a platform builder, or by the repository's own
+pipeline once a platform administrator sets the scenario source to it, and
+they can run only on agent runners owned by
 the same organization. Organization runner bootstrap credentials remain valid
 until rotation, revocation, host disablement, or deletion; the access JWTs they
 mint remain short-lived.

@@ -15,6 +15,14 @@ export function useSession() {
   return useQuery(sessionQueryOptions());
 }
 
+/** Whether the builder's own surfaces are shown: the builds page's nav entry and the builder role in host enrollment. */
+export function useBuilderOperations(): boolean {
+  return useQuery({
+    ...appBootstrapQueryOptions(),
+    select: (bootstrap: AppBootstrapData) => bootstrap.builderOperations,
+  }).data === true;
+}
+
 /**
  * The session and what it may do: "stranded" is a session the server no
  * longer lets act. It is refused everywhere, a new sign-in included, so

@@ -570,6 +570,8 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, {
           session,
           access: session ? "active" : "inactive",
+          // On unless a test turns it off, so the admin pages show what they did.
+          builderOperations: session !== null && server.state.builderOperations !== false,
         });
         return;
       }

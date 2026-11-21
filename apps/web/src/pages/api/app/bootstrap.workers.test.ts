@@ -15,6 +15,10 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@/lib/account-access", () => ({
   sessionMayAct: accountAccessMock.sessionMayAct,
 }));
+const flagsMock = vi.hoisted(() => ({ getBoolean: vi.fn() }));
+vi.mock("@/lib/organization-access", () => ({
+  featureToggleService: () => ({ getBoolean: flagsMock.getBoolean }),
+}));
 
 import { GET } from "./bootstrap";
 
@@ -23,6 +27,7 @@ describe("app bootstrap API", () => {
     vi.clearAllMocks();
     authMock.getSession.mockResolvedValue(null);
     accountAccessMock.sessionMayAct.mockResolvedValue(false);
+    flagsMock.getBoolean.mockResolvedValue(true);
   });
 
   it("returns a private inactive bootstrap for an anonymous visitor", async () => {
@@ -36,6 +41,7 @@ describe("app bootstrap API", () => {
     await expect(response.json()).resolves.toEqual({
       session: null,
       access: "inactive",
+      builderOperations: false,
     });
     expect(authMock.getSession).toHaveBeenCalledTimes(1);
     expect(authMock.getSession).toHaveBeenCalledWith({
@@ -60,7 +66,10 @@ describe("app bootstrap API", () => {
     await expect(response.json()).resolves.toEqual({
       session: authSession,
       access: "active",
+      // Not an administrator: the flag is not even asked.
+      builderOperations: false,
     });
+    expect(flagsMock.getBoolean).not.toHaveBeenCalled();
     expect(authMock.getSession).toHaveBeenCalledTimes(1);
     // The session rule every API request applies, impersonation included.
     expect(accountAccessMock.sessionMayAct).toHaveBeenCalledWith(
@@ -96,6 +105,7 @@ describe("app bootstrap API", () => {
     await expect(response.json()).resolves.toEqual({
       session: null,
       access: "inactive",
+      builderOperations: false,
     });
     expect(accountAccessMock.sessionMayAct).not.toHaveBeenCalled();
   });
@@ -132,5 +142,27 @@ describe("app bootstrap API", () => {
     await expect(response.json()).resolves.toEqual({
       error: "The app bootstrap state could not be loaded",
     });
+  });
+
+  it("tells an acting platform administrator whether the builder's surfaces are shown", async () => {
+    const admin = {
+      session: { id: "session-1", userId: "admin-1" },
+      user: { id: "admin-1", email: "admin@example.test", role: "admin" },
+    };
+    authMock.getSession.mockResolvedValue(admin);
+    const read = async () =>
+      ((await (await GET({ request: new Request("https://intar.test/api/app/bootstrap") } as never)).json()) as {
+        builderOperations: boolean;
+      }).builderOperations;
+
+    accountAccessMock.sessionMayAct.mockResolvedValue(true);
+    expect(await read()).toBe(true);
+    expect(flagsMock.getBoolean).toHaveBeenCalledWith("builder_operations", false, { targetingKey: "admin-1" });
+    flagsMock.getBoolean.mockResolvedValue(false);
+    expect(await read()).toBe(false);
+    // An administrator whose session may not act is told nothing.
+    flagsMock.getBoolean.mockResolvedValue(true);
+    accountAccessMock.sessionMayAct.mockResolvedValue(false);
+    expect(await read()).toBe(false);
   });
 });
