@@ -199,3 +199,58 @@ test("an organization's owner switches its own source's settings", async ({ page
   await expect(card.getByText("runner: your-kvm-runner")).toBeVisible();
   if (process.env.SOURCE_CARD_SHOTS) await card.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/organization.png` });
 });
+
+test("an organization's owner reads its pipeline's usage and forgets a recorded image", async ({ page, ui }) => {
+  const GIB = 1024 ** 3;
+  const source = { ...disconnected("admin"), disconnectedAt: null, disconnectReason: null, imageProducer: "pipeline" };
+  let images = [{
+    buildKey: `sha256:${"a".repeat(64)}`, architecture: "amd64", imageDigest: `sha256:${"b".repeat(64)}`,
+    sizeBytes: 2 * GIB, counted: true, githubRepository: "acme/labs", sha: "c".repeat(40), runId: "42", runAttempt: 1,
+    runnerEnvironment: "github-hosted", createdAt: 1,
+  }];
+  const changes: unknown[] = [];
+  await page.route(`**${api}`, async (route) => {
+    const request = route.request();
+    if (request.method() === "GET") {
+      await route.fulfill({ json: {
+        enabled: true, pipelineImages: true, appSlug: null, workflowRef: "scenario-publish-v1",
+        pipelineWorkflowRef: "scenario-publish-v2",
+        settings: { platform: false, automaticPromotion: true, publicPlay: false },
+        usage: {
+          openSessions: { used: 0, limit: 8 }, sessions: { used: 3, limit: 200 },
+          uploadedBytes: { used: 4 * GIB, limit: 100 * GIB },
+          countedBytes: { used: images.length * 2 * GIB, limit: 50 * GIB },
+          images, imageCount: images.length,
+        },
+        source,
+      } });
+      return;
+    }
+    changes.push(request.postDataJSON());
+    images = [];
+    await route.fulfill({ json: { source } });
+  });
+  await ui.open({
+    ...routeCase("organization-detail"),
+    path: "/organizations/org-platform?tab=settings",
+    organizationRole: "owner",
+  });
+
+  const card = page.locator("section", { has: page.getByRole("heading", { name: "Scenario source" }) });
+  await expect(card.getByRole("heading", { name: "Pipeline usage" })).toBeVisible();
+  await expect(card.getByText("2.0 GiB of 50.0 GiB")).toBeVisible();
+  await expect(card.getByText("4.0 GiB of 100.0 GiB")).toBeVisible();
+  await card.getByText("Recorded images (1)").click();
+  await expect(card.getByRole("link", { name: "run 42" })).toHaveAttribute(
+    "href", "https://github.com/acme/labs/actions/runs/42/attempts/1",
+  );
+  if (process.env.SOURCE_CARD_SHOTS) await card.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/usage.png` });
+
+  await card.getByRole("button", { name: /^Forget the amd64 image/ }).click();
+  expect(changes).toEqual([]);
+  await expect(page.getByRole("dialog")).toContainText("Revisions that already name the image keep it");
+  await page.getByRole("dialog").getByRole("button", { name: "Forget" }).click();
+  await expect(card.getByText("Recorded images")).toHaveCount(0);
+  expect(changes).toEqual([{ action: "forget_image", build_key: `sha256:${"a".repeat(64)}`, architecture: "amd64" }]);
+  await expect(card.getByText("0 B of 50.0 GiB")).toBeVisible();
+});

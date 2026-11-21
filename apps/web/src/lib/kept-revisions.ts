@@ -30,6 +30,19 @@ export const KEPT_REVISIONS_CTE = `kept_revisions AS (
                 WHERE execution.id = run.runtime_execution_id AND execution.state IN (${ACTIVE_EXECUTIONS})))))`;
 
 /**
+ * Holds while a kept revision of the image's own scope names its build key
+ * (`image`, an alias of `scope_machine_images`): the images a scope's quota
+ * counts. Needs `KEPT_REVISIONS_CTE`.
+ */
+export function imageKeptSql(image: string): string {
+  return `EXISTS (SELECT 1 FROM kept_revisions kept
+                    JOIN scenarios scenario ON scenario.id = kept.scenario_id,
+                    json_each(kept.doc_json, '$.machines') machine
+                   WHERE scenario.scope_key = ${image}.scope_key
+                     AND json_extract(machine.value, '$.build_key') = ${image}.build_key)`;
+}
+
+/**
  * Holds while every machine of the revision (`scenario`, `rev`, SQL
  * expressions) names an image whose manifest row exists. The sweep deletes a
  * manifest's rows before its objects, so a row present means the image is

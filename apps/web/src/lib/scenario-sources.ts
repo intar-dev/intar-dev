@@ -57,6 +57,13 @@ import {
   type RepositoryHead,
 } from "@/lib/github-app";
 import { createAppId } from "@/lib/id";
+import { imageKeptSql, KEPT_REVISIONS_CTE } from "@/lib/kept-revisions";
+import {
+  PIPELINE_OPEN_SESSIONS_PER_SCOPE,
+  PIPELINE_SESSION_WINDOW_MS,
+  PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW,
+  pipelineScopeLimits,
+} from "@/lib/pipeline-upload-sessions";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { featureToggleService } from "@/lib/organization-access";
 import { administersOrganization } from "@/lib/organizations";
@@ -123,6 +130,37 @@ export interface ScenarioSourceView {
   forgotten?: { imageDigest: string; revisions: Array<{ scenarioId: string; rev: string; state: string }> };
 }
 
+/** One image a source's pipeline recorded, with what built it. */
+export interface ScenarioSourceImage {
+  buildKey: string;
+  architecture: "amd64" | "arm64";
+  imageDigest: string;
+  sizeBytes: number;
+  /** Whether a kept revision names it, so that it counts against the quota. */
+  counted: boolean;
+  githubRepository: string;
+  sha: string;
+  runId: string;
+  runAttempt: number;
+  runnerEnvironment: string;
+  createdAt: number;
+}
+
+/** What a source's pipeline has used of what it may, each with its limit. */
+export interface ScenarioSourceUsage {
+  openSessions: { used: number; limit: number };
+  /** Sessions opened in the last 24 hours. */
+  sessions: { used: number; limit: number };
+  /** Bytes those sessions stored. */
+  uploadedBytes: { used: number; limit: number };
+  /** The recorded images a kept revision names. */
+  countedBytes: { used: number; limit: number };
+  /** The most recently recorded, at most `SOURCE_IMAGES_SHOWN`. */
+  images: ScenarioSourceImage[];
+  imageCount: number;
+}
+export const SOURCE_IMAGES_SHOWN = 100;
+
 export interface ScenarioSourceCard {
   /** Whether bind, resume and mode are available to this scope. */
   enabled: boolean;
@@ -147,6 +185,8 @@ export interface ScenarioSourceCard {
     /** The organization's play labs are open to everyone, so it promotes by hand. */
     publicPlay: boolean;
   };
+  /** With `settings`, for a scope with a connected source. */
+  usage?: ScenarioSourceUsage;
   source: ScenarioSourceView | null;
 }
 
@@ -375,7 +415,57 @@ export async function scenarioSourceCard(
     workflowRef: env.SCENARIO_PUBLISH_WORKFLOW_REF || "scenario-publish-v1",
     pipelineWorkflowRef: env.SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF || null,
     ...(settingsFor ? { settings: { platform: settingsFor === "platform", automaticPromotion, publicPlay } } : {}),
+    ...(settingsFor && source?.disconnectedAt === null ? { usage: await scenarioSourceUsage(scope.key) } : {}),
     source,
+  };
+}
+
+/**
+ * What the registry counts for a scope when it opens a session and records
+ * an image, read the way it reads them there.
+ */
+async function scenarioSourceUsage(scopeKey: string): Promise<ScenarioSourceUsage> {
+  const now = Date.now();
+  const limits = pipelineScopeLimits(scopeKey);
+  const [sessions, images] = await env.DB.batch<Record<string, unknown>>([
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(closed_at IS NULL AND expires_at > ?2), 0) AS open,
+              COALESCE(SUM(created_at > ?3), 0) AS opened,
+              COALESCE(SUM(CASE WHEN created_at > ?3 THEN bytes_put ELSE 0 END), 0) AS bytes
+         FROM pipeline_upload_sessions WHERE scope_key = ?1`,
+    ).bind(scopeKey, now, now - PIPELINE_SESSION_WINDOW_MS),
+    // ponytail: every image row of the scope is read to count it; a scope has tens.
+    env.DB.prepare(
+      `WITH ${KEPT_REVISIONS_CTE}
+       SELECT image.*, ${imageKeptSql("image")} AS counted
+         FROM scope_machine_images image WHERE image.scope_key = ?1
+        ORDER BY image.created_at DESC, image.build_key, image.architecture`,
+    ).bind(scopeKey),
+  ]);
+  const counted = sessions?.results[0] ?? {};
+  const rows = images?.results ?? [];
+  return {
+    openSessions: { used: Number(counted.open ?? 0), limit: PIPELINE_OPEN_SESSIONS_PER_SCOPE },
+    sessions: { used: Number(counted.opened ?? 0), limit: PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW },
+    uploadedBytes: { used: Number(counted.bytes ?? 0), limit: limits.windowBytes },
+    countedBytes: {
+      used: rows.reduce((sum, row) => sum + (row.counted ? Number(row.size_bytes) : 0), 0),
+      limit: limits.storageBytes,
+    },
+    images: rows.slice(0, SOURCE_IMAGES_SHOWN).map((row) => ({
+      buildKey: String(row.build_key),
+      architecture: row.architecture as "amd64" | "arm64",
+      imageDigest: String(row.image_digest),
+      sizeBytes: Number(row.size_bytes),
+      counted: Boolean(row.counted),
+      githubRepository: String(row.github_repository),
+      sha: String(row.sha),
+      runId: String(row.run_id),
+      runAttempt: Number(row.run_attempt),
+      runnerEnvironment: String(row.runner_environment),
+      createdAt: Number(row.created_at),
+    })),
+    imageCount: rows.length,
   };
 }
 
