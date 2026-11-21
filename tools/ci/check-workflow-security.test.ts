@@ -291,12 +291,13 @@ jobs:
     const violations = (name: string, packages: string) => {
       const workflows = join(root, ".github", "workflows");
       mkdirSync(workflows, { recursive: true });
-      for (const file of ["scenario-publish.yml", "other.yml"]) rmSync(join(workflows, file), { force: true });
+      for (const file of ["scenario-publish.yml", "scenario-publish-image.yml", "other.yml"]) rmSync(join(workflows, file), { force: true });
       writeFileSync(join(workflows, name), install(packages));
       return checkWorkflowSecurity(root).filter((line) => line.includes("apt installs"));
     };
     const packages = "qemu-system-x86 qemu-system-arm qemu-utils e2fsprogs zstd";
     expect(violations("scenario-publish.yml", packages)).toEqual([]);
+    expect(violations("scenario-publish-image.yml", packages)).toEqual([]);
     // Another package there, or the same packages anywhere else, is refused.
     expect(violations("scenario-publish.yml", `${packages} curl`)).toHaveLength(1);
     expect(violations("other.yml", packages)).toHaveLength(1);

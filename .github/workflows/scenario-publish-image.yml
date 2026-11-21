@@ -1,0 +1,312 @@
+name: Intar scenario image
+
+# One image of a publish: its amd64 build, then its arm64 build, each a job.
+# Only scenario-publish.yml calls this, once an image and one image at a time;
+# a scenario repository calls that workflow, never this one.
+
+on:
+  workflow_call:
+    inputs:
+      spec:
+        description: The image as `plan` names it, JSON with target, build_key and archs.
+        type: string
+        required: true
+      index:
+        description: The image's place in the publish, which names its log artifacts.
+        type: number
+        required: true
+      rev:
+        description: The revision the images are pushed for.
+        type: string
+        required: true
+      build-only:
+        description: A SCENARIO/MACHINE to build without pushing, or nothing.
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+      cpus:
+        type: number
+        required: true
+      cache:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  INTAR_ORIGIN: https://intar.dev
+  # As in scenario-publish.yml: `git archive` must emit LFS pointers.
+  GIT_LFS_SKIP_SMUDGE: "1"
+
+jobs:
+  amd64:
+    name: amd64
+    if: contains(fromJSON(inputs.spec).archs, 'amd64')
+    runs-on: ${{ inputs.runner }}
+    # An image is 3 to 7 minutes cold on the measured runner for its own
+    # architecture, and several times that emulated.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      stopped: ${{ steps.build.outputs.stopped }}
+    env:
+      ARCH: amd64
+    steps: &steps
+      - name: DEBUG token claims (temporary)
+        run: |
+          set -euo pipefail
+          payload="$(curl --fail --silent --show-error --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=probe" | jq -r '.value' | cut -d. -f2 | tr '_-' '/+')"
+          while [ $(( ${#payload} % 4 )) != 0 ]; do payload="${payload}="; done
+          base64 -d <<<"${payload}" | jq '{job_workflow_ref, job_workflow_sha, workflow_ref, event_name, runner_environment}'
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Mount the cache volume
+        if: inputs.cache == 'namespace' && inputs.build-only == ''
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1
+        with:
+          path: /home/runner/intar-cache
+
+      - name: Build, boot and push the image
+        id: build
+        env:
+          IMAGE: ${{ inputs.spec }}
+          REV: ${{ inputs.rev }}
+          BUILD_ONLY: ${{ inputs.build-only }}
+          CPUS: ${{ inputs.cpus }}
+          CACHE: ${{ inputs.cache }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/intar"
+          mkdir -p "${work}/logs" "${work}/source" "${work}/cli"
+          summary() { printf '%s\n' "$*" >> "${GITHUB_STEP_SUMMARY}"; }
+
+          target="$(jq -r '.target // empty' <<<"${IMAGE}")"
+          key="$(jq -r '.build_key' <<<"${IMAGE}")"
+          if [ -n "${BUILD_ONLY}" ]; then
+            # The caller's matrix cannot carry the input into its one entry.
+            target="${BUILD_ONLY}"
+            CACHE=none
+          fi
+          summary "### \`${target}\` ${ARCH}"
+          summary ""
+
+          # The CLI and the Kino Intar names now.
+          curl --fail --silent --show-error --retry 20 --retry-delay 60 \
+            --output "${work}/descriptor.json" "${INTAR_ORIGIN}/registry/v1/sources/compiler"
+          cli_version="$(jq -r '.cli_version' "${work}/descriptor.json")"
+          cli_sha256="$(jq -r '.sha256.linux_amd64' "${work}/descriptor.json")"
+          digest="$(jq -r '.digest' "${work}/descriptor.json")"
+          if ! [[ "${cli_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${cli_sha256}" =~ ^[0-9a-f]{64}$ && "${digest}" =~ ^p[0-9a-f]{8}$ ]]; then
+            echo "The compiler descriptor is malformed: $(cat "${work}/descriptor.json")" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s\n' 0.15.0 "${cli_version}" | sort -V | head -n 1)" != 0.15.0 ]; then
+            echo "Intar names intar-image-cli ${cli_version}; this workflow needs 0.15.0 or newer." >&2
+            exit 1
+          fi
+          # The image is of the bundle the upload compiled. A compiler that
+          # changed since gives other build keys, refused only after the bake.
+          if [ -z "${BUILD_ONLY}" ] && [[ "${REV}" != *"-${digest}" ]]; then
+            echo "Intar's compiler changed since this commit was uploaded. Re-run all jobs." >&2
+            exit 1
+          fi
+          archive="${work}/intar-image-cli_${cli_version}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --output "${archive}" \
+            "https://github.com/intar-dev/intar-dev/releases/download/image-cli%2Fv${cli_version}/${archive##*/}"
+          echo "${cli_sha256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "${archive}" -C "${work}/cli"
+          cli="${work}/cli/intar-image-cli"
+
+          # The tree the upload compiled, not the checkout: the archive leaves
+          # out what the repository marks export-ignore.
+          git archive --format=tar "${GITHUB_SHA}" | tar -x -C "${work}/source"
+
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 qemu-system-arm qemu-utils e2fsprogs zstd
+
+          threads="$(nproc)"
+          memory_mib="$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)"
+          # shellcheck disable=SC2153 # CPUS is this step's input, cpus what the build gets
+          if ! [[ "${CPUS}" =~ ^[0-9]+$ ]]; then
+            echo "cpus is a whole number, not \`${CPUS}\`." >&2
+            exit 1
+          fi
+          cpus="${CPUS}"
+          if [ "${cpus}" = 0 ]; then
+            if [ "${CACHE}" != none ]; then
+              echo "Set \`cpus\` with a cache: a checkpoint is found again only by a build with the same number, and a runner label does not always give the same machine." >&2
+              exit 1
+            fi
+            cpus="$(( threads > 2 ? threads - 2 : threads ))"
+          fi
+          if [ "${cpus}" -gt "${threads}" ]; then
+            cpus="${threads}"
+          fi
+          # An emulated machine gets two processors whatever `cpus` says.
+          case "$(uname -m)" in
+            x86_64) native=amd64 ;;
+            aarch64) native=arm64 ;;
+            *) native="" ;;
+          esac
+          how=native
+          if [ "${ARCH}" != "${native}" ]; then
+            how=emulated
+            if [ "${cpus}" -gt 2 ]; then
+              cpus=2
+            fi
+          fi
+
+          case "${CACHE}" in
+            none) cache="${work}/cache" ;;
+            namespace) cache=/home/runner/intar-cache ;;
+            *) echo "cache is \`none\` or \`namespace\`, not \`${CACHE}\`." >&2; exit 1 ;;
+          esac
+
+          sudo "${cli}" setup --dir "${work}/tools" --descriptor "${work}/descriptor.json" \
+            --cache "${cache}" --github-output "${work}/setup.env"
+          config="$(sed -n 's/^config=//p' "${work}/setup.env")"
+          socket="$(sed -n 's/^buildkit_socket=//p' "${work}/setup.env")"
+          buildkit_run="$(sed -n 's/^buildkit_run=//p' "${work}/setup.env")"
+          # shellcheck disable=SC2086 # the image and its arguments, as `setup` printed them
+          sudo docker run --detach --privileged --name intar-buildkitd \
+            --volume "${cache}:${cache}" ${buildkit_run} > /dev/null
+          ready=0
+          for _ in $(seq 1 60); do
+            if sudo "${work}/tools/bin/buildctl" --addr "unix://${socket}" debug workers > /dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "${ready}" != 1 ]; then
+            echo "The BuildKit daemon did not come up:" >&2
+            sudo docker logs intar-buildkitd 2>&1 | tail -n 30 >&2
+            exit 1
+          fi
+
+          summary "- Runner: ${threads} threads, ${memory_mib} MiB; ${how} on ${cpus} processors; cache \`${CACHE}\`."
+
+          # Bake, check, boot. The output goes to the log directory.
+          out="${work}/out/${ARCH}"
+          built=0
+          # shellcheck disable=SC2024 # the logs are this job's user's, the build is root's
+          sudo "${cli}" build "${target}" --arch "${ARCH}" --out "${out}" --root "${work}/source" \
+            --config "${config}" --kino "${work}/tools/kino/${ARCH}/kino" --cpus "${cpus}" \
+            < /dev/null > "${work}/logs/${ARCH}.out" 2> "${work}/logs/${ARCH}.err" || built=$?
+          grep -a '^base_s=\|^boot_s=' "${work}/logs/${ARCH}.out" || true
+          if [ "${built}" != 0 ]; then
+            summary "- Built and booted: failed."
+            echo "The ${ARCH} build of ${target} failed:" >&2
+            tail -n 40 "${work}/logs/${ARCH}.err" | cut -c1-300 >&2
+            exit 1
+          fi
+          summary "- Built and booted: passed."
+
+          if [ -n "${BUILD_ONLY}" ]; then
+            summary "- Not pushed: build-only."
+          else
+            # `build` ran as root; `push` runs as this job's user, which is
+            # the one the runner gives a token to.
+            sudo chown -R "$(id -u):$(id -g)" "${out}"
+            is="$(jq -r '.build_key' "${out}/image.json")"
+            if [ "${is}" != "${key}" ]; then
+              summary "- Not pushed: built as another key than Intar asked for."
+              echo "${target} built as ${is}, not the ${key} Intar asked for." >&2
+              exit 1
+            fi
+            tries=0
+            while :; do
+              status=0
+              "${cli}" push --image "${out}" --url "${INTAR_ORIGIN}" --rev "${REV}" \
+                < /dev/null > "${work}/logs/${ARCH}.push" 2> "${work}/logs/${ARCH}.push.err" || status=$?
+              tries=$((tries + 1))
+              # `push` waits out a busy registry for about twenty minutes by
+              # itself; twice more is enough.
+              if [ "${status}" != 75 ] || [ "${tries}" -ge 3 ]; then
+                break
+              fi
+              sleep 60
+            done
+            case "${status}" in
+              0)
+                summary "- Pushed: $(sed -n 's/.* recorded=//p' "${work}/logs/${ARCH}.push")."
+                ;;
+              3)
+                # Intar takes no more images for this commit: its head moved,
+                # or its revisions ended. Intar's own words say which.
+                # This image's next architecture is not built either.
+                echo "stopped=superseded" >> "${GITHUB_OUTPUT}"
+                why="$(tail -n 1 "${work}/logs/${ARCH}.push.err" | cut -c1-240)"
+                summary "- Not taken: Intar takes no more images of this commit: ${why}"
+                echo "Intar takes no more images of this commit: ${why}"
+                ;;
+              *)
+                summary "- Push failed (${status})."
+                echo "The push of the ${ARCH} image of ${target} failed:" >&2
+                tail -n 20 "${work}/logs/${ARCH}.push.err" | cut -c1-300 >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+      - name: Collect the build logs
+        if: failure()
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/intar"
+          mkdir -p "${work}/logs"
+          # The bake's own logs and the serial consoles lie in root's work
+          # directories.
+          sudo find "${work}/tools/work" -maxdepth 2 -type f \( -name '*.log' -o -name '*.serial.log' \) \
+            -exec cp --parents -t "${work}/logs" {} + 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" "${work}/logs"
+
+      - name: Upload the build logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: intar-image-build-logs-${{ inputs.index }}-${{ env.ARCH }}
+          path: ${{ runner.temp }}/intar/logs
+          retention-days: 7
+          if-no-files-found: ignore
+          overwrite: true
+
+      - name: Stop the BuildKit daemon
+        if: always()
+        run: |
+          sudo docker rm --force intar-buildkitd > /dev/null 2>&1 || true
+          # A runner that is kept keeps a build VM this job was cancelled in.
+          # The bracket keeps the pattern from matching this very command.
+          sudo pkill -KILL -f -- "${RUNNER_TEMP}/intar/tools/[w]ork/" > /dev/null 2>&1 || true
+          # And what root wrote, which the runner cannot remove by itself.
+          sudo rm -rf -- "${RUNNER_TEMP}/intar"
+
+  # Only after this image's amd64 build was built and pushed, or when Intar
+  # lacks the image for arm64 alone. A failed amd64 job leaves this one
+  # skipped, and "Re-run failed jobs" then runs both.
+  arm64:
+    name: arm64
+    needs: amd64
+    if: >-
+      !cancelled() && contains(fromJSON(inputs.spec).archs, 'arm64') && (
+        needs.amd64.result == 'skipped' ||
+        (needs.amd64.result == 'success' && needs.amd64.outputs.stopped == '')
+      )
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARCH: arm64
+    steps: *steps
