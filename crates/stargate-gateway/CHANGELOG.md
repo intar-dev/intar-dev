@@ -1,5 +1,11 @@
 # Changelog
 
+## stargate/v0.11.0 (2026-11-21)
+
+### Features
+
+- **intar-image-cli:** Build a machine image and boot it once (#439) (f10b3b10)
+
 ## stargate/v0.10.0 (2026-11-19)
 
 ### Breaking changes
