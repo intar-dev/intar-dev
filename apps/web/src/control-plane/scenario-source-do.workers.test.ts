@@ -11,7 +11,7 @@ import { handleAgentBootstrap, sha256Hex as sha256Text } from "@/control-plane/a
 import { GITHUB_WEBHOOK_PATH, handleGitHubWebhook } from "@/control-plane/github-webhook";
 import { stateReport } from "@/control-plane/host-runtime-do/test-fixtures";
 import type { ScenarioSourceDO } from "@/control-plane/scenario-source-do";
-import { sweepScenarioSources } from "@/control-plane/scenario-source-do";
+import { buildingTitle, sweepScenarioSources } from "@/control-plane/scenario-source-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import {
   agentBootstrapTokens,
@@ -983,5 +983,24 @@ describe("scenario source cron", () => {
     await sweepScenarioSources(cronEnv, Date.now() + 11 * 60_000);
     expect(await stagedKeys(SHA_A)).toHaveLength(1);
     expect(await stagedKeys(SHA_B)).toEqual([]);
+  });
+});
+
+describe("a building commit's check", () => {
+  it("counts the labs that are built while images are still on their way", () => {
+    expect(buildingTitle({ built: 2, verified: 0, total: 9, automatic: false })).toBe("Building 2/9");
+    expect(buildingTitle({ built: 0, verified: 0, total: 0, automatic: false })).toBe("Building 0/0");
+  });
+
+  it("says what a source promoted by hand waits for once nothing is built any more", () => {
+    // The row stays `building` until an administrator promoted its labs.
+    expect(buildingTitle({ built: 9, verified: 2, total: 9, automatic: false }))
+      .toBe("Built 9/9: waiting to be verified and promoted");
+    expect(buildingTitle({ built: 9, verified: 9, total: 9, automatic: false }))
+      .toBe("Verified 9/9: waiting to be promoted");
+  });
+
+  it("leaves an automatic source's count as it is: its job takes the row on by itself", () => {
+    expect(buildingTitle({ built: 9, verified: 9, total: 9, automatic: true })).toBe("Building 9/9");
   });
 });

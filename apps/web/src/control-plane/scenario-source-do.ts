@@ -769,9 +769,11 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
       WHERE revision.rev = ?1 ORDER BY revision.scenario_id`,
   ).bind(row.rev, step.scopeKey).all<{ scenario_id: string; state: string; failure_reason: string | null }>()).results;
   let built = 0;
+  let verified = 0;
   const total = revisions.length;
   const revisionLines = revisions.map(({ scenario_id: scenarioId, state, failure_reason: reason }) => {
     if (state === "ready" || state === "verified") built += 1;
+    if (state === "verified") verified += 1;
     return `- ${scenarioId}: ${state}${reason ? `: ${reason}` : ""}`;
   });
   const diagnostics = parseDiagnostics(row.diagnostics_json).map(({ path, line, message }) => {
@@ -785,7 +787,7 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
   // The job's own count of the labs it has decided, while it is this row's.
   const job = state === "waiting" ? await step.storage.get<DeployJob>(DEPLOY_JOB_STORAGE_KEY) : undefined;
   const title = state === "building"
-    ? `Building ${built}/${total}`
+    ? buildingTitle({ built, verified, total, automatic: row.automatic === 1 })
     : job?.rowId === row.id
       ? `Checking ${job.decided}/${job.total}`
       : check.title;
@@ -804,6 +806,22 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
   return { ...check, title, summary: (summary || title).slice(0, MAX_CHECK_SUMMARY_CHARS) };
+}
+
+/**
+ * What a commit's check says while its row is `building`. For a source
+ * promoted by hand the row stays there after the last image: nothing is
+ * built any more, and the commit waits for an administrator. The check then
+ * says what it waits for, so that it does not read as a build that hangs.
+ * An automatic source's job takes the row on from here by itself.
+ */
+export function buildingTitle(labs: { built: number; verified: number; total: number; automatic: boolean }): string {
+  if (labs.automatic || labs.total === 0 || labs.built < labs.total) {
+    return `Building ${labs.built}/${labs.total}`;
+  }
+  return labs.verified < labs.total
+    ? `Built ${labs.total}/${labs.total}: waiting to be verified and promoted`
+    : `Verified ${labs.total}/${labs.total}: waiting to be promoted`;
 }
 
 // Sends a changed check. A row's first check, and one that reopens after it
