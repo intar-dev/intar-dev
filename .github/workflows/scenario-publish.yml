@@ -34,9 +34,11 @@ name: Intar scenario publish
 #   cold: nothing one image built is there for the next.
 # - An image's amd64 build is pushed when it is done, before its arm64 build
 #   starts. The arm64 build starts only when the amd64 one was built and
-#   pushed.
+#   pushed. A lab can become ready from its amd64 image while the run is red
+#   for arm64.
 # - When Intar takes no more images of a commit, because a newer one is the
-#   head, each remaining job still builds its image before it learns so.
+#   head, each remaining job still builds its image's first architecture
+#   before it learns so.
 
 on:
   workflow_call:
@@ -50,7 +52,7 @@ on:
         type: string
         default: ubuntu-latest
       cpus:
-        description: Processors each build gets. 0 lets the job choose; with a cache it must be set.
+        description: Processors a build for the runner's own architecture gets; an emulated one gets two at most. 0 lets the job choose; with a cache it must be set.
         type: number
         default: 0
       cache:
