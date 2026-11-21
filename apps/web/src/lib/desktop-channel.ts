@@ -33,6 +33,52 @@ export const DESKTOP_PROTOCOL = 1;
 /** The processors machine images exist for, as the app names its own (Rust's names). */
 const IMAGE_ARCHITECTURES: Record<string, "amd64" | "arm64"> = { x86_64: "amd64", aarch64: "arm64" };
 
+/** The targets the app is released for, by what it sends as `os` and `arch`. */
+const APP_TARGETS: Record<string, string> = { "macos aarch64": "macos_arm64" };
+const APP_RELEASE_BASE = "https://github.com/intar-dev/intar-dev/releases/download";
+
+/**
+ * The release an installed app is offered as its update (#404), for the
+ * system and processor it names: its version, where its zip is, and the
+ * SHA-256 the app checks the download against. `release` is null while none
+ * is pinned for that target, and for a target the app is not released for.
+ *
+ * Public and the same for everyone: it holds what a release page shows. The
+ * hash comes from the deploy's configuration, not from the release, so a
+ * replaced download is refused by the app.
+ */
+export function appReleaseRequest(request: Request, workerEnv: { JUMPER_RELEASE_JSON?: string | undefined } = env): Response {
+  if (request.method !== "GET") return jsonResponse({ error: "method not allowed" }, { status: 405 });
+  const query = new URL(request.url).searchParams;
+  const target = APP_TARGETS[`${query.get("os")} ${query.get("arch")}`];
+  let pins: unknown = null;
+  try {
+    pins = JSON.parse(workerEnv.JUMPER_RELEASE_JSON || "null");
+  } catch {
+    // An unreadable value pins none.
+  }
+  const pin = target && pins !== null && typeof pins === "object" ? (pins as Record<string, unknown>)[target] : null;
+  const release =
+    pin !== null && typeof pin === "object" &&
+    typeof (pin as { version?: unknown }).version === "string" &&
+    /^\d+\.\d+\.\d+$/.test((pin as { version: string }).version) &&
+    typeof (pin as { sha256?: unknown }).sha256 === "string" &&
+    /^[0-9a-f]{64}$/.test((pin as { sha256: string }).sha256)
+      ? (pin as { version: string; sha256: string })
+      : null;
+  return jsonResponse(
+    {
+      protocol: DESKTOP_PROTOCOL,
+      release: release && {
+        version: release.version,
+        sha256: release.sha256,
+        url: `${APP_RELEASE_BASE}/jumper%2Fv${release.version}/jumper_${release.version}_${target}.zip`,
+      },
+    },
+    { headers: { "cache-control": "public, max-age=300" } },
+  );
+}
+
 export type DesktopCaller =
   | { ok: true; userId: string; accessTokenId: string }
   | { ok: false; response: Response };

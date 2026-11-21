@@ -148,3 +148,19 @@ pub struct CatalogLectureV1 {
     /// The learner's active run of this lecture, local or not.
     pub active_run_id: Option<String>,
 }
+
+/// `GET /api/local/app-release`: the release of the app that intar offers
+/// this system and processor as an update, if it pins one.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct AppReleaseAnswerV1 {
+    pub protocol: u16,
+    pub release: Option<AppReleaseV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct AppReleaseV1 {
+    pub version: String,
+    /// The SHA-256 of the download at `url`, as lowercase hex.
+    pub sha256: String,
+    pub url: String,
+}

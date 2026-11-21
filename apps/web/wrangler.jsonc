@@ -53,6 +53,13 @@
     // release workflow's pin pull request names the first one that compiles
     // the current format.
     "SCENARIO_COMPILER_CLI_VERSION": "0.15.0",
+    // The desktop app's release an installed app is offered as its update,
+    // per system and processor, with the SHA-256 of its download:
+    // {"macos_arm64":{"version":"X.Y.Z","sha256":"<hex>"}}. Empty: the app
+    // is offered none. It is set by a reviewed change, never read from the
+    // release page, so a published release is offered only once that change
+    // is merged; the release workflow's pin pull request will make it (#404).
+    "JUMPER_RELEASE_JSON": "",
     // Public run shares keep their terminal logs next to the run recordings.
     // Local workerd has no jurisdictions, so local configs leave this unset.
     "RUN_SHARE_JURISDICTION": "eu",

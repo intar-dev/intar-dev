@@ -13,6 +13,7 @@ use crate::local::Local;
 use crate::secrets::Keychain;
 use crate::state::{Command, Event, MachineStatus};
 use crate::terminal::{self, Size};
+use crate::update::{self, Offer};
 
 /// How often the running machine's reports are looked at.
 const MACHINE_POLL: Duration = Duration::from_millis(300);
@@ -42,6 +43,8 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                 // What the keychain holds, to write only when a call changed the tokens.
                 let mut stored: Option<Tokens> = None;
                 let mut local = Local::new();
+                // The newer app intar offers, once asked.
+                let mut offer: Option<Offer> = None;
                 let mut tick = tokio::time::interval(MACHINE_POLL);
                 // Commands that arrived while a machine was being started.
                 let mut waiting = std::collections::VecDeque::new();
@@ -146,6 +149,37 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                         }
                         Command::ReadRun { run_id } => run_event(&channel, async |channel| channel.run(&run_id).await).await,
                         Command::EndRun { run_id } => run_event(&channel, async |channel| channel.end_run(&run_id).await).await,
+                        // A check that fails offers nothing; the next launch asks again.
+                        Command::CheckUpdate => {
+                            offer = subspace::app_release(&http, &base)
+                                .await
+                                .ok()
+                                .flatten()
+                                .and_then(|release| Offer::of(release, env!("CARGO_PKG_VERSION")));
+                            Event::Update(offer.as_ref().map(|offer| offer.version.clone()))
+                        }
+                        Command::InstallUpdate => match offer.take() {
+                            None => Event::Update(None),
+                            // The machine would be left running without its app.
+                            // ponytail: only this app's machine is seen; a second copy of the
+                            // app that runs one keeps running on the program it has loaded.
+                            Some(kept) if local.running() => {
+                                offer = Some(kept);
+                                Event::UpdateFailed("End the run before the app updates.".to_owned())
+                            }
+                            Some(taken) => match install_update(&http, &taken).await {
+                                Ok(bundle) => match update::start(&bundle) {
+                                    Ok(()) => Event::Restart,
+                                    // The new app is in place and this one is the old one
+                                    // still running: there is nothing to offer any more.
+                                    Err(_) => Event::UpdateFailed("The new version is installed. Quit Intar and open it again.".to_owned()),
+                                },
+                                Err(refusal) => {
+                                    offer = Some(taken);
+                                    Event::UpdateFailed(format!("The app was not updated: {refusal}."))
+                                }
+                            },
+                        },
                     };
                     // Keep the keychain current: after a sign-in, after a refresh, and
                     // empty once signed out, whether the learner or the server ended it.
@@ -179,7 +213,10 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             }
                         }
                     }
-                    if outbox.send(event).is_err() {
+                    // The new app is starting. Whatever was asked while it was installed
+                    // is not begun: a run started now would be left without its app.
+                    let restarting = matches!(event, Event::Restart);
+                    if outbox.send(event).is_err() || restarting {
                         break;
                     }
                     // Said after the run's end, so it stays on the closed run's screen.
@@ -203,7 +240,16 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                                 tokio::select! {
                                     status = &mut start => break Some(status),
                                     command = inbox.recv() => {
-                                        let stop = !matches!(command, Some(Command::LoadCatalog | Command::ReadRun { .. } | Command::Restore));
+                                        let stop = !matches!(
+                                            command,
+                                            Some(
+                                                Command::LoadCatalog
+                                                    | Command::ReadRun { .. }
+                                                    | Command::Restore
+                                                    | Command::CheckUpdate
+                                                    | Command::InstallUpdate
+                                            )
+                                        );
                                         waiting.extend(command);
                                         if stop {
                                             break None;
@@ -223,6 +269,32 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
             });
         })?;
     Ok(Engine { commands, events })
+}
+
+/// Downloads the offered app and puts it in this one's place; the bundle to
+/// start.
+async fn install_update(
+    http: &reqwest::Client,
+    offer: &Offer,
+) -> Result<std::path::PathBuf, update::Refusal> {
+    let bundle = update::bundle_of(&std::env::current_exe()?)?;
+    let zip = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("intar")
+        .join("jumper")
+        .join(format!("update-{}.zip", offer.version));
+    offer.download(http, &zip).await?;
+    let installed = {
+        let (bundle, zip, sha256) = (bundle, zip.clone(), offer.sha256.clone());
+        // Hashing, unpacking and verifying take seconds; not on the engine's loop.
+        tokio::task::spawn_blocking(move || {
+            update::install(&bundle, env!("CARGO_PKG_VERSION"), &zip, &sha256)
+        })
+        .await
+        .map_err(|error| update::Refusal::Io(std::io::Error::other(error)))?
+    };
+    let _ = tokio::fs::remove_file(&zip).await;
+    installed
 }
 
 async fn sign_in(
