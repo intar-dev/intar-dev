@@ -12,8 +12,12 @@ import { encodeBase64Url } from "@/lib/base64url";
 import { runnerMayPublish, verifyGithubActionsToken } from "@/lib/github-oidc";
 import { createAppId } from "@/lib/id";
 import {
+  PIPELINE_OPEN_SESSIONS_PER_SCOPE,
   PIPELINE_SESSION_MAX_BYTES,
   PIPELINE_SESSION_TOKEN_PREFIX,
+  PIPELINE_SESSION_WINDOW_MS,
+  PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW,
+  pipelineScopeLimits,
   pipelineSessionTokenHash,
   readBearer,
   readPipelineSessionToken,
@@ -45,13 +49,6 @@ export const PIPELINE_SESSIONS_CLOSE_PATH = `${PIPELINE_SESSIONS_PATH}/close`;
 
 /** Absolute: a session is never extended. */
 export const PIPELINE_SESSION_TTL_MS = 60 * 60 * 1000;
-/** Sessions of one scope that are neither closed nor expired. */
-export const PIPELINE_OPEN_SESSIONS_PER_SCOPE = 8;
-/** Sessions one scope may open in `PIPELINE_SESSION_WINDOW_MS`. */
-export const PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW = 200;
-export const PIPELINE_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
-/** Bytes the sessions one scope opened in the window may have stored. */
-export const PIPELINE_BYTES_PER_SCOPE_PER_WINDOW = 400 * 1024 ** 3;
 /** How long a pipeline waits before it asks again while its bundle is ingested. */
 export const PIPELINE_BUNDLE_PENDING_RETRY_SECONDS = 5;
 const MAX_SESSION_REQUEST_BYTES = 1024;
@@ -226,7 +223,7 @@ export async function handlePipelineSessionOpen(
         PIPELINE_OPEN_SESSIONS_PER_SCOPE,
         now - PIPELINE_SESSION_WINDOW_MS,
         PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW,
-        PIPELINE_BYTES_PER_SCOPE_PER_WINDOW,
+        pipelineScopeLimits(binding.scopeKey).windowBytes,
       )
       .first();
     if (!opened) {

@@ -17,8 +17,28 @@ export const PIPELINE_SESSION_TOKEN_PREFIX = "ips_";
 export const PIPELINE_SESSION_MAX_BYTES = 16 * 1024 * 1024 * 1024;
 /** The config and layers of one image a pipeline pushes. */
 export const PIPELINE_IMAGE_MAX_BYTES = PIPELINE_SESSION_MAX_BYTES;
-/** The images one scope may have recorded, counted over those a kept revision names. */
-export const PIPELINE_SCOPE_STORAGE_BYTES = 200 * 1024 * 1024 * 1024;
+/** Sessions of one scope that are neither closed nor expired. */
+export const PIPELINE_OPEN_SESSIONS_PER_SCOPE = 8;
+/** Sessions one scope may open in `PIPELINE_SESSION_WINDOW_MS`. */
+export const PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW = 200;
+export const PIPELINE_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+const GIB = 1024 ** 3;
+
+/** What a scope's pipeline may store; the kind of scope chooses (#472). */
+export interface PipelineScopeLimits {
+  /** The images the scope may have recorded, counted over those a kept revision names. */
+  storageBytes: number;
+  /** Bytes the sessions the scope opened in the window may have stored. */
+  windowBytes: number;
+}
+export const PIPELINE_PLATFORM_LIMITS: PipelineScopeLimits = { storageBytes: 200 * GIB, windowBytes: 400 * GIB };
+export const PIPELINE_ORGANIZATION_LIMITS: PipelineScopeLimits = { storageBytes: 50 * GIB, windowBytes: 100 * GIB };
+
+/** Only the platform's own scope gets the platform's limits: any other key is an organization's. */
+export function pipelineScopeLimits(scopeKey: string): PipelineScopeLimits {
+  return scopeKey === "public" ? PIPELINE_PLATFORM_LIMITS : PIPELINE_ORGANIZATION_LIMITS;
+}
 
 export function readBearer(request: Request): string | null {
   return /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")?.[1] ?? null;

@@ -11,7 +11,7 @@ import {
 import validateManifest from "@/generated/contracts/oci-manifest-v1.validate";
 import validateMachineConfig from "@/generated/contracts/oci-machine-config-v1.validate";
 import validateKinoConfig from "@/generated/contracts/oci-kino-config-v1.validate";
-import { KEPT_REVISIONS_CTE } from "@/lib/kept-revisions";
+import { imageKeptSql, KEPT_REVISIONS_CTE } from "@/lib/kept-revisions";
 import {
   liveWriterSql,
   readRegistryAuth,
@@ -20,7 +20,7 @@ import {
 import {
   chargePipelineSession,
   PIPELINE_IMAGE_MAX_BYTES,
-  PIPELINE_SCOPE_STORAGE_BYTES,
+  pipelineScopeLimits,
   refundPipelineSession,
 } from "@/lib/pipeline-upload-sessions";
 import { isRecord, jsonResponse, sha256Hex } from "./shared";
@@ -479,17 +479,15 @@ async function recordPipelineImage(
   // together; put it into the insert if a scope ever gets near its quota.
   const used = await env.DB.prepare(
     `WITH ${KEPT_REVISIONS_CTE}
-     SELECT COALESCE(SUM(image.size_bytes), 0) AS bytes
-       FROM scope_machine_images image, pipeline_upload_sessions session
-      WHERE session.id = ?1 AND image.scope_key = session.scope_key
-        AND NOT (image.build_key = ?2 AND image.architecture = ?3)
-        AND EXISTS (SELECT 1 FROM kept_revisions kept
-                      JOIN scenarios scenario ON scenario.id = kept.scenario_id,
-                      json_each(kept.doc_json, '$.machines') machine
-                     WHERE scenario.scope_key = image.scope_key
-                       AND json_extract(machine.value, '$.build_key') = image.build_key)`,
-  ).bind(sessionId, buildKey, architecture).first<number>("bytes");
-  if ((used ?? 0) + sizeBytes > PIPELINE_SCOPE_STORAGE_BYTES) {
+     SELECT session.scope_key AS scope_key,
+            (SELECT COALESCE(SUM(image.size_bytes), 0) FROM scope_machine_images image
+              WHERE image.scope_key = session.scope_key
+                AND NOT (image.build_key = ?2 AND image.architecture = ?3)
+                AND ${imageKeptSql("image")}) AS bytes
+       FROM pipeline_upload_sessions session WHERE session.id = ?1`,
+  ).bind(sessionId, buildKey, architecture).first<{ scope_key: string; bytes: number }>();
+  // A session that is gone records nothing below, whatever it is allowed.
+  if (used && used.bytes + sizeBytes > pipelineScopeLimits(used.scope_key).storageBytes) {
     return jsonResponse({
       error: "this source's images are over the storage it may use", code: "scope_storage_exceeded",
     }, 409);

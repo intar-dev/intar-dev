@@ -10,8 +10,10 @@ import { Section } from "../../patterns/Section";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { formatBytes } from "../../lib/format";
 import type {
   ScenarioSourceCard as Card,
+  ScenarioSourceImage,
   ScenarioSourceView,
 } from "@/lib/scenario-sources";
 import { fetchJson, mutationResponse } from "./types";
@@ -207,6 +209,21 @@ export function ScenarioSourceSection({
             onConfirm={(confirm) => {
               change.reset();
               setConfirming(confirm);
+            }}
+          />
+        ) : null}
+        {source && card.data.usage && (pipelineBuilds || card.data.usage.imageCount > 0) ? (
+          <SourceUsage
+            usage={card.data.usage}
+            pending={change.isPending}
+            onForget={(image) => {
+              change.reset();
+              setConfirming({
+                title: `Forget this ${image.architecture} image?`,
+                description: `Its record here is deleted, with who built it. Revisions that already name the image keep it, live ones too. The next commit that needs build key ${shortKey(image.buildKey)} for ${image.architecture} builds it again.`,
+                label: "Forget",
+                body: { action: "forget_image", build_key: image.buildKey, architecture: image.architecture },
+              });
             }}
           />
         ) : null}
@@ -613,6 +630,90 @@ function SourceSettings({
       </ul>
     </div>
   );
+}
+
+/**
+ * What the source's pipeline used of its limits, and the images it recorded
+ * with what built each. The numbers are the registry's own counts.
+ */
+function SourceUsage({
+  usage,
+  pending,
+  onForget,
+}: {
+  usage: NonNullable<Card["usage"]>;
+  pending: boolean;
+  onForget: (image: ScenarioSourceImage) => void;
+}) {
+  const counts: Array<[string, string]> = [
+    ["Images counted", `${formatBytes(usage.countedBytes.used)} of ${formatBytes(usage.countedBytes.limit)}`],
+    ["Uploaded in 24 hours", `${formatBytes(usage.uploadedBytes.used)} of ${formatBytes(usage.uploadedBytes.limit)}`],
+    ["Upload sessions in 24 hours", `${usage.sessions.used} of ${usage.sessions.limit}`],
+    ["Open upload sessions", `${usage.openSessions.used} of ${usage.openSessions.limit}`],
+  ];
+  return (
+    <div className="space-y-3 border-t pt-4">
+      <h3 className="font-medium">Pipeline usage</h3>
+      <dl className="grid gap-3 sm:grid-cols-2">
+        {counts.map(([label, value]) => (
+          <div key={label}>
+            <dt className="text-label">{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="text-muted-foreground">
+        An image counts while a revision that is live, a candidate, building or kept for a rollback names it.
+      </p>
+      {usage.imageCount > 0 ? (
+        <details>
+          <summary className="cursor-pointer font-medium">
+            Recorded images ({usage.imageCount})
+          </summary>
+          <ul className="mt-2 divide-y">
+            {usage.images.map((image) => (
+              <li key={`${image.buildKey}/${image.architecture}`} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                <div className="min-w-0">
+                  <p>
+                    <code>{shortKey(image.buildKey)}</code> {image.architecture} · {formatBytes(image.sizeBytes)}
+                    {image.counted ? null : " · not counted"}
+                  </p>
+                  <p className="text-muted-foreground">
+                    Built by{" "}
+                    <a
+                      className="text-brand-text underline"
+                      href={`https://github.com/${image.githubRepository}/actions/runs/${encodeURIComponent(image.runId)}/attempts/${image.runAttempt}`}
+                    >
+                      run {image.runId}
+                    </a>{" "}
+                    of {image.githubRepository} at <code>{image.sha.slice(0, 7)}</code>, on a {image.runnerEnvironment}{" "}
+                    runner
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={pending}
+                  aria-label={`Forget the ${image.architecture} image ${shortKey(image.buildKey)}`}
+                  onClick={() => onForget(image)}
+                >
+                  Forget
+                </Button>
+              </li>
+            ))}
+          </ul>
+          {usage.imageCount > usage.images.length ? (
+            <p className="mt-2 text-muted-foreground">The {usage.images.length} most recent are shown.</p>
+          ) : null}
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+/** A build key without its algorithm, short enough to read. */
+function shortKey(buildKey: string): string {
+  return buildKey.replace(/^sha256:/, "").slice(0, 12);
 }
 
 function Snippet({ children, language = "yaml" }: { children: string; language?: string }) {

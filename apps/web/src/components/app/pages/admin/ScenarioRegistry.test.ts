@@ -280,4 +280,40 @@ describe("scenario registry resources", () => {
       }),
     ).toEqual(["2 CPU", "2 GiB RAM", "16 GiB disk"]);
   });
+
+  describe("a pipeline's usage", () => {
+    const GIB = 1024 ** 3;
+    const image = {
+      buildKey: `sha256:${"a".repeat(64)}`, architecture: "arm64" as const, imageDigest: `sha256:${"b".repeat(64)}`,
+      sizeBytes: 3 * GIB, counted: false, githubRepository: "acme/labs", sha: "c".repeat(40), runId: "42",
+      runAttempt: 2, runnerEnvironment: "self-hosted", createdAt: 1,
+    };
+    const usage = {
+      openSessions: { used: 1, limit: 8 }, sessions: { used: 12, limit: 200 },
+      uploadedBytes: { used: 10 * GIB, limit: 100 * GIB }, countedBytes: { used: 20 * GIB, limit: 50 * GIB },
+      images: [image], imageCount: 2,
+    };
+    const settings = { platform: false, automaticPromotion: true, publicPlay: false };
+
+    it("shows what the source used of each limit, and each image with what built it", () => {
+      const html = renderCard({ imageProducer: "pipeline" }, "scenario-publish-v2", { settings, usage }, "acme");
+      expect(html).toContain("Pipeline usage");
+      expect(html).toContain("20.0 GiB of 50.0 GiB");
+      expect(html).toContain("10.0 GiB of 100.0 GiB");
+      expect(html).toContain("12 of 200");
+      expect(html).toContain("1 of 8");
+      expect(html).toContain("Recorded images (2)");
+      expect(html).toContain("https://github.com/acme/labs/actions/runs/42/attempts/2");
+      expect(html).toContain("not counted");
+      expect(html).toContain("self-hosted");
+      expect(html).toContain("Forget the arm64 image aaaaaaaaaaaa"");
+      expect(html).toContain("The 1 most recent are shown.");
+    });
+
+    it("is left out for a builder's source that recorded nothing, and kept while images remain", () => {
+      expect(renderCard({}, null, { settings, usage: { ...usage, images: [], imageCount: 0 } }, "acme")).not.toContain("Pipeline usage");
+      expect(renderCard({}, null, { settings, usage }, "acme")).toContain("Pipeline usage");
+      expect(renderCard({ imageProducer: "pipeline" }, null, { settings }, "acme")).not.toContain("Pipeline usage");
+    });
+  });
 });

@@ -34,22 +34,25 @@ import {
   type RegistryOperationLease,
 } from "@/lib/image-registry-admission";
 import { OCI_SWEEP_AGE_GUARD_MS, runOciSweep } from "@/lib/oci-registry-sweep";
-import { PIPELINE_SCOPE_STORAGE_BYTES, PIPELINE_SESSION_MAX_BYTES } from "@/lib/pipeline-upload-sessions";
+import {
+  PIPELINE_OPEN_SESSIONS_PER_SCOPE,
+  PIPELINE_ORGANIZATION_LIMITS,
+  PIPELINE_PLATFORM_LIMITS,
+  PIPELINE_SESSION_MAX_BYTES,
+  PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW,
+} from "@/lib/pipeline-upload-sessions";
 import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { moveLiveRevision } from "@/lib/scenario-revisions";
-import { changeScenarioSource, scenarioSourceScope } from "@/lib/scenario-sources";
+import { changeScenarioSource, scenarioSourceCard, scenarioSourceScope } from "@/lib/scenario-sources";
 import { driveDeployJob } from "@/lib/source-deploy-job";
 import { arm64MachineImages } from "@/lib/scenario-runs/revision-begin";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { blob, machineConfig, manifestOf, type PushedBlob } from "./oci-test-fixtures";
 import {
-  PIPELINE_BYTES_PER_SCOPE_PER_WINDOW,
-  PIPELINE_OPEN_SESSIONS_PER_SCOPE,
   PIPELINE_SESSIONS_CLOSE_PATH,
   PIPELINE_SESSIONS_PATH,
-  PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW,
   PIPELINE_SESSION_TTL_MS,
 } from "./pipeline-sessions";
 import { handleBuildResult, handleManifestPut, KINO_CONFIG_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE } from "./push";
@@ -434,13 +437,13 @@ describe("opening a pipeline upload session", () => {
   it("limits the bytes a scope's sessions store in a day", async () => {
     await seedBundle();
     await session();
-    await db().update(pipelineUploadSessions).set({ bytesPut: PIPELINE_BYTES_PER_SCOPE_PER_WINDOW, closedAt: Date.now() });
+    await db().update(pipelineUploadSessions).set({ bytesPut: PIPELINE_PLATFORM_LIMITS.windowBytes, closedAt: Date.now() });
     await refusal(await open(), 429, "pipeline_session_limit");
 
-    await db().update(pipelineUploadSessions).set({ bytesPut: PIPELINE_BYTES_PER_SCOPE_PER_WINDOW - 1 });
+    await db().update(pipelineUploadSessions).set({ bytesPut: PIPELINE_PLATFORM_LIMITS.windowBytes - 1 });
     expect((await open()).status).toBe(201);
     // What an older session stored is not counted.
-    await db().update(pipelineUploadSessions).set({ bytesPut: PIPELINE_BYTES_PER_SCOPE_PER_WINDOW, closedAt: Date.now() });
+    await db().update(pipelineUploadSessions).set({ bytesPut: PIPELINE_PLATFORM_LIMITS.windowBytes, closedAt: Date.now() });
     await refusal(await open(), 429, "pipeline_session_limit");
     await db().update(pipelineUploadSessions).set({ createdAt: Date.now() - 25 * 60 * 60 * 1000 });
     expect((await open()).status).toBe(201);
@@ -1027,16 +1030,16 @@ describe("a pipeline recording its image", () => {
       runnerEnvironment: "github-hosted", jobWorkflowSha: WORKFLOW_SHA,
     });
     // Neither an image no kept revision names nor another scope's counts.
-    await held(`sha256:${FOREIGN_HEX}`, SCOPE, PIPELINE_SCOPE_STORAGE_BYTES);
-    await held(kept, "organization:acme", PIPELINE_SCOPE_STORAGE_BYTES);
-    await held(kept, SCOPE, PIPELINE_SCOPE_STORAGE_BYTES - size + 1);
+    await held(`sha256:${FOREIGN_HEX}`, SCOPE, PIPELINE_PLATFORM_LIMITS.storageBytes);
+    await held(kept, "organization:acme", PIPELINE_PLATFORM_LIMITS.storageBytes);
+    await held(kept, SCOPE, PIPELINE_PLATFORM_LIMITS.storageBytes - size + 1);
     await refusal(await record(token, image.digest), 409, "scope_storage_exceeded");
 
-    await db().update(scopeMachineImages).set({ sizeBytes: PIPELINE_SCOPE_STORAGE_BYTES - size })
+    await db().update(scopeMachineImages).set({ sizeBytes: PIPELINE_PLATFORM_LIMITS.storageBytes - size })
       .where(and(eq(scopeMachineImages.buildKey, kept), eq(scopeMachineImages.scopeKey, SCOPE)));
     expect((await record(token, image.digest)).status).toBe(201);
     // A second run of a recorded key needs no room at all.
-    await db().update(scopeMachineImages).set({ sizeBytes: PIPELINE_SCOPE_STORAGE_BYTES })
+    await db().update(scopeMachineImages).set({ sizeBytes: PIPELINE_PLATFORM_LIMITS.storageBytes })
       .where(and(eq(scopeMachineImages.buildKey, kept), eq(scopeMachineImages.scopeKey, SCOPE)));
     expect((await record(token, image.digest)).status).toBe(200);
   });
@@ -1175,6 +1178,70 @@ describe("an organization's own pipeline", () => {
     expect(await env.DB.prepare("SELECT scope_key, source_revision FROM course_catalogs").all().then((rows) => rows.results))
       .toEqual([{ scope_key: ORG_SCOPE, source_revision: rev }]);
     expect(await env.DB.prepare("SELECT count(*) AS n FROM scenarios WHERE scope_key = 'public'").first("n")).toBe(0);
+  });
+
+  it("has an organization's limits, lower than the platform's, and its card shows what it used of them", async () => {
+    await ingestSourceBundle(env, {
+      organizationId: ORG, rev, gzip: new Uint8Array(gzipSync(JSON.stringify(bundleFixture))), stored: false,
+      imageProducer: "pipeline", pipelineCanPush: true,
+    });
+    const key = (await env.DB.prepare(
+      "SELECT json_extract(doc_json, '$.machines[0].build_key') AS key FROM scenario_revisions WHERE scenario_id = ?1",
+    ).bind(LAB).first<string>("key"))!;
+    const keyHex = key.slice("sha256:".length);
+    const { storageBytes, windowBytes } = PIPELINE_ORGANIZATION_LIMITS;
+    expect(storageBytes).toBeLessThan(PIPELINE_PLATFORM_LIMITS.storageBytes);
+    expect(windowBytes).toBeLessThan(PIPELINE_PLATFORM_LIMITS.windowBytes);
+
+    // A day's uploads: refused at the organization's limit, which the platform's scope is far below.
+    const token = ((await (await open({ rev, claims: orgClaims })).json()) as { token: string }).token;
+    const image = await pushImage(token, keyHex);
+    await db().update(pipelineUploadSessions).set({ bytesPut: windowBytes });
+    await refusal(await open({ rev, claims: orgClaims }), 429, "pipeline_session_limit");
+    await db().update(pipelineUploadSessions).set({ bytesPut: windowBytes - 1 });
+    expect((await open({ rev, claims: orgClaims })).status).toBe(201);
+
+    // Its counted images: the arm64 image of the lab's key takes all but one byte too many.
+    const size = image.blobs.reduce((sum, pushed) => sum + pushed.bytes.length, 0);
+    await db().insert(scopeMachineImages).values({
+      scopeKey: ORG_SCOPE, buildKey: key, architecture: "arm64", imageDigest: `sha256:${"1".repeat(64)}`,
+      imageFormat: "intar-image-4", sizeBytes: storageBytes - size + 1, githubRepositoryId: ORG_REPO,
+      githubRepository: "acme/labs", sha: SHA, runId: "7", runAttempt: 2, runnerEnvironment: "self-hosted",
+      jobWorkflowSha: WORKFLOW_SHA,
+    });
+    const record = () => call("POST", `/registry/v1/builds/${keyHex}/result`, {
+      bearer: token, body: JSON.stringify({ image_digest: image.digest }),
+    });
+    await refusal(await record(), 409, "scope_storage_exceeded");
+    await db().update(scopeMachineImages).set({ sizeBytes: storageBytes - size });
+    expect((await record()).status).toBe(201);
+    // An image no kept revision names is listed and not counted.
+    await db().insert(scopeMachineImages).values({
+      scopeKey: ORG_SCOPE, buildKey: `sha256:${FOREIGN_HEX}`, architecture: "amd64", imageDigest: `sha256:${"2".repeat(64)}`,
+      imageFormat: "intar-image-4", sizeBytes: 5, githubRepositoryId: ORG_REPO, githubRepository: "acme/labs", sha: SHA,
+      runId: "8", runAttempt: 1, runnerEnvironment: "github-hosted", jobWorkflowSha: WORKFLOW_SHA, createdAt: 1,
+    });
+
+    const { usage } = await scenarioSourceCard(scenarioSourceScope(ORG), undefined, "scope");
+    expect(usage).toMatchObject({
+      openSessions: { used: 2, limit: PIPELINE_OPEN_SESSIONS_PER_SCOPE },
+      sessions: { used: 2, limit: PIPELINE_SESSIONS_PER_SCOPE_PER_WINDOW },
+      uploadedBytes: { used: windowBytes - 1, limit: windowBytes },
+      countedBytes: { used: storageBytes, limit: storageBytes },
+      imageCount: 3,
+    });
+    expect(usage!.images.map((row) => [row.architecture, row.counted, row.runId, row.runnerEnvironment]).sort()).toEqual([
+      ["amd64", false, "8", "github-hosted"], ["amd64", true, expect.any(String), "github-hosted"],
+      ["arm64", true, "7", "self-hosted"],
+    ]);
+    // Without a reader who administers the scope, the card tells none of it.
+    expect((await scenarioSourceCard(scenarioSourceScope(ORG))).usage).toBeUndefined();
+    // The platform's scope has the platform's limits.
+    expect((await scenarioSourceCard(scenarioSourceScope(null), undefined, "platform")).usage).toMatchObject({
+      uploadedBytes: { used: 0, limit: PIPELINE_PLATFORM_LIMITS.windowBytes },
+      countedBytes: { used: 0, limit: PIPELINE_PLATFORM_LIMITS.storageBytes },
+      imageCount: 0,
+    });
   });
 
   it("serves only its own scope: the platform's revision of the same build key stays without an image", async () => {
