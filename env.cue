@@ -216,11 +216,11 @@ schema.#Project & {
 				# workflow step task runs in.
 				cuenv task -p ci --package ci -o json >/dev/null
 				if ! diff <(printf '%s\\n' "$@" | sort) <(find .github/workflows -type f | sort) >&2; then
-				  echo 'Every workflow must be rendered by cuenv or be scenario-publish.yml.' >&2
+				  echo 'Every workflow must be rendered by cuenv or be scenario-publish.yml or scenario-publish-image.yml.' >&2
 				  exit 1
 				fi
 				for path in "$@"; do
-				  if [[ "${path}" == */scenario-publish.yml ]]; then
+				  if [[ "${path}" == */scenario-publish.yml || "${path}" == */scenario-publish-image.yml ]]; then
 				    continue
 				  fi
 				  if ! grep -qF -- "- \\"${path}\\"" .github/dependabot.yml; then
@@ -231,7 +231,7 @@ schema.#Project & {
 				"""
 			_argv: list.Concat([
 				[for path, _ in workflows.files {path}],
-				[".github/workflows/scenario-publish.yml"],
+				[".github/workflows/scenario-publish.yml", ".github/workflows/scenario-publish-image.yml"],
 			])
 		}
 

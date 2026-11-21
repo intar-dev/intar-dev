@@ -20,7 +20,10 @@ const RENDERED_HEADER = "# Generated from ci/workflows/";
 // and package versions it cannot know, so it names them without a version.
 // `intar-image-cli setup` then refuses a QEMU that is too old, and the QEMU
 // binary's hash is part of every checkpoint's key. Nothing else is exempt.
-const CALLER_RUNNER_WORKFLOW = ".github/workflows/scenario-publish.yml";
+const CALLER_RUNNER_WORKFLOWS = new Set([
+  ".github/workflows/scenario-publish.yml",
+  ".github/workflows/scenario-publish-image.yml",
+]);
 const CALLER_RUNNER_PACKAGES = new Set([
   "qemu-system-x86",
   "qemu-system-arm",
@@ -328,7 +331,7 @@ function checkInstalledToolVersions(
       .split(/\s+/u)
       .filter((value) => value && !value.startsWith("-") && value !== "\\");
     const callerRunner =
-      workflowName === CALLER_RUNNER_WORKFLOW &&
+      CALLER_RUNNER_WORKFLOWS.has(workflowName) &&
       packages.every((value) => CALLER_RUNNER_PACKAGES.has(value));
     if (
       content.endsWith("\\") ||

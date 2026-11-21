@@ -2,7 +2,8 @@
 # next pinned revision, and a human reviews the version comment with it.
 # `directory: "/"` scans only .github/workflows and a root action.yml, so the
 # composite actions under .github/actions are listed as well.
-# Every workflow except scenario-publish.yml is rendered by cuenv, and
+# Every workflow except scenario-publish.yml and scenario-publish-image.yml is
+# rendered by cuenv, and
 # `cuenv task sync-check` rejects a hand edit, so Dependabot skips them to keep
 # the grouped proposal mergeable; sync-check also requires each rendered file
 # below. Their pins are also listed in a scanned file, which the workflow
