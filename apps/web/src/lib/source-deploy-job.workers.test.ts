@@ -10,7 +10,7 @@ import { settleScenarioRevisions } from "@/lib/machine-builds";
 import { maintainPipelineRevisions } from "@/lib/pipeline-revisions";
 import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
-import { liftRevisionHold, moveLiveRevision } from "@/lib/scenario-revisions";
+import { liftRevisionHold, listAdministeredScenarios, moveLiveRevision } from "@/lib/scenario-revisions";
 import {
   DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, detailOf, driveDeployJob,
   RESTORE_CHECK_EVERY_MS, RESTORE_CHECK_FOR_MS, type DeployJob, type Lab,
@@ -252,7 +252,7 @@ describe("an automatic source's job", () => {
     await finish("run-2", "failed");
     await drive();
     expect(begun).toHaveLength(2);
-    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: its checks did not pass in 2 verify runs` });
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: failed: its checks did not pass in 2 verify runs` });
     expect(job()).toBeUndefined();
   });
 
@@ -270,7 +270,7 @@ describe("an automatic source's job", () => {
     await finish("run-3", "verify_timeout", false);
     await drive();
     expect(begun).toHaveLength(3);
-    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: its verify run did not finish` });
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: failed: its verify run did not finish` });
 
     await env.DB.prepare("UPDATE scenario_sources SET head_sha = NULL WHERE scope_key = ?1").bind(SCOPE).run();
     await head("b", twoLabs());
@@ -279,7 +279,7 @@ describe("an automatic source's job", () => {
     const run = `run-${begun.length}`;
     await finish(run, "verify_timeout", true);
     await drive();
-    expect((await commit("b"))!.detail).toContain(`- ${WEB}: its verify run did not finish`);
+    expect((await commit("b"))!.detail).toContain(`- ${WEB}: failed: its verify run did not finish`);
   });
 
   it("decides every lab by itself: one fails, the other goes on, and the row fails only at the end", async () => {
@@ -302,7 +302,7 @@ describe("an automatic source's job", () => {
     // The lab that passed is live although the commit failed.
     expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("a") });
     expect(await scenario(WEB)).toMatchObject({ live_rev: null });
-    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: its build failed\n- ${DB_LAB}: live` });
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: failed: its build failed\n- ${DB_LAB}: live` });
     expect(await sourceRow()).toMatchObject({ live_rev: rev("a") });
   });
 
@@ -449,7 +449,7 @@ describe("an automatic source's job", () => {
     expect(await commit()).toEqual({ state: "waiting", detail: `- ${WEB}: waiting for the image registry` });
     now += DEPLOY_JOB_DEADLINE_MS;
     await driveBusy();
-    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: it could not go live within 24 hours` });
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: failed: it could not go live within 24 hours` });
     expect(await scenario(WEB)).toMatchObject({ live_rev: null });
   });
 
@@ -475,7 +475,7 @@ describe("an automatic source's job", () => {
     const lines = detailOf(labs, "- the step")!.split("\n");
     expect(lines.join("\n").length).toBeLessThanOrEqual(4096);
     expect(lines[0]).toBe("- the step");
-    expect(lines[1]).toContain("acme/lab-000: its build failed");
+    expect(lines[1]).toContain("acme/lab-000: failed: its build failed");
     expect(lines.at(-1)).toBe("- 1 lab unchanged");
     const shown = lines.length - 3;
     expect(lines.at(-2)).toBe(`- and ${100 - shown} more`);
@@ -508,7 +508,7 @@ describe("an automatic source's job", () => {
     expect(await scenario(DB_LAB)).toEqual({ live_rev: rev("b"), enabled: 1 });
     expect(await commit("a")).toEqual({
       state: "failed",
-      detail: `- ${DB_LAB}: a newer revision of this lab exists; publish the commit again\n- ${WEB}: live, verified without a run`,
+      detail: `- ${DB_LAB}: failed: a newer revision of this lab exists; publish the commit again\n- ${WEB}: live, verified without a run`,
     });
   });
 
@@ -610,7 +610,7 @@ describe("an automatic source's job", () => {
     await drive();
     await finish("run-3", "failed");
     await drive();
-    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: its checks did not pass in 2 verify runs` });
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: failed: its checks did not pass in 2 verify runs` });
   });
 
   it("looks again in a minute while a recorded run still holds its slot", async () => {
@@ -669,7 +669,7 @@ describe("an automatic source's job", () => {
     await drive();
     now += DEPLOY_JOB_DEADLINE_MS;
     await drive();
-    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: its verify run did not finish` });
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: failed: its verify run did not finish` });
     expect(ended).toEqual(["run-1"]);
     expect(job()).toBeUndefined();
   });
@@ -699,6 +699,66 @@ describe("an automatic source's job", () => {
     ]);
     await maintainPipelineRevisions(env, SCOPE, now + DEPLOY_JOB_DEADLINE_MS + 60_000);
     expect(await commit()).toMatchObject({ state: "failed" });
+  });
+});
+
+describe("what the scenario page learns of the job", () => {
+  const sourceJob = async (scenarioId = WEB) => (await listAdministeredScenarios(OWNER, scenarioId))[0]!.sourceJob;
+
+  it("is nothing for a manual source, and the job's line while it drives the candidate's commit", async () => {
+    await env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE).run();
+    await head("a", twoLabs());
+    expect(await sourceJob()).toBeNull();
+    await env.DB.prepare("UPDATE scenario_sources SET promotion = 'automatic' WHERE scope_key = ?1").bind(SCOPE).run();
+    // Driven from the first pass on, before the job has said anything.
+    expect(await sourceJob()).toEqual({ rev: rev("a"), driving: true, failed: false, note: null });
+    refuse = { "*": "scenario_host_unavailable" };
+    await drive();
+    expect(await sourceJob()).toEqual({ rev: rev("a"), driving: true, failed: false, note: "waiting for a platform host" });
+    expect(await sourceJob(DB_LAB)).toEqual({ rev: rev("a"), driving: true, failed: false, note: "waiting for a platform host" });
+    // One lab is given up while the commit goes on for the other: only that lab's page says so.
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'failed', failure_reason = 'its build failed' WHERE scenario_id = ?1")
+      .bind(WEB).run();
+    await drive();
+    expect(await sourceJob()).toEqual({ rev: rev("a"), driving: true, failed: true, note: "its build failed" });
+    expect(await sourceJob(DB_LAB)).toMatchObject({ driving: true, failed: false });
+  });
+
+  it("says the job is not driving: a paused source, a binder without rights, the head left at the switch, an ended commit", async () => {
+    await head("a");
+    const not = async (sql: string, undo: string) => {
+      await env.DB.prepare(sql).run();
+      expect(await sourceJob()).toMatchObject({ driving: false });
+      await env.DB.prepare(undo).run();
+      expect(await sourceJob()).toMatchObject({ driving: true });
+    };
+    await not("UPDATE scenario_sources SET paused_at = 1", "UPDATE scenario_sources SET paused_at = NULL");
+    // The binder loses its rights; another administrator of the scope reads the page.
+    await createFixtureMember({ d1: env.DB, userId: "reader" });
+    await env.DB.prepare("INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('m2', ?1, 'reader', 'owner', 1)").bind(ORG).run();
+    const read = async () => (await listAdministeredScenarios("reader", WEB))[0]!.sourceJob;
+    expect(await read()).toMatchObject({ driving: true });
+    await env.DB.prepare("UPDATE member SET role = 'member' WHERE user_id = ?1").bind(OWNER).run();
+    expect(await read()).toMatchObject({ driving: false });
+    await env.DB.prepare("UPDATE member SET role = 'owner' WHERE user_id = ?1").bind(OWNER).run();
+    await not("UPDATE scenario_sources SET promotion_after = 'row-a:1'", "UPDATE scenario_sources SET promotion_after = 'row-a:0'");
+    await not("UPDATE scenario_source_commits SET state = 'failed'", "UPDATE scenario_source_commits SET state = 'building'");
+    // The reader is the binder here; the page says so only to someone who may read it.
+    await env.DB.prepare("UPDATE scenario_sources SET disconnected_at = 1").run();
+    expect(await sourceJob()).toBeNull();
+  });
+
+  it("keeps the job's last word on a lab once the commit has ended, and none for a scenario of another commit", async () => {
+    await head("a");
+    await drive();
+    await finish("run-1", "failed");
+    await drive();
+    await finish("run-2", "failed");
+    await drive();
+    expect(await sourceJob()).toEqual({ rev: rev("a"), driving: false, failed: true, note: "its checks did not pass in 2 verify runs" });
+    // The head moves to a commit that has no revision of the scenario's candidate or live.
+    await env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "f".repeat(40)).run();
+    expect(await sourceJob()).toBeNull();
   });
 });
 
@@ -757,7 +817,7 @@ describe("a pipeline's lab", () => {
     await drive();
     now += DEPLOY_JOB_DEADLINE_MS;
     await drive();
-    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: its arm64 images did not arrive within 24 hours` });
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: failed: its arm64 images did not arrive within 24 hours` });
     expect(await scenario(WEB)).toMatchObject({ live_rev: null });
   });
 });

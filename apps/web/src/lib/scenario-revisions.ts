@@ -34,7 +34,7 @@ import { pokeAutomaticSource } from "@/lib/source-pokes";
 import { VALIDATION_USER_ID } from "@/lib/scenario-runs/content-access";
 import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
 import { markRunVmsAbsentInDesiredState, revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
-import { countUnitGuardRuns, unitGuardRunsSql } from "@/lib/scenario-sources";
+import { countUnitGuardRuns, redactHostPaths, unitGuardRunsSql } from "@/lib/scenario-sources";
 
 /**
  * Holds while the account bound at ?{actor} administers the scope of the
@@ -118,11 +118,35 @@ export interface AdministeredScenario {
   /** The active verify run of each revision, by rev. */
   verifyRuns: Record<string, string>;
   revisions: ScenarioRevisionSummary[];
+  /**
+   * Set while the scenario's candidate or live revision is of the head
+   * commit of its scope's automatic source: what that source's job says
+   * of this lab. Null for a manual source and a scope without one.
+   */
+  sourceJob: {
+    /** The rev the job's commit is of. */
+    rev: string;
+    /**
+     * Whether the job is working on the commit now: the source may act and
+     * its row is one the job takes up. When false, a lab that is not live
+     * waits for an administrator, or for the commit to be run again.
+     */
+    driving: boolean;
+    /** The job's line for this lab on the commit, when it has one. */
+    note: string | null;
+    /**
+     * The job has given this lab up on this commit, whatever it still does
+     * for the commit's other labs: only an administrator, or a re-run,
+     * takes it further.
+     */
+    failed: boolean;
+  } | null;
 }
 
 /** The scenarios `actorUserId` may read, or one of them, with their revisions newest first. */
 export async function listAdministeredScenarios(actorUserId: string, scenarioId?: string): Promise<AdministeredScenario[]> {
-  const [scenarios, revisions, runs] = await env.DB.batch([
+  const digest = await sourceCompileDigest();
+  const [scenarios, revisions, runs, jobs] = await env.DB.batch([
     env.DB.prepare(
       `SELECT scenario.id, scenario.namespace, scenario.slug, scenario.organization_id, scenario.enabled,
           scenario.play, scenario.live_rev, scenario.candidate_rev, ${scopeAdminSql(1)} AS can_manage,
@@ -157,6 +181,24 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
         WHERE run.launch_source = 'verify' AND run.active_key IS NOT NULL AND ${readerSql(1)}
           AND (?2 IS NULL OR scenario.id = ?2)`,
     ).bind(actorUserId, scenarioId ?? null),
+    // The head commit of the scope's automatic source, where a revision of
+    // it is this scenario's candidate or live one. The job drives it while
+    // the source may act for that row (`sourceHeadSql`) and it is not the
+    // commit the source was told to leave when it went automatic.
+    env.DB.prepare(
+      `SELECT scenario.id AS scenario_id, job_head.rev, job_head.detail,
+          (${sourceHeadSql("scenario.scope_key", {
+            binder: "job_source.bound_by_user_id", rev: "job_head.rev", row: "job_head.id", attempt: "job_head.attempt",
+            digest: "?3",
+          })} AND job_source.promotion_after IS NOT (job_head.id || ':' || job_head.attempt)) AS driving
+        FROM scenarios scenario
+        JOIN scenario_sources job_source ON job_source.scope_key = scenario.scope_key
+          AND job_source.promotion = 'automatic' AND job_source.disconnected_at IS NULL
+        JOIN scenario_source_commits job_head ON job_head.scope_key = job_source.scope_key AND job_head.purpose = 'deploy'
+          AND job_head.rev = 'git-' || job_source.github_repository_id || '-' || job_source.head_sha || '-' || ?3
+        WHERE ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2)
+          AND job_head.rev IN (scenario.candidate_rev, scenario.live_rev)`,
+    ).bind(actorUserId, scenarioId ?? null, digest),
   ]);
   type ScenarioRow = {
     id: string; namespace: string; slug: string; organization_id: string | null; enabled: number; play: number;
@@ -174,8 +216,21 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
     byScenario.set(row.id, {
       id: row.id, namespace: row.namespace, slug: row.slug, organizationId: row.organization_id, title: row.title,
       enabled: row.enabled === 1, play: row.play === 1, liveRev: row.live_rev, candidateRev: row.candidate_rev,
-      canManage: row.can_manage === 1, verifyRuns: {}, revisions: [],
+      canManage: row.can_manage === 1, verifyRuns: {}, revisions: [], sourceJob: null,
     });
+  }
+  for (const row of jobs!.results as Array<{ scenario_id: string; rev: string; detail: string | null; driving: number }>) {
+    const scenario = byScenario.get(row.scenario_id);
+    if (!scenario) continue;
+    // The job writes one line per lab that changed: `- <scenario>: <what>`.
+    const prefix = `- ${row.scenario_id}: `;
+    const line = row.detail?.split("\n").find((entry) => entry.startsWith(prefix))?.slice(prefix.length);
+    // `failed: `, as the job marks a lab it has given up (`LAB_FAILED` in source-deploy-job.ts).
+    const failed = line?.startsWith("failed: ") === true;
+    scenario.sourceJob = {
+      rev: row.rev, driving: row.driving === 1, failed,
+      note: line ? redactHostPaths(failed ? line.slice("failed: ".length) : line) : null,
+    };
   }
   for (const row of revisions!.results as RevisionRow[]) {
     byScenario.get(row.scenario_id)?.revisions.push({

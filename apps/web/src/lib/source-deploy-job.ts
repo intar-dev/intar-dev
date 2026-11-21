@@ -63,6 +63,8 @@ export const RESTORE_CHECK_EVERY_MS = 5 * 60_000;
 export const RESTORE_CHECK_FOR_MS = 2 * 3_600_000;
 /** The next pass while a restore check goes on. */
 const RESTORE_RUNNING_WAIT_MS = 2 * 60_000;
+/** How a lab's line begins on the commit when the job has given the lab up. */
+export const LAB_FAILED = "failed: ";
 const RESTORE_GAVE_UP = ", starts cold: no snapshot start passed in two hours";
 const RESTORE_NOT_TRIED = ", starts cold: its snapshot start could not be checked in two hours";
 const MAX_FAILED_RUNS = 2;
@@ -532,7 +534,9 @@ export function detailOf(labs: Map<string, Lab>, stepLine: string | null): strin
     .sort(([, a], [, b]) => rank[a.kind] - rank[b.kind])
     .map(([scenarioId, lab]) => `- ${scenarioId}: ${lab.kind === "live"
       ? `live${lab.inherited ? ", verified without a run" : ""}`
-      : lab.kind === "held" ? `held; ${lab.note}` : lab.note}`);
+      : lab.kind === "held" ? `held; ${lab.note}`
+      // Marked, so a reader can tell the job's last word from what it waits for.
+      : lab.kind === "failed" ? `${LAB_FAILED}${lab.note}` : lab.note}`);
   const unchanged = [...labs.values()].filter((lab) => lab.kind === "unchanged").length;
   const tail = unchanged ? [`- ${unchanged} ${unchanged === 1 ? "lab" : "labs"} unchanged`] : [];
   const kept: string[] = stepLine ? [stepLine] : [];
