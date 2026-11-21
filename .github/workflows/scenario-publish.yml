@@ -301,6 +301,8 @@ jobs:
         with:
           pattern: intar-done-*-${{ matrix.spec.n }}
           path: ${{ runner.temp }}/intar-done
+          # One file an architecture, named after it, however many there are.
+          merge-multiple: true
 
       - name: Mount the cache volume
         if: inputs.cache == 'namespace' && !(inputs.build-only != '' && github.event_name == 'workflow_dispatch')
@@ -336,8 +338,7 @@ jobs:
           # What a job of this image came to: its outcome, when it was of
           # this very image. A re-run of all jobs numbers the images anew.
           done_of() { # arch
-            local file
-            file="${RUNNER_TEMP}/intar-done/intar-done-$1-$(jq -r '.n' <<<"${IMAGE}")/result"
+            local file="${RUNNER_TEMP}/intar-done/$1"
             if [ -f "${file}" ] && [ "$(sed -n 2p "${file}")" = "${key}" ]; then
               sed -n 1p "${file}"
             fi
@@ -528,7 +529,7 @@ jobs:
 
           # What this image's later jobs and attempts read before they start.
           mkdir -p "${work}/done"
-          printf '%s\n%s\n' "${outcome}" "${key}" > "${work}/done/result"
+          printf '%s\n%s\n' "${outcome}" "${key}" > "${work}/done/${ARCH}"
           echo "done=${outcome}" >> "${GITHUB_OUTPUT}"
 
       # Kept as long as a run can be re-run.
@@ -537,7 +538,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: intar-done-${{ env.ARCH }}-${{ matrix.spec.n }}
-          path: ${{ runner.temp }}/intar/done/result
+          path: ${{ runner.temp }}/intar/done/${{ env.ARCH }}
           retention-days: 30
           overwrite: true
 
