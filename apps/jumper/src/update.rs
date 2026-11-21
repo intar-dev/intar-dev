@@ -356,7 +356,7 @@ mod tests {
         };
         // Against the app's own releases, whatever this test's environment names.
         let offer = |release, running| Offer::from(release, running, super::RELEASES);
-        let zip = "https://github.com/intar-dev/intar-dev/releases/download/jumper%2Fv0.2.0/jumper_0.2.0_macos_arm64.zip";
+        let zip = "https://github.com/intar-dev/intar-dev/releases/download/desktop%2Fv0.2.0/intar-desktop_0.2.0_macos_arm64.zip";
         assert_eq!(
             offer(release("0.2.0", zip), "0.1.9").map(|offer| offer.version),
             Some("0.2.0".to_owned())
@@ -367,9 +367,9 @@ mod tests {
         }
         // Anywhere but the app's own releases, however the URL is dressed.
         for url in [
-            "http://github.com/intar-dev/intar-dev/releases/download/jumper%2Fv0.2.0/app.zip",
+            "http://github.com/intar-dev/intar-dev/releases/download/desktop%2Fv0.2.0/app.zip",
             "https://example.test/app.zip",
-            "https://github.com/someone-else/intar-dev/releases/download/jumper%2Fv0.2.0/app.zip",
+            "https://github.com/someone-else/intar-dev/releases/download/desktop%2Fv0.2.0/app.zip",
             "https://github.com.example.test/intar-dev/intar-dev/releases/download/app.zip",
             "app.zip",
         ] {

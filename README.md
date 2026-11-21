@@ -37,9 +37,13 @@ and Markdown-first Course source under `courses/`. Each Course contains
 
 ## Releasing
 
-The agent, builder, image CLI, kino, and Stargate are released as GitHub
-releases tagged `<prefix>/vX.Y.Z`. Nothing is published to crates.io or any
-other registry.
+The agent, builder, image CLI, kino, Stargate, and the desktop app
+(`intar-desktop`, tagged `desktop/vX.Y.Z`; its crate and program are `jumper`)
+are released as GitHub releases tagged `<prefix>/vX.Y.Z`. Nothing is
+published to crates.io or any other registry. The desktop app's release is a
+macOS bundle for Apple silicon, built on a Mac by
+`tools/workflows/release/build-jumper-macos.sh`; every other product is a
+Linux archive.
 
 - **Release pull request:** on every push to main, the Release workflow
   rebuilds `release/next`. git-cliff reads the Conventional Commits since each
@@ -73,14 +77,17 @@ other registry.
 - **Publishing:** when the merge queue lands that pull request, the Release
   workflow tags each new version on main and opens a draft release with that
   version's changelog section as its notes. It builds and smoke-tests each
-  draft from its tag, attests the payload, and publishes it. CI's rust lane
-  already ran the workspace checks in the merge queue, so the build runs them
-  again only for a tag whose commit never passed CI there. A failed build
+  draft from its tag, attests the payload, and publishes it. CI already ran
+  the checks in the merge queue, the rust lane's workspace gate and the app
+  lane's for the desktop app, so the build runs them again only for a tag
+  whose commit never passed CI there. A failed build
   leaves its draft, and the next run of the workflow rebuilds and publishes
   it: after the next merge, a re-run, or a dispatch from main.
-- **After an image CLI or kino release,** the workflow opens a pull request
-  that points the website at the new scenario compiler, and writes the Kino
-  artifact's digest into `tools/deploy/kino-pin.json`.
+- **After an image CLI, kino or desktop app release,** the workflow opens a
+  pull request that points the website at the new scenario compiler, writes
+  the Kino artifact's digest into `tools/deploy/kino-pin.json`, and sets the
+  release that installed desktop apps are offered, with the digest of its
+  download.
 
 Never bump a product version, edit a product `CHANGELOG.md`, or create a
 product tag as part of other work, and never push a tag by hand. To release a
@@ -118,6 +125,11 @@ checks the downloads. `gh attestation verify <archive> --repo intar-dev/intar-de
 checks that this repository's release workflow built them; releases published
 before the workflow attested them have no attestation. Then:
 
+- **Desktop app:** merge the website pin pull request that the release
+  opens. From the website deploy that follows, an installed app is offered
+  the release and installs it itself; nothing is rolled out by hand. The
+  download is `intar-desktop_X.Y.Z_macos_arm64.zip`; on a Mac, check it with
+  `shasum -a 256 --check intar-desktop_X.Y.Z_checksums.txt`.
 - **Agent on a personal host:** `sudo intar-host update`, or
   `--version X.Y.Z` for a specific release. It downloads the release from GitHub
   itself; see `deploy/personal-metal/README.md`.

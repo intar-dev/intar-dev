@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Builds the desktop app as a macOS bundle for Apple silicon:
-# dist/Intar.app, dist/jumper_<version>_macos_arm64.zip and its checksums.
-# The app lane runs it to check the bundle (`cuenv task bundle-app`); a
-# release runs it with VERSION set to the version it publishes.
+# release.yml, job build, step "Build the app's bundle"; and the app lane, to
+# check the bundle (`cuenv task bundle-app`).
+# Builds the desktop app as a macOS bundle for Apple silicon,
+# target/release/bundle/Intar.app, and what a release publishes of it:
+# dist/intar-desktop_<version>_macos_arm64.zip and its checksums, and nothing else in
+# dist/, since a release uploads every file there. A release sets VERSION to
+# the version it publishes.
 #
 # The bundle is signed ad hoc. The QEMU in it is the pinned set, with the
 # signature and the hypervisor entitlement it was published with: signing it
@@ -26,15 +29,42 @@ version="$("${built}" --version | sed -n 's/^jumper //p')"
 bash "${root}/tools/workflows/qemu/fetch.sh" release
 qemu="target/release/qemu"
 
-app="dist/Intar.app"
-rm -rf "${app}" dist/jumper_*_macos_arm64.zip dist/jumper_*_checksums.txt
-mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Helpers" "${app}/Contents/Resources/qemu"
+app="target/release/bundle/Intar.app"
+rm -rf "${app}" dist/intar-desktop_*_macos_arm64.zip dist/intar-desktop_*_checksums.txt
+mkdir -p dist "${app}/Contents/MacOS" "${app}/Contents/Helpers" "${app}/Contents/Resources/qemu"
 cp "${built}" "${app}/Contents/MacOS/jumper"
 # Only programs in the code directories: any other file there is signed
 # through extended attributes, which a zip loses.
 cp "${qemu}/bin/qemu-system-aarch64" "${qemu}/bin/qemu-img" "${app}/Contents/Helpers/"
 # QEMU's licences and where its exact sources are (the GPL's source offer).
 cp -R "${qemu}/licenses" "${qemu}/SOURCES" "${app}/Contents/Resources/qemu/"
+# The app's own licences, and what it is built from: every crate in the
+# program for this target, with its licence.
+cp LICENSE "${app}/Contents/Resources/LICENSE-MIT"
+cp apps/jumper/LICENSE-APACHE "${app}/Contents/Resources/LICENSE-APACHE"
+cargo metadata --locked --format-version 1 --filter-platform aarch64-apple-darwin |
+  python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)
+packages = {package["id"]: package for package in metadata["packages"]}
+nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+pending = [package["id"] for package in metadata["packages"] if package["name"] == "jumper" and package["source"] is None]
+reached = set(pending)
+while pending:
+    for dependency in nodes[pending.pop()]["deps"]:
+        # What is compiled into the program, not what only builds or tests it.
+        if dependency["pkg"] not in reached and any(kind["kind"] is None for kind in dependency["dep_kinds"]):
+            reached.add(dependency["pkg"])
+            pending.append(dependency["pkg"])
+inventory = sorted(
+    ({"name": p["name"], "version": p["version"], "license": p["license"], "repository": p["repository"]}
+     for p in (packages[i] for i in reached) if p["source"] is not None),
+    key=lambda entry: (entry["name"], entry["version"]),
+)
+if len(inventory) < 50 or any(not entry["license"] for entry in inventory):
+    sys.exit("the dependency inventory is incomplete: %d crates" % len(inventory))
+json.dump(inventory, sys.stdout, indent=1)
+' > "${app}/Contents/Resources/rust-dependencies.json"
 
 # The icon, from the one picture the repository keeps.
 scratch="$(mktemp -d)"
@@ -83,7 +113,8 @@ if grep -Ev '^[[:space:]]+(/usr/lib/|/System/Library/)' <<< "${linked}"; then
   echo "The app needs a library that macOS does not ship." >&2; exit 1
 fi
 
-zip="jumper_${version}_macos_arm64.zip"
+# The product is intar-desktop; the program in it, and its crate, are jumper.
+zip="intar-desktop_${version}_macos_arm64.zip"
 # Without resource forks and extended attributes: every signature here is in
 # a program or in _CodeSignature, and the `._` entries ditto would add for
 # them are plain files to any other unzipper, which break the seal.
@@ -92,5 +123,6 @@ ditto -c -k --norsrc --noextattr --keepParent "${app}" "dist/${zip}"
 unzip -q "dist/${zip}" -d "${scratch}/unzipped"
 codesign --verify --strict --deep "${scratch}/unzipped/Intar.app" ||
   { echo "The bundle's signature does not survive the zip." >&2; exit 1; }
-(cd dist && shasum -a 256 "${zip}" > "jumper_${version}_checksums.txt")
+(cd dist && shasum -a 256 "${zip}" > "intar-desktop_${version}_checksums.txt")
 echo "Built dist/${zip}: $(du -sh "${app}" | cut -f1) unpacked, $(du -h "dist/${zip}" | cut -f1) zipped."
+echo "The bundle is ${app}."

@@ -17,8 +17,8 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 //     release, and lists every draft for the build;
 //   - build packages each draft from its tag, and publish attests the payload
 //     and publishes the draft;
-//   - web-pins opens the website pin pull request once the image CLI version
-//     on main is published.
+//   - web-pins opens the website pin pull request once the image CLI, Kino
+//     or desktop app version on main is published.
 //
 // A draft left by a failed run is rebuilt by the next run, so re-running or
 // dispatching the workflow resumes it.
@@ -156,7 +156,7 @@ let _gitCliff = {
 		// longer lists the published image CLI. web-pins.sh does nothing until
 		// that version is published, or once the website pins it.
 		"web-pins": {
-			name: "Pin the website to the new image CLI"
+			name: "Pin the website to the new releases"
 			needs: ["plan", "publish"]
 			if:          "${{ !cancelled() && needs.plan.result == 'success' }}"
 			"runs-on":   "ubuntu-24.04"
@@ -231,15 +231,40 @@ let _gitCliff = {
 		// CI's rust lane runs the workspace gate in the merge group that lands a
 		// version change. A tag whose commit CI never passed there, such as a
 		// draft left from before, runs it here.
+		// The workspace gate is the rust lane's, on Linux; the app's is its own
+		// lane's, on a Mac.
 		if !#dryRun {
 			gha.#Run & {
 				name:  "Run checks"
-				if:    "matrix.ci_passed != true"
+				if:    "matrix.ci_passed != true && matrix.project != 'intar-desktop'"
 				#task: "verify"
 			}
 		},
+		if !#dryRun {
+			gha.#Run & {
+				name:  "Run the app's Clippy"
+				if:    "matrix.ci_passed != true && matrix.project == 'intar-desktop'"
+				#task: "clippy-app"
+			}
+		},
+		if !#dryRun {
+			gha.#Run & {
+				name:  "Run the app's tests"
+				if:    "matrix.ci_passed != true && matrix.project == 'intar-desktop'"
+				#task: "test-app"
+			}
+		},
+		// The app is a macOS bundle with its own build; every other product is a
+		// Linux archive.
+		{
+			name: "Build the app's bundle"
+			if:   "matrix.project == 'intar-desktop'"
+			env: VERSION: "${{ matrix.version }}"
+			#StepTask & {#task: "release-build-jumper-macos"}
+		},
 		{
 			name: "Build release artifacts"
+			if:   "matrix.project != 'intar-desktop'"
 			env: {
 				PACKAGE: "${{ matrix.package }}"
 				BINARY:  "${{ matrix.binary }}"
@@ -264,6 +289,17 @@ let _gitCliff = {
 			env: VERSION: "${{ matrix.version }}"
 			#StepTask & {#task: "release-smoke-test-image-cli-package"}
 		},
+		// A draft whose tag is older than this check has no such task: it is
+		// built as it always was.
+		{
+			name: "Check the release payload"
+			if:   "hashFiles('tools/workflows/release/check-release-payload.sh') != ''"
+			env: {
+				BINARY:  "${{ matrix.binary }}"
+				VERSION: "${{ matrix.version }}"
+			}
+			#StepTask & {#task: "release-check-release-payload"}
+		},
 		if !#dryRun {
 			name: "Preserve exact release payload"
 			uses: gha.pin."upload-artifact".ref
@@ -286,6 +322,8 @@ tasks: {
 	"release-update-pr": #Script & {_script: "tools/workflows/release/update-release-pr.sh", _production: true}
 	"release-preflight-jailed-release-runner": #Script & {_script: "tools/workflows/release/preflight-jailed-release-runner.sh", _production: true}
 	"release-build-release-artifacts": #Script & {_script: "tools/workflows/release/build-release-artifacts.sh", _production: true}
+	"release-build-jumper-macos": #Script & {_script: "tools/workflows/release/build-jumper-macos.sh", _production: true}
+	"release-check-release-payload": #Script & {_script: "tools/workflows/release/check-release-payload.sh"}
 	"release-privileged-agent-package-smoke": #Script & {_script: "tools/workflows/release/privileged-agent-package-smoke.sh", _production: true}
 	"release-smoke-test-image-cli-package": #Script & {_script: "tools/workflows/release/smoke-test-image-cli-package.sh", _production: true}
 	"release-publish-tagged-github-release": #Script & {_script: "tools/workflows/release/publish-tagged-github-release.sh", _production: true}

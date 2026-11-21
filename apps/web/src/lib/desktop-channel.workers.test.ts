@@ -575,7 +575,7 @@ describe("the app's offered release", () => {
       release: {
         version: "0.2.0",
         sha256: SHA,
-        url: "https://github.com/intar-dev/intar-dev/releases/download/jumper%2Fv0.2.0/jumper_0.2.0_macos_arm64.zip",
+        url: "https://github.com/intar-dev/intar-dev/releases/download/desktop%2Fv0.2.0/intar-desktop_0.2.0_macos_arm64.zip",
       },
     });
   });

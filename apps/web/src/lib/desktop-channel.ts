@@ -72,7 +72,7 @@ export function appReleaseRequest(request: Request, workerEnv: { JUMPER_RELEASE_
       release: release && {
         version: release.version,
         sha256: release.sha256,
-        url: `${APP_RELEASE_BASE}/jumper%2Fv${release.version}/jumper_${release.version}_${target}.zip`,
+        url: `${APP_RELEASE_BASE}/desktop%2Fv${release.version}/intar-desktop_${release.version}_${target}.zip`,
       },
     },
     { headers: { "cache-control": "public, max-age=300" } },

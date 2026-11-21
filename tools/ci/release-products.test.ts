@@ -6,7 +6,7 @@ import { dirname, join, relative, resolve } from "node:path";
 // globs, so every workspace crate its binaries build from, and every file they
 // compile in or package, must be covered.
 const root = resolve(import.meta.dir, "../..");
-const products: { project: string; manifest: string; paths: string[] }[] =
+const products: { project: string; prefix: string; manifest: string; paths: string[] }[] =
   JSON.parse(
     readFileSync(join(root, "tools/workflows/release/products.json"), "utf8"),
   );
@@ -18,6 +18,11 @@ const shipped: Record<string, string[]> = {
 // agent's Cloud Hypervisor binary is pinned in build-release-artifacts.sh.
 const packaged: Record<string, string[]> = {
   "intar-agent": ["tools/workflows/release/build-release-artifacts.sh"],
+  // The app's bundle is its script's, with the QEMU the pin names in it.
+  "intar-desktop": [
+    "tools/workflows/release/build-jumper-macos.sh",
+    "tools/workflows/qemu/pins.txt",
+  ],
 };
 
 type Dependencies = Record<string, string | { path?: string }>;
@@ -86,3 +91,16 @@ test.each(products)(
     expect(uncovered).toEqual([]);
   },
 );
+
+// plan-release.sh reads a new version's notes from the changelog beside the
+// manifest, at the tag. Without the file it fails after the tag is pushed,
+// and then for every product, so a product has one from its first release. A
+// version without a section there still releases: git-cliff writes its notes.
+test.each(products)("$project has a changelog beside its manifest", (product) => {
+  const changelog = readFileSync(
+    join(root, dirname(product.manifest), "CHANGELOG.md"),
+    "utf8",
+  );
+  expect(changelog.startsWith("# Changelog\n\n## ")).toBe(true);
+  expect(changelog).toMatch(new RegExp(`\\n## ${product.prefix}/v\\d+\\.\\d+\\.\\d+ \\(`));
+});

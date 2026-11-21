@@ -127,9 +127,21 @@ jobs:
           targets: aarch64-unknown-linux-musl
           namespace-cache: "false"
       - name: Run checks
-        if: matrix.ci_passed != true
+        if: matrix.ci_passed != true && matrix.project != 'intar-desktop'
         run: cuenv task verify
+      - name: Run the app's Clippy
+        if: matrix.ci_passed != true && matrix.project == 'intar-desktop'
+        run: cuenv task clippy-app
+      - name: Run the app's tests
+        if: matrix.ci_passed != true && matrix.project == 'intar-desktop'
+        run: cuenv task test-app
+      - name: Build the app's bundle
+        if: matrix.project == 'intar-desktop'
+        env:
+          VERSION: ${{ matrix.version }}
+        run: cuenv task -p ci --package ci release-build-jumper-macos
       - name: Build release artifacts
+        if: matrix.project != 'intar-desktop'
         env:
           PACKAGE: ${{ matrix.package }}
           BINARY: ${{ matrix.binary }}
@@ -148,6 +160,12 @@ jobs:
         env:
           VERSION: ${{ matrix.version }}
         run: cuenv task -p ci --package ci release-smoke-test-image-cli-package
+      - name: Check the release payload
+        if: hashFiles('tools/workflows/release/check-release-payload.sh') != ''
+        env:
+          BINARY: ${{ matrix.binary }}
+          VERSION: ${{ matrix.version }}
+        run: cuenv task -p ci --package ci release-check-release-payload
       - name: Preserve exact release payload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -197,7 +215,7 @@ jobs:
           TITLE: ${{ matrix.project }} v${{ matrix.version }}
         run: cuenv task -p ci --package ci release-publish-tagged-github-release
   web-pins:
-    name: Pin the website to the new image CLI
+    name: Pin the website to the new releases
     needs:
       - plan
       - publish

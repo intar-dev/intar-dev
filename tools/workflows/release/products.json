@@ -83,5 +83,23 @@
       "crates/intar-observability/**",
       "crates/stargate-core/**"
     ]
+  },
+  {
+    "project": "intar-desktop",
+    "prefix": "desktop",
+    "package": "jumper",
+    "binary": "intar-desktop",
+    "manifest": "apps/jumper/Cargo.toml",
+    "runner": "namespace-profile-macos-arm64-smol",
+    "paths": [
+      "apps/jumper/**",
+      "crates/dhd/**",
+      "crates/intar-contracts/**",
+      "crates/intar-kino-proto/**",
+      "crates/subspace/**",
+      "crates/zpm/**",
+      "tools/workflows/release/build-jumper-macos.sh",
+      "tools/workflows/qemu/pins.txt"
+    ]
   }
 ]
