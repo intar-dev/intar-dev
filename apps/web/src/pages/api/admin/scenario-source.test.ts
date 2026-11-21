@@ -40,7 +40,7 @@ describe("public scenario source route", () => {
   it("shows the public card to platform admins only", async () => {
     expect((await GET(context())).status).toBe(200);
     // The route asks for the platform settings: its reader is a platform administrator.
-    expect(mocks.card).toHaveBeenCalledWith(SCOPE, undefined, true);
+    expect(mocks.card).toHaveBeenCalledWith(SCOPE, undefined, "platform");
 
     mocks.admin.mockResolvedValue({
       ok: false,

@@ -136,11 +136,17 @@ export interface ScenarioSourceCard {
   /** The ref to call once the repository's pipeline builds its images; null until that version is released. */
   pipelineWorkflowRef: string | null;
   /**
-   * Only on the platform's own card, which platform administrators read:
-   * they change the source's platform settings there, and a switch that
-   * needs a flag says so before it is tried.
+   * Only for a reader who changes the source's settings on this card, so
+   * that a switch that would be refused says why before it is tried.
    */
-  platformSettings?: { automaticPromotion: boolean };
+  settings?: {
+    /** The platform's own card: its reader also has the way to pull mode and back to the builder. */
+    platform: boolean;
+    /** Whether automatic promotion is switched on for the scope. */
+    automaticPromotion: boolean;
+    /** The organization's play labs are open to everyone, so it promotes by hand. */
+    publicPlay: boolean;
+  };
   source: ScenarioSourceView | null;
 }
 
@@ -340,13 +346,23 @@ export async function scenarioAutomaticPromotionEnabled(
 export async function scenarioSourceCard(
   scope: ScenarioSourceScope,
   toggles?: FeatureToggleService,
-  /** The reader is a platform administrator on the platform's card. */
-  platformSettings = false,
+  /**
+   * Whose settings the reader changes on this card: `platform` for a
+   * platform administrator on the platform's own, `scope` for an
+   * organization's owner or admin on theirs. Left out, the card shows a
+   * source and offers no settings.
+   */
+  settingsFor?: "platform" | "scope",
 ): Promise<ScenarioSourceCard> {
-  const [enabled, pipelineImages, automaticPromotion, source] = await Promise.all([
+  const [enabled, pipelineImages, automaticPromotion, publicPlay, source] = await Promise.all([
     scenarioGitSourcesEnabled(scope, toggles),
     scenarioPipelineImagesEnabled(scope, toggles),
-    platformSettings ? scenarioAutomaticPromotionEnabled(scope, toggles) : false,
+    settingsFor ? scenarioAutomaticPromotionEnabled(scope, toggles) : false,
+    settingsFor === "scope" && scope.organizationId !== null
+      ? env.DB.prepare(
+          "SELECT 1 AS granted FROM organization_entitlements WHERE organization_id = ?1 AND public_play_granted_at IS NOT NULL",
+        ).bind(scope.organizationId).first().then((row) => row !== null)
+      : false,
     loadScenarioSource(scope),
   ]);
   return {
@@ -358,7 +374,7 @@ export async function scenarioSourceCard(
     appSlug: env.GITHUB_APP_SLUG || null,
     workflowRef: env.SCENARIO_PUBLISH_WORKFLOW_REF || "scenario-publish-v1",
     pipelineWorkflowRef: env.SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF || null,
-    ...(platformSettings ? { platformSettings: { automaticPromotion } } : {}),
+    ...(settingsFor ? { settings: { platform: settingsFor === "platform", automaticPromotion, publicPlay } } : {}),
     source,
   };
 }

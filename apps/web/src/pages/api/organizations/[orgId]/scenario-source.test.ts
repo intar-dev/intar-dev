@@ -44,7 +44,8 @@ describe("organization scenario source route", () => {
     const owner = await GET(context());
     expect(owner.status).toBe(200);
     expect(await owner.json()).toEqual({ enabled: false, appSlug: null, source: null });
-    expect(mocks.card).toHaveBeenCalledWith(SCOPE);
+    // Its reader may change the settings on the card.
+    expect(mocks.card).toHaveBeenCalledWith(SCOPE, undefined, "scope");
 
     mocks.role.mockResolvedValue("member");
     const member = await GET(context());

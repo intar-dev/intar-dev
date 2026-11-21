@@ -726,9 +726,16 @@ describe("a source's settings", () => {
     expect(await scenarioSourceCard(ORG_SCOPE, enabled)).toMatchObject({ enabled: true, pipelineImages: false });
     // The platform's card tells a platform administrator what may be switched; no other card does.
     const promotionOn = new StaticFeatureToggleService({ scenario_git_sources: true, scenario_automatic_promotion: true });
-    expect((await scenarioSourceCard(ORG_SCOPE, promotionOn)).platformSettings).toBeUndefined();
-    expect((await scenarioSourceCard(ORG_SCOPE, promotionOn, true)).platformSettings).toEqual({ automaticPromotion: true });
-    expect((await scenarioSourceCard(ORG_SCOPE, enabled, true)).platformSettings).toEqual({ automaticPromotion: false });
+// Without a reader who changes settings, the card offers none.
+    expect((await scenarioSourceCard(ORG_SCOPE, promotionOn)).settings).toBeUndefined();
+    expect((await scenarioSourceCard(PUBLIC_SCOPE, promotionOn, "platform")).settings)
+      .toEqual({ platform: true, automaticPromotion: true, publicPlay: false });
+    expect((await scenarioSourceCard(ORG_SCOPE, promotionOn, "scope")).settings)
+      .toEqual({ platform: false, automaticPromotion: true, publicPlay: false });
+    expect((await scenarioSourceCard(ORG_SCOPE, enabled, "scope")).settings).toMatchObject({ automaticPromotion: false });
+    // An organization with the public-play grant is told so.
+    await setPublicPlay({ organizationId: ORG, actorUserId: ADMIN, granted: true });
+    expect((await scenarioSourceCard(ORG_SCOPE, promotionOn, "scope")).settings).toMatchObject({ publicPlay: true });
   });
 
   it("sets a pipeline only for a connected push source, and the builder for any", async () => {

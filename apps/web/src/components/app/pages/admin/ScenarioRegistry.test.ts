@@ -13,6 +13,7 @@ function renderCard(
   source: Partial<ScenarioSourceView> | null,
   pipelineWorkflowRef: string | null = null,
   card: Partial<ScenarioSourceCard> = {},
+  scope = "public",
 ): string {
   const endpoint = "/api/admin/scenario-source";
   const queryClient = new QueryClient();
@@ -44,7 +45,7 @@ function renderCard(
     createElement(
       QueryClientProvider,
       { client: queryClient },
-      createElement(ScenarioSourceSection, { endpoint, scope: "public" }),
+      createElement(ScenarioSourceSection, { endpoint, scope }),
     ),
   );
 }
@@ -128,7 +129,7 @@ describe("scenario source card", () => {
 
   describe("platform settings", () => {
     const platform = (source: Partial<ScenarioSourceView>, card: Partial<ScenarioSourceCard> = {}) =>
-      renderCard(source, null, { platformSettings: { automaticPromotion: false }, ...card });
+      renderCard(source, null, { settings: { platform: true, automaticPromotion: false, publicPlay: false }, ...card });
     /** The button with this label, as rendered: disabled or not. */
     const button = (html: string, label: string) => {
       const end = html.indexOf(`${label}</button>`);
@@ -139,12 +140,12 @@ describe("scenario source card", () => {
     it("are on the platform's card only, and only for a connected source", () => {
       expect(renderCard({})).not.toContain("Platform settings");
       expect(platform({})).toContain("Platform settings");
-      expect(renderCard(null, null, { platformSettings: { automaticPromotion: true } })).not.toContain("Platform settings");
+      expect(renderCard(null, null, { settings: { platform: true, automaticPromotion: true, publicPlay: false } })).not.toContain("Platform settings");
       expect(platform({ disconnectedAt: 1, disconnectReason: "admin" })).not.toContain("Platform settings");
     });
 
     it("offer the other state of each setting", () => {
-      const builder = platform({}, { pipelineImages: true, platformSettings: { automaticPromotion: true } });
+      const builder = platform({}, { pipelineImages: true, settings: { platform: true, automaticPromotion: true, publicPlay: false } });
       for (const label of ["Use the repository's pipeline", "Allow self-hosted runners", "Go live automatically", "Switch to pull"]) {
         expect(button(builder, label.replace("'", "&#x27;"))).not.toMatch(/ disabled(=""|>| )/);
       }
@@ -179,6 +180,66 @@ describe("scenario source card", () => {
         expect(button(back, label)).not.toMatch(/ disabled(=""|>| )/);
       }
     });
+  });
+
+  describe("an organization's settings", () => {
+    const own = (source: Partial<ScenarioSourceView>, card: Partial<ScenarioSourceCard> = {}, settings = {}) =>
+      renderCard(source, null, {
+        pipelineImages: true,
+        settings: { platform: false, automaticPromotion: true, publicPlay: false, ...settings },
+        ...card,
+      }, "acme");
+    const button = (html: string, label: string) => {
+      const end = html.indexOf(`${label}</button>`);
+      expect(end, label).toBeGreaterThan(-1);
+      return html.slice(html.lastIndexOf("<button", end), end);
+    };
+
+    it("are its own administrators': its pipeline, its runners, how its labs go live", () => {
+      const html = own({});
+      expect(html).toContain("Source settings");
+      expect(html).not.toContain("Platform settings");
+      for (const label of ["Use the repository&#x27;s pipeline", "Allow self-hosted runners", "Go live automatically"]) {
+        expect(button(html, label)).not.toMatch(/ disabled(=""|>| )/);
+      }
+    });
+
+    it("offer no builder and no pull mode: those are the platform's", () => {
+      const html = own({ imageProducer: "pipeline" });
+      expect(html).toContain("This repository&#x27;s pipeline builds them");
+      expect(html).not.toContain("Use Intar&#x27;s builder</button>");
+      expect(html).not.toContain("Switch to pull");
+      expect(own({})).not.toContain("Switch to pull");
+    });
+
+    it("say why a switch is not offered to this organization", () => {
+      const off = own({}, { pipelineImages: false }, { automaticPromotion: false });
+      expect(button(off, "Use the repository&#x27;s pipeline")).toMatch(/ disabled(=""|>| )/);
+      expect(off).toContain("Pipeline images are not switched on for this organization.");
+      expect(off).toContain("Automatic promotion is not switched on for this organization.");
+      const granted = own({}, {}, { publicPlay: true });
+      expect(button(granted, "Go live automatically")).toMatch(/ disabled(=""|>| )/);
+      expect(granted).toContain("play labs are open to everyone, so its labs are promoted by hand");
+      // Back to by-hand is never held.
+      expect(button(own({ promotion: "automatic" }, {}, { publicPlay: true }), "Promote by hand")).not.toMatch(/ disabled(=""|>| )/);
+    });
+  });
+
+  it("names the files a repository needs and what a lab's id is here", () => {
+    const platform = renderCard({});
+    expect(platform).toContain("intar.hcl");
+    expect(platform).not.toContain("intar.yaml");
+    expect(platform).toContain("repository {}");
+    expect(platform).toContain("<code>intar/&lt;name&gt;</code>");
+    const organization = renderCard({}, null, {}, "acme");
+    expect(organization).toContain("<code>acme/&lt;name&gt;</code>");
+    expect(organization).not.toContain("must start with");
+  });
+
+  it("links an organization's card to its scenarios page, and not the platform's, which is on it", () => {
+    expect(renderCard({}, null, {}, "acme")).toContain('href="/admin/scenarios"');
+    expect(renderCard(null, null, {}, "acme")).not.toContain('href="/admin/scenarios"');
+    expect(renderCard({})).not.toContain('href="/admin/scenarios"');
   });
 
   it("says a push source without a commit waits for its first workflow run", () => {

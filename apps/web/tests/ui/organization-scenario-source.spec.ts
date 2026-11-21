@@ -95,7 +95,7 @@ test("a platform administrator switches the platform source's settings on its ca
     if (request.method() === "GET") {
       await route.fulfill({ json: {
         enabled: true, pipelineImages: true, configured: true, appSlug: null, workflowRef: "scenario-publish-v1",
-        pipelineWorkflowRef: null, platformSettings: { automaticPromotion: true }, source,
+        pipelineWorkflowRef: null, settings: { platform: true, automaticPromotion: true, publicPlay: false }, source,
       } });
       return;
     }
@@ -149,4 +149,53 @@ test("a platform administrator switches the platform source's settings on its ca
   await expect(dialog).toBeHidden();
   expect(changes.at(-1)).toEqual({ action: "mode", mode: "pull" });
   await expect(card.getByRole("button", { name: "Switch to push" })).toBeVisible();
+});
+
+test("an organization's owner switches its own source's settings", async ({ page, ui }) => {
+  let source = { ...disconnected("admin"), disconnectedAt: null, disconnectReason: null };
+  const changes: unknown[] = [];
+  await page.route(`**${api}`, async (route) => {
+    const request = route.request();
+    if (request.method() === "GET") {
+      await route.fulfill({ json: {
+        enabled: true, pipelineImages: true, appSlug: null, workflowRef: "scenario-publish-v1",
+        pipelineWorkflowRef: "scenario-publish-v2",
+        settings: { platform: false, automaticPromotion: true, publicPlay: false }, source,
+      } });
+      return;
+    }
+    const change = request.postDataJSON() as { action: string; promotion?: string; producer?: string };
+    changes.push(change);
+    if (change.action === "promotion") source = { ...source, promotion: change.promotion! };
+    if (change.action === "image_producer") source = { ...source, imageProducer: change.producer! };
+    await route.fulfill({ json: { source } });
+  });
+  await ui.open({
+    ...routeCase("organization-detail"),
+    path: "/organizations/org-platform?tab=settings",
+    organizationRole: "owner",
+  });
+
+  const card = page.locator("section", { has: page.getByRole("heading", { name: "Scenario source" }) });
+  await expect(card.getByRole("heading", { name: "Source settings" })).toBeVisible();
+  await expect(card.getByRole("link", { name: "Scenarios" })).toHaveAttribute("href", "/admin/scenarios");
+  await expect(card.getByRole("button", { name: "Switch to pull" })).toHaveCount(0);
+
+  await card.getByRole("button", { name: "Use the repository's pipeline" }).click();
+  expect(changes).toEqual([{ action: "image_producer", producer: "pipeline" }]);
+  // On its pipeline: no way back to the builder here, and no builds page to link.
+  await expect(card.getByText("This repository's pipeline builds them")).toBeVisible();
+  await expect(card.getByRole("button", { name: "Use Intar's builder" })).toHaveCount(0);
+  await expect(card.getByRole("link", { name: "Builds" })).toHaveCount(0);
+
+  await card.getByRole("button", { name: "Go live automatically" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Go live automatically" }).click();
+  expect(changes.at(-1)).toEqual({ action: "promotion", promotion: "automatic" });
+
+  // The setup text names the files the compiler reads, and the pipeline's workflow with its runner.
+  await card.getByText("Repository setup").click();
+  await expect(card.getByText("intar.hcl")).toBeVisible();
+  await expect(card.getByText("scenario-publish.yml@scenario-publish-v2")).toBeVisible();
+  await expect(card.getByText("runner: your-kvm-runner")).toBeVisible();
+  if (process.env.SOURCE_CARD_SHOTS) await card.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/organization.png` });
 });

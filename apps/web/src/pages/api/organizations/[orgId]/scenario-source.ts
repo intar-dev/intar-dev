@@ -43,7 +43,9 @@ export const GET: APIRoute = async ({ request, params }) => {
   try {
     const access = await authorize(request, params.orgId ?? "");
     if (!access.ok) return access.response;
-    return jsonResponse(await scenarioSourceCard(access.scope));
+    // Its reader is an owner or admin of the organization: the card carries
+    // what the settings on it need.
+    return jsonResponse(await scenarioSourceCard(access.scope, undefined, "scope"));
   } catch (error) {
     const { status, body } = toErrorResponse(
       error,
