@@ -11,11 +11,18 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use intar_image_build::tools::{
-    BUILDKIT_ARCHIVE_SHA256, BUILDKIT_ARCHIVE_SHA256_ARM64, BUILDKIT_IMAGE,
-    BUILDKIT_MAX_USED_BYTES, BUILDKIT_VERSION, UMOCI_SHA256, UMOCI_SHA256_ARM64, UMOCI_VERSION,
-    extract_member,
+    BUILDKIT_ARCHIVE_SHA256, BUILDKIT_IMAGE, BUILDKIT_MAX_USED_BYTES, BUILDKIT_VERSION,
+    UMOCI_SHA256, UMOCI_VERSION, extract_member,
 };
 use intar_image_build::{BuildArch, sha256_file_hex};
+
+/// Of `buildkit-<version>.linux-arm64.tar.gz`, beside the amd64 one the
+/// builder shares. The daemon's image is an index that has both.
+pub(crate) const BUILDKIT_ARCHIVE_SHA256_ARM64: &str =
+    "d0c9601e49f441dcc5c6493c884275a5470dcc9c188c96573c4dd503f2fde97d";
+/// Of `umoci.linux.arm64`.
+pub(crate) const UMOCI_SHA256_ARM64: &str =
+    "5cfd17f2e7a4bcf9ed67ea1b955ca893d200349b9ce6a3d3707dba415f458a1f";
 
 /// The oldest QEMU whose `migrate` takes the channels a checkpoint is saved
 /// and restored through.
@@ -264,8 +271,9 @@ pub(crate) fn install(args: &SetupCommand, sources: &Sources) -> Result<Installe
             // guest answers nothing for half a minute after the pause a
             // checkpoint takes, and a lab's next stage fails; without
             // checkpoints the same image builds in two minutes. It also
-            // gives up the converted bases. Split the two settings, or find
-            // the stall, when arm64 builds get slow enough to want either.
+            // gives up the converted bases and BuildKit's layer cache, so
+            // `--cache` holds little there. Split the settings, or find the
+            // stall, when arm64 builds get slow enough to want any of it.
             "use_cache": sources.host != BuildArch::Arm64,
             "minimum_free_bytes": u64::from(args.cache_min_free_gib) * 1024 * 1024 * 1024,
         },

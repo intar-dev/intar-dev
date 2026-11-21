@@ -808,12 +808,13 @@ mod setup {
 
     use clap::Parser;
     use intar_image_build::tools::{
-        BUILDKIT_ARCHIVE_SHA256, BUILDKIT_ARCHIVE_SHA256_ARM64, BUILDKIT_IMAGE, BUILDKIT_VERSION,
-        UMOCI_SHA256, UMOCI_SHA256_ARM64, UMOCI_VERSION,
+        BUILDKIT_ARCHIVE_SHA256, BUILDKIT_IMAGE, BUILDKIT_VERSION, UMOCI_SHA256, UMOCI_VERSION,
     };
     use intar_image_build::{BuildArch, QemuBuildConfig, sha256_file_hex};
 
-    use crate::setup_command::{Sources, install, qemu_version, qemus};
+    use crate::setup_command::{
+        BUILDKIT_ARCHIVE_SHA256_ARM64, Sources, UMOCI_SHA256_ARM64, install, qemu_version, qemus,
+    };
     use crate::{Cli, Command};
 
     /// A gzipped tar with one file.
