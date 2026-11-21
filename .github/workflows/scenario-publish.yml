@@ -26,8 +26,14 @@ name: Intar scenario publish
 #   a checkpoint is found again only by a build with the same number.
 # - Runs of one branch queue behind each other, so a text-only push waits for
 #   a running image build of the push before it.
+# - Each image Intar lacks is a job of its own, and they run one at a time.
+#   One image's failure leaves the others to build and push, and "Re-run
+#   failed jobs" builds only what failed. A publish that lacks more than 256
+#   images cannot start its image jobs.
 # - An image whose arm64 build fails is not pushed for amd64 either. A lab can
 #   still become ready from another run's amd64 image while this run is red.
+# - When Intar takes no more images of a commit, because a newer one is the
+#   head, each remaining job still builds its image before it learns so.
 
 on:
   workflow_call:
@@ -229,7 +235,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
   images:
-    name: Build images
+    name: Build ${{ matrix.image.target || inputs.build-only }}
     needs: [validate, publish]
     # After a publish that has images to build for this source's own pipeline,
     # or, with `build-only`, for a manual run that publishes nothing. Never
@@ -242,9 +248,23 @@ jobs:
          needs.publish.outputs.images != '[]') ||
         (inputs.build-only != '' && github.event_name == 'workflow_dispatch')
       )
+    # One job an image, one at a time: the builds of one image fill a runner,
+    # and the jobs of a run share the cache volume. A manual build-only run
+    # has the one image it names, for both architectures.
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        image: >-
+          ${{ fromJSON(
+            (inputs.build-only != '' && github.event_name == 'workflow_dispatch')
+            && '[{"build_key":"","archs":["amd64","arm64"]}]'
+            || needs.publish.outputs.images
+          ) }}
     runs-on: ${{ inputs.runner }}
-    # A cold first publish builds every lab; one image is 3 to 7 minutes cold.
-    timeout-minutes: 360
+    # One image is 3 to 7 minutes cold on the measured runner, and several
+    # times that where its arm64 boot is emulated on few processors.
+    timeout-minutes: 120
     permissions:
       contents: read
       id-token: write
@@ -262,7 +282,8 @@ jobs:
 
       - name: Build, boot and push the images
         env:
-          IMAGES: ${{ needs.publish.outputs.images }}
+          # This job's one image, as the list the loop below reads.
+          IMAGES: ${{ format('[{0}]', toJSON(matrix.image)) }}
           REV: ${{ needs.publish.outputs.rev }}
           # Only a manual run builds without publishing.
           BUILD_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.build-only || '' }}
@@ -306,7 +327,8 @@ jobs:
           git archive --format=tar "${GITHUB_SHA}" | tar -x -C "${work}/source"
 
           if [ -n "${BUILD_ONLY}" ]; then
-            IMAGES="$(jq -cn --arg target "${BUILD_ONLY}" '[{target: $target, build_key: "", archs: ["amd64", "arm64"]}]')"
+            # The matrix cannot carry the input into its one entry.
+            IMAGES="$(jq -c --arg target "${BUILD_ONLY}" 'map(.target = $target)' <<<"${IMAGES}")"
             CACHE=none
           fi
 
@@ -509,7 +531,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: intar-image-build-logs
+          name: intar-image-build-logs-${{ strategy.job-index }}
           path: ${{ runner.temp }}/intar/logs
           retention-days: 7
           if-no-files-found: ignore
