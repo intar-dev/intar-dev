@@ -24,6 +24,7 @@ import { arm64MachineImages } from "@/lib/scenario-runs/revision-begin";
 import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { syncBuilderDesiredState } from "@/lib/machine-builds";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
+import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
   BIND_REFUSAL_MESSAGE,
   changeScenarioSource,
@@ -628,12 +629,24 @@ describe("what only a platform administrator changes", () => {
     await expect(as({ action: "promotion", promotion: "automatic" }, pipelineOn)).rejects.toMatchObject({ status: 404 });
     expect(await binding()).toMatchObject({ promotion: "manual", pokedAt: null });
     expect(await as({ action: "promotion", promotion: "automatic" }, promotionOn)).toMatchObject({ promotion: "automatic" });
-    // The source's pass is asked for at once.
+    // The source's pass is asked for at once. It had no head commit to leave alone.
+    expect(await binding()).toMatchObject({ promotionAfter: null });
     expect((await binding())!.pokedAt).not.toBeNull();
     // Back with every flag off.
     await db().update(scenarioSources).set({ pokedAt: null });
     expect(await as({ action: "promotion", promotion: "manual" }, disabled)).toMatchObject({ promotion: "manual" });
     expect((await binding())!.pokedAt).not.toBeNull();
+    // The commit that is the head at the switch is remembered, with its attempt.
+    const digest = await sourceCompileDigest();
+    await db().update(scenarioSources).set({ headSha: "a".repeat(40) });
+    await db().insert(scenarioSourceCommits).values({
+      id: "head", scopeKey: ORG_SCOPE.key, purpose: "deploy", sha: "a".repeat(40), rev: `git-9-${"a".repeat(40)}-${digest}`,
+      via: "push", state: "building", attempt: 3,
+    });
+    await as({ action: "promotion", promotion: "automatic" }, promotionOn);
+    expect(await binding()).toMatchObject({ promotion: "automatic", promotionAfter: "head:3" });
+    await as({ action: "promotion", promotion: "manual" }, disabled);
+    expect(await binding()).toMatchObject({ promotion: "manual", promotionAfter: null });
     // A disconnected source gets no job, but can still be set back.
     await db().update(scenarioSources).set({ disconnectedAt: 1, disconnectReason: "admin", promotion: "automatic" });
     await expect(as({ action: "promotion", promotion: "automatic" }, promotionOn)).rejects.toMatchObject({

@@ -191,7 +191,10 @@ export async function driveDeployJob(input: {
   const { db, storage, scopeKey, digest, now, deps } = input;
   const head = await readHead(db, scopeKey, digest);
   const stored = await storage.get<DeployJob>(DEPLOY_JOB_STORAGE_KEY);
-  const acting = head?.automatic === 1 && head.id !== null && head.binder !== null;
+  // The commit that was the head when the source went automatic stays as
+  // the administrator left it; a re-run of it is another attempt.
+  const acting = head?.automatic === 1 && head.id !== null && head.binder !== null &&
+    head.promotion_after !== `${head.id}:${head.attempt}`;
   const driven = acting &&
     (head.state === "building" || head.state === "waiting" || head.state === "awaiting_promote");
   // The row has ended and the job stayed for its restore checks.
@@ -726,6 +729,8 @@ interface Head {
   automatic: number;
   /** The source's binder, whose rights the job's writes are checked by. */
   binder: string | null;
+  /** The deploy row and attempt that were the head's when the source went automatic. */
+  promotion_after: string | null;
   organization_id: string | null;
   id: string | null;
   attempt: number | null;
@@ -739,7 +744,7 @@ interface Head {
 async function readHead(db: D1Database, scopeKey: string, digest: string): Promise<Head | undefined> {
   return await drizzle(db).get<Head>(sql`
     SELECT ${scenarioSources.promotion} = 'automatic' AS automatic, ${scenarioSources.boundByUserId} AS binder,
-        ${scenarioSources.organizationId} AS organization_id,
+        ${scenarioSources.organizationId} AS organization_id, ${scenarioSources.promotionAfter} AS promotion_after,
         head.id, head.attempt, head.state, head.rev, head.detail, head.updated_at
       FROM ${scenarioSources}
       LEFT JOIN scenario_source_commits head ON head.scope_key = ${scenarioSources.scopeKey} AND head.purpose = 'deploy'

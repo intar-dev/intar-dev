@@ -1,0 +1,1 @@
+ALTER TABLE `scenario_sources` ADD `promotion_after` text;

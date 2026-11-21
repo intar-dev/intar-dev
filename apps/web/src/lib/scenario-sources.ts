@@ -734,11 +734,21 @@ export async function changeScenarioSource(input: {
     case "promotion": {
       // In the statement: the actor is still a platform administrator, and
       // only a connected source is given a job. Back to manual is always
-      // possible. The poke runs the source's pass at once: its job takes
-      // the head commit up, or lets it go.
+      // possible. Switching changes nothing a learner sees: the job leaves
+      // the commit that is the head now as the administrator left it, and
+      // takes up the next one, or a re-run of this one. The poke runs the
+      // source's pass at once, which lets a job go on a switch to manual.
+      const digest = await sourceCompileDigest();
       const [set] = await db
         .update(scenarioSources)
-        .set({ promotion: change.promotion, pokedAt: now, updatedAt: now })
+        .set({
+          promotion: change.promotion,
+          promotionAfter: change.promotion === "manual" ? null : sql`(SELECT head.id || ':' || head.attempt
+            FROM scenario_source_commits head WHERE head.scope_key = ${scenarioSources.scopeKey} AND head.purpose = 'deploy'
+              AND head.rev = 'git-' || ${scenarioSources.githubRepositoryId} || '-' || ${scenarioSources.headSha} || '-' || ${digest})`,
+          pokedAt: now,
+          updatedAt: now,
+        })
         .where(
           and(
             eq(scenarioSources.scopeKey, scope.key),
@@ -912,6 +922,7 @@ async function connect(input: {
         image_producer = 'builder',
         allow_self_hosted_runners = 0,
         promotion = 'manual',
+        promotion_after = NULL,
         bound_by_user_id = excluded.bound_by_user_id,
         head_sha = NULL,
         head_observed_at = 0,

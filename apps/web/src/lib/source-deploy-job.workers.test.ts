@@ -182,6 +182,30 @@ describe("an automatic source's job", () => {
     expect(await commit()).toEqual({ state: "building", detail: null });
   });
 
+  it("leaves the commit that was the head when the source went automatic, and takes up a re-run or the next one", async () => {
+    await head("a");
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
+    await env.DB.prepare("UPDATE scenario_sources SET promotion_after = 'row-a:1' WHERE scope_key = ?1").bind(SCOPE).run();
+    expect(await drive()).toEqual({ wait: false });
+    expect(await commit()).toEqual({ state: "building", detail: null });
+    expect(await scenario(WEB)).toEqual({ live_rev: null, enabled: 1 });
+    expect(await catalogRev()).toBeNull();
+    expect(job()).toBeUndefined();
+    // The next commit is the job's.
+    await head("b", twoLabs());
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("b")).run();
+    await drive();
+    expect((await commit("b"))!.state).toBe("live");
+    expect(await scenario(WEB)).toMatchObject({ live_rev: rev("b") });
+    // So is a re-run of the first one: another attempt.
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "a".repeat(40)),
+      env.DB.prepare("UPDATE scenario_source_commits SET attempt = 2 WHERE id = 'row-a'"),
+    ]);
+    await drive();
+    expect((await commit("a"))!.state).not.toBe("building");
+  });
+
   it("waits for the images, then starts a verify run with the short lease, once", async () => {
     await head("a", bundleFixture, false);
     await drive();
