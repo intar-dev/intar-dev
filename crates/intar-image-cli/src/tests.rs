@@ -1030,6 +1030,8 @@ mod setup {
         assert_eq!(config.arch(), BuildArch::Arm64);
         assert_eq!(config.qemu_binary, Path::new("qemu-system-aarch64"));
         assert_eq!(config.accelerator, "kvm");
+        // No checkpoints there: a guest stalls after one's pause.
+        assert!(!config.layered.use_cache);
         // amd64 from there is the other QEMU, beside this one.
         assert_eq!(
             config.for_arch(BuildArch::Amd64).qemu_binary,

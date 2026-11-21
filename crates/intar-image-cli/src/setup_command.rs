@@ -259,7 +259,14 @@ pub(crate) fn install(args: &SetupCommand, sources: &Sources) -> Result<Installe
             "umoci_binary": umoci,
             "oci_cache_root": oci,
             "checkpoint_cache_root": cache.join("checkpoints"),
-            "use_cache": true,
+            // ponytail: no cache on an arm64 computer. On the arm64 runner
+            // this was measured on (KVM nested under Apple's hypervisor) a
+            // guest answers nothing for half a minute after the pause a
+            // checkpoint takes, and a lab's next stage fails; without
+            // checkpoints the same image builds in two minutes. It also
+            // gives up the converted bases. Split the two settings, or find
+            // the stall, when arm64 builds get slow enough to want either.
+            "use_cache": sources.host != BuildArch::Arm64,
             "minimum_free_bytes": u64::from(args.cache_min_free_gib) * 1024 * 1024 * 1024,
         },
     });
