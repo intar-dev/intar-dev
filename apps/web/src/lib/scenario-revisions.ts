@@ -134,6 +134,12 @@ export interface AdministeredScenario {
     driving: boolean;
     /** The job's line for this lab on the commit, when it has one. */
     note: string | null;
+    /**
+     * The job has given this lab up on this commit, whatever it still does
+     * for the commit's other labs: only an administrator, or a re-run,
+     * takes it further.
+     */
+    failed: boolean;
   } | null;
 }
 
@@ -218,8 +224,13 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
     if (!scenario) continue;
     // The job writes one line per lab that changed: `- <scenario>: <what>`.
     const prefix = `- ${row.scenario_id}: `;
-    const line = row.detail?.split("\n").find((entry) => entry.startsWith(prefix));
-    scenario.sourceJob = { rev: row.rev, driving: row.driving === 1, note: line ? redactHostPaths(line.slice(prefix.length)) : null };
+    const line = row.detail?.split("\n").find((entry) => entry.startsWith(prefix))?.slice(prefix.length);
+    // `failed: `, as the job marks a lab it has given up (`LAB_FAILED` in source-deploy-job.ts).
+    const failed = line?.startsWith("failed: ") === true;
+    scenario.sourceJob = {
+      rev: row.rev, driving: row.driving === 1, failed,
+      note: line ? redactHostPaths(failed ? line.slice("failed: ".length) : line) : null,
+    };
   }
   for (const row of revisions!.results as RevisionRow[]) {
     byScenario.get(row.scenario_id)?.revisions.push({

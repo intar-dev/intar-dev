@@ -111,18 +111,23 @@ function pointerSummary(scenario: AdministeredScenario): string {
   const pointers = scenario.candidateRev && scenario.candidateRev !== scenario.liveRev
     ? `${live}; ${shortRev(scenario.candidateRev)} is the candidate.`
     : `${live}.`;
-  // Who takes the candidate from here: the scope's source, or whoever reads this.
-  if (scenario.sourceJob?.driving) return `${pointers} Its source checks this commit and puts each lab that passes live.`;
-  if (scenario.sourceJob) return `${pointers} Its source is not working on this commit: a lab that is not live waits for an administrator, or for the commit to be run again.`;
-  return pointers;
+  // Who takes the candidate from here: the scope's source, or whoever reads
+  // this. Only where a candidate of the source's commit waits to go live.
+  const job = scenario.sourceJob;
+  if (!job || job.rev !== scenario.candidateRev || scenario.candidateRev === scenario.liveRev) return pointers;
+  return job.driving && !job.failed
+    ? `${pointers} Its source checks this commit and puts each lab that passes live.`
+    : `${pointers} Its source is not working on this lab: it waits for an administrator, or for the commit to be run again.`;
 }
 
 /** What the source's job says of the revision of its commit, for that revision's row. */
 function sourceJobLine(scenario: AdministeredScenario, revision: ScenarioRevisionSummary): string | null {
   const job = scenario.sourceJob;
   if (!job || job.rev !== revision.rev) return null;
-  if (job.note) return `Source: ${job.note}`;
-  return job.driving && revision.rev !== scenario.liveRev ? "Source: checking this commit" : null;
+  // What the job said of a lab before an administrator put it live by hand is past.
+  if (revision.rev === scenario.liveRev) return job.note?.startsWith("live") ? `Source: ${job.note}` : null;
+  if (job.note) return `Source: ${job.failed ? `gave up, ${job.note}` : job.note}`;
+  return job.driving ? "Source: checking this commit" : null;
 }
 
 type RevisionActionName = Exclude<RevisionAction["action"], "set_play">;
@@ -158,7 +163,7 @@ function RevisionRow({
   const move = (kind: "promote" | "rollback") => onAction({ action: kind, rev: revision.rev, liveRev: scenario.liveRev });
   // While the source's job works on this revision's commit, verifying and
   // promoting by hand are an override, not the way forward.
-  const driven = scenario.sourceJob?.driving === true && scenario.sourceJob.rev === revision.rev;
+  const driven = scenario.sourceJob?.driving === true && !scenario.sourceJob.failed && scenario.sourceJob.rev === revision.rev;
   const jobLine = sourceJobLine(scenario, revision);
   // A rollback left this behaviour on hold: nothing that behaves the same
   // is verified or promoted until an administrator lifts it. Going back to
@@ -180,9 +185,9 @@ function RevisionRow({
       : candidate && revision.held
         ? liftHold
         : candidate && revision.state === "ready" && !verifying
-          ? <Button size="sm" variant={driven ? "ghost" : "outline"} disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
+          ? <Button size="sm" variant={driven ? "secondary" : "outline"} disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
           : candidate && revision.canGoLive
-            ? <Button size="sm" variant={driven ? "ghost" : "default"} disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
+            ? <Button size="sm" variant={driven ? "secondary" : "default"} disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
             : (
               <>
                 {revision.canGoLive && revision.liveAt !== null

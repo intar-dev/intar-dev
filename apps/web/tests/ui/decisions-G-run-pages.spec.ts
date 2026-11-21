@@ -123,7 +123,7 @@ test("a scenario of an automatic source says what its job is doing, and keeps th
 }) => {
   await ui.open({ ...routeCase("admin-scenario-detail"), theme: "light" });
   const scenario = ui.server.state.scenarioRevisions.find((candidate) => candidate.id === "intar/repair-nginx")!;
-  scenario.sourceJob = { rev: scenario.candidateRev!, driving: true, note: "waiting for its arm64 images" };
+  scenario.sourceJob = { rev: scenario.candidateRev!, driving: true, failed: false, note: "waiting for its arm64 images" };
   await page.reload();
 
   const section = page.locator("section", { has: page.getByRole("heading", { name: "Revisions" }) });
@@ -134,10 +134,11 @@ test("a scenario of an automatic source says what its job is doing, and keeps th
   if (process.env.SOURCE_CARD_SHOTS) await section.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/driven.png` });
 
   // The job has ended on this commit: the by-hand steps are the way forward again.
-  scenario.sourceJob = { rev: scenario.candidateRev!, driving: false, note: "its checks did not pass in 2 verify runs" };
+  // Given up on this lab while the commit goes on for others.
+  scenario.sourceJob = { rev: scenario.candidateRev!, driving: true, failed: true, note: "its checks did not pass in 2 verify runs" };
   await page.reload();
-  await expect(section.getByText("Its source is not working on this commit")).toBeVisible();
-  await expect(section.getByText("Source: its checks did not pass in 2 verify runs")).toBeVisible();
+  await expect(section.getByText("Its source is not working on this lab")).toBeVisible();
+  await expect(section.getByText("Source: gave up, its checks did not pass in 2 verify runs")).toBeVisible();
   if (process.env.SOURCE_CARD_SHOTS) await section.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/not-driven.png` });
 });
 
