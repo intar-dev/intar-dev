@@ -28,6 +28,9 @@ pub enum Refusal {
     WrongDigest,
     /// What was unpacked is not the app, not intact, or not newer.
     NotTheUpdate(String),
+    /// The swap failed half way and the app could not be put back: it is
+    /// in this folder, whole, and no longer where it was.
+    Stranded(PathBuf),
     Io(std::io::Error),
 }
 
@@ -46,6 +49,11 @@ impl std::fmt::Display for Refusal {
             ),
             Self::WrongDigest => write!(f, "the download is not the published update"),
             Self::NotTheUpdate(why) => write!(f, "the download is not a usable update: {why}"),
+            Self::Stranded(kept) => write!(
+                f,
+                "the app could not be put back in its place; it is kept at {}, move it back from there",
+                kept.display()
+            ),
             Self::Io(error) => write!(f, "{error}"),
         }
     }
@@ -88,19 +96,25 @@ pub struct Offer {
 
 /// The largest download taken for an update; the app is some 15 MB.
 const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
+/// How long a download may take in all; a stalled one must not hold the app.
+const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Where the app's releases are. An offer from anywhere else is none: intar
+/// names the download and its hash, and must not be able to name the place.
+const RELEASES: &str = "https://github.com/intar-dev/intar-dev/releases/download/";
+/// The staging folders an install makes beside the app.
+const STAGING: &str = ".intar-update-";
 
 impl Offer {
     /// `release` as an offer, when it is strictly newer than `running` and
-    /// its download is over HTTPS.
+    /// its download is one of the app's own releases.
     pub fn of(release: subspace::contract::AppReleaseV1, running: &str) -> Option<Self> {
         let url = url::Url::parse(&release.url).ok()?;
-        (url.scheme() == "https" && version(&release.version)? > version(running)?).then_some(
-            Self {
+        (url.as_str().starts_with(RELEASES) && version(&release.version)? > version(running)?)
+            .then_some(Self {
                 version: release.version,
                 sha256: release.sha256,
                 url,
-            },
-        )
+            })
     }
 
     /// Downloads the offer's zip to `file`. What it holds is checked by
@@ -111,6 +125,7 @@ impl Offer {
         let failed = |error: reqwest::Error| Refusal::Io(std::io::Error::other(error));
         let mut response = http
             .get(self.url.clone())
+            .timeout(DOWNLOAD_TIMEOUT)
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
@@ -184,8 +199,15 @@ pub fn install(bundle: &Path, running: &str, zip: &Path, sha256: &str) -> Result
         return Err(Refusal::WrongDigest);
     }
     let folder = bundle.parent().ok_or(Refusal::NotABundle)?;
+    // What an install that was killed left behind. The app runs from its
+    // bundle, so none of these holds it.
+    for stale in std::fs::read_dir(folder)?.filter_map(Result::ok) {
+        if stale.file_name().to_string_lossy().starts_with(STAGING) {
+            let _ = std::fs::remove_dir_all(stale.path());
+        }
+    }
     // On the same volume as the bundle, so the swap is two renames.
-    let staging = folder.join(format!(".intar-update-{}", std::process::id()));
+    let staging = folder.join(format!("{STAGING}{}", std::process::id()));
     if let Err(error) = std::fs::create_dir(&staging) {
         return Err(match error.kind() {
             std::io::ErrorKind::PermissionDenied => Refusal::NotWritable(folder.to_path_buf()),
@@ -193,8 +215,11 @@ pub fn install(bundle: &Path, running: &str, zip: &Path, sha256: &str) -> Result
         });
     }
     let installed = swap(bundle, running, zip, &staging);
-    // The old bundle, or whatever a refusal left, goes with it.
-    let _ = std::fs::remove_dir_all(&staging);
+    // The old bundle, or whatever a refusal left, goes with it; but never
+    // the app itself, which a swap that could not be undone left in there.
+    if !matches!(installed, Err(Refusal::Stranded(_))) {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
     installed.map(|()| bundle.to_path_buf())
 }
 
@@ -241,12 +266,25 @@ fn swap(bundle: &Path, running: &str, zip: &Path, staging: &Path) -> Result<(), 
             )));
         }
     }
-    let old = staging.join(name);
-    std::fs::rename(bundle, &old)?;
-    if let Err(error) = std::fs::rename(&new, bundle) {
+    exchange(bundle, &new, &staging.join(name))
+}
+
+/// Moves `bundle` to `old` and `new` into its place. A failure leaves the
+/// app where it was, or says where it is.
+fn exchange(bundle: &Path, new: &Path, old: &Path) -> Result<(), Refusal> {
+    let refused = |error: std::io::Error| match (error.kind(), bundle.parent()) {
+        (std::io::ErrorKind::PermissionDenied, Some(folder)) => {
+            Refusal::NotWritable(folder.to_path_buf())
+        }
+        _ => Refusal::Io(error),
+    };
+    std::fs::rename(bundle, old).map_err(refused)?;
+    if let Err(error) = std::fs::rename(new, bundle) {
         // Put the running app back where it was.
-        std::fs::rename(&old, bundle)?;
-        return Err(Refusal::Io(error));
+        return Err(match std::fs::rename(old, bundle) {
+            Ok(()) => refused(error),
+            Err(_) => Refusal::Stranded(old.to_path_buf()),
+        });
     }
     Ok(())
 }
@@ -268,7 +306,33 @@ mod tests {
 
     use subspace::contract::AppReleaseV1;
 
-    use super::{Offer, Refusal, bundle_of, version};
+    use super::{Offer, Refusal, bundle_of, exchange, version};
+
+    #[test]
+    fn a_swap_that_fails_leaves_the_app_where_it_was() {
+        let folder = tempfile::tempdir().unwrap();
+        let bundle = folder.path().join("Intar.app");
+        let staging = folder.path().join(".intar-update-1");
+        let (new, old) = (staging.join("new.app"), staging.join("Intar.app"));
+        let mark = |at: &Path, text: &str| {
+            std::fs::create_dir_all(at).unwrap();
+            std::fs::write(at.join("version"), text).unwrap();
+        };
+        let version_at = |at: &Path| std::fs::read_to_string(at.join("version")).unwrap();
+
+        // The two change places.
+        mark(&bundle, "old");
+        mark(&new, "new");
+        exchange(&bundle, &new, &old).unwrap();
+        assert_eq!(version_at(&bundle), "new");
+        assert_eq!(version_at(&old), "old");
+
+        // No new bundle to move in: the app is back where it was.
+        std::fs::remove_dir_all(&old).unwrap();
+        assert!(matches!(exchange(&bundle, &new, &old), Err(Refusal::Io(_))));
+        assert_eq!(version_at(&bundle), "new");
+        assert!(!old.exists());
+    }
 
     #[test]
     fn offers_only_a_strictly_newer_release_over_https() {
@@ -286,12 +350,16 @@ mod tests {
         for (offered, running) in [("0.2.0", "0.2.0"), ("0.1.9", "0.2.0"), ("next", "0.1.0")] {
             assert_eq!(Offer::of(release(offered, zip), running), None);
         }
-        // Not over HTTPS, and not a URL.
-        assert_eq!(
-            Offer::of(release("0.2.0", "http://example.test/app.zip"), "0.1.0"),
-            None
-        );
-        assert_eq!(Offer::of(release("0.2.0", "app.zip"), "0.1.0"), None);
+        // Anywhere but the app's own releases, however the URL is dressed.
+        for url in [
+            "http://github.com/intar-dev/intar-dev/releases/download/jumper%2Fv0.2.0/app.zip",
+            "https://example.test/app.zip",
+            "https://github.com/someone-else/intar-dev/releases/download/jumper%2Fv0.2.0/app.zip",
+            "https://github.com.example.test/intar-dev/intar-dev/releases/download/app.zip",
+            "app.zip",
+        ] {
+            assert_eq!(Offer::of(release("0.2.0", url), "0.1.0"), None, "{url}");
+        }
     }
 
     #[test]

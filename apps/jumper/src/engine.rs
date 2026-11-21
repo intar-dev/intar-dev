@@ -158,13 +158,26 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                                 .and_then(|release| Offer::of(release, env!("CARGO_PKG_VERSION")));
                             Event::Update(offer.as_ref().map(|offer| offer.version.clone()))
                         }
-                        Command::InstallUpdate => match &offer {
+                        Command::InstallUpdate => match offer.take() {
                             None => Event::Update(None),
                             // The machine would be left running without its app.
-                            Some(_) if local.running() => Event::UpdateFailed("End the run before the app updates.".to_owned()),
-                            Some(offer) => match install_update(&http, offer).await {
-                                Ok(()) => Event::Restart,
-                                Err(refusal) => Event::UpdateFailed(format!("The app was not updated: {refusal}.")),
+                            // ponytail: only this app's machine is seen; a second copy of the
+                            // app that runs one keeps running on the program it has loaded.
+                            Some(kept) if local.running() => {
+                                offer = Some(kept);
+                                Event::UpdateFailed("End the run before the app updates.".to_owned())
+                            }
+                            Some(taken) => match install_update(&http, &taken).await {
+                                Ok(bundle) => match update::start(&bundle) {
+                                    Ok(()) => Event::Restart,
+                                    // The new app is in place and this one is the old one
+                                    // still running: there is nothing to offer any more.
+                                    Err(_) => Event::UpdateFailed("The new version is installed. Quit Intar and open it again.".to_owned()),
+                                },
+                                Err(refusal) => {
+                                    offer = Some(taken);
+                                    Event::UpdateFailed(format!("The app was not updated: {refusal}."))
+                                }
                             },
                         },
                     };
@@ -200,7 +213,10 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             }
                         }
                     }
-                    if outbox.send(event).is_err() {
+                    // The new app is starting. Whatever was asked while it was installed
+                    // is not begun: a run started now would be left without its app.
+                    let restarting = matches!(event, Event::Restart);
+                    if outbox.send(event).is_err() || restarting {
                         break;
                     }
                     // Said after the run's end, so it stays on the closed run's screen.
@@ -255,8 +271,12 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
     Ok(Engine { commands, events })
 }
 
-/// Downloads the offered app, puts it in this one's place and starts it.
-async fn install_update(http: &reqwest::Client, offer: &Offer) -> Result<(), update::Refusal> {
+/// Downloads the offered app and puts it in this one's place; the bundle to
+/// start.
+async fn install_update(
+    http: &reqwest::Client,
+    offer: &Offer,
+) -> Result<std::path::PathBuf, update::Refusal> {
     let bundle = update::bundle_of(&std::env::current_exe()?)?;
     let zip = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -274,8 +294,7 @@ async fn install_update(http: &reqwest::Client, offer: &Offer) -> Result<(), upd
         .map_err(|error| update::Refusal::Io(std::io::Error::other(error)))?
     };
     let _ = tokio::fs::remove_file(&zip).await;
-    update::start(&installed?)?;
-    Ok(())
+    installed
 }
 
 async fn sign_in(

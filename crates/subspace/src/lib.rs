@@ -68,8 +68,11 @@ pub async fn app_release(
     url.query_pairs_mut()
         .append_pair("os", std::env::consts::OS)
         .append_pair("arch", std::env::consts::ARCH);
+    // Asked at launch, before anything else: a server that does not answer
+    // must not hold the app up.
     let answer: contract::AppReleaseAnswerV1 = http
         .get(url)
+        .timeout(std::time::Duration::from_secs(10))
         .send()
         .await?
         .error_for_status()?

@@ -235,6 +235,34 @@ impl Jumper {
             .error
             .is_none()
             .then(|| kit::status(p.green, "Connected").text_color(rgb(p.muted)));
+        // Offered between runs only: an update restarts the app.
+        let update = self.state.update.clone().map(|version| {
+            let install = kit::button(
+                p,
+                "update",
+                Kind::Outline,
+                Size::Small,
+                None,
+                if self.state.updating {
+                    "Updating…"
+                } else {
+                    "Update and restart"
+                },
+                None,
+            );
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(10.))
+                .child(kit::label(p, format!("Version {version} is available")))
+                .child(Self::on_click(install, cx, |this, _| {
+                    if !this.state.updating {
+                        this.state.updating = true;
+                        this.send(Command::InstallUpdate);
+                    }
+                }))
+        });
         match &self.state.screen {
             Screen::Run(run) => {
                 let (title, course) = self.run_titles(run);
@@ -314,34 +342,6 @@ impl Jumper {
                     "Sign out",
                     None,
                 );
-                // Offered between runs only: an update restarts the app.
-                let update = self.state.update.clone().map(|version| {
-                    let install = kit::button(
-                        p,
-                        "update",
-                        Kind::Outline,
-                        Size::Small,
-                        None,
-                        if self.state.updating {
-                            "Updating…"
-                        } else {
-                            "Update and restart"
-                        },
-                        None,
-                    );
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(10.))
-                        .child(kit::label(p, format!("Version {version} is available")))
-                        .child(Self::on_click(install, cx, |this, _| {
-                            if !this.state.updating {
-                                this.state.updating = true;
-                                this.send(Command::InstallUpdate);
-                            }
-                        }))
-                });
                 bar.child(wordmark)
                     .child(catalog)
                     .child(fill)
@@ -351,7 +351,8 @@ impl Jumper {
                         this.send(Command::SignOut)
                     }))
             }
-            _ => bar.child(wordmark),
+            // Signed out too: an app too old to sign in can still update.
+            _ => bar.child(wordmark).child(fill).children(update),
         }
     }
 
