@@ -50,6 +50,9 @@ export default defineConfig({
           },
         },
         d1Databases: ["DB"],
+        ratelimits: {
+          REGISTRY_PIPELINE_RATE_LIMITER: { namespace_id: "88427093", simple: { limit: 2000, period: 10 } },
+        },
         durableObjects: {
           HOST_RUNTIME: {
             className: "HostRuntimeDO",
