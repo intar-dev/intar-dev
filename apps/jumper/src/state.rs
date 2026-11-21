@@ -24,6 +24,10 @@ pub enum Command {
     EndRun {
         run_id: String,
     },
+    /// Sent once at launch: ask intar whether a newer app is offered.
+    CheckUpdate,
+    /// Download the offered app, put it in this one's place and start it.
+    InstallUpdate,
 }
 
 /// What the engine tells the UI.
@@ -40,6 +44,12 @@ pub enum Event {
     Machine(MachineStatus),
     /// A machine's terminal is open; the receiver hears when its grid changed.
     Terminal(Terminal, UnboundedReceiver<()>),
+    /// The version of a newer app that intar offers, or that there is none.
+    Update(Option<String>),
+    /// The update could not be installed; this app goes on as it is.
+    UpdateFailed(String),
+    /// The new app is in place and starting: this one quits.
+    Restart,
     Failed(String),
 }
 
@@ -123,6 +133,10 @@ pub struct State {
     pub stage: usize,
     /// The course the catalog shows.
     pub course: usize,
+    /// The version of a newer app on offer.
+    pub update: Option<String>,
+    /// The offered app is being downloaded and installed.
+    pub updating: bool,
     /// The lecture a run was opened from, to return to when the server refuses.
     opened_from: Option<(usize, usize)>,
 }
@@ -132,7 +146,12 @@ impl State {
     pub fn apply(&mut self, event: Event) -> Option<Command> {
         if !matches!(
             event,
-            Event::Failed(_) | Event::Machine(_) | Event::Terminal(..)
+            Event::Failed(_)
+                | Event::Machine(_)
+                | Event::Terminal(..)
+                | Event::Update(_)
+                | Event::UpdateFailed(_)
+                | Event::Restart
         ) {
             self.error = None;
         }
@@ -172,6 +191,17 @@ impl State {
             }
             // The window keeps the terminal; it is no part of what is tested here.
             Event::Terminal(..) => {}
+            Event::Update(version) => {
+                self.update = version;
+                self.updating = false;
+            }
+            // The screen stays where it is: an update is beside the point of it.
+            Event::UpdateFailed(message) => {
+                self.updating = false;
+                self.error = Some(message);
+            }
+            // The window quits; nothing of its state matters any more.
+            Event::Restart => {}
             Event::Machine(status) => {
                 self.stage = match status {
                     MachineStatus::Starting => 0,
@@ -455,5 +485,31 @@ mod tests {
         // The lecture on screen vanished from a reloaded catalog: back to the courses.
         state.apply(Event::Catalog(vec![]));
         assert_eq!(state.screen, Screen::Catalog);
+    }
+
+    #[test]
+    fn an_update_is_offered_beside_whatever_is_on_screen_and_a_failed_one_says_why() {
+        let mut state = State {
+            screen: Screen::Catalog,
+            error: Some("an earlier failure".into()),
+            ..State::default()
+        };
+        // An offer changes neither the screen nor what was said before it.
+        assert_eq!(state.apply(Event::Update(Some("0.2.0".into()))), None);
+        assert_eq!(state.update.as_deref(), Some("0.2.0"));
+        assert_eq!(state.screen, Screen::Catalog);
+        assert_eq!(state.error.as_deref(), Some("an earlier failure"));
+
+        // A failed install is said, the offer stays, and the screen too.
+        state.updating = true;
+        state.apply(Event::UpdateFailed("The app was not updated.".into()));
+        assert!(!state.updating);
+        assert_eq!(state.error.as_deref(), Some("The app was not updated."));
+        assert_eq!(state.update.as_deref(), Some("0.2.0"));
+        assert_eq!(state.screen, Screen::Catalog);
+
+        // No offer any more.
+        state.apply(Event::Update(None));
+        assert_eq!(state.update, None);
     }
 }

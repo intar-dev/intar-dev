@@ -8,7 +8,7 @@ import { handleLocalRunCliRequest } from "@/control-plane/run-cli";
 import { user } from "@/db/schema";
 import { hashStoredOAuthToken } from "@/lib/auth";
 import {
-  DESKTOP_OAUTH_CLIENT_ID, localCatalogRequest, localRunRequest, reportLocalRunRequest, requireDesktopCaller, startLocalRunRequest,
+  appReleaseRequest, DESKTOP_OAUTH_CLIENT_ID, localCatalogRequest, localRunRequest, reportLocalRunRequest, requireDesktopCaller, startLocalRunRequest,
   type LocalRunView,
 } from "@/lib/desktop-channel";
 import { LOCAL_RUN_SILENCE_MS, reapSilentLocalRuns } from "@/lib/local-runs";
@@ -555,5 +555,44 @@ describe("the desktop channel", () => {
     expect(refreshed.status).toBe(200);
     const next = (await refreshed.json()) as { access_token: string };
     expect(await requireDesktopCaller(call(next.access_token))).toMatchObject({ ok: true, userId: LEARNER });
+  });
+});
+
+describe("the app's offered release", () => {
+  const SHA = "ab".repeat(32);
+  const ask = (query: string, json: string | undefined, method = "GET") =>
+    appReleaseRequest(new Request(`https://intar.test/api/local/app-release${query}`, { method }), { JUMPER_RELEASE_JSON: json });
+  const release = async (query: string, json: string | undefined) =>
+    ((await ask(query, json).json()) as { release: unknown }).release;
+
+  it("names the pinned release of the app's target, its download and the hash to check it by", async () => {
+    const pins = JSON.stringify({ macos_arm64: { version: "0.2.0", sha256: SHA } });
+    const response = ask("?os=macos&arch=aarch64", pins);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(await response.json()).toEqual({
+      protocol: 1,
+      release: {
+        version: "0.2.0",
+        sha256: SHA,
+        url: "https://github.com/intar-dev/intar-dev/releases/download/jumper%2Fv0.2.0/jumper_0.2.0_macos_arm64.zip",
+      },
+    });
+  });
+
+  it("offers none without a usable pin for that target", async () => {
+    const pins = JSON.stringify({ macos_arm64: { version: "0.2.0", sha256: SHA } });
+    // No pin at all, an unreadable one, another target, and no target named.
+    expect(await release("?os=macos&arch=aarch64", "")).toBeNull();
+    expect(await release("?os=macos&arch=aarch64", undefined)).toBeNull();
+    expect(await release("?os=macos&arch=aarch64", "{not json")).toBeNull();
+    expect(await release("?os=macos&arch=x86_64", pins)).toBeNull();
+    expect(await release("?os=linux&arch=aarch64", pins)).toBeNull();
+    expect(await release("", pins)).toBeNull();
+    // A pin that is not a version and a hash names nothing to download.
+    for (const pin of [{ version: "0.2", sha256: SHA }, { version: "0.2.0", sha256: "abc" }, { version: "0.2.0/../x", sha256: SHA }, "0.2.0"]) {
+      expect(await release("?os=macos&arch=aarch64", JSON.stringify({ macos_arm64: pin }))).toBeNull();
+    }
+    expect(ask("?os=macos&arch=aarch64", pins, "POST").status).toBe(405);
   });
 });
