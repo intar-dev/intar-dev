@@ -7,13 +7,15 @@ import (
 	"github.com/intar-dev/intar-dev/ci/gha"
 )
 
-// Every GitHub Actions workflow but scenario-publish.yml. Each is typed GitHub
+// Every GitHub Actions workflow but scenario-publish.yml and the
+// scenario-publish-image.yml it calls. Each is typed GitHub
 // Actions data (see ci/gha) in its own file here, and `cuenv sync codegen`
 // renders it to .github/workflows. The rendered files are checked for drift by
 // `cuenv task sync-check`. See ci/README.md.
 //
-// scenario-publish.yml stays hand-written: callers pin it by tag, and its path
-// is part of the OIDC allowlist in apps/web/src/lib/github-oidc.ts.
+// Those two stay hand-written: callers pin scenario-publish.yml by tag or
+// commit, and both paths are part of the OIDC allowlist in
+// apps/web/src/lib/github-oidc.ts.
 workflows: [Name=string]: gha.#Workflow
 
 // The workflow policy requires each pin's tag as a comment, and YAML rendering

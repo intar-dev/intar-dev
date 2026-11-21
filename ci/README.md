@@ -1,10 +1,11 @@
 # CI and deployment workflows
 
-Every workflow in `.github/workflows` except `scenario-publish.yml` is rendered
-from CUE in this directory. Edit the CUE and run `cuenv sync codegen`; never
-edit the YAML. `scenario-publish.yml` stays hand-written: callers pin it by
-tag, and its path is part of the OIDC allowlist in
-`apps/web/src/lib/github-oidc.ts`.
+Every workflow in `.github/workflows` except `scenario-publish.yml` and
+`scenario-publish-image.yml` is rendered from CUE in this directory. Edit the
+CUE and run `cuenv sync codegen`; never edit the YAML. Those two stay
+hand-written: callers pin `scenario-publish.yml` by tag or commit, it calls
+`scenario-publish-image.yml` for each image, and both paths are part of the
+OIDC allowlist in `apps/web/src/lib/github-oidc.ts`.
 
 ## Model
 
@@ -214,7 +215,8 @@ reproduce them; merge.
 ## Checks on the workflows
 
 - `cuenv task sync-check`: the rendered files match the CUE, the workflow set is
-  exactly the rendered files plus `scenario-publish.yml`, and Dependabot's
+  exactly the rendered files plus `scenario-publish.yml` and
+  `scenario-publish-image.yml`, and Dependabot's
   `exclude-paths` lists every rendered file.
 - `cuenv task workflow-policy`: every external action is pinned to a commit with
   its tag comment, installed tools are pinned, and each rendered pin also sits

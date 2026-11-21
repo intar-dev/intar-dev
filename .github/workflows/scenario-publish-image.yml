@@ -118,6 +118,11 @@ jobs:
             echo "Intar names intar-image-cli ${cli_version}; this workflow needs 0.15.0 or newer." >&2
             exit 1
           fi
+          # Up to 0.16.0 `setup` is for a Linux amd64 computer only.
+          if [ "${native}" = arm64 ] && [ "$(printf '%s\n' 0.16.0 "${cli_version}" | sort -V | tail -n 1)" = 0.16.0 ]; then
+            echo "Intar names intar-image-cli ${cli_version}, which builds on a Linux amd64 runner only. An arm64 runner needs a newer one: leave \`arm64-runner\` empty until Intar names it." >&2
+            exit 1
+          fi
           # The image is of the bundle the upload compiled. A compiler that
           # changed since gives other build keys, refused only after the bake.
           if [ -z "${BUILD_ONLY}" ] && [[ "${REV}" != *"-${digest}" ]]; then

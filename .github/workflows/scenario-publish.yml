@@ -34,7 +34,8 @@ name: Intar scenario publish
 #   images cannot start its image jobs. Without a cache every job starts
 #   cold: nothing one image built is there for the next.
 # - An image's amd64 build is pushed when it is done, before its arm64 build
-#   starts. The arm64 job starts only when the amd64 one built and pushed.
+#   starts. The arm64 job starts only when the amd64 one passed, or when
+#   Intar lacks the image for arm64 alone.
 #   A lab can become ready from its amd64 image while the run is red for
 #   arm64.
 # - When Intar takes no more images of a commit, because a newer one is the
@@ -52,7 +53,7 @@ on:
         description: >-
           The label of a Linux arm64 runner with KVM that builds the arm64
           images. Empty, they are emulated on `runner`, several times slower.
-          It needs intar-image-cli 0.17.0 or newer.
+          It needs an intar-image-cli newer than 0.16.0.
         type: string
         default: ""
       light-runner:
