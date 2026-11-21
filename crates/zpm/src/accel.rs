@@ -91,7 +91,7 @@ impl Accel {
 
     #[cfg(target_os = "macos")]
     fn of_this_system() -> Result<Self, Error> {
-        let supported = std::process::Command::new("sysctl")
+        let supported = std::process::Command::new("/usr/sbin/sysctl")
             .args(["-n", "kern.hv_support"])
             .output()
             .is_ok_and(|output| output.stdout.trim_ascii() == b"1");

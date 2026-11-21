@@ -70,6 +70,10 @@ schema.#Project & {
 			js: #Host & {command: "bun", args: ["run", "check"]}
 		}
 
+		// Puts the app's pinned QEMU beside a development build of jumper,
+		// which runs no other: `cuenv task jumper-qemu`, or `-- release`.
+		"jumper-qemu": #Host & {command: "bash", args: ["-e", "tools/workflows/qemu/fetch.sh"]}
+
 		test: {
 			type: "group"
 			rust: #Cargo & {args: ["test", "--workspace"]}

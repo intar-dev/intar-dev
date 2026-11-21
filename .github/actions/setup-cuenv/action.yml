@@ -9,10 +9,11 @@ runs:
       shell: bash
       env:
         CUENV_VERSION: 0.57.3
-        # GitHub's digests for the cuenv-linux-x64 and cuenv-linux-arm64 assets
-        # of that release.
+        # GitHub's digests for the cuenv-linux-x64, cuenv-linux-arm64 and
+        # cuenv-darwin-arm64 assets of that release.
         CUENV_SHA256_X64: 70b2097cb21afde54cbba72756fc654910cee18dd5330e6ed79b0de0748d8843
         CUENV_SHA256_ARM64: a054ee9e05b18aa05ff359906c3c73a2f90a14e963d6ad3e848474431034e02a
+        CUENV_SHA256_DARWIN_ARM64: 2c93edfb642669d79219ccece1e94a8c95ffe26c0f0e2c289558e977b6e61867
         # The zip and module.cue layers that registry.cue.works serves for
         # github.com/cuenv/cuenv@v0.57.3, the dependency in cue.mod/module.cue.
         SCHEMA_ZIP_SHA256: f83e92b64bbd087b6dc217165e70253adca6824111de4b83e90d46de7b8b7447
@@ -22,8 +23,11 @@ runs:
         case "$(uname -sm)" in
           "Linux x86_64") asset=cuenv-linux-x64 CUENV_SHA256="${CUENV_SHA256_X64}" ;;
           "Linux aarch64") asset=cuenv-linux-arm64 CUENV_SHA256="${CUENV_SHA256_ARM64}" ;;
+          "Darwin arm64") asset=cuenv-darwin-arm64 CUENV_SHA256="${CUENV_SHA256_DARWIN_ARM64}" ;;
           *) echo "No cuenv binary is pinned for $(uname -sm)." >&2; exit 1 ;;
         esac
+        # macOS has shasum where Linux has sha256sum.
+        command -v sha256sum > /dev/null || sha256sum() { shasum -a 256 "$@"; }
         bin="${RUNNER_TEMP}/cuenv-${CUENV_VERSION}"
         mkdir -p "${bin}"
         curl -fsSL --retry 3 -o "${bin}/cuenv" \

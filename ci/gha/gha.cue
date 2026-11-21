@@ -164,6 +164,22 @@ runners: {
 	with: "persist-credentials": *false | bool
 }
 
+// The intar-release GitHub App's token: its pushes and pull requests run CI,
+// which a GITHUB_TOKEN push does not. Its key lives in the release-pr
+// environment, which only main can use.
+#AppToken: {
+	#Step
+	name: "Create the release app token"
+	id:   "app-token"
+	uses: pin."create-github-app-token".ref
+	with: {
+		"client-id":                "${{ vars.RELEASE_APP_CLIENT_ID }}"
+		"private-key":              "${{ secrets.RELEASE_APP_PRIVATE_KEY }}"
+		"permission-contents":      "write"
+		"permission-pull-requests": "write"
+	}
+}
+
 #SetupCuenv: {
 	#Step
 	name: *"Set up cuenv" | string

@@ -109,8 +109,16 @@ impl Local {
                 }
             },
         };
+        // The app runs its own QEMU and no other.
+        let system = zpm::Arch::host().map_or("qemu-system-x86_64", zpm::Arch::qemu_binary);
+        let qemu = match std::env::current_exe()
+            .map_err(|error| format!("The app could not find its own program file: {error}"))
+            .and_then(|program| crate::qemu::tools(&program, system))
+        {
+            Ok(qemu) => qemu,
+            Err(reason) => return MachineStatus::Failed(reason),
+        };
         let started = tokio::task::spawn_blocking(move || {
-            let arch = zpm::Arch::host().map_or("qemu-system-x86_64", zpm::Arch::qemu_binary);
             let plan = Plan {
                 name: &machine.name,
                 image: &machine.image,
@@ -126,10 +134,9 @@ impl Local {
                 ready_seconds: None,
             };
             let (asked_run, asked_machine) = (run_id, machine.name.clone());
-            // ponytail: QEMU from PATH; the app ships its own with #403.
             zpm::machine::start(
-                std::path::Path::new(arch),
-                std::path::Path::new("qemu-img"),
+                &qemu.system,
+                &qemu.img,
                 &Cache::new(cache),
                 &dir,
                 &plan,

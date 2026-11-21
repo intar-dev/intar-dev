@@ -84,7 +84,7 @@ fn memory_mib() -> Option<u64> {
 // "available" figure. Read vm_stat if labs start and then swap.
 #[cfg(target_os = "macos")]
 fn memory_mib() -> Option<u64> {
-    let output = std::process::Command::new("sysctl")
+    let output = std::process::Command::new("/usr/sbin/sysctl")
         .args(["-n", "hw.memsize"])
         .output()
         .ok()?;

@@ -158,8 +158,10 @@ pub fn qemu_args(machine: &Machine) -> Vec<OsString> {
     }
     arg(&netdev);
     arg("-device");
+    // No option ROM: the kernel is booted directly, so nothing boots from
+    // the network, and the app's QEMU ships without firmware files.
     arg(&format!(
-        "virtio-net-pci,netdev=net0,mac={},addr={slot:#x}",
+        "virtio-net-pci,netdev=net0,mac={},addr={slot:#x},romfile=",
         net.mac
     ));
     slot += 1;
@@ -467,7 +469,7 @@ mod tests {
              -drive if=none,id=disk0,file=/run/root.qcow2,format=qcow2 -device virtio-blk-pci,drive=disk0,addr=0x3 \
              -drive if=none,id=disk1,file=/run/a,,b/run.raw,format=raw,readonly=on -device virtio-blk-pci,drive=disk1,addr=0x4 \
              -netdev user,id=net0,net=10.77.52.0/28,host=10.77.52.1,dns=10.77.52.3,hostfwd=tcp:127.0.0.1:2252-10.77.52.2:22 \
-             -device virtio-net-pci,netdev=net0,mac=02:00:00:00:34:02,addr=0x5 \
+             -device virtio-net-pci,netdev=net0,mac=02:00:00:00:34:02,addr=0x5,romfile= \
              -device vhost-vsock-pci,guest-cid=10052,addr=0x6 \
              -serial file:/run/serial.log -qmp unix:/run/qmp.sock,server=on,wait=off"
         );

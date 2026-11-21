@@ -28,20 +28,7 @@ let _releases = {
 	"fail-fast": false
 }
 
-// The intar-release GitHub App's token: its pushes and pull requests run CI,
-// which a GITHUB_TOKEN push does not. Its key lives in the release-pr
-// environment, which only main can use.
-let _appToken = {
-	name: "Create the release app token"
-	id:   "app-token"
-	uses: gha.pin."create-github-app-token".ref
-	with: {
-		"client-id":                "${{ vars.RELEASE_APP_CLIENT_ID }}"
-		"private-key":              "${{ secrets.RELEASE_APP_PRIVATE_KEY }}"
-		"permission-contents":      "write"
-		"permission-pull-requests": "write"
-	}
-}
+let _appToken = gha.#AppToken
 let _appEnv = {
 	GH_TOKEN: "${{ steps.app-token.outputs.token }}"
 	APP_SLUG: "${{ steps.app-token.outputs.app-slug }}"
