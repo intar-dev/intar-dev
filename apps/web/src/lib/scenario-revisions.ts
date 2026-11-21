@@ -490,6 +490,11 @@ export function sourceHeadSql(
       JOIN scenario_source_commits head ON head.scope_key = source.scope_key AND head.purpose = 'deploy'
      WHERE source.scope_key = ${scope} AND source.bound_by_user_id = ${by.binder} AND source.promotion = 'automatic'
        AND source.disconnected_at IS NULL AND source.paused_at IS NULL
+       -- An organization whose play labs are open to everyone promotes by
+       -- hand (#472); a source that was automatic before it was granted is
+       -- held here whatever let it through.
+       AND NOT EXISTS (SELECT 1 FROM organization_entitlements entitlement
+         WHERE entitlement.organization_id = source.organization_id AND entitlement.public_play_granted_at IS NOT NULL)
        AND ((source.organization_id IS NULL AND EXISTS (SELECT 1 FROM user binder
            WHERE binder.id = source.bound_by_user_id AND ${activeAdminSql("binder")}))
          OR EXISTS (SELECT 1 FROM member binder_member JOIN user binder ON binder.id = binder_member.user_id

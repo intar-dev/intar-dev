@@ -613,6 +613,8 @@ export async function changeScenarioSource(input: {
   // cannot be read, must not keep a source on its pipeline or on runners it
   // was allowed. Only what widens does.
   const flag =
+    // A platform administrator's step back is one, whatever it is.
+    input.asPlatform ||
     change.action === "pause" || change.action === "disconnect" || change.action === "purge" ||
     change.action === "forget_image" ||
     (change.action === "image_producer" && change.producer === "builder") ||

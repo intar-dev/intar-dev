@@ -556,6 +556,67 @@ describe("a source's settings", () => {
     }
   });
 
+  it("are a platform administrator's on the platform's own source, as before, and nobody else's", async () => {
+    const everyFlag = new StaticFeatureToggleService({
+      scenario_git_sources: true, scenario_pipeline_images: true, scenario_automatic_promotion: true,
+    });
+    await db().insert(scenarioSources).values({
+      scopeKey: "public", organizationId: null, githubInstallationId: 8, githubRepositoryId: 42,
+      githubRepository: "intar/labs", defaultBranch: "main", mode: "push", boundByUserId: ADMIN,
+    });
+    await image("amd64", `sha256:${"2".repeat(64)}`, "public");
+    const onPublic = (body: unknown, actorUserId: string) =>
+      change(body, { scope: PUBLIC_SCOPE, actorUserId, toggles: everyFlag });
+    const bodies = [
+      { action: "image_producer", producer: "pipeline" },
+      { action: "runner_policy", allow_self_hosted: true },
+      { action: "promotion", promotion: "automatic" },
+      { action: "forget_image", build_key: KEY, architecture: "amd64" },
+    ];
+    // An organization's owner is nobody on the platform's source.
+    for (const body of bodies) {
+      await expect(onPublic(body, OWNER)).rejects.toMatchObject({ status: 404, code: "not_found" });
+    }
+    expect(await binding("public")).toMatchObject({ imageProducer: "builder", allowSelfHostedRunners: false, promotion: "manual" });
+    expect(await onPublic(bodies[0], ADMIN)).toMatchObject({ imageProducer: "pipeline" });
+    expect(await onPublic(bodies[1], ADMIN)).toMatchObject({ allowSelfHostedRunners: true });
+    expect(await onPublic(bodies[2], ADMIN)).toMatchObject({ promotion: "automatic" });
+    await onPublic(bodies[3], ADMIN);
+    expect(await db().select().from(scopeMachineImages)).toEqual([]);
+    // Pull mode is theirs here too, once the builder builds again.
+    await onPublic({ action: "image_producer", producer: "builder" }, ADMIN);
+    expect(await onPublic({ action: "mode", mode: "pull" }, ADMIN)).toMatchObject({ mode: "pull" });
+  });
+
+  it("keeps one organization's administrator out of another's source, and its images apart", async () => {
+    const everyFlag = new StaticFeatureToggleService({
+      scenario_git_sources: true, scenario_pipeline_images: true, scenario_automatic_promotion: true,
+    });
+    await insertBinding({ mode: "push" });
+    // The owner of another organization.
+    await createFixtureMember({ d1: env.DB, userId: "other-owner" });
+    await db().insert(organization).values({ id: "org-b", name: "Other", slug: "other", createdAt: new Date() });
+    await db().insert(member).values({ id: "m-other", organizationId: "org-b", userId: "other-owner", role: "owner", createdAt: new Date() });
+    await image("amd64");
+    await image("amd64", `sha256:${"3".repeat(64)}`, "organization:org-b");
+    for (const body of [
+      { action: "image_producer", producer: "pipeline" },
+      { action: "runner_policy", allow_self_hosted: true },
+      { action: "promotion", promotion: "automatic" },
+      { action: "forget_image", build_key: KEY, architecture: "amd64" },
+      { action: "pause" },
+    ]) {
+      await as(body, everyFlag, "other-owner").then(
+        () => undefined, (error: unknown) => expect(error).toMatchObject({ status: 404 }),
+      );
+    }
+    expect(await binding()).toMatchObject({ imageProducer: "builder", allowSelfHostedRunners: false, promotion: "manual", pausedAt: null });
+    expect(await db().select().from(scopeMachineImages)).toHaveLength(2);
+    // The organization's own owner forgets its image: the other scope's, of the same key, stays.
+    await as({ action: "forget_image", build_key: KEY, architecture: "amd64" }, everyFlag);
+    expect((await db().select().from(scopeMachineImages)).map((row) => row.scopeKey)).toEqual(["organization:org-b"]);
+  });
+
   it("lets a platform administrator step any organization's source back, and nothing more", async () => {
     const everyFlag = new StaticFeatureToggleService({
       scenario_git_sources: true, scenario_pipeline_images: true, scenario_automatic_promotion: true,
@@ -576,7 +637,18 @@ describe("a source's settings", () => {
       await expect(platform(body, everyFlag)).rejects.toMatchObject({ status: 400, code: "scenario_source_change_invalid" });
     }
     // Not for someone who is no platform administrator, whatever they are in the organization.
-    await expect(platform({ action: "promotion", promotion: "manual" }, everyFlag, OWNER)).rejects.toMatchObject({ status: 404 });
+    for (const body of [
+      { action: "promotion", promotion: "manual" },
+      { action: "runner_policy", allow_self_hosted: false },
+      { action: "image_producer", producer: "builder" },
+      { action: "forget_image", build_key: KEY, architecture: "amd64" },
+      { action: "mode", mode: "pull" },
+    ]) {
+      await expect(platform(body, everyFlag, OWNER)).rejects.toMatchObject({ status: 404 });
+    }
+    // A pause is the owner's own on their route, but not through the platform's rights.
+    await expect(platform({ action: "pause" }, everyFlag, OWNER)).rejects.toMatchObject({ status: 404 });
+    expect(await binding()).toMatchObject({ pausedAt: null });
     expect(await binding()).toMatchObject({ imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic", pausedAt: null });
 
     // Every step back, with every flag off.
@@ -586,6 +658,8 @@ describe("a source's settings", () => {
     await platform({ action: "forget_image", build_key: KEY, architecture: "amd64" }, disabled);
     expect(await db().select().from(scopeMachineImages)).toEqual([]);
     expect(await platform({ action: "pause" }, disabled)).toMatchObject({ pauseReason: "admin" });
+    // Pull mode too, with every flag off.
+    expect(await platform({ action: "mode", mode: "pull" }, disabled)).toMatchObject({ mode: "pull" });
   });
 
   it("leaves pull mode to the platform: an organization's administrator cannot switch to it", async () => {
@@ -623,9 +697,14 @@ describe("a source's settings", () => {
     github();
     await change({ action: "connect", repository: "acme/labs" }, { toggles: pipelineOn });
     expect(await binding()).toMatchObject({ mode: "push", imageProducer: "pipeline" });
-    await db().delete(scenarioSources);
+    // Bound again without the flag: on the builder, whatever it was.
+    await db().update(scenarioSources).set({ disconnectedAt: 1, disconnectReason: "admin" });
     await change({ action: "connect", repository: "acme/labs" }, { toggles: enabled });
-    expect(await binding()).toMatchObject({ mode: "push", imageProducer: "builder" });
+    expect(await binding()).toMatchObject({ mode: "push", imageProducer: "builder", disconnectedAt: null });
+    // And bound again with it: on its pipeline.
+    await db().update(scenarioSources).set({ disconnectedAt: 1, disconnectReason: "admin" });
+    await change({ action: "connect", repository: "acme/labs" }, { toggles: pipelineOn });
+    expect(await binding()).toMatchObject({ imageProducer: "pipeline", disconnectedAt: null });
   });
 
   it("needs its flag only for what widens: a pipeline and self-hosted runners", async () => {

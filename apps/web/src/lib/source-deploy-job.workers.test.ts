@@ -482,6 +482,26 @@ describe("an automatic source's job", () => {
     expect(detailOf(new Map(), null)).toBeNull();
   });
 
+  it("holds still for an organization whose play labs are open to everyone", async () => {
+    await env.DB.prepare("INSERT INTO organization_entitlements (organization_id, public_play_granted_at) VALUES (?1, 1)").bind(ORG).run();
+    await head("a", twoLabs());
+    // One lab is verified already and would move; the other would get a verify run.
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1 AND scenario_id = ?2").bind(rev("a"), WEB).run();
+    await drive();
+    expect(begun).toEqual([]);
+    expect(await scenario(WEB)).toMatchObject({ live_rev: null });
+    expect(await catalogRev()).toBeNull();
+    await expect(moveLiveRevision({
+      scenarioId: WEB, rev: rev("a"), liveRev: null, kind: "promote", actorUserId: OWNER,
+      source: { scopeKey: SCOPE, rowId: "row-a", attempt: 1, digest },
+    })).rejects.toMatchObject({ status: 404 });
+    // An administrator still promotes by hand, and without the grant the job goes on.
+    await moveLiveRevision({ scenarioId: WEB, rev: rev("a"), liveRev: null, kind: "promote", actorUserId: OWNER });
+    await env.DB.prepare("DELETE FROM organization_entitlements").run();
+    await drive();
+    expect(begun.map((run) => run.scenarioId)).toEqual([DB_LAB]);
+  });
+
   it("fails a commit without labs and disables nothing", async () => {
     await live("a", twoLabs());
     await env.DB.batch([
