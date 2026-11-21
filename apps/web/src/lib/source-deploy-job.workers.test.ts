@@ -3,6 +3,7 @@
 import { gzipSync } from "node:zlib";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { IMAGE_FORMAT } from "@/generated/constants";
 import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
 import { appError } from "@/lib/app-error";
 import { settleScenarioRevisions } from "@/lib/machine-builds";
@@ -179,6 +180,30 @@ describe("an automatic source's job", () => {
     expect(ended).toEqual(["run-1"]);
     expect(job()).toBeUndefined();
     expect(await commit()).toEqual({ state: "building", detail: null });
+  });
+
+  it("leaves the commit that was the head when the source went automatic, and takes up a re-run or the next one", async () => {
+    await head("a");
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
+    await env.DB.prepare("UPDATE scenario_sources SET promotion_after = 'row-a:1' WHERE scope_key = ?1").bind(SCOPE).run();
+    expect(await drive()).toEqual({ wait: false });
+    expect(await commit()).toEqual({ state: "building", detail: null });
+    expect(await scenario(WEB)).toEqual({ live_rev: null, enabled: 1 });
+    expect(await catalogRev()).toBeNull();
+    expect(job()).toBeUndefined();
+    // The next commit is the job's.
+    await head("b", twoLabs());
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("b")).run();
+    await drive();
+    expect((await commit("b"))!.state).toBe("live");
+    expect(await scenario(WEB)).toMatchObject({ live_rev: rev("b") });
+    // So is a re-run of the first one: another attempt.
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "a".repeat(40)),
+      env.DB.prepare("UPDATE scenario_source_commits SET attempt = 2 WHERE id = 'row-a'"),
+    ]);
+    await drive();
+    expect((await commit("a"))!.state).not.toBe("building");
   });
 
   it("waits for the images, then starts a verify run with the short lease, once", async () => {
@@ -674,6 +699,66 @@ describe("an automatic source's job", () => {
     ]);
     await maintainPipelineRevisions(env, SCOPE, now + DEPLOY_JOB_DEADLINE_MS + 60_000);
     expect(await commit()).toMatchObject({ state: "failed" });
+  });
+});
+
+describe("a pipeline's lab", () => {
+  /** The pipeline records the head's images of `architecture`. */
+  const record = (sha: string, architecture: "amd64" | "arm64") => env.DB.prepare(
+    `INSERT INTO scope_machine_images (scope_key, build_key, architecture, image_digest, image_format, size_bytes,
+        github_repository_id, github_repository, sha, run_id, run_attempt, runner_environment, job_workflow_sha)
+      SELECT DISTINCT ?2, json_extract(machine.value, '$.build_key'), ?3, ?4, ?5, 1, 42, 'acme/labs', 'sha', '1', 1,
+          'github-hosted', 'w'
+        FROM scenario_revisions revision, json_each(revision.doc_json, '$.machines') machine WHERE revision.rev = ?1`,
+  ).bind(rev(sha), SCOPE, architecture, IMAGE, IMAGE_FORMAT).run();
+
+  it("goes live only once every architecture's image is recorded", async () => {
+    await env.DB.prepare("UPDATE scenario_sources SET image_producer = 'pipeline' WHERE scope_key = ?1").bind(SCOPE).run();
+    const refused = await ingestSourceBundle(env, {
+      organizationId: ORG, rev: rev("a"), gzip: new Uint8Array(gzipSync(JSON.stringify(bundleFixture))), stored: false,
+      imageProducer: "pipeline", pipelineCanPush: true,
+    });
+    expect(refused).toBeNull();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "a".repeat(40)),
+      env.DB.prepare(`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, attempt, state)
+        VALUES ('row-a', ?1, 'deploy', ?2, ?3, 'push', 1, 'building')`).bind(SCOPE, "a".repeat(40), rev("a")),
+    ]);
+    // The amd64 image makes the revision ready; a verify run passes.
+    await record("a", "amd64");
+    await settleScenarioRevisions(env, { rev: rev("a") });
+    expect(await revisionState(WEB)).toBe("ready");
+    await drive();
+    await finish("run-1", "passed");
+    await drive();
+    expect(await scenario(WEB)).toMatchObject({ live_rev: null });
+    expect(await commit()).toEqual({ state: "waiting", detail: `- ${WEB}: waiting for its arm64 images` });
+    // The arm64 image arrives: the lab goes live.
+    await record("a", "arm64");
+    await drive();
+    expect(await scenario(WEB)).toMatchObject({ live_rev: rev("a") });
+    expect((await commit())!.state).toBe("live");
+  });
+
+  it("fails when an architecture's image is still missing after a day", async () => {
+    await env.DB.prepare("UPDATE scenario_sources SET image_producer = 'pipeline' WHERE scope_key = ?1").bind(SCOPE).run();
+    await ingestSourceBundle(env, {
+      organizationId: ORG, rev: rev("a"), gzip: new Uint8Array(gzipSync(JSON.stringify(bundleFixture))), stored: false,
+      imageProducer: "pipeline", pipelineCanPush: true,
+    });
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "a".repeat(40)),
+      env.DB.prepare(`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, attempt, state)
+        VALUES ('row-a', ?1, 'deploy', ?2, ?3, 'push', 1, 'building')`).bind(SCOPE, "a".repeat(40), rev("a")),
+    ]);
+    await record("a", "amd64");
+    await settleScenarioRevisions(env, { rev: rev("a") });
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
+    await drive();
+    now += DEPLOY_JOB_DEADLINE_MS;
+    await drive();
+    expect(await commit()).toEqual({ state: "failed", detail: `- ${WEB}: its arm64 images did not arrive within 24 hours` });
+    expect(await scenario(WEB)).toMatchObject({ live_rev: null });
   });
 });
 

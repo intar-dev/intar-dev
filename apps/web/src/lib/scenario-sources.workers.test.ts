@@ -24,6 +24,7 @@ import { arm64MachineImages } from "@/lib/scenario-runs/revision-begin";
 import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { syncBuilderDesiredState } from "@/lib/machine-builds";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
+import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
   BIND_REFUSAL_MESSAGE,
   changeScenarioSource,
@@ -493,6 +494,8 @@ describe("what only a platform administrator changes", () => {
       { action: "image_producer", producer: "pipeline" },
       { action: "image_producer", producer: "builder" },
       { action: "runner_policy", allow_self_hosted: true },
+      { action: "promotion", promotion: "automatic" },
+      { action: "promotion", promotion: "manual" },
       { action: "forget_image", build_key: KEY, architecture: "amd64" },
     ];
     for (const body of bodies) {
@@ -502,13 +505,14 @@ describe("what only a platform administrator changes", () => {
     for (const body of bodies) {
       await expect(as(body)).rejects.toMatchObject({ status: 404, code: "not_found" });
     }
-    expect(await binding()).toMatchObject({ imageProducer: "builder", allowSelfHostedRunners: false });
+    expect(await binding()).toMatchObject({ imageProducer: "builder", allowSelfHostedRunners: false, promotion: "manual" });
     expect(await db().select().from(scopeMachineImages)).toHaveLength(1);
 
     await db().update(user).set({ role: "admin" }).where(eq(user.id, ADMIN));
     for (const body of [
       { action: "image_producer", producer: "host" },
       { action: "runner_policy", allow_self_hosted: "yes" },
+      { action: "promotion", promotion: "always" },
       { action: "forget_image", build_key: "latest", architecture: "amd64" },
       { action: "forget_image", build_key: KEY, architecture: "riscv" },
     ]) {
@@ -605,13 +609,51 @@ describe("what only a platform administrator changes", () => {
     expect((await db().select().from(scenarioRevisions))[0]).toMatchObject({ state: "ready" });
   });
 
-  it("starts a reconnected source on the builder and on GitHub's runners", async () => {
-    await insertBinding({ mode: "push", imageProducer: "pipeline", allowSelfHostedRunners: true, disconnectedAt: 1, disconnectReason: "admin" });
+  it("starts a reconnected source on the builder, on GitHub's runners and with manual promotion", async () => {
+    await insertBinding({
+      mode: "push", imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic",
+      disconnectedAt: 1, disconnectReason: "admin",
+    });
     github();
     await change({ action: "connect", repository: "acme/labs" });
     expect(await binding()).toMatchObject({
-      githubRepositoryId: 42, mode: "pull", imageProducer: "builder", allowSelfHostedRunners: false, disconnectedAt: null,
+      githubRepositoryId: 42, mode: "pull", imageProducer: "builder", allowSelfHostedRunners: false, promotion: "manual",
+      disconnectedAt: null,
     });
+  });
+
+  it("switches promotion to automatic only with its flag and for a connected source, and back always", async () => {
+    const promotionOn = new StaticFeatureToggleService({ scenario_git_sources: true, scenario_automatic_promotion: true });
+    await insertBinding({ mode: "pull" });
+    // The sources flag and the pipeline flag are not this one.
+    await expect(as({ action: "promotion", promotion: "automatic" }, pipelineOn)).rejects.toMatchObject({ status: 404 });
+    expect(await binding()).toMatchObject({ promotion: "manual", pokedAt: null });
+    expect(await as({ action: "promotion", promotion: "automatic" }, promotionOn)).toMatchObject({ promotion: "automatic" });
+    // The source's pass is asked for at once. It had no head commit to leave alone.
+    expect(await binding()).toMatchObject({ promotionAfter: null });
+    expect((await binding())!.pokedAt).not.toBeNull();
+    // Back with every flag off.
+    await db().update(scenarioSources).set({ pokedAt: null });
+    expect(await as({ action: "promotion", promotion: "manual" }, disabled)).toMatchObject({ promotion: "manual" });
+    expect((await binding())!.pokedAt).not.toBeNull();
+    // The commit that is the head at the switch is remembered, with its attempt.
+    const digest = await sourceCompileDigest();
+    await db().update(scenarioSources).set({ headSha: "a".repeat(40) });
+    await db().insert(scenarioSourceCommits).values({
+      id: "head", scopeKey: ORG_SCOPE.key, purpose: "deploy", sha: "a".repeat(40), rev: `git-9-${"a".repeat(40)}-${digest}`,
+      via: "push", state: "building", attempt: 3,
+    });
+    await as({ action: "promotion", promotion: "automatic" }, promotionOn);
+    expect(await binding()).toMatchObject({ promotion: "automatic", promotionAfter: "head:3" });
+    await as({ action: "promotion", promotion: "manual" }, disabled);
+    expect(await binding()).toMatchObject({ promotion: "manual", promotionAfter: null });
+    // A disconnected source gets no job, but can still be set back.
+    await db().update(scenarioSources).set({ disconnectedAt: 1, disconnectReason: "admin", promotion: "automatic" });
+    await expect(as({ action: "promotion", promotion: "automatic" }, promotionOn)).rejects.toMatchObject({
+      status: 409, code: "scenario_source_not_connected",
+    });
+    await as({ action: "promotion", promotion: "manual" }, disabled);
+    expect(await binding()).toMatchObject({ promotion: "manual" });
   });
 
   it("closes the sessions of self-hosted runners when they are no longer allowed", async () => {

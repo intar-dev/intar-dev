@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "8196b9a9-8c15-41b8-89d4-d32e691ee9ea",
-  "prevId": "0e47420c-0d96-4c49-b01f-2dd7bda9c615",
+  "id": "2aacebda-5edf-4db2-8d50-bd3393530293",
+  "prevId": "8196b9a9-8c15-41b8-89d4-d32e691ee9ea",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -6928,6 +6928,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'manual'"
+        },
+        "promotion_after": {
+          "name": "promotion_after",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "head_sha": {
           "name": "head_sha",

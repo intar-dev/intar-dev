@@ -95,6 +95,13 @@ export const scenarioSources = sqliteTable(
      * administrator, or the source's own pass.
      */
     promotion: text("promotion").$type<SourcePromotion>().default("manual").notNull(),
+    /**
+     * The head's deploy row and attempt, as `<id>:<attempt>`, when the
+     * source was switched to automatic: the job leaves that commit as the
+     * administrator left it and takes up what comes after. NULL when the
+     * head had none.
+     */
+    promotionAfter: text("promotion_after"),
     headSha: text("head_sha"),
     headObservedAt: integer("head_observed_at").default(0).notNull(),
     pokedAt: integer("poked_at"),
