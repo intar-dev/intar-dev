@@ -23,6 +23,7 @@ import {
   handleManifestPut,
   machineBuildKey,
 } from "./push";
+import { limitPipelineRequest } from "./pipeline-rate-limit";
 import { settleScenarioRevisions } from "@/lib/machine-builds";
 import {
   handleRegistryAdmissionEnforcement,
@@ -56,6 +57,10 @@ export async function handleImageRegistryRequest(
   env: Cloudflare.Env,
 ): Promise<Response | null> {
   const url = new URL(request.url);
+
+  // Before anything is read for the request; it names the paths it counts.
+  const limited = await limitPipelineRequest(request, env, url.pathname);
+  if (limited) return limited;
 
   // Session and admission control. These routes never take a writer lease of
   // their own, otherwise a session could not open while a sweep is settling.

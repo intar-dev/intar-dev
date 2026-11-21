@@ -1081,6 +1081,72 @@ describe("a builder next to a pipeline", () => {
   });
 });
 
+describe("the rate limit on a pipeline's calls", () => {
+  const BLOB = `/registry/v1/blobs/sha256:${"e".repeat(64)}`;
+  let keys: string[];
+  let answer: () => Promise<{ success: boolean }>;
+
+  beforeEach(() => {
+    keys = [];
+    answer = async () => ({ success: false });
+    testEnv = {
+      ...testEnv,
+      REGISTRY_PIPELINE_RATE_LIMITER: { limit: async ({ key }: { key: string }) => { keys.push(key); return answer(); } },
+    } as unknown as Cloudflare.Env;
+  });
+
+  it("refuses a session's blob, manifest and result calls before its token is looked up", async () => {
+    // A token no session has would be answered 401 by the lookup.
+    const made = "ips_made-up";
+    for (const [method, path] of [
+      ["HEAD", BLOB], ["PUT", BLOB], ["PUT", `/registry/v1/manifests/sha256:${"e".repeat(64)}`],
+      ["POST", `/registry/v1/builds/${KEY_HEX}/result`],
+    ] as const) {
+      const response = await call(method, path, { bearer: made });
+      expect([method, response.status, response.headers.get("retry-after")]).toEqual([method, 429, "10"]);
+    }
+    // Counted on the session, by a key that does not hold the token.
+    expect(new Set(keys).size).toBe(1);
+    expect(keys[0]).toMatch(/^session:[a-f0-9]{64}$/);
+    expect(keys[0]).not.toContain(made);
+    await call("HEAD", BLOB, { bearer: "ips_another" });
+    expect(new Set(keys).size).toBe(2);
+  });
+
+  it("counts an open on the client's address, before its token is verified", async () => {
+    const response = await call("POST", PIPELINE_SESSIONS_PATH, {
+      bearer: "not-a-token", body: "{}", headers: { "cf-connecting-ip": "203.0.113.7" },
+    });
+    expect(response.status).toBe(429);
+    expect(keys).toEqual(["open:203.0.113.7"]);
+  });
+
+  it("limits neither the routes the CLI does not try again nor any other credential", async () => {
+    await seedBundle();
+    answer = async () => ({ success: true });
+    const token = await session();
+    keys = [];
+    answer = async () => ({ success: false });
+    // A heartbeat, a completion and a close under a session token.
+    for (const path of ["/registry/v1/upload-sessions", "/registry/v1/upload-sessions/heartbeat", "/registry/v1/upload-sessions/complete"]) {
+      expect((await call("POST", path, { bearer: token, body: "{}" })).status).not.toBe(429);
+    }
+    expect((await call("POST", PIPELINE_SESSIONS_CLOSE_PATH, { bearer: token })).status).toBe(200);
+    // The publish token and a made-up agent credential on a limited path.
+    expect((await call("HEAD", BLOB, { bearer: "test-publish-token" })).status).not.toBe(429);
+    expect((await call("HEAD", BLOB, { bearer: "some.agent.jwt" })).status).not.toBe(429);
+    expect(keys).toEqual([]);
+  });
+
+  it("admits when the limiter cannot be asked", async () => {
+    await seedBundle();
+    answer = async () => { throw new Error("limiter down"); };
+    const token = await session();
+    expect((await pushImage(token, KEY_HEX)).response.status).toBe(201);
+    expect(keys.length).toBeGreaterThan(2);
+  });
+});
+
 describe("an organization's own pipeline", () => {
   const ORG = "org-a";
   const ORG_SCOPE = `organization:${ORG}`;

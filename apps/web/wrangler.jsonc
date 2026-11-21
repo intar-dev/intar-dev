@@ -141,6 +141,17 @@
         "period": 60,
       },
     },
+    {
+      // Blob, manifest and result calls of one pipeline upload session. An
+      // image is a layer per 4 MiB, each a HEAD and a PUT, eight at a time:
+      // the limit is above what one push can send, not near it.
+      "name": "REGISTRY_PIPELINE_RATE_LIMITER",
+      "namespace_id": "88427093",
+      "simple": {
+        "limit": 2000,
+        "period": 10,
+      },
+    },
   ],
   "durable_objects": {
     "bindings": [
