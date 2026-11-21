@@ -1,5 +1,6 @@
 /// <reference types="@cloudflare/vitest-plugin/types" />
 
+import { gzipSync } from "node:zlib";
 import { env } from "cloudflare:workers";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -10,6 +11,8 @@ import {
   agentBootstrapTokens,
   agentHosts,
   bundles,
+  member,
+  organization,
   pipelineUploadSessions,
   scenarioRevisions,
   scenarioSourceCommits,
@@ -18,6 +21,7 @@ import {
   scopeMachineImages,
   user,
 } from "@/db/schema";
+import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
 import { GITHUB_ACTIONS_ISSUER } from "@/lib/github-oidc";
 import {
   acquireRegistrySweep,
@@ -31,7 +35,11 @@ import {
 } from "@/lib/image-registry-admission";
 import { OCI_SWEEP_AGE_GUARD_MS, runOciSweep } from "@/lib/oci-registry-sweep";
 import { PIPELINE_SCOPE_STORAGE_BYTES, PIPELINE_SESSION_MAX_BYTES } from "@/lib/pipeline-upload-sessions";
+import { ingestSourceBundle } from "@/lib/scenario-bundles";
+import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
+import { moveLiveRevision } from "@/lib/scenario-revisions";
 import { changeScenarioSource, scenarioSourceScope } from "@/lib/scenario-sources";
+import { driveDeployJob } from "@/lib/source-deploy-job";
 import { arm64MachineImages } from "@/lib/scenario-runs/revision-begin";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -1067,5 +1075,134 @@ describe("a builder next to a pipeline", () => {
     // A builder's token is not a way to close or open a pipeline's session.
     expect((await call("POST", PIPELINE_SESSIONS_CLOSE_PATH, { bearer: builder })).status).toBe(401);
     expect((await open({ bearer: builder })).status).toBe(401);
+  });
+});
+
+describe("an organization's own pipeline", () => {
+  const ORG = "org-a";
+  const ORG_SCOPE = `organization:${ORG}`;
+  const OWNER = "org-owner";
+  const ORG_REPO = 77;
+  const LAB = "acme/broken-nginx";
+  let rev: string;
+  let digest: string;
+
+  beforeEach(async () => {
+    digest = await sourceCompileDigest();
+    rev = `git-${ORG_REPO}-${SHA}-${digest}`;
+    await createFixtureMember({ d1: env.DB, userId: OWNER, githubAccountId: "2000" });
+    await db().insert(organization).values({ id: ORG, name: "Acme", slug: "acme", createdAt: new Date() });
+    await db().insert(member).values({ id: "m-owner", organizationId: ORG, userId: OWNER, role: "owner", createdAt: new Date() });
+    await db().insert(scenarioSources).values({
+      scopeKey: ORG_SCOPE, organizationId: ORG, githubInstallationId: ORG_REPO, githubRepositoryId: ORG_REPO,
+      githubRepository: "acme/labs", defaultBranch: "main", mode: "push", imageProducer: "pipeline",
+      promotion: "automatic", headSha: SHA, boundByUserId: OWNER,
+    });
+  });
+
+  const orgClaims = { repository_id: String(ORG_REPO) };
+  const images = () => db().select().from(scopeMachineImages).orderBy(scopeMachineImages.architecture);
+  const lab = () => env.DB.prepare("SELECT live_rev, scope_key, organization_id FROM scenarios WHERE id = ?1").bind(LAB)
+    .first<{ live_rev: string | null; scope_key: string; organization_id: string | null }>();
+  const revisionState = () => env.DB.prepare("SELECT state FROM scenario_revisions WHERE scenario_id = ?1 AND rev = ?2")
+    .bind(LAB, rev).first<string>("state");
+
+  it("publishes a lab from its own repository into its own scope: bundle, session, images, check, live", async () => {
+    // The bundle its workflow uploaded, ingested for a pipeline.
+    expect(await ingestSourceBundle(env, {
+      organizationId: ORG, rev, gzip: new Uint8Array(gzipSync(JSON.stringify(bundleFixture))), stored: false,
+      imageProducer: "pipeline", pipelineCanPush: true,
+    })).toBeNull();
+    await db().insert(scenarioSourceCommits).values({
+      id: "head", scopeKey: ORG_SCOPE, purpose: "deploy", sha: SHA, rev, via: "push", state: "building", attempt: 1,
+    });
+    expect(await lab()).toEqual({ live_rev: null, scope_key: ORG_SCOPE, organization_id: ORG });
+    expect(await revisionState()).toBe("building");
+    const keyHex = (await env.DB.prepare(
+      "SELECT json_extract(doc_json, '$.machines[0].build_key') AS key FROM scenario_revisions WHERE scenario_id = ?1",
+    ).bind(LAB).first<string>("key"))!.slice("sha256:".length);
+
+    // Its pipeline opens a session with its own repository's token, and no other's.
+    // The platform repository's token names another repository than the rev.
+    expect((await open({ rev, claims: { repository_id: String(REPO) } })).status).toBe(400);
+    const opened = await open({ rev, claims: orgClaims });
+    expect(opened.status).toBe(201);
+    const token = ((await opened.json()) as { token: string }).token;
+    expect(await db().select({ scopeKey: pipelineUploadSessions.scopeKey, repo: pipelineUploadSessions.githubRepositoryId })
+      .from(pipelineUploadSessions)).toEqual([{ scopeKey: ORG_SCOPE, repo: ORG_REPO }]);
+
+    // It pushes and records both architectures; the amd64 image makes the revision ready.
+    const record = (imageDigest: string, query: string) => call("POST", `/registry/v1/builds/${keyHex}/result${query}`, {
+      bearer: token, body: JSON.stringify({ image_digest: imageDigest }),
+    });
+    const amd64 = await pushImage(token, keyHex);
+    expect(amd64.response.status).toBe(201);
+    expect((await record(amd64.digest, "")).status).toBe(201);
+    expect(await revisionState()).toBe("ready");
+    const arm64 = await pushImage(token, keyHex, { architecture: "arm64", label: "arm" });
+    expect((await record(arm64.digest, "?arch=arm64")).status).toBe(201);
+    expect((await images()).map((image) => [image.scopeKey, image.architecture, image.githubRepositoryId])).toEqual([
+      [ORG_SCOPE, "amd64", ORG_REPO], [ORG_SCOPE, "arm64", ORG_REPO],
+    ]);
+
+    // Its source's job checks the lab and puts it live. The verify run is
+    // a stand-in: it passes at once.
+    const stored = new Map<string, unknown>();
+    const storage = {
+      get: async <T>(key: string) => stored.get(key) as T | undefined,
+      put: async (key: string, value: unknown) => { stored.set(key, structuredClone(value)); },
+      delete: async (key: string) => stored.delete(key),
+    } as unknown as Pick<DurableObjectStorage, "get" | "put" | "delete">;
+    const started: string[] = [];
+    const deps = {
+      beginVerifyRun: async (input: { scenarioId: string; rev: string; restoreCheck?: boolean }) => {
+        if (input.restoreCheck) throw new Error("no restore check here");
+        started.push(input.scenarioId);
+        await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified', verify_run_id = 'run-1' WHERE scenario_id = ?1 AND rev = ?2")
+          .bind(input.scenarioId, input.rev).run();
+        return { runId: "run-1" };
+      },
+      endVerifyRun: async () => undefined,
+      moveLive: moveLiveRevision,
+    };
+    const drive = () => driveDeployJob({ db: env.DB, storage, scopeKey: ORG_SCOPE, digest, now: Date.now(), deps });
+    await drive();
+    expect(started).toEqual([LAB]);
+    await drive();
+    expect(await lab()).toMatchObject({ live_rev: rev });
+    expect(await env.DB.prepare("SELECT state FROM scenario_source_commits WHERE id = 'head'").first("state")).toBe("live");
+    // The catalog is its scope's, and nothing of it reached the platform's.
+    expect(await env.DB.prepare("SELECT scope_key, source_revision FROM course_catalogs").all().then((rows) => rows.results))
+      .toEqual([{ scope_key: ORG_SCOPE, source_revision: rev }]);
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM scenarios WHERE scope_key = 'public'").first("n")).toBe(0);
+  });
+
+  it("serves only its own scope: the platform's revision of the same build key stays without an image", async () => {
+    await ingestSourceBundle(env, {
+      organizationId: ORG, rev, gzip: new Uint8Array(gzipSync(JSON.stringify(bundleFixture))), stored: false,
+      imageProducer: "pipeline", pipelineCanPush: true,
+    });
+    const platformRev = `git-${REPO}-${SHA}-${digest}`;
+    await ingestSourceBundle(env, {
+      organizationId: null, rev: platformRev, gzip: new Uint8Array(gzipSync(JSON.stringify(bundleFixture))), stored: false,
+      imageProducer: "pipeline", pipelineCanPush: true,
+    });
+    const keys = await env.DB.prepare(
+      "SELECT scenario_id, json_extract(doc_json, '$.machines[0].build_key') AS key FROM scenario_revisions ORDER BY scenario_id",
+    ).all<{ scenario_id: string; key: string }>();
+    // The same lab definition has the same key in both scopes.
+    expect(new Set(keys.results.map((row) => row.key)).size).toBe(1);
+    const keyHex = keys.results[0]!.key.slice("sha256:".length);
+
+    const token = ((await (await open({ rev, claims: orgClaims })).json()) as { token: string }).token;
+    const image = await pushImage(token, keyHex);
+    expect((await call("POST", `/registry/v1/builds/${keyHex}/result`, {
+      bearer: token, body: JSON.stringify({ image_digest: image.digest }),
+    })).status).toBe(201);
+    const states = await env.DB.prepare("SELECT scenario_id, state FROM scenario_revisions ORDER BY scenario_id")
+      .all<{ scenario_id: string; state: string }>();
+    expect(states.results).toEqual([
+      { scenario_id: LAB, state: "ready" }, { scenario_id: "intar/broken-nginx", state: "building" },
+    ]);
   });
 });
