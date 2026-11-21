@@ -378,12 +378,12 @@ jobs:
           targets: aarch64-unknown-linux-musl
           namespace-cache: ${{ matrix.runner != 'ubuntu-24.04' }}
       - name: Build the app's bundle
-        if: matrix.project == 'jumper'
+        if: matrix.project == 'intar-desktop'
         env:
           VERSION: ${{ matrix.version }}
         run: cuenv task -p ci --package ci release-build-jumper-macos
       - name: Build release artifacts
-        if: matrix.project != 'jumper'
+        if: matrix.project != 'intar-desktop'
         env:
           PACKAGE: ${{ matrix.package }}
           BINARY: ${{ matrix.binary }}

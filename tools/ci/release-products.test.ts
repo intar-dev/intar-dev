@@ -19,7 +19,7 @@ const shipped: Record<string, string[]> = {
 const packaged: Record<string, string[]> = {
   "intar-agent": ["tools/workflows/release/build-release-artifacts.sh"],
   // The app's bundle is its script's, with the QEMU the pin names in it.
-  jumper: [
+  "intar-desktop": [
     "tools/workflows/release/build-jumper-macos.sh",
     "tools/workflows/qemu/pins.txt",
   ],

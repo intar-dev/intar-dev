@@ -1,6 +1,6 @@
 # Changelog
 
-## jumper/v0.1.0 (2026-11-21)
+## desktop/v0.1.0 (2026-11-21)
 
 The first release of the desktop app: run a lab's machine on your own computer.
 

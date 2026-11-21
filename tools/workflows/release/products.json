@@ -85,10 +85,10 @@
     ]
   },
   {
-    "project": "jumper",
-    "prefix": "jumper",
+    "project": "intar-desktop",
+    "prefix": "desktop",
     "package": "jumper",
-    "binary": "jumper",
+    "binary": "intar-desktop",
     "manifest": "apps/jumper/Cargo.toml",
     "runner": "namespace-profile-macos-arm64-smol",
     "paths": [

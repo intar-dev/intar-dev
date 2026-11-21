@@ -127,21 +127,21 @@ jobs:
           targets: aarch64-unknown-linux-musl
           namespace-cache: "false"
       - name: Run checks
-        if: matrix.ci_passed != true && matrix.project != 'jumper'
+        if: matrix.ci_passed != true && matrix.project != 'intar-desktop'
         run: cuenv task verify
       - name: Run the app's Clippy
-        if: matrix.ci_passed != true && matrix.project == 'jumper'
+        if: matrix.ci_passed != true && matrix.project == 'intar-desktop'
         run: cuenv task clippy-app
       - name: Run the app's tests
-        if: matrix.ci_passed != true && matrix.project == 'jumper'
+        if: matrix.ci_passed != true && matrix.project == 'intar-desktop'
         run: cuenv task test-app
       - name: Build the app's bundle
-        if: matrix.project == 'jumper'
+        if: matrix.project == 'intar-desktop'
         env:
           VERSION: ${{ matrix.version }}
         run: cuenv task -p ci --package ci release-build-jumper-macos
       - name: Build release artifacts
-        if: matrix.project != 'jumper'
+        if: matrix.project != 'intar-desktop'
         env:
           PACKAGE: ${{ matrix.package }}
           BINARY: ${{ matrix.binary }}

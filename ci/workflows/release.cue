@@ -236,21 +236,21 @@ let _gitCliff = {
 		if !#dryRun {
 			gha.#Run & {
 				name:  "Run checks"
-				if:    "matrix.ci_passed != true && matrix.project != 'jumper'"
+				if:    "matrix.ci_passed != true && matrix.project != 'intar-desktop'"
 				#task: "verify"
 			}
 		},
 		if !#dryRun {
 			gha.#Run & {
 				name:  "Run the app's Clippy"
-				if:    "matrix.ci_passed != true && matrix.project == 'jumper'"
+				if:    "matrix.ci_passed != true && matrix.project == 'intar-desktop'"
 				#task: "clippy-app"
 			}
 		},
 		if !#dryRun {
 			gha.#Run & {
 				name:  "Run the app's tests"
-				if:    "matrix.ci_passed != true && matrix.project == 'jumper'"
+				if:    "matrix.ci_passed != true && matrix.project == 'intar-desktop'"
 				#task: "test-app"
 			}
 		},
@@ -258,13 +258,13 @@ let _gitCliff = {
 		// Linux archive.
 		{
 			name: "Build the app's bundle"
-			if:   "matrix.project == 'jumper'"
+			if:   "matrix.project == 'intar-desktop'"
 			env: VERSION: "${{ matrix.version }}"
 			#StepTask & {#task: "release-build-jumper-macos"}
 		},
 		{
 			name: "Build release artifacts"
-			if:   "matrix.project != 'jumper'"
+			if:   "matrix.project != 'intar-desktop'"
 			env: {
 				PACKAGE: "${{ matrix.package }}"
 				BINARY:  "${{ matrix.binary }}"

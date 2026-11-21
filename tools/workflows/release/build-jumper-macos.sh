@@ -3,7 +3,7 @@
 # check the bundle (`cuenv task bundle-app`).
 # Builds the desktop app as a macOS bundle for Apple silicon,
 # target/release/bundle/Intar.app, and what a release publishes of it:
-# dist/jumper_<version>_macos_arm64.zip and its checksums, and nothing else in
+# dist/intar-desktop_<version>_macos_arm64.zip and its checksums, and nothing else in
 # dist/, since a release uploads every file there. A release sets VERSION to
 # the version it publishes.
 #
@@ -30,7 +30,7 @@ bash "${root}/tools/workflows/qemu/fetch.sh" release
 qemu="target/release/qemu"
 
 app="target/release/bundle/Intar.app"
-rm -rf "${app}" dist/jumper_*_macos_arm64.zip dist/jumper_*_checksums.txt
+rm -rf "${app}" dist/intar-desktop_*_macos_arm64.zip dist/intar-desktop_*_checksums.txt
 mkdir -p dist "${app}/Contents/MacOS" "${app}/Contents/Helpers" "${app}/Contents/Resources/qemu"
 cp "${built}" "${app}/Contents/MacOS/jumper"
 # Only programs in the code directories: any other file there is signed
@@ -113,7 +113,8 @@ if grep -Ev '^[[:space:]]+(/usr/lib/|/System/Library/)' <<< "${linked}"; then
   echo "The app needs a library that macOS does not ship." >&2; exit 1
 fi
 
-zip="jumper_${version}_macos_arm64.zip"
+# The product is intar-desktop; the program in it, and its crate, are jumper.
+zip="intar-desktop_${version}_macos_arm64.zip"
 # Without resource forks and extended attributes: every signature here is in
 # a program or in _CodeSignature, and the `._` entries ditto would add for
 # them are plain files to any other unzipper, which break the seal.
@@ -122,6 +123,6 @@ ditto -c -k --norsrc --noextattr --keepParent "${app}" "dist/${zip}"
 unzip -q "dist/${zip}" -d "${scratch}/unzipped"
 codesign --verify --strict --deep "${scratch}/unzipped/Intar.app" ||
   { echo "The bundle's signature does not survive the zip." >&2; exit 1; }
-(cd dist && shasum -a 256 "${zip}" > "jumper_${version}_checksums.txt")
+(cd dist && shasum -a 256 "${zip}" > "intar-desktop_${version}_checksums.txt")
 echo "Built dist/${zip}: $(du -sh "${app}" | cut -f1) unpacked, $(du -h "dist/${zip}" | cut -f1) zipped."
 echo "The bundle is ${app}."

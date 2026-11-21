@@ -37,7 +37,8 @@ and Markdown-first Course source under `courses/`. Each Course contains
 
 ## Releasing
 
-The agent, builder, image CLI, kino, Stargate, and the desktop app (`jumper`)
+The agent, builder, image CLI, kino, Stargate, and the desktop app
+(`intar-desktop`, tagged `desktop/vX.Y.Z`; its crate and program are `jumper`)
 are released as GitHub releases tagged `<prefix>/vX.Y.Z`. Nothing is
 published to crates.io or any other registry. The desktop app's release is a
 macOS bundle for Apple silicon, built on a Mac by
@@ -127,8 +128,8 @@ before the workflow attested them have no attestation. Then:
 - **Desktop app:** merge the website pin pull request that the release
   opens. From the website deploy that follows, an installed app is offered
   the release and installs it itself; nothing is rolled out by hand. The
-  download is `jumper_X.Y.Z_macos_arm64.zip`; on a Mac, check it with
-  `shasum -a 256 --check jumper_X.Y.Z_checksums.txt`.
+  download is `intar-desktop_X.Y.Z_macos_arm64.zip`; on a Mac, check it with
+  `shasum -a 256 --check intar-desktop_X.Y.Z_checksums.txt`.
 - **Agent on a personal host:** `sudo intar-host update`, or
   `--version X.Y.Z` for a specific release. It downloads the release from GitHub
   itself; see `deploy/personal-metal/README.md`.

@@ -4,7 +4,7 @@
 # the scenario compiler at intar-image-cli (its version and the published
 # archive digests), tools/deploy/kino-pin.json at the Kino artifact of the
 # kino release (the digest image-ops kino-promote pushes it under), and the
-# release installed desktop apps are offered at jumper (its version and the
+# release installed desktop apps are offered at intar-desktop (its version and the
 # digest of its published download).
 set -euo pipefail
 # A re-run keeps its run's commit. Only the run for main's tip may rewrite the
@@ -94,13 +94,13 @@ fi
 # digest it checks the download by. The app takes the digest from here and
 # not from the release, so a replaced download is refused.
 app_version="$(manifest_version apps/jumper/Cargo.toml)"
-app_tag="jumper/v${app_version}"
+app_tag="desktop/v${app_version}"
 if [ -z "$(pinned JUMPER_RELEASE_JSON)" ]; then
   echo "${wrangler} has no JUMPER_RELEASE_JSON; the desktop app is offered no release."
 elif published "${app_tag}"; then
   before="$(pinned JUMPER_RELEASE_JSON)"
   app_sums="$(mktemp -d)/checksums.txt"
-  gh release download "${app_tag}" --pattern "jumper_${app_version}_checksums.txt" --output "${app_sums}"
+  gh release download "${app_tag}" --pattern "intar-desktop_${app_version}_checksums.txt" --output "${app_sums}"
   VERSION="${app_version}" SUMS="${app_sums}" WRANGLER="${wrangler}" python3 - <<'PY'
 import json
 import os
@@ -111,7 +111,7 @@ version = os.environ["VERSION"]
 releases = {}
 for line in pathlib.Path(os.environ["SUMS"]).read_text().splitlines():
     digest, name = line.split("  ", 1)
-    match = re.fullmatch(rf"jumper_{re.escape(version)}_(macos_arm64)\.zip", name)
+    match = re.fullmatch(rf"intar-desktop_{re.escape(version)}_(macos_arm64)\.zip", name)
     if match and re.fullmatch(r"[0-9a-f]{64}", digest):
         releases[match[1]] = {"version": version, "sha256": digest}
 if sorted(releases) != ["macos_arm64"]:
@@ -128,9 +128,9 @@ if count != 1:
 path.write_text(text)
 PY
   if [ "${before}" = "$(pinned JUMPER_RELEASE_JSON)" ]; then
-    echo "The website already offers jumper ${app_version}."
+    echo "The website already offers intar-desktop ${app_version}."
   else
-    changes+=("the desktop app to jumper ${app_version}")
+    changes+=("the desktop app to intar-desktop ${app_version}")
   fi
 fi
 
