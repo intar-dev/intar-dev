@@ -14,10 +14,10 @@ name: Intar scenario publish
 # 4 compiler_outdated, 75 transient.
 #
 # What a caller should know:
-# - Image builds were measured on Linux amd64 with KVM, 16 threads and 32 GiB:
-#   both architectures of an image side by side, arm64 by emulation. A runner
-#   with less builds them one after the other; GitHub's own runner is not
-#   measured. The image job needs Docker and root.
+# - Image builds were measured on Linux amd64 with KVM, 16 threads and 32 GiB,
+#   arm64 by emulation; GitHub's own runner is not measured. The image jobs
+#   need Docker and root. A build for the runner's own architecture gets
+#   `cpus` processors, an emulated one two at most.
 # - A runner that is not GitHub's own (`runner`, and `light-runner` if set)
 #   publishes only for a source that allows self-hosted runners.
 # - With `cache: namespace` the image job keeps its caches on a Namespace
@@ -26,15 +26,19 @@ name: Intar scenario publish
 #   a checkpoint is found again only by a build with the same number.
 # - Runs of one branch queue behind each other, so a text-only push waits for
 #   a running image build of the push before it.
-# - Each image Intar lacks is a job of its own, and they run one at a time.
-#   One image's failure leaves the others to build and push, and "Re-run
-#   failed jobs" builds only what failed. A publish that lacks more than 256
-#   images cannot start its image jobs. Without a cache every job starts
-#   cold: nothing one image built is there for the next.
-# - An image whose arm64 build fails is not pushed for amd64 either. A lab can
-#   still become ready from another run's amd64 image while this run is red.
+# - Each image Intar lacks is a job an architecture, and they run one at a
+#   time: every amd64 image first, then every arm64 image. One image's
+#   failure leaves the others to build and push, and "Re-run failed jobs"
+#   builds only what failed. A publish that lacks more than 256 images cannot
+#   start its image jobs. Without a cache every job starts cold: nothing one
+#   image built is there for the next.
+# - An image's amd64 build is pushed when it is done, whatever its arm64 build
+#   comes to. Its arm64 job starts only when its amd64 job of the same run
+#   built and pushed; when that one failed, the arm64 job fails without
+#   building, so that "Re-run failed jobs" runs both.
 # - When Intar takes no more images of a commit, because a newer one is the
-#   head, each remaining job still builds its image before it learns so.
+#   head, each remaining amd64 job still builds its image before it learns
+#   so; the arm64 job of an image whose amd64 job learned so builds nothing.
 
 on:
   workflow_call:
@@ -130,7 +134,8 @@ jobs:
     outputs:
       rev: ${{ steps.upload.outputs.rev }}
       producer: ${{ steps.upload.outputs.producer }}
-      images: ${{ steps.upload.outputs.images }}
+      amd64: ${{ steps.upload.outputs.amd64 }}
+      arm64: ${{ steps.upload.outputs.arm64 }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -182,8 +187,8 @@ jobs:
               "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${INTAR_ORIGIN}" | jq -er '.value')"
             echo "::add-mask::${token}"
             status=0
-            # On success `plan` writes rev, producer, images and jobs as this
-            # step's outputs.
+            # On success `plan` writes rev and producer as this step's
+            # outputs; the image lists below are made of its answer.
             "${RUNNER_TEMP}/cli/intar-image-cli" plan \
               --url "${INTAR_ORIGIN}/registry/v1/sources/bundles" \
               --token "${token}" \
@@ -193,6 +198,15 @@ jobs:
             case "${status}" in
               0)
                 images="$(jq -r '.images | length' "${RUNNER_TEMP}/plan.json")"
+                # One list an architecture. `n` names an image in both, and
+                # `after_amd64` says its amd64 build is this run's too.
+                {
+                  echo "amd64=$(jq -c '[.images | to_entries[] | select(.value.archs | index("amd64"))
+                    | {target: .value.target, build_key: .value.build_key, n: .key}]' "${RUNNER_TEMP}/plan.json")"
+                  echo "arm64=$(jq -c '[.images | to_entries[] | select(.value.archs | index("arm64"))
+                    | {target: .value.target, build_key: .value.build_key, n: .key,
+                       after_amd64: (.value.archs | index("amd64") != null)}]' "${RUNNER_TEMP}/plan.json")"
+                } >> "${GITHUB_OUTPUT}"
                 if [ "$(jq -r '.producer' "${RUNNER_TEMP}/plan.json")" = pipeline ] && [ "${images}" != 0 ]; then
                   result="Accepted. This run builds ${images} image(s) next; Intar reports deploy progress on the commit's checks."
                 else
@@ -202,8 +216,8 @@ jobs:
                 ;;
               3)
                 result="Superseded: the default branch's head is now another commit, so this one was skipped. Follow that commit's run and checks."
-                # Nothing to build: the image job reads these.
-                { echo "rev=${rev}"; echo "producer="; echo "images=[]"; } >> "${GITHUB_OUTPUT}"
+                # Nothing to build: the image jobs read these.
+                { echo "rev=${rev}"; echo "producer="; echo "amd64=[]"; echo "arm64=[]"; } >> "${GITHUB_OUTPUT}"
                 break
                 ;;
               4)
@@ -236,23 +250,22 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
   images:
-    name: Build ${{ matrix.spec.target || inputs.build-only }}
+    name: Build ${{ matrix.spec.target || inputs.build-only }} amd64
     needs: [validate, publish]
-    # After a publish that has images to build for this source's own pipeline,
-    # or, with `build-only`, for a manual run that publishes nothing. Never
-    # for a pull request.
+    # After a publish that has amd64 images to build for this source's own
+    # pipeline, or, with `build-only`, for a manual run that publishes
+    # nothing. Never for a pull request.
     if: >-
       !cancelled() && needs.validate.result == 'success' && (
         (needs.publish.result == 'success' &&
          needs.publish.outputs.producer == 'pipeline' &&
-         needs.publish.outputs.images != '' &&
-         needs.publish.outputs.images != '[]') ||
+         needs.publish.outputs.amd64 != '' &&
+         needs.publish.outputs.amd64 != '[]') ||
         (inputs.build-only != '' && github.event_name == 'workflow_dispatch')
       )
-    # One job an image, one at a time: the builds of one image fill a runner,
-    # and the jobs of a run mount the same cache volume one after the other.
-    # A manual build-only run has the one image it names, for both
-    # architectures.
+    # One job an image and architecture, one at a time: a build fills a
+    # runner, and the jobs of a run mount the same cache volume one after the
+    # other. A manual build-only run has the one image it names.
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -261,21 +274,32 @@ jobs:
         spec: >-
           ${{ fromJSON(
             (inputs.build-only != '' && github.event_name == 'workflow_dispatch')
-            && '[{"build_key":"","archs":["amd64","arm64"]}]'
-            || needs.publish.outputs.images
+            && '[{"build_key":"","n":0}]'
+            || needs.publish.outputs.amd64
           ) }}
     runs-on: ${{ inputs.runner }}
-    # One image is 3 to 7 minutes cold on the measured runner, and several
-    # times that where its arm64 boot is emulated on few processors.
+    # An image is 3 to 7 minutes cold on the measured runner for its own
+    # architecture, and several times that emulated.
     timeout-minutes: 120
     permissions:
       contents: read
       id-token: write
-    steps:
+    env:
+      ARCH: amd64
+    steps: &image_steps
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      # Missing when that job did not pass; the build step says so.
+      - name: Read what this image's amd64 job came to
+        if: env.ARCH != 'amd64' && matrix.spec.after_amd64
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: intar-amd64-${{ matrix.spec.n }}
+          path: ${{ runner.temp }}/intar-first
 
       - name: Mount the cache volume
         if: inputs.cache == 'namespace' && !(inputs.build-only != '' && github.event_name == 'workflow_dispatch')
@@ -283,10 +307,10 @@ jobs:
         with:
           path: /home/runner/intar-cache
 
-      - name: Build, boot and push the images
+      - name: Build, boot and push the image
+        id: build
         env:
-          # This job's one image, as the list the loop below reads.
-          IMAGES: ${{ format('[{0}]', toJSON(matrix.spec)) }}
+          IMAGE: ${{ toJSON(matrix.spec) }}
           REV: ${{ needs.publish.outputs.rev }}
           # Only a manual run builds without publishing.
           BUILD_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.build-only || '' }}
@@ -297,6 +321,34 @@ jobs:
           work="${RUNNER_TEMP}/intar"
           mkdir -p "${work}/logs" "${work}/source" "${work}/cli"
           summary() { printf '%s\n' "$*" >> "${GITHUB_STEP_SUMMARY}"; }
+
+          target="$(jq -r '.target // empty' <<<"${IMAGE}")"
+          key="$(jq -r '.build_key' <<<"${IMAGE}")"
+          if [ -n "${BUILD_ONLY}" ]; then
+            # The matrix cannot carry the input into its one entry.
+            target="${BUILD_ONLY}"
+            CACHE=none
+          fi
+          summary "### \`${target}\` ${ARCH}"
+          summary ""
+
+          # An image's arm64 build follows its amd64 build of this run.
+          if [ "${ARCH}" != amd64 ] && [ "$(jq -r '.after_amd64 // false' <<<"${IMAGE}")" = true ]; then
+            first="$(cat "${RUNNER_TEMP}/intar-first/result" 2>/dev/null || true)"
+            case "${first}" in
+              pushed | built) ;;
+              superseded)
+                summary "Not built: Intar takes no more images of this commit."
+                echo "Intar takes no more images of this commit, as this image's amd64 job learned."
+                exit 0
+                ;;
+              *)
+                summary "Not built: this image's amd64 build did not pass in this run."
+                echo "The amd64 build of ${target} did not pass in this run, so its ${ARCH} build does not start. \"Re-run failed jobs\" runs both." >&2
+                exit 1
+                ;;
+            esac
+          fi
 
           # The CLI and the Kino Intar names now.
           curl --fail --silent --show-error --retry 20 --retry-delay 60 \
@@ -312,7 +364,7 @@ jobs:
             echo "Intar names intar-image-cli ${cli_version}; this workflow needs 0.15.0 or newer." >&2
             exit 1
           fi
-          # The images are of the bundle the upload compiled. A compiler that
+          # The image is of the bundle the upload compiled. A compiler that
           # changed since gives other build keys, refused only after the bake.
           if [ -z "${BUILD_ONLY}" ] && [[ "${REV}" != *"-${digest}" ]]; then
             echo "Intar's compiler changed since this commit was uploaded. Re-run all jobs." >&2
@@ -329,24 +381,12 @@ jobs:
           # out what the repository marks export-ignore.
           git archive --format=tar "${GITHUB_SHA}" | tar -x -C "${work}/source"
 
-          if [ -n "${BUILD_ONLY}" ]; then
-            # The matrix cannot carry the input into its one entry.
-            IMAGES="$(jq -c --arg target "${BUILD_ONLY}" 'map(.target = $target)' <<<"${IMAGES}")"
-            CACHE=none
-          fi
-
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 qemu-system-arm qemu-utils e2fsprogs zstd
 
           threads="$(nproc)"
           memory_mib="$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)"
-          # Two builds beside each other each take a 4 GiB build VM, and an
-          # emulated boot takes as many processors as its build was given.
-          side_by_side=0
-          if [ "${threads}" -ge 8 ] && [ "${memory_mib}" -ge 24000 ]; then
-            side_by_side=1
-          fi
-          # shellcheck disable=SC2153 # CPUS is this step's input, cpus what a build gets
+          # shellcheck disable=SC2153 # CPUS is this step's input, cpus what the build gets
           if ! [[ "${CPUS}" =~ ^[0-9]+$ ]]; then
             echo "cpus is a whole number, not \`${CPUS}\`." >&2
             exit 1
@@ -361,6 +401,19 @@ jobs:
           fi
           if [ "${cpus}" -gt "${threads}" ]; then
             cpus="${threads}"
+          fi
+          # An emulated machine gets two processors whatever `cpus` says.
+          case "$(uname -m)" in
+            x86_64) native=amd64 ;;
+            aarch64) native=arm64 ;;
+            *) native="" ;;
+          esac
+          how=native
+          if [ "${ARCH}" != "${native}" ]; then
+            how=emulated
+            if [ "${cpus}" -gt 2 ]; then
+              cpus=2
+            fi
           fi
 
           case "${CACHE}" in
@@ -391,132 +444,87 @@ jobs:
             exit 1
           fi
 
-          summary "### Intar images"
-          summary ""
-          summary "Runner: ${threads} threads, ${memory_mib} MiB; ${cpus} processors a build; architectures $([ "${side_by_side}" = 1 ] && echo 'side by side' || echo 'one after the other'); cache \`${CACHE}\`."
-          summary ""
-          summary "| image | architecture | built and booted | pushed |"
-          summary "|---|---|---|---|"
+          summary "- Runner: ${threads} threads, ${memory_mib} MiB; ${how} on ${cpus} processors; cache \`${CACHE}\`."
 
-          # One build: bake, check, boot. Its output goes to the log directory.
-          build() { # target arch out name
-            # shellcheck disable=SC2024 # the logs are this job's user's, the build is root's
-            sudo "${cli}" build "$1" --arch "$2" --out "$3" --root "${work}/source" \
-              --config "${config}" --kino "${work}/tools/kino/$2/kino" --cpus "${cpus}" \
-              < /dev/null > "${work}/logs/$4.out" 2> "${work}/logs/$4.err"
-          }
-          failed=0
-          superseded=0
-          superseded_why=""
-          n=0
-          while IFS= read -r image; do
-            n=$((n + 1))
-            target="$(jq -r '.target' <<<"${image}")"
-            key="$(jq -r '.build_key' <<<"${image}")"
-            mapfile -t archs < <(jq -r '.archs[]' <<<"${image}")
-            if [ "${superseded}" = 1 ]; then
-              # Intar takes no more images of this commit: building them would
-              # only keep the next commit's run waiting.
-              for arch in "${archs[@]}"; do
-                summary "| \`${target}\` | ${arch} | not built | not pushed: Intar takes no more images of this commit |"
-              done
-              continue
-            fi
-            echo "::group::${target} (${archs[*]})"
-            declare -A result=()
-            if [ "${side_by_side}" = 1 ] && [ "${#archs[@]}" -gt 1 ]; then
-              declare -A pid=()
-              for arch in "${archs[@]}"; do
-                build "${target}" "${arch}" "${work}/out/${n}/${arch}" "${n}-${arch}" &
-                pid[${arch}]=$!
-              done
-              # Each by itself: a bare `wait` hides a build that failed.
-              for arch in "${archs[@]}"; do
-                if wait "${pid[${arch}]}"; then result[${arch}]=passed; else result[${arch}]=failed; fi
-              done
-            else
-              for arch in "${archs[@]}"; do
-                if build "${target}" "${arch}" "${work}/out/${n}/${arch}" "${n}-${arch}"; then
-                  result[${arch}]=passed
-                else
-                  result[${arch}]=failed
-                fi
-              done
-            fi
-            good=1
-            for arch in "${archs[@]}"; do
-              grep -a '^base_s=\|^boot_s=' "${work}/logs/${n}-${arch}.out" || true
-              if [ "${result[${arch}]}" != passed ]; then
-                good=0
-                failed=1
-                echo "The ${arch} build of ${target} failed:" >&2
-                tail -n 40 "${work}/logs/${n}-${arch}.err" | cut -c1-300 >&2
-              fi
-            done
-
-            pushed="not pushed: a build of this image failed"
-            if [ "${good}" = 1 ] && [ -n "${BUILD_ONLY}" ]; then
-              pushed="not pushed: build-only"
-            elif [ "${good}" = 1 ]; then
-              pushed=""
-              for arch in "${archs[@]}"; do
-                out="${work}/out/${n}/${arch}"
-                # `build` ran as root; `push` runs as this job's user, which
-                # is the one the runner gives a token to.
-                sudo chown -R "$(id -u):$(id -g)" "${out}"
-                built="$(jq -r '.build_key' "${out}/image.json")"
-                if [ "${built}" != "${key}" ]; then
-                  echo "${target} built as ${built}, not the ${key} Intar asked for." >&2
-                  failed=1
-                  pushed="${pushed}${arch}: refused, wrong key; "
-                  continue
-                fi
-                tries=0
-                while :; do
-                  status=0
-                  "${cli}" push --image "${out}" --url "${INTAR_ORIGIN}" --rev "${REV}" \
-                    < /dev/null > "${work}/logs/${n}-${arch}.push" 2> "${work}/logs/${n}-${arch}.push.err" || status=$?
-                  tries=$((tries + 1))
-                  # `push` waits out a busy registry for about twenty minutes
-                  # by itself; twice more is enough.
-                  if [ "${status}" != 75 ] || [ "${tries}" -ge 3 ]; then
-                    break
-                  fi
-                  sleep 60
-                done
-                case "${status}" in
-                  0)
-                    pushed="${pushed}${arch}: $(sed -n 's/.* recorded=//p' "${work}/logs/${n}-${arch}.push"); "
-                    ;;
-                  3)
-                    # Intar takes no more images for this commit: its head
-                    # moved, or its revisions ended. Intar's own words say which.
-                    superseded=1
-                    superseded_why="$(tail -n 1 "${work}/logs/${n}-${arch}.push.err" | cut -c1-240)"
-                    pushed="${pushed}${arch}: not taken; "
-                    echo "Intar takes no more images of this commit: ${superseded_why}"
-                    break
-                    ;;
-                  *)
-                    failed=1
-                    pushed="${pushed}${arch}: failed (${status}); "
-                    echo "The push of the ${arch} image of ${target} failed:" >&2
-                    tail -n 20 "${work}/logs/${n}-${arch}.push.err" | cut -c1-300 >&2
-                    ;;
-                esac
-              done
-            fi
-            for arch in "${archs[@]}"; do
-              summary "| \`${target}\` | ${arch} | ${result[${arch}]} | ${pushed} |"
-            done
-            echo "::endgroup::"
-          done < <(jq -c '.[]' <<<"${IMAGES}")
-
-          if [ "${superseded}" = 1 ]; then
-            summary ""
-            summary "Intar took no more images of this commit: ${superseded_why}"
+          # Bake, check, boot. The output goes to the log directory.
+          out="${work}/out/${ARCH}"
+          built=0
+          # shellcheck disable=SC2024 # the logs are this job's user's, the build is root's
+          sudo "${cli}" build "${target}" --arch "${ARCH}" --out "${out}" --root "${work}/source" \
+            --config "${config}" --kino "${work}/tools/kino/${ARCH}/kino" --cpus "${cpus}" \
+            < /dev/null > "${work}/logs/${ARCH}.out" 2> "${work}/logs/${ARCH}.err" || built=$?
+          grep -a '^base_s=\|^boot_s=' "${work}/logs/${ARCH}.out" || true
+          if [ "${built}" != 0 ]; then
+            summary "- Built and booted: failed."
+            echo "The ${ARCH} build of ${target} failed:" >&2
+            tail -n 40 "${work}/logs/${ARCH}.err" | cut -c1-300 >&2
+            exit 1
           fi
-          exit "${failed}"
+          summary "- Built and booted: passed."
+
+          outcome=built
+          if [ -n "${BUILD_ONLY}" ]; then
+            summary "- Not pushed: build-only."
+          else
+            # `build` ran as root; `push` runs as this job's user, which is
+            # the one the runner gives a token to.
+            sudo chown -R "$(id -u):$(id -g)" "${out}"
+            is="$(jq -r '.build_key' "${out}/image.json")"
+            if [ "${is}" != "${key}" ]; then
+              summary "- Not pushed: built as another key than Intar asked for."
+              echo "${target} built as ${is}, not the ${key} Intar asked for." >&2
+              exit 1
+            fi
+            tries=0
+            while :; do
+              status=0
+              "${cli}" push --image "${out}" --url "${INTAR_ORIGIN}" --rev "${REV}" \
+                < /dev/null > "${work}/logs/${ARCH}.push" 2> "${work}/logs/${ARCH}.push.err" || status=$?
+              tries=$((tries + 1))
+              # `push` waits out a busy registry for about twenty minutes by
+              # itself; twice more is enough.
+              if [ "${status}" != 75 ] || [ "${tries}" -ge 3 ]; then
+                break
+              fi
+              sleep 60
+            done
+            case "${status}" in
+              0)
+                outcome=pushed
+                summary "- Pushed: $(sed -n 's/.* recorded=//p' "${work}/logs/${ARCH}.push")."
+                ;;
+              3)
+                # Intar takes no more images for this commit: its head moved,
+                # or its revisions ended. Intar's own words say which.
+                outcome=superseded
+                why="$(tail -n 1 "${work}/logs/${ARCH}.push.err" | cut -c1-240)"
+                summary "- Not taken: Intar takes no more images of this commit: ${why}"
+                echo "Intar takes no more images of this commit: ${why}"
+                ;;
+              *)
+                summary "- Push failed (${status})."
+                echo "The push of the ${ARCH} image of ${target} failed:" >&2
+                tail -n 20 "${work}/logs/${ARCH}.push.err" | cut -c1-300 >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          # What this image's arm64 job reads before it starts.
+          if [ "${ARCH}" = amd64 ]; then
+            mkdir -p "${work}/first"
+            printf '%s\n' "${outcome}" > "${work}/first/result"
+            echo "first=${outcome}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Tell this image's arm64 job
+        if: success() && steps.build.outputs.first != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: intar-amd64-${{ matrix.spec.n }}
+          path: ${{ runner.temp }}/intar/first/result
+          retention-days: 1
+          overwrite: true
 
       - name: Collect the build logs
         if: failure()
@@ -534,10 +542,11 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: intar-image-build-logs-${{ strategy.job-index }}
+          name: intar-image-build-logs-${{ env.ARCH }}-${{ matrix.spec.n }}
           path: ${{ runner.temp }}/intar/logs
           retention-days: 7
           if-no-files-found: ignore
+          overwrite: true
 
       - name: Stop the BuildKit daemon
         if: always()
@@ -547,4 +556,35 @@ jobs:
           # The bracket keeps the pattern from matching this very command.
           sudo pkill -KILL -f -- "${RUNNER_TEMP}/intar/tools/[w]ork/" > /dev/null 2>&1 || true
           # And what root wrote, which the runner cannot remove by itself.
-          sudo rm -rf -- "${RUNNER_TEMP}/intar"
+          sudo rm -rf -- "${RUNNER_TEMP}/intar" "${RUNNER_TEMP}/intar-first"
+
+  # Every arm64 image after every amd64 image, and each after its own.
+  images-arm64:
+    name: Build ${{ matrix.spec.target || inputs.build-only }} arm64
+    needs: [validate, publish, images]
+    if: >-
+      !cancelled() && needs.validate.result == 'success' && (
+        (needs.publish.result == 'success' &&
+         needs.publish.outputs.producer == 'pipeline' &&
+         needs.publish.outputs.arm64 != '' &&
+         needs.publish.outputs.arm64 != '[]') ||
+        (inputs.build-only != '' && github.event_name == 'workflow_dispatch')
+      )
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        spec: >-
+          ${{ fromJSON(
+            (inputs.build-only != '' && github.event_name == 'workflow_dispatch')
+            && '[{"build_key":"","n":0,"after_amd64":true}]'
+            || needs.publish.outputs.arm64
+          ) }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARCH: arm64
+    steps: *image_steps
