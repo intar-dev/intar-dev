@@ -37,14 +37,15 @@ cp "${qemu}/bin/qemu-system-aarch64" "${qemu}/bin/qemu-img" "${app}/Contents/Hel
 cp -R "${qemu}/licenses" "${qemu}/SOURCES" "${app}/Contents/Resources/qemu/"
 
 # The icon, from the one picture the repository keeps.
-iconset="$(mktemp -d)/Intar.iconset"
+scratch="$(mktemp -d)"
+trap 'rm -rf "${scratch}"' EXIT
+iconset="${scratch}/Intar.iconset"
 mkdir "${iconset}"
 for size in 16 32 128 256 512; do
   sips -z "${size}" "${size}" apps/jumper/assets/icon.png --out "${iconset}/icon_${size}x${size}.png" > /dev/null
   sips -z "$((size * 2))" "$((size * 2))" apps/jumper/assets/icon.png --out "${iconset}/icon_${size}x${size}@2x.png" > /dev/null
 done
 iconutil --convert icns --output "${app}/Contents/Resources/Intar.icns" "${iconset}"
-rm -rf "$(dirname "${iconset}")"
 
 cat > "${app}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -74,14 +75,22 @@ codesign --force --sign - --identifier dev.intar.jumper "${app}"
 codesign --verify --strict --deep "${app}"
 codesign --display --entitlements - "${app}/Contents/Helpers/qemu-system-aarch64" 2>&1 | grep -q com.apple.security.hypervisor ||
   { echo "The bundled QEMU lost its hypervisor entitlement." >&2; exit 1; }
-[ "$("${app}/Contents/MacOS/jumper" --version)" = "jumper ${version}" ]
+[ "$("${app}/Contents/MacOS/jumper" --version)" = "jumper ${version}" ] ||
+  { echo "The bundled app does not report version ${version}." >&2; exit 1; }
 # Nothing but what macOS ships may be needed.
-if otool -L "${app}/Contents/MacOS/jumper" | tail -n +2 | grep -Ev '^[[:space:]]+(/usr/lib/|/System/Library/)'; then
+linked="$(otool -L "${app}/Contents/MacOS/jumper" | tail -n +2)"
+if grep -Ev '^[[:space:]]+(/usr/lib/|/System/Library/)' <<< "${linked}"; then
   echo "The app needs a library that macOS does not ship." >&2; exit 1
 fi
 
 zip="jumper_${version}_macos_arm64.zip"
-# ditto keeps what a signature needs; zip does not.
-ditto -c -k --keepParent "${app}" "dist/${zip}"
+# Without resource forks and extended attributes: every signature here is in
+# a program or in _CodeSignature, and the `._` entries ditto would add for
+# them are plain files to any other unzipper, which break the seal.
+ditto -c -k --norsrc --noextattr --keepParent "${app}" "dist/${zip}"
+# The zip as an updater or `unzip` reads it, not as Archive Utility does.
+unzip -q "dist/${zip}" -d "${scratch}/unzipped"
+codesign --verify --strict --deep "${scratch}/unzipped/Intar.app" ||
+  { echo "The bundle's signature does not survive the zip." >&2; exit 1; }
 (cd dist && shasum -a 256 "${zip}" > "jumper_${version}_checksums.txt")
 echo "Built dist/${zip}: $(du -sh "${app}" | cut -f1) unpacked, $(du -h "dist/${zip}" | cut -f1) zipped."

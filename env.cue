@@ -68,12 +68,24 @@ schema.#Project & {
 		"clippy-app": #Cargo & {args: ["clippy", "-p", "jumper", "-p", "zpm", "--all-targets", "--", "-D", "warnings"]}
 		"test-app": #Cargo & {args: ["nextest", "run", "-p", "jumper", "-p", "zpm"]}
 		// The app's macOS bundle, as a release builds it, and a guest booted
-		// with the QEMU inside it. Only a Mac with Apple silicon can build one;
-		// anywhere else the lane's other steps are the check.
+		// with the QEMU inside it. Only a Mac can build one; on another system
+		// the lane's other steps are the check. A Mac that is not Apple
+		// silicon fails in the script, so the lane's runner cannot skip it.
+		//
+		// The bundle takes the pinned QEMU. While the sources build a set that
+		// is not pinned yet, there is none to take: qemu.yml builds and boots
+		// that QEMU in the pull request, publishes it from main and opens the
+		// pull request that pins it, and the bundle is built again from then.
 		"bundle-app": #Bash & {
 			_script: """
-				if [ "$(uname -sm)" != "Darwin arm64" ]; then
-				  echo "Skipped: the app's bundle is built on macOS on Apple silicon."
+				if [ "$(uname -s)" != Darwin ]; then
+				  echo "Skipped: the app's bundle is built on macOS."
+				  exit 0
+				fi
+				built="$(bash tools/workflows/qemu/set.sh)"
+				pinned="$(sed -n 's/^set //p' tools/workflows/qemu/pins.txt)"
+				if [ "${built}" != "${pinned}" ]; then
+				  echo "::warning::The app's bundle was not built: the QEMU sources build set ${built}, and ${pinned} is pinned."
 				  exit 0
 				fi
 				tools/workflows/release/build-jumper-macos.sh
