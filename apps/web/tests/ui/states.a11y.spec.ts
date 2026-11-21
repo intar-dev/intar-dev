@@ -2370,4 +2370,13 @@ test.describe("play page", () => {
       await expect(page.getByRole("link", { name: "Start scenario" })).toHaveCount(0);
     });
   }
+  test("an old play start link is not found and starts nothing", async ({ page, ui }) => {
+    const starts: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().endsWith("/start")) starts.push(request.url());
+    });
+    await ui.open({ path: "/runs/start/intar/repair-nginx?source=play&ref=stream-42", sessionRole: "learner", theme: "light" });
+    await expect(page.getByRole("heading", { level: 1, name: "That route is not in the manual" })).toBeVisible();
+    expect(starts).toEqual([]);
+  });
 });

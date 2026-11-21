@@ -5,8 +5,10 @@ import {
   HeadContent,
   Link,
   lazyRouteComponent,
+  notFound,
   Outlet,
   redirect,
+  rootRouteId,
   type ErrorComponentProps,
   type ParsedLocation,
 } from "@tanstack/react-router";
@@ -201,6 +203,11 @@ const scenarioRunStartRoute = createRoute({
   // A splat, so a namespaced id keeps its slash: /runs/start/intar/<slug>.
   path: "runs/start/$",
   validateSearch: validateScenarioRunStartSearch,
+  // An old play link is not found: without this, a reload of a tab on
+  // it would start the scenario as a course run nobody asked for.
+  beforeLoad: ({ location }) => {
+    if ((location.search as Record<string, unknown>).source === "play") throw notFound({ routeId: rootRouteId });
+  },
   head: () =>
     routeHead(
       "Starting run",
