@@ -306,7 +306,7 @@ describe("scenario registry resources", () => {
       expect(html).toContain("https://github.com/acme/labs/actions/runs/42/attempts/2");
       expect(html).toContain("not counted");
       expect(html).toContain("self-hosted");
-      expect(html).toContain("Forget the arm64 image aaaaaaaaaaaa"");
+      expect(html).toContain("Forget the arm64 image aaaaaaaaaaaa");
       expect(html).toContain("The 1 most recent are shown.");
     });
 
