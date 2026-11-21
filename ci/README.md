@@ -59,7 +59,8 @@ that exact commit already passed.
    `docs`), skipped when its output is false. `kino` builds the kino guest
    with its size-optimised, fat-LTO profile, so only a change that reaches
    kino pays that minute. `app` checks the desktop app and its engine on the
-   macOS runner, where the app runs; `rust` builds it on Linux only. `web-ui` runs the Chromium smoke in the Playwright
+   macOS runner, where the app runs, and builds its bundle there with the
+   pinned QEMU; `rust` builds it on Linux only. `web-ui` runs the Chromium smoke in the Playwright
    container when `web` runs.
 3. **Builds for `deploy.yml`.** A pull request's run executes branch code, so
    production never takes its upload. A merge group that changes a lane with

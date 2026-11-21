@@ -188,13 +188,16 @@ lanes: {
 	app: {
 		setup: [gha.#SetupRust]
 		runner: gha.runners.macos
-		steps: ["clippy-app", "test-app"]
+		steps: ["clippy-app", "test-app", "bundle-app"]
 		timeout: 45
 		inputs: [
 			"Cargo.toml",
 			"Cargo.lock",
 			"rust-toolchain.toml",
 			".github/actions/setup-rust/**",
+			// The bundle's script, and the QEMU it puts in the bundle.
+			"tools/workflows/release/build-jumper-macos.sh",
+			"tools/workflows/qemu/**",
 			"apps/jumper/**",
 			"crates/zpm/**",
 			"crates/dhd/**",
