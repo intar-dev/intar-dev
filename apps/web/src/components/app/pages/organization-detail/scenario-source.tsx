@@ -39,8 +39,9 @@ export function ScenarioSourceSection({
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
   const [purgeConfirm, setPurgeConfirm] = useState("");
+  const [automaticOpen, setAutomaticOpen] = useState(false);
   const change = useMutation({
-    mutationFn: async (body: Record<string, string>) => {
+    mutationFn: async (body: Record<string, string | boolean>) => {
       // A purge deletes a bounded share per request; it is done once the
       // binding is gone. ponytail: 100 rounds, then the button resumes it.
       for (let round = 0; round < 100; round += 1) {
@@ -59,6 +60,7 @@ export function ScenarioSourceSection({
     onSuccess: async () => {
       setDisconnectOpen(false);
       setPurgeOpen(false);
+      setAutomaticOpen(false);
       await queryClient.invalidateQueries({ queryKey });
     },
   });
@@ -177,6 +179,20 @@ export function ScenarioSourceSection({
             </form>
           </>
         )}
+        {source && card.data.platformSettings ? (
+          <PlatformSettings
+            source={source}
+            enabled={enabled}
+            pipelineImages={card.data.pipelineImages}
+            automaticPromotion={card.data.platformSettings.automaticPromotion}
+            pending={change.isPending}
+            onChange={(body) => change.mutate(body)}
+            onAutomatic={() => {
+              change.reset();
+              setAutomaticOpen(true);
+            }}
+          />
+        ) : null}
         {disconnected ? (
           <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
             <p className="text-muted-foreground">
@@ -267,6 +283,20 @@ export function ScenarioSourceSection({
         onConfirm={() => change.mutate({ action: "disconnect" })}
       />
       <ConfirmDialog
+        open={automaticOpen}
+        onClose={() => {
+          setAutomaticOpen(false);
+          change.reset();
+        }}
+        title="Let labs go live by themselves?"
+        description="From the next commit on, each lab that passes its check on a platform host goes live without an administrator, and the commit's course catalog and removed labs follow. The commit that is the head now stays as it is. Whoever can push to the default branch then publishes to learners."
+        error={apiErrorMessage(change.error, "Couldn't change the promotion. Try again.")}
+        pending={change.isPending}
+        confirmLabel="Go live automatically"
+        pendingLabel="Switching…"
+        onConfirm={() => change.mutate({ action: "promotion", promotion: "automatic" })}
+      />
+      <ConfirmDialog
         open={purgeOpen}
         onClose={() => {
           setPurgeOpen(false);
@@ -316,7 +346,7 @@ function ConnectedSource({
   pending: boolean;
   /** The change of mode is the one being saved. */
   switching: boolean;
-  onChange: (body: Record<string, string>) => void;
+  onChange: (body: Record<string, string | boolean>) => void;
   onDisconnect: () => void;
 }) {
   const commit = source.commit;
@@ -427,6 +457,91 @@ function ConnectedSource({
         </Button>
       </div>
     </>
+  );
+}
+
+/**
+ * What only a platform administrator changes on a source: who builds its
+ * images, which runners may publish, who puts its labs live, and the way
+ * back to pull mode. Each row says what is and offers the other; a switch
+ * that would be refused says why instead.
+ */
+function PlatformSettings({
+  source,
+  enabled,
+  pipelineImages,
+  automaticPromotion,
+  pending,
+  onChange,
+  onAutomatic,
+}: {
+  source: ScenarioSourceView;
+  /** The scope's flag for connecting and widening a source. */
+  enabled: boolean;
+  pipelineImages: boolean;
+  automaticPromotion: boolean;
+  pending: boolean;
+  onChange: (body: Record<string, string | boolean>) => void;
+  onAutomatic: () => void;
+}) {
+  const pipeline = source.imageProducer === "pipeline";
+  const automatic = source.promotion === "automatic";
+  const rows: Array<{ label: string; state: string; action: string; blocked: string | null; onClick: () => void }> = [
+    {
+      label: "Images",
+      state: pipeline ? "This repository's pipeline builds them" : "Intar's builder builds them",
+      action: pipeline ? "Use Intar's builder" : "Use the repository's pipeline",
+      blocked: pipeline
+        ? null
+        : source.mode !== "push"
+          ? "A pipeline builds only for a source in push mode."
+          : pipelineImages ? null : "Pipeline images are not switched on for this scope.",
+      onClick: () => onChange({ action: "image_producer", producer: pipeline ? "builder" : "pipeline" }),
+    },
+    {
+      label: "Runners",
+      state: source.allowSelfHostedRunners ? "Self-hosted runners may publish" : "Only GitHub-hosted runners may publish",
+      action: source.allowSelfHostedRunners ? "GitHub-hosted only" : "Allow self-hosted runners",
+      blocked: source.allowSelfHostedRunners || enabled ? null : "Scenario sources are not switched on for this scope.",
+      onClick: () => onChange({ action: "runner_policy", allow_self_hosted: !source.allowSelfHostedRunners }),
+    },
+    {
+      label: "Going live",
+      state: automatic ? "Each lab goes live once it passed its check" : "An administrator promotes each lab",
+      action: automatic ? "Promote by hand" : "Go live automatically",
+      blocked: automatic || automaticPromotion ? null : "Automatic promotion is not switched on for this scope.",
+      onClick: automatic ? () => onChange({ action: "promotion", promotion: "manual" }) : onAutomatic,
+    },
+    ...(source.mode === "push"
+      ? [{
+          label: "Delivery",
+          state: "The repository's workflow pushes each commit",
+          action: "Switch to pull",
+          blocked: pipeline
+            ? "Set the images back to Intar's builder first."
+            : enabled ? null : "Scenario sources are not switched on for this scope.",
+          onClick: () => onChange({ action: "mode", mode: "pull" }),
+        }]
+      : []),
+  ];
+  return (
+    <div className="space-y-3 border-t pt-4">
+      <h3 className="font-medium">Platform settings</h3>
+      <ul className="space-y-3">
+        {rows.map((row) => (
+          <li key={row.label} className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-label">{row.label}</p>
+              <p>{row.state}</p>
+              {row.blocked ? <p className="text-muted-foreground">{row.blocked}</p> : null}
+            </div>
+            <Button size="sm" variant="outline" disabled={pending || row.blocked !== null} onClick={row.onClick}>
+              {row.action}
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

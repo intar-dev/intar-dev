@@ -135,6 +135,12 @@ export interface ScenarioSourceCard {
   workflowRef: string;
   /** The ref to call once the repository's pipeline builds its images; null until that version is released. */
   pipelineWorkflowRef: string | null;
+  /**
+   * Only on the platform's own card, which platform administrators read:
+   * they change the source's platform settings there, and a switch that
+   * needs a flag says so before it is tried.
+   */
+  platformSettings?: { automaticPromotion: boolean };
   source: ScenarioSourceView | null;
 }
 
@@ -334,10 +340,13 @@ export async function scenarioAutomaticPromotionEnabled(
 export async function scenarioSourceCard(
   scope: ScenarioSourceScope,
   toggles?: FeatureToggleService,
+  /** The reader is a platform administrator on the platform's card. */
+  platformSettings = false,
 ): Promise<ScenarioSourceCard> {
-  const [enabled, pipelineImages, source] = await Promise.all([
+  const [enabled, pipelineImages, automaticPromotion, source] = await Promise.all([
     scenarioGitSourcesEnabled(scope, toggles),
     scenarioPipelineImagesEnabled(scope, toggles),
+    platformSettings ? scenarioAutomaticPromotionEnabled(scope, toggles) : false,
     loadScenarioSource(scope),
   ]);
   return {
@@ -349,6 +358,7 @@ export async function scenarioSourceCard(
     appSlug: env.GITHUB_APP_SLUG || null,
     workflowRef: env.SCENARIO_PUBLISH_WORKFLOW_REF || "scenario-publish-v1",
     pipelineWorkflowRef: env.SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF || null,
+    ...(platformSettings ? { platformSettings: { automaticPromotion } } : {}),
     source,
   };
 }

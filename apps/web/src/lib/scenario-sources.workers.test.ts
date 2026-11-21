@@ -556,6 +556,11 @@ describe("what only a platform administrator changes", () => {
     expect(await db().select().from(scopeMachineImages)).toEqual([]);
     expect(await scenarioSourceCard(ORG_SCOPE, pipelineOn)).toMatchObject({ enabled: true, pipelineImages: true });
     expect(await scenarioSourceCard(ORG_SCOPE, enabled)).toMatchObject({ enabled: true, pipelineImages: false });
+    // The platform's card tells a platform administrator what may be switched; no other card does.
+    const promotionOn = new StaticFeatureToggleService({ scenario_git_sources: true, scenario_automatic_promotion: true });
+    expect((await scenarioSourceCard(ORG_SCOPE, promotionOn)).platformSettings).toBeUndefined();
+    expect((await scenarioSourceCard(ORG_SCOPE, promotionOn, true)).platformSettings).toEqual({ automaticPromotion: true });
+    expect((await scenarioSourceCard(ORG_SCOPE, enabled, true)).platformSettings).toEqual({ automaticPromotion: false });
   });
 
   it("sets a pipeline only for a connected push source, and the builder for any", async () => {
