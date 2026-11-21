@@ -32,7 +32,9 @@
     "PUBLIC_SCENARIO_SOURCE_REPOSITORY_ID": "1305773952",
     // Peeled commit SHAs of the released scenario-publish-vN tags, separated
     // by commas or whitespace. Empty: every push upload is refused.
-    "SCENARIO_PUBLISH_WORKFLOW_SHAS": "a73e571caccc35b499fa11e021f4ac6a9546b647",
+    // 6c83304d is what scenario-publish-v1 resolves to; a73e571c is the commit
+    // that last changed the workflow, for a caller that pins it.
+    "SCENARIO_PUBLISH_WORKFLOW_SHAS": "6c83304d76405e8297933e3e6c24044eca19fd75 a73e571caccc35b499fa11e021f4ac6a9546b647",
     // The intar-image-cli release the compiler descriptor names, and its
     // release tarball sha256 per target as JSON, e.g. {"linux_amd64":"<hex>"}.
     // While either is empty the descriptor answers 503. Releases up to 0.10.3
