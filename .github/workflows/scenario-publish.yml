@@ -29,7 +29,8 @@ name: Intar scenario publish
 # - Each image Intar lacks is a job of its own, and they run one at a time.
 #   One image's failure leaves the others to build and push, and "Re-run
 #   failed jobs" builds only what failed. A publish that lacks more than 256
-#   images cannot start its image jobs.
+#   images cannot start its image jobs. Without a cache every job starts
+#   cold: nothing one image built is there for the next.
 # - An image whose arm64 build fails is not pushed for amd64 either. A lab can
 #   still become ready from another run's amd64 image while this run is red.
 # - When Intar takes no more images of a commit, because a newer one is the
@@ -235,7 +236,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
   images:
-    name: Build ${{ matrix.image.target || inputs.build-only }}
+    name: Build ${{ matrix.spec.target || inputs.build-only }}
     needs: [validate, publish]
     # After a publish that has images to build for this source's own pipeline,
     # or, with `build-only`, for a manual run that publishes nothing. Never
@@ -249,13 +250,15 @@ jobs:
         (inputs.build-only != '' && github.event_name == 'workflow_dispatch')
       )
     # One job an image, one at a time: the builds of one image fill a runner,
-    # and the jobs of a run share the cache volume. A manual build-only run
-    # has the one image it names, for both architectures.
+    # and the jobs of a run mount the same cache volume one after the other.
+    # A manual build-only run has the one image it names, for both
+    # architectures.
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        image: >-
+        # Not `image`: the workflow policy reads that key as a container image.
+        spec: >-
           ${{ fromJSON(
             (inputs.build-only != '' && github.event_name == 'workflow_dispatch')
             && '[{"build_key":"","archs":["amd64","arm64"]}]'
@@ -283,7 +286,7 @@ jobs:
       - name: Build, boot and push the images
         env:
           # This job's one image, as the list the loop below reads.
-          IMAGES: ${{ format('[{0}]', toJSON(matrix.image)) }}
+          IMAGES: ${{ format('[{0}]', toJSON(matrix.spec)) }}
           REV: ${{ needs.publish.outputs.rev }}
           # Only a manual run builds without publishing.
           BUILD_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.build-only || '' }}
