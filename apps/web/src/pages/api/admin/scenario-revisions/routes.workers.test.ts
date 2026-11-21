@@ -69,26 +69,45 @@ describe("scenario revision routes", () => {
 
   it("let only the scope's admins change a scenario", async () => {
     as("owner");
-    expect((await call(change, { namespace: "intar", slug: "web" }, { action: "promote", rev: "r1", liveRev: null })).status).toBe(404);
+    expect((await call(change, { namespace: "intar", slug: "web" }, { action: "rollback", rev: "r1", liveRev: null })).status).toBe(404);
     as("other");
-    expect((await call(change, { namespace: "acme", slug: "web" }, { action: "verify", rev: "r1" })).status).toBe(404);
+    expect((await call(change, { namespace: "acme", slug: "web" }, { action: "lift_hold", rev: "r1" })).status).toBe(404);
     as("admin");
-    expect((await call(change, { namespace: "acme", slug: "web" }, { action: "promote", rev: "r1", liveRev: null })).status).toBe(403);
+    expect((await call(change, { namespace: "acme", slug: "web" }, { action: "rollback", rev: "r1", liveRev: null })).status).toBe(403);
     expect((await call(change, { namespace: "intar", slug: "web" }, { action: "drop", rev: "r1" })).status).toBe(400);
-    const refused = await call(change, { namespace: "intar", slug: "web" }, { action: "promote", rev: "r1", liveRev: null });
-    expect(await refused.json()).toMatchObject({ code: "revision_not_verified" });
     as("admin", { impersonated: true } as Partial<UserContext>);
-    expect((await call(change, { namespace: "intar", slug: "web" }, { action: "verify", rev: "r1" })).status).toBe(403);
+    expect((await call(change, { namespace: "intar", slug: "web" }, { action: "rollback", rev: "r1", liveRev: null })).status).toBe(403);
   });
-});
 
-describe("verify runs under the operator drain", () => {
-  it("are held for an organization admin", async () => {
-    await env.DB.prepare("INSERT INTO runtime_operation_gates (key, state, updated_at) VALUES ('image_cutover', 'drained', 1)").run();
-    as("owner");
-    const response = await call(change, { namespace: "acme", slug: "web" }, { action: "verify", rev: "r1" });
-    expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({ code: "runtime_cutover_drained" });
+  it("refuse an administrator's approval actions, which are the source's job's, and still roll back and lift a hold", async () => {
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified', restore_verified_at = 5, behaviour_digest = 'd'").run();
+    as("admin");
+    for (const body of [
+      { action: "verify", rev: "r1" },
+      { action: "promote", rev: "r1", liveRev: null },
+      { action: "verify_restore", rev: "r1" },
+      { action: "clear_restore_verified", rev: "r1" },
+    ]) {
+      const response = await call(change, { namespace: "intar", slug: "web" }, body);
+      expect(response.status, body.action).toBe(400);
+      expect(await response.json()).toMatchObject({ code: "invalid_request" });
+    }
+    // Nothing moved, started or was withdrawn.
+    expect(await env.DB.prepare("SELECT live_rev FROM scenarios WHERE id = 'intar/web'").first("live_rev")).toBeNull();
+    expect(await env.DB.prepare("SELECT restore_verified_at FROM scenario_revisions WHERE scenario_id = 'intar/web'")
+      .first("restore_verified_at")).toBe(5);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM scenario_runs").first("n")).toBe(0);
+
+    // A rollback reaches the move: r1 was never live, so it has nowhere to go back to.
+    const rollback = await call(change, { namespace: "intar", slug: "web" }, { action: "rollback", rev: "r1", liveRev: null });
+    expect(await rollback.json()).toMatchObject({ code: "revision_never_live" });
+    // A hold is lifted.
+    await env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at, held_by_user_id)
+      VALUES ('intar/web', 'd', 1, 'admin')`).run();
+    const lifted = await call(change, { namespace: "intar", slug: "web" }, { action: "lift_hold", rev: "r1" });
+    expect(lifted.status).toBe(200);
+    expect(await env.DB.prepare("SELECT lifted_by_user_id FROM scenario_revision_holds WHERE scenario_id = 'intar/web'")
+      .first("lifted_by_user_id")).toBe("admin");
   });
 });
 

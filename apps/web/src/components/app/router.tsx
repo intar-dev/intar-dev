@@ -399,7 +399,7 @@ const adminScenariosRoute = createRoute({
   head: () =>
     routeHead(
       "Scenario registry",
-      "Verify, promote, and roll back scenario revisions.",
+      "Follow scenario revisions as their sources put them live, and roll them back.",
     ),
   // Organization owners and admins manage their own scenarios here too; the
   // API decides what each caller may read and change.

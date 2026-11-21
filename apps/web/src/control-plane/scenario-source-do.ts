@@ -39,7 +39,7 @@ import { moveLiveRevision } from "@/lib/scenario-revisions";
 import { beginVerifyRun } from "@/lib/scenario-runs/revision-begin";
 import { markRunVmsAbsentInDesiredState, revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
 import {
-  DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_WAIT_MS, driveDeployJob, type DeployJob, type DeployJobDeps,
+  DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_WAIT_MS, driveDeployJob, takeUpLeftHead, type DeployJob, type DeployJobDeps,
 } from "@/lib/source-deploy-job";
 import { backfillBehaviourDigests } from "@/lib/machine-builds";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
@@ -270,11 +270,14 @@ async function tickScenarioSource(
   // Only a push source's own pipeline builds images.
   const imageProducer = active.mode === "push" ? active.imageProducer : "builder";
   const step = { env, storage, scopeKey, organizationId, digest, imageProducer, pipelineCanPush: active.mode === "push" };
+  // A head that promotion by hand left is read again before the job sees it
+  // (#494); only an active binding gets here, so a pause holds it too.
+  await takeUpLeftHead(env.DB, scopeKey, digest, Date.now());
   const ingestAgain = await ingest(step);
   // After ingest, so a re-run failed row that ingest finds without its
   // staged objects is delivered again in the same pass.
   if (active.mode === "pull") await deliver(step, active);
-  // An automatic source's job checks the head's labs (#454). It arms its
+  // The source's job checks the head's labs (#454). It arms its
   // own next pass while it waits, apart from the retry backoff; a fault in
   // it stops nothing else.
   let jobAgain = false;
@@ -704,11 +707,9 @@ interface CheckRow {
   detail: string | null;
   diagnostics_json: string | null;
   check_run_id: number | null;
-  automatic: number | null;
 }
 
-const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_run_id,
-    (SELECT promotion = 'automatic' FROM scenario_sources WHERE scope_key = ?1) AS automatic
+const CHECK_ROW = `SELECT id, sha, rev, state, detail, diagnostics_json, check_run_id
   FROM scenario_source_commits WHERE scope_key = ?1 AND purpose = 'deploy'`;
 
 // A superseded head row waits to be delivered again, so it shows as queued.
@@ -769,11 +770,9 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
       WHERE revision.rev = ?1 ORDER BY revision.scenario_id`,
   ).bind(row.rev, step.scopeKey).all<{ scenario_id: string; state: string; failure_reason: string | null }>()).results;
   let built = 0;
-  let verified = 0;
   const total = revisions.length;
   const revisionLines = revisions.map(({ scenario_id: scenarioId, state, failure_reason: reason }) => {
     if (state === "ready" || state === "verified") built += 1;
-    if (state === "verified") verified += 1;
     return `- ${scenarioId}: ${state}${reason ? `: ${reason}` : ""}`;
   });
   const diagnostics = parseDiagnostics(row.diagnostics_json).map(({ path, line, message }) => {
@@ -787,14 +786,14 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
   // The job's own count of the labs it has decided, while it is this row's.
   const job = state === "waiting" ? await step.storage.get<DeployJob>(DEPLOY_JOB_STORAGE_KEY) : undefined;
   const title = state === "building"
-    ? buildingTitle({ built, verified, total, automatic: row.automatic === 1 })
+    ? `Building ${built}/${total}`
     : job?.rowId === row.id
       ? `Checking ${job.decided}/${job.total}`
       : check.title;
-  // In the job's states the row's detail has a line per lab already.
-  // So has a row the job failed; a manual source's failed row has none.
+  // In the job's states the row's detail has a line per lab already. So has
+  // a row the job failed; one that failed before its ingest has no labs.
   const byJob = state === "waiting" || state === "awaiting_promote" || state === "live" ||
-    (state === "failed" && row.automatic === 1 && total > 0);
+    (state === "failed" && total > 0);
   // GitHub renders the summary as Markdown and drops tags such as `<path>`.
   const summary = [
     ...(row.detail === null ? [] : [redactHostPaths(row.detail)]),
@@ -806,22 +805,6 @@ async function deployCheck(step: Step, row: CheckRow, isHead: boolean): Promise<
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
   return { ...check, title, summary: (summary || title).slice(0, MAX_CHECK_SUMMARY_CHARS) };
-}
-
-/**
- * What a commit's check says while its row is `building`. For a source
- * promoted by hand the row stays there after the last image: nothing is
- * built any more, and the commit waits for an administrator. The check then
- * says what it waits for, so that it does not read as a build that hangs.
- * An automatic source's job takes the row on from here by itself.
- */
-export function buildingTitle(labs: { built: number; verified: number; total: number; automatic: boolean }): string {
-  if (labs.automatic || labs.total === 0 || labs.built < labs.total) {
-    return `Building ${labs.built}/${labs.total}`;
-  }
-  return labs.verified < labs.total
-    ? `Built ${labs.total}/${labs.total}: waiting to be verified and promoted`
-    : `Verified ${labs.total}/${labs.total}: waiting to be promoted`;
 }
 
 // Sends a changed check. A row's first check, and one that reopens after it

@@ -594,7 +594,8 @@ describe("a source whose pipeline builds its images", () => {
     await record();
     await tick("public");
     expect(await revisions()).toEqual([expect.objectContaining({ state: "ready" })]);
-    expect(await commits()).toEqual([expect.objectContaining({ state: "building" })]);
+    // The source's job has the row: its lab waits for a host to check it on.
+    expect(await commits()).toEqual([expect.objectContaining({ state: "waiting" })]);
   });
 
   it("fails a revision that waited a day, also while paused, and a new publish of the commit takes it up again", async () => {
@@ -609,12 +610,15 @@ describe("a source whose pipeline builds its images", () => {
     await age(60_001);
     await tick("public");
     expect(await revisions()).toEqual([expect.objectContaining({ state: "failed", failure_reason: REVISION_PIPELINE_DEADLINE })]);
-    expect(await commits()).toEqual([{
-      rev: rev(), state: "failed",
-      detail: `${REVISION_PIPELINE_DEADLINE} Missing: intar/broken-nginx/webserver (amd64).`,
-    }]);
+    // The commit row is the source's job's, which a pause holds (#494).
+    expect(await commits()).toEqual([{ rev: rev(), state: "building", detail: null }]);
 
     await env.DB.prepare("UPDATE scenario_sources SET paused_at = NULL, pause_reason = NULL").run();
+    // Resumed, the job fails the commit for its failed lab.
+    await tick("public");
+    expect(await commits()).toEqual([{
+      rev: rev(), state: "failed", detail: `- intar/broken-nginx: failed: ${REVISION_PIPELINE_DEADLINE}`,
+    }]);
     const before = Date.now();
     expect(await plan(await push())).toEqual({ architectures: ["amd64", "arm64"], missing: BOTH });
     await tick("public");

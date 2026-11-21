@@ -64,14 +64,14 @@ describe("an organization's scenario source, for a platform administrator", () =
   });
 
   it("applies a change as the platform's step back, behind the write guard", async () => {
-    const response = await POST(context({ action: "promotion", promotion: "manual" }));
+    const response = await POST(context({ action: "image_producer", producer: "builder" }));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ source: { repository: "acme/labs" } });
     expect(mocks.refuse).toHaveBeenCalledWith(expect.any(Request), CONTEXT);
     expect(mocks.change).toHaveBeenCalledWith({
       scope: SCOPE,
       actorUserId: "operator",
-      body: { action: "promotion", promotion: "manual" },
+      body: { action: "image_producer", producer: "builder" },
       startedAt: expect.any(Number),
       asPlatform: true,
     });

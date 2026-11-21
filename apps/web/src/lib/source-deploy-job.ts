@@ -1,6 +1,11 @@
-// The job of an automatic source's head commit (#454): it checks each lab of
-// the commit on a platform host and puts each one that passed live. The
-// source object's pass drives it, one step per pass.
+// The job of a source's head commit (#454): it checks each lab of the commit
+// on a platform host and puts each one that passed live. Every source has
+// one (#494). The source object's pass drives it, one step per pass.
+//
+// A head row left by promotion by hand (`headLeftSql`) is not driven as it
+// lies: its revision rows may be incomplete, and the job tells a removed lab
+// by them. `takeUpLeftHead` reads its commit's stored bundle again first, as
+// a re-run of the check does.
 //
 // A lab is one scenario's revision of the commit. It has passed when the
 // revision is verified, by inheritance or by a verify run the job started;
@@ -45,8 +50,8 @@ import { AppError } from "@/lib/app-error";
 import { behaviourHeldSql } from "@/lib/kept-revisions";
 import { pipelinePlan } from "@/lib/pipeline-revisions";
 import {
-  catalogForwardSql, namespacedCatalog, sameAsLiveSql, sourceHeadSql, type moveLiveRevision, type SourceHead,
-  type VerifyReport,
+  catalogForwardSql, headLeftSql, namespacedCatalog, sameAsLiveSql, sourceHeadSql, type moveLiveRevision,
+  type SourceHead, type VerifyReport,
 } from "@/lib/scenario-revisions";
 import { scenarioSourceBindingPredicate, unitGuardRunsSql } from "@/lib/scenario-sources";
 
@@ -110,13 +115,6 @@ export interface DeployJobDeps {
 }
 
 type Storage = Pick<DurableObjectStorage, "get" | "put" | "delete">;
-
-/** Holds for a commit row with a failed revision of its rev in its scope and none still building. */
-const MANUAL_ROW_FAILED = `(EXISTS (SELECT 1 FROM scenario_revisions ended
-      JOIN bundles bundle ON bundle.rev = ended.rev AND bundle.scope_key = scenario_source_commits.scope_key
-    WHERE ended.rev = scenario_source_commits.rev AND ended.state = 'failed')
-  AND NOT EXISTS (SELECT 1 FROM scenario_revisions building
-    WHERE building.rev = scenario_source_commits.rev AND building.state = 'building'))`;
 
 /** Refusals that hold for every lab of the scope: the pass starts nothing more. */
 const SCOPE_WAITS: Record<string, string> = {
@@ -193,10 +191,9 @@ export async function driveDeployJob(input: {
   const { db, storage, scopeKey, digest, now, deps } = input;
   const head = await readHead(db, scopeKey, digest);
   const stored = await storage.get<DeployJob>(DEPLOY_JOB_STORAGE_KEY);
-  // The commit that was the head when the source went automatic stays as
-  // the administrator left it; a re-run of it is another attempt.
-  const acting = head?.automatic === 1 && head.id !== null && head.binder !== null &&
-    head.promotion_after !== `${head.id}:${head.attempt}`;
+  // A head left by promotion by hand waits for `takeUpLeftHead`, which reads
+  // its commit again as another attempt.
+  const acting = head !== undefined && head.left !== 1 && head.id !== null && head.binder !== null;
   const driven = acting &&
     (head.state === "building" || head.state === "waiting" || head.state === "awaiting_promote");
   // The row has ended and the job stayed for its restore checks.
@@ -217,23 +214,7 @@ export async function driveDeployJob(input: {
     else await closeJob(db, storage, stored, deps);
     return { wait: false, ...(restore.wakeIn === undefined ? {} : { wakeIn: restore.wakeIn }) };
   }
-  if (!head || !driven) {
-    // A source switched back to manual shows its row as a manual source's:
-    // `building`, or `failed` when a revision of it failed and none builds
-    // any more, which is what a re-run or a new publish takes up. Nothing
-    // else would end such a row: the job left it to itself.
-    if (head && head.automatic !== 1 && head.id !== null &&
-      (head.state === "waiting" || head.state === "building" || head.state === "awaiting_promote")) {
-      await db.prepare(
-        `UPDATE scenario_source_commits SET
-            state = CASE WHEN ${MANUAL_ROW_FAILED} THEN 'failed' ELSE 'building' END,
-            detail = CASE WHEN ${MANUAL_ROW_FAILED} THEN 'a revision of this commit failed' ELSE NULL END,
-            updated_at = ?3
-          WHERE id = ?1 AND attempt = ?2 AND state = ?4 AND (state <> 'building' OR ${MANUAL_ROW_FAILED})`,
-      ).bind(head.id, head.attempt, now, head.state).run();
-    }
-    return { wait: false };
-  }
+  if (!head || !driven) return { wait: false };
   const job: DeployJob = stored && stored.rowId === head.id && stored.attempt === head.attempt
     ? stored
     : { rowId: head.id!, attempt: head.attempt!, since: now, labs: {}, decided: 0, total: 0 };
@@ -730,11 +711,10 @@ function labFailure(runs: Array<{ outcome?: RunOutcome }>, overdue: boolean): st
 }
 
 interface Head {
-  automatic: number;
+  /** The row was left by promotion by hand (`headLeftSql`) and waits to be read again. */
+  left: number | null;
   /** The source's binder, whose rights the job's writes are checked by. */
   binder: string | null;
-  /** The deploy row and attempt that were the head's when the source went automatic. */
-  promotion_after: string | null;
   organization_id: string | null;
   id: string | null;
   attempt: number | null;
@@ -747,8 +727,8 @@ interface Head {
 /** The scope's source and its head's deploy row, when it has one. */
 async function readHead(db: D1Database, scopeKey: string, digest: string): Promise<Head | undefined> {
   return await drizzle(db).get<Head>(sql`
-    SELECT ${scenarioSources.promotion} = 'automatic' AS automatic, ${scenarioSources.boundByUserId} AS binder,
-        ${scenarioSources.organizationId} AS organization_id, ${scenarioSources.promotionAfter} AS promotion_after,
+    SELECT ${sql.raw(headLeftSql("scenario_sources", "head"))} AS left, ${scenarioSources.boundByUserId} AS binder,
+        ${scenarioSources.organizationId} AS organization_id,
         head.id, head.attempt, head.state, head.rev, head.detail, head.updated_at
       FROM ${scenarioSources}
       LEFT JOIN scenario_source_commits head ON head.scope_key = ${scenarioSources.scopeKey} AND head.purpose = 'deploy'
@@ -757,8 +737,8 @@ async function readHead(db: D1Database, scopeKey: string, digest: string): Promi
 }
 
 /**
- * Whether the job may start a run now: the binding may still write, the
- * source is automatic, and the row is the head's and as the pass read it.
+ * Whether the job may start a run now: the binding may still write, and the
+ * row is the head's and as the pass read it.
  */
 async function mayStart(
   db: D1Database, scopeKey: string, digest: string, rowId: string, attempt: number, state: string,
@@ -767,10 +747,45 @@ async function mayStart(
     SELECT 1 AS ok FROM ${scenarioSources}
       JOIN scenario_source_commits head ON head.scope_key = ${scenarioSources.scopeKey} AND head.purpose = 'deploy'
         AND head.rev = 'git-' || ${scenarioSources.githubRepositoryId} || '-' || ${scenarioSources.headSha} || '-' || ${digest}
-     WHERE ${scenarioSources.scopeKey} = ${scopeKey} AND ${scenarioSources.promotion} = 'automatic'
+     WHERE ${scenarioSources.scopeKey} = ${scopeKey}
        AND ${scenarioSourceBindingPredicate()}
        AND head.id = ${rowId} AND head.attempt = ${attempt} AND head.state = ${state}`);
   return row?.ok === 1;
+}
+
+/**
+ * Takes up the head of scope `scopeKey` (on compile digest `digest`) that
+ * promotion by hand left (`headLeftSql`), before the job decides anything of
+ * it: a row of it that ended up `building`, `waiting`, `awaiting_promote` or
+ * `failed`, and has its bundle, goes back to `ingesting` as another attempt,
+ * as a re-run of the check reopens a failed row. The pass's ingest then reads
+ * the stored bundle again, which recreates the revision rows it is missing
+ * and leaves those it has, and the job starts over on the new attempt.
+ *
+ * In the same batch the source's columns stop marking anything: `promotion`
+ * becomes `automatic` and `promotion_after` is emptied, so the take-up runs
+ * once per source and never for a row the job drives. Nothing sets them back
+ * but the re-bind of a disconnected source, which marks its head once more.
+ * Only once the head is known: a source without one has nothing to take up
+ * yet. The caller has found the binding active, so a paused source keeps
+ * everything as it is.
+ */
+export async function takeUpLeftHead(db: D1Database, scopeKey: string, digest: string, now: number): Promise<void> {
+  await db.batch([
+    db.prepare(
+      `UPDATE scenario_source_commits SET state = 'ingesting', attempt = attempt + 1, detail = NULL, updated_at = ?3
+        WHERE scope_key = ?1 AND purpose = 'deploy' AND state IN ('building', 'waiting', 'awaiting_promote', 'failed')
+          AND EXISTS (SELECT 1 FROM scenario_sources source WHERE source.scope_key = ?1
+            AND scenario_source_commits.rev = 'git-' || source.github_repository_id || '-' || source.head_sha || '-' || ?2
+            AND ${headLeftSql("source", "scenario_source_commits")})
+          AND EXISTS (SELECT 1 FROM bundles bundle
+            WHERE bundle.rev = scenario_source_commits.rev AND bundle.scope_key = ?1)`,
+    ).bind(scopeKey, digest, now),
+    db.prepare(
+      `UPDATE scenario_sources SET promotion = 'automatic', promotion_after = NULL
+        WHERE scope_key = ?1 AND head_sha IS NOT NULL AND (promotion = 'manual' OR promotion_after IS NOT NULL)`,
+    ).bind(scopeKey),
+  ]);
 }
 
 /** Ends the runs of a job that is over and are still going on, its restore checks too, and forgets the job. */

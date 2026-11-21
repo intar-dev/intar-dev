@@ -94,11 +94,16 @@ test("admin tab panels stay mounted so work survives a tab switch", async ({
   );
 });
 
-test("a refused promotion reports inside its revision row", async ({
+test("a refused rollback reports inside its revision row", async ({
   page,
   ui,
 }) => {
   await ui.open({ ...routeCase("admin-scenario-detail"), theme: "light" });
+  // The candidate was live before: it can be gone back to.
+  const scenario = ui.server.state.scenarioRevisions.find((candidate) => candidate.id === "intar/repair-nginx")!;
+  const revisions = scenario.revisions as Array<{ rev: string; liveAt: number | null }>;
+  revisions.find((revision) => revision.rev === scenario.candidateRev)!.liveAt = revisions.at(-1)!.liveAt;
+  await page.reload();
   await page.route("**/api/admin/scenario-revisions/intar/repair-nginx", (route) => {
     if (route.request().method() !== "POST") return route.fallback();
     ui.server.expectedConflicts += 1;
@@ -108,16 +113,16 @@ test("a refused promotion reports inside its revision row", async ({
     });
   });
 
-  await page.getByRole("button", { name: "Promote" }).click();
+  await page.getByRole("button", { name: "Roll back" }).click();
 
   const alert = page.getByRole("alert");
   await expect(alert).toHaveCount(1);
   await expect(alert).toContainText("The live revision changed; reload and try again.");
   // The row of the revision that was refused shows it.
-  await expect(page.locator("div.py-3", { has: alert }).getByRole("button", { name: "Promote" })).toBeVisible();
+  await expect(page.locator("div.py-3", { has: alert }).getByRole("button", { name: "Roll back" })).toBeVisible();
 });
 
-test("a scenario of an automatic source says what its job is doing, and keeps the by-hand steps as an override", async ({
+test("a scenario says what its source's job is doing, and offers no by-hand verify or promote", async ({
   page,
   ui,
 }) => {
@@ -129,11 +134,12 @@ test("a scenario of an automatic source says what its job is doing, and keeps th
   const section = page.locator("section", { has: page.getByRole("heading", { name: "Revisions" }) });
   await expect(section.getByText("Its source checks this commit and puts each lab that passes live.")).toBeVisible();
   await expect(section.getByText("Source: waiting for its arm64 images")).toBeVisible();
-  // Still there, as an override.
-  await expect(section.getByRole("button", { name: "Promote" })).toBeVisible();
+  // Checking and putting labs live are the job's alone (#494).
+  for (const name of ["Verify", "Promote", "Publish catalog", "Check snapshot start", "Withdraw snapshot start"]) {
+    await expect(section.getByRole("button", { name, exact: true })).toHaveCount(0);
+  }
   if (process.env.SOURCE_CARD_SHOTS) await section.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/driven.png` });
 
-  // The job has ended on this commit: the by-hand steps are the way forward again.
   // Given up on this lab while the commit goes on for others.
   scenario.sourceJob = { rev: scenario.candidateRev!, driving: true, failed: true, note: "its checks did not pass in 2 verify runs" };
   await page.reload();

@@ -22,9 +22,8 @@ import {
   scenarioSourceCommits,
   scenarioSources,
   scopeMachineImages,
-  type CourseCatalogSnapshotV2,
 } from "@/db/schema";
-import type { ImageProducer, ScenarioSourceCommitState, SourcePromotion } from "@/db/schema/scenarios";
+import type { ImageProducer, ScenarioSourceCommitState } from "@/db/schema/scenarios";
 import type { SourceCompileErrorV1 } from "@/generated/bridge";
 import type { SourceRefusalCode } from "@/generated/catalog";
 import {
@@ -37,7 +36,6 @@ import { readSourceBundle, sourceCompileDigest } from "@/lib/scenario-contract/s
 import { activeAccountExistsSql, activeAdminSql } from "@/lib/account-access";
 import type { UserContext } from "@/lib/agent-bridge";
 import { type AppError, appError, errorChainMatches } from "@/lib/app-error";
-import { courseCatalogScopeKey } from "@/lib/course-catalogs";
 import { syncBuilderDesiredState } from "@/lib/machine-builds";
 import {
   pipelinePlan,
@@ -79,8 +77,6 @@ import {
 export const SCENARIO_GIT_SOURCES_FLAG = "scenario_git_sources";
 /** Lets a platform administrator set a scope's source to pipeline-built images (#441). */
 export const SCENARIO_PIPELINE_IMAGES_FLAG = "scenario_pipeline_images";
-/** Lets a platform administrator switch a source to automatic promotion (#454). */
-export const SCENARIO_AUTOMATIC_PROMOTION_FLAG = "scenario_automatic_promotion";
 const REVISION_SOURCE_PULLS =
   "The scenario source was switched to pull mode before the images of this revision were pushed.";
 
@@ -109,8 +105,6 @@ export interface ScenarioSourceView {
   /** Who builds the images of the commits ingested from now on. */
   imageProducer: ImageProducer;
   allowSelfHostedRunners: boolean;
-  /** Who puts a commit's labs live: an administrator, or the source's job once each lab passed its check. */
-  promotion: SourcePromotion;
   pausedAt: number | null;
   pauseReason: "admin" | "binder_lost_admin" | "suspended" | null;
   disconnectedAt: number | null;
@@ -180,8 +174,6 @@ export interface ScenarioSourceCard {
   settings?: {
     /** The platform's own card: its reader also has the way to pull mode and back to the builder. */
     platform: boolean;
-    /** Whether automatic promotion is switched on for the scope. */
-    automaticPromotion: boolean;
   };
   /** With `settings`, for a scope with a connected source. */
   usage?: ScenarioSourceUsage;
@@ -259,10 +251,10 @@ function failPipelineCommits(db: DrizzleD1Database, scopeKey: string, now: numbe
           WHERE ended.rev = ${scenarioSourceCommits.rev} AND ended.state = 'failed' AND ended.failure_reason = ${reason})`,
         sql`NOT EXISTS (SELECT 1 FROM scenario_revisions waiting
           WHERE waiting.rev = ${scenarioSourceCommits.rev} AND waiting.state = 'building')`,
-        // An automatic source's job decides its row, unless the source is
-        // gone: a disconnected one has no job any more.
+        // The source's job decides its row, unless the source is gone: a
+        // disconnected one has no job any more.
         sql`NOT EXISTS (SELECT 1 FROM scenario_sources source
-          WHERE source.scope_key = ${scopeKey} AND source.promotion = 'automatic' AND source.disconnected_at IS NULL)`,
+          WHERE source.scope_key = ${scopeKey} AND source.disconnected_at IS NULL)`,
         ended,
       ),
     );
@@ -311,27 +303,11 @@ export function scenarioSourceBinderPredicate(): SQL {
 }
 
 /**
- * The unit guard: the scope's unfinished runs that have content access now
- * and would lose it once `snapshot` replaces the scope's catalog, or whose
- * scenario the commit disables. Runs without access never count. For
- * `public` (null) every organization's runs can hold public content.
- */
-export async function countUnitGuardRuns(
-  d1: D1Database,
-  organizationId: string | null,
-  snapshot: CourseCatalogSnapshotV2,
-): Promise<number> {
-  const row = await d1
-    .prepare(`SELECT COUNT(*) AS runs ${unitGuardRunsSql(1, 2, 3)}`)
-    .bind(organizationId, courseCatalogScopeKey(organizationId), JSON.stringify(snapshot))
-    .first<{ runs: number }>();
-  return row?.runs ?? 0;
-}
-
-/**
- * `FROM … WHERE` of the active runs that would lose access if the catalog
- * of scope ?{scopeKey} (organization ?{organization}) became the JSON
- * snapshot ?{snapshot}; see countUnitGuardRuns. A write can embed it as
+ * The unit guard: `FROM … WHERE` of the scope's unfinished runs that have
+ * content access now and would lose it if the catalog of scope ?{scopeKey}
+ * (organization ?{organization}) became the JSON snapshot ?{snapshot}. Runs
+ * without access never count. For `public` (null) every organization's runs
+ * can hold public content. A write can embed it as
  * `NOT EXISTS (SELECT 1 …)` to hold the guard in its own statement.
  */
 export function unitGuardRunsSql(organization: number, scopeKey: number, snapshot: number): string {
@@ -372,15 +348,6 @@ export async function scenarioPipelineImagesEnabled(
   });
 }
 
-export async function scenarioAutomaticPromotionEnabled(
-  scope: ScenarioSourceScope,
-  toggles: FeatureToggleService = featureToggleService(),
-): Promise<boolean> {
-  return toggles.getBoolean(SCENARIO_AUTOMATIC_PROMOTION_FLAG, false, {
-    targetingKey: scope.key,
-  });
-}
-
 export async function scenarioSourceCard(
   scope: ScenarioSourceScope,
   toggles?: FeatureToggleService,
@@ -392,10 +359,9 @@ export async function scenarioSourceCard(
    */
   settingsFor?: "platform" | "scope",
 ): Promise<ScenarioSourceCard> {
-  const [enabled, pipelineImages, automaticPromotion, source] = await Promise.all([
+  const [enabled, pipelineImages, source] = await Promise.all([
     scenarioGitSourcesEnabled(scope, toggles),
     scenarioPipelineImagesEnabled(scope, toggles),
-    settingsFor ? scenarioAutomaticPromotionEnabled(scope, toggles) : false,
     loadScenarioSource(scope),
   ]);
   return {
@@ -407,7 +373,7 @@ export async function scenarioSourceCard(
     appSlug: env.GITHUB_APP_SLUG || null,
     workflowRef: env.SCENARIO_PUBLISH_WORKFLOW_REF || "scenario-publish-v1",
     pipelineWorkflowRef: env.SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF || null,
-    ...(settingsFor ? { settings: { platform: settingsFor === "platform", automaticPromotion } } : {}),
+    ...(settingsFor ? { settings: { platform: settingsFor === "platform" } } : {}),
     ...(settingsFor && source?.disconnectedAt === null ? { usage: await scenarioSourceUsage(scope.key) } : {}),
     source,
   };
@@ -497,7 +463,6 @@ export async function loadScenarioSource(
     mode: binding.mode,
     imageProducer: binding.imageProducer,
     allowSelfHostedRunners: binding.allowSelfHostedRunners,
-    promotion: binding.promotion,
     pausedAt: binding.pausedAt,
     pauseReason: binding.pauseReason,
     disconnectedAt: binding.disconnectedAt,
@@ -547,16 +512,15 @@ type Change =
   | { action: "mode"; mode: "push" | "pull" }
   | { action: "image_producer"; producer: ImageProducer }
   | { action: "runner_policy"; allowSelfHosted: boolean }
-  | { action: "promotion"; promotion: SourcePromotion }
   | { action: "forget_image"; buildKey: string; architecture: "amd64" | "arm64" };
 
 /**
  * A source's settings: who builds its images, which runners may publish,
- * who puts its labs live, and forgetting an image. Its scope's
+ * and forgetting an image. Its scope's
  * administrators change them (#472): an organization's owners and admins
  * for theirs, a platform administrator for the platform's.
  */
-const SETTING_ACTIONS: ReadonlySet<Change["action"]> = new Set(["image_producer", "runner_policy", "promotion", "forget_image"]);
+const SETTING_ACTIONS: ReadonlySet<Change["action"]> = new Set(["image_producer", "runner_policy", "forget_image"]);
 
 /**
  * Whether a platform administrator may make `change` on a scope that is
@@ -572,8 +536,6 @@ function platformMayStepBack(change: Change): boolean {
       return change.producer === "builder";
     case "runner_policy":
       return !change.allowSelfHosted;
-    case "promotion":
-      return change.promotion === "manual";
     case "mode":
       return change.mode === "pull";
     default:
@@ -588,7 +550,6 @@ function parseChange(body: unknown): Change {
     mode?: unknown;
     producer?: unknown;
     allow_self_hosted?: unknown;
-    promotion?: unknown;
     build_key?: unknown;
     architecture?: unknown;
   };
@@ -623,11 +584,6 @@ function parseChange(body: unknown): Change {
     case "runner_policy":
       if (typeof input.allow_self_hosted === "boolean") {
         return { action: "runner_policy", allowSelfHosted: input.allow_self_hosted };
-      }
-      break;
-    case "promotion":
-      if (input.promotion === "manual" || input.promotion === "automatic") {
-        return { action: "promotion", promotion: input.promotion };
       }
       break;
     case "forget_image":
@@ -717,14 +673,11 @@ export async function changeScenarioSource(input: {
     change.action === "pause" || change.action === "disconnect" || change.action === "purge" ||
     change.action === "forget_image" ||
     (change.action === "image_producer" && change.producer === "builder") ||
-    (change.action === "runner_policy" && !change.allowSelfHosted) ||
-    (change.action === "promotion" && change.promotion === "manual")
+    (change.action === "runner_policy" && !change.allowSelfHosted)
       ? null
       : change.action === "image_producer"
         ? scenarioPipelineImagesEnabled
-        : change.action === "promotion"
-          ? scenarioAutomaticPromotionEnabled
-          : scenarioGitSourcesEnabled;
+        : scenarioGitSourcesEnabled;
   if (flag && !(await flag(scope, input.toggles))) {
     throw appError(404, "not_found", "not found");
   }
@@ -892,40 +845,6 @@ export async function changeScenarioSource(input: {
       }));
       break;
     }
-    case "promotion": {
-      // In the statement: the actor still administers the scope, only a
-      // connected source is given a job. Back to manual is always
-      // possible. Switching changes nothing a learner sees: the job leaves
-      // the commit that is the head now as the administrator left it, and
-      // takes up the next one, or a re-run of this one. The poke runs the
-      // source's pass at once, which lets a job go on a switch to manual.
-      const digest = await sourceCompileDigest();
-      const [set] = await db
-        .update(scenarioSources)
-        .set({
-          promotion: change.promotion,
-          promotionAfter: change.promotion === "manual" ? null : sql`(SELECT head.id || ':' || head.attempt
-            FROM scenario_source_commits head WHERE head.scope_key = ${scenarioSources.scopeKey} AND head.purpose = 'deploy'
-              AND head.rev = 'git-' || ${scenarioSources.githubRepositoryId} || '-' || ${scenarioSources.headSha} || '-' || ${digest})`,
-          pokedAt: now,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(scenarioSources.scopeKey, scope.key),
-            authority,
-            change.promotion === "manual"
-              ? undefined
-              : isNull(scenarioSources.disconnectedAt),
-          ),
-        )
-        .returning({ scopeKey: scenarioSources.scopeKey });
-      if (!set) throw await settingRefusal(db, scope, authority, false);
-      console.info(JSON.stringify({
-        event: "scenario_source_promotion_set", scope_key: scope.key, actor_user_id: actorUserId, promotion: change.promotion,
-      }));
-      break;
-    }
     case "forget_image": {
       const [row] = await db
         .delete(scopeMachineImages)
@@ -1086,6 +1005,9 @@ async function connect(input: {
         mode = excluded.mode,
         image_producer = excluded.image_producer,
         allow_self_hosted_runners = 0,
+        -- Marks the head as left (headLeftSql): a row of the repository
+        -- bound before may be the head again, and the job reads its commit
+        -- again before it decides anything (#494).
         promotion = 'manual',
         promotion_after = NULL,
         bound_by_user_id = excluded.bound_by_user_id,

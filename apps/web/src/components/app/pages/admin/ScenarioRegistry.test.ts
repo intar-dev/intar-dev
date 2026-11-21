@@ -30,7 +30,6 @@ function renderCard(
       mode: "push",
       imageProducer: "builder",
       allowSelfHostedRunners: false,
-      promotion: "manual",
       pausedAt: null,
       pauseReason: null,
       disconnectedAt: null,
@@ -101,13 +100,14 @@ describe("scenario source card", () => {
     expect(pull).toContain("keep only");
   });
 
-  it("says who builds a source's images and who puts its labs live", () => {
+  it("says who builds a source's images, and that each lab goes live once it passed its check", () => {
     const builder = renderCard({});
     expect(builder).toContain("Built by Intar&#x27;s builder");
-    expect(builder).toContain("An administrator promotes each lab");
-    const pipeline = renderCard({ imageProducer: "pipeline", promotion: "automatic" });
+    expect(builder).toContain("Each lab goes live once it passed its check on a platform host");
+    expect(builder).not.toContain("An administrator promotes each lab");
+    const pipeline = renderCard({ imageProducer: "pipeline" });
     expect(pipeline).toContain("Built by this repository&#x27;s pipeline");
-    expect(pipeline).toContain("Each lab goes live once it passed its check");
+    expect(pipeline).toContain("Each lab goes live once it passed its check on a platform host");
   });
 
   it("shows the workflow ref the server names, and a pipeline source the second version with its runner", () => {
@@ -129,7 +129,7 @@ describe("scenario source card", () => {
 
   describe("platform settings", () => {
     const platform = (source: Partial<ScenarioSourceView>, card: Partial<ScenarioSourceCard> = {}) =>
-      renderCard(source, null, { settings: { platform: true, automaticPromotion: false }, ...card });
+      renderCard(source, null, { settings: { platform: true }, ...card });
     /** The button with this label, as rendered: disabled or not. */
     const button = (html: string, label: string) => {
       const end = html.indexOf(`${label}</button>`);
@@ -140,18 +140,23 @@ describe("scenario source card", () => {
     it("are on the platform's card only, and only for a connected source", () => {
       expect(renderCard({})).not.toContain("Platform settings");
       expect(platform({})).toContain("Platform settings");
-      expect(renderCard(null, null, { settings: { platform: true, automaticPromotion: true } })).not.toContain("Platform settings");
+      expect(renderCard(null, null, { settings: { platform: true } })).not.toContain("Platform settings");
       expect(platform({ disconnectedAt: 1, disconnectReason: "admin" })).not.toContain("Platform settings");
     });
 
-    it("offer the other state of each setting", () => {
-      const builder = platform({}, { pipelineImages: true, settings: { platform: true, automaticPromotion: true } });
-      for (const label of ["Use the repository's pipeline", "Allow self-hosted runners", "Go live automatically", "Switch to pull"]) {
+    it("offer the other state of each setting, and none of how labs go live", () => {
+      const builder = platform({}, { pipelineImages: true, settings: { platform: true } });
+      for (const label of ["Use the repository's pipeline", "Allow self-hosted runners", "Switch to pull"]) {
         expect(button(builder, label.replace("'", "&#x27;"))).not.toMatch(/ disabled(=""|>| )/);
       }
-      const pipeline = platform({ imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic" });
-      for (const label of ["Use Intar&#x27;s builder", "Allow GitHub-hosted runners only", "Promote by hand"]) {
+      const pipeline = platform({ imageProducer: "pipeline", allowSelfHostedRunners: true });
+      for (const label of ["Use Intar&#x27;s builder", "Allow GitHub-hosted runners only"]) {
         expect(button(pipeline, label)).not.toMatch(/ disabled(=""|>| )/);
+      }
+      for (const html of [builder, pipeline]) {
+        expect(html).not.toContain("Go live automatically");
+        expect(html).not.toContain("Promote by hand");
+        expect(html).not.toContain("Automatic promotion");
       }
     });
 
@@ -159,8 +164,6 @@ describe("scenario source card", () => {
       const off = platform({});
       expect(button(off, "Use the repository&#x27;s pipeline")).toMatch(/ disabled(=""|>| )/);
       expect(off).toContain("Pipeline images are not switched on for this scope.");
-      expect(button(off, "Go live automatically")).toMatch(/ disabled(=""|>| )/);
-      expect(off).toContain("Automatic promotion is not switched on for this scope.");
       const pull = platform({ mode: "pull" }, { pipelineImages: true });
       expect(button(pull, "Use the repository&#x27;s pipeline")).toMatch(/ disabled(=""|>| )/);
       expect(pull).toContain("A pipeline builds only for a source in push mode.");
@@ -175,8 +178,8 @@ describe("scenario source card", () => {
       expect(dark.split("Scenario sources are not switched on for this scope.")).toHaveLength(3);
       expect(button(dark, "Allow self-hosted runners")).toContain("aria-describedby=");
       // The way back never needs a flag.
-      const back = platform({ imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic" }, { enabled: false });
-      for (const label of ["Use Intar&#x27;s builder", "Allow GitHub-hosted runners only", "Promote by hand"]) {
+      const back = platform({ imageProducer: "pipeline", allowSelfHostedRunners: true }, { enabled: false });
+      for (const label of ["Use Intar&#x27;s builder", "Allow GitHub-hosted runners only"]) {
         expect(button(back, label)).not.toMatch(/ disabled(=""|>| )/);
       }
     });
@@ -186,7 +189,7 @@ describe("scenario source card", () => {
     const own = (source: Partial<ScenarioSourceView>, card: Partial<ScenarioSourceCard> = {}, settings = {}) =>
       renderCard(source, null, {
         pipelineImages: true,
-        settings: { platform: false, automaticPromotion: true, ...settings },
+        settings: { platform: false, ...settings },
         ...card,
       }, "acme");
     const button = (html: string, label: string) => {
@@ -195,13 +198,14 @@ describe("scenario source card", () => {
       return html.slice(html.lastIndexOf("<button", end), end);
     };
 
-    it("are its own administrators': its pipeline, its runners, how its labs go live", () => {
+    it("are its own administrators': its pipeline and its runners", () => {
       const html = own({});
       expect(html).toContain("Source settings");
       expect(html).not.toContain("Platform settings");
-      for (const label of ["Use the repository&#x27;s pipeline", "Allow self-hosted runners", "Go live automatically"]) {
+      for (const label of ["Use the repository&#x27;s pipeline", "Allow self-hosted runners"]) {
         expect(button(html, label)).not.toMatch(/ disabled(=""|>| )/);
       }
+      expect(html).not.toContain("Go live automatically");
     });
 
     it("offer no builder and no pull mode: those are the platform's", () => {
@@ -213,12 +217,9 @@ describe("scenario source card", () => {
     });
 
     it("say why a switch is not offered to this organization", () => {
-      const off = own({}, { pipelineImages: false }, { automaticPromotion: false });
+      const off = own({}, { pipelineImages: false });
       expect(button(off, "Use the repository&#x27;s pipeline")).toMatch(/ disabled(=""|>| )/);
       expect(off).toContain("Pipeline images are not switched on for this organization.");
-      expect(off).toContain("Automatic promotion is not switched on for this organization.");
-      // Back to by-hand is never held.
-      expect(button(own({ promotion: "automatic" }, {}, { automaticPromotion: false }), "Promote by hand")).not.toMatch(/ disabled(=""|>| )/);
     });
   });
 
@@ -290,7 +291,7 @@ describe("scenario registry resources", () => {
       uploadedBytes: { used: 10 * GIB, limit: 100 * GIB }, countedBytes: { used: 20 * GIB, limit: 50 * GIB },
       images: [image], imageCount: 2,
     };
-    const settings = { platform: false, automaticPromotion: true };
+    const settings = { platform: false };
 
     it("shows what the source used of each limit, and each image with what built it", () => {
       const html = renderCard({ imageProducer: "pipeline" }, "scenario-publish-v2", { settings, usage }, "acme");

@@ -29,7 +29,7 @@ import { HOST_DESIRED_STATE_SCHEMA_VERSION_V3, mutateHostDesiredStateV3 } from "
 import { HOST_DEGRADED_AFTER_MS } from "@/lib/host-health";
 import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
 import { behaviourVerifiedSql } from "@/lib/kept-revisions";
-import { pokeAutomaticSource } from "@/lib/source-pokes";
+import { pokeSource } from "@/lib/source-pokes";
 import { canonicalJson, sha256Digest } from "@/lib/scenario-contract/canonical-json";
 import { behaviourDigest, restoreDigest } from "@/lib/scenario-contract/revision-digests";
 
@@ -467,7 +467,7 @@ export async function settleScenarioRevisions(
     // verify run finds them ready.
     await wakePlatformAgents();
   }
-  for (const scopeKey of settled) await pokeAutomaticSource(env.DB, { scopeKey }).run();
+  for (const scopeKey of settled) await pokeSource(env.DB, { scopeKey }).run();
 }
 
 /** Revisions one pass gives their behaviour digest. */

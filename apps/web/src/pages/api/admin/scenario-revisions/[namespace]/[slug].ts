@@ -2,9 +2,8 @@ import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
 import { appError, toErrorResponse } from "@/lib/app-error";
 import {
-  assertScenarioAdmin, clearRestoreVerified, liftRevisionHold, listAdministeredScenarios, moveLiveRevision,
+  assertScenarioAdmin, liftRevisionHold, listAdministeredScenarios, moveLiveRevision,
 } from "@/lib/scenario-revisions";
-import { beginVerifyRun } from "@/lib/scenario-runs/revision-begin";
 import { refuseScenarioSourceWrite } from "@/lib/scenario-sources";
 
 export const prerender = false;
@@ -29,15 +28,11 @@ export const GET: APIRoute = async ({ request, params }) => {
 };
 
 /**
- * `{action: "verify", rev}` starts a verify run of the candidate;
- * `{action: "verify_restore", rev}` starts a restore check of a verified
- * revision, and `{action: "clear_restore_verified", rev}` withdraws its
- * result; `{action: "lift_hold", rev}` lifts the hold a rollback left on
- * that revision's behaviour;
- * `{action: "promote" | "rollback", rev, liveRev}` moves the live revision
- * from `liveRev`, the one the caller saw; a candidate that is the same as
- * the live revision moves nothing and only publishes its course catalog.
- * Only the scenario's scope admins.
+ * `{action: "lift_hold", rev}` lifts the hold a rollback left on that
+ * revision's behaviour; `{action: "rollback", rev, liveRev}` moves the live
+ * revision from `liveRev`, the one the caller saw, back to `rev`. Only the
+ * scenario's scope admins. Checking and putting labs live, their snapshot
+ * starts and the course catalog are the scope's source's job (#494).
  */
 export const POST: APIRoute = async ({ request, params }) => {
   try {
@@ -52,30 +47,15 @@ export const POST: APIRoute = async ({ request, params }) => {
     } | null;
     const rev = typeof body?.rev === "string" ? body.rev : "";
     if (!rev) throw appError(400, "invalid_request", "rev is required");
-    if (body?.action === "verify") {
-      // Only a platform admin's verify run passes the operator drain.
-      const run = await beginVerifyRun({ scenarioId, rev, allowDrainedAdminProof: authz.context.isAdmin });
-      return jsonResponse({ runId: run.runId, scenario: await readScenario(authz.context.userId, scenarioId) }, { status: 202 });
-    }
-    if (body?.action === "verify_restore") {
-      const run = await beginVerifyRun({ scenarioId, rev, allowDrainedAdminProof: authz.context.isAdmin, restoreCheck: true });
-      return jsonResponse({ runId: run.runId, scenario: await readScenario(authz.context.userId, scenarioId) }, { status: 202 });
-    }
-    if (body?.action === "clear_restore_verified") {
-      await clearRestoreVerified(scenarioId, rev);
-      return jsonResponse({ scenario: await readScenario(authz.context.userId, scenarioId) });
-    }
     if (body?.action === "lift_hold") {
       await liftRevisionHold({ scenarioId, rev, actorUserId: authz.context.userId });
       return jsonResponse({ scenario: await readScenario(authz.context.userId, scenarioId) });
     }
-    if (body?.action !== "promote" && body?.action !== "rollback") {
-      throw appError(400, "invalid_request", "action is verify, verify_restore, clear_restore_verified, lift_hold, promote or rollback");
-    }
+    if (body?.action !== "rollback") throw appError(400, "invalid_request", "action is lift_hold or rollback");
     if (body.liveRev !== null && typeof body.liveRev !== "string") {
       throw appError(400, "invalid_request", "liveRev is the live revision you saw, or null");
     }
-    await moveLiveRevision({ scenarioId, rev, liveRev: body.liveRev, kind: body.action, actorUserId: authz.context.userId });
+    await moveLiveRevision({ scenarioId, rev, liveRev: body.liveRev, kind: "rollback", actorUserId: authz.context.userId });
     return jsonResponse({ scenario: await readScenario(authz.context.userId, scenarioId) });
   } catch (error) {
     const { status, body } = toErrorResponse(error, "failed to change the scenario");

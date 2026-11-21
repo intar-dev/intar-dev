@@ -526,13 +526,13 @@ async function recordPipelineImage(
   ]);
   if (!results[3]?.results.length) return leaseRanOut();
   if (results[1]?.results.length) {
-    // An automatic source's job may wait for just this image before it
-    // puts a lab live.
+    // The source's job may wait for just this image before it puts a lab
+    // live.
     // The image is recorded whatever comes of the poke: the source's own
     // poll finds it within ten minutes.
     await env.DB.prepare(
       `UPDATE scenario_sources SET poked_at = ?2
-        WHERE promotion = 'automatic' AND disconnected_at IS NULL
+        WHERE disconnected_at IS NULL
           AND scope_key = (SELECT scope_key FROM pipeline_upload_sessions WHERE id = ?1)`,
     ).bind(sessionId, now).run().catch((error: unknown) => {
       console.error(JSON.stringify({ event: "pipeline_image_poke_failed", error: String(error) }));

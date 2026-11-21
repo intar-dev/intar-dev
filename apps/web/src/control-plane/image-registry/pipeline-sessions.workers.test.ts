@@ -880,16 +880,16 @@ describe("a pipeline recording its image", () => {
     expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
   });
 
-  it("pokes an automatic source when an image is recorded, and never a manual one", async () => {
+  it("pokes the source when an image is recorded, whatever its promotion column says", async () => {
     await seedBundle();
     const token = await session();
     const poked = () => env.DB.prepare("SELECT poked_at FROM scenario_sources WHERE scope_key = ?1").bind(SCOPE).first<number | null>("poked_at");
-    await env.DB.prepare("UPDATE scenario_sources SET poked_at = NULL WHERE scope_key = ?1").bind(SCOPE).run();
+    await env.DB.prepare("UPDATE scenario_sources SET poked_at = NULL, promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE).run();
     const amd64 = await pushImage(token, KEY_HEX);
     expect((await record(token, amd64.digest)).status).toBe(201);
-    expect(await poked()).toBeNull();
+    expect(await poked()).not.toBeNull();
     // The arm64 image settles no revision: only its own record can poke.
-    await env.DB.prepare("UPDATE scenario_sources SET promotion = 'automatic' WHERE scope_key = ?1").bind(SCOPE).run();
+    await env.DB.prepare("UPDATE scenario_sources SET poked_at = NULL WHERE scope_key = ?1").bind(SCOPE).run();
     const arm64 = await pushImage(token, KEY_HEX, { architecture: "arm64", label: "arm" });
     expect((await record(token, arm64.digest, KEY_HEX, "?arch=arm64")).status).toBe(201);
     expect(await poked()).not.toBeNull();
