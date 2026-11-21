@@ -2,8 +2,10 @@
 # release.yml, job web-pins, step "Open the website pin pull request".
 # Points the website at the published releases that main's manifests name:
 # the scenario compiler at intar-image-cli (its version and the published
-# archive digests), and tools/deploy/kino-pin.json at the Kino artifact of the
-# kino release (the digest image-ops kino-promote pushes it under).
+# archive digests), tools/deploy/kino-pin.json at the Kino artifact of the
+# kino release (the digest image-ops kino-promote pushes it under), and the
+# release installed desktop apps are offered at jumper (its version and the
+# digest of its published download).
 set -euo pipefail
 # A re-run keeps its run's commit. Only the run for main's tip may rewrite the
 # pull request; a push that moved main has a run of its own that follows.
@@ -32,6 +34,13 @@ contract_const() {
 compiler_sed='s/^pub const SOURCE_COMPILER_VERSION_V2: &str = "\([^"]*\)";$/\1/p'
 guest_sed='s/^pub const GUEST_CONTRACT: u32 = \([1-9][0-9]*\);$/\1/p'
 changes=()
+# What the Worker's configuration holds for a variable, to tell a pin that
+# changed it from one that was there already.
+wrangler=apps/web/wrangler.jsonc
+pinned() {
+  grep -E "^[[:space:]]*\"$1\": " "${wrangler}" || true
+}
+kino_note=""
 
 version="$(manifest_version crates/intar-image-cli/Cargo.toml)"
 tag="image-cli/v${version}"
@@ -39,6 +48,7 @@ compiler="$(contract_const HEAD crates/intar-contracts/src/source.rs "${compiler
 if [ -z "${compiler}" ] || [ "$(contract_const "${tag}" crates/intar-contracts/src/source.rs "${compiler_sed}")" != "${compiler}" ]; then
   echo "${tag} does not compile ${compiler:-the current source format}; the website keeps its compiler pin."
 elif published "${tag}"; then
+  before="$(pinned SCENARIO_COMPILER_CLI_VERSION)$(pinned SCENARIO_COMPILER_CLI_SHA256)"
   sums="$(mktemp -d)/checksums.txt"
   gh release download "${tag}" --pattern "intar-image-cli_${version}_checksums.txt" --output "${sums}"
   VERSION="${version}" SUMS="${sums}" python3 - <<'PY'
@@ -73,16 +83,63 @@ for key, value in pins.items():
         raise SystemExit(f"{path} must set {key} on exactly one line, found {count}")
 path.write_text(text)
 PY
-if git diff --quiet -- apps/web/wrangler.jsonc; then
+if [ "${before}" = "$(pinned SCENARIO_COMPILER_CLI_VERSION)$(pinned SCENARIO_COMPILER_CLI_SHA256)" ]; then
   echo "The website already pins intar-image-cli ${version}."
 else
+  changes+=("the scenario compiler to intar-image-cli ${version}")
+fi
+fi
+
+# The release an installed desktop app is offered as its update, and the
+# digest it checks the download by. The app takes the digest from here and
+# not from the release, so a replaced download is refused.
+app_version="$(manifest_version apps/jumper/Cargo.toml)"
+app_tag="jumper/v${app_version}"
+if [ -z "$(pinned JUMPER_RELEASE_JSON)" ]; then
+  echo "${wrangler} has no JUMPER_RELEASE_JSON; the desktop app is offered no release."
+elif published "${app_tag}"; then
+  before="$(pinned JUMPER_RELEASE_JSON)"
+  app_sums="$(mktemp -d)/checksums.txt"
+  gh release download "${app_tag}" --pattern "jumper_${app_version}_checksums.txt" --output "${app_sums}"
+  VERSION="${app_version}" SUMS="${app_sums}" WRANGLER="${wrangler}" python3 - <<'PY'
+import json
+import os
+import pathlib
+import re
+
+version = os.environ["VERSION"]
+releases = {}
+for line in pathlib.Path(os.environ["SUMS"]).read_text().splitlines():
+    digest, name = line.split("  ", 1)
+    match = re.fullmatch(rf"jumper_{re.escape(version)}_(macos_arm64)\.zip", name)
+    if match and re.fullmatch(r"[0-9a-f]{64}", digest):
+        releases[match[1]] = {"version": version, "sha256": digest}
+if sorted(releases) != ["macos_arm64"]:
+    raise SystemExit(f"published checksums lack the app's download: {releases}")
+path = pathlib.Path(os.environ["WRANGLER"])
+text, count = re.subn(
+    r'^(\s*"JUMPER_RELEASE_JSON": )"(?:[^"\\]|\\.)*"(,?)$',
+    lambda m: m[1] + json.dumps(json.dumps(releases, separators=(",", ":"), sort_keys=True)) + m[2],
+    path.read_text(),
+    flags=re.MULTILINE,
+)
+if count != 1:
+    raise SystemExit(f"{path} must set JUMPER_RELEASE_JSON on exactly one line, found {count}")
+path.write_text(text)
+PY
+  if [ "${before}" = "$(pinned JUMPER_RELEASE_JSON)" ]; then
+    echo "The website already offers jumper ${app_version}."
+  else
+    changes+=("the desktop app to jumper ${app_version}")
+  fi
+fi
+
+if ! git diff --quiet -- "${wrangler}"; then
   # `wrangler types` types each var as its literal value and hashes the
   # config into the header, so the worker types follow the pins; CI's
   # types:cf:check fails otherwise.
   bun install --frozen-lockfile
   bun run --cwd apps/web types:cf
-  changes+=("the scenario compiler to intar-image-cli ${version}")
-fi
 fi
 
 # The pin names the amd64 build, which hosts run, and the arm64 one, for a
@@ -121,19 +178,28 @@ elif published "${kino_tag}"; then
     echo "The website already pins kino ${kino_version}."
   else
     changes+=("kino ${kino_version} (${digest}) for guest contract ${contract}")
+    kino_note=" Merge a Kino pin only after image-ops kino-promote stored that artifact, or the website deploy stops."
   fi
 fi
 
 if [ "${#changes[@]}" -eq 0 ]; then
   exit 0
 fi
-summary="${changes[0]}"
-if [ "${#changes[@]}" -eq 2 ]; then
-  summary="${changes[0]} and ${changes[1]%% (*}"
-fi
+# "a", "a and b", "a, b and c": each without its digest and contract.
+summary=""
+for index in "${!changes[@]}"; do
+  change="${changes[${index}]%% (*}"
+  if [ "${index}" -eq 0 ]; then
+    summary="${change}"
+  elif [ "${index}" -eq "$((${#changes[@]} - 1))" ]; then
+    summary="${summary} and ${change}"
+  else
+    summary="${summary}, ${change}"
+  fi
+done
 
 branch="release/web-pins"
-title="chore(web): pin ${summary%% (*}"
+title="chore(web): pin ${summary}"
 bot="${APP_SLUG}[bot]"
 bot_id="$(gh api "users/${bot}" --jq .id)"
 git config user.name "${bot}"
@@ -148,7 +214,7 @@ for pin_file in tools/deploy/kino-pin.json tools/deploy/kino-release.json; do
 done
 git commit --quiet -m "${title}"
 tools/workflows/release/push-bot-branch.sh "${branch}"
-body="The website deploy picks up $(printf '%s; ' "${changes[@]}")merge a Kino pin only after image-ops kino-promote stored that artifact, or the website deploy stops."
+body="The website deploy picks up $(printf '%s; ' "${changes[@]}")and an installed desktop app is offered a release only once its pin here is merged.${kino_note}"
 pr="$(gh pr list --head "${branch}" --base main --state open --json number --jq '.[0].number // empty')"
 if [ -n "${pr}" ]; then
   gh pr edit "${pr}" --title "${title}" --body "${body}"

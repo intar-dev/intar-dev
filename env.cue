@@ -89,7 +89,7 @@ schema.#Project & {
 				  exit 0
 				fi
 				tools/workflows/release/build-jumper-macos.sh
-				tools/workflows/qemu/smoke.sh dist/Intar.app/Contents/Helpers
+				tools/workflows/qemu/smoke.sh target/release/bundle/Intar.app/Contents/Helpers
 				"""
 		}
 

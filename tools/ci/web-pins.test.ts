@@ -10,7 +10,12 @@ import { expect, test } from "bun:test";
 const COMPILER = 'pub const SOURCE_COMPILER_VERSION_V2: &str = "intar-source-compiler-v2";\n';
 const CONTRACT = "pub const GUEST_CONTRACT: u32 = 3;\n";
 
-function run(tags: { cli: "old" | "current"; kino: "old" | "current" }) {
+const APP_PIN = `{"macos_arm64":{"sha256":"${"c".repeat(64)}","version":"0.3.0"}}`;
+
+// `app`: the desktop app's release is still a draft, is published, or is
+// published and pinned already.
+function run(tags: { cli: "old" | "current"; kino: "old" | "current"; app?: "draft" | "published" | "pinned" }) {
+  const app = tags.app ?? "draft";
   const root = mkdtempSync(join(tmpdir(), "intar-web-pins-"));
   const repo = join(root, "repo");
   const bin = join(root, "bin");
@@ -31,8 +36,11 @@ function run(tags: { cli: "old" | "current"; kino: "old" | "current" }) {
   try {
     write(join(repo, "crates/intar-image-cli/Cargo.toml"), 'version = "0.11.0"\n');
     write(join(repo, "crates/kino/Cargo.toml"), 'version = "0.6.0"\n');
+    write(join(repo, "apps/jumper/Cargo.toml"), 'version = "0.3.0"\n');
     write(join(repo, "apps/web/wrangler.jsonc"),
-      '{\n  "vars": {\n    "SCENARIO_COMPILER_CLI_VERSION": "",\n    "SCENARIO_COMPILER_CLI_SHA256": "",\n  },\n}\n');
+      `{\n  "vars": {\n    "SCENARIO_COMPILER_CLI_VERSION": "",\n    "SCENARIO_COMPILER_CLI_SHA256": "",\n    "JUMPER_RELEASE_JSON": ${
+        JSON.stringify(app === "pinned" ? APP_PIN : "")
+      },\n  },\n}\n`);
     write(join(repo, "apps/web/worker-configuration.d.ts"), "// types\n");
     write(join(repo, "tools/deploy/kino-artifact.ts"), readFileSync("tools/deploy/kino-artifact.ts"));
     write(join(repo, "tools/workflows/release/web-pins.sh"), readFileSync("tools/workflows/release/web-pins.sh"));
@@ -58,13 +66,14 @@ function run(tags: { cli: "old" | "current"; kino: "old" | "current" }) {
       checksums += `${sum(`kino_0.6.0_linux_${arch}.tar.gz`)}  kino_0.6.0_linux_${arch}.tar.gz\n`;
     }
     write(join(release, "kino_0.6.0_checksums.txt"), checksums);
+    write(join(release, "jumper_0.3.0_checksums.txt"), `${"c".repeat(64)}  jumper_0.3.0_macos_arm64.zip\n`);
     write(join(release, "intar-image-cli_0.11.0_checksums.txt"),
       `${"a".repeat(64)}  intar-image-cli_0.11.0_linux_amd64.tar.gz\n${"b".repeat(64)}  intar-image-cli_0.11.0_linux_arm64.tar.gz\n`);
     script("gh", `echo "$*" >> "${root}/gh.log"
 case "$1 $2" in
   "api repos/owner/repo/commits/main") echo "$GITHUB_SHA" ;;
   "api users/"*) echo 1 ;;
-  "release view") echo false ;;
+  "release view") case "$3" in jumper/*) echo ${app === "draft"} ;; *) echo false ;; esac ;;
   "release download") dir=. out=""; pats=()
     while [ $# -gt 0 ]; do case "$1" in --dir) dir="$2"; shift ;; --output) out="$2"; shift ;; --pattern) pats+=("$2"); shift ;; esac; shift; done
     for p in "\${pats[@]}"; do if [ -n "$out" ]; then cp "${release}"/$p "$out"; else cp "${release}"/$p "$dir"; fi; done ;;
@@ -130,4 +139,45 @@ test("pins both when both releases match HEAD's contracts", () => {
   expect([release[3].amd64.digest, release[3].arm64.digest]).toEqual([pin[3].current, pin[3].arm64.current]);
   expect(ran.pin).toMatch(/^\{"3":\{"current":"sha256:[0-9a-f]{64}","previous":null,"arm64":\{"current":"sha256:[0-9a-f]{64}","previous":null\}\}\}\n$/);
   expect(ran.committed).toStartWith("chore(web): pin the scenario compiler to intar-image-cli 0.11.0 and kino 0.6.0");
+});
+
+test("pins the desktop app's release alone, with the digest of its published download", () => {
+  const ran = run({ cli: "old", kino: "old", app: "published" });
+  expect(ran.status, ran.output).toBe(0);
+  expect(ran.committed).toBe("chore(web): pin the desktop app to jumper 0.3.0");
+  expect(ran.files).toEqual(["apps/web/worker-configuration.d.ts", "apps/web/wrangler.jsonc"]);
+  // The value the Worker parses: a JSON string in the configuration.
+  expect(ran.wrangler).toContain(`"JUMPER_RELEASE_JSON": ${JSON.stringify(APP_PIN)},`);
+  expect(ran.wrangler).toContain('"SCENARIO_COMPILER_CLI_VERSION": "",');
+  expect(ran.gh).toContain("pr create");
+  expect(ran.gh).not.toContain("kino-promote");
+});
+
+test("names all three pins in one pull request", () => {
+  const ran = run({ cli: "current", kino: "current", app: "published" });
+  expect(ran.status, ran.output).toBe(0);
+  expect(ran.committed).toBe(
+    "chore(web): pin the scenario compiler to intar-image-cli 0.11.0, the desktop app to jumper 0.3.0 and kino 0.6.0",
+  );
+  expect(ran.wrangler).toContain('"SCENARIO_COMPILER_CLI_VERSION": "0.11.0",');
+  expect(ran.wrangler).toContain(`"JUMPER_RELEASE_JSON": ${JSON.stringify(APP_PIN)},`);
+  expect(ran.files).toContain("tools/deploy/kino-pin.json");
+  expect(ran.gh).toContain("kino-promote");
+});
+
+test("leaves a pinned app release and an unpublished one as they are", () => {
+  const pinned = run({ cli: "old", kino: "old", app: "pinned" });
+  expect(pinned.status, pinned.output).toBe(0);
+  expect(pinned.output).toContain("The website already offers jumper 0.3.0.");
+  expect(pinned.committed).toBe("current");
+  expect(pinned.gh).not.toContain("pr create");
+
+  const draft = run({ cli: "old", kino: "old" });
+  expect(draft.output).toContain("jumper/v0.3.0 is not published yet");
+  expect(draft.wrangler).toContain('"JUMPER_RELEASE_JSON": "",');
+  expect(draft.committed).toBe("current");
+
+  // The compiler's pin does not make the app's look changed.
+  const beside = run({ cli: "current", kino: "old", app: "pinned" });
+  expect(beside.committed).toBe("chore(web): pin the scenario compiler to intar-image-cli 0.11.0");
 });

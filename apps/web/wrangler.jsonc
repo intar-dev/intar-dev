@@ -58,7 +58,8 @@
     // {"macos_arm64":{"version":"X.Y.Z","sha256":"<hex>"}}. Empty: the app
     // is offered none. It is set by a reviewed change, never read from the
     // release page, so a published release is offered only once that change
-    // is merged; the release workflow's pin pull request will make it (#404).
+    // is merged; the release workflow's pin pull request makes it
+    // (tools/workflows/release/web-pins.sh).
     "JUMPER_RELEASE_JSON": "",
     // Public run shares keep their terminal logs next to the run recordings.
     // Local workerd has no jurisdictions, so local configs leave this unset.

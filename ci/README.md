@@ -80,8 +80,10 @@ that exact commit already passed.
    change again only when it reruns the `rust` lane, whose inputs hold the
    release build and every product. **`release-dry-run`**
    builds and smoke-tests each with `release.yml`'s build steps
-   (`#ReleaseBuild` in `release.cue`), without the workspace gate the `rust`
-   lane runs and without keeping the payload. Nothing is published.
+   (`#ReleaseBuild` in `release.cue`), without the gate its lane runs (the
+   `rust` lane's for a Linux product, the `app` lane's for the desktop app)
+   and without keeping the payload; it checks that what the build left in
+   `dist/` is what a release could publish. Nothing is published.
 5. **`pr-title`** runs in the merge group and fails unless the squash commit's
    subject, the pull request title that lands on main, is a Conventional
    Commit with one scope (`tools/ci/check-pr-title.sh`, `cuenv task
@@ -97,7 +99,8 @@ that exact commit already passed.
 Every Namespace job shares one cache volume. Pull request runs write it, so
 nothing that ships reads it: only pull request runs use the Bun cache, and
 `release.yml` builds each product from its tag without the Rust cache and
-with a freshly downloaded, signature-checked Zig.
+with a freshly downloaded, signature-checked Zig; the desktop app's bundle
+takes its QEMU from the pinned release, by its SHA-256.
 
 A daily scheduled run runs only the `security` lane, whose audits are the only
 check that sees a newly published advisory for code no pull request touched.

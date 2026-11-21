@@ -377,7 +377,13 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
           namespace-cache: ${{ matrix.runner != 'ubuntu-24.04' }}
+      - name: Build the app's bundle
+        if: matrix.project == 'jumper'
+        env:
+          VERSION: ${{ matrix.version }}
+        run: cuenv task -p ci --package ci release-build-jumper-macos
       - name: Build release artifacts
+        if: matrix.project != 'jumper'
         env:
           PACKAGE: ${{ matrix.package }}
           BINARY: ${{ matrix.binary }}
@@ -396,6 +402,11 @@ jobs:
         env:
           VERSION: ${{ matrix.version }}
         run: cuenv task -p ci --package ci release-smoke-test-image-cli-package
+      - name: Check the release payload
+        env:
+          BINARY: ${{ matrix.binary }}
+          VERSION: ${{ matrix.version }}
+        run: cuenv task -p ci --package ci release-check-release-payload
   pr-title:
     name: pr-title
     if: github.event_name == 'merge_group'
