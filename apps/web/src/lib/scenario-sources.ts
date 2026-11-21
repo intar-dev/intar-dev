@@ -131,6 +131,10 @@ export interface ScenarioSourceCard {
   /** For `public`: whether a repository id is pinned for it. */
   configured?: boolean;
   appSlug: string | null;
+  /** The ref of the scenario-publish workflow a repository calls while the builder builds its images. */
+  workflowRef: string;
+  /** The ref to call once the repository's pipeline builds its images; null until that version is released. */
+  pipelineWorkflowRef: string | null;
   source: ScenarioSourceView | null;
 }
 
@@ -343,6 +347,8 @@ export async function scenarioSourceCard(
       ? { configured: Boolean(env.PUBLIC_SCENARIO_SOURCE_REPOSITORY_ID) }
       : {}),
     appSlug: env.GITHUB_APP_SLUG || null,
+    workflowRef: env.SCENARIO_PUBLISH_WORKFLOW_REF || "scenario-publish-v1",
+    pipelineWorkflowRef: env.SCENARIO_PUBLISH_PIPELINE_WORKFLOW_REF || null,
     source,
   };
 }
