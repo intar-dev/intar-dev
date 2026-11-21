@@ -889,6 +889,10 @@ async function platformChangeRefusal(
 // One statement connects a new scope or re-binds a disconnected one. A
 // re-bind keeps the live commit until the new repository's first deploy goes
 // live, and forgets the old repository's head and target.
+// Either starts in push mode (#465): the repository's own workflow
+// publishes, and nothing is published until its first run. Pull mode, where
+// Intar fetches the repository and a builder compiles it, is a platform
+// administrator's fallback.
 async function connect(input: {
   scope: ScenarioSourceScope;
   actorUserId: string;
@@ -910,7 +914,7 @@ async function connect(input: {
         created_at, updated_at)
       SELECT ${scope.key}, ${scope.organizationId}, ${bound.installationId},
         ${bound.repository.id}, ${bound.repository.fullName},
-        ${bound.repository.defaultBranch}, 'pull', ${input.actorUserId}, ${now},
+        ${bound.repository.defaultBranch}, 'push', ${input.actorUserId}, ${now},
         ${now}, ${now}
       WHERE ${input.authority}
       ON CONFLICT (scope_key) DO UPDATE SET
@@ -946,7 +950,21 @@ async function connect(input: {
     }
     throw error;
   }
-  if (changes === 1) return;
+  if (changes === 1) {
+    // A fetch or compile that a pull source left in flight is dropped, as a
+    // change of mode drops it: a push source delivers nothing itself, and a
+    // row left on the head would refuse the workflow's first upload.
+    const dropped = await db
+      .update(scenarioSourceCommits)
+      .set({ state: "superseded", updatedAt: now })
+      .where(and(
+        eq(scenarioSourceCommits.scopeKey, scope.key),
+        inArray(scenarioSourceCommits.state, ["fetching", "compiling"]),
+      ))
+      .returning({ hostId: scenarioSourceCommits.compileHostId });
+    await endSourceCompiles(env, dropped.map((row) => row.hostId));
+    return;
+  }
   const [existing] = await db
     .select({
       disconnectedAt: scenarioSources.disconnectedAt,

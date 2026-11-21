@@ -178,13 +178,15 @@ describe("binding a repository", () => {
     expect(await binding()).toBeUndefined();
   });
 
-  it("connects a pull binding with the caller as binder", async () => {
+  it("connects a push binding with the caller as binder", async () => {
     github();
     const view = await change({ action: "connect", repository: "acme/labs" });
     expect(view).toMatchObject({
       repository: "acme/labs",
       defaultBranch: "main",
-      mode: "pull",
+      mode: "push",
+      imageProducer: "builder",
+      promotion: "manual",
       pausedAt: null,
       disconnectedAt: null,
     });
@@ -225,7 +227,7 @@ describe("binding a repository", () => {
   it("re-binds a disconnected scope and keeps its live commit", async () => {
     github();
     await insertBinding({
-      mode: "push",
+      mode: "pull",
       headSha: "c".repeat(40),
       headObservedAt: 5,
       targetRev: "git-9-target",
@@ -243,7 +245,8 @@ describe("binding a repository", () => {
       githubInstallationId: 7,
       githubRepositoryId: 42,
       githubRepository: "acme/labs",
-      mode: "pull",
+      // Whatever it was before, a source that is bound again publishes by push.
+      mode: "push",
       headSha: null,
       headObservedAt: 0,
       targetRev: LIVE_REV,
@@ -256,6 +259,22 @@ describe("binding a repository", () => {
       disconnectReason: null,
       boundByUserId: OWNER,
     });
+  });
+
+  it("drops a fetch or compile a pull source left in flight when it is bound again", async () => {
+    github();
+    await insertBinding({ mode: "pull", disconnectedAt: 3, disconnectReason: "admin" });
+    const rows = (state: string) => ({
+      id: state, scopeKey: ORG_SCOPE.key, purpose: "deploy" as const, sha: state.padEnd(40, "0"),
+      rev: `git-9-${state}`, via: "pull" as const, state: state as "fetching",
+    });
+    await drizzle(env.DB).insert(scenarioSourceCommits).values([rows("fetching"), rows("compiling"), rows("building")]);
+    await change({ action: "connect", repository: "acme/labs" });
+    const states = await drizzle(env.DB).select({ id: scenarioSourceCommits.id, state: scenarioSourceCommits.state })
+      .from(scenarioSourceCommits).orderBy(scenarioSourceCommits.id);
+    expect(states).toEqual([
+      { id: "building", state: "building" }, { id: "compiling", state: "superseded" }, { id: "fetching", state: "superseded" },
+    ]);
   });
 
   it("waits for a purge of the last repository before re-binding", async () => {
@@ -617,7 +636,7 @@ describe("what only a platform administrator changes", () => {
     github();
     await change({ action: "connect", repository: "acme/labs" });
     expect(await binding()).toMatchObject({
-      githubRepositoryId: 42, mode: "pull", imageProducer: "builder", allowSelfHostedRunners: false, promotion: "manual",
+      githubRepositoryId: 42, mode: "push", imageProducer: "builder", allowSelfHostedRunners: false, promotion: "manual",
       disconnectedAt: null,
     });
   });

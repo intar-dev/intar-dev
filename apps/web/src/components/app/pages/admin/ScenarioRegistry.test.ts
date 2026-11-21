@@ -18,7 +18,10 @@ function renderCard(source: Partial<ScenarioSourceView> | null): string {
     source: source && {
       repository: "intar-dev/scenarios",
       defaultBranch: "main",
-      mode: "pull",
+      mode: "push",
+      imageProducer: "builder",
+      allowSelfHostedRunners: false,
+      promotion: "manual",
       pausedAt: null,
       pauseReason: null,
       disconnectedAt: null,
@@ -26,7 +29,6 @@ function renderCard(source: Partial<ScenarioSourceView> | null): string {
       liveSha: null,
       liveAt: null,
       commit: null,
-      builds: [],
       ...source,
     },
   });
@@ -66,9 +68,42 @@ describe("scenario source card", () => {
     );
   });
 
-  it("links to the builds page, connected or not", () => {
-    expect(renderCard(null)).toContain('href="/admin/builds"');
+  it("ends the connect steps with the workflow file, whose push is the first publish", () => {
+    expect(renderCard(null)).toContain("that push is the first publish");
+  });
+
+  it("links to the builds page only while the builder builds the source's images", () => {
+    expect(renderCard(null)).not.toContain('href="/admin/builds"');
     expect(renderCard({})).toContain('href="/admin/builds"');
+    expect(renderCard({ disconnectedAt: 1, disconnectReason: "admin" })).toContain('href="/admin/builds"');
+    expect(renderCard({ imageProducer: "pipeline" })).not.toContain('href="/admin/builds"');
+  });
+
+  it("offers no choice of delivery mode, and a pull source its way to push", () => {
+    const push = renderCard({});
+    expect(push).not.toContain("Delivery mode");
+    expect(push).not.toContain("Switch to push");
+    expect(push).not.toContain("Pull mode");
+    expect(push).toContain("a push to the default branch publishes");
+    const pull = renderCard({ mode: "pull" });
+    expect(pull).not.toContain("Delivery mode");
+    expect(pull).toContain("Switch to push</button>");
+    expect(pull).toContain("switch to push first, then commit the workflow file");
+    expect(pull).toContain("keep only");
+  });
+
+  it("says who builds a source's images and who puts its labs live", () => {
+    const builder = renderCard({});
+    expect(builder).toContain("Built by Intar&#x27;s builder");
+    expect(builder).toContain("An administrator promotes each lab");
+    const pipeline = renderCard({ imageProducer: "pipeline", promotion: "automatic" });
+    expect(pipeline).toContain("Built by this repository&#x27;s pipeline");
+    expect(pipeline).toContain("Each lab goes live once it passed its check");
+  });
+
+  it("says a push source without a commit waits for its first workflow run", () => {
+    expect(renderCard({})).toContain("Waiting for the first workflow run");
+    expect(renderCard({ mode: "pull" })).not.toContain("Waiting for the first workflow run");
   });
 
   it("offers to delete what a disconnected repository published", () => {
