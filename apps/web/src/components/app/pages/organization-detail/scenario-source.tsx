@@ -1,6 +1,6 @@
-import { useId, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { GitBranch, Hammer, Pause, Play, Trash2, Unplug } from "lucide-react";
+import { ArrowRightLeft, GitBranch, Hammer, Pause, Play, Trash2, Unplug } from "lucide-react";
 import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
 import { CodeBlock } from "../../patterns/CodeBlock";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
@@ -10,15 +10,11 @@ import { Section } from "../../patterns/Section";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
 import type {
   ScenarioSourceCard as Card,
   ScenarioSourceView,
 } from "@/lib/scenario-sources";
 import { fetchJson, mutationResponse } from "./types";
-
-const MODE_NOTE =
-  "Pull mode copies the whole repository archive to Intar for each deployed commit. Push mode sends only the compiled course bundle.";
 
 /** A binding always shows; otherwise only once this scope may bind one. */
 export function scenarioSourceCardVisible(card: Card): boolean {
@@ -75,6 +71,9 @@ export function ScenarioSourceSection({
   const source = card.data.source?.disconnectedAt === null ? card.data.source : null;
   const disconnected = card.data.source?.disconnectedAt != null ? card.data.source : null;
   const branch = source?.defaultBranch ?? "main";
+  // The builds page lists what builder hosts build: a source whose own
+  // pipeline builds its images has nothing there.
+  const builderBuilds = card.data.source?.imageProducer === "builder";
   // Connecting a repository can refuse it; the field says why.
   const repositoryError =
     !source && failure?.field === "repository" ? failure.message : null;
@@ -86,10 +85,12 @@ export function ScenarioSourceSection({
       description="Merging to the repository's default branch releases its courses here."
       actions={
         // The one builds page; it shows organization admins only their builds.
-        <Button size="sm" variant="outline" render={<a href="/admin/builds" />}>
-          <Hammer className="size-4" />
-          Builds
-        </Button>
+        builderBuilds ? (
+          <Button size="sm" variant="outline" render={<a href="/admin/builds" />}>
+            <Hammer className="size-4" />
+            Builds
+          </Button>
+        ) : undefined
       }
     >
       <div className="space-y-4 text-sm">
@@ -98,7 +99,6 @@ export function ScenarioSourceSection({
             source={source}
             enabled={enabled}
             pending={change.isPending}
-            pendingMode={change.isPending ? change.variables?.mode : undefined}
             onChange={(body) => change.mutate(body)}
             onDisconnect={() => setDisconnectOpen(true)}
           />
@@ -127,6 +127,10 @@ export function ScenarioSourceSection({
                 on the repository with “Only select repositories”.
               </li>
               <li>Push at least one commit to the repository's default branch.</li>
+              <li>
+                Connect the repository here. Then add the workflow file from “Repository setup” below and push it:
+                that push is the first publish.
+              </li>
             </ol>
             <form
               className="space-y-3"
@@ -192,7 +196,6 @@ export function ScenarioSourceSection({
         {failure && !repositoryError ? (
           <InlineFeedback tone="error">{failure.message}</InlineFeedback>
         ) : null}
-        <p className="text-muted-foreground">{MODE_NOTE}</p>
         <details>
           <summary className="cursor-pointer font-medium">
             Repository setup
@@ -207,9 +210,17 @@ export function ScenarioSourceSection({
             </p>
           )}
           <p className="mt-2 text-muted-foreground">
-            <code>.github/workflows/intar.yml</code>, required in push mode.
-            In pull mode keep only <code>pull_request</code> to validate pull
-            requests.
+            {source?.mode === "pull" ? (
+              <>
+                <code>.github/workflows/intar.yml</code>. While Intar fetches the repository itself, keep only{" "}
+                <code>pull_request</code>, to validate pull requests.
+              </>
+            ) : (
+              <>
+                <code>.github/workflows/intar.yml</code>: a push to the default branch publishes, and a pull request is
+                validated.
+              </>
+            )}
           </p>
           <Snippet>
             {`name: Intar\non:\n  push: { branches: [${branch}] }\n  pull_request:\n  workflow_dispatch:\npermissions: { contents: read, id-token: write }\njobs:\n  intar:\n    uses: intar-dev/intar-dev/.github/workflows/scenario-publish.yml@scenario-publish-v1`}
@@ -274,20 +285,16 @@ function ConnectedSource({
   source,
   enabled,
   pending,
-  pendingMode,
   onChange,
   onDisconnect,
 }: {
   source: ScenarioSourceView;
   enabled: boolean;
   pending: boolean;
-  /** The mode being saved, so the select holds it instead of snapping back. */
-  pendingMode: string | undefined;
   onChange: (body: Record<string, string>) => void;
   onDisconnect: () => void;
 }) {
   const commit = source.commit;
-  const modeId = useId();
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
@@ -301,25 +308,37 @@ function ConnectedSource({
           {source.pauseReason ? PAUSE_LABELS[source.pauseReason] : "Active"}
         </Badge>
       </div>
-      <dl className="grid gap-3 sm:grid-cols-3">
+      {source.mode === "pull" ? (
+        <div className="space-y-2 rounded-md border p-3">
+          <p className="text-muted-foreground">
+            Intar fetches this repository and compiles it on its builder. To publish from the repository's own
+            workflow, switch to push first, then commit the workflow file from “Repository setup” below: that commit
+            is the first publish.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!enabled || pending}
+            onClick={() => onChange({ action: "mode", mode: "push" })}
+          >
+            <ArrowRightLeft className="size-4" />
+            {pending ? "Switching…" : "Switch to push"}
+          </Button>
+        </div>
+      ) : null}
+      <dl className="grid gap-3 sm:grid-cols-2">
         <div>
-          <dt className="text-label">
-            <label htmlFor={modeId}>Delivery mode</label>
-          </dt>
+          <dt className="text-label">Images</dt>
           <dd className="mt-1">
-            <NativeSelect
-              id={modeId}
-              value={pendingMode ?? source.mode}
-              disabled={!enabled}
-              aria-disabled={pending || undefined}
-              onChange={(event) => {
-                if (pending) return;
-                onChange({ action: "mode", mode: event.target.value });
-              }}
-            >
-              <option value="pull">Pull</option>
-              <option value="push">Push</option>
-            </NativeSelect>
+            {source.imageProducer === "pipeline" ? "Built by this repository's pipeline" : "Built by Intar's builder"}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-label">Going live</dt>
+          <dd className="mt-1">
+            {source.promotion === "automatic"
+              ? "Each lab goes live once it passed its check"
+              : "An administrator promotes each lab"}
           </dd>
         </div>
         <div>
@@ -340,6 +359,8 @@ function ConnectedSource({
                 <code className="text-code">{commit.sha.slice(0, 12)}</code>{" "}
                 {commit.state.replace("_", " ")}
               </>
+            ) : source.mode === "push" ? (
+              "Waiting for the first workflow run"
             ) : (
               "None yet"
             )}
