@@ -101,6 +101,10 @@ const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600
 /// Where the app's releases are. An offer from anywhere else is none: intar
 /// names the download and its hash, and must not be able to name the place.
 const RELEASES: &str = "https://github.com/intar-dev/intar-dev/releases/download/";
+/// Names another place for the app's releases, as `INTAR_URL` names another
+/// intar: for trying an update against a stand-in. Whoever can set the app's
+/// environment runs what they like anyway.
+const RELEASES_OVERRIDE: &str = "INTAR_RELEASES";
 /// The staging folders an install makes beside the app.
 const STAGING: &str = ".intar-update-";
 
@@ -108,8 +112,17 @@ impl Offer {
     /// `release` as an offer, when it is strictly newer than `running` and
     /// its download is one of the app's own releases.
     pub fn of(release: subspace::contract::AppReleaseV1, running: &str) -> Option<Self> {
+        let releases = std::env::var(RELEASES_OVERRIDE).unwrap_or_else(|_| RELEASES.to_owned());
+        Self::from(release, running, &releases)
+    }
+
+    fn from(
+        release: subspace::contract::AppReleaseV1,
+        running: &str,
+        releases: &str,
+    ) -> Option<Self> {
         let url = url::Url::parse(&release.url).ok()?;
-        (url.as_str().starts_with(RELEASES) && version(&release.version)? > version(running)?)
+        (url.as_str().starts_with(releases) && version(&release.version)? > version(running)?)
             .then_some(Self {
                 version: release.version,
                 sha256: release.sha256,
@@ -341,14 +354,16 @@ mod tests {
             sha256: "ab".repeat(32),
             url: url.to_owned(),
         };
+        // Against the app's own releases, whatever this test's environment names.
+        let offer = |release, running| Offer::from(release, running, super::RELEASES);
         let zip = "https://github.com/intar-dev/intar-dev/releases/download/jumper%2Fv0.2.0/jumper_0.2.0_macos_arm64.zip";
         assert_eq!(
-            Offer::of(release("0.2.0", zip), "0.1.9").map(|offer| offer.version),
+            offer(release("0.2.0", zip), "0.1.9").map(|offer| offer.version),
             Some("0.2.0".to_owned())
         );
         // The same, an older one, and what is no version.
         for (offered, running) in [("0.2.0", "0.2.0"), ("0.1.9", "0.2.0"), ("next", "0.1.0")] {
-            assert_eq!(Offer::of(release(offered, zip), running), None);
+            assert_eq!(offer(release(offered, zip), running), None);
         }
         // Anywhere but the app's own releases, however the URL is dressed.
         for url in [
@@ -358,7 +373,7 @@ mod tests {
             "https://github.com.example.test/intar-dev/intar-dev/releases/download/app.zip",
             "app.zip",
         ] {
-            assert_eq!(Offer::of(release("0.2.0", url), "0.1.0"), None, "{url}");
+            assert_eq!(offer(release("0.2.0", url), "0.1.0"), None, "{url}");
         }
     }
 
