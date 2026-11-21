@@ -18,7 +18,7 @@ export const GET: APIRoute = async ({ request }) => {
     if (!authz.ok) return authz.response;
     // The reader is a platform administrator: the card carries what the
     // platform settings on it need.
-    return jsonResponse(await scenarioSourceCard(PUBLIC_SCOPE, undefined, true));
+    return jsonResponse(await scenarioSourceCard(PUBLIC_SCOPE, undefined, "platform"));
   } catch (error) {
     const { status, body } = toErrorResponse(
       error,

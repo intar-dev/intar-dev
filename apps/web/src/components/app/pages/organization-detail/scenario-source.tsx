@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRightLeft, GitBranch, Hammer, Pause, Play, Trash2, Unplug } from "lucide-react";
+import { ArrowRightLeft, GitBranch, Hammer, Library, Pause, Play, Trash2, Unplug } from "lucide-react";
 import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
 import { CodeBlock } from "../../patterns/CodeBlock";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
@@ -77,6 +77,9 @@ export function ScenarioSourceSection({
   // The builds page lists what builder hosts build: a source whose own
   // pipeline builds its images has nothing there.
   const builderBuilds = card.data.source?.imageProducer === "builder";
+  // What the scope's scenarios are filed under: the platform's own name, or
+  // the organization's slug.
+  const namespace = scope === "public" ? "intar" : scope;
   // A pipeline that builds images needs the workflow's second version and
   // a runner with KVM; the builder's sources call the first.
   const pipelineBuilds = source?.imageProducer === "pipeline";
@@ -94,13 +97,23 @@ export function ScenarioSourceSection({
       title="Scenario source"
       description="Merging to the repository's default branch releases its courses here."
       actions={
-        // The one builds page; it shows organization admins only their builds.
-        builderBuilds ? (
-          <Button size="sm" variant="outline" render={<a href="/admin/builds" />}>
-            <Hammer className="size-4" />
-            Builds
-          </Button>
-        ) : undefined
+        <>
+          {/* The page of what the repository published: its revisions, and where a lab is verified, promoted and
+              rolled back. The platform's card is on that page already. */}
+          {scope !== "public" && card.data.source ? (
+            <Button size="sm" variant="outline" render={<a href="/admin/scenarios" />}>
+              <Library className="size-4" />
+              Scenarios
+            </Button>
+          ) : null}
+          {/* The one builds page; it shows organization admins only their builds. */}
+          {builderBuilds ? (
+            <Button size="sm" variant="outline" render={<a href="/admin/builds" />}>
+              <Hammer className="size-4" />
+              Builds
+            </Button>
+          ) : null}
+        </>
       }
     >
       <div className="space-y-4 text-sm">
@@ -183,12 +196,12 @@ export function ScenarioSourceSection({
             </form>
           </>
         )}
-        {source && card.data.platformSettings ? (
-          <PlatformSettings
+        {source && card.data.settings ? (
+          <SourceSettings
             source={source}
             enabled={enabled}
             pipelineImages={card.data.pipelineImages}
-            automaticPromotion={card.data.platformSettings.automaticPromotion}
+            settings={card.data.settings}
             pending={change.isPending}
             onChange={(body) => change.mutate(body)}
             onConfirm={(confirm) => {
@@ -229,14 +242,14 @@ export function ScenarioSourceSection({
             Repository setup
           </summary>
           <p className="mt-2 text-muted-foreground">
-            <code>intar.yaml</code> at the repository root:
+            <code>intar.hcl</code> at the repository root:
           </p>
-          <Snippet>{`version: 1\nscope: ${scope}\ncourses_root: courses`}</Snippet>
-          {scope === "public" ? null : (
-            <p className="mt-2 text-muted-foreground">
-              Scenario ids must start with <code>{scope}-</code>.
-            </p>
-          )}
+          <Snippet language="hcl">{"repository {}"}</Snippet>
+          <p className="mt-2 text-muted-foreground">
+            Each lab is a file <code>scenarios/&lt;name&gt;/scenario.hcl</code>, and an image several labs build on is{" "}
+            <code>images/&lt;name&gt;.hcl</code>. A lab's id here is <code>{namespace}/&lt;name&gt;</code>: the
+            repository does not choose the part before the slash.
+          </p>
           <p className="mt-2 text-muted-foreground">
             {source?.mode === "pull" ? (
               <>
@@ -261,10 +274,11 @@ export function ScenarioSourceSection({
           )}
           {pipelineBuilds && ref !== null ? (
             <p className="mt-2 text-muted-foreground">
-              The image builds need a Linux amd64 runner with KVM: put its label in <code>runner</code>.
+              The image builds need a Linux amd64 runner with KVM and Docker, where the job may run as root: put its
+              label in <code>runner</code>.
               {source?.allowSelfHostedRunners
                 ? " This source accepts a self-hosted runner."
-                : " This source accepts GitHub-hosted runners only; a self-hosted one publishes once a platform administrator allows it."}
+                : " This source accepts GitHub-hosted runners only; a self-hosted one publishes once this source's runner setting allows it."}
             </p>
           ) : null}
         </details>
@@ -476,16 +490,16 @@ interface SettingConfirm {
 }
 
 /**
- * What only a platform administrator changes on a source: who builds its
+ * What an administrator of the source's scope changes on it: who builds its
  * images, which runners may publish, who puts its labs live, and the way
  * back to pull mode. Each row says what is and offers the other; a switch
  * that would be refused says why instead.
  */
-function PlatformSettings({
+function SourceSettings({
   source,
   enabled,
   pipelineImages,
-  automaticPromotion,
+  settings,
   pending,
   onChange,
   onConfirm,
@@ -494,38 +508,47 @@ function PlatformSettings({
   /** The scope's flag for connecting and widening a source. */
   enabled: boolean;
   pipelineImages: boolean;
-  automaticPromotion: boolean;
+  settings: NonNullable<Card["settings"]>;
   pending: boolean;
   onChange: (body: Record<string, string | boolean>) => void;
   onConfirm: (confirm: SettingConfirm) => void;
 }) {
   const reasonId = useId();
+  const { platform, automaticPromotion, publicPlay } = settings;
+  // The platform's card is its operators'; an organization's is its own
+  // administrators', who have no builder to choose and no pull mode.
+  const here = platform ? "this scope" : "this organization";
   const pipeline = source.imageProducer === "pipeline";
   const automatic = source.promotion === "automatic";
-  const rows: Array<{ label: string; state: string; action: string; blocked: string | null; onClick: () => void }> = [
+  const rows: Array<{ label: string; state: string; action: string | null; blocked: string | null; onClick: () => void }> = [
     {
       label: "Images",
       state: pipeline ? "This repository's pipeline builds them" : "Intar's builder builds them",
-      action: pipeline ? "Use Intar's builder" : "Use the repository's pipeline",
+      // Back to the builder is the platform's step.
+      action: pipeline ? (platform ? "Use Intar's builder" : null) : "Use the repository's pipeline",
       blocked: pipeline
         ? null
         : source.mode !== "push"
           ? "A pipeline builds only for a source in push mode."
-          : pipelineImages ? null : "Pipeline images are not switched on for this scope.",
+          : pipelineImages ? null : `Pipeline images are not switched on for ${here}.`,
       onClick: () => onChange({ action: "image_producer", producer: pipeline ? "builder" : "pipeline" }),
     },
     {
       label: "Runners",
       state: source.allowSelfHostedRunners ? "Self-hosted runners may publish" : "Only GitHub-hosted runners may publish",
       action: source.allowSelfHostedRunners ? "Allow GitHub-hosted runners only" : "Allow self-hosted runners",
-      blocked: source.allowSelfHostedRunners || enabled ? null : "Scenario sources are not switched on for this scope.",
+      blocked: source.allowSelfHostedRunners || enabled ? null : `Scenario sources are not switched on for ${here}.`,
       onClick: () => onChange({ action: "runner_policy", allow_self_hosted: !source.allowSelfHostedRunners }),
     },
     {
       label: "Going live",
       state: automatic ? "Each lab goes live once it passed its check" : "An administrator promotes each lab",
       action: automatic ? "Promote by hand" : "Go live automatically",
-      blocked: automatic || automaticPromotion ? null : "Automatic promotion is not switched on for this scope.",
+      blocked: automatic
+        ? null
+        : publicPlay
+          ? "This organization's play labs are open to everyone, so its labs are promoted by hand."
+          : automaticPromotion ? null : `Automatic promotion is not switched on for ${here}.`,
       onClick: () => onConfirm(automatic
         ? {
             title: "Promote by hand again?",
@@ -540,14 +563,14 @@ function PlatformSettings({
             body: { action: "promotion", promotion: "automatic" },
           }),
     },
-    ...(source.mode === "push"
+    ...(platform && source.mode === "push"
       ? [{
           label: "Delivery",
           state: "The repository's workflow pushes each commit",
           action: "Switch to pull",
           blocked: pipeline
             ? "Set the images back to Intar's builder first."
-            : enabled ? null : "Scenario sources are not switched on for this scope.",
+            : enabled ? null : `Scenario sources are not switched on for ${here}.`,
           onClick: () => onConfirm({
             title: "Switch to pull?",
             description: "Intar fetches the repository itself again and compiles it on its builder. The repository's publish workflow is refused from then on and fails until the source is switched back to push.",
@@ -559,7 +582,7 @@ function PlatformSettings({
   ];
   return (
     <div className="space-y-3 border-t pt-4">
-      <h3 className="font-medium">Platform settings</h3>
+      <h3 className="font-medium">{platform ? "Platform settings" : "Source settings"}</h3>
       <ul className="space-y-3">
         {rows.map((row) => (
           <li key={row.label} className="flex flex-wrap items-center justify-between gap-2">
@@ -572,15 +595,17 @@ function PlatformSettings({
                 </p>
               ) : null}
             </div>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={pending || row.blocked !== null}
-              aria-describedby={row.blocked ? `${reasonId}-${row.label}` : undefined}
-              onClick={row.onClick}
-            >
-              {row.action}
-            </Button>
+            {row.action === null ? null : (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={pending || row.blocked !== null}
+                aria-describedby={row.blocked ? `${reasonId}-${row.label}` : undefined}
+                onClick={row.onClick}
+              >
+                {row.action}
+              </Button>
+            )}
           </li>
         ))}
       </ul>
@@ -588,9 +613,9 @@ function PlatformSettings({
   );
 }
 
-function Snippet({ children }: { children: string }) {
+function Snippet({ children, language = "yaml" }: { children: string; language?: string }) {
   return (
-    <CodeBlock language="yaml" copyName="Copy the snippet" className="mt-2">
+    <CodeBlock language={language} copyName="Copy the snippet" className="mt-2">
       {children}
     </CodeBlock>
   );
