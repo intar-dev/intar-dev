@@ -181,6 +181,29 @@ lanes: {
 		]
 	}
 
+	// The desktop app on a Mac, where it runs: the rust lane builds it on
+	// Linux only. Clippy and the tests of the app and its engine, not the
+	// workspace's, which the rust lane has. Its inputs are the crates the app
+	// builds from.
+	app: {
+		setup: [gha.#SetupRust]
+		runner: gha.runners.macos
+		steps: ["clippy-app", "test-app"]
+		timeout: 45
+		inputs: [
+			"Cargo.toml",
+			"Cargo.lock",
+			"rust-toolchain.toml",
+			".github/actions/setup-rust/**",
+			"apps/jumper/**",
+			"crates/zpm/**",
+			"crates/dhd/**",
+			"crates/subspace/**",
+			"crates/intar-contracts/**",
+			"crates/intar-kino-proto/**",
+		]
+	}
+
 	// deploy.yml deploys the build this lane checks.
 	docs: {
 		setup: [gha.#SetupRuntime]
