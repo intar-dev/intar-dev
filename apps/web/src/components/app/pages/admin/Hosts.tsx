@@ -354,7 +354,7 @@ export function AdminHosts() {
         <EmptyState
           icon={<Server />}
           title="No hosts yet"
-          description="Generate a bridge config to register your first agent or builder host."
+          description="Generate a bridge config to register your first host."
           action={
             <Button onClick={() => setShowOnboarding(true)}>
               <Plus />

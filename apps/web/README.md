@@ -225,6 +225,15 @@ serve `on` only when the `targetingKey` context field matches a selected Better
 Auth user ID. The toggle controls creation only—it is not an authentication or
 authorization boundary.
 
+The `builder_operations` boolean flag, evaluated the same way for the platform
+administrator who reads, also defaults to `off`. While it is off, the admin
+navigation has no "Builds" entry and host enrollment offers no "Builder" role:
+scenario repositories build their own images, and the builder is the fallback.
+Serve `on` to show both again. Nothing else depends on it: the builds page and
+its API stay reachable at `/admin/builds`, the enrollment API still accepts a
+builder from a platform administrator, enrolled builders keep working, and a
+scenario source card links to its builds whenever a builder builds for it.
+
 ### Organization OIDC
 
 An organization admin can configure one OIDC provider and a domain the

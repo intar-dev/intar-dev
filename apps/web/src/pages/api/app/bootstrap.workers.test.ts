@@ -157,7 +157,7 @@ describe("app bootstrap API", () => {
 
     accountAccessMock.sessionMayAct.mockResolvedValue(true);
     expect(await read()).toBe(true);
-    expect(flagsMock.getBoolean).toHaveBeenCalledWith("builder_operations", false);
+    expect(flagsMock.getBoolean).toHaveBeenCalledWith("builder_operations", false, { targetingKey: "admin-1" });
     flagsMock.getBoolean.mockResolvedValue(false);
     expect(await read()).toBe(false);
     // An administrator whose session may not act is told nothing.

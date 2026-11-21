@@ -107,6 +107,9 @@ export function HostOnboardingPanel({
   const [hostName, setHostName] = useState("");
   const [hostRole, setHostRole] = useState<HostRole>("agent");
   const builderOperations = useBuilderOperations();
+  // Without its control a role cannot be chosen: every new host is an
+  // agent, also when the control went away while "builder" was chosen.
+  const role: HostRole = builderOperations ? hostRole : "agent";
   const [enrollment, setEnrollment] = useState<PlatformEnrollment | null>(
     null,
   );
@@ -122,7 +125,7 @@ export function HostOnboardingPanel({
         body: JSON.stringify({
           name: hostName.trim(),
           scope: "platform",
-          role: hostRole,
+          role,
         }),
       });
       if (!response.ok) {
@@ -139,7 +142,7 @@ export function HostOnboardingPanel({
         PlatformEnrollment,
         "role"
       >;
-      return { ...result, role: hostRole };
+      return { ...result, role };
     },
     onSuccess: (result) => {
       setEnrollment(result);

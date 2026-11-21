@@ -9,7 +9,9 @@ import { featureToggleService } from "@/lib/organization-access";
  * Shows a platform administrator the builder's own surfaces: the builds
  * page in the navigation and the builder role in host enrollment (#465).
  * One flag for the platform, not per scope. Off, they are out of sight; the
- * pages and their APIs stay.
+ * pages and their APIs stay. It is evaluated for the administrator who
+ * reads, as `organization-creation` is, so it can be on by default or for
+ * selected administrators.
  */
 export const BUILDER_OPERATIONS_FLAG = "builder_operations";
 
@@ -33,7 +35,7 @@ export const GET: APIRoute = async ({ request }) => {
     // surfaces it shows.
     const builderOperations =
       session !== null && access === "active" && isAdminUser(session.user)
-        ? await featureToggleService().getBoolean(BUILDER_OPERATIONS_FLAG, false)
+        ? await featureToggleService().getBoolean(BUILDER_OPERATIONS_FLAG, false, { targetingKey: session.user.id })
         : false;
 
     return accessInviteJson({ session, access, builderOperations });
