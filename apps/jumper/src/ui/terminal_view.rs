@@ -1,9 +1,11 @@
 //! A machine's terminal in the window (#402): it draws the emulator's grid
 //! and passes on what is typed. The session behind it is `terminal.rs`.
 //
-// ponytail: no input method support (composed characters arrive only as the
-// platform hands them over as typed text), and no mouse reporting to the
-// guest; add them when a learner misses them.
+// ponytail: text being composed is not drawn in the grid (the input method's
+// own window shows it), and no mouse reporting to the guest; add them when a
+// learner misses them.
+
+use std::ops::Range;
 
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
@@ -13,10 +15,10 @@ use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent,
-    SharedString, TextAlign, TextRun, Window, canvas, div, fill, font, outline, point, px, rgb,
-    size,
+    App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
+    Focusable, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, ScrollWheelEvent, SharedString, TextAlign, TextRun, UTF16Selection, Window,
+    canvas, div, fill, font, outline, point, px, rgb, size,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -171,6 +173,12 @@ pub struct TerminalView {
     /// last paint; the mouse needs both.
     origin: Point<Pixels>,
     cell_width: Pixels,
+    /// The cursor's cell in the window, from the last paint; the input
+    /// method opens its window there.
+    cursor: Option<Bounds<Pixels>>,
+    /// What the input method is composing, such as the accent of option-e.
+    /// The guest gets the character it ends in.
+    marked: Option<String>,
     selecting: bool,
 }
 
@@ -195,6 +203,8 @@ impl TerminalView {
             focus: cx.focus_handle(),
             origin: Point::default(),
             cell_width: px(8.),
+            cursor: None,
+            marked: None,
             selecting: false,
         }
     }
@@ -208,7 +218,7 @@ impl TerminalView {
         let paste = key.key == "v" && (held.platform || held.control && held.shift);
         let copy = key.key == "c" && (held.platform || held.control && held.shift);
         if paste {
-            self.paste(cx);
+            self.paste_clipboard(cx);
         } else if copy {
             if let Some(text) = self.terminal.grid.lock().selection_to_string() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -223,29 +233,40 @@ impl TerminalView {
                     Scroll::PageDown
                 });
         } else {
-            let mut grid = self.terminal.grid.lock();
+            let app_cursor = self
+                .terminal
+                .grid
+                .lock()
+                .mode()
+                .contains(TermMode::APP_CURSOR);
+            // Text goes on to the input handler, which also hears what an
+            // input method composes.
             let Some(bytes) = encode_key(
                 &key.key,
-                key.key_char.as_deref(),
                 held.control,
                 held.alt,
                 held.shift,
                 held.platform,
-                grid.mode().contains(TermMode::APP_CURSOR),
+                app_cursor,
             ) else {
                 return;
             };
-            // Typing looks at the prompt again and lets go of a selection.
-            grid.scroll_display(Scroll::Bottom);
-            grid.selection = None;
-            drop(grid);
-            self.terminal.write(bytes);
+            self.send(bytes);
         }
         cx.stop_propagation();
         cx.notify();
     }
 
-    fn paste(&self, cx: &mut Context<Self>) {
+    /// Typing looks at the prompt again and lets go of a selection.
+    fn send(&self, bytes: Vec<u8>) {
+        let mut grid = self.terminal.grid.lock();
+        grid.scroll_display(Scroll::Bottom);
+        grid.selection = None;
+        drop(grid);
+        self.terminal.write(bytes);
+    }
+
+    fn paste_clipboard(&self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
@@ -277,7 +298,7 @@ impl TerminalView {
             let app_cursor = grid.mode().contains(TermMode::APP_CURSOR);
             drop(grid);
             let arrow = if lines > 0 { "up" } else { "down" };
-            if let Some(bytes) = encode_key(arrow, None, false, false, false, false, app_cursor) {
+            if let Some(bytes) = encode_key(arrow, false, false, false, false, app_cursor) {
                 self.terminal
                     .write(bytes.repeat(lines.unsigned_abs() as usize));
             }
@@ -339,20 +360,101 @@ impl TerminalView {
     }
 }
 
+/// Typed and composed text: the guest has the line being edited, so the view
+/// holds nothing but what is still being composed.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked
+            .as_ref()
+            .map(|text| 0..text.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+        self.marked = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = None;
+        if !text.is_empty() {
+            self.send(text.replace('\n', "\r").into_bytes());
+            cx.notify();
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        self.marked = (!text.is_empty()).then(|| text.to_owned());
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        self.cursor
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _: Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
 }
 
-/// Paints one frame into `bounds` and fits the grid to it.
+/// Paints one frame into `bounds` and fits the grid to it. Returns the cell
+/// width and where the cursor is.
 fn paint(
     terminal: &Terminal,
     focused: bool,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
-) -> Pixels {
+) -> (Pixels, Option<Bounds<Pixels>>) {
     let mono = font(MONO);
     let run = |len: usize, colour: u32, bold: bool, underline: bool| TextRun {
         len,
@@ -429,8 +531,10 @@ fn paint(
             index = next;
         }
     }
-    if let Some((row, column)) = frame.cursor {
-        let area = Bounds::new(at(row, column), cell_size);
+    let cursor = frame
+        .cursor
+        .map(|(row, column)| Bounds::new(at(row, column), cell_size));
+    if let (Some(area), Some((row, column))) = (cursor, frame.cursor) {
         if focused {
             window.paint_quad(fill(area, rgb(term::TEXT)));
             // The character under a filled cursor is drawn in the background's colour.
@@ -454,13 +558,14 @@ fn paint(
             ));
         }
     }
-    cell_width
+    (cell_width, cursor)
 }
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let terminal = self.terminal.clone();
-        let focused = self.focus.is_focused(window);
+        let focus = self.focus.clone();
+        let focused = focus.is_focused(window);
         let view = cx.entity();
         div()
             .size_full()
@@ -478,14 +583,64 @@ impl Render for TerminalView {
                 canvas(
                     |_, _, _| {},
                     move |bounds, (), window, cx| {
-                        let cell_width = paint(&terminal, focused, bounds, window, cx);
+                        window.handle_input(
+                            &focus,
+                            ElementInputHandler::new(bounds, view.clone()),
+                            cx,
+                        );
+                        let (cell_width, cursor) = paint(&terminal, focused, bounds, window, cx);
                         view.update(cx, |view, _| {
                             view.origin = bounds.origin;
                             view.cell_width = cell_width;
+                            view.cursor = cursor;
                         });
                     },
                 )
                 .size_full(),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    use super::*;
+    use crate::terminal::{ToGuest, detached};
+
+    #[gpui::test]
+    fn typed_pasted_and_composed_text_reaches_the_guest(cx: &mut TestAppContext) {
+        let (terminal, mut to_guest) = detached(Size {
+            columns: 80,
+            rows: 24,
+        });
+        let (_changed, changes) = tokio::sync::mpsc::unbounded_channel();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = TerminalView::new(terminal, changes, cx);
+            window.focus(&view.focus, cx);
+            view
+        });
+        // Key events with no key code, as synthetic input sends them.
+        cx.simulate_input("ls -A");
+        cx.simulate_keystrokes("space enter ctrl-c up");
+        cx.write_to_clipboard(ClipboardItem::new_string("echo hi\n".into()));
+        cx.simulate_keystrokes("cmd-v");
+        // Option-e, then e, as the Mac's input method hands them over.
+        view.update_in(cx, |view, window, cx| {
+            view.replace_and_mark_text_in_range(None, "´", None, window, cx);
+            assert_eq!(view.marked_text_range(window, cx), Some(0..1));
+            view.replace_text_in_range(Some(0..1), "é", window, cx);
+            assert_eq!(view.marked_text_range(window, cx), None);
+        });
+        let mut sent = Vec::new();
+        while let Ok(message) = to_guest.try_recv() {
+            if let ToGuest::Bytes(bytes) = message {
+                sent.extend(bytes);
+            }
+        }
+        assert_eq!(
+            String::from_utf8(sent).expect("text"),
+            "ls -A \r\x03\x1b[Aecho hi\ré"
+        );
     }
 }
