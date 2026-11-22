@@ -1377,3 +1377,164 @@ fn main() {
             }
         });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use subspace::contract::CatalogCourseV1;
+    use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+
+    /// The window with `state` on screen, and what it asks of the engine.
+    fn open(
+        cx: &mut TestAppContext,
+        state: State,
+    ) -> (
+        Entity<Jumper>,
+        &mut VisualTestContext,
+        UnboundedReceiver<Command>,
+    ) {
+        let (commands, mut heard) = unbounded_channel();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut jumper = Jumper::new(commands, window, cx);
+            jumper.state = state;
+            jumper
+        });
+        cx.run_until_parked();
+        // What the window asks at launch.
+        while heard.try_recv().is_ok() {}
+        (view, cx, heard)
+    }
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is not on screen"));
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn lecture(state: &str) -> CatalogLectureV1 {
+        CatalogLectureV1 {
+            lecture_id: "l".into(),
+            title: "Serve".into(),
+            summary: String::new(),
+            category: String::new(),
+            tags: vec![],
+            difficulty: None,
+            estimated_minutes: None,
+            scenario_id: Some("intar/web".into()),
+            state: state.into(),
+            active_run_id: None,
+        }
+    }
+
+    fn catalog(state: &str) -> Vec<CatalogCourseV1> {
+        vec![CatalogCourseV1 {
+            course_id: "c".into(),
+            organization_id: None,
+            organization_name: None,
+            title: "Web".into(),
+            summary: String::new(),
+            body_markdown: String::new(),
+            sequential: true,
+            lectures: vec![lecture(state)],
+        }]
+    }
+
+    #[gpui::test]
+    fn a_locked_lecture_does_not_start_and_an_open_one_does(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.catalog = catalog("locked");
+        state.screen = Screen::Lecture {
+            course: 0,
+            lecture: 0,
+        };
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "start");
+        assert!(heard.try_recv().is_err(), "a locked start asks nothing");
+
+        view.update(cx, |view, cx| {
+            view.state.catalog = catalog("available");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click(cx, "start");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::StartRun {
+                scenario_id: "intar/web".into(),
+                organization_id: None
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn the_end_confirm_closes_outside_and_ends_on_its_button(cx: &mut TestAppContext) {
+        let run = LocalRunV1 {
+            run_id: "run-1".into(),
+            scenario_id: "intar/web".into(),
+            state: "running".into(),
+            active: true,
+            user_id: None,
+            execution_id: None,
+            generation: None,
+            machines: vec![],
+        };
+        let mut state = State::default();
+        state.screen = Screen::Run(run);
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "end");
+        assert!(view.read_with(cx, |view, _| view.ending));
+        // Pressing End run again keeps it open rather than flickering.
+        click(cx, "end");
+        assert!(view.read_with(cx, |view, _| view.ending));
+
+        cx.simulate_click(point(px(200.), px(400.)), Modifiers::none());
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |view, _| view.ending), "closed outside");
+
+        click(cx, "end");
+        click(cx, "keep");
+        assert!(!view.read_with(cx, |view, _| view.ending));
+        assert!(heard.try_recv().is_err());
+
+        click(cx, "end");
+        click(cx, "end-now");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::EndRun {
+                run_id: "run-1".into()
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn copy_link_copies_and_says_so(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::SigningIn("https://intar.dev/sign-in".into());
+        let (view, cx, _heard) = open(cx, state);
+        click(cx, "copy");
+        assert!(view.read_with(cx, |view, _| view.copied));
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("https://intar.dev/sign-in".into())
+        );
+        // The next event takes the word back.
+        view.update(cx, |view, cx| view.apply(Event::Update(None), cx));
+        assert!(!view.read_with(cx, |view, _| view.copied));
+    }
+
+    #[gpui::test]
+    fn an_update_in_progress_is_not_started_again(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::SignedOut;
+        state.update = Some("0.2.0".into());
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "update");
+        assert_eq!(heard.try_recv().ok(), Some(Command::InstallUpdate));
+        assert!(view.read_with(cx, |view, _| view.state.updating));
+        click(cx, "update");
+        assert!(heard.try_recv().is_err(), "Updating… asks nothing");
+    }
+}

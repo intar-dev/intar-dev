@@ -215,6 +215,8 @@ fn surface(
     };
     div()
         .id(id)
+        // Tests find the button by its id.
+        .debug_selector(|| id.to_owned())
         .h(px(height))
         .px(px(pad))
         .flex()
