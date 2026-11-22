@@ -14,8 +14,9 @@ mod update;
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, Focusable, FontWeight,
-    SharedString, Stateful, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    div, point, px, relative, rgb, size,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Stateful,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, px, relative,
+    rgb, size,
 };
 use gpui_platform::application;
 use state::{Command, Event, MachineStatus, Screen, State};
@@ -43,6 +44,8 @@ struct Jumper {
     focus_terminal: bool,
     /// The sign-in link was copied; the button says so until the next event.
     copied: bool,
+    /// The left button went down on the title bar: a move now drags the window.
+    moving: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -127,6 +130,7 @@ impl Jumper {
             terminal: None,
             focus_terminal: false,
             copied: false,
+            moving: false,
             _subscriptions: subscriptions,
         }
     }
@@ -185,14 +189,17 @@ impl Jumper {
         }))
     }
 
+    /// `id` tells the title bar's button from the card's: two buttons with
+    /// one id share their click, and only the first one drawn takes it.
     fn back_to_catalog(
         &self,
         p: &Palette,
+        id: &'static str,
         kind: Kind,
         size: Size,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
-        let button = kit::button(p, "back", kind, size, None, "Back to catalog", None);
+        let button = kit::button(p, id, kind, size, None, "Back to catalog", None);
         Self::on_click(button, cx, |this, _| {
             let reload = this.state.back_to_catalog();
             this.send(reload);
@@ -217,8 +224,36 @@ impl Jumper {
             .unwrap_or_else(|| (run.scenario_id.clone().into(), None))
     }
 
-    fn title_bar(&self, p: &Palette, cx: &Context<Self>) -> Div {
+    fn title_bar(&self, p: &Palette, cx: &Context<Self>) -> Stateful<Div> {
         let bar = div()
+            .id("title-bar")
+            // The app owns its title bar on macOS (`app_owns_titlebar_drag`), so
+            // its buttons get the pointer; a press and a move here drag the
+            // window, as Zed's title bar does, and a double-click does what the
+            // system's title bar would.
+            .when(OWN_TITLE_BAR, |bar| {
+                bar.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, _| this.moving = true),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, _| this.moving = false),
+                )
+                .on_mouse_down_out(
+                    cx.listener(|this, _: &MouseDownEvent, _, _| this.moving = false),
+                )
+                .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, _| {
+                    if std::mem::take(&mut this.moving) {
+                        window.start_window_move();
+                    }
+                }))
+                .on_click(|event, window, _| {
+                    if event.click_count() == 2 {
+                        window.titlebar_double_click();
+                    }
+                })
+            })
             .h(px(46.))
             .flex_none()
             .flex()
@@ -306,7 +341,18 @@ impl Jumper {
                     .text_color(rgb(p.muted))
                     .child(kit::icon("monitor", 12., p.muted))
                     .child("Local run");
-                let leave = if run.active {
+                let leave = if matches!(self.state.machine, Some(MachineStatus::Saving)) {
+                    // The run is already ending; a second end would only fail.
+                    kit::inert_button(
+                        p,
+                        "end",
+                        Kind::QuietDanger,
+                        Size::Small,
+                        Some("stop"),
+                        "Ending…",
+                        None,
+                    )
+                } else if run.active {
                     let end = kit::button(
                         p,
                         "end",
@@ -319,7 +365,7 @@ impl Jumper {
                     // A press outside the open confirm closes it first, so this opens it.
                     Self::on_click(end, cx, |this, _| this.ending = true)
                 } else {
-                    self.back_to_catalog(p, Kind::Outline, Size::Small, cx)
+                    self.back_to_catalog(p, "back", Kind::Outline, Size::Small, cx)
                 };
                 bar.child(kit::card_title(p, title).truncate())
                     .children(course.map(|course| kit::label(p, course).flex_none()))
@@ -532,14 +578,16 @@ impl Jumper {
                 let row = if index == shown {
                     row.bg(rgb(p.panel)).border_color(rgb(p.border)).shadow_sm()
                 } else {
-                    let hover = p.track;
+                    // Lifts toward the selected row's surface; `track` is the canvas's own tone.
+                    let hover = p.bg;
                     row.border_color(gpui::transparent_black())
                         .hover(move |style| style.bg(rgb(hover)))
                 };
                 Self::on_click(row, cx, move |this, _| this.state.open_course(index))
             }));
 
-        let query = self.search.read(cx).text().trim().to_lowercase();
+        let typed = self.search.read(cx).text().trim().to_owned();
+        let query = typed.to_lowercase();
         let minutes: u32 = course
             .lectures
             .iter()
@@ -552,7 +600,7 @@ impl Jumper {
         if minutes > 0 {
             facts.push(format!("about {minutes} min"));
         }
-        let rows = course
+        let rows: Vec<_> = course
             .lectures
             .iter()
             .enumerate()
@@ -618,7 +666,17 @@ impl Jumper {
                 Self::on_click(row, cx, move |this, _| {
                     this.state.open_lecture(shown, index)
                 })
-            });
+            })
+            .collect();
+        // A search that matches nothing says so instead of an empty card.
+        let lectures = if rows.is_empty() {
+            div().py_8().flex().justify_center().child(kit::support(
+                p,
+                format!("No lecture in this course matches \u{201c}{typed}\u{201d}."),
+            ))
+        } else {
+            kit::card(p).children(rows)
+        };
         let list = div()
             .flex_1()
             .min_w_0()
@@ -650,7 +708,7 @@ impl Jumper {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(kit::card(p).children(rows)),
+                    .child(lectures),
             );
 
         let detail = div()
@@ -960,6 +1018,7 @@ impl Jumper {
             .when(failed.is_some(), |card| {
                 card.child(div().flex().child(self.back_to_catalog(
                     p,
+                    "back-card",
                     Kind::Outline,
                     Size::Medium,
                     cx,
@@ -1077,7 +1136,7 @@ impl Jumper {
                 )
                 // What went wrong while the run ended, such as an unsaved replay.
                 .children(self.state.error.clone().map(|error| kit::failure(p, error)))
-                .child(div().flex().justify_end().child(self.back_to_catalog(p, Kind::Primary, Size::Medium, cx)));
+                .child(div().flex().justify_end().child(self.back_to_catalog(p, "back-card", Kind::Primary, Size::Medium, cx)));
             return body.child(
                 kit::panel(p)
                     .flex_1()
@@ -1143,9 +1202,10 @@ impl Jumper {
                     .child(kit::section(p, "Tasks"))
                     .child(kit::meta(
                         p,
-                        match tasks {
-                            Some(tasks) => format!("{passed} of {tasks} verified"),
-                            None => "Begin when the machines are ready".to_owned(),
+                        match (tasks, &self.state.machine) {
+                            (Some(tasks), _) => format!("{passed} of {tasks} verified"),
+                            (None, Some(MachineStatus::Saving)) => "The run is ending".to_owned(),
+                            (None, _) => "Begin when the machines are ready".to_owned(),
                         },
                     )),
             )
@@ -1352,6 +1412,10 @@ fn main() {
                     traffic_light_position: Some(point(px(16.), px(15.))),
                 }),
                 window_min_size: Some(size(px(1040.), px(600.))),
+                // Otherwise AppKit keeps the title bar's strip, where the app's
+                // own buttons never see the pointer and clicks wait on a
+                // double-click check (macOS 27).
+                app_owns_titlebar_drag: OWN_TITLE_BAR,
                 ..Default::default()
             };
             let opened = cx.open_window(options, move |window, cx| {
@@ -1536,5 +1600,40 @@ mod tests {
         assert!(view.read_with(cx, |view, _| view.state.updating));
         click(cx, "update");
         assert!(heard.try_recv().is_err(), "Updating… asks nothing");
+    }
+
+    fn run(active: bool) -> LocalRunV1 {
+        LocalRunV1 {
+            run_id: "run-1".into(),
+            scenario_id: "intar/web".into(),
+            state: "running".into(),
+            active,
+            user_id: None,
+            execution_id: None,
+            generation: None,
+            machines: vec![],
+        }
+    }
+
+    #[gpui::test]
+    fn the_closed_cards_back_button_returns_to_the_catalog(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::Run(run(false));
+        let (view, cx, mut heard) = open(cx, state);
+        // The title bar has a Back to catalog of its own; the card's must work too.
+        click(cx, "back-card");
+        assert_eq!(heard.try_recv().ok(), Some(Command::LoadCatalog));
+        assert!(view.read_with(cx, |view, _| view.state.screen == Screen::Catalog));
+    }
+
+    #[gpui::test]
+    fn a_run_that_is_ending_cannot_be_ended_again(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::Run(run(true));
+        state.machine = Some(MachineStatus::Saving);
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "end");
+        assert!(!view.read_with(cx, |view, _| view.ending));
+        assert!(heard.try_recv().is_err());
     }
 }

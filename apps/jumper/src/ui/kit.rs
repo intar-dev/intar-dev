@@ -166,7 +166,9 @@ pub fn button(
         Kind::Danger => (p.red_hover, p.on_red, None),
         Kind::Outline => (p.outline_hover, p.text, Some(p.border_strong)),
         Kind::QuietDanger => (p.red_subtle, p.red, Some(p.red)),
-        Kind::Ghost => (p.subtle, p.text, None),
+        // Ghost buttons sit on the title bar's canvas, where the website's
+        // `muted` fill would not show; the border colour does.
+        Kind::Ghost => (p.border, p.text, None),
     };
     surface(p, id, kind, size, lead, label, trail)
         .cursor_pointer()
