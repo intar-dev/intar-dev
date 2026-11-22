@@ -36,6 +36,8 @@ zpm = { path = "../../crates/zpm" }
 zstd.workspace = true
 
 [dev-dependencies]
+# Window tests: TestAppContext and simulated input.
+gpui = { workspace = true, features = ["test-support"] }
 fatfs.workspace = true
 axum = { workspace = true, features = ["http1", "json", "tokio"] }
 tempfile.workspace = true

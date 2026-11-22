@@ -85,7 +85,7 @@ impl Dimensions for Size {
     }
 }
 
-enum ToGuest {
+pub(crate) enum ToGuest {
     Bytes(Vec<u8>),
     Resize(Size),
     Close,
@@ -144,6 +144,19 @@ impl Terminal {
     }
 }
 
+/// A terminal with no session: what the window writes stays in the receiver.
+#[cfg(test)]
+pub(crate) fn detached(size: Size) -> (Terminal, UnboundedReceiver<ToGuest>) {
+    let (to_guest, from_window) = unbounded_channel();
+    let grid = Term::new(Config::default(), &size, Replies(to_guest.clone()));
+    let terminal = Terminal {
+        machine: "test".to_owned(),
+        grid: Arc::new(FairMutex::new(grid)),
+        to_guest,
+    };
+    (terminal, from_window)
+}
+
 /// Opens `machine`'s terminal. The session runs on the calling tokio runtime
 /// until the guest closes it or the [`Terminal`] and its copies are dropped.
 /// The receiver hears whenever the grid changed.
@@ -180,12 +193,12 @@ pub fn open(machine: &str, target: Target, size: Size) -> (Terminal, UnboundedRe
     (terminal, changes)
 }
 
-/// The bytes a key press sends to the guest, as xterm does. `key` is the
-/// key's name, `typed` the character it would type. `None` for a key that
-/// sends nothing, and for every key held with the platform's command key.
+/// The bytes a key press sends to the guest, as xterm does; `key` is the
+/// key's name. Only keys that type no text: text, typed or composed, reaches
+/// the guest through the view's input handler. `None` for a key that is
+/// text, and for every key held with the platform's command key.
 pub fn encode_key(
     key: &str,
-    typed: Option<&str>,
     control: bool,
     alt: bool,
     shift: bool,
@@ -240,13 +253,12 @@ pub fn encode_key(
             };
             char::from(code).to_string()
         }
-        "space" => " ".to_owned(),
         // Option composes characters on a Mac; elsewhere Alt is Meta, which
         // programs read as Escape before the key.
         _ if alt && !cfg!(target_os = "macos") && key.chars().count() == 1 => {
             format!("\x1b{key}")
         }
-        _ => typed?.to_owned(),
+        _ => return None,
     };
     Some(sequence.into_bytes())
 }
@@ -370,40 +382,31 @@ mod tests {
 
     #[test]
     fn keys_become_what_xterm_sends() {
-        let plain = |key: &str, typed: Option<&str>| {
-            encode_key(key, typed, false, false, false, false, false)
-        };
-        assert_eq!(plain("a", Some("a")), Some(b"a".to_vec()));
-        assert_eq!(
-            plain("a", Some("A")),
-            Some(b"A".to_vec()),
-            "shift types its own text"
-        );
-        assert_eq!(plain("enter", None), Some(b"\r".to_vec()));
-        assert_eq!(plain("backspace", None), Some(vec![0x7f]));
-        assert_eq!(plain("up", None), Some(b"\x1b[A".to_vec()));
-        assert_eq!(plain("f5", None), Some(b"\x1b[15~".to_vec()));
-        assert_eq!(plain("shift", None), None, "a modifier alone sends nothing");
+        let plain = |key: &str| encode_key(key, false, false, false, false, false);
+        assert_eq!(plain("a"), None, "text is the input handler's");
+        assert_eq!(plain("space"), None);
+        assert_eq!(plain("enter"), Some(b"\r".to_vec()));
+        assert_eq!(plain("backspace"), Some(vec![0x7f]));
+        assert_eq!(plain("up"), Some(b"\x1b[A".to_vec()));
+        assert_eq!(plain("f5"), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(plain("shift"), None, "a modifier alone sends nothing");
         // Full-screen programs ask for the other arrow form.
         assert_eq!(
-            encode_key("up", None, false, false, false, false, true),
+            encode_key("up", false, false, false, false, true),
             Some(b"\x1bOA".to_vec())
         );
-        let control = |key: &str| encode_key(key, None, true, false, false, false, false);
+        let control = |key: &str| encode_key(key, true, false, false, false, false);
         assert_eq!(control("c"), Some(vec![3]));
         assert_eq!(control("d"), Some(vec![4]));
         assert_eq!(control("["), Some(vec![0x1b]));
         assert_eq!(control("space"), Some(vec![0]));
         assert_eq!(control("1"), None);
         assert_eq!(
-            encode_key("tab", None, false, false, true, false, false),
+            encode_key("tab", false, false, true, false, false),
             Some(b"\x1b[Z".to_vec())
         );
         // Command shortcuts belong to the app, never to the guest.
-        assert_eq!(
-            encode_key("c", Some("c"), false, false, false, true, false),
-            None
-        );
+        assert_eq!(encode_key("c", false, false, false, true, false), None);
     }
 
     #[tokio::test]
