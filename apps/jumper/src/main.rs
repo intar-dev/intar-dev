@@ -41,6 +41,8 @@ struct Jumper {
     terminal: Option<Entity<TerminalView>>,
     /// The terminal just opened and has not been given the keyboard yet.
     focus_terminal: bool,
+    /// The sign-in link was copied; the button says so until the next event.
+    copied: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -107,7 +109,8 @@ impl Jumper {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| TextInput::new("Search lectures", false, 0, cx));
+        let search =
+            cx.new(|cx| TextInput::new("Search lectures", false, 0, cx).with_icon("search"));
         let subscriptions = vec![
             cx.observe(&search, |_, _, cx| cx.notify()),
             cx.observe_window_appearance(window, |_, window, cx| theme::apply(window, cx)),
@@ -123,6 +126,7 @@ impl Jumper {
             ending: false,
             terminal: None,
             focus_terminal: false,
+            copied: false,
             _subscriptions: subscriptions,
         }
     }
@@ -151,6 +155,7 @@ impl Jumper {
             cx.quit();
             return;
         }
+        self.copied = false;
         if let Some(next) = self.state.apply(event) {
             self.send(next);
         }
@@ -237,31 +242,38 @@ impl Jumper {
             .then(|| kit::status(p.green, "Connected").text_color(rgb(p.muted)));
         // Offered between runs only: an update restarts the app.
         let update = self.state.update.clone().map(|version| {
-            let install = kit::button(
-                p,
-                "update",
-                Kind::Outline,
-                Size::Small,
-                None,
-                if self.state.updating {
-                    "Updating…"
-                } else {
-                    "Update and restart"
-                },
-                None,
-            );
+            let install = if self.state.updating {
+                kit::inert_button(
+                    p,
+                    "update",
+                    Kind::Outline,
+                    Size::Small,
+                    None,
+                    "Updating…",
+                    None,
+                )
+            } else {
+                let install = kit::button(
+                    p,
+                    "update",
+                    Kind::Outline,
+                    Size::Small,
+                    None,
+                    "Update and restart",
+                    None,
+                );
+                Self::on_click(install, cx, |this, _| {
+                    this.state.updating = true;
+                    this.send(Command::InstallUpdate);
+                })
+            };
             div()
                 .flex()
                 .flex_none()
                 .items_center()
                 .gap(px(10.))
                 .child(kit::label(p, format!("Version {version} is available")))
-                .child(Self::on_click(install, cx, |this, _| {
-                    if !this.state.updating {
-                        this.state.updating = true;
-                        this.send(Command::InstallUpdate);
-                    }
-                }))
+                .child(install)
         });
         match &self.state.screen {
             Screen::Run(run) => {
@@ -304,7 +316,8 @@ impl Jumper {
                         "End run",
                         None,
                     );
-                    Self::on_click(end, cx, |this, _| this.ending = !this.ending)
+                    // A press outside the open confirm closes it first, so this opens it.
+                    Self::on_click(end, cx, |this, _| this.ending = true)
                 } else {
                     self.back_to_catalog(p, Kind::Outline, Size::Small, cx)
                 };
@@ -383,8 +396,8 @@ impl Jumper {
                     "copy",
                     Kind::Outline,
                     Size::Small,
-                    Some("copy"),
-                    "Copy link",
+                    Some(if self.copied { "check" } else { "copy" }),
+                    if self.copied { "Copied" } else { "Copy link" },
                     None,
                 );
                 let (open, link) = (url.clone(), url.clone());
@@ -419,8 +432,9 @@ impl Jumper {
                                         "Copy the sign-in link and paste it into any browser on this computer.",
                                     )),
                             )
-                            .child(Self::on_click(copy, cx, move |_, cx| {
+                            .child(Self::on_click(copy, cx, move |this, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                                this.copied = true;
                             })),
                     )
             }
@@ -675,19 +689,11 @@ impl Jumper {
                 ),
             ),
             Some((index, lecture)) => {
-                let start = kit::button(
-                    p,
-                    "start",
-                    Kind::Primary,
-                    Size::Large,
-                    None,
-                    if lecture.active_run_id.is_some() {
-                        "Open the run"
-                    } else {
-                        "Start scenario"
-                    },
-                    Some("arrow-right"),
-                );
+                let label = if lecture.active_run_id.is_some() {
+                    "Open the run"
+                } else {
+                    "Start scenario"
+                };
                 let blocked = match (&lecture.scenario_id, lecture.state.as_str()) {
                     (None, _) => Some("This lecture has no scenario."),
                     (_, "locked") => {
@@ -701,14 +707,34 @@ impl Jumper {
                 let foot = match blocked {
                     Some(why) if lecture.scenario_id.is_none() => foot.child(kit::caption(p, why)),
                     Some(why) => foot
-                        .child(start.opacity(0.5).cursor_default())
+                        .child(kit::inert_button(
+                            p,
+                            "start",
+                            Kind::Primary,
+                            Size::Large,
+                            None,
+                            label,
+                            Some("arrow-right"),
+                        ))
                         .child(kit::caption(p, why)),
                     None => foot
-                        .child(Self::on_click(start, cx, |this, _| {
-                            if let Some(command) = this.state.open_run() {
-                                this.send(command);
-                            }
-                        }))
+                        .child(Self::on_click(
+                            kit::button(
+                                p,
+                                "start",
+                                Kind::Primary,
+                                Size::Large,
+                                None,
+                                label,
+                                Some("arrow-right"),
+                            ),
+                            cx,
+                            |this, _| {
+                                if let Some(command) = this.state.open_run() {
+                                    this.send(command);
+                                }
+                            },
+                        ))
                         .child(kit::caption(
                             p,
                             "Runs on this computer. The result counts toward your course and is marked as a local run.",
@@ -1180,6 +1206,10 @@ impl Jumper {
             .right(px(10.))
             .w(px(348.))
             .occlude()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.ending = false;
+                cx.notify();
+            }))
             .shadow_lg()
             .p_4()
             .flex()
