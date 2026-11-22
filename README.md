@@ -34,6 +34,10 @@ and `bun run check:database-migrations` before committing it.
 `content/` is a scenario repository: `intar.hcl`, `scenarios/<slug>/scenario.hcl`
 and Markdown-first Course source under `courses/`. Each Course contains
 `course.md` and ordered Lecture directories, each with a `lecture.md`.
+Learners reach a scenario only through a Lecture, so every scenario must be
+named by at least one Lecture's `scenario: <slug>` front matter; otherwise
+`intar-image-cli validate` refuses the repository with
+``scenarios/<slug>/scenario.hcl: no lecture names the scenario `<slug>`: ...``.
 
 ## Releasing
 
