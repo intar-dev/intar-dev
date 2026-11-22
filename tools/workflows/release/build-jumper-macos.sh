@@ -13,6 +13,10 @@
 #     self-signed code-signing, certificate, imported into a keychain of the build's own, and the
 #     hardened runtime; with ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8, an App
 #     Store Connect API key, it is notarized and the ticket stapled.
+#     With MACOS_PROVISIONING_PROFILE_BASE64, a Developer ID provisioning
+#     profile for dev.intar.jumper, the profile is embedded and the app signed
+#     with its keychain access group, so it keeps the sign-in in the protected
+#     keychain (apps/jumper/src/secrets.rs); without it, in the login keychain.
 #   - With SIGN_IDENTITY: with that identity from the login keychain, say a
 #     self-signed one, so a local build keeps its keychain access across
 #     builds. Not notarized.
@@ -156,7 +160,30 @@ PLIST
   "${sign[@]}" --identifier dev.intar.jumper.qemu-system --entitlements "${scratch}/qemu.entitlements" \
     "${app}/Contents/Helpers/qemu-system-aarch64"
   "${sign[@]}" --identifier dev.intar.jumper.qemu-img "${app}/Contents/Helpers/qemu-img"
-  "${sign[@]}" --identifier dev.intar.jumper "${app}"
+  app_entitlements=()
+  if [ -n "${MACOS_PROVISIONING_PROFILE_BASE64:-}" ]; then
+    base64 --decode <<< "${MACOS_PROVISIONING_PROFILE_BASE64}" > "${scratch}/embedded.provisionprofile"
+    security cms -D -i "${scratch}/embedded.provisionprofile" > "${scratch}/profile.plist"
+    profile() { /usr/libexec/PlistBuddy -c "Print :$1" "${scratch}/profile.plist"; }
+    team="$(profile TeamIdentifier:0)"
+    application="${team}.dev.intar.jumper"
+    [ "$(profile Entitlements:com.apple.application-identifier)" = "${application}" ] ||
+      { echo "The provisioning profile is not for ${application}." >&2; exit 1; }
+    cp "${scratch}/embedded.provisionprofile" "${app}/Contents/embedded.provisionprofile"
+    cat > "${scratch}/app.entitlements" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.application-identifier</key><string>${application}</string>
+  <key>com.apple.developer.team-identifier</key><string>${team}</string>
+  <key>keychain-access-groups</key><array><string>${application}</string></array>
+</dict>
+</plist>
+PLIST
+    app_entitlements=(--entitlements "${scratch}/app.entitlements")
+  fi
+  "${sign[@]}" --identifier dev.intar.jumper "${app_entitlements[@]}" "${app}"
   if [ -n "${notarize}" ]; then
     : "${ASC_ISSUER_ID:?ASC_KEY_ID is set without ASC_ISSUER_ID}" "${ASC_KEY_P8:?ASC_KEY_ID is set without ASC_KEY_P8}"
     printf '%s\n' "${ASC_KEY_P8}" > "${scratch}/notary.p8"
@@ -178,6 +205,8 @@ fi
 codesign --verify --strict --deep "${app}"
 codesign --display --entitlements - "${app}/Contents/Helpers/qemu-system-aarch64" 2>&1 | grep -q com.apple.security.hypervisor ||
   { echo "The bundled QEMU lost its hypervisor entitlement." >&2; exit 1; }
+# Also what refuses a bundle whose entitlements its profile does not allow:
+# macOS kills such a program at launch.
 [ "$("${app}/Contents/MacOS/jumper" --version)" = "jumper ${version}" ] ||
   { echo "The bundled app does not report version ${version}." >&2; exit 1; }
 # Nothing but what macOS ships may be needed.

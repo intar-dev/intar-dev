@@ -45,7 +45,7 @@ tempfile.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # runtime_shaders: builds without the Metal compiler that only full Xcode ships.
 gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders"] }
-apple-native-keyring-store.workspace = true
+apple-native-keyring-store = { workspace = true, features = ["protected"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = { workspace = true, features = ["wayland", "x11"] }
