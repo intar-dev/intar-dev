@@ -3,7 +3,7 @@
 "use strict";
 export const validate = validate20;
 export default validate20;
-const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"SourceBundleV2","description":"One compiled repository: the `bundle` field of an upload, gzipped JSON.\nEvery script is lowered and every `file()` and `markdown()` inlined; no\nHCL and no author path survives.","type":"object","properties":{"compiler":{"description":"[`SOURCE_COMPILER_VERSION_V2`] of the compiler that wrote it.","type":"string"},"course_catalog":{"description":"Lecture `scenario_id`s are bare scenario slugs of this bundle; the\nWorker namespaces them from the repository's binding.","$ref":"#/$defs/CourseCatalogSnapshotV2"},"image_format":{"description":"`IMAGE_FORMAT` the compiler targets.","type":"string"},"images":{"type":"array","items":{"$ref":"#/$defs/ImageV1"}},"scenarios":{"type":"array","items":{"$ref":"#/$defs/ScenarioV1"}}},"additionalProperties":false,"required":["compiler","image_format","scenarios","images","course_catalog"],"$defs":{"ClusterRole":{"oneOf":[{"type":"string","enum":["controlplane","worker"]},{"description":"The cluster's trixie machine with kubectl, talosctl and their\nconfigs, where the learner works.","type":"string","const":"management"}]},"ClusterV1":{"description":"A Talos cluster: its nodes and its management machine are the machines\nwhose `cluster` names it.","type":"object","properties":{"name":{"type":"string"},"patches":{"description":"Talos machine-config patches (YAML), applied to every node in order.","type":"array","items":{"$ref":"#/$defs/ScriptV1"}}},"additionalProperties":false,"required":["name","patches"]},"CourseCatalogCourseV2":{"type":"object","properties":{"body_markdown":{"type":"string"},"course_id":{"type":"string"},"lectures":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogLectureV2"}},"sequential":{"type":"boolean"},"summary":{"type":"string"},"title":{"type":"string"}},"additionalProperties":false,"required":["course_id","title","summary","body_markdown","sequential","lectures"]},"CourseCatalogLectureV2":{"type":"object","properties":{"body_markdown":{"type":"string"},"category":{"type":"string"},"difficulty":{"anyOf":[{"$ref":"#/$defs/ScenarioDifficulty"},{"type":"null"}]},"estimated_minutes":{"type":"integer","minimum":1,"maximum":4294967295},"lecture_id":{"type":"string"},"scenario_id":{"type":["string","null"]},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"title":{"type":"string"}},"additionalProperties":false,"required":["lecture_id","title","summary","body_markdown","category","tags","estimated_minutes"]},"CourseCatalogSnapshotV2":{"description":"The published, Markdown-authored course catalog.\n\n`version` is intentionally a field rather than an enum tag. The bundle\nreceiver must reject a catalog version that it does not understand.","type":"object","properties":{"courses":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogCourseV2"}},"version":{"type":"integer","maximum":2,"minimum":2}},"additionalProperties":false,"required":["version","courses"]},"Difficulty":{"type":"string","enum":["easy","medium","hard"]},"HintV1":{"type":"object","properties":{"body":{"type":"string"},"id":{"type":"string"},"title":{"type":["string","null"]}},"additionalProperties":false,"required":["id","body"]},"ImageV1":{"description":"A repository image, `images/<name>.hcl`.","type":"object","properties":{"defer":{"type":"array","items":{"type":"string"}},"disk_mib":{"description":"The chain's build geometry: set exactly when `from` is `trixie`.","type":["integer","null"],"minimum":0,"maximum":4294967295},"from":{"type":"string"},"name":{"type":"string"},"setup":{"type":"array","items":{"$ref":"#/$defs/ScriptV1"}}},"additionalProperties":false,"required":["name","from","defer","setup"]},"MachineClusterV1":{"description":"A machine's place in a cluster.","type":"object","properties":{"cluster":{"type":"string"},"role":{"$ref":"#/$defs/ClusterRole"}},"additionalProperties":false,"required":["cluster","role"]},"MachineV1":{"type":"object","properties":{"cluster":{"description":"Set on a machine of a Talos cluster.","anyOf":[{"$ref":"#/$defs/MachineClusterV1"},{"type":"null"}]},"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"defer":{"type":"array","items":{"type":"string"}},"disk_mib":{"type":"integer","minimum":0,"maximum":4294967295},"egress":{"type":"boolean"},"env":{"type":"object","additionalProperties":{"type":"string"}},"from":{"description":"`trixie`, `talos` for a cluster node, or the name of an image.","type":"string"},"memory_mib":{"type":"integer","minimum":0,"maximum":4294967295},"name":{"type":"string"},"ready":{"type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"setup":{"description":"Build-time stages in run order; `packages` is lowered to the first.","type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"terminal":{"type":"boolean"}},"additionalProperties":false,"required":["name","cpu_millis","memory_mib","disk_mib","from","defer","terminal","egress","env","setup","ready"]},"ScenarioDifficulty":{"type":"string","enum":["easy","medium","hard"]},"ScenarioV1":{"type":"object","properties":{"briefing":{"type":"string"},"clusters":{"description":"Talos clusters; their machines are among `machines`.","type":"array","items":{"$ref":"#/$defs/ClusterV1"}},"credit":{"type":["string","null"]},"difficulty":{"$ref":"#/$defs/Difficulty"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"machines":{"description":"File order is the terminal tab order.","type":"array","items":{"$ref":"#/$defs/MachineV1"}},"minutes":{"type":"integer","minimum":0,"maximum":4294967295},"play":{"type":"boolean"},"slug":{"type":"string"},"solution":{"type":"string"},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"tasks":{"description":"File order is the order learners see.","type":"array","items":{"$ref":"#/$defs/TaskV1"}},"title":{"type":"string"}},"additionalProperties":false,"required":["slug","title","summary","difficulty","minutes","tags","play","briefing","solution","hints","machines","tasks"]},"ScriptV1":{"description":"A named lowered bash script: a setup stage or a ready block.","type":"object","properties":{"name":{"type":"string"},"script":{"type":"string"}},"additionalProperties":false,"required":["name","script"]},"TaskV1":{"type":"object","properties":{"body":{"type":["string","null"]},"check":{"description":"The task's check bodies lowered into one script.","type":"string"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"id":{"type":"string"},"machine":{"type":"string"},"needs":{"description":"Bare task IDs, on any machine.","type":"array","items":{"type":"string"}},"optional":{"type":"boolean"},"solve":{"description":"Absent on an implied task: it must pass once its needs pass.","type":["string","null"]},"title":{"type":"string"}},"additionalProperties":false,"required":["id","title","machine","needs","optional","check","hints"]}}};
+const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"SourceBundleV2","description":"One compiled repository: the `bundle` field of an upload, gzipped JSON.\nEvery script is lowered and every `file()` and `markdown()` inlined; no\nHCL and no author path survives.","type":"object","properties":{"compiler":{"description":"[`SOURCE_COMPILER_VERSION_V2`] of the compiler that wrote it.","type":"string"},"course_catalog":{"description":"Lecture `scenario_id`s are bare scenario slugs of this bundle; the\nWorker namespaces them from the repository's binding.","$ref":"#/$defs/CourseCatalogSnapshotV2"},"image_format":{"description":"`IMAGE_FORMAT` the compiler targets.","type":"string"},"images":{"type":"array","items":{"$ref":"#/$defs/ImageV1"}},"scenarios":{"type":"array","items":{"$ref":"#/$defs/ScenarioV1"}}},"additionalProperties":false,"required":["compiler","image_format","scenarios","images","course_catalog"],"$defs":{"ClusterRole":{"oneOf":[{"type":"string","enum":["controlplane","worker"]},{"description":"The cluster's trixie machine with kubectl, talosctl and their\nconfigs, where the learner works.","type":"string","const":"management"}]},"ClusterV1":{"description":"A Talos cluster: its nodes and its management machine are the machines\nwhose `cluster` names it.","type":"object","properties":{"kubernetes":{"description":"The Kubernetes release, e.g. `v1.37.1`.","type":"string"},"name":{"type":"string"},"patches":{"description":"Talos machine-config patches (YAML), applied to every node in order.","type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"talos":{"description":"The Talos release, e.g. `v1.14.6`; with `kubernetes` one of\n[`TALOS_RELEASES`].","type":"string"}},"additionalProperties":false,"required":["name","talos","kubernetes","patches"]},"CourseCatalogCourseV2":{"type":"object","properties":{"body_markdown":{"type":"string"},"course_id":{"type":"string"},"lectures":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogLectureV2"}},"sequential":{"type":"boolean"},"summary":{"type":"string"},"title":{"type":"string"}},"additionalProperties":false,"required":["course_id","title","summary","body_markdown","sequential","lectures"]},"CourseCatalogLectureV2":{"type":"object","properties":{"body_markdown":{"type":"string"},"category":{"type":"string"},"difficulty":{"anyOf":[{"$ref":"#/$defs/ScenarioDifficulty"},{"type":"null"}]},"estimated_minutes":{"type":"integer","minimum":1,"maximum":4294967295},"lecture_id":{"type":"string"},"scenario_id":{"type":["string","null"]},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"title":{"type":"string"}},"additionalProperties":false,"required":["lecture_id","title","summary","body_markdown","category","tags","estimated_minutes"]},"CourseCatalogSnapshotV2":{"description":"The published, Markdown-authored course catalog.\n\n`version` is intentionally a field rather than an enum tag. The bundle\nreceiver must reject a catalog version that it does not understand.","type":"object","properties":{"courses":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogCourseV2"}},"version":{"type":"integer","maximum":2,"minimum":2}},"additionalProperties":false,"required":["version","courses"]},"Difficulty":{"type":"string","enum":["easy","medium","hard"]},"HintV1":{"type":"object","properties":{"body":{"type":"string"},"id":{"type":"string"},"title":{"type":["string","null"]}},"additionalProperties":false,"required":["id","body"]},"ImageV1":{"description":"A repository image, `images/<name>.hcl`.","type":"object","properties":{"defer":{"type":"array","items":{"type":"string"}},"disk_mib":{"description":"The chain's build geometry: set exactly when `from` is `trixie`.","type":["integer","null"],"minimum":0,"maximum":4294967295},"from":{"type":"string"},"name":{"type":"string"},"setup":{"type":"array","items":{"$ref":"#/$defs/ScriptV1"}}},"additionalProperties":false,"required":["name","from","defer","setup"]},"MachineClusterV1":{"description":"A machine's place in a cluster.","type":"object","properties":{"cluster":{"type":"string"},"role":{"$ref":"#/$defs/ClusterRole"}},"additionalProperties":false,"required":["cluster","role"]},"MachineV1":{"type":"object","properties":{"cluster":{"description":"Set on a machine of a Talos cluster.","anyOf":[{"$ref":"#/$defs/MachineClusterV1"},{"type":"null"}]},"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"defer":{"type":"array","items":{"type":"string"}},"disk_mib":{"type":"integer","minimum":0,"maximum":4294967295},"egress":{"type":"boolean"},"env":{"type":"object","additionalProperties":{"type":"string"}},"from":{"description":"`trixie`, `talos` for a cluster node, or the name of an image.","type":"string"},"memory_mib":{"type":"integer","minimum":0,"maximum":4294967295},"name":{"type":"string"},"ready":{"type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"setup":{"description":"Build-time stages in run order; `packages` is lowered to the first.","type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"terminal":{"type":"boolean"}},"additionalProperties":false,"required":["name","cpu_millis","memory_mib","disk_mib","from","defer","terminal","egress","env","setup","ready"]},"ScenarioDifficulty":{"type":"string","enum":["easy","medium","hard"]},"ScenarioV1":{"type":"object","properties":{"briefing":{"type":"string"},"clusters":{"description":"Talos clusters; their machines are among `machines`.","type":"array","items":{"$ref":"#/$defs/ClusterV1"}},"credit":{"type":["string","null"]},"difficulty":{"$ref":"#/$defs/Difficulty"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"machines":{"description":"File order is the terminal tab order.","type":"array","items":{"$ref":"#/$defs/MachineV1"}},"minutes":{"type":"integer","minimum":0,"maximum":4294967295},"play":{"type":"boolean"},"slug":{"type":"string"},"solution":{"type":"string"},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"tasks":{"description":"File order is the order learners see.","type":"array","items":{"$ref":"#/$defs/TaskV1"}},"title":{"type":"string"}},"additionalProperties":false,"required":["slug","title","summary","difficulty","minutes","tags","play","briefing","solution","hints","machines","tasks"]},"ScriptV1":{"description":"A named lowered bash script: a setup stage or a ready block.","type":"object","properties":{"name":{"type":"string"},"script":{"type":"string"}},"additionalProperties":false,"required":["name","script"]},"TaskV1":{"type":"object","properties":{"body":{"type":["string","null"]},"check":{"description":"The task's check bodies lowered into one script.","type":"string"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"id":{"type":"string"},"machine":{"type":"string"},"needs":{"description":"Bare task IDs, on any machine.","type":"array","items":{"type":"string"}},"optional":{"type":"boolean"},"solve":{"description":"Absent on an implied task: it must pass once its needs pass.","type":["string","null"]},"title":{"type":"string"}},"additionalProperties":false,"required":["id","title","machine","needs","optional","check","hints"]}}};
 const schema32 = {"description":"The published, Markdown-authored course catalog.\n\n`version` is intentionally a field rather than an enum tag. The bundle\nreceiver must reject a catalog version that it does not understand.","type":"object","properties":{"courses":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogCourseV2"}},"version":{"type":"integer","maximum":2,"minimum":2}},"additionalProperties":false,"required":["version","courses"]};
 const schema33 = {"type":"object","properties":{"body_markdown":{"type":"string"},"course_id":{"type":"string"},"lectures":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogLectureV2"}},"sequential":{"type":"boolean"},"summary":{"type":"string"},"title":{"type":"string"}},"additionalProperties":false,"required":["course_id","title","summary","body_markdown","sequential","lectures"]};
 const schema34 = {"type":"object","properties":{"body_markdown":{"type":"string"},"category":{"type":"string"},"difficulty":{"anyOf":[{"$ref":"#/$defs/ScenarioDifficulty"},{"type":"null"}]},"estimated_minutes":{"type":"integer","minimum":1,"maximum":4294967295},"lecture_id":{"type":"string"},"scenario_id":{"type":["string","null"]},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"title":{"type":"string"}},"additionalProperties":false,"required":["lecture_id","title","summary","body_markdown","category","tags","estimated_minutes"]};
@@ -697,7 +697,7 @@ validate27.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
 const schema38 = {"type":"object","properties":{"briefing":{"type":"string"},"clusters":{"description":"Talos clusters; their machines are among `machines`.","type":"array","items":{"$ref":"#/$defs/ClusterV1"}},"credit":{"type":["string","null"]},"difficulty":{"$ref":"#/$defs/Difficulty"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"machines":{"description":"File order is the terminal tab order.","type":"array","items":{"$ref":"#/$defs/MachineV1"}},"minutes":{"type":"integer","minimum":0,"maximum":4294967295},"play":{"type":"boolean"},"slug":{"type":"string"},"solution":{"type":"string"},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"tasks":{"description":"File order is the order learners see.","type":"array","items":{"$ref":"#/$defs/TaskV1"}},"title":{"type":"string"}},"additionalProperties":false,"required":["slug","title","summary","difficulty","minutes","tags","play","briefing","solution","hints","machines","tasks"]};
 const schema41 = {"type":"string","enum":["easy","medium","hard"]};
 const schema42 = {"type":"object","properties":{"body":{"type":"string"},"id":{"type":"string"},"title":{"type":["string","null"]}},"additionalProperties":false,"required":["id","body"]};
-const schema39 = {"description":"A Talos cluster: its nodes and its management machine are the machines\nwhose `cluster` names it.","type":"object","properties":{"name":{"type":"string"},"patches":{"description":"Talos machine-config patches (YAML), applied to every node in order.","type":"array","items":{"$ref":"#/$defs/ScriptV1"}}},"additionalProperties":false,"required":["name","patches"]};
+const schema39 = {"description":"A Talos cluster: its nodes and its management machine are the machines\nwhose `cluster` names it.","type":"object","properties":{"kubernetes":{"description":"The Kubernetes release, e.g. `v1.37.1`.","type":"string"},"name":{"type":"string"},"patches":{"description":"Talos machine-config patches (YAML), applied to every node in order.","type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"talos":{"description":"The Talos release, e.g. `v1.14.6`; with `kubernetes` one of\n[`TALOS_RELEASES`].","type":"string"}},"additionalProperties":false,"required":["name","talos","kubernetes","patches"]};
 
 function validate30(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
 let vErrors = null;
@@ -712,24 +712,24 @@ evaluated0.items = undefined;
 if(errors === 0){
 if(data && typeof data == "object" && !Array.isArray(data)){
 let missing0;
-if(((data.name === undefined) && (missing0 = "name")) || ((data.patches === undefined) && (missing0 = "patches"))){
+if(((((data.name === undefined) && (missing0 = "name")) || ((data.talos === undefined) && (missing0 = "talos"))) || ((data.kubernetes === undefined) && (missing0 = "kubernetes"))) || ((data.patches === undefined) && (missing0 = "patches"))){
 validate30.errors = [{instancePath,schemaPath:"#/required",keyword:"required",params:{missingProperty: missing0},message:"must have required property '"+missing0+"'"}];
 return false;
 }
 else {
 const _errs1 = errors;
 for(const key0 in data){
-if(!((key0 === "name") || (key0 === "patches"))){
+if(!((((key0 === "kubernetes") || (key0 === "name")) || (key0 === "patches")) || (key0 === "talos"))){
 validate30.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
 return false;
 break;
 }
 }
 if(_errs1 === errors){
-if(data.name !== undefined){
+if(data.kubernetes !== undefined){
 const _errs2 = errors;
-if(typeof data.name !== "string"){
-validate30.errors = [{instancePath:instancePath+"/name",schemaPath:"#/properties/name/type",keyword:"type",params:{type: "string"},message:"must be string"}];
+if(typeof data.kubernetes !== "string"){
+validate30.errors = [{instancePath:instancePath+"/kubernetes",schemaPath:"#/properties/kubernetes/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
 var valid0 = _errs2 === errors;
@@ -738,53 +738,65 @@ else {
 var valid0 = true;
 }
 if(valid0){
-if(data.patches !== undefined){
-let data1 = data.patches;
+if(data.name !== undefined){
 const _errs4 = errors;
-if(errors === _errs4){
-if(Array.isArray(data1)){
-var valid1 = true;
-const len0 = data1.length;
-for(let i0=0; i0<len0; i0++){
-let data2 = data1[i0];
+if(typeof data.name !== "string"){
+validate30.errors = [{instancePath:instancePath+"/name",schemaPath:"#/properties/name/type",keyword:"type",params:{type: "string"},message:"must be string"}];
+return false;
+}
+var valid0 = _errs4 === errors;
+}
+else {
+var valid0 = true;
+}
+if(valid0){
+if(data.patches !== undefined){
+let data2 = data.patches;
 const _errs6 = errors;
-const _errs7 = errors;
-if(errors === _errs7){
-if(data2 && typeof data2 == "object" && !Array.isArray(data2)){
+if(errors === _errs6){
+if(Array.isArray(data2)){
+var valid1 = true;
+const len0 = data2.length;
+for(let i0=0; i0<len0; i0++){
+let data3 = data2[i0];
+const _errs8 = errors;
+const _errs9 = errors;
+if(errors === _errs9){
+if(data3 && typeof data3 == "object" && !Array.isArray(data3)){
 let missing1;
-if(((data2.name === undefined) && (missing1 = "name")) || ((data2.script === undefined) && (missing1 = "script"))){
+if(((data3.name === undefined) && (missing1 = "name")) || ((data3.script === undefined) && (missing1 = "script"))){
 validate30.errors = [{instancePath:instancePath+"/patches/" + i0,schemaPath:"#/$defs/ScriptV1/required",keyword:"required",params:{missingProperty: missing1},message:"must have required property '"+missing1+"'"}];
 return false;
 }
 else {
-const _errs9 = errors;
-for(const key1 in data2){
+const _errs11 = errors;
+for(const key1 in data3){
 if(!((key1 === "name") || (key1 === "script"))){
 validate30.errors = [{instancePath:instancePath+"/patches/" + i0,schemaPath:"#/$defs/ScriptV1/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key1},message:"must NOT have additional properties"}];
 return false;
 break;
 }
 }
-if(_errs9 === errors){
-if(data2.name !== undefined){
-const _errs10 = errors;
-if(typeof data2.name !== "string"){
+if(_errs11 === errors){
+if(data3.name !== undefined){
+const _errs12 = errors;
+if(typeof data3.name !== "string"){
 validate30.errors = [{instancePath:instancePath+"/patches/" + i0+"/name",schemaPath:"#/$defs/ScriptV1/properties/name/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
-var valid3 = _errs10 === errors;
+var valid3 = _errs12 === errors;
 }
 else {
 var valid3 = true;
 }
 if(valid3){
-if(data2.script !== undefined){
-const _errs12 = errors;
-if(typeof data2.script !== "string"){
+if(data3.script !== undefined){
+const _errs14 = errors;
+if(typeof data3.script !== "string"){
 validate30.errors = [{instancePath:instancePath+"/patches/" + i0+"/script",schemaPath:"#/$defs/ScriptV1/properties/script/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
-var valid3 = _errs12 === errors;
+var valid3 = _errs14 === errors;
 }
 else {
 var valid3 = true;
@@ -798,7 +810,7 @@ validate30.errors = [{instancePath:instancePath+"/patches/" + i0,schemaPath:"#/$
 return false;
 }
 }
-var valid1 = _errs6 === errors;
+var valid1 = _errs8 === errors;
 if(!valid1){
 break;
 }
@@ -809,10 +821,24 @@ validate30.errors = [{instancePath:instancePath+"/patches",schemaPath:"#/propert
 return false;
 }
 }
-var valid0 = _errs4 === errors;
+var valid0 = _errs6 === errors;
 }
 else {
 var valid0 = true;
+}
+if(valid0){
+if(data.talos !== undefined){
+const _errs16 = errors;
+if(typeof data.talos !== "string"){
+validate30.errors = [{instancePath:instancePath+"/talos",schemaPath:"#/properties/talos/type",keyword:"type",params:{type: "string"},message:"must be string"}];
+return false;
+}
+var valid0 = _errs16 === errors;
+}
+else {
+var valid0 = true;
+}
+}
 }
 }
 }

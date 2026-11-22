@@ -45,8 +45,8 @@
 //! key and each gets a key derived from it:
 //!
 //! ```text
-//! cluster = str(IMAGE_FORMAT) str("cluster") str(TALOS_RELEASE) str(name)
-//!           list(node) list(patch)
+//! cluster = str(IMAGE_FORMAT) str("cluster") str(talos) str(kubernetes)
+//!           str(name) list(node) list(patch)
 //! node    = str(name) ‖ str(role) ‖ str(disk)  the cluster's nodes in scenario order
 //! patch   = str(name) ‖ str(patch)             in order
 //! machine = str(IMAGE_FORMAT) str("cluster-machine") str(cluster key)
@@ -61,9 +61,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest as _, Sha256};
 
-use super::{
-    ClusterV1, ImageV1, MachineV1, PLATFORM_BASE_IMAGE, ScenarioV1, ScriptV1, TALOS_RELEASE,
-};
+use super::{ClusterV1, ImageV1, MachineV1, PLATFORM_BASE_IMAGE, ScenarioV1, ScriptV1};
 use crate::oci::{IMAGE_FORMAT, OciDigest};
 
 /// The keys of a scenario's machines and of its repository's images.
@@ -100,7 +98,13 @@ fn digest(bytes: &[u8]) -> OciDigest {
 
 fn cluster_key(cluster: &ClusterV1, machines: &[MachineV1]) -> OciDigest {
     let mut bytes = Vec::new();
-    for text in [IMAGE_FORMAT, "cluster", TALOS_RELEASE, &cluster.name] {
+    for text in [
+        IMAGE_FORMAT,
+        "cluster",
+        &cluster.talos,
+        &cluster.kubernetes,
+        &cluster.name,
+    ] {
         put(&mut bytes, text);
     }
     let nodes: Vec<_> = machines

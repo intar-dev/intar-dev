@@ -21,9 +21,10 @@ pub const PLATFORM_BASE_IMAGE: &str = "trixie";
 /// The `from` of a Talos cluster node: the platform's Talos release, not an
 /// image.
 pub const TALOS_BASE_IMAGE: &str = "talos";
-/// The Talos and Kubernetes release every cluster is built from. It is an
-/// input of every cluster key; the builder pins the matching assets.
-pub const TALOS_RELEASE: &str = "talos-v1.14.6-kubernetes-v1.37.1";
+/// The Talos and Kubernetes releases a cluster may name, as
+/// `(talos, kubernetes)`. The builder pins each pair's assets by digest, so a
+/// pair is added here together with its pins.
+pub const TALOS_RELEASES: &[(&str, &str)] = &[("v1.14.6", "v1.37.1")];
 pub const MAX_CLUSTERS: usize = 1;
 pub const MAX_CLUSTER_PATCHES: usize = 16;
 /// The smallest disk of a Talos node: room for Talos and the cluster's
@@ -82,6 +83,11 @@ pub struct ScenarioV1 {
 #[serde(deny_unknown_fields)]
 pub struct ClusterV1 {
     pub name: String,
+    /// The Talos release, e.g. `v1.14.6`; with `kubernetes` one of
+    /// [`TALOS_RELEASES`].
+    pub talos: String,
+    /// The Kubernetes release, e.g. `v1.37.1`.
+    pub kubernetes: String,
     /// Talos machine-config patches (YAML), applied to every node in order.
     pub patches: Vec<ScriptV1>,
 }
@@ -608,6 +614,12 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
             &cluster.patches,
             &mut problem,
         );
+        if !TALOS_RELEASES.contains(&(cluster.talos.as_str(), cluster.kubernetes.as_str())) {
+            problem(format!(
+                "cluster `{name}`: Talos `{}` with Kubernetes `{}` is not a supported release",
+                cluster.talos, cluster.kubernetes
+            ));
+        }
         for role in [ClusterRole::Controlplane, ClusterRole::Management] {
             let count = scenario
                 .machines
@@ -1064,6 +1076,8 @@ mod tests {
         scenario.tasks = vec![task("nodes-ready", "mgmt", &[], true)];
         scenario.clusters = vec![ClusterV1 {
             name: "lab".to_owned(),
+            talos: "v1.14.6".to_owned(),
+            kubernetes: "v1.37.1".to_owned(),
             patches: vec![script("ntp")],
         }];
         scenario
@@ -1073,7 +1087,10 @@ mod tests {
     fn cluster_rules_are_enforced() {
         assert_eq!(problems(&cluster_scenario(), &images()), "");
         type Break = fn(&mut ScenarioV1, &mut Vec<ImageV1>);
-        let broken: [(&str, Break); 10] = [
+        let broken: [(&str, Break); 11] = [
+            ("is not a supported release", |s, _| {
+                s.clusters[0].kubernetes = "v1.36.0".to_owned()
+            }),
             ("at most 1 cluster", |s, _| {
                 let mut other = s.clusters[0].clone();
                 other.name = "other".to_owned();

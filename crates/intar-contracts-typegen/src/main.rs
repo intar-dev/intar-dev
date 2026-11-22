@@ -401,6 +401,8 @@ fn refusal_cases() -> Vec<(&'static str, Mutation)> {
         scenario.machines.push(node);
         scenario.clusters = vec![ClusterV1 {
             name: "lab".to_owned(),
+            talos: "v1.14.6".to_owned(),
+            kubernetes: "v1.37.1".to_owned(),
             patches: Vec::new(),
         }];
     }
@@ -546,6 +548,10 @@ fn refusal_cases() -> Vec<(&'static str, Mutation)> {
             other.name = "other".to_owned();
             b.scenarios[0].clusters.push(other);
         }),
+        ("cluster-release", |b| {
+            clustered(b);
+            b.scenarios[0].clusters[0].talos = "v1.13.0".to_owned();
+        }),
         ("cluster-name", |b| {
             clustered(b);
             b.scenarios[0].clusters[0].name = "L".to_owned();
@@ -669,7 +675,7 @@ export const MAX_MARKDOWN_BYTES = {};
 export const MAX_MACHINE_SPEC_BYTES = {};
 export const MAX_DISK_MIB = {};
 export const TALOS_BASE_IMAGE = "{}";
-export const TALOS_RELEASE = "{}";
+export const TALOS_RELEASES: readonly (readonly [string, string])[] = {};
 export const MAX_CLUSTERS = {};
 export const MAX_CLUSTER_PATCHES = {};
 export const MIN_TALOS_DISK_MIB = {};
@@ -730,7 +736,7 @@ export const runtimeEnvKeys = {{
         intar_contracts::scenario::MAX_MACHINE_SPEC_BYTES,
         MAX_DISK_MIB,
         intar_contracts::scenario::TALOS_BASE_IMAGE,
-        intar_contracts::scenario::TALOS_RELEASE,
+        serde_json::json!(intar_contracts::scenario::TALOS_RELEASES),
         intar_contracts::scenario::MAX_CLUSTERS,
         intar_contracts::scenario::MAX_CLUSTER_PATCHES,
         intar_contracts::scenario::MIN_TALOS_DISK_MIB,

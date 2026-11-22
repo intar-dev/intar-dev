@@ -19,6 +19,7 @@ import {
   PLATFORM_BASE_IMAGE,
   SOURCE_COMPILER_VERSION_V2,
   TALOS_BASE_IMAGE,
+  TALOS_RELEASES,
 } from "@/generated/constants";
 import type {
   HintV1,
@@ -244,6 +245,11 @@ export function validate(scenario: ScenarioV1, images: ImageV1[]): string[] {
       problem(`cluster \`${name}\`: more than ${MAX_CLUSTER_PATCHES} patches`);
     }
     checkScripts(`cluster \`${name}\` patch`, cluster.patches, problem);
+    if (!TALOS_RELEASES.some(([talos, kubernetes]) => talos === cluster.talos && kubernetes === cluster.kubernetes)) {
+      problem(
+        `cluster \`${name}\`: Talos \`${cluster.talos}\` with Kubernetes \`${cluster.kubernetes}\` is not a supported release`,
+      );
+    }
     for (const role of ["controlplane", "management"] as const) {
       const count = scenario.machines.filter(
         (machine) => machine.cluster?.cluster === name && machine.cluster.role === role,

@@ -100,11 +100,20 @@ export interface ScenarioV1 {
  * whose `cluster` names it.
  */
 export interface ClusterV1 {
+  /**
+   * The Kubernetes release, e.g. `v1.37.1`.
+   */
+  kubernetes: string;
   name: string;
   /**
    * Talos machine-config patches (YAML), applied to every node in order.
    */
   patches: ScriptV1[];
+  /**
+   * The Talos release, e.g. `v1.14.6`; with `kubernetes` one of
+   * [`TALOS_RELEASES`].
+   */
+  talos: string;
 }
 export interface HintV1 {
   body: string;

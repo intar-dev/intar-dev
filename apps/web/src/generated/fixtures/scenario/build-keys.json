@@ -617,19 +617,21 @@
               "name": "ntp",
               "script": "machine:\n  time:\n    servers: [time.cloudflare.com]\n"
             }
-          ]
+          ],
+          "talos": "v1.14.6",
+          "kubernetes": "v1.37.1"
         }
       ],
       "keys": {
         "images": {},
         "machines": {
-          "cp1": "sha256:7027cb5b3acc8b702def9bb06db15fe5ce1eb792d812f79a29b64211b06da4d8",
-          "mgmt": "sha256:471dbef1d4fd6bd9a4c3e77f1d162368124753a4cd992f81ee09337f5f9cda39",
-          "wk1": "sha256:9193913bb167a3eeaeece3c1dfe4a6425cd3cc74df6be73fdb6579302d6e1486",
-          "wk2": "sha256:31214fcc7ed8e25dca8e16f49373591920344cf6021c3c271c3a4b413303a5b8"
+          "cp1": "sha256:b0bbd46319df5835f336d7bf8bae6644f02ee4d45ff609c17e9e71cfd093e20b",
+          "mgmt": "sha256:58ee7b4702b3bc0586adcbb711dfafe7b87795cc5198e33d0d5ea5df889d8f99",
+          "wk1": "sha256:18c0c3d3f151434a4659829db3b261704bdc1a5ceb3bec68961230500b1d01c7",
+          "wk2": "sha256:56430471fce91d48e54759a05eeaf1c9139349b4f3b81d235b7211f896190bfc"
         },
         "clusters": {
-          "lab": "sha256:5e165f0862a80c46b184f40ade643861b4cbcb00ac5c11741216bb00605dc8e8"
+          "lab": "sha256:34411b4f85e31ef0d75cf66cd2ca6e414106926a4936fa867a4f6e0642732a1b"
         }
       }
     },
@@ -715,19 +717,21 @@
               "name": "ntp",
               "script": "machine:\n  time:\n    servers: [time.cloudflare.com]\n"
             }
-          ]
+          ],
+          "talos": "v1.14.6",
+          "kubernetes": "v1.37.1"
         }
       ],
       "keys": {
         "images": {},
         "machines": {
-          "cp1": "sha256:7027cb5b3acc8b702def9bb06db15fe5ce1eb792d812f79a29b64211b06da4d8",
-          "mgmt": "sha256:471dbef1d4fd6bd9a4c3e77f1d162368124753a4cd992f81ee09337f5f9cda39",
-          "wk1": "sha256:9193913bb167a3eeaeece3c1dfe4a6425cd3cc74df6be73fdb6579302d6e1486",
-          "wk2": "sha256:31214fcc7ed8e25dca8e16f49373591920344cf6021c3c271c3a4b413303a5b8"
+          "cp1": "sha256:b0bbd46319df5835f336d7bf8bae6644f02ee4d45ff609c17e9e71cfd093e20b",
+          "mgmt": "sha256:58ee7b4702b3bc0586adcbb711dfafe7b87795cc5198e33d0d5ea5df889d8f99",
+          "wk1": "sha256:18c0c3d3f151434a4659829db3b261704bdc1a5ceb3bec68961230500b1d01c7",
+          "wk2": "sha256:56430471fce91d48e54759a05eeaf1c9139349b4f3b81d235b7211f896190bfc"
         },
         "clusters": {
-          "lab": "sha256:5e165f0862a80c46b184f40ade643861b4cbcb00ac5c11741216bb00605dc8e8"
+          "lab": "sha256:34411b4f85e31ef0d75cf66cd2ca6e414106926a4936fa867a4f6e0642732a1b"
         }
       }
     },
@@ -813,19 +817,21 @@
               "name": "ntp",
               "script": "machine:\n  time:\n    servers: [time.cloudflare.com]\n# changed\n"
             }
-          ]
+          ],
+          "talos": "v1.14.6",
+          "kubernetes": "v1.37.1"
         }
       ],
       "keys": {
         "images": {},
         "machines": {
-          "cp1": "sha256:d0353bc4a1ad17305a07f891a674e5b3fb9f557e9763fdfc58339c9f25bb0673",
-          "mgmt": "sha256:efaa971c1a1a26abf479dcb959b10429c7d0747e39a865043af753e50714cd08",
-          "wk1": "sha256:02dd973e6ee20e890bc629c41e020a2f4093381fe681d15c6bc48f78f97362e1",
-          "wk2": "sha256:48b610ee885a1922925d65b2b1c1aec5c53997314d7ecd005c047569a237058c"
+          "cp1": "sha256:bf61eb27a0387bca29b2b2a2374f81eab9be4fcbb016a2f57899107bda078607",
+          "mgmt": "sha256:ab639254d7fbaf4bb5cbcc22cb8056de7b9851a10d8a62a09d0389dcabfd7d4b",
+          "wk1": "sha256:3bcb1c2592f74041c1bb04571182acabb91a0e9652b061274c398f65d0589980",
+          "wk2": "sha256:59c7929123d09491eba9c9444bd68db494b45f934cf41c20b973f53c373483b0"
         },
         "clusters": {
-          "lab": "sha256:4e337ee9a3db641495fd293f4d1226d748cc55b8ed67625902df9dc42d530cea"
+          "lab": "sha256:0f185a24046406f5b8150e71767ac06af3da4a343ff57e3ccef20074ddd684ff"
         }
       }
     },
@@ -911,19 +917,21 @@
               "name": "ntp",
               "script": "machine:\n  time:\n    servers: [time.cloudflare.com]\n"
             }
-          ]
+          ],
+          "talos": "v1.14.6",
+          "kubernetes": "v1.37.1"
         }
       ],
       "keys": {
         "images": {},
         "machines": {
-          "cp1": "sha256:6438f75dc7363a49fe015410e01274d97304c5cdfc94bf79838a9b583bfe5ba2",
-          "mgmt": "sha256:7deec8bbb974c8c5ec80ef3073acbe2042bf51e5d7f6e6ab5ff5d37e24b1d5a6",
-          "wk1": "sha256:ff92641c2cbd7a1f3a1234ed0c3b9bc038b14840584bd191affc307c153f40b0",
-          "wk2": "sha256:6a65cff42cf63a1d528aeb0a482138991b6e76b3ee19148ac62fe41b8ca54443"
+          "cp1": "sha256:1ea91907591406ce26c35056375b2101391de2c1c964032d5557617f182c1300",
+          "mgmt": "sha256:d61e2627d1f1bbdf1bc2514de117899c7f9bf18d134324a4a69daf416331bb7a",
+          "wk1": "sha256:d5fe84bf59f13382adc4717e4c0e8ed7dc5ff11c663bb06e9e7ba6999cba0619",
+          "wk2": "sha256:b0927517b33750e922292930d6d4f4f70ce97145e8b31f847b9053692c2d4dff"
         },
         "clusters": {
-          "lab": "sha256:7178e0a772e0eb56e0bccde2924de48bb548bda43682dcdba15829dd6f865ff4"
+          "lab": "sha256:26bf3c0539b58fc051448b8a06c69ac9e6d2ab894bae0835b1071b440ff4edb7"
         }
       }
     },
@@ -1014,19 +1022,21 @@
               "name": "ntp",
               "script": "machine:\n  time:\n    servers: [time.cloudflare.com]\n"
             }
-          ]
+          ],
+          "talos": "v1.14.6",
+          "kubernetes": "v1.37.1"
         }
       ],
       "keys": {
         "images": {},
         "machines": {
-          "cp1": "sha256:7027cb5b3acc8b702def9bb06db15fe5ce1eb792d812f79a29b64211b06da4d8",
-          "mgmt": "sha256:0a472c107f413241d5fb4d44deb868d420f75ce1f5493cd28d4464165ea6776c",
-          "wk1": "sha256:9193913bb167a3eeaeece3c1dfe4a6425cd3cc74df6be73fdb6579302d6e1486",
-          "wk2": "sha256:31214fcc7ed8e25dca8e16f49373591920344cf6021c3c271c3a4b413303a5b8"
+          "cp1": "sha256:b0bbd46319df5835f336d7bf8bae6644f02ee4d45ff609c17e9e71cfd093e20b",
+          "mgmt": "sha256:956360c7ffd589e3f69468a24350e85bf57507efafb079da2abf63e97c5186c5",
+          "wk1": "sha256:18c0c3d3f151434a4659829db3b261704bdc1a5ceb3bec68961230500b1d01c7",
+          "wk2": "sha256:56430471fce91d48e54759a05eeaf1c9139349b4f3b81d235b7211f896190bfc"
         },
         "clusters": {
-          "lab": "sha256:5e165f0862a80c46b184f40ade643861b4cbcb00ac5c11741216bb00605dc8e8"
+          "lab": "sha256:34411b4f85e31ef0d75cf66cd2ca6e414106926a4936fa867a4f6e0642732a1b"
         }
       }
     }
