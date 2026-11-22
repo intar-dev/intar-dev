@@ -158,14 +158,13 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
     ).bind(actorUserId, scenarioId ?? null),
     // The head commit of the scope's source, where a revision of it is this
     // scenario's candidate or live one. The job drives it while the source
-    // may act for that row (`sourceHeadSql`) and the row is not one the job
-    // still has to read again (`headLeftSql`).
+    // may act for that row (`sourceHeadSql`).
     env.DB.prepare(
       `SELECT scenario.id AS scenario_id, job_head.rev, job_head.detail,
           (${sourceHeadSql("scenario.scope_key", {
             binder: "job_source.bound_by_user_id", rev: "job_head.rev", row: "job_head.id", attempt: "job_head.attempt",
             digest: "?3",
-          })} AND NOT ${headLeftSql("job_source", "job_head")}) AS driving
+          })}) AS driving
         FROM scenarios scenario
         JOIN scenario_sources job_source ON job_source.scope_key = scenario.scope_key
           AND job_source.disconnected_at IS NULL
@@ -383,19 +382,6 @@ export function sourceHeadSql(
        AND head.id = ${by.row} AND head.attempt = ${by.attempt} AND head.rev = ${by.rev}
        AND head.state IN ('building', 'waiting', 'awaiting_promote')
        AND head.rev = 'git-' || source.github_repository_id || '-' || source.head_sha || '-' || ${by.digest})`;
-}
-
-/**
- * Holds while the head deploy row aliased `head` of the scenario_sources
- * row aliased `source` was left by promotion by hand (#494): the source's
- * column still says `manual`, as every source did before its job drove
- * them all, or names that row and attempt as the one it left when it went
- * automatic. Such a row's revision rows may be incomplete, so the job reads
- * its commit again before it decides anything (`takeUpLeftHead`); until
- * then it does not drive it. The columns are read for nothing else.
- */
-export function headLeftSql(source: string, head: string): string {
-  return `(${source}.promotion = 'manual' OR ${source}.promotion_after IS (${head}.id || ':' || ${head}.attempt))`;
 }
 
 /**

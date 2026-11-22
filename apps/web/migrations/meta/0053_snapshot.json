@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "2aacebda-5edf-4db2-8d50-bd3393530293",
-  "prevId": "8196b9a9-8c15-41b8-89d4-d32e691ee9ea",
+  "id": "ed746c0a-6ff0-4eb1-86ac-89d4ddc4a62a",
+  "prevId": "2aacebda-5edf-4db2-8d50-bd3393530293",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -3759,51 +3759,6 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "organization_entitlements": {
-      "name": "organization_entitlements",
-      "columns": {
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "public_play_granted_at": {
-          "name": "public_play_granted_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "granted_by": {
-          "name": "granted_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "organization_entitlements_organization_id_organization_id_fk": {
-          "name": "organization_entitlements_organization_id_organization_id_fk",
-          "tableFrom": "organization_entitlements",
-          "tableTo": "organization",
-          "columnsFrom": [
-            "organization_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "organization_member_removals": {
       "name": "organization_member_removals",
       "columns": {
@@ -5541,81 +5496,6 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "scenario_revision_holds": {
-      "name": "scenario_revision_holds",
-      "columns": {
-        "scenario_id": {
-          "name": "scenario_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "behaviour_digest": {
-          "name": "behaviour_digest",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "held_at": {
-          "name": "held_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
-        },
-        "held_by_user_id": {
-          "name": "held_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "lifted_at": {
-          "name": "lifted_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "lifted_by_user_id": {
-          "name": "lifted_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "scenario_revision_holds_scenario_id_scenarios_id_fk": {
-          "name": "scenario_revision_holds_scenario_id_scenarios_id_fk",
-          "tableFrom": "scenario_revision_holds",
-          "tableTo": "scenarios",
-          "columnsFrom": [
-            "scenario_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "scenario_revision_holds_scenario_id_behaviour_digest_pk": {
-          "columns": [
-            "scenario_id",
-            "behaviour_digest"
-          ],
-          "name": "scenario_revision_holds_scenario_id_behaviour_digest_pk"
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "scenario_revisions": {
       "name": "scenario_revisions",
       "columns": {
@@ -6921,21 +6801,6 @@
           "autoincrement": false,
           "default": false
         },
-        "promotion": {
-          "name": "promotion",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'manual'"
-        },
-        "promotion_after": {
-          "name": "promotion_after",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "head_sha": {
           "name": "head_sha",
           "type": "text",
@@ -7147,13 +7012,6 @@
         },
         "enabled": {
           "name": "enabled",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "play": {
-          "name": "play",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,

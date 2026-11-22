@@ -57,7 +57,7 @@ beforeEach(async () => {
     const [namespace, slug] = scenarioId.split("/") as [string, string];
     await db.insert(scenarios).values({
       id: scenarioId, namespace, slug, organizationId,
-      scopeKey: organizationId ? SCOPE.key : "public", enabled: true, play: false, liveRev: null,
+      scopeKey: organizationId ? SCOPE.key : "public", enabled: true, liveRev: null,
     });
     await db.insert(scenarioAssignments).values({
       id: `assignment-${scenarioId}`, organizationId: ORG, scenarioId, assignedBy: OWNER,

@@ -106,7 +106,7 @@ describe("organization slug rename", () => {
     const db = drizzle(env.DB);
     await db.insert(scenarios).values({
       id: "org-b/lab", namespace: "org-b", slug: "lab", organizationId: "org-b",
-      scopeKey: "organization:org-b", enabled: true, play: false,
+      scopeKey: "organization:org-b", enabled: true,
     });
     await expect(renameOrganizationSlug({ organizationId: "org-b", actorUserId: "operator", slug: "beta" }))
       .rejects.toMatchObject({ status: 409, code: "organization_slug_in_use" });

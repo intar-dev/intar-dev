@@ -38,6 +38,16 @@ export interface RehearsalEvidence {
 export const REBUILT_TABLES: readonly string[] = ["runtime_vms"];
 
 /**
+ * The columns the pending migrations may drop, by table; any other dropped
+ * column fails the rehearsal. 0053 drops what approval, rollback and play
+ * left (#494). Rows are compared in the columns that remain.
+ */
+export const DROPPED_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  scenario_sources: ["promotion", "promotion_after"],
+  scenarios: ["play"],
+};
+
+/**
  * Rehearses the pending generated migrations on a disposable database.
  *
  * The baseline is the committed prefix production reports, built with the same
@@ -116,8 +126,8 @@ export async function snapshotTables(
 }
 
 /**
- * Every table present before the migrations must keep every column it had
- * and hold the rows it held, compared in those columns; a table whose columns
+ * Every table present before the migrations must keep every column it had,
+ * except the ones DROPPED_COLUMNS allows, and hold the rows it held, compared in those columns; a table whose columns
  * did not change must also keep its definition, unless it is a rebuilt one.
  * A table the migrations add must be empty.
  */
@@ -134,9 +144,14 @@ export function comparePreservedTables(
       continue;
     }
     const rebuilt = REBUILT_TABLES.includes(name);
-    // A rebuilt table may lose columns; its rows are compared in the ones it kept.
+    // A rebuilt table may lose columns, and a table may lose the columns
+    // DROPPED_COLUMNS names; its rows are compared in the ones it kept.
     const kept = earlier.columns.flatMap((column, index) =>
-      table.columns.includes(column) ? [index] : rebuilt ? [] : [-1]);
+      table.columns.includes(column)
+        ? [index]
+        : rebuilt || DROPPED_COLUMNS[name]?.includes(column)
+          ? []
+          : [-1]);
     if (kept.includes(-1)) throw new Error(`the migrations dropped a column of ${name}`);
     const sameColumns = JSON.stringify(earlier.columns) === JSON.stringify(table.columns);
     if (sameColumns && !rebuilt && earlier.sql !== table.sql) {
@@ -249,12 +264,15 @@ export function rehearsalSeedStatements(
     "INSERT INTO image_registry_gc_runs (id, owner, sweep_token, started_at, heartbeat_at) VALUES ('gc-1', 'oci-registry-sweep', 'sweep-1', 1, 2)",
     `INSERT INTO registry_manifests (digest, media_type, artifact_type, size) VALUES ('${digest("a")}', 'application/vnd.oci.image.manifest.v1+json', 'application/vnd.intar.machine.v1', 10)`,
     `INSERT INTO registry_manifest_blobs (manifest_digest, blob_digest) VALUES ('${digest("a")}', '${digest("b")}')`,
-    "INSERT INTO scenario_sources (scope_key, github_installation_id, github_repository_id, github_repository, default_branch) VALUES ('public', 1, 2, 'owner/scenarios', 'main')",
+    "INSERT INTO scenario_sources (scope_key, github_installation_id, github_repository_id, github_repository, default_branch, promotion, promotion_after) VALUES ('public', 1, 2, 'owner/scenarios', 'main', 'automatic', NULL)",
     "INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, state) VALUES ('commit-1', 'public', 'deploy', 'abc', 'rev-1', 'push', 'live')",
     "INSERT INTO course_catalogs (scope_key, catalog_json, source_revision) VALUES ('public', '{\"version\":2,\"courses\":[]}', 'rev-1')",
     "INSERT INTO bundles (rev, scope_key, compiler_version, r2_key) VALUES ('rev-1', 'public', '1.0.0', 'bundles/rev-1.json.gz')",
     "INSERT INTO scenarios (id, namespace, slug, scope_key, enabled, play) VALUES ('intar/nginx', 'intar', 'nginx', 'public', 1, 0)",
+    "INSERT INTO scenarios (id, namespace, slug, scope_key, enabled, play) VALUES ('intar/played', 'intar', 'played', 'public', 0, 1)",
     "INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state) VALUES ('intar/nginx', 'rev-1', 3, '{}', 'verified')",
+    "INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state) VALUES ('intar/played', 'rev-1', 3, '{}', 'verified')",
+    "INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at) VALUES ('intar/nginx', '" + digest("d") + "', 1)",
     "INSERT INTO machine_builds (build_key, image_format, bundle_rev, state) VALUES ('" + digest("c") + "', 'raw', 'rev-1', 'succeeded')",
     "INSERT INTO image_build_bundles (rev, r2_key, meta_json) VALUES ('legacy-rev', 'legacy/bundle.tar', '{}')",
     "INSERT INTO image_builds (id, scenario_id, arch, rev, content_hash) VALUES ('legacy-build', 'legacy-scenario', 'x86_64', 'legacy-rev', 'hash')",

@@ -181,10 +181,8 @@ export async function ingestSourceBundle(
         VALUES (?1, ?2, ?3, ?4, ?5, ?7, ?6) ON CONFLICT (rev) DO NOTHING`,
     ).bind(rev, scopeKey, organizationId, SOURCE_COMPILER_VERSION_V2, objectKey, now, producer),
     env.DB.prepare(
-      `INSERT INTO scenarios (id, namespace, slug, organization_id, scope_key, enabled, play, updated_at)
-        SELECT json_extract(value, '$.id'), ?2, json_extract(value, '$.slug'), ?3, ?4, 1,
-          -- A bundle's play is not read: no new scenario is open to play.
-          0, ?5
+      `INSERT INTO scenarios (id, namespace, slug, organization_id, scope_key, enabled, updated_at)
+        SELECT json_extract(value, '$.id'), ?2, json_extract(value, '$.slug'), ?3, ?4, 1, ?5
         FROM json_each(?1) WHERE true ON CONFLICT (id) DO NOTHING`,
     ).bind(
       JSON.stringify(scenarios.map(({ id: scenarioId, slug }) => ({ id: scenarioId, slug }))),

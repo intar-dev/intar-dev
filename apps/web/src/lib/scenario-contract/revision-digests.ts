@@ -9,8 +9,8 @@ import { machineSpec } from "./machine-spec";
 
 /**
  * What of a revision only people read: a lab runs and is checked the same
- * with other words here. `play` is left out too: who may play a lab is an
- * administrator's setting, not a commit's.
+ * with other words here. `play` is left out too: the contract still carries
+ * it, and nothing reads it since play labs went (#494).
  */
 export const REVISION_FIELDS_NOT_BEHAVIOUR = [
   "briefing",

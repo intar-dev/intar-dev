@@ -23,6 +23,8 @@ import { arm64MachineImages } from "@/lib/scenario-runs/revision-begin";
 import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { syncBuilderDesiredState } from "@/lib/machine-builds";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
+import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
+import { driveDeployJob } from "@/lib/source-deploy-job";
 import {
   BIND_REFUSAL_MESSAGE,
   changeScenarioSource,
@@ -260,20 +262,60 @@ describe("binding a repository", () => {
     });
   });
 
-  it("drops a fetch or compile a pull source left in flight when it is bound again", async () => {
+  it("drops every unfinished or failed row the repository bound before left when it is bound again, and keeps a live one", async () => {
     github();
     await insertBinding({ mode: "pull", disconnectedAt: 3, disconnectReason: "admin" });
-    const rows = (state: string) => ({
+    const states = ["fetching", "compiling", "ingesting", "building", "waiting", "awaiting_promote", "failed", "live"] as const;
+    await drizzle(env.DB).insert(scenarioSourceCommits).values(states.map((state) => ({
       id: state, scopeKey: ORG_SCOPE.key, purpose: "deploy" as const, sha: state.padEnd(40, "0"),
-      rev: `git-9-${state}`, via: "pull" as const, state: state as "fetching",
-    });
-    await drizzle(env.DB).insert(scenarioSourceCommits).values([rows("fetching"), rows("compiling"), rows("building")]);
+      rev: `git-9-${state}`, via: "pull" as const, state,
+    })));
     await change({ action: "connect", repository: "acme/labs" });
-    const states = await drizzle(env.DB).select({ id: scenarioSourceCommits.id, state: scenarioSourceCommits.state })
-      .from(scenarioSourceCommits).orderBy(scenarioSourceCommits.id);
-    expect(states).toEqual([
-      { id: "building", state: "building" }, { id: "compiling", state: "superseded" }, { id: "fetching", state: "superseded" },
+    const after = await drizzle(env.DB).select({ id: scenarioSourceCommits.id, state: scenarioSourceCommits.state })
+      .from(scenarioSourceCommits);
+    expect(Object.fromEntries(after.map((row) => [row.id, row.state]))).toEqual(
+      Object.fromEntries(states.map((state) => [state, state === "live" ? "live" : "superseded"])),
+    );
+  });
+
+  it("does not drive the old head of a re-bound repository as it lies: a lab whose revision row was lost stays enabled", async () => {
+    github();
+    // The same repository, bound again with the same head commit, whose old
+    // row sat building and lost the second lab's revision row.
+    const sha = "c".repeat(40);
+    const digest = await sourceCompileDigest();
+    const headRev = `git-42-${sha}-${digest}`;
+    await insertBinding({ githubRepositoryId: 42, githubRepository: "acme/labs", mode: "push", disconnectedAt: 3, disconnectReason: "admin" });
+    const db = drizzle(env.DB);
+    await db.insert(bundles).values({ rev: headRev, scopeKey: ORG_SCOPE.key, organizationId: ORG, compilerVersion: "c", r2Key: "k" });
+    await db.insert(scenarios).values(["lab", "other"].map((slug) => ({
+      id: `${ORG}/${slug}`, namespace: ORG, slug, organizationId: ORG, scopeKey: ORG_SCOPE.key, enabled: true, liveRev: LIVE_REV,
+    })));
+    await db.insert(scenarioRevisions).values([
+      ...["lab", "other"].map((slug) => ({ scenarioId: `${ORG}/${slug}`, rev: LIVE_REV, guestContract: 3, state: "verified" as const, docJson: {} as never })),
+      { scenarioId: `${ORG}/lab`, rev: headRev, guestContract: 3, state: "verified" as const, docJson: {} as never },
     ]);
+    await db.insert(scenarioSourceCommits).values({
+      id: "old-head", scopeKey: ORG_SCOPE.key, purpose: "deploy", sha, rev: headRev, via: "push", state: "building", attempt: 1,
+    });
+    await change({ action: "connect", repository: "acme/labs" });
+    // The source object's next pass observes the same commit as the head.
+    await db.update(scenarioSources).set({ headSha: sha }).where(eq(scenarioSources.scopeKey, ORG_SCOPE.key));
+    const stored = new Map<string, unknown>();
+    const storage = {
+      get: async (key: string) => stored.get(key),
+      put: async (key: string, value: unknown) => { stored.set(key, value); },
+      delete: async (key: string) => stored.delete(key),
+    } as unknown as Pick<DurableObjectStorage, "get" | "put" | "delete">;
+    const refused = () => { throw new Error("the job must not act on the old head"); };
+    expect(await driveDeployJob({
+      db: env.DB, storage, scopeKey: ORG_SCOPE.key, digest, now: Date.now(),
+      deps: { beginVerifyRun: refused, endVerifyRun: refused, moveLive: refused },
+    })).toEqual({ wait: false });
+    const enabled = await db.select({ id: scenarios.id, enabled: scenarios.enabled }).from(scenarios).orderBy(scenarios.id);
+    expect(enabled).toEqual([{ id: `${ORG}/lab`, enabled: true }, { id: `${ORG}/other`, enabled: true }]);
+    // Superseded, the row is the commit's next upload's to take up, which reads its bundle again.
+    expect((await db.select().from(scenarioSourceCommits))[0]).toMatchObject({ id: "old-head", state: "superseded" });
   });
 
   it("waits for a purge of the last repository before re-binding", async () => {
@@ -495,7 +537,7 @@ describe("a source's settings", () => {
       rev: REV, scopeKey: ORG_SCOPE.key, organizationId: ORG, compilerVersion: "c", r2Key: "k", imageProducer: producer,
     });
     await db().insert(scenarios).values({
-      id: `${ORG}/lab`, namespace: ORG, slug: "lab", organizationId: ORG, scopeKey: ORG_SCOPE.key, enabled: true, play: false,
+      id: `${ORG}/lab`, namespace: ORG, slug: "lab", organizationId: ORG, scopeKey: ORG_SCOPE.key, enabled: true,
     });
     await db().insert(scenarioRevisions).values({
       scenarioId: `${ORG}/lab`, rev: REV, guestContract: 3, state: "building",
@@ -741,7 +783,7 @@ describe("a source's settings", () => {
     // A builder's building head of the same scope is left alone.
     await db().insert(bundles).values({ rev: "builders", scopeKey: ORG_SCOPE.key, organizationId: ORG, compilerVersion: "c", r2Key: "k2" });
     await db().insert(scenarios).values({
-      id: `${ORG}/other`, namespace: ORG, slug: "other", organizationId: ORG, scopeKey: ORG_SCOPE.key, enabled: true, play: false,
+      id: `${ORG}/other`, namespace: ORG, slug: "other", organizationId: ORG, scopeKey: ORG_SCOPE.key, enabled: true,
     });
     await db().insert(scenarioRevisions).values({
       scenarioId: `${ORG}/other`, rev: "builders", guestContract: 3, state: "building", docJson: { machines: [] } as never,
@@ -770,18 +812,16 @@ describe("a source's settings", () => {
     expect((await db().select().from(scenarioRevisions))[0]).toMatchObject({ state: "ready" });
   });
 
-  it("starts a reconnected source on the builder and on GitHub's runners, with its head marked to be read again", async () => {
+  it("starts a reconnected source on the builder and on GitHub's runners", async () => {
     await insertBinding({
-      mode: "push", imageProducer: "pipeline", allowSelfHostedRunners: true, promotion: "automatic",
+      mode: "push", imageProducer: "pipeline", allowSelfHostedRunners: true,
       disconnectedAt: 1, disconnectReason: "admin",
     });
     github();
     await change({ action: "connect", repository: "acme/labs" });
     expect(await binding()).toMatchObject({
       githubRepositoryId: 42, mode: "push", imageProducer: "builder", allowSelfHostedRunners: false,
-      // A row of the repository bound before may be the head again: the job
-      // reads its commit again before it decides anything (#494).
-      promotion: "manual", promotionAfter: null, disconnectedAt: null,
+      headSha: null, disconnectedAt: null,
     });
   });
 
@@ -796,7 +836,7 @@ describe("a source's settings", () => {
         status: 400, code: "scenario_source_change_invalid",
       });
     }
-    expect(await binding()).toMatchObject({ promotion: "manual", promotionAfter: null, pokedAt: null });
+    expect(await binding()).toMatchObject({ pokedAt: null });
   });
 
   it("closes the sessions of self-hosted runners when they are no longer allowed", async () => {

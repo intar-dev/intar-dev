@@ -606,7 +606,7 @@ async function insertScenario(
   await db.insert(scenarios).values({
     id: scenarioId, namespace, slug, organizationId,
     scopeKey: organizationId ? `organization:${organizationId}` : "public",
-    enabled, play: false, liveRev: "r1",
+    enabled, liveRev: "r1",
   });
   await db.insert(scenarioRevisions).values({
     scenarioId, rev: "r1", guestContract: 3, state: "ready",

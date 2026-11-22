@@ -242,7 +242,7 @@ describe("/v2 pull API", () => {
     const unlisted = await machine("unlisted");
     await desire("platform", "platform", { cached_images: [cached.manifest] });
     const db = drizzle(env.DB);
-    await db.insert(scenarios).values({ id: "intar/web", namespace: "intar", slug: "web", scopeKey: "public", enabled: true, play: false, liveRev: "r1" });
+    await db.insert(scenarios).values({ id: "intar/web", namespace: "intar", slug: "web", scopeKey: "public", enabled: true, liveRev: "r1" });
     const revision = { machines: [{ name: "webserver", image_digest: live.manifest }] };
     await db.insert(scenarioRevisions).values({ scenarioId: "intar/web", rev: "r1", guestContract: 3, docJson: revision as never, state: "verified" });
     expect((await v2(machinePath(cached.manifest, "manifests/machine"), { token: platform })).status).toBe(200);

@@ -61,7 +61,6 @@ export type ScenarioSourceCommitState =
 
 /** Who builds a source's machine images. */
 export type ImageProducer = "builder" | "pipeline";
-export type SourcePromotion = "manual" | "automatic";
 
 export const scenarioSources = sqliteTable(
   "scenario_sources",
@@ -90,20 +89,6 @@ export const scenarioSources = sqliteTable(
     })
       .default(false)
       .notNull(),
-    /**
-     * No longer a setting (#494): the source's job puts every source's labs
-     * live. `manual` only marks a source whose head promotion by hand left,
-     * which the job reads again once and then sets to `automatic`. The
-     * column goes with the last slice of #494.
-     */
-    promotion: text("promotion").$type<SourcePromotion>().default("manual").notNull(),
-    /**
-     * The head's deploy row and attempt, as `<id>:<attempt>`, when the
-     * source was switched to automatic by hand: with `promotion`, it marks
-     * that head as left, for the job to read again once (#494). NULL
-     * otherwise. The column goes with the last slice of #494.
-     */
-    promotionAfter: text("promotion_after"),
     headSha: text("head_sha"),
     headObservedAt: integer("head_observed_at").default(0).notNull(),
     pokedAt: integer("poked_at"),
@@ -213,7 +198,6 @@ export const scenarios = sqliteTable(
     }),
     scopeKey: text("scope_key").notNull(),
     enabled: integer("enabled", { mode: "boolean" }).notNull(),
-    play: integer("play", { mode: "boolean" }).notNull(),
     liveRev: text("live_rev"),
     candidateRev: text("candidate_rev"),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
@@ -278,29 +262,6 @@ export const scenarioRevisions = sqliteTable(
       "scenario_revisions_doc_json_check",
       sql`json_valid(${table.docJson})`,
     ),
-  ],
-);
-
-/**
- * No longer read or written (#494): there is no rollback, so there are no
- * holds. A row, open or lifted, means nothing; a revision whose behaviour it
- * names is verified by inheritance and goes live like any other. The table is
- * kept, so this change needs no migration, until the last slice drops it.
- */
-export const scenarioRevisionHolds = sqliteTable(
-  "scenario_revision_holds",
-  {
-    scenarioId: text("scenario_id")
-      .notNull()
-      .references(() => scenarios.id, { onDelete: "cascade" }),
-    behaviourDigest: text("behaviour_digest").notNull(),
-    heldAt: integer("held_at").default(nowMsDefault).notNull(),
-    heldByUserId: text("held_by_user_id"),
-    liftedAt: integer("lifted_at"),
-    liftedByUserId: text("lifted_by_user_id"),
-  },
-  (table) => [
-    primaryKey({ columns: [table.scenarioId, table.behaviourDigest] }),
   ],
 );
 
@@ -403,16 +364,4 @@ export const pipelineUploadSessions = sqliteTable(
       table.expiresAt,
     ),
   ],
-);
-
-/** What a platform admin has granted an organization. */
-export const organizationEntitlements = sqliteTable(
-  "organization_entitlements",
-  {
-    organizationId: text("organization_id")
-      .primaryKey()
-      .references(() => organization.id, { onDelete: "cascade" }),
-    publicPlayGrantedAt: integer("public_play_granted_at"),
-    grantedBy: text("granted_by"),
-  },
 );

@@ -46,14 +46,12 @@ export {
 } from "./schema/runs";
 export {
   bundles,
-  organizationEntitlements,
   scenarioRevisions,
   scenarios,
   courseCatalogs,
   scenarioSourceCommits,
   scopeMachineImages,
   pipelineUploadSessions,
-  scenarioRevisionHolds,
   scenarioSources,
 } from "./schema/scenarios";
 export {

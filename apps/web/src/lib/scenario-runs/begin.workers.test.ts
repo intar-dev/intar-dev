@@ -1420,7 +1420,7 @@ async function insertScenario(
   const [namespace, slug] = scenarioId.split("/") as [string, string];
   await db.insert(scenarios).values({
     id: scenarioId, namespace, slug, organizationId,
-    scopeKey: organizationId ? `organization:${organizationId}` : "public", enabled: true, play: false, liveRev: "r1",
+    scopeKey: organizationId ? `organization:${organizationId}` : "public", enabled: true, liveRev: "r1",
   });
   await db.insert(scenarioRevisions).values({ scenarioId, rev: "r1", guestContract: 3, docJson: doc, state: "ready" });
   return doc;

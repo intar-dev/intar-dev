@@ -86,7 +86,7 @@ export async function seedScenario(id: string, organizationId: string | null, do
   const db = drizzle(env.DB);
   const [namespace, slug] = id.split("/") as [string, string];
   await db.insert(scenarios).values({ id, namespace, slug, organizationId, scopeKey: organizationId ? `organization:${organizationId}` : "public",
-    enabled: true, play: false, liveRev: "r1" });
+    enabled: true, liveRev: "r1" });
   await db.insert(scenarioRevisions).values({ scenarioId: id, rev: "r1", guestContract: 3, docJson: doc, state: "ready" });
   await db.insert(courseCatalogs).values({
     scopeKey: organizationId ? `organization:${organizationId}` : "public", organizationId, sourceRevision: "test",

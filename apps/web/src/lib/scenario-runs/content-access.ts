@@ -1,18 +1,3 @@
-import { PUBLIC_NAMESPACE } from "@/lib/organization-slugs";
-
-/**
- * Holds while the scenario aliased `alias` is open to everyone signed in:
- * enabled, marked for play, with a live revision, and in the public
- * namespace or of an organization a platform admin granted public play.
- */
-export function playableScenarioCondition(alias: string): string {
-  return `(${alias}.enabled = 1 AND ${alias}.play = 1 AND ${alias}.live_rev IS NOT NULL
-    AND ((${alias}.namespace = '${PUBLIC_NAMESPACE}' AND ${alias}.organization_id IS NULL)
-      OR EXISTS (SELECT 1 FROM organization_entitlements entitlement
-        WHERE entitlement.organization_id = ${alias}.organization_id
-          AND entitlement.public_play_granted_at IS NOT NULL)))`;
-}
-
 /**
  * The account that owns every verify run. It has no sign-in, is never an
  * administrator and joins no organization; a verify run's access is its
@@ -67,11 +52,14 @@ function contentAccessCondition(field: (name: keyof typeof currentRunFields) => 
         AND administrator.deleted_at IS NULL
         AND coalesce(administrator.banned, 0) = 0
         AND instr(',' || replace(lower(coalesce(administrator.role, '')), ' ', '') || ',', ',admin,') > 0))`;
-  // A play run: personal, of a scenario still open to play; no course.
-  const play = `${administered} AND ${org} IS NULL AND EXISTS (SELECT 1 FROM scenarios played
-      WHERE played.id = ${scenario} AND ${playableScenarioCondition("played")})`;
+  // A run started from the play page (`launch_source = 'play'`, #494) has
+  // no course, so the course branch never holds for it: it has no access,
+  // and an unfinished one would lose its machines. That is safe only because
+  // none is unfinished, and the deploy refuses to migrate while a run is
+  // active. A finished one stays readable, since history, run pages and
+  // artifacts do not ask this.
   return `CASE WHEN ${field("launchSource")} = 'verify' THEN ${verify}
-    WHEN ${field("launchSource")} = 'play' THEN ${play} ELSE ${administered}
+    ELSE ${administered}
     AND (${org} IS NULL OR EXISTS (SELECT 1 FROM member membership
       WHERE membership.user_id = ${user} AND membership.organization_id = ${org}))
     AND EXISTS (SELECT 1 FROM scenarios revised
