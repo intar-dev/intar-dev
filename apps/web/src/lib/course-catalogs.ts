@@ -188,6 +188,8 @@ export async function loadCourseLectureDetailForUser(input: {
   lectureId: string;
   courseScope?: CourseSourceScope;
   allowSequenceBypass?: boolean;
+  /** For the desktop app: a local run needs no host that holds the images. */
+  local?: boolean;
 }): Promise<CourseLectureDetailResult> {
   const views = await loadCourseViews(input);
   const course = findCourseView(
@@ -252,6 +254,8 @@ export async function completePureCourseLectureForUser(input: {
   nowUnixMs: number;
   courseScope?: CourseSourceScope;
   allowSequenceBypass?: boolean;
+  /** For the desktop app: a local run needs no host that holds the images. */
+  local?: boolean;
 }): Promise<CourseLectureDetailResponse> {
   const before = await loadCourseLectureDetailForUser(input);
   if (!before.ok) {

@@ -1,7 +1,9 @@
 //! What the window shows, and how the engine's events change it. No GPUI
 //! here, so it is tested without a window.
 
-use subspace::contract::{CatalogCourseV1, CatalogLectureV1, LocalRunV1};
+use subspace::contract::{
+    CatalogCourseV1, CatalogLectureV1, LocalLectureAnswerV1, LocalRunLearningV1, LocalRunV1,
+};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::terminal::Terminal;
@@ -28,6 +30,37 @@ pub enum Command {
     CheckUpdate,
     /// Download the offered app, put it in this one's place and start it.
     InstallUpdate,
+    /// A call about what the learner reads; it never touches the machine.
+    Learn(Learn),
+}
+
+/// The theory and help around a lab, as the website's lecture page and
+/// learning panel show them.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Learn {
+    Lecture(LectureRef),
+    /// Marks a lecture without a lab as read.
+    CompleteLecture(LectureRef),
+    /// The run's theory, checks, hints and solution. The engine asks it
+    /// itself when a run opens and after each report of its machine.
+    Run {
+        run_id: String,
+    },
+    RevealHint {
+        run_id: String,
+        hint_key: String,
+    },
+    RevealSolution {
+        run_id: String,
+    },
+}
+
+/// A lecture as intar's routes name it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LectureRef {
+    pub course_id: String,
+    pub lecture_id: String,
+    pub organization_id: Option<String>,
 }
 
 /// What the engine tells the UI.
@@ -38,6 +71,11 @@ pub enum Event {
     SignedIn,
     SignedOut,
     Catalog(Vec<CatalogCourseV1>),
+    /// The theory of the lecture on screen, or that it is locked.
+    Lecture(LocalLectureAnswerV1),
+    /// The run's theory, checks, hints and solution: after it opened, after
+    /// a report of its machine, and after a reveal.
+    Learning(LocalRunLearningV1),
     /// A run as the server holds it: after a start, a read or an end.
     Run(LocalRunV1),
     /// Where the run's machine on this computer stands.
@@ -137,6 +175,10 @@ pub struct State {
     pub update: Option<String>,
     /// The offered app is being downloaded and installed.
     pub updating: bool,
+    /// The theory of the lecture on screen, once intar answered.
+    pub theory: Option<LocalLectureAnswerV1>,
+    /// What the run on screen teaches, once intar answered.
+    pub learning: Option<LocalRunLearningV1>,
     /// The lecture a run was opened from, to return to when the server refuses.
     opened_from: Option<(usize, usize)>,
 }
@@ -148,6 +190,7 @@ impl State {
             event,
             Event::Failed(_)
                 | Event::Machine(_)
+                | Event::Learning(_)
                 | Event::Terminal(..)
                 | Event::Update(_)
                 | Event::UpdateFailed(_)
@@ -186,7 +229,34 @@ impl State {
                 // The answer to a start or a read opens the run; news about a
                 // run the learner has left does not pull them back to it.
                 if same || self.screen == Screen::OpeningRun {
+                    if !same {
+                        self.learning = None;
+                    }
                     self.screen = Screen::Run(run);
+                }
+            }
+            Event::Lecture(answer) => {
+                let (_, shown) = self.lecture()?;
+                // An answer about a lecture the learner has since left.
+                if answer
+                    .lecture
+                    .as_ref()
+                    .is_some_and(|theory| theory.lecture_id != shown.lecture_id)
+                {
+                    return None;
+                }
+                // The lecture moved on, as after Mark as read: the catalog's
+                // states are behind.
+                let stale = answer
+                    .lecture
+                    .as_ref()
+                    .is_some_and(|theory| theory.state != shown.state);
+                self.theory = Some(answer);
+                return stale.then_some(Command::LoadCatalog);
+            }
+            Event::Learning(learning) => {
+                if matches!(&self.screen, Screen::Run(run) if run.run_id == learning.run_id) {
+                    self.learning = Some(learning);
                 }
             }
             // The window keeps the terminal; it is no part of what is tested here.
@@ -245,10 +315,24 @@ impl State {
         self.screen = Screen::Catalog;
     }
 
-    pub fn open_lecture(&mut self, course: usize, lecture: usize) {
+    /// Shows a lecture; the command loads its theory.
+    pub fn open_lecture(&mut self, course: usize, lecture: usize) -> Option<Command> {
         self.error = None;
         self.course = course;
+        self.theory = None;
         self.screen = Screen::Lecture { course, lecture };
+        self.lecture_ref()
+            .map(|at| Command::Learn(Learn::Lecture(at)))
+    }
+
+    /// The lecture on screen, as intar's routes name it.
+    pub fn lecture_ref(&self) -> Option<LectureRef> {
+        let (course, lecture) = self.lecture()?;
+        Some(LectureRef {
+            course_id: course.course_id.clone(),
+            lecture_id: lecture.lecture_id.clone(),
+            organization_id: course.organization_id.clone(),
+        })
     }
 
     /// Back to the courses, reloading them: a run changes a lecture's state.
@@ -485,6 +569,96 @@ mod tests {
         // The lecture on screen vanished from a reloaded catalog: back to the courses.
         state.apply(Event::Catalog(vec![]));
         assert_eq!(state.screen, Screen::Catalog);
+    }
+
+    fn theory(lecture_id: &str, state: &str) -> LocalLectureAnswerV1 {
+        LocalLectureAnswerV1 {
+            protocol: 1,
+            locked: false,
+            lecture: Some(subspace::contract::LocalLectureV1 {
+                course_id: "c".into(),
+                lecture_id: lecture_id.into(),
+                title: "Serve".into(),
+                body_markdown: "# Serve".into(),
+                ordinal: 1,
+                count: 1,
+                state: state.into(),
+            }),
+        }
+    }
+
+    fn learning(run_id: &str) -> LocalRunLearningV1 {
+        LocalRunLearningV1 {
+            run_id: run_id.into(),
+            lecture_title: None,
+            lecture_markdown: String::new(),
+            solved: false,
+            checks: vec![],
+            hints: vec![],
+            solution: subspace::contract::LocalRunSolutionV1 {
+                unlocked: false,
+                assisted: false,
+                revealed: false,
+                body_markdown: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_lecture_loads_its_theory_and_a_read_one_reloads_the_catalog() {
+        let mut state = State::default();
+        state.apply(Event::SignedIn);
+        state.apply(Event::Catalog(vec![course(vec![lecture(None, None)])]));
+        assert_eq!(
+            state.open_lecture(0, 0),
+            Some(Command::Learn(Learn::Lecture(LectureRef {
+                course_id: "c".into(),
+                lecture_id: "l".into(),
+                organization_id: Some("org-1".into()),
+            })))
+        );
+        // An answer about another lecture is not this one's theory.
+        assert_eq!(
+            state.apply(Event::Lecture(theory("other", "available"))),
+            None
+        );
+        assert_eq!(state.theory, None);
+        assert_eq!(state.apply(Event::Lecture(theory("l", "available"))), None);
+        assert!(state.theory.is_some());
+        // Marked as read: the catalog still says available, so it reloads.
+        assert_eq!(
+            state.apply(Event::Lecture(theory("l", "completed"))),
+            Some(Command::LoadCatalog)
+        );
+        // Opening a lecture forgets the last one's theory.
+        state.open_lecture(0, 0);
+        assert_eq!(state.theory, None);
+    }
+
+    #[test]
+    fn learning_belongs_to_the_run_on_screen() {
+        let mut state = State {
+            screen: Screen::OpeningRun,
+            error: Some("Could not reveal".into()),
+            ..State::default()
+        };
+        state.apply(Event::Learning(learning("run-1")));
+        assert_eq!(state.learning, None, "no run on screen yet");
+        state.apply(Event::Run(run(true)));
+        state.error = Some("Could not reveal".into());
+        state.apply(Event::Learning(learning("run-2")));
+        assert_eq!(state.learning, None, "another run's");
+        state.apply(Event::Learning(learning("run-1")));
+        assert_eq!(state.learning, Some(learning("run-1")));
+        assert!(state.error.is_some(), "a refresh keeps what was said");
+        // A re-read keeps it; another run opening drops it.
+        state.apply(Event::Run(run(true)));
+        assert!(state.learning.is_some());
+        let mut other = run(true);
+        other.run_id = "run-2".into();
+        state.screen = Screen::OpeningRun;
+        state.apply(Event::Run(other));
+        assert_eq!(state.learning, None);
     }
 
     #[test]

@@ -8,7 +8,8 @@ import { handleLocalRunCliRequest } from "@/control-plane/run-cli";
 import { user } from "@/db/schema";
 import { hashStoredOAuthToken } from "@/lib/auth";
 import {
-  appReleaseRequest, DESKTOP_OAUTH_CLIENT_ID, localCatalogRequest, localRunRequest, reportLocalRunRequest, requireDesktopCaller, startLocalRunRequest,
+  appReleaseRequest, DESKTOP_OAUTH_CLIENT_ID, localCatalogRequest, localLectureRequest, localRunLearning, localRunLearningRequest,
+  localRunRequest, reportLocalRunRequest, requireDesktopCaller, startLocalRunRequest,
   type LocalRunView,
 } from "@/lib/desktop-channel";
 import { LOCAL_RUN_SILENCE_MS, reapSilentLocalRuns } from "@/lib/local-runs";
@@ -21,7 +22,7 @@ import desktopClientSeed from "../../seeds/desktop-oauth-client.sql?raw";
 import { seedSessionCookie } from "@/test/auth-requests";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  KINO, LEARNER, ORIGIN, STRANGER, labState, machineImage, revisionDoc, seedScenario, specBlob, store, v2, vmState,
+  HINT_BODY, KINO, LEARNER, ORIGIN, SOLUTION, STRANGER, TASK_BODY, labState, machineImage, revisionDoc, seedScenario, specBlob, store, v2, vmState,
 } from "./scenario-runs/revision-test-fixtures";
 
 const FAR = 9_999_999_999_999;
@@ -496,6 +497,135 @@ describe("the desktop channel", () => {
     const stored = JSON.parse((await env.DB.prepare("SELECT state_json FROM scenario_runs WHERE run_id = ?1").bind(run.runId)
       .first<{ state_json: string }>())!.state_json) as { tasks: Array<{ id: string; status: string }> };
     expect(stored.tasks.find((task) => task.id === "serve")).toMatchObject({ status: "pass" });
+  });
+
+  it("answers a lecture's theory, locked while an earlier one is open, and marks a theory lecture read", async () => {
+    await env.DB.prepare("UPDATE course_catalogs SET catalog_json = ?1 WHERE scope_key = 'public'").bind(JSON.stringify({
+      version: 2, courses: [{ courseId: "course", title: "Course", summary: "", bodyMarkdown: "", sequential: true, lectures: [
+        { lectureId: "intro", scenarioId: null, title: "Intro", summary: "", bodyMarkdown: "INTRO-THEORY", category: "t", tags: [], estimatedMinutes: 5 },
+        { lectureId: "web", scenarioId: "intar/web", title: "Lecture", summary: "", bodyMarkdown: "WEB-THEORY", category: "t", tags: [], estimatedMinutes: 10 },
+      ] }],
+    })).run();
+    const mine = await token("mine", LEARNER);
+    const lecture = async (id: string, action: "read" | "complete" = "read", secret: string | null = mine) => {
+      const path = `/api/local/courses/course/lectures/${id}${action === "complete" ? "/complete" : ""}`;
+      const response = await localLectureRequest(call(secret, { method: action === "complete" ? "POST" : "GET" }, path), "course", id, action);
+      return { status: response.status, ...(await response.json() as Record<string, unknown>) };
+    };
+
+    expect((await lecture("intro", "read", null)).status).toBe(401);
+    expect(await lecture("web")).toEqual({ status: 200, protocol: 1, locked: true });
+    expect(await lecture("intro")).toEqual({ status: 200, protocol: 1, locked: false, lecture: {
+      courseId: "course", lectureId: "intro", title: "Intro", bodyMarkdown: "INTRO-THEORY", ordinal: 1, count: 2, state: "available",
+    } });
+    // A lecture with a lab is completed by its run, not here.
+    expect(await lecture("web", "complete")).toMatchObject({ status: 409, code: "course_lecture_locked", protocol: 1 });
+    expect(await lecture("intro", "complete")).toMatchObject({ status: 200, lecture: { lectureId: "intro", state: "completed" } });
+    expect(await lecture("web")).toMatchObject({ locked: false, lecture: { bodyMarkdown: "WEB-THEORY", ordinal: 2, state: "available" } });
+    expect(await lecture("web", "complete")).toMatchObject({ status: 409, code: "course_lecture_requires_scenario" });
+    expect(await lecture("missing")).toMatchObject({ status: 404, code: "course_lecture_not_found" });
+  });
+
+  it("answers an organization's lecture to its members only", async () => {
+    await env.DB.prepare("INSERT INTO organization (id, name, slug, created_at) VALUES ('org-1', 'Acme', 'acme', 1)").run();
+    await seedScenario("acme/secret", "org-1", revisionDoc(images, specs));
+    await env.DB.prepare("UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].bodyMarkdown', 'ORG-THEORY') WHERE scope_key = 'organization:org-1'").run();
+    const read = async (secret: string, organizationId: string | null) => {
+      const query = organizationId ? `?organizationId=${organizationId}` : "";
+      const response = await localLectureRequest(call(secret, {}, `/api/local/courses/course/lectures/secret${query}`), "course", "secret", "read");
+      return { status: response.status, ...(await response.json() as { code?: string; lecture?: { bodyMarkdown: string } }) };
+    };
+    const mine = await token("mine", LEARNER);
+    // Not a member: the course answers like a missing one, by id, by slug, and without the organization.
+    for (const organizationId of ["org-1", "acme", "no-such-org", null]) {
+      const answer = await read(mine, organizationId);
+      expect(answer.status, String(organizationId)).toBe(404);
+      expect(JSON.stringify(answer)).not.toContain("ORG-THEORY");
+    }
+    await env.DB.prepare("INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('m1', 'org-1', ?1, 'member', 1)").bind(LEARNER).run();
+    for (const organizationId of ["org-1", "acme"]) {
+      expect(await read(mine, organizationId)).toMatchObject({ status: 200, lecture: { bodyMarkdown: "ORG-THEORY" } });
+    }
+    expect((await read(await token("theirs", STRANGER), "org-1")).status).toBe(404);
+  });
+
+  it("shows a local run's learning panel to its learner, sealed until revealed", async () => {
+    const mine = await token("mine", LEARNER);
+    const { run } = await view(await start(mine));
+    type Learning = { runId: string; solved: boolean; lectureMarkdown: string;
+      checks: Array<{ key: string; machine: string; status: string; description: string | null }>;
+      hints: Array<{ key: string; checkKey: string | null; title: string | null; revealed: boolean; unlocked: boolean; bodyMarkdown: string | null }>;
+      solution: { unlocked: boolean; revealed: boolean; assisted: boolean; bodyMarkdown: string | null } };
+    const learning = async (action: "read" | "hint" | "solution" = "read", options: { secret?: string | null; body?: unknown } = {}) => {
+      const path = `/api/local/runs/${run.runId}/${{ read: "learning", hint: "hints/reveal", solution: "solution/reveal" }[action]}`;
+      const response = await localRunLearningRequest(call(options.secret === undefined ? mine : options.secret, {
+        method: action === "read" ? "GET" : "POST",
+        ...(options.body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(options.body) }),
+      }, path), run.runId, action);
+      const text = await response.text();
+      return { status: response.status, text, ...(JSON.parse(text) as { code?: string; learning: Learning }) };
+    };
+
+    expect((await learning("read", { secret: null })).status).toBe(401);
+    const theirs = await token("theirs", STRANGER);
+    for (const action of ["read", "hint", "solution"] as const) {
+      expect((await learning(action, { secret: theirs, ...(action === "read" ? {} : { body: { protocol: 1, hintKey: "x" } }) })).status, action).toBe(404);
+    }
+
+    const before = await learning();
+    expect(before.status).toBe(200);
+    expect(before.learning).toMatchObject({ runId: run.runId, solved: false, checks: [
+      { key: "serve", machine: "web", status: "checking", description: TASK_BODY },
+      { key: "fetch", machine: "client", status: "checking", description: null },
+    ], solution: { revealed: false, bodyMarkdown: null } });
+    // Nothing sealed is in the answer.
+    expect(before.text).not.toContain(HINT_BODY);
+    expect(before.text).not.toContain(SOLUTION);
+    const portHint = before.learning.hints.find((hint) => hint.checkKey === "serve")!;
+    expect(portHint).toMatchObject({ title: null, bodyMarkdown: null, revealed: false, unlocked: true });
+    expect(before.learning.hints.find((hint) => hint.checkKey === null)).toBeDefined();
+
+    expect((await learning("hint", { body: { protocol: 2, hintKey: portHint.key } })).code).toBe("upgrade_required");
+    expect((await learning("hint", { body: { protocol: 1 } })).code).toBe("invalid_hint");
+    expect((await learning("hint", { body: { protocol: 1, hintKey: "nope" } })).status).toBe(404);
+    const revealed = await learning("hint", { body: { protocol: 1, hintKey: portHint.key } });
+    expect(revealed.learning.hints.find((hint) => hint.key === portHint.key))
+      .toMatchObject({ revealed: true, title: "Port", bodyMarkdown: HINT_BODY });
+    expect((await learning("hint", { body: { protocol: 1, hintKey: portHint.key } })).code).toBe("scenario_hint_already_revealed");
+    expect((await learning()).learning.hints.find((hint) => hint.key === portHint.key)).toMatchObject({ bodyMarkdown: HINT_BODY });
+
+    expect((await learning("solution")).learning.solution).toMatchObject({ revealed: true, bodyMarkdown: SOLUTION });
+
+    // Only a local run is the app's to read.
+    await env.DB.prepare("UPDATE scenario_runs SET runtime = 'host' WHERE run_id = ?1").bind(run.runId).run();
+    expect((await learning()).status).toBe(404);
+  });
+
+  it("maps a probe run's checks and hints as the website's panel shows them", () => {
+    const probe = (id: string, status: string) => ({ id, label: id, kind: "http", phase: "scenario" as const, status, error: null, value: null });
+    const learning = localRunLearning({
+      id: "run-1", phase: "active_full", solvedAt: null, lectureTitle: null, lectureBodyMarkdown: null, briefingMarkdown: "BRIEFING",
+      objectives: [{ probeName: "p1", vmName: "web", label: "P1", title: "Serve it", bodyMarkdown: "SECRET", hintCount: 1 }],
+      vms: [{ scenarioVmName: "web", scenarioProbes: [probe("p1", "pass"), probe("p2", "fail"), probe("p3", "pending")] }],
+      hints: [
+        { key: "probe:web:p1:0", scope: "probe", probeName: "p1", id: "0", title: null, revealed: false, unlocked: true, bodyMarkdown: null },
+        { key: "scenario:0", scope: "scenario", probeName: null, id: "0", title: "T", revealed: true, unlocked: false, bodyMarkdown: "B" },
+      ],
+      solution: { unlocked: false, revealed: false, assisted: false, revealedAt: null, bodyMarkdown: null },
+    } as unknown as Parameters<typeof localRunLearning>[0]);
+    expect(learning).toEqual({
+      runId: "run-1", lectureTitle: null, lectureMarkdown: "BRIEFING", solved: false,
+      checks: [
+        { key: "p1", machine: "web", title: "Serve it", description: null, status: "verified", optional: false },
+        { key: "p2", machine: "web", title: "Repair objective 2", description: null, status: "needs_repair", optional: false },
+        { key: "p3", machine: "web", title: "Repair objective 3", description: null, status: "checking", optional: false },
+      ],
+      hints: [
+        { key: "probe:web:p1:0", checkKey: "p1", title: null, revealed: false, unlocked: true, bodyMarkdown: null },
+        { key: "scenario:0", checkKey: null, title: "T", revealed: true, unlocked: false, bodyMarkdown: "B" },
+      ],
+      solution: { unlocked: false, revealed: false, assisted: false, bodyMarkdown: null },
+    });
   });
 
   it("signs the app in through the provider with the client a deploy seeds", async () => {

@@ -164,3 +164,103 @@ pub struct AppReleaseV1 {
     pub sha256: String,
     pub url: String,
 }
+
+/// `GET /api/local/courses/<courseId>/lectures/<lectureId>`: a lecture's
+/// theory, as the website's lecture page shows it. `lecture` is absent and
+/// `locked` true while an earlier lecture of a sequential course is open.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct LocalLectureAnswerV1 {
+    pub protocol: u16,
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lecture: Option<LocalLectureV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalLectureV1 {
+    pub course_id: String,
+    pub lecture_id: String,
+    pub title: String,
+    pub body_markdown: String,
+    /// One-based position in its course, and the course's lecture count.
+    pub ordinal: u32,
+    pub count: u32,
+    /// Same meaning as [`CatalogLectureV1::state`].
+    pub state: String,
+}
+
+/// `GET /api/local/runs/<id>/learning`, and the answer to a hint or solution
+/// reveal: what the website's learning panel shows beside a run.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct LocalRunLearningAnswerV1 {
+    pub protocol: u16,
+    pub learning: LocalRunLearningV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRunLearningV1 {
+    pub run_id: String,
+    pub lecture_title: Option<String>,
+    /// The lecture's theory as it was when the run started, or the
+    /// scenario's briefing for a run that predates that snapshot.
+    pub lecture_markdown: String,
+    /// The whole run is solved.
+    pub solved: bool,
+    pub checks: Vec<LocalRunCheckV1>,
+    pub hints: Vec<LocalRunHintV1>,
+    pub solution: LocalRunSolutionV1,
+}
+
+/// One check (a probe or a task) the learner works towards.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRunCheckV1 {
+    /// What a probe-scoped hint names as its `check_key`.
+    pub key: String,
+    /// The machine the check runs on.
+    pub machine: String,
+    pub title: String,
+    pub description: Option<String>,
+    /// `verified`, `checking` or `needs_repair`, as the website shows it.
+    pub status: String,
+    #[serde(default)]
+    pub optional: bool,
+}
+
+/// Hints unlock in order per ladder: the run's own and one per check. A
+/// sealed hint has neither title nor body; `unlocked` marks the one hint of
+/// each ladder that can be revealed next.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRunHintV1 {
+    /// What a reveal names.
+    pub key: String,
+    /// The check whose ladder it is on; absent on the run's own ladder.
+    pub check_key: Option<String>,
+    pub title: Option<String>,
+    pub revealed: bool,
+    pub unlocked: bool,
+    pub body_markdown: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRunSolutionV1 {
+    pub unlocked: bool,
+    pub revealed: bool,
+    /// The learner revealed it before solving the run.
+    #[serde(default)]
+    pub assisted: bool,
+    pub body_markdown: Option<String>,
+}
+
+/// `POST /api/local/runs/<id>/hints/reveal`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevealHintV1 {
+    pub protocol: u16,
+    pub hint_key: String,
+}
