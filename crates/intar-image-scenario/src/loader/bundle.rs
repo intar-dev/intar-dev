@@ -37,6 +37,32 @@ pub fn compile(root: &Path) -> Result<(SourceBundleV2, Vec<LoweredScript>), Vec<
             return Err(problems);
         }
     };
+    // A scenario is reached through a course only (#494), so one no lecture
+    // names would be published and never started. Here and not in the bundle
+    // rules: a bundle stored before this must stay readable.
+    let named: BTreeSet<&str> = course_catalog
+        .courses
+        .iter()
+        .flat_map(|course| &course.lectures)
+        .filter_map(|lecture| lecture.scenario_id.as_deref())
+        .collect();
+    let unnamed: Vec<Diagnostic> = repository
+        .scenarios
+        .iter()
+        .filter(|scenario| !named.contains(scenario.slug.as_str()))
+        .map(|scenario| Diagnostic {
+            path: Path::new("scenarios").join(&scenario.slug).join("scenario.hcl"),
+            line: 0,
+            column: 0,
+            message: format!(
+                "no lecture names the scenario `{}`: give a lecture of a course `scenario: {}`, or remove the scenario",
+                scenario.slug, scenario.slug
+            ),
+        })
+        .collect();
+    if !unnamed.is_empty() {
+        return Err(unnamed);
+    }
     let bundle = SourceBundleV2 {
         compiler: SOURCE_COMPILER_VERSION_V2.to_owned(),
         image_format: IMAGE_FORMAT.to_owned(),
