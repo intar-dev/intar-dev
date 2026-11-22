@@ -33,6 +33,8 @@ cd "${root}"
 
 # The oldest macOS the bundled QEMU runs on (tools/workflows/qemu/build.sh).
 export MACOSX_DEPLOYMENT_TARGET=13.0
+# The paths below are in the workspace's target directory, whatever the shell sets.
+export CARGO_TARGET_DIR="${root}/target"
 cargo build --locked --release -p jumper --bin jumper
 built="target/release/jumper"
 version="$("${built}" --version | sed -n 's/^jumper //p')"
