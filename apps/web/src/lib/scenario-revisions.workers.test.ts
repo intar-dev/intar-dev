@@ -46,8 +46,8 @@ describe("candidate revision", () => {
   const select = (rev: string) => selectCandidateRevision(env.DB, "intar/web", rev).run();
 
   it("is the newest revision once it is ready or verified, never an older one that settles later", async () => {
-    await env.DB.prepare(`INSERT INTO scenarios (id, namespace, slug, scope_key, enabled, play)
-      VALUES ('intar/web', 'intar', 'web', 'public', 1, 0)`).run();
+    await env.DB.prepare(`INSERT INTO scenarios (id, namespace, slug, scope_key, enabled)
+      VALUES ('intar/web', 'intar', 'web', 'public', 1)`).run();
     await revision("r1", "ready", 1);
     await revision("r2", "building", 2);
     await select("r1");
@@ -386,18 +386,6 @@ describe("promotion and verify runs", () => {
       expect((await digestsOf(rev("c")))!.state).toBe("verified");
     });
 
-    it("ignores an open hold row: the behaviour it names is verified by inheritance and promoted", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      // A row left from when a rollback held a behaviour; nothing reads it now.
-      await env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at)
-        VALUES (?1, ?2, 1)`).bind(PUBLIC_ID, (await digestsOf(rev("a")))!.behaviour_digest).run();
-      await publish(rev("b"), image, null, reworded);
-      expect((await digestsOf(rev("b")))!.state).toBe("verified");
-      await promote(rev("b"), rev("a"));
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("b"));
-    });
-
     it("takes restore verification from the replaced revision only, when a snapshot start depends on the same", async () => {
       const restoreVerified = (at: string, value: number | null) =>
         env.DB.prepare("UPDATE scenario_revisions SET restore_verified_at = ?2 WHERE rev = ?1").bind(at, value).run();
@@ -467,13 +455,11 @@ describe("promotion and verify runs", () => {
   });
 
   describe("play", () => {
-    it("is not read from a bundle: a new scenario is never open to play", async () => {
+    it("is accepted in a bundle and kept in the revision document, where nothing reads it", async () => {
       const playable = structuredClone(bundleFixture);
       playable.scenarios[0]!.play = true;
-      // The organization's scenario is new with this bundle.
       await publish(rev("c"), image, "org-a", playable);
-      expect(await env.DB.prepare("SELECT play FROM scenarios WHERE id = ?1").bind(ORG_ID).first<number>("play")).toBe(0);
-      // The revision document still carries the bundle's word; nothing reads it.
+      expect(await scenarioRow(ORG_ID)).toBeTruthy();
       expect(JSON.parse((await revisionRow(ORG_ID, rev("c")))!.doc_json).play).toBe(true);
     });
   });
@@ -499,8 +485,8 @@ describe("promotion and verify runs", () => {
   describe("verify runs", () => {
     async function cloneScenario(id: string) {
       const [namespace, slug] = id.split("/");
-      await env.DB.prepare(`INSERT INTO scenarios (id, namespace, slug, scope_key, enabled, play, candidate_rev)
-        VALUES (?1, ?2, ?3, 'public', 1, 0, ?4)`).bind(id, namespace, slug, rev("a")).run();
+      await env.DB.prepare(`INSERT INTO scenarios (id, namespace, slug, scope_key, enabled, candidate_rev)
+        VALUES (?1, ?2, ?3, 'public', 1, ?4)`).bind(id, namespace, slug, rev("a")).run();
       await env.DB.prepare(`INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, content_digest, state, created_at)
         SELECT ?1, rev, guest_contract, doc_json, content_digest, state, created_at FROM scenario_revisions WHERE scenario_id = ?2`)
         .bind(id, PUBLIC_ID).run();
@@ -629,21 +615,20 @@ describe("promotion and verify runs", () => {
       await promote(rev("a"), null);
     });
 
-    it("pokes the scope's source once the run is settled, whatever its promotion column says, and never a disconnected one", async () => {
-      const source = (promotion: string, disconnectedAt: number | null = null) => env.DB.prepare(
+    it("pokes the scope's source once the run is settled, and never a disconnected one", async () => {
+      const source = (disconnectedAt: number | null = null) => env.DB.prepare(
         `INSERT INTO scenario_sources (scope_key, github_installation_id, github_repository_id, github_repository,
-            default_branch, mode, bound_by_user_id, promotion, disconnected_at)
-          VALUES ('public', 7, 42, 'intar/labs', 'main', 'push', ?1, ?2, ?3)
-          ON CONFLICT (scope_key) DO UPDATE SET promotion = excluded.promotion, disconnected_at = excluded.disconnected_at,
-            poked_at = NULL`,
-      ).bind(ADMIN, promotion, disconnectedAt).run();
+            default_branch, mode, bound_by_user_id, disconnected_at)
+          VALUES ('public', 7, 42, 'intar/labs', 'main', 'push', ?1, ?2)
+          ON CONFLICT (scope_key) DO UPDATE SET disconnected_at = excluded.disconnected_at, poked_at = NULL`,
+      ).bind(ADMIN, disconnectedAt).run();
       const poked = () => env.DB.prepare("SELECT poked_at FROM scenario_sources WHERE scope_key = 'public'").first<number | null>("poked_at");
-      await source("automatic", 1);
+      await source(1);
       const first = await verify();
       sendVm(ws, PLATFORM, verifyVm(first.runId, verifyLab({ steps: [], done: true, passed: false, pre_done: true })));
       await until(() => runOf(first.runId), (run) => run?.active_key === null);
       expect(await poked()).toBeNull();
-      await source("manual");
+      await source();
       const second = await verify();
       sendVm(ws, PLATFORM, verifyVm(second.runId, verifyLab({ steps: [], done: true, passed: true, pre_done: true })));
       expect(await until(poked, (at) => at !== null)).not.toBeNull();

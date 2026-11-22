@@ -39,7 +39,7 @@ import { moveLiveRevision } from "@/lib/scenario-revisions";
 import { beginVerifyRun } from "@/lib/scenario-runs/revision-begin";
 import { markRunVmsAbsentInDesiredState, revokeScenarioRunRoutes } from "@/lib/scenario-runs/start";
 import {
-  DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_WAIT_MS, driveDeployJob, takeUpLeftHead, type DeployJob, type DeployJobDeps,
+  DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_WAIT_MS, driveDeployJob, type DeployJob, type DeployJobDeps,
 } from "@/lib/source-deploy-job";
 import { backfillBehaviourDigests } from "@/lib/machine-builds";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
@@ -270,9 +270,6 @@ async function tickScenarioSource(
   // Only a push source's own pipeline builds images.
   const imageProducer = active.mode === "push" ? active.imageProducer : "builder";
   const step = { env, storage, scopeKey, organizationId, digest, imageProducer, pipelineCanPush: active.mode === "push" };
-  // A head that promotion by hand left is read again before the job sees it
-  // (#494); only an active binding gets here, so a pause holds it too.
-  await takeUpLeftHead(env.DB, scopeKey, digest, Date.now());
   const ingestAgain = await ingest(step);
   // After ingest, so a re-run failed row that ingest finds without its
   // staged objects is delivered again in the same pass.

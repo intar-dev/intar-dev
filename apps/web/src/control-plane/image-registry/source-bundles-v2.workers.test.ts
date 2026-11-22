@@ -632,7 +632,7 @@ describe("a source whose pipeline builds its images", () => {
     await byPipeline();
     await push();
     await tick("public");
-    await env.DB.prepare("INSERT INTO scenarios (id, namespace, slug, scope_key, enabled, play) VALUES ('intar/other', 'intar', 'other', 'public', 1, 0)").run();
+    await env.DB.prepare("INSERT INTO scenarios (id, namespace, slug, scope_key, enabled) VALUES ('intar/other', 'intar', 'other', 'public', 1)").run();
     await env.DB.prepare(
       `INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state, created_at)
        SELECT 'intar/other', rev, guest_contract, doc_json, 'building', ?1 FROM scenario_revisions`,
@@ -777,8 +777,8 @@ describe("namespaces", () => {
       ingestSourceBundle(env, { organizationId, rev: at, gzip: gz(BUNDLE), stored: false });
     // A scenario in this namespace held by another scope.
     await env.DB.prepare(
-      `INSERT INTO scenarios (id, namespace, slug, organization_id, scope_key, enabled, play)
-        VALUES ('acme/broken-nginx', 'acme', 'broken-nginx', NULL, 'public', 1, 0)`,
+      `INSERT INTO scenarios (id, namespace, slug, organization_id, scope_key, enabled)
+        VALUES ('acme/broken-nginx', 'acme', 'broken-nginx', NULL, 'public', 1)`,
     ).run();
     await expect(ingest(ORG, rev(43))).resolves.toBe("scenario `acme/broken-nginx` belongs to another scope");
     // A rev another scope already ingested.

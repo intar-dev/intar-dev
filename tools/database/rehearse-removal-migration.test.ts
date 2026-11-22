@@ -15,6 +15,8 @@ import { BunSqliteD1ReadClient } from "./generated-d1-schema";
 const BASELINE = 46;
 /** What production applied before this change: the migrations before the revision model's. */
 const BEFORE_REVISION_MODEL = 39;
+/** What production applied before 0053 dropped what approval, rollback and play left. */
+const BEFORE_DROPS = 53;
 
 describe("removal migration D1 rehearsal", () => {
   test("seeds the post-wipe baseline: no run, no execution", () => {
@@ -63,14 +65,15 @@ describe("removal migration D1 rehearsal", () => {
         client: new PrefixWriteClient(database),
         appliedCount: BASELINE,
       });
-      // The removal migration, and the additive ones committed after it.
-      expect(evidence.appliedTags).toHaveLength(7);
+      // The removal migration, and the ones committed after it.
+      expect(evidence.appliedTags).toHaveLength(8);
       expect(evidence.appliedMigrationCount).toBe(evidence.committedMigrationCount);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(evidence.droppedTables).toEqual([
         "image_build_bundles",
         "image_build_coordination_locks",
         "image_builds",
+        "organization_entitlements",
         "scenario_catalog_candidates",
         "scenario_catalog_snapshots",
         "scenario_run_probe_snapshots",
@@ -78,8 +81,9 @@ describe("removal migration D1 rehearsal", () => {
         "vm_scenario_vms",
         "vm_scenarios",
       ]);
-      // Every seeded row outside the retired tables survives.
-      const retired = new Set(evidence.droppedTables);
+      // Every seeded row outside the retired tables survives; holds are added
+      // after this baseline, so they are neither seeded nor dropped.
+      const retired = new Set([...evidence.droppedTables, "scenario_revision_holds"]);
       const seeded = rehearsalSeedStatements().filter(
         ({ sql }) => !retired.has(/^INSERT INTO (\w+)/u.exec(sql)?.[1] ?? ""),
       );
@@ -118,7 +122,7 @@ describe("removal migration D1 rehearsal", () => {
     try {
       await applyBaselineMigrations(client, BASELINE);
       const applied = await applyGeneratedMigrations(client);
-      expect(applied.appliedTags).toHaveLength(7);
+      expect(applied.appliedTags).toHaveLength(8);
       const columns = database
         .query("SELECT name FROM pragma_table_info('runtime_vms') ORDER BY cid")
         .all() as Array<{ name: string }>;
@@ -138,7 +142,7 @@ describe("removal migration D1 rehearsal", () => {
     try {
       await applyBaselineMigrations(client, BASELINE);
       await client.batch([
-        ...rehearsalSeedStatements(),
+        ...rehearsalSeedStatements(await snapshotTables(client)),
         { sql: "INSERT INTO runtime_executions (id, user_id, host_id, domain_kind, domain_id, generation, state) VALUES ('run-1', 'user-1', 'host-1', 'scenario', 'run-1', 1, 'provisioning')" },
         { sql: "INSERT INTO runtime_vms (id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json, image_sha256, cpu_millis, memory_mib, disk_mib) VALUES ('runtime-vm-1', 'run-1', 'vm-1', 0, 'server', '{}', '" + "a".repeat(64) + "', 1000, 1024, 4096)" },
       ]);
@@ -153,6 +157,42 @@ describe("removal migration D1 rehearsal", () => {
       expect(comparePreservedTables(before, after).droppedTables).toEqual([]);
       expect(after.get("runtime_executions")?.rows).toHaveLength(1);
       expect(after.get("runtime_vms")?.rows).toHaveLength(1);
+    } finally {
+      database.close(false);
+    }
+  });
+
+  test("drops approval, rollback and play and keeps every row and reference of sources, scenarios and runs", async () => {
+    const database = new Database(":memory:", { strict: true });
+    database.exec("PRAGMA foreign_keys = ON");
+    const client = new PrefixWriteClient(database);
+    try {
+      await applyBaselineMigrations(client, BEFORE_DROPS);
+      await client.batch([
+        ...rehearsalSeedStatements(await snapshotTables(client)),
+        // Finished runs, one started from the play page, as production keeps them.
+        ...["course", "play"].map((source, index) => ({
+          sql: `INSERT INTO scenario_runs (run_id, user_id, host_id, scenario_id, scenario_name, title, tagline, briefing_markdown, objectives_json, difficulty, estimated_minutes, tags_json, hints_json, solution_markdown, vm_count, state, state_rank, state_json, completed_at, scenario_rev, launch_source, ref)
+            VALUES ('run-${index}', 'user-1', 'host-1', '${index ? "intar/played" : "intar/nginx"}', 'n', 'T', 't', 'b', '[]', 'easy', 5, '[]', '[]', 's', 1, 'completed', 9, '{}', 3, 'rev-1', '${source}', ${index ? "'ref-1'" : "NULL"})`,
+        })),
+      ]);
+      const before = await snapshotTables(client);
+      const applied = await applyGeneratedMigrations(client);
+      expect(applied.appliedTags).toEqual(["0053_goofy_selene"]);
+      const after = await snapshotTables(client);
+      const evidence = comparePreservedTables(before, after);
+      expect(evidence.droppedTables).toEqual(["organization_entitlements", "scenario_revision_holds"]);
+      expect(after.get("scenario_sources")?.columns).not.toContain("promotion");
+      expect(after.get("scenario_sources")?.columns).not.toContain("promotion_after");
+      expect(after.get("scenarios")?.columns).not.toContain("play");
+      expect(after.get("scenarios")?.rows).toHaveLength(2);
+      expect(after.get("scenario_revisions")?.rows).toHaveLength(2);
+      expect(after.get("scenario_runs")?.rows).toHaveLength(2);
+      expect(database.query("SELECT launch_source, ref FROM scenario_runs ORDER BY run_id").all()).toEqual([
+        { launch_source: "course", ref: null },
+        { launch_source: "play", ref: "ref-1" },
+      ]);
+      expect(database.query("PRAGMA foreign_key_check").all()).toEqual([]);
     } finally {
       database.close(false);
     }
@@ -177,6 +217,12 @@ describe("removal migration D1 rehearsal", () => {
     expect(() => comparePreservedTables(before, new Map([["t", { ...table, sql: "CREATE TABLE t ( a )" }]]))).toThrow(/definition of t/u);
     expect(() => comparePreservedTables(before, new Map([["t", { ...table, columns: ["b"] }]]))).toThrow(/dropped a column of t/u);
     expect(() => comparePreservedTables(before, new Map([["t", table], ["u", table]]))).toThrow(/new table u/u);
+    // Only the columns DROPPED_COLUMNS names may go, and only from their table.
+    const source = { sql: "CREATE TABLE scenario_sources (a, promotion)", columns: ["a", "promotion"], rows: [["'x'", "'manual'"]] };
+    const dropped = { sql: "CREATE TABLE scenario_sources (a)", columns: ["a"], rows: [["'x'"]] };
+    expect(comparePreservedTables(new Map([["scenario_sources", source]]), new Map([["scenario_sources", dropped]])).preservedRows).toBe(1);
+    expect(() => comparePreservedTables(new Map([["scenario_sources", source]]), new Map([["scenario_sources", { ...dropped, rows: [["'y'"]] }]]))).toThrow(/rows of scenario_sources/u);
+    expect(() => comparePreservedTables(new Map([["scenarios", source]]), new Map([["scenarios", dropped]]))).toThrow(/dropped a column of scenarios/u);
     // An added column and an empty added table are what the additive migrations do.
     const added = { sql: "CREATE TABLE t (a, b)", columns: ["a", "b"], rows: [["'x'", "NULL"]] };
     const empty = { sql: "CREATE TABLE u (c)", columns: ["c"], rows: [] };

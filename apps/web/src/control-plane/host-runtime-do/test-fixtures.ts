@@ -92,7 +92,6 @@ export async function seedScenarioRow(
     organizationId,
     scopeKey: organizationId ? `organization:${organizationId}` : "public",
     enabled: true,
-    play: false,
     liveRev: "r1",
   }).onConflictDoNothing();
 }

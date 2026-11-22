@@ -1,5 +1,3 @@
-import { playableScenarioCondition } from "@/lib/scenario-runs/content-access";
-
 /** How long a personal or organization host keeps a start's image grant. */
 export const PERSONAL_IMAGE_PREPARATION_TTL_MS = 15 * 60_000;
 
@@ -12,7 +10,7 @@ export function preparationAuthoritySql(): string {
     json_each(hidden_course.value, '$.lectures') hidden_lecture
     WHERE hidden.organization_id = ${field("organizationId")}
       AND json_extract(hidden_lecture.value, '$.scenarioId') = ${scenario})`;
-  // The host, its owner and the preparation itself, for every launch source.
+  // The host, its owner and the preparation itself.
   const hostAndOwner = `(host.id, host.role, host.disabled, host.scenario_enabled,
         host.credential_generation) = (prep.host_id, 'agent', 0, 1, prep.credential_generation)
       AND ((host.scope = 'personal' AND host.user_id = prep.user_id AND owner.metal_placement = 'personal')
@@ -25,15 +23,11 @@ export function preparationAuthoritySql(): string {
         WHERE active.active_key = prep.user_id OR (active.user_id = prep.user_id AND active.request_idempotency_key = prep.request_key))
       AND (${field("requiresAdmin")} = 0 OR
         instr(',' || replace(lower(coalesce(owner.role, '')), ' ', '') || ',', ',admin,') > 0)`;
-  // A play start: personal, of a scenario still open to play.
-  const play = `EXISTS (SELECT 1 FROM agent_hosts host
-    JOIN user owner ON owner.id = prep.user_id
-    JOIN scenarios played ON played.id = ${field("scenarioId")}
-    WHERE ${hostAndOwner}
-      AND ${field("organizationId")} IS NULL AND ${playableScenarioCondition("played")})`;
   // Small grouped predicates keep this correlated query below D1's expression
   // depth limit when image, manifest, and artifact routes add their own fences.
-  return `CASE WHEN ${field("launchSource")} = 'play' THEN ${play} ELSE EXISTS (SELECT 1 FROM agent_hosts host
+  // Every grant is a course start's: a play start (#494) has no course, so
+  // nothing here holds for it.
+  return `EXISTS (SELECT 1 FROM agent_hosts host
     JOIN user owner ON owner.id = prep.user_id
     JOIN (SELECT id AS scenario_id, organization_id FROM scenarios
         WHERE enabled = 1 AND live_rev IS NOT NULL) scenario ON scenario.scenario_id = ${field("scenarioId")}
@@ -57,5 +51,5 @@ export function preparationAuthoritySql(): string {
             AND (catalog.organization_id IS NOT NULL OR NOT ${shadowed("json_extract(prior.value, '$.scenarioId')")})
             AND NOT EXISTS (SELECT 1 FROM course_unit_completions done WHERE done.user_id = prep.user_id
               AND (done.scope_key, done.course_id, done.lecture_id) =
-                (catalog.scope_key, ${field("courseId")}, json_extract(prior.value, '$.lectureId')))))) END`;
+                (catalog.scope_key, ${field("courseId")}, json_extract(prior.value, '$.lectureId'))))))`;
 }

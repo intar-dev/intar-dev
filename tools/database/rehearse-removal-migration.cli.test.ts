@@ -27,7 +27,7 @@ describe("rehearsal entrypoint", () => {
           fakeApi,
           entrypoint,
           "--applied",
-          "46",
+          "53",
           "--evidence",
           evidencePath,
         ],
@@ -59,13 +59,14 @@ describe("rehearsal entrypoint", () => {
         preservedTables: number;
         preservedRows: number;
       };
-      expect(evidence.baselineTags).toHaveLength(46);
-      // The removal migration, and the additive ones committed after it.
-      expect(evidence.appliedTags).toEqual(["0046_yielding_smiling_tiger", "0047_slimy_proudstar", "0048_dapper_mongoose", "0049_steady_kinsey_walden", "0050_naive_machine_man", "0051_slow_rage", "0052_curly_susan_delgado"]);
-      expect(evidence.appliedMigrationCount).toBe(53);
-      expect(evidence.committedMigrationCount).toBe(53);
+      // The baseline production serves, and the migration that drops what
+      // approval, rollback and play left.
+      expect(evidence.baselineTags).toHaveLength(53);
+      expect(evidence.appliedTags).toEqual(["0053_goofy_selene"]);
+      expect(evidence.appliedMigrationCount).toBe(54);
+      expect(evidence.committedMigrationCount).toBe(54);
       expect(evidence.foreignKeyViolations).toBe(0);
-      expect(evidence.droppedTables).toContain("vm_scenarios");
+      expect(evidence.droppedTables).toEqual(["organization_entitlements", "scenario_revision_holds"]);
       expect(evidence.preservedRows).toBeGreaterThan(0);
 
       const log = JSON.parse(readFileSync(requestLog, "utf8")) as {
@@ -77,7 +78,7 @@ describe("rehearsal entrypoint", () => {
       // The disposable database is deleted in the entrypoint's finally block,
       // so the run leaves nothing behind.
       expect(log.requests.some((entry) => entry.startsWith("DELETE"))).toBe(true);
-      expect(log.ledgerRows).toBe(53);
+      expect(log.ledgerRows).toBe(54);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

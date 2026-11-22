@@ -19,8 +19,8 @@ const catalog = (courseId: string, lectures: ReturnType<typeof lecture>[]) => ({
 
 async function scenario(id: string, organizationId: string | null, state: "ready" | "building" | null) {
   const [namespace, slug] = id.split("/");
-  await env.DB.prepare(`INSERT INTO scenarios (id, namespace, slug, organization_id, scope_key, enabled, play, live_rev)
-    VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, ?6)`)
+  await env.DB.prepare(`INSERT INTO scenarios (id, namespace, slug, organization_id, scope_key, enabled, live_rev)
+    VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)`)
     .bind(id, namespace, slug, organizationId, organizationId ? `organization:${organizationId}` : "public", state ? "r1" : null).run();
   if (state) {
     await env.DB.prepare(`INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state) VALUES (?1, 'r1', 3, '{}', ?2)`)

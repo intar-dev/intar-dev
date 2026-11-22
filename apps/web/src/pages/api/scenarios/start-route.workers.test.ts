@@ -39,8 +39,6 @@ describe("the start route", () => {
     const images = { web: await machineImage("web"), client: await machineImage("client") };
     const specs = { web: await specBlob("web"), client: await specBlob("client") };
     await seedScenario("intar/web", null, revisionDoc(images, specs));
-    // As open to play as a scenario ever was, with a host that could run it.
-    await env.DB.prepare("UPDATE scenarios SET play = 1").run();
     await enrollHost(HOST, LEARNER);
     ws = await connect(HOST);
     mocks.auth.mockResolvedValue({

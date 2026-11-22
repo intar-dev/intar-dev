@@ -42,8 +42,8 @@ beforeEach(async () => {
     { id: "m2", organizationId: "beta", userId: "other", role: "admin", createdAt: new Date() },
   ]);
   await env.DB.batch([
-    env.DB.prepare(`INSERT INTO scenarios (id, namespace, slug, organization_id, scope_key, enabled, play, candidate_rev)
-      VALUES ('intar/web', 'intar', 'web', NULL, 'public', 1, 0, 'r1'), ('acme/web', 'acme', 'web', 'acme', 'organization:acme', 1, 0, 'r1')`),
+    env.DB.prepare(`INSERT INTO scenarios (id, namespace, slug, organization_id, scope_key, enabled, candidate_rev)
+      VALUES ('intar/web', 'intar', 'web', NULL, 'public', 1, 'r1'), ('acme/web', 'acme', 'web', 'acme', 'organization:acme', 1, 'r1')`),
     env.DB.prepare(`INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state, created_at)
       VALUES ('intar/web', 'r1', 3, '{}', 'ready', 1), ('acme/web', 'r1', 3, '{}', 'ready', 1)`),
     env.DB.prepare(`INSERT INTO bundles (rev, scope_key, organization_id, compiler_version, r2_key, created_at)
@@ -69,15 +69,10 @@ describe("scenario revision routes", () => {
   });
 
   it("take no action on a revision: rollback, lift_hold and the approval actions find no handler, and nothing changes", async () => {
-    await env.DB.batch([
-      env.DB.prepare("UPDATE scenario_revisions SET state = 'verified', restore_verified_at = 5, behaviour_digest = 'd', live_at = 1"),
-      env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at, held_by_user_id)
-        VALUES ('intar/web', 'd', 1, 'admin')`),
-    ]);
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified', restore_verified_at = 5, behaviour_digest = 'd', live_at = 1").run();
     const before = async () => env.DB.batch([
       env.DB.prepare("SELECT id, live_rev, candidate_rev, enabled FROM scenarios ORDER BY id"),
       env.DB.prepare("SELECT scenario_id, rev, state, live_at, restore_verified_at FROM scenario_revisions ORDER BY scenario_id"),
-      env.DB.prepare("SELECT * FROM scenario_revision_holds"),
       env.DB.prepare("SELECT COUNT(*) AS n FROM scenario_runs"),
     ]).then((results) => results.map((result) => result.results));
     const snapshot = await before();

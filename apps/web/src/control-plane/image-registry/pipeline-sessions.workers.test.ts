@@ -126,7 +126,7 @@ async function seedBundle(
     imageProducer: input.producer ?? "pipeline",
   });
   await db().insert(scenarios).values({
-    id: "intar/lab", namespace: "intar", slug: "lab", scopeKey: SCOPE, enabled: true, play: true,
+    id: "intar/lab", namespace: "intar", slug: "lab", scopeKey: SCOPE, enabled: true,
   }).onConflictDoNothing();
   await db().insert(scenarioRevisions).values({
     scenarioId: "intar/lab", rev, guestContract: 3, state: input.state ?? "building",
@@ -531,7 +531,7 @@ describe("a pipeline session token as a registry credential", () => {
     // A key no revision of its commit names, and one only another scope's does.
     await refusal((await pushImage(token, FOREIGN_HEX)).response, 403, "build_key_not_in_bundle");
     await db().insert(scenarios).values({
-      id: "acme/lab", namespace: "acme", slug: "lab", scopeKey: "organization:acme", enabled: true, play: true,
+      id: "acme/lab", namespace: "acme", slug: "lab", scopeKey: "organization:acme", enabled: true,
     });
     await db().insert(scenarioRevisions).values({
       scenarioId: "acme/lab", rev: REV, guestContract: 3, state: "building",
@@ -880,11 +880,11 @@ describe("a pipeline recording its image", () => {
     expect(await env.DB.prepare("SELECT count(*) AS n FROM image_registry_operation_writers").first("n")).toBe(0);
   });
 
-  it("pokes the source when an image is recorded, whatever its promotion column says", async () => {
+  it("pokes the source when an image is recorded", async () => {
     await seedBundle();
     const token = await session();
     const poked = () => env.DB.prepare("SELECT poked_at FROM scenario_sources WHERE scope_key = ?1").bind(SCOPE).first<number | null>("poked_at");
-    await env.DB.prepare("UPDATE scenario_sources SET poked_at = NULL, promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE).run();
+    await env.DB.prepare("UPDATE scenario_sources SET poked_at = NULL WHERE scope_key = ?1").bind(SCOPE).run();
     const amd64 = await pushImage(token, KEY_HEX);
     expect((await record(token, amd64.digest)).status).toBe(201);
     expect(await poked()).not.toBeNull();
@@ -1165,7 +1165,7 @@ describe("an organization's own pipeline", () => {
     await db().insert(scenarioSources).values({
       scopeKey: ORG_SCOPE, organizationId: ORG, githubInstallationId: ORG_REPO, githubRepositoryId: ORG_REPO,
       githubRepository: "acme/labs", defaultBranch: "main", mode: "push", imageProducer: "pipeline",
-      promotion: "automatic", headSha: SHA, boundByUserId: OWNER,
+      headSha: SHA, boundByUserId: OWNER,
     });
   });
 

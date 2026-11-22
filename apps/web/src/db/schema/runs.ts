@@ -26,7 +26,7 @@ export interface ScenarioStartRequestScope {
   candidateBuildId: string | null;
   allowDrainedAdminProof: boolean;
   allowSequenceBypass: boolean;
-  /** Present on a start from a play page, with the page's `ref`. */
+  /** Present on a run started from the play page, which is gone (#494); old rows keep it. */
   launchSource?: "play";
   ref?: string | null;
   /** Present on a start of a local run. */
@@ -61,6 +61,8 @@ export const scenarioRuns = sqliteTable(
     // The scenario revision the run started from, and its tasks.
     scenarioRev: text("scenario_rev"),
     tasksJson: jsonText<RevisionTaskV1[]>("tasks_json"),
+    // `play`: a run from the play page, which is gone (#494). Finished ones
+    // stay in their owners' history; such a run has no access any more.
     launchSource: text("launch_source").$type<
       "course" | "play" | "assignment" | "verify"
     >(),

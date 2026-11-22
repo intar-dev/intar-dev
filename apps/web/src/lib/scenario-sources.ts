@@ -983,11 +983,6 @@ async function connect(input: {
         mode = excluded.mode,
         image_producer = excluded.image_producer,
         allow_self_hosted_runners = 0,
-        -- Marks the head as left (headLeftSql): a row of the repository
-        -- bound before may be the head again, and the job reads its commit
-        -- again before it decides anything (#494).
-        promotion = 'manual',
-        promotion_after = NULL,
         bound_by_user_id = excluded.bound_by_user_id,
         head_sha = NULL,
         head_observed_at = 0,
@@ -1012,15 +1007,24 @@ async function connect(input: {
     throw error;
   }
   if (changes === 1) {
-    // A fetch or compile that a pull source left in flight is dropped, as a
-    // change of mode drops it: a push source delivers nothing itself, and a
-    // row left on the head would refuse the workflow's first upload.
+    // Every row the repository bound before left unfinished or failed is
+    // dropped. A fetch or compile in flight goes as a change of mode drops
+    // it: a push source delivers nothing itself, and a row left on the head
+    // would refuse the workflow's first upload. And the head is observed
+    // again before the pass supersedes what it left, so a re-bind whose
+    // commit is that of an old row would make the row the head, driven as
+    // it lies: its revision rows may be incomplete, and the job would
+    // disable a lab the repository still has (#494). Superseded, the row is
+    // taken up again by the commit's next upload or fetch, which reads its
+    // bundle again. A live row stays as it ended.
     const dropped = await db
       .update(scenarioSourceCommits)
       .set({ state: "superseded", updatedAt: now })
       .where(and(
         eq(scenarioSourceCommits.scopeKey, scope.key),
-        inArray(scenarioSourceCommits.state, ["fetching", "compiling"]),
+        inArray(scenarioSourceCommits.state, [
+          "fetching", "compiling", "ingesting", "building", "waiting", "awaiting_promote", "failed",
+        ]),
       ))
       .returning({ hostId: scenarioSourceCommits.compileHostId });
     await endSourceCompiles(env, dropped.map((row) => row.hostId));

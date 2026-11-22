@@ -58,6 +58,26 @@ describe("scenario run artifact ledger", () => {
     expect(runs[0]?.replayState).toBe("none");
   });
 
+  it("keeps a finished run from the removed play page listed and readable by its owner, with no course", async () => {
+    await seedIdentity();
+    await insertCompletedRun({ sessionTimeline: true, hasRecording: true });
+    // As production keeps such a run (#494): play launch, its page's ref, no course.
+    await drizzle(env.DB).update(scenarioRuns).set({
+      launchSource: "play", ref: "stream-42", courseScopeKey: null, courseId: null, courseTitle: null, lectureId: null,
+    }).where(eq(scenarioRuns.runId, "run-1"));
+    await drizzle(env.DB)
+      .insert(scenarioRunArtifacts)
+      .values(artifact("segment-uploaded", 0, "uploaded", "ssh_recording_segment"));
+
+    const runs = await listScenarioRunsForUser({ userId: "user-1" });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ runId: "run-1", courseId: null, courseTitle: null, replayState: "ready", hasReplay: true });
+    const run = await getScenarioRunForUser({ runId: "run-1", userId: "user-1" });
+    expect(run).toMatchObject({ id: "run-1", phase: "completed", courseLocation: null });
+    expect(run.replayArtifacts.map((entry) => entry.id)).toEqual(["segment-uploaded"]);
+    expect(await getScenarioRunStatusForUser({ runId: "run-1", userId: "user-1" })).toMatchObject({ phase: "completed", hasReplay: true });
+  });
+
   it("advertises replay only when a usable session timeline exists", async () => {
     await seedIdentity();
     await insertCompletedRun({ sessionTimeline: true, hasRecording: true });

@@ -53,8 +53,8 @@ async function seedHost() {
 
 async function seedScenario(id: string, pointers: { live?: string; candidate?: string } = {}) {
   const [namespace, slug] = id.split("/");
-  await env.DB.prepare(`INSERT INTO scenarios (id, namespace, slug, scope_key, enabled, play, live_rev, candidate_rev)
-    VALUES (?1, ?2, ?3, 'public', 1, 0, ?4, ?5)`).bind(id, namespace, slug, pointers.live ?? null, pointers.candidate ?? null).run();
+  await env.DB.prepare(`INSERT INTO scenarios (id, namespace, slug, scope_key, enabled, live_rev, candidate_rev)
+    VALUES (?1, ?2, ?3, 'public', 1, ?4, ?5)`).bind(id, namespace, slug, pointers.live ?? null, pointers.candidate ?? null).run();
 }
 
 async function seedRevision(
