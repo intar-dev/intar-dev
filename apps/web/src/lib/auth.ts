@@ -82,7 +82,8 @@ const oauthScopes = [
   "email",
   "offline_access",
   "roles",
-  // The desktop app's channel (#399): start, end and pull a local run.
+  // The desktop app's channel (#399): start, end and pull a local run, and
+  // read the learner's lectures, runs, recaps and replays.
   "local-runs",
 ] as const;
 

@@ -441,11 +441,16 @@ impl Subspace {
         {
             return Err(too_big());
         }
-        let bytes = response.bytes().await?;
-        if bytes.len() > max_bytes {
-            return Err(too_big());
+        // Read in chunks so a body without a length stops at the cap.
+        let mut response = response;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len() + chunk.len() > max_bytes {
+                return Err(too_big());
+            }
+            bytes.extend_from_slice(&chunk);
         }
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
 
     /// Passes on what the learner's `intar` command in a guest asked, for the
