@@ -86,20 +86,20 @@ function pointerSummary(scenario: AdministeredScenario): string {
   const pointers = scenario.candidateRev && scenario.candidateRev !== scenario.liveRev
     ? `${live}; ${shortRev(scenario.candidateRev)} is the candidate.`
     : `${live}.`;
-  // Who takes the candidate from here: the scope's source, or whoever reads
-  // this. Only where a candidate of the source's commit waits to go live.
+  // What takes the candidate from here: the scope's source. Only where a
+  // candidate of the source's commit waits to go live.
   const job = scenario.sourceJob;
   if (!job || job.rev !== scenario.candidateRev || scenario.candidateRev === scenario.liveRev) return pointers;
   return job.driving && !job.failed
     ? `${pointers} Its source checks this commit and puts each lab that passes live.`
-    : `${pointers} Its source is not working on this lab: it waits for an administrator, or for the commit to be run again.`;
+    : `${pointers} Its source is not working on this lab: it waits for the source to be resumed, or for the commit to be run again.`;
 }
 
 /** What the source's job says of the revision of its commit, for that revision's row. */
 function sourceJobLine(scenario: AdministeredScenario, revision: ScenarioRevisionSummary): string | null {
   const job = scenario.sourceJob;
   if (!job || job.rev !== revision.rev) return null;
-  // What the job said of a lab before an administrator put it live by hand is past.
+  // What the job said of a lab before a rollback put another one live is past.
   if (revision.rev === scenario.liveRev) return job.note?.startsWith("live") ? `Source: ${job.note}` : null;
   if (job.note) return `Source: ${job.failed ? `gave up, ${job.note}` : job.note}`;
   return job.driving ? "Source: checking this commit" : null;
@@ -108,11 +108,7 @@ function sourceJobLine(scenario: AdministeredScenario, revision: ScenarioRevisio
 type RevisionActionName = RevisionAction["action"];
 
 const PENDING_WORDS: Record<RevisionActionName, string> = {
-  verify: "Starting…",
-  verify_restore: "Starting…",
-  clear_restore_verified: "Withdrawing…",
   lift_hold: "Lifting…",
-  promote: "Promoting…",
   rollback: "Rolling back…",
 };
 
@@ -135,51 +131,23 @@ function RevisionRow({
   const candidate = revision.rev === scenario.candidateRev;
   const verifying = Boolean(scenario.verifyRuns[revision.rev]);
   const state = REVISION_STATES[revision.state];
-  const move = (kind: "promote" | "rollback") => onAction({ action: kind, rev: revision.rev, liveRev: scenario.liveRev });
-  // While the source's job works on this revision's commit, verifying and
-  // promoting by hand are an override, not the way forward.
-  const driven = scenario.sourceJob?.driving === true && !scenario.sourceJob.failed && scenario.sourceJob.rev === revision.rev;
   const jobLine = sourceJobLine(scenario, revision);
   // A rollback left this behaviour on hold: nothing that behaves the same
   // is verified or promoted until an administrator lifts it. Going back to
-  // such a revision stays possible.
-  const liftHold = <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "lift_hold", rev: revision.rev })}>{pending === "lift_hold" ? PENDING_WORDS[pending] : "Lift hold"}</Button>;
+  // such a revision stays possible. Checking a revision and putting it live
+  // are the source's job.
   const actions = !scenario.canManage || live
     ? null
-    // The same lab as the live one: nothing to move, at most a catalog to
-    // publish, whatever the candidate's own state.
-    : candidate && revision.sameAsLive
-      ? (
-        <>
-          {revision.catalogPending
-            ? <Button size="sm" disabled={busy} onClick={() => move("promote")}>{pending === "promote" ? "Publishing…" : "Publish catalog"}</Button>
-            : null}
-          {revision.held ? liftHold : null}
-        </>
-      )
-      : candidate && revision.held
-        ? liftHold
-        : candidate && revision.state === "ready" && !verifying
-          ? <Button size="sm" variant={driven ? "secondary" : "outline"} disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify", rev: revision.rev })}>{pending ? PENDING_WORDS[pending] : revision.imagesReady ? "Verify" : "Preparing"}</Button>
-          : candidate && revision.canGoLive
-            ? <Button size="sm" variant={driven ? "secondary" : "default"} disabled={busy} onClick={() => move("promote")}>{pending ? PENDING_WORDS[pending] : "Promote"}</Button>
-            : (
-              <>
-                {revision.canGoLive && revision.liveAt !== null
-                  ? <Button size="sm" variant="outline" disabled={busy} onClick={() => move("rollback")}>{pending === "rollback" ? PENDING_WORDS[pending] : "Roll back"}</Button>
-                  : null}
-                {revision.held ? liftHold : null}
-              </>
-            );
-  // A restore check is for any verified revision, the live one included: it
-  // decides whether labs of the revision may start from a host snapshot.
-  const restoreAction = !scenario.canManage || verifying
-    ? null
-    : revision.canVerifyRestore
-      ? <Button size="sm" variant="outline" disabled={busy || !revision.imagesReady} onClick={() => onAction({ action: "verify_restore", rev: revision.rev })}>{pending === "verify_restore" ? PENDING_WORDS[pending] : "Check snapshot start"}</Button>
-      : revision.restoreVerifiedAt !== null
-        ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => onAction({ action: "clear_restore_verified", rev: revision.rev })}>{pending === "clear_restore_verified" ? PENDING_WORDS[pending] : "Withdraw snapshot start"}</Button>
-        : null;
+    : (
+      <>
+        {revision.canGoLive && revision.liveAt !== null
+          ? <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "rollback", rev: revision.rev, liveRev: scenario.liveRev })}>{pending === "rollback" ? PENDING_WORDS[pending] : "Roll back"}</Button>
+          : null}
+        {revision.held
+          ? <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "lift_hold", rev: revision.rev })}>{pending === "lift_hold" ? PENDING_WORDS[pending] : "Lift hold"}</Button>
+          : null}
+      </>
+    );
   return (
     <div className="space-y-2 py-3 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -188,7 +156,7 @@ function RevisionRow({
             <code title={revision.rev}>{shortRev(revision.rev)}</code>
             {live ? <Badge variant="success">Live</Badge> : null}
             {candidate && !live ? <Badge variant="outline">Candidate</Badge> : null}
-            {revision.sameAsLive ? <Badge variant="outline" title="The same lab as the live revision. Promoting it would move nothing.">Same as live</Badge> : null}
+            {revision.sameAsLive ? <Badge variant="outline" title="The same lab as the live revision. Its source does not move it.">Same as live</Badge> : null}
             {revision.held ? <Badge variant="outline" title="A rollback left this revision's behaviour on hold. It is not promoted until the hold is lifted.">Held</Badge> : null}
           </h3>
           <MetaLine
@@ -204,7 +172,6 @@ function RevisionRow({
         <div className="flex flex-wrap items-center gap-3">
           {verifying ? <StatusToken tone="live" word="Verifying" pulse /> : <StatusToken tone={state.tone} word={state.word} />}
           {actions}
-          {restoreAction}
         </div>
       </div>
       {revision.failureReason ? <InlineFeedback tone="error" announce={false}>{revision.failureReason}</InlineFeedback> : null}

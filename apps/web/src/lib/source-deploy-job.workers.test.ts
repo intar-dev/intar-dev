@@ -8,12 +8,12 @@ import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.jso
 import { appError } from "@/lib/app-error";
 import { settleScenarioRevisions } from "@/lib/machine-builds";
 import { maintainPipelineRevisions } from "@/lib/pipeline-revisions";
-import { ingestSourceBundle } from "@/lib/scenario-bundles";
+import { ingestSourceBundle, sourceBundleObjectKey } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { liftRevisionHold, listAdministeredScenarios, moveLiveRevision } from "@/lib/scenario-revisions";
 import {
   DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, detailOf, driveDeployJob,
-  RESTORE_CHECK_EVERY_MS, RESTORE_CHECK_FOR_MS, type DeployJob, type Lab,
+  RESTORE_CHECK_EVERY_MS, RESTORE_CHECK_FOR_MS, takeUpLeftHead, type DeployJob, type Lab,
 } from "@/lib/source-deploy-job";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
@@ -114,6 +114,27 @@ async function head(sha: string, bundle: typeof bundleFixture = bundleFixture, b
   if (built) await build(sha);
 }
 
+/**
+ * The source object's take-up of a head left by promotion by hand, and the
+ * ingest of the same pass, which reads the row's stored bundle again.
+ */
+async function takeUp(sha: string) {
+  await takeUpLeftHead(env.DB, SCOPE, digest, now);
+  const row = await env.DB.prepare("SELECT id, attempt, state FROM scenario_source_commits WHERE rev = ?1")
+    .bind(rev(sha)).first<{ id: string; attempt: number; state: string }>();
+  if (row?.state !== "ingesting") return;
+  const stored = await env.VM_IMAGE_REGISTRY_BUCKET.get(sourceBundleObjectKey(rev(sha)));
+  expect(await ingestSourceBundle(env, {
+    organizationId: ORG, rev: rev(sha), gzip: new Uint8Array(await stored!.arrayBuffer()), stored: true,
+  })).toBeNull();
+  await env.DB.prepare("UPDATE scenario_source_commits SET state = 'building' WHERE id = ?1 AND attempt = ?2 AND state = 'ingesting'")
+    .bind(row.id, row.attempt).run();
+}
+const marks = () => env.DB.prepare("SELECT promotion, promotion_after FROM scenario_sources WHERE scope_key = ?1")
+  .bind(SCOPE).first<{ promotion: string; promotion_after: string | null }>();
+const attemptOf = (sha = "a") => env.DB.prepare("SELECT attempt FROM scenario_source_commits WHERE rev = ?1")
+  .bind(rev(sha)).first<number>("attempt");
+
 /** The builds of `sha` succeed, so its revisions leave `building`. */
 async function build(sha: string) {
   await env.DB.prepare("UPDATE machine_builds SET state = 'succeeded', image_digest = ?1 WHERE image_digest IS NULL").bind(IMAGE).run();
@@ -163,47 +184,88 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("an automatic source's job", () => {
-  it("does nothing for a manual source, and gives a waiting row back", async () => {
+describe("a source's job", () => {
+  it("drives a source whose column says manual like any other, once its head was read again", async () => {
+    await live("a", twoLabs());
     await env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE).run();
-    await head("a");
+    // Rev b changes the first lab and no longer has the second.
+    const changed = structuredClone(bundleFixture);
+    changed.scenarios[0]!.machines[0]!.setup[0]!.script += "\n# changed";
+    await head("b", changed);
+    // Left by promotion by hand: the job does not decide anything of it as it lies.
     expect(await drive()).toEqual({ wait: false });
     expect(begun).toEqual([]);
-    expect(await commit()).toMatchObject({ state: "building" });
-    expect(job()).toBeUndefined();
-    // Switched to manual while its job ran: the runs end, the row shows as before.
-    await env.DB.prepare("UPDATE scenario_sources SET promotion = 'automatic' WHERE scope_key = ?1").bind(SCOPE).run();
+    expect(await commit("b")).toEqual({ state: "building", detail: null });
+    expect(await scenario(DB_LAB)).toMatchObject({ enabled: 1 });
+    await takeUp("b");
+    expect(await marks()).toEqual({ promotion: "automatic", promotion_after: null });
+    expect(await attemptOf("b")).toBe(2);
+    // From here it is the job's as for every source: a verify run, the lab live, the catalog, the removal.
     await drive();
-    expect(await commit()).toMatchObject({ state: "waiting" });
-    await env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE).run();
+    expect(begun).toEqual([{ scenarioId: WEB, rev: rev("b"), leaseMs: DEPLOY_JOB_VERIFY_LEASE_MS }]);
+    expect(await scenario(DB_LAB)).toEqual({ live_rev: rev("a"), enabled: 0 });
+    expect(await catalogRev()).toBe(rev("b"));
+    await finish("run-1", "passed");
     await drive();
-    expect(ended).toEqual(["run-1"]);
-    expect(job()).toBeUndefined();
-    expect(await commit()).toEqual({ state: "building", detail: null });
+    expect(await scenario(WEB)).toEqual({ live_rev: rev("b"), enabled: 1 });
+    expect(await commit("b")).toEqual({ state: "live", detail: `- ${WEB}: live` });
+    expect(await sourceRow()).toMatchObject({ live_rev: rev("b") });
   });
 
-  it("leaves the commit that was the head when the source went automatic, and takes up a re-run or the next one", async () => {
+  it("reads a head left by promotion by hand again first: a lab whose revision row was lost is not disabled", async () => {
+    await live("a", twoLabs());
+    await env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE).run();
+    await head("b", twoLabs("again"));
+    // The second lab's revision of rev b is gone, as a long wait by hand can leave it.
+    await env.DB.prepare("DELETE FROM scenario_revisions WHERE scenario_id = ?1 AND rev = ?2").bind(DB_LAB, rev("b")).run();
+    await drive();
+    expect(await scenario(DB_LAB)).toMatchObject({ enabled: 1 });
+    await takeUp("b");
+    expect(await revisionState(DB_LAB, "b")).not.toBeNull();
+    await build("b");
+    await drive();
+    // The commit still has the lab: nothing is disabled, and its recreated revision goes live.
+    expect(await scenario(DB_LAB)).toEqual({ live_rev: rev("b"), enabled: 1 });
+    expect((await commit("b"))!.state).not.toBe("failed");
+    // Once: the marks are gone, so neither the job's row nor its attempt is taken up again.
+    await takeUpLeftHead(env.DB, SCOPE, digest, now);
+    expect(await attemptOf("b")).toBe(2);
+    expect((await commit("b"))!.state).not.toBe("ingesting");
+  });
+
+  it("takes up the head a source left when it went automatic, and only that row and attempt", async () => {
     await head("a");
     await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
+    await env.DB.prepare("UPDATE scenario_sources SET promotion_after = 'row-a:0' WHERE scope_key = ?1").bind(SCOPE).run();
+    // Another attempt than the one left: the job's own, nothing to take up.
+    await takeUpLeftHead(env.DB, SCOPE, digest, now);
+    expect(await attemptOf()).toBe(1);
+    expect(await marks()).toEqual({ promotion: "automatic", promotion_after: null });
     await env.DB.prepare("UPDATE scenario_sources SET promotion_after = 'row-a:1' WHERE scope_key = ?1").bind(SCOPE).run();
     expect(await drive()).toEqual({ wait: false });
-    expect(await commit()).toEqual({ state: "building", detail: null });
     expect(await scenario(WEB)).toEqual({ live_rev: null, enabled: 1 });
     expect(await catalogRev()).toBeNull();
-    expect(job()).toBeUndefined();
-    // The next commit is the job's.
-    await head("b", twoLabs());
-    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("b")).run();
+    await takeUp("a");
+    expect(await attemptOf()).toBe(2);
     await drive();
-    expect((await commit("b"))!.state).toBe("live");
-    expect(await scenario(WEB)).toMatchObject({ live_rev: rev("b") });
-    // So is a re-run of the first one: another attempt.
+    expect((await commit())!.state).toBe("live");
+    expect(await scenario(WEB)).toMatchObject({ live_rev: rev("a") });
+  });
+
+  it("does not reopen a left head without a bundle, nor one before the head is known", async () => {
     await env.DB.batch([
-      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "a".repeat(40)),
-      env.DB.prepare("UPDATE scenario_source_commits SET attempt = 2 WHERE id = 'row-a'"),
+      env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual', head_sha = NULL WHERE scope_key = ?1").bind(SCOPE),
+      env.DB.prepare(`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, attempt, state, detail)
+        VALUES ('row-f', ?1, 'deploy', ?2, ?3, 'pull', 1, 'failed', 'did not compile')`).bind(SCOPE, "f".repeat(40), rev("f")),
     ]);
-    await drive();
-    expect((await commit("a"))!.state).not.toBe("building");
+    // No head yet: the mark stays for the head that comes.
+    await takeUpLeftHead(env.DB, SCOPE, digest, now);
+    expect(await marks()).toMatchObject({ promotion: "manual" });
+    await env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "f".repeat(40)).run();
+    await takeUpLeftHead(env.DB, SCOPE, digest, now);
+    expect(await commit("f")).toEqual({ state: "failed", detail: "did not compile" });
+    expect(await attemptOf("f")).toBe(1);
+    expect(await marks()).toEqual({ promotion: "automatic", promotion_after: null });
   });
 
   it("waits for the images, then starts a verify run with the short lease, once", async () => {
@@ -522,7 +584,7 @@ describe("an automatic source's job", () => {
     });
   });
 
-  it("moves nothing once the source may not act: paused, manual, another binder, or a head that moved", async () => {
+  it("moves nothing once the source may not act: paused, another binder, or a head that moved", async () => {
     await head("a");
     await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1").bind(rev("a")).run();
     const source = { scopeKey: SCOPE, rowId: "row-a", attempt: 1, digest };
@@ -534,7 +596,6 @@ describe("an automatic source's job", () => {
       await env.DB.prepare(undo).run();
     };
     await refused("UPDATE scenario_sources SET paused_at = 1", "UPDATE scenario_sources SET paused_at = NULL");
-    await refused("UPDATE scenario_sources SET promotion = 'manual'", "UPDATE scenario_sources SET promotion = 'automatic'");
     await refused("UPDATE scenario_sources SET disconnected_at = 1", "UPDATE scenario_sources SET disconnected_at = NULL");
     await refused(`UPDATE scenario_sources SET head_sha = '${"f".repeat(40)}'`, `UPDATE scenario_sources SET head_sha = '${"a".repeat(40)}'`);
     await refused("UPDATE scenario_source_commits SET attempt = 2", "UPDATE scenario_source_commits SET attempt = 1");
@@ -637,22 +698,6 @@ describe("an automatic source's job", () => {
     expect(begun).toHaveLength(2);
   });
 
-  it("gives a manual source its row back as failed when a revision of it failed", async () => {
-    await head("a");
-    await drive();
-    await finish("run-1", "gone");
-    await env.DB.batch([
-      env.DB.prepare("UPDATE scenario_revisions SET state = 'failed', failure_reason = 'x' WHERE rev = ?1").bind(rev("a")),
-      env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE),
-    ]);
-    await drive();
-    expect(await commit()).toEqual({ state: "failed", detail: "a revision of this commit failed" });
-    // A building row without a failed revision is left as it is.
-    await head("b");
-    await drive();
-    expect(await commit("b")).toEqual({ state: "building", detail: null });
-  });
-
   it("fails what is still undecided 24 hours after the job began, not after the revision was made", async () => {
     await head("a", twoLabs(), false);
     // Old revisions: a re-run long after ingest gets its full day.
@@ -684,6 +729,38 @@ describe("an automatic source's job", () => {
     expect(job()).toBeUndefined();
   });
 
+  it("reads a left head of a source whose pipeline builds its images again, and leaves a paused one", async () => {
+    await env.DB.prepare("UPDATE scenario_sources SET image_producer = 'pipeline', promotion = 'manual' WHERE scope_key = ?1")
+      .bind(SCOPE).run();
+    expect(await ingestSourceBundle(env, {
+      organizationId: ORG, rev: rev("a"), gzip: new Uint8Array(gzipSync(JSON.stringify(twoLabs()))), stored: false,
+      imageProducer: "pipeline", pipelineCanPush: true,
+    })).toBeNull();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "a".repeat(40)),
+      env.DB.prepare(`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, attempt, state)
+        VALUES ('row-a', ?1, 'deploy', ?2, ?3, 'push', 1, 'building')`).bind(SCOPE, "a".repeat(40), rev("a")),
+      env.DB.prepare("DELETE FROM scenario_revisions WHERE scenario_id = ?1 AND rev = ?2").bind(DB_LAB, rev("a")),
+    ]);
+    // Paused: nothing is taken up, and the mark stays for the resume.
+    await env.DB.prepare("UPDATE scenario_sources SET paused_at = 1 WHERE scope_key = ?1").bind(SCOPE).run();
+    await takeUp("a");
+    expect(await attemptOf("a")).toBe(1);
+    expect(await marks()).toEqual({ promotion: "manual", promotion_after: null });
+    await env.DB.prepare("UPDATE scenario_sources SET paused_at = NULL WHERE scope_key = ?1").bind(SCOPE).run();
+    await takeUp("a");
+    expect(await attemptOf("a")).toBe(2);
+    expect(await marks()).toEqual({ promotion: "automatic", promotion_after: null });
+    // The lost revision is back, waiting for its images like the other.
+    const states = await env.DB.prepare("SELECT scenario_id, state FROM scenario_revisions WHERE rev = ?1 ORDER BY scenario_id")
+      .bind(rev("a")).all<{ scenario_id: string; state: string }>();
+    expect(states.results.map((row) => row.state)).toEqual(["building", "building"]);
+    // Nothing is disabled while they build.
+    await drive();
+    expect(await scenario(DB_LAB)).toMatchObject({ enabled: 1 });
+    expect(await scenario(WEB)).toMatchObject({ enabled: 1 });
+  });
+
   it("is the only writer of failed for its row: the pipeline deadline leaves the row to it", async () => {
     await env.DB.prepare("UPDATE scenario_sources SET image_producer = 'pipeline' WHERE scope_key = ?1").bind(SCOPE).run();
     const refused = await ingestSourceBundle(env, {
@@ -701,12 +778,17 @@ describe("an automatic source's job", () => {
     expect(await commit()).toMatchObject({ state: "building" });
     await drive();
     expect((await commit())!.state).toBe("failed");
-    // A manual source's row is failed by the deadline itself, as before.
+    // Whatever the source's promotion column says: the job decides every source's row.
     await env.DB.batch([
       env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE),
       env.DB.prepare("UPDATE scenario_source_commits SET state = 'building' WHERE id = 'row-a'"),
       env.DB.prepare("UPDATE scenario_revisions SET state = 'building', created_at = 1 WHERE rev = ?1").bind(rev("a")),
     ]);
+    await maintainPipelineRevisions(env, SCOPE, now + DEPLOY_JOB_DEADLINE_MS + 60_000);
+    expect(await commit()).toMatchObject({ state: "building" });
+    // A disconnected source has no job: the deadline fails its row.
+    await env.DB.prepare("UPDATE scenario_revisions SET state = 'building' WHERE rev = ?1").bind(rev("a")).run();
+    await env.DB.prepare("UPDATE scenario_sources SET disconnected_at = 1 WHERE scope_key = ?1").bind(SCOPE).run();
     await maintainPipelineRevisions(env, SCOPE, now + DEPLOY_JOB_DEADLINE_MS + 60_000);
     expect(await commit()).toMatchObject({ state: "failed" });
   });
@@ -715,10 +797,10 @@ describe("an automatic source's job", () => {
 describe("what the scenario page learns of the job", () => {
   const sourceJob = async (scenarioId = WEB) => (await listAdministeredScenarios(OWNER, scenarioId))[0]!.sourceJob;
 
-  it("is nothing for a manual source, and the job's line while it drives the candidate's commit", async () => {
+  it("is not driving while the head waits to be read again, and the job's line while it drives the candidate's commit", async () => {
     await env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual' WHERE scope_key = ?1").bind(SCOPE).run();
     await head("a", twoLabs());
-    expect(await sourceJob()).toBeNull();
+    expect(await sourceJob()).toEqual({ rev: rev("a"), driving: false, failed: false, note: null });
     await env.DB.prepare("UPDATE scenario_sources SET promotion = 'automatic' WHERE scope_key = ?1").bind(SCOPE).run();
     // Driven from the first pass on, before the job has said anything.
     expect(await sourceJob()).toEqual({ rev: rev("a"), driving: true, failed: false, note: null });
@@ -734,7 +816,7 @@ describe("what the scenario page learns of the job", () => {
     expect(await sourceJob(DB_LAB)).toMatchObject({ driving: true, failed: false });
   });
 
-  it("says the job is not driving: a paused source, a binder without rights, the head left at the switch, an ended commit", async () => {
+  it("says the job is not driving: a paused source, a binder without rights, a head left to read again, an ended commit", async () => {
     await head("a");
     const not = async (sql: string, undo: string) => {
       await env.DB.prepare(sql).run();
@@ -752,6 +834,7 @@ describe("what the scenario page learns of the job", () => {
     expect(await read()).toMatchObject({ driving: false });
     await env.DB.prepare("UPDATE member SET role = 'owner' WHERE user_id = ?1").bind(OWNER).run();
     await not("UPDATE scenario_sources SET promotion_after = 'row-a:1'", "UPDATE scenario_sources SET promotion_after = 'row-a:0'");
+    await not("UPDATE scenario_sources SET promotion = 'manual'", "UPDATE scenario_sources SET promotion = 'automatic'");
     await not("UPDATE scenario_source_commits SET state = 'failed'", "UPDATE scenario_source_commits SET state = 'building'");
     // The reader is the binder here; the page says so only to someone who may read it.
     await env.DB.prepare("UPDATE scenario_sources SET disconnected_at = 1").run();
@@ -1008,7 +1091,7 @@ describe("restore checks after a lab is live", () => {
     await env.DB.prepare("UPDATE member SET role = 'owner'").run();
     await drive();
     expect(restoreChecks).toHaveLength(1);
-    // Switched to manual: the check is ended and the row stays live.
+    // Marked to be read again, as a re-bind marks it: the check is ended and the row stays live.
     await env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual'").run();
     await drive();
     expect(ended).toEqual(["restore-1"]);
@@ -1021,7 +1104,7 @@ describe("pokes", () => {
   const poked = () => env.DB.prepare("SELECT poked_at FROM scenario_sources WHERE scope_key = ?1").bind(SCOPE).first<number | null>("poked_at");
   const unpoke = () => env.DB.prepare("UPDATE scenario_sources SET poked_at = NULL WHERE scope_key = ?1").bind(SCOPE).run();
 
-  it("reach an automatic source when a revision leaves building and when a hold is lifted, and never a manual one", async () => {
+  it("reach the source when a revision leaves building and when a hold is lifted, whatever its column says, never a disconnected one", async () => {
     await head("a", bundleFixture, false);
     await unpoke();
     await build("a");
@@ -1033,10 +1116,22 @@ describe("pokes", () => {
     await liftRevisionHold({ scenarioId: WEB, rev: rev("a"), actorUserId: OWNER });
     expect(await poked()).not.toBeNull();
 
+    // Each with a machine of its own, so its build is new.
+    const rebuilt = (words: string) => {
+      const bundle = structuredClone(bundleFixture);
+      bundle.scenarios[0]!.machines[0]!.setup[0]!.script += `\n# ${words}`;
+      return bundle;
+    };
     await env.DB.prepare("UPDATE scenario_sources SET promotion = 'manual', poked_at = NULL WHERE scope_key = ?1").bind(SCOPE).run();
-    await head("b", bundleFixture, false);
+    await head("b", rebuilt("b"), false);
     await unpoke();
     await build("b");
+    expect(await poked()).not.toBeNull();
+
+    await env.DB.prepare("UPDATE scenario_sources SET disconnected_at = 1 WHERE scope_key = ?1").bind(SCOPE).run();
+    await head("c", rebuilt("c"), false);
+    await unpoke();
+    await build("c");
     expect(await poked()).toBeNull();
   });
 });

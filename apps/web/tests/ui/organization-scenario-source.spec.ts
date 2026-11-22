@@ -8,7 +8,6 @@ const disconnected = (disconnectReason: string) => ({
   mode: "push",
   imageProducer: "builder",
   allowSelfHostedRunners: false,
-  promotion: "manual",
   pausedAt: null,
   pauseReason: null,
   disconnectedAt: 1,
@@ -76,7 +75,8 @@ test("a pull source is offered its way to push, in the order that works", async 
   await expect(card.getByText("Delivery mode")).toHaveCount(0);
   await expect(card.getByText("switch to push first, then commit the workflow file")).toBeVisible();
   await expect(card.getByText("Built by Intar's builder")).toBeVisible();
-  await expect(card.getByText("An administrator promotes each lab")).toBeVisible();
+  await expect(card.getByText("Each lab goes live once it passed its check on a platform host")).toBeVisible();
+  await expect(card.getByText("An administrator promotes each lab")).toHaveCount(0);
   await expect(card.getByRole("link", { name: "Builds" })).toBeVisible();
   if (process.env.SOURCE_CARD_SHOTS) await card.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/pull.png` });
   await card.getByRole("button", { name: "Switch to push" }).click();
@@ -95,15 +95,14 @@ test("a platform administrator switches the platform source's settings on its ca
     if (request.method() === "GET") {
       await route.fulfill({ json: {
         enabled: true, pipelineImages: true, configured: true, appSlug: null, workflowRef: "scenario-publish-v1",
-        pipelineWorkflowRef: null, settings: { platform: true, automaticPromotion: true }, source,
+        pipelineWorkflowRef: null, settings: { platform: true }, source,
       } });
       return;
     }
     const change = request.postDataJSON() as {
-      action: string; promotion?: string; producer?: string; allow_self_hosted?: boolean; mode?: string;
+      action: string; producer?: string; allow_self_hosted?: boolean; mode?: string;
     };
     changes.push(change);
-    if (change.action === "promotion") source = { ...source, promotion: change.promotion! };
     if (change.action === "image_producer") source = { ...source, imageProducer: change.producer! };
     if (change.action === "runner_policy") source = { ...source, allowSelfHostedRunners: change.allow_self_hosted! };
     if (change.action === "mode") source = { ...source, mode: change.mode! };
@@ -115,22 +114,11 @@ test("a platform administrator switches the platform source's settings on its ca
   await expect(card.getByRole("heading", { name: "Platform settings" })).toBeVisible();
   if (process.env.SOURCE_CARD_SHOTS) await card.screenshot({ path: `${process.env.SOURCE_CARD_SHOTS}/platform.png` });
 
-  // Going automatic asks first, and says what it hands over.
-  await card.getByRole("button", { name: "Go live automatically" }).click();
+  // Who puts labs live is no setting: each lab goes live once it passed its check.
+  await expect(card.getByText("Going live")).toHaveCount(1);
+  await expect(card.getByRole("button", { name: "Go live automatically" })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Promote by hand" })).toHaveCount(0);
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("The commit that is the head now stays as it is, unless its workflow is run again.")).toBeVisible();
-  expect(changes).toEqual([]);
-  await dialog.getByRole("button", { name: "Go live automatically" }).click();
-  await expect(dialog).toBeHidden();
-  expect(changes).toEqual([{ action: "promotion", promotion: "automatic" }]);
-  await expect(card.getByRole("button", { name: "Promote by hand" })).toBeVisible();
-
-  // Going back to by-hand asks too: it ends checks that are running.
-  await card.getByRole("button", { name: "Promote by hand" }).click();
-  await expect(dialog.getByText("Checks of the latest commit that are running stop")).toBeVisible();
-  await dialog.getByRole("button", { name: "Promote by hand" }).click();
-  await expect(dialog).toBeHidden();
-  expect(changes.at(-1)).toEqual({ action: "promotion", promotion: "manual" });
 
   // Images and runners switch at once.
   await card.getByRole("button", { name: "Allow self-hosted runners" }).click();
@@ -160,13 +148,12 @@ test("an organization's owner switches its own source's settings", async ({ page
       await route.fulfill({ json: {
         enabled: true, pipelineImages: true, appSlug: null, workflowRef: "scenario-publish-v1",
         pipelineWorkflowRef: "scenario-publish-v2",
-        settings: { platform: false, automaticPromotion: true }, source,
+        settings: { platform: false }, source,
       } });
       return;
     }
-    const change = request.postDataJSON() as { action: string; promotion?: string; producer?: string };
+    const change = request.postDataJSON() as { action: string; producer?: string };
     changes.push(change);
-    if (change.action === "promotion") source = { ...source, promotion: change.promotion! };
     if (change.action === "image_producer") source = { ...source, imageProducer: change.producer! };
     await route.fulfill({ json: { source } });
   });
@@ -188,9 +175,8 @@ test("an organization's owner switches its own source's settings", async ({ page
   await expect(card.getByRole("button", { name: "Use Intar's builder" })).toHaveCount(0);
   await expect(card.getByRole("link", { name: "Builds" })).toHaveCount(0);
 
-  await card.getByRole("button", { name: "Go live automatically" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "Go live automatically" }).click();
-  expect(changes.at(-1)).toEqual({ action: "promotion", promotion: "automatic" });
+  await expect(card.getByRole("button", { name: "Go live automatically" })).toHaveCount(0);
+  expect(changes).toEqual([{ action: "image_producer", producer: "pipeline" }]);
 
   // The setup text names the files the compiler reads, and the pipeline's workflow with its runner.
   await card.getByText("Repository setup").click();
@@ -215,7 +201,7 @@ test("an organization's owner reads its pipeline's usage and forgets a recorded 
       await route.fulfill({ json: {
         enabled: true, pipelineImages: true, appSlug: null, workflowRef: "scenario-publish-v1",
         pipelineWorkflowRef: "scenario-publish-v2",
-        settings: { platform: false, automaticPromotion: true },
+        settings: { platform: false },
         usage: {
           openSessions: { used: 0, limit: 8 }, sessions: { used: 3, limit: 200 },
           uploadedBytes: { used: 4 * GIB, limit: 100 * GIB },

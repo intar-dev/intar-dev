@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRightLeft, GitBranch, Hammer, Library, Pause, Play, Trash2, Unplug } from "lucide-react";
+import { ArrowRightLeft, GitBranch, Hammer, Library, Play, Trash2, Unplug } from "lucide-react";
 import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
 import { CodeBlock } from "../../patterns/CodeBlock";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
@@ -100,7 +100,7 @@ export function ScenarioSourceSection({
       description="Merging to the repository's default branch releases its courses here."
       actions={
         <>
-          {/* The page of what the repository published: its revisions, and where a lab is verified, promoted and
+          {/* The page of what the repository published: its revisions, what its job did with each lab, and where a lab is
               rolled back. The platform's card is on that page already. */}
           {scope !== "public" && card.data.source ? (
             <Button size="sm" variant="outline" render={<a href="/admin/scenarios" />}>
@@ -433,11 +433,7 @@ function ConnectedSource({
         </div>
         <div>
           <dt className="text-label">Going live</dt>
-          <dd className="mt-1">
-            {source.promotion === "automatic"
-              ? "Each lab goes live once it passed its check"
-              : "An administrator promotes each lab"}
-          </dd>
+          <dd className="mt-1">Each lab goes live once it passed its check on a platform host</dd>
         </div>
         <div>
           <dt className="text-label">Live commit</dt>
@@ -477,13 +473,6 @@ function ConnectedSource({
         </ul>
       ) : null}
       <div className="flex flex-wrap gap-2">
-        {/* An admin pause replaces a suspension, so a later unsuspend does not resume. */}
-        {source.pausedAt === null || source.pauseReason === "suspended" ? (
-          <Button variant="outline" disabled={pending} onClick={() => onChange({ action: "pause" })}>
-            <Pause className="size-4" />
-            Pause
-          </Button>
-        ) : null}
         {source.pausedAt === null ? null : (
           <Button
             variant="outline"
@@ -514,8 +503,7 @@ interface SettingConfirm {
 
 /**
  * What an administrator of the source's scope changes on it: who builds its
- * images, which runners may publish, who puts its labs live, and the way
- * back to pull mode. Each row says what is and offers the other; a switch
+ * images, which runners may publish, and the way back to pull mode. Each row says what is and offers the other; a switch
  * that would be refused says why instead.
  */
 function SourceSettings({
@@ -537,12 +525,11 @@ function SourceSettings({
   onConfirm: (confirm: SettingConfirm) => void;
 }) {
   const reasonId = useId();
-  const { platform, automaticPromotion } = settings;
+  const { platform } = settings;
   // The platform's card is its operators'; an organization's is its own
   // administrators', who have no builder to choose and no pull mode.
   const here = platform ? "this scope" : "this organization";
   const pipeline = source.imageProducer === "pipeline";
-  const automatic = source.promotion === "automatic";
   const rows: Array<{ label: string; state: string; action: string | null; blocked: string | null; onClick: () => void }> = [
     {
       label: "Images",
@@ -564,27 +551,6 @@ function SourceSettings({
       action: source.allowSelfHostedRunners ? "Allow GitHub-hosted runners only" : "Allow self-hosted runners",
       blocked: source.allowSelfHostedRunners || enabled ? null : `Scenario sources are not switched on for ${here}.`,
       onClick: () => onChange({ action: "runner_policy", allow_self_hosted: !source.allowSelfHostedRunners }),
-    },
-    {
-      label: "Going live",
-      state: automatic ? "Each lab goes live once it passed its check" : "An administrator promotes each lab",
-      action: automatic ? "Promote by hand" : "Go live automatically",
-      blocked: automatic
-        ? null
-        : automaticPromotion ? null : `Automatic promotion is not switched on for ${here}.`,
-      onClick: () => onConfirm(automatic
-        ? {
-            title: "Promote by hand again?",
-            description: "Checks of the latest commit that are running stop, and its labs that are not live yet wait for an administrator to verify and promote them, or for its workflow to be run again after switching back. What is live stays live.",
-            label: "Promote by hand",
-            body: { action: "promotion", promotion: "manual" },
-          }
-        : {
-            title: "Let labs go live by themselves?",
-            description: "From the next commit on, each lab that passes its check on a platform host goes live without an administrator, and the commit's course catalog and removed labs follow. The commit that is the head now stays as it is, unless its workflow is run again. Whoever can push to the default branch then publishes to learners.",
-            label: "Go live automatically",
-            body: { action: "promotion", promotion: "automatic" },
-          }),
     },
     ...(platform && source.mode === "push"
       ? [{

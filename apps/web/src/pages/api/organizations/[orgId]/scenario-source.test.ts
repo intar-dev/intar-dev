@@ -58,16 +58,16 @@ describe("organization scenario source route", () => {
 
   it("refuses member writes before any change", async () => {
     mocks.role.mockResolvedValue("member");
-    expect((await POST(context("POST", { action: "pause" }))).status).toBe(404);
+    expect((await POST(context("POST", { action: "disconnect" }))).status).toBe(404);
     expect(mocks.refuse).not.toHaveBeenCalled();
     expect(mocks.change).not.toHaveBeenCalled();
   });
 
   it("answers the write guard's refusal without changing anything", async () => {
     mocks.refuse.mockResolvedValue(Response.json({ code: "rate_limited" }, { status: 429 }));
-    expect((await POST(context("POST", { action: "pause" }))).status).toBe(429);
+    expect((await POST(context("POST", { action: "disconnect" }))).status).toBe(429);
     mocks.refuse.mockRejectedValue(appError(403, "impersonation_forbidden", "no"));
-    expect((await POST(context("POST", { action: "pause" }))).status).toBe(403);
+    expect((await POST(context("POST", { action: "disconnect" }))).status).toBe(403);
     expect(mocks.refuse).toHaveBeenCalledWith(expect.any(Request), CONTEXT);
     expect(mocks.change).not.toHaveBeenCalled();
   });

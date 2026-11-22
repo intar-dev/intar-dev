@@ -47,7 +47,7 @@ describe("public scenario source route", () => {
       response: Response.json({ error: "admin required" }, { status: 403 }),
     });
     expect((await GET(context())).status).toBe(403);
-    expect((await POST(context({ action: "pause" }))).status).toBe(403);
+    expect((await POST(context({ action: "disconnect" }))).status).toBe(403);
     expect(mocks.card).toHaveBeenCalledTimes(1);
     expect(mocks.refuse).not.toHaveBeenCalled();
     expect(mocks.change).not.toHaveBeenCalled();
@@ -55,21 +55,21 @@ describe("public scenario source route", () => {
 
   it("answers the write guard's refusal without changing anything", async () => {
     mocks.refuse.mockResolvedValue(Response.json({ code: "rate_limited" }, { status: 429 }));
-    expect((await POST(context({ action: "pause" }))).status).toBe(429);
+    expect((await POST(context({ action: "disconnect" }))).status).toBe(429);
     mocks.refuse.mockRejectedValue(appError(403, "impersonation_forbidden", "no"));
-    expect((await POST(context({ action: "pause" }))).status).toBe(403);
+    expect((await POST(context({ action: "disconnect" }))).status).toBe(403);
     expect(mocks.refuse).toHaveBeenCalledWith(expect.any(Request), CONTEXT);
     expect(mocks.change).not.toHaveBeenCalled();
   });
 
   it("applies the change to public for the caller", async () => {
-    const response = await POST(context({ action: "pause" }));
+    const response = await POST(context({ action: "disconnect" }));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ source: { repository: "intar-dev/scenarios" } });
     expect(mocks.change).toHaveBeenCalledWith({
       scope: SCOPE,
       actorUserId: "operator",
-      body: { action: "pause" },
+      body: { action: "disconnect" },
       startedAt: expect.any(Number),
     });
   });

@@ -11,7 +11,7 @@ import { handleAgentBootstrap, sha256Hex as sha256Text } from "@/control-plane/a
 import { GITHUB_WEBHOOK_PATH, handleGitHubWebhook } from "@/control-plane/github-webhook";
 import { stateReport } from "@/control-plane/host-runtime-do/test-fixtures";
 import type { ScenarioSourceDO } from "@/control-plane/scenario-source-do";
-import { buildingTitle, sweepScenarioSources } from "@/control-plane/scenario-source-do";
+import { sweepScenarioSources } from "@/control-plane/scenario-source-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import {
   agentBootstrapTokens,
@@ -32,6 +32,7 @@ import {
 import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
 import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { BUILDER_REASSIGN_AFTER_MS, syncBuilderDesiredState } from "@/lib/machine-builds";
+import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { stagedSourceObjectPrefix } from "@/lib/scenario-sources";
 import { createFixtureMember } from "@/test/account-fixtures";
@@ -986,21 +987,45 @@ describe("scenario source cron", () => {
   });
 });
 
-describe("a building commit's check", () => {
-  it("counts the labs that are built while images are still on their way", () => {
-    expect(buildingTitle({ built: 2, verified: 0, total: 9, automatic: false })).toBe("Building 2/9");
-    expect(buildingTitle({ built: 0, verified: 0, total: 0, automatic: false })).toBe("Building 0/0");
+describe("a head left by promotion by hand (#494)", () => {
+  // The source's row names no promotion: it has the column's default,
+  // `manual`, as every source had before its job drove them all.
+  const revisions = async () => (await env.DB.prepare(
+    "SELECT scenario_id, state FROM scenario_revisions WHERE rev = ?1 ORDER BY scenario_id",
+  ).bind(rev(SHA_A)).all<{ scenario_id: string; state: string }>()).results;
+  const headRow = async () => (await db().select({ state: scenarioSourceCommits.state, attempt: scenarioSourceCommits.attempt })
+    .from(scenarioSourceCommits).where(eq(scenarioSourceCommits.rev, rev(SHA_A))))[0];
+
+  beforeEach(async () => {
+    // Ingested long ago and handed back to an administrator; a lab's revision row was lost since.
+    expect(await ingestSourceBundle(env, {
+      organizationId: ORG, rev: rev(SHA_A), gzip: new Uint8Array(gzipSync(JSON.stringify(bundleFixture))), stored: false,
+    })).toBeNull();
+    await insertCommit(SHA_A, "building", { attempt: 1 });
+    await db().update(scenarioSources).set({ headSha: SHA_A, headObservedAt: 1 });
+    await env.DB.prepare("DELETE FROM scenario_revisions WHERE rev = ?1").bind(rev(SHA_A)).run();
   });
 
-  it("says what a source promoted by hand waits for once nothing is built any more", () => {
-    // The row stays `building` until an administrator promoted its labs.
-    expect(buildingTitle({ built: 9, verified: 2, total: 9, automatic: false }))
-      .toBe("Built 9/9: waiting to be verified and promoted");
-    expect(buildingTitle({ built: 9, verified: 9, total: 9, automatic: false }))
-      .toBe("Verified 9/9: waiting to be promoted");
+  it("is left as it is while the source is paused", async () => {
+    await db().update(scenarioSources).set({ pausedAt: 1, pauseReason: "admin" });
+    github();
+    await tick();
+    expect(await headRow()).toEqual({ state: "building", attempt: 1 });
+    expect(await revisions()).toEqual([]);
+    expect(await binding()).toMatchObject({ promotion: "manual", promotionAfter: null });
+    expect(checkRuns).toEqual([]);
   });
 
-  it("leaves an automatic source's count as it is: its job takes the row on by itself", () => {
-    expect(buildingTitle({ built: 9, verified: 9, total: 9, automatic: true })).toBe("Building 9/9");
+  it("is read again from its stored bundle in the first pass of an active source, once", async () => {
+    github();
+    await tick();
+    // Another attempt, ingested again: the lost revision row is back and the job has the row.
+    expect(await headRow()).toEqual({ state: "building", attempt: 2 });
+    expect(await revisions()).toEqual([{ scenario_id: "acme/broken-nginx", state: "building" }]);
+    expect(await binding()).toMatchObject({ promotion: "automatic", promotionAfter: null });
+    // The check counts builds; nothing waits for an administrator any more.
+    expect(shownChecks().at(-1)).toMatchObject({ status: "in_progress", title: "Building 0/1" });
+    await tick();
+    expect(await headRow()).toEqual({ state: "building", attempt: 2 });
   });
 });

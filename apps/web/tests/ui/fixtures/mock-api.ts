@@ -1526,11 +1526,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         }
         if (method === "POST") {
           const body = await requestBody(route);
-          if (body.action === "verify") {
-            scenario.verifyRuns = { [String(body.rev)]: "run-verify-new" };
-          } else {
-            scenario.liveRev = body.rev;
-          }
+          if (body.action === "rollback") scenario.liveRev = body.rev;
         }
         await json(route, { scenario });
         return;

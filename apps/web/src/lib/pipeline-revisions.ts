@@ -85,10 +85,10 @@ export async function maintainPipelineRevisions(
               WHERE ended.rev = ?2 AND ended.state = 'failed' AND ended.failure_reason = ?3)
             AND NOT EXISTS (SELECT 1 FROM scenario_revisions waiting
               WHERE waiting.rev = ?2 AND waiting.state = 'building')
-            -- An automatic source's job decides its row: other labs of the
-            -- commit may still be checked (#454).
+            -- The source's job decides its row: other labs of the commit
+            -- may still be checked (#454). A disconnected source has none.
             AND NOT EXISTS (SELECT 1 FROM scenario_sources source
-              WHERE source.scope_key = ?1 AND source.promotion = 'automatic')`,
+              WHERE source.scope_key = ?1 AND source.disconnected_at IS NULL)`,
       ).bind(
         scopeKey,
         rev,

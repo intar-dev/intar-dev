@@ -29,7 +29,7 @@ import { HOST_DESIRED_STATE_SCHEMA_VERSION_V3, mutateHostDesiredStateV3 } from "
 import { HOST_DEGRADED_AFTER_MS } from "@/lib/host-health";
 import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
 import { behaviourVerifiedSql } from "@/lib/kept-revisions";
-import { pokeAutomaticSource } from "@/lib/source-pokes";
+import { pokeSource } from "@/lib/source-pokes";
 import { canonicalJson, sha256Digest } from "@/lib/scenario-contract/canonical-json";
 import { behaviourDigest, restoreDigest } from "@/lib/scenario-contract/revision-digests";
 
@@ -399,8 +399,8 @@ export async function settleScenarioRevisions(
     scenario_id: string; rev: string; doc_json: string; restore_basis: string | null;
     scope_key: string | null; producer: string;
   }>();
-  // The scopes a revision of which left `building`: an automatic source's
-  // job goes on with it.
+  // The scopes a revision of which left `building`: its source's job goes
+  // on with it.
   const settled = new Set<string>();
   for (const revision of results) {
     const doc = JSON.parse(revision.doc_json) as ScenarioRevisionV1;
@@ -467,7 +467,7 @@ export async function settleScenarioRevisions(
     // verify run finds them ready.
     await wakePlatformAgents();
   }
-  for (const scopeKey of settled) await pokeAutomaticSource(env.DB, { scopeKey }).run();
+  for (const scopeKey of settled) await pokeSource(env.DB, { scopeKey }).run();
 }
 
 /** Revisions one pass gives their behaviour digest. */

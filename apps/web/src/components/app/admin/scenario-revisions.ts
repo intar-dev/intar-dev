@@ -36,8 +36,8 @@ export function useAdministeredScenario(scenarioId: string) {
 }
 
 export type RevisionAction =
-  | { action: "verify" | "verify_restore" | "clear_restore_verified" | "lift_hold"; rev: string }
-  | { action: "promote" | "rollback"; rev: string; liveRev: string | null };
+  | { action: "lift_hold"; rev: string }
+  | { action: "rollback"; rev: string; liveRev: string | null };
 
 export function useRevisionAction(scenarioId: string) {
   const queryClient = useQueryClient();

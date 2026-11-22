@@ -15,10 +15,11 @@ import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
   assertScenarioAdmin,
-  clearRestoreVerified,
+  catalogForwardSql,
   liftRevisionHold,
   listAdministeredScenarios,
   moveLiveRevision,
+  namespacedCatalog,
   type RestoreVerifyReport,
   type VerifyReport,
 } from "@/lib/scenario-revisions";
@@ -113,8 +114,26 @@ const scenarioRow = (id: string) => env.DB.prepare("SELECT live_rev, candidate_r
   .bind(id).first<{ live_rev: string | null; candidate_rev: string | null }>();
 const markVerified = (scenarioId: string, at: string) =>
   env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE scenario_id = ?1 AND rev = ?2").bind(scenarioId, at).run();
-const promote = (at: string, liveRev: string | null, actorUserId = ADMIN, scenarioId = PUBLIC_ID) =>
-  moveLiveRevision({ scenarioId, rev: at, liveRev, kind: "promote", actorUserId });
+/** The scope's catalog becomes bundle `at`'s when that is newer, as a source job's commit step makes it. */
+async function applyCatalog(at: string, scenarioId: string) {
+  const row = await env.DB.prepare(
+    `SELECT scenario.namespace, scenario.scope_key, scenario.organization_id, bundle.r2_key,
+        ${catalogForwardSql("?2", "scenario.scope_key")} AS forward
+      FROM scenarios scenario JOIN bundles bundle ON bundle.rev = ?2 WHERE scenario.id = ?1`,
+  ).bind(scenarioId, at).first<{ namespace: string; scope_key: string; organization_id: string | null; r2_key: string; forward: number }>();
+  if (!row?.forward) return;
+  await env.DB.prepare(
+    `INSERT INTO course_catalogs (scope_key, organization_id, catalog_json, source_revision, created_at, updated_at)
+      VALUES (?1, ?2, ?3, ?4, 1, 1) ON CONFLICT (scope_key) DO UPDATE SET catalog_json = excluded.catalog_json,
+        source_revision = excluded.source_revision, updated_at = course_catalogs.updated_at + 1`,
+  ).bind(row.scope_key, row.organization_id, JSON.stringify(await namespacedCatalog(row.r2_key, row.namespace)), at).run();
+}
+/** A promotion of the candidate, and its bundle's catalog after it, as the scope's source's job does both. */
+const promote = async (at: string, liveRev: string | null, actorUserId = ADMIN, scenarioId = PUBLIC_ID) => {
+  const moved = await moveLiveRevision({ scenarioId, rev: at, liveRev, kind: "promote", actorUserId });
+  await applyCatalog(at, scenarioId);
+  return moved;
+};
 const rollback = (at: string, liveRev: string | null, actorUserId = ADMIN) =>
   moveLiveRevision({ scenarioId: PUBLIC_ID, rev: at, liveRev, kind: "rollback", actorUserId });
 const catalogRow = () => env.DB.prepare("SELECT source_revision, catalog_json FROM course_catalogs WHERE scope_key = 'public'")
@@ -212,10 +231,10 @@ describe("promotion, rollback and verify runs", () => {
 
     it("never makes a revision live that a racing ingest or verify changed after the read", async () => {
       await markVerified(PUBLIC_ID, rev("a"));
-      const get = env.VM_IMAGE_REGISTRY_BUCKET.get.bind(env.VM_IMAGE_REGISTRY_BUCKET);
-      vi.spyOn(env.VM_IMAGE_REGISTRY_BUCKET, "get").mockImplementationOnce(async (key: string) => {
+      const batch = env.DB.batch.bind(env.DB);
+      vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
         await env.DB.prepare("UPDATE scenario_revisions SET state = 'ready'").run();
-        return get(key);
+        return batch(statements);
       });
       await expect(promote(rev("a"), null)).rejects.toMatchObject({ status: 409, code: "live_revision_changed" });
       expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBeNull();
@@ -225,12 +244,15 @@ describe("promotion, rollback and verify runs", () => {
       expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
     });
 
-    it("moves live_rev, applies the catalog with namespaced ids and updates platform caches, under the drain too", async () => {
+    it("moves live_rev and updates platform caches, under the drain too, and leaves the catalog to the job", async () => {
       await markVerified(PUBLIC_ID, rev("a"));
       await drain();
-      expect(await promote(rev("a"), null)).toEqual({ liveRev: rev("a") });
+      expect(await moveLiveRevision({ scenarioId: PUBLIC_ID, rev: rev("a"), liveRev: null, kind: "promote", actorUserId: ADMIN }))
+        .toEqual({ liveRev: rev("a") });
       expect(await scenarioRow(PUBLIC_ID)).toEqual({ live_rev: rev("a"), candidate_rev: rev("a") });
       expect((await revisionRow(PUBLIC_ID, rev("a")))?.live_at).toEqual(expect.any(Number));
+      expect(await catalogRow()).toBeNull();
+      await applyCatalog(rev("a"), PUBLIC_ID);
       const catalog = await env.DB.prepare("SELECT catalog_json, source_revision FROM course_catalogs WHERE scope_key = 'public'")
         .first<{ catalog_json: string; source_revision: string }>();
       expect(catalog?.source_revision).toBe(rev("a"));
@@ -239,44 +261,6 @@ describe("promotion, rollback and verify runs", () => {
         .toEqual([["00-operating-model", null], ["01-broken-nginx", PUBLIC_ID]]);
       expect((await until(() => desiredDoc(PLATFORM), (doc) => doc?.cached_images.includes(image) === true))?.cached_images)
         .toEqual([image]);
-    });
-
-    it("holds a promotion whose catalog would strand an active run", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      const { runId } = await learnerStart(LEARNER);
-      // The next commit drops the lecture the learner is in.
-      const dropped = structuredClone(bundleFixture);
-      dropped.course_catalog.courses[0]!.lectures.splice(1, 1);
-      await publish(rev("b"), image, null, dropped);
-      // The same content as a verified revision: verified without a run.
-      expect((await revisionRow(PUBLIC_ID, rev("b")))?.state).toBe("verified");
-      expect((await scenarioRow(PUBLIC_ID))?.candidate_rev).toBe(rev("b"));
-      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ status: 409, code: "active_runs_would_lose_access" });
-      await env.DB.prepare("UPDATE scenario_runs SET state = 'completed', completed_at = 1, active_key = NULL WHERE run_id = ?1")
-        .bind(runId).run();
-      await promote(rev("b"), rev("a"));
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("b"));
-    });
-
-    it("holds the unit guard in the move itself, against a start that commits after the check", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      const dropped = structuredClone(bundleFixture);
-      dropped.course_catalog.courses[0]!.lectures.splice(1, 1);
-      await publish(rev("b"), image, null, dropped);
-      // A learner start commits between the check and the move's own write.
-      const batch = env.DB.batch.bind(env.DB);
-      let started = "";
-      vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
-        started = (await learnerStart(LEARNER)).runId;
-        return batch(statements);
-      });
-      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ status: 409, code: "active_runs_would_lose_access" });
-      expect(started).not.toBe("");
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("a"));
-      expect((await catalogRow())?.source_revision).toBe(rev("a"));
-      expect((await revisionRow(PUBLIC_ID, rev("b")))?.live_at).toBeNull();
     });
 
     it("starts learners on the new live revision while an older run keeps its snapshot", async () => {
@@ -390,31 +374,6 @@ describe("promotion, rollback and verify runs", () => {
       expect(await rollback(rev("a"), rev("b"))).toEqual({ liveRev: rev("a") });
       // The move's writer lease is closed again, so the next sweep can start.
       expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM image_registry_operation_writers WHERE released_at IS NULL").first("n")).toBe(0);
-    });
-  });
-
-  describe("course catalog", () => {
-    it("moves only forward: a lagging promotion and a rollback leave the newer catalog", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      expect((await catalogRow())?.source_revision).toBe(rev("a"));
-      // A newer bundle moves the catalog forward.
-      await publish(rev("b"), image, null, retitled("Linux operations, second edition"));
-      await promote(rev("b"), rev("a"));
-      const newer = await catalogRow();
-      expect(newer?.source_revision).toBe(rev("b"));
-      expect(newer?.catalog_json).toContain("second edition");
-      // A rollback to the older bundle keeps the catalog.
-      await rollback(rev("a"), rev("b"));
-      expect(await catalogRow()).toEqual(newer);
-      // So does a promotion of a candidate from the older bundle.
-      await liftRevisionHold({ scenarioId: PUBLIC_ID, rev: rev("b"), actorUserId: ADMIN });
-      await promote(rev("b"), rev("a"));
-      await env.DB.prepare("UPDATE scenarios SET candidate_rev = ?1 WHERE id = ?2").bind(rev("a"), PUBLIC_ID).run();
-      await env.DB.prepare("UPDATE scenario_revisions SET live_at = NULL WHERE rev = ?1").bind(rev("a")).run();
-      await promote(rev("a"), rev("b"));
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("a"));
-      expect(await catalogRow()).toEqual(newer);
     });
   });
 
@@ -614,7 +573,7 @@ describe("promotion, rollback and verify runs", () => {
       await promote(rev("b"), rev("a"));
       expect((await digestsOf(rev("b")))!.restore_verified_at).toBe(7);
       // Withdrawn on the live revision: the next push does not bring it back.
-      await clearRestoreVerified(PUBLIC_ID, rev("b"));
+      await restoreVerified(rev("b"), null);
       await publish(rev("c"), image, null, reworded);
       await markVerified(PUBLIC_ID, rev("c"));
       await promote(rev("c"), rev("b"));
@@ -650,60 +609,22 @@ describe("promotion, rollback and verify runs", () => {
     const listed = async (at: string) =>
       (await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.revisions.find((revision) => revision.rev === at)!;
 
-    it("does not move, and is refused when its catalog is published", async () => {
+    it("does not move: the catalog is its commit's job's", async () => {
       await markVerified(PUBLIC_ID, rev("a"));
       await promote(rev("a"), null);
       const live = (await revisionRow(PUBLIC_ID, rev("a")))!.live_at;
-      // The same bundle again: the catalog moves to it once, the lab never.
-      await publish(rev("b"), image, null, bundleFixture, rev("a"));
-      expect(await listed(rev("b"))).toMatchObject({ sameAsLive: true, catalogPending: true, state: "verified" });
+      await publish(rev("b"), image, null, retitled("Linux operations, second edition"), rev("a"));
+      expect(await listed(rev("b"))).toMatchObject({ sameAsLive: true, state: "verified" });
       expect(await listed(rev("a"))).toMatchObject({ sameAsLive: false });
-      expect(await promote(rev("b"), rev("a"))).toEqual({ liveRev: rev("a") });
+      await expect(moveLiveRevision({ scenarioId: PUBLIC_ID, rev: rev("b"), liveRev: rev("a"), kind: "promote", actorUserId: ADMIN }))
+        .rejects.toMatchObject({ code: "revision_unchanged" });
       expect(await scenarioRow(PUBLIC_ID)).toEqual({ live_rev: rev("a"), candidate_rev: rev("b") });
-      expect((await catalogRow())?.source_revision).toBe(rev("b"));
+      expect((await catalogRow())?.source_revision).toBe(rev("a"));
       expect((await revisionRow(PUBLIC_ID, rev("b")))!.live_at).toBeNull();
       expect((await revisionRow(PUBLIC_ID, rev("a")))!.live_at).toBe(live);
-      expect(await listed(rev("b"))).toMatchObject({ sameAsLive: true, catalogPending: false });
-      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ code: "revision_unchanged" });
       // Another guest contract is another lab.
       await env.DB.prepare("UPDATE scenario_revisions SET guest_contract = 2 WHERE rev = ?1").bind(rev("a")).run();
       expect(await listed(rev("b"))).toMatchObject({ sameAsLive: false });
-    });
-
-    /** Rev b: rev a's lab with another catalog. */
-    async function sameLab(bundle: typeof bundleFixture) {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      await publish(rev("b"), image, null, bundle, rev("a"));
-    }
-
-    it("publishes a catalog-only change without a move, for the scope's administrators only", async () => {
-      await sameLab(retitled("Linux operations, second edition"));
-      await expect(promote(rev("b"), rev("a"), ORG_OWNER)).rejects.toMatchObject({ status: 404 });
-      await expect(promote(rev("b"), null)).rejects.toMatchObject({ code: "live_revision_changed" });
-      expect((await catalogRow())?.source_revision).toBe(rev("a"));
-      await promote(rev("b"), rev("a"));
-      expect((await catalogRow())?.catalog_json).toContain("second edition");
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("a"));
-    });
-
-    it("holds a catalog that would strand an active run, in the write too", async () => {
-      const dropped = structuredClone(bundleFixture);
-      dropped.course_catalog.courses[0]!.lectures.splice(1, 1);
-      await sameLab(dropped);
-      // A learner start commits between the check and the write.
-      const batch = env.DB.batch.bind(env.DB);
-      let started = "";
-      vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
-        started = (await learnerStart(LEARNER)).runId;
-        return batch(statements);
-      });
-      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ code: "active_runs_would_lose_access" });
-      expect(started).not.toBe("");
-      expect((await catalogRow())?.source_revision).toBe(rev("a"));
-      // And in the check, while the run goes on.
-      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ code: "active_runs_would_lose_access" });
-      expect((await catalogRow())?.source_revision).toBe(rev("a"));
     });
   });
 
@@ -875,20 +796,21 @@ describe("promotion, rollback and verify runs", () => {
       await promote(rev("a"), null);
     });
 
-    it("pokes the scope's automatic source once the run is settled, and never a manual one", async () => {
-      const source = (promotion: string) => env.DB.prepare(
+    it("pokes the scope's source once the run is settled, whatever its promotion column says, and never a disconnected one", async () => {
+      const source = (promotion: string, disconnectedAt: number | null = null) => env.DB.prepare(
         `INSERT INTO scenario_sources (scope_key, github_installation_id, github_repository_id, github_repository,
-            default_branch, mode, bound_by_user_id, promotion)
-          VALUES ('public', 7, 42, 'intar/labs', 'main', 'push', ?1, ?2)
-          ON CONFLICT (scope_key) DO UPDATE SET promotion = excluded.promotion, poked_at = NULL`,
-      ).bind(ADMIN, promotion).run();
+            default_branch, mode, bound_by_user_id, promotion, disconnected_at)
+          VALUES ('public', 7, 42, 'intar/labs', 'main', 'push', ?1, ?2, ?3)
+          ON CONFLICT (scope_key) DO UPDATE SET promotion = excluded.promotion, disconnected_at = excluded.disconnected_at,
+            poked_at = NULL`,
+      ).bind(ADMIN, promotion, disconnectedAt).run();
       const poked = () => env.DB.prepare("SELECT poked_at FROM scenario_sources WHERE scope_key = 'public'").first<number | null>("poked_at");
-      await source("manual");
+      await source("automatic", 1);
       const first = await verify();
       sendVm(ws, PLATFORM, verifyVm(first.runId, verifyLab({ steps: [], done: true, passed: false, pre_done: true })));
       await until(() => runOf(first.runId), (run) => run?.active_key === null);
       expect(await poked()).toBeNull();
-      await source("automatic");
+      await source("manual");
       const second = await verify();
       sendVm(ws, PLATFORM, verifyVm(second.runId, verifyLab({ steps: [], done: true, passed: true, pre_done: true })));
       expect(await until(poked, (at) => at !== null)).not.toBeNull();
@@ -1022,7 +944,7 @@ describe("promotion, rollback and verify runs", () => {
       expect(row).toMatchObject({ state: "verified", verify_run_id: null });
       expect((await until(() => runOf(runId), (run) => run?.delete_requested_at !== null))?.delete_requested_at).not.toBeNull();
       const listed = (await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.revisions.find((revision) => revision.rev === rev("a"))!;
-      expect(listed).toMatchObject({ canVerifyRestore: false, restoreVerifyReport: { restored: true } });
+      expect(listed).toMatchObject({ restoreVerifyReport: { restored: true } });
       expect(listed.restoreVerifiedAt).not.toBeNull();
       // Once is enough.
       await until(() => runOf(runId), (run) => run?.active_key === null);
@@ -1064,9 +986,9 @@ describe("promotion, rollback and verify runs", () => {
       const restored = await learnerStart(LEARNER_2);
       expect(restored.hostId).toBe(PLATFORM);
       expect(await vmOf()).toMatchObject({ run_id: restored.runId, mode: "learn", may_restore: true });
-      // Withdrawn: the next learner cold-boots again.
-      expect(await clearRestoreVerified(PUBLIC_ID, rev("a"))).toBe(true);
-      expect((await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.revisions[0]).toMatchObject({ restoreVerifiedAt: null, canVerifyRestore: true });
+      // Without it, as before the check: the next learner cold-boots again.
+      await env.DB.prepare("UPDATE scenario_revisions SET restore_verified_at = NULL WHERE scenario_id = ?1").bind(PUBLIC_ID).run();
+      expect((await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.revisions[0]).toMatchObject({ restoreVerifiedAt: null });
       await createFixtureMember({ d1: env.DB, userId: "learner-3" });
       const after = await learnerStart("learner-3");
       expect(await vmOf()).toMatchObject({ run_id: after.runId });
@@ -1094,7 +1016,7 @@ describe("promotion, rollback and verify runs", () => {
       expect(row).toMatchObject({ state: "verified", verify_run_id: null, restore_verify_run_id: runId });
       expect(row!.restore_verified_at).not.toBeNull();
       // A late report of that run, after a second check began, leaves the second one alone.
-      await clearRestoreVerified(PUBLIC_ID, rev("a"));
+      await env.DB.prepare("UPDATE scenario_revisions SET restore_verified_at = NULL WHERE scenario_id = ?1").bind(PUBLIC_ID).run();
       await until(() => runOf(runId), (run) => run?.active_key === null);
       const second = await check();
       sendVm(ws, PLATFORM, { ...restoredVm(runId, true), updated_at_unix_ms: Date.now() + 5 });
