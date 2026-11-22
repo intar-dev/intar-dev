@@ -49,6 +49,22 @@ pub struct DirectBootQemuCommand {
 }
 
 #[must_use]
+/// QEMU's `-machine` (without `accel`) and `-cpu` for `arch` under
+/// `accelerator`.
+pub(crate) fn machine_and_cpu(arch: BuildArch, accelerator: &str) -> (&'static str, &'static str) {
+    let machine = match (arch, accelerator) {
+        (BuildArch::Amd64, _) => "q35",
+        (BuildArch::Arm64, "kvm") => "virt,its=off",
+        (BuildArch::Arm64, _) => "virt",
+    };
+    let cpu = match (accelerator, arch) {
+        ("tcg", BuildArch::Arm64) => "max,pauth-impdef=on",
+        ("tcg", BuildArch::Amd64) => "max",
+        _ => "host",
+    };
+    (machine, cpu)
+}
+
 pub fn render_direct_boot_qemu_command(input: &DirectBootQemuInput<'_>) -> DirectBootQemuCommand {
     let accelerator = input.config.accelerator.trim();
     // A PC for amd64, QEMU's own board for arm64. Under emulation there is no
@@ -60,16 +76,7 @@ pub fn render_direct_boot_qemu_command(input: &DirectBootQemuInput<'_>) -> Direc
     // hardware, a guest with several processors and that service stops soon
     // after its user space starts (the RCU thread starves); without it the
     // devices use their plain interrupt lines, which is all these VMs need.
-    let machine = match (input.config.arch(), accelerator) {
-        (BuildArch::Amd64, _) => "q35",
-        (BuildArch::Arm64, "kvm") => "virt,its=off",
-        (BuildArch::Arm64, _) => "virt",
-    };
-    let cpu = match (accelerator, input.config.arch()) {
-        ("tcg", BuildArch::Arm64) => "max,pauth-impdef=on",
-        ("tcg", BuildArch::Amd64) => "max",
-        _ => "host",
-    };
+    let (machine, cpu) = machine_and_cpu(input.config.arch(), accelerator);
     let args = vec![
         "-display".to_string(),
         "none".to_string(),

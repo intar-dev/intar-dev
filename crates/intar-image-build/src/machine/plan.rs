@@ -74,6 +74,29 @@ pub fn plan_build(
     target: &BuildTarget,
     expected_key: Option<&OciDigest>,
 ) -> Result<BuildPlan> {
+    plan(bundle, target, expected_key, false)
+}
+
+/// The plan of a cluster's management machine, which only its cluster's
+/// build runs: the cluster's credentials go in after its stages.
+pub(crate) fn plan_cluster_management(
+    bundle: &SourceBundleV2,
+    scenario: &str,
+    machine: &str,
+) -> Result<BuildPlan> {
+    let target = BuildTarget::Machine {
+        scenario: scenario.to_owned(),
+        machine: machine.to_owned(),
+    };
+    plan(bundle, &target, None, true)
+}
+
+fn plan(
+    bundle: &SourceBundleV2,
+    target: &BuildTarget,
+    expected_key: Option<&OciDigest>,
+    cluster_management: bool,
+) -> Result<BuildPlan> {
     if let Err(problems) = validate_bundle(bundle) {
         bail!("the bundle is invalid:\n{}", problems.join("\n"));
     }
@@ -103,6 +126,14 @@ pub fn plan_build(
                 .iter()
                 .find(|candidate| candidate.name == *machine)
                 .with_context(|| format!("scenario `{scenario}` has no machine `{machine}`"))?;
+            match &spec.cluster {
+                None => {}
+                Some(member) if cluster_management && !member.role.is_node() => {}
+                Some(member) => bail!(
+                    "machine `{machine}` is built by its cluster `{}`, not on its own",
+                    member.cluster
+                ),
+            }
             let keys = build_keys(found, &bundle.images).map_err(anyhow::Error::msg)?;
             let key = keys.machines.get(machine).context("machine key")?.clone();
             (key, Some(spec.from.as_str()), Some(spec))
@@ -273,13 +304,80 @@ fn encode_stage(stage: &PlannedStage) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use intar_contracts::scenario::{MachineV1, ScenarioV1};
 
     pub(crate) fn bundle() -> SourceBundleV2 {
         let bytes = include_bytes!("../../tests/fixtures/broken-nginx.json");
         serde_json::from_slice(bytes).expect("fixture bundle")
+    }
+
+    /// The fixture with a cluster `lab`: `webserver` manages it, `cp1` is
+    /// its control plane and `wk1` its worker.
+    pub(crate) fn clustered() -> SourceBundleV2 {
+        use intar_contracts::scenario::{ClusterRole, ClusterV1, MachineClusterV1};
+        let mut bundle = bundle();
+        let scenario = &mut bundle.scenarios[0];
+        let member = |role| {
+            Some(MachineClusterV1 {
+                cluster: "lab".to_owned(),
+                role,
+            })
+        };
+        for (name, role) in [
+            ("wk1", ClusterRole::Worker),
+            ("cp1", ClusterRole::Controlplane),
+        ] {
+            let mut node = scenario.machines[0].clone();
+            node.name = name.to_owned();
+            node.from = "talos".to_owned();
+            node.disk_mib = 10240;
+            node.terminal = false;
+            node.defer.clear();
+            node.env.clear();
+            node.setup.clear();
+            node.ready.clear();
+            node.cluster = member(role);
+            scenario.machines.push(node);
+        }
+        scenario.machines[0].cluster = member(ClusterRole::Management);
+        scenario.clusters = vec![ClusterV1 {
+            name: "lab".to_owned(),
+            talos: "v1.14.6".to_owned(),
+            kubernetes: "v1.37.1".to_owned(),
+            patches: Vec::new(),
+        }];
+        bundle
+    }
+
+    #[test]
+    fn a_cluster_machine_is_built_only_by_its_cluster() {
+        let bundle = clustered();
+        let target = |machine: &str| BuildTarget::Machine {
+            scenario: "broken-nginx".to_owned(),
+            machine: machine.to_owned(),
+        };
+        for machine in ["cp1", "webserver"] {
+            let refused = plan_build(&bundle, &target(machine), None).expect_err("refused");
+            assert!(
+                refused.to_string().contains("built by its cluster `lab`"),
+                "{refused}"
+            );
+        }
+        let keys = build_keys(&bundle.scenarios[0], &bundle.images).expect("keys");
+        let management =
+            plan_cluster_management(&bundle, "broken-nginx", "webserver").expect("plans");
+        assert_eq!(management.build_key, keys.machines["webserver"]);
+        assert_eq!(
+            management
+                .stages
+                .iter()
+                .map(|stage| stage.name.as_str())
+                .collect::<Vec<_>>(),
+            ["packages", "break-nginx"]
+        );
+        assert!(plan_cluster_management(&bundle, "broken-nginx", "cp1").is_err());
     }
 
     fn webserver() -> BuildTarget {

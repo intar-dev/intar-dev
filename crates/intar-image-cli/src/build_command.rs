@@ -13,8 +13,9 @@ use intar_contracts::oci::OciDigest;
 use intar_contracts::scenario::SpecMode;
 use intar_contracts::source::SourceBundleV2;
 use intar_image_build::{
-    BuildArch, BuildTarget, MachineBuildRequest, QemuBuildConfig, build_machine_image,
-    reconstruct_machine_disk, sha256_file_hex, verify_machine_image,
+    BuildArch, BuildTarget, ClusterBuildRequest, MachineBuildRequest, QemuBuildConfig,
+    build_cluster_images, build_machine_image, reconstruct_machine_disk, sha256_file_hex,
+    verify_machine_image,
 };
 use intar_image_scenario::loader::compile;
 use zpm::machine::{CMDLINE_FILE, Cache, Plan};
@@ -33,7 +34,9 @@ const BOOT_SECONDS: u64 = 120;
 
 #[derive(Debug, Args)]
 pub(crate) struct BuildCommand {
-    /// What to build: SCENARIO/MACHINE, image:NAME or base.
+    /// What to build: SCENARIO/MACHINE, image:NAME, base, or
+    /// cluster:SCENARIO/CLUSTER for every machine of a Talos cluster (not
+    /// booted yet).
     target: String,
     /// The architecture to build for: amd64 or arm64. One that is not this
     /// computer's own is built and booted by emulation.
@@ -98,7 +101,6 @@ fn target_of(text: &str) -> Result<BuildTarget> {
 }
 
 pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
-    let target = target_of(&args.target)?;
     // One left by an earlier build into this directory describes that build.
     crate::push_command::BuiltImage::forget(&args.out)?;
     let arch = BuildArch::parse(&args.arch)
@@ -119,6 +121,16 @@ pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
     // one image have the same key, and may run beside each other.
     config.work_root = config.work_root.join(arch.debian());
 
+    if let Some(cluster) = args.target.strip_prefix("cluster:") {
+        let Some((scenario, cluster)) = cluster.split_once('/') else {
+            bail!(
+                "a cluster target is cluster:SCENARIO/CLUSTER, not '{}'",
+                args.target
+            );
+        };
+        return build_cluster(bundle, scenario, cluster, config, &args.out);
+    }
+    let target = target_of(&args.target)?;
     let output = build_machine_image(&MachineBuildRequest {
         bundle: bundle.clone(),
         target: target.clone(),
@@ -176,6 +188,43 @@ pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
         booted.seconds, booted.accelerator, booted.cpus, booted.tasks, booted.passed
     );
     built.write(&args.out)
+}
+
+/// Bakes every image of a cluster and checks each as a host would.
+// ponytail: no boot check yet; the cluster's boot is checked by hand until
+// the runtimes can start a cluster (S4/S5).
+fn build_cluster(
+    bundle: SourceBundleV2,
+    scenario: &str,
+    cluster: &str,
+    config: QemuBuildConfig,
+    out: &Path,
+) -> Result<()> {
+    let output = build_cluster_images(&ClusterBuildRequest {
+        bundle,
+        scenario: scenario.to_owned(),
+        cluster: cluster.to_owned(),
+        expected_key: None,
+        config,
+        output_dir: out.to_owned(),
+    })?;
+    println!("cluster_key={}", output.cluster_key.as_str());
+    for (machine, (key, image)) in &output.images {
+        verify_machine_image(out, &image.manifest_digest)?;
+        println!(
+            "machine={machine} build_key={} manifest={} disk_bytes={}",
+            key.as_str(),
+            image.manifest_digest.as_str(),
+            image.disk_bytes
+        );
+    }
+    println!(
+        "bake_s={:.1} management_s={:.1} log={}",
+        output.bake_seconds,
+        output.management_seconds,
+        output.log_path.display()
+    );
+    Ok(())
 }
 
 struct Boot<'a> {

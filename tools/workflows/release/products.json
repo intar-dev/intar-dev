@@ -30,6 +30,7 @@
     "runner": "namespace-profile-linux-amd64-chonky",
     "paths": [
       "crates/intar-builder/**",
+      "crates/dhd/**",
       "crates/intar-contracts/**",
       "crates/intar-image-build/**",
       "crates/intar-image-scenario/**",
@@ -48,6 +49,7 @@
     "runner": "namespace-profile-linux-amd64-chonky",
     "paths": [
       "crates/intar-image-cli/**",
+      "crates/dhd/**",
       "crates/intar-contracts/**",
       "crates/intar-image-build/**",
       "crates/intar-image-scenario/**",

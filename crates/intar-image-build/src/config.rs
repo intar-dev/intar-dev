@@ -161,6 +161,10 @@ pub struct LayeredBuildConfig {
     pub oci_cache_root: Option<PathBuf>,
     #[serde(default)]
     pub checkpoint_cache_root: Option<PathBuf>,
+    /// Where a cluster build keeps its pinned Talos and Kubernetes downloads
+    /// across builds; `work_root/talos-cache` when unset.
+    #[serde(default)]
+    pub talos_cache_root: Option<PathBuf>,
     #[serde(default = "default_layered_use_cache")]
     pub use_cache: bool,
     #[serde(default = "default_oci_cache_bytes")]
@@ -183,6 +187,7 @@ impl Default for LayeredBuildConfig {
             debian_image_arm64: default_debian_image_arm64(),
             oci_cache_root: None,
             checkpoint_cache_root: None,
+            talos_cache_root: None,
             use_cache: default_layered_use_cache(),
             oci_cache_bytes: default_oci_cache_bytes(),
             checkpoint_cache_bytes: default_checkpoint_cache_bytes(),

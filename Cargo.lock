@@ -3934,10 +3934,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "dhd",
  "fatfs",
  "flate2",
  "fs2",
  "intar-contracts",
+ "reqwest",
  "ring",
  "russh",
  "rustix",

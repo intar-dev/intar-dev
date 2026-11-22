@@ -7,6 +7,8 @@
 
 pub mod check_passes;
 pub mod krec;
+#[cfg(unix)]
+pub mod lab_hub;
 pub mod recordings;
 pub mod replay_compose;
 pub mod replay_media;

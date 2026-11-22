@@ -2,12 +2,12 @@
 //! `SourceBundleV2` (#311 §6): plan, build VM, OCI output.
 
 mod host;
-mod output;
+pub(crate) mod output;
 pub(crate) mod plan;
 mod qmp;
 pub(crate) mod script;
 mod shutdown;
-mod vm;
+pub(crate) mod vm;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,6 +57,23 @@ pub fn machine_build_log_path(work_root: &Path, build_key: &OciDigest) -> PathBu
     work_root.join(format!("machine-{}.build.log", build_key.hex()))
 }
 
+/// The architecture `config` builds, refused unless the host can build it:
+/// Linux, KVM for the host's own architecture and emulation for another.
+pub(crate) fn build_arch(config: &QemuBuildConfig) -> Result<BuildArch> {
+    let arch = BuildArch::parse(&config.target_arch).with_context(|| {
+        format!(
+            "no machine images exist for architecture '{}'",
+            config.target_arch
+        )
+    })?;
+    let native = BuildArch::host() == Some(arch);
+    ensure!(
+        cfg!(target_os = "linux") && config.accelerator == if native { "kvm" } else { "tcg" },
+        "machine builds need Linux, with KVM for the host's own architecture and emulation (tcg) for another"
+    );
+    Ok(arch)
+}
+
 /// Plan, build and write one image.
 ///
 /// # Errors
@@ -67,20 +84,7 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
         &request.target,
         request.expected_key.as_ref(),
     )?;
-    let arch = BuildArch::parse(&request.config.target_arch).with_context(|| {
-        format!(
-            "no machine images exist for architecture '{}'",
-            request.config.target_arch
-        )
-    })?;
-    // The host's own architecture is built with KVM and nothing else. Another
-    // one has no KVM to use and is emulated.
-    let native = BuildArch::host() == Some(arch);
-    ensure!(
-        cfg!(target_os = "linux")
-            && request.config.accelerator == if native { "kvm" } else { "tcg" },
-        "machine builds need Linux, with KVM for the host's own architecture and emulation (tcg) for another"
-    );
+    let arch = build_arch(&request.config)?;
     let started = Instant::now();
     let base = ensure_platform_base(&request.config)?;
     let base_seconds = started.elapsed().as_secs_f64();
@@ -92,7 +96,7 @@ pub fn build_machine_image(request: &MachineBuildRequest) -> Result<MachineBuild
         .tempdir_in(work_root)?;
     let started = Instant::now();
     fs::create_dir_all(&request.output_dir)?;
-    let raw = vm::build_disk(&plan, &request.config, &base, work.path(), &log_path)?;
+    let raw = vm::build_disk(&plan, &request.config, &base, work.path(), &log_path, None)?;
     let build_seconds = started.elapsed().as_secs_f64();
     let started = Instant::now();
     let image = write_machine_image(
