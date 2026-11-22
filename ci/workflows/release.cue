@@ -198,6 +198,12 @@ let _gitCliff = {
 		"fail-fast": false
 	}
 	"runs-on": "${{ matrix.runner }}"
+	// The app's signing certificate and notary key live in the macos-signing
+	// environment, which only main can use; no other build, and no dry run,
+	// sees them.
+	if !#dryRun {
+		environment: "${{ matrix.project == 'intar-desktop' && 'macos-signing' || '' }}"
+	}
 	permissions: contents: "read"
 	steps: [
 		gha.#Checkout & {
@@ -259,7 +265,16 @@ let _gitCliff = {
 		{
 			name: "Build the app's bundle"
 			if:   "matrix.project == 'intar-desktop'"
-			env: VERSION: "${{ matrix.version }}"
+			env: {
+				VERSION: "${{ matrix.version }}"
+				if !#dryRun {
+					MACOS_CERT_P12_BASE64: "${{ secrets.MACOS_CERT_P12_BASE64 }}"
+					MACOS_CERT_PASSWORD:   "${{ secrets.MACOS_CERT_PASSWORD }}"
+					ASC_KEY_ID:            "${{ secrets.ASC_KEY_ID }}"
+					ASC_ISSUER_ID:         "${{ secrets.ASC_ISSUER_ID }}"
+					ASC_KEY_P8:            "${{ secrets.ASC_KEY_P8 }}"
+				}
+			}
 			#StepTask & {#task: "release-build-jumper-macos"}
 		},
 		{

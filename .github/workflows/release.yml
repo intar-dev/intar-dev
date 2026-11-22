@@ -96,6 +96,7 @@ jobs:
     name: Build ${{ matrix.tag }}
     needs: plan
     if: needs.plan.outputs.matrix != '[]'
+    environment: ${{ matrix.project == 'intar-desktop' && 'macos-signing' || '' }}
     permissions:
       contents: read
     runs-on: ${{ matrix.runner }}
@@ -138,6 +139,11 @@ jobs:
       - name: Build the app's bundle
         if: matrix.project == 'intar-desktop'
         env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
           VERSION: ${{ matrix.version }}
         run: cuenv task -p ci --package ci release-build-jumper-macos
       - name: Build release artifacts
