@@ -210,7 +210,10 @@ describe("run recap model", () => {
 
     const solved = renderToStaticMarkup(
       createElement(RunRecap, {
-        run: { ...tasks, tasks: tasks.tasks?.map((t) => ({ ...t, status: "pass" as const })) },
+        run: {
+          ...tasks,
+          tasks: (tasks.tasks ?? []).map((t) => ({ ...t, status: "pass" as const })),
+        },
         nextAction: createElement("button", { type: "button" }, "Continue"),
       }),
     ).replace(/<[^>]+>/g, "");
