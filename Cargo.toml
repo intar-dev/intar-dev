@@ -102,7 +102,7 @@ opentelemetry-otlp = { version = "=0.33.1", default-features = false, features =
 tracing-opentelemetry = { version = "=0.34.0", default-features = false }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 unicode-segmentation = "=1.13.3"
-url = { version = "=2.5.8", features = ["serde"] }
+url = { version = "=2.5.9", features = ["serde"] }
 windows-native-keyring-store = "=1.1.0"
 uuid = { version = "=1.29.0", features = ["serde", "v4"] }
 zstd = "=0.14.3"
