@@ -509,6 +509,7 @@ mod tests {
                 chunk_size: CHUNK as u64,
                 chunks,
             },
+            talos: None,
         };
         let disk = |chunks| disk_for(own, chunks);
         let image_of = |config: &MachineConfigV1| {

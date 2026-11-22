@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import compileDigest from "@/generated/fixtures/source/compile-digest-v2.json";
+import type { SourceBundleV2 } from "@/generated/contracts/source-bundle-v2";
 import { MAX_SOURCE_BUNDLE_JSON_BYTES, readSourceBundle, sourceCompileDigest } from "./source-bundle";
+import { validateBundle } from "./validate";
 
 const fixture = (name: string) =>
   readFileSync(new URL(`../../generated/fixtures/scenario/${name}`, import.meta.url), "utf8");
@@ -70,6 +72,32 @@ describe("readSourceBundle", () => {
     ["an unknown field", gz({ ...bundle(), extra: 1 })],
   ])("refuses %s with 400", async (_name, bytes) => {
     await expect(readSourceBundle(bytes)).rejects.toMatchObject({ status: 400, code: "bundle_invalid" });
+  });
+
+  it("holds a sound Talos cluster back until clusters are accepted", async () => {
+    const value = bundle() as unknown as SourceBundleV2;
+    const scenario = value.scenarios[0]!;
+    const [mgmt] = scenario.machines;
+    scenario.machines.push({
+      ...mgmt!,
+      name: "cp1",
+      from: "talos",
+      disk_mib: 10240,
+      terminal: false,
+      defer: [],
+      env: {},
+      setup: [],
+      ready: [],
+      cluster: { cluster: "lab", role: "controlplane" },
+    });
+    mgmt!.cluster = { cluster: "lab", role: "management" };
+    scenario.clusters = [{ name: "lab", patches: [] }];
+    expect(validateBundle(value)).toEqual([]);
+    await expect(readSourceBundle(gz(value))).rejects.toMatchObject({
+      status: 400,
+      code: "bundle_invalid",
+      message: "scenario `broken-nginx`: Talos clusters are not accepted yet",
+    });
   });
 
   const refusals = JSON.parse(fixture("bundle-refusals.json")) as { name: string; bundle: unknown; problems: string[] }[];

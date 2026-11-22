@@ -96,10 +96,14 @@ export async function readSourceBundle(gzip: Uint8Array<ArrayBuffer>): Promise<S
   }
   const problems = validateBundle(value);
   if (problems.length) throw invalid(problems.join("\n"));
+  // ponytail: refused until hosted and desktop runs can start a cluster (Talos plan, slice S6).
+  for (const scenario of value.scenarios) {
+    if (scenario.clusters?.length) throw invalid(`scenario \`${scenario.slug}\`: Talos clusters are not accepted yet`);
+  }
   // The stored document's size does not depend on the build keys' values.
   const placeholder = `sha256:${"0".repeat(64)}`;
   for (const scenario of value.scenarios) {
-    const keys = { images: {}, machines: Object.fromEntries(scenario.machines.map((machine) => [machine.name, placeholder])) };
+    const keys = { images: {}, clusters: {}, machines: Object.fromEntries(scenario.machines.map((machine) => [machine.name, placeholder])) };
     const doc = canonicalJson(await scenarioRevision(scenario, `${scenario.slug}/${scenario.slug}`, keys));
     if (utf8Length(doc) > MAX_REVISION_DOC_BYTES) {
       throw invalid(`scenario \`${scenario.slug}\`: its stored document is over ${MAX_REVISION_DOC_BYTES} bytes`);

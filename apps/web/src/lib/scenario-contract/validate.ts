@@ -5,6 +5,8 @@
 
 import {
   IMAGE_FORMAT,
+  MAX_CLUSTER_PATCHES,
+  MAX_CLUSTERS,
   MAX_DISK_MIB,
   MAX_MACHINE_NAME_LEN,
   MAX_MACHINES,
@@ -13,8 +15,10 @@ import {
   MAX_READY_PER_MACHINE,
   MAX_SCRIPT_BYTES,
   MAX_TASKS_PER_MACHINE,
+  MIN_TALOS_DISK_MIB,
   PLATFORM_BASE_IMAGE,
   SOURCE_COMPILER_VERSION_V2,
+  TALOS_BASE_IMAGE,
 } from "@/generated/constants";
 import type {
   HintV1,
@@ -101,7 +105,7 @@ function imageGeometry(images: ImageV1[], problem: Problem): Map<string, number>
   const byName = new Map<string, ImageV1>();
   for (const image of images) {
     const { name } = image;
-    if (!isId(name) || name === PLATFORM_BASE_IMAGE) {
+    if (!isId(name) || name === PLATFORM_BASE_IMAGE || name === TALOS_BASE_IMAGE) {
       problem(`image \`${name}\`: not a valid image name`);
     }
     if (byName.has(name)) problem(`image \`${name}\`: declared twice`);
@@ -183,8 +187,29 @@ export function validate(scenario: ScenarioV1, images: ImageV1[]): string[] {
     if (machine.cpu_millis === 0 || machine.memory_mib === 0) {
       problem(`machine \`${name}\`: cpu and memory must be above zero`);
     }
+    const node = machine.cluster != null && machine.cluster.role !== "management";
+    if (node !== (machine.from === TALOS_BASE_IMAGE)) {
+      problem(`machine \`${name}\`: from is \`${TALOS_BASE_IMAGE}\` exactly on a cluster node`);
+    }
+    if (node) {
+      if (machine.disk_mib < MIN_TALOS_DISK_MIB) {
+        problem(`machine \`${name}\`: disk is smaller than a cluster node's ${MIN_TALOS_DISK_MIB} MiB`);
+      }
+      if (
+        machine.terminal ||
+        machine.defer.length > 0 ||
+        Object.keys(machine.env).length > 0 ||
+        machine.setup.length > 0 ||
+        machine.ready.length > 0 ||
+        scenario.tasks.some((task) => task.machine === name)
+      ) {
+        problem(`machine \`${name}\`: a cluster node has no terminal, defer, env, setup, ready or tasks`);
+      }
+    }
     const minimum = geometry.get(machine.from);
-    if (minimum === undefined) {
+    if (machine.from === TALOS_BASE_IMAGE) {
+      // A cluster node: no image geometry.
+    } else if (minimum === undefined) {
       problem(`machine \`${name}\`: from \`${machine.from}\` names no image`);
     } else if (machine.disk_mib < minimum) {
       problem(`machine \`${name}\`: disk is smaller than its image's ${minimum} MiB`);
@@ -204,6 +229,31 @@ export function validate(scenario: ScenarioV1, images: ImageV1[]): string[] {
     const spec = machineSpec(scenario, "", name, "verify");
     if (!spec || utf8Length(JSON.stringify(spec)) > MAX_MACHINE_SPEC_BYTES) {
       problem(`machine \`${name}\`: its spec is over ${MAX_MACHINE_SPEC_BYTES} bytes`);
+    }
+  }
+
+  const clusters = scenario.clusters ?? [];
+  if (clusters.length > MAX_CLUSTERS) problem(`a scenario has at most ${MAX_CLUSTERS} cluster`);
+  const clusterNames = new Set<string>();
+  for (const cluster of clusters) {
+    const { name } = cluster;
+    if (!isId(name)) problem(`cluster \`${name}\`: not a valid ID`);
+    if (clusterNames.has(name)) problem(`cluster \`${name}\`: declared twice`);
+    clusterNames.add(name);
+    if (cluster.patches.length > MAX_CLUSTER_PATCHES) {
+      problem(`cluster \`${name}\`: more than ${MAX_CLUSTER_PATCHES} patches`);
+    }
+    checkScripts(`cluster \`${name}\` patch`, cluster.patches, problem);
+    for (const role of ["controlplane", "management"] as const) {
+      const count = scenario.machines.filter(
+        (machine) => machine.cluster?.cluster === name && machine.cluster.role === role,
+      ).length;
+      if (count !== 1) problem(`cluster \`${name}\`: needs exactly one ${role} machine`);
+    }
+  }
+  for (const machine of scenario.machines) {
+    if (machine.cluster != null && !clusterNames.has(machine.cluster.cluster)) {
+      problem(`machine \`${machine.name}\`: cluster \`${machine.cluster.cluster}\` is not declared`);
     }
   }
 

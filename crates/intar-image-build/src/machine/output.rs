@@ -64,6 +64,7 @@ pub fn write_machine_image(
             cmdline: published_boot_cmdline(arch),
         },
         disk: disk.disk,
+        talos: None,
     })
 }
 

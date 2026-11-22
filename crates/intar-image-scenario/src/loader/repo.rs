@@ -323,6 +323,7 @@ fn machine(source: &Source, name: String, block: &Block) -> Loaded<MachineV1> {
         env: fields.string_map("env")?,
         setup: stages(source, &mut fields)?,
         ready,
+        cluster: None,
     };
     fields.done()?;
     Ok(machine)
@@ -423,6 +424,7 @@ fn scenario(source: &Source, block: &Block, directory: &str) -> Loaded<ScenarioV
         hints: hints(source, &mut fields)?,
         machines,
         tasks,
+        clusters: Vec::new(),
     };
     fields.done()?;
     Ok(scenario)

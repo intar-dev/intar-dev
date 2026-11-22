@@ -2,8 +2,9 @@
 // crates/intar-contracts/src/scenario/build_key.rs, which documents the
 // encoding. The golden vectors in fixtures/scenario/build-keys.json pin it.
 
-import { IMAGE_FORMAT, PLATFORM_BASE_IMAGE } from "@/generated/constants";
+import { IMAGE_FORMAT, PLATFORM_BASE_IMAGE, TALOS_RELEASE } from "@/generated/constants";
 import type {
+  ClusterV1,
   ImageV1,
   MachineV1,
   ScenarioV1,
@@ -14,6 +15,7 @@ import { byteOrder, sha256Digest } from "./canonical-json";
 export interface BuildKeys {
   images: Record<string, string>;
   machines: Record<string, string>;
+  clusters: Record<string, string>;
 }
 
 interface BuildRecord {
@@ -27,44 +29,76 @@ interface BuildRecord {
 
 const encoder = new TextEncoder();
 
-function key(record: BuildRecord): Promise<string> {
-  const chunks: Uint8Array[] = [];
-  const count = (length: number) => {
+class Encoding {
+  chunks: Uint8Array[] = [];
+  count(length: number) {
     const bytes = new Uint8Array(4);
     new DataView(bytes.buffer).setUint32(0, length);
-    chunks.push(bytes);
-  };
-  const put = (text: string) => {
+    this.chunks.push(bytes);
+  }
+  put(text: string) {
     const bytes = encoder.encode(text);
-    count(bytes.length);
-    chunks.push(bytes);
-  };
-  put(IMAGE_FORMAT);
-  put(record.kind);
-  put(record.parent);
-  const defer = [...new Set(record.defer)].sort(byteOrder);
-  count(defer.length);
-  defer.forEach(put);
-  const env = Object.entries(record.env ?? {}).sort(([a], [b]) => byteOrder(a, b));
-  count(env.length);
-  for (const [name, value] of env) {
-    put(name);
-    put(value ?? "");
+    this.count(bytes.length);
+    this.chunks.push(bytes);
   }
-  count(record.stages.length);
-  for (const stage of record.stages) {
-    put(stage.name);
-    put(stage.script);
+  digest(): Promise<string> {
+    const bytes = new Uint8Array(this.chunks.reduce((total, chunk) => total + chunk.length, 0));
+    let offset = 0;
+    for (const chunk of this.chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return sha256Digest(bytes);
   }
-  put(record.disk === null ? "" : String(record.disk));
+}
 
-  const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.length;
+function clusterKey(cluster: ClusterV1, machines: MachineV1[]): Promise<string> {
+  const e = new Encoding();
+  for (const text of [IMAGE_FORMAT, "cluster", TALOS_RELEASE, cluster.name]) e.put(text);
+  const nodes = machines.filter(
+    (machine) => machine.cluster?.cluster === cluster.name && machine.cluster.role !== "management",
+  );
+  e.count(nodes.length);
+  for (const node of nodes) {
+    e.put(node.name);
+    e.put(node.cluster!.role);
+    e.put(String(node.disk_mib));
   }
-  return sha256Digest(bytes);
+  e.count(cluster.patches.length);
+  for (const patch of cluster.patches) {
+    e.put(patch.name);
+    e.put(patch.script);
+  }
+  return e.digest();
+}
+
+function clusterMachineKey(cluster: string, name: string, role: string, own: string): Promise<string> {
+  const e = new Encoding();
+  for (const text of [IMAGE_FORMAT, "cluster-machine", cluster, name, role, own]) e.put(text);
+  return e.digest();
+}
+
+function key(record: BuildRecord): Promise<string> {
+  const e = new Encoding();
+  e.put(IMAGE_FORMAT);
+  e.put(record.kind);
+  e.put(record.parent);
+  const defer = [...new Set(record.defer)].sort(byteOrder);
+  e.count(defer.length);
+  for (const unit of defer) e.put(unit);
+  const env = Object.entries(record.env ?? {}).sort(([a], [b]) => byteOrder(a, b));
+  e.count(env.length);
+  for (const [name, value] of env) {
+    e.put(name);
+    e.put(value ?? "");
+  }
+  e.count(record.stages.length);
+  for (const stage of record.stages) {
+    e.put(stage.name);
+    e.put(stage.script);
+  }
+  e.put(record.disk === null ? "" : String(record.disk));
+  return e.digest();
 }
 
 /** The key of the platform base `trixie`. */
@@ -132,13 +166,27 @@ async function machineKey(
 
 /** The key of every machine of `scenario` and of every repository image. */
 export async function buildKeys(
-  scenario: Pick<ScenarioV1, "machines">,
+  scenario: Pick<ScenarioV1, "machines" | "clusters">,
   images: ImageV1[],
 ): Promise<BuildKeys> {
   const imageKeysByName = await imageKeys(images);
+  const clusters: Record<string, string> = {};
+  for (const cluster of scenario.clusters ?? []) {
+    clusters[cluster.name] = await clusterKey(cluster, scenario.machines);
+  }
   const machines: Record<string, string> = {};
   for (const machine of scenario.machines) {
-    machines[machine.name] = await machineKey(machine, imageKeysByName);
+    const member = machine.cluster;
+    if (member == null) {
+      machines[machine.name] = await machineKey(machine, imageKeysByName);
+      continue;
+    }
+    const cluster = clusters[member.cluster];
+    if (cluster === undefined) {
+      throw new Error(`machine \`${machine.name}\`: cluster \`${member.cluster}\` is not declared`);
+    }
+    const own = member.role === "management" ? await machineKey(machine, imageKeysByName) : "";
+    machines[machine.name] = await clusterMachineKey(cluster, machine.name, member.role, own);
   }
-  return { images: imageKeysByName, machines };
+  return { images: imageKeysByName, machines, clusters };
 }

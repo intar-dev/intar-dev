@@ -45,6 +45,11 @@ export const MAX_SCRIPT_BYTES = 65536;
 export const MAX_MARKDOWN_BYTES = 65536;
 export const MAX_MACHINE_SPEC_BYTES = 262144;
 export const MAX_DISK_MIB = 65536;
+export const TALOS_BASE_IMAGE = "talos";
+export const TALOS_RELEASE = "talos-v1.14.6-kubernetes-v1.37.1";
+export const MAX_CLUSTERS = 1;
+export const MAX_CLUSTER_PATCHES = 16;
+export const MIN_TALOS_DISK_MIB = 4096;
 
 export const runtimeEnvKeys = {
   sshAuthorizedKeysB64: "INTAR_SSH_AUTHORIZED_KEYS_B64",

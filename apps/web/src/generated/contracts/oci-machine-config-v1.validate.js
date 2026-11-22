@@ -3,7 +3,7 @@
 "use strict";
 export const validate = validate20;
 export default validate20;
-const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"MachineConfigV1","description":"The config blob of a machine image. The image's identity is its\nmanifest's digest.","type":"object","properties":{"architecture":{"description":"The machines the image boots on. Every config says it; only one of\n[`PREVIOUS_IMAGE_FORMAT`], written before the field existed, does not.\nRead it through [`MachineConfigV1::architecture`].","anyOf":[{"$ref":"#/$defs/Architecture"},{"type":"null"}]},"boot":{"$ref":"#/$defs/MachineBootV1"},"build_key":{"$ref":"#/$defs/OciDigest"},"disk":{"$ref":"#/$defs/MachineDiskV1"},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"image_format":{"type":"string"}},"additionalProperties":false,"required":["guest_contract","image_format","build_key","boot","disk"],"$defs":{"Architecture":{"description":"The processors machine images and Kino exist for.","type":"string","enum":["amd64","arm64"]},"MachineBootV1":{"type":"object","properties":{"cmdline":{"type":"string"}},"additionalProperties":false,"required":["cmdline"]},"MachineDiskV1":{"type":"object","properties":{"chunk_size":{"type":"integer","minimum":0},"chunks":{"description":"`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.","type":"array","items":{"type":"array","maxItems":3,"minItems":3,"prefixItems":[{"type":"integer","minimum":0},{"type":"integer","minimum":0,"maximum":4294967295},{"$ref":"#/$defs/Sha256Hex"}]}},"size_bytes":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["size_bytes","chunk_size","chunks"]},"OciDigest":{"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"Sha256Hex":{"description":"A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.","type":"string","pattern":"^[0-9a-f]{64}$"}}};
+const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"MachineConfigV1","description":"The config blob of a machine image. The image's identity is its\nmanifest's digest.","type":"object","properties":{"architecture":{"description":"The machines the image boots on. Every config says it; only one of\n[`PREVIOUS_IMAGE_FORMAT`], written before the field existed, does not.\nRead it through [`MachineConfigV1::architecture`].","anyOf":[{"$ref":"#/$defs/Architecture"},{"type":"null"}]},"boot":{"$ref":"#/$defs/MachineBootV1"},"build_key":{"$ref":"#/$defs/OciDigest"},"disk":{"$ref":"#/$defs/MachineDiskV1"},"guest_contract":{"type":"integer","minimum":0,"maximum":4294967295},"image_format":{"type":"string"},"talos":{"description":"Set on the image of a Talos cluster node. Runtimes boot it without\nKino and give it no port forwards.","anyOf":[{"$ref":"#/$defs/MachineTalosV1"},{"type":"null"}]}},"additionalProperties":false,"required":["guest_contract","image_format","build_key","boot","disk"],"$defs":{"Architecture":{"description":"The processors machine images and Kino exist for.","type":"string","enum":["amd64","arm64"]},"ClusterRole":{"oneOf":[{"type":"string","enum":["controlplane","worker"]},{"description":"The cluster's trixie machine with kubectl, talosctl and their\nconfigs, where the learner works.","type":"string","const":"management"}]},"MachineBootV1":{"type":"object","properties":{"cmdline":{"type":"string"}},"additionalProperties":false,"required":["cmdline"]},"MachineDiskV1":{"type":"object","properties":{"chunk_size":{"type":"integer","minimum":0},"chunks":{"description":"`[chunk_index, layer_index, raw_sha256]`; absent indexes are zero\nholes.","type":"array","items":{"type":"array","maxItems":3,"minItems":3,"prefixItems":[{"type":"integer","minimum":0},{"type":"integer","minimum":0,"maximum":4294967295},{"$ref":"#/$defs/Sha256Hex"}]}},"size_bytes":{"type":"integer","minimum":0}},"additionalProperties":false,"required":["size_bytes","chunk_size","chunks"]},"MachineTalosV1":{"description":"A Talos node's place on its cluster's lab network.","type":"object","properties":{"lab_ip":{"description":"Its baked address on the lab network, e.g. `172.31.0.2`.","type":"string"},"role":{"$ref":"#/$defs/ClusterRole"}},"additionalProperties":false,"required":["role","lab_ip"]},"OciDigest":{"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"Sha256Hex":{"description":"A SHA-256 as 64 lowercase hex digits. Hosts name files after these, so\nnothing else parses.","type":"string","pattern":"^[0-9a-f]{64}$"}}};
 const schema32 = {"description":"The processors machine images and Kino exist for.","type":"string","enum":["amd64","arm64"]};
 const schema33 = {"type":"object","properties":{"cmdline":{"type":"string"}},"additionalProperties":false,"required":["cmdline"]};
 const schema34 = {"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"};
@@ -205,6 +205,154 @@ return errors === 0;
 }
 validate21.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
 
+const schema37 = {"description":"A Talos node's place on its cluster's lab network.","type":"object","properties":{"lab_ip":{"description":"Its baked address on the lab network, e.g. `172.31.0.2`.","type":"string"},"role":{"$ref":"#/$defs/ClusterRole"}},"additionalProperties":false,"required":["role","lab_ip"]};
+const schema38 = {"oneOf":[{"type":"string","enum":["controlplane","worker"]},{"description":"The cluster's trixie machine with kubectl, talosctl and their\nconfigs, where the learner works.","type":"string","const":"management"}]};
+
+function validate23(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
+let vErrors = null;
+let errors = 0;
+const evaluated0 = validate23.evaluated;
+if(evaluated0.dynamicProps){
+evaluated0.props = undefined;
+}
+if(evaluated0.dynamicItems){
+evaluated0.items = undefined;
+}
+if(errors === 0){
+if(data && typeof data == "object" && !Array.isArray(data)){
+let missing0;
+if(((data.role === undefined) && (missing0 = "role")) || ((data.lab_ip === undefined) && (missing0 = "lab_ip"))){
+validate23.errors = [{instancePath,schemaPath:"#/required",keyword:"required",params:{missingProperty: missing0},message:"must have required property '"+missing0+"'"}];
+return false;
+}
+else {
+const _errs1 = errors;
+for(const key0 in data){
+if(!((key0 === "lab_ip") || (key0 === "role"))){
+validate23.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
+return false;
+break;
+}
+}
+if(_errs1 === errors){
+if(data.lab_ip !== undefined){
+const _errs2 = errors;
+if(typeof data.lab_ip !== "string"){
+validate23.errors = [{instancePath:instancePath+"/lab_ip",schemaPath:"#/properties/lab_ip/type",keyword:"type",params:{type: "string"},message:"must be string"}];
+return false;
+}
+var valid0 = _errs2 === errors;
+}
+else {
+var valid0 = true;
+}
+if(valid0){
+if(data.role !== undefined){
+let data1 = data.role;
+const _errs4 = errors;
+const _errs6 = errors;
+let valid2 = false;
+let passing0 = null;
+const _errs7 = errors;
+if(typeof data1 !== "string"){
+const err0 = {instancePath:instancePath+"/role",schemaPath:"#/$defs/ClusterRole/oneOf/0/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err0];
+}
+else {
+vErrors.push(err0);
+}
+errors++;
+}
+if(!((data1 === "controlplane") || (data1 === "worker"))){
+const err1 = {instancePath:instancePath+"/role",schemaPath:"#/$defs/ClusterRole/oneOf/0/enum",keyword:"enum",params:{allowedValues: schema38.oneOf[0].enum},message:"must be equal to one of the allowed values"};
+if(vErrors === null){
+vErrors = [err1];
+}
+else {
+vErrors.push(err1);
+}
+errors++;
+}
+var _valid0 = _errs7 === errors;
+if(_valid0){
+valid2 = true;
+passing0 = 0;
+}
+const _errs9 = errors;
+if(typeof data1 !== "string"){
+const err2 = {instancePath:instancePath+"/role",schemaPath:"#/$defs/ClusterRole/oneOf/1/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err2];
+}
+else {
+vErrors.push(err2);
+}
+errors++;
+}
+if("management" !== data1){
+const err3 = {instancePath:instancePath+"/role",schemaPath:"#/$defs/ClusterRole/oneOf/1/const",keyword:"const",params:{allowedValue: "management"},message:"must be equal to constant"};
+if(vErrors === null){
+vErrors = [err3];
+}
+else {
+vErrors.push(err3);
+}
+errors++;
+}
+var _valid0 = _errs9 === errors;
+if(_valid0 && valid2){
+valid2 = false;
+passing0 = [passing0, 1];
+}
+else {
+if(_valid0){
+valid2 = true;
+passing0 = 1;
+}
+}
+if(!valid2){
+const err4 = {instancePath:instancePath+"/role",schemaPath:"#/$defs/ClusterRole/oneOf",keyword:"oneOf",params:{passingSchemas: passing0},message:"must match exactly one schema in oneOf"};
+if(vErrors === null){
+vErrors = [err4];
+}
+else {
+vErrors.push(err4);
+}
+errors++;
+validate23.errors = vErrors;
+return false;
+}
+else {
+errors = _errs6;
+if(vErrors !== null){
+if(_errs6){
+vErrors.length = _errs6;
+}
+else {
+vErrors = null;
+}
+}
+}
+var valid0 = _errs4 === errors;
+}
+else {
+var valid0 = true;
+}
+}
+}
+}
+}
+else {
+validate23.errors = [{instancePath,schemaPath:"#/type",keyword:"type",params:{type: "object"},message:"must be object"}];
+return false;
+}
+}
+validate23.errors = vErrors;
+return errors === 0;
+}
+validate23.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
+
 
 function validate20(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
 let vErrors = null;
@@ -226,7 +374,7 @@ return false;
 else {
 const _errs1 = errors;
 for(const key0 in data){
-if(!((((((key0 === "architecture") || (key0 === "boot")) || (key0 === "build_key")) || (key0 === "disk")) || (key0 === "guest_contract")) || (key0 === "image_format"))){
+if(!(((((((key0 === "architecture") || (key0 === "boot")) || (key0 === "build_key")) || (key0 === "disk")) || (key0 === "guest_contract")) || (key0 === "image_format")) || (key0 === "talos"))){
 validate20.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
 return false;
 break;
@@ -415,6 +563,61 @@ var valid0 = _errs21 === errors;
 }
 else {
 var valid0 = true;
+}
+if(valid0){
+if(data.talos !== undefined){
+let data7 = data.talos;
+const _errs23 = errors;
+const _errs24 = errors;
+let valid6 = false;
+const _errs25 = errors;
+if(!(validate23(data7, {instancePath:instancePath+"/talos",parentData:data,parentDataProperty:"talos",rootData,dynamicAnchors}))){
+vErrors = vErrors === null ? validate23.errors : vErrors.concat(validate23.errors);
+errors = vErrors.length;
+}
+var _valid1 = _errs25 === errors;
+valid6 = valid6 || _valid1;
+const _errs26 = errors;
+if(data7 !== null){
+const err4 = {instancePath:instancePath+"/talos",schemaPath:"#/properties/talos/anyOf/1/type",keyword:"type",params:{type: "null"},message:"must be null"};
+if(vErrors === null){
+vErrors = [err4];
+}
+else {
+vErrors.push(err4);
+}
+errors++;
+}
+var _valid1 = _errs26 === errors;
+valid6 = valid6 || _valid1;
+if(!valid6){
+const err5 = {instancePath:instancePath+"/talos",schemaPath:"#/properties/talos/anyOf",keyword:"anyOf",params:{},message:"must match a schema in anyOf"};
+if(vErrors === null){
+vErrors = [err5];
+}
+else {
+vErrors.push(err5);
+}
+errors++;
+validate20.errors = vErrors;
+return false;
+}
+else {
+errors = _errs24;
+if(vErrors !== null){
+if(_errs24){
+vErrors.length = _errs24;
+}
+else {
+vErrors = null;
+}
+}
+}
+var valid0 = _errs23 === errors;
+}
+else {
+var valid0 = true;
+}
 }
 }
 }
