@@ -2,7 +2,8 @@
 //! here, so it is tested without a window.
 
 use subspace::contract::{
-    CatalogCourseV1, CatalogLectureV1, LocalLectureAnswerV1, LocalRunLearningV1, LocalRunV1,
+    CatalogCourseV1, CatalogLectureV1, LocalLectureAnswerV1, LocalRunLearningV1, LocalRunRecapV1,
+    LocalRunSummaryV1, LocalRunV1,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -32,6 +33,23 @@ pub enum Command {
     InstallUpdate,
     /// A call about what the learner reads; it never touches the machine.
     Learn(Learn),
+    /// A call about runs that are over, as the website's runs page and recap
+    /// show them; it never touches the machine either.
+    History(History),
+}
+
+/// The learner's runs, an ended run's recap and its replay.
+#[derive(Debug, PartialEq, Eq)]
+pub enum History {
+    List,
+    Recap {
+        run_id: String,
+    },
+    /// One replay part's recording.
+    Replay {
+        run_id: String,
+        artifact_id: String,
+    },
 }
 
 /// The theory and help around a lab, as the website's lecture page and
@@ -78,6 +96,15 @@ pub enum Event {
     Learning(LocalRunLearningV1),
     /// A run as the server holds it: after a start, a read or an end.
     Run(LocalRunV1),
+    /// The learner's runs, newest first as intar lists them.
+    History(Vec<LocalRunSummaryV1>),
+    Recap(LocalRunRecapV1),
+    /// One replay part's asciicast.
+    Replay {
+        run_id: String,
+        artifact_id: String,
+        cast: Vec<u8>,
+    },
     /// Where the run's machine on this computer stands.
     Machine(MachineStatus),
     /// A machine's terminal is open; the receiver hears when its grid changed.
@@ -136,7 +163,7 @@ impl MachineStatus {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Screen {
     /// Until the engine has looked in the keychain.
     #[default]
@@ -154,6 +181,10 @@ pub enum Screen {
     /// Waiting for the server's answer about a run.
     OpeningRun,
     Run(LocalRunV1),
+    /// The learner's runs.
+    History,
+    /// An ended run's recap, by its id.
+    Recap(String),
 }
 
 #[derive(Debug, Default)]
@@ -179,8 +210,71 @@ pub struct State {
     pub theory: Option<LocalLectureAnswerV1>,
     /// What the run on screen teaches, once intar answered.
     pub learning: Option<LocalRunLearningV1>,
-    /// The lecture a run was opened from, to return to when the server refuses.
-    opened_from: Option<(usize, usize)>,
+    /// The learner's runs, once intar answered.
+    pub history: Option<Vec<LocalRunSummaryV1>>,
+    /// The recap on screen, once intar answered.
+    pub recap: Option<LocalRunRecapV1>,
+    /// The replay part chosen on the recap, by its recording's id.
+    pub replay: Option<String>,
+    /// The screen a run was opened from, to return to when the server refuses.
+    opened_from: Option<Screen>,
+}
+
+/// The runs page's groups, as the website's runs page has them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RunGroups<'a> {
+    /// Runs the learner is working in.
+    pub active: Vec<&'a LocalRunSummaryV1>,
+    /// Runs that ended and are still being saved.
+    pub finishing: Vec<&'a LocalRunSummaryV1>,
+    /// One per scenario, the latest first.
+    pub past: Vec<Scenario<'a>>,
+}
+
+/// A scenario's settled runs, each with its attempt number (1 is the
+/// earliest), the latest first.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Scenario<'a> {
+    /// Organization and scenario: two organizations may share a scenario id.
+    pub key: String,
+    pub attempts: Vec<(usize, &'a LocalRunSummaryV1)>,
+}
+
+/// Groups runs as `groupMyRunsByActivity` and `groupSettledRunsByScenario`
+/// do on the website.
+pub fn group_runs(runs: &[LocalRunSummaryV1]) -> RunGroups<'_> {
+    let mut groups = RunGroups::default();
+    let mut settled = Vec::new();
+    for run in runs {
+        match run.activity.as_str() {
+            "foreground" => groups.active.push(run),
+            "background" => groups.finishing.push(run),
+            _ => settled.push(run),
+        }
+    }
+    settled.sort_by(|a, b| (a.created_at, &a.run_id).cmp(&(b.created_at, &b.run_id)));
+    for run in settled {
+        let key = format!(
+            "{}\u{0}{}",
+            run.organization_id.as_deref().unwrap_or("public"),
+            run.scenario_id
+        );
+        match groups.past.iter_mut().find(|group| group.key == key) {
+            Some(group) => {
+                let attempt = group.attempts.len() + 1;
+                group.attempts.insert(0, (attempt, run));
+            }
+            None => groups.past.push(Scenario {
+                key,
+                attempts: vec![(1, run)],
+            }),
+        }
+    }
+    groups.past.sort_by(|a, b| {
+        let latest = |group: &Scenario| group.attempts.first().map_or(0, |(_, run)| run.created_at);
+        latest(b).cmp(&latest(a)).then_with(|| a.key.cmp(&b.key))
+    });
+    groups
 }
 
 impl State {
@@ -208,6 +302,9 @@ impl State {
                 self.machine = None;
                 self.stage = 0;
                 self.catalog.clear();
+                // The next account's runs are not this one's.
+                self.history = None;
+                self.recap = None;
                 self.screen = Screen::SignedOut;
             }
             Event::Catalog(courses) => {
@@ -254,6 +351,15 @@ impl State {
                 self.theory = Some(answer);
                 return stale.then_some(Command::LoadCatalog);
             }
+            Event::History(runs) => self.history = Some(runs),
+            // An answer about a recap the learner has since left is dropped.
+            Event::Recap(recap) => {
+                if self.screen == Screen::Recap(recap.run_id.clone()) {
+                    self.recap = Some(recap);
+                }
+            }
+            // The window keeps the replay's player.
+            Event::Replay { .. } => {}
             Event::Learning(learning) => {
                 if matches!(&self.screen, Screen::Run(run) if run.run_id == learning.run_id) {
                     self.learning = Some(learning);
@@ -287,11 +393,13 @@ impl State {
                 self.screen = match std::mem::take(&mut self.screen) {
                     // A failed sign-in or first load has nothing to show: start over.
                     Screen::Starting | Screen::SigningIn(_) | Screen::Loading => Screen::SignedOut,
-                    // A refused start or read returns to the lecture it came from.
-                    Screen::OpeningRun => match self.opened_from {
-                        Some((course, lecture)) => Screen::Lecture { course, lecture },
-                        None => Screen::Catalog,
-                    },
+                    // A refused start or read returns to where it came from.
+                    Screen::OpeningRun => self.opened_from.take().unwrap_or(Screen::Catalog),
+                    // A replay that cannot be played is no longer chosen.
+                    recap @ Screen::Recap(_) => {
+                        self.replay = None;
+                        recap
+                    }
                     other => other,
                 };
             }
@@ -359,9 +467,56 @@ impl State {
             (None, None) => return None,
         };
         self.error = None;
-        self.opened_from = Some((course, lecture));
+        self.opened_from = Some(Screen::Lecture { course, lecture });
         self.screen = Screen::OpeningRun;
         Some(command)
+    }
+
+    /// Shows the learner's runs; the command reloads them.
+    pub fn open_history(&mut self) -> Command {
+        self.error = None;
+        self.screen = Screen::History;
+        Command::History(History::List)
+    }
+
+    /// Opens an active run from the runs page.
+    pub fn resume(&mut self, run_id: &str) -> Command {
+        self.error = None;
+        self.opened_from = Some(Screen::History);
+        self.screen = Screen::OpeningRun;
+        Command::ReadRun {
+            run_id: run_id.to_owned(),
+        }
+    }
+
+    /// Shows a run's recap; the command loads it.
+    pub fn open_recap(&mut self, run_id: &str) -> Command {
+        self.error = None;
+        self.recap = None;
+        self.replay = None;
+        self.screen = Screen::Recap(run_id.to_owned());
+        Command::History(History::Recap {
+            run_id: run_id.to_owned(),
+        })
+    }
+
+    /// Chooses a replay part of the recap on screen; the command fetches it.
+    pub fn play(&mut self, artifact_id: &str) -> Option<Command> {
+        let Screen::Recap(run_id) = &self.screen else {
+            return None;
+        };
+        self.error = None;
+        self.replay = Some(artifact_id.to_owned());
+        Some(Command::History(History::Replay {
+            run_id: run_id.clone(),
+            artifact_id: artifact_id.to_owned(),
+        }))
+    }
+
+    /// Whether a fetched recording is the replay part chosen on screen.
+    pub fn playing(&self, run_id: &str, artifact_id: &str) -> bool {
+        matches!(&self.screen, Screen::Recap(shown) if shown == run_id)
+            && self.replay.as_deref() == Some(artifact_id)
     }
 }
 
@@ -685,5 +840,117 @@ mod tests {
         // No offer any more.
         state.apply(Event::Update(None));
         assert_eq!(state.update, None);
+    }
+
+    fn summary(
+        run_id: &str,
+        org: Option<&str>,
+        activity: &str,
+        created_at: i64,
+    ) -> LocalRunSummaryV1 {
+        LocalRunSummaryV1 {
+            run_id: run_id.into(),
+            scenario_id: "intar/web".into(),
+            organization_id: org.map(str::to_owned),
+            title: "Serve".into(),
+            local: true,
+            active: activity == "foreground",
+            outcome: "succeeded".into(),
+            activity: activity.into(),
+            created_at,
+            finished_at: None,
+            solved_at: None,
+            solve_duration_ms: None,
+            solution_assisted: false,
+            has_replay: false,
+        }
+    }
+
+    #[test]
+    fn runs_group_like_the_websites_runs_page() {
+        let runs = vec![
+            summary("b", None, "settled", 2),
+            summary("live", None, "foreground", 9),
+            summary("saving", None, "background", 8),
+            summary("a", None, "settled", 1),
+            summary("org", Some("org-1"), "settled", 5),
+            summary("c", None, "settled", 3),
+        ];
+        let groups = group_runs(&runs);
+        let ids = |list: &[&LocalRunSummaryV1]| {
+            list.iter()
+                .map(|run| run.run_id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&groups.active), ["live"]);
+        assert_eq!(ids(&groups.finishing), ["saving"]);
+        // Another organization's scenario of the same id is its own group,
+        // and the newest group comes first.
+        assert_eq!(groups.past.len(), 2);
+        let attempts: Vec<_> = groups.past[1]
+            .attempts
+            .iter()
+            .map(|(attempt, run)| (*attempt, run.run_id.as_str()))
+            .collect();
+        assert_eq!(attempts, [(3, "c"), (2, "b"), (1, "a")]);
+        assert_eq!(groups.past[0].attempts[0].1.run_id, "org");
+    }
+
+    fn recap(run_id: &str) -> LocalRunRecapV1 {
+        LocalRunRecapV1 {
+            run_id: run_id.into(),
+            scenario_id: "intar/web".into(),
+            title: "Serve".into(),
+            kind: "solved".into(),
+            heading: "Solved".into(),
+            description: String::new(),
+            solve_duration_ms: None,
+            hints_revealed: 0,
+            solution_used: false,
+            checks: vec![],
+            replay: "ready".into(),
+            replay_parts: vec![],
+        }
+    }
+
+    #[test]
+    fn a_recap_and_its_replay_belong_to_the_run_on_screen() {
+        let mut state = State::default();
+        assert_eq!(
+            state.open_recap("run-1"),
+            Command::History(History::Recap {
+                run_id: "run-1".into()
+            })
+        );
+        state.apply(Event::Recap(recap("run-2")));
+        assert_eq!(state.recap, None, "another run's");
+        state.apply(Event::Recap(recap("run-1")));
+        assert!(state.recap.is_some());
+
+        assert!(state.play("cast-1").is_some());
+        assert!(state.playing("run-1", "cast-1"));
+        assert!(!state.playing("run-2", "cast-1"));
+        // A refused fetch keeps the recap and unchooses the part.
+        state.apply(Event::Failed("Replay unavailable.".into()));
+        assert_eq!(state.screen, Screen::Recap("run-1".into()));
+        assert_eq!(state.replay, None);
+
+        // Leaving drops answers for it; the history page lists the runs.
+        assert_eq!(state.open_history(), Command::History(History::List));
+        state.apply(Event::Recap(recap("run-1")));
+        assert_eq!(state.screen, Screen::History);
+        assert!(state.play("cast-1").is_none(), "no recap on screen");
+        state.apply(Event::History(vec![summary("a", None, "settled", 1)]));
+        assert_eq!(state.history.as_ref().map(Vec::len), Some(1));
+
+        // A refused resume returns to the runs page.
+        assert_eq!(
+            state.resume("run-9"),
+            Command::ReadRun {
+                run_id: "run-9".into()
+            }
+        );
+        state.apply(Event::Failed("gone".into()));
+        assert_eq!(state.screen, Screen::History);
     }
 }

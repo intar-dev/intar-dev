@@ -5,6 +5,7 @@
 //! input goes back to GPUI's own `examples/input.rs`, also Apache-2.0. Each
 //! file says what was changed. The rest of the app is MIT.
 
+pub mod history;
 pub mod kit;
 pub mod learning;
 pub mod markdown;

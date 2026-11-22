@@ -25,11 +25,17 @@ import { enforceRateLimit } from "@/lib/request-security";
 import { applyVmStateV3ToRunState } from "@/lib/run-lifecycle";
 import { learnerCheckStatus, repairObjectiveTitle } from "@/lib/verification-copy";
 import { persistRunState } from "@/lib/run-projection";
+import { presentScenarioRun } from "@/lib/run-phase";
 import { revealScenarioRunHintForUser, revealScenarioRunSolutionForUser } from "@/lib/scenario-hints";
 import { isRevisionScenarioId } from "@/lib/scenario-id";
-import { getScenarioRunForUser, type ScenarioRunRecord } from "@/lib/scenario-runs";
+import { decodeScenarioRunArtifactRouteParams, serveScenarioRunArtifactContent } from "@/lib/scenario-run-artifact-content";
+import { getScenarioRunForUser, listScenarioRunsForUser, type ScenarioRunRecord } from "@/lib/scenario-runs";
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
 import { arm64MachineImages, liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
+import {
+  getRunRecapObjectives, getRunRecapState, getRunReplayAvailability, getRunReplayParts,
+} from "@/components/app/run/run-recap-model";
+import type { ScenarioRunRecord as RunViewRecord } from "@/components/app/run/run-types";
 
 /** The one OAuth client the routes accept. A deploy seeds its row (apps/web/seeds). */
 export const DESKTOP_OAUTH_CLIENT_ID = "intar-jumper";
@@ -602,4 +608,127 @@ export async function localRunLearningRequest(
     const { status, body } = toErrorResponse(error, "the run's learning could not be loaded");
     return jsonResponse({ ...body, protocol: DESKTOP_PROTOCOL }, { status, headers: { "cache-control": "no-store" } });
   }
+}
+
+/**
+ * `GET /api/local/runs`: the learner's run history as the website lists it
+ * (`/api/scenarios/runs`), local or not, newest first.
+ */
+export async function localRunHistoryRequest(
+  request: Request,
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  const runs = await listScenarioRunsForUser({ userId: caller.userId });
+  return jsonResponse({
+    protocol: DESKTOP_PROTOCOL,
+    runs: runs.map((run) => ({
+      runId: run.runId,
+      scenarioId: run.scenarioId,
+      organizationId: run.organizationId ?? null,
+      title: run.title,
+      local: run.local,
+      active: run.active,
+      outcome: run.outcome,
+      activity: run.activity,
+      createdAt: run.createdAt,
+      finishedAt: run.finishedAt,
+      solvedAt: run.solvedAt,
+      solveDurationMs: run.solveDurationMs,
+      solutionAssisted: run.solutionAssisted,
+      hasReplay: run.hasReplay,
+    })),
+  }, { headers: { "cache-control": "no-store" } });
+}
+
+/**
+ * What the website's recap (RunRecap) shows of a run, through the same
+ * model, so probe values, errors, filenames and VM ids stay out as there.
+ */
+export function localRunRecap(record: ScenarioRunRecord) {
+  // The run page presents the record before its recap reads it.
+  const run = presentScenarioRun(record) as unknown as RunViewRecord;
+  const state = getRunRecapState(run);
+  const parts = getRunReplayParts(run);
+  return {
+    runId: run.id,
+    scenarioId: run.scenarioId,
+    title: run.title,
+    kind: state.kind,
+    heading: state.title,
+    description: state.description,
+    solveDurationMs: run.solveDurationMs,
+    hintsRevealed: run.hints.filter((hint) => hint.revealed).length,
+    solutionUsed: run.solution.assisted || run.solution.revealed,
+    // A task run (every local run) keeps no objectives, so its final checks
+    // are its tasks; the recap shows only verified or needs repair.
+    checks: record.tasks
+      ? record.tasks.map((task) => ({
+          key: task.id,
+          machine: task.machine,
+          title: task.title,
+          description: task.body,
+          status: learnerCheckStatus(task.status) === "verified" ? "verified" : "needs_repair",
+          optional: task.optional,
+        }))
+      : getRunRecapObjectives(run).map((objective, index) => ({
+          key: objective.key,
+          machine: run.objectives[index]!.vmName,
+          title: objective.title,
+          description: null,
+          status: objective.status,
+          optional: false,
+        })),
+    replay: getRunReplayAvailability(run, parts),
+    replayParts: parts.map((part) => ({
+      key: part.key,
+      machineLabel: part.machineLabel,
+      partLabel: part.partLabel,
+      castArtifactId: part.castArtifactId,
+      sizeBytes: part.sizeBytes ?? null,
+    })),
+  };
+}
+
+/** `GET /api/local/runs/<id>/recap`: any run of the learner's, read-only. */
+export async function localRunRecapRequest(
+  request: Request,
+  runId: string,
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  try {
+    const run = await getScenarioRunForUser({ runId, userId: caller.userId });
+    return jsonResponse({ protocol: DESKTOP_PROTOCOL, recap: localRunRecap(run) }, { headers: { "cache-control": "no-store" } });
+  } catch (error) {
+    if (!(error instanceof AppError)) throw error;
+    if (error.code === "scenario_run_not_found") return refuse(404, "run_not_found", "run not found");
+    const { status, body } = toErrorResponse(error, "the run's recap could not be loaded");
+    return jsonResponse({ ...body, protocol: DESKTOP_PROTOCOL }, { status, headers: { "cache-control": "no-store" } });
+  }
+}
+
+/**
+ * `GET /api/local/runs/<id>/artifacts/<artifactId>`: an artifact of one of
+ * the learner's runs, as the website serves it
+ * (`/api/runs/<id>/artifacts/<artifactId>/content`).
+ */
+export async function localRunArtifactRequest(
+  request: Request,
+  rawRunId: string | undefined,
+  rawArtifactId: string | undefined,
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  const ids = decodeScenarioRunArtifactRouteParams(rawRunId, rawArtifactId);
+  if (!ids.ok) return ids.response;
+  return serveScenarioRunArtifactContent({
+    request,
+    runId: ids.runId,
+    artifactId: ids.artifactId,
+    ownerUserId: caller.userId,
+  });
 }

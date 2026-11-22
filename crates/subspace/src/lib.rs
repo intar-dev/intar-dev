@@ -13,9 +13,10 @@ pub mod contract;
 use std::time::{Duration, SystemTime};
 
 use crate::contract::{
-    LocalCatalogV1, LocalLectureAnswerV1, LocalRunAnswerV1, LocalRunHistoryV1, LocalRunLearningAnswerV1, LocalRunRecapAnswerV1,
-    LocalRunRefusalV1, LocalRunReportV1, LocalRunV1, RevealHintV1, SUBSPACE_OAUTH_CLIENT_ID,
-    SUBSPACE_OAUTH_SCOPE, SUBSPACE_PROTOCOL_VERSION, StartLocalRunV1,
+    LocalCatalogV1, LocalLectureAnswerV1, LocalRunAnswerV1, LocalRunHistoryV1,
+    LocalRunLearningAnswerV1, LocalRunRecapAnswerV1, LocalRunRefusalV1, LocalRunReportV1,
+    LocalRunV1, RevealHintV1, SUBSPACE_OAUTH_CLIENT_ID, SUBSPACE_OAUTH_SCOPE,
+    SUBSPACE_PROTOCOL_VERSION, StartLocalRunV1,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use intar_contracts::bridge_v9::VmStateV3;
@@ -400,7 +401,8 @@ impl Subspace {
 
     /// The learner's runs, newest first.
     pub async fn history(&self) -> Result<LocalRunHistoryV1, Error> {
-        self.call::<(), _>(Method::GET, "/api/local/runs", None, None).await
+        self.call::<(), _>(Method::GET, "/api/local/runs", None, None)
+            .await
     }
 
     /// An ended run's recap.
@@ -433,7 +435,10 @@ impl Subspace {
                 run: None,
             });
         }
-        if response.content_length().is_some_and(|length| length > max_bytes as u64) {
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
             return Err(too_big());
         }
         let bytes = response.bytes().await?;
