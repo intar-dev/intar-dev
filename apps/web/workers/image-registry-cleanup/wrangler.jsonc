@@ -10,9 +10,10 @@
   "preview_urls": false,
   "vars": {
     // The live mode, deployed as committed on every release. "report-only"
-    // lists candidates and writes no delete. The OCI store's sweep starts in
-    // report-only; commit "delete" once its reports list the expected set.
-    "REGISTRY_CLEANUP_MODE": "report-only"
+    // lists candidates and writes no delete. The OCI store's sweep ran in
+    // report-only from its start until its plan listed the expected set
+    // (2026-11-22: no image a live or candidate revision needs among them).
+    "REGISTRY_CLEANUP_MODE": "delete"
   },
   "triggers": {
     // Every six hours at minute 17 UTC: 00:17, 06:17, 12:17, 18:17. Each tick
