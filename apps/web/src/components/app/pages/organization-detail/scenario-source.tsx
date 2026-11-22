@@ -100,8 +100,8 @@ export function ScenarioSourceSection({
       description="Merging to the repository's default branch releases its courses here."
       actions={
         <>
-          {/* The page of what the repository published: its revisions, what its job did with each lab, and where a lab is
-              rolled back. The platform's card is on that page already. */}
+          {/* The page of what the repository published: its revisions and what its job did with each lab. The
+              platform's card is on that page already. */}
           {scope !== "public" && card.data.source ? (
             <Button size="sm" variant="outline" render={<a href="/admin/scenarios" />}>
               <Library className="size-4" />
@@ -633,7 +633,7 @@ function SourceUsage({
         ))}
       </dl>
       <p className="text-muted-foreground">
-        An image counts while a revision that is live, a candidate, building or kept for a rollback names it.
+        An image counts while a revision that is live, a candidate, building or one of the last ones live names it.
       </p>
       {usage.imageCount > 0 ? (
         <details>

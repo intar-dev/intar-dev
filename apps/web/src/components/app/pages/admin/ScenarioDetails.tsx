@@ -3,13 +3,10 @@ import { useParams } from "@tanstack/react-router";
 import {
   REVISION_STATES,
   type AdministeredScenario,
-  type RevisionAction,
   type ScenarioRevisionSummary,
   shortRev,
   useAdministeredScenario,
-  useRevisionAction,
 } from "@/components/app/admin/scenario-revisions";
-import { apiErrorMessage } from "@/components/app/lib/api-errors";
 import { formatRelativeTime, formatTimestamp } from "@/components/app/lib/format";
 import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
@@ -21,13 +18,11 @@ import { ErrorState } from "@/components/app/patterns/StateCard";
 import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 
 export function ScenarioDetails() {
   const { namespace, slug } = useParams({ from: "/app/admin/scenarios/$namespace/$slug" });
   const scenarioId = `${namespace}/${slug}`;
   const scenario = useAdministeredScenario(scenarioId);
-  const action = useRevisionAction(scenarioId);
   const record = scenario.data ?? null;
 
   usePageChrome({
@@ -57,21 +52,12 @@ export function ScenarioDetails() {
     );
   }
 
-  const failed = action.error ? apiErrorMessage(action.error, "Try again.") ?? "Try again." : null;
   return (
     <PageShell variant="workspace" density="compact">
       <Section density="compact" title="Revisions" description={pointerSummary(record)} bodyClassName="divide-y">
         {record.revisions.length ? (
           record.revisions.map((revision) => (
-            <RevisionRow
-              key={revision.rev}
-              scenario={record}
-              revision={revision}
-              busy={action.isPending}
-              pending={action.isPending && action.variables?.rev === revision.rev ? action.variables.action : null}
-              error={action.variables?.rev === revision.rev ? failed : null}
-              onAction={(request) => action.mutate(request)}
-            />
+            <RevisionRow key={revision.rev} scenario={record} revision={revision} />
           ))
         ) : (
           <p className="py-3 text-sm text-muted-foreground">No revisions yet.</p>
@@ -99,55 +85,20 @@ function pointerSummary(scenario: AdministeredScenario): string {
 function sourceJobLine(scenario: AdministeredScenario, revision: ScenarioRevisionSummary): string | null {
   const job = scenario.sourceJob;
   if (!job || job.rev !== revision.rev) return null;
-  // What the job said of a lab before a rollback put another one live is past.
+  // Of the live revision only the job's word that put it live counts; an earlier word is past.
   if (revision.rev === scenario.liveRev) return job.note?.startsWith("live") ? `Source: ${job.note}` : null;
   if (job.note) return `Source: ${job.failed ? `gave up, ${job.note}` : job.note}`;
   return job.driving ? "Source: checking this commit" : null;
 }
 
-type RevisionActionName = RevisionAction["action"];
-
-const PENDING_WORDS: Record<RevisionActionName, string> = {
-  lift_hold: "Lifting…",
-  rollback: "Rolling back…",
-};
-
-function RevisionRow({
-  scenario,
-  revision,
-  busy,
-  pending,
-  error,
-  onAction,
-}: {
-  scenario: AdministeredScenario;
-  revision: ScenarioRevisionSummary;
-  busy: boolean;
-  pending: RevisionActionName | null;
-  error: string | null;
-  onAction: (request: RevisionAction) => void;
-}) {
+// The page only shows (#494): checking a revision and putting it live are its
+// source's job, and a bad lab is reverted in its repository.
+function RevisionRow({ scenario, revision }: { scenario: AdministeredScenario; revision: ScenarioRevisionSummary }) {
   const live = revision.rev === scenario.liveRev;
   const candidate = revision.rev === scenario.candidateRev;
   const verifying = Boolean(scenario.verifyRuns[revision.rev]);
   const state = REVISION_STATES[revision.state];
   const jobLine = sourceJobLine(scenario, revision);
-  // A rollback left this behaviour on hold: nothing that behaves the same
-  // is verified or promoted until an administrator lifts it. Going back to
-  // such a revision stays possible. Checking a revision and putting it live
-  // are the source's job.
-  const actions = !scenario.canManage || live
-    ? null
-    : (
-      <>
-        {revision.canGoLive && revision.liveAt !== null
-          ? <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "rollback", rev: revision.rev, liveRev: scenario.liveRev })}>{pending === "rollback" ? PENDING_WORDS[pending] : "Roll back"}</Button>
-          : null}
-        {revision.held
-          ? <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction({ action: "lift_hold", rev: revision.rev })}>{pending === "lift_hold" ? PENDING_WORDS[pending] : "Lift hold"}</Button>
-          : null}
-      </>
-    );
   return (
     <div className="space-y-2 py-3 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -157,7 +108,6 @@ function RevisionRow({
             {live ? <Badge variant="success">Live</Badge> : null}
             {candidate && !live ? <Badge variant="outline">Candidate</Badge> : null}
             {revision.sameAsLive ? <Badge variant="outline" title="The same lab as the live revision. Its source does not move it.">Same as live</Badge> : null}
-            {revision.held ? <Badge variant="outline" title="A rollback left this revision's behaviour on hold. It is not promoted until the hold is lifted.">Held</Badge> : null}
           </h3>
           <MetaLine
             items={[
@@ -171,7 +121,6 @@ function RevisionRow({
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {verifying ? <StatusToken tone="live" word="Verifying" pulse /> : <StatusToken tone={state.tone} word={state.word} />}
-          {actions}
         </div>
       </div>
       {revision.failureReason ? <InlineFeedback tone="error" announce={false}>{revision.failureReason}</InlineFeedback> : null}
@@ -182,7 +131,6 @@ function RevisionRow({
           title={`Last snapshot check: ${restoreCheckWords(revision.restoreVerifyReport)}`}
         />
       ) : null}
-      {error ? <InlineFeedback tone="error">{error}</InlineFeedback> : null}
     </div>
   );
 }

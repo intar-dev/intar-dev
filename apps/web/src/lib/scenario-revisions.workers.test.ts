@@ -10,13 +10,12 @@ import type { DesiredVmV3, VmLabV1, VmVerifyV1 } from "@/generated/contracts/bri
 import validateBridgeMessageV9 from "@/generated/contracts/bridge-message-v9.validate";
 import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
 import { acquireRegistrySweep, finishRegistrySweep, setRegistryEnforcement } from "@/lib/image-registry-admission";
+import { KEPT_REVISIONS_CTE } from "@/lib/kept-revisions";
 import { selectCandidateRevision, settleScenarioRevisions } from "@/lib/machine-builds";
 import { ingestSourceBundle } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import {
-  assertScenarioAdmin,
   catalogForwardSql,
-  liftRevisionHold,
   listAdministeredScenarios,
   moveLiveRevision,
   namespacedCatalog,
@@ -134,8 +133,6 @@ const promote = async (at: string, liveRev: string | null, actorUserId = ADMIN, 
   await applyCatalog(at, scenarioId);
   return moved;
 };
-const rollback = (at: string, liveRev: string | null, actorUserId = ADMIN) =>
-  moveLiveRevision({ scenarioId: PUBLIC_ID, rev: at, liveRev, kind: "rollback", actorUserId });
 const catalogRow = () => env.DB.prepare("SELECT source_revision, catalog_json FROM course_catalogs WHERE scope_key = 'public'")
   .first<{ source_revision: string; catalog_json: string }>();
 /** The fixture bundle with another course title, so its catalog differs. */
@@ -165,7 +162,7 @@ function verifyLab(verify: VmVerifyV1, state: VmLabV1["state"] = "ready", failur
 }
 const verifyVm = (runId: string, lab: VmLabV1) => ({ ...vmState(runId, "webserver", lab), owner_user_id: VALIDATION_USER_ID });
 
-describe("promotion, rollback and verify runs", () => {
+describe("promotion and verify runs", () => {
   let image: string;
   let ws: WebSocket;
   const sockets: Array<[WebSocket, string]> = [];
@@ -277,66 +274,36 @@ describe("promotion, rollback and verify runs", () => {
     });
   });
 
-  describe("rollback", () => {
-    it("goes back only to a verified revision that was live, of the current contract", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      await publish(rev("b"), image);
-      await expect(rollback(rev("b"), rev("a"))).rejects.toMatchObject({ code: "revision_never_live" });
-      await promote(rev("b"), rev("a"));
-      await expect(rollback(rev("a"), rev("b"), ORG_OWNER)).rejects.toMatchObject({ status: 404 });
-      await env.DB.prepare("UPDATE scenario_revisions SET guest_contract = 2 WHERE rev = ?1").bind(rev("a")).run();
-      await expect(rollback(rev("a"), rev("b"))).rejects.toMatchObject({ code: "guest_contract_mismatch" });
-      await env.DB.prepare("UPDATE scenario_revisions SET guest_contract = 3 WHERE rev = ?1").bind(rev("a")).run();
-      await drain();
-      expect(await rollback(rev("a"), rev("b"))).toEqual({ liveRev: rev("a") });
-      expect(await scenarioRow(PUBLIC_ID)).toEqual({ live_rev: rev("a"), candidate_rev: rev("b") });
-    });
+  describe("the revisions that were live", () => {
+    /** Whether the registry sweep keeps revision `at` of the public scenario. */
+    const kept = async (at: string) => (await env.DB.prepare(
+      `WITH ${KEPT_REVISIONS_CTE} SELECT EXISTS (SELECT 1 FROM kept_revisions WHERE scenario_id = ?1 AND rev = ?2) AS kept`,
+    ).bind(PUBLIC_ID, at).first<number>("kept")) === 1;
 
-    it("goes back only to a revision the registry sweep keeps", async () => {
+    it("stay kept, the three most recently live, so a revert finds its verified twin and images", async () => {
       await markVerified(PUBLIC_ID, rev("a"));
       await promote(rev("a"), null);
       await publish(rev("b"), image);
       await markVerified(PUBLIC_ID, rev("b"));
       await promote(rev("b"), rev("a"));
-      const canGoLive = async (at: string) =>
-        (await listAdministeredScenarios(ADMIN))[0]?.revisions.find((r) => r.rev === at)?.canGoLive;
       // Verified revisions that never go live push nothing out.
       for (const sha of ["c", "d", "e"]) await publish(rev(sha), image);
-      expect(await canGoLive(rev("a"))).toBe(true);
+      expect(await kept(rev("a"))).toBe(true);
       // Only the candidate of them is kept.
-      expect(await canGoLive(rev("d"))).toBe(false);
-      expect(await canGoLive(rev("e"))).toBe(true);
+      expect(await kept(rev("d"))).toBe(false);
+      expect(await kept(rev("e"))).toBe(true);
       // a is the third most recently live once another revision went live.
       await promote(rev("e"), rev("b"));
-      expect(await canGoLive(rev("a"))).toBe(true);
+      expect(await kept(rev("a"))).toBe(true);
       // A fourth one pushes it out.
       await publish(rev("f"), image);
       await promote(rev("f"), rev("e"));
-      expect(await canGoLive(rev("a"))).toBe(false);
-      await expect(rollback(rev("a"), rev("f"))).rejects.toMatchObject({ code: "revision_not_retained" });
-      // A rollback makes its target the most recent again: b outlives e.
-      await rollback(rev("b"), rev("f"));
-      await liftRevisionHold({ scenarioId: PUBLIC_ID, rev: rev("f"), actorUserId: ADMIN });
-      await publish(rev("g"), image);
-      await promote(rev("g"), rev("b"));
-      expect(await canGoLive(rev("b"))).toBe(true);
-      expect(await canGoLive(rev("e"))).toBe(false);
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("g"));
+      expect(await kept(rev("a"))).toBe(false);
+      expect(await kept(rev("b"))).toBe(true);
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("f"));
     });
 
-    it("writes when a revision was last made live, on a rollback too", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      const first = (await revisionRow(PUBLIC_ID, rev("a")))!.live_at!;
-      await publish(rev("b"), image);
-      await promote(rev("b"), rev("a"));
-      await env.DB.prepare("UPDATE scenario_revisions SET live_at = 1 WHERE rev = ?1").bind(rev("a")).run();
-      await rollback(rev("a"), rev("b"));
-      expect((await revisionRow(PUBLIC_ID, rev("a")))!.live_at).toBeGreaterThanOrEqual(first);
-    });
-
-    it("refuses a target whose machine image is no longer indexed, for a promotion too", async () => {
+    it("refuses a promotion whose machine image is no longer indexed", async () => {
       await markVerified(PUBLIC_ID, rev("a"));
       await promote(rev("a"), null);
       await publish(rev("b"), image);
@@ -344,15 +311,12 @@ describe("promotion, rollback and verify runs", () => {
       const gone = `sha256:${"0".repeat(64)}`;
       await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].image_digest', ?1) WHERE rev = ?2")
         .bind(gone, rev("b")).run();
-      expect((await listAdministeredScenarios(ADMIN))[0]?.revisions.find((r) => r.rev === rev("b"))?.canGoLive).toBe(false);
       await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ code: "revision_images_gone" });
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("a"));
 
       await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].image_digest', ?1) WHERE rev = ?2")
         .bind(image, rev("b")).run();
       await promote(rev("b"), rev("a"));
-      await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].image_digest', ?1) WHERE rev = ?2")
-        .bind(gone, rev("a")).run();
-      await expect(rollback(rev("a"), rev("b"))).rejects.toMatchObject({ code: "revision_images_gone" });
       expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("b"));
     });
 
@@ -361,23 +325,22 @@ describe("promotion, rollback and verify runs", () => {
       await promote(rev("a"), null);
       await publish(rev("b"), image);
       await markVerified(PUBLIC_ID, rev("b"));
-      await promote(rev("b"), rev("a"));
       await setRegistryEnforcement(env, "enforce");
-      const sweep = await acquireRegistrySweep(env, { owner: "rollback-test-collector" });
+      const sweep = await acquireRegistrySweep(env, { owner: "promotion-test-collector" });
       if (!sweep.ok) throw new Error(`the test sweep did not acquire: ${sweep.code}`);
 
-      await expect(rollback(rev("a"), rev("b"))).rejects.toMatchObject({ status: 503, code: "registry_busy" });
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("b"));
+      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ status: 503, code: "registry_busy" });
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("a"));
       expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM registry_manifests WHERE digest = ?1").bind(image).first("n")).toBe(1);
 
       await finishRegistrySweep(env, { sweepToken: sweep.lease.sweepToken, outcome: "completed" });
-      expect(await rollback(rev("a"), rev("b"))).toEqual({ liveRev: rev("a") });
+      expect(await promote(rev("b"), rev("a"))).toEqual({ liveRev: rev("b") });
       // The move's writer lease is closed again, so the next sweep can start.
       expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM image_registry_operation_writers WHERE released_at IS NULL").first("n")).toBe(0);
     });
   });
 
-  describe("inheritance and holds", () => {
+  describe("inheritance", () => {
     /** The fixture bundle with its scenario changed by `change`. */
     const changed = (change: (scenario: (typeof bundleFixture)["scenarios"][number]) => void) => {
       const bundle = structuredClone(bundleFixture);
@@ -397,13 +360,6 @@ describe("promotion, rollback and verify runs", () => {
         WHERE scenario_id = ?1 AND rev = ?2`,
     ).bind(PUBLIC_ID, at).first<{ state: string; content_digest: string; behaviour_digest: string; restore_digest: string;
       restore_verified_at: number | null }>();
-    const holds = () => env.DB.prepare(
-      "SELECT behaviour_digest, held_by_user_id, lifted_at, lifted_by_user_id FROM scenario_revision_holds WHERE scenario_id = ?1",
-    ).bind(PUBLIC_ID).all<{ behaviour_digest: string; held_by_user_id: string | null; lifted_at: number | null;
-      lifted_by_user_id: string | null }>().then((rows) => rows.results);
-    const lift = (at: string, actorUserId = ADMIN) => liftRevisionHold({ scenarioId: PUBLIC_ID, rev: at, actorUserId });
-    const listed = async (at: string) =>
-      (await listAdministeredScenarios(ADMIN, PUBLIC_ID))[0]!.revisions.find((revision) => revision.rev === at)!;
 
     it("verifies a revision with other words without a run, and one with another check not", async () => {
       await markVerified(PUBLIC_ID, rev("a"));
@@ -430,132 +386,16 @@ describe("promotion, rollback and verify runs", () => {
       expect((await digestsOf(rev("c")))!.state).toBe("verified");
     });
 
-    it("holds the behaviour a rollback leaves: the next push of it is not verified and not promoted", async () => {
+    it("ignores an open hold row: the behaviour it names is verified by inheritance and promoted", async () => {
       await markVerified(PUBLIC_ID, rev("a"));
       await promote(rev("a"), null);
-      await publish(rev("b"), image, null, rechecked);
-      await markVerified(PUBLIC_ID, rev("b"));
+      // A row left from when a rollback held a behaviour; nothing reads it now.
+      await env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at)
+        VALUES (?1, ?2, 1)`).bind(PUBLIC_ID, (await digestsOf(rev("a")))!.behaviour_digest).run();
+      await publish(rev("b"), image, null, reworded);
+      expect((await digestsOf(rev("b")))!.state).toBe("verified");
       await promote(rev("b"), rev("a"));
-      expect(await holds()).toEqual([]);
-      // The revision left behind is from before the digest existed.
-      const left = (await digestsOf(rev("b")))!.behaviour_digest;
-      await env.DB.prepare("UPDATE scenario_revisions SET behaviour_digest = NULL WHERE rev = ?1").bind(rev("b")).run();
-      await rollback(rev("a"), rev("b"));
-      expect(await holds()).toEqual([{ behaviour_digest: left, held_by_user_id: ADMIN, lifted_at: null, lifted_by_user_id: null }]);
-      expect((await digestsOf(rev("b")))!.behaviour_digest).toBe(left);
-      expect(await listed(rev("b"))).toMatchObject({ held: true });
-      expect(await listed(rev("a"))).toMatchObject({ held: false });
-
-      // The same behaviour with other words: not verified by inheritance.
-      await publish(rev("c"), image, null, changed((scenario) => {
-        scenario.tasks[0]!.check = "true";
-        scenario.briefing = "Fixed words.";
-      }));
-      expect(await digestsOf(rev("c"))).toMatchObject({ state: "ready", behaviour_digest: left });
-      expect(await listed(rev("c"))).toMatchObject({ held: true });
-      // Nor promoted, even once a run verified it.
-      await markVerified(PUBLIC_ID, rev("c"));
-      await expect(promote(rev("c"), rev("a"))).rejects.toMatchObject({ code: "revision_held" });
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("a"));
-      // Behaviour that was never rolled away from is not held.
-      await publish(rev("d"), image);
-      expect((await digestsOf(rev("d")))!.state).toBe("verified");
-      await promote(rev("d"), rev("a"));
-    });
-
-    it("refuses a held promotion in the move itself, when the rollback lands after the check", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      await publish(rev("b"), image, null, rechecked);
-      await markVerified(PUBLIC_ID, rev("b"));
-      const behaviour = (await digestsOf(rev("b")))!.behaviour_digest;
-      const batch = env.DB.batch.bind(env.DB);
-      vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
-        await env.DB.prepare("INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at) VALUES (?1, ?2, 1)")
-          .bind(PUBLIC_ID, behaviour).run();
-        return batch(statements);
-      });
-      await expect(promote(rev("b"), rev("a"))).rejects.toMatchObject({ code: "revision_held" });
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("a"));
-    });
-
-    it("lifts a hold only for the scope's administrators, and verifies the waiting candidate", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      await publish(rev("b"), image, null, rechecked);
-      await markVerified(PUBLIC_ID, rev("b"));
-      await promote(rev("b"), rev("a"));
-      await rollback(rev("a"), rev("b"));
-      await publish(rev("c"), image, null, rechecked);
-      expect((await digestsOf(rev("c")))!.state).toBe("ready");
-
-      await expect(lift(rev("a"))).rejects.toMatchObject({ code: "revision_not_held" });
-      await expect(lift(rev("c"), ORG_OWNER)).rejects.toMatchObject({ code: "revision_not_held" });
-      expect((await holds())[0]!.lifted_at).toBeNull();
-      await lift(rev("c"));
-      expect((await holds())[0]).toMatchObject({ lifted_by_user_id: ADMIN });
-      expect((await holds())[0]!.lifted_at).not.toBeNull();
-      expect((await digestsOf(rev("c")))!.state).toBe("verified");
-      expect(await listed(rev("c"))).toMatchObject({ held: false });
-      await promote(rev("c"), rev("a"));
-      // A second rollback from the same behaviour holds it again.
-      await rollback(rev("a"), rev("c"));
-      expect(await holds()).toMatchObject([{ lifted_at: null, lifted_by_user_id: null }]);
-      // Going back to a held revision stays possible, and holds what it leaves.
-      await rollback(rev("c"), rev("a"));
-      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("c"));
-      expect((await holds()).map((hold) => hold.lifted_at)).toEqual([null, null]);
-    });
-
-    it("writes no hold when the rollback does not happen", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      await publish(rev("b"), image, null, rechecked);
-      await markVerified(PUBLIC_ID, rev("b"));
-      await promote(rev("b"), rev("a"));
-      await env.DB.prepare("UPDATE scenario_revisions SET behaviour_digest = NULL WHERE rev = ?1").bind(rev("b")).run();
-      // The scenario is disabled between the read and the move.
-      const batch = env.DB.batch.bind(env.DB);
-      vi.spyOn(env.DB, "batch").mockImplementationOnce(async (statements) => {
-        await env.DB.prepare("UPDATE scenarios SET enabled = 0 WHERE id = ?1").bind(PUBLIC_ID).run();
-        return batch(statements);
-      });
-      await expect(rollback(rev("a"), rev("b"))).rejects.toMatchObject({ code: "live_revision_changed" });
-      expect(await holds()).toEqual([]);
-      expect((await digestsOf(rev("b")))!.behaviour_digest).toBeNull();
-    });
-
-    it("leaves a candidate ready on a lift when no verified revision behaves the same", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      await publish(rev("b"), image, null, rechecked);
-      await markVerified(PUBLIC_ID, rev("b"));
-      await promote(rev("b"), rev("a"));
-      await rollback(rev("a"), rev("b"));
-      // Another behaviour than the held one.
-      await publish(rev("c"), image, null, otherReady);
-      await lift(rev("b"));
-      expect((await digestsOf(rev("c")))!.state).toBe("ready");
-      // The held behaviour, but its verified revision is of another guest contract.
-      await rollback(rev("b"), rev("a"));
-      await rollback(rev("a"), rev("b"));
-      await publish(rev("d"), image, null, rechecked);
-      await env.DB.prepare("UPDATE scenario_revisions SET guest_contract = 2 WHERE rev = ?1").bind(rev("b")).run();
-      await lift(rev("d"));
-      expect((await digestsOf(rev("d")))!.state).toBe("ready");
-    });
-
-    it("leaves a candidate ready on a lift while a verify run of it is active", async () => {
-      await markVerified(PUBLIC_ID, rev("a"));
-      await promote(rev("a"), null);
-      await publish(rev("b"), image, null, rechecked);
-      await markVerified(PUBLIC_ID, rev("b"));
-      await promote(rev("b"), rev("a"));
-      await rollback(rev("a"), rev("b"));
-      await publish(rev("c"), image, null, rechecked);
-      await beginVerifyRun({ scenarioId: PUBLIC_ID, rev: rev("c") });
-      await lift(rev("c"));
-      expect((await digestsOf(rev("c")))!.state).toBe("ready");
+      expect((await scenarioRow(PUBLIC_ID))?.live_rev).toBe(rev("b"));
     });
 
     it("takes restore verification from the replaced revision only, when a snapshot start depends on the same", async () => {
@@ -594,13 +434,11 @@ describe("promotion, rollback and verify runs", () => {
       await env.DB.prepare("UPDATE scenario_revisions SET restore_verify_run_id = 'run-own' WHERE rev = ?1").bind(rev("f")).run();
       await promote(rev("f"), rev("d"));
       expect((await digestsOf(rev("f")))!.restore_verified_at).toBeNull();
-      await rollback(rev("d"), rev("f"));
-      await lift(rev("f"));
       // Nor from a revision without the digest.
-      await restoreVerified(rev("d"), 11);
+      await restoreVerified(rev("f"), 11);
       await publish(rev("e"), image, null, otherReady);
-      await env.DB.prepare("UPDATE scenario_revisions SET restore_digest = NULL WHERE rev IN (?1, ?2)").bind(rev("d"), rev("e")).run();
-      await promote(rev("e"), rev("d"));
+      await env.DB.prepare("UPDATE scenario_revisions SET restore_digest = NULL WHERE rev IN (?1, ?2)").bind(rev("f"), rev("e")).run();
+      await promote(rev("e"), rev("f"));
       expect((await digestsOf(rev("e")))!.restore_verified_at).toBeNull();
     });
   });
@@ -643,16 +481,11 @@ describe("promotion, rollback and verify runs", () => {
   describe("scope rights", () => {
     it("lets an organization's admins manage only their own scenarios and platform admins only public ones", async () => {
       await publish(rev("c"), image, "org-a");
-      await expect(assertScenarioAdmin(ORG_OWNER, ORG_ID)).resolves.toBeUndefined();
-      await expect(assertScenarioAdmin(ORG_OWNER, PUBLIC_ID)).rejects.toMatchObject({ status: 404 });
-      await expect(assertScenarioAdmin(OTHER_OWNER, ORG_ID)).rejects.toMatchObject({ status: 404 });
-      await expect(assertScenarioAdmin(LEARNER, PUBLIC_ID)).rejects.toMatchObject({ status: 404 });
-      await expect(assertScenarioAdmin(ADMIN, ORG_ID)).rejects.toMatchObject({ status: 403 });
-      await expect(assertScenarioAdmin(ADMIN, PUBLIC_ID)).resolves.toBeUndefined();
       expect((await listAdministeredScenarios(ORG_OWNER)).map((scenario) => scenario.id)).toEqual([ORG_ID]);
       expect(await listAdministeredScenarios(OTHER_OWNER)).toEqual([]);
-      expect((await listAdministeredScenarios(ADMIN)).map((scenario) => [scenario.id, scenario.canManage]))
-        .toEqual([[ORG_ID, false], [PUBLIC_ID, true]]);
+      expect(await listAdministeredScenarios(LEARNER)).toEqual([]);
+      // A platform admin reads every scenario and promotes only the public ones.
+      expect((await listAdministeredScenarios(ADMIN)).map((scenario) => scenario.id)).toEqual([ORG_ID, PUBLIC_ID]);
       await markVerified(ORG_ID, rev("c"));
       await expect(promote(rev("c"), null, ADMIN, ORG_ID)).rejects.toMatchObject({ status: 404 });
       await expect(promote(rev("c"), null, OTHER_OWNER, ORG_ID)).rejects.toMatchObject({ status: 404 });

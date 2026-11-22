@@ -1,16 +1,14 @@
 // The pointer model of scenario revisions. Each scenario has a candidate
 // (`candidate_rev`, its newest ready or verified revision, which its
 // source's job checks) and a live revision (`live_rev`, which learners start). Only a
-// verified revision of the current guest contract goes live: by the scope's
-// source's job promoting the candidate, or by rollback to a revision that was
-// live before.
+// verified revision of the current guest contract goes live, by the scope's
+// source's job promoting the candidate. There is no rollback (#494): the
+// remedy for a bad lab is a revert in the repository, whose commit finds the
+// verified twin among the revisions that were live and goes live without a
+// new check.
 // Every change is a compare-and-set on the scenario row that rechecks the
 // actor's rights, so a racing admin or ingest cannot make an unverified or
 // stale revision live. A run keeps the revision it started from.
-//
-// A rollback puts the behaviour it rolled away from on hold (#454): no
-// revision that behaves the same is verified by inheritance or promoted
-// until an administrator lifts the hold.
 //
 // A candidate with the live revision's content does not move. The course
 // catalog is the source's job's, once per commit.
@@ -24,8 +22,8 @@ import { activeAccountSql, activeAdminSql } from "@/lib/account-access";
 import { appError } from "@/lib/app-error";
 import { tryWakeHostRuntime, wakePlatformAgents } from "@/lib/host-runtime-wake";
 import { admitInternalRegistryOperation } from "@/lib/image-registry-admission";
-import { behaviourHeldSql, behaviourVerifiedSql, KEPT_REVISIONS_CTE, revisionImagesPresentSql } from "@/lib/kept-revisions";
-import { logKeyAttempt, machineBuildLogKey, storedBehaviourDigest } from "@/lib/machine-builds";
+import { KEPT_REVISIONS_CTE, revisionImagesPresentSql } from "@/lib/kept-revisions";
+import { logKeyAttempt, machineBuildLogKey } from "@/lib/machine-builds";
 import { platformHasRevisionImagesSql, readyPlatformImagesCtes } from "@/lib/scenario-runs/image-readiness";
 import { verifyOutcome, type VerifyOutcome } from "@/lib/run-tasks";
 import type { RunStateDocument } from "@/lib/run-state";
@@ -67,19 +65,12 @@ export interface ScenarioRevisionSummary {
   /** When the revision was last made live. */
   liveAt: number | null;
   createdAt: number;
-  /**
-   * Whether the server would make this revision live now: verified, of the
-   * current guest contract, kept by the registry sweep, its images stored.
-   */
-  canGoLive: boolean;
   /** Whether a live platform host reports every image of the revision ready, as a verify run needs. */
   imagesReady: boolean;
   /** When the revision's checks passed in a lab started from a host snapshot; only then may its runs start that way. */
   restoreVerifiedAt: number | null;
   /** The last restore check's outcome; admin-only. */
   restoreVerifyReport: RestoreVerifyReport | null;
-  /** Whether a rollback left this revision's behaviour on hold: it is not promoted until the hold is lifted. */
-  held: boolean;
   /** Whether this is another revision with the live one's content and guest contract: promoting it moves nothing. */
   sameAsLive: boolean;
 }
@@ -108,8 +99,6 @@ export interface AdministeredScenario {
   enabled: boolean;
   liveRev: string | null;
   candidateRev: string | null;
-  /** Whether the reader may roll back and lift holds. */
-  canManage: boolean;
   /** The active verify run of each revision, by rev. */
   verifyRuns: Record<string, string>;
   revisions: ScenarioRevisionSummary[];
@@ -144,27 +133,23 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
   const [scenarios, revisions, runs, jobs] = await env.DB.batch([
     env.DB.prepare(
       `SELECT scenario.id, scenario.namespace, scenario.slug, scenario.organization_id, scenario.enabled,
-          scenario.live_rev, scenario.candidate_rev, ${scopeAdminSql(1)} AS can_manage,
+          scenario.live_rev, scenario.candidate_rev,
           (SELECT json_extract(titled.doc_json, '$.title') FROM scenario_revisions titled
             WHERE titled.scenario_id = scenario.id ORDER BY titled.rev = scenario.live_rev DESC,
               titled.created_at DESC LIMIT 1) AS title
         FROM scenarios scenario WHERE ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2) ORDER BY scenario.id`,
     ).bind(actorUserId, scenarioId ?? null),
     env.DB.prepare(
-      `WITH ${KEPT_REVISIONS_CTE}, ${readyPlatformImagesCtes()}
+      `WITH ${readyPlatformImagesCtes()}
       SELECT revision.scenario_id, revision.rev, revision.state, revision.guest_contract, revision.content_digest,
           revision.failure_reason, revision.verify_run_id, revision.verify_report_json, revision.live_at,
-          revision.restore_verified_at, revision.restore_verify_report_json,
-          revision.created_at, (revision.state = 'verified' AND revision.guest_contract = ?3
-            AND EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = revision.scenario_id AND kept.rev = revision.rev)
-            AND ${revisionImagesPresentSql("revision.scenario_id", "revision.rev")}) AS can_go_live,
-          ${behaviourHeldSql("revision.scenario_id", "revision.behaviour_digest")} AS held,
+          revision.restore_verified_at, revision.restore_verify_report_json, revision.created_at,
           ${sameAsLiveSql("revision", "scenario")} AS same_as_live,
           ${platformHasRevisionImagesSql("revision.doc_json")} AS images_ready
         FROM scenario_revisions revision JOIN scenarios scenario ON scenario.id = revision.scenario_id
         WHERE ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2)
         ORDER BY revision.created_at DESC, revision.rev DESC`,
-    ).bind(actorUserId, scenarioId ?? null, GUEST_CONTRACT),
+    ).bind(actorUserId, scenarioId ?? null),
     env.DB.prepare(
       `SELECT run.run_id, run.scenario_id, run.scenario_rev FROM scenario_runs run
         JOIN scenarios scenario ON scenario.id = run.scenario_id
@@ -192,21 +177,21 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
   ]);
   type ScenarioRow = {
     id: string; namespace: string; slug: string; organization_id: string | null; enabled: number;
-    live_rev: string | null; candidate_rev: string | null; can_manage: number; title: string | null;
+    live_rev: string | null; candidate_rev: string | null; title: string | null;
   };
   type RevisionRow = {
     scenario_id: string; rev: string; state: ScenarioRevisionSummary["state"]; guest_contract: number;
     content_digest: string | null; failure_reason: string | null; verify_run_id: string | null;
-    verify_report_json: string | null; live_at: number | null; created_at: number; can_go_live: number;
+    verify_report_json: string | null; live_at: number | null; created_at: number;
     images_ready: number; restore_verified_at: number | null; restore_verify_report_json: string | null;
-    held: number; same_as_live: number;
+    same_as_live: number;
   };
   const byScenario = new Map<string, AdministeredScenario>();
   for (const row of scenarios!.results as ScenarioRow[]) {
     byScenario.set(row.id, {
       id: row.id, namespace: row.namespace, slug: row.slug, organizationId: row.organization_id, title: row.title,
       enabled: row.enabled === 1, liveRev: row.live_rev, candidateRev: row.candidate_rev,
-      canManage: row.can_manage === 1, verifyRuns: {}, revisions: [], sourceJob: null,
+      verifyRuns: {}, revisions: [], sourceJob: null,
     });
   }
   for (const row of jobs!.results as Array<{ scenario_id: string; rev: string; detail: string | null; driving: number }>) {
@@ -227,12 +212,11 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
       rev: row.rev, state: row.state, guestContract: row.guest_contract, contentDigest: row.content_digest,
       failureReason: row.failure_reason, verifyRunId: row.verify_run_id,
       verifyReport: row.verify_report_json ? (JSON.parse(row.verify_report_json) as VerifyReport) : null,
-      liveAt: row.live_at, createdAt: row.created_at, canGoLive: row.can_go_live === 1,
+      liveAt: row.live_at, createdAt: row.created_at,
       imagesReady: row.images_ready === 1,
       restoreVerifiedAt: row.restore_verified_at,
       restoreVerifyReport: row.restore_verify_report_json
         ? (JSON.parse(row.restore_verify_report_json) as RestoreVerifyReport) : null,
-      held: row.held === 1,
       sameAsLive: row.same_as_live === 1,
     });
   }
@@ -243,29 +227,17 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
   return [...byScenario.values()];
 }
 
-/** Refuses unless `actorUserId` administers the scenario's scope; the same 404 hides a scenario it may not read. */
-export async function assertScenarioAdmin(actorUserId: string, scenarioId: string): Promise<void> {
-  const row = await env.DB.prepare(
-    `SELECT ${scopeAdminSql(1)} AS manage, ${readerSql(1)} AS read FROM scenarios scenario WHERE scenario.id = ?2`,
-  ).bind(actorUserId, scenarioId).first<{ manage: number; read: number }>();
-  if (!row?.read) throw appError(404, "scenario_not_found", "scenario not found");
-  if (!row.manage) throw appError(403, "scenario_scope_admin_required", "only an administrator of this scenario's scope may change it");
-}
-
 /**
- * Moves `live_rev` from `liveRev` to `rev`: a promotion of the candidate, or
- * a rollback to a revision that was live before. Either needs a verified
- * revision of the current guest contract, and neither touches the course
- * catalog, which the source's job applies once per commit. The operator
- * drain does not hold it. Platform hosts then cache the new live images.
+ * Moves `live_rev` from `liveRev` to `rev`, a promotion of the candidate. It
+ * needs a verified revision of the current guest contract, and does not touch
+ * the course catalog, which the source's job applies once per commit. The
+ * operator drain does not hold it. Platform hosts then cache the new live
+ * images.
  *
  * A candidate with the live revision's content and guest contract does not
- * move. Every move writes the revision's `live_at`.
- *
- * A promotion of a behaviour on hold is refused. One that goes through
- * takes over the replaced revision's restore verification when a snapshot
- * start of both depends on the same things. A rollback puts the behaviour
- * of the revision it leaves on hold.
+ * move. Every move writes the revision's `live_at`, and takes over the
+ * replaced revision's restore verification when a snapshot start of both
+ * depends on the same things.
  *
  * With `source` the move is the source's job's (#454): a promotion
  * of one lab of its head commit, with no catalog, which the job applies
@@ -278,20 +250,17 @@ export async function moveLiveRevision(input: {
   rev: string;
   /** The live revision the actor saw; the move fails when it changed. */
   liveRev: string | null;
-  kind: "promote" | "rollback";
+  kind: "promote";
   actorUserId: string;
   source?: SourceHead;
 }): Promise<{ liveRev: string }> {
   const { scenarioId, rev, liveRev, kind, actorUserId, source } = input;
-  if (source && kind !== "promote") throw new Error("a source's job only promotes");
   const row = await env.DB.prepare(
     `WITH ${KEPT_REVISIONS_CTE}
     SELECT scenario.live_rev, scenario.candidate_rev,
-        revision.state, revision.guest_contract, revision.live_at,
+        revision.state, revision.guest_contract,
         (${scopeAdminSql(3)}${source ? ` AND ${sourceHeadSql("scenario.scope_key", { binder: "?3", rev: "?2", row: "?4", attempt: "?5", digest: "?6" })}` : ""}) AS manage,
-        revision.doc_json, ${sameAsLiveSql("revision", "scenario")} AS same_as_live,
-        (SELECT live.doc_json FROM scenario_revisions live
-          WHERE live.scenario_id = scenario.id AND live.rev = scenario.live_rev) AS live_doc_json,
+        ${sameAsLiveSql("revision", "scenario")} AS same_as_live,
         EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = ?1 AND kept.rev = ?2) AS kept,
         ${revisionImagesPresentSql("?1", "?2")} AS images_present
       FROM scenarios scenario
@@ -299,38 +268,24 @@ export async function moveLiveRevision(input: {
       WHERE scenario.id = ?1`,
   ).bind(scenarioId, rev, actorUserId, ...(source ? [source.rowId, source.attempt, source.digest] : [])).first<{
     live_rev: string | null; candidate_rev: string | null;
-    state: string; guest_contract: number; live_at: number | null; manage: number;
-    kept: number; images_present: number; doc_json: string; live_doc_json: string | null; same_as_live: number;
+    state: string; guest_contract: number; manage: number;
+    kept: number; images_present: number; same_as_live: number;
   }>();
   if (!row?.manage) throw appError(404, "scenario_revision_not_found", "scenario revision not found");
   if (row.live_rev === rev) throw appError(409, "revision_already_live", "this revision is already live");
   if (row.live_rev !== liveRev) throw appError(409, "live_revision_changed", "the live revision changed; reload and try again");
-  if (kind === "promote" && row.candidate_rev !== rev) {
+  if (row.candidate_rev !== rev) {
     throw appError(409, "revision_not_candidate", "only the scenario's candidate revision can be promoted");
   }
   // An unchanged lab does not move, and the catalog is not this path's.
-  if (kind === "promote" && row.same_as_live) {
-    throw appError(409, "revision_unchanged", "this revision is the same as the live one");
-  }
-  if (kind === "rollback" && row.live_at === null) {
-    throw appError(409, "revision_never_live", "a rollback goes only to a revision that was live before");
-  }
+  if (row.same_as_live) throw appError(409, "revision_unchanged", "this revision is the same as the live one");
   if (row.state !== "verified") throw appError(409, "revision_not_verified", "only a verified revision can go live");
   if (row.guest_contract !== GUEST_CONTRACT) {
     throw appError(409, "guest_contract_mismatch", "this revision was built for another guest contract");
   }
-  if (!row.kept) {
-    throw appError(409, "revision_not_retained", "only the revisions most recently live stay available to roll back to");
-  }
+  // The candidate is always kept; this is the registry sweep's word on it.
+  if (!row.kept) throw appError(409, "revision_not_retained", "this revision is no longer kept");
   if (!row.images_present) throw appError(409, "revision_images_gone", "this revision's images are no longer stored");
-  // Both digests come from the documents, so a revision from before the
-  // digest existed is held, and refused, like any other.
-  const behaviour = await storedBehaviourDigest(row.doc_json);
-  if (kind === "promote" && (await env.DB.prepare(`SELECT ${behaviourHeldSql("?1", "?2")} AS held`)
-    .bind(scenarioId, behaviour).first<{ held: number }>())?.held) {
-    throw revisionHeld();
-  }
-  const leftBehaviour = kind === "rollback" && row.live_doc_json !== null ? await storedBehaviourDigest(row.live_doc_json) : "";
 
   const now = Date.now();
   // The marker the dependent writes check: this move's own row write.
@@ -341,27 +296,22 @@ export async function moveLiveRevision(input: {
     env.DB.prepare(
       `WITH ${KEPT_REVISIONS_CTE}
       UPDATE scenarios SET live_rev = ?2, updated_at = ?3
-        WHERE id = ?1 AND live_rev IS ?4 AND enabled = 1
+        WHERE id = ?1 AND live_rev IS ?4 AND enabled = 1 AND candidate_rev = ?2
           AND EXISTS (SELECT 1 FROM kept_revisions kept WHERE kept.scenario_id = ?1 AND kept.rev = ?2)
           AND ${revisionImagesPresentSql("?1", "?2")}
-          AND (?5 = 'rollback' OR candidate_rev = ?2)
           AND EXISTS (SELECT 1 FROM scenario_revisions revision WHERE revision.scenario_id = ?1 AND revision.rev = ?2
-            AND revision.state = 'verified' AND revision.guest_contract = ?6
-            AND (?5 = 'promote' OR revision.live_at IS NOT NULL))
-          AND EXISTS (SELECT 1 FROM scenarios scenario WHERE scenario.id = ?1 AND ${scopeAdminSql(7)})
-          -- A rollback racing this promotion may have put the behaviour on hold.
-          AND (?5 = 'rollback' OR NOT ${behaviourHeldSql("?1", "?8")})
-          ${source ? `AND ${sourceHeadSql("scenarios.scope_key", { binder: "?7", rev: "?2", row: "?9", attempt: "?10", digest: "?11" })}` : ""}
+            AND revision.state = 'verified' AND revision.guest_contract = ?5)
+          AND EXISTS (SELECT 1 FROM scenarios scenario WHERE scenario.id = ?1 AND ${scopeAdminSql(6)})
+          ${source ? `AND ${sourceHeadSql("scenarios.scope_key", { binder: "?6", rev: "?2", row: "?7", attempt: "?8", digest: "?9" })}` : ""}
         RETURNING id`,
-    ).bind(scenarioId, rev, now, liveRev, kind, GUEST_CONTRACT, actorUserId,
-      behaviour, ...(source ? [source.rowId, source.attempt, source.digest] : [])),
+    ).bind(scenarioId, rev, now, liveRev, GUEST_CONTRACT, actorUserId,
+      ...(source ? [source.rowId, source.attempt, source.digest] : [])),
     env.DB.prepare(
-      // "Last made live": a rollback target becomes the newest again, so
-      // retention keeps what was live most recently.
+      // "Last made live": retention keeps the revisions live most recently.
       `UPDATE scenario_revisions SET live_at = ?3 WHERE scenario_id = ?1 AND rev = ?2 AND ${moved}`,
     ).bind(scenarioId, rev, now),
   ];
-  if (kind === "promote" && liveRev !== null) {
+  if (liveRev !== null) {
     // Restore verification comes from the revision this one replaces and
     // from no other, so withdrawing it there is not undone by a push. A
     // revision with a restore check of its own keeps that check's word.
@@ -373,21 +323,6 @@ export async function moveLiveRevision(input: {
         WHERE scenario_id = ?1 AND rev = ?2 AND restore_verified_at IS NULL AND restore_verify_run_id IS NULL
           AND ${moved}`,
     ).bind(scenarioId, rev, now, liveRev));
-  }
-  if (leftBehaviour !== "") {
-    statements.push(
-      env.DB.prepare(
-        `INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at, held_by_user_id)
-          SELECT ?1, ?4, ?3, ?5 WHERE ${moved}
-          ON CONFLICT (scenario_id, behaviour_digest) DO UPDATE SET held_at = excluded.held_at,
-            held_by_user_id = excluded.held_by_user_id, lifted_at = NULL, lifted_by_user_id = NULL`,
-      ).bind(scenarioId, rev, now, leftBehaviour, actorUserId),
-      // The revision left behind shows as held, also one from before the digest existed.
-      env.DB.prepare(
-        `UPDATE scenario_revisions SET behaviour_digest = ?4
-          WHERE scenario_id = ?1 AND rev = ?5 AND behaviour_digest IS NULL AND ${moved}`,
-      ).bind(scenarioId, rev, now, leftBehaviour, liveRev),
-    );
   }
   // A registry writer for the move: refused while a sweep holds the gate, and
   // no sweep starts while it is open, so the move never overlaps a deleting
@@ -405,16 +340,9 @@ export async function moveLiveRevision(input: {
   } finally {
     await writer.lease.complete(outcome);
   }
-  if (!changed?.results.length) {
-    if (kind === "promote" && (await env.DB.prepare(`SELECT ${behaviourHeldSql("?1", "?2")} AS held`)
-      .bind(scenarioId, behaviour).first<{ held: number }>())?.held) {
-      throw revisionHeld();
-    }
-    throw appError(409, "live_revision_changed", "the scenario changed; reload and try again");
-  }
+  if (!changed?.results.length) throw appError(409, "live_revision_changed", "the scenario changed; reload and try again");
   console.info(JSON.stringify({ event: "scenario_live_revision", scenarioId, kind, from: liveRev, to: rev,
-    ...(source ? { source: source.scopeKey, commitRow: source.rowId } : { actorUserId }),
-    ...(leftBehaviour !== "" ? { held: leftBehaviour } : {}) }));
+    ...(source ? { source: source.scopeKey, commitRow: source.rowId } : { actorUserId }) }));
   await wakePlatformAgents();
   return { liveRev: rev };
 }
@@ -479,61 +407,6 @@ export function sameAsLiveSql(revision: string, scenario: string): string {
   return `EXISTS (SELECT 1 FROM scenario_revisions same_live WHERE same_live.scenario_id = ${scenario}.id
     AND same_live.rev = ${scenario}.live_rev AND same_live.rev <> ${revision}.rev
     AND same_live.content_digest = ${revision}.content_digest AND same_live.guest_contract = ${revision}.guest_contract)`;
-}
-
-const revisionHeld = () =>
-  appError(409, "revision_held", "a rollback put this revision's behaviour on hold; lift the hold to promote it");
-
-/**
- * Lifts the hold a rollback left on the behaviour of revision `rev`. The
- * scenario's candidate is then verified without a run when it is ready, no
- * verify run of it is active, and a verified revision behaves the same.
- *
- * The source's head commit whose job has ended is taken up again,
- * as a new attempt: the lab that was held is checked and goes live without
- * a new commit.
- */
-export async function liftRevisionHold(input: { scenarioId: string; rev: string; actorUserId: string }): Promise<void> {
-  const { scenarioId, rev, actorUserId } = input;
-  const now = Date.now();
-  const digest = await sourceCompileDigest();
-  const [lifted] = await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE scenario_revision_holds SET lifted_at = ?3, lifted_by_user_id = ?4
-        WHERE scenario_id = ?1 AND lifted_at IS NULL
-          AND behaviour_digest = (SELECT revision.behaviour_digest FROM scenario_revisions revision
-            WHERE revision.scenario_id = ?1 AND revision.rev = ?2)
-          AND EXISTS (SELECT 1 FROM scenarios scenario WHERE scenario.id = ?1 AND ${scopeAdminSql(4)})
-        RETURNING behaviour_digest`,
-    ).bind(scenarioId, rev, now, actorUserId),
-    env.DB.prepare(
-      `UPDATE scenario_revisions SET state = 'verified'
-        WHERE scenario_id = ?1 AND state = 'ready'
-          AND rev = (SELECT candidate_rev FROM scenarios WHERE id = ?1)
-          AND EXISTS (SELECT 1 FROM scenario_revision_holds hold WHERE hold.scenario_id = ?1
-            AND hold.behaviour_digest = scenario_revisions.behaviour_digest AND hold.lifted_at = ?2)
-          AND ${behaviourVerifiedSql("?1", "scenario_revisions.behaviour_digest", "scenario_revisions.guest_contract")}
-          AND NOT EXISTS (SELECT 1 FROM scenario_runs run WHERE run.scenario_id = ?1
-            AND run.scenario_rev = scenario_revisions.rev AND run.launch_source = 'verify' AND run.active_key IS NOT NULL)`,
-    ).bind(scenarioId, now),
-    // Only a row the job ended, which has its bundle: one that failed
-    // before its ingest has no labs to take up.
-    env.DB.prepare(
-      `UPDATE scenario_source_commits SET state = 'waiting', attempt = attempt + 1, detail = NULL, updated_at = ?2
-        WHERE purpose = 'deploy' AND state IN ('live', 'failed')
-          AND EXISTS (SELECT 1 FROM scenario_revision_holds hold WHERE hold.scenario_id = ?1 AND hold.lifted_at = ?2)
-          AND EXISTS (SELECT 1 FROM scenario_sources source JOIN scenarios scenario ON scenario.scope_key = source.scope_key
-            WHERE scenario.id = ?1 AND source.scope_key = scenario_source_commits.scope_key
-              AND source.disconnected_at IS NULL
-              AND scenario_source_commits.rev = 'git-' || source.github_repository_id || '-' || source.head_sha || '-' || ?3)
-          AND EXISTS (SELECT 1 FROM bundles bundle
-            WHERE bundle.rev = scenario_source_commits.rev AND bundle.scope_key = scenario_source_commits.scope_key)`,
-    ).bind(scenarioId, now, digest),
-  ]);
-  if (!lifted?.results.length) throw appError(409, "revision_not_held", "this revision is not on hold");
-  // The source's job takes the lab up again.
-  await pokeSource(env.DB, { scenarioId }).run();
-  console.info(JSON.stringify({ event: "scenario_revision_hold_lifted", scenarioId, rev, actorUserId }));
 }
 
 /**

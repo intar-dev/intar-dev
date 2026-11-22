@@ -1,6 +1,11 @@
 import { ACTIVE_RUNTIME_EXECUTION_STATES } from "@/db/schema";
 
-/** How many revisions of a scenario that were live stay rollback targets, the live one among them. */
+/**
+ * How many revisions of a scenario that were live stay kept, the live one
+ * among them. They are no rollback target (#494): they make a revert quick,
+ * since a commit that brings a behaviour back finds its verified twin and its
+ * images, and goes live without a rebuild or a new check.
+ */
 export const KEPT_LIVE_REVISIONS = 3;
 export const ACTIVE_EXECUTIONS = ACTIVE_RUNTIME_EXECUTION_STATES.map((state) => `'${state}'`).join(", ");
 
@@ -12,7 +17,7 @@ export const ACTIVE_EXECUTIONS = ACTIVE_RUNTIME_EXECUTION_STATES.map((state) => 
  * Besides the pointers, the building revisions and those a run started
  * from, a scenario keeps the revisions most recently made live (#454). A
  * verified revision that was never live is kept only as the candidate:
- * nothing else can promote it or roll back to it.
+ * nothing else can promote it.
  */
 export const KEPT_REVISIONS_CTE = `kept_revisions AS (
   SELECT revision.scenario_id, revision.rev, revision.doc_json
@@ -56,22 +61,11 @@ export function revisionImagesPresentSql(scenario: string, rev: string): string 
 }
 
 /**
- * Holds while the behaviour digest (`digest`, an SQL expression) of
- * `scenario` is on hold: a rollback left it, and no administrator lifted
- * the hold. A held digest is not verified by inheritance and not promoted.
- */
-export function behaviourHeldSql(scenario: string, digest: string): string {
-  return `EXISTS (SELECT 1 FROM scenario_revision_holds hold WHERE hold.scenario_id = ${scenario}
-    AND hold.behaviour_digest = ${digest} AND hold.lifted_at IS NULL)`;
-}
-
-/**
  * Holds while a verified revision of `scenario` and guest contract
- * `contract` behaves as `digest` says and that behaviour is not on hold:
- * a revision with this digest needs no verify run of its own (#454).
+ * `contract` behaves as `digest` says: a revision with this digest needs no
+ * verify run of its own (#454).
  */
 export function behaviourVerifiedSql(scenario: string, digest: string, contract: string): string {
-  return `(EXISTS (SELECT 1 FROM scenario_revisions twin WHERE twin.scenario_id = ${scenario}
-      AND twin.behaviour_digest = ${digest} AND twin.guest_contract = ${contract} AND twin.state = 'verified')
-    AND NOT ${behaviourHeldSql(scenario, digest)})`;
+  return `EXISTS (SELECT 1 FROM scenario_revisions twin WHERE twin.scenario_id = ${scenario}
+      AND twin.behaviour_digest = ${digest} AND twin.guest_contract = ${contract} AND twin.state = 'verified')`;
 }

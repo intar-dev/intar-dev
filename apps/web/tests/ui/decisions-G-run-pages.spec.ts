@@ -94,32 +94,27 @@ test("admin tab panels stay mounted so work survives a tab switch", async ({
   );
 });
 
-test("a refused rollback reports inside its revision row", async ({
+test("a scenario's revisions only show: no rollback and no hold to lift", async ({
   page,
   ui,
 }) => {
   await ui.open({ ...routeCase("admin-scenario-detail"), theme: "light" });
-  // The candidate was live before: it can be gone back to.
+  // The verified candidate was live before, as a rollback target was.
   const scenario = ui.server.state.scenarioRevisions.find((candidate) => candidate.id === "intar/repair-nginx")!;
   const revisions = scenario.revisions as Array<{ rev: string; liveAt: number | null }>;
   revisions.find((revision) => revision.rev === scenario.candidateRev)!.liveAt = revisions.at(-1)!.liveAt;
-  await page.reload();
-  await page.route("**/api/admin/scenario-revisions/intar/repair-nginx", (route) => {
-    if (route.request().method() !== "POST") return route.fallback();
-    ui.server.expectedConflicts += 1;
-    return route.fulfill({
-      status: 409,
-      json: { error: "The live revision changed; reload and try again.", code: "live_revision_changed" },
-    });
+  const posts: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/api/admin/scenario-revisions/")) posts.push(request.url());
   });
+  await page.reload();
 
-  await page.getByRole("button", { name: "Roll back" }).click();
-
-  const alert = page.getByRole("alert");
-  await expect(alert).toHaveCount(1);
-  await expect(alert).toContainText("The live revision changed; reload and try again.");
-  // The row of the revision that was refused shows it.
-  await expect(page.locator("div.py-3", { has: alert }).getByRole("button", { name: "Roll back" })).toBeVisible();
+  const section = page.locator("section", { has: page.getByRole("heading", { name: "Revisions" }) });
+  await expect(section.getByText("Last made live").first()).toBeVisible();
+  // A bad lab is reverted in its repository (#494).
+  for (const name of ["Roll back", "Lift hold"]) await expect(page.getByRole("button", { name })).toHaveCount(0);
+  await expect(section.getByText("Held", { exact: true })).toHaveCount(0);
+  expect(posts).toEqual([]);
 });
 
 test("a scenario says what its source's job is doing, and offers no by-hand verify or promote", async ({

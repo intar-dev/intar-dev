@@ -375,7 +375,7 @@ export async function recordMachineBuildReport(
  * One with a failed build fails. One whose every machine has its image gets
  * the digests in its document and its own digests, and is ready, or verified
  * when a verified revision of its scenario and guest contract behaves the
- * same and that behaviour is not on hold.
+ * same.
  */
 export async function settleScenarioRevisions(
   env: Env,
@@ -498,9 +498,9 @@ interface UndigestedRevision {
 
 /**
  * The behaviour digest of a stored revision document, or `""` for one that
- * cannot be read: that matches no other revision and no hold.
+ * cannot be read: that matches no other revision.
  */
-export async function storedBehaviourDigest(docJson: string): Promise<string> {
+async function storedBehaviourDigest(docJson: string): Promise<string> {
   try {
     return await behaviourDigest(JSON.parse(docJson) as ScenarioRevisionV1);
   } catch {

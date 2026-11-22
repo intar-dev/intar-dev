@@ -10,7 +10,8 @@ import { settleScenarioRevisions } from "@/lib/machine-builds";
 import { maintainPipelineRevisions } from "@/lib/pipeline-revisions";
 import { ingestSourceBundle, sourceBundleObjectKey } from "@/lib/scenario-bundles";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
-import { liftRevisionHold, listAdministeredScenarios, moveLiveRevision } from "@/lib/scenario-revisions";
+import { KEPT_REVISIONS_CTE } from "@/lib/kept-revisions";
+import { listAdministeredScenarios, moveLiveRevision } from "@/lib/scenario-revisions";
 import {
   DEPLOY_JOB_DEADLINE_MS, DEPLOY_JOB_STORAGE_KEY, DEPLOY_JOB_VERIFY_LEASE_MS, detailOf, driveDeployJob,
   RESTORE_CHECK_EVERY_MS, RESTORE_CHECK_FOR_MS, takeUpLeftHead, type DeployJob, type Lab,
@@ -410,35 +411,51 @@ describe("a source's job", () => {
     expect(await sourceRow()).toMatchObject({ live_rev: rev("b"), live_sha: "b".repeat(40) });
   });
 
-  it("leaves a held lab where it is while the commit goes live, and takes it up again on the lift", async () => {
+  /** Two labs whose second checks otherwise: another behaviour, which only a verify run passes. */
+  const rechecked = () => {
+    const bundle = twoLabs();
+    bundle.scenarios[1]!.tasks[0]!.check = "true";
+    return bundle;
+  };
+
+  it("ignores an open hold row: the lab it names is checked and goes live as any other", async () => {
     await live("a", twoLabs());
-    await head("b", twoLabs("changed"));
+    await head("b", rechecked());
+    // A row left from when a rollback held this behaviour; nothing reads it now.
     await env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at)
       SELECT scenario_id, behaviour_digest, 1 FROM scenario_revisions WHERE scenario_id = ?1 AND rev = ?2`).bind(DB_LAB, rev("b")).run();
-    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified' WHERE rev = ?1 AND state = 'ready'").bind(rev("b")).run();
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM scenario_revision_holds WHERE lifted_at IS NULL").first("n")).toBe(1);
     await drive();
-    expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("a") });
-    expect(await commit("b")).toEqual({
-      state: "live", detail: `- ${DB_LAB}: held; an administrator must lift it\n- 1 lab unchanged`,
-    });
-    // The lift takes the commit up again as a new attempt.
-    await liftRevisionHold({ scenarioId: DB_LAB, rev: rev("b"), actorUserId: OWNER });
-    expect(await env.DB.prepare("SELECT state, attempt, detail FROM scenario_source_commits WHERE id = 'row-b'").first())
-      .toEqual({ state: "waiting", attempt: 2, detail: null });
+    expect(begun).toEqual([{ scenarioId: DB_LAB, rev: rev("b"), leaseMs: DEPLOY_JOB_VERIFY_LEASE_MS }]);
+    expect(await commit("b")).toEqual({ state: "waiting", detail: "- 1 lab unchanged" });
+    await finish("run-1", "passed");
     await drive();
     expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("b") });
-    expect((await commit("b"))!.state).toBe("live");
-    // A row that ended before its ingest has no bundle, and is not taken up.
-    await env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at)
-      SELECT scenario_id, behaviour_digest, 1 FROM scenario_revisions WHERE scenario_id = ?1 AND rev = ?2
-      ON CONFLICT DO UPDATE SET lifted_at = NULL`).bind(DB_LAB, rev("b")).run();
-    await env.DB.batch([
-      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "c".repeat(40)),
-      env.DB.prepare(`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, attempt, state, detail)
-        VALUES ('row-c', ?1, 'deploy', ?2, ?3, 'push', 1, 'failed', 'the fetch failed')`).bind(SCOPE, "c".repeat(40), rev("c")),
-    ]);
-    await liftRevisionHold({ scenarioId: DB_LAB, rev: rev("b"), actorUserId: OWNER });
-    expect(await commit("c")).toEqual({ state: "failed", detail: "the fetch failed" });
+    expect(await commit("b")).toEqual({ state: "live", detail: `- ${DB_LAB}: live\n- 1 lab unchanged` });
+  });
+
+  it("puts a revert live in one pass: its lab finds the kept verified twin and its images, with no run and no build", async () => {
+    await live("a", twoLabs());
+    await head("b", rechecked());
+    await drive();
+    await finish("run-1", "passed");
+    await drive();
+    expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("b") });
+    // Rev a's revision of the lab was live and is kept, its images with it.
+    expect(await env.DB.prepare(
+      `WITH ${KEPT_REVISIONS_CTE} SELECT COUNT(*) AS n FROM kept_revisions WHERE scenario_id = ?1 AND rev = ?2`,
+    ).bind(DB_LAB, rev("a")).first("n")).toBe(1);
+    const builds = () => env.DB.prepare("SELECT COUNT(*) AS n FROM machine_builds").first("n");
+    const before = await builds();
+    begun = [];
+    // Rev c reverts b: the second lab behaves as it did in a.
+    await head("c", twoLabs(), false);
+    expect(await builds()).toBe(before);
+    expect(await revisionState(DB_LAB, "c")).toBe("verified");
+    await drive();
+    expect(begun).toEqual([]);
+    expect(await scenario(DB_LAB)).toMatchObject({ live_rev: rev("c") });
+    expect(await commit("c")).toEqual({ state: "live", detail: `- ${DB_LAB}: live, verified without a run\n- 1 lab unchanged` });
   });
 
   it("disables a lab the commit no longer has and enables one it has again, which is then checked and moved", async () => {
@@ -620,10 +637,7 @@ describe("a source's job", () => {
         env.DB.prepare("UPDATE scenario_source_commits SET attempt = 1"),
       ]);
     }
-    // A rollback is never the job's, and the move goes through once all holds.
-    await expect(moveLiveRevision({ scenarioId: WEB, rev: rev("a"), liveRev: null, kind: "rollback", actorUserId: OWNER, source }))
-      .rejects.toThrow();
-    // The catalog is not this path's.
+    // The move goes through once all holds, and the catalog is not this path's.
     await moveA();
     expect(await scenario(WEB)).toMatchObject({ live_rev: rev("a") });
     expect(await catalogRev()).toBeNull();
@@ -1104,16 +1118,10 @@ describe("pokes", () => {
   const poked = () => env.DB.prepare("SELECT poked_at FROM scenario_sources WHERE scope_key = ?1").bind(SCOPE).first<number | null>("poked_at");
   const unpoke = () => env.DB.prepare("UPDATE scenario_sources SET poked_at = NULL WHERE scope_key = ?1").bind(SCOPE).run();
 
-  it("reach the source when a revision leaves building and when a hold is lifted, whatever its column says, never a disconnected one", async () => {
+  it("reach the source when a revision leaves building, whatever its column says, never a disconnected one", async () => {
     await head("a", bundleFixture, false);
     await unpoke();
     await build("a");
-    expect(await poked()).not.toBeNull();
-
-    await env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at)
-      SELECT scenario_id, behaviour_digest, 1 FROM scenario_revisions WHERE scenario_id = ?1`).bind(WEB).run();
-    await unpoke();
-    await liftRevisionHold({ scenarioId: WEB, rev: rev("a"), actorUserId: OWNER });
     expect(await poked()).not.toBeNull();
 
     // Each with a machine of its own, so its build is new.

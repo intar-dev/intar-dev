@@ -1,6 +1,6 @@
 /**
  * Asks for a pass of the source that owns `by`, a scope or one of its
- * scenarios: a build, a verify run or a hold of it just changed. The
+ * scenarios: a build or a verify run of it just changed. The
  * every-minute cron runs a poked source.
  */
 export function pokeSource(db: D1Database, by: { scopeKey: string } | { scenarioId: string }): D1PreparedStatement {

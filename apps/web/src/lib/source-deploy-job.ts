@@ -9,7 +9,7 @@
 //
 // A lab is one scenario's revision of the commit. It has passed when the
 // revision is verified, by inheritance or by a verify run the job started;
-// it is skipped when it would not move (unchanged, on hold); it failed when
+// it is skipped when it would not move (unchanged); it failed when
 // its revision failed, its checks did not pass, or a wait ran out. A lab
 // that passed goes live by a move of its own, whatever the commit's other
 // labs do. A pipeline's lab goes live only once the image of each of its
@@ -47,7 +47,6 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { scenarioSources } from "@/db/schema";
 import { AppError } from "@/lib/app-error";
-import { behaviourHeldSql } from "@/lib/kept-revisions";
 import { pipelinePlan } from "@/lib/pipeline-revisions";
 import {
   catalogForwardSql, headLeftSql, namespacedCatalog, sameAsLiveSql, sourceHeadSql, type moveLiveRevision,
@@ -133,7 +132,7 @@ const LAB_WAITS: Record<string, string> = {
 };
 
 /** Refusals of a move that the next pass reads again. */
-const MOVE_RETRIES = new Set(["live_revision_changed", "revision_held", "revision_unchanged", "revision_already_live",
+const MOVE_RETRIES = new Set(["live_revision_changed", "revision_unchanged", "revision_already_live",
   "revision_not_verified", "revision_not_candidate", "scenario_revision_not_found"]);
 /** Refusals of a move that are the lab's end. */
 const MOVE_FAILURES: Record<string, string> = {
@@ -151,7 +150,6 @@ interface LabRow {
   live: number;
   candidate: number;
   unchanged: number;
-  held: number;
   running: number;
   verify_run_id: string | null;
   verify_report_json: string | null;
@@ -169,9 +167,9 @@ interface LabRow {
 
 export type Lab =
   | { kind: "building" | "checking" | "unchanged" }
-  /** Live: by this pass, before it, or by an administrator. */
+  /** Live: by this pass or before it. */
   | { kind: "live"; inherited: boolean }
-  | { kind: "held" | "failed" | "waiting"; note: string };
+  | { kind: "failed" | "waiting"; note: string };
 
 /**
  * One step of the job of scope `scopeKey`'s head commit, whose rev is built
@@ -483,7 +481,6 @@ async function readLabs(db: D1Database, rev: string, scopeKey: string): Promise<
     `SELECT revision.scenario_id, scenario.live_rev, revision.state, revision.failure_reason, scenario.enabled,
         scenario.live_rev IS revision.rev AS live, scenario.candidate_rev IS revision.rev AS candidate,
         ${sameAsLiveSql("revision", "scenario")} AS unchanged,
-        ${behaviourHeldSql("revision.scenario_id", "revision.behaviour_digest")} AS held,
         EXISTS (SELECT 1 FROM scenario_runs run
           WHERE run.active_key = 'verify:' || ?2 || ':' || revision.rev || ':' || revision.scenario_id) AS running,
         revision.verify_run_id, revision.verify_report_json, bundle.image_producer AS producer,
@@ -505,17 +502,16 @@ async function readLabs(db: D1Database, rev: string, scopeKey: string): Promise<
 }
 
 /**
- * The check run's lines: one per lab that changed, the failed and held
+ * The check run's lines: one per lab that changed, the failed
  * first, the unchanged as a count; cut at a line when they are too many.
  */
 export function detailOf(labs: Map<string, Lab>, stepLine: string | null): string | null {
-  const rank = { failed: 0, held: 1, waiting: 2, live: 3 } as const;
+  const rank = { failed: 0, waiting: 1, live: 2 } as const;
   const lines = [...labs]
     .filter((entry): entry is [string, Extract<Lab, { kind: keyof typeof rank }>] => entry[1].kind in rank)
     .sort(([, a], [, b]) => rank[a.kind] - rank[b.kind])
     .map(([scenarioId, lab]) => `- ${scenarioId}: ${lab.kind === "live"
       ? `live${lab.inherited ? ", verified without a run" : ""}`
-      : lab.kind === "held" ? `held; ${lab.note}`
       // Marked, so a reader can tell the job's last word from what it waits for.
       : lab.kind === "failed" ? `${LAB_FAILED}${lab.note}` : lab.note}`);
   const unchanged = [...labs.values()].filter((lab) => lab.kind === "unchanged").length;
@@ -673,7 +669,6 @@ function decide(row: LabRow, overdue: boolean): Lab | "move" | null {
     return overdue ? { kind: "failed", note: "its images did not arrive within 24 hours" } : { kind: "building" };
   }
   if (row.unchanged) return { kind: "unchanged" };
-  if (row.held) return { kind: "held", note: "an administrator must lift it" };
   // Disabled with a revision of the head: the commit has the lab again,
   // and its step enables it.
   if (!row.enabled) {

@@ -1516,17 +1516,14 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         pathname,
         /^\/api\/admin\/scenario-revisions\/([^/]+\/[^/]+)$/,
       );
-      if (revisionScenarioId) {
+      // Only a read: the route has no POST any more (#494).
+      if (revisionScenarioId && method === "GET") {
         const scenario = server.state.scenarioRevisions.find(
           (candidate) => candidate.id === revisionScenarioId,
         );
         if (!scenario) {
           await json(route, { error: "scenario not found", code: "scenario_not_found" }, 404);
           return;
-        }
-        if (method === "POST") {
-          const body = await requestBody(route);
-          if (body.action === "rollback") scenario.liveRev = body.rev;
         }
         await json(route, { scenario });
         return;

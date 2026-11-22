@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { HttpResponseError } from "@/components/app/lib/http-response-error";
 import type { StatusTone } from "@/components/app/patterns/StatusToken";
 import type { AdministeredScenario, MachineBuildSummary, ScenarioRevisionSummary } from "@/lib/scenario-revisions";
@@ -32,31 +32,6 @@ export function useAdministeredScenario(scenarioId: string) {
     queryFn: async () => (await getJson<{ scenario: AdministeredScenario }>(scenarioUrl(scenarioId), "Failed to load the scenario")).scenario,
     // A running verify run settles on its own; poll until it has.
     refetchInterval: (query) => (Object.keys(query.state.data?.verifyRuns ?? {}).length ? 5_000 : false),
-  });
-}
-
-export type RevisionAction =
-  | { action: "lift_hold"; rev: string }
-  | { action: "rollback"; rev: string; liveRev: string | null };
-
-export function useRevisionAction(scenarioId: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (request: RevisionAction) => {
-      const response = await fetch(scenarioUrl(scenarioId), {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(request),
-      });
-      const body = await response.json().catch(() => null);
-      if (!response.ok) throw HttpResponseError.fromBody(response.status, body, `Could not ${request.action} this revision`);
-      return (body as { scenario: AdministeredScenario }).scenario;
-    },
-    onSuccess: (scenario) => {
-      queryClient.setQueryData([...SCENARIOS_KEY, scenarioId], scenario);
-      void queryClient.invalidateQueries({ queryKey: SCENARIOS_KEY, exact: true });
-    },
   });
 }
 
