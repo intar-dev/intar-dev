@@ -86,14 +86,17 @@ fn parses_the_frozen_workflow_argv() {
 pub(crate) fn example() -> tempfile::TempDir {
     let content = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
     let temp = tempfile::tempdir().expect("tempdir");
-    let scenario = temp.path().join("scenarios/broken-nginx");
-    std::fs::create_dir_all(&scenario).expect("mkdir");
-    std::fs::copy(content.join("intar.hcl"), temp.path().join("intar.hcl")).expect("copy");
-    std::fs::copy(
-        content.join("scenarios/broken-nginx/scenario.hcl"),
-        scenario.join("scenario.hcl"),
-    )
-    .expect("copy");
+    for file in [
+        "intar.hcl",
+        "scenarios/broken-nginx/scenario.hcl",
+        "courses/linux-operations/course.md",
+        "courses/linux-operations/00-operating-model/lecture.md",
+        "courses/linux-operations/01-broken-nginx/lecture.md",
+    ] {
+        let to = temp.path().join(file);
+        std::fs::create_dir_all(to.parent().expect("parent")).expect("mkdir");
+        std::fs::copy(content.join(file), to).expect("copy");
+    }
     temp
 }
 

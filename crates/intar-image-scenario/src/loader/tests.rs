@@ -638,14 +638,17 @@ fn bundles_round_trip_and_are_capped() {
 fn example() -> tempfile::TempDir {
     let content = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
     let temp = tempfile::tempdir().expect("tempdir");
-    let scenario = temp.path().join("scenarios/broken-nginx");
-    std::fs::create_dir_all(&scenario).expect("mkdir");
-    std::fs::copy(content.join("intar.hcl"), temp.path().join("intar.hcl")).expect("copy");
-    std::fs::copy(
-        content.join("scenarios/broken-nginx/scenario.hcl"),
-        scenario.join("scenario.hcl"),
-    )
-    .expect("copy");
+    for file in [
+        "intar.hcl",
+        "scenarios/broken-nginx/scenario.hcl",
+        "courses/linux-operations/course.md",
+        "courses/linux-operations/00-operating-model/lecture.md",
+        "courses/linux-operations/01-broken-nginx/lecture.md",
+    ] {
+        let to = temp.path().join(file);
+        std::fs::create_dir_all(to.parent().expect("parent")).expect("mkdir");
+        std::fs::copy(content.join(file), to).expect("copy");
+    }
     temp
 }
 
@@ -747,4 +750,73 @@ fn quiet_greps_are_warned_at_their_block() {
         )),
         "{found:?}"
     );
+}
+
+fn unnamed(slug: &str) -> String {
+    format!(
+        "scenarios/{slug}/scenario.hcl: no lecture names the scenario `{slug}`: give a lecture of a course `scenario: {slug}`, or remove the scenario"
+    )
+}
+
+#[test]
+fn every_scenario_is_named_by_a_lecture() {
+    assert_eq!(compiled(|_| {}), Err(unnamed("repair-nginx")));
+
+    // A text-only lecture names no scenario.
+    let theory_only = compiled(|root| {
+        with_course(root, "repair-nginx");
+        std::fs::remove_dir_all(root.join("courses/linux/01-repair")).expect("rm");
+    });
+    assert_eq!(theory_only, Err(unnamed("repair-nginx")));
+
+    // Two unnamed scenarios: one diagnostic each, in path order.
+    let two = compiled(|root| {
+        for file in ["scenario.hcl", "briefing.md", "break.sh"] {
+            let from = root.join("scenarios/repair-nginx").join(file);
+            let to = root.join("scenarios/a-nginx").join(file);
+            std::fs::create_dir_all(to.parent().expect("parent")).expect("mkdir");
+            std::fs::copy(from, to).expect("copy");
+        }
+        edit(
+            root,
+            "scenarios/a-nginx/scenario.hcl",
+            "scenario \"repair-nginx\"",
+            "scenario \"a-nginx\"",
+        );
+    });
+    assert_eq!(
+        two,
+        Err(format!(
+            "{}\n{}",
+            unnamed("a-nginx"),
+            unnamed("repair-nginx")
+        ))
+    );
+
+    // Named once, or by lectures of two courses (the text-only lecture
+    // beside it is fine).
+    assert!(compiled(|root| with_course(root, "repair-nginx")).is_ok());
+    let twice = compiled(|root| {
+        with_course(root, "repair-nginx");
+        std::fs::create_dir_all(root.join("courses/ops")).expect("mkdir");
+        std::fs::copy(
+            root.join("courses/linux/course.md"),
+            root.join("courses/ops/course.md"),
+        )
+        .expect("copy");
+        std::fs::create_dir_all(root.join("courses/ops/00-again")).expect("mkdir");
+        std::fs::copy(
+            root.join("courses/linux/01-repair/lecture.md"),
+            root.join("courses/ops/00-again/lecture.md"),
+        )
+        .expect("copy");
+    })
+    .expect("compiles");
+    let courses: Vec<&str> = twice
+        .course_catalog
+        .courses
+        .iter()
+        .map(|course| course.course_id.as_str())
+        .collect();
+    assert_eq!(courses, ["linux", "ops"]);
 }
