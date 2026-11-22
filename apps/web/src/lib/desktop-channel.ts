@@ -12,7 +12,10 @@ import { activeAccountSql, usableIdentityExistsSql } from "@/lib/account-access"
 import { jsonResponse } from "@/lib/agent-bridge";
 import { AppError, toErrorResponse } from "@/lib/app-error";
 import { hashStoredOAuthToken } from "@/lib/auth";
-import { listCourseCatalogForUser } from "@/lib/course-catalogs";
+import {
+  completePureCourseLectureForUser, listCourseCatalogForUser, loadCourseLectureDetailForUser,
+  type CourseLectureDetailForUser,
+} from "@/lib/course-catalogs";
 import type { VmStateV3 } from "@/generated/contracts/bridge-message-v9";
 import validateBridgeMessageV9 from "@/generated/contracts/bridge-message-v9.validate";
 import { requireIdempotencyKey } from "@/lib/idempotency-key";
@@ -20,8 +23,11 @@ import { endLocalRun, localHostId } from "@/lib/local-runs";
 import { resolveOrganizationId } from "@/lib/organizations";
 import { enforceRateLimit } from "@/lib/request-security";
 import { applyVmStateV3ToRunState } from "@/lib/run-lifecycle";
+import { learnerCheckStatus, repairObjectiveTitle } from "@/lib/verification-copy";
 import { persistRunState } from "@/lib/run-projection";
+import { revealScenarioRunHintForUser, revealScenarioRunSolutionForUser } from "@/lib/scenario-hints";
 import { isRevisionScenarioId } from "@/lib/scenario-id";
+import { getScenarioRunForUser, type ScenarioRunRecord } from "@/lib/scenario-runs";
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
 import { arm64MachineImages, liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
 
@@ -429,4 +435,171 @@ export async function localCatalogRequest(
     }
   }
   return jsonResponse({ protocol: DESKTOP_PROTOCOL, courses }, { headers: { "cache-control": "no-store" } });
+}
+
+/**
+ * The organization a lecture request names in `?organizationId=` (an id or
+ * slug), or null for a public course. `undefined` when it names one the
+ * learner is not in, which answers like a missing course.
+ */
+async function lectureOrganization(request: Request, userId: string, d1: D1Database): Promise<string | null | undefined> {
+  const key = new URL(request.url).searchParams.get("organizationId")?.trim();
+  if (!key) return null;
+  const organizationId = await resolveOrganizationId(key);
+  if (!organizationId) return undefined;
+  const member = await d1.prepare("SELECT 1 FROM member WHERE organization_id = ?1 AND user_id = ?2")
+    .bind(organizationId, userId).first();
+  return member ? organizationId : undefined;
+}
+
+const lectureAnswer = (courseId: string, lecture: CourseLectureDetailForUser) =>
+  jsonResponse({
+    protocol: DESKTOP_PROTOCOL,
+    locked: false,
+    lecture: {
+      courseId,
+      lectureId: lecture.lectureId,
+      title: lecture.title,
+      bodyMarkdown: lecture.bodyMarkdown,
+      ordinal: lecture.lectureOrdinal,
+      count: lecture.lectureCount,
+      state: lecture.state,
+    },
+  }, { headers: { "cache-control": "no-store" } });
+
+/**
+ * `GET /api/local/courses/<course>/lectures/<lecture>` and its `/complete`:
+ * a lecture's theory, as the website's lecture page loads it, and marking a
+ * lecture without a lab as read. The course is the organization's when
+ * `organizationId` names one the learner is in, else the public one. As in
+ * the catalog, no admin option applies: a locked lecture stays locked.
+ */
+export async function localLectureRequest(
+  request: Request,
+  courseId: string,
+  lectureId: string,
+  action: "read" | "complete",
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  const organizationId = await lectureOrganization(request, caller.userId, workerEnv.DB);
+  if (organizationId === undefined) return refuse(404, "course_not_found", "course not found");
+  const input = {
+    db: drizzle(workerEnv.DB),
+    userId: caller.userId,
+    organizationId,
+    courseId: courseId.trim(),
+    lectureId: lectureId.trim(),
+    courseScope: organizationId ? "private" as const : "public" as const,
+    local: true,
+  };
+  try {
+    if (action === "complete") {
+      const detail = await completePureCourseLectureForUser({ ...input, nowUnixMs: Date.now() });
+      return lectureAnswer(detail.course.courseId, detail.lecture);
+    }
+    const result = await loadCourseLectureDetailForUser(input);
+    if (!result.ok) {
+      return jsonResponse({ protocol: DESKTOP_PROTOCOL, locked: true }, { headers: { "cache-control": "no-store" } });
+    }
+    return lectureAnswer(result.detail.course.courseId, result.detail.lecture);
+  } catch (error) {
+    if (!(error instanceof AppError)) throw error;
+    const { status, body } = toErrorResponse(error, "the lecture could not be loaded");
+    return jsonResponse({ ...body, protocol: DESKTOP_PROTOCOL }, { status, headers: { "cache-control": "no-store" } });
+  }
+}
+
+/**
+ * What the website's learning panel shows beside a run (RunLearningPanel),
+ * for all of its machines at once: the lecture's theory, the checks, the
+ * hint ladders and the solution. The record already seals unrevealed hints
+ * and an unrevealed solution; this keeps what it holds.
+ */
+export function localRunLearning(run: ScenarioRunRecord) {
+  const checks = run.tasks
+    ? run.tasks.map((task) => ({
+        key: task.id,
+        machine: task.machine,
+        title: task.title,
+        description: task.body,
+        status: learnerCheckStatus(task.status),
+        optional: task.optional,
+      }))
+    : run.vms.flatMap((vm) => {
+        // A machine's checks are titled by its own objectives, else by all (scopeObjectivesToVm).
+        const own = run.objectives.filter((objective) => objective.vmName === vm.scenarioVmName);
+        const objectives = own.length ? own : run.objectives;
+        return vm.scenarioProbes.map((probe, index) => {
+          const at = objectives.findIndex((objective) => objective.probeName === probe.id);
+          return {
+            key: probe.id,
+            machine: vm.scenarioVmName,
+            title: repairObjectiveTitle(objectives[at], at >= 0 ? at : index),
+            description: null,
+            status: learnerCheckStatus(probe.status),
+            optional: false,
+          };
+        });
+      });
+  return {
+    runId: run.id,
+    lectureTitle: run.lectureTitle ?? null,
+    lectureMarkdown: run.lectureBodyMarkdown ?? run.briefingMarkdown,
+    solved: run.phase === "solved" || run.solvedAt !== null,
+    checks,
+    hints: run.hints.map((hint) => ({
+      key: hint.key,
+      checkKey: hint.scope === "probe" ? hint.probeName : null,
+      title: hint.title,
+      revealed: hint.revealed,
+      unlocked: hint.unlocked,
+      bodyMarkdown: hint.bodyMarkdown,
+    })),
+    solution: {
+      unlocked: run.solution.unlocked,
+      revealed: run.solution.revealed,
+      assisted: run.solution.assisted,
+      bodyMarkdown: run.solution.bodyMarkdown,
+    },
+  };
+}
+
+/**
+ * `GET /api/local/runs/<id>/learning`, `POST .../hints/reveal` and
+ * `POST .../solution/reveal`: the learning panel of the learner's own local
+ * run, and revealing in it what the website reveals.
+ */
+export async function localRunLearningRequest(
+  request: Request,
+  runId: string,
+  action: "read" | "hint" | "solution",
+  workerEnv: Cloudflare.Env = env,
+): Promise<Response> {
+  const caller = await requireDesktopCaller(request, workerEnv.DB);
+  if (!caller.ok) return caller.response;
+  let hintKey = "";
+  if (action === "hint") {
+    const body = (await request.json().catch(() => null)) as { protocol?: unknown; hintKey?: unknown } | null;
+    if (body?.protocol !== DESKTOP_PROTOCOL) {
+      return refuse(409, "upgrade_required", "this version of the app is too old to reveal a hint; update it");
+    }
+    hintKey = typeof body.hintKey === "string" ? body.hintKey.trim() : "";
+    if (!hintKey) return refuse(400, "invalid_hint", "hintKey is required");
+  }
+  try {
+    const userId = caller.userId;
+    // Only the learner's local runs, as the run route reads them.
+    let run = await getScenarioRunForUser({ runId, userId });
+    if (!run.local) return refuse(404, "run_not_found", "run not found");
+    if (action === "hint") run = await revealScenarioRunHintForUser({ runId, userId, hintKey });
+    if (action === "solution") run = await revealScenarioRunSolutionForUser({ runId, userId });
+    return jsonResponse({ protocol: DESKTOP_PROTOCOL, learning: localRunLearning(run) }, { headers: { "cache-control": "no-store" } });
+  } catch (error) {
+    if (!(error instanceof AppError)) throw error;
+    if (error.code === "scenario_run_not_found") return refuse(404, "run_not_found", "run not found");
+    const { status, body } = toErrorResponse(error, "the run's learning could not be loaded");
+    return jsonResponse({ ...body, protocol: DESKTOP_PROTOCOL }, { status, headers: { "cache-control": "no-store" } });
+  }
 }

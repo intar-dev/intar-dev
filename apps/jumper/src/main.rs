@@ -19,10 +19,11 @@ use gpui::{
     rgb, size,
 };
 use gpui_platform::application;
-use state::{Command, Event, MachineStatus, Screen, State};
+use state::{Command, Event, Learn, MachineStatus, Screen, State};
 use subspace::contract::{CatalogCourseV1, CatalogLectureV1, LocalRunV1};
 use tokio::sync::mpsc::UnboundedSender;
 use ui::kit::{self, Kind, Size};
+use ui::markdown::markdown;
 use ui::terminal_view::TerminalView;
 use ui::text_input::TextInput;
 use ui::theme::{self, MONO, Palette, palette, term};
@@ -38,6 +39,8 @@ struct Jumper {
     search: Entity<TextInput>,
     /// The learner pressed End run and is asked whether they mean it.
     ending: bool,
+    /// The learner asked for the full solution and is asked whether they mean it.
+    confirm_solution: bool,
     /// The terminal of the run's machine, once its SSH is up.
     terminal: Option<Entity<TerminalView>>,
     /// The terminal just opened and has not been given the keyboard yet.
@@ -127,6 +130,7 @@ impl Jumper {
             commands,
             search,
             ending: false,
+            confirm_solution: false,
             terminal: None,
             focus_terminal: false,
             copied: false,
@@ -165,6 +169,7 @@ impl Jumper {
         }
         if !matches!(&self.state.screen, Screen::Run(run) if run.active) {
             self.ending = false;
+            self.confirm_solution = false;
         }
         // The terminal belongs to a machine that runs; it goes with it. SSH
         // can be up while the lab is still preparing, so booting keeps it.
@@ -622,6 +627,7 @@ impl Jumper {
                 };
                 let row = div()
                     .id(("lecture", index))
+                    .debug_selector(move || format!("lecture-{index}"))
                     .flex()
                     .items_start()
                     .gap_3()
@@ -664,7 +670,9 @@ impl Jumper {
                     row.hover(move |style| style.bg(rgb(hover)))
                 };
                 Self::on_click(row, cx, move |this, _| {
-                    this.state.open_lecture(shown, index)
+                    if let Some(load) = this.state.open_lecture(shown, index) {
+                        this.send(load);
+                    }
                 })
             })
             .collect();
@@ -743,7 +751,13 @@ impl Jumper {
                         .child(kit::label(p, "Course"))
                         .child(kit::content(p, course.title.clone()))
                         .child(kit::support(p, course.summary.clone()).text_size(px(15.)))
-                        .child(kit::meta(p, "Pick a lecture to see its scenario.")),
+                        .when(!course.body_markdown.trim().is_empty(), |words| {
+                            words.child(markdown(p, &course.body_markdown).pt_2())
+                        })
+                        .child(kit::meta(
+                            p,
+                            "Pick a lecture to see its theory and scenario.",
+                        )),
                 ),
             ),
             Some((index, lecture)) => {
@@ -762,8 +776,26 @@ impl Jumper {
                     }
                     _ => None,
                 };
+                let theory = self.state.theory.as_ref();
+                let locked =
+                    lecture.state == "locked" || theory.is_some_and(|answer| answer.locked);
                 let foot = match blocked {
-                    Some(why) if lecture.scenario_id.is_none() => foot.child(kit::caption(p, why)),
+                    // A lecture without a lab is done once read.
+                    Some(_) if lecture.scenario_id.is_none() => {
+                        if lecture.state == "completed" {
+                            foot.child(kit::status(p.green, "Lecture complete"))
+                        } else if locked {
+                            foot.child(kit::caption(p, "Finish the lectures before this one to unlock it."))
+                        } else {
+                            let read = kit::button(p, "read", Kind::Primary, Size::Large, Some("check"), "Mark as read", None);
+                            foot.child(Self::on_click(read, cx, |this, _| {
+                                if let Some(at) = this.state.lecture_ref() {
+                                    this.send(Command::Learn(Learn::CompleteLecture(at)));
+                                }
+                            }))
+                            .child(kit::caption(p, "This lecture has no scenario. Mark it as read when you are done."))
+                        }
+                    }
                     Some(why) => foot
                         .child(kit::inert_button(
                             p,
@@ -805,13 +837,37 @@ impl Jumper {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(kit::label(
-                                    p,
-                                    format!("Lecture {} of {}", index + 1, course.lectures.len()),
-                                ))
+                                .child(kit::label(p, {
+                                    let (ordinal, count) = match theory.and_then(|answer| answer.lecture.as_ref()) {
+                                        Some(theory) => (theory.ordinal as usize, theory.count as usize),
+                                        None => (index + 1, course.lectures.len()),
+                                    };
+                                    format!("Lecture {ordinal} of {count}")
+                                }))
                                 .child(kit::content(p, lecture.title.clone()))
                                 .child(kit::support(p, lecture.summary.clone()).text_size(px(15.)))
-                                .child(kit::meta(p, lecture_facts(lecture))),
+                                .child(kit::meta(p, lecture_facts(lecture)))
+                                .child(div().pt_2().child(match theory {
+                                    None => kit::meta(p, "Loading the lecture…"),
+                                    Some(answer) => match &answer.lecture {
+                                        Some(theory) if !answer.locked => {
+                                            markdown(p, &theory.body_markdown).debug_selector(|| "theory".to_owned())
+                                        }
+                                        _ => div()
+                                            .flex()
+                                            .items_start()
+                                            .gap_2()
+                                            .child(div().pt(px(2.)).child(kit::icon("lock", 14., p.muted)))
+                                            .child(
+                                                div()
+                                                    .child(kit::card_title(p, "This lecture is locked"))
+                                                    .child(kit::support(
+                                                        p,
+                                                        "Complete the required earlier lecture before you open this lecture.",
+                                                    )),
+                                            ),
+                                    },
+                                })),
                         ),
                     )
                     .child(foot)
@@ -1186,9 +1242,20 @@ impl Jumper {
                 )
                 .child(kit::meta(p, machine_facts(machine)).text_color(rgb(p.muted)))
         });
-        let side = kit::panel(p)
-            .w(px(400.))
-            .flex_none()
+        // intar's checks once it answered; the machine's own count until then.
+        let learning = self.state.learning.as_ref();
+        let (passed, tasks) = match learning {
+            Some(learning) => (
+                ui::learning::verified(learning),
+                Some(learning.checks.len()),
+            ),
+            None => (passed, tasks),
+        };
+        let solved = match learning {
+            Some(learning) => learning.solved,
+            None => tasks.is_some_and(|tasks| tasks > 0 && passed == tasks),
+        };
+        let side = div()
             .flex()
             .flex_col()
             .gap_4()
@@ -1199,43 +1266,49 @@ impl Jumper {
                     .items_baseline()
                     .justify_between()
                     .px_1()
-                    .child(kit::section(p, "Tasks"))
-                    .child(kit::meta(
-                        p,
-                        match (tasks, &self.state.machine) {
+                    .child(kit::section(p, "Checks"))
+                    .child({
+                        let progress = match (tasks, &self.state.machine) {
                             (Some(tasks), _) => format!("{passed} of {tasks} verified"),
                             (None, Some(MachineStatus::Saving)) => "The run is ending".to_owned(),
                             (None, _) => "Begin when the machines are ready".to_owned(),
-                        },
-                    )),
+                        };
+                        // Tests read the count by it.
+                        let selector = progress.clone();
+                        kit::meta(p, progress).debug_selector(|| selector)
+                    }),
             )
             .children(tasks.map(|tasks| kit::segments(p, passed, tasks, 4.).px_1()))
-            .when(
-                tasks.is_some_and(|tasks| tasks > 0 && passed == tasks),
-                |side| {
-                    side.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .px(px(14.))
-                            .py_3()
-                            .rounded(px(10.))
-                            .border_1()
-                            .border_color(rgb(p.green_border))
-                            .bg(rgb(p.green_subtle))
-                            .child(kit::icon("check-circle", 20., p.green))
-                            .child(
-                                div()
-                                    .child(kit::card_title(p, "All tasks verified"))
-                                    .child(kit::meta(p, "Saved to your course as a local run")),
-                            ),
-                    )
-                },
-            )
+            .when(solved, |side| {
+                side.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px(px(14.))
+                        .py_3()
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(rgb(p.green_border))
+                        .bg(rgb(p.green_subtle))
+                        .child(kit::icon("check-circle", 20., p.green))
+                        .child(
+                            div()
+                                .child(kit::card_title(p, "All checks verified"))
+                                .child(kit::meta(p, "Saved to your course as a local run")),
+                        ),
+                )
+            })
             .children(self.state.error.clone().map(|error| kit::failure(p, error)))
+            .children(learning.map(|learning| self.learning(p, learning, cx).px_1()))
             .child(kit::label(p, "Machines").px_1())
             .child(kit::card(p).mt(px(-8.)).children(machines));
+        let side = kit::panel(p)
+            .id("side")
+            .w(px(400.))
+            .flex_none()
+            .overflow_y_scroll()
+            .child(side);
         body.child(stage).child(side)
     }
 
@@ -1624,6 +1697,159 @@ mod tests {
         click(cx, "back-card");
         assert_eq!(heard.try_recv().ok(), Some(Command::LoadCatalog));
         assert!(view.read_with(cx, |view, _| view.state.screen == Screen::Catalog));
+    }
+
+    fn theory_lecture() -> subspace::contract::LocalLectureAnswerV1 {
+        subspace::contract::LocalLectureAnswerV1 {
+            protocol: 1,
+            locked: false,
+            lecture: Some(subspace::contract::LocalLectureV1 {
+                course_id: "c".into(),
+                lecture_id: "l".into(),
+                title: "Serve".into(),
+                body_markdown: "Serve **files**.".into(),
+                ordinal: 1,
+                count: 1,
+                state: "available".into(),
+            }),
+        }
+    }
+
+    #[gpui::test]
+    fn a_selected_lecture_loads_and_shows_its_theory(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.catalog = catalog("available");
+        state.screen = Screen::Catalog;
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "lecture-0");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::Learn(Learn::Lecture(state::LectureRef {
+                course_id: "c".into(),
+                lecture_id: "l".into(),
+                organization_id: None,
+            })))
+        );
+        assert!(cx.debug_bounds("theory").is_none(), "not loaded yet");
+        view.update(cx, |view, cx| {
+            view.apply(Event::Lecture(theory_lecture()), cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("theory").is_some());
+    }
+
+    #[gpui::test]
+    fn a_lecture_without_a_scenario_is_marked_as_read(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.catalog = catalog("available");
+        state.catalog[0].lectures[0].scenario_id = None;
+        state.screen = Screen::Lecture {
+            course: 0,
+            lecture: 0,
+        };
+        let (_view, cx, mut heard) = open(cx, state);
+        assert!(cx.debug_bounds("start").is_none(), "nothing to start");
+        click(cx, "read");
+        assert!(matches!(
+            heard.try_recv().ok(),
+            Some(Command::Learn(Learn::CompleteLecture(at))) if at.lecture_id == "l"
+        ));
+    }
+
+    fn learning() -> subspace::contract::LocalRunLearningV1 {
+        use subspace::contract::{LocalRunCheckV1, LocalRunHintV1, LocalRunSolutionV1};
+        let check = |key: &str, status: &str| LocalRunCheckV1 {
+            key: key.into(),
+            machine: "web".into(),
+            title: key.into(),
+            description: None,
+            status: status.into(),
+            optional: false,
+        };
+        let hint = |key: &str, revealed: bool, unlocked: bool| LocalRunHintV1 {
+            key: key.into(),
+            check_key: None,
+            title: revealed.then(|| "Look at the port".to_owned()),
+            revealed,
+            unlocked,
+            body_markdown: revealed.then(|| "It is `8080`.".to_owned()),
+        };
+        subspace::contract::LocalRunLearningV1 {
+            run_id: "run-1".into(),
+            lecture_title: Some("Serve".into()),
+            lecture_markdown: String::new(),
+            solved: false,
+            checks: vec![
+                check("listen", "verified"),
+                check("serve", "checking"),
+                check("cache", "needs_repair"),
+            ],
+            hints: vec![
+                hint("h1", true, false),
+                hint("h2", false, true),
+                hint("h3", false, false),
+            ],
+            solution: LocalRunSolutionV1 {
+                unlocked: false,
+                assisted: false,
+                revealed: false,
+                body_markdown: None,
+            },
+        }
+    }
+
+    fn learning_run(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Jumper>,
+        &mut VisualTestContext,
+        UnboundedReceiver<Command>,
+    ) {
+        let mut state = State::default();
+        state.screen = Screen::Run(run(true));
+        state.learning = Some(learning());
+        open(cx, state)
+    }
+
+    #[gpui::test]
+    fn the_checks_count_what_intar_verified(cx: &mut TestAppContext) {
+        let (_view, cx, _heard) = learning_run(cx);
+        assert!(cx.debug_bounds("1 of 3 verified").is_some());
+    }
+
+    #[gpui::test]
+    fn only_the_unlocked_hint_can_be_revealed(cx: &mut TestAppContext) {
+        let (_view, cx, mut heard) = learning_run(cx);
+        assert!(cx.debug_bounds("reveal-h1").is_none(), "already revealed");
+        assert!(cx.debug_bounds("reveal-h3").is_none(), "still sealed");
+        click(cx, "reveal-h2");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::Learn(Learn::RevealHint {
+                run_id: "run-1".into(),
+                hint_key: "h2".into(),
+            }))
+        );
+    }
+
+    #[gpui::test]
+    fn the_solution_is_revealed_only_after_its_confirm(cx: &mut TestAppContext) {
+        let (view, cx, mut heard) = learning_run(cx);
+        click(cx, "solution");
+        assert!(heard.try_recv().is_err(), "asks first");
+        click(cx, "keep-trying");
+        assert!(!view.read_with(cx, |view, _| view.confirm_solution));
+        assert!(heard.try_recv().is_err());
+
+        click(cx, "solution");
+        click(cx, "reveal-solution");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::Learn(Learn::RevealSolution {
+                run_id: "run-1".into()
+            }))
+        );
+        assert!(!view.read_with(cx, |view, _| view.confirm_solution));
     }
 
     #[gpui::test]

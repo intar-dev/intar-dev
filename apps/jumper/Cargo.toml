@@ -22,6 +22,8 @@ intar-contracts = { path = "../../crates/intar-contracts" }
 keyring-core.workspace = true
 # The terminal's SSH connection to the guest.
 russh.workspace = true
+# Course markdown (bodies, theory, hints, solutions).
+pulldown-cmark.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 serde_json.workspace = true
 # Downloads are checked against their digests; disk chunks are zstd.

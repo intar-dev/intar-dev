@@ -251,6 +251,9 @@ pub struct LocalRunHintV1 {
 pub struct LocalRunSolutionV1 {
     pub unlocked: bool,
     pub revealed: bool,
+    /// The learner revealed it before solving the run.
+    #[serde(default)]
+    pub assisted: bool,
     pub body_markdown: Option<String>,
 }
 

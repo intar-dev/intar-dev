@@ -14,7 +14,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::contract::{
     LocalCatalogV1, LocalLectureAnswerV1, LocalRunAnswerV1, LocalRunLearningAnswerV1,
-    LocalRunRefusalV1, LocalRunReportV1, LocalRunV1, RevealHintV1, SUBSPACE_OAUTH_CLIENT_ID, SUBSPACE_OAUTH_SCOPE, SUBSPACE_PROTOCOL_VERSION, StartLocalRunV1,
+    LocalRunRefusalV1, LocalRunReportV1, LocalRunV1, RevealHintV1, SUBSPACE_OAUTH_CLIENT_ID,
+    SUBSPACE_OAUTH_SCOPE, SUBSPACE_PROTOCOL_VERSION, StartLocalRunV1,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use intar_contracts::bridge_v9::VmStateV3;

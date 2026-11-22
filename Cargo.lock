@@ -4314,6 +4314,7 @@ dependencies = [
  "gpui_platform",
  "intar-contracts",
  "keyring-core",
+ "pulldown-cmark",
  "reqwest",
  "russh",
  "serde_json",
