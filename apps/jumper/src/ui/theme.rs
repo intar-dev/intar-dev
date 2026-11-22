@@ -52,6 +52,10 @@ pub struct Palette {
     pub on_red: u32,
     pub red_subtle: u32,
     pub red_border: u32,
+    /// An outline button under the pointer (the website's `muted`, `accent` in dark).
+    pub outline_hover: u32,
+    /// A danger button under the pointer, as the website mixes it.
+    pub red_hover: u32,
 }
 
 /// The terminal's colours; it is dark in both themes.
@@ -94,6 +98,8 @@ pub static LIGHT: Palette = Palette {
     on_red: 0xfdfbf9,
     red_subtle: 0xf6e8e7,
     red_border: 0xe9bebd,
+    outline_hover: 0xf0e9de,
+    red_hover: 0xaa2929,
 };
 
 pub static DARK: Palette = Palette {
@@ -125,6 +131,8 @@ pub static DARK: Palette = Palette {
     on_red: 0x2a0e0d,
     red_subtle: 0x352629,
     red_border: 0x653a3b,
+    outline_hover: 0x312c27,
+    red_hover: 0xfa8a86,
 };
 
 /// The palette every view draws with.
@@ -254,6 +262,10 @@ mod tests {
                     let r = contrast(f, s);
                     assert!(r >= 3.0, "{name}: {fname} on {sn} is {r:.2}");
                 }
+            }
+            for red in [p.red, p.red_hover] {
+                let r = contrast(p.on_red, red);
+                assert!(r >= 4.5, "{name}: on_red on {red:06x} is {r:.2}");
             }
             for accent in [p.accent, p.accent_hover] {
                 let r = contrast(p.on_accent, accent);
