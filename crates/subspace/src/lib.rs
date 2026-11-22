@@ -13,7 +13,7 @@ pub mod contract;
 use std::time::{Duration, SystemTime};
 
 use crate::contract::{
-    LocalCatalogV1, LocalLectureAnswerV1, LocalRunAnswerV1, LocalRunLearningAnswerV1,
+    LocalCatalogV1, LocalLectureAnswerV1, LocalRunAnswerV1, LocalRunHistoryV1, LocalRunLearningAnswerV1, LocalRunRecapAnswerV1,
     LocalRunRefusalV1, LocalRunReportV1, LocalRunV1, RevealHintV1, SUBSPACE_OAUTH_CLIENT_ID,
     SUBSPACE_OAUTH_SCOPE, SUBSPACE_PROTOCOL_VERSION, StartLocalRunV1,
 };
@@ -396,6 +396,51 @@ impl Subspace {
     pub async fn reveal_solution(&self, run_id: &str) -> Result<LocalRunLearningAnswerV1, Error> {
         let path = format!("/api/local/runs/{run_id}/solution/reveal");
         self.call::<(), _>(Method::POST, &path, None, None).await
+    }
+
+    /// The learner's runs, newest first.
+    pub async fn history(&self) -> Result<LocalRunHistoryV1, Error> {
+        self.call::<(), _>(Method::GET, "/api/local/runs", None, None).await
+    }
+
+    /// An ended run's recap.
+    pub async fn recap(&self, run_id: &str) -> Result<LocalRunRecapAnswerV1, Error> {
+        let path = format!("/api/local/runs/{run_id}/recap");
+        self.call::<(), _>(Method::GET, &path, None, None).await
+    }
+
+    /// One replay part's asciicast, refused above `max_bytes`.
+    pub async fn replay(
+        &self,
+        run_id: &str,
+        artifact_id: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, Error> {
+        let path = format!("/api/local/runs/{run_id}/artifacts/{artifact_id}");
+        let response = self.send::<()>(Method::GET, &path, None, None).await?;
+        let status = response.status();
+        let too_big = || Error::Refused {
+            status: status.as_u16(),
+            code: "replay_too_large".to_owned(),
+            message: "This replay is too large to play here.".to_owned(),
+            run: None,
+        };
+        if !status.is_success() {
+            return Err(Error::Refused {
+                status: status.as_u16(),
+                code: "replay_unavailable".to_owned(),
+                message: "Replay unavailable.".to_owned(),
+                run: None,
+            });
+        }
+        if response.content_length().is_some_and(|length| length > max_bytes as u64) {
+            return Err(too_big());
+        }
+        let bytes = response.bytes().await?;
+        if bytes.len() > max_bytes {
+            return Err(too_big());
+        }
+        Ok(bytes.to_vec())
     }
 
     /// Passes on what the learner's `intar` command in a guest asked, for the

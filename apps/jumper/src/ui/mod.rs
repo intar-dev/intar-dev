@@ -8,6 +8,7 @@
 pub mod kit;
 pub mod learning;
 pub mod markdown;
+pub mod replay;
 pub mod terminal_view;
 pub mod text_input;
 pub mod theme;
