@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRightLeft, GitBranch, Hammer, Library, Pause, Play, Trash2, Unplug } from "lucide-react";
+import { ArrowRightLeft, GitBranch, Hammer, Library, Play, Trash2, Unplug } from "lucide-react";
 import { apiErrorMessage, describeApiError } from "../../lib/api-errors";
 import { CodeBlock } from "../../patterns/CodeBlock";
 import { ConfirmDialog } from "../../patterns/ConfirmDialog";
@@ -473,13 +473,6 @@ function ConnectedSource({
         </ul>
       ) : null}
       <div className="flex flex-wrap gap-2">
-        {/* An admin pause replaces a suspension, so a later unsuspend does not resume. */}
-        {source.pausedAt === null || source.pauseReason === "suspended" ? (
-          <Button variant="outline" disabled={pending} onClick={() => onChange({ action: "pause" })}>
-            <Pause className="size-4" />
-            Pause
-          </Button>
-        ) : null}
         {source.pausedAt === null ? null : (
           <Button
             variant="outline"

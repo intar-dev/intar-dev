@@ -11,11 +11,11 @@ export const prerender = false;
  * not one of its own (#472). Its own owners and admins run it at
  * `/api/organizations/[orgId]/scenario-source`; a flag that let them widen
  * it revokes nothing when it is turned off, so this is how the platform
- * steps a source back: images to the builder, runners to GitHub-hosted, a
- * pause, pull mode, and forgetting an image. None of it needs a flag.
+ * steps a source back: images to the builder, runners to GitHub-hosted,
+ * pull mode, and forgetting an image. None of it needs a flag.
  *
  * A step back holds only as far as the organization cannot take it again:
- * turn its flag off first. The pipeline has a flag of its own; a pause, the runners and push mode need only the flag that lets an
+ * turn its flag off first. The pipeline has a flag of its own; the runners and push mode need only the flag that lets an
  * organization connect at all, so its administrators can undo those.
  */
 async function scopeOf(request: Request, organizationKey: string) {

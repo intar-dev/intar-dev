@@ -255,15 +255,14 @@ describe("scenario source card", () => {
     ).toContain("Finish deleting</button>");
   });
 
-  it("offers an admin pause over a suspension, but only resume otherwise", () => {
-    const suspended = renderCard({ pausedAt: 1, pauseReason: "suspended" });
-    expect(suspended).toContain("Pause</button>");
-    expect(suspended).toContain("Resume</button>");
-    const lost = renderCard({ pausedAt: 1, pauseReason: "binder_lost_admin" });
-    expect(lost).not.toContain("Pause</button>");
-    expect(lost).toContain("Resume</button>");
+  it("offers no pause, and resume for any paused source, one from before included", () => {
+    for (const pauseReason of ["suspended", "binder_lost_admin", "admin"] as const) {
+      const paused = renderCard({ pausedAt: 1, pauseReason });
+      expect(paused).not.toContain("Pause</button>");
+      expect(paused).toContain("Resume</button>");
+    }
     const active = renderCard({});
-    expect(active).toContain("Pause</button>");
+    expect(active).not.toContain("Pause</button>");
     expect(active).not.toContain("Resume</button>");
   });
 });

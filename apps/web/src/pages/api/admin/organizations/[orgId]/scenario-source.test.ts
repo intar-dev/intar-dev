@@ -45,7 +45,7 @@ describe("an organization's scenario source, for a platform administrator", () =
       response: Response.json({ error: "admin required" }, { status: 403 }),
     });
     expect((await GET(context())).status).toBe(403);
-    expect((await POST(context({ action: "pause" }))).status).toBe(403);
+    expect((await POST(context({ action: "runner_policy", allow_self_hosted: false }))).status).toBe(403);
     expect(mocks.resolve).not.toHaveBeenCalled();
     expect(mocks.change).not.toHaveBeenCalled();
   });
@@ -53,7 +53,7 @@ describe("an organization's scenario source, for a platform administrator", () =
   it("answers 404 for an organization that is not there", async () => {
     mocks.resolve.mockResolvedValue(null);
     expect((await GET(context())).status).toBe(404);
-    expect((await POST(context({ action: "pause" }))).status).toBe(404);
+    expect((await POST(context({ action: "runner_policy", allow_self_hosted: false }))).status).toBe(404);
     expect(mocks.change).not.toHaveBeenCalled();
   });
 
@@ -77,7 +77,7 @@ describe("an organization's scenario source, for a platform administrator", () =
     });
 
     mocks.refuse.mockRejectedValue(appError(403, "impersonation_forbidden", "no"));
-    expect((await POST(context({ action: "pause" }))).status).toBe(403);
+    expect((await POST(context({ action: "runner_policy", allow_self_hosted: false }))).status).toBe(403);
     expect(mocks.change).toHaveBeenCalledTimes(1);
   });
 });

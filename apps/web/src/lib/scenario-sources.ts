@@ -2,7 +2,7 @@
 // through the Intar GitHub App. The binding is the only thing Intar trusts
 // about where a repository may publish.
 import { env } from "cloudflare:workers";
-import { and, desc, eq, exists, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, exists, inArray, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { assertCutoverNotWiped, CUTOVER_WIPED_SQL } from "@/lib/run-admission-gate";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
@@ -106,6 +106,7 @@ export interface ScenarioSourceView {
   imageProducer: ImageProducer;
   allowSelfHostedRunners: boolean;
   pausedAt: number | null;
+  /** Set by the system; `admin` only on a row paused by hand before that change went away, which a resume lifts. */
   pauseReason: "admin" | "binder_lost_admin" | "suspended" | null;
   disconnectedAt: number | null;
   disconnectReason: string | null;
@@ -508,7 +509,7 @@ export function parseDiagnostics(
 
 type Change =
   | { action: "connect"; repository: string }
-  | { action: "resume" | "pause" | "disconnect" | "purge" }
+  | { action: "resume" | "disconnect" | "purge" }
   | { action: "mode"; mode: "push" | "pull" }
   | { action: "image_producer"; producer: ImageProducer }
   | { action: "runner_policy"; allowSelfHosted: boolean }
@@ -524,12 +525,11 @@ const SETTING_ACTIONS: ReadonlySet<Change["action"]> = new Set(["image_producer"
 
 /**
  * Whether a platform administrator may make `change` on a scope that is
- * not theirs to run: what steps a source back or stops it, forgetting an
+ * not theirs to run: what steps a source back, forgetting an
  * image, and the way to pull mode, which only the platform has.
  */
 function platformMayStepBack(change: Change): boolean {
   switch (change.action) {
-    case "pause":
     case "forget_image":
       return true;
     case "image_producer":
@@ -567,7 +567,6 @@ function parseChange(body: unknown): Change {
       return { action: "connect", repository };
     }
     case "resume":
-    case "pause":
     case "disconnect":
     case "purge":
       return { action: input.action };
@@ -627,7 +626,7 @@ export async function refuseScenarioSourceWrite(
 /**
  * Applies one owner or admin change to the scope's binding and returns the
  * binding afterwards. Bind, resume and mode need the flag and answer 404
- * without it; pause, disconnect and purge never do, so a scope can always stop.
+ * without it; disconnect and purge never do, so a scope can always stop.
  */
 export async function changeScenarioSource(input: {
   scope: ScenarioSourceScope;
@@ -670,7 +669,7 @@ export async function changeScenarioSource(input: {
   const flag =
     // A platform administrator's step back is one, whatever it is.
     input.asPlatform ||
-    change.action === "pause" || change.action === "disconnect" || change.action === "purge" ||
+    change.action === "disconnect" || change.action === "purge" ||
     change.action === "forget_image" ||
     (change.action === "image_producer" && change.producer === "builder") ||
     (change.action === "runner_policy" && !change.allowSelfHosted)
@@ -747,27 +746,6 @@ export async function changeScenarioSource(input: {
         );
       break;
     }
-    case "pause":
-      // An admin pause replaces a suspension, so a later unsuspend leaves the
-      // binding paused; a lost binder still needs a resume.
-      await db
-        .update(scenarioSources)
-        .set({
-          pausedAt: sql`COALESCE(${scenarioSources.pausedAt}, ${now})`,
-          pauseReason: "admin",
-          pokedAt: now,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            connected,
-            or(
-              isNull(scenarioSources.pausedAt),
-              eq(scenarioSources.pauseReason, "suspended"),
-            ),
-          ),
-        );
-      break;
     case "disconnect":
       await db.batch([
         db

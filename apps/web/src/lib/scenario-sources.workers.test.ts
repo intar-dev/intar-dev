@@ -366,7 +366,7 @@ describe("binding a repository", () => {
 });
 
 describe("scenario source changes", () => {
-  it("needs the flag for bind, resume and mode, but never for pause and disconnect", async () => {
+  it("needs the flag for bind, resume and mode, but never for disconnect", async () => {
     await insertBinding();
     for (const body of [
       { action: "connect", repository: "acme/labs" },
@@ -377,8 +377,6 @@ describe("scenario source changes", () => {
         status: 404,
       });
     }
-    await change({ action: "pause" }, { toggles: disabled });
-    expect(await binding()).toMatchObject({ pauseReason: "admin" });
     await change({ action: "disconnect" }, { toggles: disabled });
     expect(await binding()).toMatchObject({
       disconnectedAt: expect.any(Number),
@@ -386,16 +384,21 @@ describe("scenario source changes", () => {
     });
   });
 
-  it("lets an admin pause override a suspension but not a lost binder", async () => {
-    await insertBinding({ pausedAt: 5, pauseReason: "suspended" });
-    await change({ action: "pause" });
-    expect(await binding()).toMatchObject({ pausedAt: 5, pauseReason: "admin" });
+  it("refuses a pause like any unknown change, and changes nothing", async () => {
+    await insertBinding();
+    const before = await binding();
+    await expect(change({ action: "pause" })).rejects.toMatchObject({ status: 400, code: "scenario_source_change_invalid" });
+    await expect(change({ action: "pause" }, { asPlatform: true })).rejects.toMatchObject({
+      status: 400, code: "scenario_source_change_invalid",
+    });
+    expect(await binding()).toEqual(before);
+  });
 
-    await drizzle(env.DB)
-      .update(scenarioSources)
-      .set({ pauseReason: "binder_lost_admin" });
-    await change({ action: "pause" });
-    expect(await binding()).toMatchObject({ pauseReason: "binder_lost_admin" });
+  it("resumes a pause an administrator set while pausing was still a change", async () => {
+    github();
+    await insertBinding({ githubRepositoryId: 42, githubRepository: "acme/labs", pausedAt: 1, pauseReason: "admin" });
+    await change({ action: "resume" });
+    expect(await binding()).toMatchObject({ pausedAt: null, pauseReason: null });
   });
 
   it("supersedes fetching and compiling rows on a mode change and ends the compile", async () => {
@@ -598,13 +601,13 @@ describe("a source's settings", () => {
       { action: "image_producer", producer: "pipeline" },
       { action: "runner_policy", allow_self_hosted: true },
       { action: "forget_image", build_key: KEY, architecture: "amd64" },
-      { action: "pause" },
+      { action: "disconnect" },
     ]) {
       await as(body, everyFlag, "other-owner").then(
         () => undefined, (error: unknown) => expect(error).toMatchObject({ status: 404 }),
       );
     }
-    expect(await binding()).toMatchObject({ imageProducer: "builder", allowSelfHostedRunners: false, pausedAt: null });
+    expect(await binding()).toMatchObject({ imageProducer: "builder", allowSelfHostedRunners: false, disconnectedAt: null });
     expect(await db().select().from(scopeMachineImages)).toHaveLength(2);
     // The organization's own owner forgets its image: the other scope's, of the same key, stays.
     await as({ action: "forget_image", build_key: KEY, architecture: "amd64" }, everyFlag);
@@ -639,9 +642,6 @@ describe("a source's settings", () => {
     ]) {
       await expect(platform(body, everyFlag, OWNER)).rejects.toMatchObject({ status: 404 });
     }
-    // A pause is the owner's own on their route, but not through the platform's rights.
-    await expect(platform({ action: "pause" }, everyFlag, OWNER)).rejects.toMatchObject({ status: 404 });
-    expect(await binding()).toMatchObject({ pausedAt: null });
     expect(await binding()).toMatchObject({ imageProducer: "pipeline", allowSelfHostedRunners: true, pausedAt: null });
 
     // Every step back, with every flag off.
@@ -649,7 +649,6 @@ describe("a source's settings", () => {
     expect(await platform({ action: "image_producer", producer: "builder" }, disabled)).toMatchObject({ imageProducer: "builder" });
     await platform({ action: "forget_image", build_key: KEY, architecture: "amd64" }, disabled);
     expect(await db().select().from(scopeMachineImages)).toEqual([]);
-    expect(await platform({ action: "pause" }, disabled)).toMatchObject({ pauseReason: "admin" });
     // Pull mode too, with every flag off.
     expect(await platform({ action: "mode", mode: "pull" }, disabled)).toMatchObject({ mode: "pull" });
   });
