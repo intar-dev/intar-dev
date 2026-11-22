@@ -13,8 +13,8 @@ pub mod contract;
 use std::time::{Duration, SystemTime};
 
 use crate::contract::{
-    LocalCatalogV1, LocalRunAnswerV1, LocalRunRefusalV1, LocalRunReportV1, LocalRunV1,
-    SUBSPACE_OAUTH_CLIENT_ID, SUBSPACE_OAUTH_SCOPE, SUBSPACE_PROTOCOL_VERSION, StartLocalRunV1,
+    LocalCatalogV1, LocalLectureAnswerV1, LocalRunAnswerV1, LocalRunLearningAnswerV1,
+    LocalRunRefusalV1, LocalRunReportV1, LocalRunV1, RevealHintV1, SUBSPACE_OAUTH_CLIENT_ID, SUBSPACE_OAUTH_SCOPE, SUBSPACE_PROTOCOL_VERSION, StartLocalRunV1,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use intar_contracts::bridge_v9::VmStateV3;
@@ -343,6 +343,58 @@ impl Subspace {
             None,
         )
         .await
+    }
+
+    /// A lecture's theory. `organization_id` is its course's, from the catalog.
+    pub async fn lecture(
+        &self,
+        course_id: &str,
+        lecture_id: &str,
+        organization_id: Option<&str>,
+    ) -> Result<LocalLectureAnswerV1, Error> {
+        let mut path = format!("/api/local/courses/{course_id}/lectures/{lecture_id}");
+        if let Some(organization_id) = organization_id {
+            path.push_str(&format!("?organizationId={organization_id}"));
+        }
+        self.call::<(), _>(Method::GET, &path, None, None).await
+    }
+
+    /// Marks a lecture without a lab as read; answers the lecture as it now is.
+    pub async fn complete_lecture(
+        &self,
+        course_id: &str,
+        lecture_id: &str,
+        organization_id: Option<&str>,
+    ) -> Result<LocalLectureAnswerV1, Error> {
+        let mut path = format!("/api/local/courses/{course_id}/lectures/{lecture_id}/complete");
+        if let Some(organization_id) = organization_id {
+            path.push_str(&format!("?organizationId={organization_id}"));
+        }
+        self.call::<(), _>(Method::POST, &path, None, None).await
+    }
+
+    /// The run's theory, checks, hints and solution.
+    pub async fn learning(&self, run_id: &str) -> Result<LocalRunLearningAnswerV1, Error> {
+        let path = format!("/api/local/runs/{run_id}/learning");
+        self.call::<(), _>(Method::GET, &path, None, None).await
+    }
+
+    pub async fn reveal_hint(
+        &self,
+        run_id: &str,
+        hint_key: &str,
+    ) -> Result<LocalRunLearningAnswerV1, Error> {
+        let body = RevealHintV1 {
+            protocol: SUBSPACE_PROTOCOL_VERSION,
+            hint_key: hint_key.to_owned(),
+        };
+        let path = format!("/api/local/runs/{run_id}/hints/reveal");
+        self.call(Method::POST, &path, Some(&body), None).await
+    }
+
+    pub async fn reveal_solution(&self, run_id: &str) -> Result<LocalRunLearningAnswerV1, Error> {
+        let path = format!("/api/local/runs/{run_id}/solution/reveal");
+        self.call::<(), _>(Method::POST, &path, None, None).await
     }
 
     /// Passes on what the learner's `intar` command in a guest asked, for the
