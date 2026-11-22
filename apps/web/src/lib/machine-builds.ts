@@ -498,9 +498,9 @@ interface UndigestedRevision {
 
 /**
  * The behaviour digest of a stored revision document, or `""` for one that
- * cannot be read: that matches no other revision and no hold.
+ * cannot be read: that matches no other revision.
  */
-export async function storedBehaviourDigest(docJson: string): Promise<string> {
+async function storedBehaviourDigest(docJson: string): Promise<string> {
   try {
     return await behaviourDigest(JSON.parse(docJson) as ScenarioRevisionV1);
   } catch {
