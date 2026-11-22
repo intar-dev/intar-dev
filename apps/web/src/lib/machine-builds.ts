@@ -399,8 +399,8 @@ export async function settleScenarioRevisions(
     scenario_id: string; rev: string; doc_json: string; restore_basis: string | null;
     scope_key: string | null; producer: string;
   }>();
-  // The scopes a revision of which left `building`: an automatic source's
-  // job goes on with it.
+  // The scopes a revision of which left `building`: its source's job goes
+  // on with it.
   const settled = new Set<string>();
   for (const revision of results) {
     const doc = JSON.parse(revision.doc_json) as ScenarioRevisionV1;

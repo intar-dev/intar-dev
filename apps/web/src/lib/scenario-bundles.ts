@@ -160,8 +160,8 @@ export async function ingestSourceBundle(
   );
 
   // The bundle's course catalog is not applied here: learners read
-  // course_catalogs, and no revision of this rev is ready yet. Promotion
-  // applies it from the stored bundle, each lecture `scenario_id` written as
+  // course_catalogs, and no revision of this rev is ready yet. The source's
+  // job applies it from the stored bundle, each lecture `scenario_id` written as
   // `<namespace>/<slug>`.
   const now = Date.now();
   // One transaction, one statement per revision so no bound value carries

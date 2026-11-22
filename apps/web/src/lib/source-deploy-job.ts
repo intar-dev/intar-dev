@@ -767,8 +767,8 @@ async function mayStart(
  * once per source and never for a row the job drives. Nothing sets them back
  * but the re-bind of a disconnected source, which marks its head once more.
  * Only once the head is known: a source without one has nothing to take up
- * yet. The caller has found the binding active, so a paused source keeps
- * everything as it is.
+ * yet. And only for an active source, which the caller has found and both
+ * statements ask again: a paused source keeps everything as it is.
  */
 export async function takeUpLeftHead(db: D1Database, scopeKey: string, digest: string, now: number): Promise<void> {
   await db.batch([
@@ -776,6 +776,7 @@ export async function takeUpLeftHead(db: D1Database, scopeKey: string, digest: s
       `UPDATE scenario_source_commits SET state = 'ingesting', attempt = attempt + 1, detail = NULL, updated_at = ?3
         WHERE scope_key = ?1 AND purpose = 'deploy' AND state IN ('building', 'waiting', 'awaiting_promote', 'failed')
           AND EXISTS (SELECT 1 FROM scenario_sources source WHERE source.scope_key = ?1
+            AND source.paused_at IS NULL AND source.disconnected_at IS NULL
             AND scenario_source_commits.rev = 'git-' || source.github_repository_id || '-' || source.head_sha || '-' || ?2
             AND ${headLeftSql("source", "scenario_source_commits")})
           AND EXISTS (SELECT 1 FROM bundles bundle
@@ -783,7 +784,8 @@ export async function takeUpLeftHead(db: D1Database, scopeKey: string, digest: s
     ).bind(scopeKey, digest, now),
     db.prepare(
       `UPDATE scenario_sources SET promotion = 'automatic', promotion_after = NULL
-        WHERE scope_key = ?1 AND head_sha IS NOT NULL AND (promotion = 'manual' OR promotion_after IS NOT NULL)`,
+        WHERE scope_key = ?1 AND head_sha IS NOT NULL AND paused_at IS NULL AND disconnected_at IS NULL
+          AND (promotion = 'manual' OR promotion_after IS NOT NULL)`,
     ).bind(scopeKey),
   ]);
 }

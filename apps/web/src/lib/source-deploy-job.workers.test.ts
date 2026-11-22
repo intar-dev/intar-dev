@@ -729,6 +729,38 @@ describe("a source's job", () => {
     expect(job()).toBeUndefined();
   });
 
+  it("reads a left head of a source whose pipeline builds its images again, and leaves a paused one", async () => {
+    await env.DB.prepare("UPDATE scenario_sources SET image_producer = 'pipeline', promotion = 'manual' WHERE scope_key = ?1")
+      .bind(SCOPE).run();
+    expect(await ingestSourceBundle(env, {
+      organizationId: ORG, rev: rev("a"), gzip: new Uint8Array(gzipSync(JSON.stringify(twoLabs()))), stored: false,
+      imageProducer: "pipeline", pipelineCanPush: true,
+    })).toBeNull();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_sources SET head_sha = ?2 WHERE scope_key = ?1").bind(SCOPE, "a".repeat(40)),
+      env.DB.prepare(`INSERT INTO scenario_source_commits (id, scope_key, purpose, sha, rev, via, attempt, state)
+        VALUES ('row-a', ?1, 'deploy', ?2, ?3, 'push', 1, 'building')`).bind(SCOPE, "a".repeat(40), rev("a")),
+      env.DB.prepare("DELETE FROM scenario_revisions WHERE scenario_id = ?1 AND rev = ?2").bind(DB_LAB, rev("a")),
+    ]);
+    // Paused: nothing is taken up, and the mark stays for the resume.
+    await env.DB.prepare("UPDATE scenario_sources SET paused_at = 1 WHERE scope_key = ?1").bind(SCOPE).run();
+    await takeUp("a");
+    expect(await attemptOf("a")).toBe(1);
+    expect(await marks()).toEqual({ promotion: "manual", promotion_after: null });
+    await env.DB.prepare("UPDATE scenario_sources SET paused_at = NULL WHERE scope_key = ?1").bind(SCOPE).run();
+    await takeUp("a");
+    expect(await attemptOf("a")).toBe(2);
+    expect(await marks()).toEqual({ promotion: "automatic", promotion_after: null });
+    // The lost revision is back, waiting for its images like the other.
+    const states = await env.DB.prepare("SELECT scenario_id, state FROM scenario_revisions WHERE rev = ?1 ORDER BY scenario_id")
+      .bind(rev("a")).all<{ scenario_id: string; state: string }>();
+    expect(states.results.map((row) => row.state)).toEqual(["building", "building"]);
+    // Nothing is disabled while they build.
+    await drive();
+    expect(await scenario(DB_LAB)).toMatchObject({ enabled: 1 });
+    expect(await scenario(WEB)).toMatchObject({ enabled: 1 });
+  });
+
   it("is the only writer of failed for its row: the pipeline deadline leaves the row to it", async () => {
     await env.DB.prepare("UPDATE scenario_sources SET image_producer = 'pipeline' WHERE scope_key = ?1").bind(SCOPE).run();
     const refused = await ingestSourceBundle(env, {

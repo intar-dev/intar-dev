@@ -91,15 +91,17 @@ export const scenarioSources = sqliteTable(
       .default(false)
       .notNull(),
     /**
-     * Who puts a commit's labs live once they are checked (#454): an
-     * administrator, or the source's own pass.
+     * No longer a setting (#494): the source's job puts every source's labs
+     * live. `manual` only marks a source whose head promotion by hand left,
+     * which the job reads again once and then sets to `automatic`. The
+     * column goes with the last slice of #494.
      */
     promotion: text("promotion").$type<SourcePromotion>().default("manual").notNull(),
     /**
      * The head's deploy row and attempt, as `<id>:<attempt>`, when the
-     * source was switched to automatic: the job leaves that commit as the
-     * administrator left it and takes up what comes after. NULL when the
-     * head had none.
+     * source was switched to automatic by hand: with `promotion`, it marks
+     * that head as left, for the job to read again once (#494). NULL
+     * otherwise. The column goes with the last slice of #494.
      */
     promotionAfter: text("promotion_after"),
     headSha: text("head_sha"),

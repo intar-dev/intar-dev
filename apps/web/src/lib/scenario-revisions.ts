@@ -1,6 +1,6 @@
 // The pointer model of scenario revisions. Each scenario has a candidate
-// (`candidate_rev`, its newest ready or verified revision, which admins
-// verify) and a live revision (`live_rev`, which learners start). Only a
+// (`candidate_rev`, its newest ready or verified revision, which its
+// source's job checks) and a live revision (`live_rev`, which learners start). Only a
 // verified revision of the current guest contract goes live: by the scope's
 // source's job promoting the candidate, or by rollback to a revision that was
 // live before.
@@ -267,7 +267,7 @@ export async function assertScenarioAdmin(actorUserId: string, scenarioId: strin
  * start of both depends on the same things. A rollback puts the behaviour
  * of the revision it leaves on hold.
  *
- * With `source` the move is an automatic source's job's (#454): a promotion
+ * With `source` the move is the source's job's (#454): a promotion
  * of one lab of its head commit, with no catalog, which the job applies
  * once for the commit. `actorUserId` is then the source's binder, whose
  * rights are the binding's, and the source and its commit row are checked
