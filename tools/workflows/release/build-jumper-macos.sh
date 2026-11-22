@@ -189,6 +189,7 @@ PLIST
     printf '%s\n' "${ASC_KEY_P8}" > "${scratch}/notary.p8"
     ditto -c -k --keepParent "${app}" "${scratch}/notarize.zip"
     notary=(--key "${scratch}/notary.p8" --key-id "${ASC_KEY_ID}" --issuer "${ASC_ISSUER_ID}")
+    echo "Notarizing with Apple: usually minutes, a new team's first submissions can take hours."
     xcrun notarytool submit "${scratch}/notarize.zip" "${notary[@]}" --wait --timeout 1h \
       --output-format json > "${scratch}/notarized.json"
     submission="$(plutil -extract id raw "${scratch}/notarized.json")"
