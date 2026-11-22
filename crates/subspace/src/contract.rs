@@ -264,3 +264,78 @@ pub struct RevealHintV1 {
     pub protocol: u16,
     pub hint_key: String,
 }
+
+/// `GET /api/local/runs`: the learner's runs, newest first, as the website's
+/// run history lists them. Runs on intar's hosts are listed too; the app
+/// shows their recap but cannot open them.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct LocalRunHistoryV1 {
+    pub protocol: u16,
+    pub runs: Vec<LocalRunSummaryV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRunSummaryV1 {
+    pub run_id: String,
+    pub scenario_id: String,
+    pub organization_id: Option<String>,
+    pub title: String,
+    /// The run's machines ran on the learner's own computer.
+    pub local: bool,
+    pub active: bool,
+    /// `in_progress`, `succeeded`, `cancelled` or `failed`.
+    pub outcome: String,
+    /// `foreground`, `background` or `settled`, as the website groups runs.
+    pub activity: String,
+    /// Unix milliseconds.
+    pub created_at: i64,
+    pub finished_at: Option<i64>,
+    pub solved_at: Option<i64>,
+    pub solve_duration_ms: Option<i64>,
+    pub solution_assisted: bool,
+    pub has_replay: bool,
+}
+
+/// `GET /api/local/runs/<id>/recap`: what the website's recap shows once a
+/// run has ended. Any run of the learner's, local or not.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct LocalRunRecapAnswerV1 {
+    pub protocol: u16,
+    pub recap: LocalRunRecapV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRunRecapV1 {
+    pub run_id: String,
+    pub scenario_id: String,
+    pub title: String,
+    /// `saving`, `solved`, `could_not_finish` or `ended_early`.
+    pub kind: String,
+    /// The website's heading and line for `kind`.
+    pub heading: String,
+    pub description: String,
+    pub solve_duration_ms: Option<i64>,
+    pub hints_revealed: u32,
+    pub solution_used: bool,
+    /// The final checks; `status` is `verified` or not.
+    pub checks: Vec<LocalRunCheckV1>,
+    /// `none`, `pending`, `unavailable` or `ready`.
+    pub replay: String,
+    pub replay_parts: Vec<LocalReplayPartV1>,
+}
+
+/// One terminal session of the replay, in playing order.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalReplayPartV1 {
+    pub key: String,
+    /// The machine's name; absent for a one-machine run.
+    pub machine_label: Option<String>,
+    pub part_label: String,
+    /// The asciicast at `GET /api/local/runs/<id>/artifacts/<artifactId>`;
+    /// absent when this part's recording is missing.
+    pub cast_artifact_id: Option<String>,
+    pub size_bytes: Option<u64>,
+}

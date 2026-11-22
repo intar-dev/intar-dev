@@ -5,10 +5,11 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { KINO_CONFIG_MEDIA_TYPE } from "@/control-plane/image-registry/push";
 import { handleLocalRunCliRequest } from "@/control-plane/run-cli";
-import { user } from "@/db/schema";
+import { scenarioRunArtifacts, user } from "@/db/schema";
 import { hashStoredOAuthToken } from "@/lib/auth";
 import {
-  appReleaseRequest, DESKTOP_OAUTH_CLIENT_ID, localCatalogRequest, localLectureRequest, localRunLearning, localRunLearningRequest,
+  appReleaseRequest, DESKTOP_OAUTH_CLIENT_ID, localCatalogRequest, localLectureRequest, localRunArtifactRequest,
+  localRunHistoryRequest, localRunLearning, localRunLearningRequest, localRunRecap, localRunRecapRequest,
   localRunRequest, reportLocalRunRequest, requireDesktopCaller, startLocalRunRequest,
   type LocalRunView,
 } from "@/lib/desktop-channel";
@@ -626,6 +627,136 @@ describe("the desktop channel", () => {
       ],
       solution: { unlocked: false, revealed: false, assisted: false, bodyMarkdown: null },
     });
+  });
+
+  it("lists the learner's runs, recaps any of them and serves their artifacts, to that learner only", async () => {
+    const mine = await token("mine", LEARNER);
+    const theirs = await token("theirs", STRANGER);
+    type Recap = { runId: string; kind: string; heading: string; description: string; solveDurationMs: number | null;
+      hintsRevealed: number; solutionUsed: boolean; checks: unknown[]; replay: string; replayParts: unknown[] };
+    const history = async (secret: string | null) => {
+      const response = await localRunHistoryRequest(call(secret), channelEnv);
+      return { status: response.status, ...(await response.json() as { protocol: number; runs: Array<Record<string, unknown>> }) };
+    };
+    const recap = async (runId: string, secret: string | null = mine) => {
+      const response = await localRunRecapRequest(call(secret, {}, `/api/local/runs/${runId}/recap`), runId, channelEnv);
+      return { status: response.status, ...(await response.json() as { protocol: number; code?: string; recap: Recap }) };
+    };
+    const artifact = (runId: string, artifactId: string, secret: string | null = mine) =>
+      localRunArtifactRequest(call(secret, {}, `/api/local/runs/${runId}/artifacts/${artifactId}`), runId, artifactId, channelEnv);
+    const end = (runId: string, secret = mine) =>
+      localRunRequest(call(secret, { method: "POST" }, `/api/local/runs/${runId}/end`), runId, "end");
+
+    // Ended before any check passed, then moved off the learner's computer.
+    const early = (await view(await start(mine))).run;
+    expect((await end(early.runId)).status).toBe(200);
+    // Solved with a hint and the solution revealed.
+    const solved = (await view(await start(mine, {}, "desktop-key-2"))).run;
+    const learning = (path: string, body: unknown) => localRunLearningRequest(call(mine, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    }, `/api/local/runs/${solved.runId}/${path}`), solved.runId, path === "solution/reveal" ? "solution" : "hint");
+    const { learning: panel } = await (await localRunLearningRequest(call(mine), solved.runId, "read")).json() as
+      { learning: { hints: Array<{ key: string; unlocked: boolean }> } };
+    expect((await learning("hints/reveal", { protocol: 1, hintKey: panel.hints.find((hint) => hint.unlocked)!.key })).status).toBe(200);
+    expect((await learning("solution/reveal", {})).status).toBe(200);
+    const t0 = Date.now();
+    const passed = (id: string) => [{ id, status: "pass" as const, message: "", passed_at_unix_ms: t0 }];
+    expect((await reportLocalRunRequest(call(mine, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ protocol: 1, vms: [
+        vmState(solved.runId, "web", labState("ready", passed("serve")), t0),
+        vmState(solved.runId, "client", labState("ready", passed("fetch")), t0),
+      ] }),
+    }, `/api/local/runs/${solved.runId}/report`), solved.runId)).status).toBe(200);
+    expect((await end(solved.runId)).status).toBe(200);
+    const strangers = (await view(await start(theirs, {}, "desktop-key-3"))).run;
+    await env.DB.prepare("UPDATE scenario_runs SET created_at = 1000, runtime = 'host' WHERE run_id = ?1").bind(early.runId).run();
+    await env.DB.prepare("UPDATE scenario_runs SET created_at = 2000 WHERE run_id = ?1").bind(solved.runId).run();
+
+    // Signed out, every route refuses.
+    expect((await history(null)).status).toBe(401);
+    expect((await recap(solved.runId, null)).status).toBe(401);
+    expect((await artifact(solved.runId, "a1", null)).status).toBe(401);
+
+    // Only the caller's runs, newest first, local or not.
+    const listed = await history(mine);
+    expect(listed.protocol).toBe(1);
+    expect(listed.runs.map((run) => run.runId)).toEqual([solved.runId, early.runId]);
+    expect(listed.runs[0]).toMatchObject({ scenarioId: "intar/web", organizationId: null, local: true, active: false,
+      outcome: "succeeded", activity: "settled", createdAt: 2000, solutionAssisted: true, hasReplay: false });
+    expect(listed.runs[1]).toMatchObject({ local: false, outcome: "cancelled", solvedAt: null, solveDurationMs: null });
+    expect(Object.keys(listed.runs[0]!).sort()).toEqual(["active", "activity", "createdAt", "finishedAt", "hasReplay",
+      "local", "organizationId", "outcome", "runId", "scenarioId", "solutionAssisted", "solveDurationMs", "solvedAt", "title"]);
+
+    const won = await recap(solved.runId);
+    expect(won).toMatchObject({ status: 200, protocol: 1, recap: { runId: solved.runId, kind: "solved", heading: "Solved",
+      hintsRevealed: 1, solutionUsed: true, replay: "none", replayParts: [] } });
+    // A task run keeps no objectives; its final checks are its tasks.
+    expect(won.recap.checks).toMatchObject([
+      { key: "serve", machine: "web", status: "verified", description: TASK_BODY },
+      { key: "fetch", machine: "client", status: "verified", description: null },
+    ]);
+    expect(won.recap.solveDurationMs).toBeGreaterThanOrEqual(0);
+    const quit = await recap(early.runId);
+    expect(quit.recap).toMatchObject({ kind: "ended_early", heading: "Ended early",
+      description: "You can try this scenario again when you are ready.", hintsRevealed: 0, solutionUsed: false, solveDurationMs: null });
+
+    // Another learner's run answers like an unknown one.
+    expect(await recap(strangers.runId)).toMatchObject({ status: 404, code: "run_not_found" });
+    expect(await recap("unknown-run")).toMatchObject({ status: 404, code: "run_not_found" });
+
+    await drizzle(env.DB).insert(scenarioRunArtifacts).values([solved.runId, strangers.runId].map((runId) => ({
+      id: `${runId}:cast`, runId, vmId: `${runId}-vm`, ordinal: 0, kind: "ssh_recording_segment", filename: "session.cast",
+      contentType: "application/x-asciicast", sizeBytes: 5, sha256: "a".repeat(64), r2Key: `runs/${runId}/cast`,
+      uploadStatus: "uploaded", uploadedAt: Date.now(),
+    })));
+    for (const runId of [solved.runId, strangers.runId]) await env.VM_RUN_ARTIFACTS_BUCKET.put(`runs/${runId}/cast`, "cast\n");
+    const served = await artifact(solved.runId, `${solved.runId}:cast`);
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe("cast\n");
+    expect((await artifact(strangers.runId, `${strangers.runId}:cast`)).status).toBe(404);
+    expect((await artifact(strangers.runId, `${strangers.runId}:cast`, theirs)).status).toBe(200);
+  });
+
+  it("recaps a probe run's final checks and replay as the website does, and nothing more", () => {
+    const probe = (id: string, status: string) => ({ id, label: "RAW-LABEL", kind: "http", phase: "scenario" as const, status, error: "RAW-ERROR", value: "RAW-VALUE" });
+    const session = (index: number, castArtifactId: string | null) => ({
+      index, startTimestampMs: index, durationMs: 1, exitCode: 0, castFilename: "RAW-FILE.cast", castArtifactId, transcriptTruncated: false,
+    });
+    const vm = (id: string, name: string, ordinal: number, probes: unknown[], sessions: unknown[]) => ({
+      id, ordinal, scenarioVmId: name, scenarioVmName: name, runtimeVmName: "RAW-RUNTIME", phase: "completed",
+      scenarioProbes: probes, bootProbes: [], sessionTimeline: sessions,
+      replayArtifacts: [{ id: `${id}-a`, sizeBytes: 42 }],
+    });
+    const recap = localRunRecap({
+      id: "run-1", scenarioId: "intar/web", title: "Web", phase: "completed", phaseDetail: "RAW-DETAIL",
+      activity: "settled", outcome: "succeeded", solvedAt: 5, solveDurationMs: 4, replayState: "ready",
+      objectives: [
+        { probeName: "p1", vmName: "web", label: "P1", title: "Serve it", bodyMarkdown: "SECRET", hintCount: 0 },
+        { probeName: "p2", vmName: "client", label: "P2", title: null, bodyMarkdown: null, hintCount: 0 },
+      ],
+      vms: [
+        vm("vm-c", "client", 1, [probe("p2", "fail")], [session(0, "vm-c-a")]),
+        vm("vm-w", "web", 0, [probe("p1", "pass")], [session(0, "vm-w-a"), session(1, null)]),
+      ],
+      replayArtifacts: [],
+      hints: [{ revealed: true }, { revealed: false }, { revealed: true }],
+      solution: { revealed: false, assisted: true },
+    } as unknown as Parameters<typeof localRunRecap>[0]);
+    expect(recap).toEqual({
+      runId: "run-1", scenarioId: "intar/web", title: "Web", kind: "solved", heading: "Solved",
+      description: "You completed this scenario.", solveDurationMs: 4, hintsRevealed: 2, solutionUsed: true,
+      checks: [
+        { key: "objective-1", machine: "web", title: "Serve it", description: null, status: "verified", optional: false },
+        { key: "objective-2", machine: "client", title: "Repair objective 2", description: null, status: "needs_repair", optional: false },
+      ],
+      replay: "ready",
+      replayParts: [
+        { key: "replay-vm-w-a", machineLabel: "web", partLabel: "Part 1", castArtifactId: "vm-w-a", sizeBytes: 42 },
+        { key: "replay-vm-c-a", machineLabel: "client", partLabel: "Part 2", castArtifactId: "vm-c-a", sizeBytes: 42 },
+      ],
+    });
+    expect(JSON.stringify(recap)).not.toMatch(/RAW-|SECRET/);
   });
 
   it("signs the app in through the provider with the client a deploy seeds", async () => {

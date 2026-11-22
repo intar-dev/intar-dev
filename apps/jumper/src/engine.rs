@@ -11,12 +11,15 @@ use url::Url;
 
 use crate::local::Local;
 use crate::secrets::Keychain;
-use crate::state::{Command, Event, Learn, MachineStatus};
+use crate::state::{Command, Event, History, Learn, MachineStatus};
 use crate::terminal::{self, Size};
 use crate::update::{self, Offer};
 
 /// How often the running machine's reports are looked at.
 const MACHINE_POLL: Duration = Duration::from_millis(300);
+/// The largest replay part the app plays, as the website's
+/// `MAX_INLINE_REPLAY_BYTES`.
+pub const MAX_REPLAY_BYTES: usize = 2 * 1024 * 1024;
 /// How long the learner has to finish in the browser.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -161,6 +164,10 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             None => Event::SignedOut,
                             Some(channel) => learn(channel, call).await,
                         },
+                        Command::History(call) => match &channel {
+                            None => Event::SignedOut,
+                            Some(channel) => history(channel, call).await,
+                        },
                         Command::ReadRun { run_id } => run_event(&channel, async |channel| channel.run(&run_id).await).await,
                         Command::EndRun { run_id } => run_event(&channel, async |channel| channel.end_run(&run_id).await).await,
                         // A check that fails offers nothing; the next launch asks again.
@@ -266,24 +273,28 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                                     status = &mut start => break Some(status),
                                     command = inbox.recv() => {
                                         // What the learner reads does not wait for the machine.
-                                        if let Some(Command::Learn(call)) = command {
-                                            if !quiet_send(&outbox, learn(&learning, call).await) {
-                                                break None;
+                                        let answer = match command {
+                                            Some(Command::Learn(call)) => learn(&learning, call).await,
+                                            Some(Command::History(call)) => history(&learning, call).await,
+                                            other => {
+                                                let stop = !matches!(
+                                                    other,
+                                                    Some(
+                                                        Command::LoadCatalog
+                                                            | Command::ReadRun { .. }
+                                                            | Command::Restore
+                                                            | Command::CheckUpdate
+                                                            | Command::InstallUpdate
+                                                    )
+                                                );
+                                                waiting.extend(other);
+                                                if stop {
+                                                    break None;
+                                                }
+                                                continue;
                                             }
-                                            continue;
-                                        }
-                                        let stop = !matches!(
-                                            command,
-                                            Some(
-                                                Command::LoadCatalog
-                                                    | Command::ReadRun { .. }
-                                                    | Command::Restore
-                                                    | Command::CheckUpdate
-                                                    | Command::InstallUpdate
-                                            )
-                                        );
-                                        waiting.extend(command);
-                                        if stop {
+                                        };
+                                        if !quiet_send(&outbox, answer) {
                                             break None;
                                         }
                                     }
@@ -366,6 +377,32 @@ async fn learn(channel: &Subspace, call: Learn) -> Event {
             .reveal_solution(&run_id)
             .await
             .map(|answer| Event::Learning(answer.learning)),
+    };
+    answer.unwrap_or_else(failed)
+}
+
+/// One call about the learner's runs, as the event the UI gets.
+async fn history(channel: &Subspace, call: History) -> Event {
+    let answer = match call {
+        History::List => channel
+            .history()
+            .await
+            .map(|history| Event::History(history.runs)),
+        History::Recap { run_id } => channel
+            .recap(&run_id)
+            .await
+            .map(|answer| Event::Recap(answer.recap)),
+        History::Replay {
+            run_id,
+            artifact_id,
+        } => channel
+            .replay(&run_id, &artifact_id, MAX_REPLAY_BYTES)
+            .await
+            .map(|cast| Event::Replay {
+                run_id,
+                artifact_id,
+                cast,
+            }),
     };
     answer.unwrap_or_else(failed)
 }
