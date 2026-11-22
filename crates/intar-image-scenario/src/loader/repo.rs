@@ -6,7 +6,8 @@ use super::{Diagnostic, Fields, Loaded, Source, label, lower};
 use hcl::edit::Span as _;
 use hcl::edit::structure::{Block, Structure};
 use intar_contracts::scenario::{
-    Difficulty, HintV1, ImageV1, MachineV1, ScenarioV1, ScriptV1, TaskV1, validate,
+    ClusterRole, ClusterV1, Difficulty, HintV1, ImageV1, MachineClusterV1, MachineV1, ScenarioV1,
+    ScriptV1, TALOS_BASE_IMAGE, TaskV1, validate,
 };
 use std::path::{Path, PathBuf};
 
@@ -323,10 +324,75 @@ fn machine(source: &Source, name: String, block: &Block) -> Loaded<MachineV1> {
         env: fields.string_map("env")?,
         setup: stages(source, &mut fields)?,
         ready,
-        cluster: None,
+        // A machine that names a cluster is its management machine.
+        cluster: fields.text("cluster")?.map(|cluster| MachineClusterV1 {
+            cluster,
+            role: ClusterRole::Management,
+        }),
     };
     fields.done()?;
     Ok(machine)
+}
+
+/// A `cluster` block: the cluster and its nodes, which join the scenario's
+/// machines after the declared ones, in name order.
+fn cluster(source: &Source, name: String, block: &Block) -> Loaded<(ClusterV1, Vec<MachineV1>)> {
+    let mut fields = Fields::of(source, block)?;
+    let kind = fields.text("kind")?;
+    if fields.need("kind", kind)? != "talos" {
+        return Err(fields.error(None, "`kind` is `talos`"));
+    }
+    let mut nodes = Vec::new();
+    for (node, role) in fields.string_map("nodes")? {
+        // ponytail: one size per role; a per-node override when a lab needs one.
+        let (role, cpu_millis, memory_mib) = match role.as_str() {
+            "controlplane" => (ClusterRole::Controlplane, 2000, 2048),
+            "worker" => (ClusterRole::Worker, 2000, 1536),
+            _ => {
+                return Err(fields.error(
+                    None,
+                    format!("`nodes.{node}` is `controlplane` or `worker`"),
+                ));
+            }
+        };
+        nodes.push(MachineV1 {
+            name: node,
+            cpu_millis,
+            memory_mib,
+            disk_mib: 10 * 1024,
+            from: TALOS_BASE_IMAGE.to_owned(),
+            defer: Vec::new(),
+            terminal: false,
+            // Workloads pull images.
+            egress: true,
+            env: Default::default(),
+            setup: Vec::new(),
+            ready: Vec::new(),
+            cluster: Some(MachineClusterV1 {
+                cluster: name.clone(),
+                role,
+            }),
+        });
+    }
+    if nodes.is_empty() {
+        return Err(fields.error(None, "`nodes` names at least one node"));
+    }
+    let patches = fields
+        .labelled("patch")?
+        .into_iter()
+        .map(|(patch, block)| {
+            let mut fields = Fields::of(source, block)?;
+            let yaml = fields.script("yaml")?;
+            let yaml = fields.need("yaml", yaml)?;
+            fields.done()?;
+            Ok(ScriptV1 {
+                name: patch,
+                script: yaml,
+            })
+        })
+        .collect::<Loaded<_>>()?;
+    fields.done()?;
+    Ok((ClusterV1 { name, patches }, nodes))
 }
 
 fn task(source: &Source, id: String, block: &Block, machines: &[MachineV1]) -> Loaded<TaskV1> {
@@ -400,11 +466,17 @@ fn scenario(source: &Source, block: &Block, directory: &str) -> Loaded<ScenarioV
         .number("minutes")?
         .and_then(|minutes| u32::try_from(minutes).ok());
     let (briefing, solution) = (fields.markdown("briefing")?, fields.markdown("solution")?);
-    let machines = fields
+    let mut machines = fields
         .labelled("machine")?
         .into_iter()
         .map(|(name, block)| machine(source, name, block))
         .collect::<Loaded<Vec<_>>>()?;
+    let mut clusters = Vec::new();
+    for (name, block) in fields.labelled("cluster")? {
+        let (found, nodes) = cluster(source, name, block)?;
+        clusters.push(found);
+        machines.extend(nodes);
+    }
     let tasks = fields
         .labelled("task")?
         .into_iter()
@@ -424,7 +496,7 @@ fn scenario(source: &Source, block: &Block, directory: &str) -> Loaded<ScenarioV
         hints: hints(source, &mut fields)?,
         machines,
         tasks,
-        clusters: Vec::new(),
+        clusters,
     };
     fields.done()?;
     Ok(scenario)

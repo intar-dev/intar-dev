@@ -820,3 +820,122 @@ fn every_scenario_is_named_by_a_lecture() {
         .collect();
     assert_eq!(courses, ["linux", "ops"]);
 }
+
+const TALOS: &str = r#"scenario "talos-lab" {
+  title      = "Talos"
+  summary    = "A cluster."
+  difficulty = "medium"
+  minutes    = 30
+  briefing   = "Get the nodes Ready."
+  solution   = "Wait."
+
+  cluster "lab" {
+    kind  = "talos"
+    nodes = { wk1 = "worker", cp1 = "controlplane" }
+    patch "ntp" { yaml = file("talos/ntp.yaml") }
+  }
+
+  machine "mgmt" {
+    cluster = "lab"
+    cpu     = 1
+    memory  = "512Mi"
+    disk    = "4Gi"
+    from    = "trixie"
+    ready "nodes" { run = "kubectl get nodes" }
+  }
+
+  task "nodes-ready" {
+    title   = "Nodes are Ready"
+    machine = "mgmt"
+    check { run = "kubectl get nodes" }
+    solve { run = "true" }
+  }
+}
+"#;
+
+fn talos(change: impl FnOnce(&Path)) -> (tempfile::TempDir, Result<Repository, Vec<Diagnostic>>) {
+    repository(|root| {
+        let dir = root.join("scenarios/talos-lab");
+        std::fs::create_dir_all(dir.join("talos")).expect("mkdir");
+        std::fs::write(dir.join("scenario.hcl"), TALOS).expect("write");
+        std::fs::write(dir.join("talos/ntp.yaml"), "machine: {}\n").expect("write");
+        change(root);
+    })
+}
+
+#[test]
+fn a_cluster_lowers_to_its_nodes_and_management_machine() {
+    let (_temp, loaded) = talos(|_| {});
+    let repository = loaded.expect("loads");
+    let scenario = &repository.scenarios[1];
+    assert_eq!(scenario.slug, "talos-lab");
+    let roles: Vec<_> = scenario
+        .machines
+        .iter()
+        .map(|m| {
+            let role = m
+                .cluster
+                .as_ref()
+                .map(|c| (c.cluster.as_str(), c.role.as_str()));
+            (m.name.as_str(), m.from.as_str(), m.terminal, role)
+        })
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            ("mgmt", "trixie", true, Some(("lab", "management"))),
+            ("cp1", "talos", false, Some(("lab", "controlplane"))),
+            ("wk1", "talos", false, Some(("lab", "worker"))),
+        ]
+    );
+    assert_eq!(scenario.clusters.len(), 1);
+    assert_eq!(scenario.clusters[0].patches[0].name, "ntp");
+    assert_eq!(scenario.clusters[0].patches[0].script, "machine: {}\n");
+}
+
+#[test]
+fn cluster_blocks_are_checked() {
+    let at = "scenarios/talos-lab/scenario.hcl";
+    for (from, to, expected) in [
+        ("kind  = \"talos\"", "kind  = \"k3s\"", "`kind` is `talos`"),
+        (
+            "wk1 = \"worker\"",
+            "wk1 = \"boss\"",
+            "`nodes.wk1` is `controlplane` or `worker`",
+        ),
+        (
+            "nodes = { wk1 = \"worker\", cp1 = \"controlplane\" }",
+            "nodes = {}",
+            "`nodes` names at least one node",
+        ),
+        (
+            "cluster = \"lab\"",
+            "cluster = \"other\"",
+            "cluster `other` is not declared",
+        ),
+        (
+            "cp1 = \"controlplane\"",
+            "cp2 = \"worker\"",
+            "needs exactly one controlplane machine",
+        ),
+        (
+            "machine = \"mgmt\"",
+            "machine = \"cp1\"",
+            "a cluster node has no terminal",
+        ),
+        ("yaml = file(", "yml = file(", "`patch`: `yaml` is required"),
+    ] {
+        let (_temp, loaded) = talos(|root| edit(root, at, from, to));
+        let found = loaded
+            .err()
+            .unwrap_or_default()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            found.contains(expected),
+            "expected `{expected}` in `{found}`"
+        );
+    }
+}
