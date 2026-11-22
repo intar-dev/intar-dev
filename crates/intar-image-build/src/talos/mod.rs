@@ -274,9 +274,10 @@ pub fn build_cluster_images(request: &ClusterBuildRequest) -> Result<ClusterBuil
 }
 
 /// The management machine's cluster step: kubectl and talosctl, the lab
-/// kubeconfig and talosconfig for the guest user, and its lab address on
-/// its last NIC at every boot (the lab NIC on the desktop, the run NIC on a
-/// platform host, where the lab shares the run's network).
+/// kubeconfig and talosconfig for the guest user, and its lab address at
+/// every boot on the NIC with the lab MAC prefix (the desktop's lab NIC), or
+/// else on its only physical NIC (a platform host's run NIC, which the lab
+/// shares). Virtual devices such as `sit0` are never taken.
 fn management_step(
     files: &assets::ReleaseFiles,
     baked: &bake::Baked,
@@ -286,6 +287,7 @@ fn management_step(
         |local: &Path, name: &str| (local.to_owned(), format!("/tmp/intar-cluster-{name}"));
     let user = GUEST_USERNAME;
     let prefix = intar_contracts::scenario::CLUSTER_LAB_PREFIX_LEN;
+    let mac = intar_contracts::scenario::CLUSTER_LAB_MAC_PREFIX;
     PostStageStep {
         files: vec![
             upload(&files.target_kubectl, "kubectl"),
@@ -304,8 +306,18 @@ rm -f /tmp/intar-cluster-*
 cat > /usr/local/sbin/intar-cluster-lab-address <<'EOF'
 #!/bin/sh
 set -eu
-nic="$(ls /sys/class/net | grep -v '^lo$' | sort | tail -n 1)"
-ip link set "$nic" up
+nic=""
+first=""
+for dev in /sys/class/net/*; do
+  [ -e "$dev/device" ] || continue
+  case "$(cat "$dev/address")" in
+    {mac}:*) nic="${{dev##*/}}"; break ;;
+  esac
+  [ -n "$first" ] || first="${{dev##*/}}"
+done
+nic="${{nic:-$first}}"
+[ -n "$nic" ] || {{ echo "no NIC for the lab address" >&2; exit 1; }}
+ip link set dev "$nic" up
 ip address replace {lab}/{prefix} dev "$nic"
 EOF
 chmod 0755 /usr/local/sbin/intar-cluster-lab-address
@@ -456,6 +468,8 @@ mod tests {
                 .all(|(_, remote)| remote.starts_with("/tmp/intar-cluster-"))
         );
         assert!(step.script.contains("ip address replace 172.31.0.14/28"));
+        assert!(step.script.contains("52:54:00:31:00:*) nic="));
+        assert!(step.script.contains("[ -e \"$dev/device\" ] || continue"));
         assert!(
             step.script
                 .contains(&format!("/home/{GUEST_USERNAME}/.kube/config"))

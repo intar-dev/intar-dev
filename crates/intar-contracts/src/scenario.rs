@@ -447,6 +447,10 @@ impl ScenarioV1 {
 /// the run sees anything.
 pub const CLUSTER_LAB_PREFIX: [u8; 3] = [172, 31, 0];
 pub const CLUSTER_LAB_PREFIX_LEN: u8 = 28;
+/// The first five bytes of every lab NIC's MAC, as `xx:xx:xx:xx:xx`: a
+/// runtime that gives a machine a NIC on the lab network uses it, and the
+/// management machine finds its lab NIC by it.
+pub const CLUSTER_LAB_MAC_PREFIX: &str = "52:54:00:31:00";
 
 /// Each machine of cluster `name` with its lab address: the control plane
 /// `.2`, the workers `.3` up in scenario order, the management machine `.14`.

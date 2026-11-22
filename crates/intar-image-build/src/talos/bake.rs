@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use dhd::lab_hub::LabHub;
-use intar_contracts::scenario::ClusterRole;
+use intar_contracts::scenario::{CLUSTER_LAB_MAC_PREFIX, ClusterRole};
 
 use super::assets::ReleaseFiles;
 use super::configs::{self, controlplane_ip};
@@ -356,7 +356,7 @@ fn spawn_node(
                 hub.display()
             ),
             "-device".to_owned(),
-            format!("virtio-net-pci,netdev=lab,mac=52:54:00:31:00:{octet:02x}"),
+            format!("virtio-net-pci,netdev=lab,mac={CLUSTER_LAB_MAC_PREFIX}:{octet:02x}"),
             "-netdev".to_owned(),
             uplink,
             "-device".to_owned(),
