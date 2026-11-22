@@ -701,7 +701,6 @@ function scenarioRevisions() {
     verifyRunId: null,
     verifyReport: null,
     liveAt: null,
-    canGoLive: state === "verified",
     imagesReady: true,
     createdAt: FIXED_NOW - age,
     ...extra,
@@ -716,7 +715,6 @@ function scenarioRevisions() {
       enabled: true,
       liveRev: rev("a"),
       candidateRev: rev("c"),
-      canManage: true,
       verifyRuns: {},
       revisions: [
         revision("c", "verified", 2 * 60 * minute, { verifyRunId: "run-verify-2" }),
@@ -750,7 +748,6 @@ function scenarioRevisions() {
       enabled: true,
       liveRev: null,
       candidateRev: rev("e"),
-      canManage: true,
       verifyRuns: { [rev("e")]: "run-verify-3" },
       revisions: [revision("e", "ready", 30 * minute)],
     },

@@ -254,7 +254,7 @@ describe("image registry admission", () => {
   });
 
   it("admits operator pointer work without an upload session", async () => {
-    // Forcing an operator promotion or rollback to open an upload session would
+    // Forcing a promotion of a live revision to open an upload session would
     // make the collector unreachable while that request runs, so operator
     // operations are admitted session-less even in enforce mode.
     await setRegistryEnforcement(env, "enforce");

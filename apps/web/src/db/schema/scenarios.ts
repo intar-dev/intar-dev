@@ -254,8 +254,8 @@ export const scenarioRevisions = sqliteTable(
     failureReason: text("failure_reason"),
     verifyRunId: text("verify_run_id"),
     verifyReportJson: text("verify_report_json"),
-    // When the revision was last made live; only such a revision is a rollback
-    // target.
+    // When the revision was last made live; retention keeps the most recent
+    // of them, which a revert finds its verified twin among.
     liveAt: integer("live_at"),
     // When the revision's checks passed in a lab that a host started from
     // its snapshot. Only then may a run of the revision start that way.
@@ -282,10 +282,10 @@ export const scenarioRevisions = sqliteTable(
 );
 
 /**
- * A behaviour of a scenario that must not go live again by itself (#454): a
- * rollback puts the one it rolled away from here. While a hold is not
- * lifted, no revision of the scenario with that digest is verified by
- * inheritance or promoted.
+ * No longer read or written (#494): there is no rollback, so there are no
+ * holds. A row, open or lifted, means nothing; a revision whose behaviour it
+ * names is verified by inheritance and goes live like any other. The table is
+ * kept, so this change needs no migration, until the last slice drops it.
  */
 export const scenarioRevisionHolds = sqliteTable(
   "scenario_revision_holds",

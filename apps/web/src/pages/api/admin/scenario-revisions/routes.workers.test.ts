@@ -7,7 +7,7 @@ import type { UserContext } from "@/lib/agent-bridge";
 import { createFixtureMember } from "@/test/account-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { GET as list } from "@/pages/api/admin/scenario-revisions/index";
-import { GET as read, POST as change } from "@/pages/api/admin/scenario-revisions/[namespace]/[slug]";
+import * as scenarioRoute from "@/pages/api/admin/scenario-revisions/[namespace]/[slug]";
 import { GET as builds } from "@/pages/api/admin/machine-builds/index";
 import { GET as buildLog } from "@/pages/api/admin/machine-builds/[buildKey]/log";
 
@@ -21,6 +21,7 @@ const as = (userId: string, extra: Partial<UserContext> = {}) => mocks.auth.mock
   ok: true,
   context: { userId, sessionId: "browser", role: "user", isAdmin: userId === "admin", organizationIds: [], activeOrganizationId: null, ...extra },
 });
+const read = scenarioRoute.GET;
 const call = (route: typeof list, params: Record<string, string> = {}, body?: unknown) => route({
   request: new Request("https://intar.test/api", body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }),
   params,
@@ -67,47 +68,25 @@ describe("scenario revision routes", () => {
     expect((await call(read, { namespace: "acme", slug: "web" })).status).toBe(404);
   });
 
-  it("let only the scope's admins change a scenario", async () => {
-    as("owner");
-    expect((await call(change, { namespace: "intar", slug: "web" }, { action: "rollback", rev: "r1", liveRev: null })).status).toBe(404);
-    as("other");
-    expect((await call(change, { namespace: "acme", slug: "web" }, { action: "lift_hold", rev: "r1" })).status).toBe(404);
+  it("take no action on a revision: rollback, lift_hold and the approval actions find no handler, and nothing changes", async () => {
+    await env.DB.batch([
+      env.DB.prepare("UPDATE scenario_revisions SET state = 'verified', restore_verified_at = 5, behaviour_digest = 'd', live_at = 1"),
+      env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at, held_by_user_id)
+        VALUES ('intar/web', 'd', 1, 'admin')`),
+    ]);
+    const before = async () => env.DB.batch([
+      env.DB.prepare("SELECT id, live_rev, candidate_rev, enabled FROM scenarios ORDER BY id"),
+      env.DB.prepare("SELECT scenario_id, rev, state, live_at, restore_verified_at FROM scenario_revisions ORDER BY scenario_id"),
+      env.DB.prepare("SELECT * FROM scenario_revision_holds"),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM scenario_runs"),
+    ]).then((results) => results.map((result) => result.results));
+    const snapshot = await before();
+    // Only a read is exported; Astro answers any other method with a 404.
+    expect(Object.keys(scenarioRoute).sort()).toEqual(["GET", "prerender"]);
+    expect("POST" in scenarioRoute).toBe(false);
     as("admin");
-    expect((await call(change, { namespace: "acme", slug: "web" }, { action: "rollback", rev: "r1", liveRev: null })).status).toBe(403);
-    expect((await call(change, { namespace: "intar", slug: "web" }, { action: "drop", rev: "r1" })).status).toBe(400);
-    as("admin", { impersonated: true } as Partial<UserContext>);
-    expect((await call(change, { namespace: "intar", slug: "web" }, { action: "rollback", rev: "r1", liveRev: null })).status).toBe(403);
-  });
-
-  it("refuse an administrator's approval actions, which are the source's job's, and still roll back and lift a hold", async () => {
-    await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified', restore_verified_at = 5, behaviour_digest = 'd'").run();
-    as("admin");
-    for (const body of [
-      { action: "verify", rev: "r1" },
-      { action: "promote", rev: "r1", liveRev: null },
-      { action: "verify_restore", rev: "r1" },
-      { action: "clear_restore_verified", rev: "r1" },
-    ]) {
-      const response = await call(change, { namespace: "intar", slug: "web" }, body);
-      expect(response.status, body.action).toBe(400);
-      expect(await response.json()).toMatchObject({ code: "invalid_request" });
-    }
-    // Nothing moved, started or was withdrawn.
-    expect(await env.DB.prepare("SELECT live_rev FROM scenarios WHERE id = 'intar/web'").first("live_rev")).toBeNull();
-    expect(await env.DB.prepare("SELECT restore_verified_at FROM scenario_revisions WHERE scenario_id = 'intar/web'")
-      .first("restore_verified_at")).toBe(5);
-    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM scenario_runs").first("n")).toBe(0);
-
-    // A rollback reaches the move: r1 was never live, so it has nowhere to go back to.
-    const rollback = await call(change, { namespace: "intar", slug: "web" }, { action: "rollback", rev: "r1", liveRev: null });
-    expect(await rollback.json()).toMatchObject({ code: "revision_never_live" });
-    // A hold is lifted.
-    await env.DB.prepare(`INSERT INTO scenario_revision_holds (scenario_id, behaviour_digest, held_at, held_by_user_id)
-      VALUES ('intar/web', 'd', 1, 'admin')`).run();
-    const lifted = await call(change, { namespace: "intar", slug: "web" }, { action: "lift_hold", rev: "r1" });
-    expect(lifted.status).toBe(200);
-    expect(await env.DB.prepare("SELECT lifted_by_user_id FROM scenario_revision_holds WHERE scenario_id = 'intar/web'")
-      .first("lifted_by_user_id")).toBe("admin");
+    expect((await call(read, { namespace: "intar", slug: "web" })).status).toBe(200);
+    expect(await before()).toEqual(snapshot);
   });
 });
 
