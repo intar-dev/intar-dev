@@ -25,6 +25,11 @@ pub const TALOS_BASE_IMAGE: &str = "talos";
 /// `(talos, kubernetes)`. The builder pins each pair's assets by digest, so a
 /// pair is added here together with its pins.
 pub const TALOS_RELEASES: &[(&str, &str)] = &[("v1.14.6", "v1.37.1")];
+/// What the builder bakes into a cluster besides the scenario's inputs: its
+/// fixed machine-config patches, pinned assets and bake steps. An input of
+/// every cluster key; bumped with any change to them, so the change rebuilds
+/// every cluster.
+pub const CLUSTER_BAKE_REVISION: &str = "1";
 pub const MAX_CLUSTERS: usize = 1;
 pub const MAX_CLUSTER_PATCHES: usize = 16;
 /// The smallest disk of a Talos node: room for Talos and the cluster's
@@ -438,6 +443,36 @@ impl ScenarioV1 {
 }
 
 /// `^[a-z0-9][a-z0-9-]{2,62}$`
+/// The lab network every cluster's machines share, a `/28` of which only
+/// the run sees anything.
+pub const CLUSTER_LAB_PREFIX: [u8; 3] = [172, 31, 0];
+pub const CLUSTER_LAB_PREFIX_LEN: u8 = 28;
+
+/// Each machine of cluster `name` with its lab address: the control plane
+/// `.2`, the workers `.3` up in scenario order, the management machine `.14`.
+/// Validation keeps a cluster within `MAX_MACHINES`, so the workers end below
+/// `.14`.
+pub fn cluster_lab_ips(scenario: &ScenarioV1, name: &str) -> BTreeMap<String, std::net::Ipv4Addr> {
+    let [a, b, c] = CLUSTER_LAB_PREFIX;
+    let mut worker = 3;
+    let mut found = BTreeMap::new();
+    for machine in &scenario.machines {
+        let Some(member) = machine.cluster.as_ref().filter(|m| m.cluster == name) else {
+            continue;
+        };
+        let host = match member.role {
+            ClusterRole::Controlplane => 2,
+            ClusterRole::Management => 14,
+            ClusterRole::Worker => {
+                worker += 1;
+                worker - 1
+            }
+        };
+        found.insert(machine.name.clone(), std::net::Ipv4Addr::new(a, b, c, host));
+    }
+    found
+}
+
 pub fn is_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     (3..=63).contains(&bytes.len())
@@ -1081,6 +1116,26 @@ mod tests {
             patches: vec![script("ntp")],
         }];
         scenario
+    }
+
+    #[test]
+    fn cluster_machines_get_their_lab_addresses() {
+        let mut scenario = cluster_scenario();
+        let mut second = scenario.machines[1].clone();
+        second.name = "wk2".to_owned();
+        scenario.machines.insert(0, second);
+        let ips = cluster_lab_ips(&scenario, "lab");
+        let found: Vec<_> = ips.iter().map(|(m, ip)| format!("{m}={ip}")).collect();
+        assert_eq!(
+            found,
+            [
+                "cp1=172.31.0.2",
+                "mgmt=172.31.0.14",
+                "wk1=172.31.0.4",
+                "wk2=172.31.0.3"
+            ]
+        );
+        assert!(cluster_lab_ips(&scenario, "other").is_empty());
     }
 
     #[test]

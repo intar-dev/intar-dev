@@ -2,7 +2,7 @@
 // crates/intar-contracts/src/scenario/build_key.rs, which documents the
 // encoding. The golden vectors in fixtures/scenario/build-keys.json pin it.
 
-import { IMAGE_FORMAT, PLATFORM_BASE_IMAGE } from "@/generated/constants";
+import { CLUSTER_BAKE_REVISION, IMAGE_FORMAT, PLATFORM_BASE_IMAGE } from "@/generated/constants";
 import type {
   ClusterV1,
   ImageV1,
@@ -54,7 +54,7 @@ class Encoding {
 
 function clusterKey(cluster: ClusterV1, machines: MachineV1[]): Promise<string> {
   const e = new Encoding();
-  for (const text of [IMAGE_FORMAT, "cluster", cluster.talos, cluster.kubernetes, cluster.name]) e.put(text);
+  for (const text of [IMAGE_FORMAT, "cluster", CLUSTER_BAKE_REVISION, cluster.talos, cluster.kubernetes, cluster.name]) e.put(text);
   const nodes = machines.filter(
     (machine) => machine.cluster?.cluster === cluster.name && machine.cluster.role !== "management",
   );

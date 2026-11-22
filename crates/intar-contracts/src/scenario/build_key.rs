@@ -45,8 +45,8 @@
 //! key and each gets a key derived from it:
 //!
 //! ```text
-//! cluster = str(IMAGE_FORMAT) str("cluster") str(talos) str(kubernetes)
-//!           str(name) list(node) list(patch)
+//! cluster = str(IMAGE_FORMAT) str("cluster") str(CLUSTER_BAKE_REVISION)
+//!           str(talos) str(kubernetes) str(name) list(node) list(patch)
 //! node    = str(name) ‖ str(role) ‖ str(disk)  the cluster's nodes in scenario order
 //! patch   = str(name) ‖ str(patch)             in order
 //! machine = str(IMAGE_FORMAT) str("cluster-machine") str(cluster key)
@@ -61,7 +61,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest as _, Sha256};
 
-use super::{ClusterV1, ImageV1, MachineV1, PLATFORM_BASE_IMAGE, ScenarioV1, ScriptV1};
+use super::{
+    CLUSTER_BAKE_REVISION, ClusterV1, ImageV1, MachineV1, PLATFORM_BASE_IMAGE, ScenarioV1, ScriptV1,
+};
 use crate::oci::{IMAGE_FORMAT, OciDigest};
 
 /// The keys of a scenario's machines and of its repository's images.
@@ -101,6 +103,7 @@ fn cluster_key(cluster: &ClusterV1, machines: &[MachineV1]) -> OciDigest {
     for text in [
         IMAGE_FORMAT,
         "cluster",
+        CLUSTER_BAKE_REVISION,
         &cluster.talos,
         &cluster.kubernetes,
         &cluster.name,

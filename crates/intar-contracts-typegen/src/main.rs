@@ -676,6 +676,7 @@ export const MAX_MACHINE_SPEC_BYTES = {};
 export const MAX_DISK_MIB = {};
 export const TALOS_BASE_IMAGE = "{}";
 export const TALOS_RELEASES: readonly (readonly [string, string])[] = {};
+export const CLUSTER_BAKE_REVISION = "{}";
 export const MAX_CLUSTERS = {};
 export const MAX_CLUSTER_PATCHES = {};
 export const MIN_TALOS_DISK_MIB = {};
@@ -737,6 +738,7 @@ export const runtimeEnvKeys = {{
         MAX_DISK_MIB,
         intar_contracts::scenario::TALOS_BASE_IMAGE,
         serde_json::json!(intar_contracts::scenario::TALOS_RELEASES),
+        intar_contracts::scenario::CLUSTER_BAKE_REVISION,
         intar_contracts::scenario::MAX_CLUSTERS,
         intar_contracts::scenario::MAX_CLUSTER_PATCHES,
         intar_contracts::scenario::MIN_TALOS_DISK_MIB,
