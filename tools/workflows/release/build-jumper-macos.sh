@@ -9,8 +9,8 @@
 #
 # How the bundle is signed:
 #   - With MACOS_CERT_P12_BASE64 and MACOS_CERT_PASSWORD (release.yml, from the
-#     macos-signing environment): with that Developer ID Application
-#     certificate, imported into a keychain of the build's own, and the
+#     macos-signing environment): with that Developer ID Application, or
+#     self-signed code-signing, certificate, imported into a keychain of the build's own, and the
 #     hardened runtime; with ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8, an App
 #     Store Connect API key, it is notarized and the ticket stapled.
 #   - With SIGN_IDENTITY: with that identity from the login keychain, say a
@@ -126,8 +126,10 @@ if [ -n "${MACOS_CERT_P12_BASE64:-}" ]; then
   security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${keychain_password}" "${keychain}" > /dev/null
   # shellcheck disable=SC2086 # the keychains searched before, one per word
   security list-keychains -d user -s "${keychain}" ${searched}
-  identity="$(security find-identity -p codesigning "${keychain}" | awk '/"Developer ID Application: / {print $2; exit}')"
-  [ -n "${identity}" ] || { echo "The certificate is no Developer ID Application identity." >&2; exit 1; }
+  # A Developer ID Application identity, or until there is one a self-signed
+  # code-signing one: either keeps the app one identity across releases.
+  identity="$(security find-identity -p codesigning "${keychain}" | awk '/^ *[0-9]+\) [0-9A-F]{40} / {print $2; exit}')"
+  [ -n "${identity}" ] || { echo "The certificate holds no code-signing identity." >&2; exit 1; }
 elif [ -z "${identity}" ] && [ -n "${VERSION:-}" ]; then
   echo "::warning::No signing certificate: the app is signed ad hoc." >&2
 fi
