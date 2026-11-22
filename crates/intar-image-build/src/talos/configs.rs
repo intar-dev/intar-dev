@@ -90,7 +90,9 @@ extraArgs: [\"--iface=eth0\"]
 }
 
 /// Last on every node: its lab address on eth0 without a gateway, its name,
-/// the node IP and endpoint on the lab subnet, the preinstalled disk kept.
+/// the node IP and endpoint on the lab subnet, the preinstalled disk kept,
+/// and no time sync: the VM's clock is the host's, and Talos holds etcd and
+/// the kubelet until a sync that a node without egress never gets.
 fn invariant(name: &str, ip: Ipv4Addr) -> String {
     let subnet = lab_subnet();
     let endpoint = endpoint();
@@ -121,6 +123,10 @@ apiVersion: v1alpha1
 kind: HostnameConfig
 auto: off
 hostname: {name}
+---
+apiVersion: v1alpha1
+kind: TimeSyncConfig
+enabled: false
 "
     )
 }
@@ -234,6 +240,7 @@ mod tests {
             "match: disk.dev_path == \"/dev/vda\"",
             "- address: 172.31.0.3/28",
             "hostname: wk1",
+            "kind: TimeSyncConfig\nenabled: false",
         ] {
             assert!(patch.contains(expected), "{expected} in {patch}");
         }

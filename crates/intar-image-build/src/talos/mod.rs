@@ -158,7 +158,7 @@ pub(crate) fn plan_cluster(
 /// own (`ip=` on a platform host).
 pub(crate) fn node_cmdline(arch: BuildArch) -> String {
     format!(
-        "talos.platform=metal console={} slab_nomerge pti=on printk.devkmsg=on sysctl.kernel.kexec_load_disabled=1 net.ifnames=0",
+        "talos.platform=metal console={} loglevel=3 slab_nomerge pti=on printk.devkmsg=on sysctl.kernel.kexec_load_disabled=1 net.ifnames=0",
         arch.console()
     )
 }
