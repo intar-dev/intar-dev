@@ -1,5 +1,15 @@
 # Changelog
 
+## image-cli/v0.18.0 (2026-11-22)
+
+### Breaking changes
+
+- **intar-image-scenario:** [**breaking**] Refuse a scenario that no lecture names (#504) (b892d147)
+
+### Bug fixes
+
+- **deps:** Bump url past RUSTSEC-2026-0592 (#511) (03319a5a)
+
 ## image-cli/v0.17.0 (2026-11-21)
 
 ### Features

@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.26.1 (2026-11-22)
+
+### Bug fixes
+
+- **deps:** Bump url past RUSTSEC-2026-0592 (#511) (03319a5a)
+
 ## agent/v0.26.0 (2026-11-21)
 
 ### Features

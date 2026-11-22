@@ -1,5 +1,12 @@
 # Changelog
 
+## desktop/v0.1.1 (2026-11-22)
+
+### Bug fixes
+
+- **jumper:** Send typed and composed text to the terminal through an input handler (#510) (dfaf4ecd)
+- **deps:** Bump url past RUSTSEC-2026-0592 (#511) (03319a5a)
+
 ## desktop/v0.1.0 (2026-11-21)
 
 The first release of the desktop app: run a lab's machine on your own computer.
