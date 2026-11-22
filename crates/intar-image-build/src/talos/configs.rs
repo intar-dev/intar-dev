@@ -65,10 +65,12 @@ fn controlplane() -> String {
         "cluster:
   etcd:
     advertisedSubnets: [{subnet}]
-  apiServer:
-    certSANs: [127.0.0.1]
   adminKubeconfig:
     certLifetime: {CERT_LIFETIME}
+---
+apiVersion: v1alpha1
+kind: KubeAPIServerConfig
+certExtraSANs: [127.0.0.1]
 ---
 apiVersion: v1alpha1
 kind: KubeControllerManagerConfig
