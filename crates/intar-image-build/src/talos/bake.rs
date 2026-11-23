@@ -82,7 +82,11 @@ pub(crate) fn bake(
         vec![("TALOSCONFIG", talosconfig.clone())],
         log,
     );
-    let base = configs::generate(&talosctl, &plan.cluster, &config_dir)?;
+    let schedulable = !plan
+        .nodes
+        .iter()
+        .any(|node| node.role == ClusterRole::Worker);
+    let base = configs::generate(&talosctl, &plan.cluster, schedulable, &config_dir)?;
     let mut node_configs = BTreeMap::new();
     for node in &plan.nodes {
         let role_base = match node.role {
