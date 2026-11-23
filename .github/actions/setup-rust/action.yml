@@ -37,6 +37,10 @@ runs:
         # TARGETS is word-split on purpose: one argument per target.
         rustup target add --toolchain 1.100.0 x86_64-unknown-linux-musl ${TARGETS}
         rustup show active-toolchain
+        # The git CLI clones GPUI's zed repository faster than Cargo's built-in
+        # git, which an uncached release build otherwise spends about a
+        # minute on.
+        echo 'CARGO_NET_GIT_FETCH_WITH_CLI=true' >> "${GITHUB_ENV}"
 
     # apps/jumper builds on GPUI, which links these on Linux. Only a job that
     # builds the whole workspace needs them; a release build builds one
