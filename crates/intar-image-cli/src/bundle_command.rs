@@ -160,6 +160,8 @@ pub(super) fn upload_bundle(
         .text(SOURCE_META_FIELD, meta.field())
         .part(SOURCE_BUNDLE_FIELD, part);
 
+    // reqwest has no crypto provider of its own; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let response = reqwest::blocking::Client::builder()
         .timeout(BUNDLE_UPLOAD_TIMEOUT)
         .build()?

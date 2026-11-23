@@ -154,6 +154,8 @@ pub(crate) struct AgentBootstrapResponse {
 }
 
 pub async fn run(cfg: BridgeConfig, vm: VmManager, db: Db, disk_probe_path: PathBuf) {
+    // reqwest has no crypto provider of its own; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let http = match HttpClient::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))

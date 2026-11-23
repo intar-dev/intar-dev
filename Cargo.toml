@@ -77,7 +77,10 @@ rustix = { version = "=1.1.6", features = ["event", "fs", "mount", "net", "pipe"
 reflink-copy = "=0.1.30"
 rustls = { version = "=0.23.46", default-features = false }
 rusqlite = { version = "=0.41.0", features = ["bundled"] }
-russh = "=0.65.0"
+# ring keeps one crypto library in the binaries that use rustls with ring, and
+# skips building aws-lc-sys. russh takes only AES-GCM and ChaCha20-Poly1305
+# from it; ML-KEM key exchange comes from the pure-Rust ml-kem crate either way.
+russh = { version = "=0.65.0", default-features = false, features = ["flate2", "rsa", "ring"] }
 schemars = { version = "=1.2.3", features = ["derive"] }
 sd-notify = "=0.5.0"
 serde = { version = "=1.0.229", features = ["derive"] }

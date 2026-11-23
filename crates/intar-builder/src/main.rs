@@ -38,6 +38,9 @@ struct ConfigArgs {
 }
 
 fn main() -> Result<()> {
+    // OpenTelemetry's exporter builds a reqwest client of its own, which has
+    // no crypto provider until one is installed; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

@@ -310,6 +310,8 @@ fn fetch(url: &str, sha256: &str, dest: &Path) -> Result<()> {
     let part = dest.with_extension("part");
     let _ = std::fs::remove_file(dest);
     let download = || -> Result<()> {
+        // reqwest has no crypto provider of its own; install ring first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut response = reqwest::blocking::Client::builder()
             .timeout(DOWNLOAD_TIMEOUT)
             .build()?

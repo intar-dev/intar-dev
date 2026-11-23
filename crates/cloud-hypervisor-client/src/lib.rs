@@ -804,6 +804,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn typed_add_disk_preserves_v53_error_response_without_half_close() {
+        // Other workspace crates switch on reqwest's TLS, which then needs a
+        // process-wide crypto provider.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let temp = tempfile::tempdir().expect("create add-disk test directory");
         let socket = temp.path().join("cloud-hypervisor.sock");
         let listener = UnixListener::bind(&socket).expect("bind add-disk Unix socket");
@@ -845,6 +848,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn fd_anchored_endpoint_connects_beyond_sun_path_limit() {
+        // Other workspace crates switch on reqwest's TLS, which then needs a
+        // process-wide crypto provider.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let temp = tempfile::tempdir().expect("create socket test directory");
         let short_socket = temp.path().join("short.sock");
         let listener = UnixListener::bind(&short_socket).expect("bind short unix socket");
@@ -943,6 +949,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn fd_anchored_clients_cannot_be_redirected_by_pathname_swap() {
+        // Other workspace crates switch on reqwest's TLS, which then needs a
+        // process-wide crypto provider.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let temp = tempfile::tempdir().expect("create socket test directory");
         let logical_socket = temp.path().join("cloud-hypervisor.sock");
         let original_listener =

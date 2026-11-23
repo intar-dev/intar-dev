@@ -959,6 +959,7 @@ fn relay_credentials_are_bound_to_the_current_control_session() {
 
 #[tokio::test]
 async fn access_refresh_failure_reaches_the_control_connection() {
+    crate::tls_provider::ensure_ring_provider().expect("rustls provider");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test service operation");
@@ -986,6 +987,7 @@ async fn access_refresh_failure_reaches_the_control_connection() {
 
 #[tokio::test]
 async fn access_refresh_timeout_reaches_the_control_connection() {
+    crate::tls_provider::ensure_ring_provider().expect("rustls provider");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test service operation");

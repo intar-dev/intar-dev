@@ -24,7 +24,8 @@ keyring-core.workspace = true
 russh.workspace = true
 # Course markdown (bodies, theory, hints, solutions).
 pulldown-cmark.workspace = true
-reqwest = { workspace = true, features = ["rustls"] }
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
+rustls = { workspace = true, features = ["ring", "std"] }
 serde_json.workspace = true
 # Downloads are checked against their digests; disk chunks are zstd.
 sha2.workspace = true

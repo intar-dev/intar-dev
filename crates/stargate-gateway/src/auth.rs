@@ -50,6 +50,8 @@ impl AudClaim {
 
 impl AssertionValidator {
     pub fn new(config: AssertionAuthSettings) -> Result<Self> {
+        // reqwest has no crypto provider of its own; install ring first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::Client::builder()
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(2))

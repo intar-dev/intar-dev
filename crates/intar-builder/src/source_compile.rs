@@ -592,6 +592,8 @@ async fn send_result(
 }
 
 fn http_client() -> Result<reqwest::Client> {
+    // reqwest has no crypto provider of its own; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .build()

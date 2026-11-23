@@ -235,6 +235,8 @@ fn github_oidc_token(audience: &str) -> std::result::Result<String, (String, boo
     };
     let mut url = reqwest::Url::parse(&url).map_err(|error| (error.to_string(), false))?;
     url.query_pairs_mut().append_pair("audience", audience);
+    // reqwest has no crypto provider of its own; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let answer: serde_json::Value = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()

@@ -20,11 +20,11 @@ http.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 jsonwebtoken.workspace = true
-reqwest = { workspace = true, features = ["json", "rustls"] }
+reqwest = { workspace = true, features = ["json", "rustls-no-provider"] }
 russh.workspace = true
-# The share ingest socket's TLS needs a process-wide crypto provider (see
-# `mirror.rs`); aws-lc-rs is already linked through reqwest.
-rustls = { workspace = true, features = ["aws-lc-rs", "std"] }
+# reqwest and the share ingest socket use the process-wide ring provider that
+# `main` installs.
+rustls = { workspace = true, features = ["ring", "std"] }
 sd-notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true

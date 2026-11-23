@@ -19,6 +19,9 @@ pub fn load_settings(path: &Path) -> anyhow::Result<ServerSettings> {
 }
 
 pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
+    // OpenTelemetry's exporter builds a reqwest client of its own, which has
+    // no crypto provider until one is installed; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let _telemetry = init_tracing(&settings)?;
     validate_runtime_security(&settings)?;
     ensure_parent_dirs(&settings).await?;

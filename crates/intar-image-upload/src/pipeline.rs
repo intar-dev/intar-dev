@@ -66,6 +66,8 @@ impl PipelineSession {
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
             return Err(Error::InvalidConfig("the registry URL must be http(s)"));
         }
+        // reqwest has no crypto provider of its own; install ring first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let client = Client::builder().timeout(REQUEST_TIMEOUT).build()?;
         let body = serde_json::json!({ "rev": rev });
         let mut attempt = 1;

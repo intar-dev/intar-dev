@@ -188,6 +188,8 @@ async fn cli(
 }
 
 async fn serve() -> (Url, Shared) {
+    // reqwest has no crypto provider of its own; every test serves first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let shared = Shared::default();
     let app = Router::new()
         .route("/api/auth/oauth2/token", post(token))

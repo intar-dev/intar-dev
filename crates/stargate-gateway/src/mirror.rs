@@ -96,11 +96,9 @@ impl RunMirrors {
     pub(crate) async fn load(store: SqliteRouteStore, ingest_base_url: &url::Url) -> Result<Self> {
         let ingest_url = ingest_socket_url(ingest_base_url)?;
         if ingest_url.scheme() == "wss" {
-            // The gateway can link more than one rustls provider, and then
-            // rustls can not pick a process default and the socket's TLS setup
-            // would panic without one. reqwest already uses aws-lc-rs, so this
-            // changes nothing there.
-            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            // The socket's TLS setup panics without a process-wide provider.
+            // `run` installs ring first; this covers a caller that skips it.
+            let _ = rustls::crypto::ring::default_provider().install_default();
         }
         let targets = DashMap::new();
         for (run_id, share_id, write_token) in store.list_run_mirrors().await? {
