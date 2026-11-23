@@ -1490,6 +1490,45 @@ impl Render for Jumper {
     }
 }
 
+gpui::actions!(jumper, [Quit, Hide, Minimize, Zoom]);
+
+/// The menu bar: the app's version, Hide and Quit, and the window's Minimize and Zoom.
+fn app_menu(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &Minimize, cx| {
+        if let Some(window) = cx.active_window() {
+            let _ = window.update(cx, |_, window, _| window.minimize_window());
+        }
+    });
+    cx.on_action(|_: &Zoom, cx| {
+        if let Some(window) = cx.active_window() {
+            let _ = window.update(cx, |_, window, _| window.zoom_window());
+        }
+    });
+    cx.bind_keys([
+        gpui::KeyBinding::new("cmd-q", Quit, None),
+        gpui::KeyBinding::new("cmd-h", Hide, None),
+        gpui::KeyBinding::new("cmd-m", Minimize, None),
+    ]);
+    cx.set_menus([
+        gpui::Menu::new("Intar").items([
+            gpui::MenuItem::action(concat!("Intar ", env!("CARGO_PKG_VERSION")), gpui::NoAction)
+                .disabled(true),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::action("Hide Intar", Hide),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::action("Quit Intar", Quit),
+        ]),
+        gpui::Menu::new("Window").items([
+            gpui::MenuItem::action("Minimize", Minimize),
+            gpui::MenuItem::action("Zoom", Zoom),
+        ]),
+    ]);
+}
+
 fn main() {
     // QEMU runs the app itself as `<app> relay <port>` for a guest without
     // internet access; that is no window, only a pipe to the app's port.
@@ -1562,6 +1601,9 @@ fn main() {
         .with_assets(kit::Assets)
         .run(move |cx: &mut App| {
             ui::text_input::bind_keys(cx);
+            app_menu(cx);
+            // One window: closing it quits the app, as its red button promises.
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
             theme::init_ui_font(cx);
             let bounds = Bounds::centered(None, size(px(1280.), px(760.)), cx);
             let options = WindowOptions {
