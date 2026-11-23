@@ -19,11 +19,12 @@ use gpui::{
     rgb, size,
 };
 use gpui_platform::application;
-use state::{Command, Event, Learn, MachineStatus, Screen, State};
+use state::{Command, Event, History, Learn, MachineStatus, Screen, State};
 use subspace::contract::{CatalogCourseV1, CatalogLectureV1, LocalRunV1};
 use tokio::sync::mpsc::UnboundedSender;
 use ui::kit::{self, Kind, Size};
 use ui::markdown::markdown;
+use ui::replay::ReplayView;
 use ui::terminal_view::TerminalView;
 use ui::text_input::TextInput;
 use ui::theme::{self, MONO, Palette, palette, term};
@@ -31,10 +32,18 @@ use url::Url;
 
 /// The window's title bar is the app's own on macOS; elsewhere the system draws one.
 const OWN_TITLE_BAR: bool = cfg!(target_os = "macos");
+/// How often a recap that is still being saved is asked again.
+const RECAP_POLL: std::time::Duration = std::time::Duration::from_secs(3);
 
 struct Jumper {
     state: State,
     commands: UnboundedSender<Command>,
+    /// The website, for a run that is not on this computer.
+    base: Url,
+    /// The runs page's scenarios whose older attempts are shown.
+    expanded: std::collections::HashSet<String>,
+    /// The player of the replay part chosen on the recap, by its recording's id.
+    replay: Option<(String, Entity<ReplayView>)>,
     /// Narrows the lecture list to titles that contain it.
     search: Entity<TextInput>,
     /// The learner pressed End run and is asked whether they mean it.
@@ -112,6 +121,7 @@ fn machine_facts(machine: &subspace::contract::LocalRunMachineV1) -> String {
 impl Jumper {
     fn new(
         commands: UnboundedSender<Command>,
+        base: Url,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -128,6 +138,9 @@ impl Jumper {
         Self {
             state: State::default(),
             commands,
+            base,
+            expanded: Default::default(),
+            replay: None,
             search,
             ending: false,
             confirm_solution: false,
@@ -153,6 +166,19 @@ impl Jumper {
                 cx.notify();
                 return;
             }
+            // The recording of the replay part on screen gets its player.
+            Event::Replay {
+                run_id,
+                artifact_id,
+                cast,
+            } => {
+                if self.state.playing(&run_id, &artifact_id) {
+                    self.replay = Some((artifact_id, cx.new(|cx| ReplayView::new(cast, cx))));
+                }
+                self.state.error = None;
+                cx.notify();
+                return;
+            }
             other => other,
         };
         if let Event::SignInStarted(url) = &event {
@@ -164,8 +190,25 @@ impl Jumper {
             return;
         }
         self.copied = false;
+        let recap = matches!(event, Event::Recap(_));
         if let Some(next) = self.state.apply(event) {
             self.send(next);
+        }
+        // A run still being saved has no recap yet: ask again while it is on screen.
+        if let (true, Screen::Recap(run_id), Some(shown)) =
+            (recap, &self.state.screen, &self.state.recap)
+            && shown.kind == "saving"
+        {
+            let run_id = run_id.clone();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(RECAP_POLL).await;
+                let _ = this.update(cx, |this, _| {
+                    if this.state.screen == Screen::Recap(run_id.clone()) {
+                        this.send(Command::History(History::Recap { run_id }));
+                    }
+                });
+            })
+            .detach();
         }
         if !matches!(&self.state.screen, Screen::Run(run) if run.active) {
             self.ending = false;
@@ -381,22 +424,46 @@ impl Jumper {
                     .child(div().w(px(1.)).h(px(18.)).bg(rgb(p.border)))
                     .child(leave)
             }
-            Screen::Catalog | Screen::Lecture { .. } => {
-                let catalog = div()
-                    .h(px(30.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(p.border))
-                    .bg(rgb(p.panel))
-                    .shadow_sm()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(kit::icon("grid", 14., p.accent))
-                    .child("Catalog");
+            Screen::Catalog | Screen::Lecture { .. } | Screen::History | Screen::Recap(_) => {
+                let runs = matches!(self.state.screen, Screen::History | Screen::Recap(_));
+                let nav = |id: &'static str, glyph, label: &'static str, on: bool| {
+                    let tab = div()
+                        .id(id)
+                        .debug_selector(move || id.to_owned())
+                        .h(px(30.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .rounded_lg()
+                        .border_1()
+                        .cursor_pointer()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(kit::icon(glyph, 14., if on { p.accent } else { p.muted }))
+                        .child(label);
+                    if on {
+                        tab.border_color(rgb(p.border)).bg(rgb(p.panel)).shadow_sm()
+                    } else {
+                        let hover = p.border;
+                        tab.border_color(gpui::transparent_black())
+                            .text_color(rgb(p.muted))
+                            .hover(move |style| style.bg(rgb(hover)))
+                    }
+                };
+                let catalog = Self::on_click(
+                    nav("nav-catalog", "grid", "Catalog", !runs),
+                    cx,
+                    |this, _| {
+                        let reload = this.state.back_to_catalog();
+                        this.send(reload);
+                    },
+                );
+                let history =
+                    Self::on_click(nav("nav-runs", "monitor", "Runs", runs), cx, |this, _| {
+                        let reload = this.state.open_history();
+                        this.send(reload);
+                    });
                 let sign_out = kit::button(
                     p,
                     "sign-out",
@@ -407,7 +474,7 @@ impl Jumper {
                     None,
                 );
                 bar.child(wordmark)
-                    .child(catalog)
+                    .child(div().flex().gap_1().child(catalog).child(history))
                     .child(fill)
                     .children(update)
                     .children(connected)
@@ -1192,7 +1259,21 @@ impl Jumper {
                 )
                 // What went wrong while the run ended, such as an unsaved replay.
                 .children(self.state.error.clone().map(|error| kit::failure(p, error)))
-                .child(div().flex().justify_end().child(self.back_to_catalog(p, "back-card", Kind::Primary, Size::Medium, cx)));
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(self.back_to_catalog(p, "back-card", Kind::Outline, Size::Medium, cx))
+                        .child({
+                            let see = kit::button(p, "see-recap", Kind::Primary, Size::Medium, None, "See your recap", Some("arrow-right"));
+                            let run_id = run.run_id.clone();
+                            Self::on_click(see, cx, move |this, _| {
+                                let load = this.state.open_recap(&run_id);
+                                this.send(load);
+                            })
+                        }),
+                );
             return body.child(
                 kit::panel(p)
                     .flex_1()
@@ -1380,8 +1461,14 @@ impl Render for Jumper {
             window.focus(&view.focus_handle(cx), cx);
             self.focus_terminal = false;
         }
+        // The player goes with the replay part it plays.
+        if self.state.replay.as_ref() != self.replay.as_ref().map(|(shown, _)| shown) {
+            self.replay = None;
+        }
         let (body, confirm) = match &self.state.screen {
             Screen::Catalog | Screen::Lecture { .. } => (self.catalog(p, cx), None),
+            Screen::History => (self.history(p, cx), None),
+            Screen::Recap(_) => (self.recap(p, cx), None),
             Screen::Run(run) => (
                 self.run(p, run, cx),
                 self.ending.then(|| self.end_confirm(p, run, cx)),
@@ -1464,7 +1551,7 @@ fn main() {
     let engine::Engine {
         commands,
         mut events,
-    } = match engine::start(base) {
+    } = match engine::start(base.clone()) {
         Ok(engine) => engine,
         Err(error) => {
             eprintln!("jumper: could not start: {error}");
@@ -1492,7 +1579,7 @@ fn main() {
                 ..Default::default()
             };
             let opened = cx.open_window(options, move |window, cx| {
-                let view = cx.new(|cx| Jumper::new(commands, window, cx));
+                let view = cx.new(|cx| Jumper::new(commands, base, window, cx));
                 // Engine → view. The task ends with the engine or the window.
                 let weak = view.downgrade();
                 cx.spawn(async move |cx| {
@@ -1519,7 +1606,9 @@ fn main() {
 mod tests {
     use super::*;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
-    use subspace::contract::CatalogCourseV1;
+    use subspace::contract::{
+        CatalogCourseV1, LocalReplayPartV1, LocalRunRecapV1, LocalRunSummaryV1,
+    };
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
     /// The window with `state` on screen, and what it asks of the engine.
@@ -1533,7 +1622,8 @@ mod tests {
     ) {
         let (commands, mut heard) = unbounded_channel();
         let (view, cx) = cx.add_window_view(|window, cx| {
-            let mut jumper = Jumper::new(commands, window, cx);
+            let base = Url::parse("https://intar.dev").unwrap_or_else(|error| panic!("{error}"));
+            let mut jumper = Jumper::new(commands, base, window, cx);
             jumper.state = state;
             jumper
         });
@@ -1850,6 +1940,233 @@ mod tests {
             }))
         );
         assert!(!view.read_with(cx, |view, _| view.confirm_solution));
+    }
+
+    fn summary(run_id: &str, scenario: &str, activity: &str, created_at: i64) -> LocalRunSummaryV1 {
+        LocalRunSummaryV1 {
+            run_id: run_id.into(),
+            scenario_id: scenario.into(),
+            organization_id: None,
+            title: scenario.into(),
+            local: true,
+            active: activity == "foreground",
+            outcome: if activity == "foreground" {
+                "in_progress"
+            } else {
+                "succeeded"
+            }
+            .into(),
+            activity: activity.into(),
+            created_at,
+            finished_at: None,
+            solved_at: None,
+            solve_duration_ms: Some(252_000),
+            solution_assisted: false,
+            has_replay: true,
+        }
+    }
+
+    fn history_screen(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Jumper>,
+        &mut VisualTestContext,
+        UnboundedReceiver<Command>,
+    ) {
+        let mut state = State::default();
+        state.screen = Screen::History;
+        let mut remote = summary("run-remote", "intar/dns", "foreground", 5);
+        remote.local = false;
+        state.history = Some(vec![
+            summary("run-old", "intar/web", "settled", 1),
+            summary("run-new", "intar/web", "settled", 3),
+            summary("run-live", "intar/k8s", "foreground", 4),
+            remote,
+            summary("run-dns", "intar/dns", "settled", 2),
+        ]);
+        open(cx, state)
+    }
+
+    #[gpui::test]
+    fn the_runs_page_lists_active_work_first_and_one_row_per_scenario(cx: &mut TestAppContext) {
+        let (_view, cx, mut heard) = history_screen(cx);
+        let top = |cx: &mut VisualTestContext, selector| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is not on screen"))
+                .top()
+        };
+        assert!(top(cx, "active-0") < top(cx, "past-0"));
+        assert!(
+            top(cx, "past-0") < top(cx, "past-1"),
+            "newest scenario first"
+        );
+        assert!(
+            cx.debug_bounds("past-2").is_none(),
+            "two scenarios, two rows"
+        );
+        // The older attempt shows on demand.
+        assert!(cx.debug_bounds("attempt-0-1").is_none());
+        assert!(
+            cx.debug_bounds("attempts-1").is_none(),
+            "one attempt, no disclosure"
+        );
+        click(cx, "attempts-0");
+        assert!(cx.debug_bounds("attempt-0-1").is_some());
+
+        // A local active run opens here; one on intar does not.
+        click(cx, "active-0");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::ReadRun {
+                run_id: "run-live".into()
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn a_past_run_opens_its_recap(cx: &mut TestAppContext) {
+        let (view, cx, mut heard) = history_screen(cx);
+        click(cx, "active-1");
+        assert!(
+            heard.try_recv().is_err(),
+            "a run on intar opens the website"
+        );
+        click(cx, "past-0");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::History(History::Recap {
+                run_id: "run-new".into()
+            }))
+        );
+        assert!(view.read_with(cx, |view, _| view.state.screen
+            == Screen::Recap("run-new".into())));
+    }
+
+    fn recap() -> LocalRunRecapV1 {
+        let check = |key: &str, status: &str| subspace::contract::LocalRunCheckV1 {
+            key: key.into(),
+            machine: "web".into(),
+            title: key.into(),
+            description: None,
+            status: status.into(),
+            optional: false,
+        };
+        let part = |key: &str, artifact: Option<&str>| LocalReplayPartV1 {
+            key: key.into(),
+            machine_label: Some("web".into()),
+            part_label: key.into(),
+            cast_artifact_id: artifact.map(str::to_owned),
+            size_bytes: None,
+        };
+        LocalRunRecapV1 {
+            run_id: "run-1".into(),
+            scenario_id: "intar/web".into(),
+            title: "Serve".into(),
+            kind: "solved".into(),
+            heading: "Solved".into(),
+            description: "You completed this scenario.".into(),
+            solve_duration_ms: Some(252_000),
+            hints_revealed: 2,
+            solution_used: true,
+            checks: vec![check("listen", "verified"), check("serve", "missing")],
+            replay: "ready".into(),
+            replay_parts: vec![part("Part 1", Some("cast-1")), part("Part 2", None)],
+        }
+    }
+
+    #[gpui::test]
+    fn the_recap_shows_checks_help_and_replay_parts(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::Recap("run-1".into());
+        state.recap = Some(recap());
+        let (view, cx, mut heard) = open(cx, state);
+        for shown in [
+            "1/2 verified",
+            "Solve time: 04:12",
+            "Hints used: 2 hints",
+            "Full solution: Used",
+            "part-0",
+            "part-1",
+        ] {
+            assert!(cx.debug_bounds(shown).is_some(), "{shown}");
+        }
+        // A part without its recording cannot be played.
+        click(cx, "part-1");
+        assert!(heard.try_recv().is_err());
+        click(cx, "part-0");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::History(History::Replay {
+                run_id: "run-1".into(),
+                artifact_id: "cast-1".into()
+            }))
+        );
+        // Another run's recording is not this part's; this one's gets its player.
+        view.update(cx, |view, cx| {
+            view.apply(
+                Event::Replay {
+                    run_id: "run-2".into(),
+                    artifact_id: "cast-1".into(),
+                    cast: vec![],
+                },
+                cx,
+            )
+        });
+        assert!(view.read_with(cx, |view, _| view.replay.is_none()));
+        view.update(cx, |view, cx| {
+            view.apply(
+                Event::Replay {
+                    run_id: "run-1".into(),
+                    artifact_id: "cast-1".into(),
+                    cast: vec![],
+                },
+                cx,
+            )
+        });
+        assert!(view.read_with(cx, |view, _| view.replay.is_some()));
+        click(cx, "back-runs");
+        assert_eq!(heard.try_recv().ok(), Some(Command::History(History::List)));
+    }
+
+    #[gpui::test]
+    fn a_recap_being_saved_is_asked_again_until_it_is_left(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::Recap("run-1".into());
+        let (view, cx, mut heard) = open(cx, state);
+        let mut saving = recap();
+        saving.kind = "saving".into();
+        view.update(cx, |view, cx| view.apply(Event::Recap(saving.clone()), cx));
+        cx.executor().advance_clock(RECAP_POLL);
+        cx.run_until_parked();
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::History(History::Recap {
+                run_id: "run-1".into()
+            }))
+        );
+        view.update(cx, |view, cx| {
+            view.apply(Event::Recap(saving), cx);
+            view.state.open_history();
+        });
+        cx.executor().advance_clock(RECAP_POLL);
+        cx.run_until_parked();
+        assert!(heard.try_recv().is_err(), "left: no more asking");
+    }
+
+    #[gpui::test]
+    fn a_closed_run_offers_its_recap(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::Run(run(false));
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "see-recap");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::History(History::Recap {
+                run_id: "run-1".into()
+            }))
+        );
+        assert!(view.read_with(cx, |view, _| view.state.screen
+            == Screen::Recap("run-1".into())));
     }
 
     #[gpui::test]

@@ -7,6 +7,7 @@
 
 use std::ops::Range;
 
+use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
@@ -23,10 +24,10 @@ use gpui::{
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::theme::{MONO, term};
-use crate::terminal::{Replies, Size, Terminal, encode_key};
+use crate::terminal::{Size, Terminal, encode_key};
 
-const FONT_SIZE: f32 = 14.;
-const LINE_HEIGHT: f32 = 22.;
+pub(crate) const FONT_SIZE: f32 = 14.;
+pub(crate) const LINE_HEIGHT: f32 = 22.;
 /// Room between the panel's edge and the grid.
 const PAD: f32 = 14.;
 
@@ -89,14 +90,14 @@ struct Cell {
     underline: bool,
 }
 
-struct Frame {
+pub(crate) struct Frame {
     rows: Vec<Vec<Cell>>,
     /// Row and column of the cursor, when it is on screen and shown.
     cursor: Option<(usize, usize)>,
 }
 
 /// What is on screen, with colours resolved and the selection marked.
-fn frame(grid: &Term<Replies>) -> Frame {
+pub(crate) fn frame<T: EventListener>(grid: &Term<T>) -> Frame {
     let content = grid.renderable_content();
     let offset = i32::try_from(content.display_offset).unwrap_or(i32::MAX);
     let resolve = |colour: Color| match colour {
@@ -446,6 +447,39 @@ impl Focusable for TerminalView {
     }
 }
 
+fn mono_run(len: usize, colour: u32, bold: bool, underline: bool) -> TextRun {
+    let mono = font(MONO);
+    TextRun {
+        len,
+        font: if bold { mono.bold() } else { mono },
+        color: rgb(colour).into(),
+        background_color: None,
+        underline: underline.then(|| gpui::UnderlineStyle {
+            thickness: px(1.),
+            color: None,
+            wavy: false,
+        }),
+        strikethrough: None,
+    }
+}
+
+fn shape(text: String, runs: &[TextRun], font_size: f32, window: &mut Window) -> gpui::ShapedLine {
+    window
+        .text_system()
+        .shape_line(SharedString::from(text), px(font_size), runs, None)
+}
+
+/// How wide one cell is at `font_size`.
+pub(crate) fn cell_width(font_size: f32, window: &mut Window) -> Pixels {
+    shape(
+        "M".into(),
+        &[mono_run(1, term::TEXT, false, false)],
+        font_size,
+        window,
+    )
+    .x_for_index(1)
+}
+
 /// Paints one frame into `bounds` and fits the grid to it. Returns the cell
 /// width and where the cursor is.
 fn paint(
@@ -455,48 +489,43 @@ fn paint(
     window: &mut Window,
     cx: &mut App,
 ) -> (Pixels, Option<Bounds<Pixels>>) {
-    let mono = font(MONO);
-    let run = |len: usize, colour: u32, bold: bool, underline: bool| TextRun {
-        len,
-        font: if bold {
-            mono.clone().bold()
-        } else {
-            mono.clone()
-        },
-        color: rgb(colour).into(),
-        background_color: None,
-        underline: underline.then(|| gpui::UnderlineStyle {
-            thickness: px(1.),
-            color: None,
-            wavy: false,
-        }),
-        strikethrough: None,
-    };
-    let shape = |text: String, runs: &[TextRun], window: &mut Window| {
-        window
-            .text_system()
-            .shape_line(SharedString::from(text), px(FONT_SIZE), runs, None)
-    };
-    let cell_width = shape("M".into(), &[run(1, term::TEXT, false, false)], window).x_for_index(1);
-
+    let cell_width = cell_width(FONT_SIZE, window);
     // As many cells as fit; the guest hears of a change.
     let fit = |length: Pixels, cell: f32| ((f32::from(length) / cell) as usize).max(2);
     terminal.resize(Size {
         columns: fit(bounds.size.width, f32::from(cell_width)),
         rows: fit(bounds.size.height, LINE_HEIGHT),
     });
-
     let frame = frame(&terminal.grid.lock());
+    paint_frame(&frame, FONT_SIZE, focused, bounds.origin, window, cx)
+}
+
+/// Paints `frame` from `origin` at `font_size` (rows keep the live view's
+/// proportions). A focused cursor is filled, else outlined. Returns the cell
+/// width and where the cursor is.
+pub(crate) fn paint_frame(
+    frame: &Frame,
+    font_size: f32,
+    focused: bool,
+    origin: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> (Pixels, Option<Bounds<Pixels>>) {
+    let line_height = LINE_HEIGHT * font_size / FONT_SIZE;
+    let run = mono_run;
+    let shape =
+        |text: String, runs: &[TextRun], window: &mut Window| shape(text, runs, font_size, window);
+    let cell_width = cell_width(font_size, window);
     let at = |row: usize, column: usize| {
-        bounds.origin + point(cell_width * column as f32, px(LINE_HEIGHT * row as f32))
+        origin + point(cell_width * column as f32, px(line_height * row as f32))
     };
-    let cell_size = size(cell_width, px(LINE_HEIGHT));
+    let cell_size = size(cell_width, px(line_height));
     for (row, cells) in frame.rows.iter().enumerate() {
         for cell in cells {
             if let Some(bg) = cell.bg {
                 // A wide character's background covers both of its cells.
                 let wide = if cell.text.is_ascii() { 1. } else { 2. };
-                let area = size(cell_width * wide, px(LINE_HEIGHT));
+                let area = size(cell_width * wide, px(line_height));
                 window.paint_quad(fill(Bounds::new(at(row, cell.column), area), rgb(bg)));
             }
         }
@@ -521,7 +550,7 @@ fn paint(
                 let line = shape(text, &runs, window);
                 let _ = line.paint(
                     at(row, first.column),
-                    px(LINE_HEIGHT),
+                    px(line_height),
                     TextAlign::Left,
                     None,
                     window,
@@ -543,7 +572,7 @@ fn paint(
                 let line = shape(cell.text.to_string(), &runs, window);
                 let _ = line.paint(
                     area.origin,
-                    px(LINE_HEIGHT),
+                    px(line_height),
                     TextAlign::Left,
                     None,
                     window,
