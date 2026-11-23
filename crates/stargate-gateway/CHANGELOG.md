@@ -1,5 +1,11 @@
 # Changelog
 
+## stargate/v0.11.1 (2026-11-23)
+
+### Bug fixes
+
+- **deps:** Bump url past RUSTSEC-2026-0592 (#511) (03319a5a)
+
 ## stargate/v0.11.0 (2026-11-21)
 
 ### Features

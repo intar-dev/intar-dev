@@ -151,6 +151,7 @@ pub enum Size {
 }
 
 /// A button without its click; `lead` and `trail` are icons around the label.
+/// Its hover follows the website's buttons (`apps/web/src/components/ui/button.tsx`).
 pub fn button(
     p: &Palette,
     id: &'static str,
@@ -160,12 +161,54 @@ pub fn button(
     label: &'static str,
     trail: Option<&'static str>,
 ) -> Stateful<Div> {
-    let (bg, hover, fg, border) = match kind {
-        Kind::Primary => (Some(p.accent), p.accent_hover, p.on_accent, None),
-        Kind::Danger => (Some(p.red), p.red, p.on_red, None),
-        Kind::Outline => (Some(p.panel), p.subtle, p.text, Some(p.input_border)),
-        Kind::QuietDanger => (Some(p.panel), p.red_subtle, p.red, Some(p.input_border)),
-        Kind::Ghost => (None, p.track, p.muted, None),
+    let (bg, fg, hover_border) = match kind {
+        Kind::Primary => (p.accent_hover, p.on_accent, None),
+        Kind::Danger => (p.red_hover, p.on_red, None),
+        Kind::Outline => (p.outline_hover, p.text, Some(p.border_strong)),
+        Kind::QuietDanger => (p.red_subtle, p.red, Some(p.red)),
+        // Ghost buttons sit on the title bar's canvas, where the website's
+        // `muted` fill would not show; the border colour does.
+        Kind::Ghost => (p.border, p.text, None),
+    };
+    surface(p, id, kind, size, lead, label, trail)
+        .cursor_pointer()
+        .hover(move |style| {
+            let style = style.bg(rgb(bg)).text_color(rgb(fg));
+            match hover_border {
+                Some(border) => style.border_color(rgb(border)),
+                None => style,
+            }
+        })
+}
+
+/// A button that cannot be pressed now: dimmed, with no hover and no pointer.
+pub fn inert_button(
+    p: &Palette,
+    id: &'static str,
+    kind: Kind,
+    size: Size,
+    lead: Option<&'static str>,
+    label: &'static str,
+    trail: Option<&'static str>,
+) -> Stateful<Div> {
+    surface(p, id, kind, size, lead, label, trail).opacity(0.45)
+}
+
+fn surface(
+    p: &Palette,
+    id: &'static str,
+    kind: Kind,
+    size: Size,
+    lead: Option<&'static str>,
+    label: &'static str,
+    trail: Option<&'static str>,
+) -> Stateful<Div> {
+    let (bg, fg, border) = match kind {
+        Kind::Primary => (Some(p.accent), p.on_accent, None),
+        Kind::Danger => (Some(p.red), p.on_red, None),
+        Kind::Outline => (Some(p.panel), p.text, Some(p.input_border)),
+        Kind::QuietDanger => (Some(p.panel), p.red, Some(p.red_border)),
+        Kind::Ghost => (None, p.muted, None),
     };
     let (height, pad, text_size, glyph) = match size {
         Size::Small => (32., 10., 13., 14.),
@@ -174,6 +217,8 @@ pub fn button(
     };
     div()
         .id(id)
+        // Tests find the button by its id.
+        .debug_selector(|| id.to_owned())
         .h(px(height))
         .px(px(pad))
         .flex()
@@ -186,11 +231,9 @@ pub fn button(
         .border_color(border.map_or(gpui::transparent_black(), |c| rgb(c).into()))
         .when_some(bg, |b, bg| b.bg(rgb(bg)))
         .when(kind != Kind::Ghost, |b| b.shadow_sm())
-        .hover(move |style| style.bg(rgb(hover)))
         .text_size(px(text_size))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(fg))
-        .cursor_pointer()
         .children(lead.map(|name| icon(name, glyph, fg)))
         .child(label)
         .children(trail.map(|name| icon(name, glyph, fg)))

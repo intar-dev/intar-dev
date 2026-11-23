@@ -14,14 +14,17 @@ mod update;
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, Focusable, FontWeight,
-    SharedString, Stateful, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    div, point, px, relative, rgb, size,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Stateful,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, px, relative,
+    rgb, size,
 };
 use gpui_platform::application;
-use state::{Command, Event, MachineStatus, Screen, State};
+use state::{Command, Event, History, Learn, MachineStatus, Screen, State};
 use subspace::contract::{CatalogCourseV1, CatalogLectureV1, LocalRunV1};
 use tokio::sync::mpsc::UnboundedSender;
 use ui::kit::{self, Kind, Size};
+use ui::markdown::markdown;
+use ui::replay::ReplayView;
 use ui::terminal_view::TerminalView;
 use ui::text_input::TextInput;
 use ui::theme::{self, MONO, Palette, palette, term};
@@ -29,18 +32,32 @@ use url::Url;
 
 /// The window's title bar is the app's own on macOS; elsewhere the system draws one.
 const OWN_TITLE_BAR: bool = cfg!(target_os = "macos");
+/// How often a recap that is still being saved is asked again.
+const RECAP_POLL: std::time::Duration = std::time::Duration::from_secs(3);
 
 struct Jumper {
     state: State,
     commands: UnboundedSender<Command>,
+    /// The website, for a run that is not on this computer.
+    base: Url,
+    /// The runs page's scenarios whose older attempts are shown.
+    expanded: std::collections::HashSet<String>,
+    /// The player of the replay part chosen on the recap, by its recording's id.
+    replay: Option<(String, Entity<ReplayView>)>,
     /// Narrows the lecture list to titles that contain it.
     search: Entity<TextInput>,
     /// The learner pressed End run and is asked whether they mean it.
     ending: bool,
+    /// The learner asked for the full solution and is asked whether they mean it.
+    confirm_solution: bool,
     /// The terminal of the run's machine, once its SSH is up.
     terminal: Option<Entity<TerminalView>>,
     /// The terminal just opened and has not been given the keyboard yet.
     focus_terminal: bool,
+    /// The sign-in link was copied; the button says so until the next event.
+    copied: bool,
+    /// The left button went down on the title bar: a move now drags the window.
+    moving: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -104,10 +121,12 @@ fn machine_facts(machine: &subspace::contract::LocalRunMachineV1) -> String {
 impl Jumper {
     fn new(
         commands: UnboundedSender<Command>,
+        base: Url,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| TextInput::new("Search lectures", false, 0, cx));
+        let search =
+            cx.new(|cx| TextInput::new("Search lectures", false, 0, cx).with_icon("search"));
         let subscriptions = vec![
             cx.observe(&search, |_, _, cx| cx.notify()),
             cx.observe_window_appearance(window, |_, window, cx| theme::apply(window, cx)),
@@ -119,10 +138,16 @@ impl Jumper {
         Self {
             state: State::default(),
             commands,
+            base,
+            expanded: Default::default(),
+            replay: None,
             search,
             ending: false,
+            confirm_solution: false,
             terminal: None,
             focus_terminal: false,
+            copied: false,
+            moving: false,
             _subscriptions: subscriptions,
         }
     }
@@ -141,6 +166,19 @@ impl Jumper {
                 cx.notify();
                 return;
             }
+            // The recording of the replay part on screen gets its player.
+            Event::Replay {
+                run_id,
+                artifact_id,
+                cast,
+            } => {
+                if self.state.playing(&run_id, &artifact_id) {
+                    self.replay = Some((artifact_id, cx.new(|cx| ReplayView::new(cast, cx))));
+                }
+                self.state.error = None;
+                cx.notify();
+                return;
+            }
             other => other,
         };
         if let Event::SignInStarted(url) = &event {
@@ -151,11 +189,30 @@ impl Jumper {
             cx.quit();
             return;
         }
+        self.copied = false;
+        let recap = matches!(event, Event::Recap(_));
         if let Some(next) = self.state.apply(event) {
             self.send(next);
         }
+        // A run still being saved has no recap yet: ask again while it is on screen.
+        if let (true, Screen::Recap(run_id), Some(shown)) =
+            (recap, &self.state.screen, &self.state.recap)
+            && shown.kind == "saving"
+        {
+            let run_id = run_id.clone();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(RECAP_POLL).await;
+                let _ = this.update(cx, |this, _| {
+                    if this.state.screen == Screen::Recap(run_id.clone()) {
+                        this.send(Command::History(History::Recap { run_id }));
+                    }
+                });
+            })
+            .detach();
+        }
         if !matches!(&self.state.screen, Screen::Run(run) if run.active) {
             self.ending = false;
+            self.confirm_solution = false;
         }
         // The terminal belongs to a machine that runs; it goes with it. SSH
         // can be up while the lab is still preparing, so booting keeps it.
@@ -180,14 +237,17 @@ impl Jumper {
         }))
     }
 
+    /// `id` tells the title bar's button from the card's: two buttons with
+    /// one id share their click, and only the first one drawn takes it.
     fn back_to_catalog(
         &self,
         p: &Palette,
+        id: &'static str,
         kind: Kind,
         size: Size,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
-        let button = kit::button(p, "back", kind, size, None, "Back to catalog", None);
+        let button = kit::button(p, id, kind, size, None, "Back to catalog", None);
         Self::on_click(button, cx, |this, _| {
             let reload = this.state.back_to_catalog();
             this.send(reload);
@@ -212,8 +272,36 @@ impl Jumper {
             .unwrap_or_else(|| (run.scenario_id.clone().into(), None))
     }
 
-    fn title_bar(&self, p: &Palette, cx: &Context<Self>) -> Div {
+    fn title_bar(&self, p: &Palette, cx: &Context<Self>) -> Stateful<Div> {
         let bar = div()
+            .id("title-bar")
+            // The app owns its title bar on macOS (`app_owns_titlebar_drag`), so
+            // its buttons get the pointer; a press and a move here drag the
+            // window, as Zed's title bar does, and a double-click does what the
+            // system's title bar would.
+            .when(OWN_TITLE_BAR, |bar| {
+                bar.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, _| this.moving = true),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, _| this.moving = false),
+                )
+                .on_mouse_down_out(
+                    cx.listener(|this, _: &MouseDownEvent, _, _| this.moving = false),
+                )
+                .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, _| {
+                    if std::mem::take(&mut this.moving) {
+                        window.start_window_move();
+                    }
+                }))
+                .on_click(|event, window, _| {
+                    if event.click_count() == 2 {
+                        window.titlebar_double_click();
+                    }
+                })
+            })
             .h(px(46.))
             .flex_none()
             .flex()
@@ -237,31 +325,38 @@ impl Jumper {
             .then(|| kit::status(p.green, "Connected").text_color(rgb(p.muted)));
         // Offered between runs only: an update restarts the app.
         let update = self.state.update.clone().map(|version| {
-            let install = kit::button(
-                p,
-                "update",
-                Kind::Outline,
-                Size::Small,
-                None,
-                if self.state.updating {
-                    "Updating…"
-                } else {
-                    "Update and restart"
-                },
-                None,
-            );
+            let install = if self.state.updating {
+                kit::inert_button(
+                    p,
+                    "update",
+                    Kind::Outline,
+                    Size::Small,
+                    None,
+                    "Updating…",
+                    None,
+                )
+            } else {
+                let install = kit::button(
+                    p,
+                    "update",
+                    Kind::Outline,
+                    Size::Small,
+                    None,
+                    "Update and restart",
+                    None,
+                );
+                Self::on_click(install, cx, |this, _| {
+                    this.state.updating = true;
+                    this.send(Command::InstallUpdate);
+                })
+            };
             div()
                 .flex()
                 .flex_none()
                 .items_center()
                 .gap(px(10.))
                 .child(kit::label(p, format!("Version {version} is available")))
-                .child(Self::on_click(install, cx, |this, _| {
-                    if !this.state.updating {
-                        this.state.updating = true;
-                        this.send(Command::InstallUpdate);
-                    }
-                }))
+                .child(install)
         });
         match &self.state.screen {
             Screen::Run(run) => {
@@ -294,7 +389,18 @@ impl Jumper {
                     .text_color(rgb(p.muted))
                     .child(kit::icon("monitor", 12., p.muted))
                     .child("Local run");
-                let leave = if run.active {
+                let leave = if matches!(self.state.machine, Some(MachineStatus::Saving)) {
+                    // The run is already ending; a second end would only fail.
+                    kit::inert_button(
+                        p,
+                        "end",
+                        Kind::QuietDanger,
+                        Size::Small,
+                        Some("stop"),
+                        "Ending…",
+                        None,
+                    )
+                } else if run.active {
                     let end = kit::button(
                         p,
                         "end",
@@ -304,9 +410,10 @@ impl Jumper {
                         "End run",
                         None,
                     );
-                    Self::on_click(end, cx, |this, _| this.ending = !this.ending)
+                    // A press outside the open confirm closes it first, so this opens it.
+                    Self::on_click(end, cx, |this, _| this.ending = true)
                 } else {
-                    self.back_to_catalog(p, Kind::Outline, Size::Small, cx)
+                    self.back_to_catalog(p, "back", Kind::Outline, Size::Small, cx)
                 };
                 bar.child(kit::card_title(p, title).truncate())
                     .children(course.map(|course| kit::label(p, course).flex_none()))
@@ -317,22 +424,46 @@ impl Jumper {
                     .child(div().w(px(1.)).h(px(18.)).bg(rgb(p.border)))
                     .child(leave)
             }
-            Screen::Catalog | Screen::Lecture { .. } => {
-                let catalog = div()
-                    .h(px(30.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(p.border))
-                    .bg(rgb(p.panel))
-                    .shadow_sm()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(kit::icon("grid", 14., p.accent))
-                    .child("Catalog");
+            Screen::Catalog | Screen::Lecture { .. } | Screen::History | Screen::Recap(_) => {
+                let runs = matches!(self.state.screen, Screen::History | Screen::Recap(_));
+                let nav = |id: &'static str, glyph, label: &'static str, on: bool| {
+                    let tab = div()
+                        .id(id)
+                        .debug_selector(move || id.to_owned())
+                        .h(px(30.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .rounded_lg()
+                        .border_1()
+                        .cursor_pointer()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(kit::icon(glyph, 14., if on { p.accent } else { p.muted }))
+                        .child(label);
+                    if on {
+                        tab.border_color(rgb(p.border)).bg(rgb(p.panel)).shadow_sm()
+                    } else {
+                        let hover = p.border;
+                        tab.border_color(gpui::transparent_black())
+                            .text_color(rgb(p.muted))
+                            .hover(move |style| style.bg(rgb(hover)))
+                    }
+                };
+                let catalog = Self::on_click(
+                    nav("nav-catalog", "grid", "Catalog", !runs),
+                    cx,
+                    |this, _| {
+                        let reload = this.state.back_to_catalog();
+                        this.send(reload);
+                    },
+                );
+                let history =
+                    Self::on_click(nav("nav-runs", "monitor", "Runs", runs), cx, |this, _| {
+                        let reload = this.state.open_history();
+                        this.send(reload);
+                    });
                 let sign_out = kit::button(
                     p,
                     "sign-out",
@@ -343,7 +474,7 @@ impl Jumper {
                     None,
                 );
                 bar.child(wordmark)
-                    .child(catalog)
+                    .child(div().flex().gap_1().child(catalog).child(history))
                     .child(fill)
                     .children(update)
                     .children(connected)
@@ -383,8 +514,8 @@ impl Jumper {
                     "copy",
                     Kind::Outline,
                     Size::Small,
-                    Some("copy"),
-                    "Copy link",
+                    Some(if self.copied { "check" } else { "copy" }),
+                    if self.copied { "Copied" } else { "Copy link" },
                     None,
                 );
                 let (open, link) = (url.clone(), url.clone());
@@ -419,8 +550,9 @@ impl Jumper {
                                         "Copy the sign-in link and paste it into any browser on this computer.",
                                     )),
                             )
-                            .child(Self::on_click(copy, cx, move |_, cx| {
+                            .child(Self::on_click(copy, cx, move |this, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                                this.copied = true;
                             })),
                     )
             }
@@ -518,14 +650,16 @@ impl Jumper {
                 let row = if index == shown {
                     row.bg(rgb(p.panel)).border_color(rgb(p.border)).shadow_sm()
                 } else {
-                    let hover = p.track;
+                    // Lifts toward the selected row's surface; `track` is the canvas's own tone.
+                    let hover = p.bg;
                     row.border_color(gpui::transparent_black())
                         .hover(move |style| style.bg(rgb(hover)))
                 };
                 Self::on_click(row, cx, move |this, _| this.state.open_course(index))
             }));
 
-        let query = self.search.read(cx).text().trim().to_lowercase();
+        let typed = self.search.read(cx).text().trim().to_owned();
+        let query = typed.to_lowercase();
         let minutes: u32 = course
             .lectures
             .iter()
@@ -538,7 +672,7 @@ impl Jumper {
         if minutes > 0 {
             facts.push(format!("about {minutes} min"));
         }
-        let rows = course
+        let rows: Vec<_> = course
             .lectures
             .iter()
             .enumerate()
@@ -560,6 +694,7 @@ impl Jumper {
                 };
                 let row = div()
                     .id(("lecture", index))
+                    .debug_selector(move || format!("lecture-{index}"))
                     .flex()
                     .items_start()
                     .gap_3()
@@ -602,9 +737,21 @@ impl Jumper {
                     row.hover(move |style| style.bg(rgb(hover)))
                 };
                 Self::on_click(row, cx, move |this, _| {
-                    this.state.open_lecture(shown, index)
+                    if let Some(load) = this.state.open_lecture(shown, index) {
+                        this.send(load);
+                    }
                 })
-            });
+            })
+            .collect();
+        // A search that matches nothing says so instead of an empty card.
+        let lectures = if rows.is_empty() {
+            div().py_8().flex().justify_center().child(kit::support(
+                p,
+                format!("No lecture in this course matches \u{201c}{typed}\u{201d}."),
+            ))
+        } else {
+            kit::card(p).children(rows)
+        };
         let list = div()
             .flex_1()
             .min_w_0()
@@ -636,7 +783,7 @@ impl Jumper {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(kit::card(p).children(rows)),
+                    .child(lectures),
             );
 
         let detail = div()
@@ -671,23 +818,21 @@ impl Jumper {
                         .child(kit::label(p, "Course"))
                         .child(kit::content(p, course.title.clone()))
                         .child(kit::support(p, course.summary.clone()).text_size(px(15.)))
-                        .child(kit::meta(p, "Pick a lecture to see its scenario.")),
+                        .when(!course.body_markdown.trim().is_empty(), |words| {
+                            words.child(markdown(p, &course.body_markdown).pt_2())
+                        })
+                        .child(kit::meta(
+                            p,
+                            "Pick a lecture to see its theory and scenario.",
+                        )),
                 ),
             ),
             Some((index, lecture)) => {
-                let start = kit::button(
-                    p,
-                    "start",
-                    Kind::Primary,
-                    Size::Large,
-                    None,
-                    if lecture.active_run_id.is_some() {
-                        "Open the run"
-                    } else {
-                        "Start scenario"
-                    },
-                    Some("arrow-right"),
-                );
+                let label = if lecture.active_run_id.is_some() {
+                    "Open the run"
+                } else {
+                    "Start scenario"
+                };
                 let blocked = match (&lecture.scenario_id, lecture.state.as_str()) {
                     (None, _) => Some("This lecture has no scenario."),
                     (_, "locked") => {
@@ -698,17 +843,55 @@ impl Jumper {
                     }
                     _ => None,
                 };
+                let theory = self.state.theory.as_ref();
+                let locked =
+                    lecture.state == "locked" || theory.is_some_and(|answer| answer.locked);
                 let foot = match blocked {
-                    Some(why) if lecture.scenario_id.is_none() => foot.child(kit::caption(p, why)),
+                    // A lecture without a lab is done once read.
+                    Some(_) if lecture.scenario_id.is_none() => {
+                        if lecture.state == "completed" {
+                            foot.child(kit::status(p.green, "Lecture complete"))
+                        } else if locked {
+                            foot.child(kit::caption(p, "Finish the lectures before this one to unlock it."))
+                        } else {
+                            let read = kit::button(p, "read", Kind::Primary, Size::Large, Some("check"), "Mark as read", None);
+                            foot.child(Self::on_click(read, cx, |this, _| {
+                                if let Some(at) = this.state.lecture_ref() {
+                                    this.send(Command::Learn(Learn::CompleteLecture(at)));
+                                }
+                            }))
+                            .child(kit::caption(p, "This lecture has no scenario. Mark it as read when you are done."))
+                        }
+                    }
                     Some(why) => foot
-                        .child(start.opacity(0.5).cursor_default())
+                        .child(kit::inert_button(
+                            p,
+                            "start",
+                            Kind::Primary,
+                            Size::Large,
+                            None,
+                            label,
+                            Some("arrow-right"),
+                        ))
                         .child(kit::caption(p, why)),
                     None => foot
-                        .child(Self::on_click(start, cx, |this, _| {
-                            if let Some(command) = this.state.open_run() {
-                                this.send(command);
-                            }
-                        }))
+                        .child(Self::on_click(
+                            kit::button(
+                                p,
+                                "start",
+                                Kind::Primary,
+                                Size::Large,
+                                None,
+                                label,
+                                Some("arrow-right"),
+                            ),
+                            cx,
+                            |this, _| {
+                                if let Some(command) = this.state.open_run() {
+                                    this.send(command);
+                                }
+                            },
+                        ))
                         .child(kit::caption(
                             p,
                             "Runs on this computer. The result counts toward your course and is marked as a local run.",
@@ -721,13 +904,37 @@ impl Jumper {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(kit::label(
-                                    p,
-                                    format!("Lecture {} of {}", index + 1, course.lectures.len()),
-                                ))
+                                .child(kit::label(p, {
+                                    let (ordinal, count) = match theory.and_then(|answer| answer.lecture.as_ref()) {
+                                        Some(theory) => (theory.ordinal as usize, theory.count as usize),
+                                        None => (index + 1, course.lectures.len()),
+                                    };
+                                    format!("Lecture {ordinal} of {count}")
+                                }))
                                 .child(kit::content(p, lecture.title.clone()))
                                 .child(kit::support(p, lecture.summary.clone()).text_size(px(15.)))
-                                .child(kit::meta(p, lecture_facts(lecture))),
+                                .child(kit::meta(p, lecture_facts(lecture)))
+                                .child(div().pt_2().child(match theory {
+                                    None => kit::meta(p, "Loading the lecture…"),
+                                    Some(answer) => match &answer.lecture {
+                                        Some(theory) if !answer.locked => {
+                                            markdown(p, &theory.body_markdown).debug_selector(|| "theory".to_owned())
+                                        }
+                                        _ => div()
+                                            .flex()
+                                            .items_start()
+                                            .gap_2()
+                                            .child(div().pt(px(2.)).child(kit::icon("lock", 14., p.muted)))
+                                            .child(
+                                                div()
+                                                    .child(kit::card_title(p, "This lecture is locked"))
+                                                    .child(kit::support(
+                                                        p,
+                                                        "Complete the required earlier lecture before you open this lecture.",
+                                                    )),
+                                            ),
+                                    },
+                                })),
                         ),
                     )
                     .child(foot)
@@ -934,6 +1141,7 @@ impl Jumper {
             .when(failed.is_some(), |card| {
                 card.child(div().flex().child(self.back_to_catalog(
                     p,
+                    "back-card",
                     Kind::Outline,
                     Size::Medium,
                     cx,
@@ -1051,7 +1259,21 @@ impl Jumper {
                 )
                 // What went wrong while the run ended, such as an unsaved replay.
                 .children(self.state.error.clone().map(|error| kit::failure(p, error)))
-                .child(div().flex().justify_end().child(self.back_to_catalog(p, Kind::Primary, Size::Medium, cx)));
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(self.back_to_catalog(p, "back-card", Kind::Outline, Size::Medium, cx))
+                        .child({
+                            let see = kit::button(p, "see-recap", Kind::Primary, Size::Medium, None, "See your recap", Some("arrow-right"));
+                            let run_id = run.run_id.clone();
+                            Self::on_click(see, cx, move |this, _| {
+                                let load = this.state.open_recap(&run_id);
+                                this.send(load);
+                            })
+                        }),
+                );
             return body.child(
                 kit::panel(p)
                     .flex_1()
@@ -1101,9 +1323,20 @@ impl Jumper {
                 )
                 .child(kit::meta(p, machine_facts(machine)).text_color(rgb(p.muted)))
         });
-        let side = kit::panel(p)
-            .w(px(400.))
-            .flex_none()
+        // intar's checks once it answered; the machine's own count until then.
+        let learning = self.state.learning.as_ref();
+        let (passed, tasks) = match learning {
+            Some(learning) => (
+                ui::learning::verified(learning),
+                Some(learning.checks.len()),
+            ),
+            None => (passed, tasks),
+        };
+        let solved = match learning {
+            Some(learning) => learning.solved,
+            None => tasks.is_some_and(|tasks| tasks > 0 && passed == tasks),
+        };
+        let side = div()
             .flex()
             .flex_col()
             .gap_4()
@@ -1114,42 +1347,49 @@ impl Jumper {
                     .items_baseline()
                     .justify_between()
                     .px_1()
-                    .child(kit::section(p, "Tasks"))
-                    .child(kit::meta(
-                        p,
-                        match tasks {
-                            Some(tasks) => format!("{passed} of {tasks} verified"),
-                            None => "Begin when the machines are ready".to_owned(),
-                        },
-                    )),
+                    .child(kit::section(p, "Checks"))
+                    .child({
+                        let progress = match (tasks, &self.state.machine) {
+                            (Some(tasks), _) => format!("{passed} of {tasks} verified"),
+                            (None, Some(MachineStatus::Saving)) => "The run is ending".to_owned(),
+                            (None, _) => "Begin when the machines are ready".to_owned(),
+                        };
+                        // Tests read the count by it.
+                        let selector = progress.clone();
+                        kit::meta(p, progress).debug_selector(|| selector)
+                    }),
             )
             .children(tasks.map(|tasks| kit::segments(p, passed, tasks, 4.).px_1()))
-            .when(
-                tasks.is_some_and(|tasks| tasks > 0 && passed == tasks),
-                |side| {
-                    side.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .px(px(14.))
-                            .py_3()
-                            .rounded(px(10.))
-                            .border_1()
-                            .border_color(rgb(p.green_border))
-                            .bg(rgb(p.green_subtle))
-                            .child(kit::icon("check-circle", 20., p.green))
-                            .child(
-                                div()
-                                    .child(kit::card_title(p, "All tasks verified"))
-                                    .child(kit::meta(p, "Saved to your course as a local run")),
-                            ),
-                    )
-                },
-            )
+            .when(solved, |side| {
+                side.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px(px(14.))
+                        .py_3()
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(rgb(p.green_border))
+                        .bg(rgb(p.green_subtle))
+                        .child(kit::icon("check-circle", 20., p.green))
+                        .child(
+                            div()
+                                .child(kit::card_title(p, "All checks verified"))
+                                .child(kit::meta(p, "Saved to your course as a local run")),
+                        ),
+                )
+            })
             .children(self.state.error.clone().map(|error| kit::failure(p, error)))
+            .children(learning.map(|learning| self.learning(p, learning, cx).px_1()))
             .child(kit::label(p, "Machines").px_1())
             .child(kit::card(p).mt(px(-8.)).children(machines));
+        let side = kit::panel(p)
+            .id("side")
+            .w(px(400.))
+            .flex_none()
+            .overflow_y_scroll()
+            .child(side);
         body.child(stage).child(side)
     }
 
@@ -1180,6 +1420,10 @@ impl Jumper {
             .right(px(10.))
             .w(px(348.))
             .occlude()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.ending = false;
+                cx.notify();
+            }))
             .shadow_lg()
             .p_4()
             .flex()
@@ -1217,8 +1461,14 @@ impl Render for Jumper {
             window.focus(&view.focus_handle(cx), cx);
             self.focus_terminal = false;
         }
+        // The player goes with the replay part it plays.
+        if self.state.replay.as_ref() != self.replay.as_ref().map(|(shown, _)| shown) {
+            self.replay = None;
+        }
         let (body, confirm) = match &self.state.screen {
             Screen::Catalog | Screen::Lecture { .. } => (self.catalog(p, cx), None),
+            Screen::History => (self.history(p, cx), None),
+            Screen::Recap(_) => (self.recap(p, cx), None),
             Screen::Run(run) => (
                 self.run(p, run, cx),
                 self.ending.then(|| self.end_confirm(p, run, cx)),
@@ -1301,7 +1551,7 @@ fn main() {
     let engine::Engine {
         commands,
         mut events,
-    } = match engine::start(base) {
+    } = match engine::start(base.clone()) {
         Ok(engine) => engine,
         Err(error) => {
             eprintln!("jumper: could not start: {error}");
@@ -1322,10 +1572,14 @@ fn main() {
                     traffic_light_position: Some(point(px(16.), px(15.))),
                 }),
                 window_min_size: Some(size(px(1040.), px(600.))),
+                // Otherwise AppKit keeps the title bar's strip, where the app's
+                // own buttons never see the pointer and clicks wait on a
+                // double-click check (macOS 27).
+                app_owns_titlebar_drag: OWN_TITLE_BAR,
                 ..Default::default()
             };
             let opened = cx.open_window(options, move |window, cx| {
-                let view = cx.new(|cx| Jumper::new(commands, window, cx));
+                let view = cx.new(|cx| Jumper::new(commands, base, window, cx));
                 // Engine → view. The task ends with the engine or the window.
                 let weak = view.downgrade();
                 cx.spawn(async move |cx| {
@@ -1346,4 +1600,583 @@ fn main() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use subspace::contract::{
+        CatalogCourseV1, LocalReplayPartV1, LocalRunRecapV1, LocalRunSummaryV1,
+    };
+    use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+
+    /// The window with `state` on screen, and what it asks of the engine.
+    fn open(
+        cx: &mut TestAppContext,
+        state: State,
+    ) -> (
+        Entity<Jumper>,
+        &mut VisualTestContext,
+        UnboundedReceiver<Command>,
+    ) {
+        let (commands, mut heard) = unbounded_channel();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let base = Url::parse("https://intar.dev").unwrap_or_else(|error| panic!("{error}"));
+            let mut jumper = Jumper::new(commands, base, window, cx);
+            jumper.state = state;
+            jumper
+        });
+        cx.run_until_parked();
+        // What the window asks at launch.
+        while heard.try_recv().is_ok() {}
+        (view, cx, heard)
+    }
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is not on screen"));
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn lecture(state: &str) -> CatalogLectureV1 {
+        CatalogLectureV1 {
+            lecture_id: "l".into(),
+            title: "Serve".into(),
+            summary: String::new(),
+            category: String::new(),
+            tags: vec![],
+            difficulty: None,
+            estimated_minutes: None,
+            scenario_id: Some("intar/web".into()),
+            state: state.into(),
+            active_run_id: None,
+        }
+    }
+
+    fn catalog(state: &str) -> Vec<CatalogCourseV1> {
+        vec![CatalogCourseV1 {
+            course_id: "c".into(),
+            organization_id: None,
+            organization_name: None,
+            title: "Web".into(),
+            summary: String::new(),
+            body_markdown: String::new(),
+            sequential: true,
+            lectures: vec![lecture(state)],
+        }]
+    }
+
+    #[gpui::test]
+    fn a_locked_lecture_does_not_start_and_an_open_one_does(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.catalog = catalog("locked");
+        state.screen = Screen::Lecture {
+            course: 0,
+            lecture: 0,
+        };
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "start");
+        assert!(heard.try_recv().is_err(), "a locked start asks nothing");
+
+        view.update(cx, |view, cx| {
+            view.state.catalog = catalog("available");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click(cx, "start");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::StartRun {
+                scenario_id: "intar/web".into(),
+                organization_id: None
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn the_end_confirm_closes_outside_and_ends_on_its_button(cx: &mut TestAppContext) {
+        let run = LocalRunV1 {
+            run_id: "run-1".into(),
+            scenario_id: "intar/web".into(),
+            state: "running".into(),
+            active: true,
+            user_id: None,
+            execution_id: None,
+            generation: None,
+            machines: vec![],
+        };
+        let mut state = State::default();
+        state.screen = Screen::Run(run);
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "end");
+        assert!(view.read_with(cx, |view, _| view.ending));
+        // Pressing End run again keeps it open rather than flickering.
+        click(cx, "end");
+        assert!(view.read_with(cx, |view, _| view.ending));
+
+        cx.simulate_click(point(px(200.), px(400.)), Modifiers::none());
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |view, _| view.ending), "closed outside");
+
+        click(cx, "end");
+        click(cx, "keep");
+        assert!(!view.read_with(cx, |view, _| view.ending));
+        assert!(heard.try_recv().is_err());
+
+        click(cx, "end");
+        click(cx, "end-now");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::EndRun {
+                run_id: "run-1".into()
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn copy_link_copies_and_says_so(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::SigningIn("https://intar.dev/sign-in".into());
+        let (view, cx, _heard) = open(cx, state);
+        click(cx, "copy");
+        assert!(view.read_with(cx, |view, _| view.copied));
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("https://intar.dev/sign-in".into())
+        );
+        // The next event takes the word back.
+        view.update(cx, |view, cx| view.apply(Event::Update(None), cx));
+        assert!(!view.read_with(cx, |view, _| view.copied));
+    }
+
+    #[gpui::test]
+    fn an_update_in_progress_is_not_started_again(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::SignedOut;
+        state.update = Some("0.2.0".into());
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "update");
+        assert_eq!(heard.try_recv().ok(), Some(Command::InstallUpdate));
+        assert!(view.read_with(cx, |view, _| view.state.updating));
+        click(cx, "update");
+        assert!(heard.try_recv().is_err(), "Updating… asks nothing");
+    }
+
+    fn run(active: bool) -> LocalRunV1 {
+        LocalRunV1 {
+            run_id: "run-1".into(),
+            scenario_id: "intar/web".into(),
+            state: "running".into(),
+            active,
+            user_id: None,
+            execution_id: None,
+            generation: None,
+            machines: vec![],
+        }
+    }
+
+    #[gpui::test]
+    fn the_closed_cards_back_button_returns_to_the_catalog(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::Run(run(false));
+        let (view, cx, mut heard) = open(cx, state);
+        // The title bar has a Back to catalog of its own; the card's must work too.
+        click(cx, "back-card");
+        assert_eq!(heard.try_recv().ok(), Some(Command::LoadCatalog));
+        assert!(view.read_with(cx, |view, _| view.state.screen == Screen::Catalog));
+    }
+
+    fn theory_lecture() -> subspace::contract::LocalLectureAnswerV1 {
+        subspace::contract::LocalLectureAnswerV1 {
+            protocol: 1,
+            locked: false,
+            lecture: Some(subspace::contract::LocalLectureV1 {
+                course_id: "c".into(),
+                lecture_id: "l".into(),
+                title: "Serve".into(),
+                body_markdown: "Serve **files**.".into(),
+                ordinal: 1,
+                count: 1,
+                state: "available".into(),
+            }),
+        }
+    }
+
+    #[gpui::test]
+    fn a_selected_lecture_loads_and_shows_its_theory(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.catalog = catalog("available");
+        state.screen = Screen::Catalog;
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "lecture-0");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::Learn(Learn::Lecture(state::LectureRef {
+                course_id: "c".into(),
+                lecture_id: "l".into(),
+                organization_id: None,
+            })))
+        );
+        assert!(cx.debug_bounds("theory").is_none(), "not loaded yet");
+        view.update(cx, |view, cx| {
+            view.apply(Event::Lecture(theory_lecture()), cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("theory").is_some());
+    }
+
+    #[gpui::test]
+    fn a_lecture_without_a_scenario_is_marked_as_read(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.catalog = catalog("available");
+        state.catalog[0].lectures[0].scenario_id = None;
+        state.screen = Screen::Lecture {
+            course: 0,
+            lecture: 0,
+        };
+        let (_view, cx, mut heard) = open(cx, state);
+        assert!(cx.debug_bounds("start").is_none(), "nothing to start");
+        click(cx, "read");
+        assert!(matches!(
+            heard.try_recv().ok(),
+            Some(Command::Learn(Learn::CompleteLecture(at))) if at.lecture_id == "l"
+        ));
+    }
+
+    fn learning() -> subspace::contract::LocalRunLearningV1 {
+        use subspace::contract::{LocalRunCheckV1, LocalRunHintV1, LocalRunSolutionV1};
+        let check = |key: &str, status: &str| LocalRunCheckV1 {
+            key: key.into(),
+            machine: "web".into(),
+            title: key.into(),
+            description: None,
+            status: status.into(),
+            optional: false,
+        };
+        let hint = |key: &str, revealed: bool, unlocked: bool| LocalRunHintV1 {
+            key: key.into(),
+            check_key: None,
+            title: revealed.then(|| "Look at the port".to_owned()),
+            revealed,
+            unlocked,
+            body_markdown: revealed.then(|| "It is `8080`.".to_owned()),
+        };
+        subspace::contract::LocalRunLearningV1 {
+            run_id: "run-1".into(),
+            lecture_title: Some("Serve".into()),
+            lecture_markdown: String::new(),
+            solved: false,
+            checks: vec![
+                check("listen", "verified"),
+                check("serve", "checking"),
+                check("cache", "needs_repair"),
+            ],
+            hints: vec![
+                hint("h1", true, false),
+                hint("h2", false, true),
+                hint("h3", false, false),
+            ],
+            solution: LocalRunSolutionV1 {
+                unlocked: false,
+                assisted: false,
+                revealed: false,
+                body_markdown: None,
+            },
+        }
+    }
+
+    fn learning_run(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Jumper>,
+        &mut VisualTestContext,
+        UnboundedReceiver<Command>,
+    ) {
+        let mut state = State::default();
+        state.screen = Screen::Run(run(true));
+        state.learning = Some(learning());
+        open(cx, state)
+    }
+
+    #[gpui::test]
+    fn the_checks_count_what_intar_verified(cx: &mut TestAppContext) {
+        let (_view, cx, _heard) = learning_run(cx);
+        assert!(cx.debug_bounds("1 of 3 verified").is_some());
+    }
+
+    #[gpui::test]
+    fn only_the_unlocked_hint_can_be_revealed(cx: &mut TestAppContext) {
+        let (_view, cx, mut heard) = learning_run(cx);
+        assert!(cx.debug_bounds("reveal-h1").is_none(), "already revealed");
+        assert!(cx.debug_bounds("reveal-h3").is_none(), "still sealed");
+        click(cx, "reveal-h2");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::Learn(Learn::RevealHint {
+                run_id: "run-1".into(),
+                hint_key: "h2".into(),
+            }))
+        );
+    }
+
+    #[gpui::test]
+    fn the_solution_is_revealed_only_after_its_confirm(cx: &mut TestAppContext) {
+        let (view, cx, mut heard) = learning_run(cx);
+        click(cx, "solution");
+        assert!(heard.try_recv().is_err(), "asks first");
+        click(cx, "keep-trying");
+        assert!(!view.read_with(cx, |view, _| view.confirm_solution));
+        assert!(heard.try_recv().is_err());
+
+        click(cx, "solution");
+        click(cx, "reveal-solution");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::Learn(Learn::RevealSolution {
+                run_id: "run-1".into()
+            }))
+        );
+        assert!(!view.read_with(cx, |view, _| view.confirm_solution));
+    }
+
+    fn summary(run_id: &str, scenario: &str, activity: &str, created_at: i64) -> LocalRunSummaryV1 {
+        LocalRunSummaryV1 {
+            run_id: run_id.into(),
+            scenario_id: scenario.into(),
+            organization_id: None,
+            title: scenario.into(),
+            local: true,
+            active: activity == "foreground",
+            outcome: if activity == "foreground" {
+                "in_progress"
+            } else {
+                "succeeded"
+            }
+            .into(),
+            activity: activity.into(),
+            created_at,
+            finished_at: None,
+            solved_at: None,
+            solve_duration_ms: Some(252_000),
+            solution_assisted: false,
+            has_replay: true,
+        }
+    }
+
+    fn history_screen(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Jumper>,
+        &mut VisualTestContext,
+        UnboundedReceiver<Command>,
+    ) {
+        let mut state = State::default();
+        state.screen = Screen::History;
+        let mut remote = summary("run-remote", "intar/dns", "foreground", 5);
+        remote.local = false;
+        state.history = Some(vec![
+            summary("run-old", "intar/web", "settled", 1),
+            summary("run-new", "intar/web", "settled", 3),
+            summary("run-live", "intar/k8s", "foreground", 4),
+            remote,
+            summary("run-dns", "intar/dns", "settled", 2),
+        ]);
+        open(cx, state)
+    }
+
+    #[gpui::test]
+    fn the_runs_page_lists_active_work_first_and_one_row_per_scenario(cx: &mut TestAppContext) {
+        let (_view, cx, mut heard) = history_screen(cx);
+        let top = |cx: &mut VisualTestContext, selector| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is not on screen"))
+                .top()
+        };
+        assert!(top(cx, "active-0") < top(cx, "past-0"));
+        assert!(
+            top(cx, "past-0") < top(cx, "past-1"),
+            "newest scenario first"
+        );
+        assert!(
+            cx.debug_bounds("past-2").is_none(),
+            "two scenarios, two rows"
+        );
+        // The older attempt shows on demand.
+        assert!(cx.debug_bounds("attempt-0-1").is_none());
+        assert!(
+            cx.debug_bounds("attempts-1").is_none(),
+            "one attempt, no disclosure"
+        );
+        click(cx, "attempts-0");
+        assert!(cx.debug_bounds("attempt-0-1").is_some());
+
+        // A local active run opens here; one on intar does not.
+        click(cx, "active-0");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::ReadRun {
+                run_id: "run-live".into()
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn a_past_run_opens_its_recap(cx: &mut TestAppContext) {
+        let (view, cx, mut heard) = history_screen(cx);
+        click(cx, "active-1");
+        assert!(
+            heard.try_recv().is_err(),
+            "a run on intar opens the website"
+        );
+        click(cx, "past-0");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::History(History::Recap {
+                run_id: "run-new".into()
+            }))
+        );
+        assert!(view.read_with(cx, |view, _| view.state.screen
+            == Screen::Recap("run-new".into())));
+    }
+
+    fn recap() -> LocalRunRecapV1 {
+        let check = |key: &str, status: &str| subspace::contract::LocalRunCheckV1 {
+            key: key.into(),
+            machine: "web".into(),
+            title: key.into(),
+            description: None,
+            status: status.into(),
+            optional: false,
+        };
+        let part = |key: &str, artifact: Option<&str>| LocalReplayPartV1 {
+            key: key.into(),
+            machine_label: Some("web".into()),
+            part_label: key.into(),
+            cast_artifact_id: artifact.map(str::to_owned),
+            size_bytes: None,
+        };
+        LocalRunRecapV1 {
+            run_id: "run-1".into(),
+            scenario_id: "intar/web".into(),
+            title: "Serve".into(),
+            kind: "solved".into(),
+            heading: "Solved".into(),
+            description: "You completed this scenario.".into(),
+            solve_duration_ms: Some(252_000),
+            hints_revealed: 2,
+            solution_used: true,
+            checks: vec![check("listen", "verified"), check("serve", "missing")],
+            replay: "ready".into(),
+            replay_parts: vec![part("Part 1", Some("cast-1")), part("Part 2", None)],
+        }
+    }
+
+    #[gpui::test]
+    fn the_recap_shows_checks_help_and_replay_parts(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::Recap("run-1".into());
+        state.recap = Some(recap());
+        let (view, cx, mut heard) = open(cx, state);
+        for shown in [
+            "1/2 verified",
+            "Solve time: 04:12",
+            "Hints used: 2 hints",
+            "Full solution: Used",
+            "part-0",
+            "part-1",
+        ] {
+            assert!(cx.debug_bounds(shown).is_some(), "{shown}");
+        }
+        // A part without its recording cannot be played.
+        click(cx, "part-1");
+        assert!(heard.try_recv().is_err());
+        click(cx, "part-0");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::History(History::Replay {
+                run_id: "run-1".into(),
+                artifact_id: "cast-1".into()
+            }))
+        );
+        // Another run's recording is not this part's; this one's gets its player.
+        view.update(cx, |view, cx| {
+            view.apply(
+                Event::Replay {
+                    run_id: "run-2".into(),
+                    artifact_id: "cast-1".into(),
+                    cast: vec![],
+                },
+                cx,
+            )
+        });
+        assert!(view.read_with(cx, |view, _| view.replay.is_none()));
+        view.update(cx, |view, cx| {
+            view.apply(
+                Event::Replay {
+                    run_id: "run-1".into(),
+                    artifact_id: "cast-1".into(),
+                    cast: vec![],
+                },
+                cx,
+            )
+        });
+        assert!(view.read_with(cx, |view, _| view.replay.is_some()));
+        click(cx, "back-runs");
+        assert_eq!(heard.try_recv().ok(), Some(Command::History(History::List)));
+    }
+
+    #[gpui::test]
+    fn a_recap_being_saved_is_asked_again_until_it_is_left(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::Recap("run-1".into());
+        let (view, cx, mut heard) = open(cx, state);
+        let mut saving = recap();
+        saving.kind = "saving".into();
+        view.update(cx, |view, cx| view.apply(Event::Recap(saving.clone()), cx));
+        cx.executor().advance_clock(RECAP_POLL);
+        cx.run_until_parked();
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::History(History::Recap {
+                run_id: "run-1".into()
+            }))
+        );
+        view.update(cx, |view, cx| {
+            view.apply(Event::Recap(saving), cx);
+            view.state.open_history();
+        });
+        cx.executor().advance_clock(RECAP_POLL);
+        cx.run_until_parked();
+        assert!(heard.try_recv().is_err(), "left: no more asking");
+    }
+
+    #[gpui::test]
+    fn a_closed_run_offers_its_recap(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::Run(run(false));
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "see-recap");
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(Command::History(History::Recap {
+                run_id: "run-1".into()
+            }))
+        );
+        assert!(view.read_with(cx, |view, _| view.state.screen
+            == Screen::Recap("run-1".into())));
+    }
+
+    #[gpui::test]
+    fn a_run_that_is_ending_cannot_be_ended_again(cx: &mut TestAppContext) {
+        let mut state = State::default();
+        state.screen = Screen::Run(run(true));
+        state.machine = Some(MachineStatus::Saving);
+        let (view, cx, mut heard) = open(cx, state);
+        click(cx, "end");
+        assert!(!view.read_with(cx, |view, _| view.ending));
+        assert!(heard.try_recv().is_err());
+    }
 }

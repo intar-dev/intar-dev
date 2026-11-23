@@ -5,10 +5,12 @@ import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { KINO_CONFIG_MEDIA_TYPE } from "@/control-plane/image-registry/push";
 import { handleLocalRunCliRequest } from "@/control-plane/run-cli";
-import { user } from "@/db/schema";
+import { scenarioRunArtifacts, user } from "@/db/schema";
 import { hashStoredOAuthToken } from "@/lib/auth";
 import {
-  appReleaseRequest, DESKTOP_OAUTH_CLIENT_ID, localCatalogRequest, localRunRequest, reportLocalRunRequest, requireDesktopCaller, startLocalRunRequest,
+  appReleaseRequest, DESKTOP_OAUTH_CLIENT_ID, localCatalogRequest, localLectureRequest, localRunArtifactRequest,
+  localRunHistoryRequest, localRunLearning, localRunLearningRequest, localRunRecap, localRunRecapRequest,
+  localRunRequest, reportLocalRunRequest, requireDesktopCaller, startLocalRunRequest,
   type LocalRunView,
 } from "@/lib/desktop-channel";
 import { LOCAL_RUN_SILENCE_MS, reapSilentLocalRuns } from "@/lib/local-runs";
@@ -21,7 +23,7 @@ import desktopClientSeed from "../../seeds/desktop-oauth-client.sql?raw";
 import { seedSessionCookie } from "@/test/auth-requests";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
-  KINO, LEARNER, ORIGIN, STRANGER, labState, machineImage, revisionDoc, seedScenario, specBlob, store, v2, vmState,
+  HINT_BODY, KINO, LEARNER, ORIGIN, SOLUTION, STRANGER, TASK_BODY, labState, machineImage, revisionDoc, seedScenario, specBlob, store, v2, vmState,
 } from "./scenario-runs/revision-test-fixtures";
 
 const FAR = 9_999_999_999_999;
@@ -496,6 +498,265 @@ describe("the desktop channel", () => {
     const stored = JSON.parse((await env.DB.prepare("SELECT state_json FROM scenario_runs WHERE run_id = ?1").bind(run.runId)
       .first<{ state_json: string }>())!.state_json) as { tasks: Array<{ id: string; status: string }> };
     expect(stored.tasks.find((task) => task.id === "serve")).toMatchObject({ status: "pass" });
+  });
+
+  it("answers a lecture's theory, locked while an earlier one is open, and marks a theory lecture read", async () => {
+    await env.DB.prepare("UPDATE course_catalogs SET catalog_json = ?1 WHERE scope_key = 'public'").bind(JSON.stringify({
+      version: 2, courses: [{ courseId: "course", title: "Course", summary: "", bodyMarkdown: "", sequential: true, lectures: [
+        { lectureId: "intro", scenarioId: null, title: "Intro", summary: "", bodyMarkdown: "INTRO-THEORY", category: "t", tags: [], estimatedMinutes: 5 },
+        { lectureId: "web", scenarioId: "intar/web", title: "Lecture", summary: "", bodyMarkdown: "WEB-THEORY", category: "t", tags: [], estimatedMinutes: 10 },
+      ] }],
+    })).run();
+    const mine = await token("mine", LEARNER);
+    const lecture = async (id: string, action: "read" | "complete" = "read", secret: string | null = mine) => {
+      const path = `/api/local/courses/course/lectures/${id}${action === "complete" ? "/complete" : ""}`;
+      const response = await localLectureRequest(call(secret, { method: action === "complete" ? "POST" : "GET" }, path), "course", id, action);
+      return { status: response.status, ...(await response.json() as Record<string, unknown>) };
+    };
+
+    expect((await lecture("intro", "read", null)).status).toBe(401);
+    expect(await lecture("web")).toEqual({ status: 200, protocol: 1, locked: true });
+    expect(await lecture("intro")).toEqual({ status: 200, protocol: 1, locked: false, lecture: {
+      courseId: "course", lectureId: "intro", title: "Intro", bodyMarkdown: "INTRO-THEORY", ordinal: 1, count: 2, state: "available",
+    } });
+    // A lecture with a lab is completed by its run, not here.
+    expect(await lecture("web", "complete")).toMatchObject({ status: 409, code: "course_lecture_locked", protocol: 1 });
+    expect(await lecture("intro", "complete")).toMatchObject({ status: 200, lecture: { lectureId: "intro", state: "completed" } });
+    expect(await lecture("web")).toMatchObject({ locked: false, lecture: { bodyMarkdown: "WEB-THEORY", ordinal: 2, state: "available" } });
+    expect(await lecture("web", "complete")).toMatchObject({ status: 409, code: "course_lecture_requires_scenario" });
+    expect(await lecture("missing")).toMatchObject({ status: 404, code: "course_lecture_not_found" });
+  });
+
+  it("answers an organization's lecture to its members only", async () => {
+    await env.DB.prepare("INSERT INTO organization (id, name, slug, created_at) VALUES ('org-1', 'Acme', 'acme', 1)").run();
+    await seedScenario("acme/secret", "org-1", revisionDoc(images, specs));
+    await env.DB.prepare("UPDATE course_catalogs SET catalog_json = json_set(catalog_json, '$.courses[0].lectures[0].bodyMarkdown', 'ORG-THEORY') WHERE scope_key = 'organization:org-1'").run();
+    const read = async (secret: string, organizationId: string | null) => {
+      const query = organizationId ? `?organizationId=${organizationId}` : "";
+      const response = await localLectureRequest(call(secret, {}, `/api/local/courses/course/lectures/secret${query}`), "course", "secret", "read");
+      return { status: response.status, ...(await response.json() as { code?: string; lecture?: { bodyMarkdown: string } }) };
+    };
+    const mine = await token("mine", LEARNER);
+    // Not a member: the course answers like a missing one, by id, by slug, and without the organization.
+    for (const organizationId of ["org-1", "acme", "no-such-org", null]) {
+      const answer = await read(mine, organizationId);
+      expect(answer.status, String(organizationId)).toBe(404);
+      expect(JSON.stringify(answer)).not.toContain("ORG-THEORY");
+    }
+    await env.DB.prepare("INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('m1', 'org-1', ?1, 'member', 1)").bind(LEARNER).run();
+    for (const organizationId of ["org-1", "acme"]) {
+      expect(await read(mine, organizationId)).toMatchObject({ status: 200, lecture: { bodyMarkdown: "ORG-THEORY" } });
+    }
+    expect((await read(await token("theirs", STRANGER), "org-1")).status).toBe(404);
+  });
+
+  it("shows a local run's learning panel to its learner, sealed until revealed", async () => {
+    const mine = await token("mine", LEARNER);
+    const { run } = await view(await start(mine));
+    type Learning = { runId: string; solved: boolean; lectureMarkdown: string;
+      checks: Array<{ key: string; machine: string; status: string; description: string | null }>;
+      hints: Array<{ key: string; checkKey: string | null; title: string | null; revealed: boolean; unlocked: boolean; bodyMarkdown: string | null }>;
+      solution: { unlocked: boolean; revealed: boolean; assisted: boolean; bodyMarkdown: string | null } };
+    const learning = async (action: "read" | "hint" | "solution" = "read", options: { secret?: string | null; body?: unknown } = {}) => {
+      const path = `/api/local/runs/${run.runId}/${{ read: "learning", hint: "hints/reveal", solution: "solution/reveal" }[action]}`;
+      const response = await localRunLearningRequest(call(options.secret === undefined ? mine : options.secret, {
+        method: action === "read" ? "GET" : "POST",
+        ...(options.body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(options.body) }),
+      }, path), run.runId, action);
+      const text = await response.text();
+      return { status: response.status, text, ...(JSON.parse(text) as { code?: string; learning: Learning }) };
+    };
+
+    expect((await learning("read", { secret: null })).status).toBe(401);
+    const theirs = await token("theirs", STRANGER);
+    for (const action of ["read", "hint", "solution"] as const) {
+      expect((await learning(action, { secret: theirs, ...(action === "read" ? {} : { body: { protocol: 1, hintKey: "x" } }) })).status, action).toBe(404);
+    }
+
+    const before = await learning();
+    expect(before.status).toBe(200);
+    expect(before.learning).toMatchObject({ runId: run.runId, solved: false, checks: [
+      { key: "serve", machine: "web", status: "checking", description: TASK_BODY },
+      { key: "fetch", machine: "client", status: "checking", description: null },
+    ], solution: { revealed: false, bodyMarkdown: null } });
+    // Nothing sealed is in the answer.
+    expect(before.text).not.toContain(HINT_BODY);
+    expect(before.text).not.toContain(SOLUTION);
+    const portHint = before.learning.hints.find((hint) => hint.checkKey === "serve")!;
+    expect(portHint).toMatchObject({ title: null, bodyMarkdown: null, revealed: false, unlocked: true });
+    expect(before.learning.hints.find((hint) => hint.checkKey === null)).toBeDefined();
+
+    expect((await learning("hint", { body: { protocol: 2, hintKey: portHint.key } })).code).toBe("upgrade_required");
+    expect((await learning("hint", { body: { protocol: 1 } })).code).toBe("invalid_hint");
+    expect((await learning("hint", { body: { protocol: 1, hintKey: "nope" } })).status).toBe(404);
+    const revealed = await learning("hint", { body: { protocol: 1, hintKey: portHint.key } });
+    expect(revealed.learning.hints.find((hint) => hint.key === portHint.key))
+      .toMatchObject({ revealed: true, title: "Port", bodyMarkdown: HINT_BODY });
+    expect((await learning("hint", { body: { protocol: 1, hintKey: portHint.key } })).code).toBe("scenario_hint_already_revealed");
+    expect((await learning()).learning.hints.find((hint) => hint.key === portHint.key)).toMatchObject({ bodyMarkdown: HINT_BODY });
+
+    expect((await learning("solution")).learning.solution).toMatchObject({ revealed: true, bodyMarkdown: SOLUTION });
+
+    // Only a local run is the app's to read.
+    await env.DB.prepare("UPDATE scenario_runs SET runtime = 'host' WHERE run_id = ?1").bind(run.runId).run();
+    expect((await learning()).status).toBe(404);
+  });
+
+  it("maps a probe run's checks and hints as the website's panel shows them", () => {
+    const probe = (id: string, status: string) => ({ id, label: id, kind: "http", phase: "scenario" as const, status, error: null, value: null });
+    const learning = localRunLearning({
+      id: "run-1", phase: "active_full", solvedAt: null, lectureTitle: null, lectureBodyMarkdown: null, briefingMarkdown: "BRIEFING",
+      objectives: [{ probeName: "p1", vmName: "web", label: "P1", title: "Serve it", bodyMarkdown: "SECRET", hintCount: 1 }],
+      vms: [{ scenarioVmName: "web", scenarioProbes: [probe("p1", "pass"), probe("p2", "fail"), probe("p3", "pending")] }],
+      hints: [
+        { key: "probe:web:p1:0", scope: "probe", probeName: "p1", id: "0", title: null, revealed: false, unlocked: true, bodyMarkdown: null },
+        { key: "scenario:0", scope: "scenario", probeName: null, id: "0", title: "T", revealed: true, unlocked: false, bodyMarkdown: "B" },
+      ],
+      solution: { unlocked: false, revealed: false, assisted: false, revealedAt: null, bodyMarkdown: null },
+    } as unknown as Parameters<typeof localRunLearning>[0]);
+    expect(learning).toEqual({
+      runId: "run-1", lectureTitle: null, lectureMarkdown: "BRIEFING", solved: false,
+      checks: [
+        { key: "p1", machine: "web", title: "Serve it", description: null, status: "verified", optional: false },
+        { key: "p2", machine: "web", title: "Repair objective 2", description: null, status: "needs_repair", optional: false },
+        { key: "p3", machine: "web", title: "Repair objective 3", description: null, status: "checking", optional: false },
+      ],
+      hints: [
+        { key: "probe:web:p1:0", checkKey: "p1", title: null, revealed: false, unlocked: true, bodyMarkdown: null },
+        { key: "scenario:0", checkKey: null, title: "T", revealed: true, unlocked: false, bodyMarkdown: "B" },
+      ],
+      solution: { unlocked: false, revealed: false, assisted: false, bodyMarkdown: null },
+    });
+  });
+
+  it("lists the learner's runs, recaps any of them and serves their artifacts, to that learner only", async () => {
+    const mine = await token("mine", LEARNER);
+    const theirs = await token("theirs", STRANGER);
+    type Recap = { runId: string; kind: string; heading: string; description: string; solveDurationMs: number | null;
+      hintsRevealed: number; solutionUsed: boolean; checks: unknown[]; replay: string; replayParts: unknown[] };
+    const history = async (secret: string | null) => {
+      const response = await localRunHistoryRequest(call(secret), channelEnv);
+      return { status: response.status, ...(await response.json() as { protocol: number; runs: Array<Record<string, unknown>> }) };
+    };
+    const recap = async (runId: string, secret: string | null = mine) => {
+      const response = await localRunRecapRequest(call(secret, {}, `/api/local/runs/${runId}/recap`), runId, channelEnv);
+      return { status: response.status, ...(await response.json() as { protocol: number; code?: string; recap: Recap }) };
+    };
+    const artifact = (runId: string, artifactId: string, secret: string | null = mine) =>
+      localRunArtifactRequest(call(secret, {}, `/api/local/runs/${runId}/artifacts/${artifactId}`), runId, artifactId, channelEnv);
+    const end = (runId: string, secret = mine) =>
+      localRunRequest(call(secret, { method: "POST" }, `/api/local/runs/${runId}/end`), runId, "end");
+
+    // Ended before any check passed, then moved off the learner's computer.
+    const early = (await view(await start(mine))).run;
+    expect((await end(early.runId)).status).toBe(200);
+    // Solved with a hint and the solution revealed.
+    const solved = (await view(await start(mine, {}, "desktop-key-2"))).run;
+    const learning = (path: string, body: unknown) => localRunLearningRequest(call(mine, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    }, `/api/local/runs/${solved.runId}/${path}`), solved.runId, path === "solution/reveal" ? "solution" : "hint");
+    const { learning: panel } = await (await localRunLearningRequest(call(mine), solved.runId, "read")).json() as
+      { learning: { hints: Array<{ key: string; unlocked: boolean }> } };
+    expect((await learning("hints/reveal", { protocol: 1, hintKey: panel.hints.find((hint) => hint.unlocked)!.key })).status).toBe(200);
+    expect((await learning("solution/reveal", {})).status).toBe(200);
+    const t0 = Date.now();
+    const passed = (id: string) => [{ id, status: "pass" as const, message: "", passed_at_unix_ms: t0 }];
+    expect((await reportLocalRunRequest(call(mine, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ protocol: 1, vms: [
+        vmState(solved.runId, "web", labState("ready", passed("serve")), t0),
+        vmState(solved.runId, "client", labState("ready", passed("fetch")), t0),
+      ] }),
+    }, `/api/local/runs/${solved.runId}/report`), solved.runId)).status).toBe(200);
+    expect((await end(solved.runId)).status).toBe(200);
+    const strangers = (await view(await start(theirs, {}, "desktop-key-3"))).run;
+    await env.DB.prepare("UPDATE scenario_runs SET created_at = 1000, runtime = 'host' WHERE run_id = ?1").bind(early.runId).run();
+    await env.DB.prepare("UPDATE scenario_runs SET created_at = 2000 WHERE run_id = ?1").bind(solved.runId).run();
+
+    // Signed out, every route refuses.
+    expect((await history(null)).status).toBe(401);
+    expect((await recap(solved.runId, null)).status).toBe(401);
+    expect((await artifact(solved.runId, "a1", null)).status).toBe(401);
+
+    // Only the caller's runs, newest first, local or not.
+    const listed = await history(mine);
+    expect(listed.protocol).toBe(1);
+    expect(listed.runs.map((run) => run.runId)).toEqual([solved.runId, early.runId]);
+    expect(listed.runs[0]).toMatchObject({ scenarioId: "intar/web", organizationId: null, local: true, active: false,
+      outcome: "succeeded", activity: "settled", createdAt: 2000, solutionAssisted: true, hasReplay: false });
+    expect(listed.runs[1]).toMatchObject({ local: false, outcome: "cancelled", solvedAt: null, solveDurationMs: null });
+    expect(Object.keys(listed.runs[0]!).sort()).toEqual(["active", "activity", "createdAt", "finishedAt", "hasReplay",
+      "local", "organizationId", "outcome", "runId", "scenarioId", "solutionAssisted", "solveDurationMs", "solvedAt", "title"]);
+
+    const won = await recap(solved.runId);
+    expect(won).toMatchObject({ status: 200, protocol: 1, recap: { runId: solved.runId, kind: "solved", heading: "Solved",
+      hintsRevealed: 1, solutionUsed: true, replay: "none", replayParts: [] } });
+    // A task run keeps no objectives; its final checks are its tasks.
+    expect(won.recap.checks).toMatchObject([
+      { key: "serve", machine: "web", status: "verified", description: TASK_BODY },
+      { key: "fetch", machine: "client", status: "verified", description: null },
+    ]);
+    expect(won.recap.solveDurationMs).toBeGreaterThanOrEqual(0);
+    const quit = await recap(early.runId);
+    expect(quit.recap).toMatchObject({ kind: "ended_early", heading: "Ended early",
+      description: "You can try this scenario again when you are ready.", hintsRevealed: 0, solutionUsed: false, solveDurationMs: null });
+
+    // Another learner's run answers like an unknown one.
+    expect(await recap(strangers.runId)).toMatchObject({ status: 404, code: "run_not_found" });
+    expect(await recap("unknown-run")).toMatchObject({ status: 404, code: "run_not_found" });
+
+    await drizzle(env.DB).insert(scenarioRunArtifacts).values([solved.runId, strangers.runId].map((runId) => ({
+      id: `${runId}:cast`, runId, vmId: `${runId}-vm`, ordinal: 0, kind: "ssh_recording_segment", filename: "session.cast",
+      contentType: "application/x-asciicast", sizeBytes: 5, sha256: "a".repeat(64), r2Key: `runs/${runId}/cast`,
+      uploadStatus: "uploaded", uploadedAt: Date.now(),
+    })));
+    for (const runId of [solved.runId, strangers.runId]) await env.VM_RUN_ARTIFACTS_BUCKET.put(`runs/${runId}/cast`, "cast\n");
+    const served = await artifact(solved.runId, `${solved.runId}:cast`);
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe("cast\n");
+    expect((await artifact(strangers.runId, `${strangers.runId}:cast`)).status).toBe(404);
+    expect((await artifact(strangers.runId, `${strangers.runId}:cast`, theirs)).status).toBe(200);
+  });
+
+  it("recaps a probe run's final checks and replay as the website does, and nothing more", () => {
+    const probe = (id: string, status: string) => ({ id, label: "RAW-LABEL", kind: "http", phase: "scenario" as const, status, error: "RAW-ERROR", value: "RAW-VALUE" });
+    const session = (index: number, castArtifactId: string | null) => ({
+      index, startTimestampMs: index, durationMs: 1, exitCode: 0, castFilename: "RAW-FILE.cast", castArtifactId, transcriptTruncated: false,
+    });
+    const vm = (id: string, name: string, ordinal: number, probes: unknown[], sessions: unknown[]) => ({
+      id, ordinal, scenarioVmId: name, scenarioVmName: name, runtimeVmName: "RAW-RUNTIME", phase: "completed",
+      scenarioProbes: probes, bootProbes: [], sessionTimeline: sessions,
+      replayArtifacts: [{ id: `${id}-a`, sizeBytes: 42 }],
+    });
+    const recap = localRunRecap({
+      id: "run-1", scenarioId: "intar/web", title: "Web", phase: "completed", phaseDetail: "RAW-DETAIL",
+      activity: "settled", outcome: "succeeded", solvedAt: 5, solveDurationMs: 4, replayState: "ready",
+      objectives: [
+        { probeName: "p1", vmName: "web", label: "P1", title: "Serve it", bodyMarkdown: "SECRET", hintCount: 0 },
+        { probeName: "p2", vmName: "client", label: "P2", title: null, bodyMarkdown: null, hintCount: 0 },
+      ],
+      vms: [
+        vm("vm-c", "client", 1, [probe("p2", "fail")], [session(0, "vm-c-a")]),
+        vm("vm-w", "web", 0, [probe("p1", "pass")], [session(0, "vm-w-a"), session(1, null)]),
+      ],
+      replayArtifacts: [],
+      hints: [{ revealed: true }, { revealed: false }, { revealed: true }],
+      solution: { revealed: false, assisted: true },
+    } as unknown as Parameters<typeof localRunRecap>[0]);
+    expect(recap).toEqual({
+      runId: "run-1", scenarioId: "intar/web", title: "Web", kind: "solved", heading: "Solved",
+      description: "You completed this scenario.", solveDurationMs: 4, hintsRevealed: 2, solutionUsed: true,
+      checks: [
+        { key: "objective-1", machine: "web", title: "Serve it", description: null, status: "verified", optional: false },
+        { key: "objective-2", machine: "client", title: "Repair objective 2", description: null, status: "needs_repair", optional: false },
+      ],
+      replay: "ready",
+      replayParts: [
+        { key: "replay-vm-w-a", machineLabel: "web", partLabel: "Part 1", castArtifactId: "vm-w-a", sizeBytes: 42 },
+        { key: "replay-vm-c-a", machineLabel: "client", partLabel: "Part 2", castArtifactId: "vm-c-a", sizeBytes: 42 },
+      ],
+    });
+    expect(JSON.stringify(recap)).not.toMatch(/RAW-|SECRET/);
   });
 
   it("signs the app in through the provider with the client a deploy seeds", async () => {

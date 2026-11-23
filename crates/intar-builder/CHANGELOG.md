@@ -1,5 +1,15 @@
 # Changelog
 
+## builder/v0.22.0 (2026-11-23)
+
+### Breaking changes
+
+- **intar-image-scenario:** [**breaking**] Refuse a scenario that no lecture names (#504) (b892d147)
+
+### Bug fixes
+
+- **deps:** Bump url past RUSTSEC-2026-0592 (#511) (03319a5a)
+
 ## builder/v0.21.0 (2026-11-21)
 
 ### Features

@@ -11,12 +11,15 @@ use url::Url;
 
 use crate::local::Local;
 use crate::secrets::Keychain;
-use crate::state::{Command, Event, MachineStatus};
+use crate::state::{Command, Event, History, Learn, MachineStatus};
 use crate::terminal::{self, Size};
 use crate::update::{self, Offer};
 
 /// How often the running machine's reports are looked at.
 const MACHINE_POLL: Duration = Duration::from_millis(300);
+/// The largest replay part the app plays, as the website's
+/// `MAX_INLINE_REPLAY_BYTES`.
+pub const MAX_REPLAY_BYTES: usize = 2 * 1024 * 1024;
 /// How long the learner has to finish in the browser.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -75,8 +78,18 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             // run from being closed as silent. A report that cannot be sent
                             // is not queued: Kino repeats its latest every ten seconds.
                             if let (Some(vm), Some(reporting)) = (polled.report, channel.clone()) {
-                                let closed = match reporting.report(&vm.run_id.clone(), vec![vm]).await {
-                                    Ok(answer) => (!answer.run.active).then_some(Event::Run(answer.run)),
+                                let run_id = vm.run_id.clone();
+                                let closed = match reporting.report(&run_id, vec![vm]).await {
+                                    // The report may have verified a check: the learning
+                                    // panel follows. A refresh that fails waits for the next.
+                                    Ok(answer) if answer.run.active => {
+                                        let refreshed = learn(&reporting, Learn::Run { run_id }).await;
+                                        if matches!(refreshed, Event::Learning(_)) && outbox.send(refreshed).is_err() {
+                                            break;
+                                        }
+                                        None
+                                    }
+                                    Ok(answer) => Some(Event::Run(answer.run)),
                                     // intar closed the run: its machine stops.
                                     Err(Error::Refused { run: Some(run), .. }) => Some(Event::Run(*run)),
                                     Err(Error::SignedOut) => Some(Event::SignedOut),
@@ -147,6 +160,14 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             })
                             .await
                         }
+                        Command::Learn(call) => match &channel {
+                            None => Event::SignedOut,
+                            Some(channel) => learn(channel, call).await,
+                        },
+                        Command::History(call) => match &channel {
+                            None => Event::SignedOut,
+                            Some(channel) => history(channel, call).await,
+                        },
                         Command::ReadRun { run_id } => run_event(&channel, async |channel| channel.run(&run_id).await).await,
                         Command::EndRun { run_id } => run_event(&channel, async |channel| channel.end_run(&run_id).await).await,
                         // A check that fails offers nothing; the next launch asks again.
@@ -216,6 +237,11 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                     // The new app is starting. Whatever was asked while it was installed
                     // is not begun: a run started now would be left without its app.
                     let restarting = matches!(event, Event::Restart);
+                    // A run that opens brings what it teaches.
+                    let opened = match (&event, &channel) {
+                        (Event::Run(run), Some(channel)) if run.active => Some((run.run_id.clone(), channel.clone())),
+                        _ => None,
+                    };
                     if outbox.send(event).is_err() || restarting {
                         break;
                     }
@@ -226,7 +252,13 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             break;
                         }
                     }
+                    if let Some((run_id, channel)) = opened
+                        && !quiet_send(&outbox, learn(&channel, Learn::Run { run_id }).await)
+                    {
+                        break;
+                    }
                     if let Some((run, channel)) = boot {
+                        let learning = channel.clone();
                         let _ = outbox.send(Event::Machine(MachineStatus::Starting));
                         let downloaded = |done, total| {
                             let _ = outbox.send(Event::Machine(MachineStatus::Downloading { done, total }));
@@ -240,18 +272,29 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                                 tokio::select! {
                                     status = &mut start => break Some(status),
                                     command = inbox.recv() => {
-                                        let stop = !matches!(
-                                            command,
-                                            Some(
-                                                Command::LoadCatalog
-                                                    | Command::ReadRun { .. }
-                                                    | Command::Restore
-                                                    | Command::CheckUpdate
-                                                    | Command::InstallUpdate
-                                            )
-                                        );
-                                        waiting.extend(command);
-                                        if stop {
+                                        // What the learner reads does not wait for the machine.
+                                        let answer = match command {
+                                            Some(Command::Learn(call)) => learn(&learning, call).await,
+                                            Some(Command::History(call)) => history(&learning, call).await,
+                                            other => {
+                                                let stop = !matches!(
+                                                    other,
+                                                    Some(
+                                                        Command::LoadCatalog
+                                                            | Command::ReadRun { .. }
+                                                            | Command::Restore
+                                                            | Command::CheckUpdate
+                                                            | Command::InstallUpdate
+                                                    )
+                                                );
+                                                waiting.extend(other);
+                                                if stop {
+                                                    break None;
+                                                }
+                                                continue;
+                                            }
+                                        };
+                                        if !quiet_send(&outbox, answer) {
                                             break None;
                                         }
                                     }
@@ -311,6 +354,75 @@ async fn sign_in(
     Ok(Subspace::new(http.clone(), base.clone(), tokens))
 }
 
+/// One call about what the learner reads, as the event the UI gets.
+async fn learn(channel: &Subspace, call: Learn) -> Event {
+    let answer = match call {
+        Learn::Lecture(at) => channel
+            .lecture(&at.course_id, &at.lecture_id, at.organization_id.as_deref())
+            .await
+            .map(Event::Lecture),
+        Learn::CompleteLecture(at) => channel
+            .complete_lecture(&at.course_id, &at.lecture_id, at.organization_id.as_deref())
+            .await
+            .map(Event::Lecture),
+        Learn::Run { run_id } => channel
+            .learning(&run_id)
+            .await
+            .map(|answer| Event::Learning(answer.learning)),
+        Learn::RevealHint { run_id, hint_key } => channel
+            .reveal_hint(&run_id, &hint_key)
+            .await
+            .map(|answer| Event::Learning(answer.learning)),
+        Learn::RevealSolution { run_id } => channel
+            .reveal_solution(&run_id)
+            .await
+            .map(|answer| Event::Learning(answer.learning)),
+    };
+    answer.unwrap_or_else(failed)
+}
+
+/// One call about the learner's runs, as the event the UI gets.
+async fn history(channel: &Subspace, call: History) -> Event {
+    let answer = match call {
+        History::List => channel
+            .history()
+            .await
+            .map(|history| Event::History(history.runs)),
+        History::Recap { run_id } => channel
+            .recap(&run_id)
+            .await
+            .map(|answer| Event::Recap(answer.recap)),
+        History::Replay {
+            run_id,
+            artifact_id,
+        } => channel
+            .replay(&run_id, &artifact_id, MAX_REPLAY_BYTES)
+            .await
+            .map(|cast| Event::Replay {
+                run_id,
+                artifact_id,
+                cast,
+            }),
+    };
+    answer.unwrap_or_else(failed)
+}
+
+/// Sends an event from beside the engine's main path; false once the window
+/// is gone. A lost sign-in is not said here: the main path forgets the
+/// tokens and stops the machine when its next call hears it.
+fn quiet_send(outbox: &UnboundedSender<Event>, event: Event) -> bool {
+    matches!(event, Event::SignedOut) || outbox.send(event).is_ok()
+}
+
+/// A failed call, in the learner's words.
+fn failed(error: Error) -> Event {
+    match error {
+        Error::SignedOut => Event::SignedOut,
+        Error::Refused { message, .. } if !message.is_empty() => Event::Failed(message),
+        error => Event::Failed(error.to_string()),
+    }
+}
+
 /// One call about a run, as the event the UI gets.
 async fn run_event(
     channel: &Option<Arc<Subspace>>,
@@ -321,10 +433,8 @@ async fn run_event(
     };
     match call(channel).await {
         Ok(answer) => Event::Run(answer.run),
-        Err(Error::SignedOut) => Event::SignedOut,
         // A run the server has closed is still the run to show.
         Err(Error::Refused { run: Some(run), .. }) => Event::Run(*run),
-        Err(Error::Refused { message, .. }) if !message.is_empty() => Event::Failed(message),
-        Err(error) => Event::Failed(error.to_string()),
+        Err(error) => failed(error),
     }
 }

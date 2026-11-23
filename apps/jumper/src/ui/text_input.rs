@@ -84,6 +84,8 @@ pub struct TextInput {
     is_selecting: bool,
     /// Draws a red border (an address field that does not parse).
     invalid: bool,
+    /// An icon before the text, such as the search glass.
+    icon: Option<&'static str>,
 }
 
 impl TextInput {
@@ -105,7 +107,14 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             invalid: false,
+            icon: None,
         }
+    }
+
+    /// Puts `icon` (one of `assets/icons`) before the text.
+    pub fn with_icon(mut self, icon: &'static str) -> Self {
+        self.icon = Some(icon);
+        self
     }
 
     pub fn text(&self) -> &str {
@@ -800,6 +809,13 @@ impl Render for TextInput {
             .line_height(px(18.))
             .text_size(px(14.))
             .text_color(rgb(pal.text))
+            .when_some(self.icon, |field, icon| {
+                field
+                    .items_center()
+                    .gap(px(8.))
+                    .pl(px(11.))
+                    .child(super::kit::icon(icon, 16., pal.disabled))
+            })
             .child(TextElement { input: cx.entity() })
     }
 }

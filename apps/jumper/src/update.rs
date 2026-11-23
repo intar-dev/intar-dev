@@ -204,6 +204,29 @@ fn tool(program: &str, arguments: &[&std::ffi::OsStr]) -> Result<String, Refusal
     }
 }
 
+/// The Apple team that signed `bundle`; none for an ad hoc signature.
+fn team_of(bundle: &Path) -> Result<Option<String>, Refusal> {
+    let output = Command::new("/usr/bin/codesign")
+        .args(["-d", "--verbose=2"])
+        .arg(bundle)
+        .output()?;
+    if !output.status.success() {
+        return Err(Refusal::NotTheUpdate(format!(
+            "the running app's signature: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    // codesign describes a signature on stderr.
+    Ok(team_in(&String::from_utf8_lossy(&output.stderr)).map(str::to_owned))
+}
+
+fn team_in(description: &str) -> Option<&str> {
+    description
+        .lines()
+        .find_map(|line| line.strip_prefix("TeamIdentifier="))
+        .filter(|team| *team != "not set")
+}
+
 /// Puts the app in `zip` in the place of `bundle`, which is version
 /// `running`. The zip must hash to `sha256` and hold a strictly newer app.
 /// On success the returned bundle path is the new app's, ready to be started.
@@ -265,6 +288,21 @@ fn swap(bundle: &Path, running: &str, zip: &Path, staging: &Path) -> Result<(), 
             new.as_os_str(),
         ],
     )?;
+    // From the same team as the running app, once that one has a team: a
+    // signature alone holds for whoever made it.
+    if let Some(team) = team_of(bundle)? {
+        let requirement =
+            format!("-R=anchor apple generic and certificate leaf[subject.OU] = \"{team}\"");
+        tool(
+            "/usr/bin/codesign",
+            &[
+                "--verify".as_ref(),
+                "--strict".as_ref(),
+                requirement.as_ref(),
+                new.as_os_str(),
+            ],
+        )?;
+    }
     let program = std::env::current_exe()?
         .file_name()
         .map(|program| new.join("Contents").join("MacOS").join(program))
@@ -319,7 +357,7 @@ mod tests {
 
     use subspace::contract::AppReleaseV1;
 
-    use super::{Offer, Refusal, bundle_of, exchange, version};
+    use super::{Offer, Refusal, bundle_of, exchange, team_in, version};
 
     #[test]
     fn a_swap_that_fails_leaves_the_app_where_it_was() {
@@ -401,6 +439,14 @@ mod tests {
             )),
             Err(Refusal::Translocated)
         ));
+    }
+
+    #[test]
+    fn reads_the_signing_team_and_none_for_an_ad_hoc_signature() {
+        let signed = "Identifier=dev.intar.jumper\nAuthority=Developer ID Application: A (AB12CD34EF)\nTeamIdentifier=AB12CD34EF\n";
+        assert_eq!(team_in(signed), Some("AB12CD34EF"));
+        assert_eq!(team_in("Signature=adhoc\nTeamIdentifier=not set\n"), None);
+        assert_eq!(team_in("Signature=adhoc\n"), None);
     }
 
     #[test]

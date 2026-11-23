@@ -7,10 +7,24 @@
 # dist/, since a release uploads every file there. A release sets VERSION to
 # the version it publishes.
 #
-# The bundle is signed ad hoc. The QEMU in it is the pinned set, with the
-# signature and the hypervisor entitlement it was published with: signing it
-# again, or the bundle with --deep, would take the entitlement away, and macOS
-# then refuses it the hypervisor.
+# How the bundle is signed:
+#   - With MACOS_CERT_P12_BASE64 and MACOS_CERT_PASSWORD (release.yml, from the
+#     macos-signing environment): with that Developer ID Application, or
+#     self-signed code-signing, certificate, imported into a keychain of the build's own, and the
+#     hardened runtime; with ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8, an App
+#     Store Connect API key, it is notarized and the ticket stapled.
+#     With MACOS_PROVISIONING_PROFILE_BASE64, a Developer ID provisioning
+#     profile for dev.intar.jumper, the profile is embedded and the app signed
+#     with its keychain access group, so it keeps the sign-in in the protected
+#     keychain (apps/jumper/src/secrets.rs); without it, in the login keychain.
+#   - With SIGN_IDENTITY: with that identity from the login keychain, say a
+#     self-signed one, so a local build keeps its keychain access across
+#     builds. Not notarized.
+#   - Otherwise ad hoc.
+# The QEMU in it is the pinned set. Signed ad hoc, it keeps the signature and
+# the hypervisor entitlement it was published with; with an identity it is
+# signed again with that entitlement given back, never through --deep, which
+# would take the entitlement away, and macOS then refuses it the hypervisor.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "${here}/../../.." && pwd)"
@@ -19,6 +33,8 @@ cd "${root}"
 
 # The oldest macOS the bundled QEMU runs on (tools/workflows/qemu/build.sh).
 export MACOSX_DEPLOYMENT_TARGET=13.0
+# The paths below are in the workspace's target directory, whatever the shell sets.
+export CARGO_TARGET_DIR="${root}/target"
 cargo build --locked --release -p jumper --bin jumper
 built="target/release/jumper"
 version="$("${built}" --version | sed -n 's/^jumper //p')"
@@ -100,11 +116,100 @@ cat > "${app}/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "${app}/Contents/Info.plist" > /dev/null
 
-# The bundle alone: its helpers are sealed in as they are.
-codesign --force --sign - --identifier dev.intar.jumper "${app}"
+identity="${SIGN_IDENTITY:-}"
+if [ -n "${MACOS_CERT_P12_BASE64:-}" ]; then
+  [ -n "${MACOS_CERT_PASSWORD:-}" ] || { echo "MACOS_CERT_P12_BASE64 is set without MACOS_CERT_PASSWORD." >&2; exit 1; }
+  keychain="${scratch}/signing.keychain-db"
+  keychain_password="$(openssl rand -hex 24)"
+  searched="$(security list-keychains -d user | tr -d '"')"
+  trap 'security list-keychains -d user -s ${searched}; security delete-keychain "${keychain}" 2> /dev/null; rm -rf "${scratch}"' EXIT
+  security create-keychain -p "${keychain_password}" "${keychain}"
+  security set-keychain-settings -lut 3600 "${keychain}"
+  security unlock-keychain -p "${keychain_password}" "${keychain}"
+  base64 --decode <<< "${MACOS_CERT_P12_BASE64}" > "${scratch}/certificate.p12"
+  security import "${scratch}/certificate.p12" -k "${keychain}" -f pkcs12 -P "${MACOS_CERT_PASSWORD}" -T /usr/bin/codesign > /dev/null
+  rm "${scratch}/certificate.p12"
+  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${keychain_password}" "${keychain}" > /dev/null
+  # shellcheck disable=SC2086 # the keychains searched before, one per word
+  security list-keychains -d user -s "${keychain}" ${searched}
+  # A Developer ID Application identity, or until there is one a self-signed
+  # code-signing one: either keeps the app one identity across releases.
+  identity="$(security find-identity -p codesigning "${keychain}" | awk '/^ *[0-9]+\) [0-9A-F]{40} / {print $2; exit}')"
+  [ -n "${identity}" ] || { echo "The certificate holds no code-signing identity." >&2; exit 1; }
+elif [ -z "${identity}" ] && [ -n "${VERSION:-}" ]; then
+  echo "::warning::No signing certificate: the app is signed ad hoc." >&2
+fi
+
+if [ -z "${identity}" ]; then
+  # The bundle alone: its helpers are sealed in as they are.
+  codesign --force --sign - --identifier dev.intar.jumper "${app}"
+else
+  notarize="${ASC_KEY_ID:+yes}"
+  # Notarization asks for a secure timestamp; a local build signs without.
+  timestamp="--timestamp"
+  [ -n "${notarize}" ] || timestamp="--timestamp=none"
+  sign=(codesign --force --sign "${identity}" --options runtime "${timestamp}")
+  cat > "${scratch}/qemu.entitlements" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.hypervisor</key><true/>
+</dict>
+</plist>
+PLIST
+  # Inside out: the helpers, then the bundle that seals them.
+  "${sign[@]}" --identifier dev.intar.jumper.qemu-system --entitlements "${scratch}/qemu.entitlements" \
+    "${app}/Contents/Helpers/qemu-system-aarch64"
+  "${sign[@]}" --identifier dev.intar.jumper.qemu-img "${app}/Contents/Helpers/qemu-img"
+  app_entitlements=()
+  if [ -n "${MACOS_PROVISIONING_PROFILE_BASE64:-}" ]; then
+    base64 --decode <<< "${MACOS_PROVISIONING_PROFILE_BASE64}" > "${scratch}/embedded.provisionprofile"
+    security cms -D -i "${scratch}/embedded.provisionprofile" > "${scratch}/profile.plist"
+    profile() { /usr/libexec/PlistBuddy -c "Print :$1" "${scratch}/profile.plist"; }
+    team="$(profile TeamIdentifier:0)"
+    application="${team}.dev.intar.jumper"
+    [ "$(profile Entitlements:com.apple.application-identifier)" = "${application}" ] ||
+      { echo "The provisioning profile is not for ${application}." >&2; exit 1; }
+    cp "${scratch}/embedded.provisionprofile" "${app}/Contents/embedded.provisionprofile"
+    cat > "${scratch}/app.entitlements" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.application-identifier</key><string>${application}</string>
+  <key>com.apple.developer.team-identifier</key><string>${team}</string>
+  <key>keychain-access-groups</key><array><string>${application}</string></array>
+</dict>
+</plist>
+PLIST
+    app_entitlements=(--entitlements "${scratch}/app.entitlements")
+  fi
+  "${sign[@]}" --identifier dev.intar.jumper "${app_entitlements[@]}" "${app}"
+  if [ -n "${notarize}" ]; then
+    : "${ASC_ISSUER_ID:?ASC_KEY_ID is set without ASC_ISSUER_ID}" "${ASC_KEY_P8:?ASC_KEY_ID is set without ASC_KEY_P8}"
+    printf '%s\n' "${ASC_KEY_P8}" > "${scratch}/notary.p8"
+    ditto -c -k --keepParent "${app}" "${scratch}/notarize.zip"
+    notary=(--key "${scratch}/notary.p8" --key-id "${ASC_KEY_ID}" --issuer "${ASC_ISSUER_ID}")
+    echo "Notarizing with Apple: usually minutes, a new team's first submissions can take hours."
+    xcrun notarytool submit "${scratch}/notarize.zip" "${notary[@]}" --wait --timeout 1h \
+      --output-format json > "${scratch}/notarized.json"
+    submission="$(plutil -extract id raw "${scratch}/notarized.json")"
+    if [ "$(plutil -extract status raw "${scratch}/notarized.json")" != "Accepted" ]; then
+      xcrun notarytool log "${submission}" "${notary[@]}" >&2 || true
+      echo "Apple did not notarize the app (submission ${submission})." >&2; exit 1
+    fi
+    rm "${scratch}/notary.p8" "${scratch}/notarize.zip"
+    xcrun stapler staple "${app}"
+    spctl --assess --type execute --verbose=2 "${app}" 2>&1 | grep -q "source=Notarized Developer ID" ||
+      { echo "Gatekeeper does not accept the app as notarized." >&2; exit 1; }
+  fi
+fi
 codesign --verify --strict --deep "${app}"
 codesign --display --entitlements - "${app}/Contents/Helpers/qemu-system-aarch64" 2>&1 | grep -q com.apple.security.hypervisor ||
   { echo "The bundled QEMU lost its hypervisor entitlement." >&2; exit 1; }
+# Also what refuses a bundle whose entitlements its profile does not allow:
+# macOS kills such a program at launch.
 [ "$("${app}/Contents/MacOS/jumper" --version)" = "jumper ${version}" ] ||
   { echo "The bundled app does not report version ${version}." >&2; exit 1; }
 # Nothing but what macOS ships may be needed.

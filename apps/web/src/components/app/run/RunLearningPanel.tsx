@@ -49,7 +49,9 @@ import {
 import { cn } from "@/lib/utils";
 import {
   isVerificationPassed,
+  learnerCheckStatus,
   repairObjectiveTitle,
+  type LearnerCheckStatus,
 } from "@/lib/verification-copy";
 import type {
   ScenarioObjective,
@@ -121,10 +123,7 @@ export interface RunLearningTriggerCopy {
   accessibleLabel: string;
 }
 
-export type LearnerCheckStatus =
-  | "verified"
-  | "checking"
-  | "needs_repair";
+export type { LearnerCheckStatus };
 
 export interface LearnerCheck {
   /** React identity only. Never render this internal value. */
@@ -1472,15 +1471,6 @@ function groupHints(
 
 function countPassedChecks(probes: readonly ScenarioProbeStatus[]) {
   return probes.filter((probe) => isVerificationPassed(probe.status)).length;
-}
-
-function learnerCheckStatus(status: string): LearnerCheckStatus {
-  if (isVerificationPassed(status)) return "verified" as const;
-  return ["", "pending", "unknown", "queued", "checking"].includes(
-    status.trim().toLowerCase(),
-  )
-    ? ("checking" as const)
-    : ("needs_repair" as const);
 }
 
 function learnerCheckStatusLabel(

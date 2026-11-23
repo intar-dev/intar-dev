@@ -1,6 +1,12 @@
 //! The sign-in, kept in the OS keychain and never on disk: the macOS
 //! Keychain, the Windows Credential Manager, or the Secret Service on Linux.
 //! One entry per intar the app talks to.
+//!
+//! On macOS a release signed with the Developer ID and its provisioning
+//! profile keeps it in the protected (data protection) keychain, in the
+//! app's own access group: no prompt, whoever signed the build before. Any
+//! other build lacks the entitlement for that store and keeps it in the login
+//! keychain, which asks once per signer.
 
 use std::sync::OnceLock;
 
@@ -16,7 +22,7 @@ fn ensure_store() -> Result<(), String> {
     STORE
         .get_or_init(|| {
             #[cfg(target_os = "macos")]
-            let store = apple_native_keyring_store::keychain::Store::new();
+            let store = macos_store();
             #[cfg(target_os = "windows")]
             let store = windows_native_keyring_store::Store::new();
             #[cfg(target_os = "linux")]
@@ -25,6 +31,26 @@ fn ensure_store() -> Result<(), String> {
             Ok(())
         })
         .clone()
+}
+
+/// The protected store when this build may use it, else the login keychain.
+#[cfg(target_os = "macos")]
+fn macos_store() -> keyring_core::Result<std::sync::Arc<keyring_core::CredentialStore>> {
+    let protected = apple_native_keyring_store::protected::Store::new()?;
+    // Without the keychain-access-groups entitlement the store refuses a
+    // delete (errSecMissingEntitlement), while a read only finds nothing. The
+    // probe item is never written, so the delete never removes anything.
+    let probe = keyring_core::api::CredentialStoreApi::build(
+        protected.as_ref(),
+        SERVICE,
+        "store-probe",
+        None,
+    )?
+    .delete_credential();
+    match probe {
+        Ok(_) | Err(keyring_core::Error::NoEntry) => Ok(protected),
+        Err(_) => Ok(apple_native_keyring_store::keychain::Store::new()?),
+    }
 }
 
 pub struct Keychain {

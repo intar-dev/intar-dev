@@ -1,6 +1,6 @@
 [package]
 name = "jumper"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 # src/ui/theme.rs and src/ui/text_input.rs are Apache-2.0 (LICENSE-APACHE).
 license = "MIT AND Apache-2.0"
@@ -22,6 +22,8 @@ intar-contracts = { path = "../../crates/intar-contracts" }
 keyring-core.workspace = true
 # The terminal's SSH connection to the guest.
 russh.workspace = true
+# Course markdown (bodies, theory, hints, solutions).
+pulldown-cmark.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 serde_json.workspace = true
 # Downloads are checked against their digests; disk chunks are zstd.
@@ -45,7 +47,7 @@ tempfile.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # runtime_shaders: builds without the Metal compiler that only full Xcode ships.
 gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders"] }
-apple-native-keyring-store.workspace = true
+apple-native-keyring-store = { workspace = true, features = ["protected"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = { workspace = true, features = ["wayland", "x11"] }

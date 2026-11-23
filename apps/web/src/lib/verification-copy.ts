@@ -29,6 +29,16 @@ export function isVerificationPassed(status: string | null | undefined) {
   }
 }
 
+export type LearnerCheckStatus = "verified" | "checking" | "needs_repair";
+
+/** A check's status as the learning panel shows it. */
+export function learnerCheckStatus(status: string): LearnerCheckStatus {
+  if (isVerificationPassed(status)) return "verified";
+  return ["", "pending", "unknown", "queued", "checking"].includes(status.trim().toLowerCase())
+    ? "checking"
+    : "needs_repair";
+}
+
 export function buildVerificationLabelMap(input: {
   bootProbeIds: readonly string[];
   scenarioProbeIds: readonly string[];

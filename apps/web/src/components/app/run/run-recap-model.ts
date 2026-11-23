@@ -4,10 +4,11 @@ import {
   isVerificationPassed,
   repairObjectiveTitle,
 } from "@/lib/verification-copy";
-import type {
-  ScenarioObjective,
-  ScenarioRunRecord,
-  ScenarioRunVmRecord,
+import {
+  runTaskChecks,
+  type ScenarioObjective,
+  type ScenarioRunRecord,
+  type ScenarioRunVmRecord,
 } from "./run-types";
 
 export type RunRecapState =
@@ -116,12 +117,14 @@ export function getRunRecapState(run: ScenarioRunRecord): RunRecapState {
 export function getRunRecapObjectives(
   run: ScenarioRunRecord,
 ): RunRecapObjective[] {
-  return run.objectives.map((objective, index) => {
-    const probe = findObjectiveProbe(run, objective);
+  return recapObjectives(run).map((objective, index) => {
+    const status = run.tasks
+      ? run.tasks[index]?.status
+      : findObjectiveProbe(run, objective)?.status;
     return {
       key: `objective-${index + 1}`,
       title: repairObjectiveTitle(objective, index),
-      status: isVerificationPassed(probe?.status)
+      status: isVerificationPassed(status)
         ? "verified"
         : "needs_repair",
     };
@@ -216,6 +219,14 @@ export function getRunReplayAvailability(
   }
 }
 
+/**
+ * The run's final checks: a task run stores no objectives, so its tasks stand
+ * in, one per task, keyed by the task id its casts mark passes with.
+ */
+function recapObjectives(run: ScenarioRunRecord): ScenarioObjective[] {
+  return runTaskChecks(run, null)?.objectives ?? run.objectives;
+}
+
 /** The machines an objective's probe runs on. */
 function objectiveVms(run: ScenarioRunRecord, objective: ScenarioObjective) {
   const matchingVms = run.vms.filter(
@@ -234,7 +245,7 @@ function replayChecks(
   run: ScenarioRunRecord,
   vm: ScenarioRunVmRecord,
 ): RunReplayCheck[] {
-  return run.objectives.flatMap((objective, index) =>
+  return recapObjectives(run).flatMap((objective, index) =>
     objectiveVms(run, objective).includes(vm)
       ? [
           {
