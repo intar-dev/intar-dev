@@ -29,7 +29,7 @@ pub const TALOS_RELEASES: &[(&str, &str)] = &[("v1.14.6", "v1.37.1")];
 /// fixed machine-config patches, pinned assets and bake steps. An input of
 /// every cluster key; bumped with any change to them, so the change rebuilds
 /// every cluster.
-pub const CLUSTER_BAKE_REVISION: &str = "1";
+pub const CLUSTER_BAKE_REVISION: &str = "2";
 pub const MAX_CLUSTERS: usize = 1;
 pub const MAX_CLUSTER_PATCHES: usize = 16;
 /// The smallest disk of a Talos node: room for Talos and the cluster's

@@ -32,8 +32,13 @@ pub(crate) fn endpoint() -> String {
 }
 
 /// Every node: the API also answers on 127.0.0.1 (the bake's forwards),
-/// fast kubelet start and in-place restart at wake, no KubePrism (a single
-/// control plane; it stalls the kubelet at wake), DHCP on the uplink.
+/// fast kubelet start and in-place restart at wake, DHCP on the uplink.
+/// The kubelet reports status every second, so a node the woken
+/// controller-manager marks NotReady from its baked heartbeat is back at
+/// once. No KubePrism: with one control plane it has nothing to balance, and
+/// Talos health-checks its upstreams only every 20 s (a constant), so the
+/// failed dials before the API server is up stall every client on the node
+/// (kubelet, controller-manager, scheduler, flannel) for up to 20 s at wake.
 fn common() -> String {
     "machine:
   certSANs: [127.0.0.1]
@@ -42,6 +47,7 @@ apiVersion: v1alpha1
 kind: KubeletConfig
 config:
   httpCheckFrequency: 1s
+  nodeStatusUpdateFrequency: 1s
   shutdownGracePeriod: 0s
   shutdownGracePeriodCriticalPods: 0s
 ---
@@ -57,8 +63,11 @@ name: eth1
 }
 
 /// The control plane: etcd on the lab subnet, the API server's certificate
-/// for 127.0.0.1, a long-lived admin kubeconfig, no leader election (one
-/// control plane, no baked lease to wait out at wake), flannel on the lab NIC.
+/// for 127.0.0.1, a long-lived admin kubeconfig, flannel on the lab NIC.
+/// The controller-manager gives up its lease when it stops, as the scheduler
+/// always does, and the API server keeps serving for a few seconds after it
+/// is told to stop, so both releases land during the bake's shutdown (Talos
+/// stops all three at once) and the woken cluster takes the leases at once.
 fn controlplane() -> String {
     let subnet = lab_subnet();
     format!(
@@ -71,16 +80,13 @@ fn controlplane() -> String {
 apiVersion: v1alpha1
 kind: KubeAPIServerConfig
 certExtraSANs: [127.0.0.1]
+extraArgs:
+  shutdown-delay-duration: 5s
 ---
 apiVersion: v1alpha1
 kind: KubeControllerManagerConfig
 extraArgs:
-  leader-elect: \"false\"
----
-apiVersion: v1alpha1
-kind: KubeSchedulerConfig
-extraArgs:
-  leader-elect: \"false\"
+  feature-gates: ControllerManagerReleaseLeaderElectionLockOnExit=true
 ---
 apiVersion: v1alpha1
 kind: KubeFlannelCNIConfig
@@ -91,8 +97,9 @@ extraArgs: [\"--iface=eth0\"]
 
 /// Last on every node: its lab address on eth0 without a gateway, its name,
 /// the node IP and endpoint on the lab subnet, the preinstalled disk kept,
-/// and no time sync: the VM's clock is the host's, and Talos holds etcd and
-/// the kubelet until a sync that a node without egress never gets.
+/// and time sync that does not hold the boot: the VM starts on the host's
+/// clock, and without a boot timeout Talos holds etcd and the kubelet until a
+/// sync that a node without egress never gets. NTP keeps trying behind it.
 fn invariant(name: &str, ip: Ipv4Addr) -> String {
     let subnet = lab_subnet();
     let endpoint = endpoint();
@@ -126,7 +133,7 @@ hostname: {name}
 ---
 apiVersion: v1alpha1
 kind: TimeSyncConfig
-enabled: false
+bootTimeout: 1s
 "
     )
 }
@@ -240,7 +247,7 @@ mod tests {
             "match: disk.dev_path == \"/dev/vda\"",
             "- address: 172.31.0.3/28",
             "hostname: wk1",
-            "kind: TimeSyncConfig\nenabled: false",
+            "kind: TimeSyncConfig\nbootTimeout: 1s",
         ] {
             assert!(patch.contains(expected), "{expected} in {patch}");
         }
@@ -254,13 +261,17 @@ mod tests {
         for expected in [
             "httpCheckFrequency: 1s",
             "shutdownGracePeriod: 0s",
+            "nodeStatusUpdateFrequency: 1s",
             "kind: KubePrismConfig\n$patch: delete",
-            "leader-elect: \"false\"",
+            "feature-gates: ControllerManagerReleaseLeaderElectionLockOnExit=true",
+            "shutdown-delay-duration: 5s",
             "--iface=eth0",
             "advertisedSubnets: [172.31.0.0/28]",
             "certLifetime: 87600h",
         ] {
             assert!(all.contains(expected), "{expected}");
         }
+        // Leader election stays on: the lab keeps Talos's default.
+        assert!(!all.contains("leader-elect"));
     }
 }
