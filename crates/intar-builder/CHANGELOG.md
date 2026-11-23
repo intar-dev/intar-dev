@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.24.0 (2026-11-23)
+
+### Features
+
+- **talos:** Run talos cluster labs on the hosted agent (#528) (22b21dd6)
+
 ## builder/v0.23.1 (2026-11-23)
 
 ### Bug fixes

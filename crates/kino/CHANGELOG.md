@@ -1,5 +1,11 @@
 # Changelog
 
+## kino/v0.14.0 (2026-11-23)
+
+### Features
+
+- **talos:** Run talos cluster labs on the hosted agent (#528) (22b21dd6)
+
 ## kino/v0.13.1 (2026-11-23)
 
 ### Bug fixes
