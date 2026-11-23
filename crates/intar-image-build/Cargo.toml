@@ -16,8 +16,9 @@ fs2.workspace = true
 intar-contracts = { path = "../intar-contracts" }
 russh.workspace = true
 rustix.workspace = true
-reqwest = { workspace = true, features = ["blocking", "rustls"] }
+reqwest = { workspace = true, features = ["blocking", "rustls-no-provider"] }
 ring.workspace = true
+rustls = { workspace = true, features = ["ring", "std"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

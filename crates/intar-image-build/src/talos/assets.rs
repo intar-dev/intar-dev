@@ -189,6 +189,8 @@ fn fetch(path: &Path, url: &str, sha256: &str) -> Result<PathBuf> {
     }
     let dir = path.parent().context("cache file has a directory")?;
     let mut partial = tempfile::NamedTempFile::new_in(dir)?;
+    // reqwest has no crypto provider of its own; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let mut response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30 * 60))
         .build()?
