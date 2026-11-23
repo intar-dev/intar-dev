@@ -344,7 +344,7 @@ pub(crate) mod tests {
         scenario.machines[0].cluster = member(ClusterRole::Management);
         scenario.clusters = vec![ClusterV1 {
             name: "lab".to_owned(),
-            talos: "v1.14.6".to_owned(),
+            talos: "v1.15.0-beta.0".to_owned(),
             kubernetes: "v1.37.1".to_owned(),
             patches: Vec::new(),
         }];

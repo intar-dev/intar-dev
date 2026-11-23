@@ -91,7 +91,7 @@ describe("readSourceBundle", () => {
       cluster: { cluster: "lab", role: "controlplane" },
     });
     mgmt!.cluster = { cluster: "lab", role: "management" };
-    scenario.clusters = [{ name: "lab", talos: "v1.14.6", kubernetes: "v1.37.1", patches: [] }];
+    scenario.clusters = [{ name: "lab", talos: "v1.15.0-beta.0", kubernetes: "v1.37.1", patches: [] }];
     expect(validateBundle(value)).toEqual([]);
     await expect(readSourceBundle(gz(value))).rejects.toMatchObject({
       status: 400,

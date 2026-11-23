@@ -24,12 +24,12 @@ pub const TALOS_BASE_IMAGE: &str = "talos";
 /// The Talos and Kubernetes releases a cluster may name, as
 /// `(talos, kubernetes)`. The builder pins each pair's assets by digest, so a
 /// pair is added here together with its pins.
-pub const TALOS_RELEASES: &[(&str, &str)] = &[("v1.14.6", "v1.37.1")];
+pub const TALOS_RELEASES: &[(&str, &str)] = &[("v1.15.0-beta.0", "v1.37.1")];
 /// What the builder bakes into a cluster besides the scenario's inputs: its
 /// fixed machine-config patches, pinned assets and bake steps. An input of
 /// every cluster key; bumped with any change to them, so the change rebuilds
 /// every cluster.
-pub const CLUSTER_BAKE_REVISION: &str = "3";
+pub const CLUSTER_BAKE_REVISION: &str = "4";
 pub const MAX_CLUSTERS: usize = 1;
 pub const MAX_CLUSTER_PATCHES: usize = 16;
 /// The smallest disk of a Talos node: room for Talos and the cluster's
@@ -88,7 +88,7 @@ pub struct ScenarioV1 {
 #[serde(deny_unknown_fields)]
 pub struct ClusterV1 {
     pub name: String,
-    /// The Talos release, e.g. `v1.14.6`; with `kubernetes` one of
+    /// The Talos release, e.g. `v1.15.0-beta.0`; with `kubernetes` one of
     /// [`TALOS_RELEASES`].
     pub talos: String,
     /// The Kubernetes release, e.g. `v1.37.1`.
@@ -1115,7 +1115,7 @@ mod tests {
         scenario.tasks = vec![task("nodes-ready", "mgmt", &[], true)];
         scenario.clusters = vec![ClusterV1 {
             name: "lab".to_owned(),
-            talos: "v1.14.6".to_owned(),
+            talos: "v1.15.0-beta.0".to_owned(),
             kubernetes: "v1.37.1".to_owned(),
             patches: vec![script("ntp")],
         }];

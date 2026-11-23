@@ -20,52 +20,52 @@ const KUBERNETES_RELEASE_URL: &str = "https://dl.k8s.io/release";
 /// `sha256sum.txt`.
 const TALOS_FILES: &[(&str, &str, &str)] = &[
     (
-        "v1.14.6",
+        "v1.15.0-beta.0",
         "vmlinuz-amd64",
-        "5ad47a99265ba0031f0ff44afce78c6efe99cfdec0fc76d64b3e426a2f100c2c",
+        "83fff3595e082abc40f7839e067d5bec7157c0bfe0ef5d256f0728e1404c1665",
     ),
     (
-        "v1.14.6",
+        "v1.15.0-beta.0",
         "vmlinuz-arm64",
-        "ae8b90c11bb47655f689c37a8bfdff4ff47338f54904982857c06b0d42d94cdd",
+        "0876970ef4a274bfea572ac7e13508caf772d88c95e551c00fd7ca18f7c23915",
     ),
     (
-        "v1.14.6",
+        "v1.15.0-beta.0",
         "initramfs-amd64.xz",
-        "201a04c9410cb56004bc1ea70bec593c3e7c42b561a47465c7b99985ab31ee06",
+        "3702bfb39a5c8dd2ea152868ea1204eed8e01d322bed772855f6f55ca8a18627",
     ),
     (
-        "v1.14.6",
+        "v1.15.0-beta.0",
         "initramfs-arm64.xz",
-        "65b258cff48b70384ffaadf46179073cac1a098cfbc78cd607a1b65584501189",
+        "247ec615ec521d1d77d4bc27f0512b208bfc9068dcf1ecf7ade45f24eb78f119",
     ),
     (
-        "v1.14.6",
+        "v1.15.0-beta.0",
         "metal-amd64.raw.zst",
-        "b592972383a06af588e9e64554c8ab5705a219bbabfda9ab4bdf6e9a1fb24c53",
+        "72b5f01901906c0f3eeb511d925f1a39e18c414ce912a46210fb124047d63807",
     ),
     (
-        "v1.14.6",
+        "v1.15.0-beta.0",
         "metal-arm64.raw.zst",
-        "09d509fc186e5b31253e978559e4df856235c165a311743f972e3f4edab1a4eb",
+        "683a1378a466893bebac3775d185a19f8831270cec2b7d3b7e01219ceee4bc21",
     ),
     (
-        "v1.14.6",
+        "v1.15.0-beta.0",
         "talosctl-linux-amd64",
-        "11acde7f7578ffe9cbe6fb8349b34595065f597de0842615982e350b365de987",
+        "cc4f2483dc3a137840690aa925460ef3a45eeffbb9292675b4f417d7489cbe64",
     ),
     (
-        "v1.14.6",
+        "v1.15.0-beta.0",
         "talosctl-linux-arm64",
-        "fd22e0678d783105646d824c23ee45cf7a57f737edae274ca41376d03a4def65",
+        "f7595189b1ce7fa2a0b1c6dc0bb0bdd33a9c7d3be69dad8805ddf05852143e07",
     ),
 ];
 
 /// `(talos, sha256)` of the arm64 kernel unpacked from its EFI zboot
 /// wrapper, which QEMU's direct boot cannot load.
 const ARM64_IMAGES: &[(&str, &str)] = &[(
-    "v1.14.6",
-    "6e4955e8d65c69a5710aa670ebd22c1fc059c4c1d299f1ba2b1977c4a4d3cf2e",
+    "v1.15.0-beta.0",
+    "e75b1082f489d0009d3314afbf276bc6576461df810eef1e05dd6909e07df518",
 )];
 
 /// `(kubernetes, arch, sha256)` of `kubectl`, from dl.k8s.io.

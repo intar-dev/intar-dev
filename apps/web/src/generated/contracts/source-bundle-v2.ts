@@ -110,7 +110,7 @@ export interface ClusterV1 {
    */
   patches: ScriptV1[];
   /**
-   * The Talos release, e.g. `v1.14.6`; with `kubernetes` one of
+   * The Talos release, e.g. `v1.15.0-beta.0`; with `kubernetes` one of
    * [`TALOS_RELEASES`].
    */
   talos: string;

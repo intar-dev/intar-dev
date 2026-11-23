@@ -830,7 +830,7 @@ const TALOS: &str = r#"scenario "talos-lab" {
   solution   = "Wait."
 
   talos-cluster "lab" {
-    talos      = "v1.14.6"
+    talos      = "v1.15.0-beta.0"
     kubernetes = "v1.37.1"
     patch "ntp" { yaml = file("talos/ntp.yaml") }
 
@@ -927,7 +927,7 @@ fn a_cluster_lowers_to_its_machines() {
     let cluster = &scenario.clusters[0];
     assert_eq!(
         (cluster.talos.as_str(), cluster.kubernetes.as_str()),
-        ("v1.14.6", "v1.37.1")
+        ("v1.15.0-beta.0", "v1.37.1")
     );
     assert_eq!(cluster.patches[0].name, "ntp");
     assert_eq!(cluster.patches[0].script, "machine: {}\n");
@@ -937,9 +937,9 @@ fn a_cluster_lowers_to_its_machines() {
 fn cluster_blocks_are_checked() {
     let at = "scenarios/talos-lab/scenario.hcl";
     for (from, to, expected) in [
-        ("talos      = \"v1.14.6\"", "", "`talos` is required"),
+        ("talos      = \"v1.15.0-beta.0\"", "", "`talos` is required"),
         (
-            "talos      = \"v1.14.6\"",
+            "talos      = \"v1.15.0-beta.0\"",
             "talos = \"v1.99.0\"",
             "is not a supported release",
         ),
