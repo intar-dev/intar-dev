@@ -117,3 +117,31 @@ fn a_launch_on_a_template_jailerd_no_longer_holds_withdraws_the_images_readiness
     assert!(withdraw_if_template_missing(temp.path(), &image, &missing));
     Ok(())
 }
+
+#[test]
+fn talos_cmdline_gives_the_run_address_and_a_resolver_only_with_egress() -> Result<()> {
+    let network = CreateVmNetwork {
+        guest_ip_cidr: "10.200.0.3/28".to_owned(),
+        gateway: "10.200.0.1".to_owned(),
+        dns: vec!["1.1.1.1".to_owned(), "8.8.8.8".to_owned()],
+    };
+    assert_eq!(
+        talos_cmdline("talos.platform=metal", &network, true)?,
+        "talos.platform=metal ip=10.200.0.3::10.200.0.1:255.255.255.240::eth0:off:1.1.1.1 nfsaddrs=off"
+    );
+    assert!(talos_cmdline("x", &network, false)?.ends_with("eth0:off: nfsaddrs=off"));
+    assert!(talos_cmdline(&"x".repeat(2000), &network, true).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_talos_node_reports_ready_and_verified() {
+    let update = talos_ready_update("vm-1", "run-1", "gen-1");
+    assert_eq!(
+        ready_gate(&update, "vm-1", "run-1", "gen-1"),
+        ReadyGate::Ready
+    );
+    let verify = update.lab.verify.expect("a verify block");
+    assert!(verify.done && verify.passed && verify.pre_done);
+    assert_eq!(update.lab.state, LabState::Ready);
+}

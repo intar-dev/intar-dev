@@ -285,3 +285,19 @@ pub(crate) fn image_failure_state(image: &OciDigest) -> Option<(String, bool)> {
     let failure = failures.get(image)?;
     Some((failure.message.clone(), failure.definitive))
 }
+
+/// Whether a stored machine image is a Talos node's, read from its config in
+/// the blob store. A Talos node boots without Kino and gets no port forward.
+pub(crate) fn image_boots_talos(cache_root: &Path, image: &OciDigest) -> Result<bool> {
+    let store = BlobStore::new(cache_root);
+    let manifest: OciManifestV1 = serde_json::from_slice(
+        &std::fs::read(store.path(image)).context("read the stored image manifest")?,
+    )
+    .context("parse the stored image manifest")?;
+    let config: MachineConfigV1 = serde_json::from_slice(
+        &std::fs::read(store.path(&manifest.config.digest))
+            .context("read the stored machine config")?,
+    )
+    .context("parse the stored machine config")?;
+    Ok(config.talos.is_some())
+}

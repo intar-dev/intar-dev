@@ -862,6 +862,7 @@ async fn reconcile_desired_vm(
                 vsock_cid: kino_vsock_cid(desired.version, desired_vm),
             }),
             peer_vm_names: peer_vm_aliases.keys().cloned().collect(),
+            talos_peer_names: talos_peer_names(desired, &peer_vm_aliases),
             peer_vm_aliases,
         },
     })
@@ -907,6 +908,25 @@ fn desired_peer_vm_aliases(
                 && desired_vm.peers.contains(&vm.name)
         })
         .map(|vm| (vm.vm_id.clone(), vm.name.clone()))
+        .collect()
+}
+
+/// The peers whose images are Talos nodes', by the name the guest sees.
+/// ponytail: a peer image not in the store yet reads as not Talos; the
+/// control plane places a cluster only on a host that cached its images.
+fn talos_peer_names(
+    desired: &HostDesiredStateV3,
+    peer_vm_aliases: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let Ok(cache_root) = crate::image_cache::default_cache_root() else {
+        return BTreeSet::new();
+    };
+    desired
+        .vms
+        .iter()
+        .filter(|vm| peer_vm_aliases.contains_key(&vm.vm_id))
+        .filter(|vm| crate::image_cache::image_boots_talos(&cache_root, &vm.image).unwrap_or(false))
+        .map(|vm| vm.name.clone())
         .collect()
 }
 

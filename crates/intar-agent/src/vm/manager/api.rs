@@ -447,6 +447,7 @@ impl VmManager {
             kino: req.runtime.kino,
             peer_vm_names,
             peer_vm_aliases,
+            talos_peer_names: req.runtime.talos_peer_names,
         };
 
         self.queue_vm_create(QueueVmCreateRequest {
@@ -642,7 +643,15 @@ impl VmManager {
         };
 
         let mac = mac::generate_local_unicast_mac();
-        let ssh_public_port = if self.inner.ssh_access.enabled {
+        // ponytail: an image not in the store yet reads as not Talos; the
+        // control plane places Talos nodes only on hosts that cached them.
+        let talos = image_cache::default_cache_root()
+            .and_then(|root| image_cache::image_boots_talos(&root, &image))
+            .unwrap_or_else(|error| {
+                debug!(error = %error, "could not read whether the image is a Talos node's");
+                false
+            });
+        let ssh_public_port = if self.inner.ssh_access.enabled && !talos {
             Some(allocate_ssh_public_port(&self.inner).await?)
         } else {
             None
