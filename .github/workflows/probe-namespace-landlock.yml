@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [namespace-profile-linux-amd64-chonky, namespace-profile-intar-dev]
+        runner: [namespace-profile-linux-amd64-chonky, namespace-profile-linux-amd64-chonkiest]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
