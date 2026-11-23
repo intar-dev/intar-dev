@@ -1,5 +1,11 @@
 # Changelog
 
+## image-cli/v0.19.0 (2026-11-23)
+
+### Features
+
+- **talos:** Run talos cluster labs on hosted and desktop runtimes (#509) (4eeb3200)
+
 ## image-cli/v0.18.0 (2026-11-23)
 
 ### Breaking changes

@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.23.0 (2026-11-23)
+
+### Features
+
+- **talos:** Run talos cluster labs on hosted and desktop runtimes (#509) (4eeb3200)
+
 ## builder/v0.22.0 (2026-11-23)
 
 ### Breaking changes

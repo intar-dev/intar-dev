@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.27.0 (2026-11-23)
+
+### Features
+
+- **talos:** Run talos cluster labs on hosted and desktop runtimes (#509) (4eeb3200)
+
 ## agent/v0.26.1 (2026-11-23)
 
 ### Bug fixes
