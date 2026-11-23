@@ -1,0 +1,28 @@
+# Temporary probe, never merged: does a Namespace runner pass the jailed
+# agent release preflight (Landlock ABI >= 3, KVM, tun, systemd, cgroup v2)?
+name: Probe Namespace Landlock
+"on":
+  pull_request:
+permissions: {}
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [namespace-profile-linux-amd64-chonky, namespace-profile-intar-dev]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Kernel facts
+        run: |
+          uname -a
+          cat /proc/cmdline
+          echo "lsm: $(cat /sys/kernel/security/lsm 2>&1)"
+          grep -i landlock "/boot/config-$(uname -r)" 2>&1 || zgrep -i landlock /proc/config.gz 2>&1 || true
+      - name: Jailed release preflight
+        run: bash tools/workflows/release/preflight-jailed-release-runner.sh
