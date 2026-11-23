@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.25.0 (2026-11-23)
+
+### Features
+
+- **talos:** Allow several control planes in a cluster (#533) (a1f2f435)
+
 ## builder/v0.24.0 (2026-11-23)
 
 ### Features

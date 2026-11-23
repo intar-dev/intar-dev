@@ -1,5 +1,11 @@
 # Changelog
 
+## desktop/v0.5.0 (2026-11-23)
+
+### Features
+
+- **talos:** Allow several control planes in a cluster (#533) (a1f2f435)
+
 ## desktop/v0.4.0 (2026-11-23)
 
 ### Features

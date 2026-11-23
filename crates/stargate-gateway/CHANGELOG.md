@@ -1,5 +1,11 @@
 # Changelog
 
+## stargate/v0.14.0 (2026-11-23)
+
+### Features
+
+- **talos:** Allow several control planes in a cluster (#533) (a1f2f435)
+
 ## stargate/v0.13.0 (2026-11-23)
 
 ### Features
