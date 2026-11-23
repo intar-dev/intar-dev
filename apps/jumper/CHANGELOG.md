@@ -1,5 +1,11 @@
 # Changelog
 
+## desktop/v0.3.0 (2026-11-23)
+
+### Features
+
+- **jumper:** Open the window filling the screen (#518) (30abf40c)
+
 ## desktop/v0.2.0 (2026-11-23)
 
 ### Features
