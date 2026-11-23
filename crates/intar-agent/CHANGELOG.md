@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.29.0 (2026-11-23)
+
+### Features
+
+- **talos:** Allow several control planes in a cluster (#533) (a1f2f435)
+
 ## agent/v0.28.0 (2026-11-23)
 
 ### Features

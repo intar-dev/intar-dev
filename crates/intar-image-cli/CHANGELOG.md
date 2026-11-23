@@ -1,5 +1,11 @@
 # Changelog
 
+## image-cli/v0.21.0 (2026-11-23)
+
+### Features
+
+- **talos:** Allow several control planes in a cluster (#533) (a1f2f435)
+
 ## image-cli/v0.20.0 (2026-11-23)
 
 ### Features
