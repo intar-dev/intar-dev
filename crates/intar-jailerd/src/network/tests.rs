@@ -584,6 +584,16 @@ fn nft_policy_blocks_host_cross_run_private_and_metadata_destinations() {
         !rules.contains(&format!("iifname \"{veth}\" accept\n")),
         "no blanket accept for the run"
     );
+
+    // Toward the run only replies and the SSH forward pass.
+    let inbound = format!(
+        "    oifname \"{veth}\" ct state established,related accept\n    oifname \"{veth}\" ct status dnat accept\n    oifname \"{veth}\" counter drop\n    iifname \"{veth}\" counter drop\n  }}\n  chain prerouting"
+    );
+    assert!(rules.contains(&inbound), "inbound guard: {rules}");
+    assert!(
+        !rules.contains(&format!("oifname \"{veth}\" accept")),
+        "no blanket accept toward the run"
+    );
 }
 
 fn artifact(

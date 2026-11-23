@@ -25,7 +25,7 @@ import {
 import { beginScenarioRun } from "@/lib/scenario-runs/begin";
 import { VALIDATION_USER_ID } from "@/lib/scenario-runs/content-access";
 import { expireOverdueRunLeases } from "@/lib/scenario-runs/lifecycle";
-import { agentReadsMayRestore, beginVerifyRun, liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
+import { agentBootsTalos, agentReadsMayRestore, beginVerifyRun, liveScenarioRevision } from "@/lib/scenario-runs/revision-begin";
 import { getScenarioRunStatusForUser } from "@/lib/scenario-runs/status";
 import { mutateHostDesiredStateV3 } from "@/lib/desired-state-store";
 import { createFixtureMember } from "@/test/account-fixtures";
@@ -850,6 +850,23 @@ describe("promotion and verify runs", () => {
       }
       expect(agentReadsMayRestore(null)).toBe(false);
       expect(agentReadsMayRestore("not json")).toBe(false);
+    });
+
+    it("places a Talos cluster only on an agent that boots one, and never in the app", async () => {
+      await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].cluster_key', ?1) WHERE rev = ?2")
+        .bind(`sha256:${"c".repeat(64)}`, rev("a")).run();
+      const agent = (version: string) => env.DB.prepare("UPDATE agent_hosts SET hello_json = json_set(hello_json, '$.agent_version', ?1)")
+        .bind(version).run();
+      const verify = () => beginVerifyRun({ scenarioId: PUBLIC_ID, rev: rev("a"), allowDrainedAdminProof: true });
+      await agent("0.27.1");
+      await expect(verify()).rejects.toMatchObject({ code: "scenario_host_unavailable" });
+      await agent("0.28.0");
+      expect((await verify()).runId).toBeTruthy();
+    });
+
+    it("reads a Talos agent's release strictly", () => {
+      const hello = (agent_version: string) => JSON.stringify({ agent_version });
+      expect(["0.27.9", "0.28.0", "1.0.0"].map((version) => agentBootsTalos(hello(version)))).toEqual([false, true, true]);
     });
 
     it("never tells a host with an older agent", async () => {

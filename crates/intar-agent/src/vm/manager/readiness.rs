@@ -85,6 +85,11 @@ pub(super) async fn wait_for_scenario_runtime_ready(
         .cpu_millis
         .ok_or_else(|| anyhow::anyhow!("vm details missing cpu_millis"))?;
     let ready_timeout = scenario_runtime_ready_timeout(cpu_millis)?;
+    if vm_boots_talos(details) {
+        return wait_for_talos_running(inner, vm_name, ch, details, ready_timeout)
+            .await
+            .map(|()| talos_ready_update(vm_name, &run_id, jail_generation));
+    }
     let mut saw_kino_vsock_socket = false;
     let mut process_interval = tokio::time::interval(Duration::from_millis(
         SCENARIO_READY_PROCESS_POLL_INTERVAL_MILLIS,
@@ -198,6 +203,87 @@ pub(super) async fn wait_for_scenario_runtime_ready(
                 ready_timeout,
             ))
         }
+    }
+}
+
+/// Whether the VM's image is a Talos node's. An image no longer in the store
+/// reads as not Talos.
+pub(super) fn vm_boots_talos(details: &VmDetails) -> bool {
+    details.image.as_ref().is_some_and(|image| {
+        image_cache::default_cache_root()
+            .and_then(|root| image_cache::image_boots_talos(&root, image))
+            .unwrap_or_else(|error| {
+                warn!(error = %error, "could not read whether the VM is a Talos node");
+                false
+            })
+    })
+}
+
+/// A Talos node has no Kino: it is ready once its VMM runs it. The
+/// cluster's health is the management VM's ready checks, which need the nodes.
+async fn wait_for_talos_running(
+    inner: &Arc<Inner>,
+    vm_name: &str,
+    ch: &ChClient,
+    details: &VmDetails,
+    ready_timeout: Duration,
+) -> Result<()> {
+    timeout(ready_timeout, async {
+        loop {
+            ensure_create_not_deleted(inner, vm_name).await?;
+            ensure_scenario_runtime_process_live(vm_name, details).await?;
+            match ch.vm_info().await {
+                Ok(info) => match info.state {
+                    cloud_hypervisor_client::VmState::Running => return Ok(()),
+                    cloud_hypervisor_client::VmState::Shutdown => {
+                        anyhow::bail!("the Talos node shut down before it ran")
+                    }
+                    _ => {}
+                },
+                Err(cloud_hypervisor_client::Error::HttpStatus { status: 404, .. }) => {
+                    anyhow::bail!("the Talos node disappeared before it ran")
+                }
+                Err(error) => {
+                    debug!(vm = vm_name, error = %error, "vm_info failed for a Talos node")
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .context("timed out waiting for the Talos node to run")?
+}
+
+/// The report a Talos node stands in for Kino's: ready, and verified with
+/// nothing to verify, so a run's readiness and verify rules hold unchanged.
+pub(super) fn talos_ready_update(
+    vm_name: &str,
+    run_id: &str,
+    jail_generation: &str,
+) -> GuestUpdate {
+    GuestUpdate {
+        vm_name: vm_name.to_owned(),
+        run_id: run_id.to_owned(),
+        jail_generation: jail_generation.to_owned(),
+        ssh_ready: true,
+        failed: None,
+        ssh_host_keys_openssh: Vec::new(),
+        lab: VmLabV1 {
+            state: LabState::Ready,
+            kino_version: String::new(),
+            ready: Vec::new(),
+            tasks: Vec::new(),
+            verify: Some(VmVerifyV1 {
+                steps: Vec::new(),
+                done: true,
+                passed: true,
+                pre_done: true,
+            }),
+            timings_ms: BTreeMap::new(),
+            failure: None,
+        },
+        first_report_ms: None,
+        received_at_ms: now_unix_ms(),
     }
 }
 

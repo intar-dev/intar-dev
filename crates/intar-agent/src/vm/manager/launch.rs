@@ -78,6 +78,32 @@ pub(super) fn build_cloud_hypervisor_vm_config(
     ))
 }
 
+/// A Talos node has no Kino to set its run address, so the kernel's `ip=`
+/// does; a nameserver only with egress, as boot.json.
+pub(super) fn talos_cmdline(base: &str, network: &CreateVmNetwork, egress: bool) -> Result<String> {
+    let (ip, prefix) = network
+        .guest_ip_cidr
+        .split_once('/')
+        .context("the guest CIDR has no prefix")?;
+    let prefix: u32 = prefix.parse().context("the guest CIDR's prefix")?;
+    anyhow::ensure!(prefix <= 32, "the guest CIDR's prefix is over 32");
+    let mask = Ipv4Addr::from(u32::MAX.checked_shl(32 - prefix).unwrap_or(0));
+    let dns = match network.dns.first() {
+        Some(dns) if egress => dns.as_str(),
+        _ => "",
+    };
+    let cmdline = format!(
+        "{base} ip={ip}::{}:{mask}::eth0:off:{dns} nfsaddrs=off",
+        network.gateway
+    );
+    // The x86 kernel's COMMAND_LINE_SIZE, terminator included.
+    anyhow::ensure!(
+        cmdline.len() < 2048,
+        "the Talos node's kernel command line is over 2047 bytes"
+    );
+    Ok(cmdline)
+}
+
 pub(super) async fn cached_jailer_launch_capabilities(
     inner: &Inner,
 ) -> Result<&JailerCapabilities> {
@@ -959,6 +985,19 @@ pub(super) async fn run_create(
             ready
         }
     };
+    let talos = image_cache::image_boots_talos(&cache_root, req.image)
+        .context("read whether the image is a Talos node's")?;
+    // The SSH port is reserved at create, from the same read; an image not
+    // ready then reads as not Talos.
+    anyhow::ensure!(
+        !(talos && req.ssh_public_port.is_some()),
+        "the Talos node's image was not ready when the VM was created"
+    );
+    let cmdline = if talos {
+        talos_cmdline(&ready_image.cmdline, req.network, req.egress)?
+    } else {
+        ready_image.cmdline.clone()
+    };
     let image_ready_at = Instant::now();
     // Kino and the spec come by digest and are checked against it before
     // anything reaches the run disk.
@@ -997,11 +1036,18 @@ pub(super) async fn run_create(
         u64::from(target_disk_mib) * 1024 * 1024 > base_virtual_size_bytes
     });
 
+    // Kino's verify waits on every peer it is told of; a Talos node never answers.
+    let guest_peers: BTreeMap<String, String> = req
+        .peer_guest_ips
+        .iter()
+        .filter(|(name, _)| !req.runtime.talos_peer_names.contains(*name))
+        .map(|(name, ip)| (name.clone(), ip.clone()))
+        .collect();
     let boot = runtime_disk::boot_json(&runtime_disk::BootJsonInput {
         hostname: req.hostname,
         network: req.network,
         egress: req.egress,
-        peer_guest_ips: req.peer_guest_ips,
+        peer_guest_ips: &guest_peers,
         ssh_enabled: req.terminal,
         ssh_authorized_keys_openssh: &req.runtime.ssh_authorized_keys_openssh,
         root_resize,
@@ -1107,7 +1153,7 @@ pub(super) async fn run_create(
     let vm_cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
         cpu_millis: req.cpu_millis,
         name: req.name,
-        cmdline: &ready_image.cmdline,
+        cmdline: &cmdline,
         paths: &launch.paths,
         memory_mib: req.memory_mib,
         tap: req.tap,

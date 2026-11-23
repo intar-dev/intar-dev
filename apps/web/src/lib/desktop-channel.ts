@@ -298,6 +298,10 @@ export async function startLocalRunRequest(
   if (!guestContracts.includes(revision.guestContract)) {
     return refuse(409, "upgrade_required", "this scenario needs a newer version of the app; update it");
   }
+  // ponytail: no app boots a Talos cluster yet; S5 lets one say it does.
+  if (revision.doc.machines.some((machine) => machine.cluster_key !== undefined)) {
+    return refuse(409, "upgrade_required", "this scenario needs a newer version of the app; update it");
+  }
 
   try {
     const started = await beginScenarioRun({

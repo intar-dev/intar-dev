@@ -210,6 +210,13 @@ pub(super) fn render_nft_rules(state: &RunState) -> Result<String> {
             rules.push_str(&format!("    iifname \"{veth}\" ip saddr {guest} accept\n"));
         }
     }
+    // Nothing enters a run but replies to its own connections and its SSH
+    // forward: an address of the run that the host's network routes here
+    // reaches no other port. The host's own connections to a guest (the SSH
+    // readiness check) leave through output, not this hook.
+    rules.push_str(&format!(
+        "    oifname \"{veth}\" ct state established,related accept\n    oifname \"{veth}\" ct status dnat accept\n    oifname \"{veth}\" counter drop\n",
+    ));
     rules.push_str(&format!(
         "    iifname \"{veth}\" counter drop\n  }}\n  chain prerouting {{\n    type nat hook prerouting priority dstnat; policy accept;\n",
     ));

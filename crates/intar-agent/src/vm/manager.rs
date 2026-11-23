@@ -15,7 +15,7 @@ use cloud_hypervisor_client::{Client as ChClient, VmConfig};
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use getrandom::fill as getrandom_fill;
 use intar_contracts::bridge::VmRuntimeConstraintsV2;
-use intar_contracts::bridge_v9::VmLabV1;
+use intar_contracts::bridge_v9::{LabState, VmLabV1, VmVerifyV1};
 use intar_contracts::oci::OciDigest;
 use intar_contracts::scenario::SpecMode;
 use intar_jailer_protocol::{
@@ -97,6 +97,10 @@ pub struct CreateScenarioVmRuntime {
     pub peer_vm_names: Vec<String>,
     #[serde(default)]
     pub peer_vm_aliases: BTreeMap<String, String>,
+    /// The peers (by the name the guest sees) that are Talos nodes. They
+    /// run no Kino, so the guest is not told of them as peers.
+    #[serde(default)]
+    pub talos_peer_names: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

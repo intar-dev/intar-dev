@@ -306,23 +306,39 @@ install -m 0755 /tmp/intar-cluster-talosctl /usr/local/bin/talosctl
 install -d -m 0700 -o {user} -g {user} /home/{user}/.kube /home/{user}/.talos
 install -m 0600 -o {user} -g {user} /tmp/intar-cluster-kubeconfig /home/{user}/.kube/config
 install -m 0600 -o {user} -g {user} /tmp/intar-cluster-talosconfig /home/{user}/.talos/config
+install -d -m 0700 /root/.kube /root/.talos
+install -m 0600 /tmp/intar-cluster-kubeconfig /root/.kube/config
+install -m 0600 /tmp/intar-cluster-talosconfig /root/.talos/config
+# Kino runs the checks as root with no HOME, where kubectl and talosctl
+# look for their configs.
+install -d /etc/systemd/system/intar.service.d
+printf '[Service]\nEnvironment=HOME=/root\n' > /etc/systemd/system/intar.service.d/cluster-home.conf
 rm -f /tmp/intar-cluster-*
 cat > /usr/local/sbin/intar-cluster-lab-address <<'EOF'
 #!/bin/sh
-set -eu
-nic=""
-first=""
-for dev in /sys/class/net/*; do
-  [ -e "$dev/device" ] || continue
-  case "$(cat "$dev/address")" in
-    {mac}:*) nic="${{dev##*/}}"; break ;;
-  esac
-  [ -n "$first" ] || first="${{dev##*/}}"
+set -u
+# udev may rename the NIC under us (eth0 -> ens5): pick it again until the
+# address is on.
+try=0
+while :; do
+  nic=""
+  first=""
+  for dev in /sys/class/net/*; do
+    [ -e "$dev/device" ] || continue
+    case "$(cat "$dev/address" 2>/dev/null)" in
+      {mac}:*) nic="${{dev##*/}}"; break ;;
+    esac
+    [ -n "$first" ] || first="${{dev##*/}}"
+  done
+  nic="${{nic:-$first}}"
+  if [ -n "$nic" ] && ip link set dev "$nic" up 2>/dev/null \
+    && ip address replace {lab}/{prefix} dev "$nic" 2>/dev/null; then
+    exit 0
+  fi
+  try=$((try + 1))
+  [ "$try" -lt 100 ] || {{ echo "no NIC took the lab address" >&2; exit 1; }}
+  sleep 0.1
 done
-nic="${{nic:-$first}}"
-[ -n "$nic" ] || {{ echo "no NIC for the lab address" >&2; exit 1; }}
-ip link set dev "$nic" up
-ip address replace {lab}/{prefix} dev "$nic"
 EOF
 chmod 0755 /usr/local/sbin/intar-cluster-lab-address
 cat > /etc/systemd/system/intar-cluster-lab.service <<'EOF'
@@ -478,6 +494,10 @@ mod tests {
             step.script
                 .contains(&format!("/home/{GUEST_USERNAME}/.kube/config"))
         );
+        // Kino runs ready and task checks as root.
+        assert!(step.script.contains("/root/.kube/config"));
+        assert!(step.script.contains("Environment=HOME=/root"));
+        assert!(step.script.contains("[ \"$try\" -lt 100 ]"));
         assert!(step.script.contains("rm -f /tmp/intar-cluster-*"));
     }
 

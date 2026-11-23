@@ -110,7 +110,20 @@ pub(crate) async fn require_ready_image(
     let bytes = tokio::fs::read(descriptor_path(cache_root, image))
         .await
         .context("the image's launch descriptor is unavailable")?;
-    validate_descriptor(image, serde_json::from_slice(&bytes)?)
+    let ready = validate_descriptor(image, serde_json::from_slice(&bytes)?)?;
+    anyhow::ensure!(
+        config_blobs_present(cache_root, &ready),
+        "the image's manifest or config is no longer in the store"
+    );
+    Ok(ready)
+}
+
+/// A launch reads the image's manifest and config (whether it is a Talos
+/// node's), and eviction can remove them before the descriptor: such an
+/// image is not ready, so the cache pass pulls them again.
+fn config_blobs_present(cache_root: &Path, ready: &ReadyImage) -> bool {
+    let store = BlobStore::new(cache_root);
+    store.path(&ready.image).is_file() && store.path(&ready.config).is_file()
 }
 
 /// Withdraw an image's readiness: jailerd answered that its template is gone
@@ -128,7 +141,8 @@ pub(crate) fn is_image_ready(cache_root: &Path, image: &OciDigest) -> bool {
     std::fs::read(descriptor_path(cache_root, image))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .is_some_and(|descriptor| validate_descriptor(image, descriptor).is_ok())
+        .and_then(|descriptor| validate_descriptor(image, descriptor).ok())
+        .is_some_and(|ready| config_blobs_present(cache_root, &ready))
 }
 
 fn validate_descriptor(image: &OciDigest, descriptor: ReadyDescriptorV2) -> Result<ReadyImage> {
@@ -284,4 +298,20 @@ pub(crate) fn image_failure_state(image: &OciDigest) -> Option<(String, bool)> {
     let failures = image_failures().lock().ok()?;
     let failure = failures.get(image)?;
     Some((failure.message.clone(), failure.definitive))
+}
+
+/// Whether a stored machine image is a Talos node's, read from its config in
+/// the blob store. A Talos node boots without Kino and gets no port forward.
+pub(crate) fn image_boots_talos(cache_root: &Path, image: &OciDigest) -> Result<bool> {
+    let store = BlobStore::new(cache_root);
+    let manifest: OciManifestV1 = serde_json::from_slice(
+        &std::fs::read(store.path(image)).context("read the stored image manifest")?,
+    )
+    .context("parse the stored image manifest")?;
+    let config: MachineConfigV1 = serde_json::from_slice(
+        &std::fs::read(store.path(&manifest.config.digest))
+            .context("read the stored machine config")?,
+    )
+    .context("parse the stored machine config")?;
+    Ok(config.talos.is_some())
 }
