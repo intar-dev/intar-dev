@@ -22,6 +22,8 @@ import type {
   ScenarioRunVmRecord,
   SessionTimelineEntry,
 } from "./run-types";
+import type { CheckStatus } from "@/generated/contracts/bridge-message-v9";
+import type { RunTaskView } from "@/lib/run-tasks";
 
 describe("run recap model", () => {
   it("uses learner outcomes instead of lifecycle state", () => {
@@ -167,6 +169,56 @@ describe("run recap model", () => {
         checks: [{ probeName: "site-ready", number: 1, title: "Restore the site" }],
       },
     ]);
+  });
+
+  it("builds a task run's final checks and replay checks from its tasks", () => {
+    const tasks = run({
+      objectives: [],
+      vms: [
+        vm({ scenarioProbes: [], sessions: [session({ castArtifactId: "cast-web" })] }),
+        vm({
+          id: "database-vm",
+          ordinal: 1,
+          scenarioVmId: "database",
+          scenarioVmName: "database",
+          scenarioProbes: [],
+          sessions: [session({ castArtifactId: "cast-db" })],
+        }),
+      ],
+      replayState: "ready",
+      hasReplay: true,
+      tasks: [
+        task("start-nginx", "Start nginx", "pass"),
+        task("fix-config", "Fix the config", "fail"),
+        task("seed-db", "Seed the database", "pass", "database"),
+      ],
+    });
+
+    expect(getRunRecapObjectives(tasks)).toEqual([
+      { key: "objective-1", title: "Start nginx", status: "verified" },
+      { key: "objective-2", title: "Fix the config", status: "needs_repair" },
+      { key: "objective-3", title: "Seed the database", status: "verified" },
+    ]);
+    // Casts mark a task's first pass by its id; numbers follow the final checks.
+    expect(getRunReplayParts(tasks).map((part) => part.checks)).toEqual([
+      [
+        { probeName: "start-nginx", number: 1, title: "Start nginx" },
+        { probeName: "fix-config", number: 2, title: "Fix the config" },
+      ],
+      [{ probeName: "seed-db", number: 3, title: "Seed the database" }],
+    ]);
+
+    const solved = renderToStaticMarkup(
+      createElement(RunRecap, {
+        run: {
+          ...tasks,
+          tasks: (tasks.tasks ?? []).map((t) => ({ ...t, status: "pass" as const })),
+        },
+        nextAction: createElement("button", { type: "button" }, "Continue"),
+      }),
+    ).replace(/<[^>]+>/g, "");
+    expect(solved).toContain("Final checks");
+    expect(solved).toContain("3/3 verified");
   });
 
   it("gives each replay part its own machine's checks, numbered as final checks", () => {
@@ -738,6 +790,18 @@ function run(overrides: Partial<ScenarioRunRecord> = {}): ScenarioRunRecord {
     replayArtifacts: [],
     vms,
     ...overrides,
+  };
+}
+
+function task(
+  id: string,
+  title: string,
+  status: CheckStatus,
+  machine = "web",
+): RunTaskView {
+  return {
+    id, title, body: null, machine, optional: false, status,
+    message: "", available: true, complete: status === "pass",
   };
 }
 
