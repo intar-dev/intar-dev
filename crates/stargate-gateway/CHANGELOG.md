@@ -1,5 +1,11 @@
 # Changelog
 
+## stargate/v0.12.0 (2026-11-23)
+
+### Features
+
+- **talos:** Run talos cluster labs on hosted and desktop runtimes (#509) (4eeb3200)
+
 ## stargate/v0.11.1 (2026-11-23)
 
 ### Bug fixes

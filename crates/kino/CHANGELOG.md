@@ -1,5 +1,11 @@
 # Changelog
 
+## kino/v0.13.0 (2026-11-23)
+
+### Features
+
+- **talos:** Run talos cluster labs on hosted and desktop runtimes (#509) (4eeb3200)
+
 ## kino/v0.12.1 (2026-11-23)
 
 ### Bug fixes
