@@ -321,6 +321,8 @@ pub(crate) fn wake(
     }
     let (api, k8s) = cp_ports.context("the cluster has no control plane")?;
     talosctl.run(&["config", "endpoint", &format!("127.0.0.1:{api}")])?;
+    // `health` gives up at once while the woken node's API is not up yet.
+    talosctl.retry(&["version"], deadline, "waking the control plane's API")?;
     healthy(&talosctl, plan, deadline)?;
     let kubectl = Tool::new(
         &files.host_kubectl,
