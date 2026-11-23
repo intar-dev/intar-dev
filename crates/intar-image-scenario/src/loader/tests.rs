@@ -956,7 +956,7 @@ fn cluster_blocks_are_checked() {
         (
             "role   = \"controlplane\"",
             "role   = \"worker\"",
-            "needs exactly one controlplane machine",
+            "needs at least one controlplane machine",
         ),
         (
             "role   = \"management\"",

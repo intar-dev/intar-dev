@@ -82,7 +82,11 @@ pub(crate) fn bake(
         vec![("TALOSCONFIG", talosconfig.clone())],
         log,
     );
-    let base = configs::generate(&talosctl, &plan.cluster, &config_dir)?;
+    let schedulable = !plan
+        .nodes
+        .iter()
+        .any(|node| node.role == ClusterRole::Worker);
+    let base = configs::generate(&talosctl, &plan.cluster, schedulable, &config_dir)?;
     let mut node_configs = BTreeMap::new();
     for node in &plan.nodes {
         let role_base = match node.role {
@@ -116,7 +120,8 @@ pub(crate) fn bake(
         };
         let (vm, api, k8s) = spawn_node(&launch, files, config, arch, hub.path(), work)?;
         api_ports.insert(node.name.clone(), api);
-        if controlplane {
+        // The first control plane is the endpoint.
+        if controlplane && k8s_port.is_none() {
             k8s_port = k8s;
         }
         vms.push(vm);
@@ -220,7 +225,10 @@ pub(crate) fn bake(
         vec![("TALOSCONFIG", lab_talosconfig.clone())],
         log,
     );
-    lab_talosctl.run(&["config", "endpoint", &cp])?;
+    let controlplanes = lab_ips(plan, ClusterRole::Controlplane);
+    let mut endpoints = vec!["config", "endpoint"];
+    endpoints.extend(controlplanes.iter().map(String::as_str));
+    lab_talosctl.run(&endpoints)?;
     lab_talosctl.run(&["config", "node", &cp])?;
 
     thread::sleep(SETTLE.min(remaining(deadline)?));
@@ -258,18 +266,25 @@ pub(crate) fn bake(
     })
 }
 
+/// The lab addresses of `plan`'s nodes of `role`, in boot order.
+fn lab_ips(plan: &ClusterPlan, role: ClusterRole) -> Vec<String> {
+    plan.nodes
+        .iter()
+        .filter(|node| node.role == role)
+        .map(|node| node.ip.to_string())
+        .collect()
+}
+
 /// `talosctl health` of every node of `plan`, until `deadline`.
 fn healthy(talosctl: &Tool, plan: &ClusterPlan, deadline: Instant) -> Result<()> {
-    let workers: Vec<String> = plan
-        .nodes
-        .iter()
-        .filter(|node| node.role == ClusterRole::Worker)
-        .map(|node| node.ip.to_string())
-        .collect();
+    let workers = lab_ips(plan, ClusterRole::Worker);
     let mut health = vec![
         "health".to_owned(),
         format!("--wait-timeout={}s", remaining(deadline)?.as_secs()),
-        format!("--control-plane-nodes={}", controlplane_ip()),
+        format!(
+            "--control-plane-nodes={}",
+            lab_ips(plan, ClusterRole::Controlplane).join(",")
+        ),
     ];
     if !workers.is_empty() {
         health.push(format!("--worker-nodes={}", workers.join(",")));
@@ -314,7 +329,7 @@ pub(crate) fn wake(
             snapshot: true,
         };
         let (vm, api, k8s) = spawn_node(&launch, files, config, arch, hub.path(), work)?;
-        if let Some(k8s) = k8s {
+        if let Some(k8s) = k8s.filter(|_| cp_ports.is_none()) {
             cp_ports = Some((api, k8s));
         }
         vms.push(vm);

@@ -250,12 +250,11 @@ export function validate(scenario: ScenarioV1, images: ImageV1[]): string[] {
         `cluster \`${name}\`: Talos \`${cluster.talos}\` with Kubernetes \`${cluster.kubernetes}\` is not a supported release`,
       );
     }
-    for (const role of ["controlplane", "management"] as const) {
-      const count = scenario.machines.filter(
-        (machine) => machine.cluster?.cluster === name && machine.cluster.role === role,
-      ).length;
-      if (count !== 1) problem(`cluster \`${name}\`: needs exactly one ${role} machine`);
-    }
+    const count = (role: "controlplane" | "management") =>
+      scenario.machines.filter((machine) => machine.cluster?.cluster === name && machine.cluster.role === role)
+        .length;
+    if (count("controlplane") === 0) problem(`cluster \`${name}\`: needs at least one controlplane machine`);
+    if (count("management") !== 1) problem(`cluster \`${name}\`: needs exactly one management machine`);
   }
   for (const machine of scenario.machines) {
     if (machine.cluster != null && !clusterNames.has(machine.cluster.cluster)) {

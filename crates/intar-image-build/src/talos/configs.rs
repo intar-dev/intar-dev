@@ -21,7 +21,7 @@ fn lab_subnet() -> String {
     format!("{a}.{b}.{c}.0/{CLUSTER_LAB_PREFIX_LEN}")
 }
 
-/// The control plane's lab address and the cluster endpoint on it.
+/// The first control plane's lab address and the cluster endpoint on it.
 pub(crate) fn controlplane_ip() -> Ipv4Addr {
     let [a, b, c] = CLUSTER_LAB_PREFIX;
     Ipv4Addr::new(a, b, c, 2)
@@ -38,10 +38,11 @@ pub(crate) fn endpoint() -> String {
 /// once. It resyncs pods every second, which also caps its retry of a
 /// failed pod sync (10 s otherwise): at wake its pods often arrive before its
 /// Services list (no pod starts until that is in) or before flannel's subnet
-/// lease, and each such miss cost 10-15 s. No KubePrism: with one control
-/// plane it has nothing to balance, and while the API server is down at wake
-/// it holds the kubelet's calls instead of failing them, which stalled the
-/// control plane's static pods for ~22 s (API at 28 s instead of 6 s).
+/// lease, and each such miss cost 10-15 s. No KubePrism: while the API server
+/// is down at wake it holds the kubelet's calls instead of failing them, which
+/// stalled the control plane's static pods for ~22 s (API at 28 s instead of
+/// 6 s). So every node reaches the API through the first control plane, also
+/// with several.
 fn common() -> String {
     "machine:
   certSANs: [127.0.0.1]
@@ -72,8 +73,21 @@ name: eth1
 /// always does, and the API server keeps serving for a few seconds after it
 /// is told to stop, so both releases land during the bake's shutdown (Talos
 /// stops all three at once) and the woken cluster takes the leases at once.
-fn controlplane() -> String {
+/// A cluster without workers runs its pods on the control planes, so they
+/// lose their taint.
+fn controlplane(schedulable: bool) -> String {
     let subnet = lab_subnet();
+    let untaint = if schedulable {
+        "---
+apiVersion: v1alpha1
+kind: KubeNodeConfig
+taints:
+  node-role.kubernetes.io/control-plane:
+    $patch: delete
+"
+    } else {
+        ""
+    };
     format!(
         "cluster:
   etcd:
@@ -95,7 +109,7 @@ extraArgs:
 apiVersion: v1alpha1
 kind: KubeFlannelCNIConfig
 extraArgs: [\"--iface=eth0\"]
-"
+{untaint}"
     )
 }
 
@@ -150,12 +164,18 @@ pub(crate) struct BaseConfigs {
     pub talosconfig: PathBuf,
 }
 
-/// Fresh secrets and the base configs of `cluster` in `dir`.
-pub(crate) fn generate(talosctl: &Tool, cluster: &ClusterV1, dir: &Path) -> Result<BaseConfigs> {
+/// Fresh secrets and the base configs of `cluster` in `dir`; `schedulable`
+/// when it has no workers.
+pub(crate) fn generate(
+    talosctl: &Tool,
+    cluster: &ClusterV1,
+    schedulable: bool,
+    dir: &Path,
+) -> Result<BaseConfigs> {
     let secrets = dir.join("secrets.yaml");
     talosctl.run(&["gen", "secrets", "-o", &path(&secrets)])?;
     let common_patch = write(dir, "patch-common.yaml", &common())?;
-    let controlplane_patch = write(dir, "patch-controlplane.yaml", &controlplane())?;
+    let controlplane_patch = write(dir, "patch-controlplane.yaml", &controlplane(schedulable))?;
     let mut args = vec![
         "gen".to_owned(),
         "config".to_owned(),
@@ -261,7 +281,7 @@ mod tests {
 
     #[test]
     fn the_fixed_patches_carry_the_wake_fixes() {
-        let all = format!("{}{}", common(), controlplane());
+        let all = format!("{}{}", common(), controlplane(false));
         for expected in [
             "httpCheckFrequency: 1s",
             "shutdownGracePeriod: 0s",
@@ -278,5 +298,11 @@ mod tests {
         }
         // Leader election stays on: the lab keeps Talos's default.
         assert!(!all.contains("leader-elect"));
+        // Control planes keep their taint unless there are no workers.
+        assert!(!all.contains("taints"));
+        assert!(
+            controlplane(true)
+                .contains("node-role.kubernetes.io/control-plane:\n    $patch: delete")
+        );
     }
 }

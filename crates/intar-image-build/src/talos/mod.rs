@@ -140,7 +140,8 @@ pub(crate) fn plan_cluster(
             key,
         });
     }
-    // The control plane boots first and is shut down last.
+    // The control planes boot first, in scenario order, and are shut down
+    // last; the first is the endpoint.
     nodes.sort_by_key(|node| node.role != ClusterRole::Controlplane);
     let (management, management_key) =
         management.context("the cluster has no management machine")?;
