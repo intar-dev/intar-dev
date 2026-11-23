@@ -185,6 +185,11 @@ describe("the desktop channel", () => {
       expect(response.status, code).toBe(status);
       expect((await view(response)).code, JSON.stringify(body)).toBe(code);
     }
+    // No app boots a Talos cluster yet.
+    await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].cluster_key', ?1)")
+      .bind(`sha256:${"c".repeat(64)}`).run();
+    expect((await view(await start(secret, {}))).code).toBe("upgrade_required");
+    await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_remove(doc_json, '$.machines[0].cluster_key')").run();
     expect((await start(null)).status).toBe(401);
     // Starts are limited per learner, after the token is known.
     allow = false;

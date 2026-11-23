@@ -281,6 +281,12 @@ export async function admitRevisionRun(context: {
   if (!doc.machines.length || doc.machines.some((machine) => !machine.image_digest)) {
     throw appError(409, "image_not_ready", "scenario images are not built yet");
   }
+  // A Talos cluster runs only on a host whose agent boots one; the desktop
+  // app does not yet.
+  const cluster = doc.machines.some((machine) => machine.cluster_key !== undefined);
+  if (cluster && local) {
+    throw appError(409, "upgrade_required", "this scenario needs a newer version of the app; update it");
+  }
   // A learner's arm64 computer boots the arm64 image of each machine's build
   // and the arm64 Kino. Either may be missing: those builds are not what a
   // revision waits for.
@@ -480,6 +486,7 @@ export async function admitRevisionRun(context: {
       kino: pin.current,
       ...(input.hostId ? { requestedHostId: input.hostId } : {}),
       platformOnly: verifyScopeKey !== null,
+      cluster,
       now,
     });
     // Only a host that reports every image ready may take the run. The commit
@@ -669,9 +676,20 @@ interface RevisionHostCandidate {
 
 /** The first agent release that reads `DesiredVmV3.may_restore`. */
 const MAY_RESTORE_AGENT_VERSION = [0, 22, 0] as const;
+/** The first agent release that boots a Talos cluster's machines. */
+const TALOS_AGENT_VERSION = [0, 27, 0] as const;
 
 /** Whether the agent of a stored client hello is at least that release. */
 export function agentReadsMayRestore(helloJson: string | null): boolean {
+  return agentAtLeast(helloJson, MAY_RESTORE_AGENT_VERSION);
+}
+
+/** Whether the agent of a stored client hello boots Talos clusters. */
+export function agentBootsTalos(helloJson: string | null): boolean {
+  return agentAtLeast(helloJson, TALOS_AGENT_VERSION);
+}
+
+function agentAtLeast(helloJson: string | null, release: readonly [number, number, number]): boolean {
   if (!helloJson) return false;
   let version: unknown;
   try {
@@ -682,7 +700,7 @@ export function agentReadsMayRestore(helloJson: string | null): boolean {
   const match = typeof version === "string" ? /^(\d+)\.(\d+)\.(\d+)$/.exec(version) : null;
   if (!match) return false;
   const parts = match.slice(1).map(Number);
-  for (const [index, least] of MAY_RESTORE_AGENT_VERSION.entries()) {
+  for (const [index, least] of release.entries()) {
     const part = parts[index] ?? 0;
     if (part !== least) return part > least;
   }
@@ -706,6 +724,8 @@ async function eligibleRevisionHosts(input: {
   requestedHostId?: string;
   /** Platform hosts only: a verify run never runs on a host a user controls. */
   platformOnly?: boolean;
+  /** The revision has a Talos cluster: only an agent that boots one. */
+  cluster?: boolean;
   now: number;
 }): Promise<RevisionHostCandidate[]> {
   const db = drizzle(env.DB);
@@ -745,7 +765,8 @@ async function eligibleRevisionHosts(input: {
       report.guest_contract !== input.guestContract ||
       // Load is the planner's to judge, so a busy host is contended, not unable.
       !strictCpuHardware(report) ||
-      (row.scope !== "platform" && !hostReportV3Ready(report))
+      (row.scope !== "platform" && !hostReportV3Ready(report)) ||
+      (input.cluster === true && !agentBootsTalos(row.helloJson))
     ) continue;
     const desired = await loadStoredHostDesiredState(db, row.id, input.now);
     if (desired.kino_pin !== input.kino) continue;
