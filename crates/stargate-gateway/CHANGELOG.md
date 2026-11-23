@@ -1,5 +1,11 @@
 # Changelog
 
+## stargate/v0.12.1 (2026-11-23)
+
+### Bug fixes
+
+- **deps:** Drop aws-lc-rs and use ring for all crypto (#519) (1f43eb6c)
+
 ## stargate/v0.12.0 (2026-11-23)
 
 ### Features

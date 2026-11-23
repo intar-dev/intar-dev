@@ -1,5 +1,11 @@
 # Changelog
 
+## kino/v0.13.1 (2026-11-23)
+
+### Bug fixes
+
+- **deps:** Drop aws-lc-rs and use ring for all crypto (#519) (1f43eb6c)
+
 ## kino/v0.13.0 (2026-11-23)
 
 ### Features
