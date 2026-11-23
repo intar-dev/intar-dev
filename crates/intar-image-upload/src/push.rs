@@ -95,6 +95,8 @@ impl RegistryPusher {
         if token.trim().is_empty() {
             return Err(Error::InvalidConfig("the registry token is empty"));
         }
+        // reqwest has no crypto provider of its own; install ring first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Ok(Self {
             root,
             token: token.trim().to_owned(),

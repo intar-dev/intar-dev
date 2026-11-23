@@ -356,6 +356,8 @@ async fn fetch_bundle(base_url: &str, token: &str, rev: &str) -> Result<SourceBu
         "{}/agent/registry/bundles/{rev}",
         base_url.trim().trim_end_matches('/')
     );
+    // reqwest has no crypto provider of its own; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let response = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .build()?
@@ -490,6 +492,8 @@ async fn upload_log(
             cfg.bridge.base_url.trim().trim_end_matches('/'),
             build.build_id
         );
+        // reqwest has no crypto provider of its own; install ring first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let response = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()?

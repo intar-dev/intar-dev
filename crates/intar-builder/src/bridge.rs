@@ -84,6 +84,8 @@ pub async fn run(
     mut build_reports: mpsc::Receiver<BuildReportV2>,
     desired: DesiredStateSenders,
 ) -> Result<()> {
+    // reqwest has no crypto provider of its own; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let http = HttpClient::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -429,6 +431,8 @@ pub fn host_architecture() -> ImageArchitecture {
 
 /// A short-lived access token for the builder's HTTP routes.
 pub async fn bootstrap_builder_access_token(cfg: &BridgeConfig) -> Result<String> {
+    // reqwest has no crypto provider of its own; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let http = HttpClient::builder()
         .timeout(Duration::from_secs(30))
         .build()

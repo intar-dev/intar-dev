@@ -476,6 +476,7 @@ mod tests {
         };
         let folder = tempfile::tempdir().unwrap();
         let zip = folder.path().join("cache").join("update.zip");
+        let _ = rustls::crypto::ring::default_provider().install_default();
         offer.download(&reqwest::Client::new(), &zip).await.unwrap();
         assert_eq!(std::fs::read(&zip).unwrap(), b"not the published zip");
 

@@ -427,6 +427,7 @@ mod tests {
             .expect("listen");
         let base = format!("http://{}", listener.local_addr().expect("address"));
         tokio::spawn(async move { axum::serve(listener, app).await });
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Subspace::new(
             reqwest::Client::new(),
             base.parse().expect("url"),

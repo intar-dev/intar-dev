@@ -40,6 +40,8 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
         .name("jumper-engine".into())
         .spawn(move || {
             runtime.block_on(async move {
+                // reqwest has no crypto provider of its own; install ring first.
+                let _ = rustls::crypto::ring::default_provider().install_default();
                 let http = reqwest::Client::new();
                 let keychain = Keychain::new(&base);
                 let mut channel: Option<Arc<Subspace>> = None;

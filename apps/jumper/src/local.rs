@@ -483,6 +483,7 @@ mod tests {
         let base = std::env::var("INTAR_URL").unwrap_or_else(|_| "https://intar.dev".into());
         let base = url::Url::parse(&base).expect("INTAR_URL");
         let course = std::env::var("INTAR_LIVE_COURSE").unwrap_or_default();
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::new();
         let sign_in = subspace::SignIn::begin(&base)
             .await
@@ -638,6 +639,7 @@ mod tests {
             .expect("listen");
         let base = format!("http://{}", listener.local_addr().expect("address"));
         tokio::spawn(async move { axum::serve(listener, app).await });
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let channel = Subspace::new(
             reqwest::Client::new(),
             base.parse().expect("url"),
