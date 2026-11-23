@@ -6,10 +6,13 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 // the title or description re-runs only this, never ci.yml's lanes. It is not
 // required: ci.yml's pr-title job checks the squash commit in the merge queue,
 // which is what lands on main. The title reaches the check only as data.
+//
+// No concurrency group: a push followed by a description edit fires two events
+// a second apart, and cancelling the first left a red cancelled check on the
+// pull request. Each run checks its own event's title and takes seconds.
 "workflows": "pr-title": {
 	name: "PR title"
 	on: pull_request: types: ["opened", "edited", "synchronize", "reopened"]
-	concurrency: gha.#PRConcurrency & {#name: "pr-title"}
 	jobs: "pr-title": {
 		name:              "pr-title"
 		"runs-on":         "ubuntu-24.04"
