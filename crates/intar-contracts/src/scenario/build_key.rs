@@ -47,15 +47,21 @@
 //! ```text
 //! cluster = str(IMAGE_FORMAT) str("cluster") str(CLUSTER_BAKE_REVISION)
 //!           str(talos) str(kubernetes) str(name) list(node) list(patch)
+//!           list(management)
 //! node    = str(name) ‖ str(role) ‖ str(disk)  the cluster's nodes in scenario order
 //! patch   = str(name) ‖ str(patch)             in order
+//! management = str(name) ‖ str(own)            the management machine
 //! machine = str(IMAGE_FORMAT) str("cluster-machine") str(cluster key)
 //!           str(name) str(role) str(own)
 //! ```
 //!
 //! `own` is empty on a node; on the management machine it is the key it
 //! would have outside the cluster, so its image, setup and defer count.
-//! Node order is an input because it assigns the nodes' lab addresses.
+//! Node order is an input because it assigns the nodes' lab addresses. The
+//! management machine's `own` is an input of the cluster key too: one bake
+//! makes every image of the cluster with one PKI, so a change to any of its
+//! machines must change every machine's key, or a rebuild would pair new
+//! images with recorded ones of another bake.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -98,7 +104,11 @@ fn digest(bytes: &[u8]) -> OciDigest {
     OciDigest::from_sha256(&Sha256::digest(bytes).into())
 }
 
-fn cluster_key(cluster: &ClusterV1, machines: &[MachineV1]) -> OciDigest {
+fn cluster_key(
+    cluster: &ClusterV1,
+    machines: &[MachineV1],
+    images: &BTreeMap<String, OciDigest>,
+) -> Result<OciDigest, String> {
     let mut bytes = Vec::new();
     for text in [
         IMAGE_FORMAT,
@@ -126,7 +136,20 @@ fn cluster_key(cluster: &ClusterV1, machines: &[MachineV1]) -> OciDigest {
         put(&mut bytes, &patch.name);
         put(&mut bytes, &patch.script);
     }
-    digest(&bytes)
+    let management: Vec<_> = machines
+        .iter()
+        .filter(|m| {
+            m.cluster
+                .as_ref()
+                .is_some_and(|c| c.cluster == cluster.name && !c.role.is_node())
+        })
+        .collect();
+    count(&mut bytes, management.len());
+    for machine in management {
+        put(&mut bytes, &machine.name);
+        put(&mut bytes, machine_key(machine, images)?.as_str());
+    }
+    Ok(digest(&bytes))
 }
 
 fn cluster_machine_key(cluster: &OciDigest, name: &str, role: &str, own: &str) -> OciDigest {
@@ -273,12 +296,12 @@ pub fn build_keys(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<BuildKeys
         .clusters
         .iter()
         .map(|cluster| {
-            (
+            Ok((
                 cluster.name.clone(),
-                cluster_key(cluster, &scenario.machines),
-            )
+                cluster_key(cluster, &scenario.machines, &images)?,
+            ))
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     let machines = scenario
         .machines
         .iter()

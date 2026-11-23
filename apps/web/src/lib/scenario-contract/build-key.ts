@@ -52,7 +52,11 @@ class Encoding {
   }
 }
 
-function clusterKey(cluster: ClusterV1, machines: MachineV1[]): Promise<string> {
+async function clusterKey(
+  cluster: ClusterV1,
+  machines: MachineV1[],
+  images: Record<string, string>,
+): Promise<string> {
   const e = new Encoding();
   for (const text of [IMAGE_FORMAT, "cluster", CLUSTER_BAKE_REVISION, cluster.talos, cluster.kubernetes, cluster.name]) e.put(text);
   const nodes = machines.filter(
@@ -68,6 +72,16 @@ function clusterKey(cluster: ClusterV1, machines: MachineV1[]): Promise<string> 
   for (const patch of cluster.patches) {
     e.put(patch.name);
     e.put(patch.script);
+  }
+  // The management machine's own key: a change to any machine of the
+  // cluster changes every machine's key (one bake, one PKI).
+  const management = machines.filter(
+    (machine) => machine.cluster?.cluster === cluster.name && machine.cluster.role === "management",
+  );
+  e.count(management.length);
+  for (const machine of management) {
+    e.put(machine.name);
+    e.put(await machineKey(machine, images));
   }
   return e.digest();
 }
@@ -172,7 +186,7 @@ export async function buildKeys(
   const imageKeysByName = await imageKeys(images);
   const clusters: Record<string, string> = {};
   for (const cluster of scenario.clusters ?? []) {
-    clusters[cluster.name] = await clusterKey(cluster, scenario.machines);
+    clusters[cluster.name] = await clusterKey(cluster, scenario.machines, imageKeysByName);
   }
   const machines: Record<string, string> = {};
   for (const machine of scenario.machines) {
