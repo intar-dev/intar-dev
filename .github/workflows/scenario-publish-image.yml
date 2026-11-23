@@ -1,6 +1,8 @@
 name: Intar scenario image
 
 # One image of a publish: its amd64 build, then its arm64 build, each a job.
+# A Talos cluster (`cluster:SCENARIO/CLUSTER`) is one image here: all its
+# machines are baked together and recorded as one set.
 # Only scenario-publish.yml calls this, once an image and one image at a time;
 # a scenario repository calls that workflow, never this one.
 
@@ -8,7 +10,9 @@ on:
   workflow_call:
     inputs:
       spec:
-        description: The image as `plan` names it, JSON with target, build_key and archs.
+        description: >-
+          The image as `plan` names it, JSON with target, build_key and archs; a
+          cluster's also with build_keys, every machine key it records.
         type: string
         required: true
       index:
@@ -123,6 +127,18 @@ jobs:
             echo "Intar names intar-image-cli ${cli_version}, which builds on a Linux amd64 runner only. An arm64 runner needs a newer one: leave \`arm64-runner\` empty until Intar names it." >&2
             exit 1
           fi
+          # A cluster's nodes are baked and woken with KVM: emulated, they
+          # would not come up within the bake's limits.
+          if [[ "${target}" == cluster:* ]]; then
+            if [ "$(printf '%s\n' 0.18.0 "${cli_version}" | sort -V | tail -n 1)" = 0.18.0 ]; then
+              echo "Intar names intar-image-cli ${cli_version}, which pushes no Talos cluster; a newer one does." >&2
+              exit 1
+            fi
+            if [ "${ARCH}" != "${native}" ]; then
+              echo "A Talos cluster is built only on a runner of its own architecture: set \`arm64-runner\` to a Linux arm64 runner with KVM." >&2
+              exit 1
+            fi
+          fi
           # The image is of the bundle the upload compiled. A compiler that
           # changed since gives other build keys, refused only after the bake.
           if [ -z "${BUILD_ONLY}" ] && [[ "${REV}" != *"-${digest}" ]]; then
@@ -222,10 +238,19 @@ jobs:
             # `build` ran as root; `push` runs as this job's user, which is
             # the one the runner gives a token to.
             sudo chown -R "$(id -u):$(id -g)" "${out}"
-            is="$(jq -r '.build_key' "${out}/image.json")"
-            if [ "${is}" != "${key}" ]; then
+            if [[ "${target}" == cluster:* ]]; then
+              # The cluster key and every machine key, as Intar asked.
+              is="$(jq -r '.cluster_key' "${out}/images.json")"
+              keys="$(jq -c '[.images[].build_key] | sort' "${out}/images.json")"
+              wanted="$(jq -c '.build_keys // [] | sort' <<<"${IMAGE}")"
+            else
+              is="$(jq -r '.build_key' "${out}/image.json")"
+              keys=same
+              wanted=same
+            fi
+            if [ "${is}" != "${key}" ] || [ "${keys}" != "${wanted}" ]; then
               summary "- Not pushed: built as another key than Intar asked for."
-              echo "${target} built as ${is}, not the ${key} Intar asked for." >&2
+              echo "${target} built as ${is} ${keys}, not the ${key} ${wanted} Intar asked for." >&2
               exit 1
             fi
             tries=0
@@ -243,7 +268,7 @@ jobs:
             done
             case "${status}" in
               0)
-                summary "- Pushed: $(sed -n 's/.* recorded=//p' "${work}/logs/${ARCH}.push")."
+                summary "- Pushed: $(sed -n '1s/.* recorded=//p' "${work}/logs/${ARCH}.push")."
                 ;;
               3)
                 # Intar takes no more images for this commit: its head moved,

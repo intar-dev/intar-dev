@@ -10,6 +10,7 @@ export type Architecture = "amd64" | "arm64";
  * digits.
  */
 export type OciDigest = string;
+export type ClusterRole = ("controlplane" | "worker") | "management";
 
 /**
  * The config blob of a machine image. The image's identity is its
@@ -27,6 +28,11 @@ export interface MachineConfigV1 {
   disk: MachineDiskV1;
   guest_contract: number;
   image_format: string;
+  /**
+   * Set on the image of a Talos cluster node. Runtimes boot it without
+   * Kino and give it no port forwards.
+   */
+  talos?: MachineTalosV1 | null;
 }
 export interface MachineBootV1 {
   cmdline: string;
@@ -39,4 +45,14 @@ export interface MachineDiskV1 {
    */
   chunks: [unknown, unknown, unknown][];
   size_bytes: number;
+}
+/**
+ * A Talos node's place on its cluster's lab network.
+ */
+export interface MachineTalosV1 {
+  /**
+   * Its baked address on the lab network, e.g. `172.31.0.2`.
+   */
+  lab_ip: string;
+  role: ClusterRole;
 }

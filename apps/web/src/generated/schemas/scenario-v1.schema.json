@@ -6,6 +6,13 @@
     "briefing": {
       "type": "string"
     },
+    "clusters": {
+      "description": "Talos clusters; their machines are among `machines`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ClusterV1"
+      }
+    },
     "credit": {
       "type": [
         "string",
@@ -78,6 +85,53 @@
     "tasks"
   ],
   "$defs": {
+    "ClusterRole": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "controlplane",
+            "worker"
+          ]
+        },
+        {
+          "description": "The cluster's trixie machine with kubectl, talosctl and their\nconfigs, where the learner works.",
+          "type": "string",
+          "const": "management"
+        }
+      ]
+    },
+    "ClusterV1": {
+      "description": "A Talos cluster: its nodes and its management machine are the machines\nwhose `cluster` names it.",
+      "type": "object",
+      "properties": {
+        "kubernetes": {
+          "description": "The Kubernetes release, e.g. `v1.37.1`.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "patches": {
+          "description": "Talos machine-config patches (YAML), applied to every node in order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScriptV1"
+          }
+        },
+        "talos": {
+          "description": "The Talos release, e.g. `v1.15.0-beta.0`; with `kubernetes` one of\n[`TALOS_RELEASES`].",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "talos",
+        "kubernetes",
+        "patches"
+      ]
+    },
     "Difficulty": {
       "type": "string",
       "enum": [
@@ -108,9 +162,37 @@
         "body"
       ]
     },
+    "MachineClusterV1": {
+      "description": "A machine's place in a cluster.",
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/ClusterRole"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cluster",
+        "role"
+      ]
+    },
     "MachineV1": {
       "type": "object",
       "properties": {
+        "cluster": {
+          "description": "Set on a machine of a Talos cluster.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MachineClusterV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cpu_millis": {
           "type": "integer",
           "format": "uint32",
@@ -137,7 +219,7 @@
           }
         },
         "from": {
-          "description": "`trixie` or the name of an image.",
+          "description": "`trixie`, `talos` for a cluster node, or the name of an image.",
           "type": "string"
         },
         "memory_mib": {

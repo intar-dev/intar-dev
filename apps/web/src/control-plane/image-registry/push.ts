@@ -437,7 +437,13 @@ async function recordPipelineImage(
   },
 ): Promise<Response> {
   const { sessionId, buildKey, architecture, imageDigest } = input;
-  if (!(await keyInSessionBundle(env, sessionId, buildKey))) return notInBundle();
+  const place = await keyInSessionBundle(env, sessionId, buildKey);
+  if (place === null) return notInBundle();
+  if (place.cluster) {
+    return jsonResponse({
+      error: "a cluster machine's image is recorded with its whole cluster", code: "cluster_machine",
+    }, 409);
+  }
   // An image that stands is the answer before anything is asked of the new
   // one: a second run of the key stores nothing and needs no room.
   const standing = await env.DB.prepare(
@@ -526,17 +532,7 @@ async function recordPipelineImage(
   ]);
   if (!results[3]?.results.length) return leaseRanOut();
   if (results[1]?.results.length) {
-    // The source's job may wait for just this image before it puts a lab
-    // live.
-    // The image is recorded whatever comes of the poke: the source's own
-    // poll finds it within ten minutes.
-    await env.DB.prepare(
-      `UPDATE scenario_sources SET poked_at = ?2
-        WHERE disconnected_at IS NULL
-          AND scope_key = (SELECT scope_key FROM pipeline_upload_sessions WHERE id = ?1)`,
-    ).bind(sessionId, now).run().catch((error: unknown) => {
-      console.error(JSON.stringify({ event: "pipeline_image_poke_failed", error: String(error) }));
-    });
+    await pokeScopeSources(env, sessionId, now);
     return jsonResponse({ ok: true, image_digest: imageDigest }, 201);
   }
   const recorded = (results[2]?.results[0] as { image_digest: string } | undefined)?.image_digest;
@@ -545,21 +541,230 @@ async function recordPipelineImage(
     : jsonResponse({ error: "the image is not a stored machine image", code: "image_unknown" }, 409);
 }
 
+/** The most machines one cluster result records. */
+const MAX_CLUSTER_MACHINES = 32;
+
+/**
+ * Records the images of one Talos cluster's bake, for one architecture, as
+ * its scope's images of the cluster's machine keys. A cluster's machines
+ * share the PKI made at bake time, so their images stand or fall as one set:
+ * the body names an image for every machine key the session's bundle gives
+ * the cluster, and nothing less.
+ *
+ * A set stands when every key has a current row whose manifest is stored.
+ * A standing set is the answer, as for a single key. Anything less (a key
+ * the sweep removed, a manifest gone, a format no longer current) is deleted
+ * and the new set written in its place, decided inside one batch, so two
+ * results at once end with one whole set.
+ */
+export async function handleClusterResult(
+  request: Request,
+  env: Cloudflare.Env,
+  clusterId: string,
+  lease?: RegistryOperationLease,
+): Promise<Response> {
+  if (request.method !== "POST") return methodNotAllowed("POST");
+  const auth = await readRegistryAuth(request, env);
+  if (!auth.ok) return auth.response;
+  if (auth.owner.kind !== "pipeline") return jsonResponse({ error: "only a pipeline records a cluster" }, 403);
+  const clusterKey = machineBuildKey(clusterId);
+  if (!clusterKey) return invalid("a cluster result names a cluster key");
+  const architecture = new URL(request.url).searchParams.get("arch") ?? "amd64";
+  if (architecture !== "amd64" && architecture !== "arm64") return invalid("a result is for amd64 or arm64");
+  const sessionId = auth.owner.id;
+
+  const length = declaredLength(request, MAX_RESULT_BYTES * 8);
+  if (length instanceof Response) return length;
+  const body = parseJson(await request.arrayBuffer());
+  const listed = isRecord(body) && Object.keys(body).length === 1 && Array.isArray(body.images) ? body.images : null;
+  const images = (listed ?? []).flatMap((entry: unknown) =>
+    isRecord(entry) && Object.keys(entry).length === 2
+      && typeof entry.build_key === "string" && DIGEST_RE.test(entry.build_key)
+      && typeof entry.image_digest === "string" && DIGEST_RE.test(entry.image_digest)
+      ? [{ build_key: entry.build_key, image_digest: entry.image_digest }]
+      : [],
+  );
+  if (!listed || images.length !== listed.length || images.length === 0 || images.length > MAX_CLUSTER_MACHINES) {
+    return invalid("the result is {\"images\":[{\"build_key\":\"sha256:<hex>\",\"image_digest\":\"sha256:<hex>\"}]}");
+  }
+  const keys = await clusterKeysInSessionBundle(env, sessionId, clusterKey);
+  if (keys.length === 0) return notInBundle();
+  const named = images.map((image) => image.build_key).sort();
+  if (named.length !== keys.length || named.some((key, index) => key !== keys[index])) {
+    return jsonResponse({
+      error: "a cluster result names an image for every machine of the cluster and no other",
+      code: "cluster_set_mismatch", build_keys: keys,
+    }, 409);
+  }
+  const keysJson = JSON.stringify(keys);
+
+  // The set's rows, with the session, architecture and key list as `s`, `a` and `k`.
+  const setRows = (s: string, a: string, k: string) => `scope_machine_images image
+    WHERE image.scope_key = (SELECT scope_key FROM pipeline_upload_sessions WHERE id = ${s})
+      AND image.architecture = ${a} AND image.build_key IN (SELECT value FROM json_each(${k}))`;
+  const standingCount = (s: string, a: string, f: string, k: string) => `(SELECT COUNT(*) FROM ${setRows(s, a, k)}
+      AND image.image_format = ${f} AND EXISTS (SELECT 1 FROM registry_manifests WHERE digest = image.image_digest))`;
+  const recordedSet = (rows: { build_key: string; image_digest: string }[]) =>
+    Object.fromEntries(rows.map((row) => [row.build_key, row.image_digest]));
+
+  // A set that stands is the answer before anything is asked of the new one.
+  const standing = await env.DB.prepare(
+    `SELECT ${standingCount("?1", "?2", "?3", "?4")} AS count,
+            (SELECT json_group_object(image.build_key, image.image_digest) FROM ${setRows("?1", "?2", "?4")}) AS images`,
+  ).bind(sessionId, architecture, IMAGE_FORMAT, keysJson).first<{ count: number; images: string }>();
+  if (standing?.count === keys.length) {
+    return jsonResponse({ ok: true, images: JSON.parse(standing.images) as Record<string, string>, recorded: true });
+  }
+
+  // Each image as the single route checks it: pushed in this session, a
+  // machine image of its key, this format and this architecture.
+  const entries: { build_key: string; image_digest: string; size_bytes: number }[] = [];
+  for (const { build_key: buildKey, image_digest: imageDigest } of images) {
+    const pushed = await env.DB.prepare(
+      `SELECT 1 AS present FROM registry_manifests manifest
+        WHERE manifest.digest = ?1 AND manifest.artifact_type = ?2 AND ${PUSHED_IN_SESSION}`,
+    ).bind(imageDigest, MACHINE_ARTIFACT_TYPE, sessionId).first();
+    const manifest = pushed ? await readJsonObject(env, imageDigest) : null;
+    const config = validateManifest(manifest) ? await readJsonObject(env, manifest.config.digest) : null;
+    if (!validateManifest(manifest) || !validateMachineConfig(config)) {
+      return jsonResponse({
+        error: "the image is not a machine image this session pushed", code: "image_unknown", build_key: buildKey,
+      }, 409);
+    }
+    if (config.build_key !== buildKey || config.image_format !== IMAGE_FORMAT) {
+      return jsonResponse({
+        error: "the image was built for another build key", code: "build_key_mismatch", build_key: buildKey,
+      }, 409);
+    }
+    if (config.architecture !== architecture) {
+      return jsonResponse({
+        error: `the image is not an ${architecture} image`, code: "architecture_mismatch", build_key: buildKey,
+      }, 409);
+    }
+    const sizes = new Map([manifest.config, ...manifest.layers].map((descriptor) => [descriptor.digest, descriptor.size]));
+    entries.push({ build_key: buildKey, image_digest: imageDigest, size_bytes: imageBytes(sizes) });
+  }
+
+  // The whole set counts against the scope's storage, in place of what the
+  // set's keys hold now.
+  // ponytail: read before the batch, as for a single key.
+  const used = await env.DB.prepare(
+    `WITH ${KEPT_REVISIONS_CTE}
+     SELECT session.scope_key AS scope_key,
+            (SELECT COALESCE(SUM(image.size_bytes), 0) FROM scope_machine_images image
+              WHERE image.scope_key = session.scope_key
+                AND NOT (image.architecture = ?2 AND image.build_key IN (SELECT value FROM json_each(?3)))
+                AND ${imageKeptSql("image")}) AS bytes
+       FROM pipeline_upload_sessions session WHERE session.id = ?1`,
+  ).bind(sessionId, architecture, keysJson).first<{ scope_key: string; bytes: number }>();
+  const setBytes = entries.reduce((sum, entry) => sum + entry.size_bytes, 0);
+  if (used && used.bytes + setBytes > pipelineScopeLimits(used.scope_key).storageBytes) {
+    return jsonResponse({
+      error: "this source's images are over the storage it may use", code: "scope_storage_exceeded",
+    }, 409);
+  }
+
+  const now = Date.now();
+  const live = liveWriterSql("?1", "?2");
+  const binds = [lease?.operationId ?? "", now, sessionId, architecture, IMAGE_FORMAT, keysJson, keys.length,
+    JSON.stringify(entries)] as const;
+  const results = await env.DB.batch([
+    // A set that does not stand goes whole: no key keeps an image of
+    // another bake. One that stood up in the meantime stays.
+    env.DB.prepare(
+      `DELETE FROM scope_machine_images
+        WHERE scope_key = (SELECT scope_key FROM pipeline_upload_sessions WHERE id = ?3) AND architecture = ?4
+          AND build_key IN (SELECT value FROM json_each(?6))
+          AND ${standingCount("?3", "?4", "?5", "?6")} < ?7
+          AND ${live}`,
+    ).bind(...binds.slice(0, 7)),
+    // Every row or none: each manifest must still be there.
+    env.DB.prepare(
+      `INSERT INTO scope_machine_images
+         (scope_key, build_key, architecture, image_digest, image_format, size_bytes,
+          github_repository_id, github_repository, sha, run_id, run_attempt,
+          runner_environment, job_workflow_sha, created_at)
+       SELECT session.scope_key, json_extract(entry.value, '$.build_key'), ?4,
+              json_extract(entry.value, '$.image_digest'), ?5, json_extract(entry.value, '$.size_bytes'),
+              session.github_repository_id, session.github_repository, session.sha, session.run_id,
+              session.run_attempt, session.runner_environment, session.job_workflow_sha, ?2
+         FROM pipeline_upload_sessions session, json_each(?8) entry
+        WHERE session.id = ?3 AND ${live}
+          AND (SELECT COUNT(*) FROM json_each(?8) wanted
+                JOIN registry_manifests manifest ON manifest.digest = json_extract(wanted.value, '$.image_digest')
+               WHERE ${PUSHED_IN_SESSION}) = ?7
+       ON CONFLICT DO NOTHING
+       RETURNING build_key`,
+    ).bind(...binds),
+    env.DB.prepare(`SELECT image.build_key, image.image_digest FROM ${setRows("?1", "?2", "?3")}`)
+      .bind(sessionId, architecture, keysJson),
+    env.DB.prepare(`SELECT 1 AS live WHERE ${live}`).bind(lease?.operationId ?? "", now),
+  ]);
+  if (!results[3]?.results.length) return leaseRanOut();
+  const recorded = (results[2]?.results ?? []) as { build_key: string; image_digest: string }[];
+  if (results[1]?.results.length === keys.length) {
+    await pokeScopeSources(env, sessionId, now);
+    return jsonResponse({ ok: true, images: recordedSet(recorded) }, 201);
+  }
+  return recorded.length === keys.length
+    ? jsonResponse({ ok: true, images: recordedSet(recorded), recorded: true })
+    : jsonResponse({ error: "an image of the set is not a stored machine image", code: "image_unknown" }, 409);
+}
+
+/**
+ * The source's job may wait for just this image before it puts a lab live.
+ * The image is recorded whatever comes of the poke: the source's own poll
+ * finds it within ten minutes.
+ */
+async function pokeScopeSources(env: Cloudflare.Env, sessionId: string, now: number): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE scenario_sources SET poked_at = ?2
+      WHERE disconnected_at IS NULL
+        AND scope_key = (SELECT scope_key FROM pipeline_upload_sessions WHERE id = ?1)`,
+  ).bind(sessionId, now).run().catch((error: unknown) => {
+    console.error(JSON.stringify({ event: "pipeline_image_poke_failed", error: String(error) }));
+  });
+}
+
 /** `manifest` was pushed, or pushed again, since the session `?3` was opened. */
 const PUSHED_IN_SESSION = `manifest.created_at >= (SELECT created_at FROM pipeline_upload_sessions WHERE id = ?3)`;
 
-/** Whether a revision of the session's rev, in the session's scope, names `buildKey` for a machine. */
-async function keyInSessionBundle(env: Cloudflare.Env, sessionId: string, buildKey: string): Promise<boolean> {
+/**
+ * Whether a revision of the session's rev, in the session's scope, names
+ * `buildKey` for a machine, and whether that machine is one of a cluster.
+ */
+async function keyInSessionBundle(
+  env: Cloudflare.Env,
+  sessionId: string,
+  buildKey: string,
+): Promise<{ cluster: boolean } | null> {
   const named = await env.DB.prepare(
-    `SELECT 1 AS named
+    `SELECT MAX(json_extract(machine.value, '$.cluster_key') IS NOT NULL) AS cluster
        FROM pipeline_upload_sessions session
        JOIN scenario_revisions revision ON revision.rev = session.rev
        JOIN scenarios scenario ON scenario.id = revision.scenario_id AND scenario.scope_key = session.scope_key,
             json_each(revision.doc_json, '$.machines') machine
-      WHERE session.id = ?1 AND json_extract(machine.value, '$.build_key') = ?2
-      LIMIT 1`,
-  ).bind(sessionId, buildKey).first();
-  return named !== null;
+      WHERE session.id = ?1 AND json_extract(machine.value, '$.build_key') = ?2`,
+  ).bind(sessionId, buildKey).first<{ cluster: number | null }>();
+  return named?.cluster == null ? null : { cluster: named.cluster === 1 };
+}
+
+/** The machine keys the session's bundle names for the cluster `clusterKey`, sorted. */
+async function clusterKeysInSessionBundle(
+  env: Cloudflare.Env,
+  sessionId: string,
+  clusterKey: string,
+): Promise<string[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT DISTINCT json_extract(machine.value, '$.build_key') AS build_key
+       FROM pipeline_upload_sessions session
+       JOIN scenario_revisions revision ON revision.rev = session.rev
+       JOIN scenarios scenario ON scenario.id = revision.scenario_id AND scenario.scope_key = session.scope_key,
+            json_each(revision.doc_json, '$.machines') machine
+      WHERE session.id = ?1 AND json_extract(machine.value, '$.cluster_key') = ?2
+      ORDER BY build_key`,
+  ).bind(sessionId, clusterKey).all<{ build_key: string }>();
+  return results.map((row) => row.build_key);
 }
 
 /** The bytes of an image's distinct blobs. */

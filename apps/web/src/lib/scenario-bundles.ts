@@ -99,6 +99,13 @@ export async function ingestSourceBundle(
     return "the images of this commit come from the repository's pipeline, and this source no longer publishes from it; publish a new commit";
   }
 
+  // A cluster's machines are baked together and recorded as one set, which
+  // only a pipeline does.
+  const clustered = bundle.scenarios.find((scenario) => scenario.clusters?.length);
+  if (clustered && !byPipeline) {
+    return `scenario \`${clustered.slug}\` has a Talos cluster, whose images only the repository's pipeline builds`;
+  }
+
   const bucket = env.VM_IMAGE_REGISTRY_BUCKET;
   const objectKey = sourceBundleObjectKey(rev);
   if (!input.stored) {

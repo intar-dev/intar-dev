@@ -1236,6 +1236,8 @@ export async function acceptScenarioSourceUpload(
     claim: SourceUploadClaim;
     /** Who builds the source's images now; absent, a builder. */
     imageProducer?: ImageProducer;
+    /** The upload's workflow builds and pushes a Talos cluster; absent, it does not. */
+    clusters?: boolean;
   },
 ): Promise<Response> {
   const { scope, purpose, claim } = input;
@@ -1345,6 +1347,14 @@ export async function acceptScenarioSourceUpload(
     }
     const gzip = new Uint8Array(await bundle.arrayBuffer());
     const read = await readSourceBundle(gzip);
+    const clustered = read.scenarios.find((scenario) => scenario.clusters?.length);
+    if (clustered && !input.clusters) {
+      throw appError(
+        409,
+        "clusters_unsupported",
+        `Scenario \`${clustered.slug}\` has a Talos cluster, which this workflow cannot build. Call a scenario-publish version that builds clusters.`,
+      );
+    }
     if (!normalizeCourseCatalogSnapshot(read.course_catalog)) {
       throw appError(400, "bundle_invalid", "The course catalog is invalid.");
     }

@@ -17,6 +17,8 @@ mod rootfs;
 mod seed;
 mod sha256;
 mod ssh;
+#[cfg(unix)]
+mod talos;
 pub mod tools;
 
 pub use chunked::{
@@ -46,3 +48,7 @@ pub use machine::{
 pub use platform::{PLATFORM_BASE_DISK_BYTES, ensure_platform_base, render_platform_rootfs_plan};
 pub use rootfs::{BaseRootfsArtifact, RootfsBuildPaths, RootfsBuildPlan};
 pub use sha256::sha256_file_hex;
+#[cfg(unix)]
+pub use talos::{
+    ClusterBuildOutput, ClusterBuildRequest, build_cluster_images, cluster_build_log_path,
+};

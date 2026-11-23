@@ -534,6 +534,511 @@
           "node-other-env": "sha256:b90a92635edb0d8bafa435bbe136616ef34b402ccfd30f5af8649dba5ee13d14"
         }
       }
+    },
+    {
+      "name": "cluster",
+      "scenario": "talos-lab",
+      "images": [],
+      "machines": [
+        {
+          "name": "cp1",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "controlplane"
+          }
+        },
+        {
+          "name": "wk1",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "worker"
+          }
+        },
+        {
+          "name": "wk2",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "worker"
+          }
+        },
+        {
+          "name": "mgmt",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "management"
+          }
+        }
+      ],
+      "clusters": [
+        {
+          "name": "lab",
+          "patches": [
+            {
+              "name": "ntp",
+              "script": "machine:\n  time:\n    servers: [time.cloudflare.com]\n"
+            }
+          ],
+          "talos": "v1.15.0-beta.0",
+          "kubernetes": "v1.37.1"
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "cp1": "sha256:e12d8608b689ed5d28abf2eb0e42671bf079e520dd4445360d3a1f1d53d58e34",
+          "mgmt": "sha256:4f1757838d9b21d801a2936d699839a3e4ad619d56d4e243e2f5d1d55bcfe3af",
+          "wk1": "sha256:3bb6cf5f063c5aed2425983a2f6a309b7ccdbfb3029575b13c3f5266b02b6f76",
+          "wk2": "sha256:2985902d2c90cea2dacc99b387484055b3f2eb2612477875bde78ccc72391d2b"
+        },
+        "clusters": {
+          "lab": "sha256:90dfda4b17512d376c1e8b383fde9ecddd67428b334fe215cfe64c34055b3be1"
+        }
+      }
+    },
+    {
+      "name": "cluster-other-scenario-sizes",
+      "scenario": "other",
+      "images": [],
+      "machines": [
+        {
+          "name": "cp1",
+          "cpu_millis": 4000,
+          "memory_mib": 4096,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": false,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "controlplane"
+          }
+        },
+        {
+          "name": "wk1",
+          "cpu_millis": 4000,
+          "memory_mib": 4096,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": false,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "worker"
+          }
+        },
+        {
+          "name": "wk2",
+          "cpu_millis": 4000,
+          "memory_mib": 4096,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": false,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "worker"
+          }
+        },
+        {
+          "name": "mgmt",
+          "cpu_millis": 2000,
+          "memory_mib": 1024,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": false,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "management"
+          }
+        }
+      ],
+      "clusters": [
+        {
+          "name": "lab",
+          "patches": [
+            {
+              "name": "ntp",
+              "script": "machine:\n  time:\n    servers: [time.cloudflare.com]\n"
+            }
+          ],
+          "talos": "v1.15.0-beta.0",
+          "kubernetes": "v1.37.1"
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "cp1": "sha256:e12d8608b689ed5d28abf2eb0e42671bf079e520dd4445360d3a1f1d53d58e34",
+          "mgmt": "sha256:4f1757838d9b21d801a2936d699839a3e4ad619d56d4e243e2f5d1d55bcfe3af",
+          "wk1": "sha256:3bb6cf5f063c5aed2425983a2f6a309b7ccdbfb3029575b13c3f5266b02b6f76",
+          "wk2": "sha256:2985902d2c90cea2dacc99b387484055b3f2eb2612477875bde78ccc72391d2b"
+        },
+        "clusters": {
+          "lab": "sha256:90dfda4b17512d376c1e8b383fde9ecddd67428b334fe215cfe64c34055b3be1"
+        }
+      }
+    },
+    {
+      "name": "cluster-patch-changed",
+      "scenario": "talos-lab",
+      "images": [],
+      "machines": [
+        {
+          "name": "cp1",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "controlplane"
+          }
+        },
+        {
+          "name": "wk1",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "worker"
+          }
+        },
+        {
+          "name": "wk2",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "worker"
+          }
+        },
+        {
+          "name": "mgmt",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "management"
+          }
+        }
+      ],
+      "clusters": [
+        {
+          "name": "lab",
+          "patches": [
+            {
+              "name": "ntp",
+              "script": "machine:\n  time:\n    servers: [time.cloudflare.com]\n# changed\n"
+            }
+          ],
+          "talos": "v1.15.0-beta.0",
+          "kubernetes": "v1.37.1"
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "cp1": "sha256:21dc26849a36c0634460f7dd59447d7ea70168a0ce96f2a0691adea880f6e45e",
+          "mgmt": "sha256:7f5171f1232a2da4831a62592ebd9572dcefabad1a17abe10b04bd4facfaa70c",
+          "wk1": "sha256:dede0bdbd0a0a530d47c5d9a1d84b6b2dee84a8df0f4ff7681278b3392e72b9f",
+          "wk2": "sha256:0799706cdfa69251b3f2eb6e598f83a01e0df87b2b48285539cf9e144cf0a2d0"
+        },
+        "clusters": {
+          "lab": "sha256:5551b189ceff5bd63c98bffd4ae47153161bc226ab924f9f042e16cf6e267a31"
+        }
+      }
+    },
+    {
+      "name": "cluster-nodes-reordered",
+      "scenario": "talos-lab",
+      "images": [],
+      "machines": [
+        {
+          "name": "cp1",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "controlplane"
+          }
+        },
+        {
+          "name": "wk2",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "worker"
+          }
+        },
+        {
+          "name": "wk1",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "worker"
+          }
+        },
+        {
+          "name": "mgmt",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "management"
+          }
+        }
+      ],
+      "clusters": [
+        {
+          "name": "lab",
+          "patches": [
+            {
+              "name": "ntp",
+              "script": "machine:\n  time:\n    servers: [time.cloudflare.com]\n"
+            }
+          ],
+          "talos": "v1.15.0-beta.0",
+          "kubernetes": "v1.37.1"
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "cp1": "sha256:162f2d487fea3e8789249907a22318d4d0a915b7bfc23c8df41611377015463a",
+          "mgmt": "sha256:060d4ac11e5d7cb1977f3eded96b6a634f58ef908e28ad596f1b64bc230d9df2",
+          "wk1": "sha256:43723a0614b9d3282357e6744eb7c2ded65b9e333e2214b44ee1b011b195ea0a",
+          "wk2": "sha256:fb45e57acb1d9af12343c76b88e1d19239332ed3d0646d636a5e1f513c2ff566"
+        },
+        "clusters": {
+          "lab": "sha256:04b212dff403b847628c8c3570833d8dbfadac60ae243bd3a54d999b9a5ca2d9"
+        }
+      }
+    },
+    {
+      "name": "cluster-management-setup",
+      "scenario": "talos-lab",
+      "images": [],
+      "machines": [
+        {
+          "name": "cp1",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "controlplane"
+          }
+        },
+        {
+          "name": "wk1",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "worker"
+          }
+        },
+        {
+          "name": "wk2",
+          "cpu_millis": 2000,
+          "memory_mib": 2048,
+          "disk_mib": 10240,
+          "from": "talos",
+          "defer": [],
+          "terminal": false,
+          "egress": true,
+          "env": {},
+          "setup": [],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "worker"
+          }
+        },
+        {
+          "name": "mgmt",
+          "cpu_millis": 1000,
+          "memory_mib": 512,
+          "disk_mib": 4096,
+          "from": "trixie",
+          "defer": [],
+          "terminal": true,
+          "egress": true,
+          "env": {},
+          "setup": [
+            {
+              "name": "packages",
+              "script": "apt-get install -y jq\n"
+            }
+          ],
+          "ready": [],
+          "cluster": {
+            "cluster": "lab",
+            "role": "management"
+          }
+        }
+      ],
+      "clusters": [
+        {
+          "name": "lab",
+          "patches": [
+            {
+              "name": "ntp",
+              "script": "machine:\n  time:\n    servers: [time.cloudflare.com]\n"
+            }
+          ],
+          "talos": "v1.15.0-beta.0",
+          "kubernetes": "v1.37.1"
+        }
+      ],
+      "keys": {
+        "images": {},
+        "machines": {
+          "cp1": "sha256:4f325f48de3512391a3578503b19752f021a4eae68331713eef18e0eb49ab6c6",
+          "mgmt": "sha256:76437a81a136a21e426aec6a7fba8742de047fbe7dd7b91f07a13e0d5b7b8eac",
+          "wk1": "sha256:a16a5a153e87dc337a6eecc4244a20844ff437610742a66c71a0c947fc1f5b27",
+          "wk2": "sha256:603ffc4b8bb5b4393e36f8a4bf97854cdf54575bc7c7d6cbaf7b530637b8d5f5"
+        },
+        "clusters": {
+          "lab": "sha256:dadd3f7b3060d775d70f825db9df2fccfa92502bb99c2d7832d6d1ab3f2a7b04"
+        }
+      }
     }
   ],
   "equal": [
@@ -552,6 +1057,14 @@
     [
       "zero-setup-on-image/node",
       "zero-setup-on-image/node-other-env"
+    ],
+    [
+      "cluster/cp1",
+      "cluster-other-scenario-sizes/cp1"
+    ],
+    [
+      "cluster/mgmt",
+      "cluster-other-scenario-sizes/mgmt"
     ]
   ],
   "differ": [
@@ -578,6 +1091,30 @@
     [
       "image-chain/control-plane",
       "zero-setup-on-image/node"
+    ],
+    [
+      "cluster/cp1",
+      "cluster/wk1"
+    ],
+    [
+      "cluster/cp1",
+      "cluster-patch-changed/cp1"
+    ],
+    [
+      "cluster/mgmt",
+      "cluster-patch-changed/mgmt"
+    ],
+    [
+      "cluster/cp1",
+      "cluster-nodes-reordered/cp1"
+    ],
+    [
+      "cluster/mgmt",
+      "cluster-management-setup/mgmt"
+    ],
+    [
+      "cluster/cp1",
+      "cluster-management-setup/cp1"
     ]
   ]
 }

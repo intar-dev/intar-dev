@@ -20,6 +20,7 @@ import {
   handleBlobHead,
   handleBlobPut,
   handleBuildResult,
+  handleClusterResult,
   handleManifestPut,
   machineBuildKey,
 } from "./push";
@@ -136,6 +137,20 @@ export async function handleImageRegistryRequest(
       handleBuildResult(request, env, buildResultMatch[1] ?? "", lease),
     );
     await settleAfterPipelineResult(request, env, url, buildResultMatch[1] ?? "", response);
+    return response;
+  }
+
+  const clusterResultMatch = url.pathname.match(
+    /^\/registry\/v1\/clusters\/([^/]+)\/result$/,
+  );
+  if (clusterResultMatch) {
+    const response = await admitted(request, env, "POST", "build_result", (lease) =>
+      handleClusterResult(request, env, clusterResultMatch[1] ?? "", lease),
+    );
+    // One of the set's keys finds every revision of the cluster.
+    const images = response.ok ? ((await response.clone().json()) as { images?: Record<string, string> }).images : null;
+    const key = Object.keys(images ?? {})[0]?.replace(/^sha256:/, "");
+    if (key) await settleAfterPipelineResult(request, env, url, key, response);
     return response;
   }
 

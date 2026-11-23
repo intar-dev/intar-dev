@@ -37,8 +37,10 @@ use intar_contracts::{
 use intar_contracts::{
     oci::OciDigest,
     scenario::{
-        HintV1, ImageV1, MAX_DISK_MIB, MAX_READY_PER_MACHINE, MAX_SCRIPT_BYTES,
-        MAX_TASKS_PER_MACHINE, ScenarioRevisionV1, ScriptV1, SpecMode, build_keys, canonical_json,
+        ClusterRole, ClusterV1, HintV1, ImageV1, MAX_CLUSTER_PATCHES, MAX_DISK_MIB,
+        MAX_READY_PER_MACHINE, MAX_SCRIPT_BYTES, MAX_TASKS_PER_MACHINE, MIN_TALOS_DISK_MIB,
+        MachineClusterV1, MachineV1, ScenarioRevisionV1, ScriptV1, SpecMode, TALOS_BASE_IMAGE,
+        build_keys, canonical_json,
     },
     source::validate_bundle,
 };
@@ -375,6 +377,40 @@ fn refusal_cases() -> Vec<(&'static str, Mutation)> {
             script,
         }
     }
+    /// The first scenario as a sound cluster: its first machine manages the
+    /// cluster `lab`, whose one node is `cp1`.
+    fn clustered(b: &mut SourceBundleV2) {
+        let scenario = &mut b.scenarios[0];
+        let role = |role| {
+            Some(MachineClusterV1 {
+                cluster: "lab".to_owned(),
+                role,
+            })
+        };
+        let mut node = scenario.machines[0].clone();
+        node.name = "cp1".to_owned();
+        node.from = TALOS_BASE_IMAGE.to_owned();
+        node.disk_mib = 10240;
+        node.terminal = false;
+        node.defer.clear();
+        node.env.clear();
+        node.setup.clear();
+        node.ready.clear();
+        node.cluster = role(ClusterRole::Controlplane);
+        scenario.machines[0].cluster = role(ClusterRole::Management);
+        scenario.machines.push(node);
+        scenario.clusters = vec![ClusterV1 {
+            name: "lab".to_owned(),
+            talos: "v1.15.0-beta.0".to_owned(),
+            kubernetes: "v1.37.1".to_owned(),
+            patches: Vec::new(),
+        }];
+    }
+    fn cp1(b: &mut SourceBundleV2) -> &mut MachineV1 {
+        let machines = &mut b.scenarios[0].machines;
+        let last = machines.len() - 1;
+        &mut machines[last]
+    }
     vec![
         ("compiler", |b| {
             b.compiler = "intar-source-compiler-v1".to_owned()
@@ -506,6 +542,49 @@ fn refusal_cases() -> Vec<(&'static str, Mutation)> {
                 lecture.scenario_id = Some("elsewhere".to_owned());
             }
         }),
+        ("too-many-clusters", |b| {
+            clustered(b);
+            let mut other = b.scenarios[0].clusters[0].clone();
+            other.name = "other".to_owned();
+            b.scenarios[0].clusters.push(other);
+        }),
+        ("cluster-release", |b| {
+            clustered(b);
+            b.scenarios[0].clusters[0].talos = "v1.13.0".to_owned();
+        }),
+        ("cluster-name", |b| {
+            clustered(b);
+            b.scenarios[0].clusters[0].name = "L".to_owned();
+        }),
+        ("cluster-patches", |b| {
+            clustered(b);
+            b.scenarios[0].clusters[0].patches = (0..=MAX_CLUSTER_PATCHES)
+                .map(|n| script(&format!("patch-{n:02}"), "machine: {}".to_owned()))
+                .collect();
+        }),
+        ("cluster-role-count", |b| {
+            clustered(b);
+            b.scenarios[0].machines[0].cluster = None;
+        }),
+        ("cluster-undeclared", |b| {
+            clustered(b);
+            b.scenarios[0].clusters.clear();
+        }),
+        ("cluster-node-from", |b| {
+            clustered(b);
+            cp1(b).from = "trixie".to_owned();
+        }),
+        ("cluster-node-disk", |b| {
+            clustered(b);
+            cp1(b).disk_mib = MIN_TALOS_DISK_MIB - 1;
+        }),
+        ("cluster-node-terminal", |b| {
+            clustered(b);
+            cp1(b).terminal = true;
+        }),
+        ("image-name-talos", |b| {
+            b.images.push(image(TALOS_BASE_IMAGE, "trixie", Some(4096)))
+        }),
     ]
 }
 
@@ -595,6 +674,12 @@ export const MAX_SCRIPT_BYTES = {};
 export const MAX_MARKDOWN_BYTES = {};
 export const MAX_MACHINE_SPEC_BYTES = {};
 export const MAX_DISK_MIB = {};
+export const TALOS_BASE_IMAGE = "{}";
+export const TALOS_RELEASES: readonly (readonly [string, string])[] = {};
+export const CLUSTER_BAKE_REVISION = "{}";
+export const MAX_CLUSTERS = {};
+export const MAX_CLUSTER_PATCHES = {};
+export const MIN_TALOS_DISK_MIB = {};
 
 export const runtimeEnvKeys = {{
   sshAuthorizedKeysB64: "{}",
@@ -651,6 +736,12 @@ export const runtimeEnvKeys = {{
         intar_contracts::scenario::MAX_MARKDOWN_BYTES,
         intar_contracts::scenario::MAX_MACHINE_SPEC_BYTES,
         MAX_DISK_MIB,
+        intar_contracts::scenario::TALOS_BASE_IMAGE,
+        serde_json::json!(intar_contracts::scenario::TALOS_RELEASES),
+        intar_contracts::scenario::CLUSTER_BAKE_REVISION,
+        intar_contracts::scenario::MAX_CLUSTERS,
+        intar_contracts::scenario::MAX_CLUSTER_PATCHES,
+        intar_contracts::scenario::MIN_TALOS_DISK_MIB,
         ENV_SSH_AUTHORIZED_KEYS_B64,
         ENV_KINO_VSOCK_CID,
         ENV_KINO_VSOCK_PORT,

@@ -9,12 +9,14 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
+dhd = { path = "../dhd" }
 fatfs.workspace = true
 flate2.workspace = true
 fs2.workspace = true
 intar-contracts = { path = "../intar-contracts" }
 russh.workspace = true
 rustix.workspace = true
+reqwest = { workspace = true, features = ["blocking", "rustls"] }
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true

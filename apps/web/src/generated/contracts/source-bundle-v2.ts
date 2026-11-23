@@ -3,6 +3,7 @@
 
 export type ScenarioDifficulty = "easy" | "medium" | "hard";
 export type Difficulty = "easy" | "medium" | "hard";
+export type ClusterRole = ("controlplane" | "worker") | "management";
 
 /**
  * One compiled repository: the `bundle` field of an upload, gzipped JSON.
@@ -71,6 +72,10 @@ export interface ScriptV1 {
 }
 export interface ScenarioV1 {
   briefing: string;
+  /**
+   * Talos clusters; their machines are among `machines`.
+   */
+  clusters?: ClusterV1[];
   credit?: string | null;
   difficulty: Difficulty;
   hints: HintV1[];
@@ -90,12 +95,36 @@ export interface ScenarioV1 {
   tasks: TaskV1[];
   title: string;
 }
+/**
+ * A Talos cluster: its nodes and its management machine are the machines
+ * whose `cluster` names it.
+ */
+export interface ClusterV1 {
+  /**
+   * The Kubernetes release, e.g. `v1.37.1`.
+   */
+  kubernetes: string;
+  name: string;
+  /**
+   * Talos machine-config patches (YAML), applied to every node in order.
+   */
+  patches: ScriptV1[];
+  /**
+   * The Talos release, e.g. `v1.15.0-beta.0`; with `kubernetes` one of
+   * [`TALOS_RELEASES`].
+   */
+  talos: string;
+}
 export interface HintV1 {
   body: string;
   id: string;
   title?: string | null;
 }
 export interface MachineV1 {
+  /**
+   * Set on a machine of a Talos cluster.
+   */
+  cluster?: MachineClusterV1 | null;
   cpu_millis: number;
   defer: string[];
   disk_mib: number;
@@ -104,7 +133,7 @@ export interface MachineV1 {
     [k: string]: string | undefined;
   };
   /**
-   * `trixie` or the name of an image.
+   * `trixie`, `talos` for a cluster node, or the name of an image.
    */
   from: string;
   memory_mib: number;
@@ -115,6 +144,13 @@ export interface MachineV1 {
    */
   setup: ScriptV1[];
   terminal: boolean;
+}
+/**
+ * A machine's place in a cluster.
+ */
+export interface MachineClusterV1 {
+  cluster: string;
+  role: ClusterRole;
 }
 export interface TaskV1 {
   body?: string | null;

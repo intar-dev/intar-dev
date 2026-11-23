@@ -6,7 +6,8 @@ use super::{Diagnostic, Fields, Loaded, Source, label, lower};
 use hcl::edit::Span as _;
 use hcl::edit::structure::{Block, Structure};
 use intar_contracts::scenario::{
-    Difficulty, HintV1, ImageV1, MachineV1, ScenarioV1, ScriptV1, TaskV1, validate,
+    ClusterRole, ClusterV1, Difficulty, HintV1, ImageV1, MachineClusterV1, MachineV1, ScenarioV1,
+    ScriptV1, TALOS_BASE_IMAGE, TaskV1, validate,
 };
 use std::path::{Path, PathBuf};
 
@@ -280,7 +281,13 @@ fn hints(source: &Source, fields: &mut Fields) -> Loaded<Vec<HintV1>> {
         .collect()
 }
 
-fn machine(source: &Source, name: String, block: &Block) -> Loaded<MachineV1> {
+/// A `machine` block; `cluster` names the `talos-cluster` it sits in.
+fn machine(
+    source: &Source,
+    name: String,
+    block: &Block,
+    cluster: Option<&str>,
+) -> Loaded<MachineV1> {
     let mut fields = Fields::of(source, block)?;
     // `cpu = 2` is vCPUs, `cpu = "500m"` millicores.
     let cpu_millis = match fields.take("cpu") {
@@ -301,6 +308,28 @@ fn machine(source: &Source, name: String, block: &Block) -> Loaded<MachineV1> {
     );
     let memory = mib(&fields, "memory", memory)?;
     let disk = mib(&fields, "disk", disk)?;
+    let cluster = match cluster {
+        None => None,
+        Some(cluster) => {
+            let role = match fields.text("role")?.as_deref() {
+                Some("controlplane") => ClusterRole::Controlplane,
+                Some("worker") => ClusterRole::Worker,
+                Some("management") => ClusterRole::Management,
+                _ => {
+                    return Err(
+                        fields.error(None, "`role` is `controlplane`, `worker` or `management`")
+                    );
+                }
+            };
+            Some(MachineClusterV1 {
+                cluster: cluster.to_owned(),
+                role,
+            })
+        }
+    };
+    // A Talos node is from `talos` and has no terminal unless it says otherwise.
+    let node = cluster.as_ref().is_some_and(|c| c.role.is_node());
+    let from = from.or_else(|| node.then(|| TALOS_BASE_IMAGE.to_owned()));
     let ready = fields
         .labelled("ready")?
         .into_iter()
@@ -318,14 +347,53 @@ fn machine(source: &Source, name: String, block: &Block) -> Loaded<MachineV1> {
         disk_mib: fields.need("disk", disk)?,
         from: fields.need("from", from)?,
         defer: fields.deferred_units()?,
-        terminal: fields.flag("terminal", true)?,
+        terminal: fields.flag("terminal", !node)?,
         egress: fields.flag("egress", false)?,
         env: fields.string_map("env")?,
         setup: stages(source, &mut fields)?,
         ready,
+        cluster,
     };
     fields.done()?;
     Ok(machine)
+}
+
+/// A `talos-cluster` block: the release, the patches and its machines,
+/// which follow the scenario's own machines in file order.
+fn cluster(source: &Source, name: String, block: &Block) -> Loaded<(ClusterV1, Vec<MachineV1>)> {
+    let mut fields = Fields::of(source, block)?;
+    let machines = fields
+        .labelled("machine")?
+        .into_iter()
+        .map(|(machine_name, block)| machine(source, machine_name, block, Some(&name)))
+        .collect::<Loaded<Vec<_>>>()?;
+    let (talos, kubernetes) = (fields.text("talos")?, fields.text("kubernetes")?);
+    let talos = fields.need("talos", talos)?;
+    let kubernetes = fields.need("kubernetes", kubernetes)?;
+    let patches = fields
+        .labelled("patch")?
+        .into_iter()
+        .map(|(patch, block)| {
+            let mut fields = Fields::of(source, block)?;
+            let yaml = fields.script("yaml")?;
+            let yaml = fields.need("yaml", yaml)?;
+            fields.done()?;
+            Ok(ScriptV1 {
+                name: patch,
+                script: yaml,
+            })
+        })
+        .collect::<Loaded<_>>()?;
+    fields.done()?;
+    Ok((
+        ClusterV1 {
+            name,
+            talos,
+            kubernetes,
+            patches,
+        },
+        machines,
+    ))
 }
 
 fn task(source: &Source, id: String, block: &Block, machines: &[MachineV1]) -> Loaded<TaskV1> {
@@ -399,11 +467,17 @@ fn scenario(source: &Source, block: &Block, directory: &str) -> Loaded<ScenarioV
         .number("minutes")?
         .and_then(|minutes| u32::try_from(minutes).ok());
     let (briefing, solution) = (fields.markdown("briefing")?, fields.markdown("solution")?);
-    let machines = fields
+    let mut machines = fields
         .labelled("machine")?
         .into_iter()
-        .map(|(name, block)| machine(source, name, block))
+        .map(|(name, block)| machine(source, name, block, None))
         .collect::<Loaded<Vec<_>>>()?;
+    let mut clusters = Vec::new();
+    for (name, block) in fields.labelled("talos-cluster")? {
+        let (found, members) = cluster(source, name, block)?;
+        clusters.push(found);
+        machines.extend(members);
+    }
     let tasks = fields
         .labelled("task")?
         .into_iter()
@@ -423,6 +497,7 @@ fn scenario(source: &Source, block: &Block, directory: &str) -> Loaded<ScenarioV
         hints: hints(source, &mut fields)?,
         machines,
         tasks,
+        clusters,
     };
     fields.done()?;
     Ok(scenario)

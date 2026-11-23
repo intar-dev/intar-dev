@@ -41,6 +41,12 @@ export interface HintV1 {
 }
 export interface RevisionMachineV1 {
   build_key: OciDigest;
+  /**
+   * The key of the Talos cluster the machine belongs to: its image is
+   * baked with every other machine of that cluster and recorded with them
+   * as one set.
+   */
+  cluster_key?: OciDigest | null;
   cpu_millis: number;
   disk_mib: number;
   egress: boolean;

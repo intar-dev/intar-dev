@@ -38,12 +38,38 @@
 //! a repository image still gets a key of its own (image key, defer), for its
 //! finalize. `scenario_id` and `egress` are never inputs, so the same machine
 //! in two scenarios, or with `egress` flipped, has the same key.
+//!
+//! # Clusters
+//!
+//! One build bakes a whole Talos cluster, so its machines share one cluster
+//! key and each gets a key derived from it:
+//!
+//! ```text
+//! cluster = str(IMAGE_FORMAT) str("cluster") str(CLUSTER_BAKE_REVISION)
+//!           str(talos) str(kubernetes) str(name) list(node) list(patch)
+//!           list(management)
+//! node    = str(name) ‖ str(role) ‖ str(disk)  the cluster's nodes in scenario order
+//! patch   = str(name) ‖ str(patch)             in order
+//! management = str(name) ‖ str(own)            the management machine
+//! machine = str(IMAGE_FORMAT) str("cluster-machine") str(cluster key)
+//!           str(name) str(role) str(own)
+//! ```
+//!
+//! `own` is empty on a node; on the management machine it is the key it
+//! would have outside the cluster, so its image, setup and defer count.
+//! Node order is an input because it assigns the nodes' lab addresses. The
+//! management machine's `own` is an input of the cluster key too: one bake
+//! makes every image of the cluster with one PKI, so a change to any of its
+//! machines must change every machine's key, or a rebuild would pair new
+//! images with recorded ones of another bake.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest as _, Sha256};
 
-use super::{ImageV1, MachineV1, PLATFORM_BASE_IMAGE, ScenarioV1, ScriptV1};
+use super::{
+    CLUSTER_BAKE_REVISION, ClusterV1, ImageV1, MachineV1, PLATFORM_BASE_IMAGE, ScenarioV1, ScriptV1,
+};
 use crate::oci::{IMAGE_FORMAT, OciDigest};
 
 /// The keys of a scenario's machines and of its repository's images.
@@ -51,6 +77,7 @@ use crate::oci::{IMAGE_FORMAT, OciDigest};
 pub struct BuildKeys {
     pub images: BTreeMap<String, OciDigest>,
     pub machines: BTreeMap<String, OciDigest>,
+    pub clusters: BTreeMap<String, OciDigest>,
 }
 
 struct Record<'a> {
@@ -71,6 +98,73 @@ fn count(bytes: &mut Vec<u8>, length: usize) {
     // Every field is capped far below 4 GiB (64 KiB scripts).
     let length = u32::try_from(length).unwrap_or(u32::MAX);
     bytes.extend_from_slice(&length.to_be_bytes());
+}
+
+fn digest(bytes: &[u8]) -> OciDigest {
+    OciDigest::from_sha256(&Sha256::digest(bytes).into())
+}
+
+fn cluster_key(
+    cluster: &ClusterV1,
+    machines: &[MachineV1],
+    images: &BTreeMap<String, OciDigest>,
+) -> Result<OciDigest, String> {
+    let mut bytes = Vec::new();
+    for text in [
+        IMAGE_FORMAT,
+        "cluster",
+        CLUSTER_BAKE_REVISION,
+        &cluster.talos,
+        &cluster.kubernetes,
+        &cluster.name,
+    ] {
+        put(&mut bytes, text);
+    }
+    let nodes: Vec<_> = machines
+        .iter()
+        .filter_map(|m| m.cluster.as_ref().map(|c| (m, c)))
+        .filter(|(_, c)| c.cluster == cluster.name && c.role.is_node())
+        .collect();
+    count(&mut bytes, nodes.len());
+    for (machine, c) in nodes {
+        put(&mut bytes, &machine.name);
+        put(&mut bytes, c.role.as_str());
+        put(&mut bytes, &machine.disk_mib.to_string());
+    }
+    count(&mut bytes, cluster.patches.len());
+    for patch in &cluster.patches {
+        put(&mut bytes, &patch.name);
+        put(&mut bytes, &patch.script);
+    }
+    let management: Vec<_> = machines
+        .iter()
+        .filter(|m| {
+            m.cluster
+                .as_ref()
+                .is_some_and(|c| c.cluster == cluster.name && !c.role.is_node())
+        })
+        .collect();
+    count(&mut bytes, management.len());
+    for machine in management {
+        put(&mut bytes, &machine.name);
+        put(&mut bytes, machine_key(machine, images)?.as_str());
+    }
+    Ok(digest(&bytes))
+}
+
+fn cluster_machine_key(cluster: &OciDigest, name: &str, role: &str, own: &str) -> OciDigest {
+    let mut bytes = Vec::new();
+    for text in [
+        IMAGE_FORMAT,
+        "cluster-machine",
+        cluster.as_str(),
+        name,
+        role,
+        own,
+    ] {
+        put(&mut bytes, text);
+    }
+    digest(&bytes)
 }
 
 fn key(record: &Record) -> OciDigest {
@@ -98,7 +192,7 @@ fn key(record: &Record) -> OciDigest {
         &mut bytes,
         &record.disk.map(|mib| mib.to_string()).unwrap_or_default(),
     );
-    OciDigest::from_sha256(&Sha256::digest(&bytes).into())
+    digest(&bytes)
 }
 
 /// The key of the platform base `trixie`.
@@ -198,12 +292,45 @@ fn machine_key(
 /// repository.
 pub fn build_keys(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<BuildKeys, String> {
     let images = image_keys(images)?;
+    let clusters: BTreeMap<String, OciDigest> = scenario
+        .clusters
+        .iter()
+        .map(|cluster| {
+            Ok((
+                cluster.name.clone(),
+                cluster_key(cluster, &scenario.machines, &images)?,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
     let machines = scenario
         .machines
         .iter()
-        .map(|machine| Ok((machine.name.clone(), machine_key(machine, &images)?)))
+        .map(|machine| {
+            let found = match &machine.cluster {
+                None => machine_key(machine, &images)?,
+                Some(c) => {
+                    let cluster = clusters.get(&c.cluster).ok_or_else(|| {
+                        format!(
+                            "machine `{}`: cluster `{}` is not declared",
+                            machine.name, c.cluster
+                        )
+                    })?;
+                    let own = if c.role.is_node() {
+                        String::new()
+                    } else {
+                        machine_key(machine, &images)?.as_str().to_owned()
+                    };
+                    cluster_machine_key(cluster, &machine.name, c.role.as_str(), &own)
+                }
+            };
+            Ok((machine.name.clone(), found))
+        })
         .collect::<Result<_, String>>()?;
-    Ok(BuildKeys { images, machines })
+    Ok(BuildKeys {
+        images,
+        machines,
+        clusters,
+    })
 }
 
 #[cfg(test)]
@@ -231,6 +358,8 @@ mod tests {
         scenario: String,
         images: Vec<ImageV1>,
         machines: Vec<MachineV1>,
+        #[serde(default)]
+        clusters: Vec<ClusterV1>,
         keys: Keys,
     }
 
@@ -239,9 +368,11 @@ mod tests {
     struct Keys {
         images: BTreeMap<String, OciDigest>,
         machines: BTreeMap<String, OciDigest>,
+        #[serde(default)]
+        clusters: BTreeMap<String, OciDigest>,
     }
 
-    fn scenario(slug: &str, machines: Vec<MachineV1>) -> ScenarioV1 {
+    fn scenario(slug: &str, machines: Vec<MachineV1>, clusters: Vec<ClusterV1>) -> ScenarioV1 {
         ScenarioV1 {
             slug: slug.to_owned(),
             title: String::new(),
@@ -256,6 +387,7 @@ mod tests {
             hints: Vec::new(),
             machines,
             tasks: Vec::new(),
+            clusters,
         }
     }
 
@@ -268,10 +400,14 @@ mod tests {
         assert_eq!(vectors.base_key, base_key());
         let mut found = BTreeMap::new();
         for case in vectors.cases {
-            let keys = build_keys(&scenario(&case.scenario, case.machines), &case.images)
-                .unwrap_or_else(|problem| panic!("{}: {problem}", case.name));
+            let keys = build_keys(
+                &scenario(&case.scenario, case.machines, case.clusters),
+                &case.images,
+            )
+            .unwrap_or_else(|problem| panic!("{}: {problem}", case.name));
             assert_eq!(keys.images, case.keys.images, "{}", case.name);
             assert_eq!(keys.machines, case.keys.machines, "{}", case.name);
+            assert_eq!(keys.clusters, case.keys.clusters, "{}", case.name);
             for (machine, key) in keys.machines {
                 found.insert(format!("{}/{machine}", case.name), key);
             }

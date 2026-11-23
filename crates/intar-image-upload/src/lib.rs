@@ -8,4 +8,6 @@ mod session;
 
 pub use error::{Error, Result};
 pub use pipeline::PipelineSession;
-pub use push::{BLOB_CONCURRENCY, REGISTRY_SESSION_HEADER, RecordedImage, RegistryPusher};
+pub use push::{
+    BLOB_CONCURRENCY, REGISTRY_SESSION_HEADER, RecordedCluster, RecordedImage, RegistryPusher,
+};

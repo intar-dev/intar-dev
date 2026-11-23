@@ -76,6 +76,11 @@ export async function scenarioRevision(
     };
     const buildKey = keys.machines[name];
     if (buildKey === undefined) throw new Error(`machine \`${name}\`: no build key`);
+    const cluster = machine.cluster?.cluster;
+    const clusterKey = cluster == null ? undefined : keys.clusters[cluster];
+    if (cluster != null && clusterKey === undefined) {
+      throw new Error(`machine \`${name}\`: no key for cluster \`${cluster}\``);
+    }
     machines.push({
       name,
       cpu_millis: machine.cpu_millis,
@@ -84,6 +89,7 @@ export async function scenarioRevision(
       terminal: machine.terminal,
       egress: machine.egress,
       build_key: buildKey,
+      ...(clusterKey === undefined ? {} : { cluster_key: clusterKey }),
       spec: await digest("learn"),
       verify_spec: await digest("verify"),
     });

@@ -110,6 +110,16 @@ impl Drop for Guest {
     }
 }
 
+/// What a build runs after its stages and before finalize, never
+/// checkpointed: files uploaded to the guest, then a script run as root.
+/// A cluster's management machine gets its cluster credentials this way.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PostStageStep {
+    /// Each local file and the guest path it is uploaded to, mode 0600.
+    pub files: Vec<(PathBuf, String)>,
+    pub script: String,
+}
+
 /// Build the plan's disk in `work` and return the repacked raw disk. Logs go
 /// to `log` and the serial console next to it.
 pub(crate) fn build_disk(
@@ -118,6 +128,7 @@ pub(crate) fn build_disk(
     base: &BaseRootfsArtifact,
     work: &Path,
     log: &Path,
+    post_stage: Option<&PostStageStep>,
 ) -> Result<PathBuf> {
     fs::set_permissions(work, fs::Permissions::from_mode(0o700))?;
     let vm = Vm {
@@ -207,6 +218,22 @@ pub(crate) fn build_disk(
         }
     }
 
+    if let Some(step) = post_stage {
+        let started = Instant::now();
+        let ssh = guest.ssh.as_mut().context("the build VM has no session")?;
+        for (local, remote) in &step.files {
+            vm.watched(
+                remaining_until(vm.deadline, "post-stage upload")?,
+                "post-stage upload",
+                ssh.upload_file(local, remote, 0o600),
+            )?;
+        }
+        vm.guest_run(&mut guest, &as_root(&step.script), "post-stage")?;
+        vm.log(&format!(
+            "post_stage elapsed_ms={}",
+            started.elapsed().as_millis()
+        ))?;
+    }
     let started = Instant::now();
     let finalize = finalize_script(&plan.defer);
     vm.guest_run(&mut guest, &as_root(&finalize), "finalize")?;

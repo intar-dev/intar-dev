@@ -14,7 +14,8 @@ use intar_contracts::oci::verify::{layers_of, verified_image};
 use intar_contracts::oci::{
     Architecture, DISK_CHUNK_MEDIA_TYPE, IMAGE_FORMAT, INITRD_MEDIA_TYPE, KERNEL_MEDIA_TYPE,
     MACHINE_ARTIFACT_TYPE, MACHINE_CONFIG_MEDIA_TYPE, MachineBootV1, MachineConfigV1,
-    MachineDiskV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest, OciManifestV1, Sha256Hex,
+    MachineDiskV1, MachineTalosV1, OCI_MANIFEST_MEDIA_TYPE, OciDescriptorV1, OciDigest,
+    OciManifestV1, Sha256Hex,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -48,6 +49,37 @@ pub fn write_machine_image(
     arch: BuildArch,
     output: &Path,
 ) -> Result<MachineImage> {
+    write_image(
+        raw,
+        kernel,
+        initrd,
+        build_key,
+        arch,
+        ImageBoot {
+            cmdline: published_boot_cmdline(arch),
+            talos: None,
+        },
+        output,
+    )
+}
+
+/// How an image boots: its kernel command line and, for a Talos node, its
+/// place on the cluster's lab network.
+pub(crate) struct ImageBoot {
+    pub cmdline: String,
+    pub talos: Option<MachineTalosV1>,
+}
+
+/// [`write_machine_image`] with its own boot.
+pub(crate) fn write_image(
+    raw: &Path,
+    kernel: &Path,
+    initrd: &Path,
+    build_key: &OciDigest,
+    arch: BuildArch,
+    boot: ImageBoot,
+    output: &Path,
+) -> Result<MachineImage> {
     let mut writer = ImageWriter::new(output)?;
     writer.file(kernel, KERNEL_MEDIA_TYPE)?;
     writer.file(initrd, INITRD_MEDIA_TYPE)?;
@@ -61,9 +93,10 @@ pub fn write_machine_image(
             BuildArch::Arm64 => Architecture::Arm64,
         }),
         boot: MachineBootV1 {
-            cmdline: published_boot_cmdline(arch),
+            cmdline: boot.cmdline,
         },
         disk: disk.disk,
+        talos: boot.talos,
     })
 }
 

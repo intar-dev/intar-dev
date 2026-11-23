@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { MAX_MACHINE_SPEC_BYTES } from "@/generated/constants";
-import type { ImageV1, MachineV1, SourceBundleV2 } from "@/generated/contracts/source-bundle-v2";
+import type { ClusterV1, ImageV1, MachineV1, SourceBundleV2 } from "@/generated/contracts/source-bundle-v2";
 import validateRevision from "@/generated/contracts/scenario-revision-v1.validate";
 import validateSourceBundle from "@/generated/contracts/source-bundle-v2.validate";
 import vectors from "@/generated/fixtures/scenario/build-keys.json";
@@ -29,10 +29,13 @@ describe("build keys", () => {
     const found = new Map<string, string>();
     for (const testCase of vectors.cases) {
       const keys = await buildKeys(
-        { machines: testCase.machines as MachineV1[] },
+        {
+          machines: testCase.machines as MachineV1[],
+          clusters: "clusters" in testCase ? (testCase.clusters as ClusterV1[]) : [],
+        },
         testCase.images as ImageV1[],
       );
-      expect(keys, testCase.name).toEqual(testCase.keys);
+      expect(keys, testCase.name).toEqual({ clusters: {}, ...testCase.keys });
       for (const [machine, key] of Object.entries(keys.machines)) {
         found.set(`${testCase.name}/${machine}`, key);
       }

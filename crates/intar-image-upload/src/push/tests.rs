@@ -758,3 +758,66 @@ fn every_try_of_a_session_open_asks_for_a_new_token() {
     assert!(matches!(error, Error::Token(_)), "{error}");
     assert!(silent.calls().is_empty());
 }
+
+#[test]
+fn a_cluster_is_pushed_in_one_session_and_recorded_as_one_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first, _) = image(dir.path());
+    // A second image of the same blobs, in another order.
+    let blobs = dir.path().join("sha256");
+    let mut parsed: OciManifestV1 =
+        serde_json::from_slice(&std::fs::read(blobs.join(first.hex())).unwrap()).unwrap();
+    parsed.layers.reverse();
+    let bytes = serde_json::to_vec(&parsed).unwrap();
+    let second = digest_of(&bytes);
+    std::fs::write(blobs.join(second.hex()), &bytes).unwrap();
+    let keys = [digest_of(b"key one"), digest_of(b"key two")];
+    let images: std::collections::BTreeMap<_, _> = [
+        (keys[0].clone(), first.clone()),
+        (keys[1].clone(), second.clone()),
+    ]
+    .into();
+    let answer = serde_json::json!({
+        "ok": true,
+        "images": { keys[0].as_str(): first.as_str(), keys[1].as_str(): second.as_str() },
+        "recorded": true,
+    })
+    .to_string();
+    let registry = result_answers(200, answer);
+    let cluster = "c".repeat(64);
+    let recorded = registry
+        .pusher()
+        .push_cluster(dir.path(), &images, &cluster, Architecture::Arm64)
+        .unwrap();
+    assert!(!recorded.first);
+    assert_eq!(recorded.images, images);
+    let calls = registry.calls();
+    let puts: Vec<_> = calls
+        .iter()
+        .filter(|call| call.method == "PUT" && call.path.contains("/manifests/"))
+        .map(|call| call.path.clone())
+        .collect();
+    assert_eq!(puts.len(), 2);
+    let result = calls.last().unwrap();
+    assert_eq!(
+        result.path,
+        format!("/registry/v1/clusters/{cluster}/result?arch=arm64")
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&result.body).unwrap(),
+        serde_json::json!({ "images": images
+            .iter()
+            .map(|(key, manifest)| serde_json::json!({
+                "build_key": key.as_str(), "image_digest": manifest.as_str(),
+            }))
+            .collect::<Vec<_>>() })
+    );
+    let opened = registry
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.method == "POST" && request.path.ends_with("/upload-sessions"))
+        .count();
+    assert_eq!(opened, 1);
+}

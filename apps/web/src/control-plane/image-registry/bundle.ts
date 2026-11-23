@@ -96,11 +96,17 @@ export async function handleSourceBundleUpload(
       purpose: "deploy",
       claim: { via: "push", headSha: head.headSha, observedAt },
       imageProducer: binding.imageProducer,
+      clusters: workflowShaListed(env.SCENARIO_CLUSTER_WORKFLOW_SHAS, claims.jobWorkflowSha),
     });
   } catch (error) {
     const refusal = toErrorResponse(error, "scenario source upload failed");
     return jsonResponse(refusal.body, refusal.status);
   }
+}
+
+/** Whether `sha` is on `list`, commit SHAs separated by commas or whitespace. */
+function workflowShaListed(list: string | undefined, sha: string): boolean {
+  return (list ?? "").split(/[\s,]+/).includes(sha);
 }
 
 /**

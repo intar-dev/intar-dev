@@ -31,6 +31,17 @@
     },
     "image_format": {
       "type": "string"
+    },
+    "talos": {
+      "description": "Set on the image of a Talos cluster node. Runtimes boot it without\nKino and give it no port forwards.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MachineTalosV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -48,6 +59,22 @@
       "enum": [
         "amd64",
         "arm64"
+      ]
+    },
+    "ClusterRole": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "controlplane",
+            "worker"
+          ]
+        },
+        {
+          "description": "The cluster's trixie machine with kubectl, talosctl and their\nconfigs, where the learner works.",
+          "type": "string",
+          "const": "management"
+        }
       ]
     },
     "MachineBootV1": {
@@ -105,6 +132,24 @@
         "size_bytes",
         "chunk_size",
         "chunks"
+      ]
+    },
+    "MachineTalosV1": {
+      "description": "A Talos node's place on its cluster's lab network.",
+      "type": "object",
+      "properties": {
+        "lab_ip": {
+          "description": "Its baked address on the lab network, e.g. `172.31.0.2`.",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/ClusterRole"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "lab_ip"
       ]
     },
     "OciDigest": {

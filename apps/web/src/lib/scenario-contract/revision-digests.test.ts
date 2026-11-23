@@ -29,7 +29,7 @@ describe("the behaviour digest", () => {
       [...TASK_FIELDS_NOT_BEHAVIOUR, "id", "machine", "needs", "optional", "ordinal"].sort(),
     );
     expect(fields(schema.$defs.RevisionMachineV1.properties)).toEqual([
-      "build_key", "cpu_millis", "disk_mib", "egress", "image_digest", "memory_mib", "name", "spec", "terminal",
+      "build_key", "cluster_key", "cpu_millis", "disk_mib", "egress", "image_digest", "memory_mib", "name", "spec", "terminal",
       "verify_spec",
     ]);
   });

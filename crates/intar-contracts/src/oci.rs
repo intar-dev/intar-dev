@@ -156,6 +156,19 @@ pub struct MachineConfigV1 {
     pub architecture: Option<Architecture>,
     pub boot: MachineBootV1,
     pub disk: MachineDiskV1,
+    /// Set on the image of a Talos cluster node. Runtimes boot it without
+    /// Kino and give it no port forwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talos: Option<MachineTalosV1>,
+}
+
+/// A Talos node's place on its cluster's lab network.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineTalosV1 {
+    pub role: crate::scenario::ClusterRole,
+    /// Its baked address on the lab network, e.g. `172.31.0.2`.
+    pub lab_ip: String,
 }
 
 impl MachineConfigV1 {

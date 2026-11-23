@@ -18,6 +18,23 @@ pub use build_key::{BuildKeys, base_key, build_keys, image_keys};
 
 /// The platform base image every chain starts from.
 pub const PLATFORM_BASE_IMAGE: &str = "trixie";
+/// The `from` of a Talos cluster node: the platform's Talos release, not an
+/// image.
+pub const TALOS_BASE_IMAGE: &str = "talos";
+/// The Talos and Kubernetes releases a cluster may name, as
+/// `(talos, kubernetes)`. The builder pins each pair's assets by digest, so a
+/// pair is added here together with its pins.
+pub const TALOS_RELEASES: &[(&str, &str)] = &[("v1.15.0-beta.0", "v1.37.1")];
+/// What the builder bakes into a cluster besides the scenario's inputs: its
+/// fixed machine-config patches, pinned assets and bake steps. An input of
+/// every cluster key; bumped with any change to them, so the change rebuilds
+/// every cluster.
+pub const CLUSTER_BAKE_REVISION: &str = "4";
+pub const MAX_CLUSTERS: usize = 1;
+pub const MAX_CLUSTER_PATCHES: usize = 16;
+/// The smallest disk of a Talos node: room for Talos and the cluster's
+/// images.
+pub const MIN_TALOS_DISK_MIB: u32 = 4096;
 pub const MAX_MACHINES: usize = 8;
 /// The longest machine name. A run's VM id is `<machine>-<run id>` with a
 /// 24-character run id, and the jailer takes ids of at most 64 characters:
@@ -60,6 +77,59 @@ pub struct ScenarioV1 {
     pub machines: Vec<MachineV1>,
     /// File order is the order learners see.
     pub tasks: Vec<TaskV1>,
+    /// Talos clusters; their machines are among `machines`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<ClusterV1>,
+}
+
+/// A Talos cluster: its nodes and its management machine are the machines
+/// whose `cluster` names it.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterV1 {
+    pub name: String,
+    /// The Talos release, e.g. `v1.15.0-beta.0`; with `kubernetes` one of
+    /// [`TALOS_RELEASES`].
+    pub talos: String,
+    /// The Kubernetes release, e.g. `v1.37.1`.
+    pub kubernetes: String,
+    /// Talos machine-config patches (YAML), applied to every node in order.
+    pub patches: Vec<ScriptV1>,
+}
+
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ClusterRole {
+    Controlplane,
+    Worker,
+    /// The cluster's trixie machine with kubectl, talosctl and their
+    /// configs, where the learner works.
+    Management,
+}
+
+impl ClusterRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Controlplane => "controlplane",
+            Self::Worker => "worker",
+            Self::Management => "management",
+        }
+    }
+
+    /// A Talos node, as opposed to the management machine.
+    pub fn is_node(self) -> bool {
+        self != Self::Management
+    }
+}
+
+/// A machine's place in a cluster.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineClusterV1 {
+    pub cluster: String,
+    pub role: ClusterRole,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -79,7 +149,7 @@ pub struct MachineV1 {
     pub cpu_millis: u32,
     pub memory_mib: u32,
     pub disk_mib: u32,
-    /// `trixie` or the name of an image.
+    /// `trixie`, `talos` for a cluster node, or the name of an image.
     pub from: String,
     pub defer: Vec<String>,
     pub terminal: bool,
@@ -88,6 +158,9 @@ pub struct MachineV1 {
     /// Build-time stages in run order; `packages` is lowered to the first.
     pub setup: Vec<ScriptV1>,
     pub ready: Vec<ScriptV1>,
+    /// Set on a machine of a Talos cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<MachineClusterV1>,
 }
 
 /// A named lowered bash script: a setup stage or a ready block.
@@ -213,6 +286,11 @@ pub struct RevisionMachineV1 {
     pub terminal: bool,
     pub egress: bool,
     pub build_key: OciDigest,
+    /// The key of the Talos cluster the machine belongs to: its image is
+    /// baked with every other machine of that cluster and recorded with them
+    /// as one set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_key: Option<OciDigest>,
     /// The built image, set once its build has succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_digest: Option<OciDigest>,
@@ -284,6 +362,15 @@ impl ScenarioRevisionV1 {
                         .get(name)
                         .cloned()
                         .ok_or_else(|| format!("machine `{name}`: no build key"))?,
+                    cluster_key: machine
+                        .cluster
+                        .as_ref()
+                        .map(|place| {
+                            keys.clusters.get(&place.cluster).cloned().ok_or_else(|| {
+                                format!("machine `{name}`: no key for cluster `{}`", place.cluster)
+                            })
+                        })
+                        .transpose()?,
                     image_digest: None,
                     spec: spec(SpecMode::Learn)?,
                     verify_spec: spec(SpecMode::Verify)?,
@@ -370,6 +457,40 @@ impl ScenarioV1 {
 }
 
 /// `^[a-z0-9][a-z0-9-]{2,62}$`
+/// The lab network every cluster's machines share, a `/28` of which only
+/// the run sees anything.
+pub const CLUSTER_LAB_PREFIX: [u8; 3] = [172, 31, 0];
+pub const CLUSTER_LAB_PREFIX_LEN: u8 = 28;
+/// The first five bytes of every lab NIC's MAC, as `xx:xx:xx:xx:xx`: a
+/// runtime that gives a machine a NIC on the lab network uses it, and the
+/// management machine finds its lab NIC by it.
+pub const CLUSTER_LAB_MAC_PREFIX: &str = "52:54:00:31:00";
+
+/// Each machine of cluster `name` with its lab address: the control plane
+/// `.2`, the workers `.3` up in scenario order, the management machine `.14`.
+/// Validation keeps a cluster within `MAX_MACHINES`, so the workers end below
+/// `.14`.
+pub fn cluster_lab_ips(scenario: &ScenarioV1, name: &str) -> BTreeMap<String, std::net::Ipv4Addr> {
+    let [a, b, c] = CLUSTER_LAB_PREFIX;
+    let mut worker = 3;
+    let mut found = BTreeMap::new();
+    for machine in &scenario.machines {
+        let Some(member) = machine.cluster.as_ref().filter(|m| m.cluster == name) else {
+            continue;
+        };
+        let host = match member.role {
+            ClusterRole::Controlplane => 2,
+            ClusterRole::Management => 14,
+            ClusterRole::Worker => {
+                worker += 1;
+                worker - 1
+            }
+        };
+        found.insert(machine.name.clone(), std::net::Ipv4Addr::new(a, b, c, host));
+    }
+    found
+}
+
 pub fn is_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     (3..=63).contains(&bytes.len())
@@ -451,7 +572,32 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
                 "machine `{name}`: cpu and memory must be above zero"
             ));
         }
+        let node = machine.cluster.as_ref().is_some_and(|c| c.role.is_node());
+        if node != (machine.from == TALOS_BASE_IMAGE) {
+            problem(format!(
+                "machine `{name}`: from is `{TALOS_BASE_IMAGE}` exactly on a cluster node"
+            ));
+        }
+        if node {
+            if machine.disk_mib < MIN_TALOS_DISK_MIB {
+                problem(format!(
+                    "machine `{name}`: disk is smaller than a cluster node's {MIN_TALOS_DISK_MIB} MiB"
+                ));
+            }
+            if machine.terminal
+                || !machine.defer.is_empty()
+                || !machine.env.is_empty()
+                || !machine.setup.is_empty()
+                || !machine.ready.is_empty()
+                || scenario.tasks.iter().any(|task| task.machine == *name)
+            {
+                problem(format!(
+                    "machine `{name}`: a cluster node has no terminal, defer, env, setup, ready or tasks"
+                ));
+            }
+        }
         match geometry.get(machine.from.as_str()) {
+            _ if machine.from == TALOS_BASE_IMAGE => {}
             None => problem(format!(
                 "machine `{name}`: from `{}` names no image",
                 machine.from
@@ -495,6 +641,60 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
         if size.is_none_or(|size| size > MAX_MACHINE_SPEC_BYTES) {
             problem(format!(
                 "machine `{name}`: its spec is over {MAX_MACHINE_SPEC_BYTES} bytes"
+            ));
+        }
+    }
+
+    if scenario.clusters.len() > MAX_CLUSTERS {
+        problem(format!("a scenario has at most {MAX_CLUSTERS} cluster"));
+    }
+    let mut cluster_names = BTreeSet::new();
+    for cluster in &scenario.clusters {
+        let name = &cluster.name;
+        if !is_id(name) {
+            problem(format!("cluster `{name}`: not a valid ID"));
+        }
+        if !cluster_names.insert(name.as_str()) {
+            problem(format!("cluster `{name}`: declared twice"));
+        }
+        if cluster.patches.len() > MAX_CLUSTER_PATCHES {
+            problem(format!(
+                "cluster `{name}`: more than {MAX_CLUSTER_PATCHES} patches"
+            ));
+        }
+        check_scripts(
+            &format!("cluster `{name}` patch"),
+            &cluster.patches,
+            &mut problem,
+        );
+        if !TALOS_RELEASES.contains(&(cluster.talos.as_str(), cluster.kubernetes.as_str())) {
+            problem(format!(
+                "cluster `{name}`: Talos `{}` with Kubernetes `{}` is not a supported release",
+                cluster.talos, cluster.kubernetes
+            ));
+        }
+        for role in [ClusterRole::Controlplane, ClusterRole::Management] {
+            let count = scenario
+                .machines
+                .iter()
+                .filter_map(|machine| machine.cluster.as_ref())
+                .filter(|c| c.cluster == *name && c.role == role)
+                .count();
+            if count != 1 {
+                problem(format!(
+                    "cluster `{name}`: needs exactly one {} machine",
+                    role.as_str()
+                ));
+            }
+        }
+    }
+    for machine in &scenario.machines {
+        if let Some(c) = &machine.cluster
+            && !cluster_names.contains(c.cluster.as_str())
+        {
+            problem(format!(
+                "machine `{}`: cluster `{}` is not declared",
+                machine.name, c.cluster
             ));
         }
     }
@@ -584,7 +784,7 @@ fn image_geometry<'a>(
     let mut by_name = BTreeMap::new();
     for image in images {
         let name = image.name.as_str();
-        if !is_id(name) || name == PLATFORM_BASE_IMAGE {
+        if !is_id(name) || name == PLATFORM_BASE_IMAGE || name == TALOS_BASE_IMAGE {
             problem(format!("image `{name}`: not a valid image name"));
         }
         if by_name.insert(name, image).is_some() {
@@ -730,6 +930,7 @@ mod tests {
             env: BTreeMap::from([("KUBECONFIG".to_owned(), "/etc/k".to_owned())]),
             setup: vec![script("faults")],
             ready: vec![script("node")],
+            cluster: None,
         }
     }
 
@@ -752,6 +953,7 @@ mod tests {
                 task("b-peers", "router-b", &["a-up"], true),
                 task("both", "router-a", &["a-up", "b-peers"], false),
             ],
+            clusters: Vec::new(),
         }
     }
 
@@ -898,6 +1100,119 @@ mod tests {
         }
     }
 
+    fn cluster_scenario() -> ScenarioV1 {
+        let member = |name: &str, role| {
+            let mut machine = machine(name, TALOS_BASE_IMAGE);
+            machine.terminal = false;
+            machine.defer.clear();
+            machine.env.clear();
+            machine.setup.clear();
+            machine.ready.clear();
+            machine.disk_mib = 10240;
+            machine.cluster = Some(MachineClusterV1 {
+                cluster: "lab".to_owned(),
+                role,
+            });
+            machine
+        };
+        let mut mgmt = machine("mgmt", PLATFORM_BASE_IMAGE);
+        mgmt.cluster = Some(MachineClusterV1 {
+            cluster: "lab".to_owned(),
+            role: ClusterRole::Management,
+        });
+        let mut scenario = scenario();
+        scenario.machines = vec![
+            member("cp1", ClusterRole::Controlplane),
+            member("wk1", ClusterRole::Worker),
+            mgmt,
+        ];
+        scenario.tasks = vec![task("nodes-ready", "mgmt", &[], true)];
+        scenario.clusters = vec![ClusterV1 {
+            name: "lab".to_owned(),
+            talos: "v1.15.0-beta.0".to_owned(),
+            kubernetes: "v1.37.1".to_owned(),
+            patches: vec![script("ntp")],
+        }];
+        scenario
+    }
+
+    #[test]
+    fn cluster_machines_get_their_lab_addresses() {
+        let mut scenario = cluster_scenario();
+        let mut second = scenario.machines[1].clone();
+        second.name = "wk2".to_owned();
+        scenario.machines.insert(0, second);
+        let ips = cluster_lab_ips(&scenario, "lab");
+        let found: Vec<_> = ips.iter().map(|(m, ip)| format!("{m}={ip}")).collect();
+        assert_eq!(
+            found,
+            [
+                "cp1=172.31.0.2",
+                "mgmt=172.31.0.14",
+                "wk1=172.31.0.4",
+                "wk2=172.31.0.3"
+            ]
+        );
+        assert!(cluster_lab_ips(&scenario, "other").is_empty());
+    }
+
+    #[test]
+    fn cluster_rules_are_enforced() {
+        assert_eq!(problems(&cluster_scenario(), &images()), "");
+        type Break = fn(&mut ScenarioV1, &mut Vec<ImageV1>);
+        let broken: [(&str, Break); 11] = [
+            ("is not a supported release", |s, _| {
+                s.clusters[0].kubernetes = "v1.36.0".to_owned()
+            }),
+            ("at most 1 cluster", |s, _| {
+                let mut other = s.clusters[0].clone();
+                other.name = "other".to_owned();
+                s.clusters.push(other);
+            }),
+            ("cluster `lab`: declared twice", |s, _| {
+                s.clusters.push(s.clusters[0].clone())
+            }),
+            ("more than 16 patches", |s, _| {
+                s.clusters[0].patches = (0..17).map(|n| script(&format!("p-{n:02}"))).collect();
+            }),
+            ("needs exactly one controlplane machine", |s, _| {
+                if let Some(c) = &mut s.machines[1].cluster {
+                    c.role = ClusterRole::Controlplane;
+                }
+            }),
+            ("needs exactly one management machine", |s, _| {
+                s.machines.pop();
+                s.tasks.clear();
+            }),
+            ("cluster `nope` is not declared", |s, _| {
+                if let Some(c) = &mut s.machines[0].cluster {
+                    c.cluster = "nope".to_owned();
+                }
+            }),
+            ("from is `talos` exactly on a cluster node", |s, _| {
+                s.machines[2].from = TALOS_BASE_IMAGE.to_owned()
+            }),
+            ("smaller than a cluster node's 4096 MiB", |s, _| {
+                s.machines[0].disk_mib = 2048
+            }),
+            ("a cluster node has no terminal", |s, _| {
+                s.tasks[0].machine = "wk1".to_owned()
+            }),
+            ("image `talos`: not a valid image name", |_, i| {
+                i[0].name = TALOS_BASE_IMAGE.to_owned()
+            }),
+        ];
+        for (expected, mutate) in broken {
+            let (mut scenario, mut images) = (cluster_scenario(), images());
+            mutate(&mut scenario, &mut images);
+            let found = problems(&scenario, &images);
+            assert!(
+                found.contains(expected),
+                "expected `{expected}` in `{found}`"
+            );
+        }
+    }
+
     #[test]
     fn image_chains_resolve_and_cycles_are_refused() {
         let mut images = images();
@@ -967,6 +1282,29 @@ mod tests {
         unknown["machines"][0]["setup"] = serde_json::json!([]);
         assert!(serde_json::from_value::<ScenarioRevisionV1>(unknown).is_err());
         assert!(ScenarioRevisionV1::new(&scenario, "x", &BuildKeys::default()).is_err());
+    }
+
+    #[test]
+    fn a_revision_names_the_cluster_of_each_cluster_machine() {
+        let lab = cluster_scenario();
+        let keys = build_keys(&lab, &images()).unwrap_or_else(|problem| panic!("{problem}"));
+        let revision = ScenarioRevisionV1::new(&lab, "intar/lab", &keys);
+        let revision = revision.unwrap_or_else(|problem| panic!("{problem}"));
+        for machine in &revision.machines {
+            assert_eq!(machine.cluster_key.as_ref(), Some(&keys.clusters["lab"]));
+        }
+        let plain = ScenarioRevisionV1::new(
+            &scenario(),
+            "x",
+            &build_keys(&scenario(), &images()).unwrap_or_default(),
+        );
+        let plain = plain.unwrap_or_else(|problem| panic!("{problem}"));
+        assert!(
+            plain
+                .machines
+                .iter()
+                .all(|machine| machine.cluster_key.is_none())
+        );
     }
 
     #[test]
