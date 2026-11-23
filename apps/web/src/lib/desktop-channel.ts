@@ -661,25 +661,19 @@ export function localRunRecap(record: ScenarioRunRecord) {
     solveDurationMs: run.solveDurationMs,
     hintsRevealed: run.hints.filter((hint) => hint.revealed).length,
     solutionUsed: run.solution.assisted || run.solution.revealed,
-    // A task run (every local run) keeps no objectives, so its final checks
-    // are its tasks; the recap shows only verified or needs repair.
-    checks: record.tasks
-      ? record.tasks.map((task) => ({
-          key: task.id,
-          machine: task.machine,
-          title: task.title,
-          description: task.body,
-          status: learnerCheckStatus(task.status) === "verified" ? "verified" : "needs_repair",
-          optional: task.optional,
-        }))
-      : getRunRecapObjectives(run).map((objective, index) => ({
-          key: objective.key,
-          machine: run.objectives[index]!.vmName,
-          title: objective.title,
-          description: null,
-          status: objective.status,
-          optional: false,
-        })),
+    // The website's final checks; a task run's (every local run's) are its
+    // tasks, in order, which add their own id, description and optionality.
+    checks: getRunRecapObjectives(run).map((objective, index) => {
+      const task = record.tasks?.[index];
+      return {
+        key: task?.id ?? objective.key,
+        machine: task?.machine ?? run.objectives[index]!.vmName,
+        title: objective.title,
+        description: task?.body ?? null,
+        status: objective.status,
+        optional: task?.optional ?? false,
+      };
+    }),
     replay: getRunReplayAvailability(run, parts),
     replayParts: parts.map((part) => ({
       key: part.key,
