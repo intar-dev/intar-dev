@@ -306,6 +306,9 @@ install -m 0755 /tmp/intar-cluster-talosctl /usr/local/bin/talosctl
 install -d -m 0700 -o {user} -g {user} /home/{user}/.kube /home/{user}/.talos
 install -m 0600 -o {user} -g {user} /tmp/intar-cluster-kubeconfig /home/{user}/.kube/config
 install -m 0600 -o {user} -g {user} /tmp/intar-cluster-talosconfig /home/{user}/.talos/config
+install -d -m 0700 /root/.kube /root/.talos
+install -m 0600 /tmp/intar-cluster-kubeconfig /root/.kube/config
+install -m 0600 /tmp/intar-cluster-talosconfig /root/.talos/config
 rm -f /tmp/intar-cluster-*
 cat > /usr/local/sbin/intar-cluster-lab-address <<'EOF'
 #!/bin/sh
@@ -478,6 +481,8 @@ mod tests {
             step.script
                 .contains(&format!("/home/{GUEST_USERNAME}/.kube/config"))
         );
+        // Kino runs ready and task checks as root.
+        assert!(step.script.contains("/root/.kube/config"));
         assert!(step.script.contains("rm -f /tmp/intar-cluster-*"));
     }
 

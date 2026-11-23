@@ -625,13 +625,13 @@
       "keys": {
         "images": {},
         "machines": {
-          "cp1": "sha256:e12d8608b689ed5d28abf2eb0e42671bf079e520dd4445360d3a1f1d53d58e34",
-          "mgmt": "sha256:4f1757838d9b21d801a2936d699839a3e4ad619d56d4e243e2f5d1d55bcfe3af",
-          "wk1": "sha256:3bb6cf5f063c5aed2425983a2f6a309b7ccdbfb3029575b13c3f5266b02b6f76",
-          "wk2": "sha256:2985902d2c90cea2dacc99b387484055b3f2eb2612477875bde78ccc72391d2b"
+          "cp1": "sha256:1a524ad9a6ad0bf056c933ec0f961541ae8f0b5ef80185f8a687ee66d752ec1c",
+          "mgmt": "sha256:68b14f65295c0442cfac3bb00cef13da8251513ffd23f16dc885d11c1403f53e",
+          "wk1": "sha256:ada996b0c19a36ea8996ebf0b7fbf3cf2fa0dd70775f3135220a5bfbc2290bf3",
+          "wk2": "sha256:5b8676da50f48d1da25fac76934fb9231418fad3338a2e79bc06c46a7dc2c34a"
         },
         "clusters": {
-          "lab": "sha256:90dfda4b17512d376c1e8b383fde9ecddd67428b334fe215cfe64c34055b3be1"
+          "lab": "sha256:919ccd0d98520c2f95f8a11bc85f9cdb8938fc14522dbe98739b32855f7c02a7"
         }
       }
     },
@@ -725,13 +725,13 @@
       "keys": {
         "images": {},
         "machines": {
-          "cp1": "sha256:e12d8608b689ed5d28abf2eb0e42671bf079e520dd4445360d3a1f1d53d58e34",
-          "mgmt": "sha256:4f1757838d9b21d801a2936d699839a3e4ad619d56d4e243e2f5d1d55bcfe3af",
-          "wk1": "sha256:3bb6cf5f063c5aed2425983a2f6a309b7ccdbfb3029575b13c3f5266b02b6f76",
-          "wk2": "sha256:2985902d2c90cea2dacc99b387484055b3f2eb2612477875bde78ccc72391d2b"
+          "cp1": "sha256:1a524ad9a6ad0bf056c933ec0f961541ae8f0b5ef80185f8a687ee66d752ec1c",
+          "mgmt": "sha256:68b14f65295c0442cfac3bb00cef13da8251513ffd23f16dc885d11c1403f53e",
+          "wk1": "sha256:ada996b0c19a36ea8996ebf0b7fbf3cf2fa0dd70775f3135220a5bfbc2290bf3",
+          "wk2": "sha256:5b8676da50f48d1da25fac76934fb9231418fad3338a2e79bc06c46a7dc2c34a"
         },
         "clusters": {
-          "lab": "sha256:90dfda4b17512d376c1e8b383fde9ecddd67428b334fe215cfe64c34055b3be1"
+          "lab": "sha256:919ccd0d98520c2f95f8a11bc85f9cdb8938fc14522dbe98739b32855f7c02a7"
         }
       }
     },
@@ -825,13 +825,13 @@
       "keys": {
         "images": {},
         "machines": {
-          "cp1": "sha256:21dc26849a36c0634460f7dd59447d7ea70168a0ce96f2a0691adea880f6e45e",
-          "mgmt": "sha256:7f5171f1232a2da4831a62592ebd9572dcefabad1a17abe10b04bd4facfaa70c",
-          "wk1": "sha256:dede0bdbd0a0a530d47c5d9a1d84b6b2dee84a8df0f4ff7681278b3392e72b9f",
-          "wk2": "sha256:0799706cdfa69251b3f2eb6e598f83a01e0df87b2b48285539cf9e144cf0a2d0"
+          "cp1": "sha256:00cd0633939804388197f1d5b759099bcc555676ebdee90d07b4b74a9778754b",
+          "mgmt": "sha256:5f8d6f7daad99ba98118b5bbaa39632aa8694fc55190e95ab8771a7eecedd64f",
+          "wk1": "sha256:6c0232e9bafb7e93d2d53834592e6cf40ed48116ef24571fb196bee3280c89b1",
+          "wk2": "sha256:9cb56c4f2522545b44f26a6bc26d4e1498b923c440bea783f4deaf3bd9e3832d"
         },
         "clusters": {
-          "lab": "sha256:5551b189ceff5bd63c98bffd4ae47153161bc226ab924f9f042e16cf6e267a31"
+          "lab": "sha256:052f397eac70821a7c3880ab20a483f0732556071aa89d3e2b2c28edae254990"
         }
       }
     },
@@ -925,13 +925,13 @@
       "keys": {
         "images": {},
         "machines": {
-          "cp1": "sha256:162f2d487fea3e8789249907a22318d4d0a915b7bfc23c8df41611377015463a",
-          "mgmt": "sha256:060d4ac11e5d7cb1977f3eded96b6a634f58ef908e28ad596f1b64bc230d9df2",
-          "wk1": "sha256:43723a0614b9d3282357e6744eb7c2ded65b9e333e2214b44ee1b011b195ea0a",
-          "wk2": "sha256:fb45e57acb1d9af12343c76b88e1d19239332ed3d0646d636a5e1f513c2ff566"
+          "cp1": "sha256:644b7fae2285030d3786ce73e6c4fdca7589f850ac5bb58c32a08bf66c37eca4",
+          "mgmt": "sha256:0b3c4991e6ad8bda16e687d41c1f6c17fe7ffcf7c0385076c1a4494cd6f0b6b1",
+          "wk1": "sha256:4f695d694921e4ba9a7270a72b6103e1ba174fb1f3e2385cb64abb7ca2eaf34e",
+          "wk2": "sha256:a483499530290f2b50ad7af5bd09c2fcb1cc15dc6d746f2d909ad24e6ad8c55c"
         },
         "clusters": {
-          "lab": "sha256:04b212dff403b847628c8c3570833d8dbfadac60ae243bd3a54d999b9a5ca2d9"
+          "lab": "sha256:1f4d222a604cf7fb436dbce520ecff98e6a0a1c1707adc34de668b85fcc19bb1"
         }
       }
     },
@@ -1030,13 +1030,13 @@
       "keys": {
         "images": {},
         "machines": {
-          "cp1": "sha256:4f325f48de3512391a3578503b19752f021a4eae68331713eef18e0eb49ab6c6",
-          "mgmt": "sha256:76437a81a136a21e426aec6a7fba8742de047fbe7dd7b91f07a13e0d5b7b8eac",
-          "wk1": "sha256:a16a5a153e87dc337a6eecc4244a20844ff437610742a66c71a0c947fc1f5b27",
-          "wk2": "sha256:603ffc4b8bb5b4393e36f8a4bf97854cdf54575bc7c7d6cbaf7b530637b8d5f5"
+          "cp1": "sha256:e380bc7f5a8c145b33b3389dd94a6c72b89ea8d11b24fe51c2a3017d7e67c4f6",
+          "mgmt": "sha256:8123c5971abdea68626713ad0ab9b938f9537a59147a3b2cdc9018ebde5c9884",
+          "wk1": "sha256:6254fdf445eacd5e3df255d0d9368f95830cec28b037bcf278248d5e26b552d3",
+          "wk2": "sha256:66eeb0eb3bd5cd068038f05d26c434007b55cc2974edc6b9748df0d132770df5"
         },
         "clusters": {
-          "lab": "sha256:dadd3f7b3060d775d70f825db9df2fccfa92502bb99c2d7832d6d1ab3f2a7b04"
+          "lab": "sha256:ff451d9a8684d0eeb664aa13a89622fc15c6ca2ea619d186378f6cabd88af19b"
         }
       }
     }
