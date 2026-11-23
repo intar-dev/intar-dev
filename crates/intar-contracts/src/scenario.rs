@@ -286,6 +286,11 @@ pub struct RevisionMachineV1 {
     pub terminal: bool,
     pub egress: bool,
     pub build_key: OciDigest,
+    /// The key of the Talos cluster the machine belongs to: its image is
+    /// baked with every other machine of that cluster and recorded with them
+    /// as one set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_key: Option<OciDigest>,
     /// The built image, set once its build has succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_digest: Option<OciDigest>,
@@ -357,6 +362,15 @@ impl ScenarioRevisionV1 {
                         .get(name)
                         .cloned()
                         .ok_or_else(|| format!("machine `{name}`: no build key"))?,
+                    cluster_key: machine
+                        .cluster
+                        .as_ref()
+                        .map(|place| {
+                            keys.clusters.get(&place.cluster).cloned().ok_or_else(|| {
+                                format!("machine `{name}`: no key for cluster `{}`", place.cluster)
+                            })
+                        })
+                        .transpose()?,
                     image_digest: None,
                     spec: spec(SpecMode::Learn)?,
                     verify_spec: spec(SpecMode::Verify)?,
@@ -1268,6 +1282,29 @@ mod tests {
         unknown["machines"][0]["setup"] = serde_json::json!([]);
         assert!(serde_json::from_value::<ScenarioRevisionV1>(unknown).is_err());
         assert!(ScenarioRevisionV1::new(&scenario, "x", &BuildKeys::default()).is_err());
+    }
+
+    #[test]
+    fn a_revision_names_the_cluster_of_each_cluster_machine() {
+        let lab = cluster_scenario();
+        let keys = build_keys(&lab, &images()).unwrap_or_else(|problem| panic!("{problem}"));
+        let revision = ScenarioRevisionV1::new(&lab, "intar/lab", &keys);
+        let revision = revision.unwrap_or_else(|problem| panic!("{problem}"));
+        for machine in &revision.machines {
+            assert_eq!(machine.cluster_key.as_ref(), Some(&keys.clusters["lab"]));
+        }
+        let plain = ScenarioRevisionV1::new(
+            &scenario(),
+            "x",
+            &build_keys(&scenario(), &images()).unwrap_or_default(),
+        );
+        let plain = plain.unwrap_or_else(|problem| panic!("{problem}"));
+        assert!(
+            plain
+                .machines
+                .iter()
+                .all(|machine| machine.cluster_key.is_none())
+        );
     }
 
     #[test]

@@ -3,11 +3,11 @@
 "use strict";
 export const validate = validate20;
 export default validate20;
-const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"ScenarioRevisionV1","description":"What the Worker stores for one revision of a scenario: what learners see,\nthe tasks, and per machine its resources, build key and spec digests. No\nscript text: setup stays in the bundle, and scripts reach the guest\nthrough the spec blobs.","type":"object","properties":{"briefing":{"type":"string"},"credit":{"type":["string","null"]},"difficulty":{"$ref":"#/$defs/Difficulty"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"machines":{"description":"In the scenario's order, which is the terminal tab order.","type":"array","items":{"$ref":"#/$defs/RevisionMachineV1"}},"minutes":{"type":"integer","minimum":0,"maximum":4294967295},"play":{"type":"boolean"},"solution":{"type":"string"},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"tasks":{"description":"In the scenario's order, which is the order learners see.","type":"array","items":{"$ref":"#/$defs/RevisionTaskV1"}},"title":{"type":"string"}},"additionalProperties":false,"required":["title","summary","difficulty","minutes","tags","play","briefing","solution","hints","tasks","machines"],"$defs":{"Difficulty":{"type":"string","enum":["easy","medium","hard"]},"HintV1":{"type":"object","properties":{"body":{"type":"string"},"id":{"type":"string"},"title":{"type":["string","null"]}},"additionalProperties":false,"required":["id","body"]},"OciDigest":{"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"RevisionMachineV1":{"type":"object","properties":{"build_key":{"$ref":"#/$defs/OciDigest"},"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"disk_mib":{"type":"integer","minimum":0,"maximum":4294967295},"egress":{"type":"boolean"},"image_digest":{"description":"The built image, set once its build has succeeded.","anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"memory_mib":{"type":"integer","minimum":0,"maximum":4294967295},"name":{"type":"string"},"spec":{"description":"Digest of the learn spec blob.","$ref":"#/$defs/OciDigest"},"terminal":{"type":"boolean"},"verify_spec":{"description":"Digest of the verify spec blob.","$ref":"#/$defs/OciDigest"}},"additionalProperties":false,"required":["name","cpu_millis","memory_mib","disk_mib","terminal","egress","build_key","spec","verify_spec"]},"RevisionTaskV1":{"type":"object","properties":{"body":{"type":["string","null"]},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"id":{"type":"string"},"machine":{"type":"string"},"needs":{"description":"Bare task IDs, on any machine.","type":"array","items":{"type":"string"}},"optional":{"type":"boolean"},"ordinal":{"description":"The task's 0-based position in the scenario.","type":"integer","minimum":0,"maximum":4294967295},"title":{"type":"string"}},"additionalProperties":false,"required":["id","title","machine","needs","optional","ordinal","hints"]}}};
+const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"ScenarioRevisionV1","description":"What the Worker stores for one revision of a scenario: what learners see,\nthe tasks, and per machine its resources, build key and spec digests. No\nscript text: setup stays in the bundle, and scripts reach the guest\nthrough the spec blobs.","type":"object","properties":{"briefing":{"type":"string"},"credit":{"type":["string","null"]},"difficulty":{"$ref":"#/$defs/Difficulty"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"machines":{"description":"In the scenario's order, which is the terminal tab order.","type":"array","items":{"$ref":"#/$defs/RevisionMachineV1"}},"minutes":{"type":"integer","minimum":0,"maximum":4294967295},"play":{"type":"boolean"},"solution":{"type":"string"},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"tasks":{"description":"In the scenario's order, which is the order learners see.","type":"array","items":{"$ref":"#/$defs/RevisionTaskV1"}},"title":{"type":"string"}},"additionalProperties":false,"required":["title","summary","difficulty","minutes","tags","play","briefing","solution","hints","tasks","machines"],"$defs":{"Difficulty":{"type":"string","enum":["easy","medium","hard"]},"HintV1":{"type":"object","properties":{"body":{"type":"string"},"id":{"type":"string"},"title":{"type":["string","null"]}},"additionalProperties":false,"required":["id","body"]},"OciDigest":{"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"RevisionMachineV1":{"type":"object","properties":{"build_key":{"$ref":"#/$defs/OciDigest"},"cluster_key":{"description":"The key of the Talos cluster the machine belongs to: its image is\nbaked with every other machine of that cluster and recorded with them\nas one set.","anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"disk_mib":{"type":"integer","minimum":0,"maximum":4294967295},"egress":{"type":"boolean"},"image_digest":{"description":"The built image, set once its build has succeeded.","anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"memory_mib":{"type":"integer","minimum":0,"maximum":4294967295},"name":{"type":"string"},"spec":{"description":"Digest of the learn spec blob.","$ref":"#/$defs/OciDigest"},"terminal":{"type":"boolean"},"verify_spec":{"description":"Digest of the verify spec blob.","$ref":"#/$defs/OciDigest"}},"additionalProperties":false,"required":["name","cpu_millis","memory_mib","disk_mib","terminal","egress","build_key","spec","verify_spec"]},"RevisionTaskV1":{"type":"object","properties":{"body":{"type":["string","null"]},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"id":{"type":"string"},"machine":{"type":"string"},"needs":{"description":"Bare task IDs, on any machine.","type":"array","items":{"type":"string"}},"optional":{"type":"boolean"},"ordinal":{"description":"The task's 0-based position in the scenario.","type":"integer","minimum":0,"maximum":4294967295},"title":{"type":"string"}},"additionalProperties":false,"required":["id","title","machine","needs","optional","ordinal","hints"]}}};
 const schema32 = {"type":"string","enum":["easy","medium","hard"]};
 const schema33 = {"type":"object","properties":{"body":{"type":"string"},"id":{"type":"string"},"title":{"type":["string","null"]}},"additionalProperties":false,"required":["id","body"]};
 const func1 = Object.prototype.hasOwnProperty;
-const schema34 = {"type":"object","properties":{"build_key":{"$ref":"#/$defs/OciDigest"},"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"disk_mib":{"type":"integer","minimum":0,"maximum":4294967295},"egress":{"type":"boolean"},"image_digest":{"description":"The built image, set once its build has succeeded.","anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"memory_mib":{"type":"integer","minimum":0,"maximum":4294967295},"name":{"type":"string"},"spec":{"description":"Digest of the learn spec blob.","$ref":"#/$defs/OciDigest"},"terminal":{"type":"boolean"},"verify_spec":{"description":"Digest of the verify spec blob.","$ref":"#/$defs/OciDigest"}},"additionalProperties":false,"required":["name","cpu_millis","memory_mib","disk_mib","terminal","egress","build_key","spec","verify_spec"]};
+const schema34 = {"type":"object","properties":{"build_key":{"$ref":"#/$defs/OciDigest"},"cluster_key":{"description":"The key of the Talos cluster the machine belongs to: its image is\nbaked with every other machine of that cluster and recorded with them\nas one set.","anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"disk_mib":{"type":"integer","minimum":0,"maximum":4294967295},"egress":{"type":"boolean"},"image_digest":{"description":"The built image, set once its build has succeeded.","anyOf":[{"$ref":"#/$defs/OciDigest"},{"type":"null"}]},"memory_mib":{"type":"integer","minimum":0,"maximum":4294967295},"name":{"type":"string"},"spec":{"description":"Digest of the learn spec blob.","$ref":"#/$defs/OciDigest"},"terminal":{"type":"boolean"},"verify_spec":{"description":"Digest of the verify spec blob.","$ref":"#/$defs/OciDigest"}},"additionalProperties":false,"required":["name","cpu_millis","memory_mib","disk_mib","terminal","egress","build_key","spec","verify_spec"]};
 const schema35 = {"description":"An OCI digest of a blob or manifest: `sha256:` and 64 lowercase hex\ndigits.","type":"string","pattern":"^sha256:[0-9a-f]{64}$"};
 const pattern4 = new RegExp("^sha256:[0-9a-f]{64}$", "u");
 
@@ -60,83 +60,17 @@ else {
 var valid0 = true;
 }
 if(valid0){
-if(data.cpu_millis !== undefined){
-let data1 = data.cpu_millis;
+if(data.cluster_key !== undefined){
+let data1 = data.cluster_key;
 const _errs5 = errors;
-if(!(((typeof data1 == "number") && (!(data1 % 1) && !isNaN(data1))) && (isFinite(data1)))){
-validate21.errors = [{instancePath:instancePath+"/cpu_millis",schemaPath:"#/properties/cpu_millis/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
-return false;
-}
-if(errors === _errs5){
-if((typeof data1 == "number") && (isFinite(data1))){
-if(data1 > 4294967295 || isNaN(data1)){
-validate21.errors = [{instancePath:instancePath+"/cpu_millis",schemaPath:"#/properties/cpu_millis/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
-return false;
-}
-else {
-if(data1 < 1 || isNaN(data1)){
-validate21.errors = [{instancePath:instancePath+"/cpu_millis",schemaPath:"#/properties/cpu_millis/minimum",keyword:"minimum",params:{comparison: ">=", limit: 1},message:"must be >= 1"}];
-return false;
-}
-}
-}
-}
-var valid0 = _errs5 === errors;
-}
-else {
-var valid0 = true;
-}
-if(valid0){
-if(data.disk_mib !== undefined){
-let data2 = data.disk_mib;
-const _errs7 = errors;
-if(!(((typeof data2 == "number") && (!(data2 % 1) && !isNaN(data2))) && (isFinite(data2)))){
-validate21.errors = [{instancePath:instancePath+"/disk_mib",schemaPath:"#/properties/disk_mib/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
-return false;
-}
-if(errors === _errs7){
-if((typeof data2 == "number") && (isFinite(data2))){
-if(data2 > 4294967295 || isNaN(data2)){
-validate21.errors = [{instancePath:instancePath+"/disk_mib",schemaPath:"#/properties/disk_mib/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
-return false;
-}
-else {
-if(data2 < 0 || isNaN(data2)){
-validate21.errors = [{instancePath:instancePath+"/disk_mib",schemaPath:"#/properties/disk_mib/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"}];
-return false;
-}
-}
-}
-}
-var valid0 = _errs7 === errors;
-}
-else {
-var valid0 = true;
-}
-if(valid0){
-if(data.egress !== undefined){
-const _errs9 = errors;
-if(typeof data.egress !== "boolean"){
-validate21.errors = [{instancePath:instancePath+"/egress",schemaPath:"#/properties/egress/type",keyword:"type",params:{type: "boolean"},message:"must be boolean"}];
-return false;
-}
-var valid0 = _errs9 === errors;
-}
-else {
-var valid0 = true;
-}
-if(valid0){
-if(data.image_digest !== undefined){
-let data4 = data.image_digest;
-const _errs11 = errors;
-const _errs12 = errors;
+const _errs6 = errors;
 let valid2 = false;
-const _errs13 = errors;
-const _errs14 = errors;
-if(errors === _errs14){
-if(typeof data4 === "string"){
-if(!pattern4.test(data4)){
-const err0 = {instancePath:instancePath+"/image_digest",schemaPath:"#/$defs/OciDigest/pattern",keyword:"pattern",params:{pattern: "^sha256:[0-9a-f]{64}$"},message:"must match pattern \""+"^sha256:[0-9a-f]{64}$"+"\""};
+const _errs7 = errors;
+const _errs8 = errors;
+if(errors === _errs8){
+if(typeof data1 === "string"){
+if(!pattern4.test(data1)){
+const err0 = {instancePath:instancePath+"/cluster_key",schemaPath:"#/$defs/OciDigest/pattern",keyword:"pattern",params:{pattern: "^sha256:[0-9a-f]{64}$"},message:"must match pattern \""+"^sha256:[0-9a-f]{64}$"+"\""};
 if(vErrors === null){
 vErrors = [err0];
 }
@@ -147,7 +81,7 @@ errors++;
 }
 }
 else {
-const err1 = {instancePath:instancePath+"/image_digest",schemaPath:"#/$defs/OciDigest/type",keyword:"type",params:{type: "string"},message:"must be string"};
+const err1 = {instancePath:instancePath+"/cluster_key",schemaPath:"#/$defs/OciDigest/type",keyword:"type",params:{type: "string"},message:"must be string"};
 if(vErrors === null){
 vErrors = [err1];
 }
@@ -157,11 +91,11 @@ vErrors.push(err1);
 errors++;
 }
 }
-var _valid0 = _errs13 === errors;
+var _valid0 = _errs7 === errors;
 valid2 = valid2 || _valid0;
-const _errs16 = errors;
-if(data4 !== null){
-const err2 = {instancePath:instancePath+"/image_digest",schemaPath:"#/properties/image_digest/anyOf/1/type",keyword:"type",params:{type: "null"},message:"must be null"};
+const _errs10 = errors;
+if(data1 !== null){
+const err2 = {instancePath:instancePath+"/cluster_key",schemaPath:"#/properties/cluster_key/anyOf/1/type",keyword:"type",params:{type: "null"},message:"must be null"};
 if(vErrors === null){
 vErrors = [err2];
 }
@@ -170,10 +104,10 @@ vErrors.push(err2);
 }
 errors++;
 }
-var _valid0 = _errs16 === errors;
+var _valid0 = _errs10 === errors;
 valid2 = valid2 || _valid0;
 if(!valid2){
-const err3 = {instancePath:instancePath+"/image_digest",schemaPath:"#/properties/image_digest/anyOf",keyword:"anyOf",params:{},message:"must match a schema in anyOf"};
+const err3 = {instancePath:instancePath+"/cluster_key",schemaPath:"#/properties/cluster_key/anyOf",keyword:"anyOf",params:{},message:"must match a schema in anyOf"};
 if(vErrors === null){
 vErrors = [err3];
 }
@@ -185,40 +119,154 @@ validate21.errors = vErrors;
 return false;
 }
 else {
-errors = _errs12;
+errors = _errs6;
 if(vErrors !== null){
-if(_errs12){
-vErrors.length = _errs12;
+if(_errs6){
+vErrors.length = _errs6;
 }
 else {
 vErrors = null;
 }
 }
 }
-var valid0 = _errs11 === errors;
+var valid0 = _errs5 === errors;
 }
 else {
 var valid0 = true;
 }
 if(valid0){
-if(data.memory_mib !== undefined){
-let data5 = data.memory_mib;
-const _errs18 = errors;
-if(!(((typeof data5 == "number") && (!(data5 % 1) && !isNaN(data5))) && (isFinite(data5)))){
-validate21.errors = [{instancePath:instancePath+"/memory_mib",schemaPath:"#/properties/memory_mib/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
+if(data.cpu_millis !== undefined){
+let data2 = data.cpu_millis;
+const _errs12 = errors;
+if(!(((typeof data2 == "number") && (!(data2 % 1) && !isNaN(data2))) && (isFinite(data2)))){
+validate21.errors = [{instancePath:instancePath+"/cpu_millis",schemaPath:"#/properties/cpu_millis/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
 return false;
 }
-if(errors === _errs18){
-if((typeof data5 == "number") && (isFinite(data5))){
-if(data5 > 4294967295 || isNaN(data5)){
-validate21.errors = [{instancePath:instancePath+"/memory_mib",schemaPath:"#/properties/memory_mib/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
+if(errors === _errs12){
+if((typeof data2 == "number") && (isFinite(data2))){
+if(data2 > 4294967295 || isNaN(data2)){
+validate21.errors = [{instancePath:instancePath+"/cpu_millis",schemaPath:"#/properties/cpu_millis/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
 return false;
 }
 else {
-if(data5 < 0 || isNaN(data5)){
-validate21.errors = [{instancePath:instancePath+"/memory_mib",schemaPath:"#/properties/memory_mib/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"}];
+if(data2 < 1 || isNaN(data2)){
+validate21.errors = [{instancePath:instancePath+"/cpu_millis",schemaPath:"#/properties/cpu_millis/minimum",keyword:"minimum",params:{comparison: ">=", limit: 1},message:"must be >= 1"}];
 return false;
 }
+}
+}
+}
+var valid0 = _errs12 === errors;
+}
+else {
+var valid0 = true;
+}
+if(valid0){
+if(data.disk_mib !== undefined){
+let data3 = data.disk_mib;
+const _errs14 = errors;
+if(!(((typeof data3 == "number") && (!(data3 % 1) && !isNaN(data3))) && (isFinite(data3)))){
+validate21.errors = [{instancePath:instancePath+"/disk_mib",schemaPath:"#/properties/disk_mib/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
+return false;
+}
+if(errors === _errs14){
+if((typeof data3 == "number") && (isFinite(data3))){
+if(data3 > 4294967295 || isNaN(data3)){
+validate21.errors = [{instancePath:instancePath+"/disk_mib",schemaPath:"#/properties/disk_mib/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
+return false;
+}
+else {
+if(data3 < 0 || isNaN(data3)){
+validate21.errors = [{instancePath:instancePath+"/disk_mib",schemaPath:"#/properties/disk_mib/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"}];
+return false;
+}
+}
+}
+}
+var valid0 = _errs14 === errors;
+}
+else {
+var valid0 = true;
+}
+if(valid0){
+if(data.egress !== undefined){
+const _errs16 = errors;
+if(typeof data.egress !== "boolean"){
+validate21.errors = [{instancePath:instancePath+"/egress",schemaPath:"#/properties/egress/type",keyword:"type",params:{type: "boolean"},message:"must be boolean"}];
+return false;
+}
+var valid0 = _errs16 === errors;
+}
+else {
+var valid0 = true;
+}
+if(valid0){
+if(data.image_digest !== undefined){
+let data5 = data.image_digest;
+const _errs18 = errors;
+const _errs19 = errors;
+let valid4 = false;
+const _errs20 = errors;
+const _errs21 = errors;
+if(errors === _errs21){
+if(typeof data5 === "string"){
+if(!pattern4.test(data5)){
+const err4 = {instancePath:instancePath+"/image_digest",schemaPath:"#/$defs/OciDigest/pattern",keyword:"pattern",params:{pattern: "^sha256:[0-9a-f]{64}$"},message:"must match pattern \""+"^sha256:[0-9a-f]{64}$"+"\""};
+if(vErrors === null){
+vErrors = [err4];
+}
+else {
+vErrors.push(err4);
+}
+errors++;
+}
+}
+else {
+const err5 = {instancePath:instancePath+"/image_digest",schemaPath:"#/$defs/OciDigest/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err5];
+}
+else {
+vErrors.push(err5);
+}
+errors++;
+}
+}
+var _valid1 = _errs20 === errors;
+valid4 = valid4 || _valid1;
+const _errs23 = errors;
+if(data5 !== null){
+const err6 = {instancePath:instancePath+"/image_digest",schemaPath:"#/properties/image_digest/anyOf/1/type",keyword:"type",params:{type: "null"},message:"must be null"};
+if(vErrors === null){
+vErrors = [err6];
+}
+else {
+vErrors.push(err6);
+}
+errors++;
+}
+var _valid1 = _errs23 === errors;
+valid4 = valid4 || _valid1;
+if(!valid4){
+const err7 = {instancePath:instancePath+"/image_digest",schemaPath:"#/properties/image_digest/anyOf",keyword:"anyOf",params:{},message:"must match a schema in anyOf"};
+if(vErrors === null){
+vErrors = [err7];
+}
+else {
+vErrors.push(err7);
+}
+errors++;
+validate21.errors = vErrors;
+return false;
+}
+else {
+errors = _errs19;
+if(vErrors !== null){
+if(_errs19){
+vErrors.length = _errs19;
+}
+else {
+vErrors = null;
 }
 }
 }
@@ -228,25 +276,52 @@ else {
 var valid0 = true;
 }
 if(valid0){
+if(data.memory_mib !== undefined){
+let data6 = data.memory_mib;
+const _errs25 = errors;
+if(!(((typeof data6 == "number") && (!(data6 % 1) && !isNaN(data6))) && (isFinite(data6)))){
+validate21.errors = [{instancePath:instancePath+"/memory_mib",schemaPath:"#/properties/memory_mib/type",keyword:"type",params:{type: "integer"},message:"must be integer"}];
+return false;
+}
+if(errors === _errs25){
+if((typeof data6 == "number") && (isFinite(data6))){
+if(data6 > 4294967295 || isNaN(data6)){
+validate21.errors = [{instancePath:instancePath+"/memory_mib",schemaPath:"#/properties/memory_mib/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"}];
+return false;
+}
+else {
+if(data6 < 0 || isNaN(data6)){
+validate21.errors = [{instancePath:instancePath+"/memory_mib",schemaPath:"#/properties/memory_mib/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"}];
+return false;
+}
+}
+}
+}
+var valid0 = _errs25 === errors;
+}
+else {
+var valid0 = true;
+}
+if(valid0){
 if(data.name !== undefined){
-const _errs20 = errors;
+const _errs27 = errors;
 if(typeof data.name !== "string"){
 validate21.errors = [{instancePath:instancePath+"/name",schemaPath:"#/properties/name/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
-var valid0 = _errs20 === errors;
+var valid0 = _errs27 === errors;
 }
 else {
 var valid0 = true;
 }
 if(valid0){
 if(data.spec !== undefined){
-let data7 = data.spec;
-const _errs22 = errors;
-const _errs23 = errors;
-if(errors === _errs23){
-if(typeof data7 === "string"){
-if(!pattern4.test(data7)){
+let data8 = data.spec;
+const _errs29 = errors;
+const _errs30 = errors;
+if(errors === _errs30){
+if(typeof data8 === "string"){
+if(!pattern4.test(data8)){
 validate21.errors = [{instancePath:instancePath+"/spec",schemaPath:"#/$defs/OciDigest/pattern",keyword:"pattern",params:{pattern: "^sha256:[0-9a-f]{64}$"},message:"must match pattern \""+"^sha256:[0-9a-f]{64}$"+"\""}];
 return false;
 }
@@ -256,31 +331,31 @@ validate21.errors = [{instancePath:instancePath+"/spec",schemaPath:"#/$defs/OciD
 return false;
 }
 }
-var valid0 = _errs22 === errors;
+var valid0 = _errs29 === errors;
 }
 else {
 var valid0 = true;
 }
 if(valid0){
 if(data.terminal !== undefined){
-const _errs25 = errors;
+const _errs32 = errors;
 if(typeof data.terminal !== "boolean"){
 validate21.errors = [{instancePath:instancePath+"/terminal",schemaPath:"#/properties/terminal/type",keyword:"type",params:{type: "boolean"},message:"must be boolean"}];
 return false;
 }
-var valid0 = _errs25 === errors;
+var valid0 = _errs32 === errors;
 }
 else {
 var valid0 = true;
 }
 if(valid0){
 if(data.verify_spec !== undefined){
-let data9 = data.verify_spec;
-const _errs27 = errors;
-const _errs28 = errors;
-if(errors === _errs28){
-if(typeof data9 === "string"){
-if(!pattern4.test(data9)){
+let data10 = data.verify_spec;
+const _errs34 = errors;
+const _errs35 = errors;
+if(errors === _errs35){
+if(typeof data10 === "string"){
+if(!pattern4.test(data10)){
 validate21.errors = [{instancePath:instancePath+"/verify_spec",schemaPath:"#/$defs/OciDigest/pattern",keyword:"pattern",params:{pattern: "^sha256:[0-9a-f]{64}$"},message:"must match pattern \""+"^sha256:[0-9a-f]{64}$"+"\""}];
 return false;
 }
@@ -290,10 +365,11 @@ validate21.errors = [{instancePath:instancePath+"/verify_spec",schemaPath:"#/$de
 return false;
 }
 }
-var valid0 = _errs27 === errors;
+var valid0 = _errs34 === errors;
 }
 else {
 var valid0 = true;
+}
 }
 }
 }
@@ -317,7 +393,7 @@ return errors === 0;
 }
 validate21.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
 
-const schema39 = {"type":"object","properties":{"body":{"type":["string","null"]},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"id":{"type":"string"},"machine":{"type":"string"},"needs":{"description":"Bare task IDs, on any machine.","type":"array","items":{"type":"string"}},"optional":{"type":"boolean"},"ordinal":{"description":"The task's 0-based position in the scenario.","type":"integer","minimum":0,"maximum":4294967295},"title":{"type":"string"}},"additionalProperties":false,"required":["id","title","machine","needs","optional","ordinal","hints"]};
+const schema40 = {"type":"object","properties":{"body":{"type":["string","null"]},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"id":{"type":"string"},"machine":{"type":"string"},"needs":{"description":"Bare task IDs, on any machine.","type":"array","items":{"type":"string"}},"optional":{"type":"boolean"},"ordinal":{"description":"The task's 0-based position in the scenario.","type":"integer","minimum":0,"maximum":4294967295},"title":{"type":"string"}},"additionalProperties":false,"required":["id","title","machine","needs","optional","ordinal","hints"]};
 
 function validate23(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
 let vErrors = null;
@@ -350,7 +426,7 @@ if(data.body !== undefined){
 let data0 = data.body;
 const _errs2 = errors;
 if((typeof data0 !== "string") && (data0 !== null)){
-validate23.errors = [{instancePath:instancePath+"/body",schemaPath:"#/properties/body/type",keyword:"type",params:{type: schema39.properties.body.type},message:"must be string,null"}];
+validate23.errors = [{instancePath:instancePath+"/body",schemaPath:"#/properties/body/type",keyword:"type",params:{type: schema40.properties.body.type},message:"must be string,null"}];
 return false;
 }
 var valid0 = _errs2 === errors;

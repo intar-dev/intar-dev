@@ -116,6 +116,17 @@
         "build_key": {
           "$ref": "#/$defs/OciDigest"
         },
+        "cluster_key": {
+          "description": "The key of the Talos cluster the machine belongs to: its image is\nbaked with every other machine of that cluster and recorded with them\nas one set.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OciDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cpu_millis": {
           "type": "integer",
           "format": "uint32",
