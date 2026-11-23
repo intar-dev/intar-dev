@@ -1,5 +1,11 @@
 # Changelog
 
+## image-cli/v0.20.0 (2026-11-23)
+
+### Features
+
+- **talos:** Run talos cluster labs on the hosted agent (#528) (22b21dd6)
+
 ## image-cli/v0.19.1 (2026-11-23)
 
 ### Bug fixes

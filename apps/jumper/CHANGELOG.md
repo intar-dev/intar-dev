@@ -1,5 +1,15 @@
 # Changelog
 
+## desktop/v0.4.0 (2026-11-23)
+
+### Features
+
+- **talos:** Run talos cluster labs on the hosted agent (#528) (22b21dd6)
+
+### Bug fixes
+
+- **jumper:** Quit when the window closes and add a menu bar (#530) (c5b9385f)
+
 ## desktop/v0.3.1 (2026-11-23)
 
 ### Bug fixes

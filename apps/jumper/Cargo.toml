@@ -1,6 +1,6 @@
 [package]
 name = "jumper"
-version = "0.3.1"
+version = "0.4.0"
 edition.workspace = true
 # src/ui/theme.rs and src/ui/text_input.rs are Apache-2.0 (LICENSE-APACHE).
 license = "MIT AND Apache-2.0"
