@@ -677,7 +677,7 @@ interface RevisionHostCandidate {
 /** The first agent release that reads `DesiredVmV3.may_restore`. */
 const MAY_RESTORE_AGENT_VERSION = [0, 22, 0] as const;
 /** The first agent release that boots a Talos cluster's machines. */
-const TALOS_AGENT_VERSION = [0, 27, 0] as const;
+const TALOS_AGENT_VERSION = [0, 28, 0] as const;
 
 /** Whether the agent of a stored client hello is at least that release. */
 export function agentReadsMayRestore(helloJson: string | null): boolean {

@@ -858,15 +858,15 @@ describe("promotion and verify runs", () => {
       const agent = (version: string) => env.DB.prepare("UPDATE agent_hosts SET hello_json = json_set(hello_json, '$.agent_version', ?1)")
         .bind(version).run();
       const verify = () => beginVerifyRun({ scenarioId: PUBLIC_ID, rev: rev("a"), allowDrainedAdminProof: true });
-      await agent("0.26.1");
+      await agent("0.27.1");
       await expect(verify()).rejects.toMatchObject({ code: "scenario_host_unavailable" });
-      await agent("0.27.0");
+      await agent("0.28.0");
       expect((await verify()).runId).toBeTruthy();
     });
 
     it("reads a Talos agent's release strictly", () => {
       const hello = (agent_version: string) => JSON.stringify({ agent_version });
-      expect(["0.26.9", "0.27.0", "1.0.0"].map((version) => agentBootsTalos(hello(version)))).toEqual([false, true, true]);
+      expect(["0.27.9", "0.28.0", "1.0.0"].map((version) => agentBootsTalos(hello(version)))).toEqual([false, true, true]);
     });
 
     it("never tells a host with an older agent", async () => {
