@@ -1565,7 +1565,8 @@ fn main() {
             theme::init_ui_font(cx);
             let bounds = Bounds::centered(None, size(px(1280.), px(760.)), cx);
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // Opens filling the screen; un-zooming returns to `bounds`.
+                window_bounds: Some(WindowBounds::Maximized(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Intar".into()),
                     appears_transparent: OWN_TITLE_BAR,
