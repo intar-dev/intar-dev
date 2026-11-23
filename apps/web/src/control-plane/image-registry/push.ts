@@ -39,8 +39,12 @@ export const OCI_PREFIX = "oci/sha256/";
 export const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
 export const KINO_CONFIG_MEDIA_TYPE = "application/vnd.intar.kino.config.v1+json";
 const KINO_BINARY_MEDIA_TYPE = "application/octet-stream";
-/** A kernel is about 11 MB and a chunk at most 8 MiB; a Worker body is capped at 100 MB. */
-export const MAX_BLOB_BYTES = 64 * 1024 * 1024;
+/**
+ * A kernel is about 11 MB, a chunk at most 8 MiB and a Talos initramfs about
+ * 92 MB; a Worker body is capped at 100 MB. The body streams to R2, so its
+ * size costs no memory here.
+ */
+export const MAX_BLOB_BYTES = 95 * 1024 * 1024;
 export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_RESULT_BYTES = 4096;
 /** Two binds per row and a pipeline's two for its lease: D1's 100 per statement. */

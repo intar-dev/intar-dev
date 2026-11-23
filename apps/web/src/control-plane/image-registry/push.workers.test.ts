@@ -7,7 +7,7 @@ import { handleAgentBootstrap, sha256Hex } from "@/control-plane/auth";
 import { agentBootstrapTokens, agentHosts, machineBuilds, user } from "@/db/schema";
 import { resetD1Database } from "@/test/d1-migrations";
 import { handleImageRegistryRequest } from "./router";
-import { KINO_CONFIG_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, readKinoPin } from "./push";
+import { KINO_CONFIG_MEDIA_TYPE, MAX_BLOB_BYTES, OCI_MANIFEST_MEDIA_TYPE, readKinoPin } from "./push";
 import { blob, machineConfig, manifestOf, type PushedBlob } from "./oci-test-fixtures";
 
 const ORIGIN = "https://intar.test/registry/v1";
@@ -126,9 +126,14 @@ describe("registry push routes", () => {
     expect(await env.VM_IMAGE_REGISTRY_BUCKET.head(`oci/sha256/${claimed.hex}`)).toBeNull();
   });
 
+  it("has room for a Talos initramfs within a Worker body", () => {
+    expect(MAX_BLOB_BYTES).toBeGreaterThan(92 * 1000 * 1000);
+    expect(MAX_BLOB_BYTES).toBeLessThan(100 * 1000 * 1000);
+  });
+
   it("refuses an oversized, unsized or malformed blob", async () => {
     const pushed = await blob("x");
-    expect((await call("PUT", `/blobs/${pushed.digest}`, { body: pushed.bytes, headers: { "content-length": String(64 * 1024 * 1024 + 1) } })).status).toBe(413);
+    expect((await call("PUT", `/blobs/${pushed.digest}`, { body: pushed.bytes, headers: { "content-length": String(MAX_BLOB_BYTES + 1) } })).status).toBe(413);
     expect((await call("PUT", `/blobs/${pushed.digest}`, { body: pushed.bytes, headers: { "content-length": "nope" } })).status).toBe(411);
     expect((await call("PUT", `/blobs/sha256:${"A".repeat(64)}`, { body: pushed.bytes })).status).toBe(400);
     expect((await call("PUT", `/blobs/${pushed.hex}`, { body: pushed.bytes })).status).toBe(400);
