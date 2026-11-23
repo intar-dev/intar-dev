@@ -24,5 +24,16 @@ jobs:
           cat /proc/cmdline
           echo "lsm: $(cat /sys/kernel/security/lsm 2>&1)"
           grep -i landlock "/boot/config-$(uname -r)" 2>&1 || zgrep -i landlock /proc/config.gz 2>&1 || true
+      - name: Each requirement
+        run: |
+          chk() { if eval "$2" >/dev/null 2>&1; then echo "PASS $1"; else echo "FAIL $1"; fi; }
+          chk x86_64 'test "$(uname -m)" = x86_64'
+          echo "pid1=$(ps -p 1 -o comm=)"
+          chk systemd-pid1 'test "$(ps -p 1 -o comm= | tr -d " ")" = systemd'
+          chk cgroup2 'test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs'
+          chk cgroup-cpu 'grep -qw cpu /sys/fs/cgroup/cgroup.controllers'
+          chk kvm 'test -c /dev/kvm'
+          chk tun 'test -c /dev/net/tun'
+          python3 -c 'import ctypes;l=ctypes.CDLL(None,use_errno=True);l.syscall.restype=ctypes.c_long;a=l.syscall(444,None,0,1);print("landlock_abi",a,"errno",ctypes.get_errno())'
       - name: Jailed release preflight
-        run: bash tools/workflows/release/preflight-jailed-release-runner.sh
+        run: bash -x tools/workflows/release/preflight-jailed-release-runner.sh
