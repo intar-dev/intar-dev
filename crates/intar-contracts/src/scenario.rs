@@ -466,27 +466,33 @@ pub const CLUSTER_LAB_PREFIX_LEN: u8 = 28;
 /// management machine finds its lab NIC by it.
 pub const CLUSTER_LAB_MAC_PREFIX: &str = "52:54:00:31:00";
 
-/// Each machine of cluster `name` with its lab address: the control plane
-/// `.2`, the workers `.3` up in scenario order, the management machine `.14`.
-/// Validation keeps a cluster within `MAX_MACHINES`, so the workers end below
-/// `.14`.
+/// Each machine of cluster `name` with its lab address: the control planes
+/// `.2` up, then the workers, each in scenario order, the management machine
+/// `.14`. The first control plane (`.2`) is the cluster endpoint. Validation
+/// keeps a cluster within `MAX_MACHINES`, so the nodes end below `.14`.
 pub fn cluster_lab_ips(scenario: &ScenarioV1, name: &str) -> BTreeMap<String, std::net::Ipv4Addr> {
     let [a, b, c] = CLUSTER_LAB_PREFIX;
-    let mut worker = 3;
+    let members: Vec<_> = scenario
+        .machines
+        .iter()
+        .filter_map(|machine| {
+            let member = machine.cluster.as_ref().filter(|m| m.cluster == name)?;
+            Some((machine.name.clone(), member.role))
+        })
+        .collect();
     let mut found = BTreeMap::new();
-    for machine in &scenario.machines {
-        let Some(member) = machine.cluster.as_ref().filter(|m| m.cluster == name) else {
-            continue;
-        };
-        let host = match member.role {
-            ClusterRole::Controlplane => 2,
-            ClusterRole::Management => 14,
-            ClusterRole::Worker => {
-                worker += 1;
-                worker - 1
-            }
-        };
-        found.insert(machine.name.clone(), std::net::Ipv4Addr::new(a, b, c, host));
+    let mut host = 2;
+    for role in [ClusterRole::Controlplane, ClusterRole::Worker] {
+        for (machine, _) in members.iter().filter(|(_, r)| *r == role) {
+            found.insert(machine.clone(), std::net::Ipv4Addr::new(a, b, c, host));
+            host += 1;
+        }
+    }
+    for (machine, _) in members
+        .iter()
+        .filter(|(_, r)| *r == ClusterRole::Management)
+    {
+        found.insert(machine.clone(), std::net::Ipv4Addr::new(a, b, c, 14));
     }
     found
 }
@@ -673,19 +679,23 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
                 cluster.talos, cluster.kubernetes
             ));
         }
-        for role in [ClusterRole::Controlplane, ClusterRole::Management] {
-            let count = scenario
+        let count = |role| {
+            scenario
                 .machines
                 .iter()
                 .filter_map(|machine| machine.cluster.as_ref())
                 .filter(|c| c.cluster == *name && c.role == role)
-                .count();
-            if count != 1 {
-                problem(format!(
-                    "cluster `{name}`: needs exactly one {} machine",
-                    role.as_str()
-                ));
-            }
+                .count()
+        };
+        if count(ClusterRole::Controlplane) == 0 {
+            problem(format!(
+                "cluster `{name}`: needs at least one controlplane machine"
+            ));
+        }
+        if count(ClusterRole::Management) != 1 {
+            problem(format!(
+                "cluster `{name}`: needs exactly one management machine"
+            ));
         }
     }
     for machine in &scenario.machines {
@@ -1153,6 +1163,23 @@ mod tests {
                 "wk2=172.31.0.3"
             ]
         );
+        // Every control plane comes before the workers, in scenario order.
+        let mut cp2 = scenario.machines[1].clone();
+        cp2.name = "cp2".to_owned();
+        scenario.machines.push(cp2);
+        assert_eq!(problems(&scenario, &images()), "");
+        let ips = cluster_lab_ips(&scenario, "lab");
+        let found: Vec<_> = ips.iter().map(|(m, ip)| format!("{m}={ip}")).collect();
+        assert_eq!(
+            found,
+            [
+                "cp1=172.31.0.2",
+                "cp2=172.31.0.3",
+                "mgmt=172.31.0.14",
+                "wk1=172.31.0.5",
+                "wk2=172.31.0.4"
+            ]
+        );
         assert!(cluster_lab_ips(&scenario, "other").is_empty());
     }
 
@@ -1175,9 +1202,9 @@ mod tests {
             ("more than 16 patches", |s, _| {
                 s.clusters[0].patches = (0..17).map(|n| script(&format!("p-{n:02}"))).collect();
             }),
-            ("needs exactly one controlplane machine", |s, _| {
-                if let Some(c) = &mut s.machines[1].cluster {
-                    c.role = ClusterRole::Controlplane;
+            ("needs at least one controlplane machine", |s, _| {
+                if let Some(c) = &mut s.machines[0].cluster {
+                    c.role = ClusterRole::Worker;
                 }
             }),
             ("needs exactly one management machine", |s, _| {

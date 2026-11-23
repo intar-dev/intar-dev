@@ -21,7 +21,7 @@ fn lab_subnet() -> String {
     format!("{a}.{b}.{c}.0/{CLUSTER_LAB_PREFIX_LEN}")
 }
 
-/// The control plane's lab address and the cluster endpoint on it.
+/// The first control plane's lab address and the cluster endpoint on it.
 pub(crate) fn controlplane_ip() -> Ipv4Addr {
     let [a, b, c] = CLUSTER_LAB_PREFIX;
     Ipv4Addr::new(a, b, c, 2)
@@ -38,10 +38,11 @@ pub(crate) fn endpoint() -> String {
 /// once. It resyncs pods every second, which also caps its retry of a
 /// failed pod sync (10 s otherwise): at wake its pods often arrive before its
 /// Services list (no pod starts until that is in) or before flannel's subnet
-/// lease, and each such miss cost 10-15 s. No KubePrism: with one control
-/// plane it has nothing to balance, and while the API server is down at wake
-/// it holds the kubelet's calls instead of failing them, which stalled the
-/// control plane's static pods for ~22 s (API at 28 s instead of 6 s).
+/// lease, and each such miss cost 10-15 s. No KubePrism: while the API server
+/// is down at wake it holds the kubelet's calls instead of failing them, which
+/// stalled the control plane's static pods for ~22 s (API at 28 s instead of
+/// 6 s). So every node reaches the API through the first control plane, also
+/// with several.
 fn common() -> String {
     "machine:
   certSANs: [127.0.0.1]
