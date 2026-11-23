@@ -110,7 +110,20 @@ pub(crate) async fn require_ready_image(
     let bytes = tokio::fs::read(descriptor_path(cache_root, image))
         .await
         .context("the image's launch descriptor is unavailable")?;
-    validate_descriptor(image, serde_json::from_slice(&bytes)?)
+    let ready = validate_descriptor(image, serde_json::from_slice(&bytes)?)?;
+    anyhow::ensure!(
+        config_blobs_present(cache_root, &ready),
+        "the image's manifest or config is no longer in the store"
+    );
+    Ok(ready)
+}
+
+/// A launch reads the image's manifest and config (whether it is a Talos
+/// node's), and eviction can remove them before the descriptor: such an
+/// image is not ready, so the cache pass pulls them again.
+fn config_blobs_present(cache_root: &Path, ready: &ReadyImage) -> bool {
+    let store = BlobStore::new(cache_root);
+    store.path(&ready.image).is_file() && store.path(&ready.config).is_file()
 }
 
 /// Withdraw an image's readiness: jailerd answered that its template is gone
@@ -128,7 +141,8 @@ pub(crate) fn is_image_ready(cache_root: &Path, image: &OciDigest) -> bool {
     std::fs::read(descriptor_path(cache_root, image))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .is_some_and(|descriptor| validate_descriptor(image, descriptor).is_ok())
+        .and_then(|descriptor| validate_descriptor(image, descriptor).ok())
+        .is_some_and(|ready| config_blobs_present(cache_root, &ready))
 }
 
 fn validate_descriptor(image: &OciDigest, descriptor: ReadyDescriptorV2) -> Result<ReadyImage> {

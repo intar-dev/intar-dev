@@ -987,6 +987,12 @@ pub(super) async fn run_create(
     };
     let talos = image_cache::image_boots_talos(&cache_root, req.image)
         .context("read whether the image is a Talos node's")?;
+    // The SSH port is reserved at create, from the same read; an image not
+    // ready then reads as not Talos.
+    anyhow::ensure!(
+        !(talos && req.ssh_public_port.is_some()),
+        "the Talos node's image was not ready when the VM was created"
+    );
     let cmdline = if talos {
         talos_cmdline(&ready_image.cmdline, req.network, req.egress)?
     } else {
