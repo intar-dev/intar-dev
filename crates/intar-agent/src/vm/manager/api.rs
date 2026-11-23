@@ -62,6 +62,8 @@ impl VmManager {
         .context("failed to initialize the image registry client")?;
         let (terminal_updates_tx, _) = broadcast::channel(256);
         let (inventory_updates_tx, _) = watch::channel(0);
+        // reqwest has no crypto provider of its own; install ring first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let inner = Inner {
             control_connected: AtomicBool::new(false),
             relay_status: std::sync::RwLock::new(None),

@@ -167,6 +167,8 @@ pub(crate) fn wake_cache_refresh_if_unready(
 }
 
 pub(crate) fn registry_http_client() -> Result<reqwest::Client> {
+    // reqwest has no crypto provider of its own; install ring first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         // The scenario host is dual-stack, but one Cloudflare IPv6 anycast
