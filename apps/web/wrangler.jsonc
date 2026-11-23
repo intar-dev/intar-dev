@@ -58,7 +58,7 @@
     // compile the retired source format, so these stay empty until the
     // release workflow's pin pull request names the first one that compiles
     // the current format.
-    "SCENARIO_COMPILER_CLI_VERSION": "0.19.1",
+    "SCENARIO_COMPILER_CLI_VERSION": "0.21.0",
     // The desktop app's release an installed app is offered as its update,
     // per system and processor, with the SHA-256 of its download:
     // {"macos_arm64":{"version":"X.Y.Z","sha256":"<hex>"}}. Empty: the app
@@ -66,14 +66,14 @@
     // release page, so a published release is offered only once that change
     // is merged; the release workflow's pin pull request makes it
     // (tools/workflows/release/web-pins.sh).
-    "JUMPER_RELEASE_JSON": "{\"macos_arm64\":{\"sha256\":\"44467e5303c995464578d0dd000fb9d4c0b32891b7d1bcf77b193dea813d527c\",\"version\":\"0.3.1\"}}",
+    "JUMPER_RELEASE_JSON": "{\"macos_arm64\":{\"sha256\":\"fc2a20135e805cd5c3c87940e883a66b2e70b3875f464d8f9cc522a436073248\",\"version\":\"0.5.0\"}}",
     // Public run shares keep their terminal logs next to the run recordings.
     // Local workerd has no jurisdictions, so local configs leave this unset.
     "RUN_SHARE_JURISDICTION": "eu",
     // The public origin of SHARE_LIVE_BUCKET, and its zone for cache purges
     // (with the optional SHARE_LIVE_PURGE_TOKEN secret).
     "SHARE_LIVE_ORIGIN": "https://live.intar.dev",
-    "SCENARIO_COMPILER_CLI_SHA256": "{\"linux_amd64\":\"83f2e0b6ca0748a92ae9366006e1fa83ec7f093e2572075b62e490cf68ec924c\",\"linux_arm64\":\"20a9a164e0d254a0764ceb1ff90d03eea56556ee0d5cfee52088d7f04d2ed98c\"}",
+    "SCENARIO_COMPILER_CLI_SHA256": "{\"linux_amd64\":\"a5b1f019126656c17a0c26e64d4a968592cdb346d7b3d434b55d83782c54a219\",\"linux_arm64\":\"08a80e5e732b374cb51c80ee1d873b7f2b65c576c656a7bf15e0267c8e3b12e2\"}",
   },
   "vpc_services": [
     {
