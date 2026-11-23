@@ -35,7 +35,10 @@ pub(crate) fn endpoint() -> String {
 /// fast kubelet start and in-place restart at wake, DHCP on the uplink.
 /// The kubelet reports status every second, so a node the woken
 /// controller-manager marks NotReady from its baked heartbeat is back at
-/// once. No KubePrism: with one control plane it has nothing to balance, and
+/// once. It resyncs pods every second, which also caps its retry of a
+/// failed pod sync (10 s otherwise): at wake its pods often arrive before its
+/// Services list (no pod starts until that is in) or before flannel's subnet
+/// lease, and each such miss cost 10-15 s. No KubePrism: with one control plane it has nothing to balance, and
 /// Talos health-checks its upstreams only every 20 s (a constant), so the
 /// failed dials before the API server is up stall every client on the node
 /// (kubelet, controller-manager, scheduler, flannel) for up to 20 s at wake.
@@ -48,6 +51,7 @@ kind: KubeletConfig
 config:
   httpCheckFrequency: 1s
   nodeStatusUpdateFrequency: 1s
+  syncFrequency: 1s
   shutdownGracePeriod: 0s
   shutdownGracePeriodCriticalPods: 0s
 ---
@@ -262,6 +266,7 @@ mod tests {
             "httpCheckFrequency: 1s",
             "shutdownGracePeriod: 0s",
             "nodeStatusUpdateFrequency: 1s",
+            "syncFrequency: 1s",
             "kind: KubePrismConfig\n$patch: delete",
             "feature-gates: ControllerManagerReleaseLeaderElectionLockOnExit=true",
             "shutdown-delay-duration: 5s",
