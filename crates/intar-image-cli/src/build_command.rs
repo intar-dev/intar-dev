@@ -35,8 +35,8 @@ const BOOT_SECONDS: u64 = 120;
 #[derive(Debug, Args)]
 pub(crate) struct BuildCommand {
     /// What to build: SCENARIO/MACHINE, image:NAME, base, or
-    /// cluster:SCENARIO/CLUSTER for every machine of a Talos cluster (not
-    /// booted yet).
+    /// cluster:SCENARIO/CLUSTER for every machine of a Talos cluster, which
+    /// are pushed together.
     target: String,
     /// The architecture to build for: amd64 or arm64. One that is not this
     /// computer's own is built and booted by emulation.
@@ -128,7 +128,7 @@ pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
                 args.target
             );
         };
-        return build_cluster(bundle, scenario, cluster, config, &args.out);
+        return build_cluster(bundle, scenario, cluster, config, arch, &args.out);
     }
     let target = target_of(&args.target)?;
     let output = build_machine_image(&MachineBuildRequest {
@@ -190,14 +190,15 @@ pub(crate) fn build_command(args: &BuildCommand) -> Result<()> {
     built.write(&args.out)
 }
 
-/// Bakes every image of a cluster and checks each as a host would.
-// ponytail: no boot check yet; the cluster's boot is checked by hand until
-// the runtimes can start a cluster (S4/S5).
+/// Bakes every image of a cluster, wakes the baked nodes once more as a run
+/// does, and checks each image as a host would. `images.json` is written
+/// only once all of that has passed.
 fn build_cluster(
     bundle: SourceBundleV2,
     scenario: &str,
     cluster: &str,
     config: QemuBuildConfig,
+    arch: BuildArch,
     out: &Path,
 ) -> Result<()> {
     let output = build_cluster_images(&ClusterBuildRequest {
@@ -209,6 +210,7 @@ fn build_cluster(
         output_dir: out.to_owned(),
     })?;
     println!("cluster_key={}", output.cluster_key.as_str());
+    let mut images = Vec::new();
     for (machine, (key, image)) in &output.images {
         verify_machine_image(out, &image.manifest_digest)?;
         println!(
@@ -217,14 +219,25 @@ fn build_cluster(
             image.manifest_digest.as_str(),
             image.disk_bytes
         );
+        images.push(crate::push_command::BuiltClusterImage {
+            machine: machine.clone(),
+            build_key: key.clone(),
+            manifest: image.manifest_digest.clone(),
+        });
     }
     println!(
-        "bake_s={:.1} management_s={:.1} log={}",
+        "bake_s={:.1} wake_s={:.1} management_s={:.1} log={}",
         output.bake_seconds,
+        output.wake_seconds,
         output.management_seconds,
         output.log_path.display()
     );
-    Ok(())
+    crate::push_command::BuiltCluster {
+        cluster_key: output.cluster_key,
+        arch: arch.debian().to_owned(),
+        images,
+    }
+    .write(out)
 }
 
 struct Boot<'a> {

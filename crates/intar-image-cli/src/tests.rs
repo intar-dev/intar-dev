@@ -408,6 +408,68 @@ mod pipeline {
     }
 
     #[test]
+    fn a_cluster_missing_any_key_is_one_target_per_architecture() {
+        use intar_contracts::scenario::{
+            ClusterRole, ClusterV1, MachineClusterV1, PLATFORM_BASE_IMAGE, TALOS_BASE_IMAGE,
+        };
+        let repository = example();
+        let (mut bundle, _) = compile(repository.path()).expect("compiles");
+        let scenario = &mut bundle.scenarios[0];
+        let template = scenario.machines[0].clone();
+        let member = |name: &str, from: &str, role| {
+            let mut machine = template.clone();
+            machine.name = name.to_owned();
+            machine.from = from.to_owned();
+            machine.cluster = Some(MachineClusterV1 {
+                cluster: "lab".to_owned(),
+                role,
+            });
+            machine
+        };
+        scenario.machines.extend([
+            member("cp1", TALOS_BASE_IMAGE, ClusterRole::Controlplane),
+            member("wk1", TALOS_BASE_IMAGE, ClusterRole::Worker),
+            member("mgmt", PLATFORM_BASE_IMAGE, ClusterRole::Management),
+        ]);
+        scenario.clusters = vec![ClusterV1 {
+            name: "lab".to_owned(),
+            talos: "v1.15.0-beta.0".to_owned(),
+            kubernetes: "v1.37.1".to_owned(),
+            patches: Vec::new(),
+        }];
+        let keys = build_keys(scenario, &bundle.images).expect("keys");
+        let cluster = keys.clusters["lab"].as_str().to_owned();
+        let mut members: Vec<String> = ["cp1", "wk1", "mgmt"]
+            .iter()
+            .map(|name| keys.machines[*name].as_str().to_owned())
+            .collect();
+        members.sort();
+        let receipt = PipelineReceipt {
+            architectures: vec!["amd64".to_owned(), "arm64".to_owned()],
+            missing: vec![
+                missing(&members[0], "amd64"),
+                missing(&members[1], "amd64"),
+                missing(&members[2], "arm64"),
+            ],
+        };
+        let plan = serde_json::to_value(plan_of(&bundle, GIT_REV, Some(&receipt)).expect("a plan"))
+            .expect("json");
+        assert_eq!(
+            plan["jobs"],
+            serde_json::json!([
+                { "target": "cluster:broken-nginx/lab", "build_key": cluster, "build_keys": members, "arch": "amd64" },
+                { "target": "cluster:broken-nginx/lab", "build_key": cluster, "build_keys": members, "arch": "arm64" },
+            ])
+        );
+        assert_eq!(
+            plan["images"],
+            serde_json::json!([
+                { "target": "cluster:broken-nginx/lab", "build_key": cluster, "build_keys": members, "archs": ["amd64", "arm64"] },
+            ])
+        );
+    }
+
+    #[test]
     fn a_plan_field_that_is_no_plan_fails_the_upload() {
         let body = format!(
             r#"{{"ok":true,"rev":"{GIT_REV}","queued":0,"assigned":[],"pipeline":{{"missing":"all"}}}}"#

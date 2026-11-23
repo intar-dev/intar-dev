@@ -53,6 +53,8 @@ pub struct ClusterBuildOutput {
     pub images: BTreeMap<String, (OciDigest, MachineImage)>,
     pub log_path: PathBuf,
     pub bake_seconds: f64,
+    /// The cold wake of the baked nodes, within `bake_seconds`.
+    pub wake_seconds: f64,
     pub management_seconds: f64,
 }
 
@@ -211,6 +213,7 @@ pub fn build_cluster_images(request: &ClusterBuildRequest) -> Result<ClusterBuil
 
     let started = Instant::now();
     let baked = bake::bake(&plan, &files, config, arch, work.path(), &log_path)?;
+    let wake_seconds = bake::wake(&plan, &files, config, arch, work.path(), &log_path, &baked)?;
     let mut images = BTreeMap::new();
     for node in &plan.nodes {
         let raw = baked.disks.get(&node.name).context("baked disk")?;
@@ -269,6 +272,7 @@ pub fn build_cluster_images(request: &ClusterBuildRequest) -> Result<ClusterBuil
         images,
         log_path,
         bake_seconds,
+        wake_seconds,
         management_seconds: started.elapsed().as_secs_f64(),
     })
 }

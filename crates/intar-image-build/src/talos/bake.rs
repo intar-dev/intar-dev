@@ -112,6 +112,7 @@ pub(crate) fn bake(
             index,
             disk: &disk,
             serial: &serial,
+            snapshot: false,
         };
         let (vm, api, k8s) = spawn_node(&launch, files, config, arch, hub.path(), work)?;
         api_ports.insert(node.name.clone(), api);
@@ -192,21 +193,7 @@ pub(crate) fn bake(
         deadline,
         "pointing flannel at the control plane",
     )?;
-    let workers: Vec<String> = plan
-        .nodes
-        .iter()
-        .filter(|node| node.role == ClusterRole::Worker)
-        .map(|node| node.ip.to_string())
-        .collect();
-    let mut health = vec![
-        "health".to_owned(),
-        format!("--wait-timeout={}s", remaining(deadline)?.as_secs()),
-        format!("--control-plane-nodes={cp}"),
-    ];
-    if !workers.is_empty() {
-        health.push(format!("--worker-nodes={}", workers.join(",")));
-    }
-    talosctl.run(&health.iter().map(String::as_str).collect::<Vec<_>>())?;
+    healthy(&talosctl, plan, deadline)?;
     kubectl.run(&[
         "-n",
         "kube-system",
@@ -271,6 +258,95 @@ pub(crate) fn bake(
     })
 }
 
+/// `talosctl health` of every node of `plan`, until `deadline`.
+fn healthy(talosctl: &Tool, plan: &ClusterPlan, deadline: Instant) -> Result<()> {
+    let workers: Vec<String> = plan
+        .nodes
+        .iter()
+        .filter(|node| node.role == ClusterRole::Worker)
+        .map(|node| node.ip.to_string())
+        .collect();
+    let mut health = vec![
+        "health".to_owned(),
+        format!("--wait-timeout={}s", remaining(deadline)?.as_secs()),
+        format!("--control-plane-nodes={}", controlplane_ip()),
+    ];
+    if !workers.is_empty() {
+        health.push(format!("--worker-nodes={}", workers.join(",")));
+    }
+    talosctl.run(&health.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
+}
+
+/// The wake check: the baked disks boot again cold, as a run starts them,
+/// on a fresh lab network, and the cluster must come up healthy with every
+/// node Ready. Their disks are left as they are. The seconds it took.
+pub(crate) fn wake(
+    plan: &ClusterPlan,
+    files: &ReleaseFiles,
+    config: &QemuBuildConfig,
+    arch: BuildArch,
+    work: &Path,
+    log: &Path,
+    baked: &Baked,
+) -> Result<f64> {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(config.provision_timeout_seconds.max(1));
+    let home = work.join("home");
+    let config_dir = work.join("configs");
+    let talosctl = Tool::new(
+        &files.host_talosctl,
+        &home,
+        vec![("TALOSCONFIG", config_dir.join("talosconfig"))],
+        log,
+    );
+    let hub = LabHub::start(&work.join("wake.sock"))?;
+    let mut vms = Vec::new();
+    let mut cp_ports = None;
+    for (index, node) in plan.nodes.iter().enumerate() {
+        let disk = baked.disks.get(&node.name).context("baked disk")?;
+        let serial = log.with_extension(format!("{}.wake.serial.log", node.name));
+        let launch = NodeLaunch {
+            node,
+            index,
+            disk,
+            serial: &serial,
+            snapshot: true,
+        };
+        let (vm, api, k8s) = spawn_node(&launch, files, config, arch, hub.path(), work)?;
+        if let Some(k8s) = k8s {
+            cp_ports = Some((api, k8s));
+        }
+        vms.push(vm);
+    }
+    let (api, k8s) = cp_ports.context("the cluster has no control plane")?;
+    talosctl.run(&["config", "endpoint", &format!("127.0.0.1:{api}")])?;
+    healthy(&talosctl, plan, deadline)?;
+    let kubectl = Tool::new(
+        &files.host_kubectl,
+        &home,
+        vec![("KUBECONFIG", config_dir.join("kubeconfig.host"))],
+        log,
+    );
+    kubectl.run(&[
+        "config",
+        "set-cluster",
+        &plan.cluster.name,
+        &format!("--server=https://127.0.0.1:{k8s}"),
+    ])?;
+    kubectl.run(&[
+        "wait",
+        "--for=condition=Ready",
+        "nodes",
+        "--all",
+        &format!("--timeout={}s", remaining(deadline)?.as_secs()),
+    ])?;
+    let seconds = started.elapsed().as_secs_f64();
+    drop(vms);
+    drop(hub);
+    Ok(seconds)
+}
+
 fn remaining(deadline: Instant) -> Result<Duration> {
     let left = deadline.saturating_duration_since(Instant::now());
     ensure!(!left.is_zero(), "the cluster bake timed out");
@@ -285,6 +361,8 @@ struct NodeLaunch<'a> {
     index: usize,
     disk: &'a Path,
     serial: &'a Path,
+    /// Writes go to a scratch file and the disk stays as it is.
+    snapshot: bool,
 }
 
 /// A free port on 127.0.0.1, for a forward QEMU binds right after.
@@ -310,7 +388,9 @@ fn spawn_node(
         index,
         disk,
         serial,
+        snapshot,
     } = *launch;
+    let snapshot = if snapshot { ",snapshot=on" } else { "" };
     let controlplane = node.role == ClusterRole::Controlplane;
     let (machine, cpu) = machine_and_cpu(arch, config.accelerator.trim());
     for _ in 0..3 {
@@ -345,7 +425,7 @@ fn spawn_node(
             node_cmdline(arch),
             "-drive".to_owned(),
             format!(
-                "if=none,id=disk,format=raw,discard=unmap,file={}",
+                "if=none,id=disk,format=raw,discard=unmap{snapshot},file={}",
                 disk.display()
             ),
             "-device".to_owned(),

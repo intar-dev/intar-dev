@@ -21,6 +21,7 @@
 //! `image_digest` this attempt recorded before. The builder restarted in the
 //! middle of the job and built the image again; the recorded one stands.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -132,7 +133,8 @@ impl RegistryPusher {
                 Architecture::Arm64 => "&arch=arm64",
             }
         ))?;
-        self.push_to(dir, manifest, &result_url)
+        let body = serde_json::json!({ "image_digest": manifest.as_str() });
+        self.push_to(dir, std::slice::from_ref(manifest), &result_url, &body)
             .map(|(image, _)| image)
     }
 
@@ -163,7 +165,8 @@ impl RegistryPusher {
                 Architecture::Arm64 => "arm64",
             }
         ))?;
-        let (_, body) = self.push_to(dir, manifest, &result_url)?;
+        let body = serde_json::json!({ "image_digest": manifest.as_str() });
+        let (_, body) = self.push_to(dir, std::slice::from_ref(manifest), &result_url, &body)?;
         let answer: Answer = serde_json::from_str(&body)?;
         Ok(RecordedImage {
             first: !answer.recorded,
@@ -171,21 +174,75 @@ impl RegistryPusher {
         })
     }
 
-    /// The push itself; the image and the body of the result's answer.
+    /// Push every image of one Talos cluster's bake from `dir` in one
+    /// session and record them as one set: its scope's `architecture` images
+    /// of the cluster `cluster_id` (the cluster key's hex), each machine key
+    /// with its manifest in `images`. A set that already stands is the
+    /// answer, as for one image.
+    ///
+    /// # Errors
+    /// Returns the first call that failed for good.
+    pub fn push_cluster(
+        &self,
+        dir: &Path,
+        images: &BTreeMap<OciDigest, OciDigest>,
+        cluster_id: &str,
+        architecture: Architecture,
+    ) -> Result<RecordedCluster> {
+        #[derive(serde::Deserialize)]
+        struct Answer {
+            images: BTreeMap<OciDigest, OciDigest>,
+            #[serde(default)]
+            recorded: bool,
+        }
+        let result_url = self.root.join(&format!(
+            "clusters/{cluster_id}/result?arch={}",
+            match architecture {
+                Architecture::Amd64 => "amd64",
+                Architecture::Arm64 => "arm64",
+            }
+        ))?;
+        let body = serde_json::json!({
+            "images": images
+                .iter()
+                .map(|(key, manifest)| serde_json::json!({
+                    "build_key": key.as_str(), "image_digest": manifest.as_str(),
+                }))
+                .collect::<Vec<_>>(),
+        });
+        let manifests: Vec<OciDigest> = images.values().cloned().collect();
+        let (_, body) = self.push_to(dir, &manifests, &result_url, &body)?;
+        let answer: Answer = serde_json::from_str(&body)?;
+        Ok(RecordedCluster {
+            first: !answer.recorded,
+            images: answer.images,
+        })
+    }
+
+    /// The push itself: every blob of `manifests`, then each manifest, then
+    /// the result `body`. The first manifest and the body of the result's
+    /// answer.
     fn push_to(
         &self,
         dir: &Path,
-        manifest: &OciDigest,
+        manifests: &[OciDigest],
         result_url: &url::Url,
+        body: &serde_json::Value,
     ) -> Result<(OciDigest, String)> {
         let blobs = dir.join("sha256");
-        let manifest_bytes = std::fs::read(blobs.join(manifest.hex()))?;
-        let parsed: OciManifestV1 = serde_json::from_slice(&manifest_bytes)?;
-        let mut digests = vec![parsed.config.digest];
-        for layer in parsed.layers {
-            if !digests.contains(&layer.digest) {
-                digests.push(layer.digest);
+        let mut pushed = Vec::new();
+        let mut digests = Vec::new();
+        for manifest in manifests {
+            let bytes = std::fs::read(blobs.join(manifest.hex()))?;
+            let parsed: OciManifestV1 = serde_json::from_slice(&bytes)?;
+            for digest in std::iter::once(parsed.config.digest)
+                .chain(parsed.layers.into_iter().map(|layer| layer.digest))
+            {
+                if !digests.contains(&digest) {
+                    digests.push(digest);
+                }
             }
+            pushed.push((manifest.clone(), bytes));
         }
         let mut restarts = 0;
         let mut busy_restarts = 0;
@@ -198,14 +255,7 @@ impl RegistryPusher {
                 }
                 opened => opened?,
             };
-            let result = self.push_in(
-                &session,
-                &blobs,
-                &digests,
-                manifest,
-                &manifest_bytes,
-                result_url,
-            );
+            let result = self.push_in(&session, &blobs, &digests, &pushed, result_url, body);
             let beat = session.heartbeat.stop();
             let lost = matches!(beat, Some(BeatFailure::Superseded))
                 || matches!(&result, Err(error) if reports_lost_session(error));
@@ -236,29 +286,34 @@ impl RegistryPusher {
         session: &Session,
         blobs: &Path,
         digests: &[OciDigest],
-        manifest: &OciDigest,
-        manifest_bytes: &[u8],
+        manifests: &[(OciDigest, Vec<u8>)],
         result_url: &url::Url,
+        body: &serde_json::Value,
     ) -> Result<(OciDigest, String)> {
         self.push_blobs(session, blobs, digests)?;
-        let url = self
-            .root
-            .join(&format!("manifests/{}", manifest.as_str()))?;
-        self.call(session, || {
-            Ok(self
-                .client
-                .put(url.clone())
-                .header(reqwest::header::CONTENT_TYPE, OCI_MANIFEST_MEDIA_TYPE)
-                .body(manifest_bytes.to_vec()))
-        })?;
-        let body = serde_json::json!({ "image_digest": manifest.as_str() });
+        for (manifest, bytes) in manifests {
+            let url = self
+                .root
+                .join(&format!("manifests/{}", manifest.as_str()))?;
+            self.call(session, || {
+                Ok(self
+                    .client
+                    .put(url.clone())
+                    .header(reqwest::header::CONTENT_TYPE, OCI_MANIFEST_MEDIA_TYPE)
+                    .body(bytes.clone()))
+            })?;
+        }
+        let first = manifests
+            .first()
+            .map(|(manifest, _)| manifest.clone())
+            .ok_or(Error::InvalidConfig("a push names at least one image"))?;
         match self.call(session, || {
-            Ok(self.client.post(result_url.clone()).json(&body))
+            Ok(self.client.post(result_url.clone()).json(body))
         }) {
             // The result is recorded once it is answered: a body that cannot
             // be read does not undo it. A pipeline's push reads the body and
             // fails on an empty one.
-            Ok(response) => Ok((manifest.clone(), response.text().unwrap_or_default())),
+            Ok(response) => Ok((first, response.text().unwrap_or_default())),
             Err(error) => recorded_before(&error)
                 .map(|image| (image, String::new()))
                 .ok_or(error),
@@ -584,6 +639,14 @@ fn registry_busy(error: &Error) -> bool {
             Some(REGISTRY_PAUSED_CODE | REGISTRY_SWEEP_CODE)
         )
     })
+}
+
+/// What a pipeline's cluster push left recorded: each machine key's image.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordedCluster {
+    pub images: BTreeMap<OciDigest, OciDigest>,
+    /// This push recorded the set; false when it already stood.
+    pub first: bool,
 }
 
 /// What a pipeline's push left recorded for its key.

@@ -15,6 +15,48 @@ use crate::bundle_command::{EXIT_SUPERSEDED, EXIT_TRANSIENT, UploadFailed};
 /// its output.
 pub(crate) const IMAGE_FILE: &str = "image.json";
 
+/// What `build cluster:` leaves beside a cluster's images in place of
+/// [`IMAGE_FILE`]: they are pushed and recorded as one set.
+pub(crate) const CLUSTER_FILE: &str = "images.json";
+
+/// What `images.json` says of a cluster's images in its directory.
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BuiltCluster {
+    pub(crate) cluster_key: OciDigest,
+    /// `amd64` or `arm64`.
+    pub(crate) arch: String,
+    pub(crate) images: Vec<BuiltClusterImage>,
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BuiltClusterImage {
+    pub(crate) machine: String,
+    pub(crate) build_key: OciDigest,
+    pub(crate) manifest: OciDigest,
+}
+
+impl BuiltCluster {
+    pub(crate) fn write(&self, dir: &Path) -> Result<()> {
+        let path = dir.join(CLUSTER_FILE);
+        std::fs::write(&path, serde_json::to_vec_pretty(self)?)
+            .with_context(|| format!("failed to write {}", path.display()))
+    }
+
+    fn read(dir: &Path) -> Result<Option<Self>> {
+        let path = dir.join(CLUSTER_FILE);
+        match std::fs::read(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            read => {
+                serde_json::from_slice(&read.with_context(|| format!("read {}", path.display()))?)
+                    .map(Some)
+                    .with_context(|| {
+                        format!("{} does not describe a built cluster", path.display())
+                    })
+            }
+        }
+    }
+}
+
 /// What `image.json` says of the image in its directory.
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct BuiltImage {
@@ -31,15 +73,19 @@ impl BuiltImage {
             .with_context(|| format!("failed to write {}", path.display()))
     }
 
-    /// Removes the file, if there is one.
+    /// Removes what an earlier build left: `image.json` and `images.json`.
     pub(crate) fn forget(dir: &Path) -> Result<()> {
-        let path = dir.join(IMAGE_FILE);
-        match std::fs::remove_file(&path) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                Err(error).with_context(|| format!("failed to remove {}", path.display()))
+        for name in [IMAGE_FILE, CLUSTER_FILE] {
+            let path = dir.join(name);
+            match std::fs::remove_file(&path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error)
+                        .with_context(|| format!("failed to remove {}", path.display()));
+                }
+                _ => {}
             }
-            _ => Ok(()),
         }
+        Ok(())
     }
 
     fn read(dir: &Path) -> Result<Self> {
@@ -71,12 +117,25 @@ pub(crate) struct PushCommand {
     rev: String,
 }
 
+/// What one push records: one image, or every image of a cluster.
+enum Built {
+    Image(BuiltImage),
+    Cluster(BuiltCluster),
+}
+
 pub(crate) fn push_command(args: &PushCommand) -> Result<()> {
-    let built = BuiltImage::read(&args.image)?;
-    let architecture = match built.arch.as_str() {
+    let built = match BuiltCluster::read(&args.image)? {
+        Some(cluster) => Built::Cluster(cluster),
+        None => Built::Image(BuiltImage::read(&args.image)?),
+    };
+    let arch = match &built {
+        Built::Image(image) => &image.arch,
+        Built::Cluster(cluster) => &cluster.arch,
+    };
+    let architecture = match arch.as_str() {
         "amd64" => Architecture::Amd64,
         "arm64" => Architecture::Arm64,
-        other => anyhow::bail!("{IMAGE_FILE} names the architecture '{other}'"),
+        other => anyhow::bail!("the built image names the architecture '{other}'"),
     };
     // Told apart from a runner whose token endpoint fails for a moment:
     // without either there is nothing to try again.
@@ -109,28 +168,56 @@ pub(crate) fn push_command(args: &PushCommand) -> Result<()> {
             failed(error)
         }
     })?;
-    let pushed = RegistryPusher::new(&args.url, session.token())
-        .and_then(|pusher| {
-            pusher.push_image(
-                &args.image,
-                &built.manifest,
-                built.build_key.hex(),
-                architecture,
-            )
-        })
-        .map_err(failed);
+    let pusher = RegistryPusher::new(&args.url, session.token());
+    let pushed = match &built {
+        Built::Image(image) => pusher
+            .and_then(|pusher| {
+                pusher.push_image(
+                    &args.image,
+                    &image.manifest,
+                    image.build_key.hex(),
+                    architecture,
+                )
+            })
+            .map(|recorded| {
+                println!(
+                    "image={} recorded={}",
+                    recorded.image.as_str(),
+                    if recorded.first { "first" } else { "existing" }
+                );
+            }),
+        Built::Cluster(cluster) => pusher
+            .and_then(|pusher| {
+                let images = cluster
+                    .images
+                    .iter()
+                    .map(|image| (image.build_key.clone(), image.manifest.clone()))
+                    .collect();
+                pusher.push_cluster(
+                    &args.image,
+                    &images,
+                    cluster.cluster_key.hex(),
+                    architecture,
+                )
+            })
+            .map(|recorded| {
+                for (key, image) in &recorded.images {
+                    println!(
+                        "build_key={} image={} recorded={}",
+                        key.as_str(),
+                        image.as_str(),
+                        if recorded.first { "first" } else { "existing" }
+                    );
+                }
+            }),
+    }
+    .map_err(failed);
     // Its place among the source's open sessions is freed either way; a close
     // that fails does not undo a recorded image.
     if let Err(error) = session.close() {
         eprintln!("warning: the upload session did not close: {error}");
     }
-    let recorded = pushed?;
-    println!(
-        "image={} recorded={}",
-        recorded.image.as_str(),
-        if recorded.first { "first" } else { "existing" }
-    );
-    Ok(())
+    pushed
 }
 
 /// A new OIDC token of this GitHub Actions job for `audience`, from the

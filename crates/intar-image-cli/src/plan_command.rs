@@ -1,7 +1,10 @@
 //! `intar-image-cli plan`: the first step of a scenario repository's pipeline
 //! (#441). It uploads the bundle as `bundle` does and prints which images the
 //! pipeline has to build: the receipt's missing keys, each as a target of
-//! `build`.
+//! `build`. A Talos cluster's machines are baked together: a cluster missing
+//! any of its keys in an architecture is one target, `cluster:S/C`, whose
+//! `build_key` is the cluster key and whose `build_keys` are every key of its
+//! machines.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -41,20 +44,35 @@ pub(crate) struct PlanCommand {
     root: PathBuf,
 }
 
-/// One image in one architecture.
+/// One image, or one cluster's images, in one architecture.
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Job {
     target: String,
     build_key: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    build_keys: Vec<String>,
     arch: String,
 }
 
-/// One image with every architecture it is missing in.
+/// One image, or one cluster's images, with every architecture it is
+/// missing in.
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Image {
     target: String,
     build_key: String,
+    /// A cluster's machine keys, sorted; none for one image.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    build_keys: Vec<String>,
     archs: Vec<String>,
+}
+
+/// What builds a key: its target, the key the target is built as, and for a
+/// cluster every machine key it records.
+#[derive(Clone)]
+struct Builds {
+    target: String,
+    build_key: String,
+    build_keys: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
@@ -81,39 +99,80 @@ pub(crate) fn plan_of(
             images: Vec::new(),
         });
     };
-    let mut targets = BTreeMap::new();
+    let mut targets: BTreeMap<String, Builds> = BTreeMap::new();
     for scenario in &bundle.scenarios {
         let keys = build_keys(scenario, &bundle.images).map_err(anyhow::Error::msg)?;
         for machine in &scenario.machines {
-            if let Some(key) = keys.machines.get(&machine.name) {
-                targets
-                    .entry(key.as_str().to_owned())
-                    .or_insert_with(|| format!("{}/{}", scenario.slug, machine.name));
-            }
+            let Some(key) = keys.machines.get(&machine.name) else {
+                continue;
+            };
+            let builds = match &machine.cluster {
+                Some(place) => {
+                    let cluster_key = keys
+                        .clusters
+                        .get(&place.cluster)
+                        .with_context(|| format!("cluster `{}` has no key", place.cluster))?;
+                    let mut members: Vec<String> = scenario
+                        .machines
+                        .iter()
+                        .filter(|other| {
+                            other
+                                .cluster
+                                .as_ref()
+                                .is_some_and(|other| other.cluster == place.cluster)
+                        })
+                        .filter_map(|other| keys.machines.get(&other.name))
+                        .map(|key| key.as_str().to_owned())
+                        .collect();
+                    members.sort();
+                    members.dedup();
+                    Builds {
+                        target: format!("cluster:{}/{}", scenario.slug, place.cluster),
+                        build_key: cluster_key.as_str().to_owned(),
+                        build_keys: members,
+                    }
+                }
+                None => Builds {
+                    target: format!("{}/{}", scenario.slug, machine.name),
+                    build_key: key.as_str().to_owned(),
+                    build_keys: Vec::new(),
+                },
+            };
+            targets.entry(key.as_str().to_owned()).or_insert(builds);
         }
     }
-    let mut jobs = Vec::new();
+    let mut jobs: Vec<Job> = Vec::new();
     let mut images: Vec<Image> = Vec::new();
     for missing in &receipt.missing {
-        let target = targets.get(&missing.build_key).with_context(|| {
+        let builds = targets.get(&missing.build_key).with_context(|| {
             format!(
                 "the service asks for image {} which no machine of this commit has",
                 missing.build_key
             )
         })?;
-        jobs.push(Job {
-            target: target.clone(),
-            build_key: missing.build_key.clone(),
-            arch: missing.architecture.clone(),
-        });
+        // A cluster is one job per architecture, however many of its keys
+        // are missing.
+        if !jobs
+            .iter()
+            .any(|job| job.build_key == builds.build_key && job.arch == missing.architecture)
+        {
+            jobs.push(Job {
+                target: builds.target.clone(),
+                build_key: builds.build_key.clone(),
+                build_keys: builds.build_keys.clone(),
+                arch: missing.architecture.clone(),
+            });
+        }
         match images
             .iter_mut()
-            .find(|image| image.build_key == missing.build_key)
+            .find(|image| image.build_key == builds.build_key)
         {
+            Some(image) if image.archs.contains(&missing.architecture) => {}
             Some(image) => image.archs.push(missing.architecture.clone()),
             None => images.push(Image {
-                target: target.clone(),
-                build_key: missing.build_key.clone(),
+                target: builds.target.clone(),
+                build_key: builds.build_key.clone(),
+                build_keys: builds.build_keys.clone(),
                 archs: vec![missing.architecture.clone()],
             }),
         }
