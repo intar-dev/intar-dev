@@ -1,5 +1,12 @@
 # Changelog
 
+## builder/v0.23.1 (2026-11-23)
+
+### Bug fixes
+
+- **deps:** Drop aws-lc-rs and use ring for all crypto (#519) (1f43eb6c)
+- **deps:** Use ring for intar-image-build's downloads (#526) (961aa258)
+
 ## builder/v0.23.0 (2026-11-23)
 
 ### Features

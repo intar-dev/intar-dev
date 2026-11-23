@@ -1,5 +1,11 @@
 # Changelog
 
+## agent/v0.27.1 (2026-11-23)
+
+### Bug fixes
+
+- **deps:** Drop aws-lc-rs and use ring for all crypto (#519) (1f43eb6c)
+
 ## agent/v0.27.0 (2026-11-23)
 
 ### Features
