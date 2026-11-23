@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import compileDigest from "@/generated/fixtures/source/compile-digest-v2.json";
 import type { SourceBundleV2 } from "@/generated/contracts/source-bundle-v2";
 import { MAX_SOURCE_BUNDLE_JSON_BYTES, readSourceBundle, sourceCompileDigest } from "./source-bundle";
+import { buildKeys } from "./build-key";
+import { scenarioRevision } from "./machine-spec";
 import { validateBundle } from "./validate";
 
 const fixture = (name: string) =>
@@ -74,7 +76,7 @@ describe("readSourceBundle", () => {
     await expect(readSourceBundle(bytes)).rejects.toMatchObject({ status: 400, code: "bundle_invalid" });
   });
 
-  it("holds a sound Talos cluster back until clusters are accepted", async () => {
+  it("reads a sound Talos cluster, its revision naming the cluster of each machine", async () => {
     const value = bundle() as unknown as SourceBundleV2;
     const scenario = value.scenarios[0]!;
     const [mgmt] = scenario.machines;
@@ -93,11 +95,10 @@ describe("readSourceBundle", () => {
     mgmt!.cluster = { cluster: "lab", role: "management" };
     scenario.clusters = [{ name: "lab", talos: "v1.15.0-beta.0", kubernetes: "v1.37.1", patches: [] }];
     expect(validateBundle(value)).toEqual([]);
-    await expect(readSourceBundle(gz(value))).rejects.toMatchObject({
-      status: 400,
-      code: "bundle_invalid",
-      message: "scenario `broken-nginx`: Talos clusters are not accepted yet",
-    });
+    const read = await readSourceBundle(gz(value));
+    const keys = await buildKeys(read.scenarios[0]!, read.images);
+    const revision = await scenarioRevision(read.scenarios[0]!, "intar/broken-nginx", keys);
+    expect(revision.machines.map((machine) => machine.cluster_key)).toEqual([keys.clusters.lab, keys.clusters.lab]);
   });
 
   const refusals = JSON.parse(fixture("bundle-refusals.json")) as { name: string; bundle: unknown; problems: string[] }[];

@@ -21,6 +21,7 @@ import { AGENT_SOURCES_PATH, SOURCE_BUNDLES_PATH, SOURCE_COMPILER_PATH } from "@
 import bundleFixture from "@/generated/fixtures/scenario/broken-nginx-bundle.json";
 import revisionFixture from "@/generated/fixtures/scenario/broken-nginx-revision.json";
 import refusalsFixture from "@/generated/fixtures/scenario/bundle-refusals.json";
+import type { SourceBundleV2 } from "@/generated/contracts/source-bundle-v2";
 import sourceRefusalSchema from "@/generated/schemas/source-refusal-v1.schema.json";
 import { GITHUB_ACTIONS_ISSUER } from "@/lib/github-oidc";
 import { backfillBehaviourDigests, REVISION_REPLACED, settleScenarioRevisions } from "@/lib/machine-builds";
@@ -30,7 +31,7 @@ import {
   REVISION_SOURCE_DISCONNECTED,
 } from "@/lib/pipeline-revisions";
 import { ingestSourceBundle, sourceBundleObjectKey } from "@/lib/scenario-bundles";
-import { baseKey } from "@/lib/scenario-contract/build-key";
+import { baseKey, buildKeys } from "@/lib/scenario-contract/build-key";
 import { sourceCompileDigest } from "@/lib/scenario-contract/source-bundle";
 import { changeScenarioSource, scenarioSourceScope, stagedSourceObjectPrefix } from "@/lib/scenario-sources";
 import { createFixtureMember } from "@/test/account-fixtures";
@@ -460,6 +461,44 @@ describe("a source whose pipeline builds its images", () => {
     expect(await plan(await push())).toEqual({ architectures: ["amd64", "arm64"], missing: [BOTH[1]] });
     // Answering for a rev that is already held stages and claims nothing.
     expect(await written()).toEqual(before);
+  });
+
+  it("takes a Talos cluster only from a workflow that builds one, and only for its pipeline", async () => {
+    const value = JSON.parse(BUNDLE) as SourceBundleV2;
+    const scenario = value.scenarios[0]!;
+    const [mgmt] = scenario.machines;
+    scenario.machines.push({
+      ...mgmt!, name: "cp1", from: "talos", disk_mib: 10240, terminal: false,
+      defer: [], env: {}, setup: [], ready: [], cluster: { cluster: "lab", role: "controlplane" },
+    });
+    mgmt!.cluster = { cluster: "lab", role: "management" };
+    scenario.clusters = [{ name: "lab", talos: "v1.15.0-beta.0", kubernetes: "v1.37.1", patches: [] }];
+    const keys = await buildKeys(scenario, value.images);
+    const clustered = gz(value);
+
+    await byPipeline();
+    await expectRefusal(await push({ bundle: clustered }), 409, "clusters_unsupported");
+    const plain = testEnv;
+    testEnv = { ...plain, SCENARIO_CLUSTER_WORKFLOW_SHAS: WORKFLOW_SHA } as unknown as Cloudflare.Env;
+    try {
+      const accepted = await push({ bundle: clustered });
+      expect(accepted.status).toBe(202);
+      const missing = ((await plan(accepted)) as { missing: { build_key: string }[] }).missing;
+      expect(new Set(missing.map((entry) => entry.build_key)))
+        .toEqual(new Set([keys.machines[mgmt!.name], keys.machines.cp1]));
+      await tick("public");
+      const [revision] = await all("SELECT doc_json, state FROM scenario_revisions");
+      expect(revision?.state).toBe("building");
+      const doc = JSON.parse(String(revision?.doc_json)) as { machines: { cluster_key?: string }[] };
+      expect(doc.machines.map((machine) => machine.cluster_key)).toEqual([keys.clusters.lab, keys.clusters.lab]);
+
+    } finally {
+      testEnv = plain;
+    }
+    // A builder's source never takes one: nothing would bake it whole.
+    expect(await ingestSourceBundle(env, {
+      organizationId: ORG, rev: rev(43), gzip: clustered, stored: false, imageProducer: "builder",
+    })).toBe("scenario `broken-nginx` has a Talos cluster, whose images only the repository's pipeline builds");
   });
 
   it("gives a builder source the receipt it always got, whatever is recorded", async () => {

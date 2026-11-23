@@ -48,6 +48,10 @@
     // names. It has no tag yet, and the two before it stay for a caller that
     // still pins one.
     "SCENARIO_PUBLISH_WORKFLOW_SHAS": "6c83304d76405e8297933e3e6c24044eca19fd75 a73e571caccc35b499fa11e021f4ac6a9546b647 b72793b3d9a51c81b339de8511cd98a00b5c68e4 635a4d711df45f12e7038cb2119d0d1d37089372 594dd143c4f586d106578a0ccb6c2a034b1a30d2",
+    // The commits of SCENARIO_PUBLISH_WORKFLOW_SHAS whose image jobs build and
+    // push a Talos cluster as one set, separated by commas or whitespace.
+    // Empty: a bundle with a cluster is refused at upload.
+    "SCENARIO_CLUSTER_WORKFLOW_SHAS": "",
     // The intar-image-cli release the compiler descriptor names, and its
     // release tarball sha256 per target as JSON, e.g. {"linux_amd64":"<hex>"}.
     // While either is empty the descriptor answers 503. Releases up to 0.10.3
