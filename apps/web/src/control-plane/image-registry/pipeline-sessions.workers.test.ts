@@ -118,6 +118,7 @@ afterEach(() => {
 async function seedBundle(
   input: {
     rev?: string; producer?: "builder" | "pipeline"; state?: "building" | "ready" | "failed"; keys?: string[];
+    machines?: Record<string, string>[];
   } = {},
 ) {
   const rev = input.rev ?? REV;
@@ -130,7 +131,9 @@ async function seedBundle(
   }).onConflictDoNothing();
   await db().insert(scenarioRevisions).values({
     scenarioId: "intar/lab", rev, guestContract: 3, state: input.state ?? "building",
-    docJson: { machines: (input.keys ?? [KEY]).map((key, index) => ({ name: `m${index}`, build_key: key })) } as never,
+    docJson: {
+      machines: input.machines ?? (input.keys ?? [KEY]).map((key, index) => ({ name: `m${index}`, build_key: key })),
+    } as never,
   });
 }
 
@@ -1051,6 +1054,139 @@ describe("a pipeline recording its image", () => {
     await db().update(pipelineUploadSessions).set({ closedAt: Date.now() });
     expect((await record(token, image.digest)).status).toBe(401);
     expect(await rows()).toEqual([]);
+  });
+});
+
+describe("a pipeline recording a cluster", () => {
+  const CLUSTER_HEX = "d".repeat(64);
+  const MEMBERS = ["1", "2", "3"].map((digit) => digit.repeat(64));
+  const PLAIN_HEX = "e".repeat(64);
+  const seedCluster = () => seedBundle({
+    machines: [
+      ...MEMBERS.map((hex, index) => ({ name: `n${index}`, build_key: `sha256:${hex}`, cluster_key: `sha256:${CLUSTER_HEX}` })),
+      { name: "plain", build_key: `sha256:${PLAIN_HEX}` },
+    ],
+  });
+  /** Pushes one bake of the cluster: an image of every member, or of `members`. */
+  const bake = async (token: string, label: string, input: { architecture?: string; members?: string[] } = {}) => {
+    const images = [];
+    for (const hex of input.members ?? MEMBERS) {
+      const image = await pushImage(token, hex, { label: `${label} ${hex[0]}`, ...(input.architecture ? { architecture: input.architecture } : {}) });
+      images.push({ build_key: `sha256:${hex}`, image_digest: image.digest });
+    }
+    return images;
+  };
+  const record = (token: string, images: unknown, query = "") =>
+    call("POST", `/registry/v1/clusters/${CLUSTER_HEX}/result${query}`, { bearer: token, body: JSON.stringify({ images }) });
+  const recorded = async (architecture: "amd64" | "arm64" = "amd64") => Object.fromEntries(
+    (await db().select().from(scopeMachineImages).where(eq(scopeMachineImages.architecture, architecture)))
+      .map((row) => [row.buildKey, row.imageDigest]),
+  );
+  const asMap = (images: { build_key: string; image_digest: string }[]) =>
+    Object.fromEntries(images.map((image) => [image.build_key, image.image_digest]));
+
+  it("records the whole set at once, settles its revision, and answers a second bake with the first", async () => {
+    await seedCluster();
+    const token = await session();
+    const first = await bake(token, "first");
+    const response = await record(token, first);
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ ok: true, images: asMap(first) });
+    expect(await recorded()).toEqual(asMap(first));
+    // The revision still waits for its plain machine's image.
+    const state = async () => (await db().select({ state: scenarioRevisions.state }).from(scenarioRevisions)
+      .where(eq(scenarioRevisions.rev, REV)))[0]?.state;
+    expect(await state()).toBe("building");
+    const plain = await pushImage(token, PLAIN_HEX);
+    const single = (hex: string, digest: string) =>
+      call("POST", `/registry/v1/builds/${hex}/result`, { bearer: token, body: JSON.stringify({ image_digest: digest }) });
+    expect((await single(PLAIN_HEX, plain.digest)).status).toBe(201);
+    expect(await state()).toBe("ready");
+
+    // A second run baked the cluster again: the first set stands.
+    const second = await bake(await session(), "second");
+    const again = await record(token, second);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual({ ok: true, images: asMap(first), recorded: true });
+    expect(await recorded()).toEqual({ ...asMap(first), [`sha256:${PLAIN_HEX}`]: plain.digest });
+  });
+
+  it("takes only the cluster's whole set, and the single route takes none of it", async () => {
+    await seedCluster();
+    const token = await session();
+    const images = await bake(token, "one");
+    await refusal(await record(token, images.slice(1)), 409, "cluster_set_mismatch");
+    await refusal(await record(token, [...images, { build_key: `sha256:${PLAIN_HEX}`, image_digest: images[0]!.image_digest }]), 409, "cluster_set_mismatch");
+    await refusal(await record(token, [images[0], images[0], images[1]]), 409, "cluster_set_mismatch");
+    await refusal(await record(token, "everything"), 400, undefined);
+    await refusal(await call("POST", `/registry/v1/clusters/${FOREIGN_HEX}/result`, {
+      bearer: token, body: JSON.stringify({ images }),
+    }), 403, "build_key_not_in_bundle");
+    await refusal(await call("POST", `/registry/v1/builds/${MEMBERS[0]}/result`, {
+      bearer: token, body: JSON.stringify({ image_digest: images[0]!.image_digest }),
+    }), 409, "cluster_machine");
+    // An image of another key in a member's place, and an arm64 image as amd64.
+    const swapped = images.map((image, index) => index === 0 ? { ...image, image_digest: images[1]!.image_digest } : image);
+    await refusal(await record(token, swapped), 409, "build_key_mismatch");
+    const arm = await bake(token, "arm", { architecture: "arm64" });
+    await refusal(await record(token, arm), 409, "architecture_mismatch");
+    expect(await recorded()).toEqual({});
+    expect((await record(token, arm, "?arch=arm64")).status).toBe(201);
+    expect(await recorded()).toEqual({});
+    expect(await recorded("arm64")).toEqual(asMap(arm));
+  });
+
+  it("replaces a set the sweep left partial, or whose manifest is gone, by a whole new bake", async () => {
+    await seedCluster();
+    const token = await session();
+    const first = await bake(token, "first");
+    expect((await record(token, first)).status).toBe(201);
+    await db().delete(scopeMachineImages).where(eq(scopeMachineImages.buildKey, first[0]!.build_key));
+    const second = await bake(token, "second");
+    expect((await record(token, second)).status).toBe(201);
+    expect(await recorded()).toEqual(asMap(second));
+
+    await env.DB.prepare("DELETE FROM registry_manifests WHERE digest = ?1").bind(second[2]!.image_digest).run();
+    const third = await bake(token, "third");
+    expect((await record(token, third)).status).toBe(201);
+    expect(await recorded()).toEqual(asMap(third));
+  });
+
+  it("ends two results at once with one whole set", async () => {
+    await seedCluster();
+    const token = await session();
+    const a = await bake(token, "a");
+    const b = await bake(token, "b");
+    const responses = await Promise.all([record(token, a), record(token, b)]);
+    expect(responses.map((response) => response.ok)).toEqual([true, true]);
+    const final = await recorded();
+    expect([asMap(a), asMap(b)]).toContainEqual(final);
+  });
+
+  it("gives a local arm64 run the whole recorded set", async () => {
+    await seedCluster();
+    const token = await session();
+    const arm = await bake(token, "arm", { architecture: "arm64" });
+    expect((await record(token, arm, "?arch=arm64")).status).toBe(201);
+    const revision = {
+      scenarioId: "intar/lab", rev: REV,
+      doc: { machines: MEMBERS.map((hex) => ({ build_key: `sha256:${hex}` })) } as never,
+    };
+    expect(await arm64MachineImages(env.DB, revision)).toEqual(new Map(Object.entries(asMap(arm))));
+  });
+
+  it("counts the whole set against the scope's storage", async () => {
+    await seedCluster();
+    const token = await session();
+    const images = await bake(token, "big");
+    await db().insert(scopeMachineImages).values({
+      scopeKey: SCOPE, buildKey: `sha256:${PLAIN_HEX}`, architecture: "amd64", imageDigest: `sha256:${"9".repeat(64)}`,
+      imageFormat: "intar-image-4", sizeBytes: PIPELINE_PLATFORM_LIMITS.storageBytes - 10, githubRepositoryId: REPO,
+      githubRepository: "intar/scenarios", sha: SHA, runId: "1", runAttempt: 1, runnerEnvironment: "github-hosted",
+      jobWorkflowSha: WORKFLOW_SHA,
+    });
+    await refusal(await record(token, images), 409, "scope_storage_exceeded");
+    expect(Object.keys(await recorded())).toEqual([`sha256:${PLAIN_HEX}`]);
   });
 });
 
