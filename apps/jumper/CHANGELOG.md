@@ -1,5 +1,11 @@
 # Changelog
 
+## desktop/v0.6.1 (2026-11-24)
+
+### Bug fixes
+
+- **jumper:** Redraw the macos icon and ship it without the grey plate (#546) (0d47ee99)
+
 ## desktop/v0.6.0 (2026-11-24)
 
 ### Features
