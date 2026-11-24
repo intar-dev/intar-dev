@@ -67,7 +67,7 @@
     // release page, so a published release is offered only once that change
     // is merged; the release workflow's pin pull request makes it
     // (tools/workflows/release/web-pins.sh).
-    "JUMPER_RELEASE_JSON": "{\"macos_arm64\":{\"sha256\":\"c09c92b6536655866da119aaa56daf2be9a169bd15e5351140333513252ab2d2\",\"version\":\"0.6.0\"}}",
+    "JUMPER_RELEASE_JSON": "{\"macos_arm64\":{\"sha256\":\"98fbe85559a0892a96a3eaebeaef22b3239afc5d212a04f2a70e4f51763562fd\",\"version\":\"0.6.1\"}}",
     // Public run shares keep their terminal logs next to the run recordings.
     // Local workerd has no jurisdictions, so local configs leave this unset.
     "RUN_SHARE_JURISDICTION": "eu",
