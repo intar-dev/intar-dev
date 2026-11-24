@@ -48,33 +48,19 @@ release does (`tools/workflows/release/build-jumper-macos.sh`) and boots a
 guest with the QEMU in it. That bundle is only a check. The one people install
 is built by the release workflow; see [`RELEASING.md`](../../RELEASING.md).
 
-## Layout
+## How the code is split
 
-The window is drawn with [GPUI](https://www.gpui.rs). Nothing in the UI waits
-on the network: it sends commands to the engine and receives events.
+The window is drawn with [GPUI](https://www.gpui.rs), and nothing in it waits
+on the network. `src/engine.rs` runs everything that does, on its own tokio
+runtime; the window sends it commands and receives events. `src/state.rs`
+turns those events into what the window shows and has no GPUI in it, so it is
+tested without a window.
 
-| Path | Contents |
-| --- | --- |
-| `src/main.rs` | The window and its screens |
-| `src/ui` | The widgets: the terminal view, the replay player, Markdown, the text input, the theme |
-| `src/state.rs` | What the window shows and how events change it. No GPUI, so it is tested without a window |
-| `src/engine.rs` | Everything that waits on the network, on its own tokio runtime |
-| `src/pull.rs` | Downloads a run's images from Intar's registry by digest into the local cache |
-| `src/local.rs` | The run's machines on this computer: started through zpm, watched through Kino's reports, stopped with the run |
-| `src/terminal.rs` | The SSH session to a machine and the grid its output is drawn from |
-| `src/qemu.rs` | Finds the QEMU the app ships with |
-| `src/secrets.rs` | The sign-in, in the system keychain |
-| `src/update.rs` | Replaces the app with a newer release |
-
-Three workspace crates do the work that is not specific to the window:
-
-- [`crates/zpm`](../../crates/zpm) builds QEMU's command line and owns the
-  process. It has a small CLI of its own (`cargo run -p zpm -- --help`) to
-  boot a machine by hand.
-- [`crates/subspace`](../../crates/subspace) is the client of the app's API on
-  the website: the browser sign-in and local runs.
-- [`crates/dhd`](../../crates/dhd) reads recorded sessions and renders their
-  replays, as the agent does on a host.
+Running a machine is not in this crate. `crates/zpm` builds QEMU's command
+line and owns the process, and has a small CLI of its own
+(`cargo run -p zpm -- --help`) to boot a machine by hand. `crates/subspace` is the client of
+the website's API, and `crates/dhd` renders replays, shared with the host
+agent so both produce the same files.
 
 The QEMU itself is built and pinned by `qemu.yml`; see
 [`ci/README.md`](../../ci/README.md).
