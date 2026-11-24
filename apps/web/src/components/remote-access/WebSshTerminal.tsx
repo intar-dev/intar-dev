@@ -128,6 +128,16 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The gateway's error frame when the route's target did not attach in time. */
+const TARGET_TIMEOUT_MESSAGE = "terminal target timeout";
+
+/** The target is not up yet; the caller waits on with a fresh session. */
+class TargetNotReadyError extends Error {
+  constructor() {
+    super(TARGET_TIMEOUT_MESSAGE);
+  }
+}
+
 function isTransientBootstrapError(message: string): boolean {
   const m = message.toLowerCase();
   return (
@@ -452,15 +462,8 @@ export function WebSshTerminal({
       // Fit before the websocket dance so `open` carries the real grid.
       fitGridRef.current?.();
 
-      markTerminalStage("terminal-session-request");
-      const sessionBundle = await createSessionWithRetries({
-        sessionRequestBodyJson,
-        sessionRequestUrl,
-      });
-      if (connectionGenerationRef.current !== connectionGeneration) return;
-      markTerminalStage("terminal-session");
-
-      const websocket = await connectBrowserTerminalWithRetries({
+      const openSocket = (sessionBundle: VmBrowserTerminalSessionResponse) =>
+        connectBrowserTerminalWithRetries({
         session: sessionBundle,
         terminal: connectedTerminal,
         isCurrent: () =>
@@ -511,6 +514,28 @@ export function WebSshTerminal({
           }
         },
       });
+
+      let websocket: WebSocket | null = null;
+      while (!websocket) {
+        markTerminalStage("terminal-session-request");
+        const sessionBundle = await createSessionWithRetries({
+          sessionRequestBodyJson,
+          sessionRequestUrl,
+        });
+        if (connectionGenerationRef.current !== connectionGeneration) return;
+        markTerminalStage("terminal-session");
+        try {
+          websocket = await openSocket(sessionBundle);
+        } catch (openError) {
+          // A machine that waits on others, such as a Talos cluster's
+          // management machine, can outlast the gateway's attach wait. It is
+          // still starting: wait on with a fresh session. The session request
+          // refuses once the run ends or fails.
+          if (!(openError instanceof TargetNotReadyError)) throw openError;
+          if (connectionGenerationRef.current !== connectionGeneration) return;
+          setLabStarting(true);
+        }
+      }
       if (connectionGenerationRef.current !== connectionGeneration) {
         websocket.close();
         return;
@@ -932,6 +957,9 @@ async function connectBrowserTerminalWithRetries(input: {
       return await connectBrowserTerminal(input);
     } catch (error) {
       lastError = toErrorMessage(error);
+      if (lastError === TARGET_TIMEOUT_MESSAGE) {
+        throw new TargetNotReadyError();
+      }
       if (
         !isTransientConnectError(lastError) ||
         attempt === SSH_CONNECT_RETRY_ATTEMPTS
